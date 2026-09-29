@@ -228,13 +228,9 @@ pub struct FrameRow {
 /// Encode a frame row: type, optional external base, then the index value.
 pub fn encode_frame(id: &Hash, row: &FrameRow) -> Result<Value, StoreError> {
     let index = crate::store::codec::encode_object_index(id, &row.value)?;
-    let mut bytes = vec![row.object_type];
-    match &row.external {
-        Some(base) => {
-            bytes.push(1);
-            bytes.extend_from_slice(base);
-        }
-        None => bytes.push(0),
+    let mut bytes = vec![row.object_type, u8::from(row.external.is_some())];
+    if let Some(base) = &row.external {
+        bytes.extend_from_slice(base);
     }
     bytes.extend_from_slice(index.as_bytes());
     Ok(Value::new(bytes))
@@ -317,11 +313,11 @@ pub fn timer_reference(repo: &RepoName, pack: &Hash) -> Vec<u8> {
 pub fn parse_reference(reference: &[u8]) -> Option<(RepoName, Hash)> {
     let sep = reference.iter().position(|&b| b == 0)?;
     let pack: Hash = reference[sep + 1..].try_into().ok()?;
-    Some((
-        RepoName::new(String::from_utf8(reference[..sep].to_vec()).ok()?).ok()?,
-        pack,
-    ))
+    let repo = RepoName::new(String::from_utf8(reference[..sep].to_vec()).ok()?).ok()?;
+    Some((repo, pack))
 }
+
+type Stored<T> = Option<(T, Value)>;
 
 /// The job row and `vs` in one read.
 pub async fn read_job<S: NamespaceStore>(
@@ -329,13 +325,7 @@ pub async fn read_job<S: NamespaceStore>(
     source: &Partition,
     repo: &RepoName,
     pack: &Hash,
-) -> Result<
-    (
-        Option<(VerifyJobV1, Value)>,
-        Option<(VerificationV1, Value)>,
-    ),
-    StoreError,
-> {
+) -> Result<(Stored<VerifyJobV1>, Stored<VerificationV1>), StoreError> {
     let rows = store
         .get_many(
             source,

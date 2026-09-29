@@ -81,7 +81,12 @@ All paths below are relative to `rust/crates/`.
 8. The release Worker source guard also matched the uppercase ancestry constant
    name as transaction-control text. The adapter clamps directly to 64; the
    unchanged source guard and raised-cap regression both remain required.
-9. Added the missing Scheduled `u`-only grant integration and the actual 64-commit
+9. A source restart retained provisional frame/history/base/child rows. A fake
+   source carrying another signed commit was replaced by the valid source; the
+   regression failed because the old frame survived successful verification.
+   Decode now clears derived rows in guarded 90-row pages while kind is Unknown,
+   before reading a fresh source. This also clears rows on ticket replacement.
+10. Added the missing Scheduled `u`-only grant integration and the actual 64-commit
    staging boundary, alongside the inherited fast-forward-only child/fork test.
 
 The PR body records final gate results, size accounting, executor decisions,
@@ -91,7 +96,7 @@ and brief/spec passes; the orchestrator notes prohibit spawning new agents.
 
 ## Size and implementation decisions
 
-Production size is 2,798 added Rust source lines, excluding blank/comment lines,
+Production size is 2,800 added Rust source lines, excluding blank/comment lines,
 test files and test modules, and the complete conformance test-harness crate.
 Removed production lines are not subtracted. The completion enqueue remains the
 brief's first size cut; the attempt counter and three-failure shrink remain.

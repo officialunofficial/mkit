@@ -156,6 +156,7 @@ struct Windows {
     reads: AtomicU32,
     etag: Mutex<u32>,
     flip_after: Mutex<Option<u32>>,
+    source: Mutex<Option<Hash>>,
     /// `(offset, reads to let pass first, once)`: flip a byte at `offset`.
     corrupt: Mutex<Option<(u64, u32, bool)>>,
     fail: Mutex<bool>,
@@ -187,8 +188,9 @@ impl PackWindows for Arc<Windows> {
             if etag.is_some_and(|expected| expected != current) {
                 return Err(WindowError::EtagChanged);
             }
+            let source = self.source.lock().unwrap().unwrap_or(*pack);
             let mut window = BlobWindows(self.blobs.as_ref())
-                .read(pack, offset, len, None)
+                .read(&source, offset, len, None)
                 .await?;
             let mut corrupt = self.corrupt.lock().unwrap();
             if let Some((at, after, once)) = *corrupt
@@ -687,6 +689,56 @@ fn a_crash_at_every_batch_boundary_resumes_to_the_same_result() {
         boundaries > 10,
         "faults injected at {boundaries} boundaries"
     );
+}
+
+#[test]
+fn a_source_restart_cannot_publish_the_old_provisional_history() {
+    let tree = Object::Tree(Tree {
+        entries: Vec::new(),
+    });
+    let tree_id = tree.id().unwrap();
+    let (old_commit, old_head) = signed_commit(tree_id, Vec::new(), 7, b"fake");
+    let (commit, head) = signed_commit(tree_id, Vec::new(), 7, b"head");
+    let mut old = PackWriter::new_raw_only();
+    let mut fresh = PackWriter::new_raw_only();
+    for (writer, objects) in [
+        (&mut old, [&old_commit, &tree]),
+        (&mut fresh, [&commit, &tree]),
+    ] {
+        for object in objects {
+            writer
+                .push_raw(object.id().unwrap(), &serialize(object).unwrap())
+                .unwrap();
+        }
+    }
+    let (old, fresh) = (old.finish().unwrap(), fresh.finish().unwrap());
+    assert_eq!(old.len(), fresh.len());
+    let mut rig = Rig::new();
+    rig.limits.max_entries = 1;
+    rig.add(&old);
+    let (ticket, id) = rig.add(&fresh);
+    rig.create(&ticket, id);
+    *rig.windows.source.lock().unwrap() = Some(hash(&old));
+    rig.tick();
+    let old_frame = keys::verify_row(
+        &rig.repo.name,
+        &ticket.pack_id,
+        keys::VC_FRAME,
+        Some(&old_head),
+    );
+    assert!(block_on(rig.store.has(&rig.source(), &old_frame)).unwrap());
+    *rig.windows.source.lock().unwrap() = None;
+    *rig.windows.etag.lock().unwrap() += 1;
+    rig.drive(|rig| rig.finished(&ticket.pack_id));
+    assert!(!block_on(rig.store.has(&rig.source(), &old_frame)).unwrap());
+    let old_history = keys::verify_row(
+        &rig.repo.name,
+        &ticket.pack_id,
+        keys::VC_HISTORY,
+        Some(&old_head),
+    );
+    assert!(!block_on(rig.store.has(&rig.source(), &old_history)).unwrap());
+    assert!(rig.check(&[(&ticket, id)], head).is_ok());
 }
 
 #[test]

@@ -729,6 +729,21 @@ where
         state: Option<&(VerificationV1, Value)>,
         held: &mut Option<Value>,
     ) -> Result<u64, Stop> {
+        // A fresh job or source restart must discard provisional rows first.
+        // Delete one page with the guarded checkpoint, then try again.
+        if job.kind == Kind::Unknown {
+            let start = keys::verify_row(&self.repo.name, &self.pack, keys::VC_FRAME, None);
+            let (_, end) = keys::verify_range(&self.repo.name, &self.pack, None);
+            let page = self
+                .local
+                .scan(self.source, &start, &end, None, CLEANUP_PAGE)
+                .await?;
+            st.settled
+                .extend(page.entries.into_iter().map(|(key, _)| Write::Delete(key)));
+            if !st.settled.is_empty() {
+                return Ok(0);
+            }
+        }
         match state {
             Some((VerificationV1::Rejected { .. }, _)) => {
                 job.phase = Phase::Watch;
