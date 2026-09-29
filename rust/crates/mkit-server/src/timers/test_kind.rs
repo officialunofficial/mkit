@@ -1,6 +1,8 @@
 //! Ref-deleting test timer; absent from release builds.
 use super::{DueTimer, Fired, TimerCtx, TimerHandler, TimerKind, registry::kinds};
-use crate::store::keys;
+use crate::pipeline::{D34Shards, ShardMap};
+use crate::repo::RepoId;
+use crate::store::{Partition, keys, outbox::OutboxBuilder};
 use crate::{Batch, BoxFuture, NamespaceStore, RepoName, StoreError};
 
 /// Deletes the ref named by `<repo> 00 <refname>`.
@@ -12,7 +14,7 @@ impl<S: NamespaceStore> TimerHandler<S> for TestTimer {
     }
     fn fire<'a>(
         &'a self,
-        _ctx: &'a TimerCtx<'a, S>,
+        ctx: &'a TimerCtx<'a, S>,
         timer: &'a DueTimer,
     ) -> BoxFuture<'a, Result<Fired, StoreError>> {
         Box::pin(async move {
@@ -32,7 +34,25 @@ impl<S: NamespaceStore> TimerHandler<S> for TestTimer {
             if !crate::refs::validate_ref_name(name) {
                 return Ok(Fired::Retry);
             }
-            Ok(Fired::Done(Batch::new().delete(keys::ref_key(&repo, name))))
+            let mut batch = Batch::new().delete(keys::ref_key(&repo, name));
+            if let Partition::Ref { ns, .. } = ctx.partition {
+                let id = RepoId {
+                    namespace: ns.clone(),
+                    name: repo.clone(),
+                };
+                let target = D34Shards.ref_index(&id, name);
+                let os = ctx
+                    .store
+                    .get(ctx.partition, &keys::outbox_sequence())
+                    .await?;
+                let mut outbox = OutboxBuilder::new(os.as_ref(), None)?;
+                outbox.relay_delete(&target, vec![keys::ref_index_key(&repo, name)]);
+                outbox.relay_at(ctx.now_ms);
+                // Test-only exemption from R-127: this timer is absent from
+                // release builds and can fire after the source lease expires.
+                outbox.try_finish(&mut batch.preconditions, &mut batch.writes)?;
+            }
+            Ok(Fired::Done(batch))
         })
     }
 }

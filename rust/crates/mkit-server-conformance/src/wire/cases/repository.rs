@@ -9,8 +9,8 @@ use mkit_transport_connect::generated::{
 };
 
 use super::{
-    A, B, C, CaseResult, Commit, Ctx, Exp, Failure, Signed, ensure, sign_unary, update_req,
-    upload_msgs, want_code, want_ok,
+    A, B, C, CaseResult, Commit, Ctx, Exp, Failure, Signed, ensure, eventually_listed, sign_unary,
+    update_req, upload_msgs, want_code, want_ok,
 };
 use crate::wire::client::{Rpc, frame};
 use crate::wire::sign::pack_commitment;
@@ -142,7 +142,16 @@ async fn isolated_pair(ctx: &Ctx, name_a: &str, name_b: &str) -> CaseResult {
         (&repo_a, &A, "only-a", "only-b"),
         (&repo_b, &B, "only-b", "only-a"),
     ] {
-        let refs = want_ok(list(ctx, repository).await?, "ListRefs")?.refs;
+        let refs = eventually_listed(
+            "repository ListRefs",
+            || async { Ok(want_ok(list(ctx, repository).await?, "ListRefs")?.refs) },
+            |refs| {
+                refs.len() == 2
+                    && refs.iter().any(|r| r.name.as_deref() == Some("main"))
+                    && refs.iter().any(|r| r.name.as_deref() == Some(own))
+            },
+        )
+        .await?;
         let names: Vec<_> = refs
             .iter()
             .map(|r| r.name.as_deref().unwrap_or_default())

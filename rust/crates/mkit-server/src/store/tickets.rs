@@ -323,6 +323,8 @@ pub enum CloseReason {
     Aborted,
     /// Remove the timer along with the ticket.
     Expired,
+    /// The timer core removes the fired expiry row with the same batch.
+    ExpiryTimerFired,
 }
 
 /// Close only the exact ticket observed (R-04). The caller writes its

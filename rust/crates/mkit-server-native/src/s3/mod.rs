@@ -66,6 +66,7 @@
 //! Credentials come from the operator's environment or a secret file
 //! ([`crate::config`]); their `Debug` output is redacted.
 
+mod multipart;
 mod put;
 mod sink;
 
@@ -80,10 +81,7 @@ use bytes::{Bytes, BytesMut};
 use futures_util::{Stream, StreamExt as _};
 use mkit_server::storage_error::{StorageOp, describe_and_map};
 use mkit_server::store::MAX_BLOB_PIECE_BYTES;
-use mkit_server::{
-    BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, Clock, MultipartBlobStore, Redactor,
-    StoreError, UnsupportedPartSink,
-};
+use mkit_server::{BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, Clock, Redactor, StoreError};
 use mkit_transport_s3::sigv4;
 pub use mkit_transport_s3::sigv4::Credentials;
 use reqwest::header::{self, HeaderMap, HeaderName, HeaderValue};
@@ -494,11 +492,18 @@ async fn s3_error_code(resp: Response) -> Option<String> {
     let mut stream = resp.bytes_stream();
     while body.len() < ERROR_BODY_LIMIT {
         match stream.next().await {
-            Some(Ok(piece)) => body.extend_from_slice(&piece),
+            Some(Ok(piece)) => {
+                let room = ERROR_BODY_LIMIT - body.len();
+                body.extend_from_slice(&piece[..piece.len().min(room)]);
+            }
             _ => break,
         }
     }
     let text = String::from_utf8_lossy(&body);
+    filtered_error_code(&text)
+}
+
+fn filtered_error_code(text: &str) -> Option<String> {
     let start = text.find("<Code>")? + "<Code>".len();
     let code = &text[start..start + text[start..].find("</Code>")?];
     (code.len() <= 64 && code.bytes().all(|b| b.is_ascii_alphanumeric())).then(|| code.to_owned())
@@ -741,9 +746,4 @@ impl BlobStore for S3BlobStore {
             _ => Err(status_error(StorageOp::BlobPut, "DELETE", resp).await),
         }
     }
-}
-
-impl MultipartBlobStore for S3BlobStore {
-    type PartSink = UnsupportedPartSink;
-    const MAX_PARTS: u32 = 10_000;
 }

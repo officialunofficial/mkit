@@ -1906,13 +1906,17 @@ mod tests {
     #[test]
     fn scrub_age_boundary_is_exclusive() {
         // One second before the bound: the rotating window advances.
+        // 600 leaves, not 1500: the assertion only needs a prefix longer
+        // than `SCRUB_MIN_WINDOW` so the window path sets cursor to 512
+        // and a full walk resets it to 0. Two 1500-leaf publishes are what
+        // pushed this past the 60s hang detector even alone.
         let (_dir, layout, store) = repo();
-        let tips = build_chain(&store, 1500);
+        let tips = build_chain(&store, 600);
         set_now(1_000_000);
-        update(&layout, &store, "main", tips[1499]);
+        update(&layout, &store, "main", tips[599]);
         let dir = ancestry_state::branch_dir(layout.common_dir(), "refs/heads/main");
         set_now(1_000_000 + SCRUB_MAX_AGE_SECS - 1);
-        let step = commit(&store, vec![tips[1499]], b"1500");
+        let step = commit(&store, vec![tips[599]], b"600");
         update(&layout, &store, "main", step);
         let scrub = read_scrub_state(&dir).unwrap();
         assert_eq!(scrub.cursor, 512, "age < bound takes the window path");
@@ -1920,12 +1924,12 @@ mod tests {
 
         // Exactly at the bound: stale, so a full walk resets the cursor.
         let (_dir, layout, store) = repo();
-        let tips = build_chain(&store, 1500);
+        let tips = build_chain(&store, 600);
         set_now(1_000_000);
-        update(&layout, &store, "main", tips[1499]);
+        update(&layout, &store, "main", tips[599]);
         let dir = ancestry_state::branch_dir(layout.common_dir(), "refs/heads/main");
         set_now(1_000_000 + SCRUB_MAX_AGE_SECS);
-        let step = commit(&store, vec![tips[1499]], b"1500");
+        let step = commit(&store, vec![tips[599]], b"600");
         update(&layout, &store, "main", step);
         let scrub = read_scrub_state(&dir).unwrap();
         assert_eq!(scrub.cursor, 0, "age == bound forces a full walk");

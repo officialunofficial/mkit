@@ -302,6 +302,70 @@ fn relay_groups_by_target_sorts_deduplicates_and_excludes_backlog() {
 }
 
 #[test]
+fn relay_delete_groups_and_splits_at_96_operations() {
+    let target = Partition::Coordinator(NamespaceKey::deployment_default());
+    let keys = (0u8..97)
+        .map(|n| Key::new(vec![b'x', 0, n]))
+        .collect::<Vec<_>>();
+    let mut builder = OutboxBuilder::new(None, None).unwrap();
+    builder.relay_at(200);
+    builder.relay_delete(&target, keys[..40].to_vec());
+    builder.relay_delete(&target, keys[40..].to_vec());
+    let rows = relay_rows(&finish(builder));
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].1.deletes.len(), 96);
+    assert_eq!(rows[1].1.deletes.len(), 1);
+    assert!(rows.iter().all(|(_, row)| row.puts.is_empty()));
+}
+
+#[test]
+fn relay_delete_respects_encoded_row_byte_cap() {
+    let target = Partition::Coordinator(NamespaceKey::deployment_default());
+    let mut builder = OutboxBuilder::new(None, None).unwrap();
+    builder.relay_at(200);
+    builder.relay(
+        &target,
+        (0u8..80)
+            .map(|n| (Key::new(vec![b'x', 0, n]), Value::new(vec![7; 3_260])))
+            .collect(),
+    );
+    builder.relay_delete(&target, vec![Key::new(vec![b'y'; MAX_KEY_BYTES])]);
+    let rows = relay_rows(&finish(builder));
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].1.puts.len(), 80);
+    assert_eq!(rows[1].1.deletes.len(), 1);
+    assert!(
+        rows.iter().all(|(_, row)| {
+            codec::encode_relay(row).unwrap().as_bytes().len() <= MAX_VALUE_BYTES
+        })
+    );
+}
+
+#[test]
+fn relay_put_delete_overlap_is_invalid_in_either_order() {
+    let target = Partition::Coordinator(NamespaceKey::deployment_default());
+    let key = Key::new(b"x\0a".as_slice());
+    for delete_first in [false, true] {
+        let mut builder = OutboxBuilder::new(None, None).unwrap();
+        builder.relay_at(200);
+        if delete_first {
+            builder.relay_delete(&target, vec![key.clone()]);
+            builder.relay(&target, vec![(key.clone(), Value::default())]);
+        } else {
+            builder.relay(&target, vec![(key.clone(), Value::default())]);
+            builder.relay_delete(&target, vec![key.clone()]);
+        }
+        let mut pre = Vec::new();
+        let mut writes = Vec::new();
+        assert!(matches!(
+            builder.try_finish(&mut pre, &mut writes),
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(pre.is_empty() && writes.is_empty());
+    }
+}
+
+#[test]
 fn terminal_outcome_cannot_replace_terminal_or_be_ticketed() {
     assert!(Terminal::new(ReservationV1::Ticketed { ticket_id: [1; 32] }).is_err());
     let terminal = codec::encode_reservation(&ReservationV1::Expired {
