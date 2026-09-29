@@ -27,6 +27,17 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # can render failure annotations inline on PR diffs.
 path = "junit.xml"
 
+# The S3 wire profile deliberately delays CompleteUpload by 31 seconds to
+# prove it uses the long deadline. The rest of the wire suite follows that
+# request, so its total runtime can exceed the default 60-second envelope.
+[[profile.default.overrides]]
+filter = 'binary(wire_s3_sqlite)'
+slow-timeout = { period = "180s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'binary(wire_s3_sqlite)'
+slow-timeout = { period = "180s", terminate-after = 1 }
+
 # The bounded PR run of the stateful suite (tests/state_machine.rs, 32 cases)
 # is ~12s locally, but it spawns the `mkit` binary per op, so a slow/loaded
 # (especially macOS) runner could drift toward the default 60s / ci 120s kill
