@@ -24,7 +24,7 @@ mod begin;
 mod coordinator;
 mod download;
 #[cfg(feature = "test-faults")]
-mod faults;
+pub(crate) mod faults;
 mod gate;
 mod hooks;
 mod info;
@@ -38,6 +38,7 @@ mod shard;
 #[cfg(test)]
 mod tests;
 mod upload;
+mod watermark;
 
 use core::future::Future;
 use core::time::Duration;
@@ -76,7 +77,8 @@ pub use download::{DownloadChunk, DownloadStream};
 #[cfg(feature = "test-faults")]
 pub use faults::{
     BUMP_EPOCH_HEADER, CLOCK_SKEW_HEADER, FAULT_HEADER, FailOnce, FaultHooks, FaultPoint,
-    LEASE_RECOVERED_HEADER, RUN_TIMERS_HEADER, TIMER_MS_HEADER, TestDirectives,
+    LEASE_RECOVERED_HEADER, RELAY_DELAY_MS_HEADER, RUN_TIMERS_HEADER, TIMER_MS_HEADER,
+    TestDirectives,
 };
 pub use hooks::{
     Admission, AdmissionDecision, AdmissionInput, Authorizer, Challenge, DefaultAdmission, HookSet,
@@ -138,6 +140,22 @@ pub enum Sharding {
     Single,
     /// Coordinator and per-branch ref shards (D34).
     D34,
+}
+
+fn require_relay_source_lease(
+    sharding: Sharding,
+    has_lease: bool,
+    batch: &Batch,
+) -> Result<(), ServerError> {
+    if sharding == Sharding::D34
+        && !has_lease
+        && batch.writes.iter().any(|write| {
+            matches!(write, crate::store::Write::Put(key, _) if matches!(keys::parse(key), Some(keys::ParsedKey::Relay(_))))
+        })
+    {
+        return Err(internal("D34 relay batch lacks source epoch lease"));
+    }
+    Ok(())
 }
 
 /// A deployment's pipeline settings. Start from [`PipelineConfig::new`].
@@ -1826,6 +1844,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 prune,
                 prune_from,
             } = plan;
+            require_relay_source_lease(self.cfg.sharding, req.lease.is_some(), &batch)?;
+            #[cfg(feature = "test-faults")]
+            let batch = faults::delay_relay_batch(
+                batch,
+                a.test_directives(),
+                op,
+                ms(clock.business_now_ms),
+            );
             if req.kind != WriteKind::UploadReserve {
                 #[cfg(feature = "test-faults")]
                 {
@@ -1838,23 +1864,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             match self.meta.apply(p, batch).await {
                 Ok(BatchOutcome::Committed) => {
                     #[cfg(feature = "test-faults")]
-                    if let OpKind::UpdateRef(upd) = &op.kind
-                        && matches!(
-                            on_commit,
-                            StoredResult::UpdateRef(UpdateRefResult::Committed)
-                        )
-                    {
-                        let timer_partition = self.shards.ref_shard(&op.repo, &upd.name);
-                        faults::schedule_timer(
-                            a.test_directives(),
-                            &self.meta,
-                            &timer_partition,
-                            &op.repo.name,
-                            &upd.name,
-                            ms(clock.business_now_ms),
-                        )
+                    self.schedule_test_ref_timer(op, a, &on_commit, ms(clock.business_now_ms))
                         .await?;
-                    }
                     return Ok(on_commit);
                 }
                 Ok(BatchOutcome::DeadlinePassed { backend_now }) => {
@@ -1894,6 +1905,34 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 Err(e) => return Err(meta_error(e)),
             }
         }
+    }
+
+    #[cfg(feature = "test-faults")]
+    async fn schedule_test_ref_timer(
+        &self,
+        op: &Operation,
+        a: &Authenticated,
+        on_commit: &StoredResult,
+        now_ms: u64,
+    ) -> Result<(), ServerError> {
+        if let OpKind::UpdateRef(upd) = &op.kind
+            && matches!(
+                on_commit,
+                StoredResult::UpdateRef(UpdateRefResult::Committed)
+            )
+        {
+            let timer_partition = self.shards.ref_shard(&op.repo, &upd.name);
+            faults::schedule_timer(
+                a.test_directives(),
+                &self.meta,
+                &timer_partition,
+                &op.repo.name,
+                &upd.name,
+                now_ms,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// The deadline uses the injected clock unshifted; business time adds

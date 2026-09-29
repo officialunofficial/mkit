@@ -23,6 +23,8 @@ pub const METRIC_REQUESTS: &str = "mkit_server_requests_total";
 pub const METRIC_LATENCY: &str = "mkit_server_request_duration_ms";
 /// Counter: accepted upload bytes.
 pub const METRIC_UPLOAD_BYTES: &str = "mkit_server_upload_bytes_total";
+/// Counter: an expired shard lease remains kept beyond the relay lag bound.
+pub const METRIC_RELAY_LEASE_LAG: &str = "mkit_server_relay_lease_lag_total";
 /// Namespace quota writes admitted with no recent coordinator view.
 pub const METRIC_NAMESPACE_QUOTA_VIEW_FALLBACK: &str =
     "mkit_server_namespace_quota_view_fallback_total";

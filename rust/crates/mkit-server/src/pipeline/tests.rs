@@ -47,6 +47,20 @@ const A: Hash = [0xaa; 32];
 const B: Hash = [0xbb; 32];
 const C: Hash = [0xcc; 32];
 
+#[test]
+fn d34_relay_batch_requires_source_lease() {
+    let relay = Batch::new().put(keys::relay(1), Value::default());
+    assert_eq!(
+        require_relay_source_lease(Sharding::D34, false, &relay)
+            .unwrap_err()
+            .code(),
+        Code::Internal
+    );
+    assert!(require_relay_source_lease(Sharding::D34, true, &relay).is_ok());
+    assert!(require_relay_source_lease(Sharding::Single, false, &relay).is_ok());
+    assert!(require_relay_source_lease(Sharding::D34, false, &Batch::new()).is_ok());
+}
+
 fn planned_ticket_advance(count: usize) -> Batch {
     planned_ticket_advance_mode(count, true)
 }
@@ -494,6 +508,66 @@ fn repo() -> RepoId {
 
 fn ns() -> Partition {
     Partition::Namespace(NamespaceKey::deployment_default())
+}
+
+#[test]
+fn single_sharding_watermark_reads_namespace_outbox() {
+    let env = env(AuthMode::Open);
+    let namespace = NamespaceKey::deployment_default();
+    assert_eq!(
+        now(env.pipe.namespace_relay_watermark(&namespace)).unwrap(),
+        u64::try_from(T0).unwrap()
+    );
+    let row = codec::RelayV1 {
+        at_ms: u64::try_from(T0).unwrap() - 5,
+        target: ns(),
+        puts: vec![(Key::new(&b"x\0"[..]), Value::default())],
+    };
+    now(env.pipe.meta.apply(
+        &ns(),
+        Batch::new().put(keys::relay(1), codec::encode_relay(&row).unwrap()),
+    ))
+    .unwrap();
+    assert_eq!(
+        now(env.pipe.namespace_relay_watermark(&namespace)).unwrap(),
+        u64::try_from(T0).unwrap() - 6
+    );
+    let shards = now(env.pipe.active_shards(&namespace, None, 1)).unwrap();
+    assert_eq!(shards.shards, vec![ns()]);
+    now(env.pipe.meta.apply(
+        &ns(),
+        Batch::new().put(
+            keys::lease_recovery(),
+            codec::encode_lease_recovery(&codec::LeaseRecovery {
+                resumed_at_ms: u64::try_from(T0).unwrap(),
+            }),
+        ),
+    ))
+    .unwrap();
+    assert_eq!(
+        now(env.pipe.namespace_relay_watermark(&namespace))
+            .unwrap_err()
+            .code(),
+        Code::Unavailable
+    );
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn relay_delay_directive_commits_with_ref_write() {
+    let env = env(AuthMode::Open);
+    let req = Req::unsigned(Procedure::UpdateRef).header(RELAY_DELAY_MS_HEADER, "10000");
+    assert_eq!(
+        env.update(&req, &upd(HEAD, Missing, A)).unwrap(),
+        UpdateRefResult::Committed
+    );
+    let marker = now(env.pipe.meta.get(&ns(), &faults::relay_delay_key()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        codec::decode_u64(&marker).unwrap(),
+        u64::try_from(T0).unwrap() + 10_000
+    );
 }
 
 fn authv2() -> AuthMode {
@@ -1085,8 +1159,8 @@ fn fresh_shard_uses_coordinator_total_in_lease_read_and_persists_view() {
     assert_eq!(err.code(), Code::ResourceExhausted);
     assert_eq!(
         env.pipe.meta.calls(),
-        2,
-        "read-ahead and lease get_many only"
+        3,
+        "read-ahead, source relay scan, and lease get_many"
     );
     assert!(env.pipe.meta.seen.lock().unwrap().contains(&qt));
     assert!(
@@ -1111,7 +1185,11 @@ fn fresh_shard_uses_coordinator_total_in_lease_read_and_persists_view() {
         now(env.pipe.update_ref(&a, update)).unwrap(),
         UpdateRefResult::Committed
     );
-    assert_eq!(env.pipe.meta.calls() - before, 4);
+    assert_eq!(
+        env.pipe.meta.calls() - before,
+        5,
+        "new shard adds one source relay scan"
+    );
     let stored = now(env.pipe.meta.inner.get(&shard, &keys::quota_view(window)))
         .unwrap()
         .expect("accepted first write seeds a durable view");
@@ -2724,7 +2802,11 @@ fn d34_canonical_advance_commits_in_one_ref_partition() {
             .unwrap(),
         AdvanceOutcome::Committed
     );
-    assert_eq!(env.pipe.meta.calls(), 4);
+    assert_eq!(
+        env.pipe.meta.calls(),
+        5,
+        "renewal adds one source relay scan"
+    );
     let applied = partitions.lock().unwrap();
     let refs: Vec<_> = applied
         .iter()
