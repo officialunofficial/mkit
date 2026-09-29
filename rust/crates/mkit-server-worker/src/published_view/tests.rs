@@ -226,28 +226,28 @@ fn delivery(store: &SqlKvStore<RusqliteConn>, source: u64, seq: u64, delete: boo
         .unwrap()
 }
 fn public(meta: &impl NamespaceStore, private: bool) {
-    block_on(
-        meta.apply(
-            &Partition::Coordinator(repo().namespace),
-            Batch::new()
-                .put(
-                    keys::repo_record(&repo().name),
-                    codec::encode_repo_record(&codec::RepoRecord { created_at_ms: 1 }),
-                )
-                .put(
-                    keys::repo_visibility(&repo().name),
-                    codec::encode_repo_visibility(&codec::RepoVisibilityV1 {
-                        visibility: if private {
-                            codec::StoredVisibility::Private
-                        } else {
-                            codec::StoredVisibility::Public
-                        },
-                        last_created_ms: 0,
-                        last_statement_id: None,
-                    }),
-                ),
-        ),
+    meta.apply(
+        &Partition::Coordinator(repo().namespace),
+        Batch::new()
+            .put(
+                keys::repo_record(&repo().name),
+                codec::encode_repo_record(&codec::RepoRecord { created_at_ms: 1 }),
+            )
+            .put(
+                keys::repo_visibility(&repo().name),
+                codec::encode_repo_visibility(&codec::RepoVisibilityV1 {
+                    visibility: if private {
+                        codec::StoredVisibility::Private
+                    } else {
+                        codec::StoredVisibility::Public
+                    },
+                    last_created_ms: 0,
+                    last_statement_id: None,
+                }),
+            ),
     )
+    .now_or_never()
+    .unwrap()
     .unwrap();
 }
 fn tick(
@@ -871,4 +871,106 @@ fn conditional_replacement_never_regresses_generation_or_capture_time() {
         assert_eq!(bucket.object.lock().unwrap().as_ref().unwrap().bytes, bytes);
         assert_eq!(bucket.calls.load(Ordering::SeqCst), 1); // No retry or replacement.
     }
+}
+
+#[test]
+fn privacy_change_during_upload_is_cleaned_on_refresh_without_a_retry() {
+    let clock = Arc::new(ManualClock::new(1000));
+    let store = local(&clock);
+    let meta = CountStore::new(MemoryKv::default());
+    public(&meta, false);
+    meta.calls.store(0, Ordering::SeqCst);
+    let bucket = Bucket::new(clock.clone());
+    let changed = meta.inner.clone();
+    *bucket.interleave.lock().unwrap() = Some(Box::new(move || public(changed.as_ref(), true)));
+    let alarm = SnapshotAlarm::default();
+    let registry = TimerRegistry::new().register(SnapshotHandler {
+        bucket: bucket.clone(),
+        coordinator: meta.clone(),
+        clock: clock.clone(),
+        alarm: alarm.clone(),
+    });
+    delivery(&store, 1, 1, false);
+    clock.set(2000);
+    tick(&store, &registry, &clock);
+    // Authorization observed public before the upload await. R2 stays private;
+    // the pipeline's independent private-transition test denies subsequent reads
+    // before touching this obsolete body. Publication does not re-read visibility.
+    assert_eq!(meta.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(bucket.calls.load(Ordering::SeqCst), 2);
+    assert!(bucket.object.lock().unwrap().is_some());
+    clock.set(32000);
+    alarm.reset();
+    tick(&store, &registry, &clock);
+    assert!(bucket.object.lock().unwrap().is_none());
+    assert_eq!(bucket.puts.load(Ordering::SeqCst), 1);
+    assert_eq!(meta.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(bucket.calls.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn full_reserved_target_batch_and_three_local_writes_commit_atomically() {
+    let clock = Arc::new(ManualClock::new(1000));
+    let store = local(&clock);
+    let partition = partition();
+    let old_timer = keys::timer(
+        30000,
+        mkit_server::timers::registry::kinds::PUBLISHED_VIEW.get(),
+        b"",
+    );
+    let clean = super::timer::State {
+        generation: 1,
+        dirty: false,
+        due: 30000,
+        last_success: 0,
+    };
+    block_on(
+        store.apply(
+            &partition,
+            Batch::new()
+                .put(state_key(), clean.encode())
+                .put(old_timer.clone(), Value::default()),
+        ),
+    )
+    .unwrap();
+    let guard = Key::new(b"target-watermark".to_vec());
+    let mut batch = Batch::new()
+        .require(Precondition::Absent(guard.clone()))
+        .put(guard, Value::default());
+    for _ in 0..95 {
+        batch.writes.push(mkit_server::Write::Put(
+            keys::ref_index_key(&repo().name, "refs/heads/main"),
+            codec::encode_ref_id(&[9; 32]),
+        ));
+    }
+    let mut caps = mkit_server::StoreCapabilities::full();
+    caps.reserved_batch_ops = 3;
+    assert_eq!(batch.preconditions.len() + batch.writes.len(), 97);
+    batch.validate(&caps).unwrap();
+    let target = partition.clone();
+    assert_eq!(
+        store
+            .apply_extended(&partition, batch.clone(), move |get, batch, at| {
+                extend_relay(&target, get, batch, at).map(|_| ())
+            })
+            .unwrap(),
+        BatchOutcome::Committed
+    );
+    assert_eq!(state(&store).generation, 2);
+    assert_eq!(state(&store).due, 2000);
+    assert!(
+        block_on(store.get(&partition, &old_timer))
+            .unwrap()
+            .is_none()
+    );
+    let target = partition.clone();
+    assert!(matches!(
+        store
+            .apply_extended(&partition, batch, move |get, batch, at| {
+                extend_relay(&target, get, batch, at).map(|_| ())
+            })
+            .unwrap(),
+        BatchOutcome::PreconditionFailed { .. }
+    ));
+    assert_eq!(state(&store).generation, 2);
 }
