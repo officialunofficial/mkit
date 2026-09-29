@@ -31,6 +31,7 @@ use mkit_server::{
 };
 use mkit_server_conformance::wire::sign::{Signer, body_commitment};
 use mkit_server_native::{Blocking, RusqliteConn};
+use proptest::prelude::*;
 use tokio::sync::Notify;
 
 const REF: &str = "refs/heads/a";
@@ -361,12 +362,16 @@ fn assert_cost(calls: &[Call], expected: usize) {
     assert!(
         matches!(&calls[0], Call::Many(Partition::Ref { .. }, ks) if ks.contains(&keys::epoch_lease()) && !ks.contains(&keys::grant_epoch()))
     );
-    if expected == 4 {
+    if expected == 5 {
         assert!(
-            matches!(&calls[1], Call::Many(Partition::Coordinator(_), ks) if ks.len() == 5 && ks.contains(&keys::grant_epoch()) && ks.contains(&keys::lease_recovery()))
+            matches!(&calls[1], Call::Other),
+            "renewal adds exactly one source watermark scan"
         );
         assert!(
-            matches!(&calls[2], Call::Apply(Partition::Coordinator(_), b, BatchOutcome::Committed) if !b.preconditions.iter().any(|p| matches!(p, Precondition::NotAfter(_))))
+            matches!(&calls[2], Call::Many(Partition::Coordinator(_), ks) if ks.len() == 5 && ks.contains(&keys::grant_epoch()) && ks.contains(&keys::lease_recovery()))
+        );
+        assert!(
+            matches!(&calls[3], Call::Apply(Partition::Coordinator(_), b, BatchOutcome::Committed) if !b.preconditions.iter().any(|p| matches!(p, Precondition::NotAfter(_))))
         );
     }
     assert!(matches!(
@@ -405,7 +410,7 @@ async fn lifecycle<N: NamespaceStore>(
     let a = auth(&pipe, None);
     committed(&pipe, &a, REF, 1).await;
     let calls = store.take();
-    assert_cost(&calls, 4);
+    assert_cost(&calls, 5);
     assert_eq!(deadline(&calls), 10_000);
     assert_eq!(el(&store, &a, REF).await.expires_at_ms, 30_000);
     committed(&pipe, &a, REF, 2).await;
@@ -421,12 +426,12 @@ async fn lifecycle<N: NamespaceStore>(
     pipeline_clock.set(24_001);
     store_clock.set(24_001);
     committed(&pipe, &a, REF, 4).await;
-    assert_cost(&store.take(), 4);
+    assert_cost(&store.take(), 5);
     assert_eq!(el(&store, &a, REF).await.expires_at_ms, 54_001);
     pipeline_clock.set(54_001);
     store_clock.set(54_001);
     committed(&pipe, &a, REF, 5).await;
-    assert_cost(&store.take(), 4);
+    assert_cost(&store.take(), 5);
     assert_eq!(el(&store, &a, REF).await.expires_at_ms, 84_001);
 }
 
@@ -458,8 +463,11 @@ async fn rejected_existing_repo<N: NamespaceStore>(
                 Code::PermissionDenied
             );
             let calls = store.take();
-            assert_eq!(calls.len(), 2, "{calls:?}");
-            assert!(calls.iter().all(|c| matches!(c, Call::Many(..))));
+            assert_eq!(calls.len(), 3, "{calls:?}");
+            assert!(matches!(
+                calls.as_slice(),
+                [Call::Many(..), Call::Other, Call::Many(..)]
+            ));
             assert!(
                 store
                     .inner
@@ -860,6 +868,29 @@ async fn absent_el_and_budget<N: NamespaceStore>(
     }
 }
 
+fn assert_renewal_ops(calls: &[Call], old_timer: &Key, new_timer: &Key) {
+    let moved = calls.iter().any(|c| matches!(c, Call::Apply(Partition::Coordinator(_), b, BatchOutcome::Committed)
+        if b.writes.contains(&Write::Delete((*old_timer).clone())) && b.writes.iter().any(|w| matches!(w, Write::Put(k, _) if k == new_timer))));
+    assert!(moved, "timer move must share the lease grant batch");
+    assert!(calls.iter().any(|c| matches!(c, Call::Apply(Partition::Coordinator(_), b, BatchOutcome::Committed)
+        if b.writes.contains(&Write::Delete((*old_timer).clone())) && b.writes.len() == 3 && b.preconditions.len() == 4)),
+        "renewal still uses four guards and three writes");
+    let renewal_ref_ops = calls
+        .iter()
+        .find_map(|c| match c {
+            Call::Apply(Partition::Ref { .. }, b, BatchOutcome::Committed) => {
+                Some((b.preconditions.len(), b.writes.len()))
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        renewal_ref_ops,
+        (4, 4),
+        "the ref batch keeps its lease installation and three other writes"
+    );
+}
+
 async fn sweep<N: NamespaceStore + 'static>(
     backend: N,
     clock: Arc<ManualClock>,
@@ -890,15 +921,27 @@ async fn sweep<N: NamespaceStore + 'static>(
             .unwrap()
             .is_some()
     );
+    let mut prior = ls(&store, &a, REF).await;
+    prior.relay_watermark_ms = 60_000;
+    store
+        .apply(
+            &coordinator(&a),
+            Batch::new().put(ls_key(&a, REF), codec::encode_leased_shard(&prior)),
+        )
+        .await
+        .unwrap();
     clock.set(24_501);
     store_clock.set(24_501);
     store.take();
     committed(&pipe, &a, REF, 2).await;
+    assert_eq!(
+        ls(&store, &a, REF).await.relay_watermark_ms,
+        60_000,
+        "a lower renewal report cannot lower the running maximum"
+    );
     let new_timer = keys::timer(54_501, kinds::LEASE_SWEEP.get(), &reference);
     let calls = store.take();
-    let moved = calls.iter().any(|c| matches!(c, Call::Apply(Partition::Coordinator(_), b, BatchOutcome::Committed)
-        if b.writes.contains(&Write::Delete(old_timer.clone())) && b.writes.iter().any(|w| matches!(w, Write::Put(k, _) if *k == new_timer))));
-    assert!(moved, "timer move must share the lease grant batch");
+    assert_renewal_ops(&calls, &old_timer, &new_timer);
     assert!(
         store
             .inner
@@ -920,7 +963,7 @@ async fn sweep<N: NamespaceStore + 'static>(
     let report = run_due(
         &store,
         &coordinator(&a),
-        &TimerRegistry::new().register(LeaseSweep),
+        &TimerRegistry::new().register(LeaseSweep::new(store.clone())),
         clock.as_ref(),
         54_501,
         &TickBudget::default(),
@@ -943,6 +986,402 @@ async fn sweep<N: NamespaceStore + 'static>(
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn corrupt_relay_row_does_not_block_lease_renewal() {
+    let clock = Arc::new(ManualClock::new(1_000));
+    let store = Store::new(MemoryKv::with_clock(clock.clone()));
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        Arc::new(Faults::default()),
+        Reject::Allow,
+    );
+    let a = auth(&pipe, None);
+    committed(&pipe, &a, REF, 1).await;
+    assert_eq!(ls(&store, &a, REF).await.relay_watermark_ms, 1_000);
+
+    clock.set(1_100);
+    store
+        .apply(
+            &shard(&a, REF),
+            Batch::new().put(keys::relay(1), Value::new(&b"corrupt relay"[..])),
+        )
+        .await
+        .unwrap();
+    clock.set(26_000);
+    committed(&pipe, &a, REF, 2).await;
+    assert_eq!(ls(&store, &a, REF).await.relay_watermark_ms, 1_000);
+    let watermark =
+        mkit_server::store::watermark::namespace_relay_watermark(&store, &coordinator(&a), 26_000)
+            .await
+            .unwrap();
+    assert!(watermark < 1_100, "corrupt undelivered row is held");
+}
+
+const MODEL_REFS: [&str; 3] = ["refs/heads/a", "refs/heads/b", "refs/heads/c"];
+
+async fn append_model_relay(
+    store: &Store<MemoryKv>,
+    a: &Authenticated,
+    name: &str,
+    seq: u64,
+    at_ms: u64,
+    commit_ms: u64,
+) {
+    use mkit_server::timers::registry::kinds;
+
+    let source = shard(a, name);
+    let lease_value = store
+        .get(&source, &keys::epoch_lease())
+        .await
+        .unwrap()
+        .unwrap();
+    let lease = codec::decode_epoch_lease(&lease_value).unwrap();
+    let row = codec::RelayV1 {
+        at_ms,
+        target: coordinator(a),
+        puts: vec![(Key::new(&b"x\0"[..]), codec::encode_u64(seq))],
+    };
+    let batch = Batch::new()
+        .require(Precondition::Equals(keys::epoch_lease(), lease_value))
+        .require(Precondition::NotAfter(lease.expires_at_ms - 5_000))
+        .put(keys::relay(seq), codec::encode_relay(&row).unwrap())
+        .put(keys::outbox_sequence(), codec::encode_u64(seq))
+        .put(
+            keys::timer(commit_ms, kinds::RELAY.get(), b""),
+            Value::default(),
+        );
+    assert_eq!(
+        store.apply(&source, batch).await.unwrap(),
+        BatchOutcome::Committed
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(24))]
+    #[test]
+    fn real_relay_lease_interleavings_bound_undelivered_commits(
+        actions in prop::collection::vec((0u8..5, 0u8..3, 1u8..8), 25..70)
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            use mkit_server::relay::{NoHook, RelayBudget, RelayHandler};
+            use mkit_server::store::watermark::namespace_relay_watermark;
+            use mkit_server::timers::lease_sweep::LeaseSweep;
+
+            let clock = Arc::new(ManualClock::new(100));
+            let store = Store::new(MemoryKv::with_clock(clock.clone()));
+            let pipe = pipeline(store.clone(), clock.clone(), Arc::new(Faults::default()), Reject::Allow);
+            let a = auth(&pipe, None);
+            let mut now = 101u64;
+            let mut next_seq = [0u64; 3];
+            let mut undelivered = Vec::<(usize, u64, u64)>::new();
+
+            // Invariant: every undelivered relay row committed after report r
+            // has commit time >= r. A later row may carry a stale at_ms.
+            committed(&pipe, &a, MODEL_REFS[0], 1).await;
+            let r = ls(&store, &a, MODEL_REFS[0]).await.relay_watermark_ms;
+            prop_assert_eq!(r, 100);
+            clock.set(101);
+            next_seq[0] = 1;
+            append_model_relay(&store, &a, MODEL_REFS[0], 1, 50, now).await;
+            undelivered.push((0, 1, now));
+            prop_assert!(now >= r, "commit time must follow the prior report");
+            now = ls(&store, &a, MODEL_REFS[0]).await.expires_at_ms + 1;
+            clock.set(i64::try_from(now).unwrap());
+            let sweep = TimerRegistry::new().register(LeaseSweep::new(store.clone()));
+            let swept = run_due(&store, &coordinator(&a), &sweep, clock.as_ref(), now, &TickBudget::default()).await.unwrap();
+            prop_assert!(swept.fired > 0, "the real lease sweep must fire on an undelivered row");
+            committed(&pipe, &a, MODEL_REFS[0], 2).await;
+            prop_assert_eq!(ls(&store, &a, MODEL_REFS[0]).await.relay_watermark_ms, r,
+                "a stale lower source report cannot erase the running maximum");
+
+            for (index, (action, shard_index, step)) in actions.into_iter().enumerate() {
+                now += u64::from(step);
+                clock.set(i64::try_from(now).unwrap());
+                let n = usize::from(shard_index);
+                let name = MODEL_REFS[n];
+                let source = shard(&a, name);
+                let key = ls_key(&a, name);
+                let before = store.get(&coordinator(&a), &key).await.unwrap()
+                    .map(|v| codec::decode_leased_shard(&v).unwrap());
+                match action {
+                    0 => {
+                        committed(&pipe, &a, name, u8::try_from(index % 250 + 3).unwrap()).await;
+                        next_seq[n] += 1;
+                        let seq = next_seq[n];
+                        append_model_relay(&store, &a, name, seq, now.saturating_sub(u64::from(step) + 1), now).await;
+                        undelivered.push((n, seq, now));
+                    }
+                    1 if now < 180_000 => {
+                        if let Some(old) = before {
+                            now = now.max(old.expires_at_ms.saturating_sub(5_000).saturating_add(1));
+                            clock.set(i64::try_from(now).unwrap());
+                        }
+                        committed(&pipe, &a, name, u8::try_from(index % 250 + 3).unwrap()).await;
+                    }
+                    2 => {
+                        let registry = TimerRegistry::new().register(RelayHandler {
+                            target: store.clone(), hook: NoHook, budget: RelayBudget::default(),
+                        });
+                        run_due(&store, &source, &registry, clock.as_ref(), now, &TickBudget::default()).await.unwrap();
+                    }
+                    3 => {
+                        let registry = TimerRegistry::new().register(LeaseSweep::new(store.clone()));
+                        run_due(&store, &coordinator(&a), &registry, clock.as_ref(), now, &TickBudget::default()).await.unwrap();
+                    }
+                    _ => {}
+                }
+                let after = store.get(&coordinator(&a), &key).await.unwrap()
+                    .map(|v| codec::decode_leased_shard(&v).unwrap());
+                if let (Some(old), Some(new)) = (before, after) {
+                    prop_assert!(new.relay_watermark_ms >= old.relay_watermark_ms,
+                        "shard {n} maximum fell from {} to {}", old.relay_watermark_ms, new.relay_watermark_ms);
+                }
+                let watermark = namespace_relay_watermark(&store, &coordinator(&a), now).await.unwrap();
+                let mut remaining = Vec::new();
+                for (shard_id, seq, committed_at) in undelivered {
+                    if store.get(&shard(&a, MODEL_REFS[shard_id]), &keys::relay(seq)).await.unwrap().is_some() {
+                        prop_assert!(watermark <= committed_at,
+                            "watermark {watermark} passed undelivered commit {committed_at}");
+                        remaining.push((shard_id, seq, committed_at));
+                    }
+                }
+                undelivered = remaining;
+            }
+            Ok(())
+        })?;
+    }
+}
+
+async fn plant_delayed_relay_and_expired_lease(
+    store: &Store<MemoryKv>,
+    source: &Partition,
+    coordinator: &Partition,
+    repo: &mkit_server::RepoName,
+    shard_ref: &str,
+) {
+    use mkit_server::timers::{lease_sweep::lease_reference, registry::kinds};
+
+    let lease = codec::LeasedShard {
+        epoch: 1,
+        expires_at_ms: 100,
+        acked_epoch: 1,
+        relay_watermark_ms: 0,
+        sweep_due_ms: 100,
+    };
+    let relay = codec::RelayV1 {
+        at_ms: 90,
+        target: coordinator.clone(),
+        puts: vec![(Key::new(&b"x\0"[..]), Value::default())],
+    };
+    store
+        .apply(
+            source,
+            Batch::new()
+                .put(keys::relay(1), codec::encode_relay(&relay).unwrap())
+                .put(keys::outbox_sequence(), codec::encode_u64(1))
+                .put(keys::timer(100, kinds::RELAY.get(), b""), Value::default())
+                .put(Key::new(&b"tdr\0"[..]), codec::encode_u64(10_100)),
+        )
+        .await
+        .unwrap();
+    store
+        .apply(
+            coordinator,
+            Batch::new()
+                .put(
+                    keys::leased_shard(repo, shard_ref),
+                    codec::encode_leased_shard(&lease),
+                )
+                .put(
+                    keys::timer(
+                        100,
+                        kinds::LEASE_SWEEP.get(),
+                        &lease_reference(repo, shard_ref),
+                    ),
+                    Value::default(),
+                ),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn expired_lease_is_kept_until_source_outbox_drains() {
+    use mkit_server::relay::{NoHook, RelayBudget, RelayHandler};
+    use mkit_server::timers::{
+        lease_sweep::{LeaseSweep, lease_reference},
+        registry::kinds,
+    };
+
+    let clock = Arc::new(ManualClock::new(100));
+    let store = Store::new(MemoryKv::with_clock(clock.clone()));
+    let ns = mkit_server::NamespaceKey::deployment_default();
+    let repo = mkit_server::RepoName::new("kept").unwrap();
+    let shard_ref = "refs/heads/main";
+    let source = Partition::Ref {
+        ns: ns.clone(),
+        repo: repo.clone(),
+        shard_ref: shard_ref.into(),
+    };
+    let coordinator = Partition::Coordinator(ns);
+    let ls_key = keys::leased_shard(&repo, shard_ref);
+    let timer10100 = keys::timer(
+        10_100,
+        kinds::LEASE_SWEEP.get(),
+        &lease_reference(&repo, shard_ref),
+    );
+    plant_delayed_relay_and_expired_lease(&store, &source, &coordinator, &repo, shard_ref).await;
+    let relay_registry = TimerRegistry::new().register(RelayHandler {
+        target: store.clone(),
+        hook: NoHook,
+        budget: RelayBudget::default(),
+    });
+    let delayed = run_due(
+        &store,
+        &source,
+        &relay_registry,
+        clock.as_ref(),
+        100,
+        &TickBudget::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(delayed.fired, 1);
+    assert!(
+        store.get(&source, &keys::relay(1)).await.unwrap().is_some(),
+        "relay-delay fault must retain the outbox"
+    );
+    let registry = TimerRegistry::new().register(LeaseSweep::new(store.clone()));
+    let report = run_due(
+        &store,
+        &coordinator,
+        &registry,
+        clock.as_ref(),
+        100,
+        &TickBudget::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.fired, 1);
+    let kept =
+        codec::decode_leased_shard(&store.get(&coordinator, &ls_key).await.unwrap().unwrap())
+            .unwrap();
+    assert_eq!(kept.relay_watermark_ms, 89);
+    assert_eq!(kept.sweep_due_ms, 10_100);
+    assert!(
+        store
+            .get(&coordinator, &timer10100)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    clock.set(10_100);
+    let drained = run_due(
+        &store,
+        &source,
+        &relay_registry,
+        clock.as_ref(),
+        10_100,
+        &TickBudget::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(drained.fired, 1);
+    assert!(store.get(&source, &keys::relay(1)).await.unwrap().is_none());
+    assert!(
+        store
+            .get(&source, &Key::new(&b"tdr\0"[..]))
+            .await
+            .unwrap()
+            .is_none(),
+        "the delay marker is consumed when delivery resumes"
+    );
+    let report = run_due(
+        &store,
+        &coordinator,
+        &registry,
+        clock.as_ref(),
+        10_100,
+        &TickBudget::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.fired, 1);
+    assert!(store.get(&coordinator, &ls_key).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn revocation_completes_with_expired_kept_row() {
+    use mkit_server::timers::lease_sweep::LeaseSweep;
+
+    let clock = Arc::new(ManualClock::new(0));
+    let store_clock = Arc::new(ManualClock::new(0));
+    let store = Store::new(MemoryKv::with_clock(store_clock.clone()));
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        Arc::new(Faults::default()),
+        Reject::Allow,
+    );
+    let a = auth(&pipe, None);
+    committed(&pipe, &a, REF, 1).await;
+    let source = shard(&a, REF);
+    let relay = codec::RelayV1 {
+        at_ms: 1,
+        target: coordinator(&a),
+        puts: vec![(Key::new(&b"x\0"[..]), Value::default())],
+    };
+    store
+        .apply(
+            &source,
+            Batch::new().put(keys::relay(1), codec::encode_relay(&relay).unwrap()),
+        )
+        .await
+        .unwrap();
+    clock.set(30_000);
+    store_clock.set(30_000);
+    let report = run_due(
+        &store,
+        &coordinator(&a),
+        &TimerRegistry::new().register(LeaseSweep::new(store.clone())),
+        clock.as_ref(),
+        30_000,
+        &TickBudget::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.fired, 1);
+    assert!(
+        store
+            .get(&coordinator(&a), &ls_key(&a, REF))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    pipe.bump_epoch(&a.repo().repo.namespace, 1).await.unwrap();
+    assert_eq!(
+        pipe.revoke_step(&a.repo().repo.namespace, &RevokeBudget::default())
+            .await
+            .unwrap(),
+        RevokeProgress::Complete
+    );
+    clock.set(30_001);
+    store_clock.set(30_001);
+    committed(&pipe, &a, REF, 2).await;
+    let (start, end) = keys::class_range(keys::TAG_TIMER);
+    let timers = store
+        .scan(&coordinator(&a), &start, &end, None, 20)
+        .await
+        .unwrap();
+    let sweeps = timers.entries.iter().filter(|(key, _)| matches!(keys::parse(key), Some(keys::ParsedKey::Timer { kind, .. }) if kind == mkit_server::timers::registry::kinds::LEASE_SWEEP.get())).count();
+    assert_eq!(
+        sweeps, 1,
+        "renewal must remove the kept row's prior sweep timer"
     );
 }
 
@@ -1223,7 +1662,7 @@ async fn swept_lease_renewal<N: NamespaceStore + 'static>(
     let report = run_due(
         &store,
         &coordinator(&a),
-        &TimerRegistry::new().register(LeaseSweep),
+        &TimerRegistry::new().register(LeaseSweep::new(store.clone())),
         &sweep_clock,
         30_000,
         &TickBudget::default(),
@@ -1343,7 +1782,7 @@ async fn recovered_loss_then_renew<N: NamespaceStore + 'static>(
     store.take();
     committed(&pipe, &a, REF, 2).await;
     let calls = store.take();
-    assert_eq!(calls.len(), 4, "{calls:?}");
+    assert_eq!(calls.len(), 5, "{calls:?}");
     assert_eq!(el(&store, &a, REF).await.expires_at_ms, 54_500);
     assert_eq!(ls(&store, &a, REF).await.expires_at_ms, 54_500);
     assert_eq!(

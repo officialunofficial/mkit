@@ -69,6 +69,10 @@ pub struct LeasedShard {
     pub expires_at_ms: u64,
     /// Epoch whose installation in the shard has been acknowledged.
     pub acked_epoch: u64,
+    /// Greatest source relay lower bound observed for this shard.
+    pub relay_watermark_ms: u64,
+    /// Due time of the one sweep timer owned by this row.
+    pub sweep_due_ms: u64,
 }
 
 /// Declared coordinator recovery, retained until a later recovery overwrites it.
@@ -1656,6 +1660,8 @@ mod tests {
             epoch: 7,
             expires_at_ms: 30000,
             acked_epoch: 6,
+            relay_watermark_ms: 123,
+            sweep_due_ms: 30000,
         };
         let recovery = LeaseRecovery {
             resumed_at_ms: 100_000,
@@ -1669,7 +1675,7 @@ mod tests {
         );
         assert_eq!(
             shard_value.as_bytes(),
-            b"\x01{\"epoch\":7,\"expires_at_ms\":30000,\"acked_epoch\":6}"
+            b"\x01{\"epoch\":7,\"expires_at_ms\":30000,\"acked_epoch\":6,\"relay_watermark_ms\":123,\"sweep_due_ms\":30000}"
         );
         assert_eq!(recovery_value.as_bytes(), b"\x01{\"resumed_at_ms\":100000}");
         assert_eq!(decode_epoch_lease(&epoch_value).unwrap(), epoch);

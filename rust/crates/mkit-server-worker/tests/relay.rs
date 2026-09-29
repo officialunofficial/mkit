@@ -20,6 +20,67 @@ use mkit_server_worker::ns_client::DoNamespaceStore;
 type Source = SqlKvStore<RusqliteConn>;
 
 #[test]
+fn free_plan_caps_lease_sweep_source_subrequests_at_sixteen() {
+    block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let coordinator_store = SqlKvStore::open(RusqliteConn::open_in_memory().unwrap()).unwrap();
+        let source_client = Loopback::store(dir.path().to_path_buf(), DoConfig::default());
+        let ns = NamespaceKey::deployment_default();
+        let coordinator = mkit_server::Partition::Coordinator(ns);
+        let repo = RepoName::new("sweep").unwrap();
+        for n in 0..20 {
+            let shard_ref = format!("refs/heads/b{n}");
+            let row = codec::LeasedShard {
+                epoch: 1,
+                expires_at_ms: 100,
+                acked_epoch: 1,
+                relay_watermark_ms: 0,
+                sweep_due_ms: 100,
+            };
+            coordinator_store
+                .apply(
+                    &coordinator,
+                    Batch::new()
+                        .put(
+                            keys::leased_shard(&repo, &shard_ref),
+                            codec::encode_leased_shard(&row),
+                        )
+                        .put(
+                            keys::timer(
+                                100,
+                                kinds::LEASE_SWEEP.get(),
+                                &mkit_server::timers::lease_sweep::lease_reference(
+                                    &repo, &shard_ref,
+                                ),
+                            ),
+                            Value::default(),
+                        ),
+                )
+                .await
+                .unwrap();
+        }
+        let registry = timer_registry(
+            ShardClass::NsCoordinator,
+            Ok(source_client.clone()),
+            Some("free"),
+        );
+        let report = run_due(
+            &coordinator_store,
+            &coordinator,
+            &registry,
+            &ManualClock::new(100),
+            100,
+            &TickBudget::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.fired, 16);
+        assert_eq!(source_client.transport().calls(), 16);
+        assert_eq!(report.deferred, 4);
+    });
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // One delivery followed by replay shares exact row bytes and call counts.
 fn relay_uses_one_watermark_read_and_one_atomic_apply_per_target() {
     block_on(async {

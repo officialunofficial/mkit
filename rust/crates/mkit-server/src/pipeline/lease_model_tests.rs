@@ -99,6 +99,8 @@ impl Model {
             epoch: self.epoch,
             expires_at_ms,
             acked_epoch,
+            relay_watermark_ms: old.map_or(0, |row| row.relay_watermark_ms),
+            sweep_due_ms: expires_at_ms,
         };
         self.rows[shard] = Some(row);
         let install = Self::lease(self.epoch, expires_at_ms);

@@ -71,12 +71,52 @@ impl<S: NamespaceStore, T: NamespaceStore, H: RelayHook> TimerHandler<S> for Rel
     }
 }
 
+#[cfg(feature = "test-faults")]
+async fn apply_relay_delay<S: NamespaceStore>(
+    ctx: &TimerCtx<'_, S>,
+    timer: &DueTimer,
+) -> Result<Option<Fired>, StoreError> {
+    let marker = crate::pipeline::faults::relay_delay_key();
+    let Some(value) = ctx.store.get(ctx.partition, &marker).await? else {
+        return Ok(None);
+    };
+    let until = codec::decode_u64(&value)?;
+    if ctx.now_ms < until {
+        return Ok(Some(Fired::Reschedule {
+            due_at_ms: until.max(timer.due_at_ms.saturating_add(1)),
+            value: timer.value.clone(),
+            batch: Batch::new(),
+        }));
+    }
+    Ok(
+        match ctx
+            .store
+            .apply(
+                ctx.partition,
+                Batch::new()
+                    .require(Precondition::Equals(marker.clone(), value))
+                    .delete(marker),
+            )
+            .await?
+        {
+            BatchOutcome::Committed => None,
+            BatchOutcome::PreconditionFailed { .. } | BatchOutcome::DeadlinePassed { .. } => {
+                Some(Fired::Retry)
+            }
+        },
+    )
+}
+
 impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
     async fn deliver<S: NamespaceStore>(
         &self,
         ctx: &TimerCtx<'_, S>,
         timer: &DueTimer,
     ) -> Result<Fired, StoreError> {
+        #[cfg(feature = "test-faults")]
+        if let Some(fired) = apply_relay_delay(ctx, timer).await? {
+            return Ok(fired);
+        }
         let os_key = keys::outbox_sequence();
         let sequence_value = ctx.store.get(ctx.partition, &os_key).await?;
         let os = sequence_value

@@ -9,10 +9,11 @@
 
 use crate::op::{Creation, Operation};
 use crate::quota::NamespaceUsage;
+use crate::relay::relay_watermark;
 use crate::repo::Addressing;
 use crate::store::{
-    Batch, BatchOutcome, MultipartBlobStore, NamespaceStore, Partition, Precondition, Value, codec,
-    keys,
+    Batch, BatchOutcome, MultipartBlobStore, NamespaceStore, Partition, Precondition, StoreError,
+    Value, codec, keys,
 };
 use crate::timers::lease_sweep::lease_reference;
 use crate::timers::registry::kinds;
@@ -40,6 +41,7 @@ pub(super) struct CoordinatorLease {
     shard: Option<Value>,
     observed_el: Option<codec::EpochLease>,
     recovery: Option<codec::LeaseRecovery>,
+    relay_watermark_ms: u64,
     quota_seed: Option<(u64, NamespaceUsage)>,
 }
 
@@ -99,6 +101,11 @@ struct LeaseGrant {
     batch: Batch,
 }
 
+// A source outbox scan precedes the coordinator read on renewal. Concurrent
+// writers can therefore observe the same lease row before any grant commits.
+// Keep grant retries local to this path; creation has a different retry bound.
+const LEASE_GRANT_ATTEMPTS: usize = 8;
+
 fn grant_batch(
     read: &CoordinatorLease,
     op: &Operation,
@@ -145,6 +152,12 @@ fn grant_batch(
         acked_epoch: old
             .filter(|l| l.expires_at_ms > now)
             .map_or(epoch, |l| l.acked_epoch),
+        relay_watermark_ms: old
+            .map_or(0, |l| l.relay_watermark_ms)
+            .max(read.relay_watermark_ms),
+        sweep_due_ms: old
+            .map_or(0, |l| l.expires_at_ms)
+            .max(now.saturating_add(cfg.epoch_lease_ms)),
     };
     let creation = read.creation();
     let nr_key = keys::namespace_record();
@@ -180,7 +193,7 @@ fn grant_batch(
     }
     if let Some(old) = old {
         batch = batch.delete(keys::timer(
-            old.expires_at_ms,
+            old.sweep_due_ms,
             kinds::LEASE_SWEEP.get(),
             &reference,
         ));
@@ -188,7 +201,7 @@ fn grant_batch(
     batch = batch
         .put(ls_key.clone(), codec::encode_leased_shard(&shard))
         .put(
-            keys::timer(shard.expires_at_ms, kinds::LEASE_SWEEP.get(), &reference),
+            keys::timer(shard.sweep_due_ms, kinds::LEASE_SWEEP.get(), &reference),
             Value::default(),
         );
     let value = codec::EpochLease {
@@ -252,6 +265,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if let Some(window) = seed_window {
             wanted.push(keys::quota_total(window));
         }
+        let reported = match relay_watermark(&self.meta, p, ms(self.clock.now_ms())).await {
+            Ok(value) => value,
+            Err(StoreError::Corrupt(reason)) => {
+                tracing::warn!(shard = ?p, %reason, "renewal cannot decode relay outbox; reporting zero");
+                0
+            }
+            Err(error) => return Err(meta_error(error)),
+        };
         let rows = self
             .meta
             .get_many(&self.shards.coordinator(&op.repo.namespace), &wanted)
@@ -302,6 +323,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .map(codec::decode_lease_recovery)
                 .transpose()
                 .map_err(meta_error)?,
+            relay_watermark_ms: reported,
             quota_seed,
         };
         Ok(read)
@@ -329,7 +351,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         // TODO(WP-2.6): compare grant.epoch with the observed coordinator e before
         // writing a lease grant, so stale-grant denial writes no state (STC §5.1).
         let coordinator = self.shards.coordinator(&op.repo.namespace);
-        for _ in 0..super::coordinator::CREATION_ATTEMPTS {
+        for _ in 0..LEASE_GRANT_ATTEMPTS {
             let now = ms(self.clock.now_ms());
             let created_at_ms = ms(self.clock.now_ms().saturating_add(skew_ms));
             let grant = grant_batch(&read, op, p, now, created_at_ms, &self.cfg)?;
@@ -363,7 +385,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 }
             }
         }
-        Err(internal("coordinator lease grant did not settle"))
+        tracing::warn!(shard = ?p, attempts = LEASE_GRANT_ATTEMPTS, "coordinator lease grant did not settle");
+        Err(ServerError::aborted_retryable(
+            "coordinator lease grant contention",
+        ))
     }
 }
 

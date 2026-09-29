@@ -41,9 +41,11 @@ fn stable_rows(path: &Path) -> Vec<Vec<SqlValue>> {
                 && key != keys::relay_scan()
                 && key != keys::backup_state()
                 && key != keys::lease_recovery()
+                && key != keys::lease_reconcile()
                 && key != keys::epoch_lease()
+                && !matches!(keys::parse(&key), Some(keys::ParsedKey::LeasedShard { .. }))
                 && !matches!(keys::parse(&key), Some(keys::ParsedKey::Relay(_)))
-                && !matches!(keys::parse(&key), Some(keys::ParsedKey::Timer { kind, .. }) if kind == kinds::BACKUP.get())
+                && !matches!(keys::parse(&key), Some(keys::ParsedKey::Timer { kind, .. }) if kind == kinds::BACKUP.get() || kind == kinds::LEASE_SWEEP.get())
         }).collect()
 }
 
@@ -310,6 +312,32 @@ fn d34_archive_creates_root_marker_and_checks_restore_mode() {
         5 + (1 << 32)
     );
     assert!(get(&coordinator, keys::lease_recovery()).is_some());
+    let restored_ls = codec::decode_leased_shard(
+        &get(
+            &coordinator,
+            keys::leased_shard(
+                &mkit_server::RepoName::new("project").unwrap(),
+                "refs/heads/main",
+            ),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(restored_ls.relay_watermark_ms, 0);
+    assert!(
+        get(
+            &coordinator,
+            keys::timer(
+                restored_ls.sweep_due_ms,
+                kinds::LEASE_SWEEP.get(),
+                &mkit_server::timers::lease_sweep::lease_reference(
+                    &mkit_server::RepoName::new("project").unwrap(),
+                    "refs/heads/main"
+                )
+            )
+        )
+        .is_some()
+    );
     assert_eq!(
         codec::decode_u64(&get(&source_ref, keys::outbox_sequence()).unwrap()).unwrap(),
         13
