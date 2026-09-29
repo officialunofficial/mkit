@@ -166,7 +166,11 @@ fn set(opts: &SetOpts) -> u8 {
             Err(e) => return error(&e, exit::DATAERR),
         };
         match VisibilityStatement::parse(&signed.statement) {
-            Ok(s) if s.repository == repository && s.visibility == wanted => {}
+            Ok(s) if s.repository == repository && s.visibility == wanted => {
+                if let Err(e) = check_audiences(&s.audiences, Some(&target)) {
+                    return error(&e, exit::USAGE);
+                }
+            }
             Ok(_) => {
                 return error(
                     "the imported statement is for a different repository or visibility than the command asks for",

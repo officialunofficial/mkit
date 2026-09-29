@@ -1873,30 +1873,32 @@ impl ConnectTransport {
     /// [`TransportError::InvalidRef`] for a namespace outside the grammar;
     /// transport failures otherwise.
     pub fn get_grant_epoch(&self, namespace: &str) -> TransportResult<Completion<u64>> {
-        self.retrying(|| {
-            self.executor.block_on(async {
-                let result = self
-                    .client
-                    .get_grant_epoch_with_options(
-                        GetGrantEpochRequest {
-                            namespace: Some(namespace.to_owned()),
-                            ..Default::default()
-                        },
-                        CallOptions::default().with_timeout(self.unary_timeout),
-                    )
-                    .await;
-                match result {
-                    Ok(resp) => Ok(Completion::Done(
-                        resp.into_owned()
-                            .epoch
-                            .ok_or(TransportError::InvalidResponse)?,
-                    )),
-                    Err(e) => pending_or_error(&e).map_or_else(
-                        || Err(map_connect_error(e, ErrorContext::Ref)),
-                        |retry_after| Ok(Completion::Pending { retry_after }),
-                    ),
-                }
-            })
+        self.retrying(|| self.get_grant_epoch_attempt(namespace))
+    }
+
+    /// One `GetGrantEpoch` attempt, without the retry ladder: for advisory
+    /// reads that must fail fast.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::get_grant_epoch`], on the first failure.
+    pub fn get_grant_epoch_once(&self, namespace: &str) -> TransportResult<Completion<u64>> {
+        self.get_grant_epoch_attempt(namespace)
+    }
+
+    fn get_grant_epoch_attempt(&self, namespace: &str) -> TransportResult<Completion<u64>> {
+        self.executor.block_on(async {
+            let result = self
+                .client
+                .get_grant_epoch_with_options(
+                    GetGrantEpochRequest {
+                        namespace: Some(namespace.to_owned()),
+                        ..Default::default()
+                    },
+                    CallOptions::default().with_timeout(self.unary_timeout),
+                )
+                .await;
+            completion(result, |resp| resp.into_owned().epoch)
         })
     }
 
@@ -1925,17 +1927,7 @@ impl ConnectTransport {
                         CallOptions::default().with_timeout(self.unary_timeout),
                     )
                     .await;
-                match result {
-                    Ok(resp) => Ok(Completion::Done(
-                        resp.into_owned()
-                            .epoch
-                            .ok_or(TransportError::InvalidResponse)?,
-                    )),
-                    Err(e) => pending_or_error(&e).map_or_else(
-                        || Err(map_connect_error(e, ErrorContext::Ref)),
-                        |retry_after| Ok(Completion::Pending { retry_after }),
-                    ),
-                }
+                completion(result, |resp| resp.into_owned().epoch)
             })
         })
     }
@@ -1993,13 +1985,7 @@ impl ConnectTransport {
                         options,
                     )
                     .await;
-                match result {
-                    Ok(_) => Ok(Completion::Done(())),
-                    Err(e) => pending_or_error(&e).map_or_else(
-                        || Err(map_connect_error(e, ErrorContext::Ref)),
-                        |retry_after| Ok(Completion::Pending { retry_after }),
-                    ),
-                }
+                completion(result, |_| Some(()))
             })
         })
     }
@@ -2022,8 +2008,22 @@ impl ConnectTransport {
     }
 }
 
-fn pending_or_error(error: &connectrpc::ConnectError) -> Option<Duration> {
-    pending_retry_after(error)
+/// Map an epoch or visibility RPC result: `done` extracts the value from a
+/// success (`None` is an invalid response), and a server `unavailable` with a
+/// `Retry-After` is [`Completion::Pending`].
+fn completion<R, T>(
+    result: Result<R, connectrpc::ConnectError>,
+    done: impl FnOnce(R) -> Option<T>,
+) -> TransportResult<Completion<T>> {
+    match result {
+        Ok(resp) => done(resp)
+            .map(Completion::Done)
+            .ok_or(TransportError::InvalidResponse),
+        Err(e) => pending_retry_after(&e).map_or_else(
+            || Err(map_connect_error(e, ErrorContext::Ref)),
+            |retry_after| Ok(Completion::Pending { retry_after }),
+        ),
+    }
 }
 
 /// Short, deterministic retry ladder for tests: 5 attempts, 1ms apart,

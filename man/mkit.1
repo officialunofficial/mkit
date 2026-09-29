@@ -1232,9 +1232,12 @@ signs a grant with the owner key
 .Pq Cm ed25519 No or a software-keystore Cm secp256k1-eip191 key ,
 or imports a wallet or WebAuthn signature over a statement printed with
 .Fl Fl print-statement ;
-.Cm grant add
+.Cm grant add Oo Fl Fl remote Ar remote | Fl Fl offline Oc
 verifies a grant header and adds it to the user grant store under
-.Pa $XDG_CONFIG_HOME/mkit/grants/ ;
+.Pa $XDG_CONFIG_HOME/mkit/grants/ ,
+then makes one short attempt to compare the grant's epoch with the trusted (or
+named) remote's and only warns if that fails
+.Pq Fl Fl offline No skips it ;
 .Cm grant list Op Fl Fl check
 lists it;
 .Cm grant revoke Ar remote
@@ -1242,7 +1245,16 @@ is
 .Cm epoch bump
 by one and lists the local grants it invalidates. Among the grants valid for a
 request the higher epoch wins, then the most specific scope, then the latest
-expiry. A write-only grant never implies read on a private repository.
+expiry. A grant pre-issued for epoch e+1 outranks a live epoch-e grant until the
+owner raises the epoch. A write-only grant never implies read on a private
+repository. Each signed read may prompt for a signature when the key needs a
+touch or a passphrase. A server without indexed mode applies an update to an
+existing ref only under the
+.Cm f
+flag, so issue grants for pushes that move a branch as
+.Cm cuf ,
+not
+.Cm cu .
 This store is unrelated to the operator-side
 .Cm mkit-server grant register .
 .It Cm epoch Cm show | Cm bump

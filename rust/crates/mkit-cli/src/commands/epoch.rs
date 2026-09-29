@@ -154,22 +154,49 @@ pub(crate) struct RevokeExtras {
     pub prune: bool,
 }
 
-/// Grants in `stored` that raising `namespace` to `new_epoch` invalidates at
-/// `audience`: same namespace, that audience listed, a lower epoch.
+/// Local grants a bump to `new_epoch` touches, split by whether every audience
+/// of the grant is covered by the bump's `audiences`.
+struct Invalidated<'a> {
+    /// Every audience is covered: the grant stops working everywhere.
+    dead: Vec<&'a StoredGrant>,
+    /// Some audience is not covered: still valid there, and kept.
+    partial: Vec<&'a StoredGrant>,
+}
+
+/// Grants in `stored` of `namespace` below `new_epoch` that list at least one
+/// of the bump's `audiences`.
 fn invalidated<'a>(
     stored: &'a [StoredGrant],
     namespace: &Namespace,
     audiences: &[String],
     new_epoch: u64,
-) -> Vec<&'a StoredGrant> {
-    stored
-        .iter()
-        .filter(|g| {
-            g.grant.namespace == *namespace
-                && g.grant.epoch < new_epoch
-                && g.grant.audiences.iter().any(|a| audiences.contains(a))
-        })
-        .collect()
+) -> Invalidated<'a> {
+    let mut out = Invalidated {
+        dead: Vec::new(),
+        partial: Vec::new(),
+    };
+    for g in stored.iter().filter(|g| {
+        g.grant.namespace == *namespace
+            && g.grant.epoch < new_epoch
+            && g.grant.audiences.iter().any(|a| audiences.contains(a))
+    }) {
+        if g.grant.audiences.iter().all(|a| audiences.contains(a)) {
+            out.dead.push(g);
+        } else {
+            out.partial.push(g);
+        }
+    }
+    out
+}
+
+fn grant_line(g: &StoredGrant) -> String {
+    format!(
+        "{}  {}  epoch {}  {}",
+        mkit_core::hash::to_hex_bytes(&g.id),
+        g.grant.capabilities.token(),
+        g.grant.epoch,
+        scope_text(&g.grant)
+    )
 }
 
 #[allow(clippy::too_many_lines)] // linear flow: resolve, sign once, send until done, report
@@ -251,6 +278,22 @@ pub(crate) fn bump(opts: &BumpOpts, revoke: Option<&RevokeExtras>) -> u8 {
         Ok(s) => s,
         Err(e) => return error(&format!("invalid statement: {e}"), exit::DATAERR),
     };
+    // An imported statement was made elsewhere: hold what it says, not the
+    // flags, to the same audience and namespace rules.
+    if let Err(e) = check_audiences(&statement.audiences, Some(&target)) {
+        return error(&e, exit::USAGE);
+    }
+    if let Some(hint) = hint
+        && hint != statement.namespace
+    {
+        return error(
+            &format!(
+                "the statement is for namespace {}, but the command asks for {hint}",
+                statement.namespace
+            ),
+            exit::DATAERR,
+        );
+    }
     let current = match read_current {
         Some(c) => c,
         None => match Ctx::read_epoch(&tx, &statement.namespace) {
@@ -289,22 +332,29 @@ pub(crate) fn bump(opts: &BumpOpts, revoke: Option<&RevokeExtras>) -> u8 {
         let affected = invalidated(
             &report.grants,
             &statement.namespace,
-            &audiences,
+            &statement.audiences,
             statement.new_epoch,
         );
         eprintln!(
             "revoking: {} local grant(s) stop working when {} reaches epoch {}",
-            affected.len(),
+            affected.dead.len() + affected.partial.len(),
             statement.namespace,
             statement.new_epoch
         );
-        for g in &affected {
+        for g in &affected.dead {
+            eprintln!("  {}", grant_line(g));
+        }
+        for g in &affected.partial {
             eprintln!(
-                "  {}  {}  epoch {}  {}",
-                mkit_core::hash::to_hex_bytes(&g.id),
-                g.grant.capabilities.token(),
-                g.grant.epoch,
-                scope_text(&g.grant)
+                "  {}  (still valid at {})",
+                grant_line(g),
+                g.grant
+                    .audiences
+                    .iter()
+                    .filter(|a| !statement.audiences.contains(a))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
     }
@@ -329,7 +379,6 @@ pub(crate) fn bump(opts: &BumpOpts, revoke: Option<&RevokeExtras>) -> u8 {
         &statement,
         current,
         stored_epoch,
-        &audiences,
         revoke,
         stored.as_ref().map(|r| r.grants.as_slice()),
     )
@@ -341,7 +390,6 @@ fn report_bump(
     statement: &EpochStatement,
     previous: u64,
     stored_epoch: u64,
-    audiences: &[String],
     revoke: Option<&RevokeExtras>,
     grants: Option<&[StoredGrant]>,
 ) -> u8 {
@@ -349,7 +397,14 @@ fn report_bump(
     if let (Some(extras), Some(grants)) = (revoke, grants)
         && extras.prune
     {
-        for g in invalidated(grants, &statement.namespace, audiences, stored_epoch) {
+        for g in invalidated(
+            grants,
+            &statement.namespace,
+            &statement.audiences,
+            stored_epoch,
+        )
+        .dead
+        {
             match extras.store.remove(&g.id) {
                 Ok(true) => pruned += 1,
                 Ok(false) => {}
@@ -362,7 +417,7 @@ fn report_bump(
         let mut object = JsonObject::new();
         object
             .field_str("namespace", &statement.namespace.to_string())
-            .field_raw("audiences", &json_string_array(audiences))
+            .field_raw("audiences", &json_string_array(&statement.audiences))
             .field_u64("previous", previous)
             .field_u64("epoch", stored_epoch);
         if revoke.is_some() {
@@ -371,7 +426,7 @@ fn report_bump(
         let _ = writeln!(stdout, "{}", object.finish());
     } else {
         let _ = writeln!(stdout, "namespace {}", statement.namespace);
-        let _ = writeln!(stdout, "audience  {}", audiences.join(", "));
+        let _ = writeln!(stdout, "audience  {}", statement.audiences.join(", "));
         let _ = writeln!(stdout, "epoch     {stored_epoch} (was {previous})");
     }
     if revoke.is_some() {
@@ -396,4 +451,51 @@ fn set_epoch_error(error_value: &mkit_core::protocol::TransportError) -> u8 {
         _ => "",
     };
     error(&format!("SetGrantEpoch: {error_value}{hint}"), exit::NOPERM)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grants::store::GrantStore;
+    use crate::grants::testutil::signed_grant;
+
+    fn stored(dir: &std::path::Path, nonce: u8, epoch: u64, audiences: &[&str]) -> StoredGrant {
+        // `signed_grant` takes one audience; rebuild a multi-audience grant
+        // by signing it with the first and re-reading its fields.
+        let header = signed_grant(1, nonce, epoch, audiences[0]);
+        let store = GrantStore::at(dir.to_path_buf());
+        store.add(&header, &[]).unwrap();
+        let mut g = store
+            .load(&[])
+            .grants
+            .into_iter()
+            .find(|g| g.grant.epoch == epoch && g.header == header)
+            .unwrap();
+        g.grant.audiences = audiences.iter().map(|a| (*a).to_owned()).collect();
+        g
+    }
+
+    #[test]
+    fn a_bump_only_kills_grants_it_covers_in_full() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = "https://a.example";
+        let b = "https://b.example";
+        let all = vec![
+            stored(tmp.path(), 1, 0, &[a]),
+            stored(tmp.path(), 2, 1, &[a, b]),
+            stored(tmp.path(), 3, 2, &[b]),
+            stored(tmp.path(), 4, 5, &[a]),
+        ];
+        let namespace = all[0].grant.namespace;
+        let hit = invalidated(&all, &namespace, &[a.to_owned()], 3);
+        assert_eq!(hit.dead.len(), 1);
+        assert_eq!(hit.dead[0].grant.epoch, 0);
+        // Epoch 1 also lists b, which the bump does not reach: kept.
+        assert_eq!(hit.partial.len(), 1);
+        assert_eq!(hit.partial[0].grant.epoch, 1);
+        // Covering both audiences kills it.
+        let hit = invalidated(&all, &namespace, &[a.to_owned(), b.to_owned()], 3);
+        assert_eq!(hit.dead.len(), 3);
+        assert!(hit.partial.is_empty());
+    }
 }

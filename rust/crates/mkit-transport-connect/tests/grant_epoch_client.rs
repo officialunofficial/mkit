@@ -235,13 +235,8 @@ fn unavailable_with_retry_after_is_pending_and_the_same_statement_is_resent() {
 }
 
 #[test]
-fn a_missing_or_garbage_retry_after_is_one_second_and_large_values_are_clamped() {
-    for (header, expected) in [
-        (None, 1),
-        (Some("soon"), 1),
-        (Some("0"), 1),
-        (Some("3600"), 60),
-    ] {
+fn a_garbage_retry_after_is_one_second_and_large_values_are_clamped() {
+    for (header, expected) in [(Some("soon"), 1), (Some("0"), 1), (Some("3600"), 60)] {
         let stub = Stub::default();
         stub.epoch_pending.store(1, Ordering::SeqCst);
         *stub.retry_after.lock().unwrap() = header;

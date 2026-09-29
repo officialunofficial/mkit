@@ -20,7 +20,6 @@
 //!   `mkit-attest` verifier before anyone stores or sends it.
 
 use std::fmt::Write as _;
-use std::io::Read as _;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -323,14 +322,9 @@ fn native(args: &OwnerArgs, ctx: &SignCtx<'_>) -> Result<NativeOwner, String> {
 }
 
 fn read_bounded(path: &Path, what: &str) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::new();
     std::fs::File::open(path)
-        .and_then(|file| file.take(MAX_IMPORT_BYTES + 1).read_to_end(&mut bytes))
-        .map_err(|e| format!("{what} {}: {e}", path.display()))?;
-    if bytes.len() as u64 > MAX_IMPORT_BYTES {
-        return Err(format!("{what} {} is too large", path.display()));
-    }
-    Ok(bytes)
+        .and_then(|file| super::read_bounded(file, MAX_IMPORT_BYTES))
+        .map_err(|e| format!("{what} {}: {e}", path.display()))
 }
 
 fn read_statement_file(path: &Path) -> Result<Vec<u8>, String> {
@@ -352,7 +346,10 @@ fn read_statement_file(path: &Path) -> Result<Vec<u8>, String> {
 /// Not 65 bytes of hex, or `v`/`r`/`s` out of range.
 pub fn import_eip191(hex_text: &str) -> Result<[u8; 65], String> {
     let text = hex_text.trim();
-    let text = text.strip_prefix("0x").unwrap_or(text);
+    let text = text
+        .strip_prefix("0x")
+        .or_else(|| text.strip_prefix("0X"))
+        .unwrap_or(text);
     let bytes = hex::decode(text).map_err(|e| format!("--signature is not hex: {e}"))?;
     let sig: [u8; 65] = bytes
         .as_slice()
@@ -682,6 +679,7 @@ mod tests {
         }
         // 0x prefix accepted, wrong length and bad v refused.
         assert!(import_eip191(&format!("0x{}", hex::encode(good))).is_ok());
+        assert!(import_eip191(&format!("0X{}", hex::encode(good))).is_ok());
         assert!(import_eip191(&hex::encode(&good[..64])).is_err());
         let mut bad_v = good;
         bad_v[64] = 5;

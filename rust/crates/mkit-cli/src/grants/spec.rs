@@ -191,7 +191,7 @@ pub fn check_ref_scopes(
                 .to_owned(),
         ),
         (Capabilities::ReadWrite | Capabilities::Write, None) => Err(
-            "a grant with write needs at least one --refs pattern=flags (for example --refs 'refs/heads/*=cu')"
+            "a grant with write needs at least one --refs pattern=flags (for example --refs 'refs/heads/*=cuf')"
                 .to_owned(),
         ),
         _ => Ok(()),

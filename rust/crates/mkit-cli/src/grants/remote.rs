@@ -128,28 +128,41 @@ pub enum Driven<T> {
 /// Call `call` until it is [`Completion::Done`], waiting the server's
 /// `Retry-After` between calls. `call` sends the same request every time: the
 /// caller signs once and re-sends the identical statement bytes (SPEC-WRITE-GRANTS
-/// §5.2: the same epoch is a retry), never a fresh nonce. The wait is bounded
-/// by `timeout`, counted as time spent sleeping, and `sleep` may cancel.
+/// §5.2: the same epoch is a retry), never a fresh nonce.
+///
+/// `timeout` is a wall-clock bound measured from the first call: a re-send is
+/// not started when the time already spent plus the next delay would pass it.
+/// `sleep` may cancel (Ctrl-C). Cancellation is observed while waiting, not
+/// inside an RPC in flight (each RPC is bounded by the transport's own timeout).
 ///
 /// # Errors
 /// Whatever `call` returns.
 pub fn drive<T, E>(
+    call: impl FnMut() -> Result<Completion<T>, E>,
+    timeout: Duration,
+    sleep: impl FnMut(Duration) -> bool,
+) -> Result<Driven<T>, E> {
+    let start = std::time::Instant::now();
+    drive_with_clock(call, timeout, sleep, || start.elapsed())
+}
+
+fn drive_with_clock<T, E>(
     mut call: impl FnMut() -> Result<Completion<T>, E>,
     timeout: Duration,
     mut sleep: impl FnMut(Duration) -> bool,
+    elapsed: impl Fn() -> Duration,
 ) -> Result<Driven<T>, E> {
-    let mut waited = Duration::ZERO;
     loop {
         match call()? {
             Completion::Done(value) => return Ok(Driven::Done(value)),
             Completion::Pending { retry_after } => {
+                let waited = elapsed();
                 if waited.saturating_add(retry_after) > timeout {
                     return Ok(Driven::TimedOut { waited });
                 }
                 if !sleep(retry_after) {
                     return Ok(Driven::Cancelled);
                 }
-                waited += retry_after;
             }
         }
     }
@@ -227,7 +240,8 @@ mod tests {
     fn drive_resends_until_done_and_sums_the_waits() {
         let mut calls: u64 = 0;
         let mut slept = Vec::new();
-        let outcome: Result<Driven<u64>, ()> = drive(
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let outcome: Result<Driven<u64>, ()> = drive_with_clock(
             || {
                 calls += 1;
                 Ok(if calls < 4 {
@@ -241,8 +255,10 @@ mod tests {
             Duration::from_mins(1),
             |d| {
                 slept.push(d);
+                clock.set(clock.get() + d);
                 true
             },
+            || clock.get(),
         );
         assert_eq!(outcome, Ok(Driven::Done(9)));
         assert_eq!(calls, 4);
@@ -265,10 +281,17 @@ mod tests {
         };
         // 4 + 4 fit in 10 s; a third wait would end at 12 s.
         let mut sleeps = 0;
-        let outcome = drive(pending, Duration::from_secs(10), |_| {
-            sleeps += 1;
-            true
-        });
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let outcome = drive_with_clock(
+            pending,
+            Duration::from_secs(10),
+            |d| {
+                sleeps += 1;
+                clock.set(clock.get() + d);
+                true
+            },
+            || clock.get(),
+        );
         assert_eq!(
             outcome,
             Ok(Driven::TimedOut {
@@ -278,6 +301,24 @@ mod tests {
         assert_eq!(sleeps, 2);
         let outcome = drive(pending, Duration::from_secs(10), |_| false);
         assert_eq!(outcome, Ok(Driven::Cancelled));
+        // Time spent inside the calls counts: 7 s per call leaves no room for
+        // a 4 s wait inside a 10 s bound.
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let outcome = drive_with_clock(
+            || {
+                clock.set(clock.get() + Duration::from_secs(7));
+                pending()
+            },
+            Duration::from_secs(10),
+            |_| true,
+            || clock.get(),
+        );
+        assert_eq!(
+            outcome,
+            Ok(Driven::TimedOut {
+                waited: Duration::from_secs(7)
+            })
+        );
         // Errors from the call pass straight through.
         let outcome: Result<Driven<()>, &str> =
             drive(|| Err("boom"), Duration::from_secs(1), |_| true);

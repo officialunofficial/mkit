@@ -1445,10 +1445,62 @@ pub fn xdg_config_home() -> PathBuf {
     xdg("XDG_CONFIG_HOME", ".config")
 }
 
+/// The XDG config base for data that must never land in a working directory
+/// (the grant store): an absolute `XDG_CONFIG_HOME`, else `$HOME/.config`.
+///
+/// # Errors
+/// Neither is set to an absolute path.
+pub fn xdg_config_home_absolute() -> Result<PathBuf, String> {
+    absolute_config_home(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+    )
+}
+
+fn absolute_config_home(
+    xdg: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Result<PathBuf, String> {
+    if let Some(v) = xdg.map(PathBuf::from)
+        && v.is_absolute()
+    {
+        return Ok(v);
+    }
+    if let Some(h) = home.map(PathBuf::from)
+        && h.is_absolute()
+    {
+        return Ok(h.join(".config"));
+    }
+    Err(
+        "cannot locate the user config directory: set XDG_CONFIG_HOME or HOME to an absolute path"
+            .to_owned(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mkit_core::layout::RepoLayout;
+
+    #[test]
+    fn config_home_must_be_absolute() {
+        let os = |s: &str| Some(std::ffi::OsString::from(s));
+        assert_eq!(
+            absolute_config_home(os("/x"), os("/h")).unwrap(),
+            PathBuf::from("/x")
+        );
+        assert_eq!(
+            absolute_config_home(os("rel"), os("/h")).unwrap(),
+            PathBuf::from("/h/.config")
+        );
+        assert_eq!(
+            absolute_config_home(None, os("/h")).unwrap(),
+            PathBuf::from("/h/.config")
+        );
+        for (x, h) in [(None, None), (os(""), os("")), (os("rel"), os("rel"))] {
+            assert!(absolute_config_home(x, h).is_err());
+        }
+    }
     use tempfile::TempDir;
 
     #[test]

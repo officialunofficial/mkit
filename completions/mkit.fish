@@ -298,12 +298,51 @@ complete -c mkit -n "__fish_seen_subcommand_from key; \
 complete -c mkit -n "__fish_seen_subcommand_from grant; \
     and not __fish_seen_subcommand_from create add list revoke" \
     -a "create add list revoke"
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l cap
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l grantee
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l repo
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l all
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l refs
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l audience
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l ttl
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l epoch
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l offline
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l remote
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l store
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l namespace
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l scheme
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l print-statement
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l statement-file
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l signature
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l webauthn-assertion
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l check
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l json
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l prune
+complete -c mkit -n "__fish_seen_subcommand_from grant" -l timeout
 complete -c mkit -n "__fish_seen_subcommand_from epoch; \
     and not __fish_seen_subcommand_from show bump" \
     -a "show bump"
+complete -c mkit -n "__fish_seen_subcommand_from epoch" -l by
+complete -c mkit -n "__fish_seen_subcommand_from epoch" -l namespace
+complete -c mkit -n "__fish_seen_subcommand_from epoch" -l audience
+complete -c mkit -n "__fish_seen_subcommand_from epoch" -l timeout
+complete -c mkit -n "__fish_seen_subcommand_from epoch" -l json
+complete -c mkit -n "__fish_seen_subcommand_from epoch" -l scheme
+complete -c mkit -n "__fish_seen_subcommand_from epoch" -l print-statement
+complete -c mkit -n "__fish_seen_subcommand_from epoch" -l statement-file
+complete -c mkit -n "__fish_seen_subcommand_from epoch" -l signature
+complete -c mkit -n "__fish_seen_subcommand_from epoch" -l webauthn-assertion
 complete -c mkit -n "__fish_seen_subcommand_from visibility; \
     and not __fish_seen_subcommand_from set" \
     -a "set"
+complete -c mkit -n "__fish_seen_subcommand_from visibility" -l statement
+complete -c mkit -n "__fish_seen_subcommand_from visibility" -l audience
+complete -c mkit -n "__fish_seen_subcommand_from visibility" -l timeout
+complete -c mkit -n "__fish_seen_subcommand_from visibility" -l scheme
+complete -c mkit -n "__fish_seen_subcommand_from visibility" -l print-statement
+complete -c mkit -n "__fish_seen_subcommand_from visibility" -l statement-file
+complete -c mkit -n "__fish_seen_subcommand_from visibility" -l signature
+complete -c mkit -n "__fish_seen_subcommand_from visibility" -l webauthn-assertion
 complete -c mkit -n "__fish_seen_subcommand_from self; \
     and not __fish_seen_subcommand_from update" \
     -a "update"

@@ -1369,19 +1369,25 @@ unrelated commands.
   deduplicated. `--ttl` is at most `30d` (default `7d`). The epoch defaults to the
   remote's current one (`GetGrantEpoch`) or `0` with `--offline`; the audience
   defaults to the trusted remote's origin. `--store` also adds it to your own store.
-- `mkit grant add <file|->` &mdash; verify a grant header's owner signature and add
-  it to your grant store. Idempotent on the same grant id. Anything the verifier
-  rejects is refused with the rule named. It warns when the grant's epoch is
-  above the remote's current one (see the epoch rule below).
+- `mkit grant add [--remote REMOTE | --offline] <file|->` &mdash; verify a grant
+  header's owner signature and add it to your grant store. Idempotent on the same
+  grant id. Anything the verifier rejects is refused with the rule named. It then
+  makes one short attempt to ask the trusted (or `--remote`) deployment for the
+  namespace's epoch and warns when the grant's epoch is above it (see the epoch
+  rule below); if that check fails it warns and stores anyway, and `--offline`
+  skips it.
 - `mkit grant list [--check] [--remote REMOTE] [--json]` &mdash; id, namespace,
   scope, capabilities, ref scopes, audiences, epoch, expiry and status
   (`valid`, `expired`, `not yet valid`). `--check` asks the trusted (or named)
-  remote for each namespace's epoch and marks `stale epoch` / `future epoch`.
+  remote for each namespace's epoch and marks `stale epoch` / `future epoch`, only
+  for grants whose audiences include that remote (others are `unchecked`).
   It never contacts an origin that a grant file merely names.
 - `mkit grant revoke <remote> [--namespace NS] [--audience ORIGIN]... [--prune]
   [--timeout DURATION]` &mdash; sugar for `mkit epoch bump --by 1`. It first lists
   the local grants the bump invalidates, and afterwards prints how to reissue.
-  `--prune` deletes those grants from your store once it succeeds.
+  A grant that also lists an audience the bump does not cover stays valid there:
+  it is listed as "still valid at ..." and kept. `--prune` deletes only the grants
+  every audience of which the bump covers, once it succeeds.
 - `mkit epoch show <remote> [--namespace NS] [--json]` &mdash; the epoch the remote
   stores for a namespace (0 if never set).
 - `mkit epoch bump <remote> [--by N] [--namespace NS] [--audience ORIGIN]...
@@ -1422,6 +1428,10 @@ epoch-*e* grant until the owner raises the epoch. A **write-only grant never
 implies read on a private repository** (only `GetReceipt` accepts it). Each signed
 read may prompt for a signature when your key needs a touch or a passphrase.
 Epochs are per deployment, so a grant lists the audiences it is valid at.
+The grant store directory is never followed through a symlink: if
+`$XDG_CONFIG_HOME/mkit/grants` is a symlink, mkit refuses it rather than trust
+where it points. Files are read without following symlinks and only files named
+`<64 hex>.grant` are considered.
 
 Config / keys / version:
 

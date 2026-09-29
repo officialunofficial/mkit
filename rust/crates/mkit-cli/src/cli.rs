@@ -233,7 +233,10 @@ commands:
   grant create|add|list|revoke  Issue, import, list and revoke write and read grants
                     (create --cap read|read,write|write --grantee <hex> --repo <name>|--all
                     [--refs <pattern=cufd>] [--audience <origin>] [--ttl 7d] [--store];
-                    add <file|->; list [--check] [--json]; revoke <remote> [--prune])
+                    a push that moves an existing branch needs the f flag while servers
+                    are opaque: issue such grants as cuf;
+                    add [--remote <remote>|--offline] <file|->; list [--check] [--json];
+                    revoke <remote> [--prune])
   epoch show|bump <remote>  Show or advance a namespace's grant epoch on a remote
                     (bump [--by <n>] revokes grants issued at a lower epoch)
   visibility set <remote> public|private [--statement]

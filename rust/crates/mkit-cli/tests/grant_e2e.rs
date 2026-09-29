@@ -287,6 +287,11 @@ fn grantee_push_revocation_and_reissue_against_a_real_server() {
     grantee.commit("b.txt", "grantee 2\n", "grantee two");
     let revoked = grantee.run(&["push", "origin"]);
     assert!(!revoked.status.success(), "a revoked grant must not work");
+    let text = stderr(&revoked).to_lowercase();
+    assert!(
+        text.contains("denied") || text.contains("permission"),
+        "{text}"
+    );
 
     // A grant created at the new epoch works, and outranks the stale one.
     let header = owner.ok(&[
@@ -510,12 +515,13 @@ fn a_bump_that_stays_pending_stops_at_the_timeout_and_says_it_may_still_finish()
         owner.namespace()
     );
     owner.add_remote(&url);
-    let out = owner.run(&["epoch", "bump", "origin", "--timeout", "1s"]);
+    let out = owner.run(&["epoch", "bump", "origin", "--timeout", "2s"]);
     assert_eq!(out.status.code(), Some(75), "{}", stderr(&out));
     let text = stderr(&out);
     assert!(text.contains("still completing"), "{text}");
     assert!(text.contains("may yet finish"), "{text}");
-    // Two sends: the first, then one after the single 1 s wait that fits.
+    // Wall-clock bound: the first send, then one after the 1 s wait that fits;
+    // a third would end past 2 s.
     assert_eq!(stub.statements.lock().unwrap().len(), 2);
 }
 
@@ -686,6 +692,61 @@ fn epoch_show_and_grant_list_check_pin_their_output() {
         insta::assert_snapshot!("epoch_bump_human", owner.ok(&["epoch", "bump", "origin"]));
         insta::assert_snapshot!("epoch_bump_json", owner.ok(&["epoch", "bump", "origin", "--json"]));
     });
+}
+
+#[test]
+fn a_grant_for_another_audience_is_unchecked_and_survives_prune() {
+    let owner = Party::new(0x11);
+    let stub = Stub::start(0);
+    let url = format!(
+        "mkit+http://127.0.0.1:{}/{}/site",
+        stub.port,
+        owner.namespace()
+    );
+    owner.add_remote(&url);
+    owner.ok(&["config", "trusted_remote_endpoint", &url]);
+    let here = format!("http://127.0.0.1:{}", stub.port);
+    let create = |audiences: &[&str], epoch: &str| {
+        let mut args = vec![
+            "grant",
+            "create",
+            "--cap",
+            "read",
+            "--all",
+            "--grantee",
+            &owner.public_key,
+            "--epoch",
+            epoch,
+            "--store",
+        ];
+        for a in audiences {
+            args.extend(["--audience", a]);
+        }
+        owner.ok(&args);
+    };
+    // Epoch 1 grants are below the stub's stored epoch (0 -> bump to 1 makes
+    // them stale only where the bump reaches).
+    create(&["https://other.example"], "4");
+    create(&[&here, "https://other.example"], "4");
+    create(&[&here], "4");
+
+    let listed = owner.ok(&["grant", "list", "--check", "--remote", "origin"]);
+    assert!(
+        listed.contains("unchecked (audience is not the checked remote)"),
+        "{listed}"
+    );
+    assert!(listed.contains("epoch current"), "{listed}");
+
+    let out = owner.run(&["grant", "revoke", "origin", "--prune"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stderr(&out);
+    assert!(
+        text.contains("still valid at https://other.example"),
+        "{text}"
+    );
+    assert!(text.contains("removed 1 local grant(s)"), "{text}");
+    let left = owner.ok(&["grant", "list"]);
+    assert_eq!(left.matches("epoch 4").count(), 2, "{left}");
 }
 
 #[test]

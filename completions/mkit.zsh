@@ -450,20 +450,61 @@ _mkit() {
                         'set-url[change a remote URL]'
                     ;;
                 grant)
-                    _values 'grant subcommand' \
-                        'create[create an owner-signed grant]' \
-                        'add[verify a grant header and add it to your store]' \
-                        'list[list the grants in your store]' \
-                        'revoke[revoke grants by advancing the namespace epoch]'
+                    _arguments \
+                        '--cap[cap]' \
+                        '--grantee[grantee]' \
+                        '--repo[repo]' \
+                        '--all[all]' \
+                        '--refs[refs]' \
+                        '--audience[audience]' \
+                        '--ttl[ttl]' \
+                        '--epoch[epoch]' \
+                        '--offline[offline]' \
+                        '--remote[remote]' \
+                        '--store[store]' \
+                        '--namespace[namespace]' \
+                        '--scheme[scheme]' \
+                        '--print-statement[print statement]' \
+                        '--statement-file[statement file]' \
+                        '--signature[signature]' \
+                        '--webauthn-assertion[webauthn assertion]' \
+                        '--check[check]' \
+                        '--json[json]' \
+                        '--prune[prune]' \
+                        '--timeout[timeout]' \
+                        '--help[show help]' \
+                        '1:subcommand:((create:create\ an\ owner-signed\ grant add:verify\ a\ grant\ header\ and\ add\ it\ to\ your\ store list:list\ the\ grants\ in\ your\ store revoke:revoke\ grants\ by\ advancing\ the\ namespace\ epoch))' \
+                        '*:argument:_files'
                     ;;
                 epoch)
-                    _values 'epoch subcommand' \
-                        'show[show the epoch a remote stores]' \
-                        'bump[advance the epoch, revoking lower-epoch grants]'
+                    _arguments \
+                        '--by[by]' \
+                        '--namespace[namespace]' \
+                        '--audience[audience]' \
+                        '--timeout[timeout]' \
+                        '--json[json]' \
+                        '--scheme[scheme]' \
+                        '--print-statement[print statement]' \
+                        '--statement-file[statement file]' \
+                        '--signature[signature]' \
+                        '--webauthn-assertion[webauthn assertion]' \
+                        '--help[show help]' \
+                        '1:subcommand:((show:show\ the\ epoch\ a\ remote\ stores bump:advance\ the\ epoch,\ revoking\ lower-epoch\ grants))' \
+                        '*:argument:_files'
                     ;;
                 visibility)
-                    _values 'visibility subcommand' \
-                        'set[set a repository public or private]'
+                    _arguments \
+                        '--statement[statement]' \
+                        '--audience[audience]' \
+                        '--timeout[timeout]' \
+                        '--scheme[scheme]' \
+                        '--print-statement[print statement]' \
+                        '--statement-file[statement file]' \
+                        '--signature[signature]' \
+                        '--webauthn-assertion[webauthn assertion]' \
+                        '--help[show help]' \
+                        '1:subcommand:((set:set\ a\ repository\ public\ or\ private))' \
+                        '*:argument:_files'
                     ;;
                 key)
                     _values 'key subcommand' \

@@ -13,7 +13,7 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Read as _, Write as _};
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use mkit_attest::grant::{Grant, OwnerScheme, RelyingParty};
@@ -75,14 +75,20 @@ pub struct GrantStore {
 impl GrantStore {
     /// The store beside the user config. Derived from the XDG base directory
     /// only, so no repository configuration can relocate it.
-    #[must_use]
-    pub fn default_location() -> PathBuf {
-        crate::config::xdg_config_home().join("mkit").join("grants")
+    ///
+    /// # Errors
+    /// No absolute config base directory: a store never falls back to the
+    /// working directory.
+    pub fn default_location() -> Result<PathBuf, String> {
+        Ok(crate::config::xdg_config_home_absolute()?
+            .join("mkit")
+            .join("grants"))
     }
 
-    #[must_use]
-    pub fn open_default() -> Self {
-        Self::at(Self::default_location())
+    /// # Errors
+    /// As [`Self::default_location`].
+    pub fn open_default() -> Result<Self, String> {
+        Self::default_location().map(Self::at)
     }
 
     #[must_use]
@@ -137,7 +143,7 @@ impl GrantStore {
             Ok(entries) => entries
                 .filter_map(Result::ok)
                 .map(|entry| entry.file_name())
-                .filter(|name| Path::new(name).extension().is_some_and(|e| e == EXTENSION))
+                .filter(|name| is_grant_file_name(name))
                 .collect(),
             Err(e) => {
                 report.warnings.push(format!(
@@ -161,9 +167,10 @@ impl GrantStore {
             let path = self.dir.join(&name);
             match read_verified(&path, &name, rps, max_bytes) {
                 Ok(grant) => report.grants.push(grant),
-                Err(reason) => report
-                    .warnings
-                    .push(format!("skipping {}: {reason}", path.display())),
+                Err(reason) => report.warnings.push(format!(
+                    "skipping {}: {reason}",
+                    path.display().to_string().escape_debug()
+                )),
             }
         }
         report
@@ -211,11 +218,7 @@ impl GrantStore {
         fs::read_dir(&self.dir).map_or(0, |entries| {
             entries
                 .filter_map(Result::ok)
-                .filter(|e| {
-                    Path::new(&e.file_name())
-                        .extension()
-                        .is_some_and(|x| x == EXTENSION)
-                })
+                .filter(|e| is_grant_file_name(&e.file_name()))
                 .count()
         })
     }
@@ -286,20 +289,17 @@ fn read_verified(
     rps: &[RelyingParty],
     max_bytes: u64,
 ) -> Result<StoredGrant, String> {
-    let meta = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    // Open first, then judge the opened file: a symlink or FIFO swapped in
+    // after a path check can't be followed or block the read.
+    let file = open_regular(path).map_err(|e| e.to_string())?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
     if !meta.file_type().is_file() {
         return Err("not a regular file".to_owned());
     }
     if meta.len() > max_bytes {
         return Err(format!("larger than {max_bytes} bytes"));
     }
-    let mut bytes = Vec::new();
-    fs::File::open(path)
-        .and_then(|file| file.take(max_bytes + 1).read_to_end(&mut bytes))
-        .map_err(|e| e.to_string())?;
-    if bytes.len() as u64 > max_bytes {
-        return Err(format!("larger than {max_bytes} bytes"));
-    }
+    let bytes = super::read_bounded(file, max_bytes).map_err(|e| e.to_string())?;
     let header = String::from_utf8(bytes).map_err(|_| "not UTF-8".to_owned())?;
     let verified = verify_grant_header(&header, rps).map_err(|e| e.to_string())?;
     if Path::new(name).file_stem().and_then(|s| s.to_str()) != Some(&to_hex_bytes(&verified.id)) {
@@ -310,6 +310,35 @@ fn read_verified(
         header,
         grant: verified.grant,
         scheme: verified.scheme,
+    })
+}
+
+/// Open `path` without following a final symlink and without blocking on a
+/// FIFO or device.
+#[cfg(unix)]
+fn open_regular(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_regular(path: &Path) -> io::Result<fs::File> {
+    if !fs::symlink_metadata(path)?.file_type().is_file() {
+        return Err(io::Error::other("not a regular file"));
+    }
+    fs::File::open(path)
+}
+
+/// `<64 lowercase hex>.grant`: the only names the store reads.
+fn is_grant_file_name(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    name.strip_suffix(".grant").is_some_and(|stem| {
+        stem.len() == 64 && stem.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
     })
 }
 
@@ -497,7 +526,26 @@ mod tests {
         std::os::unix::fs::symlink(&target, &real).unwrap();
         let report = store.load(&[]);
         assert!(report.grants.is_empty());
-        assert!(report.warnings[0].contains("not a regular file"));
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(report.warnings[0].starts_with("skipping "));
+    }
+
+    #[test]
+    fn stray_files_do_not_use_up_the_file_cap() {
+        let (_tmp, store) = store();
+        let header = signed_grant(1, 1, 0, AUDIENCE);
+        store.add(&header, &[]).unwrap();
+        for name in [
+            "0.grant",
+            "1.grant",
+            "not-a-grant.grant",
+            "\u{1b}[31m.grant",
+        ] {
+            fs::write(store.dir().join(name), "junk").unwrap();
+        }
+        let report = store.load_bounded(&[], 1, MAX_STORE_FILE_BYTES);
+        assert_eq!(report.grants.len(), 1);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     }
 
     #[test]
@@ -540,7 +588,7 @@ mod tests {
     fn the_default_location_ignores_the_repository() {
         // It is derived from the XDG base directory alone: no argument, no
         // config field and no repository path can move it.
-        let path = GrantStore::default_location();
+        let path = GrantStore::default_location().unwrap();
         assert!(path.ends_with("mkit/grants"), "{}", path.display());
     }
 }

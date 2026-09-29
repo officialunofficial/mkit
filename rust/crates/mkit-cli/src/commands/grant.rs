@@ -7,7 +7,7 @@
 //! principals, this holds grants a person was given so `mkit push` and
 //! `mkit clone` present them.
 
-use std::io::{Read as _, Write as _};
+use std::io::Write as _;
 
 use clap::{Args, Parser, Subcommand};
 use mkit_attest::grant::{Capabilities, Namespace};
@@ -70,7 +70,7 @@ struct CreateOpts {
     #[arg(long, value_name = "ORIGIN")]
     audience: Vec<String>,
     /// A ref scope `pattern=flags` from `cufd` (repeatable): for example
-    /// `refs/heads/*=cu`. Required with write, not allowed with read.
+    /// `refs/heads/*=cuf`. Required with write, not allowed with read.
     #[arg(long, value_name = "PATTERN=FLAGS")]
     refs: Vec<String>,
     /// `read`, `read,write` or `write` (`write,read` is accepted and
@@ -165,6 +165,10 @@ pub fn run(args: &[String]) -> u8 {
         GrantCommand::List(opts) => list(&opts),
         GrantCommand::Revoke(opts) => {
             let opts = *opts;
+            let store = match GrantStore::open_default() {
+                Ok(store) => store,
+                Err(e) => return error(&e, exit::CONFIG_ERROR),
+            };
             bump(
                 &BumpOpts {
                     remote: opts.remote,
@@ -176,7 +180,7 @@ pub fn run(args: &[String]) -> u8 {
                     owner: opts.owner,
                 },
                 Some(&RevokeExtras {
-                    store: GrantStore::open_default(),
+                    store,
                     prune: opts.prune,
                 }),
             )
@@ -334,10 +338,12 @@ fn create(o: &CreateOpts) -> u8 {
         Err(e) => return error(&e, exit::DATAERR),
     };
     if o.store {
-        match GrantStore::open_default().add(&signed.header, &ctx.relying_parties) {
-            Ok(AddOutcome::Added) => {
-                eprintln!("stored in {}", GrantStore::default_location().display());
-            }
+        let store = match GrantStore::open_default() {
+            Ok(store) => store,
+            Err(e) => return error(&e, exit::CONFIG_ERROR),
+        };
+        match store.add(&signed.header, &ctx.relying_parties) {
+            Ok(AddOutcome::Added) => eprintln!("stored in {}", store.dir().display()),
             Ok(AddOutcome::AlreadyStored) => eprintln!("already in your grant store"),
             Err(e) => return error(&format!("store the grant: {e}"), exit::CANTCREAT),
         }
@@ -355,19 +361,12 @@ fn create(o: &CreateOpts) -> u8 {
 
 fn read_header(source: &str) -> Result<String, String> {
     const LIMIT: u64 = 16 * 1024;
-    let mut bytes = Vec::new();
     let read = if source == "-" {
-        std::io::stdin()
-            .lock()
-            .take(LIMIT + 1)
-            .read_to_end(&mut bytes)
+        crate::grants::read_bounded(std::io::stdin().lock(), LIMIT)
     } else {
-        std::fs::File::open(source).and_then(|f| f.take(LIMIT + 1).read_to_end(&mut bytes))
+        std::fs::File::open(source).and_then(|f| crate::grants::read_bounded(f, LIMIT))
     };
-    read.map_err(|e| format!("read {source}: {e}"))?;
-    if bytes.len() as u64 > LIMIT {
-        return Err(format!("{source}: a grant header is at most 8192 bytes"));
-    }
+    let bytes = read.map_err(|e| format!("{source}: {e}"))?;
     let text = String::from_utf8(bytes).map_err(|_| format!("{source}: not UTF-8"))?;
     Ok(text.trim().to_owned())
 }
@@ -385,7 +384,11 @@ fn add(o: &AddOpts) -> u8 {
         Ok(verified) => verified,
         Err(e) => return error(&format!("rejected: {e}"), exit::DATAERR),
     };
-    let outcome = match GrantStore::open_default().add(&header, &ctx.relying_parties) {
+    let store = match GrantStore::open_default() {
+        Ok(store) => store,
+        Err(e) => return error(&e, exit::CONFIG_ERROR),
+    };
+    let outcome = match store.add(&header, &ctx.relying_parties) {
         Ok(outcome) => outcome,
         Err(e) => return error(&format!("rejected: {e}"), exit::DATAERR),
     };
@@ -400,6 +403,9 @@ fn add(o: &AddOpts) -> u8 {
     exit::OK
 }
 
+/// Longest `grant add` waits to compare epochs.
+const ADD_EPOCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// B6 caveat: a grant for an epoch above the remote's outranks the live
 /// grants until the owner bumps the epoch.
 fn warn_if_future_epoch(ctx: &Ctx, remote: Option<&str>, grant: &mkit_attest::grant::Grant) {
@@ -412,9 +418,10 @@ fn warn_if_future_epoch(ctx: &Ctx, remote: Option<&str>, grant: &mkit_attest::gr
     if !grant.audiences.contains(&audience) {
         return;
     }
-    let epoch = ctx
-        .open_unsigned(&target)
-        .and_then(|tx| Ctx::read_epoch(&tx, &grant.namespace));
+    // Advisory: one short attempt, and a failure only warns.
+    let epoch = ctx.open_unsigned(&target).and_then(|tx| {
+        Ctx::read_epoch_once(&tx.with_unary_timeout(ADD_EPOCH_TIMEOUT), &grant.namespace)
+    });
     match epoch {
         Ok(current) if grant.epoch > current => eprintln!(
             "warning: this grant is for epoch {} but {audience} is at epoch {current}. Until the owner raises the epoch it is refused there, and it outranks your other grants for {} at that audience",
@@ -467,7 +474,11 @@ fn list(o: &ListOpts) -> u8 {
         Ok(ctx) => ctx,
         Err(code) => return code,
     };
-    let report = GrantStore::open_default().load(&ctx.relying_parties);
+    let store = match GrantStore::open_default() {
+        Ok(store) => store,
+        Err(e) => return error(&e, exit::CONFIG_ERROR),
+    };
+    let report = store.load(&ctx.relying_parties);
     for warning in &report.warnings {
         eprintln!("warning: {warning}");
     }
@@ -509,6 +520,12 @@ fn list(o: &ListOpts) -> u8 {
         if let Some(e) = &check_error {
             return Some(format!("unchecked ({e})"));
         }
+        let covered = check_audience
+            .as_ref()
+            .is_some_and(|a| g.grant.audiences.contains(a));
+        if !covered {
+            return Some("unchecked (audience is not the checked remote)".to_owned());
+        }
         match checked.get(&g.grant.namespace.to_string()) {
             Some(Ok(remote)) => Some(epoch_status(g.grant.epoch, *remote).to_owned()),
             Some(Err(e)) => Some(format!("unchecked ({e})")),
@@ -545,11 +562,7 @@ fn list(o: &ListOpts) -> u8 {
         return exit::OK;
     }
     if grants.is_empty() {
-        let _ = writeln!(
-            stdout,
-            "no grants in {}",
-            GrantStore::default_location().display()
-        );
+        let _ = writeln!(stdout, "no grants in {}", store.dir().display());
         return exit::OK;
     }
     for g in &grants {

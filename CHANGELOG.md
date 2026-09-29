@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mkit key, a software-keystore secp256k1 key, or an imported wallet or WebAuthn
   signature; the Connect client now presents the best stored grant, ranking the
   higher epoch first. New user-only config key `grant.webauthn_rp`.
+  Issue grants for pushes that move a branch as `cuf`, not `cu`: while servers are
+  opaque, updating an existing ref needs the `f` flag.
   `mkit-keystore` gains a defaulted `KeySigner::sign_prehash_recoverable_secp256k1`
   for the software backends (WP-2.13).
 - CLI: add `mkit epoch show|bump`, `mkit grant revoke [--prune]` and

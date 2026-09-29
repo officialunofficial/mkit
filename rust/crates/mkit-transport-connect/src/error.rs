@@ -180,17 +180,21 @@ pub(crate) fn parse_retry_after(values: &[String]) -> std::time::Duration {
 }
 
 /// For the epoch and visibility RPCs (SPEC-WRITE-GRANTS §5.3, §9.1): a real
-/// server's `unavailable` means the change is still taking effect, and its
-/// `Retry-After` says when to ask again. A transport-level failure
-/// (DNS, connect, TLS) also surfaces as `unavailable` but has no response
-/// headers, so it stays an error for the ordinary retry ladder.
+/// server's `unavailable` with a `Retry-After` header means the change is
+/// still taking effect, and the header says when to ask again. An
+/// `unavailable` without one (a transport-level failure such as DNS, connect
+/// or TLS, or a proxy error) stays an error for the ordinary retry ladder.
 pub(crate) fn pending_retry_after(err: &ConnectError) -> Option<std::time::Duration> {
-    if err.code != ErrorCode::Unavailable || err.response_headers().is_empty() {
+    if err.code != ErrorCode::Unavailable {
         return None;
     }
-    Some(parse_retry_after(
-        &visible_header_values(err, "retry-after").unwrap_or_default(),
-    ))
+    // Only an answer that carries `Retry-After` says the change is still
+    // taking effect; any other `unavailable` (a proxy, an outage) is an error.
+    let values = visible_header_values(err, "retry-after").unwrap_or_default();
+    if values.is_empty() {
+        return None;
+    }
+    Some(parse_retry_after(&values))
 }
 
 /// Which RPC family raised the error — needed to disambiguate
@@ -300,6 +304,12 @@ mod tests {
             pending_retry_after(&real),
             Some(std::time::Duration::from_secs(7))
         );
+        // An `unavailable` with response headers but no `Retry-After` (a
+        // proxy or an outage) is an error, not a wait.
+        let mut headers = http::HeaderMap::new();
+        headers.insert("content-type", "text/html".parse().unwrap());
+        let proxy = ConnectError::unavailable("bad gateway").with_headers(headers);
+        assert_eq!(pending_retry_after(&proxy), None);
         // A local transport failure carries no response headers.
         assert_eq!(pending_retry_after(&ConnectError::unavailable("dns")), None);
         // Other codes are never pending, whatever the headers.

@@ -121,6 +121,39 @@ pub fn verify_grant_header(
     })
 }
 
+/// The verifier config for a statement header, bound to the first audience
+/// that `audiences` reads out of the statement bytes.
+fn first_audience_config(
+    header: &str,
+    rps: &[RelyingParty],
+    audiences: impl FnOnce(&[u8]) -> Result<Vec<String>, GrantError>,
+) -> Result<VerifierConfig, HeaderError> {
+    check_pinned(header, rps)?;
+    let signed = SignedHeader::parse(header)?;
+    let first = audiences(&signed.statement)?
+        .into_iter()
+        .next()
+        .ok_or(GrantError::AudienceCount)?;
+    Ok(verifier_config(&first, rps)?)
+}
+
+/// Read at most `max` bytes from `reader`.
+///
+/// # Errors
+/// A read error, or more than `max` bytes (`InvalidData`).
+pub fn read_bounded(reader: impl std::io::Read, max: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    reader.take(max + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("larger than {max} bytes"),
+        ));
+    }
+    Ok(bytes)
+}
+
 /// SPEC-WRITE-GRANTS §5.2 checks 1–5 against the statement's first audience.
 ///
 /// # Errors
@@ -130,14 +163,9 @@ pub fn verify_epoch_header(
     rps: &[RelyingParty],
     now_ms: i64,
 ) -> Result<VerifiedEpoch, HeaderError> {
-    check_pinned(header, rps)?;
-    let signed = SignedHeader::parse(header)?;
-    let statement = EpochStatement::parse(&signed.statement)?;
-    let audience = statement
-        .audiences
-        .first()
-        .ok_or(GrantError::AudienceCount)?;
-    let cfg = verifier_config(audience, rps)?;
+    let cfg = first_audience_config(header, rps, |statement| {
+        EpochStatement::parse(statement).map(|s| s.audiences)
+    })?;
     Ok(verify_epoch_statement(&cfg, header, now_ms)?)
 }
 
@@ -152,14 +180,9 @@ pub fn verify_visibility_header(
     rps: &[RelyingParty],
     now_ms: i64,
 ) -> Result<VerifiedVisibility, HeaderError> {
-    check_pinned(header, rps)?;
-    let signed = SignedHeader::parse(header)?;
-    let statement = mkit_attest::grant::VisibilityStatement::parse(&signed.statement)?;
-    let audience = statement
-        .audiences
-        .first()
-        .ok_or(GrantError::AudienceCount)?;
-    let cfg = verifier_config(audience, rps)?;
+    let cfg = first_audience_config(header, rps, |statement| {
+        mkit_attest::grant::VisibilityStatement::parse(statement).map(|s| s.audiences)
+    })?;
     Ok(verify_visibility_statement(
         &cfg, header, repository, now_ms,
     )?)

@@ -126,6 +126,26 @@ impl Ctx {
     }
 }
 
+impl Ctx {
+    /// One `GetGrantEpoch` attempt, with no retry ladder and no waiting out
+    /// `Retry-After`: for advisory checks.
+    ///
+    /// # Errors
+    /// The message to print.
+    pub fn read_epoch_once(tx: &ConnectTransport, namespace: &Namespace) -> Result<u64, String> {
+        let name = namespace.to_string();
+        match tx
+            .get_grant_epoch_once(&name)
+            .map_err(|e| format!("GetGrantEpoch for {name}: {e}"))?
+        {
+            mkit_transport_connect::Completion::Done(epoch) => Ok(epoch),
+            mkit_transport_connect::Completion::Pending { .. } => Err(format!(
+                "GetGrantEpoch for {name}: the server answered `unavailable`"
+            )),
+        }
+    }
+}
+
 /// `--timeout`, in the same spellings as `--ttl`.
 ///
 /// # Errors
