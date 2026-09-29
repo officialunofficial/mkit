@@ -49,7 +49,7 @@
 //! | outbox sequence | `os 00` | be64; last allocated, starts at 1, never deleted |
 //! | outcome backlog | `oc 00` | codec `Backlog`; absent means zero |
 //! | timer (owned by `timers`) | `w 00 <due_at:be64> <kind:u8> <ref>` | codec per kind |
-//! | holder (`ContentShard`) | `h 00 <object:32> <ns> 00 <repo>` | empty |
+//! | holder (`ContentShard`) | `h 00 <object:32> <ns> 00 <repo>` | codec `HolderRecord` (`HolderV1`: `seq`, `op_id`) |
 //! | GC hold (`ContentShard`) | `g 00 <object:32> <hold_id:32>` | codec `hold` |
 //! | blocklist (`ContentShard`) | `b 00 <object:32>` | codec `BlockEntry` |
 //! | object state (`ContentShard`) | `c 00 <object:32>` | codec `ObjectState` |
@@ -61,9 +61,9 @@
 //! new row adds its layout here, with a golden test.
 //!
 //! The `ContentIndex` classes (`h`, `g`, `b`, `c`) live only in
-//! `ContentShard` partitions. Holder rows are provisional: WP-4.10a moves
-//! them to sub-shards by (object, hash(holder)); the holder count already
-//! lives in the object's `c` row.
+//! `ContentShard` partitions. Each holder row carries the object's
+//! post-bump change sequence and the recording operation's id (R-131); the
+//! holder count lives in the object's `c` row.
 
 use bytes::{BufMut, Bytes, BytesMut};
 use mkit_core::hash::Hash;

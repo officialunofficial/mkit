@@ -1852,11 +1852,30 @@
       "4.7"
     ],
     "size": "L",
-    "summary": "Extracts blobs of at least 64 KiB and reassembles every ChunkedBlob by streaming into one object keyed by its manifest id in the objects keyspace, with whole-file dedup, holds before apply (released only in the relay step that records the holder row) and R2 429 treated as HEAD-then-verify.",
+    "summary": "Native, inline before each pack's Verified CAS (R-163): extracts every ChunkedBlob (as its reassembled content, plus a chunk-offset sidecar) and every file Blob of at least 64 KiB into the global object namespaces of the blob store, via a root-verified sink, with a hold before any byte is reused and a HolderV1 row (seq, op_id) recorded in the batch that releases it. Workers keep refusing indexed mode (4.10b).",
     "human_action": false,
     "area_gates": [
       "rust",
       "conf-native"
+    ]
+  },
+  {
+    "id": "4.10b",
+    "title": "Worker: extraction slices and content relay hook",
+    "milestone": "M4",
+    "track": "worker",
+    "depends_on": [
+      "4.8",
+      "4.10"
+    ],
+    "size": "L",
+    "summary": "Runs 4.10's extraction as checkpointed alarm slices before the Worker's Verified write, with R2 multipart for large objects, a content RelayHook that rewrites `h` puts into HolderV1 with a `c` guard, the relay blocklist check (SPEC-SERVER §14.2) and hold lifetime across relay lag (R-163). Stage 2.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
+      "conf-wrangler"
     ]
   },
   {
@@ -1935,6 +1954,7 @@
     "depends_on": [
       "4.12",
       "4.10",
+      "4.10b",
       "4.14a"
     ],
     "size": "M",
@@ -2009,6 +2029,7 @@
       "4.8",
       "4.9",
       "4.10",
+      "4.10b",
       "4.14b",
       "4.15",
       "4.16",

@@ -530,6 +530,13 @@ fn config_is_validated() {
     cfg.endpoint = "http://[::1]:9000".parse().unwrap();
     assert_eq!(cfg.validate().unwrap(), "http://[::1]:9000");
     assert!(S3BlobStore::with_keyspace(config(&fake), "a/b", Arc::new(SystemClock)).is_err());
+    // A keyspace that would alias a sibling namespace, however spelled.
+    for aliased in ["objects", "Objects", "object-offsets.", "Upload-Markers"] {
+        assert!(
+            S3BlobStore::with_keyspace(config(&fake), aliased, Arc::new(SystemClock)).is_err(),
+            "{aliased}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

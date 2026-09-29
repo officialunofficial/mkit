@@ -1,12 +1,16 @@
 //! Indexed ingestion shared by native inline verification and future Worker
-//! scheduling. The verified object list is the extraction seam for WP-4.10.
+//! scheduling. Verification extracts large objects into the global object
+//! store before a pack's `Verified` state is written (WP-4.10).
 
 pub mod classify;
 pub mod entries;
+mod extract;
 pub mod resolve;
 pub mod state;
 pub mod verify;
 
+#[cfg(all(test, feature = "memory"))]
+mod extract_tests;
 #[cfg(all(test, feature = "memory"))]
 mod tests;
 
@@ -49,7 +53,29 @@ pub struct IndexedConfig {
     pub max_pack_bytes: u64,
     /// Whole-pack decoding budget; at least `max_pack_bytes`.
     pub decode_budget: u64,
+    /// Least Blob size extracted into the global object store, at least 1.
+    /// Never advertised (SPEC-SERVER §9.6).
+    pub extract_min_bytes: u64,
+    /// Most content bytes one advance may reassemble into the object store,
+    /// and most member bytes it may resolve to do so. A small manifest over
+    /// many member chunks amplifies into a large reassembly; exceeding this
+    /// is `pack exceeds indexed decode budget`. `None` derives
+    /// `4 * max_pack_bytes` when the pipeline is built; a set value must be
+    /// at least `max_pack_bytes`.
+    pub max_extract_bytes: Option<u64>,
 }
+
+impl IndexedConfig {
+    /// [`Self::max_extract_bytes`], or `4 * max_pack_bytes` when unset.
+    #[must_use]
+    pub fn effective_max_extract_bytes(&self) -> u64 {
+        self.max_extract_bytes
+            .unwrap_or_else(|| self.max_pack_bytes.saturating_mul(4))
+    }
+}
+
+/// The default [`IndexedConfig::extract_min_bytes`]: 64 KiB.
+pub const DEFAULT_EXTRACT_MIN_BYTES: u64 = 64 * 1024;
 
 impl Default for IndexedConfig {
     fn default() -> Self {
@@ -58,6 +84,8 @@ impl Default for IndexedConfig {
             relay_lag_bound_ms: crate::relay::RELAY_LAG_BOUND_MS,
             max_pack_bytes: 2 << 30,
             decode_budget: 2 << 30,
+            extract_min_bytes: DEFAULT_EXTRACT_MIN_BYTES,
+            max_extract_bytes: None,
         }
     }
 }

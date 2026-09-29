@@ -60,7 +60,7 @@ use bytes::Bytes;
 use futures::channel::{mpsc, oneshot};
 use futures::future::{self, Either};
 use futures::{SinkExt as _, Stream, StreamExt as _};
-use mkit_core::hash::Hasher;
+use mkit_core::hash::{Hash, Hasher};
 use mkit_core::upload_parts::{PartHasher, PartPlan};
 use mkit_server::storage_error::StorageOp;
 use mkit_server::store::MAX_BLOB_PIECE_BYTES;
@@ -157,8 +157,16 @@ pub struct R2BlobStore<B> {
 impl<B: ObjectBucket> R2BlobStore<B> {
     /// A store for `keyspace` ([`PACKS_KEYSPACE`] for pack uploads), capped
     /// at [`DEFAULT_MAX_BYTES`] per blob.
+    ///
+    /// # Panics
+    /// If `keyspace` would alias a sibling namespace (`objects`,
+    /// `object-offsets`, `upload-markers`).
     #[must_use]
     pub fn new(bucket: B, keyspace: &'static str) -> Self {
+        assert!(
+            !mkit_server::is_reserved_pack_keyspace(keyspace),
+            "a keyspace must not alias a sibling namespace: {keyspace:?}"
+        );
         Self {
             bucket,
             keyspace,
@@ -258,16 +266,19 @@ impl Withheld {
         Ok(chunk)
     }
 
-    /// The withheld byte, if every byte arrived and hashes to the key.
-    fn finish(&mut self) -> Result<Option<Bytes>, StoreError> {
+    /// The withheld byte, if every byte arrived and hashes to the key (or to
+    /// `root`, for an object key).
+    fn finish(&mut self, root: Option<Hash>) -> Result<Option<Bytes>, StoreError> {
         if self.received != self.len {
             return Err(StoreError::Invalid("blob length does not match".into()));
         }
         match &mut self.expected {
-            ExpectedHash::Root { key, hasher } if hasher.finalize() != *key.hash() => {
-                return Err(StoreError::Invalid(
-                    "blob hash does not match its key".into(),
-                ));
+            ExpectedHash::Root { key, hasher } => {
+                if hasher.finalize() != key.expected_root(root)? {
+                    return Err(StoreError::Invalid(
+                        "blob hash does not match its key".into(),
+                    ));
+                }
             }
             ExpectedHash::Part { cv, hasher } => {
                 let actual = hasher
@@ -278,7 +289,6 @@ impl Withheld {
                     return Err(StoreError::PartSubtreeMismatch);
                 }
             }
-            ExpectedHash::Root { .. } => {}
         }
         Ok(self.last.take())
     }
@@ -496,12 +506,28 @@ impl<B: ObjectBucket> PackSink for R2PackSink<B> {
         }
     }
 
-    async fn commit(mut self) -> Result<CommitOutcome, StoreError> {
+    async fn commit(self) -> Result<CommitOutcome, StoreError> {
+        self.finish(None).await
+    }
+
+    async fn commit_with_root(self, content_root: Hash) -> Result<CommitOutcome, StoreError> {
+        self.finish(Some(content_root)).await
+    }
+
+    async fn abort(mut self) {
+        self.fail().await;
+    }
+}
+
+impl<B: ObjectBucket> R2PackSink<B> {
+    /// Verify against `root` (the key's hash for `None`), then release the
+    /// withheld byte.
+    async fn finish(mut self, root: Option<Hash>) -> Result<CommitOutcome, StoreError> {
         if self.failed {
             self.fail().await;
             return Err(StoreError::Invalid("commit after a failed write".into()));
         }
-        let last = match self.core.finish() {
+        let last = match self.core.finish(root) {
             Ok(last) => last,
             Err(e) => {
                 self.fail().await;
@@ -539,10 +565,6 @@ impl<B: ObjectBucket> PackSink for R2PackSink<B> {
                 Err(backend_error(StorageOp::BlobPut, detail))
             }
         }
-    }
-
-    async fn abort(mut self) {
-        self.fail().await;
     }
 }
 
@@ -767,7 +789,7 @@ mod tests {
             forwarded.extend_from_slice(&out);
         }
         assert_eq!(forwarded, data[..data.len() - 1]);
-        assert_eq!(w.finish().unwrap().unwrap(), data[data.len() - 1..]);
+        assert_eq!(w.finish(None).unwrap().unwrap(), data[data.len() - 1..]);
         // Wrong key: the same bytes forward, the last byte never does.
         let mut w = Withheld::new(key_of(b"other"), data.len() as u64);
         let mut forwarded = 0;
@@ -775,14 +797,14 @@ mod tests {
             forwarded += w.push(chunk.clone()).unwrap().len();
         }
         assert_eq!(forwarded, data.len() - 1);
-        assert!(matches!(w.finish(), Err(StoreError::Invalid(_))));
+        assert!(matches!(w.finish(None), Err(StoreError::Invalid(_))));
         // Short and long bodies.
         let mut w = Withheld::new(key_of(&data), data.len() as u64 + 1);
         for chunk in &chunks {
             w.push(chunk.clone()).unwrap();
         }
         assert!(w.last.is_none(), "nothing is withheld before the end");
-        assert!(matches!(w.finish(), Err(StoreError::Invalid(_))));
+        assert!(matches!(w.finish(None), Err(StoreError::Invalid(_))));
         let mut w = Withheld::new(key_of(b"ab"), 1);
         assert!(matches!(
             w.push(Bytes::from_static(b"ab")),
@@ -791,7 +813,7 @@ mod tests {
         // The empty blob withholds nothing and verifies against BLAKE3("").
         let mut w = Withheld::new(key_of(b""), 0);
         assert!(w.push(Bytes::new()).unwrap().is_empty());
-        assert_eq!(w.finish().unwrap(), None);
+        assert_eq!(w.finish(None).unwrap(), None);
     }
 
     /// A bucket whose put consumer runs on its own thread (`spawn`), or

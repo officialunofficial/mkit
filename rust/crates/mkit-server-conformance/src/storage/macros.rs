@@ -105,6 +105,7 @@ macro_rules! __with_multipart_cases {
                 multipart_abort_then_session_gone,
                 multipart_chunked_writes,
                 multipart_crash_leftovers_invisible,
+                multipart_object_completes_only_against_its_root,
             }
         }
     };
@@ -199,6 +200,11 @@ macro_rules! __with_kv_cases {
                 idx_blocked_on_add,
                 idx_hold_extension_keeps_max,
                 idx_expired_holds_pruned_on_mutation,
+                idx_holder_records_advance_seq_and_guard_removal,
+                idx_hold_and_holder_deadline_passed_writes_nothing,
+                idx_extend_hold_only_when_live,
+                idx_holder_unless_blocked_releases_the_hold,
+                idx_hold_alone_beats_commit_collect,
             }
             object_index::{
                 idx_scan_many_default_and_prefix,
@@ -237,6 +243,8 @@ macro_rules! __with_blob_cases {
                 blob_probe_ok,
                 blob_delete_then_get_none,
                 blob_get_large_is_streamed,
+                blob_object_key_requires_root,
+                blob_object_commit_with_root,
             }
         }
     };

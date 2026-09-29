@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use futures_executor::block_on;
 use futures_util::StreamExt as _;
+use mkit_core::hash::Hash;
 use mkit_core::upload_parts::PartPlan;
 use mkit_server::store::MAX_BLOB_PIECE_BYTES;
 use mkit_server::{
@@ -233,6 +234,11 @@ impl<K: PackSink + 'static> PackSink for BlockingSink<K> {
         on_pool(move || block_on(sink.commit())).await
     }
 
+    async fn commit_with_root(mut self, content_root: Hash) -> Result<CommitOutcome, StoreError> {
+        let sink = self.inner.take().ok_or_else(sink_gone)?;
+        on_pool(move || block_on(sink.commit_with_root(content_root))).await
+    }
+
     async fn abort(mut self) {
         if let Some(sink) = self.inner.take() {
             // Nothing to report: an abort that fails leaves nothing visible
@@ -397,6 +403,27 @@ where
         let parts = parts.to_vec();
         self.run(move |s| block_on(s.complete(key, &session, &plan, &parts)))
             .await
+    }
+
+    async fn complete_with_root(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        parts: &[PartRef],
+        content_root: Hash,
+    ) -> Result<CommitOutcome, StoreError> {
+        let session = session.to_vec();
+        let plan = *plan;
+        let parts = parts.to_vec();
+        self.run(move |s| {
+            block_on(s.complete_with_root(key, &session, &plan, &parts, content_root))
+        })
+        .await
+    }
+
+    fn single_put_limit(&self) -> Option<u64> {
+        self.inner.single_put_limit()
     }
 
     async fn abort(&self, key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
