@@ -19,8 +19,11 @@ fn unavailable() -> ServerError {
     ServerError::unavailable("object storage request failed")
 }
 
+/// The public message of a decode-budget overrun.
+pub(crate) const DECODE_BUDGET_MESSAGE: &str = "pack exceeds indexed decode budget";
+
 fn budget_exceeded() -> ServerError {
-    ServerError::invalid_argument("pack exceeds indexed decode budget")
+    ServerError::invalid_argument(DECODE_BUDGET_MESSAGE)
 }
 
 /// A membership miss needs the consuming ticket's lag window; a cap is

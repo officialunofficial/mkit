@@ -66,10 +66,18 @@ enum Mutant {
     /// read-then-write compare-and-swap.
     ReadThenWrite,
     /// Drops every delete: nothing is ever pruned.
+    #[cfg_attr(
+        not(feature = "test-faults"),
+        expect(dead_code, reason = "only constructed by test-faults pruning cases")
+    )]
     NoPrune,
     /// Prunes records but leaks their expiry-index rows (`px`, `qx`): the
     /// delete is dropped and the row hidden from scans, so pruning goes on
     /// while the rows pile up.
+    #[cfg_attr(
+        not(feature = "test-faults"),
+        expect(dead_code, reason = "only constructed by test-faults pruning cases")
+    )]
     LeakIndex,
 }
 

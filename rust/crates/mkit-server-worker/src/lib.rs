@@ -21,6 +21,8 @@
 //! - [`adapter`]: what a deployment's `#[event(fetch)]` and
 //!   `#[durable_object]` call: the pipeline's Connect binding over these
 //!   stores, streaming both bodies.
+//! - [`hooks`]: remote hooks over a service binding (WP-3.9): `BindingChannel`,
+//!   the `HOOK_ROLES` vars, and the hooks and kind-8 sink they build.
 //! - [`alarm`]: pure alarm choices; `NsObject::alarm` fires due timers and
 //!   sets the object's one alarm to the next partition wake.
 //!
@@ -54,6 +56,7 @@ pub mod clock;
 pub mod do_sql;
 #[cfg(feature = "test-faults")]
 pub mod faults;
+pub mod hooks;
 pub mod naming;
 pub mod ns_client;
 pub mod ns_object;
@@ -117,6 +120,9 @@ mod tests {
             include_str!("sleep.rs"),
             include_str!("wire.rs"),
             include_str!("faults.rs"),
+            include_str!("hooks/binding.rs"),
+            include_str!("hooks/build.rs"),
+            include_str!("hooks/config.rs"),
         ];
         // Case-sensitive: prose may say "commit" or "pragma".
         for word in forbidden() {

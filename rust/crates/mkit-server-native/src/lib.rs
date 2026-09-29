@@ -11,6 +11,8 @@ pub mod enc;
 pub mod exit;
 #[cfg(feature = "http")]
 mod guard;
+#[cfg(feature = "hooks")]
+pub mod hooks;
 #[cfg(feature = "http")]
 pub mod layers;
 #[cfg(feature = "http")]

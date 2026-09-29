@@ -209,6 +209,10 @@ pub struct WorkerConfig {
     /// `test-faults` build with `INDEXED_MODE` set on a Paid plan; every
     /// release build refuses the var (Stage 1, R-171).
     pub indexed: Option<mkit_server::indexed::IndexedConfig>,
+    /// `HOOK_ROLES`, `HOOK_TIMEOUT_MS` and `AUTHORIZER_ROLE`: which stages
+    /// call the hook Worker over the `ADMISSION_HOOK` service binding. `None`
+    /// runs the built-in hooks (WP-3.9).
+    pub hooks: Option<crate::hooks::config::HookVars>,
     /// `TEST_QUOTA_OPS`, `TEST_QUOTA_BYTES` and `TEST_QUOTA_WINDOW_MS`,
     /// when all three are set: the write quota instead of the default
     /// (`test-faults` builds only, for the wire suite's quota and growth
@@ -266,6 +270,9 @@ impl WorkerConfig {
         config.sharding = self.sharding;
         config.ticket_keys.clone_from(&self.ticket_keys);
         config.indexed = self.indexed;
+        if let Some(hooks) = &self.hooks {
+            config.authorizer_role = hooks.authorizer_role;
+        }
         config.grants = self
             .grants
             .as_ref()
@@ -373,6 +380,7 @@ impl WorkerConfig {
             grants,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             blob_binding: crate::r2::STORAGE_BINDING,
+            hooks: crate::hooks::config::HookVars::parse(&var)?,
             #[cfg(feature = "test-faults")]
             test_quota: test_quota(&var)?,
         })
@@ -1506,7 +1514,7 @@ mod faults {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use glue::{fetch, ns_object, serve};
+pub use glue::{fetch, fetch_with, ns_object, ns_object_with, serve, serve_with};
 
 #[cfg(target_arch = "wasm32")]
 mod glue {
@@ -1514,7 +1522,7 @@ mod glue {
     use std::sync::Once;
 
     use crate::telemetry::{ConsoleMetrics, install};
-    use mkit_server::pipeline::{Hooks, Pipeline};
+    use mkit_server::pipeline::{DeliveryError, HookSet, OutcomeSink, Pipeline};
     use mkit_worker_common::adapter::{
         copy_headers_filtered, is_deadline_header, respond_streamed, to_http_method,
     };
@@ -1530,6 +1538,7 @@ mod glue {
     };
     use crate::backup::{BACKUPS_BINDING, BackupConfig, BackupDrain, BackupHandler};
     use crate::clock::WorkerClock;
+    use crate::hooks::build::{hooks_from_env, sink_from_env};
     use crate::ns_client::{StubTransport, WorkerNamespaceStore};
     use crate::ns_object::NsObject;
     use crate::r2::{EnvBucket, PACKS_KEYSPACE, R2BlobStore, WorkerBlobStore};
@@ -1542,8 +1551,8 @@ mod glue {
     static BACKUPS_MISSING_LOG: Once = Once::new();
     static BACKUPS_INVALID_LOG: Once = Once::new();
 
-    /// The pipeline a request runs on.
-    type WorkerPipeline = Pipeline<WorkerBlobStore, WorkerNamespaceStore, Hooks>;
+    /// The pipeline a request runs on, over the hooks `H`.
+    type WorkerPipeline<H> = Pipeline<WorkerBlobStore, WorkerNamespaceStore, H>;
 
     /// `Access-Control-Allow-Origin` and the admission `Expose-Headers` on
     /// every response, so a browser reads a challenge or a receipt.
@@ -1575,8 +1584,12 @@ mod glue {
         Ok(response)
     }
 
-    /// The pipeline for `cfg` over `env`'s bindings.
-    fn pipeline(env: &Env, cfg: &WorkerConfig) -> Result<WorkerPipeline, ConfigError> {
+    /// The pipeline for `cfg` over `env`'s bindings and `hooks`.
+    fn pipeline<H: HookSet + 'static>(
+        env: &Env,
+        cfg: &WorkerConfig,
+        hooks: H,
+    ) -> Result<WorkerPipeline<H>, ConfigError> {
         let bad = |e: &dyn core::fmt::Display| ConfigError(e.to_string());
         let config = cfg.pipeline_config()?;
         let blobs = R2BlobStore::new(
@@ -1593,7 +1606,7 @@ mod glue {
         let pipe = Pipeline::new(
             blobs,
             meta,
-            Hooks::new(),
+            hooks,
             config,
             Arc::new(WorkerClock),
             Arc::new(ConsoleMetrics::default()),
@@ -1631,14 +1644,33 @@ mod glue {
     /// A deployment's whole `#[event(fetch)]`: [`serve`] with the
     /// [`WorkerConfig`] of `env`'s vars. With a var missing or malformed,
     /// every request but a CORS preflight is answered `unavailable` (HTTP
-    /// 503) naming it.
+    /// 503) naming it. The hooks come from the hook vars and the
+    /// `ADMISSION_HOOK` service binding (WP-3.9); [`fetch_with`] supplies
+    /// others.
     ///
     /// # Errors
     /// Only when the runtime fails to build a response.
     pub async fn fetch(req: Request, env: Env) -> worker::Result<Response> {
+        fetch_with(req, env, hooks_from_env).await
+    }
+
+    /// [`fetch`] over hooks built by `make_hooks` from `env` and the parsed
+    /// [`WorkerConfig`], for a deployment with its own authorizer or
+    /// admission (the 3.14 reference Worker's business layer, for example).
+    /// A build error answers every RPC `unavailable` (HTTP 503), like a bad
+    /// var. The kind-8 outcome sink is the Durable Objects' to build:
+    /// [`ns_object_with`].
+    ///
+    /// # Errors
+    /// Only when the runtime fails to build a response.
+    pub async fn fetch_with<H, F>(req: Request, env: Env, make_hooks: F) -> worker::Result<Response>
+    where
+        H: HookSet + 'static,
+        F: FnOnce(&Env, &WorkerConfig) -> Result<H, ConfigError>,
+    {
         install();
         match WorkerConfig::from_env(&env) {
-            Ok(cfg) => serve(req, env, &cfg).await,
+            Ok(cfg) => serve_with(req, env, &cfg, make_hooks).await,
             Err(_) if is_options_preflight(&req) => {
                 cors_preflight_response(&cors_allow_headers(), CORS_ALLOW_METHODS)
             }
@@ -1646,11 +1678,29 @@ mod glue {
         }
     }
 
-    /// Answer one request of a deployment (see the module docs).
+    /// Answer one request of a deployment (see the module docs), with the
+    /// hooks the hook vars and the `ADMISSION_HOOK` binding name.
     ///
     /// # Errors
     /// Only when the runtime fails to build a response.
     pub async fn serve(req: Request, env: Env, cfg: &WorkerConfig) -> worker::Result<Response> {
+        serve_with(req, env, cfg, hooks_from_env).await
+    }
+
+    /// [`serve`] over hooks built by `make_hooks`.
+    ///
+    /// # Errors
+    /// Only when the runtime fails to build a response.
+    pub async fn serve_with<H, F>(
+        req: Request,
+        env: Env,
+        cfg: &WorkerConfig,
+        make_hooks: F,
+    ) -> worker::Result<Response>
+    where
+        H: HookSet + 'static,
+        F: FnOnce(&Env, &WorkerConfig) -> Result<H, ConfigError>,
+    {
         #[cfg(feature = "test-faults")]
         let mut req = req;
         install();
@@ -1702,7 +1752,7 @@ mod glue {
             let body = body_too_large_json(cfg.max_body_bytes);
             return Ok(cors(json_response(body, 400)?));
         }
-        let pipe = match pipeline(&env, cfg) {
+        let pipe = match make_hooks(&env, cfg).and_then(|hooks| pipeline(&env, cfg, hooks)) {
             Ok(pipe) => pipe,
             Err(e) => return Ok(cors(json_response(unavailable_json(&e.0), 503)?)),
         };
@@ -1741,19 +1791,71 @@ mod glue {
     }
 
     /// The Durable Object of a partition for `state`: its store capped for
-    /// the plan in `env`'s `WORKERS_PLAN` var (see [`plan_capacity`]).
+    /// the plan in `env`'s `WORKERS_PLAN` var (see [`plan_capacity`]), and its
+    /// kind-8 outcome sink built from the hook vars and the `ADMISSION_HOOK`
+    /// binding.
     #[must_use]
     pub fn ns_object(state: State, env: &Env, class: crate::classes::ShardClass) -> NsObject {
+        ns_object_with(state, env, class, sink_from_env)
+    }
+
+    /// The kind-8 sink, or the reason there is none: delivery then waits
+    /// (`Fired::Retry`) and the rows are kept.
+    struct MaybeSink<O>(Option<O>);
+
+    impl<O: OutcomeSink> OutcomeSink for MaybeSink<O> {
+        async fn deliver(
+            &self,
+            outcome: &mkit_server::pipeline::Outcome,
+        ) -> Result<(), DeliveryError> {
+            match &self.0 {
+                Some(sink) => sink.deliver(outcome).await,
+                None => Err(DeliveryError::new(
+                    "outcome hook configuration unavailable",
+                    None,
+                )),
+            }
+        }
+    }
+
+    /// [`ns_object`] with the outcome sink built by `make_sink` from `env`
+    /// and the parsed [`WorkerConfig`]. Pair it with [`fetch_with`] when the
+    /// deployment has its own stages. A sink or config error keeps every
+    /// outcome row queued: delivery runs only with a valid sink and audience.
+    #[must_use]
+    pub fn ns_object_with<O, F>(
+        state: State,
+        env: &Env,
+        class: crate::classes::ShardClass,
+        make_sink: F,
+    ) -> NsObject
+    where
+        O: OutcomeSink + 'static,
+        F: FnOnce(&Env, &WorkerConfig) -> Result<O, ConfigError>,
+    {
         install();
         let plan = env.var(PLAN_VAR).ok().map(|v| v.to_string());
         let capacity = plan_capacity(plan.as_deref()).unwrap_or_else(|(e, free)| {
             worker::console_error!("{e}; using the Workers Free cap");
             free
         });
-        let target = WorkerConfig::from_env(env).map(|cfg| {
+        let cfg = WorkerConfig::from_env(env);
+        let target = cfg.as_ref().map_err(Clone::clone).map(|cfg| {
             let probe = cfg.probe_partition();
-            WorkerNamespaceStore::new(StubTransport::new(env.clone(), cfg.placement), probe)
+            WorkerNamespaceStore::new(
+                StubTransport::new(env.clone(), cfg.placement.clone()),
+                probe,
+            )
         });
+        // The audience the sink names (the hook client's `server_audience`)
+        // is the one kind 8 stamps on outcomes: `outcome_audience`, once.
+        let (audience, sink) = match &cfg {
+            Ok(cfg) => match make_sink(env, cfg) {
+                Ok(sink) => (Ok(super::outcome_audience(cfg)), Some(sink)),
+                Err(error) => (Err(error), None),
+            },
+            Err(error) => (Err(error.clone()), None),
+        };
         let registry = super::timer_registry_with_blobs(
             class,
             target,
@@ -1766,9 +1868,9 @@ mod glue {
         let registry = super::with_outcome_timers(
             registry,
             class,
-            WorkerConfig::from_env(env).map(|cfg| super::outcome_audience(&cfg)),
+            audience,
             plan.as_deref(),
-            mkit_server::pipeline::NoOutcomes,
+            MaybeSink(sink),
             Arc::new(crate::sleep::WorkerSleep),
             Arc::new(WorkerClock),
         );
@@ -1795,7 +1897,8 @@ mod glue {
         let registry = if let Some(config) = backup.clone() {
             // Free-plan alarm budget: relay 32 + this handler's single R2 put
             // 1 + outcome delivery <= 8 + quota rollup <= 8 = 49 of 50 (see
-            // `outcome_budget`). Kind 9 makes no external calls.
+            // `outcome_budget`; each remote hook call is one service-binding
+            // subrequest). Kind 9 makes no external calls.
             registry.register(BackupHandler::new(
                 EnvBucket::new(env.clone(), BACKUPS_BINDING),
                 config,
@@ -1812,6 +1915,22 @@ mod glue {
         } else {
             object
         }
+    }
+
+    /// A deployment's own hooks and outcome sink type-check through the
+    /// generic entry points (R-138, R-154). Never called: the wasm32 build is
+    /// the check.
+    #[allow(dead_code)]
+    async fn own_hooks_and_sink_compile(req: Request, env: Env, state: State) {
+        use mkit_server::pipeline::{Hooks, NoOutcomes};
+
+        let _ = fetch_with(req, env.clone(), |_env, _cfg| Ok(Hooks::new())).await;
+        let _ = ns_object_with(
+            state,
+            &env,
+            crate::classes::ShardClass::RefStore,
+            |_env, _cfg| Ok(NoOutcomes),
+        );
     }
 
     #[cfg(feature = "test-faults")]
@@ -2055,6 +2174,37 @@ mod tests {
             WorkerConfig::from_vars(vars(&[(AUDIENCE_VAR, "https://vcs.example")])).unwrap_err(),
             ConfigError("AUTH_REPOSITORY is not configured".into())
         );
+    }
+
+    /// The hook vars are part of the config: absent means the built-in hooks,
+    /// present they reach the pipeline's authorizer role, and a malformed one
+    /// is a config error like any other.
+    #[test]
+    fn hook_vars_are_parsed_with_the_config() {
+        let base = [
+            (AUDIENCE_VAR, "https://vcs.example"),
+            (REPOSITORY_VAR, "default"),
+        ];
+        let plain = WorkerConfig::from_vars(vars(&base)).unwrap();
+        assert!(plain.hooks.is_none());
+        assert_eq!(
+            plain.pipeline_config().unwrap().authorizer_role,
+            mkit_server::policy::AuthorizerRole::Check
+        );
+        let mut pairs = base.to_vec();
+        pairs.extend([
+            ("HOOK_ROLES", "authorize,admit"),
+            ("AUTHORIZER_ROLE", "authority"),
+        ]);
+        let cfg = WorkerConfig::from_vars(vars(&pairs)).unwrap();
+        let hooks = cfg.hooks.unwrap();
+        assert!(hooks.roles.authorize && hooks.roles.admit && !hooks.roles.outcome);
+        assert_eq!(
+            cfg.pipeline_config().unwrap().authorizer_role,
+            mkit_server::policy::AuthorizerRole::Authority
+        );
+        pairs.push(("HOOK_TIMEOUT_MS", "0"));
+        assert!(WorkerConfig::from_vars(vars(&pairs)).is_err());
     }
 
     #[test]

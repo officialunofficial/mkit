@@ -13,6 +13,8 @@
 //!   300 s. Only a channel that reports [`HookChannel::isolated`] (a service
 //!   binding, §7.3) may go unsigned, and [`HookClient::new`] refuses anything
 //!   else.
+//! - [`HookVerifier`] is the receiving side of that signature (a hook service's
+//!   §7.1 checks), free of server-runtime dependencies.
 //! - [`RemoteAuthorizer`], [`RemoteAdmission`] and [`RemoteOutcomes`] share
 //!   one [`HookClient`] and implement the stage traits, so any subset plugs
 //!   into [`Hooks`](crate::pipeline::Hooks).
@@ -50,6 +52,7 @@ mod client;
 mod map;
 mod roles;
 mod sign;
+mod verify;
 
 #[allow(
     missing_docs,
@@ -69,6 +72,9 @@ pub use client::{DEFAULT_TIMEOUT, HookClient, HookConfigError, MAX_RESPONSE_BYTE
 pub use roles::{RemoteAdmission, RemoteAuthorizer, RemoteOutcomes};
 pub use sign::{
     DEFAULT_VALIDITY, DOMAIN, HookSigner, MAX_VALIDITY, NonceSource, OsNonces, SignerError,
+};
+pub use verify::{
+    HookVerifier, KeyListError, MAX_CLOCK_LEAD_MS, Verified, VerifierKey, VerifyError,
 };
 
 #[cfg(test)]

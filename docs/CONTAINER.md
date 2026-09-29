@@ -131,6 +131,7 @@ The server reads each secret file once, without following a symlink
 | S3 credentials | `--s3-credentials-file` | same as the token | `MKIT_R2_ACCESS_KEY_ID` + `MKIT_R2_SECRET_ACCESS_KEY` (or `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`) |
 | Enc server key | `--enc-server-key` | regular file owned by 65532, `600`, in a directory with no group or other bits, and no symlink anywhere on its path; created (`0600`, directories `0700`) on first start | none |
 | Enc peer allowlist | `--enc-authorized-peers` | regular file owned by 65532 or root, not writable by group or others | none |
+| Hook signing key | `--hook-key-file` | same as the token: one line, `<key-id> <64 hex seed>` | `MKIT_HOOK_KEY` |
 
 Never pass a secret on the command line; the server has no flag for one.
 
@@ -154,6 +155,20 @@ Never pass a secret on the command line; the server has no flag for one.
   which mounts the file itself rather than a symlink (root-owned, `0644`).
   Changes then need a pod restart, which the server needs anyway: it reads
   the allowlist once, at startup.
+
+## Remote hooks
+
+To run authorization, admission or outcome delivery in a separate service
+(a payment layer, say), pass `--hook-authorize-url`, `--hook-admit-url` and
+`--hook-outcome-url` (each an `https` base URL; `http` only to loopback) with
+`--auth auth-v2`, `--meta sqlite:<PATH>`, `--ticket-key-file` and a signing key
+in `--hook-key-file`. The container's TLS trust store verifies the hook, there
+is no way to switch verification off, and redirects are never followed. A
+remote admission replaces the built-in per-signer abuse quota: the hook owns
+abuse control. Print the public key list to configure the hook with, from the
+same image: `mkit-server hook-key-list --hook-key-file /run/secrets/hook.key`.
+Give the hook key its own secret: it must differ from the ticket and enc keys.
+See the [`mkit-server-native` README](../rust/crates/mkit-server-native/README.md#remote-hooks---hook--url).
 
 ## Health checks
 
