@@ -214,6 +214,20 @@ pub fn pending_event(event: PendingEvent) {
     });
 }
 
+/// End the current self-overwriting progress line before helper UX appears.
+pub fn suspend_for_admission() {
+    REPORTER.with(|slot| {
+        if slot
+            .borrow()
+            .as_ref()
+            .is_some_and(|reporter| reporter.emitted)
+        {
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(stderr);
+        }
+    });
+}
+
 /// RAII handle returned by [`start`]. Dropping it flushes a final
 /// progress line (if anything was reported) and uninstalls the
 /// thread-local sink, so a command can simply hold the guard for the

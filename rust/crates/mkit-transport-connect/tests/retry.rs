@@ -29,6 +29,9 @@ use mkit_core::hash::hash as blake3_hash;
 use mkit_core::protocol::{
     AdvanceOutcome, BackoffIterator, PackKey, RefWriteCondition, Transport, TransportError,
 };
+use mkit_transport_connect::admission::{
+    AdmissionContext, AdmissionPolicy, AdmissionResponder, AdmissionResponderError,
+};
 use mkit_transport_connect::{ConnectTransport, EnvelopeSigner, PendingEvent, generated};
 use mkit_transport_memory::MemoryTransport;
 
@@ -61,6 +64,7 @@ fn to_connect_error(err: TransportError) -> ConnectError {
             ErrorCode::Internal,
             "unexpected client-only error surfaced server-side",
         ),
+        _ => ConnectError::new(ErrorCode::Internal, "unexpected transport error"),
     }
 }
 
@@ -123,6 +127,9 @@ enum FailKind {
     PendingThenUnauthenticated,
     PendingThenTwoUnauthenticated,
     PendingUnauthenticatedTwice,
+    Admission,
+    Raw402,
+    AdmissionThenUnavailable,
 }
 
 impl FailKind {
@@ -163,6 +170,24 @@ impl FailKind {
             FailKind::PendingUnauthenticatedTwice => {
                 FailKind::Pending(1_000).to_connect_error(n, fail_times)
             }
+            FailKind::Admission => ConnectError::permission_denied("admission required")
+                .with_detail(connectrpc::ErrorDetail::from_message(
+                    "mkit.transport.v1.AdmissionChallenge",
+                    &generated::AdmissionChallenge {
+                        challenges: vec![generated::Challenge {
+                            scheme: Some("test".into()),
+                            value: Some("opaque-secret".into()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                )),
+            FailKind::Raw402 => ConnectError::unknown("raw body opaque-secret")
+                .with_http_status(http::StatusCode::PAYMENT_REQUIRED),
+            FailKind::AdmissionThenUnavailable if n == 0 => {
+                FailKind::Admission.to_connect_error(n, fail_times)
+            }
+            FailKind::AdmissionThenUnavailable => ConnectError::unavailable("retry this response"),
         }
     }
 }
@@ -340,9 +365,19 @@ impl generated::TransportService for FlakyService {
 
     async fn update_ref(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, generated::UpdateRefRequest>,
     ) -> ServiceResult<generated::UpdateRefResponse> {
+        if let Some(headers) = &self.advance_headers {
+            let mut captured = ctx.headers().clone();
+            captured.insert(
+                "x-test-body",
+                hex::encode(buffa::Message::encode_to_vec(&request.to_owned_message()))
+                    .parse()
+                    .unwrap(),
+            );
+            headers.lock().unwrap().push(captured);
+        }
         if let Some(e) = self.maybe_fail(Rpc::UpdateRef) {
             return Err(e);
         }
@@ -353,7 +388,10 @@ impl generated::TransportService for FlakyService {
         self.inner
             .update_ref(&name, condition, &new_id)
             .map_err(to_connect_error)?;
-        Ok(Response::new(generated::UpdateRefResponse::default()))
+        Ok(Response::new(generated::UpdateRefResponse::default())
+            .with_header("payment-receipt", "receipt-secret")
+            .with_header("payment-receipt", "v".repeat(8_193))
+            .with_header("payment-response", "reply-secret"))
     }
 
     async fn advance_refs(
@@ -362,7 +400,14 @@ impl generated::TransportService for FlakyService {
         request: ServiceRequest<'_, generated::AdvanceRefsRequest>,
     ) -> ServiceResult<generated::AdvanceRefsResponse> {
         if let Some(headers) = &self.advance_headers {
-            headers.lock().unwrap().push(ctx.headers().clone());
+            let mut captured = ctx.headers().clone();
+            captured.insert(
+                "x-test-body",
+                hex::encode(buffa::Message::encode_to_vec(&request.to_owned_message()))
+                    .parse()
+                    .unwrap(),
+            );
+            headers.lock().unwrap().push(captured);
         }
         if let Some(e) = self.maybe_fail(Rpc::AdvanceRefs) {
             return Err(e);
@@ -674,6 +719,302 @@ fn connect_to(port: u16) -> ConnectTransport {
     // `ConnectTransport::connect_for_test_with_signer`'s doc comment) —
     // plenty of headroom for these tests' 1-2 induced failures.
     ConnectTransport::connect_for_test(uri)
+}
+
+struct StaticResponder {
+    calls: Arc<AtomicUsize>,
+    fail: bool,
+}
+impl AdmissionResponder for StaticResponder {
+    fn respond(
+        &self,
+        ctx: &AdmissionContext<'_>,
+    ) -> Result<Vec<(String, String)>, AdmissionResponderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert!(matches!(
+            ctx.procedure.rsplit('/').next(),
+            Some("UpdateRef" | "AdvanceRefs")
+        ));
+        if self.fail {
+            return Err(AdmissionResponderError::Failed("responder failed".into()));
+        }
+        Ok(vec![(
+            "Payment-Authorization".into(),
+            "Payment secret".into(),
+        )])
+    }
+}
+
+#[test]
+fn admission_retries_once_and_keeps_headers_and_identity() {
+    for target in [Rpc::UpdateRef, Rpc::AdvanceRefs] {
+        let captures = Arc::new(Mutex::new(Vec::new()));
+        let (port, stop, handle, calls) = spawn_flaky_server_internal(
+            target,
+            1,
+            FailKind::Admission,
+            None,
+            Some(captures.clone()),
+        );
+        let uri = format!("http://127.0.0.1:{port}").parse().unwrap();
+        let responder_calls = Arc::new(AtomicUsize::new(0));
+        let client = ConnectTransport::connect_for_test_with_signer(
+            uri,
+            Some(Arc::new(TestSigner(SigningKey::from_bytes(&[7; 32])))),
+        )
+        .with_admission(AdmissionPolicy::new(Arc::new(StaticResponder {
+            calls: responder_calls.clone(),
+            fail: false,
+        })));
+        let h = blake3_hash(b"head");
+        let p = blake3_hash(b"packmap");
+        match target {
+            Rpc::UpdateRef => client
+                .update_ref("refs/heads/main", RefWriteCondition::Missing, &h)
+                .unwrap(),
+            Rpc::AdvanceRefs => {
+                client
+                    .advance_refs(
+                        "refs/heads/main",
+                        RefWriteCondition::Missing,
+                        &h,
+                        "refs/packmaps/main",
+                        RefWriteCondition::Missing,
+                        &p,
+                    )
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(responder_calls.load(Ordering::SeqCst), 1);
+        let headers = captures.lock().unwrap();
+        assert_eq!(headers.len(), 2);
+        assert_eq!(headers[0].get("payment-authorization"), None);
+        assert_eq!(
+            headers[1].get("payment-authorization").unwrap(),
+            "Payment secret"
+        );
+        assert_eq!(
+            headers[0].get("idempotency-key"),
+            headers[1].get("idempotency-key")
+        );
+        assert_eq!(headers[0].get("x-test-body"), headers[1].get("x-test-body"));
+        shutdown(stop, handle);
+    }
+}
+
+#[test]
+fn admission_without_policy_or_on_second_challenge_is_terminal() {
+    let h = blake3_hash(b"head");
+    let (port, stop, handle, calls) =
+        spawn_flaky_server_with_kind(Rpc::UpdateRef, 3, FailKind::Raw402);
+    let error = connect_to(port)
+        .update_ref("refs/heads/main", RefWriteCondition::Missing, &h)
+        .unwrap_err();
+    assert!(matches!(error, TransportError::AdmissionRequired(_)));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    shutdown(stop, handle);
+
+    let (port, stop, handle, calls) =
+        spawn_flaky_server_with_kind(Rpc::UpdateRef, 3, FailKind::Admission);
+    let responder_calls = Arc::new(AtomicUsize::new(0));
+    let client = connect_to(port).with_admission(AdmissionPolicy::new(Arc::new(StaticResponder {
+        calls: responder_calls.clone(),
+        fail: false,
+    })));
+    let error = client
+        .update_ref("refs/heads/main", RefWriteCondition::Missing, &h)
+        .unwrap_err();
+    assert!(error.to_string().contains("remote challenged again"));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(responder_calls.load(Ordering::SeqCst), 1);
+    shutdown(stop, handle);
+}
+
+#[test]
+fn raw_http_402_stops_after_one_attempt() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut bytes = [0; 4096];
+        let _ = stream.read(&mut bytes).unwrap();
+        stream.write_all(b"HTTP/1.1 402 Payment Required\r\nContent-Length: 0\r\nWWW-Authenticate: Payment opaque\r\nConnection: close\r\n\r\n").unwrap();
+    });
+    let hash = blake3_hash(b"head");
+    let error = connect_to(port)
+        .update_ref("refs/heads/main", RefWriteCondition::Missing, &hash)
+        .unwrap_err();
+    match error {
+        TransportError::AdmissionRequired(required) => {
+            assert!(required.challenges.is_empty());
+            assert_eq!(required.www_authenticate, ["Payment opaque"]);
+        }
+        other => panic!("expected admission challenge, got {other}"),
+    }
+    server.join().unwrap();
+}
+
+#[test]
+fn helper_headers_remain_on_every_transport_retry() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (port, stop, handle, calls) = spawn_flaky_server_internal(
+        Rpc::UpdateRef,
+        3,
+        FailKind::AdmissionThenUnavailable,
+        None,
+        Some(captured.clone()),
+    );
+    let responder_calls = Arc::new(AtomicUsize::new(0));
+    let client = connect_to(port).with_admission(AdmissionPolicy::new(Arc::new(StaticResponder {
+        calls: responder_calls.clone(),
+        fail: false,
+    })));
+    client
+        .update_ref(
+            "refs/heads/main",
+            RefWriteCondition::Missing,
+            &blake3_hash(b"head"),
+        )
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert_eq!(responder_calls.load(Ordering::SeqCst), 1);
+    let headers = captured.lock().unwrap();
+    assert!(
+        headers[1..]
+            .iter()
+            .all(|h| h.get("payment-authorization").unwrap() == "Payment secret")
+    );
+    drop(headers);
+    shutdown(stop, handle);
+}
+
+#[test]
+fn raw_402_passes_empty_challenges_to_responder() {
+    struct RawResponder;
+    impl AdmissionResponder for RawResponder {
+        fn respond(
+            &self,
+            ctx: &AdmissionContext<'_>,
+        ) -> Result<Vec<(String, String)>, AdmissionResponderError> {
+            assert!(ctx.required.challenges.is_empty());
+            assert!(ctx.required.description.is_empty());
+            Ok(vec![(
+                "Payment-Authorization".into(),
+                "Payment token".into(),
+            )])
+        }
+    }
+    let (port, stop, handle, calls) =
+        spawn_flaky_server_with_kind(Rpc::UpdateRef, 1, FailKind::Raw402);
+    let client = connect_to(port).with_admission(AdmissionPolicy::new(Arc::new(RawResponder)));
+    client
+        .update_ref(
+            "refs/heads/main",
+            RefWriteCondition::Missing,
+            &blake3_hash(b"head"),
+        )
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    shutdown(stop, handle);
+}
+
+static ADMISSION_CLOCK: AtomicI64 = AtomicI64::new(1_700_000_000_000);
+fn admission_now() -> i64 {
+    ADMISSION_CLOCK.load(Ordering::SeqCst)
+}
+
+#[test]
+fn helper_past_identity_margin_gets_new_nonce() {
+    struct SlowResponder;
+    impl AdmissionResponder for SlowResponder {
+        fn respond(
+            &self,
+            _: &AdmissionContext<'_>,
+        ) -> Result<Vec<(String, String)>, AdmissionResponderError> {
+            ADMISSION_CLOCK.fetch_add(280_000, Ordering::SeqCst);
+            Ok(vec![(
+                "Payment-Authorization".into(),
+                "Payment token".into(),
+            )])
+        }
+    }
+    ADMISSION_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (port, stop, handle, _) = spawn_flaky_server_internal(
+        Rpc::UpdateRef,
+        1,
+        FailKind::Admission,
+        None,
+        Some(captured.clone()),
+    );
+    let client = connect_to(port)
+        .with_clock_for_test(admission_now)
+        .with_admission(AdmissionPolicy::new(Arc::new(SlowResponder)));
+    client
+        .update_ref(
+            "refs/heads/main",
+            RefWriteCondition::Missing,
+            &blake3_hash(b"head"),
+        )
+        .unwrap();
+    let headers = captured.lock().unwrap();
+    assert_ne!(
+        headers[0].get("idempotency-key"),
+        headers[1].get("idempotency-key")
+    );
+    drop(headers);
+    shutdown(stop, handle);
+}
+
+#[test]
+fn receipts_are_observed_only_on_success_and_hide_values() {
+    let (port, stop, handle, _calls) =
+        spawn_flaky_server_with_kind(Rpc::UpdateRef, 0, FailKind::Unavailable);
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let out = observed.clone();
+    let client = connect_to(port).with_admission_receipt_observer(move |receipt| {
+        out.lock()
+            .unwrap()
+            .push((receipt.header.to_owned(), format!("{:?}", receipt.value)))
+    });
+    client
+        .update_ref(
+            "refs/heads/main",
+            RefWriteCondition::Missing,
+            &blake3_hash(b"head"),
+        )
+        .unwrap();
+    let receipts = observed.lock().unwrap();
+    assert_eq!(receipts.len(), 2);
+    assert!(receipts.iter().any(|(name, _)| name == "payment-receipt"));
+    assert!(receipts.iter().any(|(name, _)| name == "payment-response"));
+    assert!(receipts.iter().all(|(_, debug)| !debug.contains("secret")));
+    shutdown(stop, handle);
+
+    let (port, stop, handle, _) =
+        spawn_flaky_server_with_kind(Rpc::UpdateRef, 1, FailKind::Admission);
+    let seen = Arc::new(AtomicUsize::new(0));
+    let observer = seen.clone();
+    let client = connect_to(port).with_admission_receipt_observer(move |_| {
+        observer.fetch_add(1, Ordering::SeqCst);
+    });
+    assert!(
+        client
+            .update_ref(
+                "refs/heads/main",
+                RefWriteCondition::Missing,
+                &blake3_hash(b"head")
+            )
+            .is_err()
+    );
+    assert_eq!(seen.load(Ordering::SeqCst), 0);
+    shutdown(stop, handle);
 }
 
 struct TestSigner(SigningKey);
