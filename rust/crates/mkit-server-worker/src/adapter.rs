@@ -270,9 +270,7 @@ impl WorkerConfig {
         config.sharding = self.sharding;
         config.ticket_keys.clone_from(&self.ticket_keys);
         config.indexed = self.indexed.map(|mut indexed| {
-            indexed.max_ancestry_commits = indexed
-                .max_ancestry_commits
-                .min(mkit_server::indexed::SCHEDULED_MAX_ANCESTRY_COMMITS);
+            indexed.max_ancestry_commits = indexed.max_ancestry_commits.min(64);
             indexed
         });
         if let Some(hooks) = &self.hooks {

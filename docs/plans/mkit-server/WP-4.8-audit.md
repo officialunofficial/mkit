@@ -78,7 +78,10 @@ All paths below are relative to `rust/crates/`.
    caps 1 and 4096; zero-size object-keyed rows retain external depth.
 7. Rebuilding a Verified pack's job could persist Rejected on storage damage.
    Verified now stays monotone; the trailer-damage regression failed before the fix.
-8. Added the missing Scheduled `u`-only grant integration and the actual 64-commit
+8. The release Worker source guard also matched the uppercase ancestry constant
+   name as transaction-control text. The adapter clamps directly to 64; the
+   unchanged source guard and raised-cap regression both remain required.
+9. Added the missing Scheduled `u`-only grant integration and the actual 64-commit
    staging boundary, alongside the inherited fast-forward-only child/fork test.
 
 The PR body records final gate results, size accounting, executor decisions,
@@ -88,7 +91,7 @@ and brief/spec passes; the orchestrator notes prohibit spawning new agents.
 
 ## Size and implementation decisions
 
-Production size is 2,800 added Rust source lines, excluding blank/comment lines,
+Production size is 2,798 added Rust source lines, excluding blank/comment lines,
 test files and test modules, and the complete conformance test-harness crate.
 Removed production lines are not subtracted. The completion enqueue remains the
 brief's first size cut; the attempt counter and three-failure shrink remain.
