@@ -88,6 +88,8 @@ use crate::upload::{UploadLimits, token::TicketKeys};
 use crate::url_token::{MintedToken, UrlTarget};
 use begin::BeginWrite;
 
+#[cfg(feature = "remote-hooks")]
+pub(crate) use admission::validate_decision;
 pub use auth::{AuthMode, Authenticated, HeaderValues, RequestMeta};
 pub use download::{DownloadChunk, DownloadStream};
 pub use durable_outcome::{DeliveryError, Outcome, OutcomeKind};
