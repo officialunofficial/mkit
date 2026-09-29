@@ -922,7 +922,7 @@ mod glue {
     use crate::ns_client::{StubTransport, WorkerNamespaceStore};
     use crate::ns_object::NsObject;
     use crate::r2::{EnvBucket, PACKS_KEYSPACE, R2BlobStore, WorkerBlobStore};
-    use crate::sharding_guard::{Settled, check_mode};
+    use crate::sharding_guard::{Outcome, Settled, check_addressing, check_mode};
 
     thread_local! {
         static SHARDING_GUARD: std::cell::RefCell<Option<Settled>> = const { std::cell::RefCell::new(None) };
@@ -1029,14 +1029,19 @@ mod glue {
             cfg.probe_partition(),
         );
         let jurisdiction = cfg.placement.jurisdiction.as_deref();
+        let multi = matches!(cfg.addressing, mkit_server::Addressing::Multi(_));
         let cached =
-            SHARDING_GUARD.with(|cache| Settled::cached(cache, cfg.sharding, jurisdiction));
+            SHARDING_GUARD.with(|cache| Settled::cached(cache, cfg.sharding, multi, jurisdiction));
         let checked = if let Some(outcome) = cached {
             outcome.into_result()
         } else {
             // This request owns every await. Only settled data crosses requests.
-            let result = check_mode(&meta, cfg.sharding).await;
-            SHARDING_GUARD.with(|cache| Settled::finish(cache, cfg.sharding, jurisdiction, result))
+            let result = match check_mode(&meta, cfg.sharding).await {
+                Ok(Outcome::Ok) => check_addressing(&meta, multi).await,
+                settled => settled,
+            };
+            SHARDING_GUARD
+                .with(|cache| Settled::finish(cache, cfg.sharding, multi, jurisdiction, result))
         };
         if let Err(error) = checked {
             return Ok(with_cors(json_response(

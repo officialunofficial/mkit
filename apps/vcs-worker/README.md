@@ -130,6 +130,11 @@ requires `TICKET_KEYS` — a signed write names its repository, and uploads
 still need tickets — and writes are owner-only (STC §7.5): a signature may
 write only inside its own key's `ed25519-` namespace.
 
+Like `SHARDING`, `ADDRESSING` is fixed for the deployment lifetime: the first
+request records the mode in a root marker (`am 00`), and redeploying with the
+other addressing over existing data is refused (`deployment addressing
+mismatch`). Unmarked data is a `single` deployment's.
+
 - `NAMESPACE_POLICY=allowlist` (the default) admits only the namespaces in
   `NAMESPACE_ALLOWLIST`: canonical namespaces (`ed25519-<64 hex>` or
   `0x<40 hex>`) separated by newlines or commas, `#` comments and blank

@@ -34,7 +34,9 @@
     // The root RefStore sharding marker refuses changes over existing data (R-94).
     "SHARDING": "single"
     // ADDRESSING=multi serves every namespace its policy admits and
-    // requires TICKET_KEYS. NAMESPACE_POLICY=allowlist (the multi default)
+    // requires TICKET_KEYS. Like SHARDING, ADDRESSING installs a root marker
+    // (`am 00`) on the first request; changing it over existing data is
+    // refused. NAMESPACE_POLICY=allowlist (the multi default)
     // then requires NAMESPACE_ALLOWLIST: namespaces one per line or
     // comma-separated, `#` comments allowed. NAMESPACE_POLICY=any admits
     // every namespace and requires UNSAFE_OPEN_NAMESPACES=true (D27;

@@ -12,6 +12,7 @@
 //! | Class | Key | Value |
 //! |---|---|---|
 //! | deployment sharding marker (root `Namespace` only) | `sm 00` | UTF-8 `single` or `d34` |
+//! | deployment addressing marker (root `Namespace` only) | `am 00` | UTF-8 `single` or `multi` |
 //! | layout version | `v 00` | be32 [`LAYOUT_VERSION`]; never on `RefsOnly` stores |
 //! | ref | `r 00 <repo> 00 <refname>` | 32-byte id |
 //! | ref-name index (`RefIndex`) | `x 00 <repo> 00 <refname>` | 32-byte id |
@@ -89,6 +90,8 @@ pub const LAYOUT_VERSION: u32 = 1;
 pub const TAG_LAYOUT_VERSION: &str = "v";
 /// Worker deployment sharding marker tag (root Namespace only).
 pub const TAG_SHARDING_MARKER: &str = "sm";
+/// Worker deployment addressing marker tag (root Namespace only).
+pub const TAG_ADDRESSING_MARKER: &str = "am";
 /// Ref tag.
 pub const TAG_REF: &str = "r";
 /// Ref-name index tag.
@@ -183,6 +186,8 @@ pub enum ParsedKey {
     BackupState,
     /// `sm 00`: the Worker deployment sharding mode.
     ShardingMarker,
+    /// `am 00`: the Worker deployment addressing mode.
+    AddressingMarker,
     /// `v 00`.
     LayoutVersion,
     /// `nr 00`.
@@ -388,6 +393,12 @@ pub fn layout_version() -> Key {
 #[must_use]
 pub fn sharding_marker() -> Key {
     key(TAG_SHARDING_MARKER, &[])
+}
+
+/// `am 00`: UTF-8 `single` or `multi`, only in the root Namespace partition.
+#[must_use]
+pub fn addressing_marker() -> Key {
+    key(TAG_ADDRESSING_MARKER, &[])
 }
 
 /// `nr 00`: the namespace coordinator record.
@@ -881,6 +892,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
     let text = |b: &[u8]| String::from_utf8(b.to_vec()).ok();
     Some(match tag {
         b"sm" if body.is_empty() => ParsedKey::ShardingMarker,
+        b"am" if body.is_empty() => ParsedKey::AddressingMarker,
         b"v" if body.is_empty() => ParsedKey::LayoutVersion,
         b"e" if body.is_empty() => ParsedKey::GrantEpoch,
         b"el" if body.is_empty() => ParsedKey::EpochLease,
@@ -1043,6 +1055,7 @@ mod tests {
         let q = format!("root\n{}", "ab".repeat(32));
         let cases: Vec<(Key, Vec<u8>)> = vec![
             (sharding_marker(), b"sm\0".to_vec()),
+            (addressing_marker(), b"am\0".to_vec()),
             (layout_version(), b"v\0".to_vec()),
             (relay_scan(), b"rs\0".to_vec()),
             (
@@ -1394,6 +1407,7 @@ mod tests {
                 },
             ),
             (sharding_marker(), ParsedKey::ShardingMarker),
+            (addressing_marker(), ParsedKey::AddressingMarker),
             (namespace_record(), ParsedKey::NamespaceRecord),
             (repo_record(&repo("a")), ParsedKey::RepoRecord(repo("a"))),
             (repo_known(&repo("a")), ParsedKey::RepoKnown(repo("a"))),
