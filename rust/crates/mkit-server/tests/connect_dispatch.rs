@@ -130,6 +130,7 @@ struct Setup<H = Hooks> {
     chunk_max: usize,
     list_cap: Option<u32>,
     addressing: Option<Addressing>,
+    grants: Option<mkit_server::policy::GrantConfig>,
 }
 
 fn setup(auth: AuthMode) -> Setup {
@@ -140,6 +141,7 @@ fn setup(auth: AuthMode) -> Setup {
         chunk_max: 4,
         list_cap: None,
         addressing: None,
+        grants: None,
     }
 }
 
@@ -201,6 +203,7 @@ impl<H: HookSet + 'static> Setup<H> {
         if let Some(cap) = self.list_cap {
             cfg.max_list_refs_page_size = cap;
         }
+        cfg.grants = self.grants;
         let meta = self
             .meta
             .unwrap_or_else(|| MemoryKv::with_clock(clock.clone()));
@@ -410,16 +413,21 @@ fn pack(len: usize) -> Vec<u8> {
         .collect()
 }
 
-/// Auth v2 headers over `commitment`, signed at `T0` by seed `seed`.
-fn signed(seed: u8, rpc: &str, commitment: &str, nonce: u32) -> Vec<(&'static str, String)> {
-    let key = SigningKey::from_bytes(&[seed; 32]);
+/// Auth v2 headers over `commitment`, signed at `T0` by `key` for `repo`.
+fn signed_repo(
+    key: &SigningKey,
+    repo: &str,
+    rpc: &str,
+    commitment: &str,
+    nonce: u32,
+) -> Vec<(&'static str, String)> {
     let procedure = format!("/mkit.transport.v1.TransportService/{rpc}");
     let nonce = format!("{nonce:064x}");
     let expires = T0 + 300_000;
     let op = SignedOp {
         context: AuthContext {
             audience: AUDIENCE,
-            repository: REPO,
+            repository: repo,
         },
         procedure: &procedure,
         commitment,
@@ -431,7 +439,7 @@ fn signed(seed: u8, rpc: &str, commitment: &str, nonce: u32) -> Vec<(&'static st
     vec![
         ("x-envelope-version", "2".to_owned()),
         ("x-audience", AUDIENCE.to_owned()),
-        ("x-repository", REPO.to_owned()),
+        ("x-repository", repo.to_owned()),
         ("x-public-key", to_hex(key.verifying_key().as_bytes())),
         ("x-signature", to_hex_bytes(&signature.to_bytes())),
         ("x-content-commitment", commitment.to_owned()),
@@ -441,12 +449,34 @@ fn signed(seed: u8, rpc: &str, commitment: &str, nonce: u32) -> Vec<(&'static st
     ]
 }
 
-/// Auth v2 headers for exactly `body`.
-fn signed_body(seed: u8, rpc: &str, body: &[u8], nonce: u32) -> Vec<(&'static str, String)> {
+/// Auth v2 headers over `commitment`, signed at `T0` by seed `seed`.
+fn signed(seed: u8, rpc: &str, commitment: &str, nonce: u32) -> Vec<(&'static str, String)> {
+    signed_repo(
+        &SigningKey::from_bytes(&[seed; 32]),
+        REPO,
+        rpc,
+        commitment,
+        nonce,
+    )
+}
+
+/// Auth v2 headers for exactly `body`, signed by `key` for `repo`.
+fn signed_repo_body(
+    key: &SigningKey,
+    repo: &str,
+    rpc: &str,
+    body: &[u8],
+    nonce: u32,
+) -> Vec<(&'static str, String)> {
     let digest = to_hex(&hash(body));
-    let mut headers = signed(seed, rpc, &format!("body:{digest}"), nonce);
+    let mut headers = signed_repo(key, repo, rpc, &format!("body:{digest}"), nonce);
     headers.push(("x-digest", digest));
     headers
+}
+
+/// Auth v2 headers for exactly `body`.
+fn signed_body(seed: u8, rpc: &str, body: &[u8], nonce: u32) -> Vec<(&'static str, String)> {
+    signed_repo_body(&SigningKey::from_bytes(&[seed; 32]), REPO, rpc, body, nonce)
 }
 
 fn authv2() -> AuthMode {
@@ -1123,6 +1153,7 @@ async fn error_shaping_reaches_the_wire() {
         chunk_max: 4,
         list_cap: None,
         addressing: None,
+        grants: None,
     }
     .serve();
     let reply = server
@@ -1406,6 +1437,74 @@ async fn set_repo_visibility_rejects_missing_and_invalid_modes() {
             .await;
         assert_eq!(reply.code(), "invalid_argument");
     }
+}
+
+#[tokio::test]
+async fn set_repo_visibility_runs_both_modes_over_the_wire() {
+    use mkit_attest::grant::{
+        AcceptedSchemes, OwnerScheme, SignedHeader, Visibility, VisibilityStatement,
+    };
+    use mkit_core::repo_identity::{Namespace, RepositoryIdentity};
+    use mkit_server::policy::{GrantConfig, NamespacePolicy};
+
+    let owner = SigningKey::from_bytes(&[9; 32]);
+    let namespace = Namespace::Ed25519(*owner.verifying_key().as_bytes());
+    let repo = format!("{namespace}/{REPO}");
+    let mut s = setup(authv2());
+    s.addressing = Some(Addressing::Multi(
+        mkit_server::MultiAddressing::new()
+            .with_namespace_policy(NamespacePolicy::Allowlist([namespace].into())),
+    ));
+    s.grants = Some(
+        GrantConfig::new(
+            AUDIENCE,
+            AcceptedSchemes::of(&[OwnerScheme::Ed25519]),
+            vec![],
+        )
+        .unwrap(),
+    );
+    let server = s.serve();
+    // Envelope mode: PUBLIC then PRIVATE map and commit under the owner.
+    for (visibility, nonce) in [
+        (RepoVisibility::REPO_VISIBILITY_PUBLIC, 50),
+        (RepoVisibility::REPO_VISIBILITY_PRIVATE, 51),
+    ] {
+        let body = SetRepoVisibilityRequest {
+            mode: Some(VisibilityMode::Visibility(visibility.into())),
+            ..Default::default()
+        };
+        let bytes = body.encode_to_vec();
+        let headers = signed_repo_body(&owner, &repo, "SetRepoVisibility", &bytes, nonce);
+        let reply = server.unary("SetRepoVisibility", &body, &headers).await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    }
+    // Statement mode: an unsigned request whose owner-signed statement
+    // verifies reaches the pipeline and commits.
+    let statement = VisibilityStatement {
+        repository: RepositoryIdentity::parse(&repo).unwrap(),
+        visibility: Visibility::Private,
+        audiences: vec![AUDIENCE.into()],
+        created_ms: T0,
+        expiry_ms: T0 + 60_000,
+        nonce: [8; 32],
+    };
+    let bytes = statement.encode().unwrap();
+    let signature = owner.sign(&hash(&bytes));
+    let header = SignedHeader {
+        statement: bytes,
+        scheme: OwnerScheme::Ed25519,
+        blob: signature.to_bytes().to_vec(),
+    }
+    .encode()
+    .unwrap();
+    let body = SetRepoVisibilityRequest {
+        mode: Some(VisibilityMode::SignedStatement(header)),
+        ..Default::default()
+    };
+    let reply = server
+        .unary("SetRepoVisibility", &body, &[("x-repository", repo)])
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
 }
 
 #[tokio::test]
