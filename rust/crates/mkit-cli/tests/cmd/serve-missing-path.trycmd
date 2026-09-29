@@ -1,0 +1,15 @@
+`mkit serve` without <PATH> (and without --root) prints the same
+required-argument error clap produced when <PATH> was a required
+positional (exit 64).
+
+```
+$ mkit serve
+? 64
+error: the following required arguments were not provided:
+  <PATH>
+
+Usage: mkit serve <PATH>
+
+For more information, try '--help'.
+
+```

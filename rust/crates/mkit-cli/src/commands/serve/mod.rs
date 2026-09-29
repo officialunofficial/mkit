@@ -244,7 +244,7 @@ pub fn run(args: &[String]) -> u8 {
             let Some(path) = &opts.path else {
                 eprintln!(
                     "error: the following required arguments were not provided:\n  <PATH>\n\n\
-                     Usage: mkit serve [OPTIONS] <PATH>\n\n\
+                     Usage: mkit serve <PATH>\n\n\
                      For more information, try '--help'."
                 );
                 return exit::USAGE;
