@@ -31,6 +31,7 @@ use crate::envelope::{EnvelopeSigner, EnvelopeTransport, RetryIdentity};
 use crate::error::{ErrorContext, map_connect_error, pending_verification_delay};
 use crate::executor::TokioExecutor;
 use crate::grant::{GrantCondition, GrantOperation, GrantRef, GrantRequest, GrantSource};
+use crate::part_receipts::{MemoryPartReceiptStore, PartReceiptStore, StoredPart, TicketMetadata};
 use crate::proto::mkit::transport::v1::__buffa::oneof::begin_upload_response::Result as BeginWireResult;
 use crate::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::Body as DownloadBody;
 use crate::proto::mkit::transport::v1::upload_part_request::Msg as PartWireMessage;
@@ -41,7 +42,6 @@ use crate::proto::mkit::transport::v1::{
     TransportServiceClient, UpdateRefRequest, UploadPackHeader, UploadPackRequest,
     UploadPartHeader, UploadPartRequest,
 };
-use crate::part_receipts::{MemoryPartReceiptStore, PartReceiptStore, StoredPart, TicketMetadata};
 use crate::receipt::{AdmissionReceipt, observe_receipts};
 use crate::status::StatusTransport;
 
@@ -789,15 +789,17 @@ impl ConnectTransport {
                                 .iter()
                                 .map(|(name, value)| (name.clone(), value.clone())),
                         );
-                    match self.executor.block_on(self.client.begin_upload_with_options(
-                        BeginUploadRequest {
-                            r#ref: Some(head_ref.to_owned()),
-                            pack_id: Some(key.as_bytes().to_vec()),
-                            bytes: Some(bytes.len() as u64),
-                            ..Default::default()
-                        },
-                        options,
-                    )) {
+                    match self
+                        .executor
+                        .block_on(self.client.begin_upload_with_options(
+                            BeginUploadRequest {
+                                r#ref: Some(head_ref.to_owned()),
+                                pack_id: Some(key.as_bytes().to_vec()),
+                                bytes: Some(bytes.len() as u64),
+                                ..Default::default()
+                            },
+                            options,
+                        )) {
                         Ok(result) => {
                             observe_receipts(
                                 result.headers(),
@@ -814,7 +816,11 @@ impl ConnectTransport {
                             // message check, even when a server uses 402 with
                             // the same text.
                             let mapped = map_connect_error(err.clone(), ErrorContext::Ref);
-                            if matches!(mapped, TransportError::AdmissionRequired(_)) {
+                            if matches!(
+                                mapped,
+                                TransportError::AdmissionRequired(_)
+                                    | TransportError::InvalidResponse
+                            ) {
                                 return Err(mapped);
                             }
                             if err.code == connectrpc::ErrorCode::FailedPrecondition
@@ -1518,6 +1524,18 @@ impl ConnectTransport {
                             return Ok(Ok(CommitOutcome::Advanced(outcome)));
                         }
                         Err(err) => {
+                            // A ticket-consuming advance never invokes the
+                            // admission helper, but an HTTP 402 still surfaces
+                            // as its typed challenge, regardless of the
+                            // Connect error code used by the server.
+                            let mapped = map_connect_error(err.clone(), ErrorContext::Ref);
+                            if matches!(
+                                mapped,
+                                TransportError::AdmissionRequired(_)
+                                    | TransportError::InvalidResponse
+                            ) {
+                                return Err(mapped);
+                            }
                             if !ticket_ids.is_empty() {
                                 if err.code == connectrpc::ErrorCode::FailedPrecondition {
                                     return Ok(Ok(
@@ -1545,6 +1563,10 @@ impl ConnectTransport {
                                     return Ok(Err((Duration::from_secs(2), true)));
                                 }
                             }
+                            // The 60-second window bounds consecutive lag
+                            // answers only. Any other answer returns to the
+                            // ticket deadline and ordinary unary timeout.
+                            lag_since_ms = None;
                             if let Some(delay) = pending_verification_delay(&err) {
                                 // This pending reply belongs to the re-signed
                                 // identity, which now has its own one-shot
@@ -1561,7 +1583,7 @@ impl ConnectTransport {
                                     .map_err(TransportError::RemoteError)?;
                                 continue;
                             }
-                            return Err(map_connect_error(err, ErrorContext::Ref));
+                            return Err(mapped);
                         }
                     }
                 }

@@ -528,3 +528,25 @@ fn record_upstream(
 }
 
 use super::error as emit_err;
+
+#[cfg(test)]
+mod interrupted_hint_tests {
+    use super::*;
+
+    #[test]
+    fn begin_upload_hint_only_for_ticketing_connect_remote() {
+        let ticketing = UploadLimits {
+            tickets_per_advance: Some(7),
+            ticket_threshold_bytes: Some(0),
+            ..UploadLimits::default()
+        };
+        assert!(
+            interrupted_hint("mkit+https://example.test/repo", ticketing).contains("BeginUpload")
+        );
+        assert!(!interrupted_hint("file:///repo", ticketing).contains("BeginUpload"));
+        assert!(
+            !interrupted_hint("mkit+https://example.test/repo", UploadLimits::default())
+                .contains("BeginUpload")
+        );
+    }
+}

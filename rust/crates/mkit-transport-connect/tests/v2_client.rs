@@ -4,7 +4,7 @@ use base64::Engine as _;
 use buffa::Message as _;
 use futures::StreamExt as _;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use connectrpc::server::Server;
@@ -21,6 +21,9 @@ use mkit_core::protocol::{
     TransportResult,
 };
 use mkit_core::upload_parts::PartPlan;
+use mkit_transport_connect::admission::{
+    AdmissionContext, AdmissionPolicy, AdmissionResponder, AdmissionResponderError,
+};
 use mkit_transport_connect::{
     ConnectTransport, GrantRequest, GrantSource, MemoryPartReceiptStore, PartReceiptStore,
     ServerInfoView, StoredPart, TicketMetadata, UploadEvent, generated,
@@ -40,6 +43,33 @@ enum BeginMode {
     Present,
     Unimplemented,
     Cap,
+    Cap402,
+    Admission,
+    Rejected,
+    Unavailable,
+}
+
+fn admission_error() -> ConnectError {
+    ConnectError::permission_denied("admission required")
+        .with_http_status(http::StatusCode::PAYMENT_REQUIRED)
+}
+
+struct TestAdmission(Arc<AtomicUsize>);
+impl AdmissionResponder for TestAdmission {
+    fn respond(
+        &self,
+        context: &AdmissionContext<'_>,
+    ) -> Result<Vec<(String, String)>, AdmissionResponderError> {
+        assert!(matches!(
+            context.procedure.rsplit('/').next(),
+            Some("BeginUpload")
+        ));
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![(
+            "Payment-Authorization".into(),
+            "test-payment".into(),
+        )])
+    }
 }
 
 fn info(atomic: Option<bool>) -> generated::GetServerInfoResponse {
@@ -68,6 +98,9 @@ struct Captured {
     advance: Option<generated::AdvanceRefsRequest>,
     upload_token: Option<Vec<u8>>,
     part_index: Option<u32>,
+    admission: Option<String>,
+    streamed_bytes: u64,
+    largest_chunk: usize,
 }
 
 struct State {
@@ -78,6 +111,10 @@ struct State {
     read_failures: usize,
     download_failures: usize,
     update_failures: usize,
+    upload_unavailable_once: bool,
+    part_unavailable_once: Option<u32>,
+    complete_unavailable_once: bool,
+    clock_jump_on_first: Option<(&'static str, i64)>,
     requests: Vec<Captured>,
     begin_modes: VecDeque<BeginMode>,
     begin_expiries: VecDeque<i64>,
@@ -85,6 +122,7 @@ struct State {
     advance_errors: VecDeque<(ErrorCode, String)>,
     advance_outcomes: VecDeque<generated::AdvanceOutcome>,
     advance_pending_once: bool,
+    advance_admission_once: bool,
     part_fail_once: Option<u32>,
     part_ticket_fail_once: Option<u32>,
     complete_invalid_once: bool,
@@ -103,6 +141,10 @@ impl Default for State {
             read_failures: 0,
             download_failures: 0,
             update_failures: 0,
+            upload_unavailable_once: false,
+            part_unavailable_once: None,
+            complete_unavailable_once: false,
+            clock_jump_on_first: None,
             requests: Vec::new(),
             begin_modes: VecDeque::new(),
             begin_expiries: VecDeque::new(),
@@ -110,6 +152,7 @@ impl Default for State {
             advance_errors: VecDeque::new(),
             advance_outcomes: VecDeque::new(),
             advance_pending_once: false,
+            advance_admission_once: false,
             part_fail_once: None,
             part_ticket_fail_once: None,
             complete_invalid_once: false,
@@ -129,7 +172,15 @@ impl TestService {
                 .get(name)
                 .map(|value| value.to_str().expect("ASCII header").to_owned())
         };
-        self.0.lock().unwrap().requests.push(Captured {
+        let mut state = self.0.lock().unwrap();
+        let first = !state.requests.iter().any(|request| request.rpc == rpc);
+        if first
+            && let Some((target, jump)) = state.clock_jump_on_first
+            && target == rpc
+        {
+            RENEW_CLOCK.fetch_add(jump, Ordering::SeqCst);
+        }
+        state.requests.push(Captured {
             rpc,
             repository: header("x-repository"),
             hint: header("x-mkit-ref"),
@@ -148,6 +199,9 @@ impl TestService {
             advance: None,
             upload_token: None,
             part_index: None,
+            admission: header("payment-authorization"),
+            streamed_bytes: 0,
+            largest_chunk: 0,
         });
     }
 }
@@ -318,7 +372,25 @@ impl generated::TransportService for TestService {
                 ),
             );
         }
+        if state.advance_admission_once {
+            state.advance_admission_once = false;
+            return Err(ConnectError::failed_precondition("ticket expired")
+                .with_http_status(http::StatusCode::PAYMENT_REQUIRED));
+        }
         if let Some((code, message)) = state.advance_errors.pop_front() {
+            if message == "verification pending 61s" {
+                return Err(
+                    ConnectError::unavailable("verification pending").with_detail(
+                        connectrpc::ErrorDetail::from_message(
+                            "mkit.transport.v1.PendingVerification",
+                            &generated::PendingVerification {
+                                retry_after_ms: Some(61_000),
+                                ..Default::default()
+                            },
+                        ),
+                    ),
+                );
+            }
             return Err(ConnectError::new(code, message));
         }
         Ok(Response::new(generated::AdvanceRefsResponse {
@@ -347,10 +419,13 @@ impl generated::TransportService for TestService {
             return Err(ConnectError::invalid_argument("missing header"));
         };
         let mut received = 0_u64;
+        let mut largest_chunk = 0;
         while let Some(message) = requests.next().await {
             let message = message?.to_owned_message();
             if let Some(UploadBody::Chunk(chunk)) = message.body {
-                received += chunk.data.as_ref().map_or(0, |data| data.len()) as u64;
+                let len = chunk.data.as_ref().map_or(0, |data| data.len());
+                received += len as u64;
+                largest_chunk = largest_chunk.max(len);
                 if chunk.last == Some(true) {
                     break;
                 }
@@ -361,12 +436,18 @@ impl generated::TransportService for TestService {
         }
         let mut state = self.0.lock().unwrap();
         state.requests.last_mut().unwrap().upload_token = header.ticket_token;
+        state.requests.last_mut().unwrap().streamed_bytes = received;
+        state.requests.last_mut().unwrap().largest_chunk = largest_chunk;
         if state.upload_ticket_failure_once {
             state.upload_ticket_failure_once = false;
             return Err(ConnectError::new(
                 ErrorCode::FailedPrecondition,
                 "ticket expired",
             ));
+        }
+        if state.upload_unavailable_once {
+            state.upload_unavailable_once = false;
+            return Err(ConnectError::unavailable("injected upload failure"));
         }
         Ok(Response::new(generated::UploadPackResponse::default()))
     }
@@ -385,10 +466,17 @@ impl generated::TransportService for TestService {
                 ..Default::default()
             })),
             BeginMode::Unimplemented => Err(ConnectError::unimplemented("unused")),
+            BeginMode::Admission => Err(admission_error()),
+            BeginMode::Rejected => Err(ConnectError::failed_precondition("ticket refused")),
+            BeginMode::Unavailable => Err(ConnectError::unavailable("injected begin failure")),
             BeginMode::Cap => Err(ConnectError::new(
                 ErrorCode::FailedPrecondition,
                 "too many open upload tickets",
             )),
+            BeginMode::Cap402 => Err(ConnectError::failed_precondition(
+                "too many open upload tickets",
+            )
+            .with_http_status(http::StatusCode::PAYMENT_REQUIRED)),
             BeginMode::Ticket => Ok(Response::new(generated::BeginUploadResponse {
                 result: Some(BeginResult::Ticket(Box::new(generated::UploadTicket {
                     id: Some(
@@ -423,9 +511,11 @@ impl generated::TransportService for TestService {
         };
         let index = header.index.unwrap_or(0);
         let mut bytes = 0_usize;
+        let mut largest_chunk = 0;
         while let Some(message) = requests.next().await {
             if let Some(PartBody::Chunk(chunk)) = message?.to_owned_message().msg {
                 bytes += chunk.len();
+                largest_chunk = largest_chunk.max(chunk.len());
             }
         }
         if bytes == 0 {
@@ -433,12 +523,18 @@ impl generated::TransportService for TestService {
         }
         let mut state = self.0.lock().unwrap();
         state.requests.last_mut().unwrap().part_index = Some(index);
+        state.requests.last_mut().unwrap().streamed_bytes = bytes as u64;
+        state.requests.last_mut().unwrap().largest_chunk = largest_chunk;
         if state.part_ticket_fail_once == Some(index) {
             state.part_ticket_fail_once = None;
             return Err(ConnectError::new(
                 ErrorCode::FailedPrecondition,
                 "ticket expired",
             ));
+        }
+        if state.part_unavailable_once == Some(index) {
+            state.part_unavailable_once = None;
+            return Err(ConnectError::unavailable("injected part failure"));
         }
         if state.part_fail_once == Some(index) {
             state.part_fail_once = None;
@@ -458,6 +554,10 @@ impl generated::TransportService for TestService {
         self.capture("CompleteUpload", &ctx);
         let mut state = self.0.lock().unwrap();
         state.completed_receipts = request.to_owned_message().receipts;
+        if state.complete_unavailable_once {
+            state.complete_unavailable_once = false;
+            return Err(ConnectError::unavailable("injected complete failure"));
+        }
         if state.complete_invalid_once {
             state.complete_invalid_once = false;
             return Err(ConnectError::invalid_argument("invalid receipt"));
@@ -1051,6 +1151,20 @@ fn discovery_fallback_matrix_latches_unknown_only() {
         .upload_pack_via_ref(DATA, &key, "refs/heads/main")
         .unwrap();
     assert_eq!(served.calls("BeginUpload"), 0);
+
+    let served = Served::new(State {
+        discovery: Discovery::Error(ErrorCode::NotFound),
+        ..Default::default()
+    });
+    served
+        .client()
+        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .unwrap();
+    assert_eq!(
+        served.calls("BeginUpload"),
+        0,
+        "unsigned Unknown is ticketless"
+    );
 
     let served = Served::new(State {
         discovery: Discovery::Error(ErrorCode::NotFound),
@@ -1686,4 +1800,550 @@ fn aborted_is_retried_without_capability_discovery() {
     assert_eq!(served.client().read_ref("refs/heads/main").unwrap(), None);
     assert_eq!(served.calls("ReadRef"), 3);
     assert_eq!(served.calls("GetServerInfo"), 0);
+}
+
+#[test]
+fn begin_upload_admission_retries_once_with_headers() {
+    let served = Served::new(State {
+        begin_modes: [
+            BeginMode::Admission,
+            BeginMode::Unavailable,
+            BeginMode::Ticket,
+        ]
+        .into(),
+        ..Default::default()
+    });
+    let helper_calls = Arc::new(AtomicUsize::new(0));
+    let client = served
+        .signed_client()
+        .with_admission(AdmissionPolicy::new(Arc::new(TestAdmission(Arc::clone(
+            &helper_calls,
+        )))));
+    let key = PackKey::new(hash(DATA));
+    client
+        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .unwrap();
+    assert_eq!(helper_calls.load(Ordering::SeqCst), 1);
+    let state = served.state.lock().unwrap();
+    let begins: Vec<_> = state
+        .requests
+        .iter()
+        .filter(|r| r.rpc == "BeginUpload")
+        .collect();
+    assert_eq!(begins.len(), 3);
+    assert_eq!(begins[0].admission, None);
+    assert_eq!(begins[1].admission.as_deref(), Some("test-payment"));
+    assert_eq!(begins[2].admission.as_deref(), Some("test-payment"));
+    assert_eq!(
+        begins[0].signed.as_ref().unwrap()[3],
+        begins[1].signed.as_ref().unwrap()[3]
+    );
+    assert_eq!(
+        begins[1].signed.as_ref().unwrap()[3],
+        begins[2].signed.as_ref().unwrap()[3]
+    );
+}
+
+#[test]
+fn ticketed_advance_challenge_never_runs_admission_helper() {
+    let served = Served::new(State {
+        advance_admission_once: true,
+        ..Default::default()
+    });
+    let helper_calls = Arc::new(AtomicUsize::new(0));
+    let client = served
+        .signed_client()
+        .with_admission(AdmissionPolicy::new(Arc::new(TestAdmission(Arc::clone(
+            &helper_calls,
+        )))));
+    let key = PackKey::new(hash(DATA));
+    client
+        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .unwrap();
+    let error = client
+        .advance_refs_committing(
+            "refs/heads/main",
+            RefWriteCondition::Missing,
+            &hash(b"tip"),
+            "refs/mkit/packmap/main",
+            RefWriteCondition::Missing,
+            &hash(b"node"),
+            &[key],
+        )
+        .unwrap_err();
+    assert!(matches!(error, TransportError::AdmissionRequired(_)));
+    assert_eq!(helper_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(served.calls("AdvanceRefs"), 1);
+}
+
+#[test]
+fn begin_rejection_and_v2_small_unimplemented_are_terminal() {
+    let key = PackKey::new(hash(DATA));
+    let served = Served::new(State {
+        begin_modes: [BeginMode::Rejected].into(),
+        ..Default::default()
+    });
+    let error = served
+        .signed_client()
+        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .unwrap_err();
+    assert!(
+        matches!(error, TransportError::RemoteError(message) if message == "upload ticket rejected: ticket refused")
+    );
+    assert_eq!(served.calls("BeginUpload"), 1);
+    let served = Served::new(State {
+        begin_modes: [BeginMode::Unimplemented].into(),
+        ..Default::default()
+    });
+    let error = served
+        .signed_client()
+        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .unwrap_err();
+    assert!(
+        matches!(error, TransportError::RemoteError(message) if message.contains("V2 server does not implement BeginUpload"))
+    );
+    assert_eq!(served.calls("UploadPack"), 0);
+}
+
+#[test]
+fn expired_ticket_rejects_before_first_advance_poll() {
+    LAG_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
+    let served = Served::new(State {
+        begin_expiries: [1_700_000_000_001].into(),
+        ..Default::default()
+    });
+    let client = served.signed_client().with_clock_for_test(lag_now);
+    let key = PackKey::new(hash(DATA));
+    client
+        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .unwrap();
+    LAG_CLOCK.store(1_700_000_000_001, Ordering::SeqCst);
+    let outcome = client
+        .advance_refs_committing(
+            "refs/heads/main",
+            RefWriteCondition::Missing,
+            &hash(b"tip"),
+            "refs/mkit/packmap/main",
+            RefWriteCondition::Missing,
+            &hash(b"node"),
+            &[key],
+        )
+        .unwrap();
+    assert_eq!(outcome, CommitOutcome::TicketRejected);
+    assert_eq!(served.calls("AdvanceRefs"), 0);
+}
+
+#[test]
+fn lag_bound_clears_after_pending_reply() {
+    let start = 1_700_000_000_000;
+    LAG_CLOCK.store(start, Ordering::SeqCst);
+    let served = Served::new(State {
+        advance_errors: [
+            (
+                ErrorCode::Unavailable,
+                "repository membership not yet visible".into(),
+            ),
+            (ErrorCode::Unavailable, "verification pending 61s".into()),
+        ]
+        .into(),
+        ..Default::default()
+    });
+    let client = served
+        .signed_client()
+        .with_clock_for_test(lag_now)
+        .with_retry_hooks_for_test(short_backoff, lag_sleep);
+    let key = PackKey::new(hash(DATA));
+    client
+        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .unwrap();
+    let outcome = client
+        .advance_refs_committing(
+            "refs/heads/main",
+            RefWriteCondition::Missing,
+            &hash(b"tip"),
+            "refs/mkit/packmap/main",
+            RefWriteCondition::Missing,
+            &hash(b"node"),
+            &[key],
+        )
+        .unwrap();
+    assert_eq!(outcome, CommitOutcome::Advanced(AdvanceOutcome::Committed));
+    assert!(LAG_CLOCK.load(Ordering::SeqCst) > start + 60_000);
+    assert_eq!(served.calls("AdvanceRefs"), 3);
+}
+
+#[test]
+fn eight_distinct_ticket_ids_fail_before_advance() {
+    let served = Served::new(State {
+        ticket_ids: (0..8).map(|i| [i; 32]).collect(),
+        ..Default::default()
+    });
+    let client = served.signed_client();
+    let mut keys = Vec::new();
+    for i in 0..8_u8 {
+        let bytes = [i];
+        let key = PackKey::new(hash(&bytes));
+        client
+            .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+            .unwrap();
+        keys.push(key);
+    }
+    assert!(matches!(
+        client.advance_refs_committing(
+            "refs/heads/main",
+            RefWriteCondition::Missing,
+            &hash(b"tip"),
+            "refs/mkit/packmap/main",
+            RefWriteCondition::Missing,
+            &hash(b"node"),
+            &keys,
+        ),
+        Err(TransportError::InvalidRef(_))
+    ));
+    assert_eq!(served.calls("AdvanceRefs"), 0);
+}
+
+#[test]
+fn ticketed_upload_pack_carries_no_write_grant() {
+    let served = Served::new(State::default());
+    let uri = format!(
+        "http://127.0.0.1:{}/0x8ba1f109551bd432803012645ac136ddd64dba72/photos",
+        served.port,
+    )
+    .parse()
+    .unwrap();
+    let client = ConnectTransport::connect_for_test_with_signer(uri, Some(Arc::new(DigestSigner)))
+        .with_grant_source(Arc::new(TestGrant));
+    let key = PackKey::new(hash(DATA));
+    client
+        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .unwrap();
+    let state = served.state.lock().unwrap();
+    assert_eq!(
+        state
+            .requests
+            .iter()
+            .find(|r| r.rpc == "BeginUpload")
+            .unwrap()
+            .grant
+            .as_deref(),
+        Some("grant-value")
+    );
+    assert!(
+        state
+            .requests
+            .iter()
+            .find(|r| r.rpc == "UploadPack")
+            .unwrap()
+            .grant
+            .is_none()
+    );
+}
+
+#[test]
+fn legacy_upload_and_advance_hooks_are_ticketless() {
+    let served = Served::new(State {
+        discovery: Discovery::Error(ErrorCode::Unimplemented),
+        ..Default::default()
+    });
+    let client = served.signed_client();
+    let key = PackKey::new(hash(DATA));
+    client
+        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .unwrap();
+    let outcome = client
+        .advance_refs_committing(
+            "refs/heads/main",
+            RefWriteCondition::Missing,
+            &hash(b"tip"),
+            "refs/mkit/packmap/main",
+            RefWriteCondition::Missing,
+            &hash(b"node"),
+            &[key],
+        )
+        .unwrap();
+    assert_eq!(outcome, CommitOutcome::Advanced(AdvanceOutcome::Committed));
+    assert_eq!(served.calls("BeginUpload"), 0);
+    let state = served.state.lock().unwrap();
+    assert!(
+        state
+            .requests
+            .iter()
+            .find(|r| r.rpc == "UploadPack")
+            .unwrap()
+            .upload_token
+            .is_none()
+    );
+    assert!(
+        state
+            .requests
+            .iter()
+            .find(|r| r.rpc == "AdvanceRefs")
+            .unwrap()
+            .advance
+            .as_ref()
+            .unwrap()
+            .ticket_ids
+            .is_empty()
+    );
+}
+
+static RENEW_CLOCK: AtomicI64 = AtomicI64::new(1_700_000_000_000);
+fn renew_now() -> i64 {
+    RENEW_CLOCK.load(Ordering::SeqCst)
+}
+fn nonces(served: &Served, rpc: &str) -> Vec<String> {
+    served
+        .state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .filter(|request| request.rpc == rpc)
+        .map(|request| request.signed.as_ref().unwrap()[3].clone())
+        .collect()
+}
+
+#[test]
+fn begin_upload_keeps_nonce_inside_ladder_until_actual_lapse() {
+    for (jump, expect_new) in [(280_000, false), (301_000, true)] {
+        RENEW_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
+        let served = Served::new(State {
+            begin_modes: [BeginMode::Unavailable, BeginMode::Ticket].into(),
+            clock_jump_on_first: Some(("BeginUpload", jump)),
+            ..Default::default()
+        });
+        let key = PackKey::new(hash(DATA));
+        served
+            .signed_client()
+            .with_clock_for_test(renew_now)
+            .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+            .unwrap();
+        let got = nonces(&served, "BeginUpload");
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0] != got[1], expect_new);
+    }
+}
+
+#[test]
+fn upload_pack_renews_at_attempt_start_inside_margin() {
+    RENEW_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
+    let served = Served::new(State {
+        upload_unavailable_once: true,
+        clock_jump_on_first: Some(("UploadPack", 280_000)),
+        ..Default::default()
+    });
+    let key = PackKey::new(hash(DATA));
+    served
+        .signed_client()
+        .with_clock_for_test(renew_now)
+        .upload_pack(DATA, &key)
+        .unwrap();
+    let got = nonces(&served, "UploadPack");
+    assert_eq!(got.len(), 2);
+    assert_ne!(got[0], got[1]);
+}
+
+#[test]
+fn update_ref_renews_after_actual_lapse() {
+    RENEW_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
+    let served = Served::new(State {
+        update_failures: 1,
+        clock_jump_on_first: Some(("UpdateRef", 301_000)),
+        ..Default::default()
+    });
+    served
+        .signed_client()
+        .with_clock_for_test(renew_now)
+        .update_ref("refs/heads/main", RefWriteCondition::Missing, &hash(b"tip"))
+        .unwrap();
+    let got = nonces(&served, "UpdateRef");
+    assert_eq!(got.len(), 2);
+    assert_ne!(got[0], got[1]);
+}
+
+#[test]
+fn upload_part_and_complete_renew_at_attempt_start_inside_margin() {
+    let bytes = vec![7; (8 << 20) + 1];
+    let key = PackKey::new(hash(&bytes));
+    for (rpc, state) in [
+        (
+            "UploadPart",
+            State {
+                part_unavailable_once: Some(0),
+                clock_jump_on_first: Some(("UploadPart", 280_000)),
+                ..Default::default()
+            },
+        ),
+        (
+            "CompleteUpload",
+            State {
+                complete_unavailable_once: true,
+                clock_jump_on_first: Some(("CompleteUpload", 280_000)),
+                ..Default::default()
+            },
+        ),
+    ] {
+        RENEW_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
+        let served = Served::new(state);
+        served
+            .signed_client()
+            .with_clock_for_test(renew_now)
+            .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+            .unwrap();
+        let got = nonces(&served, rpc);
+        assert!(got.len() >= 2, "{rpc}: {got:?}");
+        assert_ne!(got[0], got[1], "{rpc}");
+    }
+}
+
+#[test]
+fn retries_stream_only_bounded_chunks_from_borrowed_pack() {
+    let bytes = vec![0x39; (8 << 20) + 1];
+    let key = PackKey::new(hash(&bytes));
+    let served = Served::new(State {
+        upload_unavailable_once: true,
+        ..Default::default()
+    });
+    served.signed_client().upload_pack(&bytes, &key).unwrap();
+    let state = served.state.lock().unwrap();
+    let attempts: Vec<_> = state
+        .requests
+        .iter()
+        .filter(|r| r.rpc == "UploadPack")
+        .collect();
+    assert_eq!(attempts.len(), 2);
+    for attempt in attempts {
+        assert_eq!(attempt.streamed_bytes, bytes.len() as u64);
+        assert!(attempt.largest_chunk > 0 && attempt.largest_chunk < bytes.len());
+        assert!(attempt.largest_chunk <= 800 * 1024);
+    }
+    drop(state);
+
+    let served = Served::new(State {
+        part_unavailable_once: Some(0),
+        ..Default::default()
+    });
+    served
+        .signed_client()
+        .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+        .unwrap();
+    let state = served.state.lock().unwrap();
+    let first_part: Vec<_> = state
+        .requests
+        .iter()
+        .filter(|r| r.part_index == Some(0))
+        .collect();
+    assert_eq!(first_part.len(), 2);
+    for attempt in first_part {
+        assert_eq!(attempt.streamed_bytes, 8 << 20);
+        assert!(attempt.largest_chunk > 0 && attempt.largest_chunk < 8 << 20);
+        assert!(attempt.largest_chunk <= 800 * 1024);
+    }
+}
+
+#[test]
+fn changed_ticket_id_discards_saved_parts_and_resends_all() {
+    let served = Served::new(State {
+        ticket_ids: [[7; 32], [8; 32]].into(),
+        part_fail_once: Some(2),
+        ..Default::default()
+    });
+    let bytes = vec![0x44; (8 << 20) * 2 + 1];
+    let key = PackKey::new(hash(&bytes));
+    let store = Arc::new(TrackedReceiptStore::default());
+    let client = served.signed_client().with_receipt_store(store.clone());
+    assert!(
+        client
+            .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+            .is_err()
+    );
+    client
+        .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+        .unwrap();
+    let indices: Vec<_> = served
+        .state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .filter_map(|r| r.part_index)
+        .collect();
+    assert_eq!(indices, [0, 1, 2, 0, 1, 2]);
+    assert!(store.forgotten.lock().unwrap().contains(&[7; 32]));
+}
+
+#[derive(Default)]
+struct TrackedReceiptStore {
+    inner: MemoryPartReceiptStore,
+    forgotten: Mutex<Vec<[u8; 32]>>,
+}
+
+impl PartReceiptStore for TrackedReceiptStore {
+    fn load(&self, ticket: &TicketMetadata, plan: &PartPlan) -> TransportResult<Vec<StoredPart>> {
+        self.inner.load(ticket, plan)
+    }
+    fn put(&self, ticket: &TicketMetadata, part: &StoredPart) -> TransportResult<()> {
+        self.inner.put(ticket, part)
+    }
+    fn forget(&self, ticket_id: &[u8; 32]) -> TransportResult<()> {
+        self.forgotten.lock().unwrap().push(*ticket_id);
+        self.inner.forget(ticket_id)
+    }
+    fn sweep(&self, now_ms: i64) -> TransportResult<()> {
+        self.inner.sweep(now_ms)
+    }
+}
+
+#[test]
+fn expired_ticket_receipts_do_not_resume() {
+    let start = 1_700_000_000_000;
+    RENEW_CLOCK.store(start, Ordering::SeqCst);
+    let served = Served::new(State {
+        ticket_ids: [[7; 32], [7; 32]].into(),
+        begin_expiries: [start + 5_000, i64::MAX].into(),
+        part_fail_once: Some(2),
+        ..Default::default()
+    });
+    let bytes = vec![0x44; (8 << 20) * 2 + 1];
+    let key = PackKey::new(hash(&bytes));
+    let client = served.signed_client().with_clock_for_test(renew_now);
+    assert!(
+        client
+            .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+            .is_err()
+    );
+    RENEW_CLOCK.store(start + 5_001, Ordering::SeqCst);
+    client
+        .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+        .unwrap();
+    let indices: Vec<_> = served
+        .state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .filter_map(|r| r.part_index)
+        .collect();
+    assert_eq!(indices, [0, 1, 2, 0, 1, 2]);
+}
+
+#[test]
+fn begin_402_precedes_open_ticket_cap_message() {
+    let served = Served::new(State {
+        begin_modes: [BeginMode::Cap402, BeginMode::Ticket].into(),
+        ..Default::default()
+    });
+    let helper_calls = Arc::new(AtomicUsize::new(0));
+    let client = served
+        .signed_client()
+        .with_admission(AdmissionPolicy::new(Arc::new(TestAdmission(Arc::clone(
+            &helper_calls,
+        )))));
+    let key = PackKey::new(hash(DATA));
+    client
+        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .unwrap();
+    assert_eq!(helper_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(served.calls("BeginUpload"), 2);
 }
