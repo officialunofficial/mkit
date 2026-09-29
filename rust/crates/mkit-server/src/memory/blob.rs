@@ -86,8 +86,11 @@ impl Default for MemoryBlobStore {
 }
 
 impl MemoryBlobStore {
-    #[cfg(test)]
-    pub(crate) fn multipart_session_count(&self) -> usize {
+    /// Open multipart sessions, observable only for test-faults conformance.
+    #[cfg(any(test, feature = "test-faults"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn multipart_session_count(&self) -> usize {
         lock(&self.shared.sessions).len()
     }
 

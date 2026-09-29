@@ -294,6 +294,7 @@ pub(crate) async fn schedule_timer<S: crate::NamespaceStore>(
 pub(crate) async fn run_timers<S: crate::NamespaceStore>(
     directives: &TestDirectives,
     store: &S,
+    blobs: &impl crate::MultipartBlobStore,
     shards: &dyn super::ShardMap,
     repo: &crate::RepoId,
     clock: &dyn crate::Clock,
@@ -315,7 +316,10 @@ pub(crate) async fn run_timers<S: crate::NamespaceStore>(
             .register(crate::timers::quota_rollup::QuotaRollup {
                 coordinator: crate::store::BorrowedStore(store),
                 metrics: crate::telemetry::NoopMetrics,
-            });
+            })
+            // Kind 2: expire due upload tickets, freeing their cap slots and
+            // aborting their multipart sessions.
+            .register(crate::timers::ticket_expiry::BorrowedTicketExpiry { blobs });
         // Bounded: rows this registry doesn't know (for example other timer
         // kinds) can keep a tick stopped on budget with nothing fired.
         for _ in 0..64 {
