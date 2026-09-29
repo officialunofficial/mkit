@@ -160,8 +160,11 @@ macro_rules! cases {
 
 cases! {
     "grants.valid_ed25519" => grants::valid_ed25519, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.valid_secp256k1_eip191" => grants::valid_secp256k1_eip191, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.valid_webauthn_p256" => grants::valid_webauthn_p256, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.push_flow" => grants::push_flow, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.part_path_ignores_header" => grants::part_path_ignores_header, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.zero_x_without_grant_denied" => grants::zero_x_without_grant_denied, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.wrong_audience" => grants::wrong_audience, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.repository_out_of_scope" => grants::repository_out_of_scope, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.namespace_scope_covers_new_repo" => grants::namespace_scope_covers_new_repo, M2, [Grants, MultiRepo, AuthV2], [];
@@ -169,6 +172,8 @@ cases! {
     "grants.read_only_grant_for_write" => grants::read_only_grant_for_write, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.expired" => grants::expired, M2, [Grants, MultiRepo, AuthV2, TestFaults], [];
     "grants.not_yet_valid" => grants::not_yet_valid, M2, [Grants, MultiRepo, AuthV2, TestFaults], [];
+    "grants.ed25519_scheme_on_0x_denied" => grants::ed25519_scheme_on_0x_denied, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.webauthn_unconfigured_rp_denied" => grants::webauthn_unconfigured_rp_denied, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.epoch_above_stored" => grants::epoch_above_stored, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.epoch_below_stored" => grants::epoch_below_stored, M2, [Grants, MultiRepo, AuthV2, TestFaults], [];
     "grants.new_epoch_grant_works" => grants::new_epoch_grant_works, M2, [Grants, MultiRepo, AuthV2, TestFaults], [];
