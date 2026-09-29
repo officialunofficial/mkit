@@ -2334,21 +2334,39 @@
     ]
   },
   {
-    "id": "REL",
-    "title": "Final merge to main: 0.5.0 bump, publish mkit-server crates, first server release",
+    "id": "REL-1",
+    "title": "Stage 1 merge to main: 0.5.0 bump, publish mkit-server crates, first server release (core profile)",
+    "milestone": "M3",
+    "track": "release",
+    "depends_on": [
+      "1.27",
+      "2.14",
+      "3.13",
+      "3.14"
+    ],
+    "size": "S",
+    "summary": "After Stage 1 (M1 minus 1.21/1.19/1.20, M2 minus 2.12/2.15, all of M3, plus 1.30 and 1.30b) completes, merge feat/mkit-server to main with a merge commit (never squash; Stage 2 continues on the branch), bump the workspace to 0.5.0, make mkit-server, -native and -conformance publishable (-worker stays unpublished) and cut the signed release. The server conforms to the SPEC-SERVER §18 core profile. The PR closes #1084, #1085, #1086, #1089 and #1090. The human confirms ghcr package creation for Actions, tags and publishes per the mkit-release runbook, adds the team owners to the new crates and checks the ghcr package (R-154).",
+    "human_action": true,
+    "area_gates": [
+      "full",
+      "ci-yaml"
+    ]
+  },
+  {
+    "id": "REL-2",
+    "title": "Stage 2 merge to main: next-minor bump, full-profile server release",
     "milestone": "M5",
     "track": "release",
     "depends_on": [
+      "REL-1",
       "1.20",
       "2.15",
-      "3.13",
-      "3.14",
       "4.13",
       "4.18",
       "5.13"
     ],
     "size": "S",
-    "summary": "After every milestone exits, merge feat/mkit-server to main, bump the workspace to 0.5.0, make mkit-server, -native and -conformance publishable (-worker stays unpublished) and cut the signed release. The human confirms ghcr package creation for Actions, tags and publishes per the mkit-release runbook, adds the team owners to the new crates and checks the ghcr package.",
+    "summary": "After Stage 2 (M4 serving, M5 lifecycle, 2.12, 1.21, staging) completes, merge feat/mkit-server to main with a merge commit and cut the next-minor release; the server moves to the SPEC-SERVER §18 full profile (R-154).",
     "human_action": true,
     "area_gates": [
       "full",
