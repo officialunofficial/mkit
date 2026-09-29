@@ -1378,6 +1378,14 @@ pub struct DecodedEntry<'a> {
     pub object: Object,
     /// `true` for a `0x02`/`0x04` delta target, `false` for a raw entry.
     pub from_delta: bool,
+    /// Offset of the complete encoded frame in the source pack.
+    pub frame_offset: u64,
+    /// Length of the complete encoded frame, including type and length.
+    pub frame_length: u64,
+    /// Encoded frame type (`0x00`, `0x02`, `0x03`, or `0x04`).
+    pub wire_type: u8,
+    /// Delta base id, if this frame is a delta.
+    pub delta_base: Option<Hash>,
 }
 
 /// Summary of a successful [`decode_entries_with`] call.
@@ -1593,9 +1601,24 @@ pub fn decode_entries_with<B: DeltaBaseSource>(
     };
     charge_compressed_claims(pack, &mut budget)?;
 
-    let mut entries: Vec<PackEntry<'_>> = Vec::with_capacity(pack_entries.entry_count());
-    for entry in pack_entries {
-        entries.push(entry?);
+    let mut entries = Vec::with_capacity(pack_entries.entry_count());
+    let mut pack_entries = pack_entries;
+    while let Some(entry) = pack_entries.next() {
+        let entry = entry?;
+        let payload = pack_entries
+            .last_payload_range()
+            .ok_or(PackError::UnexpectedEof)?;
+        let offset = payload
+            .start
+            .checked_sub(ENTRY_FRAME_LEN)
+            .ok_or(PackError::UnexpectedEof)?;
+        let length = payload.end - offset;
+        let wire_type = pack[offset];
+        let delta_base = match &entry {
+            PackEntry::Delta { base, .. } => Some(*base),
+            PackEntry::Raw { .. } => None,
+        };
+        entries.push((entry, offset as u64, length as u64, wire_type, delta_base));
     }
 
     // Charge every delta's declared result length before applying any
@@ -1603,7 +1626,7 @@ pub fn decode_entries_with<B: DeltaBaseSource>(
     // how many deltas name each base: an entry stays resident only while
     // a later delta still needs it.
     let mut uses: std::collections::HashMap<Hash, usize> = std::collections::HashMap::new();
-    for entry in &entries {
+    for (entry, ..) in &entries {
         if let PackEntry::Delta { base, stream } = entry {
             if let Some(result_len) = le_u32_at(stream, 5) {
                 budget.charge(result_len)?;
@@ -1624,7 +1647,7 @@ pub fn decode_entries_with<B: DeltaBaseSource>(
         ids: Vec::with_capacity(entries.len()),
         ..DecodeReport::default()
     };
-    for entry in entries {
+    for (entry, frame_offset, frame_length, wire_type, delta_base) in entries {
         match entry {
             PackEntry::Raw { bytes } => {
                 let object = validate_storable_object(&bytes)?;
@@ -1634,6 +1657,10 @@ pub fn decode_entries_with<B: DeltaBaseSource>(
                     bytes: bytes.as_ref(),
                     object,
                     from_delta: false,
+                    frame_offset,
+                    frame_length,
+                    wire_type,
+                    delta_base,
                 })?;
                 if uses.contains_key(&id) {
                     in_pack.insert(id, bytes);
@@ -1662,6 +1689,10 @@ pub fn decode_entries_with<B: DeltaBaseSource>(
                     bytes: &resolved,
                     object,
                     from_delta: true,
+                    frame_offset,
+                    frame_length,
+                    wire_type,
+                    delta_base,
                 })?;
                 if uses.contains_key(&id) {
                     in_pack.insert(id, Cow::Owned(resolved));
@@ -1672,6 +1703,71 @@ pub fn decode_entries_with<B: DeltaBaseSource>(
         }
     }
     Ok(report)
+}
+
+/// Decode one complete encoded frame, using the same payload parser and
+/// repository-supplied base contract as [`decode_entries_with`]. The caller
+/// authenticates the containing pack and its frame offset separately.
+///
+/// # Errors
+/// Invalid framing, unsupported version, missing or invalid base, decoded
+/// object, or a result beyond `limits`.
+pub fn decode_frame_with<B: DeltaBaseSource>(
+    frame: &[u8],
+    version: u32,
+    bases: &mut B,
+    limits: DecodeLimits,
+) -> Result<(Hash, Vec<u8>), PackError> {
+    if version != VERSION && version != VERSION_V2 {
+        return Err(PackError::UnsupportedVersion(version));
+    }
+    if frame.len() < ENTRY_FRAME_LEN {
+        return Err(PackError::UnexpectedEof);
+    }
+    let payload_len = u32::from_le_bytes(
+        frame[1..5]
+            .try_into()
+            .map_err(|_| PackError::UnexpectedEof)?,
+    ) as usize;
+    if frame.len() != ENTRY_FRAME_LEN + payload_len {
+        return Err(PackError::UnexpectedEof);
+    }
+    let payload = &frame[ENTRY_FRAME_LEN..];
+    match frame[0] {
+        0x00 if payload.len() as u64 > limits.max_decoded_bytes => {
+            return Err(PackError::PackfileTooLarge);
+        }
+        0x03 if zstd_claim(payload)?.0 as u64 > limits.max_decoded_bytes => {
+            return Err(PackError::PackfileTooLarge);
+        }
+        0x04 if payload.len() >= hash::HASH_LEN
+            && zstd_claim(&payload[hash::HASH_LEN..])?.0 as u64 > limits.max_decoded_bytes =>
+        {
+            return Err(PackError::PackfileTooLarge);
+        }
+        _ => {}
+    }
+    let decoded = decode_payload(frame[0], version, &frame[ENTRY_FRAME_LEN..])?;
+    let bytes = match decoded {
+        PackEntry::Raw { bytes } => bytes.into_owned(),
+        PackEntry::Delta { base, stream } => {
+            if validate_delta_result_size(stream.as_ref())? as u64 > limits.max_decoded_bytes {
+                return Err(PackError::PackfileTooLarge);
+            }
+            resolve_delta_target(
+                bases,
+                &mut std::collections::HashMap::new(),
+                base,
+                stream.as_ref(),
+            )?
+        }
+    };
+    if bytes.len() as u64 > limits.max_decoded_bytes {
+        return Err(PackError::PackfileTooLarge);
+    }
+    let object = validate_storable_object(&bytes)?;
+    let id = crate::object::id_from_object(&object, &bytes);
+    Ok((id, bytes))
 }
 
 /// Replay staging results in pack order; deferred admissions are strict here.
@@ -3723,6 +3819,46 @@ mod tests {
             delta_base_hashes(&pack),
             Err(PackError::InvalidMagic)
         ));
+    }
+
+    #[test]
+    fn decoded_frame_metadata_reconstructs_the_same_object() {
+        let blob = write_blob_via_serialize(b"frame metadata");
+        let id = hash::hash(&blob);
+        let mut writer = PackWriter::new_raw_only();
+        writer.push_raw(id, &blob).unwrap();
+        let pack = writer.finish().unwrap();
+        let mut frames = Vec::new();
+        decode_entries_with(
+            &pack,
+            &mut NoExternalBases,
+            DecodeLimits::default(),
+            |entry| {
+                frames.push((
+                    entry.id,
+                    entry.frame_offset,
+                    entry.frame_length,
+                    entry.wire_type,
+                    entry.delta_base,
+                ));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(frames.len(), 1);
+        let (found, offset, length, kind, base) = frames[0];
+        assert_eq!(found, id);
+        assert_eq!(kind, 0);
+        assert_eq!(base, None);
+        let frame = &pack[offset as usize..(offset + length) as usize];
+        let (decoded, bytes) = decode_frame_with(
+            frame,
+            VERSION,
+            &mut NoExternalBases,
+            DecodeLimits::default(),
+        )
+        .unwrap();
+        assert_eq!((decoded, bytes), (id, blob));
     }
 
     #[test]
