@@ -102,6 +102,11 @@ fn repo_trusted_remote_endpoint_dropped() {
 }
 
 #[test]
+fn repo_grant_webauthn_rp_dropped() {
+    assert_forbidden_key_dropped("grant.webauthn_rp", "evil.example https://evil.example", "");
+}
+
+#[test]
 fn admission_keys_are_user_scoped() {
     assert_forbidden_key_dropped("admission_helper", "/tmp/evil", "");
     assert_forbidden_key_dropped("remote.origin.admission_headers", "X-Evil", "");

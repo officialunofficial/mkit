@@ -26,7 +26,7 @@ use crate::grants::cli::{Ctx, finish_wait, parse_timeout, print_statement};
 use crate::grants::now_ms;
 use crate::grants::owner::{Kind, OwnerArgs, Produced, produce};
 use crate::grants::remote::{Driven, check_audiences, drive, interruptible_sleep, resolve_target};
-use crate::grants::spec::{build_visibility, canonical_audiences};
+use crate::grants::spec::{build_visibility, canonical_audiences, statement_lifetime_ms};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum VisibilityArg {
@@ -146,10 +146,11 @@ fn set(opts: &SetOpts) -> u8 {
             VisibilityArg::Private => Visibility::Private,
         };
         let now = now_ms();
+        let lifetime_ms = statement_lifetime_ms(timeout);
         let signed = match produce(
             plan,
             |_| {
-                build_visibility(&repository, wanted, &audiences, now)?
+                build_visibility(&repository, wanted, &audiences, now, lifetime_ms)?
                     .encode()
                     .map_err(crate::grants::spec::statement_error)
             },

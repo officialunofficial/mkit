@@ -22,6 +22,21 @@ pub const DEFAULT_GRANT_TTL: &str = "7d";
 /// a leaked statement can do.
 pub const DEFAULT_STATEMENT_TTL_MS: i64 = 10 * 60 * 1000;
 
+/// Slack on top of `--timeout` so the last re-send still lands before expiry.
+const STATEMENT_SLACK_MS: i64 = 2 * 60 * 1000;
+
+/// How long an epoch or visibility statement stays valid: the default, or,
+/// when the command will wait longer than that for the server, the wait plus a
+/// little slack, so a re-send late in a long `--timeout` is not rejected as
+/// expired. Never above the 30-day statement maximum.
+#[must_use]
+pub fn statement_lifetime_ms(wait: std::time::Duration) -> i64 {
+    let wait_ms = i64::try_from(wait.as_millis()).unwrap_or(i64::MAX);
+    wait_ms
+        .saturating_add(STATEMENT_SLACK_MS)
+        .clamp(DEFAULT_STATEMENT_TTL_MS, MAX_TTL_SECS.cast_signed() * 1000)
+}
+
 /// `30d`, `12h`, `90m`, `3600s`, or bare seconds; at most 30 days. Returns
 /// milliseconds.
 ///
@@ -221,13 +236,14 @@ pub fn build_epoch(
     new_epoch: u64,
     audiences: &[String],
     now_ms: i64,
+    lifetime_ms: i64,
 ) -> Result<EpochStatement, String> {
     Ok(EpochStatement {
         namespace: *namespace,
         new_epoch,
         audiences: audiences.to_vec(),
         created_ms: now_ms,
-        expiry_ms: now_ms + DEFAULT_STATEMENT_TTL_MS,
+        expiry_ms: now_ms.saturating_add(lifetime_ms),
         nonce: nonce()?,
     })
 }
@@ -241,13 +257,14 @@ pub fn build_visibility(
     visibility: Visibility,
     audiences: &[String],
     now_ms: i64,
+    lifetime_ms: i64,
 ) -> Result<VisibilityStatement, String> {
     Ok(VisibilityStatement {
         repository: repository.clone(),
         visibility,
         audiences: audiences.to_vec(),
         created_ms: now_ms,
-        expiry_ms: now_ms + DEFAULT_STATEMENT_TTL_MS,
+        expiry_ms: now_ms.saturating_add(lifetime_ms),
         nonce: nonce()?,
     })
 }
@@ -324,6 +341,28 @@ mod tests {
         ] {
             assert!(canonical_ref_scopes(&[bad.to_owned()]).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn statement_lifetime_covers_the_wait_and_stays_in_bounds() {
+        use std::time::Duration;
+        assert_eq!(
+            statement_lifetime_ms(Duration::from_secs(5)),
+            DEFAULT_STATEMENT_TTL_MS
+        );
+        assert_eq!(
+            statement_lifetime_ms(Duration::from_mins(5)),
+            DEFAULT_STATEMENT_TTL_MS
+        );
+        // A 30 minute wait needs a statement that outlives it.
+        assert_eq!(
+            statement_lifetime_ms(Duration::from_mins(30)),
+            32 * 60 * 1000
+        );
+        assert_eq!(
+            statement_lifetime_ms(Duration::from_secs(u64::MAX / 4)),
+            2_592_000_000
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@ use crate::format::{JsonObject, json_string_array};
 use crate::grants::cli::{Ctx, finish_wait, parse_namespace, parse_timeout, print_statement};
 use crate::grants::owner::{Kind, OwnerArgs, Produced, produce};
 use crate::grants::remote::{Driven, check_audiences, drive, interruptible_sleep, resolve_target};
-use crate::grants::spec::{build_epoch, canonical_audiences};
+use crate::grants::spec::{build_epoch, canonical_audiences, statement_lifetime_ms};
 use crate::grants::store::{GrantStore, StoredGrant};
 use crate::grants::{now_ms, scope_text};
 
@@ -222,6 +222,7 @@ pub(crate) fn bump(opts: &BumpOpts, revoke: Option<&RevokeExtras>) -> u8 {
     // Native and print plans build the statement from the stored epoch.
     let mut read_current: Option<u64> = None;
     let now = now_ms();
+    let lifetime_ms = statement_lifetime_ms(timeout);
     let produced = produce(
         plan,
         |ns| {
@@ -230,7 +231,7 @@ pub(crate) fn bump(opts: &BumpOpts, revoke: Option<&RevokeExtras>) -> u8 {
             let new = current
                 .checked_add(opts.by)
                 .ok_or("the epoch would overflow")?;
-            build_epoch(ns, new, &audiences, now)?
+            build_epoch(ns, new, &audiences, now, lifetime_ms)?
                 .encode()
                 .map_err(|e| format!("invalid statement: {e}"))
         },

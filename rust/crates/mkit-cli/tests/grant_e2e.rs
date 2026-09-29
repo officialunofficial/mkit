@@ -745,3 +745,49 @@ fn add_warns_when_the_grant_is_for_a_future_epoch() {
         stderr(&out)
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn ctrl_c_cancels_a_pending_bump_and_says_it_may_still_complete() {
+    use std::process::{Command, Stdio};
+
+    let owner = Party::new(0x11);
+    let stub = Stub::start(usize::MAX);
+    let url = format!(
+        "mkit+http://127.0.0.1:{}/{}/site",
+        stub.port,
+        owner.namespace()
+    );
+    owner.add_remote(&url);
+    let child = Command::new(env!("CARGO_BIN_EXE_mkit"))
+        .args(["epoch", "bump", "origin"])
+        .current_dir(&owner.repo)
+        .env("XDG_CONFIG_HOME", &owner.xdg)
+        .env("HOME", &owner.xdg)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Wait until the first send has been answered `unavailable`, so the
+    // command is in its Retry-After wait, then interrupt it.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while stub.statements.lock().unwrap().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the bump never reached the server"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let killed = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(75), "{}", stderr(&out));
+    let text = stderr(&out);
+    assert!(text.contains("interrupted"), "{text}");
+    assert!(text.contains("may still complete"), "{text}");
+    assert!(out.stdout.is_empty());
+}
