@@ -33,6 +33,7 @@ pub use crate::refs::RefWriteCondition;
 /// internally but MUST map them to one of these variants before
 /// returning.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum TransportError {
     /// `download_pack` called on a digest the remote does not hold.
     #[error("pack not found on remote")]
@@ -41,6 +42,15 @@ pub enum TransportError {
     /// S3 `SignatureDoesNotMatch`, …).
     #[error("access denied by remote")]
     AccessDenied,
+    /// A remote requires admission before this write may proceed.
+    #[error("{0}")]
+    AdmissionRequired(Box<AdmissionRequired>),
+    /// User admission configuration or helper headers were rejected.
+    #[error("admission configuration: {0}")]
+    AdmissionConfiguration(String),
+    /// The configured admission helper failed.
+    #[error("admission helper failed: {0}")]
+    AdmissionHelperFailed(String),
     /// Catch-all remote-side failure carrying an advisory message. The
     /// message is for operators; programs MUST NOT pattern-match on its
     /// contents.
@@ -84,6 +94,113 @@ pub enum TransportError {
     /// transported in the clear.
     #[error("insecure scheme: plain http:// is allowed only for loopback hosts")]
     InsecureScheme,
+}
+
+/// One opaque challenge advertised by the remote.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AdmissionChallengeEntry {
+    /// Lowercase scheme identifier.
+    pub scheme: String,
+    /// Opaque challenge value. Do not display or log it.
+    pub value: String,
+}
+
+impl fmt::Debug for AdmissionChallengeEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AdmissionChallengeEntry")
+            .field("scheme", &self.scheme)
+            .field("value_len", &self.value.len())
+            .finish()
+    }
+}
+
+/// A remote admission challenge and the bounded response headers needed by a helper.
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AdmissionRequired {
+    /// Challenges in server preference order.
+    pub challenges: Vec<AdmissionChallengeEntry>,
+    /// Untrusted server description, retained for the helper.
+    pub description: String,
+    /// Bounded `WWW-Authenticate` header values.
+    pub www_authenticate: Vec<String>,
+    /// Bounded `PAYMENT-REQUIRED` header values.
+    pub payment_required: Vec<String>,
+    /// Terminal admission state, if a helper already ran or hit its cap.
+    pub reason: Option<&'static str>,
+}
+
+impl AdmissionRequired {
+    /// Construct a remote challenge from already-bounded fields. The Connect
+    /// client validates the bounds before calling this.
+    #[must_use]
+    pub fn new(
+        challenges: Vec<AdmissionChallengeEntry>,
+        description: String,
+        www_authenticate: Vec<String>,
+        payment_required: Vec<String>,
+    ) -> Self {
+        Self {
+            challenges,
+            description,
+            www_authenticate,
+            payment_required,
+            reason: None,
+        }
+    }
+
+    /// Add a safe terminal explanation without exposing challenge values.
+    #[must_use]
+    pub fn with_reason(mut self, reason: &'static str) -> Self {
+        self.reason = Some(reason);
+        self
+    }
+}
+
+impl fmt::Debug for AdmissionRequired {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AdmissionRequired")
+            .field("challenges", &self.challenges)
+            .field("description_len", &self.description.len())
+            .field("www_authenticate_count", &self.www_authenticate.len())
+            .field("payment_required_count", &self.payment_required.len())
+            .field("reason", &self.reason)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Display for AdmissionRequired {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("admission required by remote: ")?;
+        write_safe_remote_text(f, &self.description)?;
+        if self.challenges.is_empty() {
+            f.write_str(" (no challenges)")?;
+        } else {
+            f.write_str(" (schemes: ")?;
+            for (i, challenge) in self.challenges.iter().enumerate() {
+                if i != 0 {
+                    f.write_str(", ")?;
+                }
+                write_safe_remote_text(f, &challenge.scheme)?;
+            }
+            f.write_str(")")?;
+        }
+        if let Some(reason) = self.reason {
+            write!(f, ": {reason}")?;
+        }
+        Ok(())
+    }
+}
+
+fn write_safe_remote_text(f: &mut fmt::Formatter<'_>, value: &str) -> fmt::Result {
+    for c in value.chars() {
+        if c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
+            write!(f, "\\u{{{:x}}}", c as u32)?;
+        } else {
+            write!(f, "{c}")?;
+        }
+    }
+    Ok(())
 }
 
 /// Result alias used throughout this module.
@@ -187,6 +304,7 @@ pub fn pack_key_from_hex(s: &str) -> Result<PackKey, FromHexError> {
 /// Explicitly non-retryable:
 /// - [`TransportError::PackNotFound`]
 /// - [`TransportError::AccessDenied`]
+/// - [`TransportError::AdmissionRequired`] — requires an explicit helper response
 /// - [`TransportError::RefConflict`] (CAS retry is a caller-level policy)
 /// - [`TransportError::InvalidRef`]
 /// - [`TransportError::InvalidResponse`] / [`TransportError::ProtocolError`]
