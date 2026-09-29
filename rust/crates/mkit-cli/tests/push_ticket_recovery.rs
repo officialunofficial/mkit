@@ -1039,3 +1039,48 @@ fn push_all_writes_the_tracking_ref_after_every_step() {
         );
     }
 }
+
+#[test]
+fn every_published_head_contains_the_remote_head_it_replaced() {
+    let repo = Repo::new();
+    let (tx, base) = seeded(&repo);
+    // Someone else advanced the remote branch.
+    repo.ok(&["branch", "theirs"]);
+    repo.ok(&["checkout", "theirs"]);
+    repo.commit_file("theirs.txt", b"theirs", "theirs");
+    let theirs = refs::read_ref(&RepoLayout::single(repo.path()), "theirs")
+        .unwrap()
+        .unwrap();
+    push_branch_with_limits(
+        &tx,
+        &store(&repo),
+        "main",
+        theirs,
+        RefWriteCondition::Match(base),
+        0,
+        CAP,
+    )
+    .unwrap();
+    // Local work that then merges it: the remote head is reachable only
+    // through the merge's second parent.
+    repo.ok(&["checkout", "main"]);
+    long_history(&repo, 10, 3000);
+    repo.ok(&["merge", "theirs"]);
+    // The first advance must already contain their commit, so the whole
+    // prefix is one step; too big for one advance, it is refused up front
+    // rather than published as a branch that drops their work.
+    let advances_before = tx.advances.load(Ordering::SeqCst);
+    let (result, heads) = push_steps(
+        &repo,
+        &tx,
+        RefWriteCondition::Match(theirs),
+        &PushControl::default(),
+    );
+    assert!(
+        matches!(result, Err(DispatchError::PushTooLarge { .. })),
+        "{result:?}"
+    );
+    assert!(heads.is_empty());
+    assert_eq!(tx.advances.load(Ordering::SeqCst), advances_before);
+    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(theirs));
+}

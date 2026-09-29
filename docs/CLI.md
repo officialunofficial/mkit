@@ -1068,7 +1068,7 @@ Remote / sync:
   up-to-date`). `--format=json` emits one JSON object to stdout:
   `{"ok":true,"remote":"...","endpoint":"...","branch":"...",
   "remote_branch":"...","old":"<hex>|null","new":"<hex>","forced":<bool>,
-  "up_to_date":<bool>,"steps":<n>}` on success (`steps` is the number of branch
+  "up_to_date":<bool>,"steps":<n>}` on success (`steps` is 0 when up to date, otherwise the number of branch
   advances the push took; `--all` reports the total plus `ref_count`), or
   `{"ok":false,"rejected":true,
   "branch":"...","error":"..."}` on a non-fast-forward (CAS) rejection
@@ -1087,8 +1087,8 @@ Remote / sync:
   lease (or `--force`); every later one is a compare-and-swap on the previous
   advance's commit, even under `--force`. Before uploading anything, the
   client checks that your stored write grants cover every advance: a
-  non-owner key needs `c` to create the branch, and, unless the server runs in
-  indexed mode, `f` for the later advances (the owner key needs no grant); a
+  non-owner key needs `c` to create the branch (or `u`/`f` to update it), and
+  `u` for the later advances, or `f` unless the server runs in indexed mode (the owner key needs no grant); a
   push that would be refused midway is refused up front, with nothing
   published. A single commit or merge that cannot be split (a merge always
   lands whole) and still needs more than six packs is refused before any

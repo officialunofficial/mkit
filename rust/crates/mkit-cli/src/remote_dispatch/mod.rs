@@ -1247,7 +1247,18 @@ pub fn push_branch_steps(
     {
         return single(Some(plan));
     }
-    drop(plan);
+    // The estimate is uncompressed: a push that compresses into the budget
+    // is not split (exact dry seal), and one against a remote tip this store
+    // lacks is left to the head CAS rather than walking all of history.
+    let unknown_remote = remote_tip.is_some_and(|remote| !store.contains(&remote));
+    if unknown_remote
+        || !matches!(
+            build_and_upload_packs(PackSink::Count, store, plan, cap, limits),
+            Err(DispatchError::PushTooLarge { .. })
+        )
+    {
+        return single(None);
+    }
     let steps = plan_push_steps(
         store,
         tip,
@@ -1265,6 +1276,7 @@ pub fn push_branch_steps(
     let mut published: Option<Hash> = None;
     for (index, step_tip) in steps.into_iter().enumerate() {
         let step_condition = published.map_or(condition, refs::RefWriteCondition::Match);
+        let mut landed = false;
         let outcome = (|| {
             if crate::signal::is_shutdown() {
                 return Err(DispatchError::Interrupted);
@@ -1283,23 +1295,26 @@ pub fn push_branch_steps(
                 pack_payload_cap,
                 None,
             )?;
+            landed = true;
             on_step(step_tip)?;
             crate::progress::step_committed(index + 1, total, &step_tip);
             Ok(())
         })();
+        if landed {
+            published = Some(step_tip);
+        }
         if let Err(cause) = outcome {
             return Err(match published {
                 Some(head) => DispatchError::SplitInterrupted {
                     branch: branch.to_owned(),
                     head: mkit_core::hash::to_hex(&head),
-                    published: index,
+                    published: index + usize::from(landed),
                     total,
                     cause: Box::new(cause),
                 },
                 None => cause,
             });
         }
-        published = Some(step_tip);
     }
     Ok(total)
 }

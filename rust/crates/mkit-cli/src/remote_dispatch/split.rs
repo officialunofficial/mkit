@@ -27,6 +27,7 @@ use std::collections::HashSet;
 use mkit_core::hash::{Hash, to_hex};
 use mkit_core::object::{Object, ObjectType};
 use mkit_core::ops::graph::{ClosureMode, MAX_REACHABLE, children, reachable_closure_checked};
+use mkit_core::ops::merge::is_ancestor;
 use mkit_core::pack;
 use mkit_core::protocol::UploadLimits;
 use mkit_core::refs::RefWriteCondition;
@@ -252,6 +253,8 @@ struct Cutter<'a> {
     limits: UploadLimits,
     cap: u64,
     budget: usize,
+    /// Chain positions the first advance must reach (0: no constraint).
+    must_reach: usize,
 }
 
 impl Cutter<'_> {
@@ -290,7 +293,18 @@ impl Cutter<'_> {
     /// The end position of the step that starts at `from`.
     fn cut(&self, from: usize) -> Result<usize, DispatchError> {
         let wcap = pack_weight_cap(self.cap, self.limits.max_pack_bytes);
-        let floor = self.furthest(from, wcap.saturating_mul(3));
+        // Two consecutive packs weigh more than one cap, so `budget / 2` caps
+        // of weight never need more than `budget` packs.
+        let floor_weight = wcap.saturating_mul((self.budget / 2) as u64);
+        let natural = self.furthest(from, floor_weight);
+        // The first advance must already contain the remote head, or the
+        // published branch would leave commits the remote holds (a merge of
+        // the remote head reaches it through a second parent).
+        let floor = if from == 0 {
+            natural.max(self.must_reach)
+        } else {
+            natural
+        };
         let ceiling = self
             .furthest(from, wcap.saturating_mul(self.budget as u64))
             .max(floor);
@@ -303,20 +317,20 @@ impl Cutter<'_> {
                 over = mid - 1;
             }
         }
-        // Within the floor a step always fits; a lone commit heavier than the
-        // floor has not been verified yet.
-        let lone_heavy =
-            fits == from + 1 && self.weights[fits] - self.weights[from] > wcap.saturating_mul(3);
-        if lone_heavy {
-            self.verify_lone_commit(from)?;
+        // Within the natural floor a step always fits; anything past it that
+        // was forced (a lone heavy commit, or reaching the remote head) has
+        // not been verified yet.
+        let heavy = self.weights[fits] - self.weights[from] > floor_weight;
+        if fits == floor && heavy {
+            self.verify_forced(from, fits)?;
         }
         Ok(fits)
     }
 
-    /// A single commit that cannot be split further must fit in the budget
-    /// once compressed: run the exact seal without uploading.
-    fn verify_lone_commit(&self, from: usize) -> Result<(), DispatchError> {
-        let (plan, packs) = self.probe(from, from + 1)?;
+    /// A step that cannot be split further must fit in the budget once
+    /// compressed: run the exact seal without uploading.
+    fn verify_forced(&self, from: usize, to: usize) -> Result<(), DispatchError> {
+        let (plan, packs) = self.probe(from, to)?;
         if packs <= self.budget {
             return Ok(());
         }
@@ -326,7 +340,7 @@ impl Cutter<'_> {
                 DispatchError::PushTooLarge { packs, limit, .. } => DispatchError::PushTooLarge {
                     packs,
                     limit,
-                    commit: Some(self.describe(self.chain.commits[from])),
+                    commit: Some(self.describe(self.chain.commits[to - 1])),
                 },
                 other => other,
             })
@@ -342,6 +356,33 @@ impl Cutter<'_> {
             _ => format!("commit {}", to_hex(&commit)),
         }
     }
+}
+
+/// The fewest chain commits after which the branch descends from the remote
+/// head, or 0 when the remote head is not an ancestor of the tip (a forced
+/// overwrite, which has nothing to preserve). Descent is monotonic along the
+/// chain, so a binary search finds it.
+fn positions_to_reach(
+    store: &ObjectStore,
+    chain: &Chain,
+    remote_tip: Option<Hash>,
+) -> Result<usize, DispatchError> {
+    let Some(remote) = remote_tip.filter(|remote| store.contains(remote)) else {
+        return Ok(0);
+    };
+    let (mut low, mut high) = (1, chain.commits.len());
+    if !is_ancestor(store, remote, chain.commits[high - 1])? {
+        return Ok(0);
+    }
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if is_ancestor(store, remote, chain.commits[mid - 1])? {
+            high = mid;
+        } else {
+            low = mid + 1;
+        }
+    }
+    Ok(low)
 }
 
 /// The commits to advance the remote head through, oldest first, ending at
@@ -384,6 +425,7 @@ pub fn plan_push_steps(
         limits,
         cap,
         budget: data_pack_budget(limits),
+        must_reach: positions_to_reach(store, &chain, remote_tip)?,
     };
     let mut steps = Vec::new();
     let mut from = 0;
@@ -582,7 +624,7 @@ mod tests {
         #[test]
         fn estimate_bounds_the_real_pack_count_and_three_caps_always_fit(
             sizes in prop::collection::vec((1_usize..6000, any::<bool>()), 1..40),
-            payload_cap in 512_u64..8192,
+            payload_cap in 512_u64..16_384,
             max_pack in prop::option::of(1024_u64..12_000),
         ) {
             let (_dir, store) = store();

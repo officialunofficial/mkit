@@ -26,7 +26,6 @@ use mkit_core::refs::RefWriteCondition;
 use mkit_core::repo_identity::RepositoryIdentity;
 use mkit_transport_connect::{
     ConnectTransport, GrantCondition, GrantOperation, GrantRef, GrantRequest, GrantSource,
-    ServerInfoView,
 };
 
 use super::StepAuthority;
@@ -228,11 +227,12 @@ impl GrantSource for LocalGrants {
 /// local grants: every advance must be covered before the first upload, so a
 /// grantee that would be refused at a later advance never publishes a prefix.
 ///
-/// The owner key needs no grant. Otherwise each advance's condition must have a
-/// grant that covers it, and on a server that is not in indexed mode the later
-/// advances (`Match` updates) need a grant carrying `f`: such a server refuses
-/// `u` alone ("update without force needs indexed mode", R-150). The check
-/// asks for an `Any` write, which only an `f` grant covers.
+/// The owner key needs no grant, and a repository without a namespace takes
+/// none. Otherwise each advance's condition must have a grant that covers it,
+/// and the later advances (`Match` updates) need a grant carrying `f`: no
+/// server yet accepts `u` alone for them (Stage 1 refuses it, "update without
+/// force needs indexed mode", and indexed mode's ancestry check is R-148's
+/// TODO). The check asks for an `Any` write, which only an `f` grant covers.
 pub(crate) struct ConnectAuthority {
     pub(crate) transport: Arc<ConnectTransport>,
     pub(crate) grants: Arc<LocalGrants>,
@@ -247,15 +247,13 @@ impl StepAuthority for ConnectAuthority {
         later_steps: bool,
     ) -> Result<(), String> {
         let repository = self.transport.repository();
-        if repository.namespace().is_some_and(|namespace| {
-            namespace.to_string() == format!("ed25519-{}", self.signer_key)
-        }) {
-            return Ok(());
+        match repository.namespace() {
+            None => return Ok(()),
+            Some(namespace) if namespace.to_string() == format!("ed25519-{}", self.signer_key) => {
+                return Ok(());
+            }
+            Some(_) => {}
         }
-        let indexed = matches!(
-            self.transport.server_info(),
-            ServerInfoView::V2(info) if info.indexed_mode == Some(true)
-        );
         check_step_grants(
             self.grants.as_ref(),
             self.transport.origin(),
@@ -264,16 +262,14 @@ impl StepAuthority for ConnectAuthority {
             branch,
             first,
             later_steps,
-            indexed,
         )
     }
 }
 
 /// Whether `source` holds a grant for each advance of a split push by a
 /// non-owner key: the first advance under `first`, and, with `later_steps`, the
-/// `Match` updates that follow. A server that is not in indexed mode refuses a
-/// `Match` update without `f`, so there the later advances ask for an `Any`
-/// write, which only an `f` grant covers.
+/// `Match` updates that follow, which ask for an `Any` write, since only an `f`
+/// grant covers that.
 #[allow(clippy::too_many_arguments)]
 fn check_step_grants(
     source: &dyn GrantSource,
@@ -283,7 +279,6 @@ fn check_step_grants(
     branch: &str,
     first: RefWriteCondition,
     later_steps: bool,
-    indexed: bool,
 ) -> Result<(), String> {
     let (first_condition, first_flag) = match first {
         RefWriteCondition::Missing => (GrantCondition::Missing, "c"),
@@ -292,11 +287,7 @@ fn check_step_grants(
     };
     let mut needed = vec![(first_condition, "the first advance", first_flag)];
     if later_steps {
-        needed.push(if indexed {
-            (GrantCondition::Match, "the later advances", "u")
-        } else {
-            (GrantCondition::Any, "the later advances", "f")
-        });
+        needed.push((GrantCondition::Any, "the later advances", "f"));
     }
     let head = format!("refs/heads/{branch}");
     let packmap = packmap_ref(branch);
@@ -847,12 +838,7 @@ mod tests {
         }
     }
 
-    fn step_check(
-        refs: &str,
-        first: RefWriteCondition,
-        later_steps: bool,
-        indexed: bool,
-    ) -> Result<(), String> {
+    fn step_check(refs: &str, first: RefWriteCondition, later_steps: bool) -> Result<(), String> {
         let source = AtNow(LocalGrants::from_headers([header(
             &format!("{NS}/photos"),
             "write",
@@ -870,7 +856,6 @@ mod tests {
             "main",
             first,
             later_steps,
-            indexed,
         )
     }
 
@@ -878,27 +863,25 @@ mod tests {
     fn split_push_needs_create_for_a_new_branch_and_more_for_later_steps() {
         let missing = RefWriteCondition::Missing;
         // Create-only: the first advance is fine, the later ones are not.
-        assert!(step_check("refs/heads/main=c", missing, false, false).is_ok());
-        let refused = step_check("refs/heads/main=c", missing, true, true).unwrap_err();
+        assert!(step_check("refs/heads/main=c", missing, false).is_ok());
+        let refused = step_check("refs/heads/main=c", missing, true).unwrap_err();
         assert!(refused.contains("nothing was published"), "{refused}");
-        assert!(refused.contains("`u`"), "{refused}");
-        // Create and update covers an indexed server, but a Stage 1 server
-        // refuses update without force: the later advances need `f`.
-        assert!(step_check("refs/heads/main=cu", missing, true, true).is_ok());
-        let refused = step_check("refs/heads/main=cu", missing, true, false).unwrap_err();
         assert!(refused.contains("`f`"), "{refused}");
-        assert!(step_check("refs/heads/main=cuf", missing, true, false).is_ok());
+        // Create and update is not enough: the later advances need `f`.
+        let refused = step_check("refs/heads/main=cu", missing, true).unwrap_err();
+        assert!(refused.contains("`f`"), "{refused}");
+        assert!(step_check("refs/heads/main=cuf", missing, true).is_ok());
         // No grant for the branch at all.
-        assert!(step_check("refs/heads/other=cuf", missing, false, false).is_err());
+        assert!(step_check("refs/heads/other=cuf", missing, false).is_err());
     }
 
     #[test]
     fn update_only_grant_cannot_create_the_first_advance() {
         let matched = RefWriteCondition::Match([1; 32]);
-        assert!(step_check("refs/heads/main=u", matched, false, true).is_ok());
-        assert!(step_check("refs/heads/main=u", RefWriteCondition::Missing, false, true).is_err());
-        assert!(step_check("refs/heads/main=u", matched, true, false).is_err());
-        assert!(step_check("refs/heads/main=uf", matched, true, false).is_ok());
+        assert!(step_check("refs/heads/main=u", matched, false).is_ok());
+        assert!(step_check("refs/heads/main=u", RefWriteCondition::Missing, false).is_err());
+        assert!(step_check("refs/heads/main=u", matched, true).is_err());
+        assert!(step_check("refs/heads/main=uf", matched, true).is_ok());
     }
 
     #[test]

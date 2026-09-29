@@ -57,7 +57,7 @@ struct PushOpts {
     /// Emit a machine-readable JSON result object to stdout:
     /// `{"ok":true,"remote":"...","endpoint":"...","branch":"...",
     /// "remote_branch":"...","old":"<hex>|null","new":"<hex>",
-    /// "forced":<bool>,"up_to_date":<bool>}` on success, or
+    /// "forced":<bool>,"up_to_date":<bool>,"steps":<n>}` on success, or
     /// `{"ok":false,"error":"...","rejected":<bool>,...}` on a
     /// non-fast-forward (CAS) rejection.
     #[arg(long, value_enum, default_value = "default")]
@@ -178,7 +178,8 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
                 .field_opt_hash("old", old_tracked.as_ref())
                 .field_opt_hash("new", old_tracked.as_ref())
                 .field_bool("forced", false)
-                .field_bool("up_to_date", true);
+                .field_bool("up_to_date", true)
+                .field_u64("steps", 0);
             emit_json_stdout(obj);
         }
         return exit::OK;
