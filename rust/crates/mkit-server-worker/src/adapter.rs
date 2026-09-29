@@ -178,6 +178,13 @@ impl WorkerConfig {
     /// A missing `AUTH_AUDIENCE` or `AUTH_REPOSITORY` (vcs-worker parity:
     /// "`<VAR>` is not configured"), an invalid repository identity, or a malformed `TEST_QUOTA_*` var.
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        if var("INDEXED_MODE")
+            .is_some_and(|value| value.eq_ignore_ascii_case("true") || value == "1")
+        {
+            return Err(ConfigError(
+                "indexed mode on Workers requires WP-4.8".into(),
+            ));
+        }
         let required =
             |name: &str| var(name).ok_or_else(|| ConfigError(format!("{name} is not configured")));
         let audience = required(AUDIENCE_VAR)?;
@@ -327,14 +334,14 @@ where
         }
         ShardClass::RefShard => {
             let paid = plan.is_some_and(|p| p.trim().eq_ignore_ascii_case("paid"));
-            let max_per_tick = if paid { 4 } else { 2 };
-            // Paid: <= 4 fires x 8 targets x 2 calls = 64 per alarm,
-            // below Workers Paid's default 10,000 subrequests. Free:
+            let max_per_tick = if paid { 8 } else { 2 };
+            // Paid: <= 8 fires x 32 targets x 2 calls = 512 per alarm.
+            // Free:
             // <= 2 fires x 8 targets x 2 calls = 32, below its limit of 50.
             // The target-call cap also bounds chunking and contention retries.
             let mut budget = RelayBudget::default();
             budget.max_rows = 128;
-            budget.max_targets = 8;
+            budget.max_targets = if paid { 32 } else { 8 };
             budget.max_target_calls = Some(2);
             let relay = match target {
                 Ok(target) => Some(RelayHandler {
@@ -350,6 +357,7 @@ where
             registry.register(WorkerRelay {
                 relay,
                 max_per_tick,
+                metrics: Arc::new(crate::telemetry::ConsoleMetrics::default()),
             })
         }
         _ => registry,
@@ -362,6 +370,7 @@ where
 struct WorkerRelay<T> {
     relay: Option<mkit_server::relay::RelayHandler<T>>,
     max_per_tick: u32,
+    metrics: Arc<dyn mkit_server::Metrics>,
 }
 
 struct WorkerLeaseSweep<T> {
@@ -408,7 +417,7 @@ impl<S: mkit_server::NamespaceStore, T: mkit_server::NamespaceStore>
     ) -> mkit_server::BoxFuture<'a, Result<mkit_server::timers::Fired, mkit_server::StoreError>>
     {
         match &self.relay {
-            Some(relay) => relay.fire(ctx, timer),
+            Some(relay) => Box::pin(relay.deliver_with_metrics(ctx, timer, self.metrics.as_ref())),
             None => Box::pin(async { Ok(mkit_server::timers::Fired::Retry) }),
         }
     }
@@ -1500,6 +1509,16 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&unavailable_json("a \"b\"")).unwrap();
         assert_eq!(v["code"], "unavailable");
         assert_eq!(v["message"], "a \"b\"");
+    }
+
+    #[test]
+    fn worker_refuses_indexed_mode_until_async_driver() {
+        let err = WorkerConfig::from_vars(|name| (name == "INDEXED_MODE").then(|| "true".into()))
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("indexed mode on Workers requires WP-4.8")
+        );
     }
 
     /// The Connect binding over memory stores, open auth, 1 MiB packs.

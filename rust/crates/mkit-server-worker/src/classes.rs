@@ -20,8 +20,7 @@ pub enum ShardClass {
 }
 
 impl ShardClass {
-    /// Stable class label for physical storage pressure. Both index kinds
-    /// share the repository-index class and therefore its pressure label.
+    /// Stable class label for physical storage pressure.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -30,6 +29,17 @@ impl ShardClass {
             Self::RefShard => "ref",
             Self::RepoIndexShard => "repo_index",
             Self::ContentIndexShard => "content",
+        }
+    }
+
+    /// Physical partition-kind label, including the two index kinds served
+    /// by the same Durable Object class.
+    #[must_use]
+    pub const fn partition_label(self, p: &Partition) -> &'static str {
+        match p {
+            Partition::RepoIndex { .. } => "repo_index",
+            Partition::RefIndex { .. } => "ref_index",
+            _ => self.label(),
         }
     }
 
@@ -58,6 +68,51 @@ impl ShardClass {
             Self::RefShard => REF_SHARD,
             Self::RepoIndexShard => REPO_INDEX,
             Self::ContentIndexShard => CONTENT_INDEX,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mkit_server::telemetry::pressure::{self, PressureLevel, PressureState};
+    use mkit_server::{NamespaceKey, RepoName};
+
+    #[test]
+    fn index_pressure_labels_and_thresholds_cover_both_partition_kinds() {
+        let ns = NamespaceKey::deployment_default();
+        let repo = RepoName::new("one").unwrap();
+        let partitions = [
+            (
+                Partition::RepoIndex {
+                    ns: ns.clone(),
+                    repo: repo.clone(),
+                    prefix: 0,
+                },
+                "repo_index",
+            ),
+            (
+                Partition::RefIndex {
+                    ns,
+                    repo,
+                    bucket: 0,
+                },
+                "ref_index",
+            ),
+        ];
+        for (partition, label) in partitions {
+            assert_eq!(
+                ShardClass::RepoIndexShard.partition_label(&partition),
+                label
+            );
+            assert_eq!(
+                pressure::observe(PressureState::default(), 70, 100, 0).1,
+                [PressureLevel::Warn]
+            );
+            assert_eq!(
+                pressure::observe(PressureState::default(), 90, 100, 0).1,
+                [PressureLevel::Critical]
+            );
         }
     }
 }

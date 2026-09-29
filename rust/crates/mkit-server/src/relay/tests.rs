@@ -1831,6 +1831,40 @@ async fn worker_budget_drains_512_distinct_healthy_targets_without_idle_fires() 
 }
 
 #[tokio::test]
+async fn worker_paid_and_free_budgets_drain_4096_targets_within_alarm_call_caps() {
+    for (targets_per_fire, fires_per_alarm, calls_per_alarm, max_alarms) in
+        [(32, 8, 512, 64), (8, 2, 32, 320)]
+    {
+        let source_store = memory();
+        plant_schedule(&source_store, &(0..4096).collect::<Vec<_>>()).await;
+        let h = RelayHandler {
+            budget: scan_budget(128, targets_per_fire),
+            ..handler(Instrumented::new())
+        };
+        let mut timer_value = Value::default();
+        let mut alarms = 0;
+        while !relay_delivered_through(&source_store, &source(), 4096)
+            .await
+            .unwrap()
+        {
+            alarms += 1;
+            assert!(
+                alarms <= max_alarms,
+                "relay did not drain within {max_alarms} alarms"
+            );
+            let before = h.target.calls.load(Ordering::SeqCst);
+            for _ in 0..fires_per_alarm {
+                fire_with_value(&h, &source_store, &mut timer_value)
+                    .await
+                    .unwrap();
+            }
+            let calls = h.target.calls.load(Ordering::SeqCst) - before;
+            assert!(calls <= calls_per_alarm, "alarm used {calls} target calls");
+        }
+    }
+}
+
+#[tokio::test]
 async fn worker_budget_reaches_healthy_target_after_31_failures_and_480_more() {
     let s = memory();
     let t = Instrumented::new();

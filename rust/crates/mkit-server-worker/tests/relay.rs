@@ -330,11 +330,11 @@ fn worker_plan_caps_relay_fires_per_alarm() {
     block_on(async {
         let dir = tempfile::tempdir().unwrap();
         let target = Loopback::store(dir.path().to_path_buf(), DoConfig::default());
-        for (plan, cap) in [(None, 2), (Some("free"), 2), (Some("paid"), 4)] {
+        for (plan, cap) in [(None, 2), (Some("free"), 2), (Some("paid"), 8)] {
             let source = source();
             let partition = D34Shards.ref_shard(&repo(), "refs/heads/main");
             let mut batch = Batch::new();
-            for reference in 0..5u8 {
+            for reference in 0..9u8 {
                 batch = batch.put(
                     keys::timer(100, kinds::RELAY.get(), &[reference]),
                     Value::default(),
@@ -353,7 +353,7 @@ fn worker_plan_caps_relay_fires_per_alarm() {
             .await
             .unwrap();
             assert_eq!(report.fired, cap);
-            assert_eq!(report.deferred, 5 - cap);
+            assert_eq!(report.deferred, 9 - cap);
         }
         assert_eq!(target.transport().calls(), 0);
     });

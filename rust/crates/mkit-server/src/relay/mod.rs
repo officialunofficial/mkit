@@ -24,9 +24,13 @@
 //! must tolerate that lag.
 
 mod deliver;
+mod enqueue;
 mod hook;
 
 pub use deliver::RelayHandler;
+pub use enqueue::{
+    RelayEnqueueSnapshot, commit_relay_rows, enqueue_relay_rows, relay_delivered_through,
+};
 pub use hook::{NoHook, RelayHook};
 
 use crate::store::{NamespaceStore, Partition, StoreError, codec, keys};

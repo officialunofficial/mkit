@@ -10,6 +10,9 @@ use crate::store::{
     codec::{self, MAX_BLOCKED_TARGETS, RelayScanV1, RelayV1},
     keys,
 };
+use crate::telemetry::{
+    METRIC_RELAY_BACKLOG_ROWS, METRIC_RELAY_LAG_EXCEEDED, Metrics, NoopMetrics,
+};
 use crate::timers::{
     DueTimer, Fired, RETRY_BACKOFF_MS, TimerCtx, TimerHandler, TimerKind, registry::kinds,
 };
@@ -29,6 +32,7 @@ struct ScanWindow {
     groups: Vec<TargetRows>,
     corrupt: bool,
     exhausted: bool,
+    lag_exceeded: bool,
 }
 
 struct Dispatch {
@@ -67,7 +71,7 @@ impl<S: NamespaceStore, T: NamespaceStore, H: RelayHook> TimerHandler<S> for Rel
         ctx: &'a TimerCtx<'a, S>,
         timer: &'a DueTimer,
     ) -> BoxFuture<'a, Result<Fired, StoreError>> {
-        Box::pin(self.deliver(ctx, timer))
+        Box::pin(self.deliver_with_metrics(ctx, timer, &NoopMetrics))
     }
 }
 
@@ -108,10 +112,12 @@ async fn apply_relay_delay<S: NamespaceStore>(
 }
 
 impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
-    async fn deliver<S: NamespaceStore>(
+    /// Deliver one relay fire while recording source backlog and lag.
+    pub async fn deliver_with_metrics<S: NamespaceStore>(
         &self,
         ctx: &TimerCtx<'_, S>,
         timer: &DueTimer,
+        metrics: &dyn Metrics,
     ) -> Result<Fired, StoreError> {
         #[cfg(feature = "test-faults")]
         if let Some(fired) = apply_relay_delay(ctx, timer).await? {
@@ -148,6 +154,28 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         let max_rows = self.budget.max_rows.max(1);
         let (rows, exhausted) = read_rows(ctx, &scan, max_rows.saturating_mul(4)).await?;
         let window = decode_window(ctx.partition, ctx.now_ms, rows, exhausted);
+        // `os - first_queued_seq + 1` is an upper bound: out-of-order
+        // delivered rows may leave holes, but a bounded scan window must
+        // never hide a large queued tail from the backlog gauge.
+        let (start, end) = keys::class_range(keys::TAG_RELAY);
+        let head = ctx.store.scan(ctx.partition, &start, &end, None, 1).await?;
+        let backlog = match head.entries.first().and_then(|(key, _)| keys::parse(key)) {
+            Some(keys::ParsedKey::Relay(first)) => os.saturating_sub(first).saturating_add(1),
+            _ => 0,
+        };
+        #[allow(clippy::cast_precision_loss)]
+        metrics.gauge(
+            METRIC_RELAY_BACKLOG_ROWS,
+            &[("source_kind", source_kind(ctx.partition))],
+            backlog as f64,
+        );
+        if window.lag_exceeded {
+            metrics.incr(
+                METRIC_RELAY_LAG_EXCEEDED,
+                &[("source_kind", source_kind(ctx.partition))],
+                1,
+            );
+        }
         let rh = keys::relay_high_water(ctx.partition)?;
         let dispatch = self.dispatch(&window.groups, &scan.blocked, &rh).await;
         if !checkpoint_window(ctx, &rs_key, &mut scan_value, &mut scan, &window, &dispatch).await? {
@@ -401,6 +429,7 @@ fn decode_window(
         groups: Vec::new(),
         corrupt: false,
         exhausted,
+        lag_exceeded: false,
     };
     let mut warned_lag = false;
     for (key, value) in rows {
@@ -427,6 +456,7 @@ fn decode_window(
             if age_ms > RELAY_LAG_BOUND_MS {
                 tracing::warn!(source = ?source, age_ms, "outbox relay lag bound exceeded");
                 warned_lag = true;
+                window.lag_exceeded = true;
             }
         }
         let target = row.target.clone();
@@ -444,6 +474,17 @@ fn decode_window(
         window.groups[i].1.push((seq, row, key, value));
     }
     window
+}
+
+fn source_kind(source: &Partition) -> &'static str {
+    match source {
+        Partition::Ref { .. } => "ref",
+        Partition::Namespace(_) => "namespace",
+        Partition::Coordinator(_) => "coordinator",
+        Partition::RepoIndex { .. } => "repo_index",
+        Partition::RefIndex { .. } => "ref_index",
+        Partition::ContentShard(_) => "content",
+    }
 }
 
 async fn checkpoint_window<S: NamespaceStore>(
