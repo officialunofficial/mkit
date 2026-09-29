@@ -90,7 +90,7 @@
 //! | `policy.owner_write_allowed` | `namespace-policy`, `multi-repo`, `auth-v2` | an allowlisted namespace owner writes and reads its ref |
 //! | `policy.non_owner_write_denied` | `namespace-policy`, `multi-repo`, `auth-v2` | a non-owner gets `permission_denied`; reads show existing and absent refs unchanged |
 //! | `policy.non_allowlisted_namespace_denied` | `namespace-policy`, `multi-repo`, `auth-v2` | an owner outside the allowlist gets `permission_denied`; the repository is not created |
-//! | `leases.bump_completes_and_writes_continue` | `epoch-leases`, `test-faults` | on a fresh target, a bump completes; repeating the epoch is rejected, then a second write succeeds (D34 listings remain deferred) |
+//! | `leases.bump_completes_and_writes_continue` | `epoch-leases`, `test-faults` | on a fresh target, a bump completes; repeating the epoch is rejected, then a second write succeeds |
 //! | `timers.directive_fires_due` | `test-faults` | a future timer remains; a skewed tick deletes only the due ref |
 //! | `timers.fire_on_schedule` | `test-faults`, `timers` | the driver deletes the ref within 20 s without a manual tick |
 //! | `timers.redelivery_is_idempotent` | `test-faults` | repeated ticks succeed with no further effects |
@@ -286,27 +286,6 @@ pub struct WireTarget {
     pub profile: Profile,
 }
 
-/// Wire cases requiring successful `ListRefs` while D34's ref index is deferred.
-/// Rejected names and repository headers still run: their validation precedes routing.
-pub const D34_LIST_REFS_SKIPS: &[&str] = &[
-    "refs.non_refs_prefix_rejected",
-    "refs.list_prefix_stripped",
-    "refs.list_prefix_component_boundary",
-    "list.large_response_within_limit",
-    "list.paging_wire",
-    "repo.isolation_refs",
-    // The unsigned-read case probes successful ListRefs as well as ReadRef.
-    "auth.v2_reads_unsigned_ok",
-    // These timer directives tick through successful ListRefs.
-    "timers.directive_fires_due",
-    "timers.redelivery_is_idempotent",
-];
-
-fn sharding_skip_reason(case: &Case, profile: &Profile) -> Option<String> {
-    (profile.sharding_d34 && D34_LIST_REFS_SKIPS.contains(&case.name))
-        .then(|| "ListRefs under d34 sharding lands with WP-1.28".to_owned())
-}
-
 /// Run every case whose name contains `filter` (all when `None`) against
 /// `target`, in [`CASES`] order.
 pub async fn run(target: &WireTarget, filter: Option<&str>) -> Report {
@@ -333,10 +312,7 @@ pub async fn run(target: &WireTarget, filter: Option<&str>) -> Report {
         .iter()
         .filter(|c| filter.is_none_or(|f| c.name.contains(f)))
     {
-        let verdict = match case
-            .skip_reason(&profile)
-            .or_else(|| sharding_skip_reason(case, &profile))
-        {
+        let verdict = match case.skip_reason(&profile) {
             Some(reason) => Verdict::Skip(reason),
             None => run_case(case, Ctx::new(client.clone(), profile.clone(), case.name)).await,
         };
@@ -391,35 +367,6 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-
-    #[test]
-    fn d34_skips_only_explicit_successful_listings() {
-        let mut profile = Profile::new(WireAuth::None);
-        for case in CASES {
-            assert!(sharding_skip_reason(case, &profile).is_none());
-        }
-        profile.sharding_d34 = true;
-        let skipped: BTreeSet<_> = CASES
-            .iter()
-            .filter(|case| sharding_skip_reason(case, &profile).is_some())
-            .map(|case| case.name)
-            .collect();
-        assert_eq!(skipped, D34_LIST_REFS_SKIPS.iter().copied().collect());
-        assert_eq!(skipped.len(), 9);
-        for name in &skipped {
-            assert!(
-                name.contains("list")
-                    || matches!(
-                        *name,
-                        "refs.non_refs_prefix_rejected"
-                            | "repo.isolation_refs"
-                            | "auth.v2_reads_unsigned_ok"
-                            | "timers.directive_fires_due"
-                            | "timers.redelivery_is_idempotent"
-                    )
-            );
-        }
-    }
 
     #[test]
     fn at_least_45_cases_with_unique_documented_names() {

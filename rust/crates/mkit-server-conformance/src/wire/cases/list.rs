@@ -7,7 +7,10 @@ use mkit_transport_connect::generated::{
     GetServerInfoResponse, ListRefsRequest, ListRefsResponse, UpdateRefResponse,
 };
 
-use super::{CaseResult, Commit, Ctx, Exp, Failure, ensure, update_req, want_code, want_ok};
+use super::{
+    CaseResult, Commit, Ctx, Exp, Failure, ensure, eventually_listed, update_req, want_code,
+    want_ok,
+};
 use crate::wire::client::{Rpc, RpcError, UNARY_PROTO, decode_unary};
 
 /// Writes in flight at once when the profile does not override it.
@@ -74,6 +77,12 @@ pub(super) async fn paging_wire(ctx: Ctx) -> CaseResult {
         want_ok(create(ctx.clone(), i, 100).await?, "UpdateRef")?;
     }
     let prefix = format!("refs/heads/{}/", ctx.ns());
+    eventually_listed(
+        &prefix,
+        || async { want_ok(ctx.list(&prefix).await?, "ListRefs before paging") },
+        |refs| refs.len() == 3,
+    )
+    .await?;
     let request = |page_size, page_token| ListRefsRequest {
         prefix: Some(prefix.clone()),
         page_size,
@@ -162,6 +171,7 @@ pub(super) async fn paging_wire(ctx: Ctx) -> CaseResult {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // One case: paced fixture, lag wait and paged assertions.
 pub(super) async fn large_response_within_limit(ctx: Ctx) -> CaseResult {
     let n = ctx.profile().list_refs;
     if n == 0 {
@@ -210,51 +220,59 @@ pub(super) async fn large_response_within_limit(ctx: Ctx) -> CaseResult {
         .max_list_refs_page_size
         .ok_or("missing max_list_refs_page_size")?;
     let prefix = format!("refs/heads/{}/", ctx.ns());
-    let mut token = None;
-    let mut seen = std::collections::HashSet::new();
-    let mut last = String::new();
-    let mut count = 0u32;
-    let mut pages = 0u32;
-    loop {
-        let req = ListRefsRequest {
-            prefix: Some(prefix.clone()),
-            page_token: token,
-            ..Default::default()
-        };
-        let body = req.encode_to_vec();
-        let headers = ctx.auth_headers(Rpc::ListRefs, Commit::Body(&body));
-        let reply = ctx
-            .client()
-            .post(Rpc::ListRefs.procedure(), UNARY_PROTO, &headers, body)
-            .await?;
-        let resp: ListRefsResponse = want_ok(decode_unary(&reply)?, "ListRefs")?;
-        ensure!(
-            reply.body.len() <= 2 * 1024 * 1024,
-            "ListRefs page exceeds 2 MiB"
-        );
-        ensure!(
-            resp.refs.len() <= cap as usize,
-            "ListRefs page exceeds advertised ref cap"
-        );
-        pages += 1;
-        for r in &resp.refs {
-            let name = r.name.as_deref().unwrap_or("");
-            ensure!(name > last.as_str(), "ListRefs names are not increasing");
-            name.clone_into(&mut last);
-            count += 1;
-        }
-        match resp.next_page_token.filter(|s| !s.is_empty()) {
-            Some(next) => {
+    let (count, pages) = eventually_listed(
+        &prefix,
+        || async {
+            let mut token = None;
+            let mut seen = std::collections::HashSet::new();
+            let mut last = String::new();
+            let mut count = 0u32;
+            let mut pages = 0u32;
+            loop {
+                let req = ListRefsRequest {
+                    prefix: Some(prefix.clone()),
+                    page_token: token,
+                    ..Default::default()
+                };
+                let body = req.encode_to_vec();
+                let headers = ctx.auth_headers(Rpc::ListRefs, Commit::Body(&body));
+                let reply = ctx
+                    .client()
+                    .post(Rpc::ListRefs.procedure(), UNARY_PROTO, &headers, body)
+                    .await?;
+                let resp: ListRefsResponse = want_ok(decode_unary(&reply)?, "ListRefs")?;
                 ensure!(
-                    !resp.refs.is_empty(),
-                    "ListRefs continuation made no progress"
+                    reply.body.len() <= 2 * 1024 * 1024,
+                    "ListRefs page exceeds 2 MiB"
                 );
-                ensure!(seen.insert(next.clone()), "ListRefs repeated a page token");
-                token = Some(next);
+                ensure!(
+                    resp.refs.len() <= cap as usize,
+                    "ListRefs page exceeds advertised ref cap"
+                );
+                pages += 1;
+                for r in &resp.refs {
+                    let name = r.name.as_deref().unwrap_or("");
+                    ensure!(name > last.as_str(), "ListRefs names are not increasing");
+                    name.clone_into(&mut last);
+                    count += 1;
+                }
+                match resp.next_page_token.filter(|s| !s.is_empty()) {
+                    Some(next) => {
+                        ensure!(
+                            !resp.refs.is_empty(),
+                            "ListRefs continuation made no progress"
+                        );
+                        ensure!(seen.insert(next.clone()), "ListRefs repeated a page token");
+                        token = Some(next);
+                    }
+                    None => break,
+                }
             }
-            None => break,
-        }
-    }
+            Ok((count, pages))
+        },
+        |(count, _)| *count == n,
+    )
+    .await?;
     ensure!(count == n, "ListRefs {prefix:?}: {count} refs, created {n}");
     ctx.set_note(format!("{n} refs across {pages} pages"));
     Ok(())

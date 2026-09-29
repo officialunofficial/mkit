@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (WP-1.13).
 - Server: expire unconsumed upload tickets with one guarded `Expired` outcome
   and best-effort upload-session cleanup (WP-1.14).
+- Server: maintain D34's 16-bucket ref-name index through relay upserts and
+  deletes, and serve eventual paged ListRefs from it (WP-1.28b).
 - Server: enforce owner-signed write grants under Multi/Owner, including
   `0x` namespaces, stored-epoch checks, and grant-scheme discovery. A
   conservative interim ref gate applies until WP-2.7; adapter grant flags

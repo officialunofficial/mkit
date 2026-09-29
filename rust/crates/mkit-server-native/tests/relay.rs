@@ -323,7 +323,7 @@ fn sql_budget(rows: u32, targets: u32, calls: Option<u32>) -> RelayBudget {
     budget
 }
 
-fn sql_registry(target: FaultSql) -> TimerRegistry<FaultSql> {
+fn sql_registry(target: FaultSql) -> TimerRegistry<'static, FaultSql> {
     TimerRegistry::new().register(RelayHandler {
         target,
         hook: NoHook,
@@ -795,6 +795,7 @@ async fn plant_sql_schedule(source: &FaultSql, partition: &Partition, schedule: 
                     Key::new([b"delivered/".as_slice(), &seq.to_be_bytes()].concat()),
                     codec::encode_u64(seq),
                 )],
+                deletes: Vec::new(),
             };
             batch = batch.put(keys::relay(seq), codec::encode_relay(&row).unwrap());
         }

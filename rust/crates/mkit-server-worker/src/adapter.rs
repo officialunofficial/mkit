@@ -309,7 +309,7 @@ pub fn timer_registry<S, T>(
     class: crate::classes::ShardClass,
     target: Result<T, ConfigError>,
     plan: Option<&str>,
-) -> mkit_server::timers::TimerRegistry<S>
+) -> mkit_server::timers::TimerRegistry<'static, S>
 where
     S: mkit_server::NamespaceStore,
     T: mkit_server::NamespaceStore + 'static,
@@ -382,7 +382,7 @@ pub fn timer_registry_with_blobs<S, T, B>(
     target: Result<T, ConfigError>,
     plan: Option<&str>,
     blobs: B,
-) -> mkit_server::timers::TimerRegistry<S>
+) -> mkit_server::timers::TimerRegistry<'static, S>
 where
     S: mkit_server::NamespaceStore,
     T: mkit_server::NamespaceStore + 'static,
