@@ -9,11 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Server: maintain D34's 16-bucket ref-name index through relay upserts and
   deletes, and serve eventual paged ListRefs from it (WP-1.28b).
+- Server: enforce owner-signed write grants under Multi/Owner, including
+  `0x` namespaces, stored-epoch checks, and grant-scheme discovery. A
+  conservative interim ref gate applies until WP-2.7; adapter grant flags
+  follow in WP-1.30b.
+- Connect client: detect bounded 402 admission challenges and report payment receipts without exposing their values (WP-3.10). `TransportError` is now non-exhaustive, a breaking change for exhaustive downstream matches.
+- Connect client: run a trusted, user-configured admission helper once and retry admitted writes with strictly filtered headers (WP-3.11).
 
 - Connect client: sign repository reads with auth v2 on each attempt, including
   the framed `DownloadPack` request. Add a grant-source API and local selection
   logic; the user grant store follows in WP-2.13.
-
 - Transport: add the `GetGrantEpoch`, `SetGrantEpoch`, `SetRepoVisibility` and
   `IssueObjectUrl` messages and RPCs; the server answers `unimplemented` until
   WP-2.8, WP-2.9 and WP-2.11 (WP-2.2).

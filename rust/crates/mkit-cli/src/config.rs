@@ -70,6 +70,7 @@ pub const DEFAULT_P256_KEY_REF: &str = "software:default-p256";
 pub const REPO_FORBIDDEN_KEYS: &[&str] = &[
     "user.identity",
     "trusted_remote_endpoint",
+    "admission_helper",
     "signer",
     "transport_auth",
     "pull.require_signed",
@@ -90,6 +91,16 @@ pub const REPO_FORBIDDEN_KEYS: &[&str] = &[
     "attest.secp256k1_key_path",
     "attest.p256_key_path",
 ];
+
+/// User-scoped exact keys and the dynamic named-remote admission allowlist key.
+#[must_use]
+pub fn is_repo_forbidden_key(key: &str) -> bool {
+    REPO_FORBIDDEN_KEYS.contains(&key)
+        || key
+            .strip_prefix("remote.")
+            .and_then(|rest| rest.strip_suffix(".admission_headers"))
+            .is_some_and(|name| !name.is_empty())
+}
 
 /// Source of a parsed config line — used to decide whether a key is
 /// allowed (`Repo` rejects [`REPO_FORBIDDEN_KEYS`]; `User` accepts
@@ -125,6 +136,10 @@ pub struct Config {
     /// Exact remote endpoint the user has explicitly trusted for
     /// ambient HTTP/S3 environment credentials. User-scoped only.
     pub trusted_remote_endpoint: String,
+    /// Absolute executable path for the user-scoped admission helper.
+    pub admission_helper: String,
+    /// Per-remote extra header allowlists, separate from endpoint listings.
+    pub remote_admission_headers: std::collections::BTreeMap<String, String>,
     pub signing_key: String,
     pub default_branch: String,
     pub remote_endpoint: String,
@@ -662,7 +677,7 @@ fn apply_cli_overrides(cfg: &mut Config) {
     };
     for (raw_key, val) in overrides.iter() {
         let key = normalize_config_key(raw_key.trim());
-        if REPO_FORBIDDEN_KEYS.contains(&key.as_str()) {
+        if is_repo_forbidden_key(&key) {
             let mut stderr = io::stderr().lock();
             let _ = writeln!(
                 stderr,
@@ -728,7 +743,7 @@ fn apply_file_inner(
         let key = normalize_config_key(k.trim());
         let key = key.as_str();
         let val = v.trim();
-        if scope == ConfigScope::Repo && REPO_FORBIDDEN_KEYS.contains(&key) {
+        if scope == ConfigScope::Repo && is_repo_forbidden_key(key) {
             if warn_on_forbidden {
                 warn_forbidden_repo_key(path, key);
             }
@@ -767,6 +782,7 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
         "user.name" => val.clone_into(&mut cfg.user_name),
         "user.email" => val.clone_into(&mut cfg.user_email),
         "trusted_remote_endpoint" => val.clone_into(&mut cfg.trusted_remote_endpoint),
+        "admission_helper" => val.clone_into(&mut cfg.admission_helper),
         "signer" => val.clone_into(&mut cfg.signer),
         "pull.require_signed" => val.clone_into(&mut cfg.pull_require_signed),
         "key.backend" => val.clone_into(&mut cfg.key.backend),
@@ -882,6 +898,13 @@ fn apply_section_kv(cfg: &mut Config, key: &str, val: &str) -> bool {
     // name longer than SPEC-REFS §3's bound; `remote add` checks it.
     let valid_name = !name.is_empty() && mkit_core::refs::validate_ref_name_grammar(name);
     match (section, field) {
+        ("remote", "admission_headers") => {
+            if valid_name {
+                cfg.remote_admission_headers
+                    .insert(name.to_owned(), val.to_owned());
+            }
+            true
+        }
         ("remote", "url") => {
             if valid_name {
                 val.clone_into(&mut cfg.remotes.entry(name.to_owned()).or_default().url);
@@ -1865,6 +1888,7 @@ mod tests {
             let observed = match *key {
                 "user.identity" => cfg.user_identity.as_str(),
                 "trusted_remote_endpoint" => cfg.trusted_remote_endpoint.as_str(),
+                "admission_helper" => cfg.admission_helper.as_str(),
                 "signer" => cfg.signer.as_str(),
                 "transport_auth" => cfg.transport_auth.as_str(),
                 "pull.require_signed" => cfg.pull_require_signed.as_str(),
@@ -2306,5 +2330,26 @@ mod tests {
         // No upstream + no default remote → None.
         let lc = layered(None, None);
         assert!(resolve_upstream(&lc, "main").is_none());
+    }
+
+    #[test]
+    fn admission_keys_are_user_only_and_do_not_create_remote() {
+        let repo = "admission_helper = /tmp/evil\nremote.origin.admission_headers = X-Evil\n";
+        let cfg = layer(Some(repo), None);
+        assert!(cfg.admission_helper.is_empty());
+        assert!(cfg.remote_admission_headers.is_empty());
+        assert!(cfg.remotes.is_empty());
+        assert!(is_repo_forbidden_key("admission_helper"));
+        assert!(is_repo_forbidden_key("remote.origin.admission_headers"));
+        assert!(is_repo_forbidden_key("remote.a.b.admission_headers"));
+        let cfg = layer(
+            None,
+            Some(
+                "admission_helper = /usr/bin/helper\nremote.origin.admission_headers = X-Payment\n",
+            ),
+        );
+        assert_eq!(cfg.admission_helper, "/usr/bin/helper");
+        assert_eq!(cfg.remote_admission_headers["origin"], "X-Payment");
+        assert!(cfg.remotes.is_empty());
     }
 }

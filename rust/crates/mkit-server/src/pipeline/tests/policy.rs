@@ -2,11 +2,12 @@
 use super::*;
 use crate::op::Creation;
 use crate::repo::MultiAddressing;
+use mkit_attest::grant::{AcceptedSchemes, OwnerScheme};
 
 #[derive(Clone)]
-struct PolicyHook {
+pub(super) struct PolicyHook {
     deny: bool,
-    seen: Arc<Mutex<Vec<Operation>>>,
+    pub(super) seen: Arc<Mutex<Vec<Operation>>>,
 }
 
 impl Authorizer for PolicyHook {
@@ -25,7 +26,7 @@ impl Authorizer for PolicyHook {
 }
 
 #[derive(Clone, Default)]
-struct PolicyAdmission(Arc<Mutex<Vec<AuthzFacts>>>);
+pub(super) struct PolicyAdmission(Arc<Mutex<Vec<AuthzFacts>>>);
 
 impl Admission for PolicyAdmission {
     fn is_default(&self) -> bool {
@@ -39,7 +40,7 @@ impl Admission for PolicyAdmission {
     }
 }
 
-fn policy_hooks(deny: bool) -> Hooks<PolicyHook, PolicyAdmission> {
+pub(super) fn policy_hooks(deny: bool) -> Hooks<PolicyHook, PolicyAdmission> {
     let defaults = Hooks::new();
     Hooks {
         authorizer: PolicyHook {
@@ -290,6 +291,41 @@ fn startup_policy_refusals_and_accepted_counterparts() {
     assert!(OpenAuthorizer.is_open());
     assert!(PolicyAdmission::default().is_default());
     assert!(!policy_hooks(false).authorizer.is_open());
+}
+
+#[test]
+fn grant_configuration_refusals_and_discovery() {
+    let grants = GrantConfig::new(
+        AUDIENCE,
+        AcceptedSchemes::of(&[OwnerScheme::Ed25519]),
+        vec![],
+    )
+    .unwrap();
+    let ns = Namespace::Ed25519([1; 32]);
+    let mut c = policy_cfg(true, namespace_policy(0, &ns));
+    c.grants = Some(grants.clone());
+    let err = construct(c.clone(), Hooks::new()).unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert_eq!(err.public_message(), "write grants require auth v2");
+
+    c.auth = authv2();
+    let info = construct(c.clone(), Hooks::new()).unwrap().server_info();
+    assert_eq!(info.grant_schemes, ["ed25519"]);
+
+    c.addressing = Addressing::Single { repo: repo() };
+    c.write_policy = WritePolicy::Open;
+    assert_eq!(
+        construct(c.clone(), Hooks::new()).unwrap_err().code(),
+        Code::InvalidArgument
+    );
+    c.addressing = Addressing::Multi(MultiAddressing::new());
+    c.write_policy = WritePolicy::Owner;
+    c.grants =
+        Some(GrantConfig::new("https://other.example.test", grants.schemes(), vec![]).unwrap());
+    assert_eq!(
+        construct(c, Hooks::new()).unwrap_err().public_message(),
+        "write grant audience must match auth v2 audience"
+    );
 }
 
 #[test]

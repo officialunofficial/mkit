@@ -348,10 +348,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 },
             ));
         };
-        // TODO(WP-2.6): compare grant.epoch with the observed coordinator e before
-        // writing a lease grant, so stale-grant denial writes no state (STC §5.1).
         let coordinator = self.shards.coordinator(&op.repo.namespace);
         for _ in 0..LEASE_GRANT_ATTEMPTS {
+            if op
+                .authz
+                .grant
+                .is_some_and(|grant| grant.epoch != read.leased_epoch)
+            {
+                return Err(super::plan::epoch_moved());
+            }
             let now = ms(self.clock.now_ms());
             let created_at_ms = ms(self.clock.now_ms().saturating_add(skew_ms));
             let grant = grant_batch(&read, op, p, now, created_at_ms, &self.cfg)?;

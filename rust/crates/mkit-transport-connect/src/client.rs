@@ -4,13 +4,14 @@
 
 use std::env;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
 use connectrpc::client::{CallOptions, ClientConfig, HttpClient};
-use http::Uri;
 use http::header::AUTHORIZATION;
+use http::{HeaderMap, Uri};
 use mkit_core::hash::Hash;
 use mkit_core::protocol::async_shim::Executor as _;
 use mkit_core::protocol::{
@@ -21,6 +22,7 @@ use mkit_core::refs::{Ref, validate_ref_name};
 use mkit_core::repo_identity::{IdentityError, RepositoryIdentity};
 use url::{Host, Url};
 
+use crate::admission::{AdmissionPolicy, respond_to_challenge, retry_once};
 use crate::envelope::{EnvelopeSigner, EnvelopeTransport, RetryIdentity};
 use crate::error::{ErrorContext, map_connect_error, pending_verification_delay};
 use crate::executor::TokioExecutor;
@@ -32,6 +34,8 @@ use crate::proto::mkit::transport::v1::{
     ReadRefRequest, RefExpectation, TransportServiceClient, UpdateRefRequest, UploadPackHeader,
     UploadPackRequest,
 };
+use crate::receipt::{AdmissionReceipt, observe_receipts};
+use crate::status::StatusTransport;
 
 /// Capability discovery result, immutable for a transport's lifetime.
 #[derive(Debug, Clone)]
@@ -217,7 +221,7 @@ const CHUNK_SIZE: usize = 800 * 1024;
 /// retrying that is caller-level policy. A typed pending-verification reply
 /// from `AdvanceRefs` uses a separate bounded polling loop around that ladder.
 pub struct ConnectTransport {
-    client: TransportServiceClient<EnvelopeTransport<HttpClient>>,
+    client: TransportServiceClient<EnvelopeTransport<StatusTransport<HttpClient>>>,
     executor: TokioExecutor,
     server_info: OnceLock<ServerInfoView>,
     repository: RepositoryIdentity,
@@ -239,6 +243,10 @@ pub struct ConnectTransport {
     sleep: fn(Duration),
     now: fn() -> i64,
     pending_observer: Option<Arc<dyn Fn(PendingEvent) -> bool + Send + Sync>>,
+    receipt_observer: Option<crate::receipt::ReceiptObserver>,
+    admission_policy: Option<AdmissionPolicy>,
+    admission_runs: AtomicUsize,
+    bearer: bool,
 }
 
 // Manual Debug: `HttpClient` doesn't implement it, and a bearer token (if
@@ -391,8 +399,12 @@ impl ConnectTransport {
         };
         let repository_text = repository.to_string();
         let signer_key = signer.as_ref().map(|signer| signer.public_key_hex());
-        let transport =
-            EnvelopeTransport::new(transport, signer, origin.clone(), repository_text.clone());
+        let transport = EnvelopeTransport::new(
+            StatusTransport(transport),
+            signer,
+            origin.clone(),
+            repository_text.clone(),
+        );
 
         // The underlying `ClientConfig` default is a defense-in-depth
         // fallback only: every RPC below sets an explicit per-call
@@ -425,6 +437,10 @@ impl ConnectTransport {
             sleep: thread::sleep,
             now: crate::envelope::now_ms,
             pending_observer: None,
+            receipt_observer: None,
+            admission_policy: None,
+            admission_runs: AtomicUsize::new(0),
+            bearer: token.is_some(),
         })
     }
 
@@ -464,7 +480,7 @@ impl ConnectTransport {
         Self {
             client: TransportServiceClient::new(
                 EnvelopeTransport::new(
-                    HttpClient::plaintext(),
+                    StatusTransport(HttpClient::plaintext()),
                     signer,
                     audience.clone(),
                     repository_text.clone(),
@@ -484,6 +500,10 @@ impl ConnectTransport {
             sleep: no_sleep,
             now: crate::envelope::now_ms,
             pending_observer: None,
+            receipt_observer: None,
+            admission_policy: None,
+            admission_runs: AtomicUsize::new(0),
+            bearer: false,
         }
     }
 
@@ -608,6 +628,23 @@ impl ConnectTransport {
         self
     }
 
+    /// Observe bounded payment receipt headers on successful unary writes.
+    #[must_use]
+    pub fn with_admission_receipt_observer(
+        mut self,
+        observer: impl Fn(&AdmissionReceipt) + Send + Sync + 'static,
+    ) -> Self {
+        self.receipt_observer = Some(Arc::new(observer));
+        self
+    }
+
+    /// Install a policy for one helper-backed retry of admitted writes.
+    #[must_use]
+    pub fn with_admission(mut self, policy: AdmissionPolicy) -> Self {
+        self.admission_policy = Some(policy);
+        self
+    }
+
     /// Inject a clock for deterministic polling tests.
     #[doc(hidden)]
     #[must_use]
@@ -666,6 +703,8 @@ impl ConnectTransport {
         let mut saw_pending = false;
         let mut waiting_since_ms = start_ms;
         let mut renewed_after_unauthenticated = false;
+        let mut admission_headers = HeaderMap::new();
+        let mut helper_ran = false;
         let refs = [
             GrantRef::new(head_ref, grant_condition(head_condition)),
             GrantRef::new(packmap_ref, grant_condition(packmap_condition)),
@@ -697,10 +736,16 @@ impl ConnectTransport {
                         identity =
                             RetryIdentity::new_at(now).map_err(TransportError::RemoteError)?;
                     }
-                    let options = self.grant_options(
-                        identity.apply(CallOptions::default().with_timeout(self.unary_timeout)),
-                        GrantOperation::Write { refs: &refs },
-                    );
+                    let options = self
+                        .grant_options(
+                            identity.apply(CallOptions::default().with_timeout(self.unary_timeout)),
+                            GrantOperation::Write { refs: &refs },
+                        )
+                        .with_headers(
+                            admission_headers
+                                .iter()
+                                .map(|(name, value)| (name.clone(), value.clone())),
+                        );
                     let response = self
                         .executor
                         .block_on(self.client.advance_refs_with_options(
@@ -719,7 +764,7 @@ impl ConnectTransport {
                         ));
                     match response {
                         Ok(resp) => {
-                            let resp = resp.into_owned();
+                            let (headers, resp, _) = resp.into_owned_parts();
                             let outcome = match resp.outcome.and_then(|o| o.as_known()) {
                                 Some(ProtoAdvanceOutcome::Committed) => {
                                     CoreAdvanceOutcome::Committed
@@ -732,6 +777,13 @@ impl ConnectTransport {
                                 }
                                 _ => return Err(TransportError::InvalidResponse),
                             };
+                            if outcome == CoreAdvanceOutcome::Committed {
+                                observe_receipts(
+                                    &headers,
+                                    "/mkit.transport.v1.TransportService/AdvanceRefs",
+                                    &self.receipt_observer,
+                                );
+                            }
                             return Ok(Ok(outcome));
                         }
                         Err(err) => {
@@ -771,6 +823,42 @@ impl ConnectTransport {
                     delay
                 }
                 Err(error) => {
+                    if let TransportError::AdmissionRequired(required) = error {
+                        if helper_ran {
+                            return Err(TransportError::AdmissionRequired(Box::new(
+                                required.with_reason(
+                                    "remote challenged again after the admission helper ran",
+                                ),
+                            )));
+                        }
+                        let Some(policy) = self.admission_policy.as_ref() else {
+                            return Err(TransportError::AdmissionRequired(required));
+                        };
+                        let mut carried = HeaderMap::new();
+                        if self.bearer {
+                            carried.insert(AUTHORIZATION, http::HeaderValue::from_static("Bearer"));
+                        }
+                        admission_headers = respond_to_challenge(
+                            policy,
+                            &self.admission_runs,
+                            (
+                                &self.origin,
+                                &self.repository_text,
+                                "/mkit.transport.v1.TransportService/AdvanceRefs",
+                            ),
+                            &carried,
+                            self.bearer,
+                            *required,
+                        )?;
+                        helper_ran = true;
+                        if identity.expires_at_ms.saturating_sub((self.now)())
+                            <= MIN_RENEWAL_MARGIN_MS
+                        {
+                            identity = RetryIdentity::new_at((self.now)())
+                                .map_err(TransportError::RemoteError)?;
+                        }
+                        continue;
+                    }
                     if saw_pending {
                         self.pending_finished(waiting_since_ms, false);
                     }
@@ -1090,30 +1178,76 @@ impl Transport for ConnectTransport {
         hash: &Hash,
     ) -> TransportResult<()> {
         let (expectation, expected_id) = condition_to_wire(condition);
-        let identity = RetryIdentity::new().map_err(TransportError::RemoteError)?;
+        let mut identity =
+            RetryIdentity::new_at((self.now)()).map_err(TransportError::RemoteError)?;
         let refs = [GrantRef::new(name, grant_condition(condition))];
-        self.retrying(|| {
-            self.executor.block_on(async {
-                let options = self.grant_options(
-                    identity.apply(CallOptions::default().with_timeout(self.unary_timeout)),
-                    GrantOperation::Write { refs: &refs },
-                );
-                self.client
-                    .update_ref_with_options(
-                        UpdateRefRequest {
-                            name: Some(name.to_owned()),
-                            expectation: Some(expectation.into()),
-                            expected_id: expected_id.clone(),
-                            new_id: Some(hash.to_vec()),
-                            ..Default::default()
-                        },
-                        options,
-                    )
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| map_connect_error(e, ErrorContext::Ref))
-            })
-        })
+        let mut carried = HeaderMap::new();
+        if self.bearer {
+            carried.insert(AUTHORIZATION, http::HeaderValue::from_static("Bearer"));
+        }
+        retry_once(
+            self.admission_policy.as_ref(),
+            &self.admission_runs,
+            (
+                &self.origin,
+                &self.repository_text,
+                "/mkit.transport.v1.TransportService/UpdateRef",
+            ),
+            &carried,
+            self.bearer,
+            |admission_headers| {
+                // The retry after the admission helper may renew early: the
+                // helper can take most of the validity window. Inside a ladder,
+                // an ambiguous failure keeps its nonce until actual expiry.
+                if !admission_headers.is_empty() {
+                    let now = (self.now)();
+                    if identity.expires_at_ms.saturating_sub(now) <= MIN_RENEWAL_MARGIN_MS {
+                        identity =
+                            RetryIdentity::new_at(now).map_err(TransportError::RemoteError)?;
+                    }
+                }
+                self.retrying(|| {
+                    self.executor.block_on(async {
+                        let now = (self.now)();
+                        if now >= identity.expires_at_ms {
+                            identity =
+                                RetryIdentity::new_at(now).map_err(TransportError::RemoteError)?;
+                        }
+                        let options = self
+                            .grant_options(
+                                identity
+                                    .apply(CallOptions::default().with_timeout(self.unary_timeout)),
+                                GrantOperation::Write { refs: &refs },
+                            )
+                            .with_headers(
+                                admission_headers
+                                    .iter()
+                                    .map(|(name, value)| (name.clone(), value.clone())),
+                            );
+                        self.client
+                            .update_ref_with_options(
+                                UpdateRefRequest {
+                                    name: Some(name.to_owned()),
+                                    expectation: Some(expectation.into()),
+                                    expected_id: expected_id.clone(),
+                                    new_id: Some(hash.to_vec()),
+                                    ..Default::default()
+                                },
+                                options,
+                            )
+                            .await
+                            .map(|resp| {
+                                observe_receipts(
+                                    resp.headers(),
+                                    "/mkit.transport.v1.TransportService/UpdateRef",
+                                    &self.receipt_observer,
+                                );
+                            })
+                            .map_err(|e| map_connect_error(e, ErrorContext::Ref))
+                    })
+                })
+            },
+        )
     }
 
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {

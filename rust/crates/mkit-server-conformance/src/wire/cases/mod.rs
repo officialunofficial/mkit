@@ -29,6 +29,7 @@ mod auth;
 mod auth_bounds;
 mod concurrent;
 mod download;
+pub(super) mod grants;
 mod growth;
 mod health;
 mod info;
@@ -187,6 +188,25 @@ macro_rules! cases {
 }
 
 cases! {
+    "grants.valid_ed25519" => grants::valid_ed25519, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.push_flow" => grants::push_flow, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.part_path_ignores_header" => grants::part_path_ignores_header, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.wrong_audience" => grants::wrong_audience, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.repository_out_of_scope" => grants::repository_out_of_scope, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.namespace_scope_covers_new_repo" => grants::namespace_scope_covers_new_repo, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.grantee_mismatch" => grants::grantee_mismatch, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.read_only_grant_for_write" => grants::read_only_grant_for_write, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.expired" => grants::expired, M2, [Grants, MultiRepo, AuthV2, TestFaults], [];
+    "grants.not_yet_valid" => grants::not_yet_valid, M2, [Grants, MultiRepo, AuthV2, TestFaults], [];
+    "grants.epoch_above_stored" => grants::epoch_above_stored, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.epoch_below_stored" => grants::epoch_below_stored, M2, [Grants, MultiRepo, AuthV2, TestFaults], [];
+    "grants.new_epoch_grant_works" => grants::new_epoch_grant_works, M2, [Grants, MultiRepo, AuthV2, TestFaults], [];
+    "grants.owner_with_bad_grant_denied" => grants::owner_with_bad_grant_denied, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.header_without_auth_unauthenticated" => grants::header_without_auth_unauthenticated, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.duplicate_header_denied" => grants::duplicate_header_denied, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.oversize_header_denied" => grants::oversize_header_denied, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.non_ascii_header_denied" => grants::non_ascii_header_denied, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.retry_with_changed_grant_returns_saved_result" => grants::retry_with_changed_grant_returns_saved_result, M2, [Grants, MultiRepo, AuthV2], [];
     "multipart.three_parts" => multipart::three_parts, M1, [Multipart, AuthV2], [MultiRepo];
     "multipart.resume_receipts" => multipart::resume_receipts, M1, [Multipart, AuthV2], [MultiRepo];
     "multipart.root_mismatch_invisible" => multipart::root_mismatch_invisible, M1, [Multipart, AuthV2], [MultiRepo];
