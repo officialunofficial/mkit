@@ -114,6 +114,7 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
         grant: Some(crate::op::GrantRef {
             id: [9; 32],
             epoch: u64::from(d34),
+            presence_requirement: None,
         }),
         lease: d34.then_some(lease::LeaseWrite {
             value: codec::EpochLease {
@@ -2804,6 +2805,7 @@ impl Authorizer for Granting {
             grant: Some(crate::op::GrantRef {
                 id: [9; 32],
                 epoch: 0,
+                presence_requirement: None,
             }),
         })
     }
@@ -3154,6 +3156,7 @@ fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
         grant: Some(crate::op::GrantRef {
             id: [9; 32],
             epoch: 0,
+            presence_requirement: None,
         }),
         layout_version: false,
         mark_repo_known: false,
@@ -3268,6 +3271,7 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
             grant: Some(crate::op::GrantRef {
                 id: [9; 32],
                 epoch: 7,
+                presence_requirement: None,
             }),
             layout_version: false,
             mark_repo_known: false,

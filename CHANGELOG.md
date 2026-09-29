@@ -17,10 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and best-effort upload-session cleanup (WP-1.14).
 - Server: maintain D34's 16-bucket ref-name index through relay upserts and
   deletes, and serve eventual paged ListRefs from it (WP-1.28b).
+- Connect push: BeginUpload tickets now follow each pack into AdvanceRefs, with
+  bounded membership polling, nonce renewal, a six-data-pack advance limit,
+  and a one-time re-plan for ticket, packlist, or delta-base failures (WP-1.17).
+- Connect push: large ticketed packs stream resumable parts with locally saved
+  receipts, progress and an interruption hint; non-multipart deployments now
+  advertise a compatible pack limit (WP-1.18).
+- Server conformance: restore Single and D34 wire cases for
+  secp256k1-eip191 and webauthn-p256 owner grants (WP-2.6b).
+- Server: enforce grant ref scopes per change, including apply-time
+  presence guards for `ANY` and head/packmap pairing (WP-2.7).
+- Server: add unsigned grant-epoch RPCs with owner statements, bounded
+  epoch transitions and completion after leased shards are fenced (WP-2.8).
 - Server: enforce owner-signed write grants under Multi/Owner, including
-  `0x` namespaces, stored-epoch checks, and grant-scheme discovery. A
-  conservative interim ref gate applies until WP-2.7; adapter grant flags
-  follow in WP-1.30b.
+  `0x` namespaces, stored-epoch checks, and grant-scheme discovery.
+  Adapter grant flags follow in WP-1.30b.
 - Connect client: detect bounded 402 admission challenges and report payment receipts without exposing their values (WP-3.10). `TransportError` is now non-exhaustive, a breaking change for exhaustive downstream matches.
 - Connect client: run a trusted, user-configured admission helper once and retry admitted writes with strictly filtered headers (WP-3.11).
 - Connect client: sign repository reads with auth v2 on each attempt, including

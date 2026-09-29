@@ -23,6 +23,7 @@ mod auth;
 mod begin;
 mod coordinator;
 mod download;
+mod epoch;
 #[cfg(feature = "test-faults")]
 pub(crate) mod faults;
 mod gate;
@@ -217,6 +218,13 @@ pub struct PipelineConfig {
 }
 
 impl PipelineConfig {
+    /// One seam for advertised and enforced indexed mode.
+    /// TODO(WP-4.7): derive this from `IndexedConfig` when indexing lands.
+    #[allow(clippy::unused_self)] // The WP-4.7 configuration makes this a real instance query.
+    pub(crate) fn indexed_mode(&self) -> bool {
+        false
+    }
+
     /// Defaults for `auth`: the default write quota only for auth v2.
     #[must_use]
     pub fn new(addressing: Addressing, auth: AuthMode, upload_limits: UploadLimits) -> Self {
@@ -912,6 +920,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     .name
                     .strip_prefix(mkit_core::refs::PACKMAP_REF_PREFIX);
                 if head_branch.is_none() || head_branch != packmap_branch {
+                    if a.write_grant.is_some()
+                        && self.cfg.grants.is_some()
+                        && matches!(self.cfg.addressing, Addressing::Multi(_))
+                    {
+                        return Err(ServerError::permission_denied(
+                            "write grant rejected: ref scope",
+                        ));
+                    }
                     return Err(ServerError::invalid_argument(if tickets.is_empty() {
                         "AdvanceRefs pairs refs/heads/<x> with refs/mkit/packmap/<x> on this server"
                     } else {
@@ -1658,7 +1674,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             })?;
             let verified = cfg.verify(header.expose(), op)?;
             // Step 8 (ref scope) before step 11, which reads state and comes last.
-            grants::interim_ref_gate(&verified, &op.kind)?;
+            let presence_requirement =
+                crate::policy::ref_scopes::authorize(&verified, &op.kind, self.cfg.indexed_mode())?;
             let observed = match self.cfg.sharding {
                 Sharding::Single => op.observed_epoch,
                 Sharding::D34 => op.leased_epoch,
@@ -1670,6 +1687,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             Some(crate::op::GrantRef {
                 id: *verified.id(),
                 epoch: verified.epoch(),
+                presence_requirement,
             })
         } else {
             None
@@ -1763,7 +1781,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 charges,
                 ahead.as_ref().and_then(|s| s.namespace_window),
             )?,
-            grant: op.authz.grant,
+            grant: op.authz.grant.clone(),
             lease,
             layout_version: caps.implicit_layout_version.is_none(),
             mark_repo_known: matches!(self.cfg.addressing, Addressing::Multi(_))

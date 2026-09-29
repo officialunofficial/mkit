@@ -5,6 +5,42 @@ single crate or spec. Each entry states the invariant, why it matters, and
 what breaks when it is violated. A regression test enforces each one; find
 it by the file path listed under "Enforced by".
 
+## Ticketed pushes bind uploaded bytes to one paired advance
+
+**Always:** a Connect push opens a signed ticket for each pack that needs one,
+uploads that ticket's bytes, and commits at most seven distinct ticket ids in
+an advance pairing `refs/heads/<branch>` with `refs/mkit/packmap/<branch>`.
+Only the current data packs and current MKPL node contribute ids. Multipart
+receipts are durable before the next part begins and remain until the advance
+commits. An ambiguous advance retry retains its nonce until the envelope
+lapses; polling renews before the worst-case retry ladder could cross expiry.
+
+**Because:** a stale node ticket, early receipt deletion, or changed nonce
+could make an otherwise complete push fail or replay a committed write.
+
+**If violated:** a push can strand content, publish an incomplete closure, or
+lose resumability after interruption.
+
+**Enforced by:** `mkit-transport-connect/src/client.rs` ticket mapping, part
+store and poll loop; `mkit-cli/src/remote_dispatch/packmap.rs` current commit
+set; Connect client wire and CLI receipt-store tests; native FS end-to-end
+ticketed upload and resume tests.
+
+## Grant revocation fences every leased ref shard
+
+**Always:** a grant epoch change reports success only after every leased
+ref shard has acknowledged the new epoch or its old lease has expired.
+Each granted write checks its epoch at authorization and again in its
+atomic ref-shard apply, including after a failed apply is replanned.
+
+**Because:** an owner must be able to treat a completed epoch update as
+revocation of every older grant, even when a write was already in flight.
+
+**If violated:** a stale grantee can commit after revocation has completed.
+
+**Enforced by:** `rust/crates/mkit-server-native/tests/epoch_leases.rs`
+on memory and SQLite, and the grant-epoch and ref-scope wire suites.
+
 ## ListRefs pages make bounded forward progress
 
 **Always:** a nonterminal ListRefs page contains at least one ref, its token

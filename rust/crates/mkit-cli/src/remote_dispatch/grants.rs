@@ -2,7 +2,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mkit_attest::grant::{Capabilities, Grant, RefFlags, RepoScope, SignedHeader, packmap_head};
+use mkit_attest::grant::{
+    Capabilities, Capability, Grant, RefFlags, RepoScope, SignedHeader, packmap_head,
+};
 use mkit_core::hash::from_hex;
 use mkit_core::repo_identity::RepositoryIdentity;
 use mkit_transport_connect::{GrantCondition, GrantOperation, GrantRequest, GrantSource};
@@ -70,11 +72,33 @@ impl LocalGrants {
                         };
                         (rank, 0)
                     }
+                    GrantOperation::BeginUpload { ref_name } => {
+                        if !grant.capabilities.allows(Capability::Write) {
+                            return None;
+                        }
+                        let scopes = grant.ref_scopes.as_ref()?;
+                        if scopes.effective_flags(ref_name).is_empty() {
+                            return None;
+                        }
+                        let specificity = scopes
+                            .entries()
+                            .iter()
+                            .filter_map(|(pattern, flags)| {
+                                (pattern.matches(ref_name) && !flags.is_empty()).then_some(
+                                    match pattern {
+                                        mkit_attest::grant::RefPattern::Exact(_) => usize::MAX,
+                                        mkit_attest::grant::RefPattern::Prefix(prefix) => {
+                                            prefix.len()
+                                        }
+                                    },
+                                )
+                            })
+                            .max()
+                            .unwrap_or(0);
+                        (0, specificity)
+                    }
                     GrantOperation::Write { refs } => {
-                        if !grant
-                            .capabilities
-                            .allows(mkit_attest::grant::Capability::Write)
-                        {
+                        if !grant.capabilities.allows(Capability::Write) {
                             return None;
                         }
                         let scopes = grant.ref_scopes.as_ref()?;

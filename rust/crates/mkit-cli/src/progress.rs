@@ -44,7 +44,7 @@
 //! is an exception: a piped, non-quiet push gets one start and one completion
 //! line because the wait can last for minutes.
 
-use mkit_transport_connect::PendingEvent;
+use mkit_transport_connect::{PendingEvent, UploadEvent};
 use std::cell::RefCell;
 use std::io::{IsTerminal, Write};
 
@@ -149,6 +149,76 @@ impl Reporter {
 thread_local! {
     static REPORTER: RefCell<Option<Reporter>> = const { RefCell::new(None) };
     static PENDING: RefCell<Option<PendingReporter>> = const { RefCell::new(None) };
+    static UPLOAD: RefCell<Option<UploadReporter>> = const { RefCell::new(None) };
+}
+
+struct UploadReporter {
+    quiet: bool,
+    interactive: bool,
+    active: bool,
+}
+
+impl UploadReporter {
+    fn render(&mut self, event: UploadEvent) -> Option<String> {
+        if self.quiet {
+            return None;
+        }
+        match event {
+            UploadEvent::PartsPlanned {
+                parts,
+                resumed,
+                saved_bytes,
+                bytes,
+            } => {
+                self.active = true;
+                if self.interactive {
+                    Some(format!(
+                        "\rUploading pack: part {resumed}/{parts} ({}/{} MiB), {resumed} resumed\x1b[K",
+                        saved_bytes / (1024 * 1024),
+                        bytes / (1024 * 1024)
+                    ))
+                } else {
+                    Some(format!(
+                        "Uploading pack: {parts} parts, {resumed} resumed.\n"
+                    ))
+                }
+            }
+            UploadEvent::PartSent {
+                index,
+                parts,
+                saved_bytes,
+                bytes,
+                resumed,
+            } if self.interactive => Some(format!(
+                "\rUploading pack: part {}/{parts} ({}/{} MiB), {resumed} resumed\x1b[K",
+                index + 1,
+                saved_bytes / (1024 * 1024),
+                bytes / (1024 * 1024)
+            )),
+            UploadEvent::Finished if self.active => {
+                self.active = false;
+                if self.interactive {
+                    Some("\rUploading pack: done.\x1b[K\n".to_owned())
+                } else {
+                    Some("Upload complete.\n".to_owned())
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Render a multipart upload event on the current command's stderr sink.
+pub fn upload_event(event: UploadEvent) {
+    UPLOAD.with(|slot| {
+        if let Some(reporter) = slot.borrow_mut().as_mut()
+            && let Some(line) = reporter.render(event)
+        {
+            let mut stderr = std::io::stderr().lock();
+            let _ = stderr.write_all(line.as_bytes());
+            let _ = stderr.flush();
+        }
+    });
 }
 
 struct PendingReporter {
@@ -244,6 +314,9 @@ impl Drop for Guard {
         PENDING.with(|r| {
             r.borrow_mut().take();
         });
+        UPLOAD.with(|r| {
+            r.borrow_mut().take();
+        });
         REPORTER.with(|r| {
             if let Some(mut rep) = r.borrow_mut().take() {
                 rep.finish();
@@ -270,6 +343,14 @@ pub fn start(label: &'static str, total: Option<usize>, enabled: bool, quiet: bo
             progress_mode.as_deref(),
             std::io::stderr().is_terminal(),
         ));
+    });
+    UPLOAD.with(|r| {
+        *r.borrow_mut() = Some(UploadReporter {
+            quiet: quiet || progress_mode.as_deref() == Some("never"),
+            interactive: progress_mode.as_deref() == Some("always")
+                || std::io::stderr().is_terminal(),
+            active: false,
+        });
     });
     REPORTER.with(|r| {
         *r.borrow_mut() = if enabled {
@@ -397,6 +478,50 @@ mod tests {
         let mut never = PendingReporter::new(false, Some("never"), true);
         assert_eq!(never.render(wait), None);
         assert_eq!(never.render(done), None);
+    }
+
+    #[test]
+    fn upload_progress_shows_resumed_bytes_on_tty_and_two_lines_when_piped() {
+        let start = UploadEvent::PartsPlanned {
+            parts: 12,
+            resumed: 4,
+            saved_bytes: 32 << 20,
+            bytes: 96 << 20,
+        };
+        let sent = UploadEvent::PartSent {
+            index: 4,
+            parts: 12,
+            saved_bytes: 40 << 20,
+            bytes: 96 << 20,
+            resumed: 4,
+        };
+        let mut tty = UploadReporter {
+            quiet: false,
+            interactive: true,
+            active: false,
+        };
+        assert!(tty.render(start).unwrap().contains("part 4/12 (32/96 MiB)"));
+        assert!(
+            tty.render(sent)
+                .unwrap()
+                .contains("part 5/12 (40/96 MiB), 4 resumed")
+        );
+        assert!(tty.render(UploadEvent::Finished).unwrap().contains("done."));
+
+        let mut piped = UploadReporter {
+            quiet: false,
+            interactive: false,
+            active: false,
+        };
+        assert_eq!(
+            piped.render(start).as_deref(),
+            Some("Uploading pack: 12 parts, 4 resumed.\n")
+        );
+        assert_eq!(piped.render(sent), None);
+        assert_eq!(
+            piped.render(UploadEvent::Finished).as_deref(),
+            Some("Upload complete.\n")
+        );
     }
 
     /// `should_report` precedence: `--quiet` wins outright, then

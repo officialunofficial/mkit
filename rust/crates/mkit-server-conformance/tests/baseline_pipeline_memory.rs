@@ -363,7 +363,7 @@ fn multi_allowlist(profile: &Profile) -> BTreeSet<mkit_core::repo_identity::Name
     else {
         panic!("Multi baseline needs auth v2");
     };
-    let allowed: BTreeSet<_> = mkit_server_conformance::wire::CASES
+    let mut allowed: BTreeSet<_> = mkit_server_conformance::wire::CASES
         .iter()
         .filter(|case| case.requires.contains(&Feature::MultiRepo))
         .flat_map(|case| {
@@ -384,6 +384,9 @@ fn multi_allowlist(profile: &Profile) -> BTreeSet<mkit_core::repo_identity::Name
             })
         })
         .collect();
+    if profile.has(Feature::Grants) {
+        allowed.extend(mkit_server_conformance::wire::grant_owner_namespaces());
+    }
     allowed
 }
 
@@ -683,13 +686,18 @@ async fn pipeline_grants_single_and_d34() {
         for case in [
             "info.shape_and_policy",
             "grants.valid_ed25519",
+            "grants.valid_secp256k1_eip191",
+            "grants.valid_webauthn_p256",
             "grants.push_flow",
             "grants.part_path_ignores_header",
+            "grants.zero_x_without_grant_denied",
             "grants.wrong_audience",
             "grants.repository_out_of_scope",
             "grants.namespace_scope_covers_new_repo",
             "grants.grantee_mismatch",
             "grants.read_only_grant_for_write",
+            "grants.ed25519_scheme_on_0x_denied",
+            "grants.webauthn_unconfigured_rp_denied",
             "grants.epoch_above_stored",
             "grants.owner_with_bad_grant_denied",
             "grants.header_without_auth_unauthenticated",
@@ -697,6 +705,34 @@ async fn pipeline_grants_single_and_d34() {
             "grants.oversize_header_denied",
             "grants.non_ascii_header_denied",
             "grants.retry_with_changed_grant_returns_saved_result",
+            "ref_scopes.create_only_rejects_update",
+            "ref_scopes.cu_grant_creates_but_match_update_denied_opaque",
+            "ref_scopes.force_allows_non_ff",
+            "ref_scopes.delete_needs_d",
+            "ref_scopes.any_on_absent_needs_c",
+            "ref_scopes.any_on_present_needs_f",
+            "ref_scopes.direct_packmap_update_denied",
+            "ref_scopes.head_only_update_ok",
+            "ref_scopes.advance_wrong_packmap_denied",
+            "ref_scopes.rebaseline_push_under_head_scope",
+            "ref_scopes.begin_upload_any_flag",
+            "ref_scopes.begin_upload_unmatched_denied",
+            "epochs.get_unsigned_zero",
+            "epochs.get_ignores_auth_headers",
+            "epochs.get_bad_namespace_invalid_argument",
+            "epochs.set_advances_and_get_reflects",
+            "epochs.set_retry_same_epoch",
+            "epochs.set_over_step_denied",
+            "epochs.set_decrease_denied",
+            "epochs.wrong_audience",
+            "epochs.expired",
+            "epochs.not_yet_valid",
+            "epochs.scheme_not_advertised",
+            "epochs.namespace_not_served",
+            "epochs.oversize_statement",
+            "epochs.zero_x_secp256k1_statement",
+            "epochs.zero_x_webauthn_statement",
+            "epochs.old_grant_denied_new_grant_works_after_set",
             #[cfg(feature = "test-faults")]
             "grants.expired",
             #[cfg(feature = "test-faults")]

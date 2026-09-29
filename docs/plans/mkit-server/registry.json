@@ -982,6 +982,17 @@
     ]
   },
   {
+    "id": "1.17b",
+    "title": "Client: split large pushes along first-parent history",
+    "milestone": "M1",
+    "track": "client",
+    "depends_on": ["1.17"],
+    "size": "M",
+    "summary": "Automatically divide a push exceeding six data packs into ancestor advances, each with at most seven tickets including its MKPL node.",
+    "human_action": false,
+    "area_gates": ["rust", "cli"]
+  },
+  {
     "id": "1.21",
     "title": "Worker: published-view ref snapshots per ref-index bucket (R2/Cache, debounced) for readers",
     "milestone": "M1",
@@ -1169,6 +1180,23 @@
       "conf-native",
       "conf-wrangler",
       "wasm"
+    ]
+  },
+  {
+    "id": "2.6b",
+    "title": "Server: secp256k1-eip191 and webauthn-p256 grant wire conformance",
+    "milestone": "M2",
+    "track": "conformance",
+    "depends_on": [
+      "2.6"
+    ],
+    "size": "S",
+    "summary": "Restores five Single and D34 wire cases for 0x owner grants; tests only.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
     ]
   },
   {
