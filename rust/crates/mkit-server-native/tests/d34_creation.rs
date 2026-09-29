@@ -9,17 +9,20 @@ use std::sync::{
 
 use mkit_core::protocol::RefWriteCondition;
 use mkit_core::repo_identity::Namespace;
+use mkit_server::Clock;
 use mkit_server::auth_v2::AuthV2Config;
 use mkit_server::pipeline::{
     Admission, AdmissionDecision, AdmissionInput, AuthMode, Authenticated, Authorizer, D34Shards,
     Hooks, Pipeline, PipelineConfig, PreReceive, RequestMeta, ShardMap, Sharding, SinglePartition,
 };
 use mkit_server::policy::NamespacePolicy;
+use mkit_server::relay::{NoHook, RelayBudget, RelayHandler};
 use mkit_server::sql::SqlKvStore;
 use mkit_server::store::{
     Batch, BatchOutcome, BlobKey, Cursor, Key, Partition, PartitionStats, ScanPage,
     StoreCapabilities, StoreError, Value, Write, codec, keys,
 };
+use mkit_server::timers::{TickBudget, TimerRegistry, run_due};
 use mkit_server::upload::{UploadLimits, token::TicketKeys};
 use mkit_server::{
     Addressing, Code, MemoryBlobStore, MemoryKv, MultiAddressing, NamespaceStore, NoopMetrics,
@@ -28,6 +31,7 @@ use mkit_server::{
 use mkit_server::{AuthzFacts, Creation, Operation};
 use mkit_server_conformance::wire::sign::Signer;
 use mkit_server_native::{Blocking, RusqliteConn};
+use proptest::prelude::*;
 use tokio::sync::Barrier;
 
 const AUDIENCE: &str = "http://localhost:9876";
@@ -49,6 +53,7 @@ struct Controls {
     race: Mutex<Option<Arc<Barrier>>>,
     race_reads: AtomicUsize,
     fail_refs: AtomicBool,
+    fail_index_scan: AtomicBool,
     fail_grants: AtomicUsize,
 }
 
@@ -129,6 +134,13 @@ impl<N: NamespaceStore> NamespaceStore for TestStore<N> {
         limit: u32,
     ) -> Result<ScanPage, StoreError> {
         self.record(Call::Scan(p.clone()));
+        if matches!(p, Partition::RefIndex { .. })
+            && self.controls.fail_index_scan.load(Ordering::SeqCst)
+        {
+            return Err(StoreError::Unsupported(
+                "injected index scan failure".into(),
+            ));
+        }
         self.inner.scan(p, start, end, after, limit).await
     }
 
@@ -232,6 +244,17 @@ fn pipeline<N: NamespaceStore>(
     challenge: bool,
     deny: bool,
 ) -> (TestPipeline<N>, Arc<Observations>) {
+    pipeline_with_page_limit(store, sharding, addressing, challenge, deny, 1000)
+}
+
+fn pipeline_with_page_limit<N: NamespaceStore>(
+    store: TestStore<N>,
+    sharding: Sharding,
+    addressing: Addressing,
+    challenge: bool,
+    deny: bool,
+    page_limit: u32,
+) -> (TestPipeline<N>, Arc<Observations>) {
     let observations = Arc::new(Observations::default());
     let observer = Observe {
         observations: observations.clone(),
@@ -264,6 +287,7 @@ fn pipeline<N: NamespaceStore>(
         },
     );
     cfg.sharding = sharding;
+    cfg.list_page_limit = page_limit;
     cfg.write_quota = None;
     cfg.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap());
     let pipe = Pipeline::new(
@@ -276,6 +300,268 @@ fn pipeline<N: NamespaceStore>(
     )
     .unwrap();
     (pipe, observations)
+}
+
+async fn real_index_listing<N: NamespaceStore>(backend: N, names: &[String]) {
+    let store = TestStore::new(backend);
+    let (pipe, _) =
+        pipeline_with_page_limit(store.clone(), Sharding::D34, multi(), false, false, 3);
+    let identities = [identity("index-a"), identity("index-b")];
+    for repository in &identities {
+        let auth = signed(&pipe, repository);
+        pipe.update_ref(&auth, update("refs/heads/bootstrap", 1))
+            .await
+            .unwrap();
+        for name in names {
+            let target = D34Shards.ref_index(&auth.repo().repo, name);
+            let value = if repository == &identities[0] {
+                [1; 32]
+            } else {
+                [2; 32]
+            };
+            store
+                .inner
+                .apply(
+                    &target,
+                    Batch::new().put(
+                        keys::ref_index_key(&auth.repo().repo.name, name),
+                        codec::encode_ref_id(&value),
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+    }
+    for (repository, id) in identities.iter().zip([[1; 32], [2; 32]]) {
+        let reader = read(&pipe, Procedure::ListRefs, repository);
+        let got = pipe.list_refs(&reader, "refs/heads/").await.unwrap();
+        let expected = names
+            .iter()
+            .map(|name| name.strip_prefix("refs/heads/").unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            got.iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(got.iter().all(|entry| entry.id == id));
+        let narrow = pipe.list_refs(&reader, "refs/heads/feat/").await.unwrap();
+        assert_eq!(
+            narrow
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            names
+                .iter()
+                .filter_map(|name| name.strip_prefix("refs/heads/feat/"))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+async fn index_corruption_unavailable<N: NamespaceStore>(backend: N) {
+    let store = TestStore::new(backend);
+    let (pipe, _) = pipeline(store.clone(), Sharding::D34, multi(), false, false);
+    let identity = identity("index-corrupt");
+    let auth = signed(&pipe, &identity);
+    pipe.update_ref(&auth, update("refs/heads/main", 1))
+        .await
+        .unwrap();
+    let reader = read(&pipe, Procedure::ListRefs, &identity);
+    store.controls.fail_index_scan.store(true, Ordering::SeqCst);
+    assert_eq!(
+        pipe.list_refs(&reader, "").await.unwrap_err().code(),
+        Code::Unavailable
+    );
+    store
+        .controls
+        .fail_index_scan
+        .store(false, Ordering::SeqCst);
+    let name = "refs/heads/wrong";
+    let correct = D34Shards.ref_index(&auth.repo().repo, name);
+    let wrong = D34Shards
+        .ref_index_partitions(&auth.repo().repo)
+        .into_iter()
+        .find(|p| p != &correct)
+        .unwrap();
+    store
+        .inner
+        .apply(
+            &wrong,
+            Batch::new().put(
+                keys::ref_index_key(&auth.repo().repo.name, name),
+                codec::encode_ref_id(&[9; 32]),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        pipe.list_refs(&reader, "").await.unwrap_err().code(),
+        Code::Unavailable
+    );
+}
+
+async fn relay_ref_index_lag<N: NamespaceStore + 'static>(backend: N) {
+    let store = TestStore::new(backend);
+    let (pipe, _) = pipeline(store.clone(), Sharding::D34, multi(), false, false);
+    let identity = identity("index-lag");
+    let name = "refs/heads/main";
+    let auth = signed(&pipe, &identity);
+    pipe.update_ref(&auth, update(name, 1)).await.unwrap();
+    let reader = read(&pipe, Procedure::ListRefs, &identity);
+    let ref_reader = read(&pipe, Procedure::ReadRef, &identity);
+    assert_eq!(
+        pipe.read_ref(&ref_reader, name).await.unwrap(),
+        Some([1; 32])
+    );
+    assert!(
+        pipe.list_refs(&reader, "refs/heads/")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let source = D34Shards.ref_shard(&auth.repo().repo, name);
+    let registry = TimerRegistry::new().register(RelayHandler {
+        target: store.clone(),
+        hook: NoHook,
+        budget: RelayBudget::default(),
+    });
+    let budget = TickBudget::default();
+    let clock = SystemClock;
+    let tick = || {
+        run_due(
+            &store,
+            &source,
+            &registry,
+            &clock,
+            u64::try_from(clock.now_ms()).unwrap(),
+            &budget,
+        )
+    };
+    assert!(tick().await.unwrap().fired > 0);
+    assert_eq!(
+        pipe.list_refs(&reader, "refs/heads/")
+            .await
+            .unwrap()
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["main"]
+    );
+    let mut delete = update(name, 0);
+    delete.condition = RefWriteCondition::Match([1; 32]);
+    delete.new = None;
+    pipe.update_ref(&signed(&pipe, &identity), delete)
+        .await
+        .unwrap();
+    assert_eq!(pipe.read_ref(&ref_reader, name).await.unwrap(), None);
+    assert_eq!(
+        pipe.list_refs(&reader, "refs/heads/").await.unwrap().len(),
+        1
+    );
+    assert!(tick().await.unwrap().fired > 0);
+    assert!(
+        pipe.list_refs(&reader, "refs/heads/")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn ref_index_lag_memory() {
+    Box::pin(relay_ref_index_lag(MemoryKv::default())).await;
+}
+
+#[tokio::test]
+async fn ref_index_lag_sqlite() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = RusqliteConn::open(dir.path().join("meta.sqlite3")).unwrap();
+    Box::pin(relay_ref_index_lag(Blocking::new(
+        SqlKvStore::open(conn).unwrap(),
+    )))
+    .await;
+}
+
+#[cfg(feature = "test-faults")]
+#[tokio::test]
+async fn advance_ref_relay_delay_holds_both_index_rows() {
+    use mkit_server::pipeline::RELAY_DELAY_MS_HEADER;
+
+    let store = TestStore::new(MemoryKv::default());
+    let (pipe, _) = pipeline(store.clone(), Sharding::D34, multi(), false, false);
+    let identity = identity("advance-delay");
+    let envelope = Signer::new([1; 32], AUDIENCE, &identity)
+        .sign_body(Procedure::AdvanceRefs.connect_path(), BODY);
+    let mut headers = envelope.headers;
+    headers.push((RELAY_DELAY_MS_HEADER.into(), "600000".into()));
+    let auth = authenticate(&pipe, Procedure::AdvanceRefs, &headers);
+    let head = "refs/heads/main";
+    let packmap = "refs/mkit/packmap/main";
+    pipe.advance_refs(&auth, update(head, 1), update(packmap, 2))
+        .await
+        .unwrap();
+
+    let source = D34Shards.ref_shard(&auth.repo().repo, head);
+    assert!(store.get(&source, &keys::relay(1)).await.unwrap().is_some());
+    let clock = SystemClock;
+    let registry = TimerRegistry::new().register(RelayHandler {
+        target: store.clone(),
+        hook: NoHook,
+        budget: RelayBudget::default(),
+    });
+    let report = run_due(
+        &store,
+        &source,
+        &registry,
+        &clock,
+        u64::try_from(clock.now_ms()).unwrap(),
+        &TickBudget::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.fired, 1);
+    assert!(store.get(&source, &keys::relay(1)).await.unwrap().is_some());
+    for name in [head, packmap] {
+        let bucket = D34Shards.ref_index(&auth.repo().repo, name);
+        assert!(
+            store
+                .get(&bucket, &keys::ref_index_key(&auth.repo().repo.name, name))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+async fn index_failures_are_unavailable_memory() {
+    index_corruption_unavailable(MemoryKv::default()).await;
+}
+
+#[tokio::test]
+async fn index_failures_are_unavailable_sqlite() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = RusqliteConn::open(dir.path().join("meta.sqlite3")).unwrap();
+    index_corruption_unavailable(Blocking::new(SqlKvStore::open(conn).unwrap())).await;
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(12))]
+    #[test]
+    fn real_memory_and_sqlite_d34_pages_match_sorted_refs(ids in proptest::collection::vec(0u16..100, 0..30)) {
+        let mut names = ids.into_iter().map(|id| format!("refs/heads/feat/n{id:03}")).collect::<Vec<_>>();
+        names.extend(["refs/heads/featx".to_owned(), "refs/heads/main".to_owned()]);
+        names.sort(); names.dedup();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            real_index_listing(MemoryKv::default(), &names).await;
+            let dir = tempfile::tempdir().unwrap();
+            let conn = RusqliteConn::open(dir.path().join("meta.sqlite3")).unwrap();
+            real_index_listing(Blocking::new(SqlKvStore::open(conn).unwrap()), &names).await;
+        });
+    }
 }
 
 fn multi() -> Addressing {
@@ -681,11 +967,7 @@ async fn registered_before_refs<N: NamespaceStore>(backend: N, sharding: Shardin
     let listed = pipe
         .list_refs(&read(&pipe, Procedure::ListRefs, &identity), "refs")
         .await;
-    if sharding == Sharding::Single {
-        assert!(listed.unwrap().is_empty());
-    } else {
-        assert_eq!(listed.unwrap_err().code(), Code::Unimplemented);
-    }
+    assert!(listed.unwrap().is_empty());
     store.controls.fail_refs.store(false, Ordering::SeqCst);
     pipe.update_ref(&auth, update("refs/heads/a", 1))
         .await
@@ -736,6 +1018,29 @@ async fn single_addressing<N: NamespaceStore>(backend: N, sharding: Sharding) {
         assert_eq!(
             store.inner.get(&p, &key).await.unwrap().is_some(),
             sharding == Sharding::D34
+        );
+    }
+    if sharding == Sharding::D34 {
+        store.take_calls();
+        let fresh = signed(&pipe, "configured");
+        pipe.update_ref(&fresh, update("refs/heads/a", 2))
+            .await
+            .unwrap();
+        let calls = store.take_calls();
+        assert_eq!(calls.len(), 2, "steady D34 ref write: {calls:?}");
+        assert!(matches!(
+            calls.as_slice(),
+            [Call::Many(..), Call::Apply(..)]
+        ));
+        let reader = read(&pipe, Procedure::ListRefs, "configured");
+        let _ = pipe.list_refs(&reader, "refs/heads/").await.unwrap();
+        let calls = store.take_calls();
+        assert!(
+            calls
+                .iter()
+                .filter(|call| matches!(call, Call::Scan(Partition::RefIndex { .. })))
+                .count()
+                <= 16
         );
     }
 }

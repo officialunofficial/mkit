@@ -224,10 +224,9 @@ SPEC-SERVER §12.1 before production use; those leases are Stage 2 work.
 `refs/mkit/packmap/<branch>` together into a ref partition, with configuration
 in the namespace coordinator. Any other `AdvanceRefs` pair is
 `invalid_argument`. D34's default write quota counts per ref partition;
-namespace totals arrive with WP-1.26. `ListRefs` under D34 is `unimplemented`
-until the ref index lands with WP-1.28. The conformance runner accepts the
-same `--sharding single|d34` option and explicitly skips its successful
-listing cases under D34.
+namespace totals arrive with WP-1.26. `ListRefs` under D34 reads the eventual
+ref-name index. The conformance runner accepts the same
+`--sharding single|d34` option and runs its listing cases under both modes.
 
 One root never keeps refs in two places (R-81). `--meta sqlite:` refuses a
 root that already holds ref files. Otherwise, under the root's ref lock, it

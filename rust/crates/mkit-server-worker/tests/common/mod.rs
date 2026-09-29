@@ -4,8 +4,8 @@
 //! - [`SimBucket`]: R2 with the semantics [`R2BlobStore`] relies on: a put
 //!   runs on its own thread (spawned) and fails, writing nothing, when its
 //!   body is short, long or aborted; a failed `If-None-Match: *` condition
-//!   is `Ok(false)`; bodies come back in 1.5 MiB pieces, so the store must
-//!   re-chunk them.
+//!   is `Ok(false)`; bodies come back in 256 KiB pieces, below the store's
+//!   piece limit (re-chunking of larger pieces is unit-tested in `r2.rs`).
 //! - [`SimDoConn`]: Durable Object SQL over rusqlite: it refuses what a
 //!   Durable Object refuses (transaction control, pragmas, `vacuum`, more
 //!   than 100 bound parameters, statements over 100 KB), has a fixed hard
@@ -19,6 +19,8 @@
 //!
 //! [`R2BlobStore`]: mkit_server_worker::r2::R2BlobStore
 #![allow(dead_code, unreachable_pub)]
+
+pub mod multipart_allocator;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -40,7 +42,7 @@ use mkit_server_worker::do_sql::classify_error;
 use mkit_server_worker::naming::DoTarget;
 use mkit_server_worker::ns_client::{DoNamespaceStore, NsTransport};
 use mkit_server_worker::ns_object::serve;
-use mkit_server_worker::r2::{ObjectBucket, ObjectStream, PutBody, PutResult};
+use mkit_server_worker::r2::{ObjectBucket, ObjectPage, ObjectStream, PutBody, PutResult};
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -58,8 +60,10 @@ pub struct SimBucket {
     early: Arc<AtomicBool>,
 }
 
-/// The piece size simulated bodies arrive in: above the store's limit.
-const SIM_PIECE: usize = 1536 * 1024;
+/// The piece size simulated bodies arrive in: below the store's limit.
+// Model the bounded chunks of an R2 response while charging each copied
+// chunk to the reading thread's heap meter.
+const SIM_PIECE: usize = 256 * 1024;
 
 impl SimBucket {
     pub fn fail_next_puts(&self, n: usize) {
@@ -74,6 +78,10 @@ impl SimBucket {
 
     pub fn objects(&self) -> usize {
         lock(&self.objects).len()
+    }
+
+    pub fn replace_object(&self, key: &str, bytes: Bytes) {
+        lock(&self.objects).insert(key.to_owned(), bytes);
     }
 
     /// A put's answer before it writes, if it does not write: a pending
@@ -94,6 +102,7 @@ impl ObjectBucket for SimBucket {
         let (tx, rx) = oneshot::channel();
         let this = self.clone();
         std::thread::spawn(move || {
+            multipart_allocator::exclude_current_thread();
             let result = block_on(async {
                 if this.early.load(Ordering::SeqCst)
                     && let Some(answer) = this.refuse(&key)
@@ -146,15 +155,44 @@ impl ObjectBucket for SimBucket {
             ),
             None => object,
         };
-        let pieces: Vec<Result<Bytes, String>> = body
-            .chunks(SIM_PIECE)
-            .map(|c| Ok(Bytes::copy_from_slice(c)))
-            .collect();
-        Ok(Some((size, Box::pin(futures::stream::iter(pieces)))))
+        let stream = futures::stream::unfold(body, |mut rest| async move {
+            if rest.is_empty() {
+                None
+            } else {
+                let n = rest.len().min(SIM_PIECE);
+                let piece = Bytes::copy_from_slice(&rest[..n]);
+                let _ = rest.split_to(n);
+                Some((Ok(piece), rest))
+            }
+        });
+        Ok(Some((size, Box::pin(stream))))
     }
 
     async fn delete(&self, key: &str) -> Result<(), String> {
         lock(&self.objects).remove(key);
+        Ok(())
+    }
+
+    async fn list(&self, prefix: &str, cursor: Option<&str>) -> Result<ObjectPage, String> {
+        let objects = lock(&self.objects);
+        let keys: Vec<_> = objects
+            .keys()
+            .filter(|key| key.starts_with(prefix) && cursor.is_none_or(|c| key.as_str() > c))
+            .take(1001)
+            .cloned()
+            .collect();
+        let next = (keys.len() > 1000).then(|| keys[999].clone());
+        Ok(ObjectPage {
+            keys: keys.into_iter().take(1000).collect(),
+            cursor: next,
+        })
+    }
+
+    async fn delete_many(&self, keys: Vec<String>) -> Result<(), String> {
+        let mut objects = lock(&self.objects);
+        for key in keys {
+            objects.remove(&key);
+        }
         Ok(())
     }
 

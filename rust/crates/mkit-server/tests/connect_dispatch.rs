@@ -1129,7 +1129,7 @@ fn m2_stub_paths_are_not_authenticated_procedures_yet() {
 }
 
 #[tokio::test]
-async fn m2_stubs_reject_binary_and_json_without_writes_in_both_auth_modes() {
+async fn m2_remaining_stubs_and_epoch_errors_write_nothing_in_both_auth_modes() {
     for auth in [
         authv2(),
         AuthMode::Bearer {
@@ -1137,8 +1137,8 @@ async fn m2_stubs_reject_binary_and_json_without_writes_in_both_auth_modes() {
         },
     ] {
         let (server, writes) = spy_server(auth);
-        assert_unimplemented(
-            &server
+        assert_eq!(
+            server
                 .unary(
                     "GetGrantEpoch",
                     &GetGrantEpochRequest {
@@ -1147,10 +1147,12 @@ async fn m2_stubs_reject_binary_and_json_without_writes_in_both_auth_modes() {
                     },
                     &[],
                 )
-                .await,
+                .await
+                .code(),
+            "invalid_argument",
         );
-        assert_unimplemented(
-            &server
+        assert_eq!(
+            server
                 .unary(
                     "SetGrantEpoch",
                     &SetGrantEpochRequest {
@@ -1159,7 +1161,9 @@ async fn m2_stubs_reject_binary_and_json_without_writes_in_both_auth_modes() {
                     },
                     &[],
                 )
-                .await,
+                .await
+                .code(),
+            "unimplemented",
         );
         assert_unimplemented(
             &server
@@ -1175,12 +1179,21 @@ async fn m2_stubs_reject_binary_and_json_without_writes_in_both_auth_modes() {
                 .unary("IssueObjectUrl", &IssueObjectUrlRequest::default(), &[])
                 .await,
         );
-        for rpc in [
-            "GetGrantEpoch",
-            "SetGrantEpoch",
-            "SetRepoVisibility",
-            "IssueObjectUrl",
-        ] {
+        assert_eq!(
+            server
+                .json("GetGrantEpoch", &serde_json::json!({}), &[])
+                .await
+                .code(),
+            "invalid_argument"
+        );
+        assert_eq!(
+            server
+                .json("SetGrantEpoch", &serde_json::json!({}), &[])
+                .await
+                .code(),
+            "unimplemented"
+        );
+        for rpc in ["SetRepoVisibility", "IssueObjectUrl"] {
             assert_unimplemented(&server.json(rpc, &serde_json::json!({}), &[]).await);
         }
         assert_eq!(writes.load(Ordering::SeqCst), 0);

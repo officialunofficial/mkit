@@ -30,6 +30,22 @@ fn indexed_startup_requires_ticketed_multi_and_advertises_effective_limits() {
 }
 
 #[test]
+fn server_info_clamps_pack_limit_without_multipart_storage() {
+    let mut c = cfg(AuthMode::Open);
+    c.upload_limits.max_total_bytes = 32 * 1024 * 1024;
+    let pipe = Pipeline::new(
+        super::stream::Counting::default(),
+        store(&clock()),
+        Hooks::new(),
+        c.clone(),
+        clock(),
+        Arc::new(crate::NoopMetrics),
+    )
+    .unwrap();
+    assert_eq!(pipe.server_info().max_pack_bytes, c.part_size);
+}
+
+#[test]
 fn server_info_defaults_and_custom_limits_read_no_store() {
     let mut c = cfg(AuthMode::Open);
     let defaults = build(c.clone(), Spy::new(store(&clock())), Hooks::new(), clock());

@@ -2,10 +2,11 @@
 //! ConnectRPC client, implementing [`Transport`] for the `mkit+https://`
 //! (and loopback-only `mkit+http://`) remote scheme.
 
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -15,11 +16,14 @@ use http::{HeaderMap, Uri};
 use mkit_core::hash::Hash;
 use mkit_core::protocol::async_shim::Executor as _;
 use mkit_core::protocol::{
-    AdvanceOutcome as CoreAdvanceOutcome, BackoffIterator, PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE,
-    PackKey, RefWriteCondition, RepositoryAddress, Transport, TransportError, TransportResult,
+    AdvanceOutcome as CoreAdvanceOutcome, BackoffIterator, CommitOutcome, PACK_BODY_LIMIT,
+    PACK_BODY_LIMIT_USIZE, PackKey, RefWriteCondition, RepositoryAddress, Transport,
+    TransportError, TransportResult, UploadLimits,
 };
 use mkit_core::refs::{Ref, validate_ref_name};
 use mkit_core::repo_identity::{IdentityError, RepositoryIdentity};
+use mkit_core::upload_parts::{PartError, PartPlan, part_subtree_cv};
+use mkit_core::write_auth::{ContentCommitment, PartCommitment};
 use url::{Host, Url};
 
 use crate::admission::{AdmissionPolicy, respond_to_challenge, retry_once};
@@ -27,12 +31,16 @@ use crate::envelope::{EnvelopeSigner, EnvelopeTransport, RetryIdentity};
 use crate::error::{ErrorContext, map_connect_error, pending_verification_delay};
 use crate::executor::TokioExecutor;
 use crate::grant::{GrantCondition, GrantOperation, GrantRef, GrantRequest, GrantSource};
+use crate::part_receipts::{MemoryPartReceiptStore, PartReceiptStore, StoredPart, TicketMetadata};
+use crate::proto::mkit::transport::v1::__buffa::oneof::begin_upload_response::Result as BeginWireResult;
 use crate::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::Body as DownloadBody;
+use crate::proto::mkit::transport::v1::upload_part_request::Msg as PartWireMessage;
 use crate::proto::mkit::transport::v1::{
-    AdvanceOutcome as ProtoAdvanceOutcome, AdvanceRefsRequest, DownloadPackRequest,
-    GetServerInfoRequest, GetServerInfoResponse, ListRefsRequest, PackChunk, PackExistsRequest,
-    ReadRefRequest, RefExpectation, TransportServiceClient, UpdateRefRequest, UploadPackHeader,
-    UploadPackRequest,
+    AdvanceOutcome as ProtoAdvanceOutcome, AdvanceRefsRequest, BeginUploadRequest,
+    CompleteUploadRequest, DownloadPackRequest, GetServerInfoRequest, GetServerInfoResponse,
+    ListRefsRequest, PackChunk, PackExistsRequest, ReadRefRequest, RefExpectation,
+    TransportServiceClient, UpdateRefRequest, UploadPackHeader, UploadPackRequest,
+    UploadPartHeader, UploadPartRequest,
 };
 use crate::receipt::{AdmissionReceipt, observe_receipts};
 use crate::status::StatusTransport;
@@ -127,6 +135,52 @@ fn valid_server_info(info: &GetServerInfoResponse) -> bool {
             .part_size
             .is_some_and(|v| v >= 8 * 1024 * 1024 && v.is_power_of_two())
         && info.max_list_refs_page_size.is_some_and(|v| v >= 1)
+        && info.max_parts.is_some_and(|v| v >= 1)
+}
+
+#[derive(Clone)]
+struct CachedTicket {
+    id: [u8; 32],
+    token: Vec<u8>,
+    part_size: u64,
+    expires_unix_ms: i64,
+}
+
+impl std::fmt::Debug for CachedTicket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedTicket")
+            .field("id", &self.id)
+            .field("part_size", &self.part_size)
+            .field("expires_unix_ms", &self.expires_unix_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+enum BeginAnswer {
+    AlreadyPresent,
+    Ticket(CachedTicket),
+    Ticketless,
+}
+
+enum BeginSpecial {
+    Unimplemented,
+    OpenCap,
+    Rejected(String),
+}
+
+enum CompleteSpecial {
+    Ticket,
+    InvalidReceipt,
+}
+
+fn log_receipt_cleanup_error(action: &str, error: &TransportError) {
+    log::warn!("upload receipt cache {action} failed: {error}");
+}
+
+fn upload_interrupted(saved: u32, total: u32) -> TransportError {
+    TransportError::RemoteError(format!(
+        "upload interrupted; {saved} of {total} parts saved, run `mkit push` again to resume"
+    ))
 }
 
 fn ref_hint(options: CallOptions, ref_name: Option<&str>) -> CallOptions {
@@ -157,6 +211,29 @@ pub enum PendingEvent {
     Waiting { elapsed: Duration, next: Duration },
     /// Emitted after polling ends, so progress UIs can finish their line.
     Finished { elapsed: Duration, succeeded: bool },
+}
+
+/// Progress for one multipart pack upload.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum UploadEvent {
+    PartsPlanned {
+        parts: u32,
+        resumed: u32,
+        saved_bytes: u64,
+        bytes: u64,
+    },
+    PartSent {
+        index: u32,
+        parts: u32,
+        saved_bytes: u64,
+        bytes: u64,
+        resumed: u32,
+    },
+    /// Cancellation check before a part begins; progress UIs can ignore it.
+    BeforePart,
+    Completing,
+    Finished,
 }
 
 fn advance_deadline_error(saw_pending: bool) -> TransportError {
@@ -243,6 +320,11 @@ pub struct ConnectTransport {
     sleep: fn(Duration),
     now: fn() -> i64,
     pending_observer: Option<Arc<dyn Fn(PendingEvent) -> bool + Send + Sync>>,
+    tickets: Mutex<HashMap<(String, PackKey), CachedTicket>>,
+    unknown_ticketless: AtomicBool,
+    receipts: Arc<dyn PartReceiptStore>,
+    receipts_swept: AtomicBool,
+    upload_observer: Option<Arc<dyn Fn(UploadEvent) -> bool + Send + Sync>>,
     receipt_observer: Option<crate::receipt::ReceiptObserver>,
     admission_policy: Option<AdmissionPolicy>,
     admission_runs: AtomicUsize,
@@ -437,6 +519,11 @@ impl ConnectTransport {
             sleep: thread::sleep,
             now: crate::envelope::now_ms,
             pending_observer: None,
+            tickets: Mutex::new(HashMap::new()),
+            unknown_ticketless: AtomicBool::new(false),
+            receipts: Arc::new(MemoryPartReceiptStore::default()),
+            receipts_swept: AtomicBool::new(false),
+            upload_observer: None,
             receipt_observer: None,
             admission_policy: None,
             admission_runs: AtomicUsize::new(0),
@@ -500,6 +587,11 @@ impl ConnectTransport {
             sleep: no_sleep,
             now: crate::envelope::now_ms,
             pending_observer: None,
+            tickets: Mutex::new(HashMap::new()),
+            unknown_ticketless: AtomicBool::new(false),
+            receipts: Arc::new(MemoryPartReceiptStore::default()),
+            receipts_swept: AtomicBool::new(false),
+            upload_observer: None,
             receipt_observer: None,
             admission_policy: None,
             admission_runs: AtomicUsize::new(0),
@@ -588,6 +680,23 @@ impl ConnectTransport {
         self
     }
 
+    /// Use a caller-owned receipt store for resume across transport instances.
+    #[must_use]
+    pub fn with_receipt_store(mut self, store: Arc<dyn PartReceiptStore>) -> Self {
+        self.receipts = store;
+        self
+    }
+
+    /// Observe multipart progress. Returning false cancels between parts.
+    #[must_use]
+    pub fn with_upload_observer(
+        mut self,
+        observer: impl Fn(UploadEvent) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.upload_observer = Some(Arc::new(observer));
+        self
+    }
+
     fn grant_options(&self, options: CallOptions, operation: GrantOperation<'_>) -> CallOptions {
         if matches!(operation, GrantOperation::Part) {
             return options;
@@ -615,6 +724,585 @@ impl ConnectTransport {
         }
         let identity = RetryIdentity::new().map_err(TransportError::RemoteError)?;
         Ok(identity.apply(self.grant_options(options, GrantOperation::Read)))
+    }
+
+    fn begin_upload_for_ref(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        head_ref: &str,
+    ) -> TransportResult<BeginAnswer> {
+        let info = self.server_info();
+        match info {
+            ServerInfoView::Legacy => return Ok(BeginAnswer::Ticketless),
+            ServerInfoView::Unknown
+                if self.signer_key.is_none() || self.unknown_ticketless.load(Ordering::Relaxed) =>
+            {
+                return Ok(BeginAnswer::Ticketless);
+            }
+            ServerInfoView::V2(info)
+                if (bytes.len() as u64) < info.begin_upload_threshold_bytes.unwrap_or(0) =>
+            {
+                return Ok(BeginAnswer::Ticketless);
+            }
+            _ => {}
+        }
+        if self.signer_key.is_none() {
+            return Err(TransportError::RemoteError(
+                "server requires signed uploads; set `transport_auth = envelope`".to_owned(),
+            ));
+        }
+        let mut identity =
+            RetryIdentity::new_at((self.now)()).map_err(TransportError::RemoteError)?;
+        let mut carried = HeaderMap::new();
+        if self.bearer {
+            carried.insert(AUTHORIZATION, http::HeaderValue::from_static("Bearer"));
+        }
+        let response = retry_once(
+            self.admission_policy.as_ref(),
+            &self.admission_runs,
+            (
+                &self.origin,
+                &self.repository_text,
+                "/mkit.transport.v1.TransportService/BeginUpload",
+            ),
+            &carried,
+            self.bearer,
+            |admission_headers| {
+                if !admission_headers.is_empty() {
+                    identity
+                        .renew_if_lapsing((self.now)(), MIN_RENEWAL_MARGIN_MS)
+                        .map_err(TransportError::RemoteError)?;
+                }
+                self.retrying(|| {
+                    if (self.now)() >= identity.expires_at_ms {
+                        identity = RetryIdentity::new_at((self.now)())
+                            .map_err(TransportError::RemoteError)?;
+                    }
+                    let options = self
+                        .grant_options(
+                            identity.apply(CallOptions::default().with_timeout(self.unary_timeout)),
+                            GrantOperation::BeginUpload { ref_name: head_ref },
+                        )
+                        .with_headers(
+                            admission_headers
+                                .iter()
+                                .map(|(name, value)| (name.clone(), value.clone())),
+                        );
+                    match self
+                        .executor
+                        .block_on(self.client.begin_upload_with_options(
+                            BeginUploadRequest {
+                                r#ref: Some(head_ref.to_owned()),
+                                pack_id: Some(key.as_bytes().to_vec()),
+                                bytes: Some(bytes.len() as u64),
+                                ..Default::default()
+                            },
+                            options,
+                        )) {
+                        Ok(result) => {
+                            observe_receipts(
+                                result.headers(),
+                                "/mkit.transport.v1.TransportService/BeginUpload",
+                                &self.receipt_observer,
+                            );
+                            Ok(Ok(result.into_owned()))
+                        }
+                        Err(err) if err.code == connectrpc::ErrorCode::Unimplemented => {
+                            Ok(Err(BeginSpecial::Unimplemented))
+                        }
+                        Err(err) => {
+                            // Admission detection must precede the open-ticket
+                            // message check, even when a server uses 402 with
+                            // the same text.
+                            let mapped = map_connect_error(err.clone(), ErrorContext::Ref);
+                            if matches!(
+                                mapped,
+                                TransportError::AdmissionRequired(_)
+                                    | TransportError::InvalidResponse
+                            ) {
+                                return Err(mapped);
+                            }
+                            if err.code == connectrpc::ErrorCode::FailedPrecondition
+                                && err.message.as_deref() == Some("too many open upload tickets")
+                            {
+                                Ok(Err(BeginSpecial::OpenCap))
+                            } else if err.code == connectrpc::ErrorCode::FailedPrecondition {
+                                Ok(Err(BeginSpecial::Rejected(err.message.unwrap_or_default())))
+                            } else {
+                                Err(mapped)
+                            }
+                        }
+                    }
+                })
+            },
+        )?;
+        let response = match response {
+            Ok(result) => result,
+            Err(BeginSpecial::OpenCap) => {
+                return Err(TransportError::RemoteError(
+                    "too many open upload tickets".to_owned(),
+                ));
+            }
+            Err(BeginSpecial::Rejected(message)) => {
+                return Err(TransportError::RemoteError(format!(
+                    "upload ticket rejected: {message}"
+                )));
+            }
+            Err(BeginSpecial::Unimplemented) => match info {
+                ServerInfoView::Unknown => {
+                    self.unknown_ticketless.store(true, Ordering::Relaxed);
+                    return Ok(BeginAnswer::Ticketless);
+                }
+                ServerInfoView::V2(info) if (bytes.len() as u64) > info.part_size.unwrap_or(0) => {
+                    return Err(TransportError::RemoteError(
+                        "server storage cannot accept packs over part_size".to_owned(),
+                    ));
+                }
+                _ => {
+                    return Err(TransportError::RemoteError(
+                        "V2 server does not implement BeginUpload".to_owned(),
+                    ));
+                }
+            },
+        };
+        match response.result {
+            Some(BeginWireResult::AlreadyPresent(_)) => {
+                if let Some(old) = self
+                    .tickets
+                    .lock()
+                    .map_err(|_| TransportError::ProtocolError)?
+                    .remove(&(head_ref.to_owned(), *key))
+                    && let Err(error) = self.receipts.forget(&old.id)
+                {
+                    log_receipt_cleanup_error("already-present ticket", &error);
+                }
+                Ok(BeginAnswer::AlreadyPresent)
+            }
+            Some(BeginWireResult::Ticket(wire)) => {
+                let id = wire
+                    .id
+                    .as_deref()
+                    .and_then(|id| <[u8; 32]>::try_from(id).ok())
+                    .ok_or(TransportError::InvalidResponse)?;
+                let ticket = CachedTicket {
+                    id,
+                    token: wire.token.ok_or(TransportError::InvalidResponse)?,
+                    part_size: wire.part_size.ok_or(TransportError::InvalidResponse)?,
+                    expires_unix_ms: wire
+                        .expires_unix_ms
+                        .ok_or(TransportError::InvalidResponse)?,
+                };
+                if ticket.token.is_empty()
+                    || ticket.part_size < 8 * 1024 * 1024
+                    || !ticket.part_size.is_power_of_two()
+                    || ticket.expires_unix_ms <= (self.now)()
+                {
+                    return Err(TransportError::InvalidResponse);
+                }
+                let old = self
+                    .tickets
+                    .lock()
+                    .map_err(|_| TransportError::ProtocolError)?
+                    .insert((head_ref.to_owned(), *key), ticket.clone());
+                if let Some(old) = old.filter(|old| old.id != ticket.id)
+                    && let Err(error) = self.receipts.forget(&old.id)
+                {
+                    log_receipt_cleanup_error("replaced ticket", &error);
+                }
+                Ok(BeginAnswer::Ticket(ticket))
+            }
+            _ => Err(TransportError::InvalidResponse),
+        }
+    }
+
+    fn upload_pack_with_token(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        token: Option<&[u8]>,
+    ) -> TransportResult<Result<(), ()>> {
+        if bytes.len() as u64 > PACK_BODY_LIMIT {
+            return Err(TransportError::PayloadTooLarge(bytes.len()));
+        }
+        let mut identity =
+            RetryIdentity::new_at((self.now)()).map_err(TransportError::RemoteError)?;
+        self.retrying(|| {
+            identity
+                .renew_if_lapsing((self.now)(), MIN_RENEWAL_MARGIN_MS)
+                .map_err(TransportError::RemoteError)?;
+            let options = identity
+                .apply(CallOptions::default().with_timeout(self.pack_transfer_timeout))
+                .with_header(
+                    "x-content-commitment",
+                    format!(
+                        "pack:{}:{}",
+                        mkit_core::hash::to_hex(key.as_bytes()),
+                        bytes.len()
+                    ),
+                );
+            let options = if token.is_some() {
+                self.grant_options(options, GrantOperation::Part)
+            } else {
+                self.grant_options(options, GrantOperation::Write { refs: &[] })
+            };
+            let pack_id = key.as_bytes().to_vec();
+            let header = UploadPackRequest {
+                body: Some(
+                    UploadPackHeader {
+                        pack_id: Some(pack_id.clone()),
+                        total_bytes: Some(bytes.len() as u64),
+                        ticket_token: token.map(<[u8]>::to_vec),
+                        ..Default::default()
+                    }
+                    .into(),
+                ),
+                ..Default::default()
+            };
+            let response = thread::scope(|scope| {
+                let (sender, receiver) = tokio::sync::mpsc::channel(1);
+                scope.spawn(move || {
+                    if sender.blocking_send(header).is_err() {
+                        return;
+                    }
+                    if bytes.is_empty() {
+                        let _ = sender.blocking_send(UploadPackRequest {
+                            body: Some(
+                                PackChunk {
+                                    pack_id: Some(pack_id),
+                                    offset: Some(0),
+                                    data: Some(Vec::new()),
+                                    last: Some(true),
+                                    ..Default::default()
+                                }
+                                .into(),
+                            ),
+                            ..Default::default()
+                        });
+                        return;
+                    }
+                    for (index, chunk) in bytes.chunks(CHUNK_SIZE).enumerate() {
+                        let offset = index * CHUNK_SIZE;
+                        if sender
+                            .blocking_send(UploadPackRequest {
+                                body: Some(
+                                    PackChunk {
+                                        pack_id: Some(pack_id.clone()),
+                                        offset: Some(offset as u64),
+                                        data: Some(chunk.to_vec()),
+                                        last: Some(offset + chunk.len() == bytes.len()),
+                                        ..Default::default()
+                                    }
+                                    .into(),
+                                ),
+                                ..Default::default()
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                });
+                let requests = futures::stream::unfold(receiver, |mut receiver| async move {
+                    receiver.recv().await.map(|message| (message, receiver))
+                });
+                self.executor
+                    .block_on(self.client.upload_pack_with_options(requests, options))
+            });
+            match response {
+                Ok(_) => Ok(Ok(())),
+                Err(err)
+                    if token.is_some() && err.code == connectrpc::ErrorCode::FailedPrecondition =>
+                {
+                    Ok(Err(()))
+                }
+                Err(err) => Err(map_connect_error(err, ErrorContext::Upload)),
+            }
+        })
+    }
+
+    fn part_plan(&self, bytes: &[u8], ticket: &CachedTicket) -> TransportResult<PartPlan> {
+        let max_parts = match self.server_info() {
+            ServerInfoView::V2(info) => info.max_parts.unwrap_or(0),
+            _ => u32::MAX,
+        };
+        PartPlan::new(bytes.len() as u64, ticket.part_size, max_parts).map_err(|err| match err {
+            PartError::TooManyParts => TransportError::RemoteError(
+                "pack exceeds the server's maximum number of upload parts".to_owned(),
+            ),
+            _ => TransportError::ProtocolError,
+        })
+    }
+
+    fn upload_part_once(
+        &self,
+        ticket: &CachedTicket,
+        plan: &PartPlan,
+        index: u32,
+        bytes: &[u8],
+    ) -> TransportResult<Result<Vec<u8>, ()>> {
+        let subtree =
+            part_subtree_cv(plan, index, bytes).map_err(|_| TransportError::ProtocolError)?;
+        let commitment = ContentCommitment::Part(PartCommitment {
+            ticket: ticket.id,
+            index,
+            subtree,
+            len: bytes.len() as u64,
+        })
+        .to_string();
+        let mut identity =
+            RetryIdentity::new_at((self.now)()).map_err(TransportError::RemoteError)?;
+        let mut renewed_after_unauthenticated = false;
+        self.retrying(|| {
+            identity
+                .renew_if_lapsing((self.now)(), MIN_RENEWAL_MARGIN_MS)
+                .map_err(TransportError::RemoteError)?;
+            loop {
+                let header = UploadPartRequest {
+                    msg: Some(
+                        UploadPartHeader {
+                            ticket_token: Some(ticket.token.clone()),
+                            index: Some(index),
+                            ..Default::default()
+                        }
+                        .into(),
+                    ),
+                    ..Default::default()
+                };
+                let options = self.grant_options(
+                    identity.apply(
+                        CallOptions::default()
+                            .with_timeout(self.pack_transfer_timeout)
+                            .with_header("x-content-commitment", &commitment),
+                    ),
+                    GrantOperation::Part,
+                );
+                let response = thread::scope(|scope| {
+                    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+                    scope.spawn(move || {
+                        if sender.blocking_send(header).is_err() {
+                            return;
+                        }
+                        for chunk in bytes.chunks(CHUNK_SIZE) {
+                            if sender
+                                .blocking_send(UploadPartRequest {
+                                    msg: Some(PartWireMessage::Chunk(chunk.to_vec())),
+                                    ..Default::default()
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    });
+                    let requests = futures::stream::unfold(receiver, |mut receiver| async move {
+                        receiver.recv().await.map(|message| (message, receiver))
+                    });
+                    self.executor
+                        .block_on(self.client.upload_part_with_options(requests, options))
+                });
+                match response {
+                    Ok(response) => {
+                        return response
+                            .into_owned()
+                            .receipt
+                            .filter(|receipt| !receipt.is_empty() && receipt.len() <= 512)
+                            .map(Ok)
+                            .ok_or(TransportError::InvalidResponse);
+                    }
+                    Err(err) if err.code == connectrpc::ErrorCode::FailedPrecondition => {
+                        return Ok(Err(()));
+                    }
+                    Err(err)
+                        if err.code == connectrpc::ErrorCode::Unauthenticated
+                            && !renewed_after_unauthenticated =>
+                    {
+                        renewed_after_unauthenticated = true;
+                        identity = RetryIdentity::new_at((self.now)())
+                            .map_err(TransportError::RemoteError)?;
+                    }
+                    Err(err) => return Err(map_connect_error(err, ErrorContext::Upload)),
+                }
+            }
+        })
+    }
+
+    fn complete_upload_once(
+        &self,
+        ticket: &CachedTicket,
+        receipts: &[Vec<u8>],
+    ) -> TransportResult<Result<(), CompleteSpecial>> {
+        let mut identity =
+            RetryIdentity::new_at((self.now)()).map_err(TransportError::RemoteError)?;
+        self.retrying(|| {
+            identity
+                .renew_if_lapsing((self.now)(), MIN_RENEWAL_MARGIN_MS)
+                .map_err(TransportError::RemoteError)?;
+            let options = self.grant_options(
+                identity.apply(CallOptions::default().with_timeout(self.pack_transfer_timeout)),
+                GrantOperation::Part,
+            );
+            match self
+                .executor
+                .block_on(self.client.complete_upload_with_options(
+                    CompleteUploadRequest {
+                        ticket_token: Some(ticket.token.clone()),
+                        receipts: receipts.to_vec(),
+                        ..Default::default()
+                    },
+                    options,
+                )) {
+                Ok(_) => Ok(Ok(())),
+                Err(err) if err.code == connectrpc::ErrorCode::FailedPrecondition => {
+                    Ok(Err(CompleteSpecial::Ticket))
+                }
+                Err(err) if err.code == connectrpc::ErrorCode::InvalidArgument => {
+                    Ok(Err(CompleteSpecial::InvalidReceipt))
+                }
+                Err(err) => Err(map_connect_error(err, ErrorContext::Upload)),
+            }
+        })
+    }
+
+    fn upload_parts(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        head_ref: &str,
+        ticket: &CachedTicket,
+    ) -> TransportResult<Result<(), ()>> {
+        let plan = self.part_plan(bytes, ticket)?;
+        let meta = TicketMetadata {
+            ticket_id: ticket.id,
+            audience: self.origin.clone(),
+            repository: self.repository_text.clone(),
+            signer: self.signer_key.clone().unwrap_or_default(),
+            head_ref: head_ref.to_owned(),
+            pack_key: *key,
+            bytes: bytes.len() as u64,
+            part_size: ticket.part_size,
+            expires_unix_ms: ticket.expires_unix_ms,
+        };
+        if !self.receipts_swept.swap(true, Ordering::Relaxed)
+            && let Err(error) = self.receipts.sweep((self.now)())
+        {
+            log_receipt_cleanup_error("sweep", &error);
+        }
+        for invalid_retry in 0..2 {
+            let mut parts = vec![None; plan.count() as usize];
+            if invalid_retry == 0 {
+                for receipt in self.receipts.load(&meta, &plan)? {
+                    if let Some(slot) = parts.get_mut(receipt.index as usize) {
+                        *slot = Some(receipt);
+                    }
+                }
+            }
+            let resumed = parts.iter().filter(|part| part.is_some()).count() as u32;
+            let mut saved_bytes: u64 = parts.iter().flatten().map(|part| part.len).sum();
+            self.upload_event(
+                UploadEvent::PartsPlanned {
+                    parts: plan.count(),
+                    resumed,
+                    saved_bytes,
+                    bytes: bytes.len() as u64,
+                },
+                resumed,
+                plan.count(),
+            )?;
+            for index in 0..plan.count() {
+                if parts[index as usize].is_some() {
+                    continue;
+                }
+                self.check_upload_cancel(
+                    parts.iter().filter(|part| part.is_some()).count() as u32,
+                    plan.count(),
+                )?;
+                let offset = usize::try_from(
+                    plan.offset(index)
+                        .map_err(|_| TransportError::ProtocolError)?,
+                )
+                .map_err(|_| TransportError::ProtocolError)?;
+                let len = usize::try_from(
+                    plan.expected_len(index)
+                        .map_err(|_| TransportError::ProtocolError)?,
+                )
+                .map_err(|_| TransportError::ProtocolError)?;
+                let slice = bytes
+                    .get(offset..offset + len)
+                    .ok_or(TransportError::ProtocolError)?;
+                let receipt = match self.upload_part_once(ticket, &plan, index, slice)? {
+                    Ok(receipt) => receipt,
+                    Err(()) => return Ok(Err(())),
+                };
+                let part = StoredPart {
+                    index,
+                    len: len as u64,
+                    receipt,
+                    from_disk: false,
+                };
+                self.receipts.put(&meta, &part)?;
+                saved_bytes += part.len;
+                parts[index as usize] = Some(part);
+                self.upload_event(
+                    UploadEvent::PartSent {
+                        index,
+                        parts: plan.count(),
+                        saved_bytes,
+                        bytes: bytes.len() as u64,
+                        resumed,
+                    },
+                    parts.iter().filter(|part| part.is_some()).count() as u32,
+                    plan.count(),
+                )?;
+            }
+            if parts.len() != plan.count() as usize || parts.iter().any(Option::is_none) {
+                return Err(TransportError::ProtocolError);
+            }
+            let from_disk = parts.iter().flatten().any(|part| part.from_disk);
+            let ordered: Vec<Vec<u8>> = parts
+                .into_iter()
+                .flatten()
+                .map(|part| part.receipt)
+                .collect();
+            self.upload_event(UploadEvent::Completing, plan.count(), plan.count())?;
+            match self.complete_upload_once(ticket, &ordered)? {
+                Ok(()) => {
+                    self.upload_event(UploadEvent::Finished, plan.count(), plan.count())?;
+                    return Ok(Ok(()));
+                }
+                Err(CompleteSpecial::Ticket) => return Ok(Err(())),
+                Err(CompleteSpecial::InvalidReceipt) if from_disk && invalid_retry == 0 => {
+                    // Best-effort: the resend pass doesn't reload stored receipts.
+                    if let Err(error) = self.receipts.forget(&ticket.id) {
+                        log_receipt_cleanup_error("invalid receipt", &error);
+                    }
+                }
+                Err(CompleteSpecial::InvalidReceipt) => return Err(TransportError::ProtocolError),
+            }
+        }
+        Err(TransportError::ProtocolError)
+    }
+
+    fn check_upload_cancel(&self, saved: u32, total: u32) -> TransportResult<()> {
+        if self
+            .upload_observer
+            .as_ref()
+            .is_some_and(|observer| !observer(UploadEvent::BeforePart))
+        {
+            return Err(upload_interrupted(saved, total));
+        }
+        Ok(())
+    }
+
+    fn upload_event(&self, event: UploadEvent, saved: u32, total: u32) -> TransportResult<()> {
+        if self
+            .upload_observer
+            .as_ref()
+            .is_some_and(|observer| !observer(event))
+        {
+            return Err(upload_interrupted(saved, total));
+        }
+        Ok(())
     }
 
     /// Observe pending verification waits and completion. A `false` return
@@ -692,17 +1380,54 @@ impl ConnectTransport {
         packmap_value: &Hash,
         deadline: Option<i64>,
     ) -> TransportResult<CoreAdvanceOutcome> {
+        match self.advance_refs_with_tickets(
+            head_ref,
+            head_condition,
+            head_value,
+            packmap_ref,
+            packmap_condition,
+            packmap_value,
+            &[],
+            deadline,
+        )? {
+            CommitOutcome::Advanced(outcome) => Ok(outcome),
+            _ => Err(TransportError::InvalidResponse),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_refs_with_tickets(
+        &self,
+        head_ref: &str,
+        head_condition: RefWriteCondition,
+        head_value: &Hash,
+        packmap_ref: &str,
+        packmap_condition: RefWriteCondition,
+        packmap_value: &Hash,
+        ticket_ids: &[Vec<u8>],
+        deadline: Option<i64>,
+    ) -> TransportResult<CommitOutcome> {
         let (head_expectation, head_expected_id) = condition_to_wire(head_condition);
         let (packmap_expectation, packmap_expected_id) = condition_to_wire(packmap_condition);
         let start_ms = (self.now)();
         let deadline = deadline.unwrap_or_else(|| start_ms.saturating_add(MAX_PENDING_MS));
+        let (attempts, ladder_sleep_ms) = (self.backoff)().fold((1_i64, 0_i64), |acc, delay| {
+            (
+                acc.0.saturating_add(1),
+                acc.1
+                    .saturating_add(i64::try_from(delay.as_millis()).unwrap_or(i64::MAX)),
+            )
+        });
         let margin_ms = i64::try_from(self.unary_timeout.as_millis())
             .unwrap_or(i64::MAX)
+            .saturating_mul(attempts)
+            .saturating_add(ladder_sleep_ms)
             .max(MIN_RENEWAL_MARGIN_MS);
         let mut identity = RetryIdentity::new_at(start_ms).map_err(TransportError::RemoteError)?;
         let mut saw_pending = false;
         let mut waiting_since_ms = start_ms;
         let mut renewed_after_unauthenticated = false;
+        let mut lag_since_ms: Option<i64> = None;
         let mut admission_headers = HeaderMap::new();
         let mut helper_ran = false;
         let refs = [
@@ -714,7 +1439,7 @@ impl ConnectTransport {
             // A pending reply is definitive: before its next poll, renew an
             // identity that cannot cover the next unary attempt. An ambiguous
             // failure inside the ladder retains its nonce until actual expiry.
-            if saw_pending {
+            if saw_pending || lag_since_ms.is_some() {
                 let now = (self.now)();
                 if now < deadline && identity.expires_at_ms.saturating_sub(now) < margin_ms {
                     identity = match RetryIdentity::new_at(now) {
@@ -732,13 +1457,26 @@ impl ConnectTransport {
                     if now >= deadline {
                         return Err(advance_deadline_error(saw_pending));
                     }
+                    if lag_since_ms.is_some_and(|start| now.saturating_sub(start) >= 60_000) {
+                        return Err(TransportError::RemoteError(
+                            "repository membership not yet visible after 60 seconds".to_owned(),
+                        ));
+                    }
                     if now >= identity.expires_at_ms {
                         identity =
                             RetryIdentity::new_at(now).map_err(TransportError::RemoteError)?;
                     }
+                    let mut timeout_ms = deadline.saturating_sub(now);
+                    if let Some(lag_start) = lag_since_ms {
+                        timeout_ms = timeout_ms
+                            .min(60_000_i64.saturating_sub(now.saturating_sub(lag_start)));
+                    }
+                    let timeout = self.unary_timeout.min(Duration::from_millis(
+                        u64::try_from(timeout_ms).unwrap_or(0),
+                    ));
                     let options = self
                         .grant_options(
-                            identity.apply(CallOptions::default().with_timeout(self.unary_timeout)),
+                            identity.apply(CallOptions::default().with_timeout(timeout)),
                             GrantOperation::Write { refs: &refs },
                         )
                         .with_headers(
@@ -758,6 +1496,7 @@ impl ConnectTransport {
                                 packmap_expectation: Some(packmap_expectation.into()),
                                 packmap_expected_id: packmap_expected_id.clone(),
                                 packmap_new_id: Some(packmap_value.to_vec()),
+                                ticket_ids: ticket_ids.to_vec(),
                                 ..Default::default()
                             },
                             options,
@@ -784,15 +1523,58 @@ impl ConnectTransport {
                                     &self.receipt_observer,
                                 );
                             }
-                            return Ok(Ok(outcome));
+                            return Ok(Ok(CommitOutcome::Advanced(outcome)));
                         }
                         Err(err) => {
+                            // A ticket-consuming advance never invokes the
+                            // admission helper, but an HTTP 402 still surfaces
+                            // as its typed challenge, regardless of the
+                            // Connect error code used by the server.
+                            let mapped = map_connect_error(err.clone(), ErrorContext::Ref);
+                            if matches!(
+                                mapped,
+                                TransportError::AdmissionRequired(_)
+                                    | TransportError::InvalidResponse
+                            ) {
+                                return Err(mapped);
+                            }
+                            if !ticket_ids.is_empty() {
+                                if err.code == connectrpc::ErrorCode::FailedPrecondition {
+                                    return Ok(Ok(
+                                        if err.message.as_deref()
+                                            == Some("delta base not available in this repository")
+                                        {
+                                            CommitOutcome::DeltaBaseUnavailable
+                                        } else {
+                                            CommitOutcome::TicketRejected
+                                        },
+                                    ));
+                                }
+                                if err.code == connectrpc::ErrorCode::InvalidArgument
+                                    && err.message.as_deref()
+                                        == Some(
+                                            "packlist lists a pack that is not in this repository",
+                                        )
+                                {
+                                    return Ok(Ok(CommitOutcome::PacklistNotInRepository));
+                                }
+                                if err.code == connectrpc::ErrorCode::Unavailable
+                                    && err.message.as_deref()
+                                        == Some("repository membership not yet visible")
+                                {
+                                    return Ok(Err((Duration::from_secs(2), true)));
+                                }
+                            }
+                            // The 60-second window bounds consecutive lag
+                            // answers only. Any other answer returns to the
+                            // ticket deadline and ordinary unary timeout.
+                            lag_since_ms = None;
                             if let Some(delay) = pending_verification_delay(&err) {
                                 // This pending reply belongs to the re-signed
                                 // identity, which now has its own one-shot
                                 // unauthenticated recovery allowance.
                                 renewed_after_unauthenticated = false;
-                                return Ok(Err(delay));
+                                return Ok(Err((delay, false)));
                             }
                             if saw_pending
                                 && !renewed_after_unauthenticated
@@ -803,7 +1585,7 @@ impl ConnectTransport {
                                     .map_err(TransportError::RemoteError)?;
                                 continue;
                             }
-                            return Err(map_connect_error(err, ErrorContext::Ref));
+                            return Err(mapped);
                         }
                     }
                 }
@@ -815,7 +1597,12 @@ impl ConnectTransport {
                     }
                     return Ok(outcome);
                 }
-                Ok(Err(delay)) => {
+                Ok(Err((delay, lag))) => {
+                    if lag {
+                        lag_since_ms.get_or_insert_with(|| (self.now)());
+                    } else {
+                        lag_since_ms = None;
+                    }
                     if !saw_pending {
                         waiting_since_ms = (self.now)();
                     }
@@ -823,7 +1610,9 @@ impl ConnectTransport {
                     delay
                 }
                 Err(error) => {
-                    if let TransportError::AdmissionRequired(required) = error {
+                    if ticket_ids.is_empty()
+                        && let TransportError::AdmissionRequired(required) = error
+                    {
                         if helper_ran {
                             return Err(TransportError::AdmissionRequired(Box::new(
                                 required.with_reason(
@@ -868,9 +1657,17 @@ impl ConnectTransport {
             let mut remaining = delay;
             while !remaining.is_zero() {
                 let now = (self.now)();
-                if now >= deadline {
+                if now >= deadline
+                    || lag_since_ms.is_some_and(|start| now.saturating_sub(start) >= 60_000)
+                {
                     self.pending_finished(waiting_since_ms, false);
-                    return Err(advance_deadline_error(true));
+                    return Err(if now >= deadline {
+                        advance_deadline_error(true)
+                    } else {
+                        TransportError::RemoteError(
+                            "repository membership not yet visible after 60 seconds".to_owned(),
+                        )
+                    });
                 }
                 let until_deadline =
                     Duration::from_millis(u64::try_from(deadline.saturating_sub(now)).unwrap_or(0));
@@ -1063,7 +1860,12 @@ fn grant_condition(c: RefWriteCondition) -> GrantCondition {
 /// followed by `ceil(len / CHUNK_SIZE)` `chunk` messages (or exactly one
 /// empty `last = true` chunk for a zero-byte pack), matching
 /// SPEC-TRANSPORT-CONNECT §6.1.
-fn build_upload_requests(bytes: &[u8], key: &PackKey) -> Vec<UploadPackRequest> {
+#[cfg(test)]
+fn build_upload_requests(
+    bytes: &[u8],
+    key: &PackKey,
+    token: Option<&[u8]>,
+) -> Vec<UploadPackRequest> {
     let pack_id = key.as_bytes().to_vec();
     let mut requests = Vec::with_capacity(2 + bytes.len() / CHUNK_SIZE);
     requests.push(UploadPackRequest {
@@ -1071,6 +1873,7 @@ fn build_upload_requests(bytes: &[u8], key: &PackKey) -> Vec<UploadPackRequest> 
             UploadPackHeader {
                 pack_id: Some(pack_id.clone()),
                 total_bytes: Some(bytes.len() as u64),
+                ticket_token: token.map(<[u8]>::to_vec),
                 ..Default::default()
             }
             .into(),
@@ -1120,31 +1923,46 @@ fn build_upload_requests(bytes: &[u8], key: &PackKey) -> Vec<UploadPackRequest> 
 
 impl Transport for ConnectTransport {
     fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        if bytes.len() as u64 > PACK_BODY_LIMIT {
-            return Err(TransportError::PayloadTooLarge(bytes.len()));
+        self.upload_pack_with_token(bytes, key, None).map(|_| ())
+    }
+
+    fn upload_pack_via_ref(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        head_ref: &str,
+    ) -> TransportResult<()> {
+        for attempt in 0..2 {
+            match self.begin_upload_for_ref(bytes, key, head_ref)? {
+                BeginAnswer::AlreadyPresent => return Ok(()),
+                BeginAnswer::Ticketless => return self.upload_pack(bytes, key),
+                BeginAnswer::Ticket(ticket) => {
+                    let result = if bytes.len() as u64 <= ticket.part_size {
+                        self.upload_pack_with_token(bytes, key, Some(&ticket.token))?
+                    } else {
+                        self.upload_parts(bytes, key, head_ref, &ticket)?
+                    };
+                    if result.is_ok() {
+                        return Ok(());
+                    }
+                    if attempt == 1 {
+                        return Err(TransportError::RemoteError(
+                            "upload ticket rejected".to_owned(),
+                        ));
+                    }
+                }
+            }
         }
-        let requests = build_upload_requests(bytes, key);
-        let identity = RetryIdentity::new().map_err(TransportError::RemoteError)?;
-        self.retrying(|| {
-            self.executor.block_on(async {
-                let options = identity
-                    .apply(CallOptions::default().with_timeout(self.pack_transfer_timeout))
-                    .with_header(
-                        "x-content-commitment",
-                        format!(
-                            "pack:{}:{}",
-                            mkit_core::hash::to_hex(key.as_bytes()),
-                            bytes.len()
-                        ),
-                    );
-                let options = self.grant_options(options, GrantOperation::Write { refs: &[] });
-                self.client
-                    .upload_pack_with_options(connectrpc::stream_iter(requests.clone()), options)
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| map_connect_error(e, ErrorContext::Upload))
-            })
-        })
+        Err(TransportError::ProtocolError)
+    }
+
+    fn upload_blob_via_ref(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        head_ref: &str,
+    ) -> TransportResult<()> {
+        self.upload_pack_via_ref(bytes, key, head_ref)
     }
 
     fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
@@ -1363,6 +2181,115 @@ impl Transport for ConnectTransport {
             packmap_value,
             None,
         )
+    }
+
+    fn advance_refs_committing(
+        &self,
+        head_ref: &str,
+        head_condition: RefWriteCondition,
+        head_value: &Hash,
+        packmap_ref: &str,
+        packmap_condition: RefWriteCondition,
+        packmap_value: &Hash,
+        commit: &[PackKey],
+    ) -> TransportResult<CommitOutcome> {
+        let cached = self
+            .tickets
+            .lock()
+            .map_err(|_| TransportError::ProtocolError)?;
+        let selected: Vec<_> = commit
+            .iter()
+            .filter_map(|key| {
+                cached
+                    .get(&(head_ref.to_owned(), *key))
+                    .map(|ticket| (*key, ticket.clone()))
+            })
+            .collect();
+        drop(cached);
+        let ids: Vec<Vec<u8>> = selected
+            .iter()
+            .map(|(_, ticket)| ticket.id.to_vec())
+            .collect();
+        if ids.len() > 7 || ids.len() != ids.iter().collect::<HashSet<_>>().len() {
+            return Err(TransportError::InvalidRef(
+                "advance contains more than seven or duplicate upload tickets".to_owned(),
+            ));
+        }
+        if !ids.is_empty() {
+            let branch = head_ref
+                .strip_prefix("refs/heads/")
+                .filter(|branch| !branch.is_empty());
+            if branch.is_none_or(|branch| packmap_ref != format!("refs/mkit/packmap/{branch}")) {
+                return Err(TransportError::InvalidRef(
+                    "ticketed advance requires paired head and packmap refs".to_owned(),
+                ));
+            }
+        }
+        let deadline = selected
+            .iter()
+            .map(|(_, ticket)| ticket.expires_unix_ms)
+            .min();
+        if !ids.is_empty() && deadline.is_some_and(|expiry| expiry <= (self.now)()) {
+            return Ok(CommitOutcome::TicketRejected);
+        }
+        let outcome = self.advance_refs_with_tickets(
+            head_ref,
+            head_condition,
+            head_value,
+            packmap_ref,
+            packmap_condition,
+            packmap_value,
+            &ids,
+            deadline,
+        )?;
+        if outcome == CommitOutcome::Advanced(CoreAdvanceOutcome::Committed) {
+            let mut cached = self
+                .tickets
+                .lock()
+                .map_err(|_| TransportError::ProtocolError)?;
+            let mut consumed = Vec::new();
+            for (key, ticket) in selected {
+                let cache_key = (head_ref.to_owned(), key);
+                if cached
+                    .get(&cache_key)
+                    .is_some_and(|current| current.id == ticket.id)
+                {
+                    cached.remove(&cache_key);
+                    consumed.push(ticket.id);
+                }
+            }
+            drop(cached);
+            for id in consumed {
+                if let Err(error) = self.receipts.forget(&id) {
+                    log_receipt_cleanup_error("committed ticket", &error);
+                }
+            }
+        }
+        Ok(outcome)
+    }
+
+    fn upload_limits(&self) -> UploadLimits {
+        match self.server_info() {
+            ServerInfoView::V2(info) => UploadLimits {
+                max_pack_bytes: info.max_pack_bytes,
+                tickets_per_advance: self.signer_key.as_ref().map(|_| 7),
+                ticket_threshold_bytes: self
+                    .signer_key
+                    .as_ref()
+                    .map(|_| info.begin_upload_threshold_bytes.unwrap_or(0)),
+            },
+            ServerInfoView::Unknown
+                if self.signer_key.is_some()
+                    && !self.unknown_ticketless.load(Ordering::Relaxed) =>
+            {
+                UploadLimits {
+                    max_pack_bytes: None,
+                    tickets_per_advance: Some(7),
+                    ticket_threshold_bytes: Some(0),
+                }
+            }
+            _ => UploadLimits::default(),
+        }
     }
 
     fn supports_atomic_advance(&self) -> bool {
@@ -1638,7 +2565,7 @@ mod tests {
     #[test]
     fn build_upload_requests_empty_pack_is_header_plus_one_empty_last_chunk() {
         let key = PackKey::new([0x11u8; 32]);
-        let reqs = build_upload_requests(b"", &key);
+        let reqs = build_upload_requests(b"", &key, None);
         assert_eq!(reqs.len(), 2, "header + one empty last=true chunk");
     }
 
@@ -1646,7 +2573,7 @@ mod tests {
     fn build_upload_requests_chunks_at_chunk_size_boundary() {
         let key = PackKey::new([0x22u8; 32]);
         let data = vec![0u8; CHUNK_SIZE * 2 + 1];
-        let reqs = build_upload_requests(&data, &key);
+        let reqs = build_upload_requests(&data, &key, None);
         // 1 header + 3 chunks (CHUNK_SIZE, CHUNK_SIZE, 1 byte).
         assert_eq!(reqs.len(), 4);
     }

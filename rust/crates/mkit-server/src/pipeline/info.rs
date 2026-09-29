@@ -87,13 +87,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         ServerInfo {
             protocol: "mkit.transport.v1",
             spec_version: 2,
-            max_pack_bytes: self.cfg.upload_limits.max_total_bytes,
+            max_pack_bytes: if self.blobs.supports_multipart() {
+                self.cfg.upload_limits.max_total_bytes
+            } else {
+                self.cfg
+                    .upload_limits
+                    .max_total_bytes
+                    .min(self.cfg.part_size)
+            },
             part_size: self.cfg.part_size,
             max_parts: self.cfg.max_parts,
             max_list_refs_page_size: self.cfg.max_list_refs_page_size,
             begin_upload_threshold_bytes: self.effective_threshold(),
             atomic_advance: self.capabilities().atomic_advance,
-            indexed_mode: self.cfg.indexed.is_some(),
+            indexed_mode: self.cfg.indexed_mode(),
             admission,
             receipt_public_key: Vec::new(),
             receipt_key_id: String::new(),

@@ -28,15 +28,8 @@ pub(super) async fn bump_completes_and_writes_continue(ctx: Ctx) -> CaseResult {
         .client()
         .unary(Rpc::ListRefs, body.clone(), &headers)
         .await?;
-    if ctx.profile().sharding_d34 {
-        // The directive runs before listing. D34 listing is deliberately
-        // deferred, so the route returns this error after completing the bump.
-        want_code(bumped, "unimplemented", "D34 listing after epoch bump")?;
-    } else {
-        want_ok(bumped, "listing after epoch bump")?;
-    }
+    want_ok(bumped, "listing after epoch bump")?;
 
-    // An ignored directive would also return Unimplemented under D34.
     // Repeating the same epoch must instead fail at the bump's monotonicity
     // check, proving that the first directive changed the coordinator epoch.
     let repeated: Result<ListRefsResponse, _> =

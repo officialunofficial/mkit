@@ -7,7 +7,7 @@
 #
 #   scripts/vcs-worker-conformance.sh [--test-faults] [--sharding single|d34] [-- <extra runner args>]
 #
-#   (default)      a release-feature build; the whole suite once.
+#   (default)      a release-optimized build; the whole suite once.
 #   --test-faults  a `test-faults` build, in two phases, each on a fresh
 #                  server: (1) the whole suite, with the clock-skew directive
 #                  and the stats hook (`replay.expired_retry_rejected`); (2)
@@ -57,7 +57,7 @@ WRANGLER_VERSION="4.134.0"
 PORT="${VCS_CONFORMANCE_PORT:-8791}"
 ORIGIN="http://127.0.0.1:${PORT}"
 REPOSITORY="default"
-MAX_PACK_BYTES=67108864
+MAX_PACK_BYTES=1073741824
 # Phase 2's quota: a window the growth case waits out (at most 60 s) that
 # still fits its 265 probe writes, and the quota cases' exhausting writes,
 # at `wrangler dev` speed.
@@ -70,6 +70,10 @@ MAX_BUFFERED_BYTES=1048576
 test_faults=0
 sharding=single
 runner_args=()
+# Under D34 a ListRefs page scans 16 buckets and each lag poll re-lists, so the
+# 10,000-ref case would take many minutes in miniflare; 1,000 exercises paging
+# (R-134).
+d34_list_args=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --test-faults) test_faults=1 ;;
@@ -77,7 +81,8 @@ while [ $# -gt 0 ]; do
             if [ $# -lt 2 ] || { [ "$2" != single ] && [ "$2" != d34 ]; }; then
                 echo "--sharding requires single or d34" >&2; exit 2
             fi
-            sharding="$2"; shift ;;
+            sharding="$2"; shift
+            if [ "${sharding}" = d34 ]; then d34_list_args=(--list-refs 1000); fi ;;
         --) shift; runner_args=("$@"); break ;;
         *) echo "usage: $0 [--test-faults] [--sharding single|d34] [-- <runner args>]" >&2; exit 2 ;;
     esac
@@ -208,10 +213,20 @@ run_suite() {
     shift
     echo ">> running the wire suite (features: ${features}) $*"
     local status=0
+    # List fixture concurrency: miniflare's proxy drops UpdateRef ("Network
+    # connection lost"; the dev server continues) when several slow writes are
+    # in flight, so local runs pace to 1. CI keeps 8, the concurrent-UpdateRef
+    # load (and a throughput signal); the harness resends dropped writes.
+    # Override with VCS_LIST_PARALLEL.
+    local list_parallel="${VCS_LIST_PARALLEL:-}"
+    if [ -z "${list_parallel}" ]; then
+        if [ -n "${CI:-}" ]; then list_parallel=8; else list_parallel=1; fi
+    fi
     "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
         --repository "${REPOSITORY}" --random-signer --atomic-advance --fresh-target --milestone M1 \
         --max-pack-bytes "${MAX_PACK_BYTES}" --features "${features}" --sharding "${sharding}" \
-        "$@" ${runner_args[@]+"${runner_args[@]}"} || status=$?
+        --list-parallel "${list_parallel}" \
+        "$@" ${d34_list_args[@]+"${d34_list_args[@]}"} ${runner_args[@]+"${runner_args[@]}"} || status=$?
     if [ "${status}" -ne 0 ]; then
         echo "wire suite failed (exit ${status}); wrangler log tail:" >&2
         tail -n 80 "${log}" >&2
@@ -287,8 +302,8 @@ NODE
 
 # The pipeline serves grpc.health.v1 and rejects an auth v2 signature over
 # gzip-encoded bytes (fails closed, SPEC-WRITE-GRANTS §9.2 is open).
-features="health,strict-gzip-auth,tickets"
-build_args=(--dev)
+features="health,strict-gzip-auth,tickets,multipart"
+build_args=(--release)
 vars=(--var "AUTH_AUDIENCE:${ORIGIN}" --var "AUTH_REPOSITORY:${REPOSITORY}" --var "SHARDING:${sharding}")
 if [ "${test_faults}" -eq 1 ]; then
     features="${features},test-faults,timers"
@@ -301,7 +316,8 @@ cargo build --manifest-path rust/Cargo.toml -p mkit-server-conformance \
 runner="${root}/rust/target/debug/mkit-server-conformance"
 
 echo ">> building apps/vcs-worker (worker-build ${build_args[*]})"
-(cd apps/vcs-worker && worker-build "${build_args[@]}")
+(cd apps/vcs-worker && CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
+    CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true worker-build "${build_args[@]}")
 
 start_server suite "${vars[@]}"
 run_suite "${features}"

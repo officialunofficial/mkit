@@ -6,6 +6,7 @@
 //! it, such as the `BeginUpload` cap error; chunk counts are not prescribed.
 
 use std::sync::{Arc, Mutex, PoisonError};
+use std::{fmt::Debug, future::Future, time::Duration};
 
 use buffa::Message;
 use futures::future::BoxFuture;
@@ -28,6 +29,7 @@ mod auth;
 mod auth_bounds;
 mod concurrent;
 mod download;
+mod epochs;
 pub(super) mod grants;
 mod growth;
 mod health;
@@ -39,6 +41,7 @@ mod multipart;
 mod packs;
 mod policy;
 mod quota;
+mod ref_scopes;
 mod refs;
 mod replay;
 mod repository;
@@ -69,6 +72,34 @@ impl From<&str> for Failure {
 
 /// A case's result.
 pub(crate) type CaseResult = Result<(), Failure>;
+
+/// Wait for a successful listing to include the writes this case just made.
+/// Relay lag is expected on both local D34 and remote deployments.
+pub(crate) async fn eventually_listed<T, F, Fut>(
+    label: &str,
+    mut fetch: F,
+    ready: impl Fn(&T) -> bool,
+) -> Result<T, Failure>
+where
+    T: Debug,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, Failure>>,
+{
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_millis(mkit_server::relay::RELAY_LAG_BOUND_MS);
+    loop {
+        let listing = fetch().await?;
+        if ready(&listing) {
+            return Ok(listing);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Failure::Fail(format!(
+                "{label} did not converge: {listing:?}"
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
 
 /// Fail the case with a formatted message unless `cond` holds.
 macro_rules! ensure {
@@ -161,8 +192,11 @@ macro_rules! cases {
 
 cases! {
     "grants.valid_ed25519" => grants::valid_ed25519, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.valid_secp256k1_eip191" => grants::valid_secp256k1_eip191, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.valid_webauthn_p256" => grants::valid_webauthn_p256, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.push_flow" => grants::push_flow, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.part_path_ignores_header" => grants::part_path_ignores_header, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.zero_x_without_grant_denied" => grants::zero_x_without_grant_denied, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.wrong_audience" => grants::wrong_audience, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.repository_out_of_scope" => grants::repository_out_of_scope, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.namespace_scope_covers_new_repo" => grants::namespace_scope_covers_new_repo, M2, [Grants, MultiRepo, AuthV2], [];
@@ -170,6 +204,8 @@ cases! {
     "grants.read_only_grant_for_write" => grants::read_only_grant_for_write, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.expired" => grants::expired, M2, [Grants, MultiRepo, AuthV2, TestFaults], [];
     "grants.not_yet_valid" => grants::not_yet_valid, M2, [Grants, MultiRepo, AuthV2, TestFaults], [];
+    "grants.ed25519_scheme_on_0x_denied" => grants::ed25519_scheme_on_0x_denied, M2, [Grants, MultiRepo, AuthV2], [];
+    "grants.webauthn_unconfigured_rp_denied" => grants::webauthn_unconfigured_rp_denied, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.epoch_above_stored" => grants::epoch_above_stored, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.epoch_below_stored" => grants::epoch_below_stored, M2, [Grants, MultiRepo, AuthV2, TestFaults], [];
     "grants.new_epoch_grant_works" => grants::new_epoch_grant_works, M2, [Grants, MultiRepo, AuthV2, TestFaults], [];
@@ -179,6 +215,34 @@ cases! {
     "grants.oversize_header_denied" => grants::oversize_header_denied, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.non_ascii_header_denied" => grants::non_ascii_header_denied, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.retry_with_changed_grant_returns_saved_result" => grants::retry_with_changed_grant_returns_saved_result, M2, [Grants, MultiRepo, AuthV2], [];
+    "ref_scopes.create_only_rejects_update" => ref_scopes::create_only_rejects_update, M2, [Grants, MultiRepo, AuthV2], [];
+    "ref_scopes.cu_grant_creates_but_match_update_denied_opaque" => ref_scopes::cu_grant_creates_but_match_update_denied_opaque, M2, [Grants, MultiRepo, AuthV2], [];
+    "ref_scopes.force_allows_non_ff" => ref_scopes::force_allows_non_ff, M2, [Grants, MultiRepo, AuthV2], [];
+    "ref_scopes.delete_needs_d" => ref_scopes::delete_needs_d, M2, [Grants, MultiRepo, AuthV2], [];
+    "ref_scopes.any_on_absent_needs_c" => ref_scopes::any_on_absent_needs_c, M2, [Grants, MultiRepo, AuthV2], [];
+    "ref_scopes.any_on_present_needs_f" => ref_scopes::any_on_present_needs_f, M2, [Grants, MultiRepo, AuthV2], [];
+    "ref_scopes.direct_packmap_update_denied" => ref_scopes::direct_packmap_update_denied, M2, [Grants, MultiRepo, AuthV2], [];
+    "ref_scopes.head_only_update_ok" => ref_scopes::head_only_update_ok, M2, [Grants, MultiRepo, AuthV2], [];
+    "ref_scopes.advance_wrong_packmap_denied" => ref_scopes::advance_wrong_packmap_denied, M2, [Grants, MultiRepo, AuthV2], [];
+    "ref_scopes.rebaseline_push_under_head_scope" => ref_scopes::rebaseline_push_under_head_scope, M2, [Grants, MultiRepo, AuthV2], [];
+    "ref_scopes.begin_upload_any_flag" => ref_scopes::begin_upload_any_flag, M2, [Grants, MultiRepo, AuthV2], [];
+    "ref_scopes.begin_upload_unmatched_denied" => ref_scopes::begin_upload_unmatched_denied, M2, [Grants, MultiRepo, AuthV2], [];
+    "epochs.get_unsigned_zero" => epochs::get_unsigned_zero, M2, [Grants, MultiRepo], [];
+    "epochs.get_ignores_auth_headers" => epochs::get_ignores_auth_headers, M2, [Grants, MultiRepo], [];
+    "epochs.get_bad_namespace_invalid_argument" => epochs::get_bad_namespace_invalid_argument, M2, [Grants, MultiRepo], [];
+    "epochs.set_advances_and_get_reflects" => epochs::set_advances_and_get_reflects, M2, [Grants, MultiRepo], [];
+    "epochs.set_retry_same_epoch" => epochs::set_retry_same_epoch, M2, [Grants, MultiRepo], [];
+    "epochs.set_over_step_denied" => epochs::set_over_step_denied, M2, [Grants, MultiRepo], [];
+    "epochs.set_decrease_denied" => epochs::set_decrease_denied, M2, [Grants, MultiRepo], [];
+    "epochs.wrong_audience" => epochs::wrong_audience, M2, [Grants, MultiRepo], [];
+    "epochs.expired" => epochs::expired, M2, [Grants, MultiRepo], [];
+    "epochs.not_yet_valid" => epochs::not_yet_valid, M2, [Grants, MultiRepo], [];
+    "epochs.scheme_not_advertised" => epochs::scheme_not_advertised, M2, [Grants, MultiRepo], [];
+    "epochs.namespace_not_served" => epochs::namespace_not_served, M2, [Grants, MultiRepo], [];
+    "epochs.oversize_statement" => epochs::oversize_statement, M2, [Grants, MultiRepo], [];
+    "epochs.zero_x_secp256k1_statement" => epochs::zero_x_secp256k1_statement, M2, [Grants, MultiRepo], [];
+    "epochs.zero_x_webauthn_statement" => epochs::zero_x_webauthn_statement, M2, [Grants, MultiRepo], [];
+    "epochs.old_grant_denied_new_grant_works_after_set" => epochs::old_grant_denied_new_grant_works_after_set, M2, [Grants, MultiRepo], [];
     "multipart.three_parts" => multipart::three_parts, M1, [Multipart, AuthV2], [MultiRepo];
     "multipart.resume_receipts" => multipart::resume_receipts, M1, [Multipart, AuthV2], [MultiRepo];
     "multipart.root_mismatch_invisible" => multipart::root_mismatch_invisible, M1, [Multipart, AuthV2], [MultiRepo];

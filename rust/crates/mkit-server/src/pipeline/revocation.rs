@@ -7,11 +7,12 @@ use crate::store::{
     Batch, BatchOutcome, MultipartBlobStore, NamespaceStore, Partition, Precondition, Value, codec,
     keys, restore::mark_lease_table_recovered,
 };
+use mkit_attest::grant::{EpochTransition, epoch_transition};
 
 use super::{HookSet, Pipeline, internal, lease::observed_guard, meta_error, ms};
 
 /// Largest allowed epoch increment (SPEC-WRITE-GRANTS §1.1).
-pub const MAX_EPOCH_STEP: u64 = 1024;
+pub const MAX_EPOCH_STEP: u64 = mkit_attest::grant::MAX_EPOCH_STEP;
 const PAGE_SIZE: u32 = 4;
 // Bound contention even with a frozen injected clock.
 const MAX_PUSH_ATTEMPTS: u32 = 32;
@@ -107,12 +108,26 @@ struct CoordinatorState {
 
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Advance the coordinator epoch, serialized with every epoch lease grant.
-    /// The grant RPC and its owner-signature verification are WP-2.8.
     ///
     /// # Errors
     /// `invalid_argument` unless the increment is in `1..=1024`;
     /// `unavailable` on repeated contention, or a mapped storage failure.
     pub async fn bump_epoch(&self, ns: &NamespaceKey, new_epoch: u64) -> Result<(), ServerError> {
+        match self.transition_epoch(ns, new_epoch).await? {
+            EpochTransition::Advance => Ok(()),
+            EpochTransition::Retry | EpochTransition::Reject => Err(ServerError::invalid_argument(
+                "epoch increment must be between 1 and 1024",
+            )),
+        }
+    }
+
+    /// CAS the epoch. A lost CAS re-reads and re-classifies, including a
+    /// concurrent winner that installed the same epoch (a valid retry).
+    pub(super) async fn transition_epoch(
+        &self,
+        ns: &NamespaceKey,
+        new_epoch: u64,
+    ) -> Result<EpochTransition, ServerError> {
         let p = self.shards.coordinator(ns);
         for _ in 0..super::coordinator::CREATION_ATTEMPTS {
             let current = self
@@ -126,23 +141,22 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .transpose()
                 .map_err(meta_error)?
                 .unwrap_or(0);
-            if new_epoch <= epoch || new_epoch - epoch > MAX_EPOCH_STEP {
-                return Err(ServerError::invalid_argument(
-                    "epoch increment must be between 1 and 1024",
-                ));
+            let transition = epoch_transition(epoch, new_epoch);
+            if transition != EpochTransition::Advance {
+                return Ok(transition);
             }
             let batch = Batch::new()
                 .require(observed_guard(keys::grant_epoch(), current.as_ref()))
                 .put(keys::grant_epoch(), codec::encode_u64(new_epoch));
             match self.meta.apply(&p, batch).await.map_err(meta_error)? {
-                BatchOutcome::Committed => return Ok(()),
+                BatchOutcome::Committed => return Ok(EpochTransition::Advance),
                 BatchOutcome::PreconditionFailed { .. } => {}
                 BatchOutcome::DeadlinePassed { .. } => {
                     return Err(internal("epoch bump had no deadline"));
                 }
             }
         }
-        Err(ServerError::unavailable("epoch contention; retry"))
+        Err(ServerError::unavailable("epoch contention; retry").with_header("Retry-After", "1"))
     }
 
     /// Declare lease-table recovery using the real pipeline clock.

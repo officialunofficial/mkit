@@ -178,6 +178,7 @@ fn plan_index_rows_inner(
                 at_ms,
                 target: target.clone(),
                 puts: Vec::new(),
+                deletes: Vec::new(),
             };
             let base_bytes = codec::encode_relay(&row)?.as_bytes().len();
             let mut encoded_bytes = base_bytes;
@@ -203,6 +204,7 @@ fn plan_index_rows_inner(
                         at_ms,
                         target: target.clone(),
                         puts: Vec::new(),
+                        deletes: Vec::new(),
                     };
                     encoded_bytes = base_bytes;
                 }

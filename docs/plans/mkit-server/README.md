@@ -127,7 +127,7 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 | 1.11b | G10 | FS multipart, native wiring and storage conformance (R-114) | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.12 | G10 | Worker: R2 multipart with client-streamed parts through the Worker | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.13 | G10 | Native: S3 multipart BlobStore | [M1/M2](m1-m2-breakdown.md) | | planned |
-| 1.14 | G10 | Ticket expiry and pre-M3 outbox retention | [M1/M2](m1-m2-breakdown.md) | | planned |
+| 1.14 | G10 | Ticket expiry | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.29 | G12 | Ops: periodic DO backup export to R2 and per-shard storage alerts | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.15 | G11 | ssh and enc: multi-repo addressing, --principal, implicit session tickets | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.16 | G11 | Client: X-Repository everywhere, identity validation, GetServerInfo, ListRefs paging, ref hint | [M1/M2](m1-m2-breakdown.md) | | planned |
@@ -143,6 +143,7 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 | 2.4b | G13 | epoch/visibility statements, ed25519 scheme, stateless verifier | [brief](briefs/WP-2.4.md) | [#1119](https://github.com/officialunofficial/mkit/pull/1119) | merged |
 | 2.5 | G13 | mkit-attest: secp256k1-eip191 and webauthn-p256 owner schemes | [M1/M2](m1-m2-breakdown.md) | [#1122](https://github.com/officialunofficial/mkit/pull/1122) | merged |
 | 2.6 | G14 | Server: grant-based write authorization, 0x namespaces, error-code alignment | [M1/M2](m1-m2-breakdown.md) | | planned |
+| 2.6b | G14 | secp256k1-eip191 and webauthn-p256 grant wire conformance | [brief](briefs/WP-2.6b-2.7-2.8.md) | | in progress |
 | 2.7 | G14 | Server: ref scopes, packmap coverage and the delete flag | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 2.8 | G14 | Epoch: GetGrantEpoch/SetGrantEpoch over epoch leases; revoke races | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 2.9 | G14 | Server: signed reads, visibility via SetRepoVisibility, read grants, not_found | [M1/M2](m1-m2-breakdown.md) | | planned |

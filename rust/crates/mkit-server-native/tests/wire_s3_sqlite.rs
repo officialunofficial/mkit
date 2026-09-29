@@ -18,13 +18,16 @@ use mkit_server_native::config::{
     S3_SECRET_KEY_ENV,
 };
 use mkit_server_native::{Shutdown, exit, server};
+use reqwest::Method;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 const REPOSITORY: &str = "default";
-const MAX_PACK: u64 = 4 << 20;
+const MAX_PACK: u64 = 64 << 20;
 const QUOTA: ServerQuota = ServerQuota {
     window_ms: 3_600_000,
     max_ops: 6,
-    max_bytes: 2 << 20,
+    max_bytes: 32 << 20,
 };
 
 /// Cases the native server over S3 fails, each with the reason. Target:
@@ -109,16 +112,22 @@ async fn wire_suite_s3_sqlite_auth_v2() {
     profile.derive_features();
     profile.features.insert(Feature::Health);
     profile.features.insert(Feature::Tickets);
+    profile.features.insert(Feature::Multipart);
     profile.ticket_per_signer = 4;
     profile.features.insert(Feature::StrictGzipAuth);
     let target = WireTarget {
         base_url: origin.parse().unwrap(),
         profile,
     };
+    // The ordinary unary deadline is 30 s; a completion must use the long
+    // deadline even when S3 assembly takes longer than that.
+    let delayed = fake.delay_next_query(Method::POST, "uploadId=", Duration::from_secs(31));
+    let start = Instant::now();
     let report = run(&target, None).await;
     common::judge(&report, DIVERGENCES);
-    // Fault injection and Multi mode are unavailable here. S3 multipart
-    // joins this profile in WP-1.13.
+    assert!(delayed.load(Ordering::SeqCst));
+    assert!(start.elapsed() >= Duration::from_secs(31));
+    // Fault injection and Multi mode are unavailable here.
     for skipped in report.skips() {
         assert!(
             skipped == "advance.nonatomic_packmap_first"
@@ -134,7 +143,6 @@ async fn wire_suite_s3_sqlite_auth_v2() {
                         | "growth.replay_and_quota_pruned"
                 )
                 || skipped.starts_with("auth.bearer")
-                || skipped.starts_with("multipart.")
                 || mkit_server_conformance::wire::CASES
                     .iter()
                     .any(|c| c.name == skipped && c.requires.contains(&Feature::MultiRepo)),
@@ -148,10 +156,13 @@ async fn wire_suite_s3_sqlite_auth_v2() {
     let keys = fake.keys(DEFAULT_BUCKET);
     assert!(!keys.is_empty());
     for key in &keys {
-        let hex = key
+        let Some(hex) = key
             .strip_prefix("wire/run/packs/")
             .or_else(|| key.strip_prefix("wire/run/upload-markers/v1/"))
-            .unwrap();
+        else {
+            assert!(key.starts_with("wire/run/server-uploads/"), "{key}");
+            continue;
+        };
         assert!(
             hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()),
             "{key}"

@@ -569,7 +569,7 @@ mod object {
         store: OnceCell<PressureStore<DoConn>>,
         storage: Storage,
         clock: WorkerClock,
-        registry: TimerRegistry<PressureStore<DoConn>>,
+        registry: TimerRegistry<'static, PressureStore<DoConn>>,
         backup_interval_ms: Option<u64>,
         /// A request committed a timer Put while an alarm handler awaited R2.
         alarm_dirty: Cell<bool>,
@@ -620,7 +620,10 @@ mod object {
 
         /// Install the handlers built by the deployment adapter at startup.
         #[must_use]
-        pub fn with_registry(mut self, registry: TimerRegistry<PressureStore<DoConn>>) -> Self {
+        pub fn with_registry(
+            mut self,
+            registry: TimerRegistry<'static, PressureStore<DoConn>>,
+        ) -> Self {
             self.registry = registry;
             self
         }

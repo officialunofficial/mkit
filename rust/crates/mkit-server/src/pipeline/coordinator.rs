@@ -70,7 +70,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let mut want = creation;
         for _ in 0..CREATION_ATTEMPTS {
             let mut batch = Batch::new();
-            if let Some(grant) = op.authz.grant {
+            if let Some(grant) = op.authz.grant.as_ref() {
                 let key = keys::grant_epoch();
                 let observed = self.meta.get(&p, &key).await.map_err(meta_error)?;
                 let epoch = observed

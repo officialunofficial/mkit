@@ -353,6 +353,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             if op
                 .authz
                 .grant
+                .as_ref()
                 .is_some_and(|grant| grant.epoch != read.leased_epoch)
             {
                 return Err(super::plan::epoch_moved());
