@@ -47,6 +47,11 @@ pub enum Procedure {
     SetRepoVisibility,
     /// `IssueObjectUrl`.
     IssueObjectUrl,
+    /// An HTTP object read by id (`/mkit.http.v1/GetObject`, SPEC-HTTP-OBJECTS
+    /// §7). Never a `TransportService` method: only the hook procedure name.
+    HttpGetObject,
+    /// An HTTP object read by ref path (`/mkit.http.v1/GetRefPath`).
+    HttpGetRefPath,
 }
 
 impl Procedure {
@@ -68,10 +73,14 @@ impl Procedure {
             Self::GetReceipt => "/mkit.transport.v1.TransportService/GetReceipt",
             Self::SetRepoVisibility => "/mkit.transport.v1.TransportService/SetRepoVisibility",
             Self::IssueObjectUrl => "/mkit.transport.v1.TransportService/IssueObjectUrl",
+            Self::HttpGetObject => "/mkit.http.v1/GetObject",
+            Self::HttpGetRefPath => "/mkit.http.v1/GetRefPath",
         }
     }
 
-    /// The procedure a full Connect path names, if any.
+    /// The `TransportService` procedure a full Connect path names, if any.
+    /// The HTTP procedures are not `TransportService` methods and are never
+    /// returned.
     #[must_use]
     pub fn from_connect_path(path: &str) -> Option<Self> {
         Some(match path.strip_prefix(SERVICE_PREFIX)? {
@@ -110,7 +119,9 @@ impl Procedure {
             | Self::PackExists
             | Self::DownloadPack
             | Self::GetReceipt
-            | Self::IssueObjectUrl => false,
+            | Self::IssueObjectUrl
+            | Self::HttpGetObject
+            | Self::HttpGetRefPath => false,
         }
     }
 
@@ -325,6 +336,13 @@ pub enum OpKind {
         /// Requested lifetime in seconds; `0` asks for the configured TTL.
         ttl_seconds: u32,
     },
+    /// An anonymous HTTP object read (SPEC-HTTP-OBJECTS §7): by id, or by
+    /// ref path when `ref_name` is set. The hook schema has no object-id
+    /// field, so the id is not part of the operation.
+    HttpGet {
+        /// The ref of a ref-path read; `None` for an id read.
+        ref_name: Option<String>,
+    },
 }
 
 impl OpKind {
@@ -342,6 +360,8 @@ impl OpKind {
             Self::DownloadPack { .. } => Procedure::DownloadPack,
             Self::SetRepoVisibility { .. } => Procedure::SetRepoVisibility,
             Self::IssueObjectUrl { .. } => Procedure::IssueObjectUrl,
+            Self::HttpGet { ref_name: None } => Procedure::HttpGetObject,
+            Self::HttpGet { ref_name: Some(_) } => Procedure::HttpGetRefPath,
         }
     }
 }
@@ -531,6 +551,30 @@ mod tests {
         for (_, name) in ALL {
             assert!(names.contains(&name), "{name} missing from the proto");
         }
+    }
+
+    #[test]
+    fn http_procedures_are_hook_names_only() {
+        for (procedure, path) in [
+            (Procedure::HttpGetObject, "/mkit.http.v1/GetObject"),
+            (Procedure::HttpGetRefPath, "/mkit.http.v1/GetRefPath"),
+        ] {
+            assert_eq!(procedure.connect_path(), path);
+            assert_eq!(Procedure::from_connect_path(path), None);
+            assert!(!procedure.is_write());
+            assert!(!procedure.is_streaming());
+        }
+        assert_eq!(
+            OpKind::HttpGet { ref_name: None }.procedure(),
+            Procedure::HttpGetObject
+        );
+        assert_eq!(
+            OpKind::HttpGet {
+                ref_name: Some("refs/heads/main".into())
+            }
+            .procedure(),
+            Procedure::HttpGetRefPath
+        );
     }
 
     #[test]

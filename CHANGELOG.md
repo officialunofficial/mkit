@@ -22,6 +22,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AUTHORIZER_ROLE`), and `adapter::fetch_with` and `ns_object_with` take a
   deployment's own `HookSet` and outcome sink (WP-3.9). The Queue outcome sink
   and a signed Worker webhook are deferred (WP-3.9b).
+- Server (Stage 2, inert): `mkit-server` gains the default-off `http-objects`
+  feature: `Pipeline::serve_http_object` serves repository objects and ref paths
+  per SPEC-HTTP-OBJECTS (the URL grammar, published resolution, a bounded
+  reachability proof for id URLs, ordinary Range and conditional requests,
+  security headers and one uniform 404), reading extracted objects that this
+  repository holds by range and everything else from its own pack entries.
+  It needs `PipelineConfig::http_objects`, which requires indexed mode, and no
+  adapter enables the feature or mounts a route (WP-4.12, R-169). SPEC-HTTP-OBJECTS
+  §4 now says the global content store decides no membership or reachability
+  but may supply the bytes of an id this repository holds. API: new
+  `Procedure::{HttpGetObject, HttpGetRefPath}` and `OpKind::HttpGet`.
+  Request queries use `RedactedQuery`, exposed only to the parser; ref scans
+  bound all rows and pages, and ref paths peel up to 16 tags.
 - **Breaking (server):** D34 is now the default sharding for Connect
   deployments: `mkit-server serve --meta sqlite:<PATH>` without `--sharding`
   runs `d34` (fs-layout stays `single`), `mkit-server restore` follows the
