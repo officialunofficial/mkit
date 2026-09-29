@@ -654,7 +654,7 @@ fn verify_reads_the_epoch_once_and_only_after_stateless_checks() {
     let verify_with = |token: &str, binding: &Binding<'_>, now_ms: i64| {
         block_on(verify(&cfg, token, binding, now_ms, || {
             calls.fetch_add(1, Ordering::SeqCst);
-            async { Ok(7) }
+            async { Ok::<u64, std::convert::Infallible>(7) }
         }))
     };
 
@@ -698,13 +698,15 @@ fn verify_reads_the_epoch_once_and_only_after_stateless_checks() {
     ] {
         assert_eq!(
             verify_with(token, &binding, now_ms),
-            Err(TokenRejected),
+            Ok(Err(TokenRejected)),
             "{name}"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0, "{name}");
     }
 
-    verify_with(&good, &binding_for(&repo, &target), T0).unwrap();
+    verify_with(&good, &binding_for(&repo, &target), T0)
+        .unwrap()
+        .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     // A mismatched stored epoch rejects.
     assert_eq!(
@@ -713,19 +715,22 @@ fn verify_reads_the_epoch_once_and_only_after_stateless_checks() {
             &good,
             &binding_for(&repo, &target),
             T0,
-            || async { Ok(8) }
+            || async { Ok::<u64, std::convert::Infallible>(8) }
         )),
-        Err(TokenRejected)
+        Ok(Err(TokenRejected))
     );
-    // And the closure's own rejection propagates.
+    // And a read error is the outer Err — never a fabricated rejection
+    // (SPEC-HTTP-OBJECTS §3 step 5: an infrastructure failure is a 503).
+    #[derive(Debug, PartialEq)]
+    struct StoreDown;
     assert_eq!(
         block_on(verify(
             &cfg,
             &good,
             &binding_for(&repo, &target),
             T0,
-            || async { Err(TokenRejected) }
+            || async { Err(StoreDown) }
         )),
-        Err(TokenRejected)
+        Err(StoreDown)
     );
 }

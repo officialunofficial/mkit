@@ -100,6 +100,12 @@ class Reject(Exception):
     pass
 
 
+class StoreDown(Exception):
+    """A read_epoch infrastructure failure: it propagates as its own
+    error (SPEC-HTTP-OBJECTS §3 step 5: a 503, never a rejection)."""
+
+
+
 # ---------------------------------------------------------------------------
 # §3.1 statement text rules, in the parser's check order.
 
@@ -385,7 +391,8 @@ def check_binding(parsed, audience, repository, target, now_ms, ttl_ms):
 
 def verify(cfg, token, binding, now_ms, read_epoch):
     """SPEC-HTTP-OBJECTS §6: precheck, then binding, then exactly one
-    stored-epoch read and the epoch comparison."""
+    stored-epoch read and the epoch comparison. A `read_epoch` failure
+    propagates as its own error, never as a Reject."""
     parsed = precheck(cfg, token, now_ms)
     epoch = check_binding(parsed, *binding, now_ms, cfg["ttl_ms"])
     if read_epoch() != epoch:
@@ -661,6 +668,16 @@ def check(root, use_b3sum):
             assert str(e) == REJECTED, v["name"]
         else:
             raise AssertionError(f"{v['name']} verified at a wrong epoch")
+
+        def read_down():
+            raise StoreDown()
+
+        try:
+            verify(cfg, v["token"], binding, parsed["issued_ms"], read_down)
+        except StoreDown:
+            pass
+        else:
+            raise AssertionError(f"{v['name']}: read error not propagated")
         rows.append(v["name"])
 
     # reject/*.json: the file set is exactly the case table, each file is

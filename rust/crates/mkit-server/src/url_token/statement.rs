@@ -28,7 +28,9 @@ pub enum UrlTarget {
     /// `object:<64 lowercase hex object id>`.
     Object(Hash),
     /// `path:<full ref name>:<unpadded base64url of the UTF-8 path>`; the
-    /// decoded path names a tree entry, empty the root tree.
+    /// decoded path names a tree entry, empty the root tree. Built only
+    /// through [`UrlTarget::path`], which enforces the §9.4 grammar.
+    #[non_exhaustive]
     Path {
         /// The full ref name (SPEC-REFS §3).
         reference: String,

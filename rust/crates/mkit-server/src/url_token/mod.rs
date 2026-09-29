@@ -547,21 +547,27 @@ impl Prechecked {
 /// choice belongs to the serving caller (SPEC-HTTP-OBJECTS §3 step 5).
 ///
 /// # Errors
-/// [`TokenRejected`] for any verification failure or a `read_epoch`
-/// error.
-pub async fn verify<F, Fut>(
+/// The outer `Err` is `read_epoch`'s own error — an infrastructure
+/// failure, never confused with a rejection (SPEC-HTTP-OBJECTS §3: a
+/// store failure is a 503, not a fabricated `not_found`). The inner
+/// `Err` is the uniform [`TokenRejected`].
+pub async fn verify<F, Fut, E>(
     cfg: &UrlTokenConfig,
     token: &str,
     binding: &Binding<'_>,
     now_ms: i64,
     read_epoch: F,
-) -> Result<(), TokenRejected>
+) -> Result<Result<(), TokenRejected>, E>
 where
     F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<u64, TokenRejected>>,
+    Fut: Future<Output = Result<u64, E>>,
 {
-    let bound = cfg
-        .precheck(token, now_ms)?
-        .check_binding(binding, now_ms, cfg.ttl_ms())?;
-    bound.check_epoch(read_epoch().await?)
+    let bound = match cfg
+        .precheck(token, now_ms)
+        .and_then(|p| p.check_binding(binding, now_ms, cfg.ttl_ms()))
+    {
+        Ok(bound) => bound,
+        Err(rejected) => return Ok(Err(rejected)),
+    };
+    Ok(bound.check_epoch(read_epoch().await?))
 }
