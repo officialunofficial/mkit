@@ -1045,9 +1045,9 @@ fn effective_payload_cap(
     // compression variance, capped at one quarter of a small server limit.
     // The actual serialized size is checked by `seal_pack` before upload.
     let cap = requested.min(pack::MAX_TOTAL_PAYLOAD).min(
-        advertised
-            .map(|limit| limit.saturating_sub((64 * 1024).min(limit / 4)))
-            .unwrap_or(pack::MAX_TOTAL_PAYLOAD),
+        advertised.map_or(pack::MAX_TOTAL_PAYLOAD, |limit| {
+            limit.saturating_sub((64 * 1024).min(limit / 4))
+        }),
     );
     if cap == 0 {
         return Err(DispatchError::Transport(TransportError::PayloadTooLarge(0)));

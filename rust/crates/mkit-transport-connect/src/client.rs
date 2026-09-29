@@ -1992,7 +1992,7 @@ impl Transport for ConnectTransport {
             let branch = head_ref
                 .strip_prefix("refs/heads/")
                 .filter(|branch| !branch.is_empty());
-            if !branch.is_some_and(|branch| packmap_ref == format!("refs/mkit/packmap/{branch}")) {
+            if branch.is_none_or(|branch| packmap_ref != format!("refs/mkit/packmap/{branch}")) {
                 return Err(TransportError::InvalidRef(
                     "ticketed advance requires paired head and packmap refs".to_owned(),
                 ));

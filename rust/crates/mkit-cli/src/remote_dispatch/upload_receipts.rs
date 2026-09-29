@@ -140,6 +140,7 @@ impl FilePartReceiptStore {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)] // Accepts the owned error directly from map_err.
 fn io_error(err: io::Error) -> TransportError {
     TransportError::RemoteError(format!("upload receipt cache: {err}"))
 }
@@ -149,7 +150,7 @@ fn stale_tmp(path: &Path) -> bool {
         .and_then(|meta| meta.modified())
         .ok()
         .and_then(|modified| SystemTime::now().duration_since(modified).ok())
-        .is_some_and(|age| age >= Duration::from_secs(60 * 60))
+        .is_some_and(|age| age >= Duration::from_hours(1))
 }
 
 impl PartReceiptStore for FilePartReceiptStore {
@@ -234,7 +235,7 @@ impl PartReceiptStore for FilePartReceiptStore {
                         .and_then(|meta| meta.modified())
                         .ok()
                         .and_then(|time| SystemTime::now().duration_since(time).ok())
-                        .is_some_and(|age| age >= Duration::from_secs(7 * 24 * 60 * 60)),
+                        .is_some_and(|age| age >= Duration::from_hours(168)),
                 };
                 if remove {
                     fs::remove_dir_all(&path).map_err(io_error)?;
@@ -318,8 +319,7 @@ mod tests {
         File::open(&torn)
             .unwrap()
             .set_times(
-                std::fs::FileTimes::new()
-                    .set_modified(SystemTime::now() - Duration::from_secs(2 * 60 * 60)),
+                std::fs::FileTimes::new().set_modified(SystemTime::now() - Duration::from_hours(2)),
             )
             .unwrap();
         store.sweep(0).unwrap();

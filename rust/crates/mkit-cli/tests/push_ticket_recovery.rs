@@ -204,8 +204,8 @@ fn typed_ticket_failures_restart_once_and_landed_write_succeeds() {
 #[test]
 fn seventh_data_pack_is_refused_before_upload() {
     let repo = Repo::new();
-    for i in 0..18 {
-        let bytes = filler(i as u64 * 2 + 1, 2048);
+    for i in 0_u64..18 {
+        let bytes = filler(i * 2 + 1, 2048);
         repo.write(&format!("f{i}.bin"), &bytes);
     }
     repo.ok(&["add", "."]);
@@ -223,8 +223,8 @@ fn seventh_data_pack_is_refused_before_upload() {
 #[test]
 fn ticketless_multi_pack_push_is_not_subject_to_ticket_cap() {
     let repo = Repo::new();
-    for i in 0..18 {
-        let bytes = filler(i as u64 * 2 + 1, 2048);
+    for i in 0_u64..18 {
+        let bytes = filler(i * 2 + 1, 2048);
         repo.write(&format!("f{i}.bin"), &bytes);
     }
     repo.ok(&["add", "."]);
@@ -240,8 +240,8 @@ fn ticketless_multi_pack_push_is_not_subject_to_ticket_cap() {
 #[test]
 fn rebaseline_over_six_packs_keeps_the_append_plan() {
     let repo = Repo::new();
-    for i in 0..16 {
-        repo.write(&format!("f{i}.bin"), &filler(i as u64 * 2 + 1, 2048));
+    for i in 0_u64..16 {
+        repo.write(&format!("f{i}.bin"), &filler(i * 2 + 1, 2048));
     }
     repo.ok(&["add", "."]);
     repo.ok(&["commit", "-m", "large base"]);

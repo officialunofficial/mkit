@@ -192,7 +192,7 @@ fn ticketed_fs_parts_resume_and_three_pack_advance() {
     });
     let info = client.server_info();
     let part_size = match info {
-        ServerInfoView::V2(info) => info.part_size.unwrap() as usize,
+        ServerInfoView::V2(info) => usize::try_from(info.part_size.unwrap()).unwrap(),
         other => panic!("expected V2 server: {other:?}"),
     };
     let big = vec![0x83; part_size * 2 + 17];

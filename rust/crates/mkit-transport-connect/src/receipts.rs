@@ -40,9 +40,11 @@ pub trait PartReceiptStore: Send + Sync {
 }
 
 /// Process-local fallback when the caller has no persistent receipt directory.
+type MemoryReceipts = HashMap<[u8; 32], (TicketMetadata, Vec<StoredPart>)>;
+
 #[derive(Default)]
 pub struct MemoryPartReceiptStore {
-    entries: Mutex<HashMap<[u8; 32], (TicketMetadata, Vec<StoredPart>)>>,
+    entries: Mutex<MemoryReceipts>,
 }
 
 impl PartReceiptStore for MemoryPartReceiptStore {

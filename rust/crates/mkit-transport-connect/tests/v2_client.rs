@@ -719,7 +719,7 @@ fn begin_upload_ticket_and_advance_commit_set() {
             .requests
             .iter()
             .filter_map(|r| r.advance.as_ref())
-            .last()
+            .next_back()
             .unwrap()
             .ticket_ids,
         vec![vec![8; 32]],
@@ -1230,17 +1230,19 @@ fn membership_lag_polls_same_nonce_and_honors_sixty_second_limit() {
     client
         .upload_pack_via_ref(bytes, &key, "refs/heads/main")
         .unwrap();
-    assert!(client
-        .advance_refs_committing(
-            "refs/heads/main",
-            RefWriteCondition::Missing,
-            &hash(b"tip"),
-            "refs/mkit/packmap/main",
-            RefWriteCondition::Missing,
-            &hash(b"node"),
-            &[key],
-        )
-        .is_err());
+    assert!(
+        client
+            .advance_refs_committing(
+                "refs/heads/main",
+                RefWriteCondition::Missing,
+                &hash(b"tip"),
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Missing,
+                &hash(b"node"),
+                &[key],
+            )
+            .is_err()
+    );
     assert_eq!(served.calls("AdvanceRefs"), 1);
     assert_eq!(LAG_CLOCK.load(Ordering::SeqCst), 1_700_000_000_000);
 }
