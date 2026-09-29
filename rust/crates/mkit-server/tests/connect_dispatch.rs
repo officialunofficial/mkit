@@ -127,6 +127,7 @@ struct Setup<H = Hooks> {
     meta: Option<MemoryKv>,
     chunk_max: usize,
     list_cap: Option<u32>,
+    addressing: Option<Addressing>,
 }
 
 fn setup(auth: AuthMode) -> Setup {
@@ -136,6 +137,7 @@ fn setup(auth: AuthMode) -> Setup {
         meta: None,
         chunk_max: 4,
         list_cap: None,
+        addressing: None,
     }
 }
 
@@ -188,7 +190,11 @@ impl<H: HookSet + 'static> Setup<H> {
             max_total_bytes: 1 << 20,
             max_chunks: 64,
         };
-        let mut cfg = PipelineConfig::new(Addressing::Single { repo }, self.auth, limits);
+        let addressing = self.addressing.unwrap_or(Addressing::Single { repo });
+        let mut cfg = PipelineConfig::new(addressing, self.auth, limits);
+        if matches!(cfg.addressing, Addressing::Multi(_)) {
+            cfg.write_policy = mkit_server::policy::WritePolicy::Owner;
+        }
         cfg.download_chunk_max = self.chunk_max;
         if let Some(cap) = self.list_cap {
             cfg.max_list_refs_page_size = cap;
@@ -207,6 +213,12 @@ impl<H: HookSet + 'static> Setup<H> {
         )
         .unwrap();
         (pipe, codes)
+    }
+
+    /// Route by `X-Repository` instead of the configured repository.
+    fn multi(mut self) -> Self {
+        self.addressing = Some(Addressing::Multi(mkit_server::MultiAddressing::new()));
+        self
     }
 
     fn serve(self) -> Server {
@@ -818,6 +830,132 @@ async fn auth_v2_signed_unary_ok_and_replayed() {
     assert!(server.exists(&hash(&data)).await);
 }
 
+/// The `auth-v2/read.json` fixture entry's headers verbatim (the
+/// repository is a namespaced `ed25519-…/photos` identity, so callers
+/// must serve Multi).
+fn golden_read_headers(index: usize) -> Vec<(&'static str, String)> {
+    let fixtures: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tests/golden/auth-v2/read.json")).unwrap();
+    let fixture = &fixtures[index];
+    let field = |name: &str| fixture[name].as_str().unwrap().to_owned();
+    vec![
+        ("x-envelope-version", "2".to_owned()),
+        ("x-audience", field("audience")),
+        ("x-repository", field("repository")),
+        ("x-public-key", field("public_key")),
+        ("x-signature", field("signature")),
+        ("x-digest", field("body_digest")),
+        ("x-content-commitment", field("commitment")),
+        (
+            "x-created-at",
+            fixture["created_at"].as_i64().unwrap().to_string(),
+        ),
+        (
+            "x-expires-at",
+            fixture["expires_at"].as_i64().unwrap().to_string(),
+        ),
+        ("idempotency-key", field("nonce")),
+    ]
+}
+
+#[tokio::test]
+async fn signed_unary_reads_verify_at_stage_0() {
+    let server = setup(authv2()).serve();
+    let body = serde_json::to_vec(&serde_json::json!({ "name": HEAD })).unwrap();
+    let headers = signed_body(7, "ReadRef", &body, 40);
+    let reply = server
+        .post(
+            "mkit.transport.v1.TransportService/ReadRef",
+            JSON,
+            &headers,
+            body.clone(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    // A forged signature and a lone marker header both fail closed.
+    let mut forged = headers.clone();
+    forged.retain(|(n, _)| *n != "x-signature");
+    forged.push(("x-signature", "ff".repeat(64)));
+    let reply = server
+        .post(
+            "mkit.transport.v1.TransportService/ReadRef",
+            JSON,
+            &forged,
+            body,
+        )
+        .await;
+    assert_eq!(reply.code(), "unauthenticated");
+    let reply = server
+        .json(
+            "ListRefs",
+            &serde_json::json!({}),
+            &[("x-signature", "ab".to_owned())],
+        )
+        .await;
+    assert_eq!(reply.code(), "unauthenticated");
+}
+
+#[tokio::test]
+async fn signed_download_pack_verifies_the_framed_request() {
+    let server = setup(authv2()).multi().serve();
+    let headers = golden_read_headers(1);
+    // The signature commits to `0x00‖be32(len)‖message`; it verifies, then
+    // the read fails on the unregistered repository (not unauthenticated).
+    let (_, end) = server.download(&[0xcd; 32], &headers).await.frames();
+    assert_eq!(end["error"]["code"], "not_found", "{end}");
+    // A forged signature fails closed.
+    let mut forged = headers.clone();
+    forged.retain(|(n, _)| *n != "x-signature");
+    forged.push(("x-signature", "ff".repeat(64)));
+    let (_, end) = server.download(&[0xcd; 32], &forged).await.frames();
+    assert_eq!(end["error"]["code"], "unauthenticated", "{end}");
+    // A signed request under a declared compression fails closed too:
+    // the reconstructed frame cannot match the compressed bytes signed.
+    let mut compressed = headers;
+    compressed.push(("connect-content-encoding", "gzip".to_owned()));
+    let (_, end) = server.download(&[0xcd; 32], &compressed).await.frames();
+    assert_eq!(end["error"]["code"], "unauthenticated", "{end}");
+}
+
+#[tokio::test]
+async fn non_utf8_auth_header_on_a_read_fails_closed() {
+    let (pipe, _) = setup(authv2()).pipeline();
+    let svc = connect::service(Arc::new(pipe));
+    let body = ReadRefRequest {
+        name: Some(HEAD.to_owned()),
+        ..Default::default()
+    }
+    .encode_to_vec();
+    let req = http::Request::builder()
+        .method(http::Method::POST)
+        .uri("http://localhost/mkit.transport.v1.TransportService/ReadRef")
+        .header("content-type", PROTO)
+        .header("connect-protocol-version", "1")
+        .header(
+            "x-signature",
+            http::HeaderValue::from_bytes(&[0xff]).unwrap(),
+        )
+        .body(Full::new(Bytes::from(body)))
+        .unwrap();
+    let resp = svc.oneshot(req).await.unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["code"], "unauthenticated");
+}
+
+#[tokio::test]
+async fn grant_header_on_an_unsigned_multi_read_is_unauthenticated() {
+    // SPEC-WRITE-GRANTS §4.2 on any procedure, Multi deployments only.
+    let server = setup(authv2()).multi().serve();
+    let grant = [("x-write-grant", "scheme.body".to_owned())];
+    let reply = server
+        .unary("ReadRef", &ReadRefRequest::default(), &grant)
+        .await;
+    assert_eq!(reply.code(), "unauthenticated");
+    let (_, end) = server.download(&[0xcd; 32], &grant).await.frames();
+    assert_eq!(end["error"]["code"], "unauthenticated");
+}
+
 #[tokio::test]
 async fn bearer_mode_rejects_missing_token_on_streaming_and_unary() {
     let auth = AuthMode::Bearer {
@@ -982,6 +1120,7 @@ async fn error_shaping_reaches_the_wire() {
         meta: None,
         chunk_max: 4,
         list_cap: None,
+        addressing: None,
     }
     .serve();
     let reply = server
@@ -1120,11 +1259,19 @@ fn grant_epoch_paths_are_permanently_outside_procedure() {
 }
 
 #[test]
-fn m2_stub_paths_are_not_authenticated_procedures_yet() {
-    // WP-2.9 and WP-2.11 add procedures for these and replace this test.
-    for rpc in ["SetRepoVisibility", "IssueObjectUrl"] {
+fn m2_paths_are_authenticated_procedures() {
+    // WP-2.9 classified these RPCs; their handlers land with the WP.
+    for (rpc, procedure) in [
+        ("GetReceipt", Procedure::GetReceipt),
+        ("SetRepoVisibility", Procedure::SetRepoVisibility),
+        ("IssueObjectUrl", Procedure::IssueObjectUrl),
+    ] {
         let path = format!("/mkit.transport.v1.TransportService/{rpc}");
-        assert_eq!(Procedure::from_connect_path(&path), None, "{rpc}");
+        assert_eq!(
+            Procedure::from_connect_path(&path),
+            Some(procedure),
+            "{rpc}"
+        );
     }
 }
 
@@ -1136,6 +1283,7 @@ async fn m2_stubs_reject_binary_and_json_without_writes_in_both_auth_modes() {
             token: Redacted::new(TOKEN),
         },
     ] {
+        let auth_v2 = matches!(auth, AuthMode::AuthV2(_));
         let (server, writes) = spy_server(auth);
         assert_unimplemented(
             &server
@@ -1161,27 +1309,47 @@ async fn m2_stubs_reject_binary_and_json_without_writes_in_both_auth_modes() {
                 )
                 .await,
         );
-        assert_unimplemented(
-            &server
-                .unary(
-                    "SetRepoVisibility",
-                    &SetRepoVisibilityRequest::default(),
-                    &[],
-                )
-                .await,
-        );
-        assert_unimplemented(
-            &server
+        // The WP-2.9/2.11 procedures authenticate at stage 0 now: under
+        // auth v2 an unsigned SetRepoVisibility passes anonymously
+        // (statement mode) to the unimplemented handler, IssueObjectUrl
+        // is never anonymous, and under Bearer every call needs a token.
+        let stub = if auth_v2 {
+            "unimplemented"
+        } else {
+            "unauthenticated"
+        };
+        for rpc in ["SetRepoVisibility", "GetReceipt"] {
+            assert_eq!(
+                server
+                    .unary(rpc, &SetRepoVisibilityRequest::default(), &[])
+                    .await
+                    .code(),
+                stub,
+                "{rpc}"
+            );
+            assert_eq!(
+                server.json(rpc, &serde_json::json!({}), &[]).await.code(),
+                stub,
+                "{rpc} json"
+            );
+        }
+        assert_eq!(
+            server
                 .unary("IssueObjectUrl", &IssueObjectUrlRequest::default(), &[])
-                .await,
+                .await
+                .code(),
+            "unauthenticated"
         );
-        for rpc in [
-            "GetGrantEpoch",
-            "SetGrantEpoch",
-            "SetRepoVisibility",
-            "IssueObjectUrl",
-        ] {
-            assert_unimplemented(&server.json(rpc, &serde_json::json!({}), &[]).await);
+        for rpc in ["GetGrantEpoch", "SetGrantEpoch", "IssueObjectUrl"] {
+            assert_eq!(
+                server.json(rpc, &serde_json::json!({}), &[]).await.code(),
+                if rpc == "IssueObjectUrl" {
+                    "unauthenticated"
+                } else {
+                    "unimplemented"
+                },
+                "{rpc} json"
+            );
         }
         assert_eq!(writes.load(Ordering::SeqCst), 0);
     }

@@ -623,16 +623,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     fn authenticate_inner(&self, meta: &RequestMeta<'_>) -> Result<Authenticated, ServerError> {
-        let signed = matches!(self.cfg.auth, AuthMode::AuthV2(_)) && meta.procedure.is_write();
+        let signed = auth::signed_request(&self.cfg.auth, meta);
+        // SPEC-WRITE-GRANTS §4.2: a grant header without auth v2 fails on
+        // any procedure. Single/Open deployments ignore it instead (2.6).
         if matches!(self.cfg.addressing, Addressing::Multi(_))
             && !signed
-            && matches!(
-                meta.procedure,
-                Procedure::UpdateRef
-                    | Procedure::AdvanceRefs
-                    | Procedure::BeginUpload
-                    | Procedure::UploadPack
-            )
             && (meta.header)("x-write-grant").is_some()
         {
             return Err(ServerError::unauthenticated(
@@ -1316,6 +1311,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         if matches!(self.cfg.auth, AuthMode::AuthV2(_))
             && kind.procedure().is_write()
+            && kind.procedure() != Procedure::SetRepoVisibility
             && a.auth.is_none()
         {
             return Err(ServerError::unauthenticated(

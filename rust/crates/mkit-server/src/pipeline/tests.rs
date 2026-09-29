@@ -672,9 +672,22 @@ impl Req {
         nonce: &str,
         created: i64,
     ) -> Self {
+        Self::signed_for(key, procedure, REPO, body, nonce, created)
+    }
+
+    /// Signed with auth v2 for `repository` (a Multi wire identity) at
+    /// `created`, valid for 300 s.
+    fn signed_for(
+        key: &SigningKey,
+        procedure: Procedure,
+        repository: &str,
+        body: &[u8],
+        nonce: &str,
+        created: i64,
+    ) -> Self {
         let digest = to_hex(&hash(body));
         let commitment = format!("body:{digest}");
-        let mut req = Self::committed(key, procedure, &commitment, nonce, created);
+        let mut req = Self::committed_for(key, procedure, repository, &commitment, nonce, created);
         req.body = body.to_vec();
         req.header("x-digest", &digest)
     }
@@ -687,11 +700,24 @@ impl Req {
         nonce: &str,
         created: i64,
     ) -> Self {
+        Self::committed_for(key, procedure, REPO, commitment, nonce, created)
+    }
+
+    /// Signed over `commitment` for `repository` at `created`, valid for
+    /// 300 s, no body.
+    fn committed_for(
+        key: &SigningKey,
+        procedure: Procedure,
+        repository: &str,
+        commitment: &str,
+        nonce: &str,
+        created: i64,
+    ) -> Self {
         let expires = created + 300_000;
         let op = SignedOp {
             context: AuthContext {
                 audience: AUDIENCE,
-                repository: REPO,
+                repository,
             },
             procedure: procedure.connect_path(),
             commitment,
@@ -703,7 +729,7 @@ impl Req {
         let headers = vec![
             ("x-envelope-version", "2".to_owned()),
             ("x-audience", AUDIENCE.to_owned()),
-            ("x-repository", REPO.to_owned()),
+            ("x-repository", repository.to_owned()),
             ("x-public-key", to_hex(key.verifying_key().as_bytes())),
             ("x-signature", to_hex_bytes(&signature.to_bytes())),
             ("x-content-commitment", commitment.to_owned()),
@@ -976,6 +1002,182 @@ fn authv2_reads_need_no_signature() {
         code(block_on(env.pipe.read_ref(&list, HEAD))),
         Code::Unauthenticated
     );
+}
+
+/// The golden `auth-v2/read.json` fixture entry as a `Req` at `created_at + 1`.
+fn golden_read(index: usize) -> (Req, serde_json::Value) {
+    let fixtures: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../tests/golden/auth-v2/read.json")).unwrap();
+    let fixture = fixtures[index].clone();
+    let field = |name: &str| fixture[name].as_str().unwrap().to_owned();
+    let unhex = |hex: &str| {
+        hex.as_bytes()
+            .chunks(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect::<Vec<u8>>()
+    };
+    let req = Req {
+        procedure: Procedure::from_connect_path(&field("procedure")).unwrap(),
+        body: unhex(&field("body_hex")),
+        headers: vec![
+            ("x-envelope-version", "2".to_owned()),
+            ("x-audience", field("audience")),
+            ("x-repository", field("repository")),
+            ("x-public-key", field("public_key")),
+            ("x-signature", field("signature")),
+            ("x-digest", field("body_digest")),
+            ("x-content-commitment", field("commitment")),
+            (
+                "x-created-at",
+                fixture["created_at"].as_i64().unwrap().to_string(),
+            ),
+            (
+                "x-expires-at",
+                fixture["expires_at"].as_i64().unwrap().to_string(),
+            ),
+            ("idempotency-key", field("nonce")),
+        ],
+        principal: None,
+    };
+    (req, fixture)
+}
+
+/// An `AuthV2` pipeline routed by `X-Repository` (the read fixtures carry
+/// a namespaced `ed25519-…/name` identity).
+fn multi_env() -> Env {
+    use crate::repo::MultiAddressing;
+
+    let clock = clock();
+    let mut config = cfg(authv2());
+    config.addressing = Addressing::Multi(MultiAddressing::new());
+    config.write_policy = WritePolicy::Owner;
+    build(config, Spy::new(store(&clock)), Hooks::new(), clock)
+}
+
+#[test]
+fn authv2_signed_reads_verify_in_full() {
+    let env = env(authv2());
+    let reads = [
+        Procedure::ListRefs,
+        Procedure::ReadRef,
+        Procedure::PackExists,
+        Procedure::DownloadPack,
+        Procedure::GetReceipt,
+    ];
+    for (i, procedure) in reads.into_iter().enumerate() {
+        // DownloadPack commits to its framed body `0x00‖be32(len)‖msg`;
+        // at stage 0 the binding supplies it as `unary_body`.
+        let body = b"request".to_vec();
+        let req = Req::signed(
+            &key(5),
+            procedure,
+            &body,
+            &nonce(10 + u32::try_from(i).unwrap()),
+            T0,
+        );
+        let a = env.auth(&req).unwrap();
+        assert!(
+            matches!(a.principal, Principal::Signer { .. }),
+            "{procedure:?}"
+        );
+        assert!(a.auth.is_some(), "{procedure:?}");
+    }
+    // A signed read captures a presented grant (Multi scope, §4.2); an
+    // unsigned read stays anonymous and never signs out a replay record.
+    let granted = Req::signed(&key(5), Procedure::ReadRef, b"x", &nonce(30), T0)
+        .header("x-write-grant", "scheme.body");
+    assert!(env.auth(&granted).unwrap().write_grant.is_some());
+    let reads = [
+        Procedure::ListRefs,
+        Procedure::ReadRef,
+        Procedure::PackExists,
+        Procedure::DownloadPack,
+        Procedure::GetReceipt,
+    ];
+    let before = (env.count("p"), env.count("px"));
+    for procedure in reads {
+        let a = env
+            .auth(&Req::signed(&key(5), procedure, b"r", &nonce(40), T0))
+            .unwrap();
+        assert_ne!(a.principal, Principal::Anonymous, "{procedure:?}");
+    }
+    assert_eq!((env.count("p"), env.count("px")), before);
+}
+
+#[test]
+fn authv2_signed_read_failures_never_fall_back_to_anonymous() {
+    let env = env(authv2());
+    // A marker header without the rest of the envelope.
+    let marker_only = Req::unsigned(Procedure::ReadRef).header("x-signature", "ab");
+    assert_eq!(code(env.auth(&marker_only)), Code::Unauthenticated);
+    // Empty marker value still marks the request signed.
+    let empty_marker = Req::unsigned(Procedure::ListRefs).header("x-envelope-version", "");
+    assert_eq!(code(env.auth(&empty_marker)), Code::Unauthenticated);
+    // A wrong signature, a tampered body, an expired envelope.
+    let forged = Req::signed(&key(5), Procedure::ReadRef, b"x", &nonce(50), T0)
+        .header("x-signature", &"ff".repeat(64));
+    assert_eq!(code(env.auth(&forged)), Code::Unauthenticated);
+    let mut tampered = Req::signed(&key(5), Procedure::ListRefs, b"x", &nonce(51), T0);
+    tampered.body = b"other".to_vec();
+    assert_eq!(code(env.auth(&tampered)), Code::Unauthenticated);
+    let expired = Req::signed(&key(5), Procedure::ReadRef, b"x", &nonce(52), T0 - 400_000);
+    assert_eq!(code(env.auth(&expired)), Code::Unauthenticated);
+    // Unsigned reads still pass anonymously; IssueObjectUrl never does.
+    for procedure in [Procedure::ListRefs, Procedure::SetRepoVisibility] {
+        assert_eq!(
+            env.auth(&Req::unsigned(procedure)).unwrap().principal,
+            Principal::Anonymous,
+            "{procedure:?}"
+        );
+    }
+    assert_eq!(
+        code(env.auth(&Req::unsigned(Procedure::IssueObjectUrl))),
+        Code::Unauthenticated
+    );
+}
+
+#[test]
+fn multi_signed_read_scopes_to_the_resolved_repository() {
+    use mkit_core::repo_identity::Namespace;
+
+    let env = multi_env();
+    let signer = key(5).verifying_key().to_bytes();
+    let identity = format!("{}/{}", Namespace::Ed25519(signer), REPO);
+    let good = Req::signed_for(
+        &key(5),
+        Procedure::ListRefs,
+        &identity,
+        b"r",
+        &nonce(60),
+        T0,
+    );
+    let a = env.auth(&good).unwrap();
+    assert!(matches!(a.principal, Principal::Signer { .. }));
+    assert_eq!(a.repo().identity, identity);
+    // The same envelope sent for another repository identity fails.
+    let moved = good.clone().header("x-repository", &format!("{identity}x"));
+    assert_eq!(code(env.auth(&moved)), Code::Unauthenticated);
+}
+
+#[test]
+fn golden_signed_reads_verify_at_stage_0() {
+    let env = multi_env();
+    for index in [0usize, 1] {
+        let (req, fixture) = golden_read(index);
+        env.clock.set(fixture["created_at"].as_i64().unwrap() + 1);
+        let a = env.auth(&req).unwrap();
+        assert!(matches!(a.principal, Principal::Signer { .. }));
+        assert_eq!(
+            to_hex(&a.auth.unwrap().signer),
+            fixture["public_key"].as_str().unwrap(),
+            "entry {index}"
+        );
+    }
+    env.clock.set(T0);
+    // Forging the signature on the DownloadPack frame fails.
+    let (req, _) = golden_read(1);
+    let forged = req.header("x-signature", &"ff".repeat(64));
+    assert_eq!(code(env.auth(&forged)), Code::Unauthenticated);
 }
 
 #[test]

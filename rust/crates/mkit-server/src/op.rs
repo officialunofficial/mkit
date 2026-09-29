@@ -41,6 +41,12 @@ pub enum Procedure {
     UploadPack,
     /// `DownloadPack` (server streaming).
     DownloadPack,
+    /// `GetReceipt`.
+    GetReceipt,
+    /// `SetRepoVisibility` (envelope mode is replay-protected like a write).
+    SetRepoVisibility,
+    /// `IssueObjectUrl`.
+    IssueObjectUrl,
 }
 
 impl Procedure {
@@ -59,6 +65,9 @@ impl Procedure {
             Self::PackExists => "/mkit.transport.v1.TransportService/PackExists",
             Self::UploadPack => "/mkit.transport.v1.TransportService/UploadPack",
             Self::DownloadPack => "/mkit.transport.v1.TransportService/DownloadPack",
+            Self::GetReceipt => "/mkit.transport.v1.TransportService/GetReceipt",
+            Self::SetRepoVisibility => "/mkit.transport.v1.TransportService/SetRepoVisibility",
+            Self::IssueObjectUrl => "/mkit.transport.v1.TransportService/IssueObjectUrl",
         }
     }
 
@@ -76,23 +85,33 @@ impl Procedure {
             "PackExists" => Self::PackExists,
             "UploadPack" => Self::UploadPack,
             "DownloadPack" => Self::DownloadPack,
+            "GetReceipt" => Self::GetReceipt,
+            "SetRepoVisibility" => Self::SetRepoVisibility,
+            "IssueObjectUrl" => Self::IssueObjectUrl,
             _ => return None,
         })
     }
 
-    /// Whether the procedure mutates state: `UpdateRef`, `AdvanceRefs` and
-    /// `UploadPack`.
+    /// Whether the procedure mutates state. Every variant is classified:
+    /// `GetServerInfo`, `GetGrantEpoch` and `SetGrantEpoch` stay outside
+    /// `Procedure` by design (SPEC-WRITE-GRANTS §5.3, §9.2).
     #[must_use]
     pub const fn is_write(self) -> bool {
-        matches!(
-            self,
+        match self {
             Self::UpdateRef
-                | Self::AdvanceRefs
-                | Self::BeginUpload
-                | Self::UploadPack
-                | Self::UploadPart
-                | Self::CompleteUpload
-        )
+            | Self::AdvanceRefs
+            | Self::BeginUpload
+            | Self::UploadPack
+            | Self::UploadPart
+            | Self::CompleteUpload
+            | Self::SetRepoVisibility => true,
+            Self::ListRefs
+            | Self::ReadRef
+            | Self::PackExists
+            | Self::DownloadPack
+            | Self::GetReceipt
+            | Self::IssueObjectUrl => false,
+        }
     }
 
     /// Whether the procedure streams: `UploadPack`, `UploadPart` and `DownloadPack`.
@@ -415,7 +434,7 @@ mod tests {
     use crate::error::Code;
     use crate::repo::{NamespaceKey, RepoName};
 
-    const ALL: [(Procedure, &str); 10] = [
+    const ALL: [(Procedure, &str); 13] = [
         (Procedure::ListRefs, "ListRefs"),
         (Procedure::ReadRef, "ReadRef"),
         (Procedure::UpdateRef, "UpdateRef"),
@@ -426,7 +445,47 @@ mod tests {
         (Procedure::PackExists, "PackExists"),
         (Procedure::UploadPack, "UploadPack"),
         (Procedure::DownloadPack, "DownloadPack"),
+        (Procedure::GetReceipt, "GetReceipt"),
+        (Procedure::SetRepoVisibility, "SetRepoVisibility"),
+        (Procedure::IssueObjectUrl, "IssueObjectUrl"),
     ];
+
+    /// `TransportService` RPCs that deliberately stay outside `Procedure`:
+    /// unauthenticated forever (SPEC-WRITE-GRANTS §5.3, §9.2; STC §2.1).
+    const EXEMPT: [&str; 3] = ["GetServerInfo", "GetGrantEpoch", "SetGrantEpoch"];
+
+    #[test]
+    fn every_transport_rpc_is_classified_or_exempt() {
+        let proto = include_str!("../../../../proto/mkit/transport/v1/transport.proto");
+        let service = proto
+            .split("service TransportService")
+            .nth(1)
+            .expect("TransportService");
+        let mut names = Vec::new();
+        for line in service.lines() {
+            let line = line.trim_start();
+            if let Some(rest) = line.strip_prefix("rpc ")
+                && let Some(name) = rest.split('(').next()
+            {
+                names.push(name.trim());
+            }
+        }
+        assert_eq!(names.len(), ALL.len() + EXEMPT.len());
+        for name in &names {
+            let path = format!("/mkit.transport.v1.TransportService/{name}");
+            if EXEMPT.contains(name) {
+                assert_eq!(Procedure::from_connect_path(&path), None, "{name}");
+            } else {
+                assert!(
+                    Procedure::from_connect_path(&path).is_some(),
+                    "{name} is not classified"
+                );
+            }
+        }
+        for (_, name) in ALL {
+            assert!(names.contains(&name), "{name} missing from the proto");
+        }
+    }
 
     #[test]
     fn procedure_paths_roundtrip() {
@@ -466,7 +525,8 @@ mod tests {
                 Procedure::BeginUpload,
                 Procedure::UploadPart,
                 Procedure::CompleteUpload,
-                Procedure::UploadPack
+                Procedure::UploadPack,
+                Procedure::SetRepoVisibility
             ]
         );
         let streams: Vec<_> = ALL
