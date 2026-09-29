@@ -25,6 +25,7 @@
 //! | coordinator namespace total | `qt 00 <window:be64>` | codec `NamespaceUsage` |
 //! | namespace record (`Coordinator`) | `nr 00` | codec `NamespaceRecord` |
 //! | repo record (`Coordinator`) | `rr 00 <repo>` | codec `RepoRecord` |
+//! | repository visibility (`Coordinator`) | `rv 00 <repo>` | codec `RepoVisibilityV1`; absent means public |
 //! | repo-known marker (ref shard) | `rk 00 <repo>` | empty |
 //! | grant epoch | `e 00` | be64; absent means 0, never written as 0 |
 //! | epoch lease (ref shard) | `el 00` | codec `EpochLease` |
@@ -141,6 +142,9 @@ pub const TAG_REPO_KNOWN: &str = "rk";
 /// Repo registry tag: one row per repo of the namespace, in its
 /// coordinator partition. Bounded by repos, not refs.
 pub const TAG_REPO_REGISTRY: &str = "rr";
+/// Repository visibility tag (`Coordinator`): absent means public; the
+/// row may exist without `rr` (SPEC-WRITE-GRANTS §9.1).
+pub const TAG_REPO_VISIBILITY: &str = "rv";
 /// Namespace list tag, reserved until namespace enumeration under
 /// `namespace_policy = any` is needed (WP-1.29 backup). No M1 consumer
 /// or deployment-wide partition exists. A backend may keep its own metadata.
@@ -192,6 +196,8 @@ pub enum ParsedKey {
     NamespaceRecord,
     /// `rr 00 <repo>`.
     RepoRecord(RepoName),
+    /// `rv 00 <repo>`.
+    RepoVisibility(RepoName),
     /// `rk 00 <repo>`.
     RepoKnown(RepoName),
     /// `rh 00 <Partition::encode(source)>`. Never pruned.
@@ -405,6 +411,12 @@ pub fn namespace_record() -> Key {
 #[must_use]
 pub fn repo_record(repo: &RepoName) -> Key {
     key(TAG_REPO_REGISTRY, &[repo.as_str().as_bytes()])
+}
+
+/// `rv 00 <repo>`: the repository's visibility row in its coordinator.
+#[must_use]
+pub fn repo_visibility(repo: &RepoName) -> Key {
+    key(TAG_REPO_VISIBILITY, &[repo.as_str().as_bytes()])
 }
 
 /// `rk 00 <repo>`: the ref shard's repository registration marker.
@@ -902,6 +914,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"ls" => parse_leased_shard(body)?,
         b"nr" if body.is_empty() => ParsedKey::NamespaceRecord,
         b"rr" => ParsedKey::RepoRecord(RepoName::new(text(body)?).ok()?),
+        b"rv" => ParsedKey::RepoVisibility(RepoName::new(text(body)?).ok()?),
         b"rh" => ParsedKey::RelayHighWater(Partition::decode(body).ok()?),
         b"rs" if body.is_empty() => ParsedKey::RelayScan,
         b"rk" => ParsedKey::RepoKnown(RepoName::new(text(body)?).ok()?),
@@ -1037,6 +1050,7 @@ mod tests {
             TAG_OBJECT_STATE,
             TAG_NAMESPACE_RECORD,
             TAG_REPO_REGISTRY,
+            TAG_REPO_VISIBILITY,
             TAG_REPO_KNOWN,
             TAG_RELAY_HIGH_WATER,
             TAG_RELAY_SCAN,
@@ -1071,6 +1085,7 @@ mod tests {
             ),
             (namespace_record(), b"nr\0".to_vec()),
             (repo_record(&repo("room-a")), b"rr\0room-a".to_vec()),
+            (repo_visibility(&repo("room-a")), b"rv\0room-a".to_vec()),
             (repo_known(&repo("room-a")), b"rk\0room-a".to_vec()),
             (
                 verification(&repo("room-a"), &s),
@@ -1504,6 +1519,14 @@ mod tests {
             })
         );
     }
+    #[test]
+    fn repo_visibility_key_roundtrips() {
+        let key = repo_visibility(&repo("room-a"));
+        assert_eq!(key.as_bytes(), b"rv\0room-a");
+        assert_eq!(parse(&key), Some(ParsedKey::RepoVisibility(repo("room-a"))));
+        assert_eq!(parse(&Key::new(b"rv\0"[..].to_vec())), None);
+    }
+
     #[test]
     fn lease_keys_reject_malformed_payloads() {
         for bad in [

@@ -58,7 +58,7 @@ const MAX_BODY_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
 /// listed for completeness (an operator console could call PurgeRoom
 /// cross-origin) even though the shipped web demo never sends it.
 const CORS_ALLOW_HEADERS: &str = "x-envelope-version, x-audience, x-repository, x-content-commitment, x-expires-at, x-public-key, x-signature, x-digest, x-created-at, \
-     idempotency-key, x-admin-token, content-type, connect-protocol-version";
+     idempotency-key, x-admin-token, x-mkit-ref, x-write-grant, content-type, connect-protocol-version";
 const CORS_ALLOW_METHODS: &str = "POST, GET, OPTIONS";
 
 #[event(fetch)]

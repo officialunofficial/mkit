@@ -12,11 +12,14 @@ use connectrpc::{
     ServiceStream,
 };
 use futures::{StreamExt, stream};
+use mkit_core::hash::Hash;
 use mkit_core::protocol::{AdvanceOutcome, PackKey};
 
 use super::error::recorded;
 use super::proto::mkit::transport::v1::__buffa::oneof::begin_upload_response::Result as BeginResult;
 use super::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::Body as DownloadBody;
+use super::proto::mkit::transport::v1::__buffa::oneof::issue_object_url_request::Target;
+use super::proto::mkit::transport::v1::__buffa::oneof::set_repo_visibility_request::Mode as VisibilityMode;
 use super::proto::mkit::transport::v1::__buffa::oneof::upload_pack_request::Body as UploadBody;
 use super::proto::mkit::transport::v1::__buffa::oneof::upload_part_request::Msg as PartMsg;
 use super::proto::mkit::transport::v1::{
@@ -30,18 +33,21 @@ use super::proto::mkit::transport::v1::{
 };
 use super::proto::mkit::transport::v1::{
     GetGrantEpochRequest, GetGrantEpochResponse, IssueObjectUrlRequest, IssueObjectUrlResponse,
-    SetGrantEpochRequest, SetGrantEpochResponse, SetRepoVisibilityRequest,
+    RepoVisibility, SetGrantEpochRequest, SetGrantEpochResponse, SetRepoVisibilityRequest,
     SetRepoVisibilityResponse,
 };
 use super::{Shared, authenticated};
 use crate::error::ServerError;
 use crate::op::RefUpdate;
-use crate::pipeline::{Authenticated, DownloadChunk, HookSet, Pipeline, ServerInfo};
+use crate::pipeline::{
+    Authenticated, DownloadChunk, HookSet, Pipeline, ServerInfo, VisibilityRequest,
+};
 use crate::refs::{DigestField, UnusedExpectedId, condition_from_wire, hash_from_slice};
 use crate::replay::{BeginUploadResult, UpdateRefResult};
 use crate::rt::{send_wrap, send_wrap_stream};
 use crate::store::{MultipartBlobStore, NamespaceStore};
 use crate::upload::UploadError;
+use crate::url_token::UrlTarget;
 
 /// `TransportService` over a [`Pipeline`]. Each handler takes the
 /// [`Authenticated`] that [`super::AuthInterceptor`] stored for existing RPCs;
@@ -632,22 +638,72 @@ where
 
     async fn set_repo_visibility(
         &self,
-        _ctx: RequestContext,
-        _request: ServiceRequest<'_, SetRepoVisibilityRequest>,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, SetRepoVisibilityRequest>,
     ) -> ServiceResult<SetRepoVisibilityResponse> {
-        // SECURITY: this path bypasses auth; the implementing WP-2.9 MUST add mode-specific authorization.
-        // TODO(WP-2.9): verify auth v2 or the owner statement before changing visibility.
-        Err(not_yet().into())
+        let a = authenticated(&ctx)?;
+        let req = match request.to_owned_message().mode {
+            Some(VisibilityMode::Visibility(visibility)) => match visibility.as_known() {
+                Some(RepoVisibility::REPO_VISIBILITY_PUBLIC) => {
+                    VisibilityRequest::Envelope(mkit_attest::grant::Visibility::Public)
+                }
+                Some(RepoVisibility::REPO_VISIBILITY_PRIVATE) => {
+                    VisibilityRequest::Envelope(mkit_attest::grant::Visibility::Private)
+                }
+                _ => return Err(ServerError::invalid_argument("invalid visibility").into()),
+            },
+            Some(VisibilityMode::SignedStatement(statement)) => {
+                VisibilityRequest::Statement(statement)
+            }
+            None => {
+                return Err(
+                    ServerError::invalid_argument("SetRepoVisibility requires a mode").into(),
+                );
+            }
+        };
+        let pipe = self.pipe.arc();
+        send_wrap(async move {
+            pipe.set_repo_visibility(&a, req).await?;
+            Response::ok(SetRepoVisibilityResponse::default())
+        })
+        .await
     }
 
     async fn issue_object_url(
         &self,
-        _ctx: RequestContext,
-        _request: ServiceRequest<'_, IssueObjectUrlRequest>,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, IssueObjectUrlRequest>,
     ) -> ServiceResult<IssueObjectUrlResponse> {
-        // SECURITY: this path bypasses auth; the implementing WP-2.11 MUST add signed-read authorization.
-        // TODO(WP-2.11): verify auth v2 and read access before minting a URL token.
-        Err(not_yet().into())
+        let a = authenticated(&ctx)?;
+        let message = request.to_owned_message();
+        let invalid = || ServerError::invalid_argument("invalid object URL target");
+        let target = match message.target {
+            Some(Target::ObjectId(id)) => {
+                UrlTarget::Object(Hash::try_from(id.as_slice()).map_err(|_| invalid())?)
+            }
+            Some(Target::RefPath(path)) => UrlTarget::path(
+                path.r#ref.unwrap_or_default(),
+                path.path.unwrap_or_default(),
+            )
+            .map_err(|_| invalid())?,
+            None => {
+                return Err(
+                    ServerError::invalid_argument("IssueObjectUrl requires a target").into(),
+                );
+            }
+        };
+        let pipe = self.pipe.arc();
+        send_wrap(async move {
+            let minted = pipe
+                .issue_object_url(&a, target, message.ttl_seconds.unwrap_or_default())
+                .await?;
+            Response::ok(IssueObjectUrlResponse {
+                token: Some(minted.expose().to_owned()),
+                expires_unix_ms: Some(minted.expires_at_ms),
+                ..Default::default()
+            })
+        })
+        .await
     }
 }
 

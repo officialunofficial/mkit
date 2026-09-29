@@ -1,0 +1,5 @@
+{
+  "expected_error": "token encoding",
+  "rule": "a `=` anywhere in a token segment is outside the unpadded base64url alphabet",
+  "token": "bWtpdC11cmwtdG9rZW46djEKaHR0cHM6Ly9hcGkuZXhhbXBsZS50ZXN0CmVkMjU1MTktZWE0YTZjNjNlMjljNTIwYWJlZjU1MDdiMTMyZWM1Zjk5NTQ3NzZhZWJlYmU3YjkyNDIxZWVhNjkxNDQ2ZDIyYy9yb29tLWEKb2JqZWN0OmFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEKMAoxNzAwMDAwMDAwMDAwCjE3MDAwMDA5MDAwMDAKOGZkNDI1MGM3ZTE5YTIyNmJiMTdhZTAwZDk4OGI1MzY.SEZNWIr74g82H2gmgrDmD3COW9xERzVyUckUpSd9aJWC6Qoe7hGOzybSJ_0g0vK9f9t_OAaSAftmJk6UitLuDw="
+}

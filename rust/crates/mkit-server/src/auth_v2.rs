@@ -85,6 +85,16 @@ impl AuthV2Config {
     }
 }
 
+/// Whether the request carries any auth v2 marker header — even an empty
+/// or undecodable value counts (adapters fail closed, mapping bad bytes to
+/// a value). SPEC-TRANSPORT-CONNECT §7.1: a signed read verifies in full;
+/// it never falls back to anonymous.
+pub(crate) fn carries_auth_headers(get: impl Fn(&str) -> Option<String>) -> bool {
+    ["x-envelope-version", "x-public-key", "x-signature"]
+        .iter()
+        .any(|name| get(name).is_some())
+}
+
 /// Read the auth v2 headers through `get`, which looks a header up by its
 /// lowercase name. Values are passed through unnormalized.
 pub fn headers_from(get: impl Fn(&str) -> Option<String>) -> Headers {
