@@ -285,10 +285,22 @@ fn run(scenario: &str) {
     for text in [&*stdout, &*stderr, &logged] {
         assert!(!text.contains("Payment ey"));
     }
-    for call in admits {
+    for (index, call) in admits.into_iter().enumerate() {
         let req: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
         for h in req["credentialHeaders"].as_array().into_iter().flatten() {
             if let Some(value) = h["value"].as_str() {
+                if scenario == "commit" {
+                    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+                    let token = value.strip_prefix("Payment ").unwrap();
+                    let credential: serde_json::Value =
+                        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(token).unwrap()).unwrap();
+                    let receipt = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({
+                        "challengeId": credential["challenge"]["id"], "reference": format!("stub:{index}"), "status":"success"
+                    })).unwrap());
+                    for text in [&*stdout, &*stderr, &logged] {
+                        assert!(!text.contains(&receipt));
+                    }
+                }
                 for text in [&*stdout, &*stderr, &logged] {
                     assert!(!text.contains(value));
                 }

@@ -79,6 +79,7 @@ TEST_QUOTA_WINDOW_MS=60000
 # The adapter's body-buffer bound under test (bytes).
 MAX_BUFFERED_BYTES=1048576
 
+hooks=0
 test_faults=0
 sharding=d34
 multi=0
@@ -89,6 +90,7 @@ runner_args=()
 d34_list_args=(--list-refs 1000)
 while [ $# -gt 0 ]; do
     case "$1" in
+        --hooks) hooks=1; shift ;;
         --test-faults) test_faults=1 ;;
         --multi) multi=1 ;;
         --sharding)
@@ -479,4 +481,5 @@ if [ "${multi}" -eq 1 ]; then
         stop_server
     fi
 fi
+if [ "${hooks}" -eq 1 ]; then bash scripts/vcs-worker-hooks.sh; fi
 echo ">> vcs-worker conformance passed"

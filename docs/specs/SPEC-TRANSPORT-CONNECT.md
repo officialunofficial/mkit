@@ -955,6 +955,13 @@ A server processes a signed write in this order:
 5. **Apply** the operation's effects.
 6. **Commit** the stored result.
 
+Concurrent duplicates of a new operation that both complete step 2 before
+either reserves may each reach admission; an admission hook MUST treat
+payment credentials as single-use (e.g. by challenge id) so at most one
+is charged. For unary writes the reserve, apply and commit transaction
+has no externally observable in-flight window; holding admission does
+not create one.
+
 For a unary write, steps 4 to 6 commit together in the one transaction
 required above. §7.7 states what each RPC's apply writes. A challenge,
 a `PendingVerification` answer (§7.6), a membership-lag `unavailable`
@@ -1699,6 +1706,7 @@ Explicitly deferred to sibling issues:
 | `2` (WP-1.15) | draft | §7.4's ssh/enc paragraph gains ssh root mode (`mkit serve --root`, one repository per process addressed by `<NAMESPACE>/<NAME>`) and the enc `--enc-repository` listener binding, and notes the same-session implicit-membership rule transport-identity sessions use in place of upload tickets (informative). |
 | `2` (WP-1.28b) | draft | §7.9 clarifies per-bucket ListRefs index lag and head/packmap age differences. |
 | `2` (WP-1.11b) | draft | §5 and §7.6: a part receipt bound to another ticket is an invalid receipt (`invalid_argument`), with no cross-ticket oracle. |
+| `2` | draft | Informative §7.1 clarification: concurrent new-operation duplicates may each reach admission before reservation; payment credentials are single-use to avoid double charging (WP-3.13 orchestrator ruling). |
 | `2` | draft | §7.9 defines absent or zero `page_size` as the advertised maximum and malformed or foreign page tokens as `invalid_argument` (WP-1.28a). |
 | `2` (WP-1.10) | draft | §7.6 requires canonical branch-head/packmap pairing for ticketed advances; §7.8 rejects deletion with tickets. |
 | `2` (WP-1.11a) | draft | §5 classifies invalid part receipts as `invalid_argument`; §7.6 permits storage-session abort after a root mismatch and retains rotated receipt keys for at least seven days. |

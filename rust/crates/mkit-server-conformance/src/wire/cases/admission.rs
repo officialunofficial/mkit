@@ -10,7 +10,7 @@ use mkit_transport_connect::generated::__buffa::oneof::begin_upload_response::Re
 use mkit_transport_connect::generated::{
     AdmissionChallenge, BeginUploadRequest, BeginUploadResponse, UploadPackResponse,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 pub(super) fn stub(ctx: &Ctx) -> Result<Client, Failure> {
@@ -101,53 +101,18 @@ pub(super) async fn ledger(ctx: &Ctx) -> Result<serde_json::Value, Failure> {
     let reply = stub(ctx)?.get("/__stub/outcomes").await?;
     serde_json::from_slice(&reply.body).map_err(|_| Failure::Fail("invalid ledger".into()))
 }
-pub(super) async fn wait_ledger(ctx: &Ctx, minimum: usize, kind: &str) -> CaseResult {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
-    loop {
-        let ledger = ledger(ctx).await?;
-        let rows = ledger.as_object().ok_or("ledger is not a map")?;
-        if rows
-            .values()
-            .filter(|d| d["kind"] == kind && d["acknowledged"].as_u64().unwrap_or_default() > 0)
-            .count()
-            >= minimum
-        {
-            return Ok(());
-        }
-        ensure!(
-            tokio::time::Instant::now() < deadline,
-            "outcome ledger deadline"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-pub(super) async fn helper_flow_commit(ctx: Ctx) -> CaseResult {
-    mode(&ctx, "normal", "normal").await?;
-    let admit_count = calls(&ctx).await?;
-    let before = ledger(&ctx).await?.as_object().ok_or("ledger")?.len();
+pub(super) async fn prepare_ticket(
+    ctx: &Ctx,
+    leaf: &str,
+) -> Result<(mkit_transport_connect::generated::AdvanceRefsRequest, Reply), Failure> {
     let pack = super::random_pack(128);
     let req = BeginUploadRequest {
-        r#ref: Some(ctx.head("main")),
+        r#ref: Some(ctx.head(leaf)),
         pack_id: Some(mkit_core::hash::hash(&pack).to_vec()),
         bytes: Some(pack.len() as u64),
         ..Default::default()
     };
-    let (_, reply) = paid(&ctx, "main", Rpc::BeginUpload, &req).await?;
-    ensure!(
-        calls(&ctx).await? == admit_count + 2,
-        "helper flow admission count"
-    );
-    ensure!(
-        reply.headers.get("payment-receipt").is_some(),
-        "missing receipt"
-    );
-    ensure!(
-        reply
-            .headers
-            .get("cache-control")
-            .is_some_and(|h| h == "private"),
-        "receipt cache policy"
-    );
+    let (_, reply) = paid(ctx, "main", Rpc::BeginUpload, &req).await?;
     let begin: BeginUploadResponse = want_ok(decode_unary(&reply)?, "paid BeginUpload")?;
     let Some(BeginResult::Ticket(ticket)) = begin.result else {
         return Err("no upload ticket".into());
@@ -169,35 +134,50 @@ pub(super) async fn helper_flow_commit(ctx: Ctx) -> CaseResult {
         .await?;
     ensure!(upload.error.is_none(), "ticketed upload rejected");
     let mut advance = advance_req(
-        (&ctx.head("main"), Exp::Missing, &A),
-        (&ctx.packmap("main"), Exp::Missing, &B),
+        (&ctx.head(leaf), Exp::Missing, &A),
+        (&ctx.packmap(leaf), Exp::Missing, &B),
     );
     advance.ticket_ids = vec![ticket.id.ok_or("no ticket id")?];
-    let result = ctx.advance(&advance).await?;
+    Ok((advance, reply))
+}
+pub(super) async fn helper_flow_commit(ctx: Ctx) -> CaseResult {
+    mode(&ctx, "normal", "normal").await?;
+    let admit_count = calls(&ctx).await?;
+    let before = snapshot(&ctx).await?;
+    let (advance, reply) = prepare_ticket(&ctx, "main").await?;
+    ensure!(
+        calls(&ctx).await? == admit_count + 2,
+        "helper admission count"
+    );
+    ensure!(
+        reply.headers.contains_key("payment-receipt"),
+        "missing receipt"
+    );
+    ensure!(
+        reply
+            .headers
+            .get("cache-control")
+            .is_some_and(|v| v == "private"),
+        "receipt cache policy"
+    );
     want_outcome(
-        result,
+        ctx.advance(&advance).await?,
         mkit_transport_connect::generated::AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
     )?;
-    wait_ledger(&ctx, before + 1, "committed").await?;
-    let ledger = ledger(&ctx).await?;
+    let rows = wait_new(&ctx, &before, 1).await?;
     ensure!(
-        ledger
-            .as_object()
-            .ok_or("ledger")?
-            .values()
-            .filter(|d| d["kind"] == "committed" && d["settled"] == true)
-            .count()
-            > before,
-        "commit did not settle"
+        rows.len() == 1 && rows[0]["kind"] == "committed" && rows[0]["settled"] == true,
+        "commit ledger"
     );
     Ok(())
 }
 
 /// Hold the first paid Admit while sending exactly the same signed bytes.
 /// Release the fixture before asserting, so a divergence cannot strand a request.
-pub(super) async fn in_flight_aborted(ctx: Ctx) -> CaseResult {
+pub(super) async fn concurrent_duplicate_during_admit(ctx: Ctx) -> CaseResult {
     mode(&ctx, "hold", "normal").await?;
     let before = calls(&ctx).await?;
+    let ledger_before = snapshot(&ctx).await?;
     let req = super::update_req(&ctx.head("main"), Exp::Missing, &A);
     let signed = sign_unary(&ctx.v2_signer("main")?, Rpc::UpdateRef, &req, |_| {});
     let challenge = post(&ctx, &signed).await?;
@@ -216,7 +196,6 @@ pub(super) async fn in_flight_aborted(ctx: Ctx) -> CaseResult {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let duplicate = tokio::time::timeout(Duration::from_secs(2), post(&ctx, &signed)).await;
-    let observed = calls(&ctx).await? - before - 1; // Exclude the initial 402.
     stub(&ctx)?
         .post("/__stub/release", UNARY_JSON, &[], vec![])
         .await?;
@@ -228,23 +207,261 @@ pub(super) async fn in_flight_aborted(ctx: Ctx) -> CaseResult {
         first.status
     );
     let duplicate = duplicate.map_err(|_| "duplicate did not return while Admit was held")??;
+    if duplicate.status == 200 {
+        ensure!(
+            duplicate.body == first.body,
+            "duplicate result differs from caller's result"
+        );
+    }
+    // The hook may deny a spent credential; a completed retry may return the
+    // saved result. Repository state and the ledger below decide conformance.
+    ctx.expect_ref(&ctx.head("main"), Some(&A)).await?;
+    let rows = wait_new(&ctx, &ledger_before, 1).await?;
+    ensure!(
+        rows.len() == 1 && rows[0]["kind"] == "committed" && rows[0]["settled"] == true,
+        "duplicate charged twice"
+    );
+    let other = sign_unary(&ctx.v2_signer("other")?, Rpc::UpdateRef, &req, |env| {
+        env.nonce.clone_from(&signed.nonce);
+    });
+    let foreign = post(&ctx, &other).await?;
+    ensure!(
+        foreign.status != 200,
+        "another caller received stored result"
+    );
+    Ok(())
+}
+
+pub(super) fn want_error(reply: &Reply, status: u16, code: &str) -> CaseResult {
     let error: serde_json::Value =
-        serde_json::from_slice(&duplicate.body).map_err(|_| "duplicate error is not JSON")?;
-    // Section D: preserve the expected assertion below, but report the known
-    // shared-pipeline divergence as an explicit skip until the orchestrator
-    // resolves admission-time duplicate handling. The ignored native diagnostic
-    // forbids skips, so it remains red while this gap exists.
-    if duplicate.status == 403 && error["code"] == "permission_denied" && observed == 2 {
+        serde_json::from_slice(&reply.body).map_err(|_| "invalid error JSON")?;
+    ensure!(
+        reply.status == status && error["code"] == code,
+        "expected HTTP {status}/{code}, got {}",
+        reply.status
+    );
+    Ok(())
+}
+pub(super) async fn snapshot(ctx: &Ctx) -> Result<BTreeSet<String>, Failure> {
+    Ok(ledger(ctx)
+        .await?
+        .as_object()
+        .ok_or("ledger map")?
+        .keys()
+        .cloned()
+        .collect())
+}
+pub(super) async fn wait_new(
+    ctx: &Ctx,
+    before: &BTreeSet<String>,
+    minimum: usize,
+) -> Result<Vec<serde_json::Value>, Failure> {
+    let deadline = tokio::time::Instant::now() + Duration::from_mins(1);
+    loop {
+        let ledger = ledger(ctx).await?;
+        let rows: Vec<_> = ledger
+            .as_object()
+            .ok_or("ledger map")?
+            .iter()
+            .filter(|(id, _)| !before.contains(*id))
+            .map(|(_, row)| row.clone())
+            .collect();
+        if rows.len() >= minimum
+            && rows
+                .iter()
+                .all(|r| r["acknowledged"].as_u64().unwrap_or_default() > 0)
+        {
+            return Ok(rows);
+        }
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "outcome delivery deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+fn update(ctx: &Ctx) -> Result<Signed, Failure> {
+    Ok(sign_unary(
+        &ctx.v2_signer("main")?,
+        Rpc::UpdateRef,
+        &super::update_req(&ctx.head("main"), Exp::Missing, &A),
+        |_| {},
+    ))
+}
+pub(super) async fn challenge_402_typed_detail(ctx: Ctx) -> CaseResult {
+    mode(&ctx, "golden", "normal").await?;
+    let reply = post(&ctx, &update(&ctx)?).await?;
+    want_error(&reply, 402, "permission_denied")?;
+    let error: serde_json::Value = serde_json::from_slice(&reply.body).map_err(|_| "error JSON")?;
+    ensure!(
+        error["details"].as_array().is_some_and(|d| d.len() == 1),
+        "challenge detail count"
+    );
+    ensure!(
+        error["details"][0]["type"] == "mkit.transport.v1.AdmissionChallenge",
+        "detail type"
+    );
+    let raw = error["details"][0]["value"]
+        .as_str()
+        .ok_or("detail value")?;
+    let bytes = STANDARD
+        .decode(raw)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(raw))
+        .map_err(|_| "detail encoding")?;
+    ensure!(
+        bytes == include_bytes!("../../../../../tests/golden/transport/admission-challenge.bin"),
+        "challenge golden differs"
+    );
+    let field_count = reply.headers.get_all("www-authenticate").iter().count();
+    ensure!(
+        reply.headers.contains_key("payment-required"),
+        "payment-required missing"
+    );
+    ensure!(
+        reply
+            .headers
+            .get("cache-control")
+            .is_some_and(|v| v == "no-store"),
+        "challenge cache policy"
+    );
+    mode(&ctx, "normal", "normal").await?;
+    if field_count == 1
+        && reply
+            .headers
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.ends_with(", Payment id=\"second\""))
+    {
         return Err(Failure::Skip(
-            "Section D escalation: held Admit duplicate reaches admission twice and returns 403; see m3-exit-report.md §2".into(),
+            "Section D: runtime coalesces repeated WWW-Authenticate fields; reproduced on Worker; requires an orchestrator ruling".into(),
         ));
     }
+    ensure!(field_count == 2, "WWW-Authenticate field count");
+    Ok(())
+}
+pub(super) async fn deny_403_no_detail(ctx: Ctx) -> CaseResult {
+    mode(&ctx, "deny", "normal").await?;
+    let reply = post(&ctx, &update(&ctx)?).await?;
+    want_error(&reply, 403, "permission_denied")?;
+    let error: serde_json::Value = serde_json::from_slice(&reply.body).map_err(|_| "error JSON")?;
     ensure!(
-        error["code"] == "aborted" && observed == 1,
-        "held admission duplicate: HTTP {}, code {}, paid Admit calls {}; expected aborted and 1 paid Admit",
-        duplicate.status,
-        error["code"],
-        observed
+        error["details"].as_array().is_none_or(Vec::is_empty),
+        "deny has details"
+    );
+    for name in [
+        "www-authenticate",
+        "payment-required",
+        "payment-receipt",
+        "payment-response",
+    ] {
+        ensure!(!reply.headers.contains_key(name), "deny has payment header");
+    }
+    ctx.expect_ref(&ctx.head("main"), None).await?;
+    mode(&ctx, "normal", "normal").await
+}
+pub(super) async fn no_state_on_challenge(ctx: Ctx) -> CaseResult {
+    mode(&ctx, "normal", "normal").await?;
+    let before = snapshot(&ctx).await?;
+    let signed = update(&ctx)?;
+    let challenge = post(&ctx, &signed).await?;
+    want_error(&challenge, 402, "permission_denied")?;
+    ctx.expect_ref(&ctx.head("main"), None).await?;
+    ensure!(
+        want_ok(ctx.list(&ctx.head("")).await?, "challenge listing")?.is_empty(),
+        "challenged operation created refs"
+    );
+    ensure!(
+        snapshot(&ctx).await? == before,
+        "challenge generated outcome"
+    );
+    let retry = post(
+        &ctx,
+        &signed.with_header("Authorization", credential(&challenge)?),
+    )
+    .await?;
+    ensure!(retry.status == 200, "challenged nonce consumed");
+    ctx.expect_ref(&ctx.head("main"), Some(&A)).await?;
+    wait_new(&ctx, &before, 1).await?;
+    Ok(())
+}
+pub(super) async fn replay_skips_admission(ctx: Ctx) -> CaseResult {
+    mode(&ctx, "normal", "normal").await?;
+    let before = snapshot(&ctx).await?;
+    let (signed, first) = paid(
+        &ctx,
+        "main",
+        Rpc::UpdateRef,
+        &super::update_req(&ctx.head("main"), Exp::Missing, &A),
+    )
+    .await?;
+    ensure!(first.status == 200, "first commit");
+    let count = calls(&ctx).await?;
+    let replay = post(&ctx, &signed).await?;
+    ensure!(
+        replay.status == 200 && replay.body == first.body,
+        "replay differs"
+    );
+    ensure!(calls(&ctx).await? == count, "replay reached Admit");
+    for name in ["payment-receipt", "payment-response"] {
+        ensure!(!replay.headers.contains_key(name), "replay has receipt");
+    }
+    ensure!(
+        wait_new(&ctx, &before, 1).await?.len() == 1,
+        "replay added reservation"
+    );
+    Ok(())
+}
+pub(super) async fn challenge_exhausted(ctx: Ctx) -> CaseResult {
+    mode(&ctx, "always-challenge", "normal").await?;
+    let before = snapshot(&ctx).await?;
+    let (_, reply) = paid(
+        &ctx,
+        "main",
+        Rpc::UpdateRef,
+        &super::update_req(&ctx.head("main"), Exp::Missing, &A),
+    )
+    .await?;
+    want_error(&reply, 402, "permission_denied")?;
+    ctx.expect_ref(&ctx.head("main"), None).await?;
+    ensure!(
+        snapshot(&ctx).await? == before,
+        "exhausted challenge generated outcome"
+    );
+    mode(&ctx, "normal", "normal").await
+}
+pub(super) async fn hook_down_unavailable(ctx: Ctx) -> CaseResult {
+    mode(&ctx, "down", "normal").await?;
+    let before = snapshot(&ctx).await?;
+    want_error(&post(&ctx, &update(&ctx)?).await?, 503, "unavailable")?;
+    ctx.expect_ref(&ctx.head("main"), None).await?;
+    ensure!(
+        snapshot(&ctx).await? == before,
+        "unavailable generated outcome"
+    );
+    mode(&ctx, "normal", "normal").await
+}
+pub(super) async fn ticketless_upload_refused(ctx: Ctx) -> CaseResult {
+    let pack = super::random_pack(64);
+    let headers = ctx.auth_headers(
+        Rpc::UploadPack,
+        Commit::Pack(&mkit_core::hash::hash(&pack), pack.len() as u64),
+    );
+    let reply = ctx
+        .client()
+        .post(
+            Rpc::UploadPack.procedure(),
+            crate::wire::client::STREAM_PROTO,
+            &headers,
+            frames(&upload_msgs(&pack, 1)),
+        )
+        .await?;
+    ensure!(reply.status != 402, "stream returned a challenge");
+    let stream: crate::wire::client::StreamReply<UploadPackResponse> =
+        crate::wire::client::decode_stream(&reply)?;
+    let error = stream.error.ok_or("ticketless upload accepted")?;
+    ensure!(
+        error.code == "failed_precondition" && error.details.is_empty(),
+        "ticketless stream refusal must have no challenge detail"
     );
     Ok(())
 }

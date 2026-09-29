@@ -212,6 +212,12 @@ pub struct WorkerConfig {
     /// cases).
     #[cfg(feature = "test-faults")]
     pub test_quota: Option<QuotaLimits>,
+    /// Test-only outbox row threshold; absent in release builds.
+    #[cfg(feature = "test-faults")]
+    pub test_outbox_rows: Option<u64>,
+    /// Test-only ticket expiry; absent in release builds.
+    #[cfg(feature = "test-faults")]
+    pub test_ticket_ttl_ms: Option<u64>,
 }
 
 /// A missing or malformed var. The adapter answers every RPC
@@ -274,6 +280,18 @@ impl WorkerConfig {
         #[cfg(feature = "test-faults")]
         if let Some(quota) = self.test_quota {
             config.write_quota = Some(quota);
+        }
+        #[cfg(feature = "test-faults")]
+        {
+            if let Some(rows) = self.test_outbox_rows {
+                config.outbox_backlog_cap = Some(mkit_server::pipeline::OutboxBacklogCap {
+                    rows,
+                    bytes: u64::MAX,
+                });
+            }
+            if let Some(ttl) = self.test_ticket_ttl_ms {
+                config.ticket_ttl_ms = ttl;
+            }
         }
         Ok(config)
     }
@@ -361,6 +379,10 @@ impl WorkerConfig {
             hooks: crate::hooks::config::HookVars::parse(&var)?,
             #[cfg(feature = "test-faults")]
             test_quota: test_quota(&var)?,
+            #[cfg(feature = "test-faults")]
+            test_outbox_rows: test_number(&var, "TEST_OUTBOX_BACKLOG_ROWS", 16)?,
+            #[cfg(feature = "test-faults")]
+            test_ticket_ttl_ms: test_number(&var, "TEST_TICKET_TTL_MS", 60_000)?,
         })
     }
 
@@ -527,6 +549,23 @@ fn resolve_grants(
         .build(audience)
         .map_err(|e| ConfigError(e.public_message().to_owned()))?;
     Ok(Some(settings))
+}
+
+#[cfg(feature = "test-faults")]
+fn test_number(
+    var: &impl Fn(&str) -> Option<String>,
+    name: &str,
+    max: u64,
+) -> Result<Option<u64>, ConfigError> {
+    var(name)
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .ok()
+                .filter(|n| *n > 0 && *n <= max)
+                .ok_or_else(|| ConfigError(format!("{name} is outside its test range")))
+        })
+        .transpose()
 }
 
 /// `TEST_QUOTA_*`: all three or none.
@@ -2672,6 +2711,44 @@ mod tests {
         let mut partial = base.to_vec();
         partial.push(("TEST_QUOTA_OPS", "7"));
         assert!(WorkerConfig::from_vars(vars(&partial)).is_err());
+    }
+
+    #[cfg(not(feature = "test-faults"))]
+    #[test]
+    fn release_never_reads_m3_test_vars() {
+        let cfg = WorkerConfig::from_vars(|name| {
+            assert!(
+                !name.starts_with("TEST_"),
+                "test var reached release configuration"
+            );
+            match name {
+                "AUTH_AUDIENCE" => Some("https://vcs.test".into()),
+                "AUTH_REPOSITORY" => Some("default".into()),
+                _ => None,
+            }
+        })
+        .unwrap();
+        let pipe = cfg.pipeline_config().unwrap();
+        assert_eq!(pipe.ticket_ttl_ms, 86_400_000);
+        assert_eq!(pipe.outbox_backlog_cap.unwrap().rows, 100_000);
+    }
+    #[cfg(feature = "test-faults")]
+    #[test]
+    fn m3_test_vars_are_bounded_and_injected() {
+        for bad in ["0", "17", "invalid"] {
+            assert!(test_number(&|_| Some(bad.into()), "TEST_OUTBOX_BACKLOG_ROWS", 16).is_err());
+        }
+        let cfg = WorkerConfig::from_vars(|name| match name {
+            "AUTH_AUDIENCE" => Some("https://vcs.test".into()),
+            "AUTH_REPOSITORY" => Some("default".into()),
+            "TEST_OUTBOX_BACKLOG_ROWS" => Some("16".into()),
+            "TEST_TICKET_TTL_MS" => Some("3000".into()),
+            _ => None,
+        })
+        .unwrap();
+        let pipe = cfg.pipeline_config().unwrap();
+        assert_eq!(pipe.ticket_ttl_ms, 3000);
+        assert_eq!(pipe.outbox_backlog_cap.unwrap().rows, 16);
     }
 
     /// `final-chunk` arms the blob store once per operation; `after-reserve`

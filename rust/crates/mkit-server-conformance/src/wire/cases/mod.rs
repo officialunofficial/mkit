@@ -29,6 +29,7 @@ mod advance;
 mod auth;
 mod auth_bounds;
 mod concurrent;
+mod cors;
 mod download;
 mod epochs;
 pub(super) mod grants;
@@ -39,6 +40,7 @@ mod info;
 mod leases;
 mod list;
 mod multipart;
+mod outcomes;
 mod packs;
 mod policy;
 mod quota;
@@ -194,7 +196,20 @@ macro_rules! cases {
 }
 
 cases! {
-    "admission.in_flight_aborted" => admission::in_flight_aborted, M3, [Admission, HookStub, AuthV2], [];
+    "admission.challenge_402_typed_detail" => admission::challenge_402_typed_detail, M3, [Admission, HookStub, AuthV2], [];
+    "admission.deny_403_no_detail" => admission::deny_403_no_detail, M3, [Admission, HookStub, AuthV2], [];
+    "admission.no_state_on_challenge" => admission::no_state_on_challenge, M3, [Admission, HookStub, AuthV2], [];
+    "admission.replay_skips_admission" => admission::replay_skips_admission, M3, [Admission, HookStub, AuthV2], [];
+    "admission.challenge_exhausted" => admission::challenge_exhausted, M3, [Admission, HookStub, AuthV2], [];
+    "admission.hook_down_unavailable" => admission::hook_down_unavailable, M3, [Admission, HookStub, AuthV2], [];
+    "admission.ticketless_upload_refused" => admission::ticketless_upload_refused, M3, [Admission, AuthV2], [];
+    "cors.preflight_payment_headers" => cors::preflight_payment_headers, M3, [HookStub], [];
+    "cors.expose_admission_headers" => cors::expose_admission_headers, M3, [], [];
+    "outcomes.aborted_on_cas_loss" => outcomes::aborted_on_cas_loss, M3, [Admission, HookStub, AuthV2, Timers], [];
+    "outcomes.expired_ticket" => outcomes::expired_ticket, M3, [Admission, HookStub, AuthV2, ShortTickets, Timers], [];
+    "outcomes.backpressure_hook_down" => outcomes::backpressure_hook_down, M3, [Admission, HookStub, AuthV2, BacklogCap, Timers], [];
+    "outcomes.eventual_completeness" => outcomes::eventual_completeness, M3, [Admission, HookStub, AuthV2, BacklogCap, Timers], [];
+    "admission.concurrent_duplicate_during_admit" => admission::concurrent_duplicate_during_admit, M3, [Admission, HookStub, AuthV2], [];
     "admission.helper_flow_commit" => admission::helper_flow_commit, M3, [Admission, HookStub, AuthV2, Tickets, Timers], [];
     "grants.valid_ed25519" => grants::valid_ed25519, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.valid_secp256k1_eip191" => grants::valid_secp256k1_eip191, M2, [Grants, MultiRepo, AuthV2], [];

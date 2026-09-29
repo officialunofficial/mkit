@@ -133,8 +133,9 @@ async fn wire_suite_s3_sqlite_auth_v2() {
     for skipped in report.skips() {
         assert!(
             skipped == "advance.nonatomic_packmap_first"
-                || skipped == "admission.helper_flow_commit"
-                || skipped == "admission.in_flight_aborted"
+                || skipped.starts_with("admission.")
+                || skipped.starts_with("outcomes.")
+                || skipped.starts_with("cors.")
                 || matches!(
                     skipped,
                     "leases.bump_completes_and_writes_continue"
@@ -412,4 +413,24 @@ fn spool_budget_defaults_and_must_fit_a_pack() {
     ]
     .concat();
     assert_eq!(spool_of(resolve(&fits).unwrap()), 2048);
+}
+
+#[cfg(feature = "hooks")]
+#[tokio::test]
+async fn wire_m3_admission_s3_sqlite() {
+    let fake = FakeS3::start();
+    let vars = creds_env(&fake);
+    let vars: Vec<_> = vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    common::mpp::suite_with(
+        &[
+            "--blob".into(),
+            format!("s3://{DEFAULT_BUCKET}/m3/run"),
+            "--s3-endpoint".into(),
+            fake.endpoint(),
+        ],
+        &["admission.", "cors."],
+        &vars,
+        false,
+    )
+    .await;
 }

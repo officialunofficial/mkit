@@ -490,3 +490,15 @@ async fn binary_s3_sqlite_auth_v2() {
     assert!(!fake.keys(DEFAULT_BUCKET).is_empty());
     assert!(!root.path().join("packs").exists());
 }
+
+#[cfg(feature = "hooks")]
+#[tokio::test]
+async fn wire_m3_binary() {
+    common::mpp::suite_with(
+        &[],
+        &["admission.", "cors.", "outcomes.aborted_on_cas_loss"],
+        &[],
+        true,
+    )
+    .await;
+}
