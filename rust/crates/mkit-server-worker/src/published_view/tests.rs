@@ -583,6 +583,12 @@ fn cache_expiry_failures_and_malformed_snapshots_use_at_most_two_lookups_before_
             .unwrap()
             .is_none()
     );
+    bucket.object.lock().unwrap().as_mut().unwrap().bytes = vec![0; MAX_BYTES + 1];
+    assert!(
+        block_on(reader.bucket(&repo(), &partition(), 2200))
+            .unwrap()
+            .is_none()
+    );
     bucket.fail_get.store(true, Ordering::SeqCst);
     assert!(
         block_on(reader.bucket(&repo(), &partition(), 2200))
@@ -833,5 +839,36 @@ fn slow_cache_awaits_never_serve_expired_data_or_add_a_fourth_operation() {
             bucket.calls.load(Ordering::SeqCst) + reader.cache.calls.load(Ordering::SeqCst),
             if expire_on_fill { 3 } else { 2 }
         );
+    }
+}
+
+#[test]
+fn conditional_replacement_never_regresses_generation_or_capture_time() {
+    for (generation, captured_at_ms) in [(2, 1000), (1, 3000)] {
+        let clock = Arc::new(ManualClock::new(1000));
+        let store = local(&clock);
+        let meta = CountStore::new(MemoryKv::default());
+        public(&meta, false);
+        let bucket = Bucket::new(clock.clone());
+        let bytes = envelope(generation, captured_at_ms).encode().unwrap();
+        *bucket.object.lock().unwrap() = Some(SnapshotObject {
+            etag: "newer".into(),
+            stored_at_ms: 0,
+            bytes: bytes.clone(),
+        });
+        let alarm = SnapshotAlarm::default();
+        let registry = TimerRegistry::new().register(SnapshotHandler {
+            bucket: bucket.clone(),
+            coordinator: meta,
+            clock: clock.clone(),
+            alarm,
+        });
+        delivery(&store, 1, 1, false);
+        clock.set(2000);
+        tick(&store, &registry, &clock);
+        assert!(state(&store).dirty);
+        assert_eq!(bucket.puts.load(Ordering::SeqCst), 0);
+        assert_eq!(bucket.object.lock().unwrap().as_ref().unwrap().bytes, bytes);
+        assert_eq!(bucket.calls.load(Ordering::SeqCst), 1); // No retry or replacement.
     }
 }

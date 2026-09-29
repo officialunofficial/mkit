@@ -9,7 +9,7 @@ async fn bounded(mut stream: worker::ByteStream) -> Result<Vec<u8>, StoreError> 
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(error)?;
-        if bytes.len() + chunk.len() > MAX_BYTES {
+        if chunk.len() > MAX_BYTES.saturating_sub(bytes.len()) {
             return Err(StoreError::Invalid("snapshot body too large".into()));
         }
         bytes.extend_from_slice(&chunk);

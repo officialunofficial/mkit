@@ -1870,7 +1870,7 @@ mod glue {
     }
 
     // Keep the one-time DO construction and typed handler wiring together.
-    #[cfg_attr(feature = "published-view", allow(clippy::too_many_lines))]
+    #[allow(clippy::too_many_lines)]
     fn ns_object_inner<O, F>(
         state: State,
         env: &Env,
@@ -2441,6 +2441,38 @@ mod tests {
             pipeline.write_policy,
             mkit_server::policy::WritePolicy::Owner
         );
+    }
+
+    #[cfg(feature = "published-view")]
+    #[test]
+    fn published_view_config_requires_valid_identity_multi_and_d34_and_caps_pages() {
+        let secret = "dev 1111111111111111111111111111111111111111111111111111111111111111";
+        let namespace = ns(1);
+        let pairs = [
+            (AUDIENCE_VAR, "https://vcs.example"),
+            (ADDRESSING_VAR, "multi"),
+            (NAMESPACE_ALLOWLIST_VAR, namespace.as_str()),
+            (TICKET_KEYS_VAR, secret),
+        ];
+        let mut cfg = WorkerConfig::from_vars(vars(&pairs)).unwrap();
+        assert!(cfg.published_view.is_none());
+        assert_eq!(cfg.pipeline_config().unwrap().max_list_refs_page_size, 1000);
+        cfg.published_view =
+            Some(crate::published_view::PublishedViewConfig::new("stage").unwrap());
+        assert_eq!(cfg.pipeline_config().unwrap().max_list_refs_page_size, 128);
+        cfg.published_view.as_mut().unwrap().deployment = "bad/identity".into();
+        assert!(cfg.pipeline_config().is_err());
+        cfg.published_view.as_mut().unwrap().deployment = "stage".into();
+        cfg.sharding = Sharding::Single;
+        assert!(cfg.pipeline_config().is_err());
+        cfg.sharding = Sharding::D34;
+        cfg.addressing = mkit_server::Addressing::Single {
+            repo: mkit_server::RepoId {
+                namespace: mkit_server::NamespaceKey::deployment_default(),
+                name: mkit_server::RepoName::new("default").unwrap(),
+            },
+        };
+        assert!(cfg.pipeline_config().is_err());
     }
 
     /// Every multi var combination the config must refuse.

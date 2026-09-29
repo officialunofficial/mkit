@@ -32,7 +32,7 @@ The normal `wrangler.jsonc` and app entrypoints remain the Stage 1 defaults.
    Match R2 and DO jurisdiction, if specified; leaving placement hints unset
    is the default. Jurisdiction cannot change over the deployment lifetime.
 5. Install `TICKET_KEYS` using Wrangler's secret mechanism with this copied
-   config and `--env staging`. Use the adapter's `id=64-hex-characters` format;
+   config and `--env staging`. Use the adapter's `<key-id> <64 hex>` (one key per line) format;
    generate a fresh random 32-byte key and unique key id. Do not print it or
    put it in vars. The template intentionally contains no ticket secret.
 
