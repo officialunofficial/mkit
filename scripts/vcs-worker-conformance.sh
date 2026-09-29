@@ -7,7 +7,7 @@
 #
 #   scripts/vcs-worker-conformance.sh [--test-faults] [--sharding single|d34] [-- <extra runner args>]
 #
-#   (default)      a release-feature build; the whole suite once.
+#   (default)      a release-optimized build; the whole suite once.
 #   --test-faults  a `test-faults` build, in two phases, each on a fresh
 #                  server: (1) the whole suite, with the clock-skew directive
 #                  and the stats hook (`replay.expired_retry_rejected`); (2)
@@ -288,7 +288,7 @@ NODE
 # The pipeline serves grpc.health.v1 and rejects an auth v2 signature over
 # gzip-encoded bytes (fails closed, SPEC-WRITE-GRANTS §9.2 is open).
 features="health,strict-gzip-auth,tickets,multipart"
-build_args=(--dev)
+build_args=(--release)
 vars=(--var "AUTH_AUDIENCE:${ORIGIN}" --var "AUTH_REPOSITORY:${REPOSITORY}" --var "SHARDING:${sharding}")
 if [ "${test_faults}" -eq 1 ]; then
     features="${features},test-faults,timers"
