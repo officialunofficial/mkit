@@ -139,7 +139,15 @@ impl BlobKey {
         // The fallback handles future BlobNamespace variants without a backend panic.
         #[allow(unreachable_patterns)]
         let directory = match self.namespace {
-            BlobNamespace::Pack => pack_keyspace.to_owned(),
+            BlobNamespace::Pack => {
+                // A pack keyspace named like a sibling namespace would let
+                // unverified pack bytes be read back as an object or marker.
+                let last = pack_keyspace.rsplit('/').next().unwrap_or(pack_keyspace);
+                if matches!(last, "objects" | "object-offsets" | "upload-markers") {
+                    return Err(StoreError::Invalid("reserved pack keyspace".into()));
+                }
+                pack_keyspace.to_owned()
+            }
             BlobNamespace::UploadMarker => sibling("upload-markers/v1"),
             BlobNamespace::Object => sibling("objects"),
             BlobNamespace::ObjectOffsets => sibling("object-offsets/v1"),
@@ -476,6 +484,28 @@ mod tests {
                 format!("tenant/a/objects/{hex}"),
                 format!("tenant/a/object-offsets/v1/{hex}"),
             ]
+        );
+    }
+
+    #[test]
+    fn a_pack_keyspace_cannot_alias_a_sibling_namespace() {
+        let id = [7; 32];
+        for reserved in [
+            "objects",
+            "object-offsets",
+            "upload-markers",
+            "tenant/a/objects",
+        ] {
+            assert!(matches!(
+                BlobKey::pack(id).relative_path(reserved),
+                Err(StoreError::Invalid(_))
+            ));
+        }
+        assert!(BlobKey::pack(id).relative_path("packs").is_ok());
+        assert!(
+            BlobKey::pack(id)
+                .relative_path("tenant/objects-a/packs")
+                .is_ok()
         );
     }
 

@@ -59,8 +59,10 @@ impl FsBlobStore {
         Self::with_keyspace(root, "packs")
     }
 
-    /// The `keyspace` directory under `root` (e.g. `objects` for the global
-    /// object store). `keyspace` is one plain path component.
+    /// The `keyspace` directory under `root`. `keyspace` is one plain path
+    /// component; `objects`, `object-offsets` and `upload-markers` are the
+    /// sibling namespaces' own directories, so a pack keyspace cannot use
+    /// them (its keys are refused).
     ///
     /// # Panics
     /// If `keyspace` is empty, starts with `.` or holds a path separator.

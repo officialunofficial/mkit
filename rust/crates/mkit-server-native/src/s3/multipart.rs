@@ -659,8 +659,9 @@ impl MultipartBlobStore for S3BlobStore {
             .await
     }
 
+    /// A single put is bounded by S3's cap and by the local upload spool.
     fn single_put_limit(&self) -> Option<u64> {
-        Some(self.max_bytes)
+        Some(self.max_bytes.min(self.spool.max()))
     }
 
     async fn abort(&self, key: BlobKey, session: &[u8]) -> Result<(), StoreError> {

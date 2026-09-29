@@ -235,6 +235,8 @@ pub struct GcPlan {
 /// What a mutation saw, for its plan.
 struct Seen {
     probe: Option<Value>,
+    /// The auxiliary row a mutation named (the hold a holder releases).
+    aux: Option<Value>,
     blocked: Option<BlockEntry>,
 }
 
@@ -361,7 +363,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
             return Err(StoreError::Invalid("hold exceeds MAX_HOLD_TTL_MS".into()));
         }
         let key = keys::hold(object, hold_id);
-        self.mutate(object, now_ms, Some(&key), true, |seen, state| {
+        self.mutate(object, now_ms, Some(&key), None, true, |seen, state| {
             if let Some(entry) = &seen.blocked {
                 return Ok(Step::Stop(HoldOutcome::Blocked(entry.clone())));
             }
@@ -384,7 +386,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
         now_ms: u64,
     ) -> Result<(), StoreError> {
         let key = keys::hold(object, hold_id);
-        self.mutate(object, now_ms, None, false, |_, _| {
+        self.mutate(object, now_ms, None, None, false, |_, _| {
             Ok(Step::Commit(vec![Write::Delete(key.clone())], ()))
         })
         .await
@@ -411,25 +413,41 @@ impl<S: NamespaceStore> ContentIndex<S> {
     ) -> Result<HolderOutcome, StoreError> {
         let key = keys::holder(object, &holder.ns, &holder.repo)?;
         let release = releases.map(|id| keys::hold(object, id));
-        self.mutate(object, now_ms, Some(&key), true, |seen, state| {
-            refuse_while_deleting(state)?;
-            let newly_added = seen.probe.is_none();
-            let first_holder = state.holders == 0;
-            if newly_added {
-                state.holders += 1;
-            }
-            // The sequence this write stores: `mutate` bumps it once more.
-            let record = HolderRecord::new(bumped(*state, now_ms).seq, *op_id);
-            let mut writes = vec![Write::Put(key.clone(), codec::encode_holder(&record))];
-            writes.extend(release.clone().map(Write::Delete));
-            let outcome = HolderOutcome {
-                newly_added,
-                first_holder,
-                record,
-                blocked: seen.blocked.clone(),
-            };
-            Ok(Step::Commit(writes, outcome))
-        })
+        self.mutate(
+            object,
+            now_ms,
+            Some(&key),
+            release.as_ref(),
+            true,
+            |seen, state| {
+                refuse_while_deleting(state)?;
+                // A hold that is gone or expired no longer protects the bytes the
+                // caller relied on: GC may have passed. Retry from the `head`.
+                if release.is_some()
+                    && !seen.aux.as_ref().is_some_and(|hold| {
+                        codec::decode_hold(hold).is_ok_and(|expires| expires > now_ms)
+                    })
+                {
+                    return Err(StoreError::unavailable("hold no longer live; retry"));
+                }
+                let newly_added = seen.probe.is_none();
+                let first_holder = state.holders == 0;
+                if newly_added {
+                    state.holders += 1;
+                }
+                // The sequence this write stores: `mutate` bumps it once more.
+                let record = HolderRecord::new(bumped(*state, now_ms).seq, *op_id);
+                let mut writes = vec![Write::Put(key.clone(), codec::encode_holder(&record))];
+                writes.extend(release.clone().map(Write::Delete));
+                let outcome = HolderOutcome {
+                    newly_added,
+                    first_holder,
+                    record,
+                    blocked: seen.blocked.clone(),
+                };
+                Ok(Step::Commit(writes, outcome))
+            },
+        )
         .await
     }
 
@@ -456,7 +474,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
         now_ms: u64,
     ) -> Result<bool, StoreError> {
         let key = keys::holder(object, &holder.ns, &holder.repo)?;
-        self.mutate(object, now_ms, Some(&key), true, |seen, state| {
+        self.mutate(object, now_ms, Some(&key), None, true, |seen, state| {
             let current = seen.probe.as_ref().map(codec::decode_holder).transpose()?;
             if current.is_none_or(|record| record.seq != expected_seq) {
                 return Ok(Step::Stop(false));
@@ -508,7 +526,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
             return Err(StoreError::Invalid("block reason too long".into()));
         }
         let (key, value) = (keys::block(object), codec::encode_block_entry(entry));
-        self.mutate(object, now_ms, None, false, |_, _| {
+        self.mutate(object, now_ms, None, None, false, |_, _| {
             Ok(Step::Commit(
                 vec![Write::Put(key.clone(), value.clone())],
                 (),
@@ -520,7 +538,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
     /// Take `object` off the blocklist.
     pub async fn unblock(&self, object: &Hash, now_ms: u64) -> Result<(), StoreError> {
         let key = keys::block(object);
-        self.mutate(object, now_ms, None, false, |_, _| {
+        self.mutate(object, now_ms, None, None, false, |_, _| {
             Ok(Step::Commit(vec![Write::Delete(key.clone())], ()))
         })
         .await
@@ -614,7 +632,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
     /// `deleting` so the object can be uploaded again. A no-op if it is not
     /// set.
     pub async fn finish_collect(&self, object: &Hash, now_ms: u64) -> Result<(), StoreError> {
-        self.mutate(object, now_ms, None, false, |_, state| {
+        self.mutate(object, now_ms, None, None, false, |_, state| {
             if !state.deleting {
                 return Ok(Step::Stop(()));
             }
@@ -639,6 +657,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
         object: &Hash,
         now_ms: u64,
         probe: Option<&Key>,
+        aux: Option<&Key>,
         deadline: bool,
         plan: impl Fn(&Seen, &mut ObjectState) -> Result<Step<T>, StoreError>,
     ) -> Result<T, StoreError> {
@@ -650,13 +669,18 @@ impl<S: NamespaceStore> ContentIndex<S> {
             keys::block(object),
         ];
         read.extend(probe.cloned());
+        read.extend(aux.cloned());
         let (hold_start, hold_end) = keys::holds_of(object);
         for _ in 0..MAX_ATTEMPTS {
             let mut values = self.store.get_many(&p, &read).await?.into_iter();
             let (v, old, blocked) = (values.next(), values.next(), values.next());
             let (v, old, blocked) = (v.flatten(), old.flatten(), blocked.flatten());
+            // The optional rows follow the fixed ones, in this order.
+            let probed = probe.and_then(|_| values.next().flatten());
+            let auxiliary = aux.and_then(|_| values.next().flatten());
             let seen = Seen {
-                probe: values.next().flatten(),
+                probe: probed,
+                aux: auxiliary,
                 blocked: blocked
                     .as_ref()
                     .map(codec::decode_block_entry)
@@ -1167,5 +1191,33 @@ mod tests {
         // A fresh plan time succeeds.
         let now = 10 + CONTENT_APPLY_WINDOW_MS + 1;
         assert!(block_on(idx.add_holder(&obj, &holder("a"), &OP, None, now)).is_ok());
+    }
+
+    #[test]
+    fn content_index_holder_releases_only_a_live_hold() {
+        let idx = ContentIndex::new(kv());
+        let obj = [0x61; 32];
+        // No hold at all, then an expired one: the holder batch refuses and
+        // writes nothing.
+        let none = block_on(idx.add_holder(&obj, &holder("a"), &OP, Some(&[1; 32]), 1));
+        assert!(matches!(none, Err(StoreError::Unavailable(_))));
+        held(block_on(idx.add_hold(&obj, &[1; 32], 50, 2)));
+        let before = state(&idx, &obj);
+        let late = block_on(idx.add_holder(&obj, &holder("a"), &OP, Some(&[1; 32]), 60));
+        assert!(matches!(late, Err(StoreError::Unavailable(_))));
+        assert_eq!(state(&idx, &obj).holders, before.holders);
+        assert_eq!(
+            block_on(idx.holder_record(&obj, &holder("a"))).unwrap(),
+            None
+        );
+        // A live hold is released with the holder.
+        held(block_on(idx.add_hold(&obj, &[2; 32], 500, 70)));
+        block_on(idx.add_holder(&obj, &holder("a"), &OP, Some(&[2; 32]), 80)).unwrap();
+        assert_eq!(hold_row(&idx, &obj, &[2; 32]), None);
+        assert!(
+            block_on(idx.holder_record(&obj, &holder("a")))
+                .unwrap()
+                .is_some()
+        );
     }
 }

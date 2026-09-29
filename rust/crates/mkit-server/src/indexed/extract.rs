@@ -40,7 +40,7 @@ use crate::store::{
     index::MAX_LOOKUP_IDS,
 };
 use crate::telemetry::Metrics;
-use crate::{BoxFuture, Clock, NamespaceStore, ServerError};
+use crate::{BoxFuture, Clock, MaybeSend, NamespaceStore, ServerError};
 
 /// The staged objects of one advance: canonical bytes, decoded object and
 /// the creating ticket's time.
@@ -181,8 +181,44 @@ fn index_error(error: &StoreError) -> ServerError {
 
 /// Renews the caller's verification lease. The extractor calls it between
 /// pieces and before each commit, so a long extraction keeps the lease.
-pub(super) trait Renew {
+pub(super) trait Renew: MaybeSend {
     fn renew(&mut self) -> BoxFuture<'_, Result<(), ServerError>>;
+}
+
+/// [`Renew`] that also keeps the extraction's `ContentIndex` hold alive: past
+/// half its lifetime, the hold is taken again (which extends it), so a long
+/// stream never outlives the protection GC honors (SPEC-SERVER §13.4, D-9).
+struct Held<'a, R, S: NamespaceStore> {
+    inner: &'a mut R,
+    content: &'a ContentIndex<BorrowedStore<'a, S>>,
+    clock: &'a dyn Clock,
+    id: Hash,
+    hold: Hash,
+    ttl_ms: u64,
+    renew_at_ms: u64,
+}
+
+impl<R: Renew, S: NamespaceStore> Renew for Held<'_, R, S> {
+    fn renew(&mut self) -> BoxFuture<'_, Result<(), ServerError>> {
+        Box::pin(async move {
+            self.inner.renew().await?;
+            let now = u64::try_from(self.clock.now_ms()).unwrap_or(0);
+            if now >= self.renew_at_ms {
+                let until = now.saturating_add(self.ttl_ms);
+                match self
+                    .content
+                    .add_hold(&self.id, &self.hold, until, now)
+                    .await
+                {
+                    Ok(HoldOutcome::Held) => {}
+                    Ok(_) => return Err(blocked()),
+                    Err(e) => return Err(index_error(&e)),
+                }
+                self.renew_at_ms = now.saturating_add(self.ttl_ms / 2);
+            }
+            Ok(())
+        })
+    }
 }
 
 /// Largest part an extraction upload uses (the protocol's 32 MiB bound).
@@ -280,19 +316,21 @@ impl<B: MultipartBlobStore> Writer<'_, B> {
     }
 
     /// Commit against the running content hash: the store checks that the
-    /// bytes it holds are the bytes that were verified here.
+    /// bytes it holds are the bytes that were verified here. A failure
+    /// aborts a multipart session, except a lost lease (`renew` fails):
+    /// the verifier that took over shares the session, so it is left to it.
     async fn finish<R: Renew>(mut self, renew: &mut R) -> Result<(), ServerError> {
         if self.written != self.expected {
+            self.abort().await;
             return Err(inconsistent());
         }
         renew.renew().await?;
         let root = self.hasher.finalize();
-        let done = match &self.target {
-            Target::Single(_) => None,
-            Target::Parts { buffer, .. } => Some(!buffer.is_empty()),
-        };
-        if done == Some(true) {
-            self.flush_part().await.map_err(|e| blob_error(&e))?;
+        if matches!(&self.target, Target::Parts { buffer, .. } if !buffer.is_empty())
+            && let Err(e) = self.flush_part().await
+        {
+            self.abort().await;
+            return Err(blob_error(&e));
         }
         let stored = match self.target {
             Target::Single(sink) => sink.commit_with_root(root).await,
@@ -302,9 +340,14 @@ impl<B: MultipartBlobStore> Writer<'_, B> {
                 parts,
                 ..
             } => {
-                self.blobs
+                let done = self
+                    .blobs
                     .complete_with_root(self.key, &session, &plan, &parts, root)
-                    .await
+                    .await;
+                if done.is_err() {
+                    let _ = self.blobs.abort(self.key, &session).await;
+                }
+                done
             }
         };
         stored.map(drop).map_err(|e| blob_error(&e))
@@ -357,31 +400,58 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
         let object = &self.staged[&id].1;
         let content = ContentIndex::new(BorrowedStore(self.store));
         let hold = hold_id(self.repo, ticket, &id);
-        let ttl = hold_ttl_ms(self.cfg.relay_lag_bound_ms);
+        let ttl_ms = hold_ttl_ms(self.cfg.relay_lag_bound_ms);
         let now = self.now_ms();
         match content
-            .add_hold(&id, &hold, now.saturating_add(ttl), now)
+            .add_hold(&id, &hold, now.saturating_add(ttl_ms), now)
             .await
         {
             Ok(HoldOutcome::Held) => {}
             Ok(_) => return Err(blocked()),
             Err(e) => return Err(index_error(&e)),
         }
+        let mut keeper = Held {
+            inner: renew,
+            content: &content,
+            clock: self.clock,
+            id,
+            hold,
+            ttl_ms,
+            renew_at_ms: now.saturating_add(ttl_ms / 2),
+        };
+        let renew = &mut keeper;
         renew.renew().await?;
-        if !self.already_stored(&id, object, kind).await? {
+        let (key, len) = (BlobKey::object(id), content_len(object));
+        // Reserve the upload before the `head`: a full spool then answers the
+        // same whether or not the object is already stored, so that answer
+        // reveals nothing about the deployment's contents (§9.6).
+        let mut reserved = if self.beyond_single_put(len) {
+            None
+        } else {
+            Some(self.writer(key, len, &hold).await?)
+        };
+        if self.already_stored(&id, object, kind).await? {
+            if let Some(w) = reserved.take() {
+                w.abort().await;
+            }
+        } else {
             match object {
                 Object::Blob(blob) => {
                     // A plain Blob rehashes against its id on its canonical bytes.
                     if hash(&self.staged[&id].0) != id {
                         return Err(inconsistent());
                     }
-                    let mut w = self
-                        .writer(BlobKey::object(id), content_len(object), &hold)
-                        .await?;
+                    let mut w = match reserved.take() {
+                        Some(w) => w,
+                        None => self.writer(key, len, &hold).await?,
+                    };
                     let filled = w.push(&blob.data, renew).await;
                     self.close(w, filled, renew).await?;
                 }
-                Object::ChunkedBlob(cb) => self.reassemble(id, cb, &hold, renew).await?,
+                Object::ChunkedBlob(cb) => {
+                    self.reassemble(id, cb, &hold, reserved.take(), renew)
+                        .await?;
+                }
                 _ => return Err(inconsistent()),
             }
         }
@@ -395,6 +465,11 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
             return Err(blocked());
         }
         Ok(())
+    }
+
+    /// Whether `len` bytes need a multipart upload on this backend.
+    fn beyond_single_put(&self, len: u64) -> bool {
+        matches!(self.blobs.single_put_limit(), Some(limit) if len > limit)
     }
 
     /// The object (and a manifest's sidecar) is there with its expected
@@ -422,41 +497,39 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
 
     /// Open the upload of `key`: one put, or parts when `len` exceeds what the
     /// backend's single put carries. `hold` names the multipart session, so a
-    /// retry resumes it.
+    /// verifier retrying the same ticket reuses its id (a failed upload
+    /// aborts it, so the retry starts over).
     async fn writer(
         &self,
         key: BlobKey,
         len: u64,
         hold: &Hash,
     ) -> Result<Writer<'_, B>, ServerError> {
-        let target = match self.blobs.single_put_limit() {
-            Some(limit) if len > limit => {
-                let mut part_size = MIN_PART_SIZE;
-                while len.div_ceil(part_size) > u64::from(B::MAX_PARTS) && part_size < MAX_PART_SIZE
-                {
-                    part_size *= 2;
-                }
-                let plan =
-                    PartPlan::new(len, part_size, B::MAX_PARTS).map_err(|_| inconsistent())?;
-                let seed = [b"mkit-extract-session:v1".as_slice(), hold, key.hash()].concat();
-                let session = self
-                    .blobs
-                    .begin_multipart_for_ticket(key, len, part_size, hash(&seed))
-                    .await
-                    .map_err(|e| blob_error(&e))?;
-                Target::Parts {
-                    session,
-                    plan,
-                    buffer: Vec::new(),
-                    parts: Vec::new(),
-                }
+        let target = if self.beyond_single_put(len) {
+            let mut part_size = MIN_PART_SIZE;
+            while len.div_ceil(part_size) > u64::from(B::MAX_PARTS) && part_size < MAX_PART_SIZE {
+                part_size *= 2;
             }
-            _ => Target::Single(
+            let plan = PartPlan::new(len, part_size, B::MAX_PARTS).map_err(|_| inconsistent())?;
+            let seed = [b"mkit-extract-session:v1".as_slice(), hold, key.hash()].concat();
+            let session = self
+                .blobs
+                .begin_multipart_for_ticket(key, len, part_size, hash(&seed))
+                .await
+                .map_err(|e| blob_error(&e))?;
+            Target::Parts {
+                session,
+                plan,
+                buffer: Vec::new(),
+                parts: Vec::new(),
+            }
+        } else {
+            Target::Single(
                 self.blobs
                     .begin(key, len)
                     .await
                     .map_err(|e| blob_error(&e))?,
-            ),
+            )
         };
         Ok(Writer {
             blobs: self.blobs,
@@ -491,11 +564,16 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
         id: Hash,
         cb: &ChunkedBlob,
         hold: &Hash,
+        reserved: Option<Writer<'_, B>>,
         renew: &mut R,
     ) -> Result<(), ServerError> {
-        let mut w = self
-            .writer(BlobKey::object(id), cb.total_size, hold)
-            .await?;
+        let mut w = match reserved {
+            Some(w) => w,
+            None => {
+                self.writer(BlobKey::object(id), cb.total_size, hold)
+                    .await?
+            }
+        };
         let mut boundaries = Vec::with_capacity(cb.chunks.len() + 1);
         boundaries.push(0);
         let filled = self.stream_chunks(cb, &mut w, &mut boundaries, renew).await;
@@ -515,6 +593,10 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
         boundaries: &mut Vec<u64>,
         renew: &mut R,
     ) -> Result<(), ServerError> {
+        // Member bytes resolved so far, bases included: a manifest may list one
+        // member chunk many times, so the resolution work is bounded by the
+        // same budget as the reassembled output.
+        let mut resolved = 0_u64;
         for window in cb.chunks.chunks(MAX_LOOKUP_IDS) {
             let unstaged: BTreeSet<Hash> = window
                 .iter()
@@ -529,7 +611,7 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
                     .await?
             };
             for chunk in window {
-                let data = self.chunk_data(chunk, &located).await?;
+                let data = self.chunk_data(chunk, &located, &mut resolved).await?;
                 let end = boundaries
                     .last()
                     .and_then(|at| at.checked_add(data.len() as u64))
@@ -552,6 +634,7 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
         &self,
         id: &Hash,
         located: &BTreeMap<Hash, crate::store::index::ObjectLookup>,
+        resolved: &mut u64,
     ) -> Result<Cow<'_, [u8]>, ServerError> {
         if let Some((canonical, object, _)) = self.staged.get(id) {
             // Borrowed: a staged chunk is never copied a second time.
@@ -564,6 +647,7 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
             return Err(inconsistent());
         };
         // A fresh cache per chunk: the chunk is dropped once written.
+        let mut cache = resolve::MemberCache::default();
         let (canonical, _) = resolve::member_object(
             self.blobs,
             self.store,
@@ -573,7 +657,7 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
             *location,
             self.cfg.max_delta_chain_depth,
             self.cfg.decode_budget.saturating_sub(self.staged_bytes),
-            &mut resolve::MemberCache::default(),
+            &mut cache,
             &mut BTreeSet::new(),
             self.metrics,
         )
@@ -582,6 +666,12 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
             resolve::ResolveFailure::Other(error) => error,
             _ => inconsistent(),
         })?;
+        *resolved = resolved.saturating_add(cache.retained_bytes());
+        if *resolved > self.cfg.max_extract_bytes {
+            return Err(ServerError::invalid_argument(
+                "pack exceeds indexed decode budget",
+            ));
+        }
         if hash(&canonical) != *id {
             return Err(inconsistent());
         }

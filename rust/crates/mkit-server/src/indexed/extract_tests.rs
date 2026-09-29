@@ -917,6 +917,13 @@ type CommitHook = Box<dyn Fn(&BlobKey) + Send>;
 struct FaultBlobs {
     inner: MemoryBlobStore,
     fail_begin: Arc<AtomicBool>,
+    /// Fail the n-th `begin` (1-based) instead of the next one.
+    fail_begin_at: Arc<AtomicU32>,
+    begins: Arc<AtomicU32>,
+    /// Answer `begin` with a full spool, for every call while set.
+    full_spool: Arc<AtomicBool>,
+    /// The namespace of every `get`, in order.
+    gets: Arc<Mutex<Vec<crate::store::BlobNamespace>>>,
     fail_write: Arc<AtomicU32>,
     writes: Arc<AtomicU32>,
     max_piece: Arc<AtomicU64>,
@@ -934,7 +941,13 @@ impl BlobStore for FaultBlobs {
     type Sink = FaultSink;
 
     async fn begin(&self, key: BlobKey, len: u64) -> Result<FaultSink, StoreError> {
-        if self.fail_begin.swap(false, Ordering::SeqCst) {
+        let n = self.begins.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.full_spool.load(Ordering::SeqCst) {
+            return Err(StoreError::Full);
+        }
+        if self.fail_begin.swap(false, Ordering::SeqCst)
+            || self.fail_begin_at.load(Ordering::SeqCst) == n
+        {
             return Err(StoreError::unavailable("injected begin fault"));
         }
         Ok(FaultSink {
@@ -949,6 +962,7 @@ impl BlobStore for FaultBlobs {
         key: &BlobKey,
         range: Option<ByteRange>,
     ) -> Result<Option<BlobBody>, StoreError> {
+        self.gets.lock().unwrap().push(key.namespace());
         self.inner.get(key, range).await
     }
 
@@ -1470,4 +1484,194 @@ fn a_failed_multipart_extraction_aborts_its_session_and_publishes_nothing() {
     let ex = extractor(&blobs, &world.store, &repo, &world.clock, &staged);
     extract_one(&ex, manifest_id, Kind::Chunked).unwrap();
     assert_eq!(world.read(&BlobKey::object(manifest_id)), chunks.concat());
+}
+
+// ---------------------------------------------------------------------------
+// Review round: hold renewal, resolution budget, sidecar crash, blocked
+// holder, the spool oracle and the resolver's reads.
+
+#[test]
+fn a_stream_longer_than_the_hold_ttl_renews_the_hold() {
+    let world = World::new();
+    // Three pieces, 25 minutes each: 75 minutes against a 60 minute hold.
+    let slow = SlowBlobs {
+        inner: world.blobs.clone(),
+        clock: world.clock.clone(),
+        step_ms: 25 * 60 * 1000,
+    };
+    let data = content(59, 3 * MAX_BLOB_PIECE_BYTES);
+    let (id, raw, object) = blob_object(&data);
+    let staged = staged_of(&[(id, raw, object)]);
+    let repo = repo("a");
+    let ex = extractor(&slow, &world.store, &repo, &world.clock, &staged);
+    // The holder batch refuses a hold that lapsed, so success proves the
+    // stream renewed it.
+    extract_one(&ex, id, Kind::Blob).unwrap();
+    assert_eq!(world.stored(&id), Some(data.len() as u64));
+    assert_eq!(world.holders(&id), ["a"]);
+    assert_eq!(world.holds(&id), 0);
+}
+
+#[test]
+fn repeated_member_chunks_are_charged_against_the_extraction_budget() {
+    // One 1,000 byte member chunk listed ten times: each listing resolves it
+    // again, so the resolution work is bounded like the output.
+    let chunk = content(61, 1_000);
+    let (chunk_id, chunk_raw, _) = blob_object(&chunk);
+    let cb = ChunkedBlob {
+        total_size: 10_000,
+        chunk_size: 0,
+        chunks: vec![chunk_id; 10],
+    };
+    let manifest_id = Object::ChunkedBlob(cb.clone()).id().unwrap();
+    let repo = repo("a");
+    let world = World::new();
+    seed_member_raw(&world.blobs, &world.store, &repo, chunk_id, &chunk_raw);
+    let staged = staged_of(&[(manifest_id, Vec::new(), Object::ChunkedBlob(cb))]);
+    let mut ex = extractor(&world.blobs, &world.store, &repo, &world.clock, &staged);
+    ex.cfg.max_extract_bytes = 5_000;
+    let e = extract_one(&ex, manifest_id, Kind::Chunked).unwrap_err();
+    assert_eq!(e.public_message(), "pack exceeds indexed decode budget");
+    assert_eq!(world.stored(&manifest_id), None);
+    ex.cfg.max_extract_bytes = 1 << 20;
+    extract_one(&ex, manifest_id, Kind::Chunked).unwrap();
+    assert_eq!(world.stored(&manifest_id), Some(10_000));
+}
+
+#[test]
+fn a_crash_between_the_object_and_its_sidecar_redoes_both() {
+    let chunks = vec![content(3, 4_000), content(5, 9_000)];
+    let (manifest_id, cb, objects) = manifest(&chunks);
+    let mut all = objects;
+    all.push((manifest_id, Vec::new(), Object::ChunkedBlob(cb)));
+    let staged = staged_of(&all);
+    let repo = repo("a");
+    let (blobs, kv, clock) = fault_world();
+    // The second `begin` is the sidecar's.
+    blobs.fail_begin_at.store(2, Ordering::SeqCst);
+    let ex = extractor(&blobs, &kv, &repo, &clock, &staged);
+    assert!(extract_one(&ex, manifest_id, Kind::Chunked).is_err());
+    let sidecar = BlobKey::object_offsets(manifest_id);
+    assert!(
+        block_on(blobs.head(&BlobKey::object(manifest_id)))
+            .unwrap()
+            .is_some()
+    );
+    assert!(block_on(blobs.head(&sidecar)).unwrap().is_none());
+    protected(&blobs, &kv, &manifest_id);
+    // The retry sees the manifest half-stored, so it is not a dedup: it
+    // rewrites the object (already present) and writes the sidecar.
+    blobs.fail_begin_at.store(0, Ordering::SeqCst);
+    extract_one(&ex, manifest_id, Kind::Chunked).unwrap();
+    assert!(block_on(blobs.head(&sidecar)).unwrap().is_some());
+    protected(&blobs, &kv, &manifest_id);
+    let holder = Holder::new(repo.namespace.clone(), repo.name.clone());
+    let content_index = ContentIndex::new(BorrowedStore(&kv));
+    assert!(
+        block_on(content_index.holder_record(&manifest_id, &holder))
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn a_block_between_the_hold_and_the_holder_fails_the_push_but_records_the_holder() {
+    let data = content(67, BIG);
+    let (id, raw, object) = blob_object(&data);
+    let staged = staged_of(&[(id, raw, object)]);
+    let repo = repo("a");
+    let (blobs, kv, clock) = fault_world();
+    let kv = Arc::new(kv);
+    // The takedown lands as the bytes become visible.
+    let block = {
+        let kv = kv.clone();
+        move |_: &BlobKey| {
+            let index = ContentIndex::new(BorrowedStore(&*kv));
+            now(index.block(&id, &crate::store::BlockEntry::new("dmca", 1), NOW as u64)).unwrap();
+        }
+    };
+    *blobs.before_commit.lock().unwrap() = Some(Box::new(block));
+    let ex = extractor(&blobs, &*kv, &repo, &clock, &staged);
+    let e = extract_one(&ex, id, Kind::Blob).unwrap_err();
+    assert_eq!(e.code(), crate::Code::PermissionDenied);
+    assert_eq!(e.public_message(), "object blocked");
+    // The holder is recorded so a takedown finds it; the hold is released.
+    let holder = Holder::new(repo.namespace.clone(), repo.name.clone());
+    let index = ContentIndex::new(BorrowedStore(&*kv));
+    assert!(
+        block_on(index.holder_record(&id, &holder))
+            .unwrap()
+            .is_some()
+    );
+    protected(&blobs, &kv, &id);
+}
+
+#[test]
+fn a_full_spool_answers_alike_whether_or_not_the_object_is_stored() {
+    let data = content(71, BIG);
+    let (id, raw, object) = blob_object(&data);
+    let staged = staged_of(&[(id, raw, object)]);
+    let repo = repo("a");
+    let answer = |stored: bool| {
+        let (blobs, kv, clock) = fault_world();
+        let ex = extractor(&blobs, &kv, &repo, &clock, &staged);
+        if stored {
+            extract_one(&ex, id, Kind::Blob).unwrap();
+        }
+        blobs.full_spool.store(true, Ordering::SeqCst);
+        let e = extract_one(&ex, id, Kind::Blob).unwrap_err();
+        (
+            e.code(),
+            e.public_message().to_owned(),
+            e.details().to_vec(),
+        )
+    };
+    assert_eq!(
+        answer(true),
+        answer(false),
+        "no dedup oracle through the spool"
+    );
+}
+
+#[test]
+fn the_resolver_never_reads_object_keys() {
+    let chunks = vec![content(3, 4_000), content(5, 9_000)];
+    let (manifest_id, cb, objects) = manifest(&chunks);
+    let repo = repo("a");
+    let world = World::new();
+    let blobs = FaultBlobs {
+        inner: world.blobs.clone(),
+        ..FaultBlobs::default()
+    };
+    seed_member_raw(
+        &world.blobs,
+        &world.store,
+        &repo,
+        objects[1].0,
+        &objects[1].1,
+    );
+    // An object-store decoy under the member chunk's id.
+    block_on(async {
+        let mut sink = world
+            .blobs
+            .begin(BlobKey::object(objects[1].0), 3)
+            .await
+            .unwrap();
+        sink.write(Bytes::from_static(b"bad")).await.unwrap();
+        sink.commit_with_root(hash(b"bad")).await.unwrap();
+    });
+    let staged = staged_of(&[
+        objects[0].clone(),
+        (manifest_id, Vec::new(), Object::ChunkedBlob(cb)),
+    ]);
+    let ex = extractor(&blobs, &world.store, &repo, &world.clock, &staged);
+    extract_one(&ex, manifest_id, Kind::Chunked).unwrap();
+    assert_eq!(world.read(&BlobKey::object(manifest_id)), chunks.concat());
+    let gets = blobs.gets.lock().unwrap();
+    assert!(!gets.is_empty());
+    assert!(
+        gets.iter()
+            .all(|namespace| *namespace == crate::store::BlobNamespace::Pack),
+        "extraction and resolution read only pack keys: {gets:?}"
+    );
 }
