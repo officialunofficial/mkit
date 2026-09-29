@@ -1442,6 +1442,11 @@ unrelated commands.
   `--statement` it sends an owner-signed `mkit-repo-visibility:v1` statement
   with no envelope, which any owner scheme can sign.
 
+Cloning a private repository: a Connect clone with `transport_auth = envelope`
+signs with `signing_key`, which defaults to the repository-relative
+`.mkit/keys/default.key`. A fresh clone has no such file, so set a user-level
+`signing_key` (or `signer = keystore`) before cloning.
+
 Signing flags (`grant create`, `epoch bump`, `grant revoke`, `visibility set
 --statement`): the owner signs with the mkit signing key (`ed25519`, the
 default; the namespace is `ed25519-<pubkey>`) or, with `--scheme
