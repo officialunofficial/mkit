@@ -229,6 +229,27 @@ fn private_repository_reads_allow_authorized_callers() {
 }
 
 #[test]
+fn a_signed_read_writes_no_replay_rows() {
+    // SPEC-WRITE-GRANTS §9.2: a signed read verifies in full but keeps no
+    // replay ledger — no `p` or `px` row, ever.
+    let owner = key(1);
+    let repo = repository(&owner);
+    let e = environment(&owner, AuthorizerRole::Check, false);
+    let id = repo_id(&e, &owner);
+    put_repo(&e, &id, Some(codec::StoredVisibility::Private));
+    assert_eq!(e.count("p"), 0);
+    assert_eq!(e.count("px"), 0);
+    for procedure in READS {
+        assert_served(
+            try_read(&e, &signed_read(&owner, &repo, procedure, None), procedure),
+            &format!("{procedure:?} owner"),
+        );
+    }
+    assert_eq!(e.count("p"), 0);
+    assert_eq!(e.count("px"), 0);
+}
+
+#[test]
 fn private_read_grant_epoch_must_match_stored() {
     let owner = key(1);
     let grantee = key(2);

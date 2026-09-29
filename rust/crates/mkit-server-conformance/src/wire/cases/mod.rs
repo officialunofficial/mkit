@@ -40,6 +40,7 @@ mod multipart;
 mod packs;
 mod policy;
 mod quota;
+mod reads;
 mod ref_scopes;
 mod refs;
 mod replay;
@@ -47,6 +48,7 @@ mod repository;
 mod tickets;
 mod timers;
 mod upload;
+mod visibility;
 
 /// Why a case did not pass.
 #[derive(Debug)]
@@ -242,6 +244,27 @@ cases! {
     "epochs.zero_x_secp256k1_statement" => epochs::zero_x_secp256k1_statement, M2, [Grants, MultiRepo], [];
     "epochs.zero_x_webauthn_statement" => epochs::zero_x_webauthn_statement, M2, [Grants, MultiRepo], [];
     "epochs.old_grant_denied_new_grant_works_after_set" => epochs::old_grant_denied_new_grant_works_after_set, M2, [Grants, MultiRepo], [];
+    "reads.signed_verified_in_full" => reads::signed_verified_in_full, M2, [SignedReads, MultiRepo, AuthV2], [];
+    "reads.public_unsigned_ok" => reads::public_unsigned_ok, M2, [SignedReads, MultiRepo, AuthV2], [];
+    "reads.private_anonymous_not_found" => reads::private_anonymous_not_found, M2, [SignedReads, MultiRepo, AuthV2], [];
+    "reads.private_owner_ok" => reads::private_owner_ok, M2, [SignedReads, MultiRepo, AuthV2], [];
+    "reads.private_read_grant_ok" => reads::private_read_grant_ok, M2, [SignedReads, Grants, MultiRepo, AuthV2], [];
+    "reads.private_write_only_not_found" => reads::private_write_only_not_found, M2, [SignedReads, Grants, MultiRepo, AuthV2], [];
+    "reads.private_expired_signature_unauthenticated" => reads::private_expired_signature_unauthenticated, M2, [SignedReads, MultiRepo, AuthV2], [];
+    "reads.private_grant_old_epoch_not_found" => reads::private_grant_old_epoch_not_found, M2, [SignedReads, Grants, MultiRepo, AuthV2, TestFaults], [];
+    "reads.private_not_found_byte_identical" => reads::private_not_found_byte_identical, M2, [SignedReads, MultiRepo, AuthV2], [];
+    "reads.url_token_mint_ok" => reads::url_token_mint_ok, M2, [SignedReads, MultiRepo, AuthV2], [];
+    "reads.url_token_private_without_read_not_found" => reads::url_token_private_without_read_not_found, M2, [SignedReads, MultiRepo, AuthV2], [];
+    "reads.url_token_anonymous_unauthenticated" => reads::url_token_anonymous_unauthenticated, M2, [SignedReads, MultiRepo, AuthV2], [];
+    "reads.url_token_bounds_invalid_argument" => reads::url_token_bounds_invalid_argument, M2, [SignedReads, MultiRepo, AuthV2], [];
+    "reads.url_token_ttl_clamped" => reads::url_token_ttl_clamped, M2, [SignedReads, MultiRepo, AuthV2], [];
+    "visibility.envelope_owner" => visibility::envelope_owner, M2, [SignedReads, MultiRepo, AuthV2], [];
+    "visibility.statement_ed25519" => visibility::statement_ed25519, M2, [SignedReads, MultiRepo, AuthV2], [];
+    "visibility.statement_eip191" => visibility::statement_eip191, M2, [SignedReads, Grants, MultiRepo, AuthV2], [];
+    "visibility.grant_never_authorizes" => visibility::grant_never_authorizes, M2, [SignedReads, Grants, MultiRepo, AuthV2], [];
+    "visibility.older_created_denied" => visibility::older_created_denied, M2, [SignedReads, MultiRepo, AuthV2], [];
+    "visibility.bad_mode_invalid_argument" => visibility::bad_mode_invalid_argument, M2, [SignedReads, MultiRepo, AuthV2], [];
+    "visibility.oversize_statement_permission_denied" => visibility::oversize_statement_permission_denied, M2, [SignedReads, MultiRepo, AuthV2], [];
     "multipart.three_parts" => multipart::three_parts, M1, [Multipart, AuthV2], [MultiRepo];
     "multipart.resume_receipts" => multipart::resume_receipts, M1, [Multipart, AuthV2], [MultiRepo];
     "multipart.root_mismatch_invisible" => multipart::root_mismatch_invisible, M1, [Multipart, AuthV2], [MultiRepo];

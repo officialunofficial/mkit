@@ -118,6 +118,27 @@
 //! | `epochs.zero_x_secp256k1_statement` | `grants`, `multi-repo` | zero x secp256k1 statement |
 //! | `epochs.zero_x_webauthn_statement` | `grants`, `multi-repo` | zero x webauthn statement |
 //! | `epochs.old_grant_denied_new_grant_works_after_set` | `grants`, `multi-repo` | old grant denied new grant works after set |
+//! | `reads.signed_verified_in_full` | `signed-reads`, `multi-repo`, `auth-v2` | a bad signature is `unauthenticated` before repository lookup |
+//! | `reads.public_unsigned_ok` | `signed-reads`, `multi-repo`, `auth-v2` | a public repository reads unsigned |
+//! | `reads.private_anonymous_not_found` | `signed-reads`, `multi-repo`, `auth-v2` | an anonymous private read is `not_found` |
+//! | `reads.private_owner_ok` | `signed-reads`, `multi-repo`, `auth-v2` | the owner reads its private repository |
+//! | `reads.private_read_grant_ok` | `signed-reads`, `grants`, `multi-repo`, `auth-v2` | a `read` grant reads |
+//! | `reads.private_write_only_not_found` | `signed-reads`, `grants`, `multi-repo`, `auth-v2` | a write grant does not read |
+//! | `reads.private_expired_signature_unauthenticated` | `signed-reads`, `multi-repo`, `auth-v2` | an expired envelope is `unauthenticated` |
+//! | `reads.private_grant_old_epoch_not_found` | `signed-reads`, `grants`, `multi-repo`, `auth-v2`, `test-faults` | an epoch bump revokes the grant |
+//! | `reads.private_not_found_byte_identical` | `signed-reads`, `multi-repo`, `auth-v2` | private and missing replies are byte-identical |
+//! | `reads.url_token_mint_ok` | `signed-reads`, `multi-repo`, `auth-v2` | a minted token passes all three phases |
+//! | `reads.url_token_private_without_read_not_found` | `signed-reads`, `multi-repo`, `auth-v2` | no read access mints `not_found` |
+//! | `reads.url_token_anonymous_unauthenticated` | `signed-reads`, `multi-repo`, `auth-v2` | an unsigned mint is `unauthenticated` |
+//! | `reads.url_token_bounds_invalid_argument` | `signed-reads`, `multi-repo`, `auth-v2` | bad targets are `invalid_argument` |
+//! | `reads.url_token_ttl_clamped` | `signed-reads`, `multi-repo`, `auth-v2` | `ttl_seconds` clamps to the configured ttl |
+//! | `visibility.envelope_owner` | `signed-reads`, `multi-repo`, `auth-v2` | the owner flips visibility |
+//! | `visibility.statement_ed25519` | `signed-reads`, `multi-repo`, `auth-v2` | an ed25519 owner statement applies |
+//! | `visibility.statement_eip191` | `signed-reads`, `grants`, `multi-repo`, `auth-v2` | a 0x owner statement applies |
+//! | `visibility.grant_never_authorizes` | `signed-reads`, `grants`, `multi-repo`, `auth-v2` | a grant cannot change visibility |
+//! | `visibility.older_created_denied` | `signed-reads`, `multi-repo`, `auth-v2` | an older statement denies |
+//! | `visibility.bad_mode_invalid_argument` | `signed-reads`, `multi-repo`, `auth-v2` | unset or `UNSPECIFIED` mode is `invalid_argument` |
+//! | `visibility.oversize_statement_permission_denied` | `signed-reads`, `multi-repo`, `auth-v2` | a statement over 8,192 bytes denies |
 //! | `info.shape_and_policy` | | unauthenticated discovery reports consistent limits, policy and bounded private caching |
 //! | `info.ignores_repository_header` | | absent, nonexistent and malformed repository identities yield identical response bytes |
 //! | `policy.owner_write_allowed` | `namespace-policy`, `multi-repo`, `auth-v2` | an allowlisted namespace owner writes and reads its ref |
@@ -267,8 +288,6 @@
 //   `tickets.complete_upload_*`,
 //   `growth.tickets_and_outbox_pruned` (WP-1.27).
 // TODO(M2, grants): native transport grant registration and the later read grants.
-// TODO(M2, signed-reads): `reads.signed_verified_in_full`,
-//   `reads.private_repo_not_found`, `reads.url_token_*`.
 // TODO(M3, admission): `admission.challenge_402_typed_detail` (HTTP 402,
 //   `permission_denied`, exactly one `AdmissionChallenge` detail, `Cache-Control:
 //   no-store`), `admission.deny_403_no_detail`, `admission.no_state_on_challenge`,
@@ -310,6 +329,14 @@ pub const STATS_PATH: &str = "/__mkit_test/stats";
 
 /// Bound on one case, so a hung server fails a case, not the run.
 pub const CASE_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(10);
+
+/// The Ed25519 seed (hex) an in-process server puts in `url_tokens` for a
+/// `signed-reads` profile, so the suite can verify the tokens it mints.
+pub const URL_TOKEN_SEED: &str =
+    "9d4f2c8b1e6a35f07c2d9841ba6e5f3c09a17d4e8b2c6f103d5e9a7b4c8f1e2d";
+
+/// `url_token_ttl` for the same configuration: 15 minutes.
+pub const URL_TOKEN_TTL_MS: u64 = 15 * 60 * 1000;
 
 /// A server to test.
 #[derive(Debug, Clone)]
