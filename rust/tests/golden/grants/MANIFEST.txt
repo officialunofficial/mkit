@@ -3,6 +3,8 @@
 # Codec reject vectors: `python3 scripts/golden/grants_ref.py rust/tests/golden/grants --write-rejects`
 # Cross-checked by `python3 scripts/golden/grants_ref.py rust/tests/golden/grants`
 # eth-primitives.json: `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-attest --features grants --test golden_eth`
+# The fixed secp256k1 and P-256 seeds own real 0x namespaces. Never allowlist
+# those public test namespaces on a shared or staging deployment.
 # Format: <path> <blake3-hex-of-file-bytes>
 epoch-ed25519.json b7ee07d72c559d540fe2919c43708e5e2e77b5d3bf871ea3ac2bbd5ec3af7184
 eth-primitives.json 326e6d4544c3bdb99ef87992b8c03a835e85b6d8d724e239aaf59e830a6b9306
