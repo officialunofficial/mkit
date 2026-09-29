@@ -31,7 +31,11 @@ impl TimerKind {
 /// | 3 | RELAY (WP-1.23a) |
 /// | 4 | BACKUP (Worker only, WP-1.29b) |
 /// | 5 | QUOTA_ROLLUP (WP-1.26a) |
-/// | 6..=0xEF | Production, unallocated |
+/// | 6 | Reserved |
+/// | 7 | Reserved for WP-4.8 |
+/// | 8 | OUTCOME_DELIVERY (WP-3.3) |
+/// | 9 | RESERVATION_RECONCILE (WP-3.3) |
+/// | 10..=0xEF | Production, unallocated |
 /// | 0xF0..=0xFE | Reserved for tests |
 /// | 0xFF | TEST (`test-faults` only) |
 pub mod kinds {
@@ -45,6 +49,10 @@ pub mod kinds {
     pub const BACKUP: super::TimerKind = super::TimerKind::new(4);
     /// Ref-shard namespace quota reconciliation.
     pub const QUOTA_ROLLUP: super::TimerKind = super::TimerKind::new(5);
+    /// Deliver durable terminal outcomes.
+    pub const OUTCOME_DELIVERY: super::TimerKind = super::TimerKind::new(8);
+    /// Settle abandoned pending reservations.
+    pub const RESERVATION_RECONCILE: super::TimerKind = super::TimerKind::new(9);
     /// Ref deletion used only by test drivers and directives.
     #[cfg(feature = "test-faults")]
     pub const TEST: super::TimerKind = super::TimerKind::new(0xFF);

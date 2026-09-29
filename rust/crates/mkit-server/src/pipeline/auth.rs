@@ -7,6 +7,7 @@ use core::fmt;
 use mkit_core::hash::hash;
 use subtle::ConstantTimeEq;
 
+use super::hooks::CredentialHeader;
 use crate::auth_v2::{self, AuthV2Config};
 use crate::error::{Redacted, ServerError};
 use crate::op::{Procedure, VerifiedAuth};
@@ -38,12 +39,17 @@ pub enum AuthMode {
     TransportIdentity,
 }
 
+/// Multi-value header lookup supplied by a transport adapter.
+pub type HeaderValues<'a> = dyn Fn(&str) -> Vec<String> + 'a;
+
 /// Everything stage 0 needs, without any HTTP or Connect type.
 pub struct RequestMeta<'a> {
     /// The procedure called.
     pub procedure: Procedure,
     /// Looks a request header up by its lowercase name.
     pub header: &'a dyn Fn(&str) -> Option<String>,
+    /// All values for a header name. Bindings with single-value metadata may omit it.
+    pub header_values: Option<&'a HeaderValues<'a>>,
     /// The exact unary request bytes (the auth v2 body commitment); `None`
     /// for streams.
     pub unary_body: Option<&'a [u8]>,
@@ -64,7 +70,7 @@ impl fmt::Debug for RequestMeta<'_> {
 
 /// A request that passed stage 0, bound to the procedure it was
 /// authenticated for. Only [`super::Pipeline::authenticate`] builds one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Authenticated {
     /// Who the request acts as.
     pub principal: Principal,
@@ -72,6 +78,8 @@ pub struct Authenticated {
     pub auth: Option<VerifiedAuth>,
     /// A presented write grant, redacted from debug output.
     pub write_grant: Option<Redacted>,
+    /// Selected payment credential headers, never shown in diagnostics.
+    pub credential_headers: Vec<CredentialHeader>,
     /// Optional repository-local read-your-writes hint (outside auth v2).
     pub ref_hint: Option<String>,
     procedure: Procedure,
@@ -83,6 +91,17 @@ pub struct Authenticated {
     pub(crate) business_now_ms: i64,
     #[cfg(feature = "test-faults")]
     directives: super::TestDirectives,
+}
+
+impl fmt::Debug for Authenticated {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Authenticated")
+            .field("principal", &self.principal)
+            .field("auth", &self.auth)
+            .field("procedure", &self.procedure)
+            .field("repo", &self.repo)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Authenticated {
@@ -169,6 +188,7 @@ pub(crate) fn authenticate(
         principal,
         auth,
         write_grant,
+        credential_headers: Vec::new(),
         procedure,
         repo,
         ref_hint: None,

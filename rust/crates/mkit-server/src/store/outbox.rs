@@ -1,6 +1,6 @@
 //! Pure reservation and outbox fragments. One guarded `o` row arbitrates
-//! Ticketed -> terminal; delivery removes that row only after acknowledgement.
-//! WP-3.3 adds Pending/ReadServed under `CODEC_V1` and extends the arbiter.
+//! Ticketed or Pending -> terminal; delivery removes that row only after
+//! acknowledgement.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -20,14 +20,14 @@ use super::{
 /// overhead is at most 25: deadline 1, lease guard/install 2, absent layout
 /// version guard/install 2, absent repo-known guard/install 2, two ref CAS
 /// pairs 4, replay 3, counters 4, outbox sequence/backlog 4, and relay kick
-/// 1, and ref-index relay rows 2. These figures are D34's. On Single, a grant guard replaces the lease
+/// 1, and ref-index relay rows 2, plus one outcome-delivery kick. These figures are D34's. On Single, a grant guard replaces the lease
 /// pair and there is no relay share or relay kick, so seven tickets cost
-/// `8 * 7 + 21 = 77`. The real maximal planner batches are tested
-/// separately. On D34, seven tickets cost `9 * 7 + 25 = 88` ops before
+/// `8 * 7 + 22 = 78`. The real maximal planner batches are tested
+/// separately. On D34, seven tickets cost `9 * 7 + 26 = 89` ops before
 /// opportunistic pruning.
 pub const MAX_TICKETS_PER_ADVANCE: usize = 7;
 /// The advance batch's ops outside the per-ticket and per-signer ones.
-pub const ADVANCE_SHARED_OPS: usize = 25;
+pub const ADVANCE_SHARED_OPS: usize = 26;
 const _: () = assert!(MAX_TICKETS_PER_ADVANCE * 9 + ADVANCE_SHARED_OPS <= MAX_BATCH_OPS);
 
 /// Maximum operations (puts plus deletes) per relay row; two ops guard/advance rh,
@@ -51,11 +51,24 @@ pub struct Terminal(ReservationV1);
 impl Terminal {
     /// Validate a terminal record before planning its replacement.
     pub fn new(record: ReservationV1) -> Result<Self, StoreError> {
-        if matches!(record, ReservationV1::Ticketed { .. }) {
+        if matches!(
+            record,
+            ReservationV1::Ticketed { .. } | ReservationV1::Pending { .. }
+        ) {
             return Err(StoreError::Invalid("outcome must be terminal".into()));
         }
         codec::decode_reservation(&codec::encode_reservation(&record))?;
         Ok(Self(record))
+    }
+
+    fn occurred_at_ms(&self) -> u64 {
+        match &self.0 {
+            ReservationV1::Committed { occurred_at_ms, .. }
+            | ReservationV1::Aborted { occurred_at_ms, .. }
+            | ReservationV1::Expired { occurred_at_ms, .. }
+            | ReservationV1::ReadServed { occurred_at_ms, .. } => *occurred_at_ms,
+            _ => 0,
+        }
     }
 }
 
@@ -91,6 +104,7 @@ pub struct OutboxBuilder {
     reservations: BTreeSet<String>,
     error: Option<StoreError>,
     relay_at_ms: Option<u64>,
+    kick_at_ms: Option<u64>,
 }
 
 impl OutboxBuilder {
@@ -116,6 +130,7 @@ impl OutboxBuilder {
             reservations: BTreeSet::new(),
             error: None,
             relay_at_ms: None,
+            kick_at_ms: None,
         })
     }
 
@@ -142,12 +157,18 @@ impl OutboxBuilder {
             if !self.reservations.insert(rid.to_owned()) {
                 return Err(StoreError::Invalid("duplicate reservation in batch".into()));
             }
-            // A row the caller already observed is a duplicate id, not a
-            // race: reject it now instead of planning a batch that fails.
-            if prior.is_some() {
+            if let Some(value) = prior
+                && !matches!(
+                    codec::decode_reservation(value)?,
+                    ReservationV1::Pending {
+                        op: codec::PendingOp::Write,
+                        ..
+                    }
+                )
+            {
                 return Err(StoreError::Invalid("reservation id already in use".into()));
             }
-            self.pre.push(Precondition::Absent(key.clone()));
+            self.pre.push(guard(key.clone(), prior));
             self.writes.push(Write::Put(
                 key,
                 codec::encode_reservation(&ReservationV1::Ticketed { ticket_id }),
@@ -157,17 +178,78 @@ impl OutboxBuilder {
         self.remember(result);
     }
 
-    /// Replace still-Ticketed with exactly one terminal outcome, queued
-    /// for delivery. A terminal prior is rejected rather than replaced.
+    /// Durably record an admitted reservation before any guarded apply.
+    /// A present prior is an invalid admission decision, not a replay.
+    pub fn pending(&mut self, rid: &str, prior: Option<&Value>, record: &ReservationV1) {
+        let result = (|| {
+            if prior.is_some() {
+                return Err(StoreError::Invalid("reservation id already in use".into()));
+            }
+            let ReservationV1::Pending {
+                reconcile_at_ms, ..
+            } = record
+            else {
+                return Err(StoreError::Invalid(
+                    "pending requires Pending record".into(),
+                ));
+            };
+            let key = keys::reservation(rid)?;
+            if !self.reservations.insert(rid.to_owned()) {
+                return Err(StoreError::Invalid("duplicate reservation in batch".into()));
+            }
+            let value = codec::encode_reservation(record);
+            codec::decode_reservation(&value)?;
+            self.pre.push(Precondition::Absent(key.clone()));
+            self.writes.push(Write::Put(key, value));
+            self.writes.push(Write::Put(
+                keys::timer(
+                    *reconcile_at_ms,
+                    crate::timers::registry::kinds::RESERVATION_RECONCILE.get(),
+                    rid.as_bytes(),
+                ),
+                Value::default(),
+            ));
+            Ok(())
+        })();
+        self.remember(result);
+    }
+
+    /// Replace still-Ticketed or Pending with exactly one terminal outcome,
+    /// queued for delivery. A terminal prior is rejected rather than replaced.
     pub fn outcome(&mut self, rid: &str, prior: &Value, terminal: Terminal) {
+        let occurred_at_ms = terminal.occurred_at_ms();
         let record = terminal.0;
         let result = (|| {
             let key = keys::reservation(rid)?;
-            if !matches!(
-                codec::decode_reservation(prior)?,
-                ReservationV1::Ticketed { .. }
-            ) {
-                return Err(corrupt("reservation is already terminal"));
+            let permitted = match (codec::decode_reservation(prior)?, &record) {
+                (
+                    ReservationV1::Ticketed { .. },
+                    ReservationV1::Committed { .. }
+                    | ReservationV1::Aborted { .. }
+                    | ReservationV1::Expired { .. },
+                ) => true,
+                (
+                    ReservationV1::Pending {
+                        repository: prior_repo,
+                        op: codec::PendingOp::Write,
+                        ..
+                    },
+                    ReservationV1::Committed { repository, .. }
+                    | ReservationV1::Aborted { repository, .. },
+                )
+                | (
+                    ReservationV1::Pending {
+                        repository: prior_repo,
+                        op: codec::PendingOp::Read,
+                        ..
+                    },
+                    ReservationV1::ReadServed { repository, .. }
+                    | ReservationV1::Aborted { repository, .. },
+                ) => prior_repo == repository.as_str(),
+                _ => false,
+            };
+            if !permitted {
+                return Err(corrupt("illegal reservation transition"));
             }
             if !self.reservations.insert(rid.to_owned()) {
                 return Err(StoreError::Invalid("duplicate reservation in batch".into()));
@@ -185,9 +267,52 @@ impl OutboxBuilder {
                 .checked_add(size)
                 .ok_or_else(|| corrupt("backlog bytes overflow"))?;
             let seq = self.allocate()?;
+            if self.backlog.rows == 1 {
+                self.kick_at_ms = Some(occurred_at_ms);
+            }
             self.backlog_touched = true;
             self.pre
                 .push(Precondition::Equals(key.clone(), prior.clone()));
+            self.writes.push(Write::Put(key, value));
+            self.writes.push(Write::Put(
+                keys::outcome_pending(seq, rid)?,
+                Value::default(),
+            ));
+            Ok(())
+        })();
+        self.remember(result);
+    }
+
+    /// Fail a ticketless streaming reservation in one guarded Absent unit.
+    pub fn abort_direct(&mut self, rid: &str, terminal: Terminal) {
+        let occurred_at_ms = terminal.occurred_at_ms();
+        let record = terminal.0;
+        let result = (|| {
+            if !matches!(record, ReservationV1::Aborted { .. }) {
+                return Err(StoreError::Invalid("direct abort requires Aborted".into()));
+            }
+            let key = keys::reservation(rid)?;
+            if !self.reservations.insert(rid.to_owned()) {
+                return Err(StoreError::Invalid("duplicate reservation in batch".into()));
+            }
+            let value = codec::encode_reservation(&record);
+            let size = (key.as_bytes().len() + value.as_bytes().len()) as u64;
+            self.backlog.rows = self
+                .backlog
+                .rows
+                .checked_add(1)
+                .ok_or_else(|| corrupt("backlog rows overflow"))?;
+            self.backlog.bytes = self
+                .backlog
+                .bytes
+                .checked_add(size)
+                .ok_or_else(|| corrupt("backlog bytes overflow"))?;
+            let seq = self.allocate()?;
+            if self.backlog.rows == 1 {
+                self.kick_at_ms = Some(occurred_at_ms);
+            }
+            self.backlog_touched = true;
+            self.pre.push(Precondition::Absent(key.clone()));
             self.writes.push(Write::Put(key, value));
             self.writes.push(Write::Put(
                 keys::outcome_pending(seq, rid)?,
@@ -366,6 +491,16 @@ impl OutboxBuilder {
                 codec::encode_backlog(&self.backlog),
             ));
         }
+        if let Some(at) = self.kick_at_ms {
+            self.writes.push(Write::Put(
+                keys::timer(
+                    at,
+                    crate::timers::registry::kinds::OUTCOME_DELIVERY.get(),
+                    b"",
+                ),
+                Value::default(),
+            ));
+        }
         let batch = Batch {
             preconditions: self.pre,
             writes: self.writes,
@@ -428,7 +563,7 @@ pub fn plan_ack(
     if oq_seq == 0
         || matches!(
             codec::decode_reservation(value)?,
-            ReservationV1::Ticketed { .. }
+            ReservationV1::Ticketed { .. } | ReservationV1::Pending { .. }
         )
     {
         return Err(corrupt("ack requires a terminal indexed outcome"));

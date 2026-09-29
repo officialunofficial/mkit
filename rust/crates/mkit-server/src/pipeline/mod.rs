@@ -5,8 +5,9 @@
 //! interceptor, then one entry point. A signed write runs one function per
 //! stage, in order: `identify` (stage 1), `replay_lookup` (the stage 0
 //! lookup), `authorize` (2), `admit` (3), `pre_receive` (5) and
-//! `plan_and_apply` (4 and 6, one batch). Receipts (7) and outcomes (8)
-//! land in M3/M5. The streaming procedures are [`Pipeline::open_upload`]
+//! `plan_and_apply` (4 and 6, one batch). Admission receipts are attached
+//! only to a committed response; durable outcomes are queued for delivery.
+//! The streaming procedures are [`Pipeline::open_upload`]
 //! ([`UploadSession`]) and [`Pipeline::download`] ([`DownloadStream`]).
 //!
 //! With the `test-faults` feature, `Pipeline::with_faults` installs
@@ -18,11 +19,13 @@
 //! `vcs-worker` (`AuthV2`: replay ledger, per-signer quota, atomic
 //! advance) and `mkit serve` over ssh (`TransportIdentity`).
 
+mod admission;
 mod advance;
 mod auth;
 mod begin;
 mod coordinator;
 mod download;
+mod durable_outcome;
 mod epoch;
 #[cfg(feature = "test-faults")]
 pub(crate) mod faults;
@@ -34,6 +37,7 @@ mod list;
 mod outcome;
 mod parts;
 mod plan;
+mod reservation;
 mod revocation;
 mod shard;
 #[cfg(test)]
@@ -52,7 +56,7 @@ use mkit_core::write_auth::MAX_CLOCK_LEAD_MS;
 use tracing::Instrument;
 
 use crate::download::DOWNLOAD_CHUNK_MAX;
-use crate::error::{ADMISSION_CHALLENGE_TYPE, InvalidHeader, ServerError};
+use crate::error::{InvalidHeader, ServerError};
 use crate::op::{AuthzFacts, OpKind, Operation, Procedure, RefUpdate};
 use crate::policy::{AuthorizerRole, GrantConfig, NamespacePolicy, WritePolicy, grants};
 use crate::quota::{
@@ -73,8 +77,9 @@ use crate::telemetry::{Metrics, Redactor};
 use crate::upload::{UploadLimits, token::TicketKeys};
 use begin::BeginWrite;
 
-pub use auth::{AuthMode, Authenticated, RequestMeta};
+pub use auth::{AuthMode, Authenticated, HeaderValues, RequestMeta};
 pub use download::{DownloadChunk, DownloadStream};
+pub use durable_outcome::{DeliveryError, Outcome, OutcomeKind};
 #[cfg(feature = "test-faults")]
 pub use faults::{
     BUMP_EPOCH_HEADER, CLOCK_SKEW_HEADER, FAULT_HEADER, FailOnce, FaultHooks, FaultPoint,
@@ -82,12 +87,12 @@ pub use faults::{
     TestDirectives,
 };
 pub use hooks::{
-    Admission, AdmissionDecision, AdmissionInput, Authorizer, Challenge, DefaultAdmission, HookSet,
-    Hooks, NoOutcomes, NoPreReceive, NoReceipts, OpenAuthorizer, OutboxRow, OutcomeSink,
-    PreReceive, ReceiptSigner,
+    Admission, AdmissionDecision, AdmissionInput, Authorizer, Challenge, CredentialHeader,
+    DefaultAdmission, HookSet, Hooks, NoOutcomes, NoPreReceive, NoReceipts, OpenAuthorizer,
+    OutcomeSink, PreReceive, ReceiptSigner,
 };
 pub use info::ServerInfo;
-use outcome::Outcome;
+use outcome::Outcome as RequestOutcome;
 pub use parts::PartUploadSession;
 use plan::{
     MAX_REPLAN, PRUNE_LIMIT, Plan, PlanClock, Planned, Snapshot, WriteKind, WriteRequest,
@@ -96,6 +101,27 @@ use plan::{
 pub use revocation::{MAX_EPOCH_STEP, RevokeBudget, RevokeProgress};
 pub use shard::{D34Shards, ShardMap, SinglePartition};
 pub use upload::{UploadMode, UploadSession};
+
+/// Success-only headers returned by admission. They are best-effort and are
+/// never stored in the signed replay ledger or returned on a replay.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResponseMeta {
+    headers: Vec<(String, String)>,
+    external_ref: Option<String>,
+}
+
+impl ResponseMeta {
+    /// Headers in admission order, followed by the private cache directive.
+    #[must_use]
+    pub fn headers(&self) -> &[(String, String)] {
+        &self.headers
+    }
+    /// Hook reference carried for the later storage receipt integration.
+    #[must_use]
+    pub fn external_ref(&self) -> Option<&str> {
+        self.external_ref.as_deref()
+    }
+}
 
 /// Call the installed fault hooks at a fault point, returning early on
 /// their error. Compiled out without `test-faults`.
@@ -215,6 +241,20 @@ pub struct PipelineConfig {
     pub min_lease_budget_ms: u64,
     /// Extra header names never to log.
     pub redactor: Redactor,
+    /// Extra request credential names passed to admission, in addition to payment defaults.
+    pub admission_credential_headers: Vec<String>,
+    /// Soft per-shard cap on undelivered outcomes, events and purges.
+    pub outbox_backlog_cap: Option<OutboxBacklogCap>,
+}
+
+/// A soft, unguarded backlog threshold; concurrent admissions may overshoot
+/// by at most their in-flight terminal rows and encoded bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutboxBacklogCap {
+    /// Terminal/event/purge rows.
+    pub rows: u64,
+    /// Key plus encoded-value bytes.
+    pub bytes: u64,
 }
 
 impl PipelineConfig {
@@ -260,6 +300,11 @@ impl PipelineConfig {
             lease_margin_ms: 5_000,
             min_lease_budget_ms: 1_000,
             redactor: Redactor::default(),
+            admission_credential_headers: Vec::new(),
+            outbox_backlog_cap: Some(OutboxBacklogCap {
+                rows: 100_000,
+                bytes: 64 * 1024 * 1024,
+            }),
         }
     }
 
@@ -427,11 +472,23 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         blobs: B,
         meta: N,
         hooks: H,
-        cfg: PipelineConfig,
+        mut cfg: PipelineConfig,
         clock: Arc<dyn Clock>,
         metrics: Arc<dyn Metrics>,
     ) -> Result<Self, ServerError> {
         cfg.validate_server_info_limits()?;
+        let mut credential_names = std::collections::BTreeSet::new();
+        if cfg.admission_credential_headers.iter().any(|name| {
+            !admission::valid_extra_name(name)
+                || ["payment-authorization", "payment-signature"]
+                    .contains(&name.to_ascii_lowercase().as_str())
+                || !credential_names.insert(name.to_ascii_lowercase())
+        }) {
+            return Err(ServerError::invalid_argument(
+                "invalid admission credential header name",
+            ));
+        }
+        cfg.redactor.add_names(&cfg.admission_credential_headers);
 
         if cfg.max_parts > B::MAX_PARTS {
             return Err(ServerError::invalid_argument(
@@ -667,6 +724,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let skew = 0;
         let now = self.clock.now_ms().saturating_add(skew);
         let mut a = auth::authenticate(&self.cfg.auth, meta, now, repo, &expected_repository)?;
+        if matches!(self.cfg.auth, AuthMode::AuthV2(_)) && a.auth.is_some() {
+            a.credential_headers =
+                admission::select_credentials(meta, &self.cfg.admission_credential_headers)?;
+        }
         // Header adapters supply UTF-8 Strings; undecodable bytes are absent.
         a.ref_hint =
             (meta.header)("x-mkit-ref").filter(|name| name.len() <= refs::MAX_REF_NAME_BYTES);
@@ -843,6 +904,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         a: &Authenticated,
         upd: RefUpdate,
     ) -> Result<UpdateRefResult, ServerError> {
+        self.update_ref_with_meta(a, upd)
+            .await
+            .map(|(result, _)| result)
+    }
+
+    /// Compare-and-swap a ref and return success-only admission headers.
+    pub async fn update_ref_with_meta(
+        &self,
+        a: &Authenticated,
+        upd: RefUpdate,
+    ) -> Result<(UpdateRefResult, ResponseMeta), ServerError> {
         self.observe(a, async {
             check_ref_name(&upd.name)?;
             if upd.new.is_none()
@@ -853,8 +925,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ));
             }
             match self.write(a, OpKind::UpdateRef(upd)).await? {
-                StoredResult::UpdateRef(result) => Ok(result),
-                other => Err(stored_mismatch(&other)),
+                (StoredResult::UpdateRef(result), meta) => Ok((result, meta)),
+                (other, _) => Err(stored_mismatch(&other)),
             }
         })
         .await
@@ -872,7 +944,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         head: RefUpdate,
         packmap: RefUpdate,
     ) -> Result<AdvanceOutcome, ServerError> {
-        self.advance_refs_with_tickets(a, head, packmap, Vec::new())
+        self.advance_refs_with_meta(a, head, packmap)
+            .await
+            .map(|(result, _)| result)
+    }
+
+    /// Advance refs and return success-only admission headers.
+    pub async fn advance_refs_with_meta(
+        &self,
+        a: &Authenticated,
+        head: RefUpdate,
+        packmap: RefUpdate,
+    ) -> Result<(AdvanceOutcome, ResponseMeta), ServerError> {
+        self.advance_refs_with_tickets_with_meta(a, head, packmap, Vec::new())
             .await
     }
 
@@ -887,6 +971,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         packmap: RefUpdate,
         tickets: Vec<Hash>,
     ) -> Result<AdvanceOutcome, ServerError> {
+        self.advance_refs_with_tickets_with_meta(a, head, packmap, tickets)
+            .await
+            .map(|(result, _)| result)
+    }
+
+    /// Advance refs with tickets and return success-only admission headers.
+    pub async fn advance_refs_with_tickets_with_meta(
+        &self,
+        a: &Authenticated,
+        head: RefUpdate,
+        packmap: RefUpdate,
+        tickets: Vec<Hash>,
+    ) -> Result<(AdvanceOutcome, ResponseMeta), ServerError> {
         self.observe(a, async {
             check_ref_name(&head.name)?;
             check_ref_name(&packmap.name)?;
@@ -946,8 +1043,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 )
                 .await?
             {
-                StoredResult::AdvanceRefs(outcome) => Ok(outcome),
-                other => Err(stored_mismatch(&other)),
+                (StoredResult::AdvanceRefs(outcome), meta) => Ok((outcome, meta)),
+                (other, _) => Err(stored_mismatch(&other)),
             }
         })
         .await
@@ -1122,29 +1219,46 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     /// The span and recorder of one request.
-    fn outcome(&self, a: &Authenticated) -> Outcome {
+    fn outcome(&self, a: &Authenticated) -> RequestOutcome {
         self.outcome_for(a.procedure(), a.principal.kind(), &a.repo().identity)
     }
 
     /// The span and recorder of one request to `procedure` as `principal`.
-    fn outcome_for(&self, procedure: Procedure, principal: &'static str, repo: &str) -> Outcome {
+    fn outcome_for(
+        &self,
+        procedure: Procedure,
+        principal: &'static str,
+        repo: &str,
+    ) -> RequestOutcome {
         let procedure = method(procedure);
         let span = tracing::info_span!("mkit.server.rpc", procedure, repo, principal);
         let (metrics, clock) = (self.metrics.clone(), self.clock.clone());
-        Outcome::new(span, procedure, metrics, clock, self.cfg.redactor.clone())
+        RequestOutcome::new(span, procedure, metrics, clock, self.cfg.redactor.clone())
     }
 
     /// A signed or unsigned unary write, stage by stage. In steady state
     /// a signed write costs two backend calls: one `get_many` before any
     /// hook runs (the replay record and the snapshot) and one `apply`.
+    fn write<'a>(
+        &'a self,
+        a: &'a Authenticated,
+        kind: OpKind,
+    ) -> crate::rt::BoxFuture<'a, Result<(StoredResult, ResponseMeta), ServerError>> {
+        Box::pin(self.write_inner(a, kind))
+    }
+
     #[allow(clippy::too_many_lines)] // Stage order and multipart session cleanup share this entry point.
-    async fn write(&self, a: &Authenticated, kind: OpKind) -> Result<StoredResult, ServerError> {
+    async fn write_inner(
+        &self,
+        a: &Authenticated,
+        kind: OpKind,
+    ) -> Result<(StoredResult, ResponseMeta), ServerError> {
         let mut op = self.identify(a, kind)?;
         fault!(self, AfterAuthenticate, &op, a);
         let (kind, refs, p) = self.ref_writes(&op)?;
         let mut ahead = self.read_ahead(&op, &p, &refs, a.business_skew_ms).await?;
         if let Some(stored) = Self::replay_lookup(&op, ahead.as_ref())? {
-            return Ok(stored);
+            return Ok((stored, ResponseMeta::default()));
         }
         let lease = if self.cfg.sharding == Sharding::D34 {
             let observed = self.observe_lease(&op, &p, ahead.as_ref()).await?;
@@ -1189,14 +1303,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .as_mut()
                 .ok_or_else(|| internal("ticket advance requires atomic metadata"))?;
             if let Some(stored) = self.ticket_decision(&op, a, &p, snap).await? {
-                return Ok(stored);
+                return Ok((stored, ResponseMeta::default()));
             }
         }
         let existing = self.begin_decision(&op, a, ahead.as_mut()).await?;
+        if existing.is_none() && !ticketed {
+            self.check_outbox_backpressure(&p, ahead.as_ref()).await?;
+        }
         let allowance = if existing.is_some() || ticketed {
             Allowance::default()
         } else {
             let mut input = AdmissionInput::new(&op);
+            input.credential_headers = &a.credential_headers;
             if let OpKind::BeginUpload { key, bytes, .. } = &op.kind {
                 input.declared_bytes = *bytes;
                 input.pack_id = Some(*key);
@@ -1204,81 +1322,116 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
             self.admit(input).await?
         };
-        if !matches!(op.kind, OpKind::BeginUpload { .. }) && allowance.reservation.is_some() {
-            return Err(ServerError::unimplemented(
-                "admission reservations on ref writes land with WP-3.3",
-            ));
-        }
-        let mut begin = self.begin_write(&op, a, existing, allowance.reservation)?;
-        self.precheck_namespace(&p, &allowance.charges, &mut ahead, a.business_skew_ms)?;
-        let mut opened_session = None;
-        if let Some(BeginWrite::Open(open)) = &mut begin
-            && open.spec.bytes > open.spec.part_size
-        {
-            let key = PackKey(open.spec.pack_id).into();
-            let ticket_id = crate::store::tickets::ticket_id(&open.spec.reservation_id);
-            let session = self
+        let pending = match allowance.reservation.as_deref() {
+            Some(rid) => Some(self.record_pending(a, &p, rid).await?),
+            None => None,
+        };
+        let write_result = async {
+            let mut begin = self.begin_write(&op, a, existing, allowance.reservation.clone())?;
+            self.precheck_namespace(&p, &allowance.charges, &mut ahead, a.business_skew_ms)?;
+            let mut opened_session = None;
+            if let Some(BeginWrite::Open(open)) = &mut begin
+                && open.spec.bytes > open.spec.part_size
+            {
+                let key = PackKey(open.spec.pack_id).into();
+                let ticket_id = crate::store::tickets::ticket_id(&open.spec.reservation_id);
+                let session = self
                 .blobs
                 .begin_multipart_for_ticket(key, open.spec.bytes, open.spec.part_size, ticket_id)
                 .await
                 .map_err(|e| {
                     if open.reserved() {
-                        // TODO(WP-3.3): record Aborted via Pending when admission
-                        // supplied a reservation but session creation failed.
                         tracing::warn!(error = %e, "reserved multipart session creation failed");
                         ServerError::unavailable("multipart session creation failed; retry")
                     } else {
                         store_error(StorageOp::MultipartSession, e)
                     }
                 })?;
-            if session.is_empty() || session.len() > u16::MAX as usize {
-                if let Err(err) = self.blobs.abort(key, &session).await {
-                    tracing::warn!(error = %err, "failed to abort invalid multipart session");
+                if session.is_empty() || session.len() > u16::MAX as usize {
+                    if let Err(err) = self.blobs.abort(key, &session).await {
+                        tracing::warn!(error = %err, "failed to abort invalid multipart session");
+                    }
+                    return Err(ServerError::internal(
+                        "object storage request failed",
+                        "multipart store returned an invalid session identifier",
+                    ));
                 }
-                return Err(ServerError::internal(
-                    "object storage request failed",
-                    "multipart store returned an invalid session identifier",
-                ));
+                opened_session = Some((key, session.clone(), ticket_id));
+                open.spec.upload_session = Some(session);
             }
-            opened_session = Some((key, session.clone(), ticket_id));
-            open.spec.upload_session = Some(session);
-        }
-        let write_result = async {
-            let lease = if let Some(observed) = lease {
-                let (created, lease) = {
-                    // The native gate serializes same-shard lease grants too.
-                    // Read observations remain pre-admission; a waiter rebuilds
-                    // a stale coordinator observation within the usual three tries.
-                    let _grant_gate = match (&self.gate, &observed) {
-                        (Some(gate), lease::LeaseObservation::Renew(_)) => {
-                            Some(gate.enter(&p).await)
-                        }
-                        _ => None,
+            let write_result = async {
+                let lease = if let Some(observed) = lease {
+                    let (created, lease) = {
+                        // The native gate serializes same-shard lease grants too.
+                        // Read observations remain pre-admission; a waiter rebuilds
+                        // a stale coordinator observation within the usual three tries.
+                        let _grant_gate = match (&self.gate, &observed) {
+                            (Some(gate), lease::LeaseObservation::Renew(_)) => {
+                                Some(gate.enter(&p).await)
+                            }
+                            _ => None,
+                        };
+                        self.admit_lease(&op, &p, observed, a.business_skew_ms)
+                            .await?
                     };
-                    self.admit_lease(&op, &p, observed, a.business_skew_ms)
-                        .await?
+                    op.created = created;
+                    op.leased_epoch = Some(lease.value.epoch);
+                    if lease.install {
+                        fault!(self, AfterLeaseGrant, &op, a);
+                    }
+                    Some(lease)
+                } else {
+                    op.created = self.commit_creation(&op, a.business_skew_ms).await?;
+                    None
                 };
-                op.created = created;
-                op.leased_epoch = Some(lease.value.epoch);
-                if lease.install {
-                    fault!(self, AfterLeaseGrant, &op, a);
-                }
-                Some(lease)
-            } else {
-                op.created = self.commit_creation(&op, a.business_skew_ms).await?;
-                None
-            };
-            self.pre_receive(&op).await?;
-            let write = (kind, refs.as_slice(), allowance.charges.as_slice());
-            self.plan_and_apply(&op, a, &p, write, ahead, (lease, begin.as_ref()))
+                self.pre_receive(&op).await?;
+                let write = (kind, refs.as_slice(), allowance.charges.as_slice());
+                self.plan_and_apply(
+                    &op,
+                    a,
+                    &p,
+                    write,
+                    ahead,
+                    (lease, begin.as_ref()),
+                    pending.as_ref(),
+                )
                 .await
+            }
+            .await;
+            if let Some((key, session, fresh_id)) = opened_session {
+                self.cleanup_opened_session(&p, &write_result, key, &session, fresh_id)
+                    .await;
+            }
+            write_result
         }
         .await;
-        if let Some((key, session, fresh_id)) = opened_session {
-            self.cleanup_opened_session(&p, &write_result, key, &session, fresh_id)
-                .await;
+        if let (Some(pending), Err(err)) = (&pending, &write_result) {
+            let (reason, detail) = reservation::abort_reason(err);
+            self.resolve_pending(&p, pending, reason, detail).await;
         }
-        write_result
+        write_result.map(|result| {
+            let committed = matches!(
+                &result,
+                StoredResult::UpdateRef(UpdateRefResult::Committed)
+                    | StoredResult::AdvanceRefs(AdvanceOutcome::Committed)
+                    | StoredResult::BeginUpload(BeginUploadResult::Ticket { .. })
+            );
+            let meta = if committed
+                && (!allowance.response_headers.is_empty() || allowance.external_ref.is_some())
+            {
+                let mut headers = allowance.response_headers;
+                if !headers.is_empty() {
+                    headers.push(("Cache-Control".into(), "private".into()));
+                }
+                ResponseMeta {
+                    headers,
+                    external_ref: allowance.external_ref,
+                }
+            } else {
+                ResponseMeta::default()
+            };
+            (result, meta)
+        })
     }
 
     async fn cleanup_opened_session(
@@ -1455,13 +1608,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if caps.implicit_layout_version.is_none() {
             wanted.push(keys::layout_version());
         }
+        wanted.push(keys::outcome_backlog());
         if matches!(self.cfg.addressing, Addressing::Multi(_)) {
             wanted.push(keys::repo_known(&op.repo.name));
         }
         if self.cfg.sharding == Sharding::D34 {
             wanted.push(keys::epoch_lease());
             if !refs.is_empty() {
-                wanted.extend([keys::outbox_sequence(), keys::outcome_backlog()]);
+                wanted.push(keys::outbox_sequence());
             }
         }
         if let Some(auth) = &op.auth {
@@ -1650,10 +1804,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         tracing::debug!(stage = "authorize");
         if !op.procedure().is_write() {
             // TODO(WP-2.9): private read authorization.
-            return self.hooks.authorizer().authorize(op).await;
+            return self
+                .hooks
+                .authorizer()
+                .authorize(op)
+                .await
+                .map_err(ServerError::strip_admission_shape);
         }
         let Addressing::Multi(multi) = &self.cfg.addressing else {
-            return self.hooks.authorizer().authorize(op).await;
+            return self
+                .hooks
+                .authorizer()
+                .authorize(op)
+                .await
+                .map_err(ServerError::strip_admission_shape);
         };
         let namespace = Namespace::parse(op.repo.namespace.as_str())
             .map_err(|_| internal("invalid resolved Multi namespace"))?;
@@ -1702,34 +1866,22 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         // Both Authorize and Admit see the established owner/grant facts (§6.2).
         let mut authorized = op.clone();
         authorized.authz = facts.clone();
-        self.hooks.authorizer().authorize(&authorized).await?;
+        self.hooks
+            .authorizer()
+            .authorize(&authorized)
+            .await
+            .map_err(ServerError::strip_admission_shape)?;
         Ok(facts)
-    }
-
-    /// Stage 3. A challenge is `permission_denied` "admission required" in
-    /// M0 (the 402 response lands in M3); nothing is written for it.
-    async fn admit(&self, mut input: AdmissionInput<'_>) -> Result<Allowance, ServerError> {
-        tracing::debug!(stage = "admission");
-        input.write_quota = self.cfg.write_quota;
-        match self.hooks.admission().admit(&input).await? {
-            AdmissionDecision::Allow {
-                charges,
-                reservation,
-            } => Ok(Allowance {
-                charges,
-                reservation,
-            }),
-            AdmissionDecision::Challenge { .. } => {
-                Err(ServerError::permission_denied("admission required"))
-            }
-            AdmissionDecision::Deny(err) => Err(deny_status(err)),
-        }
     }
 
     /// Stage 5 (no pack on a unary write).
     async fn pre_receive(&self, op: &Operation) -> Result<(), ServerError> {
         tracing::debug!(stage = "pre_receive");
-        self.hooks.pre_receive().check(op, None).await
+        self.hooks
+            .pre_receive()
+            .check(op, None)
+            .await
+            .map_err(ServerError::strip_admission_shape)
     }
 
     /// Stages 4 and 6: plan and apply, as one batch on an atomic store or
@@ -1742,6 +1894,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         (kind, refs, charges): (WriteKind, &[RefUpdate], &[QuotaCharge]),
         ahead: Option<Snapshot>,
         (lease, begin): (Option<lease::LeaseWrite>, Option<&BeginWrite>),
+        pending: Option<&reservation::PendingGuard>,
     ) -> Result<StoredResult, ServerError> {
         let caps = self.meta.capabilities();
         let replay = upload::replay_guard(op);
@@ -1789,6 +1942,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     .as_ref()
                     .is_none_or(|snap| snap.get(&keys::repo_known(&op.repo.name)).is_none()),
             rejection: None,
+            pending,
             begin,
             advance,
         };
@@ -1878,6 +2032,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 on_commit,
                 replay_index,
                 epoch_index,
+                pending_index,
                 prune,
                 prune_from,
             } = plan;
@@ -1923,6 +2078,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     deadline_missed = true;
                 }
                 Ok(BatchOutcome::PreconditionFailed { index, observed }) => {
+                    if Some(index) == pending_index {
+                        return Err(ServerError::unavailable(
+                            "admission reservation changed; retry",
+                        ));
+                    }
                     if Some(index) == replay_index {
                         return replay_raced(&req, observed.as_ref());
                     }
@@ -2065,21 +2225,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 struct Allowance {
     charges: Vec<QuotaCharge>,
     reservation: Option<String>,
-}
-
-/// A denial is 403, never 402: only [`ServerError::admission_challenge`],
-/// with its `AdmissionChallenge` detail, answers 402
-/// (SPEC-TRANSPORT-CONNECT §5).
-fn deny_status(err: ServerError) -> ServerError {
-    let challenge = err
-        .details()
-        .iter()
-        .any(|d| d.type_name == ADMISSION_CHALLENGE_TYPE);
-    if err.http_status() == Some(402) && !challenge {
-        err.with_http_status(403)
-    } else {
-        err
-    }
+    response_headers: Vec<(String, String)>,
+    external_ref: Option<String>,
 }
 
 /// A ref name the pipeline reads or writes: at most

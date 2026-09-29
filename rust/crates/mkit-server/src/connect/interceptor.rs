@@ -93,6 +93,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> AuthInterceptor<B, N,
         let meta = RequestMeta {
             procedure,
             header: &header,
+            header_values: Some(&|name| {
+                ctx.headers()
+                    .get_all(name)
+                    .iter()
+                    .map(|value| value.to_str().unwrap_or("\n").to_owned())
+                    .collect()
+            }),
             unary_body,
             transport_principal: ctx.extensions().get::<Principal>().cloned(),
         };

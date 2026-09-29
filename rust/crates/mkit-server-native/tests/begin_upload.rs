@@ -248,10 +248,13 @@ impl Admission for Policy {
             assert_eq!(input.new_to_repo_bytes, Some(input.declared_bytes));
         }
         match self.0.rejection.load(Ordering::SeqCst) {
-            2 => Ok(AdmissionDecision::Challenge {
-                challenges: vec![],
-                description: "test challenge".into(),
-            }),
+            2 => Ok(AdmissionDecision::challenge(
+                vec![mkit_server::pipeline::Challenge {
+                    scheme: "mpp".into(),
+                    value: "pay".into(),
+                }],
+                "test challenge",
+            )),
             3 => Ok(AdmissionDecision::Deny(ServerError::permission_denied(
                 "test admission denial",
             ))),
@@ -347,6 +350,7 @@ fn auth<B: MultipartBlobStore, N: NamespaceStore, H: mkit_server::pipeline::Hook
                         .find(|(name, _)| name == h)
                         .map(|(_, v)| v.clone())
                 },
+                header_values: None,
                 unary_body: Some(BODY),
                 transport_principal: None,
             })
@@ -378,6 +382,7 @@ fn auth_other_repo<N: NamespaceStore>(
                 .find(|(name, _)| name == h)
                 .map(|(_, v)| v.clone())
         },
+        header_values: None,
         unary_body: Some(BODY),
         transport_principal: None,
     })
@@ -931,12 +936,23 @@ async fn race_with_bytes<N: NamespaceStore + 'static>(
         Ok(winner) => (winner, two, &b),
         Err(error) => (two.unwrap(), Err(error), &a),
     };
-    if same_nonce {
+    if same_nonce && reserved {
+        assert_eq!(loser.unwrap_err().code(), Code::Aborted);
+        assert_eq!(
+            replay(&store, mode, &a).await,
+            Some(StoredResult::BeginUpload(winner))
+        );
+    } else if same_nonce {
         assert_eq!(loser.unwrap(), winner);
         assert_eq!(
             replay(&store, mode, &a).await,
             Some(StoredResult::BeginUpload(winner))
         );
+    } else if reserved && cap {
+        let error = loser.unwrap_err();
+        assert_eq!(error.code(), Code::FailedPrecondition);
+        assert_eq!(error.public_message(), CAP_MESSAGE);
+        assert_eq!(replay(&store, mode, loser_auth).await, None);
     } else if reserved {
         let error = loser.unwrap_err();
         assert_eq!(error.code(), Code::Aborted);
@@ -955,6 +971,31 @@ async fn race_with_bytes<N: NamespaceStore + 'static>(
         assert_eq!(loser.unwrap(), winner);
     }
     let p = mode.partition(&a, REF);
+    if reserved {
+        let (start, end) = keys::class_range(keys::TAG_RESERVATION);
+        let rows = store
+            .inner
+            .scan(&p, &start, &end, None, 100)
+            .await
+            .unwrap()
+            .entries;
+        let aborts: Vec<_> = rows
+            .iter()
+            .filter_map(|(_, raw)| match codec::decode_reservation(raw).unwrap() {
+                codec::ReservationV1::Aborted { reason, .. } => Some(reason),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(aborts.len(), 1);
+        assert_eq!(
+            aborts[0],
+            if cap {
+                codec::AbortReason::Unspecified
+            } else {
+                codec::AbortReason::ReplayRace
+            }
+        );
+    }
     assert_eq!(
         codec::decode_u64(
             &store
@@ -1171,6 +1212,7 @@ fn upload_auth<N: NamespaceStore>(pipe: &Pipe<N>, mode: Mode, pack: &[u8]) -> Au
                 .find(|(name, _)| name == h)
                 .map(|(_, v)| v.clone())
         },
+        header_values: None,
         unary_body: None,
         transport_principal: None,
     })
@@ -1941,17 +1983,13 @@ async fn direct_ref_reservations_fail_closed<N: NamespaceStore>(
         clock,
     );
     let update = auth(&pipe, mode, 1, Procedure::UpdateRef);
-    let err = pipe
+    let result = pipe
         .update_ref(&update, upd(REF, RefWriteCondition::Missing, [3; 32]))
         .await
-        .unwrap_err();
-    assert_eq!(err.code(), Code::Unimplemented);
-    assert_eq!(
-        err.public_message(),
-        "admission reservations on ref writes land with WP-3.3"
-    );
+        .unwrap();
+    assert!(matches!(result, mkit_server::UpdateRefResult::Committed));
     let advance = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
-    let err = pipe
+    let result = pipe
         .advance_refs_with_tickets(
             &advance,
             upd(REF, RefWriteCondition::Missing, [3; 32]),
@@ -1963,23 +2001,50 @@ async fn direct_ref_reservations_fail_closed<N: NamespaceStore>(
             vec![],
         )
         .await
-        .unwrap_err();
-    assert_eq!(err.code(), Code::Unimplemented);
-    assert_eq!(
-        err.public_message(),
-        "admission reservations on ref writes land with WP-3.3"
-    );
+        .unwrap();
+    assert_eq!(result, mkit_core::protocol::AdvanceOutcome::HeadConflict);
     assert_eq!(spy.admissions.load(Ordering::SeqCst), 2);
     let p = mode.partition(&advance, REF);
-    for name in [REF, "refs/mkit/packmap/main"] {
-        assert!(
-            store
+    assert!(
+        store
+            .inner
+            .get(&p, &keys::ref_key(&advance.repo().repo.name, REF))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .inner
+            .get(
+                &p,
+                &keys::ref_key(&advance.repo().repo.name, "refs/mkit/packmap/main")
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    for (rid, committed) in [("admission-0", true), ("admission-1", false)] {
+        let row = codec::decode_reservation(
+            &store
                 .inner
-                .get(&p, &keys::ref_key(&advance.repo().repo.name, name))
+                .get(&p, &keys::reservation(rid).unwrap())
                 .await
                 .unwrap()
-                .is_none()
-        );
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(if committed {
+            matches!(row, codec::ReservationV1::Committed { .. })
+        } else {
+            matches!(
+                row,
+                codec::ReservationV1::Aborted {
+                    reason: codec::AbortReason::RefConflict,
+                    ..
+                }
+            )
+        });
     }
     for a in [&update, &advance] {
         assert!(
@@ -1988,7 +2053,7 @@ async fn direct_ref_reservations_fail_closed<N: NamespaceStore>(
                 .get(&p, &keys::replay(&a.auth.as_ref().unwrap().replay_scope))
                 .await
                 .unwrap()
-                .is_none()
+                .is_some()
         );
     }
 }
@@ -2846,6 +2911,7 @@ async fn unsupported_auth_modes_have_no_metadata_effects() {
             .authenticate(&RequestMeta {
                 procedure: Procedure::BeginUpload,
                 header: &|h| (h == "authorization").then(|| "Bearer test".into()),
+                header_values: None,
                 unary_body: Some(BODY),
                 transport_principal: Some(Principal::TransportPeer { ed25519: [1; 32] }),
             })

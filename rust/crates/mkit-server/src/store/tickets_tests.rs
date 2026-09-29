@@ -592,7 +592,7 @@ fn seven_distinct_signers_and_relay_targets_fit_with_twenty_two_shared_operation
             .push(Write::Put(key, codec::encode_ref_id(&[3; 32])));
     }
     batch.preconditions.push(Precondition::NotAfter(500));
-    assert_eq!(batch.preconditions.len() + batch.writes.len(), 99);
+    assert_eq!(batch.preconditions.len() + batch.writes.len(), 100);
     batch.validate(&StoreCapabilities::full()).unwrap();
     assert_eq!(batch.writes.iter().filter(|w| matches!(w, Write::Put(key, _) if matches!(layout::parse(key), Some(layout::ParsedKey::Relay(_))))).count(), 7);
     let tc = keys(&spec).per_ref;
@@ -773,15 +773,21 @@ fn unread_indexed_ticket_must_be_gone_so_a_live_one_is_never_shadowed() {
 
 #[test]
 fn observed_reservation_or_ticket_row_is_rejected_before_planning() {
-    for reads in [
-        TicketReads {
-            reservation: Some(codec::encode_u64(1)),
-            ..TicketReads::default()
-        },
-        TicketReads {
-            ticket: Some(codec::encode_ticket(&spec().record())),
-            ..TicketReads::default()
-        },
+    for (reads, corrupt) in [
+        (
+            TicketReads {
+                reservation: Some(codec::encode_u64(1)),
+                ..TicketReads::default()
+            },
+            true,
+        ),
+        (
+            TicketReads {
+                ticket: Some(codec::encode_ticket(&spec().record())),
+                ..TicketReads::default()
+            },
+            false,
+        ),
     ] {
         let mut batch = Batch::new();
         let result = plan_ticket_open(
@@ -791,7 +797,11 @@ fn observed_reservation_or_ticket_row_is_rejected_before_planning() {
             &mut batch.preconditions,
             &mut batch.writes,
         );
-        assert!(matches!(result, Err(TicketPlanError::Invalid(_))));
+        assert!(if corrupt {
+            matches!(result, Err(TicketPlanError::Corrupt(_)))
+        } else {
+            matches!(result, Err(TicketPlanError::Invalid(_)))
+        });
         assert_eq!(batch, Batch::new());
     }
 }

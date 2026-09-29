@@ -6,10 +6,11 @@
 //! package adds a stage (`ContentInspector`, `LeasePolicy`).
 
 use core::future::Future;
+use std::sync::Arc;
 
 use mkit_core::protocol::PackKey;
 
-use crate::error::ServerError;
+use crate::error::{Redacted, ServerError};
 use crate::op::{AuthzFacts, Operation};
 use crate::quota::{QuotaCharge, QuotaLimits, QuotaScope};
 use crate::rt::{MaybeSend, MaybeSync};
@@ -41,7 +42,7 @@ pub trait Authorizer: MaybeSend + MaybeSync {
 /// racing first writes may both observe creation. `new_to_repo_bytes` stays
 /// `None` until membership, and the grant comes from `op.authz` (M2). Bytes new to
 /// the store are deliberately absent: they would be a pricing oracle.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct AdmissionInput<'a> {
     /// The operation, with its verified principal.
@@ -61,6 +62,38 @@ pub struct AdmissionInput<'a> {
     /// The deployment's default write quota (`PipelineConfig::write_quota`),
     /// which [`DefaultAdmission`] charges.
     pub write_quota: Option<QuotaLimits>,
+    /// Canonical server audience, when auth v2 supplies one.
+    pub audience: Option<&'a str>,
+    /// Selected payment credentials; values never appear in debug output.
+    pub credential_headers: &'a [CredentialHeader],
+}
+
+impl core::fmt::Debug for AdmissionInput<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("AdmissionInput")
+            .field("op", &self.op)
+            .field("declared_bytes", &self.declared_bytes)
+            .field("pack_id", &self.pack_id)
+            .field("audience", &self.audience)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One selected credential header, with a value hidden from diagnostics.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CredentialHeader {
+    /// Header name.
+    pub name: String,
+    /// Secret header value.
+    pub value: Redacted,
+}
+
+impl core::fmt::Debug for CredentialHeader {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CredentialHeader")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a> AdmissionInput<'a> {
@@ -76,6 +109,8 @@ impl<'a> AdmissionInput<'a> {
             new_to_repo_bytes: None,
             idempotency_key: op.auth.as_ref().map(|auth| auth.nonce.as_str()),
             write_quota: None,
+            audience: None,
+            credential_headers: &[],
         }
     }
 }
@@ -83,7 +118,7 @@ impl<'a> AdmissionInput<'a> {
 /// One admission challenge (SPEC-TRANSPORT-CONNECT §5.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Challenge {
-    /// Authentication scheme, e.g. `Payment`.
+    /// Lowercase authentication scheme, e.g. `mpp`.
     pub scheme: String,
     /// The challenge parameters.
     pub value: String,
@@ -102,14 +137,20 @@ pub enum AdmissionDecision {
         charges: Vec<QuotaCharge>,
         /// The reservation id outcomes are keyed by (M3).
         reservation: Option<String>,
+        /// Success-only payment receipt headers.
+        response_headers: Vec<(String, String)>,
+        /// Hook-owned external reference, carried for later receipt storage.
+        external_ref: Option<String>,
     },
-    /// Ask for credentials. M0 answers `permission_denied` "admission
-    /// required"; the 402 challenge response lands in M3.
+    /// Ask for credentials on a unary operation.
+    #[non_exhaustive]
     Challenge {
         /// The challenges offered.
         challenges: Vec<Challenge>,
         /// Human-readable description.
         description: String,
+        /// Challenge pass-through headers.
+        response_headers: Vec<(String, String)>,
     },
     /// Refuse with this error.
     Deny(ServerError),
@@ -122,6 +163,8 @@ impl AdmissionDecision {
         Self::Allow {
             charges,
             reservation: None,
+            response_headers: Vec::new(),
+            external_ref: None,
         }
     }
 
@@ -132,6 +175,52 @@ impl AdmissionDecision {
             *reservation = Some(id.into());
         }
         self
+    }
+
+    /// Attach a validated later pass-through response header.
+    #[must_use]
+    pub fn with_response_header(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        match &mut self {
+            Self::Allow {
+                response_headers, ..
+            }
+            | Self::Challenge {
+                response_headers, ..
+            } => {
+                response_headers.push((name.into(), value.into()));
+            }
+            Self::Deny(_) => {}
+        }
+        self
+    }
+
+    /// Set the hook's external reference on an Allow.
+    #[must_use]
+    pub fn with_external_ref(mut self, reference: impl Into<String>) -> Self {
+        if let Self::Allow { external_ref, .. } = &mut self {
+            *external_ref = Some(reference.into());
+        }
+        self
+    }
+
+    /// Build an admission challenge.
+    #[must_use]
+    pub fn challenge(challenges: Vec<Challenge>, description: impl Into<String>) -> Self {
+        Self::Challenge {
+            challenges,
+            description: description.into(),
+            response_headers: Vec::new(),
+        }
+    }
+
+    /// Build an explicit denial.
+    #[must_use]
+    pub fn deny(message: impl Into<String>) -> Self {
+        Self::Deny(ServerError::permission_denied(message.into()))
     }
 }
 
@@ -165,20 +254,37 @@ pub trait ReceiptSigner: MaybeSend + MaybeSync {
     fn sign(&self, op: &Operation) -> impl Future<Output = Option<Vec<u8>>> + MaybeSend;
 }
 
-/// An outbox row delivered to an [`OutcomeSink`]. Its outcome fields land
-/// with the outbox (M3/M5).
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct OutboxRow {
-    /// The reservation this outcome settles.
-    pub reservation: String,
+use super::durable_outcome::{DeliveryError, Outcome};
+
+/// Stage 8 receives outcomes at least once. A duplicate may arrive even
+/// after `Ok`; different reservations can arrive in any order. The sink must
+/// deduplicate by `reservation_id`.
+pub trait OutcomeSink: MaybeSend + MaybeSync {
+    /// Deliver one terminal outcome. Every error leaves it queued for retry.
+    fn deliver(
+        &self,
+        outcome: &Outcome,
+    ) -> impl Future<Output = Result<(), DeliveryError>> + MaybeSend;
+
+    /// Deliver a batch sequentially by default; each result is independent.
+    fn deliver_batch(
+        &self,
+        outcomes: &[Outcome],
+    ) -> impl Future<Output = Vec<Result<(), DeliveryError>>> + MaybeSend {
+        async move {
+            let mut results = Vec::with_capacity(outcomes.len());
+            for outcome in outcomes {
+                results.push(self.deliver(outcome).await);
+            }
+            results
+        }
+    }
 }
 
-/// Stage 8: receives outcomes, at least once, keyed by reservation (M3/M5).
-pub trait OutcomeSink: MaybeSend + MaybeSync {
-    /// Deliver `row`; an error leaves it in the outbox for a retry.
-    fn deliver(&self, row: &OutboxRow)
-    -> impl Future<Output = Result<(), ServerError>> + MaybeSend;
+impl<T: OutcomeSink> OutcomeSink for Arc<T> {
+    async fn deliver(&self, outcome: &Outcome) -> Result<(), DeliveryError> {
+        T::deliver(self, outcome).await
+    }
 }
 
 /// The hooks the pipeline runs, one associated type per stage.
@@ -326,12 +432,12 @@ impl ReceiptSigner for NoReceipts {
     }
 }
 
-/// Drops outcomes.
+/// Acknowledges outcomes without external delivery.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoOutcomes;
 
 impl OutcomeSink for NoOutcomes {
-    async fn deliver(&self, _row: &OutboxRow) -> Result<(), ServerError> {
+    async fn deliver(&self, _row: &Outcome) -> Result<(), DeliveryError> {
         Ok(())
     }
 }

@@ -262,6 +262,7 @@ impl ServerError {
     pub fn admission_challenge(challenge: bytes::Bytes) -> Self {
         Self::new(Code::PermissionDenied, "admission required")
             .with_http_status(402)
+            .with_header("Cache-Control", "no-store")
             .with_detail(ErrorDetail {
                 type_name: ADMISSION_CHALLENGE_TYPE.to_owned(),
                 value: challenge,
@@ -427,6 +428,18 @@ impl ServerError {
     pub fn details(&self) -> &[ErrorDetail] {
         &self.details
     }
+
+    /// Remove admission-only response shape from errors produced outside stage 3.
+    #[must_use]
+    pub(crate) fn strip_admission_shape(mut self) -> Self {
+        self.details
+            .retain(|detail| detail.type_name != ADMISSION_CHALLENGE_TYPE);
+        if self.http_status == Some(402) {
+            self.http_status = Some(403);
+            self.headers.clear();
+        }
+        self
+    }
 }
 
 /// Whether `status` may be set on an error with `code`: an error status
@@ -580,7 +593,10 @@ mod tests {
         );
         assert_eq!(
             e.headers(),
-            &[("WWW-Authenticate".to_owned(), "Payment x".to_owned())]
+            &[
+                ("Cache-Control".to_owned(), "no-store".to_owned()),
+                ("WWW-Authenticate".to_owned(), "Payment x".to_owned())
+            ]
         );
         assert_eq!(format!("{e}"), "admission required");
     }
@@ -619,7 +635,7 @@ mod tests {
             .with_header("Payment-Receipt", "rcpt-s3cr3t")
             .with_header("PAYMENT-RESPONSE", "resp-s3cr3t")
             .with_header("WWW-Authenticate", "Payment realm=x");
-        assert_eq!(e.headers().len(), 3);
+        assert_eq!(e.headers().len(), 4);
         let debug = format!("{e:?}");
         assert!(!debug.contains("s3cr3t"), "{debug}");
         assert!(debug.contains("Payment-Receipt"), "{debug}");

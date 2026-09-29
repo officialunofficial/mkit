@@ -64,10 +64,10 @@ fn forbidden_control(ch: char) -> bool {
 
 fn varint(mut value: usize, out: &mut Vec<u8>) {
     while value >= 0x80 {
-        out.push((value as u8 & 0x7f) | 0x80);
+        out.push((value.to_le_bytes()[0] & 0x7f) | 0x80);
         value >>= 7;
     }
-    out.push(value as u8);
+    out.push(value.to_le_bytes()[0]);
 }
 
 fn field(number: u8, value: &[u8], out: &mut Vec<u8>) {

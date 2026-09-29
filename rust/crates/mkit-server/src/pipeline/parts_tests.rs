@@ -144,6 +144,7 @@ fn signed<B: MultipartBlobStore>(
     pipe.authenticate(&RequestMeta {
         procedure,
         header: &header,
+        header_values: None,
         unary_body: if procedure.is_streaming() {
             None
         } else {

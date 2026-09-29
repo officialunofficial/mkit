@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: add validated two-phase admission with bounded HTTP 402 challenges,
+  redacted payment credential forwarding and committed-success receipt headers
+  (WP-3.2).
+- Server: durably arbitrate admitted reservations with pending and terminal
+  outcomes, reconcile abandoned reservations, deliver through a retrying
+  outcome sink and apply per-shard outbox backpressure (WP-3.3).
+
 - Server Worker: stream verified multipart parts into CV-keyed R2 objects and
   verify the complete pack before publishing it; raise the ticketed pack cap
   to 1 GiB while retaining the 64 MiB single-upload limit (WP-1.12).

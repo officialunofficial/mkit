@@ -193,6 +193,51 @@ fn ticketed_upload_no_metadata_and_marker() {
 }
 
 #[test]
+fn ticketless_transport_reservation_fails_closed_with_one_abort() {
+    let clock = clock();
+    let env = build(
+        cfg(AuthMode::TransportIdentity),
+        Spy::new(store(&clock)),
+        with_admission(Fixed(
+            AdmissionDecision::allow(Vec::new()).with_reservation("stream-rid"),
+        )),
+        clock,
+    );
+    let mut request = Req::unsigned(Procedure::UploadPack);
+    request.principal = Some(Principal::SshForcedCommand { key: None });
+    let data = pack(16);
+    let err = upload(&env, &request, &data, 16).unwrap_err();
+    assert_eq!(err.code(), Code::FailedPrecondition);
+    assert!(!blob_present(&env, &data));
+    let row = now(env
+        .pipe
+        .meta
+        .get(&ns(), &keys::reservation("stream-rid").unwrap()))
+    .unwrap()
+    .unwrap();
+    assert!(
+        matches!(codec::decode_reservation(&row).unwrap(), codec::ReservationV1::Aborted {
+        reason: codec::AbortReason::Unspecified, detail, ..
+    } if detail == "reservations unsupported on this transport")
+    );
+    assert_eq!(env.count("oq"), 1);
+    assert_eq!(
+        codec::decode_backlog(
+            &now(env.pipe.meta.get(&ns(), &keys::outcome_backlog()))
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap()
+        .rows,
+        1
+    );
+    let kicks = env.batches().iter().flat_map(|batch| &batch.writes).filter(|write| {
+        matches!(write, Write::Put(key, _) if matches!(keys::parse(key), Some(keys::ParsedKey::Timer { kind: 8, .. })))
+    }).count();
+    assert_eq!(kicks, 1);
+}
+
+#[test]
 fn upload_threshold_enforced_before_store_and_transport_identity_exempt() {
     let single_clock = clock();
     let mut c = cfg(authv2());
@@ -756,6 +801,7 @@ fn upload_memory_bounded_by_one_chunk() {
         .authenticate(&RequestMeta {
             procedure: Procedure::UploadPack,
             header: &lookup,
+            header_values: None,
             unary_body: None,
             transport_principal: None,
         })
@@ -928,8 +974,12 @@ impl Admission for ChallengeAdmission {
     async fn admit(&self, _: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(AdmissionDecision::Challenge {
-            challenges: vec![],
+            challenges: vec![Challenge {
+                scheme: "mpp".into(),
+                value: "pay".into(),
+            }],
             description: "challenge".into(),
+            response_headers: Vec::new(),
         })
     }
 }

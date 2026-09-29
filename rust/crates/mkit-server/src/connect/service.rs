@@ -343,11 +343,17 @@ where
         )?;
         let pipe = self.pipe.arc();
         send_wrap(async move {
-            match pipe.update_ref(&a, upd).await? {
-                UpdateRefResult::Committed => Response::ok(UpdateRefResponse::default()),
+            match pipe.update_ref_with_meta(&a, upd).await? {
+                (UpdateRefResult::Committed, meta) => {
+                    let mut response = Response::new(UpdateRefResponse::default());
+                    for (name, value) in meta.headers() {
+                        response = response.with_header(name, value);
+                    }
+                    Ok(response)
+                }
                 // SPEC-TRANSPORT-CONNECT §3: the response never carries the
                 // current value.
-                UpdateRefResult::Conflict { .. } => Err(ServerError::failed_precondition(
+                (UpdateRefResult::Conflict { .. }, _) => Err(ServerError::failed_precondition(
                     "ref CAS precondition failed — read_ref to disambiguate",
                 )
                 .into()),
@@ -398,18 +404,22 @@ where
         let pipe = self.pipe.arc();
         send_wrap(async move {
             // A conflict is a typed outcome, never an error (§4).
-            let outcome = match pipe
-                .advance_refs_with_tickets(&a, head, packmap, tickets)
-                .await?
-            {
+            let (outcome, meta) = pipe
+                .advance_refs_with_tickets_with_meta(&a, head, packmap, tickets)
+                .await?;
+            let outcome = match outcome {
                 AdvanceOutcome::Committed => WireOutcome::ADVANCE_OUTCOME_COMMITTED,
                 AdvanceOutcome::HeadConflict => WireOutcome::ADVANCE_OUTCOME_HEAD_CONFLICT,
                 AdvanceOutcome::PackmapConflict => WireOutcome::ADVANCE_OUTCOME_PACKMAP_CONFLICT,
             };
-            Response::ok(AdvanceRefsResponse {
+            let mut response = Response::new(AdvanceRefsResponse {
                 outcome: Some(outcome.into()),
                 ..Default::default()
-            })
+            });
+            for (name, value) in meta.headers() {
+                response = response.with_header(name, value);
+            }
+            Ok(response)
         })
         .await
     }
@@ -500,8 +510,8 @@ where
         let message = request.to_owned_message();
         let pipe = self.pipe.arc();
         send_wrap(async move {
-            let result = pipe
-                .begin_upload(
+            let (result, meta) = pipe
+                .begin_upload_with_meta(
                     &a,
                     &message.r#ref.unwrap_or_default(),
                     message.pack_id.as_deref().unwrap_or_default(),
@@ -531,10 +541,14 @@ where
                     }))
                 }
             };
-            Response::ok(BeginUploadResponse {
+            let mut response = Response::new(BeginUploadResponse {
                 result: Some(result),
                 ..Default::default()
-            })
+            });
+            for (name, value) in meta.headers() {
+                response = response.with_header(name, value);
+            }
+            Ok(response)
         })
         .await
     }

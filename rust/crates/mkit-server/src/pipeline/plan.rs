@@ -24,7 +24,7 @@ use crate::replay::{
 use crate::repo::{RepoId, RepoName};
 use crate::storage_error::{StorageOp, describe_and_map};
 use crate::store::keys::{self, LAYOUT_VERSION, ParsedKey};
-use crate::store::outbox::OutboxBuilder;
+use crate::store::outbox::{OutboxBuilder, Terminal};
 use crate::store::{Batch, Key, MAX_BATCH_OPS, Partition, Precondition, Value, Write, codec};
 
 use super::{ShardMap, meta_error};
@@ -145,6 +145,8 @@ pub(crate) struct WriteRequest<'a> {
     /// `UploadCommit` only: a final `pre_receive` rejection to store in
     /// place of `UploadPack`, so a retry is answered before re-streaming.
     pub(crate) rejection: Option<&'a StoredRejection>,
+    /// A separately committed admission reservation, if one was granted.
+    pub(crate) pending: Option<&'a super::reservation::PendingGuard>,
 }
 
 impl WriteRequest<'_> {
@@ -186,6 +188,10 @@ impl WriteRequest<'_> {
         }
         out.extend(self.refs.iter().map(|r| keys::ref_key(self.repo, &r.name)));
         if self.ref_index.is_some() && !self.refs.is_empty() {
+            out.extend([keys::outbox_sequence(), keys::outcome_backlog()]);
+        }
+        if let Some(pending) = self.pending {
+            out.push(pending.key.clone());
             out.extend([keys::outbox_sequence(), keys::outcome_backlog()]);
         }
         if let (
@@ -253,6 +259,8 @@ pub(crate) struct Plan {
     pub(crate) replay_index: Option<usize>,
     /// Index of the grant epoch guard.
     pub(crate) epoch_index: Option<usize>,
+    /// Index of the pending row guard, never eligible for re-planning.
+    pub(crate) pending_index: Option<usize>,
     /// The prune deletes alone, retried when a full partition rejects the
     /// batch (delete-only batches never fail with `Full`).
     pub(crate) prune: Option<Batch>,
@@ -341,7 +349,19 @@ pub(crate) fn plan_write(
 ) -> Result<Planned, ServerError> {
     // A racing retry may read ticket/reservation rows after its initial
     // replay observation. Resolve the committed answer before ticket planning.
+    if let Some(pending) = req.pending
+        && snap.get(&pending.key) != Some(&pending.value)
+    {
+        return Err(ServerError::unavailable(
+            "admission reservation changed; retry",
+        ));
+    }
     if let Some(result) = replayed_write(req, snap)? {
+        if req.pending.is_some() {
+            return Err(ServerError::aborted_retryable(
+                "operation already in flight; retry",
+            ));
+        }
         return Ok(Planned::Done(result));
     }
     let tickets = req
@@ -349,7 +369,9 @@ pub(crate) fn plan_write(
         .as_ref()
         .map(|advance| super::advance::validate(snap, advance, clock.business_now_ms))
         .transpose()?;
-    let deadline = Precondition::NotAfter(clock.deadline());
+    let deadline = Precondition::NotAfter(req.pending.map_or(clock.deadline(), |pending| {
+        clock.deadline().min(pending.apply_deadline_ms)
+    }));
     let mut pre = vec![deadline.clone()];
     let mut puts = Vec::new();
 
@@ -407,34 +429,72 @@ pub(crate) fn plan_write(
 
     let (on_commit, ref_puts, conflict) =
         decide_write_result(req, snap, clock, &mut pre, &mut puts)?;
-    if conflict && req.replay.is_none() && req.charges.is_empty() {
+    if conflict && req.replay.is_none() && req.charges.is_empty() && req.pending.is_none() {
         return Ok(Planned::Done(on_commit));
     }
     if !conflict {
         puts.extend(ref_puts);
-        if req.advance.is_some() || req.ref_index.is_some() && !req.refs.is_empty() {
-            let mut outbox = OutboxBuilder::new(
-                snap.get(&keys::outbox_sequence()),
-                snap.get(&keys::outcome_backlog()),
-            )
-            .map_err(meta_error)?;
-            if let (Some(advance), Some(tickets)) = (&req.advance, tickets.as_deref()) {
-                super::advance::plan_consumption(
-                    snap,
-                    advance,
-                    tickets,
-                    req.refs,
-                    clock,
-                    &mut pre,
-                    &mut puts,
-                    &mut outbox,
-                )?;
-            }
-            add_ref_index_relays(req, &mut outbox);
-            outbox.relay_at(clock.plan_time_ms);
-            outbox.try_finish(&mut pre, &mut puts).map_err(meta_error)?;
-        }
     }
+    if req.advance.is_some()
+        || req.ref_index.is_some() && !req.refs.is_empty()
+        || req.pending.is_some() && req.kind != WriteKind::BeginUpload
+    {
+        let mut outbox = OutboxBuilder::new(
+            snap.get(&keys::outbox_sequence()),
+            snap.get(&keys::outcome_backlog()),
+        )
+        .map_err(meta_error)?;
+        if !conflict && let (Some(advance), Some(tickets)) = (&req.advance, tickets.as_deref()) {
+            super::advance::plan_consumption(
+                snap,
+                advance,
+                tickets,
+                req.refs,
+                clock,
+                &mut pre,
+                &mut puts,
+                &mut outbox,
+            )?;
+        }
+        if !conflict {
+            add_ref_index_relays(req, &mut outbox);
+        }
+        if let Some(pending) = req.pending {
+            let record = if conflict {
+                codec::ReservationV1::Aborted {
+                    repository: pending.repository.clone(),
+                    occurred_at_ms: clock.plan_time_ms,
+                    reason: codec::AbortReason::RefConflict,
+                    detail: String::new(),
+                }
+            } else {
+                codec::ReservationV1::Committed {
+                    repository: pending.repository.clone(),
+                    occurred_at_ms: clock.plan_time_ms,
+                    bytes_stored: 0,
+                    new_to_repo: 0,
+                    new_to_store: 0,
+                    refs: req
+                        .refs
+                        .iter()
+                        .map(|update| codec::OutcomeRef {
+                            name: update.name.clone(),
+                            new: update.new,
+                            deleted: update.new.is_none(),
+                        })
+                        .collect(),
+                }
+            };
+            outbox.outcome(
+                &pending.rid,
+                &pending.value,
+                Terminal::new(record).map_err(meta_error)?,
+            );
+        }
+        outbox.relay_at(clock.plan_time_ms);
+        outbox.try_finish(&mut pre, &mut puts).map_err(meta_error)?;
+    }
+    let pending_index = req.pending.and_then(|pending| pre.iter().position(|condition| matches!(condition, Precondition::Equals(key, value) if key == &pending.key && value == &pending.value)));
 
     let replay_index = match req.replay {
         Some(replay) => {
@@ -442,6 +502,11 @@ pub(crate) fn plan_write(
             if let Some(done) =
                 plan_replay(req.kind, replay, snap, &on_commit, &mut pre, &mut puts)?
             {
+                if req.pending.is_some() {
+                    return Err(ServerError::aborted_retryable(
+                        "operation already in flight; retry",
+                    ));
+                }
                 return Ok(Planned::Done(done));
             }
             Some(index)
@@ -466,6 +531,7 @@ pub(crate) fn plan_write(
         on_commit,
         replay_index,
         epoch_index,
+        pending_index,
         prune,
         prune_from,
     }))
