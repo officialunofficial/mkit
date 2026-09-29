@@ -2469,16 +2469,16 @@ fn packmap_prev_must_be_known() {
     assert_eq!(end, SessionEnd::Clean);
     assert_eq!(frames.len(), 2, "two uploads, two responses");
     // Session 2 uploads P2 and node N with prev = M, listing only P2.
-    let data2 = b"second pack bytes".to_vec();
-    let data2_id = hash(&data2);
-    let (n_bytes, n_id) = mkpl_prev(m_id, &[data2_id]);
+    let second = b"second pack bytes".to_vec();
+    let second_id = hash(&second);
+    let (n_bytes, n_id) = mkpl_prev(m_id, &[second_id]);
     let (end, frames) = peer_run(
         &pipe,
         OWNER,
         &repo,
         [
-            upload_header(&data2_id, Some(data2.len() as u64)),
-            chunk(&data2_id, Some(0), &data2, true),
+            upload_header(&second_id, Some(second.len() as u64)),
+            chunk(&second_id, Some(0), &second, true),
             upload_header(&n_id, Some(n_bytes.len() as u64)),
             chunk(&n_id, Some(0), &n_bytes, true),
             update(PACKMAP, &n_id, Some(RefExpectation::Missing), None),
@@ -2504,7 +2504,7 @@ fn packmap_prev_must_be_known() {
         &kv,
         &root(&repo_id.namespace),
         &repo_id.name,
-        &data2_id
+        &second_id
     ));
     assert!(!member(
         &kv,
@@ -2550,16 +2550,16 @@ fn packmap_prev_pending_or_member_is_accepted() {
     ));
     // The next push's node M2 names the committed node L2 as `prev`;
     // membership makes it known.
-    let data2 = b"second pack bytes".to_vec();
-    let data2_id = hash(&data2);
-    let (m2_bytes, m2_id) = mkpl_prev(l2_id, &[data2_id]);
+    let second = b"second pack bytes".to_vec();
+    let second_id = hash(&second);
+    let (m2_bytes, m2_id) = mkpl_prev(l2_id, &[second_id]);
     let (end, frames) = peer_run(
         &pipe,
         OWNER,
         &repo,
         [
-            upload_header(&data2_id, Some(data2.len() as u64)),
-            chunk(&data2_id, Some(0), &data2, true),
+            upload_header(&second_id, Some(second.len() as u64)),
+            chunk(&second_id, Some(0), &second, true),
             upload_header(&m2_id, Some(m2_bytes.len() as u64)),
             chunk(&m2_id, Some(0), &m2_bytes, true),
             update(

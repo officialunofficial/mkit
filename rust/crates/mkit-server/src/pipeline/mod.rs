@@ -1657,9 +1657,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             return self.hooks.authorizer().authorize(op).await;
         }
         match &self.cfg.addressing {
-            Addressing::Multi(multi) => {
-                self.owner_rule(op, Some(&multi.namespace_policy)).await
-            }
+            Addressing::Multi(multi) => self.owner_rule(op, Some(&multi.namespace_policy)).await,
             // Owner on a namespaced Single is the ssh root mode's rule;
             // Open Single is the authorizer's alone, unchanged.
             Addressing::Single { .. } if self.cfg.write_policy == WritePolicy::Owner => {

@@ -1027,7 +1027,7 @@ async fn race_with_bytes<N: NamespaceStore + 'static>(
 #[tokio::test]
 async fn multipart_existing_race_aborts_losing_session() {
     let clock = Arc::new(ManualClock::new(0));
-    let losing_session_was_aborted = race_with_bytes(
+    let losing_session_was_aborted = Box::pin(race_with_bytes(
         MemoryKv::with_clock(clock.clone()),
         clock,
         MODES[0],
@@ -1035,7 +1035,7 @@ async fn multipart_existing_race_aborts_losing_session() {
         false,
         false,
         MIN_PART_SIZE + 1,
-    )
+    ))
     .await;
     assert!(losing_session_was_aborted);
 }

@@ -309,6 +309,9 @@ fn grant_configuration_refusals_and_discovery() {
     assert_eq!(err.public_message(), "write grants require auth v2");
 
     c.auth = authv2();
+    // Multi deployments carry upload ticket keys (R-136).
+    c.ticket_keys =
+        Some(crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
     let info = construct(c.clone(), Hooks::new()).unwrap().server_info();
     assert_eq!(info.grant_schemes, ["ed25519"]);
 
