@@ -240,6 +240,10 @@ on the server's runtime beside its HTTP listener, and serves every
 session with `mkit_server::ssh::serve_session` over the server's
 pipeline, as the `TransportPeer` principal holding the key the handshake
 authenticated; its verb replies are therefore the ssh session's (§3).
+Under multi-repository addressing the listener requires
+`--enc-repository <NAMESPACE>/<NAME>` and binds every session to that
+one repository (SPEC-TRANSPORT-CONNECT §7.4): nothing in the session's
+frames can select another.
 The CLI's former `mkit serve --listen-enc <addr>` (which ran the blocking
 `serve_tcp_with_policy_and_bounds`) is removed; `mkit serve` is only the
 ssh stdin/stdout server. The listener is

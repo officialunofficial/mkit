@@ -9,18 +9,15 @@ use std::time::Duration;
 
 use clap::{Args, ValueEnum};
 use http::HeaderValue;
-#[cfg(feature = "test-faults")]
-use mkit_server::MultiAddressing;
 use mkit_server::auth_v2::AuthV2Config;
 #[cfg(feature = "test-faults")]
 use mkit_server::indexed::IndexedConfig;
 use mkit_server::pipeline::{AuthMode, PipelineConfig, Sharding};
-#[cfg(feature = "test-faults")]
-use mkit_server::policy::NamespacePolicy;
+use mkit_server::policy::{NamespacePolicy, parse_namespace_allowlist};
 use mkit_server::sql::Capacity;
 use mkit_server::upload::UploadLimits;
 use mkit_server::upload::token::TicketKeys;
-use mkit_server::{Addressing, NamespaceKey, Redacted, RepoId, RepoName};
+use mkit_server::{Addressing, MultiAddressing, NamespaceKey, Redacted, RepoId, RepoName};
 
 use crate::ServeOptions;
 use crate::exit;
@@ -130,6 +127,30 @@ pub enum AuthArg {
     /// Auth v2 signed writes, with the replay ledger and write quota.
     #[value(name = "auth-v2")]
     AuthV2,
+}
+
+/// `--addressing`: one configured repository, or `X-Repository` routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum AddressingArg {
+    /// Serve the one repository `--repository` names (default `default`).
+    #[default]
+    Single,
+    /// Serve every `--namespace-policy` namespace: each request's
+    /// `X-Repository` `<ns>/<name>` routes it (SPEC-TRANSPORT-CONNECT
+    /// §7.4). Requires `--listen` with `--auth auth-v2`, ticket keys and
+    /// `--meta sqlite:<PATH>`; the write policy is owner-only.
+    Multi,
+}
+
+/// `--namespace-policy` (`--addressing multi` only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum NamespacePolicyArg {
+    /// Only the namespaces `--namespace-allowlist` lists may receive
+    /// writes. The default under `--addressing multi`.
+    Allowlist,
+    /// Every self-certifying namespace may receive writes; requires the
+    /// explicit `--unsafe-open-namespaces` opt-in (D27).
+    Any,
 }
 
 /// `--sharding`: `SQLite` metadata routing.
@@ -255,19 +276,39 @@ pub struct ServeArgs {
     #[arg(long, value_name = "ORIGIN")]
     pub audience: Option<String>,
     /// The repository identity served (and signed for under auth v2).
-    #[arg(long, value_name = "ID", default_value = DEFAULT_REPOSITORY)]
-    pub repository: String,
+    /// Single mode only: `--addressing multi` routes by `X-Repository`.
+    #[arg(long, value_name = "ID")]
+    pub repository: Option<String>,
+    /// `single` (one `--repository`; the default) or `multi` (every
+    /// request's `X-Repository` `<ns>/<name>` selects its repository;
+    /// requires `--auth auth-v2`, upload ticket keys and
+    /// `--meta sqlite:<PATH>`).
+    #[arg(long, value_enum, default_value = "single")]
+    pub addressing: AddressingArg,
+    /// Multi only: `allowlist` admits the `--namespace-allowlist` file's
+    /// namespaces (the default), `any` admits every self-certifying
+    /// namespace and requires `--unsafe-open-namespaces`.
+    #[arg(long, value_enum)]
+    pub namespace_policy: Option<NamespacePolicyArg>,
+    /// Multi + `--namespace-policy allowlist`: a file of the owner
+    /// namespaces that may write, one per line or comma-separated, `#`
+    /// comments allowed. Owner-readable configuration; validated at
+    /// startup.
+    #[arg(long, value_name = "PATH")]
+    pub namespace_allowlist: Option<PathBuf>,
+    /// Multi + `--namespace-policy any` only: accept that the default
+    /// admission step cannot vet an open namespace set (D27).
+    /// Development only.
+    #[arg(long)]
+    pub unsafe_open_namespaces: bool,
+    /// Multi + `--listen-enc`: the one repository the enc listener binds
+    /// to, as `<ns>/<name>` (SPEC-TRANSPORT-CONNECT §7.4). Required then;
+    /// refused under single addressing.
+    #[arg(long, value_name = "NS/NAME")]
+    pub enc_repository: Option<String>,
     /// Largest pack an upload may declare (default 4 GiB).
     #[arg(long, value_name = "N")]
     pub max_pack_bytes: Option<u64>,
-    /// Route namespaced repositories; required for indexed mode.
-    #[cfg(feature = "test-faults")]
-    #[arg(long)]
-    pub multi_addressing: bool,
-    /// Namespace permitted to write on a Multi deployment (repeatable).
-    #[cfg(feature = "test-faults")]
-    #[arg(long = "allow-namespace", value_name = "NAMESPACE")]
-    pub allowed_namespaces: Vec<String>,
     /// Verify consumed packs and build repository object-index rows.
     #[cfg(feature = "test-faults")]
     #[arg(long)]
@@ -476,6 +517,7 @@ pub(crate) const PREFIX: &str = "mkit-server serve";
 fn resolve_auth(
     args: &ServeArgs,
     env: &dyn Fn(&str) -> Option<String>,
+    repository: &str,
 ) -> Result<AuthMode, ConfigError> {
     let token = match &args.bearer_token_file {
         Some(path) => Some(read_token(path)?),
@@ -501,7 +543,7 @@ fn resolve_auth(
                     "{PREFIX}: --auth auth-v2 requires --audience <ORIGIN>"
                 ));
             };
-            AuthV2Config::new(audience.clone(), args.repository.clone())
+            AuthV2Config::new(audience.clone(), repository.to_owned())
                 .map(AuthMode::AuthV2)
                 .map_err(|e| {
                     ConfigError::new(
@@ -582,6 +624,152 @@ fn resolve_ticket_keys(
     .transpose()
 }
 
+/// The `--addressing multi` namespace policy: the `--namespace-allowlist`
+/// file's owners (the default), or `--namespace-policy any` with its
+/// explicit unsafe opt-in.
+fn resolve_multi(args: &ServeArgs) -> Result<MultiAddressing, ConfigError> {
+    let policy = match args
+        .namespace_policy
+        .unwrap_or(NamespacePolicyArg::Allowlist)
+    {
+        NamespacePolicyArg::Any => {
+            if !args.unsafe_open_namespaces {
+                return Err(ConfigError::new(
+                    exit::CONFIG_ERROR,
+                    format!(
+                        "{PREFIX}: --namespace-policy any requires --unsafe-open-namespaces: \
+                         the default admission step cannot vet an open namespace set (D27)"
+                    ),
+                ));
+            }
+            NamespacePolicy::Any {
+                unsafe_without_admission: true,
+            }
+        }
+        NamespacePolicyArg::Allowlist => {
+            let Some(path) = &args.namespace_allowlist else {
+                return Err(ConfigError::new(
+                    exit::CONFIG_ERROR,
+                    format!(
+                        "{PREFIX}: --addressing multi requires --namespace-allowlist <PATH> \
+                         (or --namespace-policy any with --unsafe-open-namespaces)"
+                    ),
+                ));
+            };
+            let text =
+                read_checked(path, &ReadRule::OWNER_WRITABLE, "is a symlink").map_err(|why| {
+                    ConfigError::new(
+                        exit::CONFIG_ERROR,
+                        format!("{PREFIX}: --namespace-allowlist {}: {why}", path.display()),
+                    )
+                })?;
+            NamespacePolicy::Allowlist(parse_namespace_allowlist(&text).map_err(|e| {
+                ConfigError::new(
+                    exit::CONFIG_ERROR,
+                    format!("{PREFIX}: --namespace-allowlist {}: {e}", path.display()),
+                )
+            })?)
+        }
+    };
+    Ok(MultiAddressing::new().with_namespace_policy(policy))
+}
+
+/// The addressing-mode flag cross-checks; the returned `bool` is whether
+/// `args` selects multi.
+fn multi_mode(args: &ServeArgs) -> Result<bool, ConfigError> {
+    let usage = |m: &str| ConfigError::new(exit::USAGE, format!("{PREFIX}: {m}"));
+    let multi = args.addressing == AddressingArg::Multi;
+    if !multi
+        && (args.namespace_policy.is_some()
+            || args.namespace_allowlist.is_some()
+            || args.unsafe_open_namespaces)
+    {
+        return Err(usage(
+            "--namespace-policy, --namespace-allowlist and --unsafe-open-namespaces configure \
+             multi addressing; pass --addressing multi",
+        ));
+    }
+    if multi && args.repository.is_some() {
+        return Err(usage(
+            "--repository names the single repository; --addressing multi routes by X-Repository",
+        ));
+    }
+    if args.unsafe_open_namespaces && args.namespace_policy != Some(NamespacePolicyArg::Any) {
+        return Err(usage(
+            "--unsafe-open-namespaces requires --namespace-policy any",
+        ));
+    }
+    if args.namespace_policy == Some(NamespacePolicyArg::Any) && args.namespace_allowlist.is_some()
+    {
+        return Err(usage(
+            "--namespace-allowlist and --namespace-policy any are mutually exclusive",
+        ));
+    }
+    Ok(multi)
+}
+
+/// The deployment requirements only multi faces: signed auth on the HTTP
+/// listener (every write names its repository) and transactional
+/// per-namespace metadata.
+fn check_multi_deployment(args: &ServeArgs, auth: &AuthMode) -> Result<(), ConfigError> {
+    if args.addressing != AddressingArg::Multi {
+        return Ok(());
+    }
+    if !matches!(auth, AuthMode::AuthV2(_)) {
+        return Err(ConfigError::new(
+            exit::CONFIG_ERROR,
+            format!(
+                "{PREFIX}: --addressing multi requires --listen <ADDR> with --auth auth-v2: \
+                 every write must carry a signature that names its repository (bearer, \
+                 --unsafe-allow-any-peer and enc-only deployments serve one repository)"
+            ),
+        ));
+    }
+    if !matches!(args.meta, Some(MetaArg::Sqlite(_))) {
+        return Err(ConfigError::new(
+            exit::CONFIG_ERROR,
+            format!(
+                "{PREFIX}: --addressing multi requires --meta sqlite:<PATH>: per-namespace \
+                 partitions need a transactional store, which the fs-layout ref files are not"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The `Addressing` for `args`' mode: multi reads its namespace policy and
+/// requires upload ticket keys; single parses the (defaulted) repository
+/// name exactly as before.
+fn build_addressing(
+    args: &ServeArgs,
+    repository: &str,
+    ticket_keys: Option<&TicketKeys>,
+) -> Result<Addressing, ConfigError> {
+    if args.addressing == AddressingArg::Multi {
+        if ticket_keys.is_none() {
+            return Err(ConfigError::new(
+                exit::CONFIG_ERROR,
+                format!(
+                    "{PREFIX}: --addressing multi requires upload ticket keys: pass \
+                     --ticket-key-file <PATH> or set {TICKET_KEYS_ENV}"
+                ),
+            ));
+        }
+        return resolve_multi(args).map(Addressing::Multi);
+    }
+    let usage = |m: String| ConfigError::new(exit::USAGE, format!("{PREFIX}: {m}"));
+    mkit_core::repo_identity::RepositoryIdentity::parse_bare_allowed(repository)
+        .map_err(|_| usage("--repository is invalid (SPEC-TRANSPORT-CONNECT §7.4)".to_owned()))?;
+    let name = RepoName::new(repository)
+        .map_err(|_| usage(format!("--repository {repository:?} is invalid")))?;
+    Ok(Addressing::Single {
+        repo: RepoId {
+            namespace: NamespaceKey::deployment_default(),
+            name,
+        },
+    })
+}
+
 /// Which permission bits [`read_checked`] refuses on Unix, and how it
 /// tells the operator.
 pub(crate) struct ReadRule {
@@ -604,8 +792,7 @@ impl ReadRule {
         owned: false,
     };
     /// Security configuration anyone may read but only its owner may
-    /// change (an allowlist of peer keys).
-    #[cfg(feature = "enc")]
+    /// change (an allowlist of peer keys or namespaces).
     pub(crate) const OWNER_WRITABLE: Self = Self {
         mask: 0o022,
         what: "writable by group or others",
@@ -965,9 +1152,10 @@ fn cors_policy(origins: &[String]) -> Result<CorsPolicy, ConfigError> {
 fn pipeline_auth(
     args: &ServeArgs,
     env: &dyn Fn(&str) -> Option<String>,
+    repository: &str,
 ) -> Result<AuthMode, ConfigError> {
     if args.listen.is_some() {
-        return resolve_auth(args, env);
+        return resolve_auth(args, env, repository);
     }
     let http_only = args.auth.is_some()
         || args.bearer_token_file.is_some()
@@ -1067,19 +1255,22 @@ pub fn resolve(
              both",
         ));
     }
+    let multi = multi_mode(args)?;
     #[cfg(feature = "enc")]
     let enc = crate::enc::resolve(args)?;
     #[cfg(not(feature = "enc"))]
-    if args.listen_enc.is_some() {
+    if args.listen_enc.is_some() || args.enc_repository.is_some() {
         return Err(ConfigError::new(
             exit::UNAVAILABLE,
             format!("{PREFIX}: --listen-enc needs the `enc` cargo feature; rebuild with it"),
         ));
     }
     let sharding = resolve_sharding(args)?;
-    let auth = pipeline_auth(args, env)?;
+    let repository = args.repository.as_deref().unwrap_or(DEFAULT_REPOSITORY);
+    let auth = pipeline_auth(args, env, if multi { "" } else { repository })?;
     #[cfg(feature = "enc")]
     refuse_open_enc_beside_auth(enc.as_ref(), &auth)?;
+    check_multi_deployment(args, &auth)?;
     let meta = match (&args.meta, &auth) {
         (Some(MetaArg::Sqlite(path)), _) => MetaChoice::Sqlite {
             path: canonical_db_path(path)?,
@@ -1099,42 +1290,27 @@ pub fn resolve(
     };
     let blob = resolve_blob(args, &meta, env)?;
     let repo_root = resolve_repo_root(&args.repo_root, env)?;
-    mkit_core::repo_identity::RepositoryIdentity::parse_bare_allowed(&args.repository)
-        .map_err(|_| usage("--repository is invalid (SPEC-TRANSPORT-CONNECT §7.4)"))?;
-    let name = RepoName::new(args.repository.clone())
-        .map_err(|_| usage(&format!("--repository {:?} is invalid", args.repository)))?;
-    let repo = RepoId {
-        namespace: NamespaceKey::deployment_default(),
-        name,
-    };
+    let ticket_keys = resolve_ticket_keys(args, env)?;
+    let addressing = build_addressing(args, repository, ticket_keys.as_ref())?;
     let max_pack = resolve_max_pack(args)?;
     let limits = UploadLimits {
         max_total_bytes: max_pack,
         max_chunks: u32::MAX,
     };
-    #[cfg(feature = "test-faults")]
-    let addressing = if args.multi_addressing {
-        let mut allowed = std::collections::BTreeSet::new();
-        for value in &args.allowed_namespaces {
-            let namespace = mkit_core::repo_identity::Namespace::parse(value)
-                .map_err(|_| usage("--allow-namespace is invalid"))?;
-            allowed.insert(namespace);
-        }
-        Addressing::Multi(
-            MultiAddressing::new().with_namespace_policy(NamespacePolicy::Allowlist(allowed)),
-        )
-    } else {
-        if !args.allowed_namespaces.is_empty() {
-            return Err(usage("--allow-namespace requires --multi-addressing"));
-        }
-        Addressing::Single { repo }
-    };
-    #[cfg(not(feature = "test-faults"))]
-    let addressing = Addressing::Single { repo };
     // `new` sets the default write quota for auth v2 only.
     let mut pipeline = PipelineConfig::new(addressing, auth, limits);
     pipeline.sharding = sharding;
-    pipeline.ticket_keys = resolve_ticket_keys(args, env)?;
+    pipeline.ticket_keys = ticket_keys;
+    // The enc listener's sibling pipeline consumes implicitly and cannot
+    // run ticketed verification, so `Pipeline::new` refuses `indexed` with
+    // it (R-137); refuse here, before any pipeline is built.
+    #[cfg(all(feature = "test-faults", feature = "enc"))]
+    if args.indexed && multi && enc.is_some() {
+        return Err(usage(
+            "--indexed cannot be combined with --addressing multi and --listen-enc: \
+             implicit (enc) consumption skips ticketed pack verification",
+        ));
+    }
     #[cfg(feature = "test-faults")]
     if args.indexed {
         let mut indexed = IndexedConfig::default();

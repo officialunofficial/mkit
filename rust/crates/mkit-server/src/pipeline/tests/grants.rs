@@ -18,6 +18,9 @@ pub(super) fn config(owner: &SigningKey, role: AuthorizerRole) -> PipelineConfig
     );
     c.write_policy = WritePolicy::Owner;
     c.authorizer_role = role;
+    // Multi deployments carry upload ticket keys (R-136).
+    c.ticket_keys =
+        Some(crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
     c.grants = Some(
         GrantConfig::new(
             AUDIENCE,
@@ -715,6 +718,9 @@ fn k1_config(policy: NamespacePolicy) -> PipelineConfig {
     c.addressing = Addressing::Multi(MultiAddressing::new().with_namespace_policy(policy));
     c.write_policy = WritePolicy::Owner;
     c.authorizer_role = AuthorizerRole::Check;
+    // Multi deployments carry upload ticket keys (R-136).
+    c.ticket_keys =
+        Some(crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
     c.grants = Some(
         GrantConfig::new(
             AUDIENCE,
