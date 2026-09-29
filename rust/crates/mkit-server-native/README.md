@@ -392,8 +392,12 @@ The listener speaks plaintext HTTP/1.1 and h2c; terminate TLS at the proxy.
   `deadline_exceeded`. A client's `Connect-Timeout-Ms` may shorten a
   deadline, never extend it.
 - `--cors-allow-origin` (repeatable; `*` for any) enables browser access.
-  Preflights are answered without authentication; the allowed request
-  headers are the auth v2 set plus `authorization`.
+  Preflights are answered without authentication and never reach
+  admission; the allowed request headers are the auth v2 set plus
+  `authorization`, `Payment-Authorization`, `PAYMENT-SIGNATURE`,
+  `Accept-Payment` and any configured extra credential header. Every
+  response exposes `WWW-Authenticate`, `PAYMENT-REQUIRED`,
+  `Payment-Receipt` and `PAYMENT-RESPONSE`.
 
 ### Shutdown and exit codes
 
@@ -406,6 +410,12 @@ running then are dropped (an interrupted upload leaves nothing visible). The exi
 `.mkit`, 66 missing root, 69 bind or runtime failure, 75 serve lock busy, 77
 root outside `MKIT_SERVE_ROOT`, 78 refused configuration (including a root
 another `mkit-server` holds).
+
+Once the listeners have drained, the timer driver runs every timer that is due
+(terminal outcome delivery, kind 8) for at most `--shutdown-drain-secs`
+(default 10; `0` skips the drain) before it exits, so an outcome committed by
+a draining request is delivered rather than left for the next start. A sink
+that hangs cannot hold shutdown past that deadline.
 
 ### Logs and metrics
 
@@ -427,6 +437,13 @@ service) from a resolved `config::ServeConfig`, taking the root's locks.
 With the `enc` feature (on by default), `enc::session_fn` serves enc
 sessions over a `TransportIdentity` pipeline (`Pipeline::with_auth` makes
 one beside yours) and `enc::serve` runs the listener.
+
+`server::open_with_sink(&cfg, sink)` is `open` with your `OutcomeSink` on
+kind 8 (`--meta sqlite` only: fs-layout has no timer driver, and a real sink
+with it is a config error). Each call is bounded by 5 s, a failure or timeout
+ends that fire and retries with backoff, and the sink must deduplicate by
+reservation id. A `RemoteOutcomes` client's `server_audience` must be
+`server::outcome_audience(&cfg)`, the value stamped on delivered outcomes.
 
 ## `SQLite` operations
 

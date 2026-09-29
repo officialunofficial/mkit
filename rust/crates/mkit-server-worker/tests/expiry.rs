@@ -145,6 +145,9 @@ async fn outcome_delivery_and_reconcile_fire_on_every_outcome_class() {
             ),
             class,
             Ok("https://server.example".to_owned()),
+            Some("free"),
+            mkit_server::pipeline::NoOutcomes,
+            std::sync::Arc::new(mkit_server::ManualSleep::new()),
         );
         let mut fired = 0;
         for _ in 0..4 {
