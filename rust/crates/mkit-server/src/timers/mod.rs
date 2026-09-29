@@ -1,8 +1,10 @@
 //! Partition-local timers, shared by native and Durable Object drivers.
 
 pub mod lease_sweep;
+pub mod outcome_delivery;
 pub mod quota_rollup;
 pub mod registry;
+pub mod reservation_reconcile;
 #[cfg(feature = "test-faults")]
 pub mod test_kind;
 #[cfg(test)]

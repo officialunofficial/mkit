@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: add validated two-phase admission with bounded HTTP 402 challenges,
+  redacted payment credential forwarding and committed-success receipt headers
+  (WP-3.2).
+- Server: durably arbitrate admitted reservations with pending and terminal
+  outcomes, reconcile abandoned reservations, deliver through a retrying
+  outcome sink and apply per-shard outbox backpressure (WP-3.3).
+
 - CLI: add `mkit grant create|add|list` and a user grant store under
   `$XDG_CONFIG_HOME/mkit/grants/` (never repository-scoped). Owners sign with the
   mkit key, a software-keystore secp256k1 key, or an imported wallet or WebAuthn

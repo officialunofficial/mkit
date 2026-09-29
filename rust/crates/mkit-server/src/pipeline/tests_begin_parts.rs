@@ -63,6 +63,36 @@ fn single_part_ticket_has_no_session() {
 }
 
 #[test]
+fn reserved_multipart_apply_failure_aborts_session_and_reservation() {
+    let clock = clock();
+    let mut spy = Spy::new(store(&clock));
+    let fail = spy.fail_next_apply.clone();
+    spy.after_hook = Some(Box::new(move |_, _, batch, outcome| {
+        if !matches!(outcome, BatchOutcome::Committed) {
+            return;
+        }
+        if batch.writes.iter().any(|write| {
+            matches!(write, Write::Put(_, value)
+            if matches!(codec::decode_reservation(value), Ok(codec::ReservationV1::Pending { .. })))
+        }) {
+            fail.store(true, Ordering::SeqCst);
+        }
+    }));
+    let env = build(
+        config(),
+        spy,
+        with_admission(Fixed(
+            AdmissionDecision::allow(Vec::new()).with_reservation("multipart-rid"),
+        )),
+        clock,
+    );
+    let err = begin(&env, &begin_request(44), C, MIN_PART_SIZE + 1).unwrap_err();
+    assert_eq!(err.code(), Code::Internal);
+    assert_eq!(env.pipe.blobs.multipart_session_count(), 0);
+    assert_one_abort(&env, "multipart-rid", codec::AbortReason::Internal);
+}
+
+#[test]
 fn unsupported_backend_refuses_before_admission() {
     let clock = clock();
     let admission = SpyAdmission::default();
@@ -86,6 +116,7 @@ fn unsupported_backend_refuses_before_admission() {
         .authenticate(&RequestMeta {
             procedure: Procedure::BeginUpload,
             header: &lookup,
+            header_values: None,
             unary_body: Some(&req.body),
             transport_principal: None,
         })
@@ -124,6 +155,7 @@ fn failed_batch_aborts_new_session() {
         .authenticate(&RequestMeta {
             procedure: Procedure::BeginUpload,
             header: &lookup,
+            header_values: None,
             unary_body: Some(&req.body),
             transport_principal: None,
         })
@@ -156,6 +188,7 @@ fn committed_batch_with_lost_reply_keeps_session_for_remint() {
         pipe.authenticate(&RequestMeta {
             procedure: Procedure::BeginUpload,
             header: &lookup,
+            header_values: None,
             unary_body: Some(&req.body),
             transport_principal: None,
         })

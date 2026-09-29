@@ -178,6 +178,7 @@ macro_rules! __with_kv_cases {
                 kv_refs_membership_outcome_atomic,
                 kv_ticket_changed_precondition_writes_nothing,
                 kv_outcome_ack_exact_backlog,
+                kv_pending_terminal_arbitration,
             }
             durability::{
                 dur_cancelled_apply_is_all_or_nothing,

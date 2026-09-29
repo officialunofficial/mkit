@@ -246,6 +246,8 @@ while its combined undelivered outcome, event, and cache-purge backlog exceeds a
 configured bound. Events and cache purges MUST count toward that bound. The server MUST
 NOT drop outcomes, events, or cache purges to relieve that backlog. Reads and writes
 that do not run admission MUST be unaffected by this backpressure.
+The threshold is a soft snapshot check before admission. Concurrent admitted
+operations may overshoot it by their in-flight terminal rows and encoded bytes.
 
 `new_to_store` bytes appear only in `Committed`, as STC §5.1 requires
 for admission input. They MUST NOT be added to another hook input as
@@ -603,8 +605,11 @@ The shared `Outcome` fields are:
 |---|---|
 | `bytes_stored` | The unsigned count of bytes stored by the operation. |
 | `new_to_repo` | The unsigned count of bytes new to the repository. |
-| `new_to_store` | The unsigned count of bytes new to the entire store. |
+| `new_to_store` | The unsigned count of bytes new to the entire store; in opaque mode, an upper bound: the declared pack bytes. |
 | `refs` | The refs committed by the operation, in decision order. |
+
+In opaque mode, `Committed.new_to_store` is an upper bound: the declared
+pack bytes.
 
 Each `CommittedRef.name` is the ref name. `CommittedRef.new` is
 the 32-byte committed target, or empty when `deleted` is true.
@@ -666,13 +671,16 @@ violating any response limit below is invalid and MUST be handled under
   bytes in the inclusive range `0x20`–`0x7e`.
 - Header names MUST be compared case-insensitively.
 - A `reservation_id` MUST be 1–128 bytes drawn from `[A-Za-z0-9._:-]`.
+- The `s:` prefix is reserved for server-generated synthetic reservation ids;
+  a hook MUST NOT return one.
 - `AdmitResponse.allow.reservation_id` is REQUIRED.
 - A `reservation_id` MUST be unique per server audience across all
   operations. If the server finds an existing pending record or
   terminal outcome for the returned `reservation_id`, whether for a
   different operation or for a retry of the same one, it MUST treat the
   response as invalid under §8. A hook MUST return a fresh id for each
-  allowance.
+  allowance. This uniqueness obligation lasts while the reservation row
+  exists, including its pending and undelivered terminal states.
 - `AdmitAllow.external_ref`, when present, MUST be at most 256 bytes of
   visible ASCII (`0x21`–`0x7e`). The implementer MUST keep credentials,
   bearer tokens, and other secrets out of it: it is copied into a

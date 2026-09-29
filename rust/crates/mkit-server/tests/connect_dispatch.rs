@@ -36,8 +36,8 @@ use mkit_server::connect::proto::mkit::transport::v1::{
 };
 use mkit_server::connect::{self};
 use mkit_server::pipeline::{
-    AuthMode, Authorizer, DefaultAdmission, HookSet, Hooks, NoOutcomes, NoPreReceive, NoReceipts,
-    Pipeline, PipelineConfig,
+    Admission, AdmissionDecision, AdmissionInput, AuthMode, Authorizer, DefaultAdmission, HookSet,
+    Hooks, NoOutcomes, NoPreReceive, NoReceipts, OpenAuthorizer, Pipeline, PipelineConfig,
 };
 use mkit_server::store::{
     Batch, BatchOutcome, Cursor, Key, NamespaceStore, Partition, PartitionStats, ScanPage,
@@ -190,6 +190,9 @@ impl<H: HookSet + 'static> Setup<H> {
         };
         let mut cfg = PipelineConfig::new(Addressing::Single { repo }, self.auth, limits);
         cfg.download_chunk_max = self.chunk_max;
+        if !self.hooks.admission().is_default() && matches!(cfg.auth, AuthMode::AuthV2(_)) {
+            cfg.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
+        }
         if let Some(cap) = self.list_cap {
             cfg.max_list_refs_page_size = cap;
         }
@@ -991,15 +994,12 @@ async fn error_shaping_reaches_the_wire() {
             &[],
         )
         .await;
-    assert_eq!(reply.status, StatusCode::PAYMENT_REQUIRED);
-    assert_eq!(reply.headers["www-authenticate"], "Payment id=x");
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    assert!(!reply.headers.contains_key("www-authenticate"));
     let json = reply.json();
     assert_eq!(json["code"], "permission_denied");
     assert_eq!(json["message"], "payment required");
-    let details = json["details"].as_array().unwrap();
-    assert_eq!(details.len(), 1);
-    assert_eq!(details[0]["type"], mkit_server::ADMISSION_CHALLENGE_TYPE);
-    assert_eq!(details[0]["value"], "CgF4");
+    assert!(json["details"].as_array().is_none_or(Vec::is_empty));
 }
 
 // --------------------------------------------------------- test-faults
@@ -1742,6 +1742,193 @@ async fn server_info_is_public_ignores_repository_and_sets_cache_header() {
         assert_eq!(json.headers["cache-control"], "private, max-age=60");
         assert!(server.codes.0.lock().unwrap().is_empty());
     }
+}
+
+struct PaidAdmission;
+impl Admission for PaidAdmission {
+    async fn admit(&self, _: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
+        Ok(AdmissionDecision::allow(Vec::new()))
+    }
+}
+
+struct ChallengeAdmission;
+impl Admission for ChallengeAdmission {
+    async fn admit(&self, _: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
+        Ok(AdmissionDecision::challenge(
+            vec![mkit_server::pipeline::Challenge {
+                scheme: "mpp".into(),
+                value: "opaque-pay".into(),
+            }],
+            "pay to proceed",
+        )
+        .with_response_header("WWW-Authenticate", "Payment realm=repo"))
+    }
+}
+
+#[tokio::test]
+async fn admission_challenge_is_402_with_detail_and_no_store_on_the_wire() {
+    let server = Setup {
+        auth: authv2(),
+        hooks: Hooks {
+            authorizer: OpenAuthorizer,
+            admission: ChallengeAdmission,
+            pre_receive: NoPreReceive,
+            receipts: NoReceipts,
+            outcomes: NoOutcomes,
+        },
+        meta: None,
+        chunk_max: 4,
+        list_cap: None,
+    }
+    .serve();
+    let body = update_json(HEAD, "REF_EXPECTATION_ANY", &A);
+    let headers = signed_body(7, "UpdateRef", &serde_json::to_vec(&body).unwrap(), 231);
+    let reply = server.json("UpdateRef", &body, &headers).await;
+    assert_eq!(reply.status, StatusCode::PAYMENT_REQUIRED);
+    assert_eq!(reply.headers["cache-control"], "no-store");
+    assert_eq!(reply.headers["www-authenticate"], "Payment realm=repo");
+    let json = reply.json();
+    assert_eq!(json["code"], "permission_denied");
+    assert_eq!(json["message"], "admission required");
+    assert_eq!(
+        json["details"][0]["type"],
+        mkit_server::ADMISSION_CHALLENGE_TYPE
+    );
+}
+
+struct CredentialGate(Arc<AtomicUsize>);
+impl Admission for CredentialGate {
+    async fn admit(&self, input: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        if input
+            .credential_headers
+            .iter()
+            .any(|header| header.name.eq_ignore_ascii_case("Payment-Authorization"))
+        {
+            Ok(AdmissionDecision::allow(Vec::new()))
+        } else {
+            Ok(AdmissionDecision::challenge(
+                vec![mkit_server::pipeline::Challenge {
+                    scheme: "mpp".into(),
+                    value: "pay".into(),
+                }],
+                "payment required",
+            ))
+        }
+    }
+}
+
+#[tokio::test]
+async fn credential_retry_uses_the_same_nonce_and_duplicate_header_never_reaches_admit() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = Setup {
+        auth: authv2(),
+        hooks: Hooks {
+            authorizer: OpenAuthorizer,
+            admission: CredentialGate(calls.clone()),
+            pre_receive: NoPreReceive,
+            receipts: NoReceipts,
+            outcomes: NoOutcomes,
+        },
+        meta: None,
+        chunk_max: 4,
+        list_cap: None,
+    }
+    .serve();
+    let body = update_json(HEAD, "REF_EXPECTATION_MISSING", &A);
+    let signed = signed_body(7, "UpdateRef", &serde_json::to_vec(&body).unwrap(), 234);
+    let mut duplicated = signed.clone();
+    duplicated.push(("Payment-Authorization", "first".into()));
+    duplicated.push(("Payment-Authorization", "second".into()));
+    let refusal = server.json("UpdateRef", &body, &duplicated).await;
+    assert_eq!(refusal.status, StatusCode::FORBIDDEN);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        server.json("UpdateRef", &body, &signed).await.status,
+        StatusCode::PAYMENT_REQUIRED
+    );
+    let mut paid = signed.clone();
+    paid.push(("Payment-Authorization", "secret-payment".into()));
+    assert_eq!(
+        server.json("UpdateRef", &body, &paid).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        server.json("UpdateRef", &body, &paid).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+struct ReceiptAdmission;
+impl Admission for ReceiptAdmission {
+    async fn admit(&self, _: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
+        Ok(AdmissionDecision::allow(Vec::new())
+            .with_response_header("Payment-Receipt", "receipt-1"))
+    }
+}
+
+#[tokio::test]
+async fn admission_receipt_is_private_on_commit_and_absent_on_replay_or_conflict() {
+    let server = Setup {
+        auth: authv2(),
+        hooks: Hooks {
+            authorizer: OpenAuthorizer,
+            admission: ReceiptAdmission,
+            pre_receive: NoPreReceive,
+            receipts: NoReceipts,
+            outcomes: NoOutcomes,
+        },
+        meta: None,
+        chunk_max: 4,
+        list_cap: None,
+    }
+    .serve();
+    let body = update_json(HEAD, "REF_EXPECTATION_ANY", &A);
+    let headers = signed_body(7, "UpdateRef", &serde_json::to_vec(&body).unwrap(), 232);
+    let first = server.json("UpdateRef", &body, &headers).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(first.headers["payment-receipt"], "receipt-1");
+    assert_eq!(first.headers["cache-control"], "private");
+    let replay = server.json("UpdateRef", &body, &headers).await;
+    assert_eq!(replay.status, StatusCode::OK);
+    assert!(!replay.headers.contains_key("payment-receipt"));
+    let conflict_body = update_json(HEAD, "REF_EXPECTATION_MISSING", &B);
+    let conflict_headers = signed_body(
+        7,
+        "UpdateRef",
+        &serde_json::to_vec(&conflict_body).unwrap(),
+        233,
+    );
+    let conflict = server
+        .json("UpdateRef", &conflict_body, &conflict_headers)
+        .await;
+    assert_eq!(conflict.code(), "failed_precondition");
+    assert!(!conflict.headers.contains_key("payment-receipt"));
+}
+
+#[tokio::test]
+async fn server_info_advertises_nondefault_admission_and_zero_threshold() {
+    let server = Setup {
+        auth: AuthMode::TransportIdentity,
+        hooks: Hooks {
+            authorizer: OpenAuthorizer,
+            admission: PaidAdmission,
+            pre_receive: NoPreReceive,
+            receipts: NoReceipts,
+            outcomes: NoOutcomes,
+        },
+        meta: None,
+        chunk_max: 4,
+        list_cap: None,
+    }
+    .serve();
+    let reply = server
+        .unary("GetServerInfo", &GetServerInfoRequest::default(), &[])
+        .await;
+    let info: GetServerInfoResponse = reply.decode();
+    assert_eq!(info.admission, Some(true));
+    assert_eq!(info.begin_upload_threshold_bytes, Some(0));
 }
 
 #[tokio::test]

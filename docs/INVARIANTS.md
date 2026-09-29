@@ -1290,13 +1290,18 @@ non-owner and allowlist behavior. Grants and private reads remain M2.
 ## Ticket, reservation and outbox rows keep exactly one outcome per reservation
 
 **Always:** a ticket has a reservation-derived id and a unique guarded `o` row.
-Only a still-Ticketed row can become terminal. Consumption commits its outcome
+Only a still-Ticketed or Pending row can become terminal. Directly admitted
+writes first record Pending, then replace it with Committed or Aborted under
+an equality guard; BeginUpload replaces Pending with Ticketed. A pending
+apply's deadline precedes its reconcile timer, so a late apply cannot commit
+after an Aborted(ABANDONED) replacement. Consumption commits its outcome
 with ref publication and local membership; a missing pack with a present upload
 marker records `Aborted(PACK_MISSING)` in a separate guarded batch before the
 advance fails. A missing marker leaves the ticket open. Terminal outcomes stay
 durable until acknowledgement, which deletes their delivery index and subtracts
 the exact stored key/value byte count. Shared counters and sequence/backlog
-values are guarded once per batch.
+values are guarded once per batch. A zero-to-positive backlog transition adds
+one kind-8 delivery kick; delivery may repeat but never drops an unacked row.
 
 **Because:** consumption and expiry race; delivery may repeat or crash. An
 unguarded replacement could record two outcomes, erase a replacement ticket's
@@ -1310,8 +1315,8 @@ strict `store/codec.rs` decodes, and `mkit-server-conformance/src/storage/kv_cas
 creation, atomic publication, stale-ticket and acknowledgement cases over memory
 and SQLite. WP-1.10 exercises consumption and the defensive abort over native
 memory/SQLite and wire cases; the kind-2 expiry handler closes tickets with
-one guarded `Expired` row and best-effort session abort. WP-3.3 adds guarded
-Pending reservations, ReadServed, reconciliation and backlog enforcement.
+one guarded `Expired` row and best-effort session abort. WP-3.3 enforces guarded
+Pending reservations, ReadServed, reconciliation and backlog limits.
 ## Relay delivery advances durable per-source watermarks before source cleanup
 
 **Always:** relay rows for a source/target pair apply in sequence order. Each

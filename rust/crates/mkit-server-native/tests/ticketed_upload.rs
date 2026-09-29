@@ -135,6 +135,7 @@ fn authenticated<N: NamespaceStore>(
                 .find(|(k, _)| k == h)
                 .map(|(_, v)| v.clone())
         },
+        header_values: None,
         unary_body: None,
         transport_principal: None,
     })

@@ -7,7 +7,7 @@
 
 use mkit_core::hash::to_hex;
 
-use crate::error::ServerError;
+use crate::error::{AbortCause, ServerError};
 use crate::repo::NamespaceKey;
 use crate::store::{Key, Precondition, Value, Write, codec, keys};
 use crate::timers::registry::kinds;
@@ -315,9 +315,10 @@ pub(crate) fn plan_namespace_after_admission(
     puts: &mut Vec<Write>,
 ) -> Result<(), ServerError> {
     if namespace_window(now_ms, charge.limits.window_ms) != charge.window {
-        return Err(ServerError::aborted_retryable(
-            "namespace quota window advanced; retry",
-        ));
+        return Err(
+            ServerError::aborted_retryable("namespace quota window advanced; retry")
+                .with_abort_cause(AbortCause::QuotaWindow),
+        );
     }
     plan_namespace_charge(charge, current, view, now_ms, server_now_ms, pre, puts).map_err(
         |error| {

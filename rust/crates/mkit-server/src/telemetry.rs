@@ -93,6 +93,10 @@ pub struct Redactor {
 }
 
 impl Redactor {
+    /// Add deployment-defined credential names to the redaction set.
+    pub fn add_names(&mut self, names: &[String]) {
+        self.extra.extend(names.iter().cloned());
+    }
     /// A redactor for [`NEVER_LOG`] plus `extra` header names.
     #[must_use]
     pub fn new<I, S>(extra: I) -> Self
