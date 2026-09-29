@@ -117,6 +117,11 @@ struct WireArgs {
     /// Refs the large-listing case creates (default 10000; 0 skips it).
     #[arg(long, value_name = "N")]
     list_refs: Option<u32>,
+    /// In-flight creates for that case (default 8). Use 1 against
+    /// `wrangler dev`: miniflare's proxy drops a connection when several
+    /// slow debug-wasm writes are in flight.
+    #[arg(long, value_name = "N")]
+    list_parallel: Option<u32>,
     /// The server's replay prune grace after expiry, ms (default 60000).
     #[arg(long, value_name = "MS")]
     replay_prune_grace_ms: Option<i64>,
@@ -148,6 +153,7 @@ impl WireArgs {
             features: self.features.clone(),
             run_id: self.run_id.clone(),
             list_refs: self.list_refs,
+            list_parallel: self.list_parallel,
             replay_prune_grace_ms: self.replay_prune_grace_ms,
             duplicate_retry_ms: self.duplicate_retry_ms,
             sign_reads: self.sign_reads.then_some(true),

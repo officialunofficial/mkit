@@ -405,9 +405,19 @@ pub async fn run(target: &WireTarget, filter: Option<&str>) -> Report {
 }
 
 async fn run_case(case: &Case, ctx: Ctx) -> Verdict {
+    // A paced worker fixture (one UpdateRef at a time, debug wasm) is
+    // slow but bounded. The 10 minute hang detector is too short for
+    // 10,000 sequential Durable Object writes; native runs keep 8 in
+    // flight and the ordinary ceiling.
+    let timeout =
+        if case.name == "list.large_response_within_limit" && ctx.profile().list_parallel == 1 {
+            std::time::Duration::from_mins(45)
+        } else {
+            CASE_TIMEOUT
+        };
     let fut = AssertUnwindSafe(case.run(ctx.clone())).catch_unwind();
-    match tokio::time::timeout(CASE_TIMEOUT, fut).await {
-        Err(_) => Verdict::Fail(format!("timed out after {CASE_TIMEOUT:?}")),
+    match tokio::time::timeout(timeout, fut).await {
+        Err(_) => Verdict::Fail(format!("timed out after {timeout:?}")),
         Ok(Err(_)) => Verdict::Fail("the case panicked (a suite bug)".to_owned()),
         Ok(Ok(Ok(()))) => Verdict::Pass(ctx.take_note()),
         Ok(Ok(Err(Failure::Fail(why)))) => Verdict::Fail(why),

@@ -241,6 +241,11 @@ pub struct Profile {
     pub features: BTreeSet<Feature>,
     /// Refs `list.large_response_within_limit` creates.
     pub list_refs: u32,
+    /// How many of those creates are in flight at once. Default 8, which
+    /// the native write-gate regression needs. A local `wrangler dev` debug
+    /// build drops connections when that many slow requests sit in
+    /// miniflare's proxy; the worker script paces this to 1.
+    pub list_parallel: u32,
     /// How long after an envelope's expiry the server may keep its replay
     /// record before pruning it; the growth case waits it out. No spec
     /// fixes it (a record MUST outlive the signed expiry, §7.1).
@@ -280,6 +285,7 @@ impl Profile {
             milestone: Milestone::M0,
             features: BTreeSet::new(),
             list_refs: DEFAULT_LIST_REFS,
+            list_parallel: 8,
             replay_prune_grace_ms: DEFAULT_REPLAY_PRUNE_GRACE_MS,
             duplicate_retry_ms: DEFAULT_DUPLICATE_RETRY_MS,
             sign_reads: false,
@@ -393,6 +399,8 @@ pub struct ProfileSpec {
     pub run_id: Option<String>,
     /// Refs the large-listing case creates.
     pub list_refs: Option<u32>,
+    /// In-flight creates for that case (default 8; 1 paces a local worker).
+    pub list_parallel: Option<u32>,
     /// See [`Profile::replay_prune_grace_ms`].
     pub replay_prune_grace_ms: Option<i64>,
     /// See [`Profile::duplicate_retry_ms`].
@@ -450,6 +458,7 @@ impl ProfileSpec {
             features: over.features.or(self.features),
             run_id: over.run_id.or(self.run_id),
             list_refs: over.list_refs.or(self.list_refs),
+            list_parallel: over.list_parallel.or(self.list_parallel),
             replay_prune_grace_ms: over.replay_prune_grace_ms.or(self.replay_prune_grace_ms),
             duplicate_retry_ms: over.duplicate_retry_ms.or(self.duplicate_retry_ms),
             sign_reads: over.sign_reads.or(self.sign_reads),
@@ -536,6 +545,12 @@ impl ProfileSpec {
         }
         if let Some(n) = self.list_refs {
             profile.list_refs = n;
+        }
+        if let Some(n) = self.list_parallel {
+            if !(1..=32).contains(&n) {
+                return Err("--list-parallel: 1 to 32".to_owned());
+            }
+            profile.list_parallel = n;
         }
         if let Some(ms) = self.replay_prune_grace_ms {
             profile.replay_prune_grace_ms = ms;
