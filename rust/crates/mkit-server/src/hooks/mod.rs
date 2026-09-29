@@ -40,13 +40,10 @@
 //!
 //! Inspect, Event and `CachePurge` belong to later work (5.5, 5.2, 5.10), and a
 //! core-profile server must not accept inspector configuration (§18).
-//! Until private-read authorization (§10.1, WP-2.9) lands, every read also
-//! calls Authorize, so a remote authorizer that fails denies public reads
-//! too; the §8 exception for a writer-view-only consultation is not yet
-//! implemented. `AuthorizeAllow.writer_view` is decoded but not yet used: core has no
-//! caller-view fact until §10.1 lands. Reservation-id uniqueness is enforced
-//! per partition by the pipeline, while §6.6 asks for it per audience:
-//! uniqueness across partitions is the hook's obligation.
+//! `AuthorizeAllow.writer_view` becomes `AuthzFacts::caller_view`, which the
+//! pipeline honours only under the `authority` role (§10.1). Reservation-id
+//! uniqueness is enforced per partition by the pipeline, while §6.6 asks for
+//! it per audience: uniqueness across partitions is the hook's obligation.
 
 mod channel;
 mod client;

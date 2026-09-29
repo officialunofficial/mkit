@@ -8,7 +8,7 @@ use zeroize::Zeroize;
 use super::proto::v1 as pb;
 use super::proto::v1::__buffa::oneof as one;
 use crate::error::ServerError;
-use crate::op::{OpKind, Operation, RefUpdate};
+use crate::op::{CallerView, OpKind, Operation, RefUpdate};
 use crate::pipeline::{AdmissionDecision, AdmissionInput, Challenge, Outcome, OutcomeKind};
 use crate::principal::Principal;
 use crate::repo::NamespaceKey;
@@ -228,9 +228,17 @@ pub(super) fn authorize_answer(
     op: &Operation,
 ) -> Result<crate::op::AuthzFacts, ServerError> {
     match response.result {
-        // `writer_view` has no core field until the caller's view (§10.1)
-        // lands; the established owner/grant facts pass through unchanged.
-        Some(one::authorize_response::Result::Allow(_)) => Ok(op.authz.clone()),
+        // The established owner/grant facts pass through unchanged; an
+        // `authority` hook's `writer_view` classifies the caller (§10.1). The
+        // pipeline honours it only under the `authority` role, so a `check`
+        // hook cannot confer writer status.
+        Some(one::authorize_response::Result::Allow(allow)) => {
+            let mut facts = op.authz.clone();
+            if allow.writer_view == Some(true) {
+                facts.caller_view = CallerView::Writer;
+            }
+            Ok(facts)
+        }
         Some(one::authorize_response::Result::Deny(deny)) => {
             let message = public_text(deny.message, "permission denied");
             Err(match deny.code.as_deref() {

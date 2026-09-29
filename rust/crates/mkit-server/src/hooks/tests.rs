@@ -183,6 +183,7 @@ fn granted_op(kind: OpKind, nonce: &str) -> Operation {
             presence_requirement: None,
         }),
         owner: false,
+        ..Default::default()
     };
     op
 }
@@ -563,7 +564,11 @@ fn golden_responses_decode_to_the_expected_decisions() {
     let facts = map::authorize_answer(decode("authorize-allow.response.json"), &op).unwrap();
     assert_eq!(facts, op.authz);
     let facts = map::authorize_answer(decode("authorize-writer-view.response.json"), &op).unwrap();
-    assert_eq!(facts, op.authz);
+    assert_eq!(facts.caller_view, crate::op::CallerView::Writer);
+    assert_eq!(
+        (facts.owner, &facts.grant),
+        (op.authz.owner, &op.authz.grant)
+    );
     let err = map::authorize_answer(decode("authorize-deny.response.json"), &op).unwrap_err();
     assert_eq!(
         (err.code(), err.public_message()),

@@ -22,6 +22,7 @@ use crate::replay::{
 use crate::repo::RepoName;
 use mkit_core::repo_identity::RepositoryIdentity;
 use mkit_core::upload_parts::MIN_PART_SIZE;
+use mkit_core::write_auth::is_hex;
 
 /// The namespace coordinator record. The first configuration version is 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +40,43 @@ pub struct NamespaceRecord {
 pub struct RepoRecord {
     /// Creation time, Unix milliseconds from the business clock.
     pub created_at_ms: u64,
+}
+
+/// A repository's stored visibility (SPEC-WRITE-GRANTS §9.1). A missing
+/// `rv` row means `public`; the row may exist before `rr` does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepoVisibilityV1 {
+    /// The repository's visibility.
+    pub visibility: StoredVisibility,
+    /// The newer of the last accepted statement's `created` and the last
+    /// envelope write's time; 0 before any write.
+    pub last_created_ms: u64,
+    /// The last accepted statement's id, 64 lowercase hex. The key is
+    /// always present in a stored row (`null` when none): a row missing it
+    /// is corrupt.
+    #[serde(deserialize_with = "present_option")]
+    pub last_statement_id: Option<String>,
+}
+
+/// Deserialize an `Option` whose key must be present (serde would default
+/// a missing `Option` field to `None`).
+fn present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+/// The visibility values a `rv` row stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StoredVisibility {
+    /// Readable by every caller, anonymous or signed.
+    Public,
+    /// Readable only by a signed, authorized caller (§9.3).
+    Private,
 }
 
 /// The ref shard's durable copy of its coordinator epoch lease.
@@ -428,6 +466,7 @@ enum ResultV1 {
     AdvanceHeadConflict,
     AdvancePackmapConflict,
     UploadPack,
+    RepoVisibility,
     BeginUploadAlreadyPresent,
     BeginUploadTicket {
         id: String,
@@ -540,6 +579,24 @@ pub fn encode_repo_record(record: &RepoRecord) -> Value {
 /// Decode a repository coordinator record.
 pub fn decode_repo_record(value: &Value) -> Result<RepoRecord, StoreError> {
     decode_json(value, "bad repo record")
+}
+
+/// Encode a repository visibility row.
+#[must_use]
+pub fn encode_repo_visibility(row: &RepoVisibilityV1) -> Value {
+    encode_json(row)
+}
+
+/// Decode a repository visibility row. The statement id is canonical: 64
+/// lowercase hexadecimal digits.
+pub fn decode_repo_visibility(value: &Value) -> Result<RepoVisibilityV1, StoreError> {
+    let row: RepoVisibilityV1 = decode_json(value, "bad repo visibility")?;
+    if let Some(id) = &row.last_statement_id
+        && !is_hex(id, 32)
+    {
+        return Err(corrupt("bad statement id"));
+    }
+    Ok(row)
 }
 
 /// Encode a ref shard epoch lease.
@@ -945,6 +1002,7 @@ pub fn encode_replay_record(record: &ReplayRecord) -> Value {
                     token_hex: to_hex_bytes(token),
                 },
                 StoredResult::UploadPack => ResultV1::UploadPack,
+                StoredResult::RepoVisibility => ResultV1::RepoVisibility,
                 StoredResult::Rejected(r) => ResultV1::Rejected {
                     code: r.code().as_str().to_owned(),
                     message: r.message().to_owned(),
@@ -1001,6 +1059,7 @@ pub fn decode_replay_record(value: &Value) -> Result<ReplayRecord, StoreError> {
                 })
             }
             ResultV1::UploadPack => StoredResult::UploadPack,
+            ResultV1::RepoVisibility => StoredResult::RepoVisibility,
             ResultV1::Rejected { code, message } => {
                 let code = CODES
                     .into_iter()
@@ -1617,6 +1676,7 @@ mod tests {
             StoredResult::AdvanceRefs(AdvanceOutcome::HeadConflict),
             StoredResult::AdvanceRefs(AdvanceOutcome::PackmapConflict),
             StoredResult::UploadPack,
+            StoredResult::RepoVisibility,
             StoredResult::Rejected(StoredRejection::new(Code::PermissionDenied, "no").unwrap()),
         ];
         let mut states: Vec<_> = results.into_iter().map(ReplayState::Committed).collect();
@@ -1680,6 +1740,7 @@ mod tests {
             committed(r#"{"kind":"advance_head_conflict"}"#),
             committed(r#"{"kind":"advance_packmap_conflict"}"#),
             committed(r#"{"kind":"upload_pack"}"#),
+            committed(r#"{"kind":"repo_visibility"}"#),
             committed(r#"{"kind":"rejected","code":"permission_denied","message":"no"}"#),
             r#"{"state":"in_flight","resumable":true}"#.to_owned(),
             r#"{"state":"in_flight","resumable":false}"#.to_owned(),
@@ -1729,6 +1790,46 @@ mod tests {
             namespace
         );
         assert_eq!(decode_repo_record(&repo_value).unwrap(), repo);
+        let public = RepoVisibilityV1 {
+            visibility: StoredVisibility::Public,
+            last_created_ms: 0,
+            last_statement_id: None,
+        };
+        let private = RepoVisibilityV1 {
+            visibility: StoredVisibility::Private,
+            last_created_ms: 1_700_000_000_000,
+            last_statement_id: Some("ab".repeat(32)),
+        };
+        let public_value = encode_repo_visibility(&public);
+        let private_value = encode_repo_visibility(&private);
+        assert_eq!(
+            public_value.as_bytes(),
+            b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":null}"
+        );
+        assert_eq!(
+            private_value.as_bytes(),
+            format!(
+                "\x01{{\"visibility\":\"private\",\"last_created_ms\":1700000000000,\"last_statement_id\":\"{}\"}}",
+                "ab".repeat(32)
+            )
+            .as_bytes()
+        );
+        assert_eq!(decode_repo_visibility(&public_value).unwrap(), public);
+        assert_eq!(decode_repo_visibility(&private_value).unwrap(), private);
+        for bytes in [
+            &b""[..],
+            b"\x02{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":null}",
+            b"\x01{\"visibility\":\"internal\",\"last_created_ms\":0,\"last_statement_id\":null}",
+            b"\x01{\"visibility\":\"public\"}",
+            b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":\"AB\"}",
+            b"\x01{\"visibility\":\"public\",\"last_created_ms\":0}",
+            b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":\"ab\",\"extra\":1}",
+        ] {
+            assert!(matches!(
+                decode_repo_visibility(&Value::new(bytes.to_vec())),
+                Err(StoreError::Corrupt(_))
+            ));
+        }
         for bytes in [
             &b""[..],
             b"\x02{\"created_at_ms\":0,\"config_version\":1}",

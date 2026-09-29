@@ -196,6 +196,15 @@ impl TicketKeys {
         Self::parse(&text)
     }
 
+    /// Whether `secret` is any key's source secret, in constant time.
+    /// `Pipeline::new` refuses a URL-token key that repeats one
+    /// (SPEC-WRITE-GRANTS §9.4's dedicated-key rule).
+    pub(crate) fn contains_secret(&self, secret: &[u8; 32]) -> bool {
+        self.keys
+            .iter()
+            .any(|key| bool::from(key.secret.ct_eq(secret)))
+    }
+
     /// Mint a token from trusted claims.
     ///
     /// # Panics

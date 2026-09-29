@@ -9,7 +9,7 @@ use mkit_attest::grant::{
 };
 use mkit_core::repo_identity::{Namespace, RepositoryIdentity};
 
-fn config(owner: &SigningKey, role: AuthorizerRole) -> PipelineConfig {
+pub(super) fn config(owner: &SigningKey, role: AuthorizerRole) -> PipelineConfig {
     let namespace = Namespace::Ed25519(*owner.verifying_key().as_bytes());
     let mut c = cfg(authv2());
     c.addressing = Addressing::Multi(
@@ -29,14 +29,18 @@ fn config(owner: &SigningKey, role: AuthorizerRole) -> PipelineConfig {
     c
 }
 
-fn repository(owner: &SigningKey) -> String {
+pub(super) fn repository(owner: &SigningKey) -> String {
     format!(
         "{}/{REPO}",
         Namespace::Ed25519(*owner.verifying_key().as_bytes())
     )
 }
 
-fn grant(owner: &SigningKey, grantee: &SigningKey, mutate: impl FnOnce(&mut Grant)) -> String {
+pub(super) fn grant(
+    owner: &SigningKey,
+    grantee: &SigningKey,
+    mutate: impl FnOnce(&mut Grant),
+) -> String {
     let repo = repository(owner);
     let mut grant = Grant {
         namespace: Namespace::Ed25519(*owner.verifying_key().as_bytes()),
@@ -188,7 +192,7 @@ fn epoch_rpc_reaches_u64_maximum_without_overflow() {
     );
 }
 
-fn request(signer: &SigningKey, repo: &str, nonce: u32, header: Option<&str>) -> Req {
+pub(super) fn request(signer: &SigningKey, repo: &str, nonce: u32, header: Option<&str>) -> Req {
     request_update(signer, repo, nonce, header, &upd(HEAD, Any, A))
 }
 
@@ -236,7 +240,7 @@ fn request_update(
     req
 }
 
-fn environment(
+pub(super) fn environment(
     owner: &SigningKey,
     role: AuthorizerRole,
     deny: bool,
@@ -244,7 +248,7 @@ fn environment(
     environment_sharding(owner, role, deny, Sharding::Single)
 }
 
-fn environment_sharding(
+pub(super) fn environment_sharding(
     owner: &SigningKey,
     role: AuthorizerRole,
     deny: bool,
@@ -256,7 +260,7 @@ fn environment_sharding(
     build(c, Spy::new(store(&clock)), policy_hooks(deny), clock)
 }
 
-fn assert_no_rows<H: HookSet>(e: &Env<H>, owner: &SigningKey) {
+pub(super) fn assert_no_rows<H: HookSet>(e: &Env<H>, owner: &SigningKey) {
     assert!(e.pipe.meta.batches.lock().unwrap().is_empty());
     let repo = e
         .pipe
