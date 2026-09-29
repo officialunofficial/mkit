@@ -13,7 +13,10 @@ use futures::future::join_all;
 use mkit_core::hash::hash;
 use mkit_transport_connect::generated::{AdvanceOutcome, AdvanceRefsResponse, UpdateRefResponse};
 
-use super::{A, CaseResult, Ctx, Exp, Failure, advance_req, ensure, update_req, want_outcome};
+use super::{
+    A, CaseResult, Ctx, Exp, Failure, advance_req, ensure, eventually_listed, update_req, want_ok,
+    want_outcome,
+};
 use crate::wire::client::{Rpc, RpcError};
 
 /// Racers per round.
@@ -151,4 +154,53 @@ async fn advance_round(ctx: &Ctx, round: usize) -> CaseResult {
     let id = racer_id(round, winners[0]);
     ctx.expect_ref(&head, Some(&id)).await?;
     ctx.expect_ref(&packmap, Some(&id)).await
+}
+
+/// Refs one repository holds in [`many_refs`].
+const MANY: usize = 64;
+
+/// Correctness under a wide repository (throughput is measured elsewhere):
+/// [`MANY`] refs of one repository are created at once, each reads back its
+/// own id, the listing holds exactly them in order, and all move on at once
+/// under `MATCH`.
+pub(super) async fn many_refs(ctx: Ctx) -> CaseResult {
+    let leaf = |i: usize| format!("m{i:02}");
+    let id = |i: usize, step: usize| hash(format!("many/{step}/{i}").as_bytes());
+    for step in 0..2 {
+        let writes = (0..MANY).map(|i| {
+            let previous = id(i, 0);
+            let exp = if step == 0 {
+                Exp::Missing
+            } else {
+                Exp::Match(&previous)
+            };
+            let req = update_req(&ctx.head(&leaf(i)), exp, &id(i, step));
+            let label = format!("many{i}");
+            let ctx = &ctx;
+            async move {
+                ctx.call_as::<UpdateRefResponse>(&label, Rpc::UpdateRef, &req)
+                    .await
+            }
+        });
+        for (i, result) in join_all(writes).await.into_iter().enumerate() {
+            want_ok(result?, &format!("step {step}, ref {i}"))?;
+        }
+        for i in 0..MANY {
+            ctx.expect_ref(&ctx.head(&leaf(i)), Some(&id(i, step)))
+                .await?;
+        }
+    }
+    let prefix = format!("refs/heads/{}/", ctx.ns());
+    let listed = eventually_listed(
+        &prefix,
+        || async { want_ok(ctx.list(&prefix).await?, "ListRefs") },
+        |refs| refs.len() == MANY && refs.iter().enumerate().all(|(i, r)| r.1 == id(i, 1)),
+    )
+    .await?;
+    let names: Vec<_> = listed.iter().map(|r| r.0.clone()).collect();
+    ensure!(
+        names == (0..MANY).map(leaf).collect::<Vec<_>>(),
+        "ListRefs names differ from the {MANY} created refs: {names:?}"
+    );
+    Ok(())
 }

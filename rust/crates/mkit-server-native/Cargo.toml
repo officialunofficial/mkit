@@ -190,6 +190,10 @@ name = "wire_multi"
 required-features = ["http"]
 
 [[test]]
+name = "wire_large_listing"
+required-features = ["http"]
+
+[[test]]
 name = "addressing"
 required-features = ["http"]
 

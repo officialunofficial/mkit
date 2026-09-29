@@ -230,6 +230,15 @@ pub struct Profile {
     /// Configured open-ticket cap per signer in one target-ref shard.
     /// In-process baselines use a small cap to stay within their tiny write quota.
     pub ticket_per_signer: u64,
+    /// Configured open-ticket cap per target ref (`TicketCaps::per_ref`; the
+    /// server default is 1,024). `tickets.begin_upload_per_ref_cap` opens
+    /// this many tickets across enough signers, then one more.
+    pub ticket_per_ref: u64,
+    /// Refs `list.merge_paging_over_32_mib` creates, each with a name near
+    /// the 512-byte cap: about 75,000 make the whole listing exceed 32 MiB.
+    /// Zero (the default) skips the case, which only a native deployment can
+    /// run in reasonable time (R-134 keeps the Worker at 1,000 refs).
+    pub merge_paging_refs: u32,
     /// Enables the `quota.*` cases.
     pub quota: Option<QuotaLimits>,
     /// Random per run: every ref is `refs/heads/conformance/<run_id>/<case>/..`.
@@ -282,6 +291,8 @@ impl Profile {
             sharding_d34: false,
             max_pack_bytes: mkit_core::protocol::PACK_BODY_LIMIT,
             ticket_per_signer: 64,
+            ticket_per_ref: 1024,
+            merge_paging_refs: 0,
             quota: None,
             run_id: random_hex::<8>(),
             milestone: Milestone::M0,

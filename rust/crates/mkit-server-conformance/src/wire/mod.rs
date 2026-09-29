@@ -61,8 +61,8 @@
 //! # Cases
 //!
 //! Names are stable: a baseline or a divergence list may refer to them.
-//! Discovery, multi-repository, namespace-policy, epoch-lease and multipart cases are milestone M1;
-//! the rest are M0.
+//! Discovery, multi-repository, namespace-policy, epoch-lease, lag-window, ticket, listing-paging and
+//! multipart cases are milestone M1 (the grant-scoped lease cases M2); the rest are M0.
 //!
 //! | Case | Requires | Asserts |
 //! |---|---|---|
@@ -144,7 +144,11 @@
 //! | `policy.owner_write_allowed` | `namespace-policy`, `multi-repo`, `auth-v2` | an allowlisted namespace owner writes and reads its ref |
 //! | `policy.non_owner_write_denied` | `namespace-policy`, `multi-repo`, `auth-v2` | a non-owner gets `permission_denied`; reads show existing and absent refs unchanged |
 //! | `policy.non_allowlisted_namespace_denied` | `namespace-policy`, `multi-repo`, `auth-v2` | an owner outside the allowlist gets `permission_denied`; the repository is not created |
-//! | `leases.bump_completes_and_writes_continue` | `epoch-leases`, `test-faults` | on a fresh target, a bump completes; repeating the epoch is rejected, then a second write succeeds |
+//! | `leases.idle_shard_renews_at_new_epoch` | `epoch-leases`, `grants`, `multi-repo`, `auth-v2`, `test-faults` | after a `SetGrantEpoch`, an epoch-0 grant is refused on a shard that never held a lease, and an epoch-1 grant writes there |
+//! | `leases.expired_lease_renews_at_new_epoch` | `epoch-leases`, `grants`, `multi-repo`, `auth-v2`, `test-faults` | a shard whose real-clock lease expired renews at the new epoch on a skewed request: the old grant is refused, its ref unchanged, and the new grant writes |
+//! | `lag.list_refs_window` | `auth-v2`, `test-faults`; excludes `multi-repo`; D34 | a write held in the relay reads strongly at once, is absent from `ListRefs`, then is listed within the lag bound |
+//! | `lag.membership_window` | `multi-repo`, `auth-v2`, `tickets`, `test-faults`; D34 | a ticketed push held in the relay is not a member without its hint, then is within the lag bound |
+//! | `leases.bump_completes_and_writes_continue` | `epoch-leases`, `test-faults`; excludes `multi-repo` | on a fresh target, a bump completes; repeating the epoch is rejected, then a second write succeeds |
 //! | `timers.directive_fires_due` | `test-faults` | a future timer remains; a skewed tick deletes only the due ref |
 //! | `timers.fire_on_schedule` | `test-faults`, `timers` | the driver deletes the ref within 20 s without a manual tick |
 //! | `timers.redelivery_is_idempotent` | `test-faults` | repeated ticks succeed with no further effects |
@@ -163,6 +167,7 @@
 //! | `refs.list_invalid_prefix_invalid_argument` | | SPEC-REFS §4.2 |
 //! | `refs.concurrent_missing_one_winner` | | 3 rounds of 24 racing `MISSING` creates: one wins, the rest `failed_precondition`, the ref holds the winner (SPEC-REFS §7) |
 //! | `refs.concurrent_match_one_winner` | | the same for `MATCH` |
+//! | `refs.many_refs_one_repository` | excludes `multi-repo` | 64 refs of one repository are written at once, read back, listed in order and advanced under `MATCH` |
 //! | `advance.committed` | | both refs move |
 //! | `advance.head_conflict_typed` | | `HEAD_CONFLICT` is a response, not an error; head unchanged |
 //! | `advance.packmap_conflict_typed` | | `PACKMAP_CONFLICT`; neither ref moved |
@@ -221,6 +226,8 @@
 //! | `tickets.begin_upload_new` | `tickets`, `auth-v2` | a new ticket has an id, part geometry, expiry and token |
 //! | `tickets.begin_upload_idempotent` | `tickets`, `auth-v2` | a fresh nonce returns the live ticket, replay returns identical bytes, and another signer gets its own ticket |
 //! | `tickets.begin_upload_caps` | `tickets`, `auth-v2` | the open-ticket cap has its exact public error and leaves no replay row |
+//! | `tickets.expiry_timer_frees_cap_slot` | `tickets`, `auth-v2`, `test-faults`; excludes `multi-repo` | a full per-signer cap refuses; after a skewed `run-timers` tick past every expiry the expiry timer has freed the slots |
+//! | `tickets.begin_upload_per_ref_cap` | `tickets`, `auth-v2`; excludes `multi-repo` | `Profile::ticket_per_ref` tickets from enough signers fill one ref; the next signer gets the exact cap error, and another ref is unaffected |
 //! | `tickets.begin_upload_packmap_refused` | `tickets`, `auth-v2` | a packmap ref is an invalid target |
 //! | `tickets.upload_pack_ticketed` | `tickets`, `auth-v2` | a ticketed upload succeeds and can be repeated |
 //! | `tickets.upload_pack_bad_token` | `tickets`, `auth-v2` | an invalid token fails before a pack is stored |
@@ -230,7 +237,7 @@
 //! | `tickets.advance_marker_then_upload` | `tickets`, `auth-v2` | a missing marker leaves the ticket open for upload and retry |
 //! | `tickets.advance_conflicts_keep_ticket` | `tickets`, `auth-v2` | typed ref conflicts preserve tickets for a corrected advance |
 //! | `refs.delete_pair` | — | conditional deletion removes head and packmap together and rejects invalid inputs |
-//! | `tickets.advance_ticket_bindings` | `tickets`, `auth-v2`, `multi-repo` | unknown, mismatched ref and signer ticket bindings fail with exact errors |
+//! | `tickets.advance_ticket_bindings` | `tickets`, `auth-v2` | unknown and mismatched-ref tickets fail with exact errors under Single and Multi; a stranger is refused by ticket binding or namespace policy |
 //! | `tickets.advance_other_repository` | `tickets`, `auth-v2`, `multi-repo` | a ticket cannot cross a repository boundary |
 //! | `tickets.advance_expired_ticket` | `tickets`, `auth-v2`, `test-faults` | an expired ticket fails with its exact error |
 //! | `indexed.pending_verification_unavailable` | `indexed-mode`, `multi-repo`, `tickets`, `auth-v2`, `test-faults` | HTTP 503, `Retry-After: 5`, one golden `PendingVerification` detail, and a successful same-nonce retry without replay |
@@ -239,6 +246,8 @@
 //! | `multipart.root_mismatch_invisible` | `multipart`, `auth-v2`; excludes `multi-repo` | a wrong completion root never makes the pack visible |
 //! | `multipart.cross_repository_no_oracle` | `multipart`, `auth-v2`, `multi-repo` | a foreign ticket fails, and foreign receipts use the same error code as garbage receipts; run on the memory multi-repo profile |
 //! | `growth.replay_and_quota_pruned` | `auth-v2`, `replay`, `quota`, `test-faults` | records answer before expiry; after validity + grace + window the partition shrinks back to an absolute bound (R-31); needs a quota window ≤ 60 s allowing 265 writes, and a disposable server |
+//! | `growth.tickets_and_outbox_pruned` | `auth-v2`, `tickets`, `quota`, `test-faults`, `timers` | open tickets grow the partition; they expire on the server's clock (skips when a ticket lives over 120 s), and once their outcome and relay rows drain and the replay records expire, it shrinks back to an absolute bound; needs a disposable server and the stats hook |
+//! | `list.merge_paging_over_32_mib` | | with `Profile::merge_paging_refs` near-512-byte names (about 75,000) the listing exceeds 32 MiB and every page stays within 2 MiB; skipped at zero |
 //! | `list.large_response_within_limit` | | follows tokens over `list_refs` long names; each response is at most 2 MiB |
 //! | `list.paging_wire` | | token round trip, invalid tokens, and page-size defaults and cap |
 //! | `repo.single_header_mismatch_not_found` | excludes `multi-repo` | Single reads with another identity give `not_found` |
@@ -253,6 +262,8 @@
 //! | `repository.ticketed_upload_multi` | `multi-repo`, `auth-v2`, `tickets` | a ticketed upload succeeds in Multi mode |
 //! | `repo.isolation_packs` | `multi-repo`, `auth-v2` | a planted member is invisible in other repositories, with and without a ref hint |
 //! | `repo.membership_read_your_writes` | `multi-repo`, `auth-v2`; D34 | unrelayed membership is visible only with its ref hint |
+//! | `repo.isolation_replay` | `multi-repo`, `auth-v2`, `replay` | one nonce and body, validly signed for other repositories, commits there: a replay record in one repository never answers another |
+//! | `repo.d36_hint_reads_during_lag` | `multi-repo`, `auth-v2`, `tickets`, `test-faults`; D34 | while the relay is held, `PackExists` and `DownloadPack` with `X-Mkit-Ref` see a real ticketed push, and the same hint in repositories with the same ref name do not |
 //! | `repo.malformed_membership_hint_no_op` | `multi-repo`, `auth-v2` | malformed, unserved and oversized hints are ignored |
 //!
 //! The three membership cases run against a target whose harness seeds
@@ -277,7 +288,10 @@
 //! (shift its business clock for that request) and serves
 //! `GET` [`STATS_PATH`] as `{"bytes": <u64>, "keys": <u64 or null>}` for
 //! the partition that holds the repository's replay records and quota
-//! windows. Release builds do neither. Report `keys` when you can: the
+//! windows: the one deployment-wide partition, or, when it shards by ref
+//! (D34), the shard of the ref named by the `?ref=<full ref name>` query.
+//! It also honors [`RELAY_DELAY_MS_HEADER`] (hold the write's relay
+//! delivery) and the run-timers directive. Release builds do none of these. Report `keys` when you can: the
 //! growth case then bounds the exact key count instead of bytes.
 //!
 //! `growth.replay_and_quota_pruned` needs a **disposable server**: a fresh
@@ -286,18 +300,12 @@
 //! so other traffic, or other records being pruned during its calibration,
 //! skews the measurement.
 //!
-//! # Reserved cases (M1–M5)
+//! # Reserved cases (M2–M5)
 //!
-//! The `TODO(M1..M5)` comments in this module's source name them, with
+//! The `TODO(M2..M5)` comments in this module's source name them, with
 //! their milestone and feature, so later milestones add them without
 //! renaming. None exists yet, so none can pass vacuously.
 //!
-// TODO(M1, multi-repo): `repo.isolation_replay`, `server_info.*` (GetServerInfo),
-//   `list.paging_*` and `list.page_within_2_mib` (§7.9).
-// TODO(M1, multi-repo): `namespace.policy_allowlist`, `namespace.policy_owner`.
-// TODO(M1, tickets): `tickets.upload_part_*`,
-//   `tickets.complete_upload_*`,
-//   `growth.tickets_and_outbox_pruned` (WP-1.27).
 // TODO(M2, grants): native transport grant registration and the later read grants.
 // TODO(M3, admission): `admission.challenge_402_typed_detail` (HTTP 402,
 //   `permission_denied`, exactly one `AdmissionChallenge` detail, `Cache-Control:
@@ -334,6 +342,10 @@ use cases::{Ctx, Failure};
 /// The `test-faults` directive that shifts the server's business clock for
 /// one request, in milliseconds.
 pub const CLOCK_SKEW_HEADER: &str = "x-mkit-test-clock-skew-ms";
+
+/// The `test-faults` directive that holds the relay delivery of the write it
+/// rides on (D34), in milliseconds.
+pub const RELAY_DELAY_MS_HEADER: &str = "x-mkit-test-relay-delay-ms";
 
 /// The `test-faults` stats endpoint.
 pub const STATS_PATH: &str = "/__mkit_test/stats";
@@ -377,7 +389,11 @@ pub fn multi_allowlist(profile: &Profile) -> BTreeSet<mkit_core::repo_identity::
     };
     CASES
         .iter()
-        .filter(|case| case.requires.contains(&Feature::MultiRepo))
+        .filter(|case| {
+            case.requires.contains(&Feature::MultiRepo)
+                // This stable case runs on both Single and Multi profiles.
+                || case.name == "tickets.advance_ticket_bindings"
+        })
         .flat_map(|case| {
             ["repository-a", "repository-b"].map(|label| {
                 let label = format!("{}/{label}", case.name);
@@ -468,6 +484,9 @@ async fn run_case(case: &Case, ctx: Ctx) -> Verdict {
     let timeout =
         if case.name == "list.large_response_within_limit" && ctx.profile().list_parallel == 1 {
             std::time::Duration::from_mins(45)
+        } else if case.name == "list.merge_paging_over_32_mib" {
+            // Tens of thousands of writes, then the relay drains their backlog.
+            std::time::Duration::from_mins(30)
         } else {
             CASE_TIMEOUT
         };
@@ -523,21 +542,54 @@ mod tests {
         }
     }
 
+    /// The backticked feature names in `cell`.
+    fn features(cell: &str) -> BTreeSet<&str> {
+        cell.split('`').skip(1).step_by(2).collect()
+    }
+
     #[test]
-    fn documented_requirements_match_the_table() {
+    fn every_documented_case_exists() {
+        let names: BTreeSet<_> = CASES.iter().map(|c| c.name).collect();
+        for row in include_str!("mod.rs")
+            .lines()
+            .filter(|l| l.starts_with("//! | `"))
+        {
+            let name = row["//! | `".len()..].split('`').next().unwrap();
+            assert!(
+                names.contains(name),
+                "documented case {name} is not in the table"
+            );
+        }
+    }
+
+    #[test]
+    fn documented_requirements_and_exclusions_match_the_table_exactly() {
         let docs = include_str!("mod.rs");
         for case in CASES {
             let row = docs
                 .lines()
                 .find(|l| l.starts_with(&format!("//! | `{}` |", case.name)))
                 .unwrap();
-            for f in case.requires.iter().chain(case.excludes) {
-                assert!(
-                    row.contains(&format!("`{}`", f.as_str())),
-                    "{}: {f:?}",
-                    case.name
-                );
-            }
+            // `| name | requires; not/excludes exclusions | asserts |`
+            let cell = row.split('|').nth(2).unwrap();
+            let (requires, excludes) = ["not `", "excludes `"]
+                .iter()
+                .filter_map(|marker| cell.find(marker))
+                .min()
+                .map_or((cell, ""), |at| cell.split_at(at));
+            let want = |list: &[Feature]| list.iter().map(|f| f.as_str()).collect::<BTreeSet<_>>();
+            assert_eq!(
+                features(requires),
+                want(case.requires),
+                "{} requires",
+                case.name
+            );
+            assert_eq!(
+                features(excludes),
+                want(case.excludes),
+                "{} excludes",
+                case.name
+            );
         }
     }
 
