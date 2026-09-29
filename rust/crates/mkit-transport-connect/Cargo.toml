@@ -77,6 +77,7 @@ futures = "0.3"
 url = "2"
 
 serde = { version = "1", features = ["derive"] }
+log = "0.4"
 
 # CSPRNG for the write-envelope idempotency key (`envelope::EnvelopeTransport`)
 # — same crate/version mkit-core, mkit-cli, and mkit-keystore already pull in

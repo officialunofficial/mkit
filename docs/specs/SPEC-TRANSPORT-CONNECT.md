@@ -184,7 +184,7 @@ headers or a bearer token. The response MAY be cached with
 |---|---|
 | `protocol` | The wire package, `mkit.transport.v1`. |
 | `spec_version` | This document's version, `2`. |
-| `max_pack_bytes` | The largest pack the deployment accepts. A deployment MAY advertise a lower value in indexed mode than in opaque mode, for example on a runtime with tight CPU limits. |
+| `max_pack_bytes` | The largest pack the deployment accepts. A deployment MAY advertise a lower value in indexed mode than in opaque mode, for example on a runtime with tight CPU limits. A deployment whose storage cannot accept multipart uploads MUST advertise `max_pack_bytes <= part_size`. |
 | `part_size` | The part size for resumable uploads (§7.6): a power of two, at least 8 MiB. |
 | `max_parts` | The largest number of parts in one upload (§7.6). |
 | `max_list_refs_page_size` | The largest number of refs one `ListRefs` page returns (§7.9). |

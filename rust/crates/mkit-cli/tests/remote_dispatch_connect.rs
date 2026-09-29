@@ -11,9 +11,10 @@
 //! server, memory-backed) instead of a mock standing in for one.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
+use std::collections::{BTreeMap, HashMap};
 use std::process::Command;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use connectrpc::server::Server;
 use connectrpc::{
@@ -27,6 +28,7 @@ use mkit_transport_connect::generated;
 use mkit_transport_memory::MemoryTransport;
 
 use generated::__buffa::oneof::upload_pack_request::Body as UploadBody;
+use generated::__buffa::oneof::upload_part_request::Msg as PartBody;
 
 fn mkit_bin() -> &'static str {
     env!("CARGO_BIN_EXE_mkit")
@@ -105,9 +107,18 @@ struct CapturedCall {
     procedure: &'static str,
     repository: Option<String>,
     ref_hint: Option<String>,
+    part_index: Option<u32>,
 }
 
 type CapturedCalls = Arc<Mutex<Vec<CapturedCall>>>;
+type PartBuffers = HashMap<Vec<u8>, BTreeMap<u32, Vec<u8>>>;
+
+#[derive(Default)]
+struct PartGate {
+    reached: std::sync::atomic::AtomicBool,
+    released: Mutex<bool>,
+    ready: Condvar,
+}
 
 struct TestService {
     inner: Arc<MemoryTransport>,
@@ -115,6 +126,9 @@ struct TestService {
     not_found: Vec<&'static str>,
     pending_advance: bool,
     admission_required: bool,
+    ticketed: bool,
+    part_buffers: Mutex<PartBuffers>,
+    part_gate: Option<Arc<PartGate>>,
 }
 
 impl TestService {
@@ -128,6 +142,7 @@ impl TestService {
             procedure,
             repository: header("x-repository"),
             ref_hint: header("x-mkit-ref"),
+            part_index: None,
         });
         if self.admission_required
             && procedure == "AdvanceRefs"
@@ -174,39 +189,133 @@ impl generated::TransportService for TestService {
         _request: ServiceRequest<'_, generated::GetServerInfoRequest>,
     ) -> ServiceResult<generated::GetServerInfoResponse> {
         self.capture(&ctx, "GetServerInfo")?;
-        Err(connectrpc::ConnectError::unimplemented(
-            "not implemented yet",
-        ))
+        if self.ticketed {
+            Ok(Response::new(generated::GetServerInfoResponse {
+                protocol: Some("mkit.transport.v1".into()),
+                spec_version: Some(2),
+                part_size: Some(8 << 20),
+                max_parts: Some(512),
+                max_list_refs_page_size: Some(1000),
+                atomic_advance: Some(true),
+                begin_upload_threshold_bytes: Some(0),
+                ..Default::default()
+            }))
+        } else {
+            Err(connectrpc::ConnectError::unimplemented(
+                "not implemented yet",
+            ))
+        }
     }
 
     async fn begin_upload(
         &self,
-        _ctx: RequestContext,
-        _request: ServiceRequest<'_, generated::BeginUploadRequest>,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, generated::BeginUploadRequest>,
     ) -> ServiceResult<generated::BeginUploadResponse> {
-        Err(connectrpc::ConnectError::unimplemented(
-            "not implemented yet",
-        ))
+        if !self.ticketed {
+            return Err(connectrpc::ConnectError::unimplemented(
+                "not implemented yet",
+            ));
+        }
+        self.capture(&ctx, "BeginUpload")?;
+        let pack_id = request.to_owned_message().pack_id.unwrap_or_default();
+        if pack_id.len() != 32 {
+            return Err(ConnectError::invalid_argument("pack id"));
+        }
+        Ok(Response::new(generated::BeginUploadResponse {
+            result: Some(
+                generated::__buffa::oneof::begin_upload_response::Result::Ticket(Box::new(
+                    generated::UploadTicket {
+                        id: Some(pack_id.clone()),
+                        token: Some(pack_id),
+                        part_size: Some(8 << 20),
+                        expires_unix_ms: Some(i64::MAX),
+                        ..Default::default()
+                    },
+                )),
+            ),
+            ..Default::default()
+        }))
     }
 
     async fn upload_part(
         &self,
-        _ctx: RequestContext,
-        _requests: connectrpc::InboundStream<generated::UploadPartRequest>,
+        ctx: RequestContext,
+        mut requests: connectrpc::InboundStream<generated::UploadPartRequest>,
     ) -> ServiceResult<generated::UploadPartResponse> {
-        Err(connectrpc::ConnectError::unimplemented(
-            "not implemented yet",
-        ))
+        if !self.ticketed {
+            return Err(connectrpc::ConnectError::unimplemented(
+                "not implemented yet",
+            ));
+        }
+        self.capture(&ctx, "UploadPart")?;
+        let first = requests
+            .next()
+            .await
+            .ok_or_else(|| ConnectError::invalid_argument("missing header"))??;
+        let Some(PartBody::Header(header)) = first.to_owned_message().msg else {
+            return Err(ConnectError::invalid_argument("missing header"));
+        };
+        let index = header.index.unwrap_or(0);
+        let token = header.ticket_token.unwrap_or_default();
+        let mut bytes = Vec::new();
+        while let Some(message) = requests.next().await {
+            if let Some(PartBody::Chunk(chunk)) = message?.to_owned_message().msg {
+                bytes.extend_from_slice(&chunk);
+            }
+        }
+        self.calls.lock().unwrap().last_mut().unwrap().part_index = Some(index);
+        self.part_buffers
+            .lock()
+            .unwrap()
+            .entry(token)
+            .or_default()
+            .insert(index, bytes);
+        if index == 1
+            && let Some(gate) = &self.part_gate
+        {
+            gate.reached
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let mut released = gate.released.lock().unwrap();
+            while !*released {
+                released = gate.ready.wait(released).unwrap();
+            }
+        }
+        Ok(Response::new(generated::UploadPartResponse {
+            receipt: Some(vec![
+                u8::try_from(index).map_err(|_| ConnectError::invalid_argument("part index"))?,
+                1,
+            ]),
+            ..Default::default()
+        }))
     }
 
     async fn complete_upload(
         &self,
-        _ctx: RequestContext,
-        _request: ServiceRequest<'_, generated::CompleteUploadRequest>,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, generated::CompleteUploadRequest>,
     ) -> ServiceResult<generated::CompleteUploadResponse> {
-        Err(connectrpc::ConnectError::unimplemented(
-            "not implemented yet",
-        ))
+        if !self.ticketed {
+            return Err(connectrpc::ConnectError::unimplemented(
+                "not implemented yet",
+            ));
+        }
+        self.capture(&ctx, "CompleteUpload")?;
+        let message = request.to_owned_message();
+        let token = message.ticket_token.unwrap_or_default();
+        let mut buffers = self.part_buffers.lock().unwrap();
+        let parts = buffers
+            .remove(&token)
+            .ok_or_else(|| ConnectError::invalid_argument("missing parts"))?;
+        if message.receipts.len() != parts.len() {
+            return Err(ConnectError::invalid_argument("missing receipts"));
+        }
+        let bytes: Vec<u8> = parts.into_values().flatten().collect();
+        let key = PackKey::new(mkit_core::hash::hash(&bytes));
+        self.inner
+            .upload_pack(&bytes, &key)
+            .map_err(to_connect_error)?;
+        Ok(Response::new(generated::CompleteUploadResponse::default()))
     }
 
     async fn list_refs(
@@ -280,6 +389,9 @@ impl generated::TransportService for TestService {
             );
         }
         let msg = request.to_owned_message();
+        if self.ticketed && msg.ticket_ids.is_empty() {
+            return Err(ConnectError::failed_precondition("tickets missing"));
+        }
         let head_ref = msg.head_ref.unwrap_or_default();
         let head_condition = wire_to_condition(msg.head_expectation, msg.head_expected_id)?;
         let head_new = to_hash(msg.head_new_id)?;
@@ -509,6 +621,29 @@ fn spawn_server_admission(
     std::thread::JoinHandle<()>,
     CapturedCalls,
 ) {
+    spawn_server_options(
+        backend,
+        not_found,
+        pending_advance,
+        admission_required,
+        false,
+        None,
+    )
+}
+
+fn spawn_server_options(
+    backend: Arc<MemoryTransport>,
+    not_found: Vec<&'static str>,
+    pending_advance: bool,
+    admission_required: bool,
+    ticketed: bool,
+    part_gate: Option<Arc<PartGate>>,
+) -> (
+    u16,
+    tokio::sync::oneshot::Sender<()>,
+    std::thread::JoinHandle<()>,
+    CapturedCalls,
+) {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let server_calls = Arc::clone(&calls);
     let (addr_tx, addr_rx) = mpsc::channel();
@@ -536,6 +671,9 @@ fn spawn_server_admission(
                 not_found,
                 pending_advance,
                 admission_required,
+                ticketed,
+                part_buffers: Mutex::new(HashMap::new()),
+                part_gate,
             });
             let router = Router::new().add_service(service);
 
@@ -601,6 +739,58 @@ fn source_repo_with_one_commit() -> (tempfile::TempDir, String) {
         .trim()
         .to_owned();
     (td, tip_hex)
+}
+
+#[test]
+fn cli_push_uses_begin_upload_and_ticketed_advance() {
+    let (src, tip_hex) = source_repo_with_one_commit();
+    let backend = Arc::new(MemoryTransport::new());
+    let (port, shutdown, handle, calls) =
+        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None);
+    let url = format!("mkit+http://127.0.0.1:{port}/myproj");
+    let config_path = src.path().join(".mkit/config");
+    let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
+    config.push_str("\nremote.origin.url = ");
+    config.push_str(&url);
+    config.push_str("\nremote.origin.type = http\n");
+    std::fs::write(config_path, config).unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(xdg.path().join("mkit")).unwrap();
+    std::fs::write(
+        xdg.path().join("mkit/config"),
+        format!("transport_auth = envelope\ntrusted_remote_endpoint = {url}\n"),
+    )
+    .unwrap();
+    let output = Command::new(mkit_bin())
+        .args(["push", "origin"])
+        .current_dir(src.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = calls.lock().unwrap();
+    assert!(
+        calls
+            .iter()
+            .filter(|call| call.procedure == "BeginUpload")
+            .count()
+            >= 2
+    );
+    assert!(calls.iter().any(|call| call.procedure == "AdvanceRefs"));
+    assert_eq!(
+        backend
+            .read_ref("refs/heads/main")
+            .unwrap()
+            .map(|h| mkit_core::hash::to_hex(&h)),
+        Some(tip_hex)
+    );
+    drop(calls);
+    let _ = shutdown.send(());
+    handle.join().unwrap();
 }
 
 #[test]
@@ -750,7 +940,7 @@ fn cli_pending_interrupt_uses_configured_observer_and_exits_75() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("push: interrupted; re-run push to resume"),
+        stderr.contains("push: interrupted; re-run push to retry"),
         "{stderr}"
     );
     assert!(!stderr.contains("BeginUpload"), "{stderr}");
@@ -966,4 +1156,135 @@ fn cli_admission_helper_trust_filter_json_and_exit_codes() {
         let _ = shutdown.send(());
         handle.join().unwrap();
     }
+}
+
+#[cfg(unix)]
+#[test]
+#[allow(clippy::too_many_lines)] // One subprocess lifetime covers interrupt, receipt, and resume assertions.
+fn cli_part_upload_interrupts_with_exit_75_and_resumes_from_file_receipts() {
+    use std::process::Stdio;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    struct KillOnDrop(std::process::Child);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            if matches!(self.0.try_wait(), Ok(None)) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    let (src, _) = source_repo_with_one_commit();
+    let mut big = vec![0_u8; (8 << 20) * 2 + (1 << 20)];
+    let mut random = 0x8c17_a9e5_u32;
+    for byte in &mut big {
+        random ^= random << 13;
+        random ^= random >> 17;
+        random ^= random << 5;
+        *byte = random.to_le_bytes()[0];
+    }
+    std::fs::write(src.path().join("large.bin"), &big).unwrap();
+    assert!(run_in(src.path(), &["add", "large.bin"]).status.success());
+    let committed = run_in(src.path(), &["commit", "-m", "large"]);
+    assert!(committed.status.success(), "{committed:?}");
+    let gate = Arc::new(PartGate::default());
+    let (port, shutdown, handle, calls) = spawn_server_options(
+        Arc::new(MemoryTransport::new()),
+        Vec::new(),
+        false,
+        false,
+        true,
+        Some(Arc::clone(&gate)),
+    );
+    let url = format!("mkit+http://127.0.0.1:{port}/myproj");
+    let config_path = src.path().join(".mkit/config");
+    let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
+    config.push_str("\nremote.origin.url = ");
+    config.push_str(&url);
+    config.push_str("\nremote.origin.type = http\n");
+    std::fs::write(config_path, config).unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(xdg.path().join("mkit")).unwrap();
+    std::fs::write(
+        xdg.path().join("mkit/config"),
+        format!("transport_auth = envelope\ntrusted_remote_endpoint = {url}\n"),
+    )
+    .unwrap();
+    let child = Command::new(mkit_bin())
+        .args(["push", "origin"])
+        .current_dir(src.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("MKIT_PROGRESS", "always")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut child = KillOnDrop(child);
+    let started = Instant::now();
+    while !gate.reached.load(Ordering::SeqCst) {
+        assert!(
+            started.elapsed() < Duration::from_secs(90),
+            "push never reached second part"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &child.0.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    *gate.released.lock().unwrap() = true;
+    gate.ready.notify_all();
+    let stopped = Instant::now();
+    while child.0.try_wait().unwrap().is_none() {
+        assert!(
+            stopped.elapsed() < Duration::from_secs(30),
+            "interrupted push did not stop"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(child.0.stderr.as_mut().unwrap(), &mut stderr).unwrap();
+    let status = child.0.wait().unwrap();
+    assert_eq!(status.code(), Some(75), "{stderr}");
+    assert!(
+        stderr.contains("upload interrupted; 2 of 3 parts saved"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("run `mkit push` again to resume"),
+        "{stderr}"
+    );
+    let first_parts: Vec<_> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|call| call.part_index)
+        .collect();
+    assert_eq!(first_parts, [0, 1]);
+
+    let resumed = Command::new(mkit_bin())
+        .args(["push", "origin"])
+        .current_dir(src.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let all_parts: Vec<_> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|call| call.part_index)
+        .collect();
+    assert_eq!(all_parts, [0, 1, 2]);
+    let _ = shutdown.send(());
+    handle.join().unwrap();
 }

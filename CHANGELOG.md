@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and best-effort upload-session cleanup (WP-1.14).
 - Server: maintain D34's 16-bucket ref-name index through relay upserts and
   deletes, and serve eventual paged ListRefs from it (WP-1.28b).
+- Connect push: BeginUpload tickets now follow each pack into AdvanceRefs, with
+  bounded membership polling, nonce renewal, a six-data-pack advance limit,
+  and a one-time re-plan for ticket, packlist, or delta-base failures (WP-1.17).
+- Connect push: large ticketed packs stream resumable parts with locally saved
+  receipts, progress and an interruption hint; non-multipart deployments now
+  advertise a compatible pack limit (WP-1.18).
 - Server: enforce owner-signed write grants under Multi/Owner, including
   `0x` namespaces, stored-epoch checks, and grant-scheme discovery. A
   conservative interim ref gate applies until WP-2.7; adapter grant flags
