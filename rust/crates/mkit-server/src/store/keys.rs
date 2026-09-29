@@ -861,6 +861,13 @@ fn parse_namespace_quota(tag: &[u8], body: &[u8]) -> Option<ParsedKey> {
     }
 }
 
+fn parse_named_ref(body: &[u8]) -> Option<(RepoName, String)> {
+    let sep = body.iter().position(|&b| b == 0)?;
+    let repo = RepoName::new(String::from_utf8(body[..sep].to_vec()).ok()?).ok()?;
+    let name = String::from_utf8(body[sep + 1..].to_vec()).ok()?;
+    Some((repo, name))
+}
+
 /// Decode a key of any laid-out class; `None` for a malformed key or a
 /// reserved class.
 #[must_use]
@@ -887,18 +894,12 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"rs" if body.is_empty() => ParsedKey::RelayScan,
         b"rk" => ParsedKey::RepoKnown(RepoName::new(text(body)?).ok()?),
         b"r" => {
-            let sep = body.iter().position(|&b| b == 0)?;
-            ParsedKey::Ref {
-                repo: RepoName::new(text(&body[..sep])?).ok()?,
-                name: text(&body[sep + 1..])?,
-            }
+            let (repo, name) = parse_named_ref(body)?;
+            ParsedKey::Ref { repo, name }
         }
         b"x" => {
-            let sep = body.iter().position(|&b| b == 0)?;
-            ParsedKey::RefIndexEntry {
-                repo: RepoName::new(text(&body[..sep])?).ok()?,
-                name: text(&body[sep + 1..])?,
-            }
+            let (repo, name) = parse_named_ref(body)?;
+            ParsedKey::RefIndexEntry { repo, name }
         }
         b"t" => ParsedKey::Ticket(hash(body)?),
         b"ti" | b"tc" | b"tu" => parse_ticket_binding(tag, body)?,

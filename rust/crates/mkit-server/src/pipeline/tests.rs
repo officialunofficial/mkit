@@ -1649,9 +1649,14 @@ fn planner_relays_every_d34_ref_form_and_no_conflict_or_single() {
     let shards = D34Shards;
     let head = upd(HEAD, Missing, A);
     let source = shards.ref_shard(&repo, HEAD);
-    let Planned::Apply(update) =
-        simple_index_batch(&repo, &source, &shards, &[head.clone()], &[], true)
-    else {
+    let Planned::Apply(update) = simple_index_batch(
+        &repo,
+        &source,
+        &shards,
+        std::slice::from_ref(&head),
+        &[],
+        true,
+    ) else {
         panic!("update")
     };
     let rows = index_relays(&update.batch);
@@ -1723,7 +1728,14 @@ fn planner_relays_every_d34_ref_form_and_no_conflict_or_single() {
         vec![keys::ref_index_key(&repo.name, HEAD)]
     );
     assert!(matches!(
-        simple_index_batch(&repo, &source, &shards, &[head.clone()], &prior, true),
+        simple_index_batch(
+            &repo,
+            &source,
+            &shards,
+            std::slice::from_ref(&head),
+            &prior,
+            true,
+        ),
         Planned::Done(_)
     ));
     let Planned::Apply(single) = simple_index_batch(&repo, &source, &shards, &[head], &[], false)

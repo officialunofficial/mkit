@@ -471,14 +471,17 @@ async fn relay_ref_index_lag<N: NamespaceStore + 'static>(backend: N) {
 
 #[tokio::test]
 async fn ref_index_lag_memory() {
-    relay_ref_index_lag(MemoryKv::default()).await;
+    Box::pin(relay_ref_index_lag(MemoryKv::default())).await;
 }
 
 #[tokio::test]
 async fn ref_index_lag_sqlite() {
     let dir = tempfile::tempdir().unwrap();
     let conn = RusqliteConn::open(dir.path().join("meta.sqlite3")).unwrap();
-    relay_ref_index_lag(Blocking::new(SqlKvStore::open(conn).unwrap())).await;
+    Box::pin(relay_ref_index_lag(Blocking::new(
+        SqlKvStore::open(conn).unwrap(),
+    )))
+    .await;
 }
 
 #[cfg(feature = "test-faults")]

@@ -222,7 +222,7 @@ pub struct Profile {
     pub auth: WireAuth,
     /// `true`: head/packmap conflicts leave both refs untouched.
     pub atomic_advance: bool,
-    /// D34 ref shards and eventual ListRefs over the ref-name index.
+    /// D34 ref shards and eventual `ListRefs` over the ref-name index.
     pub sharding_d34: bool,
     /// The largest pack the server accepts; the oversize case sends a
     /// header declaring one byte more.

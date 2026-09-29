@@ -891,6 +891,7 @@ fn assert_renewal_ops(calls: &[Call], old_timer: &Key, new_timer: &Key) {
     );
 }
 
+#[allow(clippy::too_many_lines)] // One lease lifecycle across write, renewal, relay drain and sweep.
 async fn sweep<N: NamespaceStore + 'static>(
     backend: N,
     clock: Arc<ManualClock>,

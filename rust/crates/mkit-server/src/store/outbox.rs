@@ -33,6 +33,7 @@ const _: () = assert!(MAX_TICKETS_PER_ADVANCE * 9 + ADVANCE_SHARED_OPS <= MAX_BA
 /// Maximum operations (puts plus deletes) per relay row; two ops guard/advance rh,
 /// and two remain for hooks.
 pub const MAX_RELAY_PUTS: usize = 96;
+const RELAY_DELETE_FIELD_BYTES: usize = 13; // ,"deletes":[]
 const _: () = assert!(MAX_RELAY_PUTS + 2 <= MAX_BATCH_OPS);
 // The encoded row is at most 512 KiB, leaving room for the worst rh guard/put.
 const _: () = assert!(MAX_VALUE_BYTES + 2 * (MAX_KEY_BYTES + 8) <= MAX_BATCH_BYTES);
@@ -239,6 +240,89 @@ impl OutboxBuilder {
         self.remember(result);
     }
 
+    fn plan_relay_rows(
+        &mut self,
+        target: Partition,
+        operations: BTreeMap<Key, Option<Value>>,
+    ) -> Result<u64, StoreError> {
+        let at_ms = self
+            .relay_at_ms
+            .ok_or_else(|| StoreError::Invalid("relay rows need relay_at".into()))?;
+        let mut row = RelayV1 {
+            at_ms,
+            target,
+            puts: Vec::new(),
+            deletes: Vec::new(),
+        };
+        let base_bytes = codec::encode_relay(&row)?.as_bytes().len();
+        let mut encoded_bytes = base_bytes;
+        let (puts, deletes): (Vec<_>, Vec<_>) = operations
+            .into_iter()
+            .partition(|(_, value)| value.is_some());
+        for (key, value) in puts {
+            let Some(value) = value else {
+                return Err(StoreError::Invalid("missing relay upsert value".into()));
+            };
+            // JSON uses hex strings: ["key","value"], plus a comma after the first.
+            let bytes = 7 + 2 * (key.as_bytes().len() + value.as_bytes().len());
+            if key.as_bytes().len() > MAX_KEY_BYTES
+                || value.as_bytes().len() > MAX_VALUE_BYTES
+                || base_bytes + bytes > MAX_VALUE_BYTES
+            {
+                return Err(StoreError::Invalid(
+                    "relay upsert cannot fit one row".into(),
+                ));
+            }
+            let addition = bytes + usize::from(!row.puts.is_empty());
+            if row.puts.len() == MAX_RELAY_PUTS
+                || encoded_bytes + addition > MAX_VALUE_BYTES
+                || encoded_bytes + addition + 2 * (MAX_KEY_BYTES + 8) > MAX_BATCH_BYTES
+            {
+                self.push_relay(&row)?;
+                row.puts.clear();
+                encoded_bytes = base_bytes;
+            }
+            encoded_bytes += bytes + usize::from(!row.puts.is_empty());
+            row.puts.push((key, value));
+        }
+        for (key, _) in deletes {
+            // First delete adds the optional JSON field. Every entry
+            // costs at most a comma, quotes, and two hex chars per byte.
+            let bytes = 3 + 2 * key.as_bytes().len();
+            if key.as_bytes().len() > MAX_KEY_BYTES
+                || base_bytes + RELAY_DELETE_FIELD_BYTES + bytes > MAX_VALUE_BYTES
+            {
+                return Err(StoreError::Invalid(
+                    "relay delete cannot fit one row".into(),
+                ));
+            }
+            let addition = bytes
+                + if row.deletes.is_empty() {
+                    RELAY_DELETE_FIELD_BYTES
+                } else {
+                    1 // comma between delete keys
+                };
+            if row.puts.len() + row.deletes.len() == MAX_RELAY_PUTS
+                || encoded_bytes + addition > MAX_VALUE_BYTES
+                || encoded_bytes + addition + 2 * (MAX_KEY_BYTES + 8) > MAX_BATCH_BYTES
+            {
+                self.push_relay(&row)?;
+                row.puts.clear();
+                row.deletes.clear();
+                encoded_bytes = base_bytes;
+            }
+            encoded_bytes += bytes
+                + if row.deletes.is_empty() {
+                    RELAY_DELETE_FIELD_BYTES
+                } else {
+                    1
+                };
+            row.deletes.push(key);
+        }
+        self.push_relay(&row)?;
+        Ok(at_ms)
+    }
+
     /// Finish with error reporting. Errors leave output vectors unchanged.
     pub fn try_finish(
         mut self,
@@ -256,80 +340,7 @@ impl OutboxBuilder {
             if operations.is_empty() {
                 continue;
             }
-            let at_ms = self
-                .relay_at_ms
-                .ok_or_else(|| StoreError::Invalid("relay rows need relay_at".into()))?;
-            relay_due = Some(at_ms);
-            let mut row = RelayV1 {
-                at_ms,
-                target,
-                puts: Vec::new(),
-                deletes: Vec::new(),
-            };
-            let base_bytes = codec::encode_relay(&row)?.as_bytes().len();
-            let mut encoded_bytes = base_bytes;
-            let (puts, deletes): (Vec<_>, Vec<_>) =
-                operations.into_iter().partition(|(_, v)| v.is_some());
-            for (key, value) in puts {
-                let value = value.expect("partitioned relay put");
-                // JSON uses hex strings: ["key","value"], plus a comma after the first.
-                let bytes = 7 + 2 * (key.as_bytes().len() + value.as_bytes().len());
-                if key.as_bytes().len() > MAX_KEY_BYTES
-                    || value.as_bytes().len() > MAX_VALUE_BYTES
-                    || base_bytes + bytes > MAX_VALUE_BYTES
-                {
-                    return Err(StoreError::Invalid(
-                        "relay upsert cannot fit one row".into(),
-                    ));
-                }
-                let addition = bytes + usize::from(!row.puts.is_empty());
-                if row.puts.len() == MAX_RELAY_PUTS
-                    || encoded_bytes + addition > MAX_VALUE_BYTES
-                    || encoded_bytes + addition + 2 * (MAX_KEY_BYTES + 8) > MAX_BATCH_BYTES
-                {
-                    self.push_relay(&row)?;
-                    row.puts.clear();
-                    encoded_bytes = base_bytes;
-                }
-                encoded_bytes += bytes + usize::from(!row.puts.is_empty());
-                row.puts.push((key, value));
-            }
-            for (key, _) in deletes {
-                // First delete adds the optional JSON field. Every entry
-                // costs at most a comma, quotes, and two hex chars per byte.
-                let bytes = 3 + 2 * key.as_bytes().len();
-                const FIELD_BYTES: usize = 13; // ,"deletes":[]
-                if key.as_bytes().len() > MAX_KEY_BYTES
-                    || base_bytes + FIELD_BYTES + bytes > MAX_VALUE_BYTES
-                {
-                    return Err(StoreError::Invalid(
-                        "relay delete cannot fit one row".into(),
-                    ));
-                }
-                let addition = bytes
-                    + if row.deletes.is_empty() {
-                        FIELD_BYTES
-                    } else {
-                        1 // comma between delete keys
-                    };
-                if row.puts.len() + row.deletes.len() == MAX_RELAY_PUTS
-                    || encoded_bytes + addition > MAX_VALUE_BYTES
-                    || encoded_bytes + addition + 2 * (MAX_KEY_BYTES + 8) > MAX_BATCH_BYTES
-                {
-                    self.push_relay(&row)?;
-                    row.puts.clear();
-                    row.deletes.clear();
-                    encoded_bytes = base_bytes;
-                }
-                encoded_bytes += bytes
-                    + if row.deletes.is_empty() {
-                        FIELD_BYTES
-                    } else {
-                        1
-                    };
-                row.deletes.push(key);
-            }
-            self.push_relay(&row)?;
+            relay_due = Some(self.plan_relay_rows(target, operations)?);
         }
         if let Some(due) = relay_due {
             self.writes.push(Write::Put(
