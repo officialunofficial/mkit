@@ -1958,12 +1958,12 @@ async fn excessive_sweep_clock_skew_panics_sqlite() {
     let conn = RusqliteConn::open(dir.path().join("meta.sqlite3"))
         .unwrap()
         .with_clock(store_clock.clone());
-    swept_lease_renewal(
+    Box::pin(swept_lease_renewal(
         Blocking::new(SqlKvStore::open(conn).unwrap()),
         pipeline_clock,
         store_clock,
         24_999,
-    )
+    ))
     .await;
 }
 

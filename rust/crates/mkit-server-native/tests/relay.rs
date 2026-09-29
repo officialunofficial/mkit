@@ -92,7 +92,7 @@ async fn assert_delivered<S: NamespaceStore>(
     pack: [u8; 32],
     due: u64,
 ) {
-    assert_delivered_repo(store, &repo(), source, target, pack, due).await
+    assert_delivered_repo(store, &repo(), source, target, pack, due).await;
 }
 
 async fn assert_delivered_repo<S: NamespaceStore>(
@@ -144,7 +144,7 @@ async fn outbox_timer_notifies_running_driver_and_delivers_without_sleep_loop() 
     assert_delivered(&store, &source, &target, pack, due).await;
 }
 
-/// A Multi repository's relay: its ref shard and RepoIndex partition are
+/// A Multi repository's relay: its ref shard and `RepoIndex` partition are
 /// namespaced (`ns`/`repo` in the partition), and the relay timer delivers
 /// membership between them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
