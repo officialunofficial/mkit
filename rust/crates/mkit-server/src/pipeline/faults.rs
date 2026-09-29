@@ -48,8 +48,11 @@ pub(crate) fn delay_relay_batch(
     op: &Operation,
     now_ms: u64,
 ) -> Batch {
+    // Skip the marker on a full batch: the planner sized it (pruning
+    // included) without this test-only op.
     if let Some(delay) = directives.relay_delay_ms
         && matches!(op.kind, OpKind::UpdateRef(_) | OpKind::AdvanceRefs { .. })
+        && batch.preconditions.len() + batch.writes.len() < crate::store::MAX_BATCH_OPS
     {
         batch.put(
             relay_delay_key(),
@@ -350,7 +353,9 @@ pub(crate) async fn run_timers<S: crate::NamespaceStore>(
                 hook: NoHook,
                 budget: RelayBudget::default(),
             });
-        loop {
+        // Bounded: rows this registry doesn't know (for example other timer
+        // kinds) can keep a tick stopped on budget with nothing fired.
+        for _ in 0..64 {
             let report = run_due(
                 store,
                 &partition,
@@ -373,6 +378,9 @@ pub(crate) async fn run_timers<S: crate::NamespaceStore>(
                 return Ok(());
             }
         }
+        return Err(ServerError::unavailable(
+            "test timers did not drain within 64 ticks",
+        ));
     }
     Ok(())
 }

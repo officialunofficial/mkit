@@ -1415,8 +1415,9 @@ absent from the set has no high-water mark. Every restored relay row and the
 source's next sequence therefore exceed every target's `rh[source]`. Missing
 sources are refused or reconstructed at the supplied watermark; missing
 coordinators require an explicit epoch floor and are marked recovered.
-Relay rows currently contain upserts only, so replaying a row has the same
-effect; gaps are harmless because delivery compares sequences only with `rh`.
+Relay rows carry upserts and deletes (R-134). Redelivering a row is
+idempotent under `rh` ordering and the single-producer rule for relay-deleted
+keys; gaps are harmless because delivery compares sequences only with `rh`.
 The epoch jump prevents a grant issued and revoked after the snapshot from
 becoming valid again. Owners must re-issue grants after restore. Already
 delivered rows cannot be replayed from an older target's snapshot; index and

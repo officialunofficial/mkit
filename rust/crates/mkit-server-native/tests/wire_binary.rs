@@ -158,7 +158,7 @@ async fn check(origin: &str, profile: Profile) {
         .cases
         .iter()
         .filter_map(|case| match &case.verdict {
-            Verdict::Skip(reason) if reason.contains("d34 sharding") => Some(case.name),
+            Verdict::Skip(reason) if reason.to_lowercase().contains("sharding") => Some(case.name),
             _ => None,
         })
         .collect();

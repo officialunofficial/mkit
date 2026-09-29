@@ -70,6 +70,10 @@ MAX_BUFFERED_BYTES=1048576
 test_faults=0
 sharding=single
 runner_args=()
+# Under D34 a ListRefs page scans 16 buckets and each lag poll re-lists, so the
+# 10,000-ref case would take many minutes in miniflare; 1,000 exercises paging
+# (R-134).
+d34_list_args=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --test-faults) test_faults=1 ;;
@@ -77,7 +81,8 @@ while [ $# -gt 0 ]; do
             if [ $# -lt 2 ] || { [ "$2" != single ] && [ "$2" != d34 ]; }; then
                 echo "--sharding requires single or d34" >&2; exit 2
             fi
-            sharding="$2"; shift ;;
+            sharding="$2"; shift
+            if [ "${sharding}" = d34 ]; then d34_list_args=(--list-refs 1000); fi ;;
         --) shift; runner_args=("$@"); break ;;
         *) echo "usage: $0 [--test-faults] [--sharding single|d34] [-- <runner args>]" >&2; exit 2 ;;
     esac
@@ -211,7 +216,7 @@ run_suite() {
     "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
         --repository "${REPOSITORY}" --random-signer --atomic-advance --fresh-target --milestone M1 \
         --max-pack-bytes "${MAX_PACK_BYTES}" --features "${features}" --sharding "${sharding}" \
-        "$@" ${runner_args[@]+"${runner_args[@]}"} || status=$?
+        "$@" ${d34_list_args[@]+"${d34_list_args[@]}"} ${runner_args[@]+"${runner_args[@]}"} || status=$?
     if [ "${status}" -ne 0 ]; then
         echo "wire suite failed (exit ${status}); wrangler log tail:" >&2
         tail -n 80 "${log}" >&2
