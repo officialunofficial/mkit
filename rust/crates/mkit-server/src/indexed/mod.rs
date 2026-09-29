@@ -72,6 +72,11 @@ pub struct IndexedConfig {
     /// Where verification runs: inline in the advance, or in checkpointed
     /// alarm slices (WP-4.8). Programmatic only.
     pub verification: VerificationMode,
+    /// Most member commits and uncached delta bases one fast-forward check
+    /// may resolve (WP-4.17), from 1 to [`MAX_ANCESTRY_COMMITS_LIMIT`].
+    /// Beyond it the check is unproven and
+    /// the write is denied.
+    pub max_ancestry_commits: u32,
 }
 
 /// Where a ticketed pack is verified.
@@ -97,6 +102,7 @@ impl IndexedConfig {
             verification: VerificationMode::Scheduled,
             max_pack_bytes,
             decode_budget: defaults.decode_budget.max(max_pack_bytes),
+            max_ancestry_commits: SCHEDULED_MAX_ANCESTRY_COMMITS,
             ..defaults
         }
     }
@@ -108,6 +114,16 @@ impl IndexedConfig {
             .unwrap_or_else(|| self.max_pack_bytes.saturating_mul(4))
     }
 }
+
+/// The largest accepted [`IndexedConfig::max_ancestry_commits`].
+pub const MAX_ANCESTRY_COMMITS_LIMIT: u32 = 65_536;
+
+/// [`IndexedConfig::max_ancestry_commits`] under scheduled verification: a
+/// Worker alarm cannot walk more (WP-4.17's Worker cap, R-171).
+pub const SCHEDULED_MAX_ANCESTRY_COMMITS: u32 = 64;
+
+/// The default [`IndexedConfig::max_ancestry_commits`].
+pub const DEFAULT_MAX_ANCESTRY_COMMITS: u32 = 256;
 
 /// The default [`IndexedConfig::extract_min_bytes`]: 64 KiB.
 pub const DEFAULT_EXTRACT_MIN_BYTES: u64 = 64 * 1024;
@@ -122,6 +138,7 @@ impl Default for IndexedConfig {
             extract_min_bytes: DEFAULT_EXTRACT_MIN_BYTES,
             max_extract_bytes: None,
             verification: VerificationMode::Inline,
+            max_ancestry_commits: DEFAULT_MAX_ANCESTRY_COMMITS,
         }
     }
 }

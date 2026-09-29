@@ -3,8 +3,26 @@
 use mkit_attest::grant::{RefFlags, VerifiedGrant, head_packmap, packmap_head};
 use mkit_core::refs::RefWriteCondition;
 
+use super::ff::FastForward;
 use crate::error::ServerError;
 use crate::op::{OpKind, PresenceRequirement, RefUpdate};
+
+/// What a scope check leaves for later stages: an `ANY` change's ref-state
+/// condition, or (indexed mode) the ancestry a `u`-only `MATCH` must prove.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ScopeOutcome {
+    pub presence: Option<PresenceRequirement>,
+    pub fast_forward: Option<FastForward>,
+}
+
+impl ScopeOutcome {
+    fn presence(requirement: Option<PresenceRequirement>) -> Self {
+        Self {
+            presence: requirement,
+            fast_forward: None,
+        }
+    }
+}
 
 fn denied() -> ServerError {
     ServerError::permission_denied("write grant rejected: ref scope")
@@ -16,7 +34,7 @@ pub(crate) fn authorize(
     grant: &VerifiedGrant,
     kind: &OpKind,
     indexed_mode: bool,
-) -> Result<Option<PresenceRequirement>, ServerError> {
+) -> Result<ScopeOutcome, ServerError> {
     gate_with(kind, indexed_mode, |name| grant.effective_flags(name))
 }
 
@@ -24,7 +42,7 @@ fn gate_with(
     kind: &OpKind,
     indexed_mode: bool,
     flags: impl Fn(&str) -> RefFlags,
-) -> Result<Option<PresenceRequirement>, ServerError> {
+) -> Result<ScopeOutcome, ServerError> {
     match kind {
         OpKind::UpdateRef(update) => {
             // The bare prefix is also reserved: some filesystem backends use
@@ -43,7 +61,9 @@ fn gate_with(
             // The packmap travels with its head; it has no independent flags.
             check_change(head, flags(&head.name), indexed_mode)
         }
-        OpKind::BeginUpload { ref_name, .. } if !flags(ref_name).is_empty() => Ok(None),
+        OpKind::BeginUpload { ref_name, .. } if !flags(ref_name).is_empty() => {
+            Ok(ScopeOutcome::default())
+        }
         // Ticketless UploadPack has no ref to scope. A ticketed upload bypasses
         // this authorization path after its BeginUpload check.
         _ => Err(denied()),
@@ -54,40 +74,54 @@ fn check_change(
     update: &RefUpdate,
     flags: RefFlags,
     indexed_mode: bool,
-) -> Result<Option<PresenceRequirement>, ServerError> {
+) -> Result<ScopeOutcome, ServerError> {
     if update.new.is_none() {
         return flags
             .contains(RefFlags::DELETE)
-            .then_some(None)
+            .then(ScopeOutcome::default)
             .ok_or_else(denied);
     }
-    match update.condition {
-        RefWriteCondition::Missing => flags
+    match (update.condition, update.new) {
+        (RefWriteCondition::Missing, _) => flags
             .contains(RefFlags::CREATE)
-            .then_some(None)
+            .then(ScopeOutcome::default)
             .ok_or_else(denied),
-        RefWriteCondition::Match(_) => {
+        (RefWriteCondition::Match(from), Some(to)) => {
             if flags.contains(RefFlags::FORCE) {
-                return Ok(None);
+                return Ok(ScopeOutcome::default());
             }
-            // TODO(Stage 2, R-148): in indexed mode, check fast-forward
-            // ancestry before accepting `u` alone. Until then it remains
-            // fail-closed.
-            if flags.contains(RefFlags::UPDATE) && !indexed_mode {
-                return Err(ServerError::permission_denied(
-                    "update without force needs indexed mode",
-                ));
+            if flags.contains(RefFlags::UPDATE) {
+                // `u` alone is a fast-forward only: opaque mode cannot
+                // prove one; indexed mode proves it at stage 5 (§8.2).
+                if !indexed_mode {
+                    return Err(ServerError::permission_denied(
+                        "update without force needs indexed mode",
+                    ));
+                }
+                return Ok(ScopeOutcome {
+                    presence: None,
+                    fast_forward: Some(FastForward {
+                        name: update.name.clone(),
+                        from,
+                        to,
+                    }),
+                });
             }
             Err(denied())
         }
-        RefWriteCondition::Any => {
+        (RefWriteCondition::Match(_), None) => Err(denied()),
+        (RefWriteCondition::Any, _) => {
             let create = flags.contains(RefFlags::CREATE);
             let force = flags.contains(RefFlags::FORCE);
             match (create, force) {
                 (false, false) => Err(denied()),
-                (true, true) => Ok(None),
-                (true, false) => Ok(Some(PresenceRequirement::Absent(update.name.clone()))),
-                (false, true) => Ok(Some(PresenceRequirement::Present(update.name.clone()))),
+                (true, true) => Ok(ScopeOutcome::default()),
+                (true, false) => Ok(ScopeOutcome::presence(Some(PresenceRequirement::Absent(
+                    update.name.clone(),
+                )))),
+                (false, true) => Ok(ScopeOutcome::presence(Some(PresenceRequirement::Present(
+                    update.name.clone(),
+                )))),
             }
         }
     }
@@ -166,7 +200,9 @@ mod tests {
                 c || f,
                 "bits={bits}"
             );
-            let requirement = gate_with(&any, false, |_| flags).ok().flatten();
+            let requirement = gate_with(&any, false, |_| flags)
+                .ok()
+                .and_then(|o| o.presence);
             assert_eq!(
                 requirement,
                 match (c, f) {
@@ -180,7 +216,53 @@ mod tests {
     }
 
     #[test]
-    fn update_only_needs_indexed_mode_and_ancestry_check() {
+    fn indexed_required_flag_table_all_subsets() {
+        let name = "refs/heads/main";
+        let matched = change(name, RefWriteCondition::Match([2; 32]), false);
+        for bits in 0..16 {
+            let mut flags = RefFlags::EMPTY;
+            for (bit, flag) in [
+                RefFlags::CREATE,
+                RefFlags::UPDATE,
+                RefFlags::FORCE,
+                RefFlags::DELETE,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if bits & (1 << bit) != 0 {
+                    flags = flags.union(flag);
+                }
+            }
+            let (u, f) = (
+                flags.contains(RefFlags::UPDATE),
+                flags.contains(RefFlags::FORCE),
+            );
+            // Only the `MATCH` row changes in indexed mode: `u` without `f`
+            // yields the ancestry requirement instead of a denial.
+            let outcome = gate_with(&matched, true, |_| flags);
+            assert_eq!(outcome.is_ok(), u || f, "bits={bits}");
+            assert_eq!(
+                outcome.ok().and_then(|o| o.fast_forward).is_some(),
+                u && !f,
+                "bits={bits}"
+            );
+            for kind in [
+                change(name, RefWriteCondition::Missing, false),
+                change(name, RefWriteCondition::Match([2; 32]), true),
+                change(name, RefWriteCondition::Any, false),
+            ] {
+                assert_eq!(
+                    gate_with(&kind, true, |_| flags).ok(),
+                    gate_with(&kind, false, |_| flags).ok(),
+                    "bits={bits}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn update_only_needs_indexed_mode_and_yields_the_ancestry_requirement() {
         let matched = change("refs/heads/main", RefWriteCondition::Match([2; 32]), false);
         assert_eq!(
             gate_with(&matched, false, |_| RefFlags::UPDATE)
@@ -188,7 +270,25 @@ mod tests {
                 .public_message(),
             "update without force needs indexed mode"
         );
-        assert!(gate_with(&matched, true, |_| RefFlags::UPDATE).is_err());
+        // Indexed mode proves the ancestry later: `u` alone yields the
+        // requirement, `u` with `f` needs none, and no `u` is denied.
+        assert_eq!(
+            gate_with(&matched, true, |_| RefFlags::UPDATE).unwrap(),
+            ScopeOutcome {
+                presence: None,
+                fast_forward: Some(FastForward {
+                    name: "refs/heads/main".into(),
+                    from: [2; 32],
+                    to: [1; 32],
+                }),
+            }
+        );
+        let forced = RefFlags::UPDATE.union(RefFlags::FORCE);
+        assert_eq!(
+            gate_with(&matched, true, |_| forced).unwrap(),
+            ScopeOutcome::default()
+        );
+        assert!(gate_with(&matched, true, |_| RefFlags::CREATE).is_err());
     }
 
     #[test]

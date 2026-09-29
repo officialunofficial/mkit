@@ -169,6 +169,7 @@ fn granted_op(kind: OpKind, nonce: &str) -> Operation {
         nonce: nonce.repeat(32),
         commitment: Commitment::Body([0; 32]),
         expires_at_ms: 0,
+        created_at_ms: 0,
     };
     let mut op = Operation::new(
         repo(),

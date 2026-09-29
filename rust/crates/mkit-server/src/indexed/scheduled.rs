@@ -19,7 +19,7 @@ use super::{
     },
     resolve,
     state::VerificationV1,
-    verify::{closure_error, packlist_error},
+    verify::{StagedCommits, closure_error, packlist_error},
 };
 use crate::ServerError;
 use crate::pipeline::ShardMap;
@@ -33,7 +33,7 @@ use crate::telemetry::Metrics;
 use crate::timers::registry::kinds;
 use mkit_core::hash::Hash;
 use mkit_core::object::ObjectType;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Owed children one advance reads per consumed pack before it gives up.
 const MAX_LOCAL_CLOSURE_IDS: usize = 4096;
@@ -181,6 +181,90 @@ async fn member_head_type<B: BlobStore, N: NamespaceStore>(
     Ok(object.object_type() as u8)
 }
 
+/// The history edges the fast-forward check reads (WP-4.17), in the shape the
+/// inline verifier stages them: the parents of the commits reachable from
+/// `head` in the consumed packs, at most `max_ancestry_commits` of them. A
+/// commit past that bound is not in the map, so the walk treats it as a
+/// member and, finding none, leaves the ancestry unproven (the write is
+/// denied): the Worker's ancestry cap of WP-4.17.
+async fn staged_commits<N: NamespaceStore>(
+    store: &N,
+    source: &Partition,
+    repo: &RepoId,
+    ready: &[Consumed<'_>],
+    head: Hash,
+    cfg: IndexedConfig,
+) -> Result<StagedCommits, ServerError> {
+    let limit = usize::try_from(cfg.max_ancestry_commits).unwrap_or(usize::MAX);
+    let packs: Vec<&Consumed<'_>> = ready.iter().filter(|c| c.job.kind == Kind::Pack).collect();
+    let mut parents: BTreeMap<Hash, Vec<Hash>> = BTreeMap::new();
+    let mut seen = BTreeSet::from([head]);
+    let mut frontier = vec![head];
+    while !frontier.is_empty() && parents.len() < limit {
+        let mut round: BTreeMap<Hash, Vec<Hash>> = BTreeMap::new();
+        for held in &packs {
+            let want: Vec<Hash> = frontier
+                .iter()
+                .copied()
+                .filter(|id| !round.contains_key(id))
+                .collect();
+            if want.is_empty() {
+                break;
+            }
+            let rows: Vec<_> = want
+                .iter()
+                .map(|id| {
+                    keys::verify_row(&repo.name, &held.ticket.pack_id, keys::VC_HISTORY, Some(id))
+                })
+                .collect();
+            let found = store
+                .get_many(source, &rows)
+                .await
+                .map_err(|_| storage_failed())?;
+            for (id, row) in want.into_iter().zip(found) {
+                let Some(raw) = row else { continue };
+                if raw.as_bytes().len() % 32 != 0 {
+                    return Err(storage_failed());
+                }
+                round.insert(
+                    id,
+                    raw.as_bytes()
+                        .chunks_exact(32)
+                        .filter_map(|p| Hash::try_from(p).ok())
+                        .collect(),
+                );
+            }
+        }
+        let mut next = Vec::new();
+        for id in std::mem::take(&mut frontier) {
+            let Some(edges) = round.remove(&id) else {
+                continue;
+            };
+            if parents.len() >= limit {
+                break;
+            }
+            for parent in &edges {
+                if seen.insert(*parent) {
+                    next.push(*parent);
+                }
+            }
+            parents.insert(id, edges);
+        }
+        frontier = next;
+    }
+    Ok(StagedCommits {
+        parents,
+        objects: ready
+            .iter()
+            .map(|c| usize::try_from(c.job.entries).unwrap_or(usize::MAX))
+            .fold(0, usize::saturating_add),
+        bytes: ready
+            .iter()
+            .map(|c| c.job.in_pack_bytes)
+            .fold(0, u64::saturating_add),
+    })
+}
+
 /// Check every consumed ticket of one advance: `Ok` only when each pack is
 /// verified, indexed and extracted, and the set's closure, head and packlists
 /// hold. No ticket is consumed and no advance row is written.
@@ -197,7 +281,7 @@ pub async fn check<B: BlobStore, N: NamespaceStore>(
     cfg: IndexedConfig,
     clock: &dyn Clock,
     metrics: &dyn Metrics,
-) -> Result<(), ServerError> {
+) -> Result<StagedCommits, ServerError> {
     let now = now_ms(clock);
     let bound = cfg.relay_lag_bound_ms;
     let wanted: Vec<_> = tickets
@@ -454,5 +538,5 @@ pub async fn check<B: BlobStore, N: NamespaceStore>(
             return Err(packlist_error(now, list.ticket.created_at_ms, bound));
         }
     }
-    Ok(())
+    staged_commits(store, source, repo, &ready, head, cfg).await
 }

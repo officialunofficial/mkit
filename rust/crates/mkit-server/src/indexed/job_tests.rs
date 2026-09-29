@@ -9,6 +9,7 @@ use mkit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEnt
 use mkit_core::pack::{DecodeLimits, NoExternalBases, PackWriter, decode_entries_with};
 use mkit_core::serialize::serialize;
 use mkit_core::sign::{KeyPair, sign_commit};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -470,7 +471,11 @@ impl Rig {
     }
 
     /// What an advance consuming `items` answers.
-    fn check(&self, items: &[(&TicketV1, Hash)], head: Hash) -> Result<(), crate::ServerError> {
+    fn check(
+        &self,
+        items: &[(&TicketV1, Hash)],
+        head: Hash,
+    ) -> Result<super::verify::StagedCommits, crate::ServerError> {
         let tickets: Vec<_> = items.iter().map(|(ticket, _)| (*ticket).clone()).collect();
         let ids: Vec<_> = items.iter().map(|(_, id)| *id).collect();
         block_on(scheduled::check(
@@ -1690,4 +1695,55 @@ fn a_child_that_became_a_member_after_the_job_looked_is_found_by_the_advance() {
     // for the job's final recheck after the lag bound.
     seed_member(&rig, tree, &tree_raw);
     rig.check(&[(&ticket, id)], head).unwrap();
+}
+
+#[test]
+fn the_advance_hands_the_fast_forward_check_the_staged_history_edges_up_to_the_worker_cap() {
+    let tree = Object::Tree(Tree {
+        entries: Vec::new(),
+    });
+    let tree_id = tree.id().unwrap();
+    let mut writer = PackWriter::new_raw_only();
+    writer
+        .push_raw(tree_id, &serialize(&tree).unwrap())
+        .unwrap();
+    let mut prior = Vec::new();
+    let mut chain = Vec::new();
+    for n in 0..5_u8 {
+        let (commit, id) = signed_commit(tree_id, prior.clone(), 7, &[n]);
+        writer.push_raw(id, &serialize(&commit).unwrap()).unwrap();
+        prior = vec![id];
+        chain.push(id);
+    }
+    let pack = writer.finish().unwrap();
+    let head = chain[4];
+    let mut rig = Rig::new();
+    let (ticket, id) = rig.add(&pack);
+    rig.create(&ticket, id);
+    rig.drive(|rig| rig.finished(&ticket.pack_id));
+    let staged = rig.check(&[(&ticket, id)], head).unwrap();
+    assert_eq!(staged.objects, 6);
+    assert_eq!(
+        staged.parents.len(),
+        5,
+        "every commit on the way down to the root"
+    );
+    assert_eq!(staged.parents[&head], vec![chain[3]]);
+    assert_eq!(staged.parents[&chain[0]], Vec::<Hash>::new());
+    assert!(
+        !staged.parents.contains_key(&tree_id),
+        "a tree has no history edge"
+    );
+    // A Worker walks at most its cap: past it a commit is simply not staged, and
+    // the fast-forward check then finds it in no member and leaves the write denied.
+    rig.cfg.max_ancestry_commits = 2;
+    let staged = rig.check(&[(&ticket, id)], head).unwrap();
+    assert_eq!(
+        staged.parents.keys().copied().collect::<BTreeSet<_>>(),
+        BTreeSet::from([chain[4], chain[3]])
+    );
+    assert_eq!(
+        IndexedConfig::scheduled(1 << 30).max_ancestry_commits,
+        super::SCHEDULED_MAX_ANCESTRY_COMMITS
+    );
 }

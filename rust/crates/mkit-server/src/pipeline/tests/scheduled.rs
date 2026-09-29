@@ -3,7 +3,8 @@
 #![allow(clippy::unwrap_used)] // Invalid fixtures should fail the test immediately.
 
 use super::indexed::{
-    assert_advance_unmoved, begin_and_upload, environment_with, pack, signed, split_pack,
+    assert_advance_unmoved, begin_and_upload, environment_with, environment_with_policy, pack,
+    signed, split_pack,
 };
 use super::*;
 use crate::indexed::budget::BlobWindows;
@@ -338,5 +339,105 @@ fn d34_slices_relay_index_rows_under_the_shards_lease_before_the_advance_commits
     assert_eq!(
         advance(&env, &owner, &identity, 331, head, pack_id, vec![id]).unwrap(),
         AdvanceOutcome::Committed
+    );
+}
+
+fn history_commit(parents: &[Hash], salt: u8) -> (mkit_core::object::Object, Hash) {
+    use mkit_core::object::{Commit, Identity, Object, Tree};
+    use mkit_core::sign::{KeyPair, sign_commit};
+    let signer = KeyPair::from_seed([9; 32]);
+    let mut commit = Commit::new_unannotated(
+        Object::Tree(Tree {
+            entries: Vec::new(),
+        })
+        .id()
+        .unwrap(),
+        parents.to_vec(),
+        Identity::ed25519(signer.public.0),
+        signer.public.0,
+        vec![salt],
+        42,
+        [0; 64],
+    );
+    commit.signature = sign_commit(&commit, &signer).unwrap().0;
+    let commit = Object::Commit(commit);
+    let id = commit.id().unwrap();
+    (commit, id)
+}
+
+/// A fast-forward-only ref over scheduled verification: the staged history
+/// edges come from the job's rows, so a child of the current head passes and a
+/// fork is refused, both after the slices ran (WP-4.17 over WP-4.8).
+#[test]
+fn fast_forward_only_works_over_scheduled_verification() {
+    use crate::policy::{RefPolicy, RefRule};
+    use mkit_attest::grant::RefPattern;
+    use mkit_core::object::{Object, Tree};
+    use mkit_core::pack::PackWriter;
+    use mkit_core::serialize::serialize;
+
+    let policy = RefPolicy::new(vec![RefRule {
+        pattern: RefPattern::parse(HEAD).unwrap(),
+        allowed_signers: None,
+        fast_forward_only: true,
+    }]);
+    let (env, owner, identity) =
+        environment_with_policy(Sharding::Single, scheduled(), Some(policy));
+    let tree = Object::Tree(Tree {
+        entries: Vec::new(),
+    });
+    let pack_of = |objects: &[&Object]| {
+        let mut writer = PackWriter::new_raw_only();
+        for object in objects {
+            writer
+                .push_raw(object.id().unwrap(), &serialize(object).unwrap())
+                .unwrap();
+        }
+        writer.finish().unwrap()
+    };
+    let (c1, id1) = history_commit(&[], 1);
+    let (c2, id2) = history_commit(&[id1], 2);
+    let (fork, fork_id) = history_commit(&[id1], 3);
+    let request = signed(&owner, &identity, Procedure::AdvanceRefs, 340);
+    let repo = env.auth(&request).unwrap().repo().repo.clone();
+    let source = env.pipe.shards.ref_shard(&repo, HEAD);
+    let mut number = 340;
+    let mut push =
+        |objects: &[&Object], head: Hash, condition: (RefWriteCondition, RefWriteCondition)| {
+            let bytes = pack_of(objects);
+            number += 2;
+            let ticket = begin_and_upload(&env, &owner, &identity, &bytes, number);
+            let request = signed(&owner, &identity, Procedure::AdvanceRefs, number + 1);
+            let attempt = || {
+                block_on(env.pipe.advance_refs_with_tickets(
+                    &env.auth(&request).unwrap(),
+                    upd(HEAD, condition.0, head),
+                    upd(PACKMAP, condition.1, hash(&bytes)),
+                    vec![ticket],
+                ))
+            };
+            assert_eq!(
+                attempt().unwrap_err().public_message(),
+                "pack verification pending"
+            );
+            alarms(&env, &source, 12);
+            (attempt(), hash(&bytes))
+        };
+    let (first, pack1) = push(&[&tree, &c1], id1, (Missing, Missing));
+    assert_eq!(first.unwrap(), AdvanceOutcome::Committed);
+    let (second, pack2) = push(&[&c2], id2, (Match(id1), Match(pack1)));
+    assert_eq!(second.unwrap(), AdvanceOutcome::Committed);
+    // A fork off c1 is not a descendant of the head c2.
+    let (third, _) = push(&[&fork], fork_id, (Match(id2), Match(pack2)));
+    let error = third.unwrap_err();
+    assert_eq!(
+        error.public_message(),
+        "non-fast-forward update not allowed on this ref"
+    );
+    assert_eq!(
+        block_on(env.pipe.meta.get(&source, &keys::ref_key(&repo.name, HEAD)))
+            .unwrap()
+            .map(|raw| codec::decode_ref_id(&raw).unwrap()),
+        Some(id2)
     );
 }

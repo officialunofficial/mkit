@@ -33,6 +33,10 @@ pub const METRIC_RELAY_BACKLOG_ROWS: &str = "mkit_server_relay_backlog_rows";
 pub const METRIC_INDEX_SLICE_SUBREQUESTS: &str = "mkit_server_index_slice_subrequests";
 /// Counter: an object index lookup hit a bounded-work cap. Label: `reason`.
 pub const METRIC_INDEX_LOOKUP_CAPPED: &str = "mkit_server_index_lookup_capped_total";
+/// Counter: a fast-forward check ended unproven (a walk or lookup cap, the
+/// decode budget or a corrupt member) and its write was denied. Label: `reason`.
+pub const METRIC_REF_POLICY_ANCESTRY_UNCHECKED: &str =
+    "mkit_server_ref_policy_ancestry_unchecked_total";
 /// Counter: a content rejection could not be persisted in verification state.
 pub const METRIC_INDEX_REJECTED_WRITE_FAILED: &str =
     "mkit_server_index_rejected_write_failed_total";

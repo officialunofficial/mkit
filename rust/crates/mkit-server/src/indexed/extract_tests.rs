@@ -18,7 +18,10 @@ use super::extract::{
     hold_ttl_ms,
 };
 use super::tests::{NOW, repo, seed_member_raw, source, ticket, upload};
-use super::{IndexedConfig, verify::verify_ticketed};
+use super::{
+    IndexedConfig,
+    verify::{StagedCommits, verify_ticketed},
+};
 use crate::memory::{MemoryBlobStore, MemoryKv};
 use crate::pipeline::SinglePartition;
 use crate::repo::RepoId;
@@ -118,7 +121,7 @@ fn run<B: MultipartBlobStore, S: NamespaceStore>(
     head: Hash,
     cfg: IndexedConfig,
     clock: &ManualClock,
-) -> Result<Vec<Hash>, ServerError> {
+) -> Result<StagedCommits, ServerError> {
     let tickets: Vec<TicketV1> = packs
         .iter()
         .map(|pack| ticket(repo, pack, NOW as u64))

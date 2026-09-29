@@ -219,8 +219,10 @@ content commitment, times and nonce before effects. Retries keep their operation
 identity. SQLite adapters commit mutable effects, quota and replay response in
 one transaction; immutable publication records a recoverable reservation first.
 New quota- or rate-limited operations pass admission before allocating a replay
-record; rejection leaves replay storage unchanged. Existing reservations and
-saved results remain retryable without another quota charge.
+record; admission rejection leaves replay storage unchanged. Permanent built-in
+ref policy denials commit a guarded replay rejection, preserving a concurrent
+winner; membership lag (`unavailable`) answers remain unstored. Existing
+reservations and saved results remain retryable without another quota charge.
 
 **Because:** signature validity alone cannot prevent cross-service replay or
 repeating an effect after a crash.
@@ -230,7 +232,8 @@ restore an old name or charge duplicate upload quota.
 Reserving rejected operations also lets throttled authors keep growing replay
 storage after exhausting their write budget.
 
-**Enforced by:** shared core canonical/context tests; Connect retry tests;
+**Enforced by:** `mkit-server` ref policy permanent-denial, lag-retry and
+concurrent replay winner tests; shared core canonical/context tests; Connect retry tests;
 actual local Workers regressions in `apps/{repo-worker,vcs-worker,keys-worker}/tests/`;
 quota and rate admission in `apps/mkit-worker-common/tests/quota_ledger.mjs`;
 web/spammer envelope tests. Keys failure injection after name and result writes

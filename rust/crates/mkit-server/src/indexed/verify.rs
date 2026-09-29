@@ -64,6 +64,105 @@ pub(super) fn packlist_error(now: u64, created: u64, bound: u64) -> ServerError 
     }
 }
 
+/// What a verified advance staged: the history edges of its commits, remixes
+/// and tags (a tag has none), and the decoded bytes it holds, which the
+/// fast-forward walk charges against the decode budget (WP-4.17).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct StagedCommits {
+    /// Object id to its `parents`; only remix sources are never followed.
+    pub parents: BTreeMap<Hash, Vec<Hash>>,
+    /// Every staged object, of any type.
+    pub objects: usize,
+    /// Total decoded bytes of the staged objects.
+    pub bytes: u64,
+}
+
+/// The `parents` of a history object; `None` for a blob, tree or manifest.
+pub(crate) fn history_parents(object: &Object) -> Option<Vec<Hash>> {
+    match object {
+        Object::Commit(commit) => Some(commit.parents.clone()),
+        Object::Remix(remix) => Some(remix.parents.clone()),
+        Object::Tag(_) => Some(Vec::new()),
+        _ => None,
+    }
+}
+
+/// Reconstruct a located member head and require a commit, remix or tag,
+/// which `verify_push` does not check for a known frontier.
+#[allow(clippy::too_many_arguments)]
+async fn check_member_head_type<B: BlobStore, S: NamespaceStore>(
+    blobs: &B,
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    head: Hash,
+    located: index::LocatedObject,
+    created: u64,
+    budget: u64,
+    (cfg, clock, metrics): (IndexedConfig, &dyn Clock, &dyn Metrics),
+) -> Result<(), ServerError> {
+    let mut memo = resolve::MemberCache::default();
+    let mut visiting = BTreeSet::new();
+    let (bytes, _) = resolve::member_object(
+        blobs,
+        store,
+        shards,
+        repo,
+        head,
+        located,
+        cfg.max_delta_chain_depth,
+        budget,
+        &mut memo,
+        &mut visiting,
+        metrics,
+    )
+    .await
+    .map_err(|failure| failure.public_error(now_ms(clock), created, cfg.relay_lag_bound_ms))?;
+    let object = mkit_core::serialize::deserialize(&bytes).map_err(|_| bad_object())?;
+    if history_parents(&object).is_none() {
+        return Err(ServerError::invalid_argument("open closure"));
+    }
+    Ok(())
+}
+
+/// A ticketless non-delete head must be a commit, remix or tag member of
+/// this repository (SPEC-SERVER §9.7). The miss answer is repository-scoped
+/// and `created` opens the §9.4 lag window.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_member_head<B: BlobStore, S: NamespaceStore>(
+    blobs: &B,
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    head: Hash,
+    created: u64,
+    (cfg, clock, metrics): (IndexedConfig, &dyn Clock, &dyn Metrics),
+) -> Result<(), ServerError> {
+    let found = resolve::locate_split(store, shards, repo, &[head], metrics).await?;
+    match found.get(&head) {
+        Some(Ok(Some(located))) => {
+            check_member_head_type(
+                blobs,
+                store,
+                shards,
+                repo,
+                head,
+                *located,
+                created,
+                cfg.decode_budget,
+                (cfg, clock, metrics),
+            )
+            .await
+        }
+        Some(Err(_)) => Err(ServerError::invalid_argument("object index limit exceeded")),
+        _ => Err(closure_error(
+            now_ms(clock),
+            created,
+            cfg.relay_lag_bound_ms,
+        )),
+    }
+}
+
 async fn pack_bytes<B: BlobStore>(
     blobs: &B,
     ticket: &TicketV1,
@@ -270,7 +369,7 @@ pub async fn verify_ticketed<B: MultipartBlobStore, S: NamespaceStore>(
     cfg: IndexedConfig,
     clock: &dyn Clock,
     metrics: &dyn Metrics,
-) -> Result<Vec<Hash>, ServerError> {
+) -> Result<StagedCommits, ServerError> {
     let mut acquired = BTreeMap::new();
     let result = verify_ticketed_inner(
         blobs,
@@ -314,7 +413,7 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
     clock: &dyn Clock,
     metrics: &dyn Metrics,
     acquired: &mut BTreeMap<Hash, HeldLease>,
-) -> Result<Vec<Hash>, ServerError> {
+) -> Result<StagedCommits, ServerError> {
     let now = now_ms(clock);
     let consumed: BTreeSet<_> = tickets.iter().map(|ticket| ticket.pack_id).collect();
     let mut staged: BTreeMap<Hash, (Vec<u8>, Object, u64)> = BTreeMap::new();
@@ -743,9 +842,13 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
         }
     }
     if !staged.contains_key(&head) {
-        needed
-            .entry(head)
-            .or_insert_with(|| tickets.first().map_or(now, |ticket| ticket.created_at_ms));
+        needed.entry(head).or_insert_with(|| {
+            tickets
+                .iter()
+                .map(|ticket| ticket.created_at_ms)
+                .min()
+                .unwrap_or(now)
+        });
     }
     let mut member_head = None;
     if !needed.is_empty() {
@@ -774,36 +877,18 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
     // `verify_push` skips known frontiers, including a known root's type.
     // Reconstruct a member head once so a blob/tree cannot become a tip.
     if let Some((located, created)) = member_head {
-        let mut memo = resolve::MemberCache::default();
-        let mut visiting = BTreeSet::new();
-        let (bytes, _) = resolve::member_object(
+        check_member_head_type(
             blobs,
             store,
             shards,
             repo,
             head,
             located,
-            cfg.max_delta_chain_depth,
+            created,
             cfg.decode_budget.saturating_sub(staged_bytes),
-            &mut memo,
-            &mut visiting,
-            metrics,
+            (cfg, clock, metrics),
         )
-        .await
-        .map_err(|failure| {
-            failure.public_error(
-                u64::try_from(clock.now_ms()).unwrap_or(0),
-                created,
-                cfg.relay_lag_bound_ms,
-            )
-        })?;
-        let object = mkit_core::serialize::deserialize(&bytes).map_err(|_| bad_object())?;
-        if !matches!(
-            object,
-            Object::Commit(_) | Object::Remix(_) | Object::Tag(_)
-        ) {
-            return Err(ServerError::invalid_argument("open closure"));
-        }
+        .await?;
     }
     let staged_ids: BTreeSet<_> = staged.keys().copied().collect();
     let report = verify_push(
@@ -968,5 +1053,13 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
         }
         acquired.remove(&pack.ticket.pack_id);
     }
-    Ok(staged_ids.into_iter().collect())
+    let parents = staged
+        .iter()
+        .filter_map(|(id, (_, object, _))| Some((*id, history_parents(object)?)))
+        .collect();
+    Ok(StagedCommits {
+        parents,
+        objects: staged.len(),
+        bytes: staged_bytes,
+    })
 }

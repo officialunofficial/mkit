@@ -928,6 +928,12 @@ where
             st.writes
                 .push(Write::Put(self.row(keys::VC_FRAME, &id), encoded));
             st.frames.insert(id, row);
+            if let Some(parents) = super::verify::history_parents(&object) {
+                st.writes.push(Write::Put(
+                    self.row(keys::VC_HISTORY, &id),
+                    Value::new(parents.concat()),
+                ));
+            }
             for child in children(&object, ClosureMode::History) {
                 st.writes.push(Write::Put(
                     self.row(keys::VC_CHILD, &child),

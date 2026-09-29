@@ -8,6 +8,7 @@ mod http_objects;
 mod indexed;
 mod info;
 mod policy;
+mod ref_policy;
 #[cfg(feature = "remote-hooks")]
 mod remote_hooks;
 mod scheduled;
@@ -1472,6 +1473,7 @@ fn namespace_denial_before_lease_allocates_nothing_and_replay_stays_free() {
         nonce: nonce(1),
         commitment: crate::op::Commitment::Body(A),
         expires_at_ms: T0 + 300_000,
+        created_at_ms: 0,
     });
     let ref_name = "refs/heads/fresh";
     let shard = env.pipe.shards.ref_shard(&a.repo().repo, ref_name);
@@ -1547,6 +1549,7 @@ fn fresh_shard_uses_coordinator_total_in_lease_read_and_persists_view() {
         nonce: nonce(1),
         commitment: crate::op::Commitment::Body(A),
         expires_at_ms: T0 + 300_000,
+        created_at_ms: 0,
     });
     let ref_name = "refs/heads/new-shard";
     let shard = env.pipe.shards.ref_shard(&a.repo().repo, ref_name);
@@ -1683,6 +1686,7 @@ fn namespace_race_after_lease_is_retryable_instead_of_a_late_denial() {
         nonce: nonce(1),
         commitment: crate::op::Commitment::Body(A),
         expires_at_ms: T0 + 300_000,
+        created_at_ms: 0,
     });
     assert_eq!(env.pipe.shards.ref_shard(&a.repo().repo, HEAD), shard);
     let err = now(env.pipe.update_ref(&a, upd(HEAD, Missing, A))).unwrap_err();
