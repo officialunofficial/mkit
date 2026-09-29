@@ -36,7 +36,7 @@ pub const HEADER_NAMES: [&str; 10] = [
 /// `Access-Control-Allow-Headers` for browser clients: the auth v2 headers
 /// plus the Connect request headers.
 pub const CORS_ALLOW_HEADERS: &str = "x-envelope-version, x-audience, x-repository, x-content-commitment, x-expires-at, x-public-key, x-signature, x-digest, x-created-at, \
-     idempotency-key, x-mkit-ref, content-type, connect-protocol-version";
+     idempotency-key, x-mkit-ref, x-write-grant, content-type, connect-protocol-version";
 
 /// The trusted audience and Single deployment's expected repository.
 /// In Multi mode the pipeline ignores this repository field and verifies
