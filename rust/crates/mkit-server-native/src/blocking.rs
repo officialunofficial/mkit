@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use futures_executor::block_on;
 use futures_util::StreamExt as _;
+use mkit_core::hash::Hash;
 use mkit_core::upload_parts::PartPlan;
 use mkit_server::store::MAX_BLOB_PIECE_BYTES;
 use mkit_server::{
@@ -231,6 +232,11 @@ impl<K: PackSink + 'static> PackSink for BlockingSink<K> {
     async fn commit(mut self) -> Result<CommitOutcome, StoreError> {
         let sink = self.inner.take().ok_or_else(sink_gone)?;
         on_pool(move || block_on(sink.commit())).await
+    }
+
+    async fn commit_with_root(mut self, content_root: Hash) -> Result<CommitOutcome, StoreError> {
+        let sink = self.inner.take().ok_or_else(sink_gone)?;
+        on_pool(move || block_on(sink.commit_with_root(content_root))).await
     }
 
     async fn abort(mut self) {

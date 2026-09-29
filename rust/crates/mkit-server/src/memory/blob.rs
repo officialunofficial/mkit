@@ -8,7 +8,7 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures_core::Stream;
-use mkit_core::hash::Hasher;
+use mkit_core::hash::{Hash, Hasher};
 use mkit_core::upload_parts::{PartHasher, PartPlan, merge_to_root};
 
 use super::{MemoryFault, lock, take_fault};
@@ -351,6 +351,28 @@ impl BlobStore for MemoryBlobStore {
     }
 }
 
+impl MemoryPackSink {
+    /// Verify against `root` (or the key, for `None`) and publish.
+    fn finish(self, root: Option<Hash>) -> Result<CommitOutcome, StoreError> {
+        take_fault(&self.shared.fault, MemoryFault::BlobCommit)?;
+        let expected = self.key.expected_root(root)?;
+        if self.buf.len() as u64 != self.len {
+            return Err(StoreError::Invalid("blob length does not match".into()));
+        }
+        if self.hasher.finalize() != expected {
+            return Err(StoreError::Invalid(
+                "blob hash does not match its key".into(),
+            ));
+        }
+        let mut blobs = lock(&self.shared.blobs);
+        if blobs.contains_key(&self.key) {
+            return Ok(CommitOutcome::AlreadyPresent);
+        }
+        blobs.insert(self.key, Bytes::from(self.buf));
+        Ok(CommitOutcome::Created)
+    }
+}
+
 impl PackSink for MemoryPackSink {
     async fn write(&mut self, chunk: Bytes) -> Result<(), StoreError> {
         let nth = self.writes;
@@ -365,21 +387,11 @@ impl PackSink for MemoryPackSink {
     }
 
     async fn commit(self) -> Result<CommitOutcome, StoreError> {
-        take_fault(&self.shared.fault, MemoryFault::BlobCommit)?;
-        if self.buf.len() as u64 != self.len {
-            return Err(StoreError::Invalid("blob length does not match".into()));
-        }
-        if self.hasher.finalize() != *self.key.hash() {
-            return Err(StoreError::Invalid(
-                "blob hash does not match its key".into(),
-            ));
-        }
-        let mut blobs = lock(&self.shared.blobs);
-        if blobs.contains_key(&self.key) {
-            return Ok(CommitOutcome::AlreadyPresent);
-        }
-        blobs.insert(self.key, Bytes::from(self.buf));
-        Ok(CommitOutcome::Created)
+        self.finish(None)
+    }
+
+    async fn commit_with_root(self, content_root: Hash) -> Result<CommitOutcome, StoreError> {
+        self.finish(Some(content_root))
     }
 
     async fn abort(self) {}

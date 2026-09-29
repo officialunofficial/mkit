@@ -237,6 +237,8 @@ macro_rules! __with_blob_cases {
                 blob_probe_ok,
                 blob_delete_then_get_none,
                 blob_get_large_is_streamed,
+                blob_object_key_requires_root,
+                blob_object_commit_with_root,
             }
         }
     };

@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime};
 
 use bytes::{Bytes, BytesMut};
 use futures_core::Stream;
-use mkit_core::hash::Hasher;
+use mkit_core::hash::{Hash, Hasher};
 use mkit_transport_file::{create_dir_all_durably, sync_dir, temp_path};
 
 use super::{io_error, unavailable};
@@ -28,7 +28,9 @@ pub(super) const READ_BLOCK: usize = 64 * 1024;
 type MultipartLocks = Arc<Mutex<HashMap<[u8; 32], Weak<tokio::sync::Mutex<()>>>>>;
 
 /// A [`BlobStore`] over `<root>/<keyspace>/<64-hex>` for packs (`packs` by
-/// default), and `<root>/upload-markers/v1/<64-hex>` for upload markers.
+/// default), `<root>/upload-markers/v1/<64-hex>` for upload markers,
+/// `<root>/objects/<64-hex>` for extracted objects and
+/// `<root>/object-offsets/v1/<64-hex>` for their offset sidecars.
 /// An upload streams into a temp file in its destination
 /// directory (named like `FileTransport`'s own, `.<hex>.tmp.<pid>.<seq>`)
 /// while hashing it, and becomes visible only once its BLAKE3 and length
@@ -119,7 +121,12 @@ impl FsBlobStore {
     pub fn sweep_stale_uploads(&self, min_age: Duration) -> io::Result<usize> {
         let now = SystemTime::now();
         let mut removed = 0;
-        for dir in [self.dir(), self.root.join("upload-markers/v1")] {
+        for dir in [
+            self.dir(),
+            self.root.join("upload-markers/v1"),
+            self.root.join("objects"),
+            self.root.join("object-offsets/v1"),
+        ] {
             let entries = match fs::read_dir(dir) {
                 Ok(entries) => entries,
                 Err(e) if e.kind() == ErrorKind::NotFound => continue,
@@ -196,11 +203,12 @@ impl fmt::Debug for FsPackSink {
 impl FsPackSink {
     /// Verify the upload and move it into place; `Ok(true)` if the
     /// destination already existed.
-    fn publish(&mut self) -> Result<bool, StoreError> {
+    fn publish(&mut self, root: Option<Hash>) -> Result<bool, StoreError> {
+        let expected = self.key.expected_root(root)?;
         if self.written != self.declared {
             return Err(StoreError::Invalid("blob length does not match".into()));
         }
-        if self.hasher.finalize() != *self.key.hash() {
+        if self.hasher.finalize() != expected {
             return Err(StoreError::Invalid(
                 "blob hash does not match its key".into(),
             ));
@@ -218,6 +226,14 @@ impl FsPackSink {
             sync_dir(dir).map_err(io_error)?;
         }
         Ok(existed)
+    }
+}
+
+fn outcome(existed: bool) -> CommitOutcome {
+    if existed {
+        CommitOutcome::AlreadyPresent
+    } else {
+        CommitOutcome::Created
     }
 }
 
@@ -251,11 +267,11 @@ impl PackSink for FsPackSink {
 
     async fn commit(mut self) -> Result<CommitOutcome, StoreError> {
         // On any error, dropping `self` removes the temp file.
-        Ok(if self.publish()? {
-            CommitOutcome::AlreadyPresent
-        } else {
-            CommitOutcome::Created
-        })
+        Ok(outcome(self.publish(None)?))
+    }
+
+    async fn commit_with_root(mut self, content_root: Hash) -> Result<CommitOutcome, StoreError> {
+        Ok(outcome(self.publish(Some(content_root))?))
     }
 
     async fn abort(self) {}

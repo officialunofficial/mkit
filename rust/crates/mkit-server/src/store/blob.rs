@@ -1,7 +1,10 @@
 //! The blob contract (PRD §5.3): content-addressed, immutable bytes.
 //!
-//! A [`BlobKey`] selects either `packs/<hex>` or the upload marker namespace;
-//! both require `BLAKE3(bytes) == key`. Pack RPCs construct only pack keys.
+//! A [`BlobKey`] selects `packs/<hex>`, the upload marker namespace, or (WP-4.10)
+//! the global object namespaces. Pack and marker keys require
+//! `BLAKE3(bytes) == key`; an object key is an object id, so its bytes are
+//! verified against a caller-supplied content root instead
+//! ([`PackSink::commit_with_root`]). Pack RPCs construct only pack keys.
 //! Resumable multipart uploads are a sub-trait (`MultipartBlobStore`, WP-1.11).
 
 use core::fmt;
@@ -31,6 +34,12 @@ pub enum BlobNamespace {
     Pack,
     /// Proof that a ticket holder streamed and verified a pack.
     UploadMarker,
+    /// The reassembled content of a Blob or ChunkedBlob, keyed by its object
+    /// id and shared by the whole deployment (SPEC-SERVER §9.6).
+    Object,
+    /// The chunk-offset sidecar of an extracted ChunkedBlob, keyed by the
+    /// manifest's object id.
+    ObjectOffsets,
 }
 
 impl BlobKey {
@@ -52,6 +61,50 @@ impl BlobKey {
         }
     }
 
+    /// Construct a global object key: the extracted content of object `id`.
+    #[must_use]
+    pub const fn object(id: Hash) -> Self {
+        Self {
+            hash: id,
+            namespace: BlobNamespace::Object,
+        }
+    }
+
+    /// Construct an offsets sidecar key for the ChunkedBlob `manifest_id`.
+    #[must_use]
+    pub const fn object_offsets(manifest_id: Hash) -> Self {
+        Self {
+            hash: manifest_id,
+            namespace: BlobNamespace::ObjectOffsets,
+        }
+    }
+
+    /// The hash a sink verifies the bytes against: the key's own hash for
+    /// `root = None` (pack and marker keys), or the caller's content root
+    /// for an object key, whose hash is an object id rather than a content
+    /// hash. An object key without a root, and a root on any other key, are
+    /// refused, so no backend can publish bytes under an object id without
+    /// checking them.
+    ///
+    /// # Errors
+    /// [`StoreError::Invalid`] for either mismatch.
+    pub fn expected_root(&self, root: Option<Hash>) -> Result<Hash, StoreError> {
+        let object = matches!(
+            self.namespace,
+            BlobNamespace::Object | BlobNamespace::ObjectOffsets
+        );
+        match (object, root) {
+            (false, None) => Ok(self.hash),
+            (true, Some(root)) => Ok(root),
+            (true, None) => Err(StoreError::Invalid(
+                "an object key needs a root-verified commit".into(),
+            )),
+            (false, Some(_)) => Err(StoreError::Invalid(
+                "a content root applies only to object keys".into(),
+            )),
+        }
+    }
+
     /// Content hash bytes.
     #[must_use]
     pub const fn hash(&self) -> &Hash {
@@ -65,25 +118,31 @@ impl BlobKey {
     }
 
     /// Path relative to a blob root, given the pack keyspace (which may
-    /// include a deployment prefix). Markers use its sibling namespace.
+    /// include a deployment prefix). Markers and objects use its sibling
+    /// namespaces.
     ///
     /// # Errors
     /// [`StoreError::Invalid`] for a namespace this backend does not support.
     pub fn relative_path(&self, pack_keyspace: &str) -> Result<String, StoreError> {
         // The fallback handles future BlobNamespace variants without a backend panic.
         #[allow(unreachable_patterns)]
+        let sibling = |name: &str| {
+            let parent = pack_keyspace
+                .rsplit_once('/')
+                .map_or("", |(parent, _)| parent);
+            if parent.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{parent}/{name}")
+            }
+        };
+        // The fallback handles future BlobNamespace variants without a backend panic.
+        #[allow(unreachable_patterns)]
         let directory = match self.namespace {
             BlobNamespace::Pack => pack_keyspace.to_owned(),
-            BlobNamespace::UploadMarker => {
-                let parent = pack_keyspace
-                    .rsplit_once('/')
-                    .map_or("", |(parent, _)| parent);
-                if parent.is_empty() {
-                    "upload-markers/v1".to_owned()
-                } else {
-                    format!("{parent}/upload-markers/v1")
-                }
-            }
+            BlobNamespace::UploadMarker => sibling("upload-markers/v1"),
+            BlobNamespace::Object => sibling("objects"),
+            BlobNamespace::ObjectOffsets => sibling("object-offsets/v1"),
             _ => return Err(StoreError::Invalid("unsupported blob namespace".into())),
         };
         Ok(format!("{directory}/{}", self.to_hex()))
@@ -227,7 +286,27 @@ pub trait PackSink: MaybeSend {
     /// equals the declared length; otherwise [`StoreError::Invalid`] and
     /// nothing is visible (a streaming backend withholds its final part
     /// until the hash verifies).
+    ///
+    /// Object keys ([`BlobNamespace::Object`], [`BlobNamespace::ObjectOffsets`])
+    /// refuse this form: use [`Self::commit_with_root`].
     fn commit(self) -> impl Future<Output = Result<CommitOutcome, StoreError>> + MaybeSend;
+
+    /// Make an **object** blob visible, only if the total equals the
+    /// declared length and `BLAKE3(bytes) == content_root` (the key is the
+    /// object id, so it cannot be the hash of the bytes). Verification and
+    /// visibility are as for [`Self::commit`]: a streaming backend withholds
+    /// its final byte until the root verifies. A pack or marker key is
+    /// [`StoreError::Invalid`]. A backend that cannot verify a root is
+    /// [`StoreError::Unsupported`], which is the default.
+    fn commit_with_root(
+        self,
+        _content_root: Hash,
+    ) -> impl Future<Output = Result<CommitOutcome, StoreError>> + MaybeSend
+    where
+        Self: Sized,
+    {
+        async { Err(StoreError::Unsupported("root-verified commit".into())) }
+    }
 
     /// Discard the upload; nothing becomes visible.
     fn abort(self) -> impl Future<Output = ()> + MaybeSend;
@@ -341,4 +420,61 @@ impl PartSink for UnsupportedPartSink {
     }
 
     async fn abort(self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_paths_are_sibling_namespaces() {
+        let id = [0xab; 32];
+        let hex = "ab".repeat(32);
+        let keys = [
+            BlobKey::pack(id),
+            BlobKey::upload_marker(id),
+            BlobKey::object(id),
+            BlobKey::object_offsets(id),
+        ];
+        let plain = keys.map(|k| k.relative_path("packs").unwrap());
+        assert_eq!(
+            plain,
+            [
+                format!("packs/{hex}"),
+                format!("upload-markers/v1/{hex}"),
+                format!("objects/{hex}"),
+                format!("object-offsets/v1/{hex}"),
+            ]
+        );
+        let prefixed = keys.map(|k| k.relative_path("tenant/a/packs").unwrap());
+        assert_eq!(
+            prefixed,
+            [
+                format!("tenant/a/packs/{hex}"),
+                format!("tenant/a/upload-markers/v1/{hex}"),
+                format!("tenant/a/objects/{hex}"),
+                format!("tenant/a/object-offsets/v1/{hex}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_sink_verifies_object_keys_only_against_a_root() {
+        let id = [1; 32];
+        let root = [2; 32];
+        for object in [BlobKey::object(id), BlobKey::object_offsets(id)] {
+            assert_eq!(object.expected_root(Some(root)).unwrap(), root);
+            assert!(matches!(
+                object.expected_root(None),
+                Err(StoreError::Invalid(_))
+            ));
+        }
+        for plain in [BlobKey::pack(id), BlobKey::upload_marker(id)] {
+            assert_eq!(plain.expected_root(None).unwrap(), id);
+            assert!(matches!(
+                plain.expected_root(Some(root)),
+                Err(StoreError::Invalid(_))
+            ));
+        }
+    }
 }

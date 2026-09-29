@@ -291,3 +291,89 @@ pub async fn blob_get_large_is_streamed<H: BlobHarness>(h: H) -> Outcome {
     ensure_eq!(got, Some(data.slice(1..=3 * 1024 * 1024)));
     Ok(Pass)
 }
+
+/// Upload `chunks` under an object `key` and commit against `root`.
+async fn put_rooted<B: BlobStore>(
+    store: &B,
+    key: BlobKey,
+    len: u64,
+    chunks: &[&[u8]],
+    root: mkit_core::hash::Hash,
+) -> Result<CommitOutcome, StoreError> {
+    let mut sink = store.begin(key, len).await?;
+    for chunk in chunks {
+        sink.write(Bytes::copy_from_slice(chunk)).await?;
+    }
+    sink.commit_with_root(root).await
+}
+
+/// An object key is an object id, not a content hash: plain `commit`
+/// refuses it, and a content root is refused on a pack key. Nothing becomes
+/// visible either way (WP-4.10).
+pub async fn blob_object_key_requires_root<H: BlobHarness>(h: H) -> Outcome {
+    let s = h.store();
+    let data = b"object content";
+    let id = hash(b"not the content hash");
+    for key in [BlobKey::object(id), BlobKey::object_offsets(id)] {
+        ensure_err!(
+            put(&s, key, data.len() as u64, &[data]).await,
+            StoreError::Invalid(_)
+        );
+        absent(&s, &key).await?;
+    }
+    let pack = key_of(data);
+    ensure_err!(
+        put_rooted(&s, pack, data.len() as u64, &[data], hash(data)).await,
+        StoreError::Invalid(_)
+    );
+    absent(&s, &pack).await?;
+    Ok(Pass)
+}
+
+/// A root-verified commit publishes only bytes that hash to the root with
+/// the declared length; a wrong root or length leaves nothing visible.
+pub async fn blob_object_commit_with_root<H: BlobHarness>(h: H) -> Outcome {
+    let s = h.store();
+    let data = vec![7_u8; 100_000];
+    let root = hash(&data);
+    let id = hash(b"object id");
+    for key in [BlobKey::object(id), BlobKey::object_offsets(id)] {
+        let bad = hash(b"wrong root");
+        let pieces: Vec<&[u8]> = data.chunks(4096).collect();
+        let len = data.len() as u64;
+        ensure_err!(
+            put_rooted(&s, key, len, &pieces, bad).await,
+            StoreError::Invalid(_)
+        );
+        absent(&s, &key).await?;
+        ensure_err!(
+            put_rooted(&s, key, len + 1, &pieces, root).await,
+            StoreError::Invalid(_)
+        );
+        absent(&s, &key).await?;
+        ensure_err!(
+            put_rooted(&s, key, len - 1, &pieces, root).await,
+            StoreError::Invalid(_)
+        );
+        absent(&s, &key).await?;
+        ensure_eq!(
+            ok!(put_rooted(&s, key, len, &pieces, root).await),
+            CommitOutcome::Created
+        );
+        ensure_eq!(ok!(s.head(&key).await).map(|m| m.len), Some(len));
+        ensure_eq!(get(&s, &key, None).await?.map(|b| b.len()), Some(100_000));
+        // A present key: `AlreadyPresent`, or `Created` where a backend
+        // cannot tell (advisory), and the bytes stay intact.
+        ok!(put_rooted(&s, key, len, &pieces, root).await);
+        ensure_eq!(get(&s, &key, None).await?.map(|b| hash(&b)), Some(root));
+    }
+    // The namespaces are disjoint from each other and from packs.
+    let pack = BlobKey::pack(id);
+    absent(&s, &pack).await?;
+    ensure_eq!(ok!(s.delete(&BlobKey::object(id)).await), true);
+    ensure_eq!(
+        ok!(s.head(&BlobKey::object_offsets(id)).await).map(|m| m.len),
+        Some(100_000)
+    );
+    Ok(Pass)
+}
