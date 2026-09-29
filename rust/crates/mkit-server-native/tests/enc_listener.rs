@@ -1358,7 +1358,7 @@ fn enc_write_needing_payment_is_told_to_use_https() {
     let aux = tempfile::tempdir().unwrap();
     let meta = mkit_server_native::Blocking::new(
         mkit_server::sql::SqlKvStore::open(
-            mkit_server_native::RusqliteConn::open(&aux.path().join("meta.sqlite3")).unwrap(),
+            mkit_server_native::RusqliteConn::open(aux.path().join("meta.sqlite3")).unwrap(),
         )
         .unwrap(),
     );

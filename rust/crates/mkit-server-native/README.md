@@ -44,7 +44,7 @@ mkit-server serve [--listen <ADDR>] [--listen-enc <ADDR>] --repo-root <DIR>
     [--max-pack-bytes N] [--unary-timeout-secs 30] [--stream-timeout-secs 3600]
     [--max-concurrency 256] [--queue-timeout-secs 5]
     [--max-connections 1024] [--header-read-timeout-secs 10] [--idle-timeout-secs 60]
-    [--cors-allow-origin <ORIGIN>]... [--shutdown-grace-secs 30]
+    [--cors-allow-origin <ORIGIN>]... [--shutdown-grace-secs 30] [--shutdown-drain-secs 10]
     [--sqlite-max-bytes N] [--log-format text|json]
 mkit-server version
 ```

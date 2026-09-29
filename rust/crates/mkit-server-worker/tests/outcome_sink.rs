@@ -1,6 +1,7 @@
 //! WP-3.5: the Worker's kind-8 sink seam, plan budget and timeout, plus the
 //! CORS strings, repeated `WWW-Authenticate` and credential redaction of the
 //! fetch adapter's host-testable parts.
+#![allow(clippy::unwrap_used)]
 
 use std::sync::{Arc, Mutex};
 

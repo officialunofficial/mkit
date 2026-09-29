@@ -83,9 +83,11 @@ docker run -d --name mkit-server \
   temp directory at startup, and without a writable `/tmp` the server exits
   with a panic; `SQLite` may also put temporary files there.
 - **Shutdown.** `docker stop` sends `SIGTERM`, and the server lets
-  in-flight requests finish for up to `--shutdown-grace-secs` (default 30).
+  in-flight requests finish for up to `--shutdown-grace-secs` (default 30),
+  then, with `--meta sqlite`, delivers due outcomes for up to
+  `--shutdown-drain-secs` (default 10; `0` skips it).
   Docker's default stop timeout is 10 s, so raise it (`--stop-timeout`, or
-  `terminationGracePeriodSeconds` in Kubernetes) above the grace. The
+  `terminationGracePeriodSeconds` in Kubernetes) above the grace plus the drain. The
   server is PID 1 and starts no child processes, so no init process is
   needed.
 - **Logs** go to stderr. Use `--log-format json` in containers; the text
@@ -192,7 +194,7 @@ spec:
     type: Recreate               # the old pod releases the root's lock first
   template:
     spec:
-      terminationGracePeriodSeconds: 45   # above --shutdown-grace-secs
+      terminationGracePeriodSeconds: 45   # above --shutdown-grace-secs + --shutdown-drain-secs
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

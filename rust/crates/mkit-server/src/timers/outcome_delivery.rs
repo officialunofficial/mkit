@@ -182,24 +182,27 @@ impl<O: OutcomeSink> OutcomeDelivery<O> {
         // rotation, so the scan page is the budget.
         let max_rows = self.max_rows.clamp(1, MAX_ROWS_CEILING);
         let scan_rows = u32::try_from(max_rows).unwrap_or(u32::MAX);
+        let mut after = cursor.as_ref();
         let mut page = ctx
             .store
-            .scan(ctx.partition, &start, &end, cursor.as_ref(), scan_rows)
+            .scan(ctx.partition, &start, &end, after, scan_rows)
             .await?;
-        if page.entries.is_empty() && cursor.is_some() && page.next.is_none() {
+        if page.entries.is_empty() && after.is_some() && page.next.is_none() {
+            after = None;
             page = ctx
                 .store
-                .scan(ctx.partition, &start, &end, None, scan_rows)
+                .scan(ctx.partition, &start, &end, after, scan_rows)
                 .await?;
         }
         let mut batch = Batch::new();
         let mut delivered = 0u64;
         let mut sink_retry_ms = 0u64;
-        let mut sink_failed = false;
+        // Index in `page` of the row whose delivery failed or timed out.
+        let mut stopped_at: Option<usize> = None;
         // Acknowledged rows are planned after the sink loop, against a fresh
         // `oc`, so slow sink awaits sit outside the read-modify-write window.
         let mut acked: Vec<(String, Value, u64)> = Vec::new();
-        for (key, _) in page.entries.iter().take(max_rows) {
+        for (index, (key, _)) in page.entries.iter().enumerate().take(max_rows) {
             let Some(keys::ParsedKey::OutcomePending {
                 seq,
                 reservation_id: rid,
@@ -245,12 +248,12 @@ impl<O: OutcomeSink> OutcomeDelivery<O> {
                             u64::try_from(hint.as_millis()).unwrap_or(u64::MAX)
                         }));
                         tracing::warn!(reason = %err.reason, "outcome delivery failed");
-                        sink_failed = true;
+                        stopped_at = Some(index);
                         false
                     }
                     Err(_) => {
                         tracing::warn!("outcome delivery timed out");
-                        sink_failed = true;
+                        stopped_at = Some(index);
                         false
                     }
                 }
@@ -259,7 +262,7 @@ impl<O: OutcomeSink> OutcomeDelivery<O> {
                 acked.push((rid, value, seq));
             }
             // A failing or hung sink is not asked again in this fire.
-            if sink_failed {
+            if stopped_at.is_some() {
                 break;
             }
         }
@@ -286,6 +289,21 @@ impl<O: OutcomeSink> OutcomeDelivery<O> {
         if delivered == backlog.rows {
             return Ok(Fired::Done(batch));
         }
+        // The next fire resumes just after the failed row. Resuming after the
+        // page instead would, when the page reached the end of the range, wrap
+        // to the head and retry the same failing row first forever, starving
+        // every row behind it. The page's cursor is opaque, so ask the store
+        // for the one after the failed row.
+        let resume = match stopped_at {
+            Some(index) => {
+                let limit = u32::try_from(index + 1).unwrap_or(u32::MAX);
+                ctx.store
+                    .scan(ctx.partition, &start, &end, after, limit)
+                    .await?
+                    .next
+            }
+            None => page.next,
+        };
         let next_attempt = if delivered > 0 {
             0
         } else {
@@ -304,7 +322,7 @@ impl<O: OutcomeSink> OutcomeDelivery<O> {
             .max(timer.due_at_ms.saturating_add(1));
         Ok(Fired::Reschedule {
             due_at_ms,
-            value: encode_timer(next_attempt, page.next.as_ref())?,
+            value: encode_timer(next_attempt, resume.as_ref())?,
             batch,
         })
     }
@@ -620,9 +638,72 @@ mod tests {
             })
             .unwrap();
         clock.set(i64::try_from(due).unwrap());
+        // The fire resumes after the failed row `a`, so `b` and `c` go first;
+        // `a` follows once the cursor wraps.
+        fire(&store, &clock, ok.clone(), due).await;
+        assert_eq!(ok.seen.lock().unwrap().len(), 2);
+        assert_eq!(backlog_rows(&store).await, 1);
+        let (start, end) = keys::class_range(keys::TAG_TIMER);
+        let page = store
+            .scan(&partition(), &start, &end, None, 10)
+            .await
+            .unwrap();
+        let due = page
+            .entries
+            .iter()
+            .find_map(|(key, _)| match keys::parse(key) {
+                Some(keys::ParsedKey::Timer {
+                    kind: 8, due_at_ms, ..
+                }) => Some(due_at_ms),
+                _ => None,
+            })
+            .unwrap();
+        clock.set(i64::try_from(due).unwrap());
         fire(&store, &clock, ok.clone(), due).await;
         assert_eq!(ok.seen.lock().unwrap().len(), 3);
         assert_eq!(backlog_rows(&store).await, 0);
+    }
+
+    /// A sink that rejects one reservation id and takes the rest.
+    struct Picky(Mutex<Vec<String>>);
+    impl OutcomeSink for Picky {
+        async fn deliver(&self, outcome: &Outcome) -> Result<(), DeliveryError> {
+            if outcome.reservation_id == "b" {
+                return Err(DeliveryError::new("rejected", None));
+            }
+            self.0.lock().unwrap().push(outcome.reservation_id.clone());
+            Ok(())
+        }
+    }
+
+    /// A row the sink keeps refusing does not starve the rows behind it: the
+    /// fire stops at it, and the next fire resumes after it rather than
+    /// retrying it first again.
+    #[tokio::test]
+    async fn a_refused_row_does_not_starve_the_rows_behind_it() {
+        let clock = Arc::new(ManualClock::new(100));
+        let store = MemoryKv::with_clock(clock.clone());
+        seed(&store, &["a", "b", "c", "d"]).await;
+        let sink = Arc::new(Picky(Mutex::new(Vec::new())));
+        let mut now = 100u64;
+        for _ in 0..3 {
+            fire_with(
+                &store,
+                &clock,
+                OutcomeDelivery::new(
+                    sink.clone(),
+                    "https://example.test".into(),
+                    Arc::new(NoopMetrics),
+                    Arc::new(ManualSleep::new()),
+                ),
+                now,
+            )
+            .await;
+            now += 1_000_000;
+            clock.set(i64::try_from(now).unwrap());
+        }
+        assert_eq!(*sink.0.lock().unwrap(), ["a", "c", "d"]);
+        assert_eq!(backlog_rows(&store).await, 1, "only b remains");
     }
 
     #[tokio::test]
