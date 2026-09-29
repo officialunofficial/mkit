@@ -213,12 +213,12 @@ async fn serve_sharding(
         max_total_bytes: max_pack,
         max_chunks: 64,
     };
-    let addressing =
-        multi.map_or(Addressing::Single { repo }, |profile| {
-            Addressing::Multi(MultiAddressing::new().with_namespace_policy(
-                NamespacePolicy::Allowlist(multi_allowlist(profile)),
-            ))
-        });
+    let addressing = multi.map_or(Addressing::Single { repo }, |profile| {
+        Addressing::Multi(
+            MultiAddressing::new()
+                .with_namespace_policy(NamespacePolicy::Allowlist(multi_allowlist(profile))),
+        )
+    });
     let mut cfg = PipelineConfig::new(addressing, auth(&origin), limits);
     if multi.is_some_and(|profile| profile.has(Feature::Grants)) {
         cfg.grants = Some(
