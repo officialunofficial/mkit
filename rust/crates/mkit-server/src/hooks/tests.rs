@@ -1459,3 +1459,34 @@ fn credentials_are_wiped_when_the_call_is_cancelled_or_unwinds() {
     drop(admit);
     assert_eq!(channel_of(&hook).seen.lock().unwrap().len(), 1);
 }
+
+#[test]
+fn choice_forwards_the_flags_the_pipeline_reads_and_delivers_to_its_side() {
+    use crate::pipeline::{Choice, DefaultAdmission, NoOutcomes, OpenAuthorizer};
+
+    let open: Choice<OpenAuthorizer, RemoteAuthorizer<MockChannel>> = Choice::Left(OpenAuthorizer);
+    assert!(open.is_open());
+    let remote = RemoteAuthorizer::new(client(
+        MockChannel::new(Step::json(r#"{"allow":{}}"#)),
+        ManualSleep::new(),
+    ));
+    let remote: Choice<OpenAuthorizer, _> = Choice::Right(remote);
+    assert!(!remote.is_open());
+    let default: Choice<DefaultAdmission, RemoteAdmission<MockChannel>> =
+        Choice::Left(DefaultAdmission);
+    assert!(default.is_default());
+    let remote_admit: Choice<DefaultAdmission, _> = Choice::Right(RemoteAdmission::new(client(
+        MockChannel::new(Step::json(r#"{"allow":{"reservationId":"r-1"}}"#)),
+        ManualSleep::new(),
+    )));
+    assert!(!remote_admit.is_default());
+
+    let row = outcome("r-1", OutcomeKind::Expired);
+    let local: Choice<NoOutcomes, RemoteOutcomes<MockChannel>> = Choice::Left(NoOutcomes);
+    assert!(block_on(local.deliver(&row)).is_ok());
+    let down: Choice<NoOutcomes, _> = Choice::Right(RemoteOutcomes::new(client(
+        MockChannel::new(Step::Reply(503, None, Vec::new())),
+        ManualSleep::elapsed(),
+    )));
+    assert!(block_on(down.deliver(&row)).is_err());
+}
