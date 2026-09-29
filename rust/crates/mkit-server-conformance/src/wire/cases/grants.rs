@@ -36,7 +36,7 @@ pub const RP_ORIGIN: &str = "https://example.test";
 const K1_SEED: [u8; 32] = [0x21; 32];
 const P256_SEED: [u8; 32] = [0x31; 32];
 
-enum Owner {
+pub(super) enum Owner {
     Ed(Signer),
     K1(K1Key),
     Web(P256Key),
@@ -73,7 +73,7 @@ impl Owner {
         }
     }
 
-    fn signed_header(&self, grant: &Grant) -> String {
+    pub(super) fn signed_header(&self, grant: &Grant) -> String {
         let statement = grant.encode().expect("valid grant fixture");
         let (scheme, blob) = match self {
             Self::Ed(signer) => (
@@ -140,11 +140,11 @@ pub fn owner_namespaces() -> [Namespace; 2] {
     [k1_owner().namespace(), web_owner().namespace()]
 }
 
-fn ed_owner(ctx: &Ctx) -> Result<Owner, Failure> {
+pub(super) fn ed_owner(ctx: &Ctx) -> Result<Owner, Failure> {
     Ok(Owner::Ed(ctx.v2_signer("repository-a")?))
 }
 
-fn repo(ctx: &Ctx, owner: &Owner) -> String {
+pub(super) fn repo(ctx: &Ctx, owner: &Owner) -> String {
     format!(
         "{}/{}-{}",
         owner.namespace(),
@@ -153,7 +153,7 @@ fn repo(ctx: &Ctx, owner: &Owner) -> String {
     )
 }
 
-fn grant(ctx: &Ctx, owner: &Owner, repo: &str, grantee: &Signer) -> Grant {
+pub(super) fn grant(ctx: &Ctx, owner: &Owner, repo: &str, grantee: &Signer) -> Grant {
     let now = now_ms();
     let WireAuth::AuthV2 { audience, .. } = &ctx.profile().auth else {
         unreachable!()

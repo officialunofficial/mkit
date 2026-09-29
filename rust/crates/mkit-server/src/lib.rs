@@ -56,8 +56,8 @@ pub use error::{
 #[cfg(any(test, feature = "memory"))]
 pub use memory::{MemoryBlobStore, MemoryFault, MemoryKv, MemoryPackSink};
 pub use op::{
-    AuthzFacts, Commitment, Creation, GrantRef, OpKind, Operation, Procedure, RefUpdate,
-    VerifiedAuth,
+    AuthzFacts, Commitment, Creation, GrantRef, OpKind, Operation, PresenceRequirement, Procedure,
+    RefUpdate, VerifiedAuth,
 };
 pub use policy::GrantConfig;
 pub use principal::Principal;

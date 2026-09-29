@@ -705,6 +705,18 @@ async fn pipeline_grants_single_and_d34() {
             "grants.oversize_header_denied",
             "grants.non_ascii_header_denied",
             "grants.retry_with_changed_grant_returns_saved_result",
+            "ref_scopes.create_only_rejects_update",
+            "ref_scopes.cu_grant_creates_but_match_update_denied_opaque",
+            "ref_scopes.force_allows_non_ff",
+            "ref_scopes.delete_needs_d",
+            "ref_scopes.any_on_absent_needs_c",
+            "ref_scopes.any_on_present_needs_f",
+            "ref_scopes.direct_packmap_update_denied",
+            "ref_scopes.head_only_update_ok",
+            "ref_scopes.advance_wrong_packmap_denied",
+            "ref_scopes.rebaseline_push_under_head_scope",
+            "ref_scopes.begin_upload_any_flag",
+            "ref_scopes.begin_upload_unmatched_denied",
             #[cfg(feature = "test-faults")]
             "grants.expired",
             #[cfg(feature = "test-faults")]

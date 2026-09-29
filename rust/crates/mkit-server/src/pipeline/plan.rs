@@ -14,7 +14,7 @@ use mkit_core::protocol::AdvanceOutcome;
 use mkit_core::refs::RefWriteCondition;
 
 use crate::error::ServerError;
-use crate::op::{GrantRef, RefUpdate};
+use crate::op::{GrantRef, PresenceRequirement, RefUpdate};
 use crate::quota::{self, NamespaceCharge, QuotaCharge, QuotaDecision, evaluate_quota};
 use crate::refs::{CasDecision, evaluate_condition};
 use crate::replay::{
@@ -338,7 +338,7 @@ pub(crate) fn plan_write(
             ));
         }
     }
-    let epoch_index = match req.grant {
+    let epoch_index = match req.grant.as_ref() {
         Some(grant) => {
             if let Some(lease) = req.lease {
                 if lease.value.epoch != grant.epoch {
@@ -610,6 +610,29 @@ fn decide_refs(
         let key = keys::ref_key(req.repo, &update.name);
         let current = snap.get(&key).map(codec::decode_ref_id).transpose();
         let current = current.map_err(corrupt)?;
+        if let Some(requirement) = req
+            .grant
+            .as_ref()
+            .and_then(|grant| grant.presence_requirement.as_ref())
+        {
+            let required = match requirement {
+                PresenceRequirement::Absent(name) if name == &update.name => Some(false),
+                PresenceRequirement::Present(name) if name == &update.name => Some(true),
+                _ => None,
+            };
+            if let Some(required) = required {
+                if current.is_some() != required {
+                    return Err(ServerError::permission_denied(
+                        "write grant rejected: ref scope",
+                    ));
+                }
+                pre.push(if required {
+                    Precondition::Present(key.clone())
+                } else {
+                    Precondition::Absent(key.clone())
+                });
+            }
+        }
         match evaluate_condition(current.as_ref(), &update.condition) {
             CasDecision::Committed => {
                 // `Any` commits whatever the ref holds: nothing to guard.

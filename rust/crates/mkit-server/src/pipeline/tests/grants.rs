@@ -61,8 +61,23 @@ fn grant(owner: &SigningKey, grantee: &SigningKey, mutate: impl FnOnce(&mut Gran
     .unwrap()
 }
 
+fn scoped_grant(owner: &SigningKey, grantee: &SigningKey, flags: &str) -> String {
+    grant(owner, grantee, |g| {
+        g.ref_scopes = Some(RefScopes::parse(&format!("refs/heads/main={flags}")).unwrap());
+    })
+}
+
 fn request(signer: &SigningKey, repo: &str, nonce: u32, header: Option<&str>) -> Req {
-    let update = upd(HEAD, Any, A);
+    request_update(signer, repo, nonce, header, &upd(HEAD, Any, A))
+}
+
+fn request_update(
+    signer: &SigningKey,
+    repo: &str,
+    nonce: u32,
+    header: Option<&str>,
+    update: &RefUpdate,
+) -> Req {
     let body = format!("{update:?}").into_bytes();
     let digest = to_hex(&hash(&body));
     let nonce = super::nonce(nonce);
@@ -160,6 +175,149 @@ fn bad_grant_allocates_nothing_and_same_nonce_can_be_corrected() {
     assert_eq!(seen.len(), 1);
     assert!(!seen[0].authz.owner);
     assert!(seen[0].authz.grant.is_some());
+}
+
+#[test]
+fn any_create_only_commits_and_force_only_on_absent_ref_denies() {
+    let owner = key(1);
+    let grantee = key(2);
+    let repo = repository(&owner);
+    for sharding in [Sharding::Single, Sharding::D34] {
+        let e = environment_sharding(&owner, AuthorizerRole::Check, false, sharding);
+        let force = scoped_grant(&owner, &grantee, "f");
+        let req = request(&grantee, &repo, 21, Some(&force));
+        assert_eq!(
+            e.update(&req, &upd(HEAD, Any, A)).unwrap_err().code(),
+            Code::PermissionDenied
+        );
+        let resolved = e.pipe.cfg.addressing.resolve(Some(&repo), true).unwrap();
+        let shard = e.pipe.shards.ref_shard(&resolved.repo, HEAD);
+        assert_eq!(
+            now(e
+                .pipe
+                .meta
+                .inner
+                .get(&shard, &keys::ref_key(&resolved.repo.name, HEAD)))
+            .unwrap(),
+            None
+        );
+        let replay = keys::replay(&e.auth(&req).unwrap().auth.unwrap().replay_scope);
+        assert_eq!(now(e.pipe.meta.inner.get(&shard, &replay)).unwrap(), None);
+
+        let create = scoped_grant(&owner, &grantee, "c");
+        // A corrected grant with the same nonce succeeds after the denial.
+        assert!(
+            e.update(
+                &request(&grantee, &repo, 21, Some(&create)),
+                &upd(HEAD, Any, A)
+            )
+            .is_ok()
+        );
+    }
+}
+
+#[test]
+fn match_update_only_is_denied_before_allocation_and_owner_is_unaffected() {
+    let owner = key(1);
+    let grantee = key(2);
+    let repo = repository(&owner);
+    let e = environment(&owner, AuthorizerRole::Check, false);
+    let update_only = scoped_grant(&owner, &grantee, "u");
+    let update = upd(HEAD, Match(B), A);
+    let err = e
+        .update(
+            &request_update(&grantee, &repo, 22, Some(&update_only), &update),
+            &update,
+        )
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+    assert_eq!(
+        err.public_message(),
+        "update without force needs indexed mode"
+    );
+    assert_no_rows(&e, &owner);
+    assert!(
+        e.update(&request(&owner, &repo, 22, None), &upd(HEAD, Any, A))
+            .is_ok()
+    );
+}
+
+#[cfg(feature = "test-faults")]
+struct CreateAtFinalApply {
+    store: Arc<MemoryKv>,
+    partition: Partition,
+    ref_key: Key,
+    fired: AtomicBool,
+}
+
+#[cfg(feature = "test-faults")]
+impl FaultHooks for CreateAtFinalApply {
+    async fn at(
+        &self,
+        point: FaultPoint,
+        _: &Operation,
+        _: &TestDirectives,
+    ) -> Result<(), ServerError> {
+        if point == FaultPoint::BeforeFinalApply && !self.fired.swap(true, Ordering::SeqCst) {
+            self.store
+                .apply(
+                    &self.partition,
+                    Batch::new().put(self.ref_key.clone(), codec::encode_ref_id(&B)),
+                )
+                .await
+                .unwrap();
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn any_create_only_race_replans_to_permission_denied_without_write_rows() {
+    let owner = key(1);
+    let grantee = key(2);
+    let repo = repository(&owner);
+    let create = scoped_grant(&owner, &grantee, "c");
+    for sharding in [Sharding::Single, Sharding::D34] {
+        let Env {
+            pipe,
+            clock,
+            metrics,
+        } = environment_sharding(&owner, AuthorizerRole::Check, false, sharding);
+        let resolved = pipe.cfg.addressing.resolve(Some(&repo), true).unwrap();
+        let shard = pipe.shards.ref_shard(&resolved.repo, HEAD);
+        let ref_key = keys::ref_key(&resolved.repo.name, HEAD);
+        let store = pipe.meta.inner.clone();
+        let pipe = pipe.with_faults(CreateAtFinalApply {
+            store,
+            partition: shard.clone(),
+            ref_key: ref_key.clone(),
+            fired: AtomicBool::new(false),
+        });
+        let e = Env {
+            pipe,
+            clock,
+            metrics,
+        };
+        let req = request(&grantee, &repo, 23, Some(&create));
+        let replay = keys::replay(&e.auth(&req).unwrap().auth.unwrap().replay_scope);
+        assert_eq!(
+            e.update(&req, &upd(HEAD, Any, A)).unwrap_err().code(),
+            Code::PermissionDenied
+        );
+        assert_eq!(
+            now(e.pipe.meta.inner.get(&shard, &ref_key)).unwrap(),
+            Some(codec::encode_ref_id(&B))
+        );
+        assert_eq!(now(e.pipe.meta.inner.get(&shard, &replay)).unwrap(), None);
+        let (first, end) = keys::class_range(keys::TAG_QUOTA);
+        assert!(
+            now(e.pipe.meta.inner.scan(&shard, &first, &end, None, 10))
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+    }
 }
 
 #[test]
