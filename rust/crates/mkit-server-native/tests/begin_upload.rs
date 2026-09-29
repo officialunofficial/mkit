@@ -20,7 +20,6 @@ use mkit_core::serialize::serialize;
 use mkit_core::sign::{KeyPair, sign_commit};
 use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan};
 use mkit_server::auth_v2::AuthV2Config;
-#[cfg(feature = "test-faults")]
 use mkit_server::fs::FsBlobStore;
 use mkit_server::indexed::{IndexedConfig, state};
 use mkit_server::pipeline::{

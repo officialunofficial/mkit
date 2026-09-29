@@ -9,9 +9,9 @@
 mod common;
 
 use mkit_server::quota::QuotaLimits as ServerQuota;
-use mkit_server_conformance::wire::{
-    Feature, Milestone, Profile, QuotaLimits, WireAuth, WireTarget, multi_allowlist_text, run,
-};
+#[cfg(feature = "test-faults")]
+use mkit_server_conformance::wire::{Feature, multi_allowlist_text};
+use mkit_server_conformance::wire::{Milestone, Profile, QuotaLimits, WireAuth, WireTarget, run};
 use mkit_server_native::{Shutdown, server};
 
 const REPOSITORY: &str = "default";
