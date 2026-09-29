@@ -112,10 +112,10 @@ impl Served {
         Self::start_ticketed_with("67108864", None)
     }
 
-    /// Single sharding, so a fetch right after a push sees the branch:
-    /// D34's `ListRefs` is eventual.
+    /// The D34 default: `ListRefs` is eventual, so callers poll it (bounded)
+    /// before a listing-driven fetch.
     fn start_ticketed_capped(max_pack_bytes: &str) -> Self {
-        Self::start_ticketed_with(max_pack_bytes, Some("single"))
+        Self::start_ticketed_with(max_pack_bytes, None)
     }
 
     /// A ticketed auth-v2 server advertising `max_pack_bytes`, with
@@ -155,8 +155,13 @@ impl Served {
         }
         let mut cfg = common::resolve_with(&flags, &[]).unwrap();
         cfg.pipeline.begin_upload_threshold_bytes = 0;
-        let opened = server::open(&cfg).unwrap();
+        let mut opened = server::open(&cfg).unwrap();
         let shutdown = Shutdown::new();
+        // The relay driver delivers D34's ref-name index.
+        let timers = opened
+            .timers
+            .take()
+            .map(|driver| runtime.block_on(driver.start(shutdown.clone())).unwrap());
         let task = {
             let _guard = runtime.enter();
             common::spawn_serve(listener, opened.router.clone(), &shutdown)
@@ -166,7 +171,7 @@ impl Served {
             origin,
             shutdown,
             task: Some(task),
-            timers: None,
+            timers,
             _opened: opened,
             root,
         }
@@ -321,6 +326,79 @@ fn local_repo() -> tempfile::TempDir {
     dir
 }
 
+/// Poll `ListRefs` until `refs/heads/main` lists `head`, for at most
+/// `RELAY_LAG_BOUND_MS`.
+fn wait_for_listed_head(client: &ConnectTransport, head: mkit_core::hash::Hash) {
+    use mkit_server::relay::RELAY_LAG_BOUND_MS;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(RELAY_LAG_BOUND_MS);
+    loop {
+        let listed = client.list_refs("refs/heads/").unwrap();
+        if listed
+            .iter()
+            .any(|r| r.name == "main" && r.hash == Some(head))
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the listing never named the pushed head within the relay bound"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// A real push, then a `-b` pull (what `clone -b` runs) straight away under
+/// the D34 default: the listing may not name the branch yet, so the client
+/// strongly reads it by name; an absent branch is `RemoteBranchMissing`,
+/// never an empty exit-0 clone. A later plain fetch, after the bounded
+/// listing poll, lands the same tip.
+#[test]
+fn push_then_clone_and_fetch_under_the_d34_default() {
+    use mkit_cli::remote_dispatch::{
+        DispatchError, PushControl, fetch_all, pull_all_with, push_branch_steps,
+    };
+    use mkit_core::layout::RepoLayout;
+
+    let served = Served::start_ticketed_capped("67108864");
+    let (source, tip) = signed_history(3, 2000);
+    let source_store =
+        mkit_core::store::ObjectStore::open(&RepoLayout::single(source.path())).unwrap();
+    let client = served.signed_client();
+    push_branch_steps(
+        &client,
+        &source_store,
+        "main",
+        tip,
+        RefWriteCondition::Missing,
+        0,
+        mkit_core::pack::MAX_TOTAL_PAYLOAD,
+        &PushControl::default(),
+        &mut |_| Ok(()),
+    )
+    .unwrap();
+
+    let missing = local_repo();
+    let err = pull_all_with(missing.path(), &client, "origin", Some("nope"), true).unwrap_err();
+    assert!(matches!(err, DispatchError::RemoteBranchMissing(b) if b == "nope"));
+
+    let clone = local_repo();
+    let clone_layout = RepoLayout::single(clone.path());
+    pull_all_with(clone.path(), &client, "origin", Some("main"), true).unwrap();
+    assert_eq!(
+        mkit_core::refs::read_ref(&clone_layout, "main").unwrap(),
+        Some(tip)
+    );
+
+    wait_for_listed_head(&client, tip);
+    let fetched = local_repo();
+    fetch_all(fetched.path(), &client, "origin").unwrap();
+    assert_eq!(
+        mkit_core::refs::read_remote_ref(&RepoLayout::single(fetched.path()), "origin", "main")
+            .unwrap(),
+        Some(tip)
+    );
+}
+
 #[test]
 fn oversized_push_splits_along_history_and_a_clone_verifies_it() {
     use mkit_cli::remote_dispatch::{PushControl, fetch_all, push_branch_steps};
@@ -348,7 +426,10 @@ fn oversized_push_splits_along_history_and_a_clone_verifies_it() {
         mkit_core::pack::MAX_TOTAL_PAYLOAD,
         &PushControl::default(),
         &mut |head| {
-            // Every intermediate state is a complete, verifiable branch.
+            // Every intermediate state is a complete, verifiable branch. The
+            // listing is eventual under D34: wait (bounded) until it names
+            // this head, then fetch.
+            wait_for_listed_head(&client, head);
             fetch_all(clone.path(), &client, "origin").unwrap();
             assert_eq!(
                 mkit_core::refs::read_remote_ref(&clone_layout, "origin", "main").unwrap(),

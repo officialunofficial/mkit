@@ -229,9 +229,12 @@ pub struct ServeArgs {
     #[arg(long, value_name = "fs-layout|sqlite:<PATH>")]
     pub meta: Option<MetaArg>,
     /// Metadata partition routing. Defaults to `d34` with `--meta
-    /// sqlite:<PATH>` and to `single` otherwise; an explicit `d34` requires
-    /// `--meta sqlite:<PATH>`. A database written `single` is refused under
-    /// the d34 default: pass `--sharding single` (there is no migration).
+    /// sqlite:<PATH>` and to `single` otherwise, and to `single` for
+    /// `--addressing multi` with `--listen-enc` (ssh/enc sessions carry no
+    /// ref hint, so under D34 their membership reads are eventual, up to
+    /// the relay lag bound); an explicit `d34` requires `--meta
+    /// sqlite:<PATH>`. A database written `single` is refused under the d34
+    /// default: pass `--sharding single` (there is no migration).
     #[arg(long, value_enum)]
     pub sharding: Option<ShardingArg>,
     /// Where packs live: `fs` (`<DIR>/packs`) or `s3://<BUCKET>[/<PREFIX>]`,
@@ -1316,8 +1319,14 @@ fn resolve_max_pack(args: &ServeArgs) -> Result<u64, ConfigError> {
     Ok(max_pack)
 }
 
-fn resolve_sharding(args: &ServeArgs) -> Result<Sharding, ConfigError> {
+fn resolve_sharding(args: &ServeArgs, multi: bool) -> Result<Sharding, ConfigError> {
     let sqlite = matches!(args.meta, Some(MetaArg::Sqlite(_)));
+    // ssh/enc sessions carry no ref hint, so under D34 their membership reads
+    // are eventual (up to RELAY_LAG_BOUND_MS): multi-repo with an enc listener
+    // defaults to `single` unless `--sharding d34` is explicit (R-157).
+    if args.sharding.is_none() && multi && args.listen_enc.is_some() {
+        return Ok(Sharding::Single);
+    }
     match args.sharding {
         None | Some(ShardingArg::D34) if sqlite => Ok(Sharding::D34),
         None | Some(ShardingArg::Single) => Ok(Sharding::Single),
@@ -1396,7 +1405,7 @@ pub fn resolve(
             format!("{PREFIX}: --listen-enc needs the `enc` cargo feature; rebuild with it"),
         ));
     }
-    let sharding = resolve_sharding(args)?;
+    let sharding = resolve_sharding(args, multi)?;
     let repository = args.repository.as_deref().unwrap_or(DEFAULT_REPOSITORY);
     let auth = pipeline_auth(args, env, if multi { "" } else { repository })?;
     #[cfg(feature = "enc")]

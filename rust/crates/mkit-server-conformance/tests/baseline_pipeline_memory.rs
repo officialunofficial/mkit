@@ -502,7 +502,7 @@ async fn pipeline_auth_v2_quota_atomic() {
 }
 
 /// D34 counts the write quota per (signer, branch): the `quota.` cases spend
-/// one branch through a CAS chain, show another branch is unaffected and that
+/// one branch through a chain of ANY-expectation writes (each a distinct id), show another branch is unaffected and that
 /// a rejection allocates no replay row (WP-1.26b).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pipeline_d34_quota_per_branch() {

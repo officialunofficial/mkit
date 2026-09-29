@@ -287,12 +287,16 @@ Bounds, as for HTTP:
   GiB) caps the file: see "Capacity" below.
 
 `--sharding` defaults to `d34` with `--meta sqlite:<PATH>` and to `single`
-otherwise (fs-layout cannot run D34). `single` keeps each namespace in one
+otherwise (fs-layout cannot run D34), and to `single` for `--addressing multi`
+with `--listen-enc`: ssh/enc sessions carry no ref hint, so under D34 enc/ssh
+membership reads are eventual (up to `RELAY_LAG_BOUND_MS`) and an enc clone
+right after a push can fail. An explicit `--sharding d34` with `--listen-enc`
+is allowed on that understanding. `single` keeps each namespace in one
 partition. `d34` requires `SQLite` metadata and routes each branch head and its
 `refs/mkit/packmap/<branch>` together into a ref partition, with configuration
 in the namespace coordinator. Any other `AdvanceRefs` pair is
 `invalid_argument`. D34's default write quota counts per ref partition;
-namespace totals arrive with WP-1.26. `ListRefs` under D34 reads the eventual
+a kind-5 rollup timer folds each shard's usage into namespace totals. `ListRefs` under D34 reads the eventual
 ref-name index. The conformance runner accepts the same
 `--sharding single|d34` option and runs its listing cases under both modes.
 

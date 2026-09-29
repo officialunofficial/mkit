@@ -204,6 +204,9 @@ pub(super) async fn replay_not_charged(ctx: Ctx) -> CaseResult {
 /// period is 60 s from the shard's first charge in a window.
 const ROLLUP_SKEW_MS: u64 = 65_000;
 
+/// Slack past a window edge, for clock differences between harness and server.
+const EDGE_MARGIN_MS: u64 = 2_000;
+
 /// Run the due timers of `ref_name`'s shard, as if `ROLLUP_SKEW_MS` had
 /// passed, through a `ListRefs` of `repository`.
 async fn force_rollup(ctx: &Ctx, repository: &str, ref_name: &str) -> CaseResult {
@@ -245,17 +248,18 @@ pub(super) async fn namespace_cap_after_rollup(ctx: Ctx) -> CaseResult {
                 .to_owned(),
         ));
     }
-    // A rollup near a window edge would read the next window: stay clear.
+    // A rollup near a window edge would read the next window: wait the edge
+    // out (at most 3 skew periods, 195 s) rather than skip, so a run filtered
+    // to this one case never flakes.
     let now = u64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis()),
     )
     .unwrap_or(0);
-    if window - now % window < 3 * ROLLUP_SKEW_MS {
-        return Err(Failure::Skip(
-            "too close to the end of a quota window to force a rollup".to_owned(),
-        ));
+    let to_edge = window - now % window;
+    if to_edge < 3 * ROLLUP_SKEW_MS {
+        tokio::time::sleep(std::time::Duration::from_millis(to_edge + EDGE_MARGIN_MS)).await;
     }
     let (repo, _) = repository::identities(&ctx, "namespace-cap", "unused")?;
     let first = q.max_ops / 2;

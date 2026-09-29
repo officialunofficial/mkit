@@ -501,11 +501,16 @@ fn grants_need_multi_and_auth_v2() {
     assert_eq!(code, exit::CONFIG_ERROR, "{message}");
     assert!(message.contains("--addressing multi"), "{message}");
     // An enc-only Multi deployment has no auth v2 audience to bind grants to.
-    let no_auth = drop_flag(&production(&f), "--listen", true);
-    let no_auth = drop_flag(&no_auth, "--audience", true);
+    let no_auth = drop_flag(&production(&f), "--audience", true);
     let no_auth = drop_flag(&no_auth, "--auth", true);
-    let (code, _) = refusal(&extra(&no_auth, &["--grant-schemes", "ed25519"]));
-    assert_ne!(code, exit::OK);
+    let (code, message) = refusal(&extra(
+        &no_auth,
+        &["--unsafe-allow-any-peer", "--grant-schemes", "ed25519"],
+    ));
+    assert_eq!(code, exit::CONFIG_ERROR, "{message}");
+    // Multi's own auth check comes first, so the grant flags never get a
+    // deployment without auth v2.
+    assert!(message.contains("--auth auth-v2"), "{message}");
 }
 
 #[test]

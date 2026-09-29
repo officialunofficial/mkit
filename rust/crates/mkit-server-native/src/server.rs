@@ -367,8 +367,8 @@ pub fn bind_sharding(conn: &RusqliteConn, mode: Sharding, db: &Path) -> Result<(
         exit::CONFIG_ERROR,
         format!(
             "mkit-server serve: --meta sqlite:{}: the database was written with --sharding \
-             {stored}, but this server was started with --sharding {wanted} (d34 is the default \
-             with --meta sqlite). Changing an existing database's sharding would hide its refs \
+             {stored}, but this server was started with --sharding {wanted} (the default with \
+             --meta sqlite is d34, or single for --addressing multi with --listen-enc). Changing an existing database's sharding would hide its refs \
              and is never done silently: start with --sharding {stored}.",
             db.display()
         ),

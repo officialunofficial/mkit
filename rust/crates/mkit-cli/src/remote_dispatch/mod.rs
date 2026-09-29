@@ -2112,7 +2112,7 @@ pub fn pull_all_with(
     // per branch, around only the local unpack + remote-ref-publish window
     // (#642 — see `packmap::apply_fetched_chain`). No lock is held here
     // across the network transfer.
-    let n = fetch_objects(&store, &layout, tx, remote, require_signed)?;
+    let n = fetch_objects(&store, &layout, tx, remote, target_branch, require_signed)?;
     let remote_refs = crate::commands::list_remote_refs_parallel(&layout, remote)?
         .into_iter()
         .filter_map(|r| r.hash.map(|hash| (r.name, hash)))
@@ -2254,7 +2254,7 @@ pub fn fetch_all_with(
     // network transfer. See `packmap::resolve_and_download_chain` /
     // `apply_fetched_chain` and `fetch_objects_inner` below.
     let store = crate::commands::open_store_configured(&layout)?;
-    fetch_objects(&store, &layout, tx, remote, require_signed)
+    fetch_objects(&store, &layout, tx, remote, None, require_signed)
 }
 
 /// Reconstruct every remote `refs/heads/*` from its packmap chain and
@@ -2332,15 +2332,30 @@ pub fn fetch_all_with(
 /// #267 GC-prune race: `gc` takes the very same lock before computing its
 /// live set, so it can never observe a branch's objects on disk without
 /// that branch's ref already published.
+///
+/// `target_branch` (a `clone -b` / `pull` target) is fetched even when an
+/// eventual `ListRefs` (D34, STC §7.9) has not caught up with it: the branch
+/// is strongly read by name, fetched if present, and
+/// [`DispatchError::RemoteBranchMissing`] if absent. Never an exit-0 empty
+/// clone for `-b`.
 fn fetch_objects(
     store: &ObjectStore,
     layout: &RepoLayout,
     tx: &dyn Transport,
     remote: &str,
+    target_branch: Option<&str>,
     require_signed: bool,
 ) -> Result<usize, DispatchError> {
     let mut applied = AppliedPacks::load_or_empty(layout, remote);
-    let result = fetch_objects_inner(store, layout, tx, remote, &mut applied, require_signed);
+    let result = fetch_objects_inner(
+        store,
+        layout,
+        tx,
+        remote,
+        target_branch,
+        &mut applied,
+        require_signed,
+    );
     persist_record(&mut applied, remote);
     result
 }
@@ -2352,12 +2367,27 @@ fn fetch_objects_inner(
     layout: &RepoLayout,
     tx: &dyn Transport,
     remote: &str,
+    target_branch: Option<&str>,
     applied: &mut AppliedPacks,
     require_signed: bool,
 ) -> Result<usize, DispatchError> {
-    let remote_refs = tx
+    let mut remote_refs = tx
         .list_refs("refs/heads/")
         .map_err(|error| repository_operation_error(tx, error))?;
+    if let Some(branch) = target_branch
+        && !remote_refs.iter().any(|r| r.name == branch)
+    {
+        // The listing may be stale (eventual under D34): a strong read by
+        // name decides whether the branch exists. A transport error here
+        // propagates; only `Ok(None)` is the "no such branch" verdict.
+        match tx.read_ref(&format!("refs/heads/{branch}"))? {
+            Some(hash) => remote_refs.push(refs::Ref {
+                name: branch.to_owned(),
+                hash: Some(hash),
+            }),
+            None => return Err(DispatchError::RemoteBranchMissing(branch.to_owned())),
+        }
+    }
     let mut n = 0;
     // Batch every fetched branch's remote-tracking-ref write (#645): see
     // `push_all_with` for the same pattern and its rationale. `tracking.write`
@@ -2389,11 +2419,13 @@ fn fetch_objects_inner(
             // propagates and never becomes a skip.
             let Some(chain_head) = tx.read_ref(&packmap_ref(&r.name))? else {
                 if tx.read_ref(&format!("refs/heads/{}", r.name))?.is_none() {
-                    eprintln!(
-                        "fetch: skipping branch `{}`: listed by an eventual ListRefs but \
-                         no longer present (deleted since the listing)",
-                        r.name
-                    );
+                    if crate::progress::should_report(false) {
+                        eprintln!(
+                            "fetch: skipping branch `{}`: listed by an eventual ListRefs but \
+                             no longer present (deleted since the listing)",
+                            r.name
+                        );
+                    }
                     continue;
                 }
                 return Err(DispatchError::PackmapMissing(r.name.clone()));

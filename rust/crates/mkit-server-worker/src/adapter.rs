@@ -721,9 +721,11 @@ pub fn outcome_audience(cfg: &WorkerConfig) -> String {
 /// The kind-8 budget for `plan` (`WORKERS_PLAN`), always applied: Free makes
 /// at most 8 sink calls per alarm (one fire of 8 rows), Paid at most 64 (four
 /// fires of 16). A sink call may be a subrequest, and a Free alarm allows 50.
-/// The Free split is fixed: relay 32 + backup 1 + outcome 8 + quota rollup
-/// at most 8 = 49 (`RefShard`, the class with all of them). The rollup is
-/// registered by WP-1.26b; until then those 8 are headroom.
+///
+/// Free per-alarm subrequest split (`RefShard`, the class with all of them):
+/// relay 32 + backup 1 + outcome delivery <= 8 (1 fire x 8 rows; 0 calls
+/// today with `NoOutcomes`, reserved for 3.9's binding sink) + quota rollup
+/// <= 8 (`FREE_ROLLUP_CALLS`, one fire per tick) = at most 49 of 50.
 #[must_use]
 pub fn outcome_budget(plan: Option<&str>) -> OutcomeBudget {
     let paid = plan.is_some_and(|p| p.trim().eq_ignore_ascii_case("paid"));
@@ -848,6 +850,27 @@ impl<T: mkit_server::NamespaceStore> mkit_server::NamespaceStore for SharedStore
     ) -> Result<Option<mkit_server::Value>, mkit_server::StoreError> {
         self.0.get(p, k).await
     }
+    async fn has(
+        &self,
+        p: &mkit_server::Partition,
+        k: &mkit_server::Key,
+    ) -> Result<bool, mkit_server::StoreError> {
+        self.0.has(p, k).await
+    }
+    async fn get_many(
+        &self,
+        p: &mkit_server::Partition,
+        keys: &[mkit_server::Key],
+    ) -> Result<Vec<Option<mkit_server::Value>>, mkit_server::StoreError> {
+        self.0.get_many(p, keys).await
+    }
+    async fn scan_many(
+        &self,
+        p: &mkit_server::Partition,
+        ranges: &[mkit_server::RangeScan],
+    ) -> Result<Vec<mkit_server::ScanPage>, mkit_server::StoreError> {
+        self.0.scan_many(p, ranges).await
+    }
     async fn scan(
         &self,
         p: &mkit_server::Partition,
@@ -878,9 +901,8 @@ impl<T: mkit_server::NamespaceStore> mkit_server::NamespaceStore for SharedStore
 
 /// Kind-5 rollups per alarm tick, and the coordinator calls one fire may make.
 ///
-/// Free-plan alarm budget (50 subrequests): relay 32, backup 1, outcome
-/// delivery 8 (1 fire x 8) and the quota rollup at most 8, so Free runs one
-/// rollup fire per tick and caps that fire at [`FREE_ROLLUP_CALLS`] external
+/// Free-plan alarm budget: see [`outcome_budget`] (49 of 50 with the rollup's
+/// 8), so Free runs one rollup fire per tick and caps that fire at [`FREE_ROLLUP_CALLS`] external
 /// calls. From `quota_rollup.rs`: a live-window fire is the aggregate read
 /// plus its guarded write (2 calls); an expired-window fire adds the
 /// contribution prune (a read, a scan, the last-source read, two
@@ -905,7 +927,9 @@ impl<T> BudgetedStore<T> {
     fn charge(&self) -> Result<(), mkit_server::StoreError> {
         use core::sync::atomic::Ordering;
         if self.used.fetch_add(1, Ordering::SeqCst) >= self.limit {
-            return Err(mkit_server::StoreError::Invalid(
+            // `Unavailable` (reason "storage"), not `Invalid` (which the rollup
+            // labels "contention"): an exhausted budget is not a CAS race.
+            return Err(mkit_server::StoreError::Unavailable(
                 "quota rollup subrequest budget exhausted".into(),
             ));
         }
@@ -924,6 +948,32 @@ impl<T: mkit_server::NamespaceStore> mkit_server::NamespaceStore for BudgetedSto
     ) -> Result<Option<mkit_server::Value>, mkit_server::StoreError> {
         self.charge()?;
         self.inner.get(p, k).await
+    }
+    async fn has(
+        &self,
+        p: &mkit_server::Partition,
+        k: &mkit_server::Key,
+    ) -> Result<bool, mkit_server::StoreError> {
+        self.charge()?;
+        self.inner.has(p, k).await
+    }
+    /// One round trip to the coordinator: charged once, however many keys.
+    async fn get_many(
+        &self,
+        p: &mkit_server::Partition,
+        keys: &[mkit_server::Key],
+    ) -> Result<Vec<Option<mkit_server::Value>>, mkit_server::StoreError> {
+        self.charge()?;
+        self.inner.get_many(p, keys).await
+    }
+    /// One round trip to the coordinator: charged once, however many ranges.
+    async fn scan_many(
+        &self,
+        p: &mkit_server::Partition,
+        ranges: &[mkit_server::RangeScan],
+    ) -> Result<Vec<mkit_server::ScanPage>, mkit_server::StoreError> {
+        self.charge()?;
+        self.inner.scan_many(p, ranges).await
     }
     async fn scan(
         &self,
@@ -1684,10 +1734,9 @@ mod glue {
             }
         });
         let registry = if let Some(config) = backup.clone() {
-            // Free-plan alarm budget (50 subrequests), fixed split: relay 32,
-            // this handler's single R2 put 1, kind-8 sink calls 8
-            // (`outcome_budget`), and the quota rollup (WP-1.26b) at most 8.
-            // Kind 9 makes no external calls, and `NoOutcomes` makes none.
+            // Free-plan alarm budget: relay 32 + this handler's single R2 put
+            // 1 + outcome delivery <= 8 + quota rollup <= 8 = 49 of 50 (see
+            // `outcome_budget`). Kind 9 makes no external calls.
             registry.register(BackupHandler::new(
                 EnvBucket::new(env.clone(), BACKUPS_BINDING),
                 config,
@@ -2189,8 +2238,80 @@ mod tests {
         }
         assert!(matches!(
             block_on(store.get(&partition, &key)),
-            Err(StoreError::Invalid(_))
+            Err(StoreError::Unavailable(_))
         ));
+    }
+
+    /// An expired-window fire with a pending shard delta stays within the
+    /// Free cap of 8 coordinator calls, and `get_many`/`scan_many` charge 1.
+    #[test]
+    fn expired_window_rollup_fits_the_free_cap() {
+        use mkit_server::timers::{TickBudget, TimerRegistry, run_due};
+        use mkit_server::{
+            Batch, Key, ManualClock, MemoryKv, NamespaceKey, NamespaceStore, Partition, RangeScan,
+            RepoName,
+        };
+        let clock = Arc::new(ManualClock::new(700_000));
+        let coordinator = Arc::new(MemoryKv::with_clock(clock.clone()));
+        let used = Arc::new(core::sync::atomic::AtomicU32::new(0));
+        let handler = mkit_server::timers::quota_rollup::QuotaRollup {
+            coordinator: BudgetedStore {
+                inner: SharedStore(coordinator),
+                used: Arc::clone(&used),
+                limit: FREE_ROLLUP_CALLS,
+            },
+            metrics: mkit_server::NoopMetrics,
+        };
+        let local = MemoryKv::with_clock(clock.clone());
+        let shard = Partition::Ref {
+            ns: NamespaceKey::deployment_default(),
+            repo: RepoName::new("room").unwrap(),
+            shard_ref: "refs/heads/b0".into(),
+        };
+        let reference = bytes::Bytes::copy_from_slice(&0u64.to_be_bytes());
+        let timer_key = mkit_server::store::keys::timer(
+            60_000,
+            mkit_server::timers::registry::kinds::QUOTA_ROLLUP.get(),
+            &reference,
+        );
+        block_on(
+            local.apply(
+                &shard,
+                Batch::new()
+                    .put(
+                        mkit_server::store::keys::quota_shard(0),
+                        mkit_server::store::codec::encode_namespace_usage(
+                            mkit_server::quota::NamespaceUsage { ops: 3, bytes: 12 },
+                        ),
+                    )
+                    .put(timer_key, mkit_server::store::codec::encode_u64(60_000)),
+            ),
+        )
+        .unwrap();
+        let registry = TimerRegistry::new().register(handler);
+        let out = block_on(run_due(
+            &local,
+            &shard,
+            &registry,
+            clock.as_ref(),
+            700_000,
+            &TickBudget::default(),
+        ))
+        .unwrap();
+        assert_eq!(out.fired, 1);
+        assert!(used.load(core::sync::atomic::Ordering::SeqCst) <= FREE_ROLLUP_CALLS);
+        // One charge per batched read, whatever its width.
+        let store = BudgetedStore {
+            inner: SharedStore(Arc::new(MemoryKv::default())),
+            used: Arc::new(core::sync::atomic::AtomicU32::new(0)),
+            limit: 100,
+        };
+        let p = Partition::Namespace(NamespaceKey::deployment_default());
+        let keys = [Key::new(b"a".to_vec()), Key::new(b"b".to_vec())];
+        block_on(store.get_many(&p, &keys)).unwrap();
+        let range = RangeScan::new(Key::new(b"a".to_vec()), Key::new(b"z".to_vec()), None, 10);
+        block_on(store.scan_many(&p, &[range.clone(), range])).unwrap();
+        assert_eq!(store.used.load(core::sync::atomic::Ordering::SeqCst), 2);
     }
 
     const RP: &str = "example.test=https://example.test";
