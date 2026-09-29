@@ -65,6 +65,32 @@ impl<B: ObjectBucket> PackWindows for R2Windows<B> {
     }
 }
 
+/// Test-faults only: the fourth pack read of the isolate fails once, as a
+/// slice the runtime kills mid-pack does. With 16 MiB windows that is the
+/// second slice of a three-window pack, so the job must resume from the
+/// checkpoint the first slice left.
+#[cfg(feature = "test-faults")]
+#[derive(Debug, Clone)]
+pub struct MidPackCrash<W>(pub W);
+
+#[cfg(feature = "test-faults")]
+impl<W: PackWindows> PackWindows for MidPackCrash<W> {
+    fn read<'a>(
+        &'a self,
+        pack: &'a Hash,
+        offset: u64,
+        len: u64,
+        etag: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Window, WindowError>> {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static READS: AtomicU32 = AtomicU32::new(0);
+        if READS.fetch_add(1, Ordering::SeqCst) + 1 == 4 {
+            return Box::pin(async { Err(WindowError::Unavailable) });
+        }
+        self.0.read(pack, offset, len, etag)
+    }
+}
+
 /// Register the kind-7 handler on a Paid deployment's ref shards when
 /// `indexed` asks for scheduled verification; on every other class or plan,
 /// and when `indexed` is `None` (every release build), `registry` comes back
@@ -132,6 +158,10 @@ pub fn register_from_env<S: NamespaceStore>(
     };
     let bucket = || EnvBucket::new(env.clone(), STORAGE_BINDING);
     let probe = cfg.probe_partition();
+    #[cfg(feature = "test-faults")]
+    let windows = MidPackCrash(R2Windows(bucket()));
+    #[cfg(not(feature = "test-faults"))]
+    let windows = R2Windows(bucket());
     with_verification_timers(
         registry,
         class,
@@ -139,7 +169,7 @@ pub fn register_from_env<S: NamespaceStore>(
         plan,
         WorkerNamespaceStore::new(StubTransport::new(env.clone(), cfg.placement), probe),
         R2BlobStore::new(bucket(), PACKS_KEYSPACE),
-        R2Windows(bucket()),
+        windows,
         Arc::new(WorkerClock),
         Arc::new(ConsoleMetrics::default()),
     )

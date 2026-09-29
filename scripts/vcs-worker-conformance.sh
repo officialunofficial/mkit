@@ -5,7 +5,7 @@
 # apps/vcs-worker under a local `wrangler dev`: the M0 "nothing changes on
 # the wire" exit check for the vcs-worker port (WP-M0-17).
 #
-#   scripts/vcs-worker-conformance.sh [--test-faults] [--sharding single|d34] [--multi] [-- <extra runner args>]
+#   scripts/vcs-worker-conformance.sh [--test-faults] [--sharding single|d34] [--multi] [--indexed] [-- <extra runner args>]
 #
 #   (default)      a release-optimized build; the whole suite once.
 #   --test-faults  a `test-faults` build, in two phases, each on a fresh
@@ -39,6 +39,13 @@
 #                  --test-faults, a grant phase (WP-1.30b) configures
 #                  GRANT_SCHEMES, WEBAUTHN_RPS and UNSAFE_LOOPBACK_GRANTS and
 #                  runs the grants., ref_scopes. and epochs. cases at M2.
+#   --indexed      add the indexed phase (WP-4.8; needs --test-faults and
+#                  d34): a fresh Multi server with INDEXED_MODE and a Paid
+#                  plan, where a push of three 16 MiB windows answers
+#                  PendingVerification until scheduled alarm slices verify it,
+#                  one slice failing mid-pack on purpose, and the same signed
+#                  advance then commits (`indexed.async_verification_commits`).
+#                  The wrangler log must show the injected slice failure.
 #   -- ARGS        passed to every `mkit-server-conformance wire` run (e.g.
 #                  `-- --filter refs.`, `-- --list-refs 1000`).
 #
@@ -82,6 +89,7 @@ MAX_BUFFERED_BYTES=1048576
 test_faults=0
 sharding=d34
 multi=0
+indexed=0
 runner_args=()
 # Under D34 a ListRefs page scans 16 buckets and each lag poll re-lists, so the
 # 10,000-ref case would take many minutes in miniflare; 1,000 exercises paging
@@ -91,6 +99,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --test-faults) test_faults=1 ;;
         --multi) multi=1 ;;
+        --indexed) indexed=1 ;;
         --sharding)
             if [ $# -lt 2 ] || { [ "$2" != single ] && [ "$2" != d34 ]; }; then
                 echo "--sharding requires single or d34" >&2; exit 2
@@ -99,10 +108,14 @@ while [ $# -gt 0 ]; do
             d34_list_args=()
             if [ "${sharding}" = d34 ]; then d34_list_args=(--list-refs 1000); fi ;;
         --) shift; runner_args=("$@"); break ;;
-        *) echo "usage: $0 [--test-faults] [--sharding single|d34] [--multi] [-- <runner args>]" >&2; exit 2 ;;
+        *) echo "usage: $0 [--test-faults] [--sharding single|d34] [--multi] [--indexed] [-- <runner args>]" >&2; exit 2 ;;
     esac
     shift
 done
+
+if [ "${indexed}" -eq 1 ] && { [ "${test_faults}" -ne 1 ] || [ "${sharding}" != d34 ]; }; then
+    echo "--indexed needs --test-faults and --sharding d34" >&2; exit 2
+fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/vcs-worker-conformance.XXXXXX")"
 server_pid=""
@@ -478,5 +491,41 @@ if [ "${multi}" -eq 1 ]; then
         fi
         stop_server
     fi
+fi
+if [ "${indexed}" -eq 1 ]; then
+    # The indexed phase (WP-4.8): the Multi allowlist of the run's fixed seed,
+    # INDEXED_MODE (accepted only by a test-faults build) and a Paid plan, so
+    # the RefShard registers the kind-7 verifier. The Worker fails the fourth
+    # pack read once (`MidPackCrash`), the second slice of a three-window pack.
+    indexed_seed="5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e"
+    indexed_run_id="worker-indexed"
+    indexed_features="health,strict-gzip-auth,tickets,multi-repo,namespace-policy,indexed-async,test-faults,timers"
+    indexed_allowlist="$("${runner}" allowlist --auth auth-v2 --audience "${ORIGIN}" \
+        --repository "${REPOSITORY}" --signer-seed-hex "${indexed_seed}" \
+        --run-id "${indexed_run_id}")"
+    indexed_allowlist="$(printf '%s' "${indexed_allowlist}" | tr '\n' ',')"
+    start_server indexed "${vars[@]}" \
+        --var "ADDRESSING:multi" --var "NAMESPACE_ALLOWLIST:${indexed_allowlist}" \
+        --var "INDEXED_MODE:true" --var "WORKERS_PLAN:paid"
+    echo ">> running the indexed wire case (features: ${indexed_features})"
+    status=0
+    "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
+        --repository "${REPOSITORY}" --signer-seed-hex "${indexed_seed}" \
+        --run-id "${indexed_run_id}" --atomic-advance --fresh-target --milestone M4 \
+        --max-pack-bytes "${MAX_PACK_BYTES}" --features "${indexed_features}" \
+        --sharding d34 --filter indexed.async \
+        ${runner_args[@]+"${runner_args[@]}"} || status=$?
+    if [ "${status}" -ne 0 ]; then
+        echo "indexed wire case failed (exit ${status}); wrangler log tail:" >&2
+        tail -n 80 "${log}" >&2
+        exit "${status}"
+    fi
+    if ! grep -q "verification slice failed" "${work}/indexed/wrangler.log"; then
+        echo "the injected mid-pack slice failure never showed in the wrangler log" >&2
+        tail -n 80 "${log}" >&2
+        exit 1
+    fi
+    echo ">> indexed phase passed: pending until verified, the failed slice resumed, then committed"
+    stop_server
 fi
 echo ">> vcs-worker conformance passed"
