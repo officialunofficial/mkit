@@ -32,7 +32,8 @@ use crate::repo::{NamespaceKey, RepoName};
 /// 3. **Repo index shards** (`RepoIndex`, `RefIndex`) are enumerable by
 ///    construction: their object-id-prefix and ref-name-hash fan-outs are
 ///    fixed deployment constants.
-/// 4. **Ref shards** are found by scanning each repo's `RefIndex` shards.
+/// 4. **Ref shards** are tracked by the coordinator's active-shard table;
+///    WP-5.3a completes GC enumeration, including deleted-ref and ticket-only shards.
 /// 5. **Content shards** are enumerable by construction (`INDEX_FANOUT`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]

@@ -14,6 +14,7 @@
 //! | deployment sharding marker (root `Namespace` only) | `sm 00` | UTF-8 `single` or `d34` |
 //! | layout version | `v 00` | be32 [`LAYOUT_VERSION`]; never on `RefsOnly` stores |
 //! | ref | `r 00 <repo> 00 <refname>` | 32-byte id |
+//! | ref-name index (`RefIndex`) | `x 00 <repo> 00 <refname>` | 32-byte id |
 //! | replay record | `p 00 <scope:32>` | codec `ReplayRecord` |
 //! | replay expiry index | `px 00 <expires_at:be64> <scope:32>` | empty |
 //! | quota state | `q 00 <scope>` | codec `QuotaState` |
@@ -90,6 +91,8 @@ pub const TAG_LAYOUT_VERSION: &str = "v";
 pub const TAG_SHARDING_MARKER: &str = "sm";
 /// Ref tag.
 pub const TAG_REF: &str = "r";
+/// Ref-name index tag.
+pub const TAG_REF_INDEX: &str = "x";
 /// Replay record tag.
 pub const TAG_REPLAY: &str = "p";
 /// Replay expiry index tag.
@@ -192,6 +195,13 @@ pub enum ParsedKey {
     RelayHighWater(Partition),
     /// `r 00 <repo> 00 <refname>`.
     Ref {
+        /// Repository.
+        repo: RepoName,
+        /// Full ref name.
+        name: String,
+    },
+    /// `x 00 <repo> 00 <refname>`.
+    RefIndexEntry {
         /// Repository.
         repo: RepoName,
         /// Full ref name.
@@ -408,6 +418,23 @@ pub fn ref_key(repo: &RepoName, name: &str) -> Key {
 #[must_use]
 pub fn ref_prefix_range(repo: &RepoName, prefix: &str) -> (Key, Key) {
     let start = ref_key(repo, prefix);
+    let end = successor(&start);
+    (start, end)
+}
+
+/// `x 00 <repo> 00 <name>`.
+#[must_use]
+pub fn ref_index_key(repo: &RepoName, name: &str) -> Key {
+    key(
+        TAG_REF_INDEX,
+        &[repo.as_str().as_bytes(), b"\0", name.as_bytes()],
+    )
+}
+
+/// The scan range of every indexed ref of `repo` starting with `prefix`.
+#[must_use]
+pub fn ref_index_prefix_range(repo: &RepoName, prefix: &str) -> (Key, Key) {
+    let start = ref_index_key(repo, prefix);
     let end = successor(&start);
     (start, end)
 }
@@ -834,6 +861,13 @@ fn parse_namespace_quota(tag: &[u8], body: &[u8]) -> Option<ParsedKey> {
     }
 }
 
+fn parse_named_ref(body: &[u8]) -> Option<(RepoName, String)> {
+    let sep = body.iter().position(|&b| b == 0)?;
+    let repo = RepoName::new(String::from_utf8(body[..sep].to_vec()).ok()?).ok()?;
+    let name = String::from_utf8(body[sep + 1..].to_vec()).ok()?;
+    Some((repo, name))
+}
+
 /// Decode a key of any laid-out class; `None` for a malformed key or a
 /// reserved class.
 #[must_use]
@@ -860,11 +894,12 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"rs" if body.is_empty() => ParsedKey::RelayScan,
         b"rk" => ParsedKey::RepoKnown(RepoName::new(text(body)?).ok()?),
         b"r" => {
-            let sep = body.iter().position(|&b| b == 0)?;
-            ParsedKey::Ref {
-                repo: RepoName::new(text(&body[..sep])?).ok()?,
-                name: text(&body[sep + 1..])?,
-            }
+            let (repo, name) = parse_named_ref(body)?;
+            ParsedKey::Ref { repo, name }
+        }
+        b"x" => {
+            let (repo, name) = parse_named_ref(body)?;
+            ParsedKey::RefIndexEntry { repo, name }
         }
         b"t" => ParsedKey::Ticket(hash(body)?),
         b"ti" | b"tc" | b"tu" => parse_ticket_binding(tag, body)?,
@@ -962,6 +997,7 @@ mod tests {
             TAG_SHARDING_MARKER,
             TAG_LAYOUT_VERSION,
             TAG_REF,
+            TAG_REF_INDEX,
             TAG_REPLAY,
             TAG_REPLAY_EXPIRY,
             TAG_QUOTA,
@@ -1019,6 +1055,10 @@ mod tests {
             (
                 ref_key(&repo("room-a"), "refs/heads/main"),
                 b"r\0room-a\0refs/heads/main".to_vec(),
+            ),
+            (
+                ref_index_key(&repo("room-a"), "refs/heads/main"),
+                b"x\0room-a\0refs/heads/main".to_vec(),
             ),
             (replay(&s), [&b"p\0"[..], &[0x11; 32]].concat()),
             (
@@ -1251,7 +1291,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ref_index_prefix_is_exact() {
+        let first = repo("one");
+        let (start, end) = ref_index_prefix_range(&first, "refs/heads/feat/");
+        assert!(
+            start <= ref_index_key(&first, "refs/heads/feat/topic")
+                && ref_index_key(&first, "refs/heads/feat/topic") < end
+        );
+        assert!(
+            !(start <= ref_index_key(&first, "refs/heads/featx")
+                && ref_index_key(&first, "refs/heads/featx") < end)
+        );
+        assert!(
+            !(start <= ref_index_key(&repo("two"), "refs/heads/feat/topic")
+                && ref_index_key(&repo("two"), "refs/heads/feat/topic") < end)
+        );
+    }
+
     proptest! {
+        #[test]
+        fn ref_index_prefix_bounds_and_repo_isolation(
+            prefix in "[a-z/.-]{0,6}",
+            name in "[a-z/.-]{0,10}",
+        ) {
+            let r = repo("repo");
+            let (start, end) = ref_index_prefix_range(&r, &prefix);
+            let key = ref_index_key(&r, &name);
+            prop_assert_eq!(start <= key && key < end, name.starts_with(&prefix));
+            let foreign = ref_index_key(&repo("repo2"), &name);
+            prop_assert!(!(start <= foreign && foreign < end));
+            prop_assert_eq!(parse(&key), Some(ParsedKey::RefIndexEntry { repo: r, name }));
+        }
+
         #[test]
         fn ref_prefix_scan_bounds_cover_exactly_the_prefix(
             prefix in "[a-z/.-]{0,6}",

@@ -1652,7 +1652,7 @@ fn advance_boundary_clock(_: Duration) {
 }
 
 #[test]
-fn renewal_margin_is_strictly_less_than_thirty_seconds() {
+fn poll_renews_before_the_worst_case_ladder_window() {
     BOUNDARY_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
     BOUNDARY_SLEEPS.store(0, Ordering::SeqCst);
     let captured = Arc::new(Mutex::new(Vec::new()));
@@ -1676,11 +1676,11 @@ fn renewal_margin_is_strictly_less_than_thirty_seconds() {
     );
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     let headers = captured.lock().unwrap();
-    assert_eq!(
+    assert_ne!(
         header(&headers[0], "idempotency-key"),
         header(&headers[1], "idempotency-key")
     );
-    assert_ne!(
+    assert_eq!(
         header(&headers[1], "idempotency-key"),
         header(&headers[2], "idempotency-key")
     );

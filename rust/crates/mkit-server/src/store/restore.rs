@@ -946,18 +946,17 @@ mod tests {
                 codec::encode_u64(10),
             )],
         );
-        let relay = codec::encode_relay(&codec::RelayV1 {
-            at_ms: 100,
-            target: target(),
-            puts: vec![(Key::new(b"m\0x".to_vec()), Value::default())],
-        })
-        .unwrap();
-        let relay_to_empty = codec::encode_relay(&codec::RelayV1 {
-            at_ms: 100,
-            target: empty_target(),
-            puts: vec![(Key::new(b"m\0y".to_vec()), Value::default())],
-        })
-        .unwrap();
+        let relay_to = |target, key: &[u8]| {
+            codec::encode_relay(&codec::RelayV1 {
+                at_ms: 100,
+                target,
+                puts: vec![(Key::new(key.to_vec()), Value::default())],
+                deletes: Vec::new(),
+            })
+            .unwrap()
+        };
+        let relay = relay_to(target(), b"m\0x");
+        let relay_to_empty = relay_to(empty_target(), b"m\0y");
         let ref_shard = snapshot(
             &source(),
             vec![
@@ -1231,6 +1230,7 @@ mod tests {
                 Key::new(b"m\0new".as_slice()),
                 Value::new(b"delivered".as_slice()),
             )],
+            deletes: Vec::new(),
         })
         .unwrap();
         block_on(

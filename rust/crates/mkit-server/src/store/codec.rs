@@ -207,7 +207,7 @@ pub enum ReservationV1 {
     },
 }
 
-/// An idempotent relay of upserts to one partition. Deletions are excluded.
+/// An idempotent relay of upserts and deletes to one partition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayV1 {
     /// Writer plan-time lower bound on commit time. V1 changed in place before deployment.
@@ -216,6 +216,8 @@ pub struct RelayV1 {
     pub target: Partition,
     /// Idempotent key/value upserts.
     pub puts: Vec<(Key, Value)>,
+    /// Keys removed after this row's upserts.
+    pub deletes: Vec<Key>,
 }
 
 /// Maximum retained targets in a persistent relay scan cycle.
@@ -259,6 +261,8 @@ struct RelayDtoV1 {
     at_ms: u64,
     target: String,
     puts: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    deletes: Vec<String>,
 }
 
 mod hash_json {
@@ -643,8 +647,18 @@ fn hex_bytes(hex: &str) -> Result<Vec<u8>, StoreError> {
         .collect()
 }
 
-/// Encode idempotent relay upserts. A malformed target returns Invalid.
+/// Encode idempotent relay operations. A malformed target returns Invalid.
 pub fn encode_relay(relay: &RelayV1) -> Result<Value, StoreError> {
+    let put_keys: std::collections::BTreeSet<_> = relay.puts.iter().map(|(key, _)| key).collect();
+    let mut delete_keys = std::collections::BTreeSet::new();
+    for key in &relay.deletes {
+        if key.as_bytes().len() > MAX_KEY_BYTES
+            || put_keys.contains(key)
+            || !delete_keys.insert(key)
+        {
+            return Err(StoreError::Invalid("invalid relay delete key".into()));
+        }
+    }
     let value = encode_json(&RelayDtoV1 {
         at_ms: relay.at_ms,
         target: to_hex_bytes(&relay.target.encode()?),
@@ -652,6 +666,11 @@ pub fn encode_relay(relay: &RelayV1) -> Result<Value, StoreError> {
             .puts
             .iter()
             .map(|(key, value)| (to_hex_bytes(key.as_bytes()), to_hex_bytes(value.as_bytes())))
+            .collect(),
+        deletes: relay
+            .deletes
+            .iter()
+            .map(|key| to_hex_bytes(key.as_bytes()))
             .collect(),
     });
     if value.as_bytes().len() > MAX_VALUE_BYTES {
@@ -665,12 +684,12 @@ pub fn encode_relay(relay: &RelayV1) -> Result<Value, StoreError> {
     Ok(value)
 }
 
-/// Decode a relay target and its bounded idempotent upserts.
+/// Decode a relay target and its bounded idempotent operations.
 pub fn decode_relay(value: &Value) -> Result<RelayV1, StoreError> {
     check_value_limit(value)?;
     let dto: RelayDtoV1 = decode_json(value, "bad relay")?;
     let target = Partition::decode(&hex_bytes(&dto.target)?)?;
-    let puts = dto
+    let puts: Vec<(Key, Value)> = dto
         .puts
         .into_iter()
         .map(|(key, value)| {
@@ -682,10 +701,24 @@ pub fn decode_relay(value: &Value) -> Result<RelayV1, StoreError> {
             Ok((Key::new(key), Value::new(value)))
         })
         .collect::<Result<_, StoreError>>()?;
+    let put_keys: std::collections::BTreeSet<_> = puts.iter().map(|(key, _)| key).collect();
+    let mut delete_keys = std::collections::BTreeSet::new();
+    let mut deletes = Vec::with_capacity(dto.deletes.len());
+    for encoded in dto.deletes {
+        let key = Key::new(hex_bytes(&encoded)?);
+        if key.as_bytes().len() > MAX_KEY_BYTES
+            || put_keys.contains(&key)
+            || !delete_keys.insert(key.clone())
+        {
+            return Err(corrupt("invalid relay delete key"));
+        }
+        deletes.push(key);
+    }
     Ok(RelayV1 {
         at_ms: dto.at_ms,
         target,
         puts,
+        deletes,
     })
 }
 
@@ -1305,6 +1338,7 @@ mod tests {
             at_ms: 123,
             target: Partition::Namespace(crate::repo::NamespaceKey::deployment_default()),
             puts: vec![(Key::new(b"m\0a\0".to_vec()), Value::new(vec![]))],
+            deletes: Vec::new(),
         };
         let encoded = encode_relay(&relay).unwrap();
         assert_eq!(
@@ -1351,10 +1385,33 @@ mod tests {
         }
         let oversized = RelayV1 {
             at_ms: 123,
-            target: relay.target,
+            target: relay.target.clone(),
             puts: vec![(Key::new(vec![0; MAX_KEY_BYTES + 1]), Value::new(vec![]))],
+            deletes: Vec::new(),
         };
         assert!(encode_relay(&oversized).is_err());
+        let key = Key::new(b"x\0a\0refs/heads/main".as_slice());
+        let mut deleted = relay.clone();
+        deleted.deletes.push(key.clone());
+        assert_eq!(
+            decode_relay(&encode_relay(&deleted).unwrap()).unwrap(),
+            deleted
+        );
+        deleted.puts.push((key.clone(), Value::default()));
+        assert!(encode_relay(&deleted).is_err());
+        deleted.puts.pop();
+        deleted.deletes.push(key.clone());
+        assert!(encode_relay(&deleted).is_err());
+        deleted.deletes = vec![Key::new(vec![b'x'; MAX_KEY_BYTES + 1])];
+        assert!(encode_relay(&deleted).is_err());
+        for json in [
+            serde_json::json!({"at_ms":123,"target":"6e726f6f7400","puts":[["780061",""]],"deletes":["780061"]}),
+            serde_json::json!({"at_ms":123,"target":"6e726f6f7400","puts":[],"deletes":["78","78"]}),
+            serde_json::json!({"at_ms":123,"target":"6e726f6f7400","puts":[],"deletes":["78"],"extra":1}),
+            serde_json::json!({"at_ms":123,"target":"6e726f6f7400","puts":[],"deletes":["78".repeat(MAX_KEY_BYTES + 1)]}),
+        ] {
+            assert!(decode_relay(&json_value(&json)).is_err());
+        }
     }
 
     #[test]

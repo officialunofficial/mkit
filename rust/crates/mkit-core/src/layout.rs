@@ -54,6 +54,7 @@
 //! | `recovery-log`           | common   | [`crate::ops::recovery`] |
 //! | `attestations/`          | common   | `mkit-attest`           |
 //! | `applied-packs/`         | common   | CLI remote dispatch (redownload cache, never a gc root) |
+//! | `upload-parts/`          | common   | CLI remote dispatch (resumable receipt cache, never a gc root) |
 //! | `git/`                   | common   | `mkit-git-bridge`       |
 //! | `sparse/`                | common   | CLI sparse witness cache |
 //! | `pack-shards/`           | common   | CLI pack-shard output   |
@@ -114,6 +115,8 @@ pub const ATTESTATIONS_DIR_NAME: &str = "attestations";
 /// Per-remote applied-pack record directory name under the common dir.
 /// A redownload-avoidance cache — never a gc root source (#409).
 pub const APPLIED_PACKS_DIR_NAME: &str = "applied-packs";
+/// Resumable upload receipt cache directory under the common dir.
+pub const UPLOAD_PARTS_DIR_NAME: &str = "upload-parts";
 /// Git-bridge per-remote state directory name under the common dir.
 pub const GIT_STATE_DIR_NAME: &str = "git";
 /// Sparse witness-cache directory name under the common dir.
@@ -312,6 +315,13 @@ impl RepoLayout {
     #[must_use]
     pub fn applied_packs_dir(&self) -> PathBuf {
         self.common_dir.join(APPLIED_PACKS_DIR_NAME)
+    }
+
+    /// `upload-parts/` — resumable part receipts. A deletable cache, never
+    /// a GC root or a source of authoritative repository content.
+    #[must_use]
+    pub fn upload_parts_dir(&self) -> PathBuf {
+        self.common_dir.join(UPLOAD_PARTS_DIR_NAME)
     }
 
     /// `git/` — git-bridge per-remote state.
@@ -784,6 +794,12 @@ mod tests {
                 "applied-packs",
                 Common,
             ),
+            (
+                "upload_parts_dir",
+                l.upload_parts_dir(),
+                "upload-parts",
+                Common,
+            ),
             ("git_state_dir", l.git_state_dir(), "git", Common),
             ("sparse_cache_dir", l.sparse_cache_dir(), "sparse", Common),
             (
@@ -918,6 +934,7 @@ mod tests {
         assert_eq!(SPARSE_CHECKOUT_FILE_NAME, "sparse-checkout");
         assert_eq!(ATTESTATIONS_DIR_NAME, "attestations");
         assert_eq!(APPLIED_PACKS_DIR_NAME, "applied-packs");
+        assert_eq!(UPLOAD_PARTS_DIR_NAME, "upload-parts");
         assert_eq!(GIT_STATE_DIR_NAME, "git");
         assert_eq!(SPARSE_CACHE_DIR_NAME, "sparse");
         assert_eq!(PACK_SHARDS_DIR_NAME, "pack-shards");

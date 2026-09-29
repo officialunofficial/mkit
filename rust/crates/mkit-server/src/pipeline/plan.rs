@@ -14,7 +14,7 @@ use mkit_core::protocol::AdvanceOutcome;
 use mkit_core::refs::RefWriteCondition;
 
 use crate::error::ServerError;
-use crate::op::{GrantRef, RefUpdate};
+use crate::op::{GrantRef, PresenceRequirement, RefUpdate};
 use crate::quota::{self, NamespaceCharge, QuotaCharge, QuotaDecision, evaluate_quota};
 use crate::refs::{CasDecision, evaluate_condition};
 use crate::replay::{
@@ -28,6 +28,8 @@ use crate::store::outbox::OutboxBuilder;
 use crate::store::{
     Batch, Key, MAX_BATCH_OPS, Partition, Precondition, Value, Write, codec, tickets,
 };
+
+use super::{ShardMap, meta_error};
 
 /// Most re-plans after a guard failed because another writer changed a
 /// value the plan read; then the write is a retryable `aborted`.
@@ -136,6 +138,8 @@ pub(crate) struct WriteRequest<'a> {
     /// Ref writes in decision order: `[update]`, or `[packmap, head]`, so a
     /// packmap conflict takes precedence (`refstore.rs` parity).
     pub(crate) refs: &'a [RefUpdate],
+    /// D34 index routing for a ref write; absent on Single and non-ref writes.
+    pub(crate) ref_index: Option<(&'a RepoId, &'a Partition, &'a dyn ShardMap)>,
     /// The replay record to commit, for signed writes.
     pub(crate) replay: Option<ReplayGuard>,
     /// Quota charges from admission.
@@ -204,6 +208,9 @@ impl WriteRequest<'_> {
             }
         }
         out.extend(self.refs.iter().map(|r| keys::ref_key(self.repo, &r.name)));
+        if self.ref_index.is_some() && !self.refs.is_empty() {
+            out.extend([keys::outbox_sequence(), keys::outcome_backlog()]);
+        }
         if let (
             WriteKind::UploadCommit | WriteKind::BeginUpload | WriteKind::AdvanceRefs,
             Some(replay),
@@ -327,6 +334,22 @@ fn plan_namespace(
     Ok(())
 }
 
+fn add_ref_index_relays(req: &WriteRequest<'_>, outbox: &mut OutboxBuilder) {
+    let Some((repo, source, shards)) = req.ref_index else {
+        return;
+    };
+    for update in req.refs {
+        let bucket = shards.ref_index(repo, &update.name);
+        if bucket != *source {
+            let key = keys::ref_index_key(req.repo, &update.name);
+            match update.new {
+                Some(id) => outbox.relay(&bucket, vec![(key, codec::encode_ref_id(&id))]),
+                None => outbox.relay_delete(&bucket, vec![key]),
+            }
+        }
+    }
+}
+
 /// Plan `req` on `snap` at `clock`.
 ///
 /// # Errors
@@ -362,7 +385,7 @@ pub(crate) fn plan_write(
             ));
         }
     }
-    let epoch_index = match req.grant {
+    let epoch_index = match req.grant.as_ref() {
         Some(grant) => {
             if let Some(lease) = req.lease {
                 if lease.value.epoch != grant.epoch {
@@ -412,30 +435,44 @@ pub(crate) fn plan_write(
     }
     if !conflict {
         puts.extend(ref_puts);
-        if let (Some(advance), Some(tickets)) = (&req.advance, tickets.as_deref()) {
-            super::advance::plan_consumption(
-                snap, advance, tickets, req.refs, clock, &mut pre, &mut puts,
-            )?;
-        }
-        if let Some(implicit) = &req.implicit {
+        // One outbox per batch: an implicit consuming packmap write can
+        // also carry D34 ref-index relays, and two builders seeded from the
+        // same snapshot would emit colliding `os` rows.
+        if req.advance.is_some()
+            || req.ref_index.is_some() && !req.refs.is_empty()
+            || req.implicit.is_some()
+        {
             let mut outbox = OutboxBuilder::new(
                 snap.get(&keys::outbox_sequence()),
                 snap.get(&keys::outcome_backlog()),
             )
-            .map_err(super::meta_error)?;
-            tickets::plan_membership(
-                req.repo,
-                implicit.packs,
-                implicit.source,
-                implicit.shards,
-                implicit.repo_id,
-                &mut outbox,
-                &mut puts,
-            );
+            .map_err(meta_error)?;
+            if let (Some(advance), Some(tickets)) = (&req.advance, tickets.as_deref()) {
+                super::advance::plan_consumption(
+                    snap,
+                    advance,
+                    tickets,
+                    req.refs,
+                    clock,
+                    &mut pre,
+                    &mut puts,
+                    &mut outbox,
+                )?;
+            }
+            add_ref_index_relays(req, &mut outbox);
+            if let Some(implicit) = &req.implicit {
+                tickets::plan_membership(
+                    req.repo,
+                    implicit.packs,
+                    implicit.source,
+                    implicit.shards,
+                    implicit.repo_id,
+                    &mut outbox,
+                    &mut puts,
+                );
+            }
             outbox.relay_at(clock.plan_time_ms);
-            outbox
-                .try_finish(&mut pre, &mut puts)
-                .map_err(super::meta_error)?;
+            outbox.try_finish(&mut pre, &mut puts).map_err(meta_error)?;
         }
     }
 
@@ -654,6 +691,29 @@ fn decide_refs(
         let key = keys::ref_key(req.repo, &update.name);
         let current = snap.get(&key).map(codec::decode_ref_id).transpose();
         let current = current.map_err(corrupt)?;
+        if let Some(requirement) = req
+            .grant
+            .as_ref()
+            .and_then(|grant| grant.presence_requirement.as_ref())
+        {
+            let required = match requirement {
+                PresenceRequirement::Absent(name) if name == &update.name => Some(false),
+                PresenceRequirement::Present(name) if name == &update.name => Some(true),
+                _ => None,
+            };
+            if let Some(required) = required {
+                if current.is_some() != required {
+                    return Err(ServerError::permission_denied(
+                        "write grant rejected: ref scope",
+                    ));
+                }
+                pre.push(if required {
+                    Precondition::Present(key.clone())
+                } else {
+                    Precondition::Absent(key.clone())
+                });
+            }
+        }
         match evaluate_condition(current.as_ref(), &update.condition) {
             CasDecision::Committed => {
                 // `Any` commits whatever the ref holds: nothing to guard.

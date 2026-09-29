@@ -17,26 +17,29 @@ use super::{
 /// put and one relay-row share. An advance uses one signer and runs no
 /// admission (the quota planner asserts this in `pipeline::plan_namespace`),
 /// so `tu` and `tc` are each guarded/written once. Shared
-/// overhead is at most 23: deadline 1, lease guard/install 2, absent layout
+/// overhead is at most 25: deadline 1, lease guard/install 2, absent layout
 /// version guard/install 2, absent repo-known guard/install 2, two ref CAS
 /// pairs 4, replay 3, counters 4, outbox sequence/backlog 4, and relay kick
-/// 1. These figures are D34's. On Single, a grant guard replaces the lease
+/// 1, and ref-index relay rows 2. These figures are D34's. On Single, a grant guard replaces the lease
 /// pair and there is no relay share or relay kick, so seven tickets cost
 /// `8 * 7 + 21 = 77`. The real maximal planner batches are tested
-/// separately. On D34, seven tickets cost `9 * 7 + 23 = 86` ops before
+/// separately. On D34, seven tickets cost `9 * 7 + 25 = 88` ops before
 /// opportunistic pruning.
 ///
 /// The same constant caps an implicit transport-identity session's pending
 /// packs (WP-1.15 B9): a D34 packmap write consuming all seven — one
-/// membership put and one relay row each — plans a 26-op batch
+/// membership put and one relay row each, plus WP-1.28b's ref-index
+/// relay row for the packmap name — plans a 27-op batch
 /// (`maximal_implicit_consume_plans_a_valid_batch`).
 pub const MAX_TICKETS_PER_ADVANCE: usize = 7;
 /// The advance batch's ops outside the per-ticket and per-signer ones.
-pub const ADVANCE_SHARED_OPS: usize = 23;
+pub const ADVANCE_SHARED_OPS: usize = 25;
 const _: () = assert!(MAX_TICKETS_PER_ADVANCE * 9 + ADVANCE_SHARED_OPS <= MAX_BATCH_OPS);
 
-/// Maximum upserts per relay row; two ops guard/advance rh, two remain for hooks.
+/// Maximum operations (puts plus deletes) per relay row; two ops guard/advance rh,
+/// and two remain for hooks.
 pub const MAX_RELAY_PUTS: usize = 96;
+const RELAY_DELETE_FIELD_BYTES: usize = 13; // ,"deletes":[]
 const _: () = assert!(MAX_RELAY_PUTS + 2 <= MAX_BATCH_OPS);
 // The encoded row is at most 512 KiB, leaving room for the worst rh guard/put.
 const _: () = assert!(MAX_VALUE_BYTES + 2 * (MAX_KEY_BYTES + 8) <= MAX_BATCH_BYTES);
@@ -90,7 +93,7 @@ pub struct OutboxBuilder {
     backlog_touched: bool,
     pre: Vec<Precondition>,
     writes: Vec<Write>,
-    relays: BTreeMap<Partition, BTreeMap<Key, Value>>,
+    relays: BTreeMap<Partition, BTreeMap<Key, Option<Value>>>,
     reservations: BTreeSet<String>,
     error: Option<StoreError>,
     relay_at_ms: Option<u64>,
@@ -213,14 +216,117 @@ impl OutboxBuilder {
             target.encode()?;
             let group = self.relays.entry(target.clone()).or_default();
             for (key, value) in puts {
-                if group.get(&key).is_some_and(|old| old != &value) {
+                if group
+                    .get(&key)
+                    .is_some_and(|old| old.as_ref() != Some(&value))
+                {
                     return Err(StoreError::Invalid("conflicting relay upserts".into()));
                 }
-                group.insert(key, value);
+                group.insert(key, Some(value));
             }
             Ok(())
         })();
         self.remember(result);
+    }
+
+    /// Group idempotent deletes by target. A key cannot be both put and
+    /// deleted in the same source batch.
+    pub fn relay_delete(&mut self, target: &Partition, keys: Vec<Key>) {
+        let result = (|| {
+            target.encode()?;
+            let group = self.relays.entry(target.clone()).or_default();
+            for key in keys {
+                if group.get(&key).is_some_and(Option::is_some) {
+                    return Err(StoreError::Invalid("relay put/delete overlap".into()));
+                }
+                group.insert(key, None);
+            }
+            Ok(())
+        })();
+        self.remember(result);
+    }
+
+    fn plan_relay_rows(
+        &mut self,
+        target: Partition,
+        operations: BTreeMap<Key, Option<Value>>,
+    ) -> Result<u64, StoreError> {
+        let at_ms = self
+            .relay_at_ms
+            .ok_or_else(|| StoreError::Invalid("relay rows need relay_at".into()))?;
+        let mut row = RelayV1 {
+            at_ms,
+            target,
+            puts: Vec::new(),
+            deletes: Vec::new(),
+        };
+        let base_bytes = codec::encode_relay(&row)?.as_bytes().len();
+        let mut encoded_bytes = base_bytes;
+        let (puts, deletes): (Vec<_>, Vec<_>) = operations
+            .into_iter()
+            .partition(|(_, value)| value.is_some());
+        for (key, value) in puts {
+            let Some(value) = value else {
+                return Err(StoreError::Invalid("missing relay upsert value".into()));
+            };
+            // JSON uses hex strings: ["key","value"], plus a comma after the first.
+            let bytes = 7 + 2 * (key.as_bytes().len() + value.as_bytes().len());
+            if key.as_bytes().len() > MAX_KEY_BYTES
+                || value.as_bytes().len() > MAX_VALUE_BYTES
+                || base_bytes + bytes > MAX_VALUE_BYTES
+            {
+                return Err(StoreError::Invalid(
+                    "relay upsert cannot fit one row".into(),
+                ));
+            }
+            let addition = bytes + usize::from(!row.puts.is_empty());
+            if row.puts.len() == MAX_RELAY_PUTS
+                || encoded_bytes + addition > MAX_VALUE_BYTES
+                || encoded_bytes + addition + 2 * (MAX_KEY_BYTES + 8) > MAX_BATCH_BYTES
+            {
+                self.push_relay(&row)?;
+                row.puts.clear();
+                encoded_bytes = base_bytes;
+            }
+            encoded_bytes += bytes + usize::from(!row.puts.is_empty());
+            row.puts.push((key, value));
+        }
+        for (key, _) in deletes {
+            // First delete adds the optional JSON field. Every entry
+            // costs at most a comma, quotes, and two hex chars per byte.
+            let bytes = 3 + 2 * key.as_bytes().len();
+            if key.as_bytes().len() > MAX_KEY_BYTES
+                || base_bytes + RELAY_DELETE_FIELD_BYTES + bytes > MAX_VALUE_BYTES
+            {
+                return Err(StoreError::Invalid(
+                    "relay delete cannot fit one row".into(),
+                ));
+            }
+            let addition = bytes
+                + if row.deletes.is_empty() {
+                    RELAY_DELETE_FIELD_BYTES
+                } else {
+                    1 // comma between delete keys
+                };
+            if row.puts.len() + row.deletes.len() == MAX_RELAY_PUTS
+                || encoded_bytes + addition > MAX_VALUE_BYTES
+                || encoded_bytes + addition + 2 * (MAX_KEY_BYTES + 8) > MAX_BATCH_BYTES
+            {
+                self.push_relay(&row)?;
+                row.puts.clear();
+                row.deletes.clear();
+                encoded_bytes = base_bytes;
+            }
+            encoded_bytes += bytes
+                + if row.deletes.is_empty() {
+                    RELAY_DELETE_FIELD_BYTES
+                } else {
+                    1
+                };
+            row.deletes.push(key);
+        }
+        self.push_relay(&row)?;
+        Ok(at_ms)
     }
 
     /// Finish with error reporting. Errors leave output vectors unchanged.
@@ -236,45 +342,11 @@ impl OutboxBuilder {
             require_unplanned(&keys::reservation(rid)?, pre, writes)?;
         }
         let mut relay_due = None;
-        for (target, puts) in std::mem::take(&mut self.relays) {
-            if puts.is_empty() {
+        for (target, operations) in std::mem::take(&mut self.relays) {
+            if operations.is_empty() {
                 continue;
             }
-            let at_ms = self
-                .relay_at_ms
-                .ok_or_else(|| StoreError::Invalid("relay rows need relay_at".into()))?;
-            relay_due = Some(at_ms);
-            let mut row = RelayV1 {
-                at_ms,
-                target,
-                puts: Vec::new(),
-            };
-            let base_bytes = codec::encode_relay(&row)?.as_bytes().len();
-            let mut encoded_bytes = base_bytes;
-            for (key, value) in puts {
-                // JSON uses hex strings: ["key","value"], plus a comma after the first.
-                let bytes = 7 + 2 * (key.as_bytes().len() + value.as_bytes().len());
-                if key.as_bytes().len() > MAX_KEY_BYTES
-                    || value.as_bytes().len() > MAX_VALUE_BYTES
-                    || base_bytes + bytes > MAX_VALUE_BYTES
-                {
-                    return Err(StoreError::Invalid(
-                        "relay upsert cannot fit one row".into(),
-                    ));
-                }
-                let addition = bytes + usize::from(!row.puts.is_empty());
-                if row.puts.len() == MAX_RELAY_PUTS
-                    || encoded_bytes + addition > MAX_VALUE_BYTES
-                    || encoded_bytes + addition + 2 * (MAX_KEY_BYTES + 8) > MAX_BATCH_BYTES
-                {
-                    self.push_relay(&row)?;
-                    row.puts.clear();
-                    encoded_bytes = base_bytes;
-                }
-                encoded_bytes += bytes + usize::from(!row.puts.is_empty());
-                row.puts.push((key, value));
-            }
-            self.push_relay(&row)?;
+            relay_due = Some(self.plan_relay_rows(target, operations)?);
         }
         if let Some(due) = relay_due {
             self.writes.push(Write::Put(

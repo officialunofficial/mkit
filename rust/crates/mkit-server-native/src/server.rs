@@ -19,7 +19,7 @@ use tokio::net::TcpListener;
 use crate::config::{BlobChoice, ConfigError, MetaChoice, ServeConfig};
 use crate::pressure::PressureMonitor;
 use crate::telemetry::MetricsBridge;
-use crate::timers::{TimerDriver, TimerNotifying};
+use crate::timers::{TimerDriver, TimerNotifying, TimerStore};
 use crate::{Blocking, RusqliteConn, Shutdown, build_router, exit, serve};
 
 /// The lock every live server holds **shared** under `<root>/.mkit`, so
@@ -588,22 +588,7 @@ where
             bind_database(&conn, &root_id, path)?;
             bind_sharding(&conn, cfg.pipeline.sharding, path)?;
             let meta = Blocking::new(TimerNotifying::new(meta));
-            let registry = mkit_server::timers::TimerRegistry::new()
-                .register(
-                    mkit_server::timers::lease_sweep::LeaseSweep::new(meta.clone())
-                        .with_metrics(Arc::new(MetricsBridge)),
-                )
-                .register(mkit_server::relay::RelayHandler {
-                    target: meta.clone(),
-                    hook: mkit_server::relay::NoHook,
-                    budget: mkit_server::relay::RelayBudget::default(),
-                })
-                .register(mkit_server::timers::quota_rollup::QuotaRollup {
-                    coordinator: meta.clone(),
-                    metrics: MetricsBridge,
-                });
-            #[cfg(feature = "test-faults")]
-            let registry = registry.register(mkit_server::timers::test_kind::TestTimer);
+            let registry = sqlite_timer_registry(blobs.clone(), meta.clone());
             let driver = TimerDriver::new(meta.clone(), registry, Arc::new(SystemClock));
             let mut services = build_services(blobs, meta, cfg)?;
             services.timers = Some(driver);
@@ -611,6 +596,31 @@ where
             Ok(services)
         }
     }
+}
+
+/// The exact timer registry installed by the native `SQLite` server.
+pub fn sqlite_timer_registry<B: MultipartBlobStore + Clone + 'static>(
+    blobs: B,
+    meta: TimerStore,
+) -> mkit_server::timers::TimerRegistry<'static, TimerStore> {
+    let registry = mkit_server::timers::TimerRegistry::new()
+        .register(mkit_server::timers::ticket_expiry::TicketExpiry { blobs })
+        .register(
+            mkit_server::timers::lease_sweep::LeaseSweep::new(meta.clone())
+                .with_metrics(Arc::new(MetricsBridge)),
+        )
+        .register(mkit_server::relay::RelayHandler {
+            target: meta.clone(),
+            hook: mkit_server::relay::NoHook,
+            budget: mkit_server::relay::RelayBudget::default(),
+        })
+        .register(mkit_server::timers::quota_rollup::QuotaRollup {
+            coordinator: meta,
+            metrics: MetricsBridge,
+        });
+    #[cfg(feature = "test-faults")]
+    let registry = registry.register(mkit_server::timers::test_kind::TestTimer);
+    registry
 }
 
 /// The directory under `<root>/.mkit` where S3 uploads spool: on the

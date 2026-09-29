@@ -313,12 +313,24 @@ impl OpKind {
 
 /// A grant the Authorizer matched, with the namespace epoch it was checked
 /// against.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantRef {
     /// Grant id.
     pub id: Hash,
     /// Namespace grant epoch at authorization time.
     pub epoch: u64,
+    /// The ref-state constraint for an `ANY` change with only `c` or `f`.
+    pub presence_requirement: Option<PresenceRequirement>,
+}
+
+/// Server-local §8.2 condition carried from authorization to each plan.
+/// The ref name makes an `AdvanceRefs` constraint apply to its head only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PresenceRequirement {
+    /// `c` alone can create this ref only while it is absent.
+    Absent(String),
+    /// `f` alone can replace this ref only while it is present.
+    Present(String),
 }
 
 /// Facts the Authorizer established, carried into `apply` as

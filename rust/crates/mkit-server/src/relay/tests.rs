@@ -68,6 +68,71 @@ async fn append<S: NamespaceStore>(
     );
     batch
 }
+
+async fn append_delete<S: NamespaceStore>(store: &S, target: &Partition, key: Key) {
+    let os = store
+        .get(&source(), &keys::outbox_sequence())
+        .await
+        .unwrap();
+    let mut builder = OutboxBuilder::new(os.as_ref(), None).unwrap();
+    builder.relay_at(50);
+    builder.relay_delete(target, vec![key]);
+    let mut batch = Batch::new();
+    builder
+        .try_finish(&mut batch.preconditions, &mut batch.writes)
+        .unwrap();
+    assert_eq!(
+        store.apply(&source(), batch).await.unwrap(),
+        BatchOutcome::Committed
+    );
+}
+
+#[tokio::test]
+async fn relay_delete_orders_after_put_and_redelivery_is_idempotent() {
+    let source_store = memory();
+    let h = handler(memory());
+    let target = target(0);
+    let key = key();
+    append(
+        &source_store,
+        &target,
+        vec![(key.clone(), Value::new(b"old".as_slice()))],
+        50,
+    )
+    .await;
+    append_delete(&source_store, &target, key.clone()).await;
+    fire(&h, &source_store).await.unwrap();
+    assert_eq!(h.target.get(&target, &key).await.unwrap(), None);
+    assert_eq!(
+        h.target
+            .get(&target, &keys::relay_high_water(&source()).unwrap())
+            .await
+            .unwrap(),
+        Some(codec::encode_u64(2))
+    );
+    fire(&h, &source_store).await.unwrap();
+    assert_eq!(h.target.get(&target, &key).await.unwrap(), None);
+
+    append(
+        &source_store,
+        &target,
+        vec![(key.clone(), Value::new(b"new".as_slice()))],
+        50,
+    )
+    .await;
+    append(
+        &source_store,
+        &target,
+        vec![(key.clone(), Value::new(b"newer".as_slice()))],
+        50,
+    )
+    .await;
+    fire(&h, &source_store).await.unwrap();
+    assert_eq!(
+        h.target.get(&target, &key).await.unwrap(),
+        Some(Value::new(b"newer".as_slice()))
+    );
+}
 async fn queued<S: NamespaceStore>(store: &S) -> Vec<(Key, Value)> {
     let (start, end) = keys::class_range(keys::TAG_RELAY);
     let mut rows = Vec::new();
@@ -844,6 +909,7 @@ fn maximal_chunk_fits_target_and_more_puts_split_in_seq_order() {
         at_ms: 12,
         target: target(0),
         puts: puts[..MAX_RELAY_PUTS].to_vec(),
+        deletes: Vec::new(),
     })
     .unwrap()
     .as_bytes()
@@ -1312,6 +1378,7 @@ async fn malformed_queue_key_before_first_sequence_blocks_later_delivery() {
             at_ms: 50,
             target: target(0),
             puts: vec![(order_key(2), codec::encode_u64(2))],
+            deletes: Vec::new(),
         };
         s.apply(
             &source(),
@@ -1355,6 +1422,7 @@ async fn malformed_suffix_between_cursor_and_next_sequence_blocks_delivery() {
         at_ms: 50,
         target: target(0),
         puts: vec![(order_key(2), codec::encode_u64(2))],
+        deletes: Vec::new(),
     };
     let scan = codec::RelayScanV1 {
         cycle_end: 2,
@@ -1405,6 +1473,7 @@ async fn plant_schedule<S: NamespaceStore>(store: &S, schedule: &[u16]) {
                 at_ms: 50,
                 target: target(*destination),
                 puts: vec![(order_key(seq), codec::encode_u64(seq))],
+                deletes: Vec::new(),
             };
             batch = batch.put(keys::relay(seq), codec::encode_relay(&row).unwrap());
         }

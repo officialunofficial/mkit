@@ -25,6 +25,7 @@ use mkit_rpc::mkit::rpc::v1::ssh::{
 };
 use mkit_rpc::mkit::rpc::v1::{Error as RpcError, ErrorCode, ProtocolVersion};
 
+use super::verbs::Verbs;
 use super::*;
 use crate::error::{Redacted, ServerError};
 use crate::op::Procedure;
@@ -1822,6 +1823,32 @@ fn implicit_tickets_require_owner_policy_on_single() {
     assert!(!build(WritePolicy::Open).implicit_tickets());
     let (plain, _) = mem();
     assert!(!plain.implicit_tickets());
+}
+
+/// The session's header closure answers only `x-repository`, so a
+/// transport-identity write can never carry a grant into `owner_rule`'s
+/// epoch recheck — ssh/enc authentication stays grant-free.
+#[test]
+fn transport_identity_write_never_carries_a_grant() {
+    let (pipe, _, _) = multi_pipeline(
+        [Namespace::Ed25519(OWNER)],
+        Sharding::Single,
+        Hooks::new(),
+    );
+    let verbs = Verbs::new(
+        &pipe,
+        Principal::TransportPeer { ed25519: OWNER },
+        Some(peer_repo(OWNER, "room-a")),
+    );
+    for procedure in [
+        Procedure::UpdateRef,
+        Procedure::AdvanceRefs,
+        Procedure::BeginUpload,
+        Procedure::UploadPack,
+    ] {
+        let a = verbs.auth(procedure).unwrap();
+        assert!(a.write_grant.is_none(), "{procedure:?} carried a grant");
+    }
 }
 
 // ------------------------------------------------- WP-1.15 B9–B11

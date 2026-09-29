@@ -20,9 +20,7 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use mkit_server_conformance::wire::{
-    D34_LIST_REFS_SKIPS, Feature, Profile, Verdict, WireAuth, WireTarget, run,
-};
+use mkit_server_conformance::wire::{Feature, Profile, Verdict, WireAuth, WireTarget, run};
 
 const BIN: &str = env!("CARGO_BIN_EXE_mkit-server");
 const MAX_PACK: u64 = 4 << 20;
@@ -156,36 +154,18 @@ async fn check(origin: &str, profile: Profile) {
             "{name} did not run"
         );
     }
-    let mut skipped: Vec<_> = report
+    let skipped: Vec<_> = report
         .cases
         .iter()
         .filter_map(|case| match &case.verdict {
-            Verdict::Skip(reason) if reason.contains("d34 sharding") => Some(case.name),
+            Verdict::Skip(reason) if reason.to_lowercase().contains("sharding") => Some(case.name),
             _ => None,
         })
         .collect();
-    if target.profile.sharding_d34 {
-        let mut expected: Vec<_> = D34_LIST_REFS_SKIPS
-            .iter()
-            .copied()
-            .filter(|name| {
-                mkit_server_conformance::wire::CASES
-                    .iter()
-                    .find(|case| case.name == *name)
-                    .unwrap()
-                    .skip_reason(&target.profile)
-                    .is_none()
-            })
-            .collect();
-        skipped.sort_unstable();
-        expected.sort_unstable();
-        assert_eq!(
-            skipped, expected,
-            "D34 skips only its declared ListRefs cases"
-        );
-    } else {
-        assert!(skipped.is_empty());
-    }
+    assert!(
+        skipped.is_empty(),
+        "D34 must run every ListRefs case: {skipped:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
