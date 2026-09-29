@@ -1,8 +1,6 @@
 //! User-scoped executable admission responder. Server input and stdout are untrusted.
 use std::collections::HashSet;
 use std::io::{Read, Write};
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -18,19 +16,11 @@ use serde::de::{MapAccess, Visitor};
 const MAX_STDOUT: usize = 128 * 1024;
 const DEADLINE: Duration = Duration::from_mins(2);
 
-// The helper gets its own process group so a child that inherits an I/O pipe
-// cannot keep the reader or writer alive after the helper's deadline.
-#[cfg(unix)]
-#[allow(unsafe_code)]
-fn kill_helper_group(pid: u32) {
-    // SAFETY: process_group(0) made the helper PID its process group ID.
-    // A negative PID targets only that group; failure is harmless here.
-    unsafe { libc::kill(-pid.cast_signed(), libc::SIGKILL) };
-}
-
+// The helper stays in mkit's foreground process group, so it can prompt on
+// the terminal (for example to confirm a payment) and receives Ctrl-C with
+// mkit. A descendant that keeps an inherited pipe open cannot extend the wait:
+// unfinished reader and writer threads are skipped at the deadline.
 fn stop_helper(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    kill_helper_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -153,8 +143,6 @@ impl ExecResponder {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
-        #[cfg(unix)]
-        command.process_group(0);
         let mut child = command
             .spawn()
             .map_err(|_| AdmissionResponderError::Failed("cannot start admission helper".into()))?;
@@ -201,7 +189,18 @@ impl ExecResponder {
                 output = Some(bytes);
             }
             if let Ok(result) = write_receiver.try_recv() {
-                wrote_input = Some(result.is_ok());
+                // A helper that exits without reading all of stdin closes the
+                // pipe; its exit status and output decide the result.
+                wrote_input = Some(match result {
+                    Ok(()) => true,
+                    Err(error) => error.kind() == std::io::ErrorKind::BrokenPipe,
+                });
+            }
+            if crate::signal::is_shutdown() {
+                stop_helper(&mut child);
+                return Err(AdmissionResponderError::Failed(
+                    "admission helper interrupted".into(),
+                ));
             }
             if start.elapsed() >= deadline {
                 stop_helper(&mut child);

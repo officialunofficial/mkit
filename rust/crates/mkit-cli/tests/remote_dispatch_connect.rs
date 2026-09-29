@@ -912,7 +912,7 @@ fn cli_admission_helper_trust_filter_json_and_exit_codes() {
         };
         std::fs::write(xdg.path().join("mkit/config"), user).unwrap();
         let output = Command::new(mkit_bin())
-            .args(["push", "origin", "--json"])
+            .args(["push", "origin", "--format", "json"])
             .current_dir(src.path())
             .env("XDG_CONFIG_HOME", xdg.path())
             .output()

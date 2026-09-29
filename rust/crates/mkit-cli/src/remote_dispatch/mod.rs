@@ -295,15 +295,11 @@ fn open_with_config_for_remote(
                 && let Some(headers) = cfg.remote_admission_headers.get(name)
             {
                 let bearer = std::env::var("MKIT_API_TOKEN").is_ok_and(|s| !s.is_empty());
-                let mut warned = false;
                 for header in headers.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                     if is_reserved(header, bearer) {
-                        if !warned {
-                            eprintln!(
-                                "warning: ignoring reserved header `{header}` in remote.{name}.admission_headers (see SPEC-TRANSPORT-CONNECT §5.1)"
-                            );
-                            warned = true;
-                        }
+                        eprintln!(
+                            "warning: ignoring reserved header `{header}` in remote.{name}.admission_headers (see SPEC-TRANSPORT-CONNECT §5.1)"
+                        );
                     } else {
                         policy = policy.with_extra_allowed(header);
                     }

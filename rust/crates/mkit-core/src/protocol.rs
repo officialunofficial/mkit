@@ -131,7 +131,8 @@ pub struct AdmissionRequired {
 }
 
 impl AdmissionRequired {
-    /// Construct a bounded remote challenge after validating its fields.
+    /// Construct a remote challenge from already-bounded fields. The Connect
+    /// client validates the bounds before calling this.
     #[must_use]
     pub fn new(
         challenges: Vec<AdmissionChallengeEntry>,
@@ -172,14 +173,18 @@ impl fmt::Display for AdmissionRequired {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("admission required by remote: ")?;
         write_safe_remote_text(f, &self.description)?;
-        f.write_str(" (schemes: ")?;
-        for (i, challenge) in self.challenges.iter().enumerate() {
-            if i != 0 {
-                f.write_str(", ")?;
+        if self.challenges.is_empty() {
+            f.write_str(" (no challenges)")?;
+        } else {
+            f.write_str(" (schemes: ")?;
+            for (i, challenge) in self.challenges.iter().enumerate() {
+                if i != 0 {
+                    f.write_str(", ")?;
+                }
+                write_safe_remote_text(f, &challenge.scheme)?;
             }
-            write_safe_remote_text(f, &challenge.scheme)?;
+            f.write_str(")")?;
         }
-        f.write_str(")")?;
         if let Some(reason) = self.reason {
             write!(f, ": {reason}")?;
         }

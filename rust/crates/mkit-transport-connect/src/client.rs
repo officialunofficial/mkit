@@ -1196,10 +1196,20 @@ impl Transport for ConnectTransport {
             &carried,
             self.bearer,
             |admission_headers| {
+                // The retry after the admission helper may renew early: the
+                // helper can take most of the validity window. Inside a ladder,
+                // an ambiguous failure keeps its nonce until actual expiry.
+                if !admission_headers.is_empty() {
+                    let now = (self.now)();
+                    if identity.expires_at_ms.saturating_sub(now) <= MIN_RENEWAL_MARGIN_MS {
+                        identity =
+                            RetryIdentity::new_at(now).map_err(TransportError::RemoteError)?;
+                    }
+                }
                 self.retrying(|| {
                     self.executor.block_on(async {
                         let now = (self.now)();
-                        if identity.expires_at_ms.saturating_sub(now) <= MIN_RENEWAL_MARGIN_MS {
+                        if now >= identity.expires_at_ms {
                             identity =
                                 RetryIdentity::new_at(now).map_err(TransportError::RemoteError)?;
                         }

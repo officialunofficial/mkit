@@ -61,9 +61,6 @@ struct PushOpts {
     /// non-fast-forward (CAS) rejection.
     #[arg(long, value_enum, default_value = "default")]
     format: PushFormat,
-    /// Alias for `--format json`.
-    #[arg(long)]
-    json: bool,
     /// Suppress transfer progress output on stderr (#711).
     #[arg(short = 'q', long)]
     quiet: bool,
@@ -104,7 +101,7 @@ pub fn run(args: &[String]) -> u8 {
 /// Default push: current branch → its upstream, CAS-protected.
 #[allow(clippy::too_many_lines)] // linear flow: resolve + no-op + push + report
 fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -> u8 {
-    let json = opts.json || matches!(opts.format, PushFormat::Json);
+    let json = matches!(opts.format, PushFormat::Json);
     let branch = match mkit_core::refs::read_head(layout) {
         Ok(mkit_core::refs::Head::Branch(b)) => b,
         Ok(mkit_core::refs::Head::Detached(_)) => {
@@ -316,7 +313,7 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
 
 /// `--all`: mirror every local branch to the remote (CAS-safe).
 fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -> u8 {
-    let json = opts.json || matches!(opts.format, PushFormat::Json);
+    let json = matches!(opts.format, PushFormat::Json);
     let remote_name = opts
         .remote
         .clone()
@@ -443,13 +440,16 @@ fn emit_push_error(error: remote_dispatch::DispatchError, json: bool) -> u8 {
     match error {
         remote_dispatch::DispatchError::Transport(
             mkit_core::protocol::TransportError::AdmissionRequired(required),
-        ) => emit_err_json(
-            &format!(
-                "push: {required}\nhint: configure admission_helper and trust this remote with mkit config trusted_remote_endpoint"
-            ),
-            exit::NOPERM,
-            json,
-        ),
+        ) => {
+            // The hint helps only when no helper ran; after a helper ran, the
+            // reason (a second challenge or the run limit) says why it stopped.
+            let hint = if required.reason.is_none() {
+                "\nhint: configure admission_helper and trust this remote with mkit config trusted_remote_endpoint"
+            } else {
+                ""
+            };
+            emit_err_json(&format!("push: {required}{hint}"), exit::NOPERM, json)
+        }
         remote_dispatch::DispatchError::Transport(
             mkit_core::protocol::TransportError::AdmissionConfiguration(message),
         ) => emit_err_json(

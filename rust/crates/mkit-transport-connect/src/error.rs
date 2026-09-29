@@ -99,7 +99,8 @@ fn admission_required(err: &ConnectError) -> Option<Result<AdmissionRequired, Tr
                 .map_err(|_| TransportError::InvalidResponse)?;
             let decoded = AdmissionChallenge::decode_from_slice(&bytes)
                 .map_err(|_| TransportError::InvalidResponse)?;
-            if decoded.challenges.len() > MAX_CHALLENGES {
+            // A present detail carries 1 to 8 challenges (STC §5.1).
+            if decoded.challenges.is_empty() || decoded.challenges.len() > MAX_CHALLENGES {
                 return Err(TransportError::InvalidResponse);
             }
             let mut challenges = Vec::with_capacity(decoded.challenges.len());
@@ -270,6 +271,8 @@ mod tests {
             TransportError::AdmissionRequired(_)
         ));
         for invalid in [
+            // A present detail with no challenges.
+            AdmissionChallenge::default(),
             AdmissionChallenge {
                 challenges: vec![challenge("ok", "v"); 9],
                 ..Default::default()
@@ -304,7 +307,8 @@ mod tests {
         ));
         let mut oversized = ConnectError::permission_denied("x").with_detail(ErrorDetail {
             type_url: CHALLENGE_TYPE.into(),
-            value: Some("!".repeat(88_837)),
+            // Valid base64: only the pre-decode length check can reject it.
+            value: Some("A".repeat(88_837)),
             debug: None,
         });
         assert!(matches!(
@@ -339,7 +343,13 @@ mod tests {
         assert_eq!(required.payment_required, ["x"]);
         assert!(!format!("{required:?}").contains("secret"));
 
-        let detail = ErrorDetail::from_message(CHALLENGE_TYPE, &AdmissionChallenge::default());
+        let detail = ErrorDetail::from_message(
+            CHALLENGE_TYPE,
+            &AdmissionChallenge {
+                challenges: vec![challenge("mpp", "v")],
+                ..Default::default()
+            },
+        );
         let mut prefixed = ConnectError::permission_denied("x").with_detail(detail.clone());
         prefixed.details[0].type_url = format!("type.googleapis.com/{CHALLENGE_TYPE}");
         assert!(matches!(
