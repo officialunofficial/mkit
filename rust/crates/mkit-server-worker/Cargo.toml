@@ -38,8 +38,9 @@ test-faults = ["mkit-server/test-faults"]
 
 [dependencies]
 # `connect` (on by default) for M0-17's fetch adapter; `sql` for the shared
-# `SqlKvStore`. No `fs` (native only) and no `memory`.
-mkit-server = { version = "0.4", path = "../mkit-server", features = ["connect", "sql"] }
+# `SqlKvStore`; `remote-hooks` for the service-binding hook channel
+# (WP-3.9). No `fs` (native only) and no `memory`.
+mkit-server = { version = "0.4", path = "../mkit-server", features = ["connect", "sql", "remote-hooks"] }
 # default-features = false keeps `pack-zstd` (zstd-sys, C) out of wasm32.
 mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
 bytes = "1"
