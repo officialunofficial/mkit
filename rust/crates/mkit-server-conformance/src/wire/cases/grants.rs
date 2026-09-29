@@ -82,11 +82,11 @@ impl Owner {
         let (scheme, blob) = match self {
             Self::Ed(signer) => (
                 OwnerScheme::Ed25519,
-                signer.sign_grant_statement(&statement).to_vec(),
+                signer.sign_grant_statement(statement).to_vec(),
             ),
             Self::K1(key) => {
                 let (signature, recovery) =
-                    key.sign_prehash_recoverable(&eth::eip191_hash(&statement));
+                    key.sign_prehash_recoverable(&eth::eip191_hash(statement));
                 let mut blob = signature.to_bytes().to_vec();
                 blob.push(27 + recovery.to_byte());
                 (OwnerScheme::Secp256k1Eip191, blob)
@@ -101,7 +101,7 @@ impl Owner {
                 authenticator_data.extend_from_slice(&0u32.to_be_bytes());
                 let client_data_json = format!(
                     r#"{{"type":"webauthn.get","challenge":"{}","origin":"{RP_ORIGIN}","crossOrigin":false}}"#,
-                    webauthn_challenge(&statement),
+                    webauthn_challenge(statement),
                 ).into_bytes();
                 let signed = [
                     authenticator_data.as_slice(),

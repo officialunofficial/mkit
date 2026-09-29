@@ -14,7 +14,7 @@ use super::{
     revocation::{RevokeBudget, RevokeProgress},
 };
 
-/// At most five revocation slices and five seconds per SetGrantEpoch request.
+/// At most five revocation slices and five seconds per `SetGrantEpoch` request.
 /// The slice count also terminates when the injected clock is frozen.
 const MAX_REVOKE_SLICES: usize = 5;
 const MAX_REVOKE_ELAPSED_MS: u64 = 5_000;

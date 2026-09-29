@@ -2223,6 +2223,17 @@ async fn reserved_begin_epoch_mismatch<N: NamespaceStore + 'static>(
         Code::PermissionDenied
     );
     assert_grant_write_uncommitted(&store, &granted, REF).await;
+    assert_eq!(
+        store
+            .inner
+            .get(
+                &shard(&owner_auth, REF),
+                &keys::ref_key(&owner_auth.repo().repo.name, REF)
+            )
+            .await
+            .unwrap(),
+        Some(codec::encode_ref_id(&[1; 32]))
+    );
     let (first, end) = keys::class_range(keys::TAG_TICKET);
     assert!(
         store
@@ -2337,7 +2348,11 @@ async fn epoch_rpc_rules<N: NamespaceStore + 'static>(
             .unwrap(),
         5
     );
-    let coordinator = coordinator(&auth(&pipe, None));
+    assert_no_epoch_accounting_rows(&store, &pipe).await;
+}
+
+async fn assert_no_epoch_accounting_rows<N: NamespaceStore>(store: &Store<N>, pipe: &Pipe<N>) {
+    let coordinator = coordinator(&auth(pipe, None));
     for tag in [keys::TAG_REPLAY, keys::TAG_QUOTA] {
         let (first, end) = keys::class_range(tag);
         assert!(

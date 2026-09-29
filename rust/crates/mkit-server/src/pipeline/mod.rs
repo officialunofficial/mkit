@@ -217,7 +217,8 @@ pub struct PipelineConfig {
 
 impl PipelineConfig {
     /// One seam for advertised and enforced indexed mode.
-    /// TODO(WP-4.7): derive this from IndexedConfig when indexing lands.
+    /// TODO(WP-4.7): derive this from `IndexedConfig` when indexing lands.
+    #[allow(clippy::unused_self)] // The WP-4.7 configuration makes this a real instance query.
     pub(crate) fn indexed_mode(&self) -> bool {
         false
     }

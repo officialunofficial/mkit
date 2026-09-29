@@ -41,13 +41,13 @@ fn update(
     if new.is_none() {
         body.delete = Some(true);
     }
-    let signed = sign_unary(signer, Rpc::UpdateRef, &body, |env| {
+    let request = sign_unary(signer, Rpc::UpdateRef, &body, |env| {
         repo.clone_into(&mut env.repository);
     });
     if let Some(grant) = grant {
-        signed.with_header("x-write-grant", grant)
+        request.with_header("x-write-grant", grant)
     } else {
-        signed
+        request
     }
 }
 
@@ -59,13 +59,13 @@ fn advance(
     grant: Option<&str>,
 ) -> Signed {
     let body = advance_req(head, packmap);
-    let signed = sign_unary(signer, Rpc::AdvanceRefs, &body, |env| {
+    let request = sign_unary(signer, Rpc::AdvanceRefs, &body, |env| {
         repo.clone_into(&mut env.repository);
     });
     if let Some(grant) = grant {
-        signed.with_header("x-write-grant", grant)
+        request.with_header("x-write-grant", grant)
     } else {
-        signed
+        request
     }
 }
 
