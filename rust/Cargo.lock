@@ -3561,6 +3561,7 @@ dependencies = [
  "libc",
  "metrics",
  "mkit-attest",
+ "mkit-cli",
  "mkit-core",
  "mkit-rpc",
  "mkit-server",

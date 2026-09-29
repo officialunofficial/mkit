@@ -44,6 +44,7 @@
 //! is an exception: a piped, non-quiet push gets one start and one completion
 //! line because the wait can last for minutes.
 
+use mkit_core::hash::{Hash, to_hex};
 use mkit_transport_connect::{PendingEvent, UploadEvent};
 use std::cell::RefCell;
 use std::io::{IsTerminal, Write};
@@ -65,6 +66,9 @@ pub enum Event {
     /// side, `unpack_downloaded_packs`) — real counts from the pack's own
     /// [`mkit_core::pack::UnpackReport`].
     ObjectsUnpacked(usize),
+    /// A split push (WP-1.17b) is starting advance `index` of `total`. The
+    /// counters restart for it and its label carries the step.
+    Step { index: usize, total: usize },
 }
 
 /// Objects between throttled stderr re-writes. The final event
@@ -80,6 +84,7 @@ struct Reporter {
     bytes: u64,
     last_emit_done: usize,
     emitted: bool,
+    step: Option<(usize, usize)>,
 }
 
 impl Reporter {
@@ -91,6 +96,7 @@ impl Reporter {
             bytes: 0,
             last_emit_done: 0,
             emitted: false,
+            step: None,
         }
     }
 
@@ -109,26 +115,40 @@ impl Reporter {
                 self.bytes = self.bytes.saturating_add(bytes);
                 self.emit();
             }
+            Event::Step { index, total } => {
+                self.finish();
+                self.done = 0;
+                self.bytes = 0;
+                self.last_emit_done = 0;
+                self.emitted = false;
+                self.step = Some((index, total));
+            }
+        }
+    }
+
+    fn label(&self) -> String {
+        match self.step {
+            Some((index, total)) => format!("{} (step {index}/{total})", self.label),
+            None => self.label.to_owned(),
         }
     }
 
     fn emit(&mut self) {
         self.last_emit_done = self.done;
         self.emitted = true;
+        let label = self.label();
         let mut stderr = std::io::stderr().lock();
         let _ = match (self.total, self.bytes) {
-            (Some(total), 0) => write!(stderr, "\r{}: {}/{} objects", self.label, self.done, total),
-            (Some(total), bytes) => write!(
-                stderr,
-                "\r{}: {}/{} objects, {} bytes",
-                self.label, self.done, total, bytes
-            ),
-            (None, 0) => write!(stderr, "\r{}: {} objects", self.label, self.done),
-            (None, bytes) => write!(
-                stderr,
-                "\r{}: {} objects, {} bytes",
-                self.label, self.done, bytes
-            ),
+            (Some(total), 0) => write!(stderr, "\r{label}: {}/{total} objects", self.done),
+            (Some(total), bytes) => {
+                write!(
+                    stderr,
+                    "\r{label}: {}/{total} objects, {bytes} bytes",
+                    self.done
+                )
+            }
+            (None, 0) => write!(stderr, "\r{label}: {} objects", self.done),
+            (None, bytes) => write!(stderr, "\r{label}: {} objects, {bytes} bytes", self.done),
         };
         let _ = stderr.flush();
     }
@@ -147,6 +167,8 @@ impl Reporter {
 }
 
 thread_local! {
+    /// `Some(quiet)` while a [`Guard`] is installed on this thread.
+    static QUIET: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static REPORTER: RefCell<Option<Reporter>> = const { RefCell::new(None) };
     static PENDING: RefCell<Option<PendingReporter>> = const { RefCell::new(None) };
     static UPLOAD: RefCell<Option<UploadReporter>> = const { RefCell::new(None) };
@@ -311,6 +333,7 @@ pub struct Guard {
 
 impl Drop for Guard {
     fn drop(&mut self) {
+        QUIET.with(|quiet| quiet.set(None));
         PENDING.with(|r| {
             r.borrow_mut().take();
         });
@@ -337,6 +360,7 @@ impl Drop for Guard {
 /// total.
 pub fn start(label: &'static str, total: Option<usize>, enabled: bool, quiet: bool) -> Guard {
     let progress_mode = std::env::var("MKIT_PROGRESS").ok();
+    QUIET.with(|state| state.set(Some(quiet || progress_mode.as_deref() == Some("never"))));
     PENDING.with(|r| {
         *r.borrow_mut() = Some(PendingReporter::new(
             quiet,
@@ -381,6 +405,41 @@ pub fn report(event: Event) {
             rep.record(event);
         }
     });
+}
+
+/// The line a piped, non-quiet run gets when one advance of a split push has
+/// landed.
+fn step_line(index: usize, total: usize, head: &Hash) -> String {
+    format!(
+        "pushed step {index}/{total}: branch now at {}",
+        to_hex(head)
+    )
+}
+
+/// The line for one landed advance, or `None` when nothing should be printed:
+/// a quiet run, a single advance, or an interactive run, whose live progress
+/// line already carries the step.
+fn step_message(
+    quiet: bool,
+    interactive: bool,
+    index: usize,
+    total: usize,
+    head: &Hash,
+) -> Option<String> {
+    (!quiet && !interactive && total >= 2).then(|| step_line(index, total, head))
+}
+
+/// Report that advance `index` of `total` of a split push has landed. Outside
+/// a [`Guard`] (library callers, tests) nothing is printed.
+pub fn step_committed(index: usize, total: usize, head: &Hash) {
+    let Some(quiet) = QUIET.with(std::cell::Cell::get) else {
+        return;
+    };
+    let interactive = REPORTER.with(|r| r.try_borrow().is_ok_and(|slot| slot.is_some()));
+    if let Some(line) = step_message(quiet, interactive, index, total, head) {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "{line}");
+    }
 }
 
 /// Whether progress should be shown on stderr: not explicitly silenced
@@ -532,5 +591,27 @@ mod tests {
     #[test]
     fn should_report_quiet_always_wins() {
         assert!(!should_report(true));
+    }
+
+    /// A split push (WP-1.17b): the live progress line names the step, a
+    /// piped run gets one line per landed advance, a quiet run and a single
+    /// advance get none.
+    #[test]
+    fn split_push_output_in_tty_piped_and_quiet_modes() {
+        let mut reporter = Reporter::new("Writing objects", None);
+        assert_eq!(reporter.label(), "Writing objects");
+        reporter.record(Event::Step { index: 2, total: 5 });
+        assert_eq!(reporter.label(), "Writing objects (step 2/5)");
+        assert_eq!((reporter.done, reporter.bytes), (0, 0));
+
+        let head = [0xab; 32];
+        let hex = to_hex(&head);
+        assert_eq!(
+            step_message(false, false, 2, 5, &head),
+            Some(format!("pushed step 2/5: branch now at {hex}"))
+        );
+        assert_eq!(step_message(false, true, 2, 5, &head), None, "tty");
+        assert_eq!(step_message(true, false, 2, 5, &head), None, "quiet");
+        assert_eq!(step_message(false, false, 1, 1, &head), None, "unsplit");
     }
 }

@@ -150,6 +150,10 @@ mkit-server-conformance = { path = "../mkit-server-conformance", features = ["fa
 # The generated `mkit.transport.v1` messages, and `ConnectTransport`, the
 # `mkit+http://` client (tests/client_e2e.rs).
 mkit-transport-connect = { version = "0.4", path = "../mkit-transport-connect" }
+# The client push path (`push_branch_steps`) against the server it pushes to
+# (tests/client_e2e.rs). A dev-dependency only: the CLI's own graph stays
+# server-free.
+mkit-cli = { version = "0.4", path = "../mkit-cli" }
 buffa = "0.9.1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1", "http2"] }

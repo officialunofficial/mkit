@@ -17,12 +17,20 @@
 //! informative) outranks a live epoch-e grant until the owner bumps the epoch.
 //! `mkit grant add` warns about it.
 
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mkit_attest::grant::{Capabilities, Capability, Grant, RefFlags, RepoScope, packmap_head};
 use mkit_core::hash::from_hex;
+use mkit_core::refs::RefWriteCondition;
 use mkit_core::repo_identity::RepositoryIdentity;
-use mkit_transport_connect::{GrantCondition, GrantOperation, GrantRequest, GrantSource};
+use mkit_transport_connect::{
+    ConnectTransport, GrantCondition, GrantOperation, GrantRef, GrantRequest, GrantSource,
+    ServerInfoView,
+};
+
+use super::StepAuthority;
+use super::packmap::packmap_ref;
 
 use crate::grants::store::StoredGrant;
 #[cfg(test)]
@@ -214,6 +222,102 @@ impl GrantSource for LocalGrants {
             .and_then(|duration| i64::try_from(duration.as_millis()).ok())?;
         self.select_at(request, now)
     }
+}
+
+/// The grant pre-check of a split push (WP-1.17b, B5) over a Connect client's
+/// local grants: every advance must be covered before the first upload, so a
+/// grantee that would be refused at a later advance never publishes a prefix.
+///
+/// The owner key needs no grant. Otherwise each advance's condition must have a
+/// grant that covers it, and on a server that is not in indexed mode the later
+/// advances (`Match` updates) need a grant carrying `f`: such a server refuses
+/// `u` alone ("update without force needs indexed mode", R-150). The check
+/// asks for an `Any` write, which only an `f` grant covers.
+pub(crate) struct ConnectAuthority {
+    pub(crate) transport: Arc<ConnectTransport>,
+    pub(crate) grants: Arc<LocalGrants>,
+    pub(crate) signer_key: String,
+}
+
+impl StepAuthority for ConnectAuthority {
+    fn authorize(
+        &self,
+        branch: &str,
+        first: RefWriteCondition,
+        later_steps: bool,
+    ) -> Result<(), String> {
+        let repository = self.transport.repository();
+        if repository.namespace().is_some_and(|namespace| {
+            namespace.to_string() == format!("ed25519-{}", self.signer_key)
+        }) {
+            return Ok(());
+        }
+        let indexed = matches!(
+            self.transport.server_info(),
+            ServerInfoView::V2(info) if info.indexed_mode == Some(true)
+        );
+        check_step_grants(
+            self.grants.as_ref(),
+            self.transport.origin(),
+            &repository.to_string(),
+            &self.signer_key,
+            branch,
+            first,
+            later_steps,
+            indexed,
+        )
+    }
+}
+
+/// Whether `source` holds a grant for each advance of a split push by a
+/// non-owner key: the first advance under `first`, and, with `later_steps`, the
+/// `Match` updates that follow. A server that is not in indexed mode refuses a
+/// `Match` update without `f`, so there the later advances ask for an `Any`
+/// write, which only an `f` grant covers.
+#[allow(clippy::too_many_arguments)]
+fn check_step_grants(
+    source: &dyn GrantSource,
+    audience: &str,
+    repository: &str,
+    signer_key: &str,
+    branch: &str,
+    first: RefWriteCondition,
+    later_steps: bool,
+    indexed: bool,
+) -> Result<(), String> {
+    let (first_condition, first_flag) = match first {
+        RefWriteCondition::Missing => (GrantCondition::Missing, "c"),
+        RefWriteCondition::Match(_) => (GrantCondition::Match, "u"),
+        RefWriteCondition::Any => (GrantCondition::Any, "f"),
+    };
+    let mut needed = vec![(first_condition, "the first advance", first_flag)];
+    if later_steps {
+        needed.push(if indexed {
+            (GrantCondition::Match, "the later advances", "u")
+        } else {
+            (GrantCondition::Any, "the later advances", "f")
+        });
+    }
+    let head = format!("refs/heads/{branch}");
+    let packmap = packmap_ref(branch);
+    for (condition, what, flag) in needed {
+        let refs = [
+            GrantRef::new(&head, condition),
+            GrantRef::new(&packmap, condition),
+        ];
+        let request = GrantRequest::new(
+            audience,
+            repository,
+            signer_key,
+            GrantOperation::Write { refs: &refs },
+        );
+        if source.select(&request).is_none() {
+            return Err(format!(
+                "this push is too large for one advance and would be published as several, but no stored write grant covers {what} on {head} (it needs the `{flag}` flag); nothing was published. Ask the repository owner for such a grant, or push with the owner key"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -732,6 +836,85 @@ mod tests {
         assert_eq!(
             LocalGrants::from_headers(vec![tied, later]).select_at(&request, NOW),
             Some(winner),
+        );
+    }
+
+    struct AtNow(LocalGrants);
+
+    impl GrantSource for AtNow {
+        fn select(&self, request: &GrantRequest<'_>) -> Option<String> {
+            self.0.select_at(request, NOW)
+        }
+    }
+
+    fn step_check(
+        refs: &str,
+        first: RefWriteCondition,
+        later_steps: bool,
+        indexed: bool,
+    ) -> Result<(), String> {
+        let source = AtNow(LocalGrants::from_headers([header(
+            &format!("{NS}/photos"),
+            "write",
+            refs,
+            NOW,
+            NOW + 100_000,
+            "https://git.example.com",
+            KEY,
+        )]));
+        check_step_grants(
+            &source,
+            "https://git.example.com",
+            "0x8ba1f109551bd432803012645ac136ddd64dba72/photos",
+            KEY,
+            "main",
+            first,
+            later_steps,
+            indexed,
+        )
+    }
+
+    #[test]
+    fn split_push_needs_create_for_a_new_branch_and_more_for_later_steps() {
+        let missing = RefWriteCondition::Missing;
+        // Create-only: the first advance is fine, the later ones are not.
+        assert!(step_check("refs/heads/main=c", missing, false, false).is_ok());
+        let refused = step_check("refs/heads/main=c", missing, true, true).unwrap_err();
+        assert!(refused.contains("nothing was published"), "{refused}");
+        assert!(refused.contains("`u`"), "{refused}");
+        // Create and update covers an indexed server, but a Stage 1 server
+        // refuses update without force: the later advances need `f`.
+        assert!(step_check("refs/heads/main=cu", missing, true, true).is_ok());
+        let refused = step_check("refs/heads/main=cu", missing, true, false).unwrap_err();
+        assert!(refused.contains("`f`"), "{refused}");
+        assert!(step_check("refs/heads/main=cuf", missing, true, false).is_ok());
+        // No grant for the branch at all.
+        assert!(step_check("refs/heads/other=cuf", missing, false, false).is_err());
+    }
+
+    #[test]
+    fn update_only_grant_cannot_create_the_first_advance() {
+        let matched = RefWriteCondition::Match([1; 32]);
+        assert!(step_check("refs/heads/main=u", matched, false, true).is_ok());
+        assert!(step_check("refs/heads/main=u", RefWriteCondition::Missing, false, true).is_err());
+        assert!(step_check("refs/heads/main=u", matched, true, false).is_err());
+        assert!(step_check("refs/heads/main=uf", matched, true, false).is_ok());
+    }
+
+    #[test]
+    fn the_owner_key_needs_no_grant() {
+        let transport =
+            ConnectTransport::connect(&format!("mkit+http://127.0.0.1:9/ed25519-{KEY}/photos"))
+                .unwrap();
+        let authority = ConnectAuthority {
+            transport: Arc::new(transport),
+            grants: Arc::new(LocalGrants::from_headers([])),
+            signer_key: KEY.to_owned(),
+        };
+        assert!(
+            authority
+                .authorize("main", RefWriteCondition::Missing, true)
+                .is_ok()
         );
     }
 }
