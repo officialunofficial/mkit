@@ -31,8 +31,8 @@ use crate::{BlobStore, NamespaceStore, ServerError};
 const BLOB_HEADER: u64 = 10;
 /// [`BLOB_HEADER`] as an index.
 const BLOB_HEADER_INDEX: usize = 10;
-/// Tag peeling depth: a tag of a tag of a tag is a chain, not a ref.
-const MAX_PEEL: usize = 8;
+/// Match git-import: at most 16 tags, plus the terminal commit or remix.
+const MAX_PEEL: usize = 16;
 
 /// The stores and limits one request resolves against.
 pub(crate) struct Env<'a, B, N> {
@@ -190,7 +190,7 @@ pub(crate) async fn resolve_ref<B: BlobStore, N: NamespaceStore>(
 ) -> Result<RefResolved, Miss> {
     let mut id = tip;
     let mut peeled = None;
-    for _ in 0..MAX_PEEL {
+    for depth in 0..=MAX_PEEL {
         let bytes = load_object(env, id, budget).await?;
         match type_of(&bytes) {
             Some(ObjectType::Commit | ObjectType::Remix) => {
@@ -202,7 +202,7 @@ pub(crate) async fn resolve_ref<B: BlobStore, N: NamespaceStore>(
                 peeled = Some((id, tree));
                 break;
             }
-            Some(ObjectType::Tag) => match decode(&bytes)? {
+            Some(ObjectType::Tag) if depth < MAX_PEEL => match decode(&bytes)? {
                 Object::Tag(tag) => id = tag.target,
                 _ => return Err(Miss::Unavailable),
             },

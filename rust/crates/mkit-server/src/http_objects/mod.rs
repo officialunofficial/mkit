@@ -36,7 +36,8 @@ pub use seams::{
 use crate::pipeline::HeaderValues;
 use crate::{Code, ServerError};
 
-/// Counter: a reachability walk hit `max_walk_objects` or the decode budget
+/// Counter: ref enumeration or a reachability walk hit its row, page or
+/// decode budget
 /// and answered the uniform 404.
 pub const METRIC_HTTP_REACH_CAPPED: &str = "mkit_server_http_reach_capped_total";
 /// Counter: an object without an extracted copy exceeded
@@ -50,8 +51,10 @@ pub const DEFAULT_MAX_INLINE_OBJECT_BYTES: u64 = 64 << 20;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HttpObjectsConfig {
-    /// Most objects one reachability walk decides before it gives up (404
-    /// and [`METRIC_HTTP_REACH_CAPPED`]).
+    /// Most objects one reachability walk decides, and most ref rows scanned
+    /// (including excluded refs and shard prefetch). Enumeration also has a
+    /// page budget of this limit divided by the configured page size, rounded
+    /// up. Exhaustion is 404 and [`METRIC_HTTP_REACH_CAPPED`].
     pub max_walk_objects: usize,
     /// How long a reachability proof is trusted, in milliseconds: a rewind
     /// or ref deletion is visible within it (§4 `reachability_lag`).
@@ -98,6 +101,31 @@ impl HttpObjectsConfig {
     }
 }
 
+/// An escaped query whose contents are available only to the URL parser.
+/// Debug and Display always redact it, including when formatted on its own.
+#[derive(Clone, Copy)]
+pub struct RedactedQuery<'a>(&'a str);
+
+impl<'a> RedactedQuery<'a> {
+    /// Wrap the query exactly as received, without the leading `?`.
+    #[must_use]
+    pub fn new(query: &'a str) -> Self {
+        Self(query)
+    }
+}
+
+impl core::fmt::Debug for RedactedQuery<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
+impl core::fmt::Display for RedactedQuery<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
 /// One request as a binding presents it. `raw_path` and `raw_query` are
 /// exactly as received (still escaped, no leading `?`): framework decoding
 /// must not reinterpret delimiters (§2). Neither is ever logged.
@@ -107,9 +135,9 @@ pub struct HttpObjectRequest<'a> {
     /// The escaped path.
     pub raw_path: &'a str,
     /// The escaped query, without the `?`. A trailing `?` with nothing after
-    /// it is `Some("")`, which is a 400 (§2); a mount that drops it must not
-    /// present it as `None`.
-    pub raw_query: Option<&'a str>,
+    /// it is `Some(RedactedQuery::new(""))`, which is a 400 (§2); a mount
+    /// that drops it must not present it as `None`.
+    pub raw_query: Option<RedactedQuery<'a>>,
     /// Multi-value header lookup by lowercase name.
     pub headers: &'a HeaderValues<'a>,
 }

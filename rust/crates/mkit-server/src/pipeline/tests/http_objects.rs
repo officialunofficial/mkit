@@ -422,7 +422,7 @@ impl<H: HookSet> Fx<H> {
         block_on(self.pipe.serve_http_object(&HttpObjectRequest {
             method,
             raw_path: path,
-            raw_query: query,
+            raw_query: query.map(crate::http_objects::RedactedQuery::new),
             headers: &lookup,
         }))
     }
@@ -815,6 +815,134 @@ fn a_ref_to_a_tag_peels_to_its_commit() {
         got.header("X-Mkit-Commit"),
         Some(to_hex(&d.head()).as_str())
     );
+}
+
+#[test]
+fn tag_peeling_accepts_16_tags_and_rejects_17() {
+    for depth in [16, 17] {
+        let (fx, d) = published();
+        let signer = KeyPair::from_seed([9; 32]);
+        let mut tags = Vec::new();
+        let mut target = d.head();
+        for index in 0..depth {
+            let mut tag = Tag {
+                target,
+                target_type: if index == 0 {
+                    ObjectType::Commit
+                } else {
+                    ObjectType::Tag
+                },
+                name: format!("v{index}").into_bytes(),
+                tagger: Identity::ed25519(signer.public.0),
+                signer: signer.public.0,
+                message: b"tag chain".to_vec(),
+                timestamp: 1,
+                signature: [0; 64],
+            };
+            tag.signature = mkit_core::sign::sign_tag(&tag, &signer).unwrap().0;
+            let object = Object::Tag(tag);
+            target = id(&object);
+            tags.push(object);
+        }
+        let objects: Vec<_> = tags.iter().collect();
+        let (outcome, _) = fx.push_ref(
+            "room",
+            &objects,
+            (TAG_REF, TAG_PACKMAP),
+            target,
+            (Missing, Missing),
+        );
+        assert_eq!(outcome, AdvanceOutcome::Committed);
+        let got = fx.get(&fx.ref_url("room", "rel", "small.txt"));
+        if depth == 16 {
+            assert_eq!(got.status, 200);
+            assert_eq!(got.body, d.small_bytes);
+            assert_eq!(
+                got.header("X-Mkit-Commit"),
+                Some(to_hex(&d.head()).as_str())
+            );
+        } else {
+            assert_uniform_404(&got);
+        }
+    }
+}
+
+#[test]
+fn excluded_packmap_refs_exhaust_the_ref_scan_budget() {
+    for page_limit in [4, 1_000] {
+        let fx = fixture_tweaked(
+            Hooks::new(),
+            HttpObjectsConfig {
+                max_walk_objects: 32,
+                ..http_cfg()
+            },
+            |cfg| cfg.list_page_limit = page_limit,
+        );
+        let d = data();
+        fx.push("room", &d.refs(), d.head(), None);
+        let repo = fx.repo_id("room");
+        // Move the published tip after the excluded namespace in listing order.
+        let partition = fx.pipe.shards.ref_shard(&repo, HEAD);
+        let mut batch = Batch::new().delete(keys::ref_key(&repo.name, HEAD));
+        batch = batch.put(
+            keys::ref_key(&repo.name, "refs/tags/z"),
+            codec::encode_ref_id(&d.head()),
+        );
+        assert_eq!(
+            block_on(fx.pipe.meta.inner.apply(&partition, batch)).unwrap(),
+            BatchOutcome::Committed
+        );
+        for index in 0..100 {
+            let batch = Batch::new().put(
+                keys::ref_key(&repo.name, &format!("refs/mkit/packmap/p{index:03}")),
+                codec::encode_ref_id(&[0x55; 32]),
+            );
+            assert_eq!(
+                block_on(fx.pipe.meta.inner.apply(&partition, batch)).unwrap(),
+                BatchOutcome::Committed
+            );
+        }
+        let (scan_start, _) = keys::ref_prefix_range(&repo.name, "refs/");
+        let scan_count = || {
+            fx.pipe
+                .meta
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|key| key.as_bytes().starts_with(scan_start.as_bytes()))
+                .count()
+        };
+        let before = scan_count();
+        assert_uniform_404(&fx.get(&fx.object_url("room", &id(&d.small))));
+        assert_eq!(fx.metrics.count(METRIC_HTTP_REACH_CAPPED), 1);
+        let after = scan_count();
+        assert!(
+            after - before <= 32_usize.div_ceil(page_limit as usize),
+            "ref scan exceeded its page budget"
+        );
+    }
+}
+
+#[test]
+fn formatting_the_raw_query_is_redacted() {
+    let request = HttpObjectRequest {
+        method: "GET",
+        raw_path: "/secret-path",
+        raw_query: Some(crate::http_objects::RedactedQuery::new(
+            "token=secret-query-token",
+        )),
+        headers: &|_| Vec::new(),
+    };
+    let query = request.raw_query.unwrap();
+    for rendered in [
+        format!("{request:?}"),
+        format!("{:?}", request.raw_query),
+        format!("{query}"),
+        format!("{query:#?}"),
+    ] {
+        assert!(!rendered.contains("secret-query-token"), "{rendered}");
+    }
 }
 
 /// A second history for `main`: a root commit over one new file.

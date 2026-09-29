@@ -182,6 +182,15 @@ fn parse_query(raw: Option<&str>) -> Result<Query, BadUrl> {
     Ok(query)
 }
 
+/// Parse a binding's request, exposing the redacted query only here.
+pub(crate) fn parse_request(request: &super::HttpObjectRequest<'_>) -> Result<ParsedUrl, BadUrl> {
+    parse(
+        request.raw_path,
+        request.raw_query.map(|query| query.0),
+        RepoPrefix::Required,
+    )
+}
+
 /// Parse a request's escaped path and query per §2. The caller passes the
 /// path exactly as received: framework decoding must not reinterpret
 /// delimiters. A `#` anywhere is invalid.

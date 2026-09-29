@@ -20,7 +20,7 @@ use crate::http_objects::resolve::{self, Budget, Env, Leaf};
 use crate::http_objects::seams::{AdmitDecision, AdmitRequest, ProofRequest, TakedownVerdict};
 use crate::http_objects::{
     Fail, HttpBody, HttpObjectRequest, HttpObjectResponse, HttpSeams, METRIC_HTTP_REACH_CAPPED,
-    ParsedUrl, RepoPrefix, Target, cache_control, route,
+    ParsedUrl, Target, cache_control, route,
 };
 use crate::repo::{NamespaceKey, RepoId, RepoName};
 use crate::store::read;
@@ -63,7 +63,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             "GET" | "HEAD" => {}
             _ => return HttpObjectResponse::error(405).with_header("Allow", ALLOW),
         }
-        let Ok(parsed) = route::parse(req.raw_path, req.raw_query, RepoPrefix::Required) else {
+        let Ok(parsed) = route::parse_request(req) else {
             return HttpObjectResponse::error(400);
         };
         // §3 step 5: a present token is prechecked before the repository
@@ -347,11 +347,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let (tips, truncated) = self
             .published_tips(env.repo, env.cfg.max_walk_objects)
             .await?;
-        let reached = reach::walk(env, seams.takedown.as_ref(), &tips, *id, budget).await?;
+        let reached = if truncated {
+            Reach::Capped
+        } else {
+            reach::walk(env, seams.takedown.as_ref(), &tips, *id, budget).await?
+        };
         match reached {
             Reach::Reachable => Ok(()),
-            Reach::Unreachable if !truncated => Err(Fail::NotFound),
-            Reach::Unreachable | Reach::Capped => {
+            Reach::Unreachable => Err(Fail::NotFound),
+            Reach::Capped => {
                 tracing::warn!("reachability walk hit a cap");
                 self.metrics.incr(METRIC_HTTP_REACH_CAPPED, &[], 1);
                 Err(Fail::NotFound)
@@ -359,15 +363,29 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
     }
 
-    /// The published ref values, packmaps excluded, and whether more than
-    /// `cap` remained. Refs are read from their shards: pending content never
+    /// The published ref values and whether enumeration hit its row or page
+    /// budget. Packmaps are excluded from tips but charged to the scan budget.
+    /// Refs are read from their shards: pending content never
     /// reaches a ref value (indexed advances publish verified packs only).
     async fn published_tips(&self, repo: &RepoId, cap: usize) -> Result<(Vec<Hash>, bool), Fail> {
         let scan = crate::refs::list_scan_prefix("refs/");
         let partitions = self.shards.ref_index_partitions(repo);
         let (mut tips, mut last) = (Vec::new(), None::<String>);
+        let mut rows_left = cap;
+        let mut pages_left = cap.div_ceil(self.cfg.list_page_limit as usize);
         loop {
-            let limit = self.cfg.list_page_limit;
+            // Reserve every shard's maximum prefetch, including rows discarded
+            // by the merge or excluded below. This conservatively bounds actual
+            // backend rows even when the emitted page is small.
+            let limit = self
+                .cfg
+                .list_page_limit
+                .min(u32::try_from(rows_left / partitions.len()).unwrap_or(u32::MAX));
+            if limit == 0 || pages_left == 0 {
+                return Ok((tips, true));
+            }
+            rows_left -= limit as usize * partitions.len();
+            pages_left -= 1;
             let page = if partitions.len() == 1 {
                 let bucket = super::list::RefBucket {
                     store: &self.meta,
@@ -409,9 +427,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     || !crate::refs::is_served_ref_name(&entry.name)
                 {
                     continue;
-                }
-                if tips.len() == cap {
-                    return Ok((tips, true));
                 }
                 tips.push(entry.id);
             }
