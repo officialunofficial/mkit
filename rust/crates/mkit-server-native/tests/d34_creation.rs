@@ -49,6 +49,7 @@ struct Controls {
     race: Mutex<Option<Arc<Barrier>>>,
     race_reads: AtomicUsize,
     fail_refs: AtomicBool,
+    fail_grants: AtomicUsize,
 }
 
 struct TestStore<N> {
@@ -133,6 +134,21 @@ impl<N: NamespaceStore> NamespaceStore for TestStore<N> {
 
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
         self.record(Call::Apply(p.clone()));
+        let writes_lease = batch.writes.iter().any(
+            |write| matches!(write, Write::Put(key, _) if key.as_bytes().starts_with(b"ls\0")),
+        );
+        if writes_lease
+            && self
+                .controls
+                .fail_grants
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+        {
+            return Ok(BatchOutcome::PreconditionFailed {
+                index: 3,
+                observed: None,
+            });
+        }
         let writes_ref = batch
             .writes
             .iter()
@@ -523,6 +539,29 @@ async fn creation_race<N: NamespaceStore>(backend: N, sharding: Sharding) {
     }
 }
 
+async fn lease_grant_retries_contention<N: NamespaceStore>(backend: N) {
+    let store = TestStore::new(backend);
+    store.controls.fail_grants.store(4, Ordering::SeqCst);
+    let (pipe, _) = pipeline(store.clone(), Sharding::D34, multi(), false, false);
+    let auth = signed(&pipe, &identity("grant-race"));
+    assert_eq!(
+        pipe.update_ref(&auth, update("refs/heads/a", 1))
+            .await
+            .unwrap(),
+        UpdateRefResult::Committed
+    );
+    assert_eq!(store.controls.fail_grants.load(Ordering::SeqCst), 0);
+    let coordinator = coordinator(Sharding::D34, &auth);
+    assert_eq!(
+        store
+            .take_calls()
+            .iter()
+            .filter(|call| matches!(call, Call::Apply(p) if p == &coordinator))
+            .count(),
+        5
+    );
+}
+
 /// Two first writes to different repos of a new namespace: both observe
 /// `{true, true}`, one creates the namespace, and each registers its own
 /// repo (the loser of `nr` retries with only its `rr`).
@@ -726,6 +765,19 @@ backends!(
     creation_and_cost
 );
 backends!(creation_race_memory, creation_race_sqlite, creation_race);
+
+#[tokio::test]
+async fn lease_grant_retries_contention_memory() {
+    lease_grant_retries_contention(MemoryKv::default()).await;
+}
+
+#[tokio::test]
+async fn lease_grant_retries_contention_sqlite() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = RusqliteConn::open(dir.path().join("meta.sqlite3")).unwrap();
+    lease_grant_retries_contention(Blocking::new(SqlKvStore::open(conn).unwrap())).await;
+}
+
 backends!(
     creation_race_two_repos_memory,
     creation_race_two_repos_sqlite,

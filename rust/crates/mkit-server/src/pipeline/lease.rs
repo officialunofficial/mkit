@@ -101,6 +101,11 @@ struct LeaseGrant {
     batch: Batch,
 }
 
+// A source outbox scan precedes the coordinator read on renewal. Concurrent
+// writers can therefore observe the same lease row before any grant commits.
+// Keep grant retries local to this path; creation has a different retry bound.
+const LEASE_GRANT_ATTEMPTS: usize = 8;
+
 fn grant_batch(
     read: &CoordinatorLease,
     op: &Operation,
@@ -346,7 +351,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         // TODO(WP-2.6): compare grant.epoch with the observed coordinator e before
         // writing a lease grant, so stale-grant denial writes no state (STC §5.1).
         let coordinator = self.shards.coordinator(&op.repo.namespace);
-        for _ in 0..super::coordinator::CREATION_ATTEMPTS {
+        for _ in 0..LEASE_GRANT_ATTEMPTS {
             let now = ms(self.clock.now_ms());
             let created_at_ms = ms(self.clock.now_ms().saturating_add(skew_ms));
             let grant = grant_batch(&read, op, p, now, created_at_ms, &self.cfg)?;
@@ -380,6 +385,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 }
             }
         }
+        tracing::warn!(shard = ?p, attempts = LEASE_GRANT_ATTEMPTS, "coordinator lease grant did not settle");
         Err(internal("coordinator lease grant did not settle"))
     }
 }
