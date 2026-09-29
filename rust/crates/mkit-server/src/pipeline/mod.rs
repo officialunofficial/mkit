@@ -1862,7 +1862,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         op.authz = authz;
         fault!(self, AfterAuthorize, &op, a);
         // §9.7: the signer rule needs no verified content, so it runs first.
-        self.check_ref_signers(&op)?;
+        if let Err(error) = self.check_ref_signers(&op) {
+            return self
+                .store_policy_denial(&op, a, &p, ahead, error, false)
+                .await
+                .map(|stored| (stored, ResponseMeta::default()));
+        }
         let ticketed =
             matches!(&op.kind, OpKind::AdvanceRefs { tickets, .. } if !tickets.is_empty());
         let mut staged = crate::indexed::verify::StagedCommits::default();
@@ -1913,8 +1918,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 )
                 .await?;
             }
-        } else {
-            self.check_ticketless_head(&op).await?;
+        } else if let Err(error) = self.check_ticketless_head(&op).await {
+            return self
+                .store_policy_denial(&op, a, &p, ahead, error, false)
+                .await
+                .map(|stored| (stored, ResponseMeta::default()));
         }
         if let Some(pending) = implicit {
             let upd = refs
@@ -2008,14 +2016,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     op.created = self.commit_creation(&op, a.business_skew_ms).await?;
                     None
                 };
-                self.check_fast_forward(
-                    &op,
-                    &mut refs,
-                    ahead.as_ref(),
-                    fast_forward.as_ref(),
-                    (&staged, ticket_ms),
-                )
-                .await?;
+                if let Err(error) = self
+                    .check_fast_forward(
+                        &op,
+                        &mut refs,
+                        ahead.as_ref(),
+                        fast_forward.as_ref(),
+                        (&staged, ticket_ms),
+                    )
+                    .await
+                {
+                    return self
+                        .store_policy_denial(&op, a, &p, ahead, error, pending.is_some())
+                        .await;
+                }
                 self.pre_receive(&op).await?;
                 let write = (kind, refs.as_slice(), allowance.charges.as_slice());
                 self.plan_and_apply(

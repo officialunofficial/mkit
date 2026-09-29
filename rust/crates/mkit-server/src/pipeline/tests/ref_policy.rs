@@ -128,7 +128,10 @@ impl World {
 
     /// Upload `objects` as one pack to a ticket for `branch`.
     fn begin(&mut self, branch: &str, objects: &[&Object]) -> Result<(Vec<u8>, Hash), ServerError> {
-        let pack = pack_of(objects);
+        self.begin_pack(branch, pack_of(objects))
+    }
+
+    fn begin_pack(&mut self, branch: &str, pack: Vec<u8>) -> Result<(Vec<u8>, Hash), ServerError> {
         let auth = self.auth(Procedure::BeginUpload);
         let BeginUploadResult::Ticket { id, .. } = block_on(self.env.pipe.begin_upload(
             &auth,
@@ -796,12 +799,16 @@ fn lag_miss_mid_walk_is_retryable_inside_the_window_and_permanent_after() {
 
     // After the window the same miss is the permanent policy denial.
     w.set_ref(HEAD, &id1);
-    w.hide(&id2);
+    let row = w.hide(&id2);
     w.env.clock.advance(LAG_MS);
     let later = w.req(&owner, &identity, Procedure::UpdateRef, T0);
     let auth = w.env.auth(&later).unwrap();
     let error = block_on(w.env.pipe.update_ref(&auth, change.clone())).unwrap_err();
     denied(&error, FF_MESSAGE);
+    w.restore(&id2, row);
+    let replay = block_on(w.env.pipe.update_ref(&auth, change)).unwrap_err();
+    denied(&replay, FF_MESSAGE);
+    assert_eq!(w.value(HEAD), Some(id1));
 }
 
 #[test]
@@ -1008,4 +1015,260 @@ fn a_ticketless_advance_must_pair_a_head_with_its_own_packmap() {
     .unwrap_err();
     assert_eq!(error.code(), Code::InvalidArgument);
     assert_eq!(w.value(HEAD), Some(id2));
+}
+
+#[test]
+fn ancestry_budget_charges_uncached_delta_bases_and_reuses_cached_bases() {
+    for cap in [2, 3] {
+        let mut w = World::new(
+            Some(ff_main()),
+            Some(IndexedConfig {
+                max_ancestry_commits: cap,
+                ..IndexedConfig::default()
+            }),
+        );
+        let (c1, id1) = commit(&[], 1);
+        let (c2, id2) = commit(&[id1], 2);
+        let (c3, id3) = commit(&[id2], 3);
+        w.push("main", &[&tree(), &c1], id1, Missing).unwrap();
+        let raw1 = serialize(&c1).unwrap();
+        let mut writer = PackWriter::new();
+        writer.push_raw(id1, &raw1).unwrap();
+        for object in [&c2, &c3] {
+            writer
+                .push_delta(
+                    &id1,
+                    &mkit_core::delta::encode(&raw1, &serialize(object).unwrap()).unwrap(),
+                )
+                .unwrap();
+        }
+        let ticket = w.begin_pack("feature", writer.finish().unwrap()).unwrap();
+        w.advance("feature", &ticket, id3, Missing).unwrap();
+        // c3, its uncached delta base c1, and c2 cost three units in
+        // total. Reusing c1 as c2's delta base costs nothing.
+        let result = w.update(HEAD, Match(id1), Some(id3));
+        if cap == 2 {
+            denied(&result.unwrap_err(), FF_MESSAGE);
+            assert_eq!(w.value(HEAD), Some(id1));
+            assert_eq!(w.unchecked(), 1);
+        } else {
+            assert_eq!(result.unwrap(), UpdateRefResult::Committed);
+            assert_eq!(w.unchecked(), 0);
+        }
+    }
+}
+
+#[test]
+fn policy_denial_preserves_a_concurrent_replay_winner() {
+    let policy = RefPolicy::new(vec![rule(HEAD, Some(&[&key(3)]), false)]);
+    let mut w = World::with_store(Some(policy), None, |clock| {
+        Spy::new(store(clock)).hook(|kv, partition, batch| {
+            let replay = batch.writes.iter().find_map(|write| match write {
+                Write::Put(key, raw) if key.as_bytes().starts_with(b"p\0") => {
+                    let mut record = codec::decode_replay_record(raw).unwrap();
+                    record.state =
+                        ReplayState::Committed(StoredResult::UpdateRef(UpdateRefResult::Committed));
+                    Some((key.clone(), codec::encode_replay_record(&record)))
+                }
+                _ => None,
+            });
+            if let Some((key, value)) = replay {
+                now(kv.apply(partition, Batch::new().put(key, value))).unwrap();
+            }
+        })
+    });
+    assert_eq!(
+        w.update(HEAD, Missing, Some(A)).unwrap(),
+        UpdateRefResult::Committed
+    );
+    assert_eq!(w.value(HEAD), None);
+}
+
+#[test]
+fn permanent_policy_denials_are_stored_before_policy_or_membership_changes() {
+    for reason in ["signer", "ff-delete", "head", "cap"] {
+        let mut w = World::indexed(None);
+        let [id1, id2, id3, _] = w.history();
+        let hidden = if reason == "head" {
+            Some(w.hide(&id3))
+        } else {
+            None
+        };
+        w.env.clock.advance(LAG_MS);
+        let change = match reason {
+            "ff-delete" => RefUpdate {
+                name: HEAD.into(),
+                condition: Match(id2),
+                new: None,
+            },
+            "cap" => {
+                w.set_ref(HEAD, &id1);
+                w.env
+                    .pipe
+                    .cfg
+                    .indexed
+                    .as_mut()
+                    .unwrap()
+                    .max_ancestry_commits = 1;
+                upd(HEAD, Match(id1), id3)
+            }
+            _ => upd(HEAD, Match(id2), id3),
+        };
+        w.env.pipe.cfg.ref_policy = match reason {
+            "signer" => Some(RefPolicy::new(vec![rule(HEAD, Some(&[&key(3)]), false)])),
+            "ff-delete" | "cap" => Some(ff_main()),
+            _ => None,
+        };
+        let auth = w.auth(Procedure::UpdateRef);
+        let error = block_on(w.env.pipe.update_ref(&auth, change.clone())).unwrap_err();
+        let partition = w.env.pipe.shards.ref_shard(&w.repo(), HEAD);
+        let replay_key = keys::replay(&auth.auth.as_ref().unwrap().replay_scope);
+        let raw = block_on(w.env.pipe.meta.get(&partition, &replay_key))
+            .unwrap()
+            .unwrap();
+        let record = codec::decode_replay_record(&raw).unwrap();
+        let ReplayState::Committed(StoredResult::Rejected(rejection)) = record.state else {
+            panic!("expected a stored policy denial");
+        };
+        assert_eq!(rejection.code(), error.code());
+        assert_eq!(rejection.message(), error.public_message());
+        w.env.pipe.cfg.ref_policy = None;
+        w.env
+            .pipe
+            .cfg
+            .indexed
+            .as_mut()
+            .unwrap()
+            .max_ancestry_commits = 256;
+        if let Some(row) = hidden {
+            w.restore(&id3, row);
+        }
+        let replay = block_on(w.env.pipe.update_ref(&auth, change)).unwrap_err();
+        assert_eq!(replay.code(), error.code());
+        assert_eq!(replay.public_message(), error.public_message());
+    }
+}
+
+#[test]
+fn begin_upload_signer_denial_replays_without_opening_a_ticket() {
+    let policy = RefPolicy::new(vec![rule(HEAD, Some(&[&key(3)]), false)]);
+    let mut w = World::new(Some(policy), None);
+    let auth = w.auth(Procedure::BeginUpload);
+    denied(
+        &block_on(w.env.pipe.begin_upload(&auth, HEAD, &B, 1)).unwrap_err(),
+        SIGNER_MESSAGE,
+    );
+    w.env.pipe.cfg.ref_policy = None;
+    denied(
+        &block_on(w.env.pipe.begin_upload(&auth, HEAD, &B, 1)).unwrap_err(),
+        SIGNER_MESSAGE,
+    );
+}
+
+#[test]
+fn policy_denial_replans_after_a_missed_deadline() {
+    let policy = RefPolicy::new(vec![rule(HEAD, Some(&[&key(3)]), false)]);
+    let mut w = World::with_store(Some(policy), None, |clock| {
+        let clock = clock.clone();
+        let once = AtomicBool::new(false);
+        Spy::new(store(&clock)).hook(move |_, _, batch| {
+            if !once.swap(true, Ordering::SeqCst) {
+                let Precondition::NotAfter(deadline) = batch.preconditions[0] else {
+                    panic!("expected deadline");
+                };
+                clock.set(i64::try_from(deadline + 1).unwrap());
+            }
+        })
+    });
+    denied(
+        &w.update(HEAD, Missing, Some(A)).unwrap_err(),
+        SIGNER_MESSAGE,
+    );
+    assert_eq!(w.env.batches().len(), 2);
+}
+
+#[test]
+fn reserved_policy_denial_aborts_its_reservation_when_a_replay_winner_commits() {
+    let clock = clock();
+    let owner = key(7);
+    let identity = grants::repository(&owner);
+    let mut config = grants::config(&owner, AuthorizerRole::Check);
+    config.indexed = Some(IndexedConfig::default());
+    config.ref_policy = Some(ff_main());
+    let fired = AtomicBool::new(false);
+    let spy = Spy::new(store(&clock)).hook(move |kv, partition, batch| {
+        let replay = batch.writes.iter().find_map(|write| match write {
+            Write::Put(key, raw) if key.as_bytes().starts_with(b"p\0") => {
+                let mut record = codec::decode_replay_record(raw).unwrap();
+                record.state =
+                    ReplayState::Committed(StoredResult::UpdateRef(UpdateRefResult::Committed));
+                Some((key.clone(), codec::encode_replay_record(&record)))
+            }
+            _ => None,
+        });
+        if let Some((key, value)) = replay
+            && !fired.swap(true, Ordering::SeqCst)
+        {
+            now(kv.apply(partition, Batch::new().put(key, value))).unwrap();
+        }
+    });
+    let env = build(
+        config,
+        spy,
+        with_admission(ReceiptReserved("policy-loser", AtomicU32::new(0))),
+        clock,
+    );
+    let repo = env
+        .pipe
+        .cfg
+        .addressing
+        .resolve(Some(&identity), true)
+        .unwrap()
+        .repo;
+    let partition = env.pipe.shards.ref_shard(&repo, HEAD);
+    now(env.pipe.meta.inner.apply(
+        &partition,
+        Batch::new().put(keys::ref_key(&repo.name, HEAD), codec::encode_ref_id(&A)),
+    ))
+    .unwrap();
+    let change = RefUpdate {
+        name: HEAD.into(),
+        condition: Match(A),
+        new: None,
+    };
+    let req = Req::signed_for(
+        &owner,
+        Procedure::UpdateRef,
+        &identity,
+        b"delete",
+        &nonce(1),
+        T0,
+    );
+    let error = update_meta(&env, &req, &change).unwrap_err();
+    assert_eq!(error.code(), Code::Aborted);
+    assert!(error.headers().is_empty());
+    let row = now(env
+        .pipe
+        .meta
+        .get(&partition, &keys::reservation("policy-loser-0").unwrap()))
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        codec::decode_reservation(&row).unwrap(),
+        codec::ReservationV1::Aborted {
+            reason: codec::AbortReason::ReplayRace,
+            ..
+        }
+    ));
+    let head = now(env
+        .pipe
+        .meta
+        .get(&partition, &keys::ref_key(&repo.name, HEAD)))
+    .unwrap()
+    .unwrap();
+    assert_eq!(codec::decode_ref_id(&head).unwrap(), A);
+    assert_eq!(
+        env.update(&req, &change).unwrap(),
+        UpdateRefResult::Committed
+    );
 }

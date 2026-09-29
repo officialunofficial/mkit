@@ -4,16 +4,68 @@
 
 use mkit_core::refs::{PACKMAP_REF_PREFIX, RefWriteCondition};
 
-use super::{HookSet, Pipeline, internal, plan::Snapshot};
-use crate::error::ServerError;
+use super::{
+    Authenticated, HookSet, Pipeline, internal,
+    plan::{Snapshot, WriteKind, WriteRequest},
+    stored_mismatch, upload,
+};
+use crate::error::{AbortCause, ServerError};
 use crate::indexed::verify::{StagedCommits, verify_member_head};
 use crate::op::{OpKind, Operation, RefUpdate};
 use crate::policy::ff::{FastForward, Verdict, Walk};
-use crate::store::{MultipartBlobStore, NamespaceStore};
+use crate::replay::{StoredRejection, StoredResult};
+use crate::store::{MultipartBlobStore, NamespaceStore, Partition};
 
 const NON_FAST_FORWARD: &str = "non-fast-forward update not allowed on this ref";
 
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
+    /// Store only final built-in policy denials, without ref, ticket or
+    /// admission effects. The usual replay guard preserves a racing winner.
+    pub(super) async fn store_policy_denial(
+        &self,
+        op: &Operation,
+        a: &Authenticated,
+        p: &Partition,
+        ahead: Option<Snapshot>,
+        error: ServerError,
+        reserved: bool,
+    ) -> Result<StoredResult, ServerError> {
+        let Some(rejection) = StoredRejection::new(error.code(), error.public_message())
+            .filter(|_| error.details().is_empty())
+        else {
+            return Err(error);
+        };
+        let Some(replay) = upload::replay_guard(op) else {
+            return Err(error);
+        };
+        let req = WriteRequest {
+            repo: &op.repo.name,
+            kind: WriteKind::UpdateRef,
+            refs: &[],
+            ref_index: None,
+            replay: Some(replay),
+            charges: &[],
+            namespace_charge: None,
+            grant: None,
+            lease: None,
+            layout_version: false,
+            mark_repo_known: false,
+            rejection: Some(&rejection),
+            pending: None,
+            begin: None,
+            advance: None,
+            implicit: None,
+        };
+        match self.apply_atomic(op, a, p, &req, ahead).await? {
+            rejected @ StoredResult::Rejected(_) => Err(stored_mismatch(&rejected)),
+            _ if reserved => Err(ServerError::aborted_retryable(
+                "operation already in flight; retry",
+            )
+            .with_abort_cause(AbortCause::ReplayRace)),
+            winner => Ok(winner),
+        }
+    }
+
     /// The authenticated operation signer must be allowed on every ref the
     /// write moves (a packmap through its head). It runs in both modes right
     /// after authorization, before any verification, and covers

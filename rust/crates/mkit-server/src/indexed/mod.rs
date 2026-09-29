@@ -63,8 +63,9 @@ pub struct IndexedConfig {
     /// `4 * max_pack_bytes` when the pipeline is built; a set value must be
     /// at least `max_pack_bytes`.
     pub max_extract_bytes: Option<u64>,
-    /// Most member commits one fast-forward check may read (WP-4.17), from 1
-    /// to [`MAX_ANCESTRY_COMMITS_LIMIT`]. Beyond it the check is unproven and
+    /// Most member commits and uncached delta bases one fast-forward check
+    /// may resolve (WP-4.17), from 1 to [`MAX_ANCESTRY_COMMITS_LIMIT`].
+    /// Beyond it the check is unproven and
     /// the write is denied.
     pub max_ancestry_commits: u32,
 }

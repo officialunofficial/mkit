@@ -217,9 +217,26 @@ pub type ResolvedMember = (Arc<[u8]>, u32);
 pub struct MemberCache {
     rows: BTreeMap<Location, ResolvedMember>,
     retained_bytes: u64,
+    remaining_work: Option<u32>,
 }
 
 impl MemberCache {
+    pub(crate) fn with_work_budget(limit: u32) -> Self {
+        Self {
+            remaining_work: Some(limit),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn charge_work(&mut self, amount: u32) -> Result<(), ResolveFailure> {
+        if let Some(remaining) = &mut self.remaining_work {
+            *remaining = remaining
+                .checked_sub(amount)
+                .ok_or(ResolveFailure::Capped)?;
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.rows.len()
@@ -280,6 +297,11 @@ pub fn member_object<'a, B: BlobStore, S: NamespaceStore>(
                 return Err(ServerError::invalid_argument("delta chain too deep").into());
             }
             return Ok(value.clone());
+        }
+        // An ancestry frontier is already charged by the walk; recursive,
+        // uncached delta bases share its work budget. Cache hits are free.
+        if !visiting.is_empty() {
+            memo.charge_work(1)?;
         }
         if !visiting.insert(location) {
             return Err(ServerError::invalid_argument("delta chain too deep").into());

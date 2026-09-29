@@ -126,7 +126,8 @@ impl<B: BlobStore, S: NamespaceStore> Walk<'_, B, S> {
 
     /// Whether `to` is `from` or descends from it. Staged commits cost
     /// nothing; member commits are read breadth-first, one batched lookup
-    /// per round, at most `max_ancestry_commits` of them. A miss while the
+    /// per round. Member commits and uncached delta bases together cost at
+    /// most `max_ancestry_commits` work units. A miss while the
     /// window from `created_ms` is open answers a retryable `unavailable`
     /// unless another path proves the ancestry.
     ///
@@ -143,10 +144,10 @@ impl<B: BlobStore, S: NamespaceStore> Walk<'_, B, S> {
             return Ok(Verdict::Descendant);
         }
         let budget = self.cfg.decode_budget.saturating_sub(staged.bytes);
-        let mut memo = resolve::MemberCache::default();
+        let mut memo = resolve::MemberCache::with_work_budget(self.cfg.max_ancestry_commits);
         let mut visited = BTreeSet::from([to]);
         let mut frontier = vec![to];
-        let (mut reads, mut missed) = (0u32, false);
+        let mut missed = false;
         while !frontier.is_empty() {
             let mut next = Vec::new();
             let mut member = Vec::new();
@@ -160,8 +161,10 @@ impl<B: BlobStore, S: NamespaceStore> Walk<'_, B, S> {
             if edges.contains(&from) {
                 return Ok(Verdict::Descendant);
             }
-            reads = reads.saturating_add(u32::try_from(member.len()).unwrap_or(u32::MAX));
-            if reads > self.cfg.max_ancestry_commits {
+            if memo
+                .charge_work(u32::try_from(member.len()).unwrap_or(u32::MAX))
+                .is_err()
+            {
                 return Ok(self.unchecked("commits"));
             }
             if !member.is_empty() {

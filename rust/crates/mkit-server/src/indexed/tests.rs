@@ -1317,3 +1317,40 @@ fn in_pack_delta_chain_above_cap_is_rejected_before_tip() {
     assert_eq!(error.code(), crate::Code::InvalidArgument);
     assert_eq!(error.public_message(), "delta chain too deep");
 }
+
+#[test]
+fn unstaged_head_lag_window_uses_earliest_consumed_ticket_in_either_order() {
+    let (good, _) = good_pack();
+    let extra = encode_packlist(None, &[]).unwrap();
+    let blobs = MemoryBlobStore::default();
+    upload(&blobs, &good);
+    upload(&blobs, &extra);
+    let repo = repo("one");
+    let clock = Arc::new(ManualClock::new(NOW));
+    for oldest_first in [false, true] {
+        let store = MemoryKv::with_clock(clock.clone());
+        let mut tickets = [
+            ticket(&repo, &good, NOW as u64),
+            ticket(
+                &repo,
+                &extra,
+                NOW as u64 - IndexedConfig::default().relay_lag_bound_ms,
+            ),
+        ];
+        if oldest_first {
+            tickets.reverse();
+        }
+        let error = verify(
+            &blobs,
+            &store,
+            &repo,
+            &tickets,
+            [99; 32],
+            IndexedConfig::default(),
+            &clock,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), crate::Code::InvalidArgument);
+        assert_eq!(error.public_message(), "open closure");
+    }
+}

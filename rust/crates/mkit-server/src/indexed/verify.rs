@@ -842,9 +842,13 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
         }
     }
     if !staged.contains_key(&head) {
-        needed
-            .entry(head)
-            .or_insert_with(|| tickets.first().map_or(now, |ticket| ticket.created_at_ms));
+        needed.entry(head).or_insert_with(|| {
+            tickets
+                .iter()
+                .map(|ticket| ticket.created_at_ms)
+                .min()
+                .unwrap_or(now)
+        });
     }
     let mut member_head = None;
     if !needed.is_empty() {
