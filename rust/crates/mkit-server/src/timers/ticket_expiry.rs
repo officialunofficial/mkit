@@ -462,7 +462,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn corrupt_expiry_does_not_use_a_healthy_ticket_slot() {
+    // The corrupt row takes one slot on its first tick, then backs off 60 s,
+    // so it cannot starve healthy tickets on later ticks.
+    async fn corrupt_expiry_backs_off_without_starving_healthy_tickets() {
         let store = MemoryKv::default();
         let bad = [0_u8; 32];
         store

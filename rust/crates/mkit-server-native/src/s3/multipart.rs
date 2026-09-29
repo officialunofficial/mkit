@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 
 use bytes::Bytes;
-use futures_util::{StreamExt as _, stream};
+use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use mkit_core::hash::to_hex_bytes;
 use mkit_core::upload_parts::{PartHasher, PartPlan, merge_to_root};
 use mkit_server::storage_error::StorageOp;
@@ -681,10 +681,9 @@ impl MultipartBlobStore for S3BlobStore {
             self.verify_part(plan, index, &source, cv).await
         }))
         .buffer_unordered(COPY_CONCURRENCY)
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>();
+        // Stop at the first bad part rather than re-reading the whole pack.
+        .try_collect::<Vec<_>>()
+        .await;
         let verified = match verified {
             Err(StoreError::Invalid(_)) if self.read_meta(&meta_path).await?.is_none() => {
                 return Err(StoreError::SessionGone);

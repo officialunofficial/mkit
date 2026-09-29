@@ -5,8 +5,8 @@ The Worker and native S3 backends stage ticket parts under
 identity, length and part size; part objects use `<index>-<subtree-cv-hex>`.
 A completed pack lives under `packs/`, outside this staging prefix. R2
 assembles by streaming the parts through a whole-pack BLAKE3-verifying put;
-native S3 copies the verified, immutable part objects through a private
-multipart upload. Backend ETags are never used as integrity evidence.
+native S3 re-hashes each staged part at completion and copies it, pinned to
+the ETag it read, through a private multipart upload. Backend ETags are never used as integrity evidence.
 
 Configure a bucket lifecycle rule on **both R2 and S3** to delete objects
 under `server-uploads/` after **8 days**. Keep it even though the kind-2

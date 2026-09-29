@@ -4,8 +4,8 @@
 //! - [`SimBucket`]: R2 with the semantics [`R2BlobStore`] relies on: a put
 //!   runs on its own thread (spawned) and fails, writing nothing, when its
 //!   body is short, long or aborted; a failed `If-None-Match: *` condition
-//!   is `Ok(false)`; bodies come back in 1.5 MiB pieces, so the store must
-//!   re-chunk them.
+//!   is `Ok(false)`; bodies come back in 256 KiB pieces, below the store's
+//!   piece limit (re-chunking of larger pieces is unit-tested in `r2.rs`).
 //! - [`SimDoConn`]: Durable Object SQL over rusqlite: it refuses what a
 //!   Durable Object refuses (transaction control, pragmas, `vacuum`, more
 //!   than 100 bound parameters, statements over 100 KB), has a fixed hard
@@ -60,7 +60,7 @@ pub struct SimBucket {
     early: Arc<AtomicBool>,
 }
 
-/// The piece size simulated bodies arrive in: above the store's limit.
+/// The piece size simulated bodies arrive in: below the store's limit.
 // Model the bounded chunks of an R2 response while charging each copied
 // chunk to the reading thread's heap meter.
 const SIM_PIECE: usize = 256 * 1024;
