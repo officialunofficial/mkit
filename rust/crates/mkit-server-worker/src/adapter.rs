@@ -413,6 +413,75 @@ where
     }
 }
 
+/// Register the outcome kinds on every class that holds `o`/`oq` rows:
+/// kind 8 (delivery, in-tree `NoOutcomes` sink that acknowledges locally)
+/// and kind 9 (reconcile). Both make no subrequests, so the Free-plan alarm
+/// budget below is unchanged. A missing audience retains kind-8 rows.
+#[must_use]
+pub fn with_outcome_timers<S>(
+    registry: mkit_server::timers::TimerRegistry<'static, S>,
+    class: crate::classes::ShardClass,
+    audience: Result<String, ConfigError>,
+) -> mkit_server::timers::TimerRegistry<'static, S>
+where
+    S: mkit_server::NamespaceStore,
+{
+    use crate::classes::ShardClass;
+    if !matches!(
+        class,
+        ShardClass::RefStore | ShardClass::NsCoordinator | ShardClass::RefShard
+    ) {
+        return registry;
+    }
+    let delivery = match audience {
+        Ok(audience) => Some(mkit_server::timers::outcome_delivery::OutcomeDelivery {
+            sink: mkit_server::pipeline::NoOutcomes,
+            audience,
+            metrics: Arc::new(crate::telemetry::ConsoleMetrics::default()),
+        }),
+        Err(error) => {
+            crate::log_failure(&format!(
+                "Worker outcome delivery configuration unavailable: {error}"
+            ));
+            None
+        }
+    };
+    registry
+        .register(WorkerOutcomeDelivery { delivery })
+        .register(mkit_server::timers::reservation_reconcile::ReservationReconcile)
+}
+
+struct WorkerOutcomeDelivery {
+    delivery: Option<
+        mkit_server::timers::outcome_delivery::OutcomeDelivery<mkit_server::pipeline::NoOutcomes>,
+    >,
+}
+
+impl<S: mkit_server::NamespaceStore> mkit_server::timers::TimerHandler<S>
+    for WorkerOutcomeDelivery
+{
+    fn kind(&self) -> mkit_server::timers::TimerKind {
+        mkit_server::timers::registry::kinds::OUTCOME_DELIVERY
+    }
+
+    // Each fire delivers at most 16 rows locally; no subrequests.
+    fn max_per_tick(&self) -> Option<u32> {
+        Some(4)
+    }
+
+    fn fire<'a>(
+        &'a self,
+        ctx: &'a mkit_server::timers::TimerCtx<'a, S>,
+        timer: &'a mkit_server::timers::DueTimer,
+    ) -> mkit_server::BoxFuture<'a, Result<mkit_server::timers::Fired, mkit_server::StoreError>>
+    {
+        match &self.delivery {
+            Some(delivery) => delivery.fire(ctx, timer),
+            None => Box::pin(async { Ok(mkit_server::timers::Fired::Retry) }),
+        }
+    }
+}
+
 struct WorkerRelay<T> {
     relay: Option<mkit_server::relay::RelayHandler<T>>,
     max_per_tick: u32,
@@ -1016,6 +1085,11 @@ mod glue {
                 PACKS_KEYSPACE,
             ),
         );
+        let registry = super::with_outcome_timers(
+            registry,
+            class,
+            WorkerConfig::from_env(env).map(|cfg| cfg.audience),
+        );
         let backup = BackupConfig::from_vars(|name| env.var(name).ok().map(|v| v.to_string()))
             .map_err(|error| {
                 BACKUPS_INVALID_LOG
@@ -1036,6 +1110,7 @@ mod glue {
         let registry = if let Some(config) = backup.clone() {
             // Free-plan alarm budget: at most 32 relay calls plus this
             // handler's single R2 put = 33 external subrequests, under 50.
+            // Kinds 8 and 9 (NoOutcomes, reconcile) make no external calls.
             registry.register(BackupHandler::new(
                 EnvBucket::new(env.clone(), BACKUPS_BINDING),
                 config,

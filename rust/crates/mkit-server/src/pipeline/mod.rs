@@ -56,7 +56,7 @@ use mkit_core::write_auth::MAX_CLOCK_LEAD_MS;
 use tracing::Instrument;
 
 use crate::download::DOWNLOAD_CHUNK_MAX;
-use crate::error::{InvalidHeader, ServerError};
+use crate::error::{AbortCause, InvalidHeader, ServerError};
 use crate::op::{AuthzFacts, OpKind, Operation, Procedure, RefUpdate};
 use crate::policy::{AuthorizerRole, GrantConfig, NamespacePolicy, WritePolicy, grants};
 use crate::quota::{
@@ -87,9 +87,9 @@ pub use faults::{
     TestDirectives,
 };
 pub use hooks::{
-    Admission, AdmissionDecision, AdmissionInput, Authorizer, Challenge, CredentialHeader,
-    DefaultAdmission, HookSet, Hooks, NoOutcomes, NoPreReceive, NoReceipts, OpenAuthorizer,
-    OutcomeSink, PreReceive, ReceiptSigner,
+    ADMISSION_EXPOSE_HEADERS, Admission, AdmissionDecision, AdmissionInput, Authorizer, Challenge,
+    CredentialHeader, DefaultAdmission, HookSet, Hooks, NoOutcomes, NoPreReceive, NoReceipts,
+    OpenAuthorizer, OutcomeSink, PreReceive, ReceiptSigner,
 };
 pub use info::ServerInfo;
 use outcome::Outcome as RequestOutcome;
@@ -511,6 +511,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 "invalid admission credential header name",
             ));
         }
+        // Defaults (Payment-Authorization, PAYMENT-SIGNATURE, Authorization)
+        // plus extras may never exceed the eight-header bound.
+        if cfg.admission_credential_headers.len() + 3 > admission::MAX_CREDENTIAL_HEADERS {
+            return Err(ServerError::invalid_argument(
+                "too many admission credential headers",
+            ));
+        }
         cfg.redactor.add_names(&cfg.admission_credential_headers);
 
         if cfg.max_parts > B::MAX_PARTS {
@@ -748,8 +755,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let now = self.clock.now_ms().saturating_add(skew);
         let mut a = auth::authenticate(&self.cfg.auth, meta, now, repo, &expected_repository)?;
         if matches!(self.cfg.auth, AuthMode::AuthV2(_)) && a.auth.is_some() {
-            a.credential_headers =
-                admission::select_credentials(meta, &self.cfg.admission_credential_headers)?;
+            a.credential_capture =
+                admission::capture_credentials(meta, &self.cfg.admission_credential_headers);
         }
         // Header adapters supply UTF-8 Strings; undecodable bytes are absent.
         a.ref_hint =
@@ -1373,8 +1380,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let allowance = if existing.is_some() || ticketed {
             Allowance::default()
         } else {
+            let credentials = admission::validate_credentials(&a.credential_capture)?;
             let mut input = AdmissionInput::new(&op);
-            input.credential_headers = &a.credential_headers;
+            input.credential_headers = &credentials;
             if let OpKind::BeginUpload { key, bytes, .. } = &op.kind {
                 input.declared_bytes = *bytes;
                 input.pack_id = Some(*key);
@@ -1771,9 +1779,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let now = self.clock.now_ms().saturating_add(business_skew_ms);
         let window = quota::namespace_window(now, charge.limits.window_ms);
         if window != charge.window && window != charge.window.saturating_add(1) {
-            return Err(ServerError::aborted_retryable(
-                "namespace quota window advanced; retry",
-            ));
+            return Err(
+                ServerError::aborted_retryable("namespace quota window advanced; retry")
+                    .with_abort_cause(AbortCause::QuotaWindow),
+            );
         }
         charge.window = window;
         let snap = ahead
@@ -2155,7 +2164,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     }
                     replans += 1;
                     if replans > MAX_REPLAN {
-                        return Err(ServerError::aborted_retryable("write contention; retry"));
+                        return Err(ServerError::aborted_retryable("write contention; retry")
+                            .with_abort_cause(AbortCause::Contention));
                     }
                 }
                 Err(StoreError::Full) => return Err(self.partition_full(p, prune).await),
@@ -2323,6 +2333,15 @@ fn replay_raced(
     req: &WriteRequest<'_>,
     observed: Option<&Value>,
 ) -> Result<StoredResult, ServerError> {
+    // Receipts and a Committed outcome belong to this request only (brief
+    // B7): a same-nonce loser holding its own reservation aborts it, whatever
+    // the winner stored.
+    if req.pending.is_some() {
+        return Err(
+            ServerError::aborted_retryable("operation already in flight; retry")
+                .with_abort_cause(AbortCause::ReplayRace),
+        );
+    }
     let (Some(replay), Some(value)) = (req.replay, observed) else {
         return Err(ServerError::aborted_retryable(
             "operation already in flight; retry",

@@ -386,8 +386,8 @@ Folded into WP-S1 §7.6/§7.8/§7.9 (adopted Q18 default). Every former dependen
 
 - **Depends on:** WP-1.10, WP-1.12, WP-1.24.
 - **Goal:** kind-2 expiry closes an unconsumed ticket with one guarded `Expired` outcome and a best-effort
-  session abort. Outcome delivery, reconcile, and pre-M3 retention are owned by WP-3.3; until then, durable
-  terminal rows accumulate undelivered and this bundle is not deployed.
+  session abort. Outcome delivery and reconcile are owned by WP-3.3; 1.14 keeps only kind-2 expiry, and the
+  durable terminal rows it writes are delivered by the WP-3.3 kind-8 driver.
 - **Tests:** one `Expired` row, no ticket or indexes, early reschedule, consumed no-op, consumption race,
   abort failure, eight-ticket tick cap, and native and Worker timer registration.
 - **Size:** M (~700).

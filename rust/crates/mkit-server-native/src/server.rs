@@ -600,7 +600,11 @@ where
             bind_database(&conn, &root_id, path)?;
             bind_sharding(&conn, cfg.pipeline.sharding, path)?;
             let meta = Blocking::new(TimerNotifying::new(meta));
-            let registry = sqlite_timer_registry(blobs.clone(), meta.clone());
+            let audience = match &cfg.pipeline.auth {
+                mkit_server::pipeline::AuthMode::AuthV2(config) => config.audience().to_owned(),
+                _ => String::new(),
+            };
+            let registry = sqlite_timer_registry(blobs.clone(), meta.clone(), audience);
             let driver = TimerDriver::new(meta.clone(), registry, Arc::new(SystemClock));
             let mut services = build_services(blobs, meta, cfg)?;
             services.timers = Some(driver);
@@ -611,9 +615,14 @@ where
 }
 
 /// The exact timer registry installed by the native `SQLite` server.
+///
+/// Kinds 8 and 9 run for every partition of the one store. Delivery uses the
+/// in-tree `NoOutcomes` sink, which acknowledges locally; `audience` is the
+/// canonical origin stamped on delivered outcomes (empty without auth v2).
 pub fn sqlite_timer_registry<B: MultipartBlobStore + Clone + 'static>(
     blobs: B,
     meta: TimerStore,
+    audience: String,
 ) -> mkit_server::timers::TimerRegistry<'static, TimerStore> {
     let registry = mkit_server::timers::TimerRegistry::new()
         .register(mkit_server::timers::ticket_expiry::TicketExpiry { blobs })
@@ -626,6 +635,12 @@ pub fn sqlite_timer_registry<B: MultipartBlobStore + Clone + 'static>(
             hook: mkit_server::relay::NoHook,
             budget: mkit_server::relay::RelayBudget::default(),
         })
+        .register(mkit_server::timers::outcome_delivery::OutcomeDelivery {
+            sink: mkit_server::pipeline::NoOutcomes,
+            audience,
+            metrics: Arc::new(MetricsBridge),
+        })
+        .register(mkit_server::timers::reservation_reconcile::ReservationReconcile)
         .register(mkit_server::timers::quota_rollup::QuotaRollup {
             coordinator: meta,
             metrics: MetricsBridge,

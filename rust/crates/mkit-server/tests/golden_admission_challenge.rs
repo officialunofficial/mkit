@@ -209,3 +209,12 @@ fn absent_description_is_the_empty_client_value() {
         "an unset description is omitted from protobuf JSON"
     );
 }
+
+#[test]
+fn maximum_challenge_value_roundtrips_through_buffa() {
+    let value = "v".repeat(8_192);
+    let encoded = mkit_core::admission::encode_admission_challenge(&[("mpp", &value)], "pay");
+    let message = AdmissionChallenge::decode_from_slice(&encoded).unwrap();
+    assert_eq!(message.challenges[0].value.as_deref(), Some(value.as_str()));
+    assert_eq!(message.encode_to_vec(), encoded);
+}

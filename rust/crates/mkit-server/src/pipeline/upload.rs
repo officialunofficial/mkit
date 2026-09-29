@@ -215,8 +215,9 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
         }
         if mode == UploadMode::Fresh {
             pipe.check_outbox_backpressure(&p, ahead.as_ref()).await?;
+            let credentials = super::admission::validate_credentials(&a.credential_capture)?;
             let mut input = AdmissionInput::new(&op);
-            input.credential_headers = &a.credential_headers;
+            input.credential_headers = &credentials;
             input.declared_bytes = declared;
             input.pack_id = Some(key);
             let allowance = pipe.admit_streaming(input).await?;

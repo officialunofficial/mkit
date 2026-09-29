@@ -111,12 +111,21 @@ impl Outcome {
 
 /// A failed sink call always means retry. Its reason is never printed.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct DeliveryError {
     /// Operator-only diagnostic text.
     pub reason: Redacted,
     /// Optional sink retry hint.
     pub retry_after: Option<Duration>,
 }
+
+impl core::fmt::Display for DeliveryError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("outcome delivery failed")
+    }
+}
+
+impl std::error::Error for DeliveryError {}
 
 impl DeliveryError {
     /// Construct a retryable delivery error.

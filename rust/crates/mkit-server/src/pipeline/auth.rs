@@ -7,7 +7,6 @@ use core::fmt;
 use mkit_core::hash::hash;
 use subtle::ConstantTimeEq;
 
-use super::hooks::CredentialHeader;
 use crate::auth_v2::{self, AuthV2Config};
 use crate::error::{Redacted, ServerError};
 use crate::op::{Procedure, VerifiedAuth};
@@ -78,8 +77,9 @@ pub struct Authenticated {
     pub auth: Option<VerifiedAuth>,
     /// A presented write grant, redacted from debug output.
     pub write_grant: Option<Redacted>,
-    /// Selected payment credential headers, never shown in diagnostics.
-    pub credential_headers: Vec<CredentialHeader>,
+    /// Raw credential header values captured at authentication and validated
+    /// only when admission runs (SPEC-SERVER §6.6); never shown in diagnostics.
+    pub(super) credential_capture: Vec<super::admission::CapturedCredential>,
     /// Optional repository-local read-your-writes hint (outside auth v2).
     pub ref_hint: Option<String>,
     procedure: Procedure,
@@ -188,7 +188,7 @@ pub(crate) fn authenticate(
         principal,
         auth,
         write_grant,
-        credential_headers: Vec::new(),
+        credential_capture: Vec::new(),
         procedure,
         repo,
         ref_hint: None,

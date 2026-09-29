@@ -148,6 +148,9 @@ impl<O: OutcomeSink> OutcomeDelivery<O> {
         let mut batch = Batch::new();
         let mut delivered = 0u64;
         let mut sink_retry_ms = 0u64;
+        // Acknowledged rows are planned after the sink loop, against a fresh
+        // `oc`, so slow sink awaits sit outside the read-modify-write window.
+        let mut acked: Vec<(String, Value, u64)> = Vec::new();
         for (key, _) in page.entries.iter().take(MAX_DELIVERY_ROWS) {
             let Some(keys::ParsedKey::OutcomePending {
                 seq,
@@ -176,7 +179,7 @@ impl<O: OutcomeSink> OutcomeDelivery<O> {
                 match Outcome::from_reservation(rid.clone(), self.audience.clone(), record) {
                     Ok(outcome) => outcome,
                     Err(reason) => {
-                        tracing::warn!(reason, "non-terminal indexed outcome; retaining");
+                        tracing::warn!(reason, "indexed outcome cannot be delivered; retaining");
                         continue;
                     }
                 };
@@ -197,15 +200,27 @@ impl<O: OutcomeSink> OutcomeDelivery<O> {
                 }
             };
             if acknowledged {
-                plan_ack(
-                    &rid,
-                    &value,
-                    seq,
-                    oc.as_ref(),
-                    &mut batch.preconditions,
-                    &mut batch.writes,
-                )?;
-                delivered += 1;
+                acked.push((rid, value, seq));
+            }
+        }
+        let fresh_oc = if acked.is_empty() {
+            None
+        } else {
+            ctx.store.get(ctx.partition, &oc_key).await?
+        };
+        for (rid, value, seq) in &acked {
+            match plan_ack(
+                rid,
+                value,
+                *seq,
+                fresh_oc.as_ref(),
+                &mut batch.preconditions,
+                &mut batch.writes,
+            ) {
+                Ok(()) => delivered += 1,
+                Err(err) => {
+                    tracing::warn!(error = %err, "outcome acknowledgment not planned; retaining");
+                }
             }
         }
         if delivered == backlog.rows {

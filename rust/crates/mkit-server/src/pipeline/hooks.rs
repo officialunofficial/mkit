@@ -1,9 +1,10 @@
 //! The PRD §5.4 extension points as traits, with the defaults M0 ships.
 //!
-//! The stage surface is settled now. M0 runs stages 0 to 6; the receipt
-//! (7) and outcome (8) hooks exist but the pipeline does not call them
-//! until M3/M5. `HookSet` grows by associated type when a later work
-//! package adds a stage (`ContentInspector`, `LeasePolicy`).
+//! The stage surface is settled. The pipeline runs stages 0 to 6, passes
+//! admission receipt headers on committed successes and records outcomes (8)
+//! durably; kind-8 delivery hands them to the sink. The receipt signer (7)
+//! is not called until M5. `HookSet` grows by associated type
+//! when a later work package adds a stage (`ContentInspector`, `LeasePolicy`).
 
 use core::future::Future;
 use std::sync::Arc;
@@ -81,11 +82,23 @@ impl core::fmt::Debug for AdmissionInput<'_> {
 
 /// One selected credential header, with a value hidden from diagnostics.
 #[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CredentialHeader {
     /// Header name.
     pub name: String,
     /// Secret header value.
     pub value: Redacted,
+}
+
+impl CredentialHeader {
+    /// A credential header named `name` with a redacted `value`.
+    #[must_use]
+    pub fn new(name: impl Into<String>, value: Redacted) -> Self {
+        Self {
+            name: name.into(),
+            value,
+        }
+    }
 }
 
 impl core::fmt::Debug for CredentialHeader {
@@ -114,6 +127,15 @@ impl<'a> AdmissionInput<'a> {
         }
     }
 }
+
+/// Response header names admission may pass through to a client, in the
+/// spelling a CORS `Access-Control-Expose-Headers` list should use.
+pub const ADMISSION_EXPOSE_HEADERS: [&str; 4] = [
+    "WWW-Authenticate",
+    "PAYMENT-REQUIRED",
+    "Payment-Receipt",
+    "PAYMENT-RESPONSE",
+];
 
 /// One admission challenge (SPEC-TRANSPORT-CONNECT §5.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,6 +254,12 @@ pub trait Admission: MaybeSend + MaybeSync {
     }
 
     /// Decide whether a new write may proceed.
+    ///
+    /// An `Allow` with a reservation is a grant that the pipeline records as
+    /// a durable `Pending` row before doing any work. If that record fails
+    /// after this call returned, the client gets `unavailable` and nothing
+    /// is written; the hook must expire or release its own hold, because the
+    /// pipeline never learned the reservation.
     fn admit(
         &self,
         input: &AdmissionInput<'_>,
@@ -256,7 +284,8 @@ pub trait ReceiptSigner: MaybeSend + MaybeSync {
 
 use super::durable_outcome::{DeliveryError, Outcome};
 
-/// Stage 8 receives outcomes at least once. A duplicate may arrive even
+/// Stage 8 receives outcomes at least once (the in-tree default is
+/// [`NoOutcomes`], which acknowledges locally). A duplicate may arrive even
 /// after `Ok`; different reservations can arrive in any order. The sink must
 /// deduplicate by `reservation_id`.
 pub trait OutcomeSink: MaybeSend + MaybeSync {
@@ -284,6 +313,10 @@ pub trait OutcomeSink: MaybeSend + MaybeSync {
 impl<T: OutcomeSink> OutcomeSink for Arc<T> {
     async fn deliver(&self, outcome: &Outcome) -> Result<(), DeliveryError> {
         T::deliver(self, outcome).await
+    }
+
+    async fn deliver_batch(&self, outcomes: &[Outcome]) -> Vec<Result<(), DeliveryError>> {
+        T::deliver_batch(self, outcomes).await
     }
 }
 

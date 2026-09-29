@@ -3,7 +3,7 @@
 use mkit_core::write_auth::MAX_CLOCK_LEAD_MS;
 
 use super::{Authenticated, Pipeline, meta_error, ms};
-use crate::error::{Code, ServerError};
+use crate::error::{AbortCause, Code, ServerError};
 use crate::pipeline::HookSet;
 use crate::store::codec::{self, AbortReason, PendingOp, ReservationV1};
 use crate::store::outbox::{OutboxBuilder, Terminal};
@@ -45,14 +45,15 @@ pub(crate) fn read_pending(
 
 pub(crate) fn abort_reason(err: &ServerError) -> (AbortReason, String) {
     let message = err.public_message();
-    if err.code() == Code::PermissionDenied && message == "write grant epoch changed; re-authorize"
-    {
-        (AbortReason::EpochMismatch, String::new())
-    } else if err.code() == Code::Aborted && message == "write contention; retry" {
-        (AbortReason::RefConflict, String::new())
-    } else if err.code() == Code::Aborted && message == "namespace quota window advanced; retry" {
-        (AbortReason::Unspecified, message.to_owned())
-    } else if err.code() == Code::Aborted {
+    match err.abort_cause() {
+        Some(AbortCause::EpochMismatch) => return (AbortReason::EpochMismatch, String::new()),
+        Some(AbortCause::ReplayRace) => return (AbortReason::ReplayRace, String::new()),
+        Some(AbortCause::QuotaWindow) => return (AbortReason::Unspecified, message.to_owned()),
+        // Re-plan exhaustion is guard contention, not a decided ref conflict.
+        Some(AbortCause::Contention) => return (AbortReason::Internal, String::new()),
+        None => {}
+    }
+    if err.code() == Code::Aborted {
         (AbortReason::ReplayRace, String::new())
     } else if matches!(
         err.code(),
@@ -69,6 +70,9 @@ pub(crate) fn abort_reason(err: &ServerError) -> (AbortReason, String) {
     }
 }
 
+/// Re-reads of the outbox counters and re-attempts of an abort that lost a guard race.
+const ABORT_ATTEMPTS: usize = 5;
+
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Ticketless ssh/enc uploads cannot settle a reserved success.
     pub(super) async fn abort_unsupported_stream(
@@ -77,43 +81,53 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         partition: &Partition,
         rid: &str,
     ) -> Result<(), ServerError> {
-        let keys = [keys::outbox_sequence(), keys::outcome_backlog()];
-        let values = self
-            .meta
-            .get_many(partition, &keys)
-            .await
-            .map_err(meta_error)?;
-        let mut builder = OutboxBuilder::new(
-            values.first().and_then(Option::as_ref),
-            values.get(1).and_then(Option::as_ref),
-        )
-        .map_err(meta_error)?;
-        let terminal = Terminal::new(ReservationV1::Aborted {
-            repository: a.repo().identity.clone(),
-            occurred_at_ms: ms(self.clock.now_ms()),
-            reason: AbortReason::Unspecified,
-            detail: "reservations unsupported on this transport".into(),
-        })
-        .map_err(meta_error)?;
-        builder.abort_direct(rid, terminal);
-        let mut batch = Batch::new();
-        builder
-            .try_finish(&mut batch.preconditions, &mut batch.writes)
-            .map_err(meta_error)?;
-        match self
-            .meta
-            .apply(partition, batch)
-            .await
-            .map_err(meta_error)?
-        {
-            BatchOutcome::Committed => Ok(()),
-            BatchOutcome::PreconditionFailed { .. } => {
-                Err(ServerError::unavailable("admission unavailable"))
+        let row = keys::reservation(rid).map_err(meta_error)?;
+        for _ in 0..ABORT_ATTEMPTS {
+            let read = [
+                keys::outbox_sequence(),
+                keys::outcome_backlog(),
+                row.clone(),
+            ];
+            let values = self
+                .meta
+                .get_many(partition, &read)
+                .await
+                .map_err(meta_error)?;
+            if values.get(2).is_some_and(Option::is_some) {
+                // Another writer already settled this reservation.
+                return Ok(());
             }
-            BatchOutcome::DeadlinePassed { .. } => {
-                Err(ServerError::unavailable("outcome commit deadline passed"))
+            let mut builder = OutboxBuilder::new(
+                values.first().and_then(Option::as_ref),
+                values.get(1).and_then(Option::as_ref),
+            )
+            .map_err(meta_error)?;
+            let terminal = Terminal::new(ReservationV1::Aborted {
+                repository: a.repo().identity.clone(),
+                occurred_at_ms: ms(self.clock.now_ms()),
+                reason: AbortReason::Unspecified,
+                detail: "reservations unsupported on this transport".into(),
+            })
+            .map_err(meta_error)?;
+            builder.abort_direct(rid, terminal);
+            let mut batch = Batch::new();
+            builder
+                .try_finish(&mut batch.preconditions, &mut batch.writes)
+                .map_err(meta_error)?;
+            match self
+                .meta
+                .apply(partition, batch)
+                .await
+                .map_err(meta_error)?
+            {
+                BatchOutcome::Committed => return Ok(()),
+                BatchOutcome::PreconditionFailed { .. } => {}
+                BatchOutcome::DeadlinePassed { .. } => {
+                    return Err(ServerError::unavailable("outcome commit deadline passed"));
+                }
             }
         }
+        Err(ServerError::unavailable("admission unavailable"))
     }
 
     pub(super) async fn record_pending(
@@ -191,43 +205,60 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         reason: AbortReason,
         detail: String,
     ) -> Result<(), ServerError> {
-        let keys = [keys::outbox_sequence(), keys::outcome_backlog()];
-        let values = self
-            .meta
-            .get_many(partition, &keys)
-            .await
+        for _ in 0..ABORT_ATTEMPTS {
+            let read = [
+                keys::outbox_sequence(),
+                keys::outcome_backlog(),
+                pending.key.clone(),
+            ];
+            let values = self
+                .meta
+                .get_many(partition, &read)
+                .await
+                .map_err(meta_error)?;
+            if values.get(2).and_then(Option::as_ref) != Some(&pending.value) {
+                // The row is no longer this Pending: another contender settled it.
+                return Ok(());
+            }
+            let mut builder = OutboxBuilder::new(
+                values.first().and_then(Option::as_ref),
+                values.get(1).and_then(Option::as_ref),
+            )
             .map_err(meta_error)?;
-        let mut builder = OutboxBuilder::new(
-            values.first().and_then(Option::as_ref),
-            values.get(1).and_then(Option::as_ref),
-        )
-        .map_err(meta_error)?;
-        let record = ReservationV1::Aborted {
-            repository: pending.repository.clone(),
-            occurred_at_ms: ms(self.clock.now_ms()),
-            reason,
-            detail,
-        };
-        builder.outcome(
-            &pending.rid,
-            &pending.value,
-            Terminal::new(record).map_err(meta_error)?,
-        );
-        let mut batch = Batch::new();
-        builder
-            .try_finish(&mut batch.preconditions, &mut batch.writes)
-            .map_err(meta_error)?;
-        match self
-            .meta
-            .apply(partition, batch)
-            .await
-            .map_err(meta_error)?
-        {
-            BatchOutcome::Committed | BatchOutcome::PreconditionFailed { .. } => Ok(()),
-            BatchOutcome::DeadlinePassed { .. } => Err(ServerError::unavailable(
-                "reservation abort deadline passed",
-            )),
+            let record = ReservationV1::Aborted {
+                repository: pending.repository.clone(),
+                occurred_at_ms: ms(self.clock.now_ms()),
+                reason,
+                detail: detail.clone(),
+            };
+            builder.outcome(
+                &pending.rid,
+                &pending.value,
+                Terminal::new(record).map_err(meta_error)?,
+            );
+            let mut batch = Batch::new();
+            builder
+                .try_finish(&mut batch.preconditions, &mut batch.writes)
+                .map_err(meta_error)?;
+            match self
+                .meta
+                .apply(partition, batch)
+                .await
+                .map_err(meta_error)?
+            {
+                BatchOutcome::Committed => return Ok(()),
+                // A shard counter moved (or the row changed): re-read and decide.
+                BatchOutcome::PreconditionFailed { .. } => {}
+                BatchOutcome::DeadlinePassed { .. } => {
+                    return Err(ServerError::unavailable(
+                        "reservation abort deadline passed",
+                    ));
+                }
+            }
         }
+        Err(ServerError::unavailable(
+            "reservation abort contended; reconcile will retry",
+        ))
     }
 }
 

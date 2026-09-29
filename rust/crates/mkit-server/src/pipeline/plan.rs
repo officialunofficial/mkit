@@ -13,7 +13,7 @@ use mkit_core::hash::Hash;
 use mkit_core::protocol::AdvanceOutcome;
 use mkit_core::refs::RefWriteCondition;
 
-use crate::error::ServerError;
+use crate::error::{AbortCause, ServerError};
 use crate::op::{GrantRef, PresenceRequirement, RefUpdate};
 use crate::quota::{self, NamespaceCharge, QuotaCharge, QuotaDecision, evaluate_quota};
 use crate::refs::{CasDecision, evaluate_condition};
@@ -505,7 +505,8 @@ pub(crate) fn plan_write(
                 if req.pending.is_some() {
                     return Err(ServerError::aborted_retryable(
                         "operation already in flight; retry",
-                    ));
+                    )
+                    .with_abort_cause(AbortCause::ReplayRace));
                 }
                 return Ok(Planned::Done(done));
             }
@@ -673,6 +674,7 @@ fn corrupt(detail: impl core::fmt::Display) -> ServerError {
 /// The grant's epoch no longer holds (M2; unreachable in M0).
 pub(crate) fn epoch_moved() -> ServerError {
     ServerError::permission_denied("write grant epoch changed; re-authorize")
+        .with_abort_cause(AbortCause::EpochMismatch)
 }
 
 /// Evaluate one charge and add its guard and writes, keeping the window

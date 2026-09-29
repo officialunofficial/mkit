@@ -252,8 +252,6 @@ operations may overshoot it by their in-flight terminal rows and encoded bytes.
 `new_to_store` bytes appear only in `Committed`, as STC §5.1 requires
 for admission input. They MUST NOT be added to another hook input as
 an admission pricing signal.
-In opaque mode, `Committed.new_to_store` is an upper bound: the declared
-pack bytes.
 
 Informative: a deployment settles payment on `Committed` and releases
 the reservation on `Aborted` or `Expired`. Settlement failures after
@@ -607,8 +605,11 @@ The shared `Outcome` fields are:
 |---|---|
 | `bytes_stored` | The unsigned count of bytes stored by the operation. |
 | `new_to_repo` | The unsigned count of bytes new to the repository. |
-| `new_to_store` | The unsigned count of bytes new to the entire store. |
+| `new_to_store` | The unsigned count of bytes new to the entire store; in opaque mode, an upper bound: the declared pack bytes. |
 | `refs` | The refs committed by the operation, in decision order. |
+
+In opaque mode, `Committed.new_to_store` is an upper bound: the declared
+pack bytes.
 
 Each `CommittedRef.name` is the ref name. `CommittedRef.new` is
 the 32-byte committed target, or empty when `deleted` is true.

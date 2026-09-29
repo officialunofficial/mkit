@@ -513,7 +513,7 @@ fn indexed_concurrent_lease_has_no_replay_row_and_retry_commits() {
 
 #[test]
 fn indexed_seven_ticket_advance_adds_no_batch_rows() {
-    for (sharding, expected) in [(Sharding::D34, 88), (Sharding::Single, 77)] {
+    for (sharding, expected) in [(Sharding::D34, 89), (Sharding::Single, 78)] {
         let d34 = sharding == Sharding::D34;
         let batch = planned_ticket_advance_mode(7, d34);
         assert_eq!(batch.preconditions.len() + batch.writes.len(), expected);

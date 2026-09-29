@@ -522,7 +522,7 @@ fn membership_is_local_under_single_and_relays_identical_deduplicated_upserts_un
 }
 
 #[test]
-fn seven_distinct_signers_and_relay_targets_fit_with_twenty_two_shared_operations() {
+fn seven_distinct_signers_and_relay_targets_fit_with_twenty_six_shared_operations() {
     let mut spec = spec();
     spec.repo = RepoName::new("r".repeat(255)).unwrap();
     spec.ref_name = format!("refs/heads/{}", "x".repeat(512 - "refs/heads/".len()));

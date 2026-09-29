@@ -191,6 +191,22 @@ pub struct ServerError {
     http_status: Option<u16>,
     headers: Vec<(String, String)>,
     details: Vec<ErrorDetail>,
+    abort: Option<AbortCause>,
+}
+
+/// Why a reserved write ended without committing, as decided where the error
+/// is produced. Reservation abort reasons come from this marker, never from
+/// message text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AbortCause {
+    /// The grant epoch moved.
+    EpochMismatch,
+    /// Another request with this nonce won the replay guard.
+    ReplayRace,
+    /// The namespace quota window advanced.
+    QuotaWindow,
+    /// Re-planning was exhausted by guard contention (`os`/`oc`, refs, quota).
+    Contention,
 }
 
 impl fmt::Debug for ServerError {
@@ -217,6 +233,7 @@ impl fmt::Debug for ServerError {
             .field("http_status", &self.http_status)
             .field("headers", &Headers(&self.headers))
             .field("details", &self.details)
+            .field("abort", &self.abort)
             .finish()
     }
 }
@@ -232,7 +249,21 @@ impl ServerError {
             http_status: None,
             headers: Vec::new(),
             details: Vec::new(),
+            abort: None,
         }
+    }
+
+    /// Tag the error with the reservation abort cause.
+    #[must_use]
+    pub(crate) fn with_abort_cause(mut self, cause: AbortCause) -> Self {
+        self.abort = Some(cause);
+        self
+    }
+
+    /// The reservation abort cause, if the producer set one.
+    #[must_use]
+    pub(crate) fn abort_cause(&self) -> Option<AbortCause> {
+        self.abort
     }
 
     /// [`Code::InvalidArgument`].
@@ -438,6 +469,11 @@ impl ServerError {
             self.http_status = Some(403);
             self.headers.clear();
         }
+        self.headers.retain(|(name, _)| {
+            !crate::pipeline::ADMISSION_EXPOSE_HEADERS
+                .iter()
+                .any(|blocked| blocked.eq_ignore_ascii_case(name))
+        });
         self
     }
 }
@@ -700,5 +736,20 @@ mod tests {
     #[should_panic(expected = "reserved")]
     fn with_header_reserved_name_fails_debug_assertion() {
         let _ = ServerError::unavailable("down").with_header("Authorization", "Bearer x");
+    }
+
+    #[test]
+    fn stripping_drops_payment_headers_on_any_error() {
+        let stripped = ServerError::permission_denied("no")
+            .with_header("WWW-Authenticate", "Payment x")
+            .with_header("payment-required", "x")
+            .with_header("Payment-Receipt", "r")
+            .with_header("PAYMENT-RESPONSE", "r")
+            .with_header("Retry-After", "30")
+            .strip_admission_shape();
+        assert_eq!(
+            stripped.headers(),
+            [("Retry-After".to_owned(), "30".to_owned())]
+        );
     }
 }

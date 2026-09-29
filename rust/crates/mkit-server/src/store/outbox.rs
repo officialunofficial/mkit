@@ -17,10 +17,10 @@ use super::{
 /// put and one relay-row share. An advance uses one signer and runs no
 /// admission (the quota planner asserts this in `pipeline::plan_namespace`),
 /// so `tu` and `tc` are each guarded/written once. Shared
-/// overhead is at most 25: deadline 1, lease guard/install 2, absent layout
+/// overhead is at most 26: deadline 1, lease guard/install 2, absent layout
 /// version guard/install 2, absent repo-known guard/install 2, two ref CAS
 /// pairs 4, replay 3, counters 4, outbox sequence/backlog 4, and relay kick
-/// 1, and ref-index relay rows 2, plus one outcome-delivery kick. These figures are D34's. On Single, a grant guard replaces the lease
+/// 1, ref-index relay rows 2, and one outcome-delivery kick 1. These figures are D34's. On Single, a grant guard replaces the lease
 /// pair and there is no relay share or relay kick, so seven tickets cost
 /// `8 * 7 + 22 = 78`. The real maximal planner batches are tested
 /// separately. On D34, seven tickets cost `9 * 7 + 26 = 89` ops before
