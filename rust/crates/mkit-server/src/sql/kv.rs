@@ -143,12 +143,17 @@ impl<C: SqlConn> SqlKvStore<C> {
     {
         batch.validate(&self.capabilities())?;
         let part = part(p)?;
+        let adds = batch.has_put();
         let soft_limit = self.capacity.map(|c| c.soft_limit());
-        self.conn
-            .transaction(Box::new(move |conn| {
-                check_and_write_extended(&conn, &part, batch, soft_limit, extend)
-            }))
-            .map_err(Into::into)
+        match self.conn.transaction(Box::new(move |conn| {
+            check_and_write_extended(&conn, &part, batch, soft_limit, extend)
+        })) {
+            Ok(outcome) => Ok(outcome),
+            Err(SqlError::Full) if !adds => Err(StoreError::unavailable(
+                "database full during a delete-only batch",
+            )),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Earliest timer due in each partition, using the timer partial index.
