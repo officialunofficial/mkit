@@ -329,8 +329,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 description,
                 response_headers,
             } => {
+                // ssh and enc sessions cannot answer a challenge.
+                let transport = matches!(self.cfg.auth, AuthMode::TransportIdentity);
                 if !unary {
-                    return Err(ServerError::permission_denied("admission required"));
+                    let refusal = ServerError::permission_denied("admission required");
+                    return Err(if transport {
+                        refusal.with_transport_admission_required()
+                    } else {
+                        refusal
+                    });
                 }
                 let pairs: Vec<_> = challenges
                     .iter()
@@ -343,7 +350,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         .try_with_header(name, value)
                         .map_err(|_| invalid("invalid response header"))?;
                 }
-                Err(error)
+                Err(if transport {
+                    error.with_transport_admission_required()
+                } else {
+                    error
+                })
             }
             AdmissionDecision::Deny(err) => Err(deny(&err)),
         }

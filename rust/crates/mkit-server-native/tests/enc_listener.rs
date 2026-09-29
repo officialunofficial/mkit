@@ -1293,3 +1293,129 @@ fn enc_and_http_listeners_share_one_pipeline() {
     let status = binary.stop();
     assert!(status.success(), "{status:?}");
 }
+
+// ---------------------------------------------------------------------------
+// WP-3.4: a write that needs a payment over enc answers "use mkit+https".
+
+/// An admission that always asks for a payment.
+#[derive(Clone)]
+struct Challenging;
+
+impl mkit_server::pipeline::Admission for Challenging {
+    async fn admit(
+        &self,
+        _input: &mkit_server::pipeline::AdmissionInput<'_>,
+    ) -> Result<mkit_server::pipeline::AdmissionDecision, mkit_server::ServerError> {
+        Ok(mkit_server::pipeline::AdmissionDecision::challenge(
+            vec![mkit_server::pipeline::Challenge {
+                scheme: "payment".to_owned(),
+                value: "id=\"c1\"".to_owned(),
+            }],
+            "pay to write",
+        ))
+    }
+}
+
+#[test]
+fn enc_write_needing_payment_is_told_to_use_https() {
+    use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig};
+    let (_td, root) = enc_repo();
+    let cfg = common::resolve_with(
+        &[
+            "--listen-enc",
+            "127.0.0.1:0",
+            "--repo-root",
+            common::s(&root),
+            "--unsafe-allow-any-enc-peer",
+        ],
+        &[],
+    )
+    .unwrap();
+    let opts = cfg.enc.clone().unwrap();
+    let repo = mkit_server::RepoId {
+        namespace: mkit_server::NamespaceKey::deployment_default(),
+        name: mkit_server::RepoName::new("default").unwrap(),
+    };
+    let mut pcfg = PipelineConfig::new(
+        mkit_server::Addressing::Single { repo },
+        AuthMode::AuthV2(
+            mkit_server::auth_v2::AuthV2Config::new("http://localhost", "default").unwrap(),
+        ),
+        mkit_server::upload::UploadLimits {
+            max_total_bytes: 1 << 20,
+            max_chunks: 64,
+        },
+    );
+    pcfg.ticket_keys =
+        Some(mkit_server::upload::token::TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap());
+    let hooks = Hooks {
+        authorizer: mkit_server::pipeline::OpenAuthorizer,
+        admission: Challenging,
+        pre_receive: mkit_server::pipeline::NoPreReceive,
+        receipts: mkit_server::pipeline::NoReceipts,
+        outcomes: mkit_server::pipeline::NoOutcomes,
+    };
+    let aux = tempfile::tempdir().unwrap();
+    let meta = mkit_server_native::Blocking::new(
+        mkit_server::sql::SqlKvStore::open(
+            mkit_server_native::RusqliteConn::open(&aux.path().join("meta.sqlite3")).unwrap(),
+        )
+        .unwrap(),
+    );
+    let pipeline = Pipeline::new(
+        mkit_server::MemoryBlobStore::default(),
+        meta,
+        hooks,
+        pcfg,
+        std::sync::Arc::new(mkit_server::SystemClock),
+        std::sync::Arc::new(mkit_server::NoopMetrics),
+    )
+    .unwrap()
+    .with_auth(AuthMode::TransportIdentity)
+    .unwrap();
+    let key = enc::load_server_key(&enc::ServerKeySource::Ephemeral).unwrap();
+    let pubkey = raw_pubkey(&key);
+    let session = enc::session_fn(std::sync::Arc::new(pipeline), None, opts.idle_timeout);
+    let service = enc::EncService { key, session };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let shutdown = Shutdown::new();
+    let stop = shutdown.clone();
+    let served = runtime.spawn(async move { enc::serve(listener, service, &opts, stop).await });
+
+    let client = connect_tcp_with_executor(
+        &addr.ip().to_string(),
+        addr.port(),
+        &pubkey,
+        PrivateKey::from_seed(5),
+        TokioExecutor::new().unwrap(),
+    )
+    .unwrap();
+    let (bytes, pack) = valid_pack();
+    for err in [
+        client
+            .update_ref("refs/heads/main", RefWriteCondition::Missing, &[7; 32])
+            .unwrap_err(),
+        client
+            .update_ref("refs/heads/main", RefWriteCondition::Any, &[7; 32])
+            .unwrap_err(),
+        client.upload_pack(&bytes, &pack).unwrap_err(),
+    ] {
+        assert!(
+            matches!(&err, TransportError::RemoteError(m) if m.contains("payment required: use mkit+https")),
+            "{err:?}"
+        );
+        assert!(!mkit_core::protocol::is_retryable(&err));
+    }
+    // Reads are not writes: the session is still good.
+    assert_eq!(client.read_ref("refs/heads/main").unwrap(), None);
+    shutdown.trigger();
+    let _ = runtime.block_on(async { tokio::time::timeout(Duration::from_secs(30), served).await });
+}
