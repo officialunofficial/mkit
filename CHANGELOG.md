@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new `ConnectTransport::{get_grant_epoch, set_grant_epoch, set_repo_visibility}`
   returning `Completion`, and a per-request signed-or-unsigned classification of
   `SetRepoVisibility` (WP-2.14).
+- Core and wasm: verify MKDS v1 multi-chunk disclosure spans against a trusted
+  commit and build boundary-aware MKDP/MKDS range proofs (WP-4.14a).
 - Server (WP-4.6): batch repository object-index range reads on Workers,
   add bounded relay enqueue and delivery checks, increase paid relay
   throughput, and report index pressure, lag, backlog, and lookup caps.

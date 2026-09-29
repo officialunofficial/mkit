@@ -7,9 +7,11 @@ use std::{
     fmt::Write as _,
     fs,
     path::PathBuf,
+    sync::OnceLock,
 };
 
 use commonware_codec::Write as _;
+use mkit_core::verify::span::{RangeProof, build_range_proof_from, verify_disclosure_span};
 use mkit_core::{
     hash::{Hash, hash, to_hex},
     object::{Object, Tree, TreeEntry},
@@ -17,6 +19,7 @@ use mkit_core::{
     sign::{KeyPair, sign_commit},
     verify::{Disclosed, DisclosedPayload, Selector, build_disclosure_from, verify_disclosure},
 };
+use proptest::prelude::*;
 use serde_json::{Value, json};
 
 mod common;
@@ -39,6 +42,36 @@ fn encoded_span(commit: Hash, offset: u64, len: u64, anchor: &[u8], chunks: &[Ve
     anchor.write(&mut out);
     chunks.write(&mut out);
     out
+}
+
+/// Read one LEB128 varint, returning its value and encoded length.
+fn read_varint(bytes: &[u8]) -> (u64, usize) {
+    let mut value = 0u64;
+    for (i, byte) in bytes.iter().enumerate() {
+        value |= u64::from(byte & 0x7f) << (7 * i);
+        if byte & 0x80 == 0 {
+            return (value, i + 1);
+        }
+    }
+    panic!("unterminated varint")
+}
+
+/// Encode a LEB128 varint; `pad` appends a redundant zero continuation group.
+fn encode_varint(mut value: u64, pad: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let byte = u8::try_from(value & 0x7f).unwrap();
+        value >>= 7;
+        if value == 0 && !pad {
+            out.push(byte);
+            return out;
+        }
+        out.push(byte | 0x80);
+        if value == 0 {
+            out.push(0);
+            return out;
+        }
+    }
 }
 
 fn body(disclosed: &Disclosed) -> &[u8] {
@@ -627,6 +660,60 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
         Some("span_encoding"),
         None,
     ));
+    // Structural failures must be diagnosed before any embedded MKDP
+    // verification. Each bad varint replaces the anchor's length prefix in an
+    // otherwise complete valid container, so a lenient reader would accept
+    // (or fail for a different reason) rather than stop with `span_encoding`.
+    let (anchor_len, anchor_len_bytes) = read_varint(&valid[53..]);
+    let rest = &valid[53 + anchor_len_bytes..];
+    let mut nonminimal = valid[..53].to_vec();
+    nonminimal.extend_from_slice(&encode_varint(anchor_len, true)); // padded with a zero group
+    nonminimal.extend_from_slice(rest);
+    vectors.push((
+        "neg_nonminimal_varint",
+        fixture.commit_id,
+        nonminimal,
+        Some("span_encoding"),
+        None,
+    ));
+    // The real length plus 2^32: a reader that truncates to u32 would accept.
+    let mut over_u32 = valid[..53].to_vec();
+    over_u32.extend_from_slice(&encode_varint(anchor_len + (1 << 32), false));
+    over_u32.extend_from_slice(rest);
+    vectors.push((
+        "neg_varint_over_u32",
+        fixture.commit_id,
+        over_u32,
+        Some("span_encoding"),
+        None,
+    ));
+    vectors.push((
+        "neg_mkdp_as_mkds",
+        fixture.commit_id,
+        files["in_chunk_range.bin"].clone(),
+        Some("span_magic"),
+        None,
+    ));
+    vectors.push((
+        "neg_mkds_anchor",
+        fixture.commit_id,
+        encoded_span(fixture.commit_id, offset, 20, &valid, &chunk_bundles),
+        Some("span_anchor_invalid"),
+        None,
+    ));
+    // Count 1,000,001 followed by exactly that many zero-length vectors
+    // (the sidecar's `expand_to` zero-fills), so `count > remaining` cannot
+    // fire and only the 1,000,000 cap rejects the container.
+    let mut excessive_count = valid[..53].to_vec();
+    excessive_count.extend_from_slice(&[0, 0xc1, 0x84, 0x3d]); // anchor length 0; count 1,000,001
+    let excessive_expanded = excessive_count.len() + 1_000_001;
+    vectors.push((
+        "neg_chunk_count_too_large",
+        fixture.commit_id,
+        excessive_count,
+        Some("span_encoding"),
+        Some(excessive_expanded),
+    ));
     vectors.push((
         "neg_oversize",
         fixture.commit_id,
@@ -705,6 +792,7 @@ fn write_http_object_goldens_if_requested() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Golden checks enumerate every sidecar and proof format.
 fn committed_http_object_goldens_verify() {
     if std::env::var("MKIT_WRITE_GOLDEN").as_deref() == Ok("1") {
         return;
@@ -738,17 +826,48 @@ fn committed_http_object_goldens_verify() {
         let want = &sidecar["expect"];
         if name.starts_with("object_") || ["chunk", "blob_range", "in_chunk_range"].contains(&name)
         {
+            let reference_reason = span::verify(&trusted, &bytes).unwrap_err();
+            assert_eq!(reference_reason, "span_magic", "{name}");
+            assert_eq!(
+                verify_disclosure_span(&trusted, &bytes)
+                    .unwrap_err()
+                    .reason(),
+                reference_reason,
+                "{name}"
+            );
             let disclosed = verify_disclosure(&trusted, &bytes).unwrap();
             assert_eq!(summary(&disclosed), want["disclosed"], "{name}");
         } else {
             let mut bytes = bytes;
             if let Some(n) = want["expand_to"].as_u64() {
-                assert_eq!(n, (CAP + 1) as u64);
+                assert!(n >= bytes.len() as u64 && n <= (CAP + 1) as u64);
                 bytes.resize(usize::try_from(n).unwrap(), 0);
             }
             let got = span::verify(&trusted, &bytes);
+            let product = verify_disclosure_span(&trusted, &bytes);
             if want["accept"] == true {
                 let verified_span = got.unwrap();
+                let product_span = product.unwrap_or_else(|e| panic!("{name}: {e:?}"));
+                assert_eq!(product_span.offset, verified_span.offset, "{name}");
+                assert_eq!(product_span.bytes, verified_span.bytes, "{name}");
+                assert_eq!(product_span.leaf_id, verified_span.leaf, "{name}");
+                assert_eq!(
+                    product_span.signature_valid, verified_span.signature_valid,
+                    "{name}"
+                );
+                assert_eq!(
+                    product_span
+                        .path
+                        .iter()
+                        .map(|(n, _)| n.as_slice())
+                        .collect::<Vec<_>>(),
+                    verified_span
+                        .path
+                        .iter()
+                        .map(Vec::as_slice)
+                        .collect::<Vec<_>>(),
+                    "{name}"
+                );
                 assert_eq!(json!(verified_span.offset), want["offset"]);
                 assert_eq!(json!(verified_span.bytes.len()), want["bytes_len"]);
                 assert_eq!(to_hex(&hash(&verified_span.bytes)), want["bytes_blake3"]);
@@ -768,14 +887,171 @@ fn committed_http_object_goldens_verify() {
                     want["signature_valid"]
                 );
             } else {
-                assert_eq!(
-                    got.unwrap_err(),
-                    want["reject_reason"].as_str().unwrap(),
-                    "{name}"
-                );
+                let expected_reason = want["reject_reason"].as_str().unwrap();
+                assert_eq!(got.unwrap_err(), expected_reason, "{name}");
+                assert_eq!(product.unwrap_err().reason(), expected_reason, "{name}");
             }
         }
     }
     assert!(count >= 40);
     tables::check(&dir);
+}
+
+fn chunk_boundaries(fixture: &common::Fixture) -> Vec<u64> {
+    let Object::Tree(tree) = fixture.store.read_object(&fixture.tree_hash).unwrap() else {
+        panic!("fixture root is not a tree")
+    };
+    let chunked_id = tree
+        .entries
+        .iter()
+        .find(|entry| entry.name == b"chunked.bin")
+        .unwrap()
+        .object_hash;
+    let Object::ChunkedBlob(manifest) = fixture.store.read_object(&chunked_id).unwrap() else {
+        panic!("fixture file is not chunked")
+    };
+    let mut boundaries = vec![0u64];
+    for id in manifest.chunks {
+        let Object::Blob(blob) = fixture.store.read_object(&id).unwrap() else {
+            panic!("fixture chunk is not a blob")
+        };
+        boundaries.push(boundaries.last().unwrap() + blob.data.len() as u64);
+    }
+    boundaries
+}
+
+#[test]
+fn boundary_aware_builder_matches_committed_bytes() {
+    let fixture = common::build_fixture();
+    let boundaries = chunk_boundaries(&fixture);
+    let starts = &boundaries;
+    let cases = [
+        ("span_two_chunks", starts[2] - 10, 20),
+        ("span_first_zero", starts[1] - 10, 20),
+        (
+            "span_three_chunks",
+            starts[1] - 10,
+            starts[2] - starts[1] + 20,
+        ),
+        ("in_chunk_range", starts[1] + 32, 16),
+    ];
+    for (name, offset, len) in cases {
+        for hints in [None, Some(boundaries.as_slice())] {
+            let proof = build_range_proof_from(
+                &fixture.store,
+                &fixture.commit_id,
+                &[b"chunked.bin"],
+                offset,
+                len,
+                hints,
+            )
+            .unwrap();
+            let (RangeProof::Mkdp(bytes) | RangeProof::Mkds(bytes)) = proof else {
+                unreachable!("non-exhaustive RangeProof")
+            };
+            assert_eq!(
+                bytes,
+                fs::read(directory().join(format!("{name}.bin"))).unwrap(),
+                "{name} hints={}",
+                hints.is_some()
+            );
+        }
+    }
+    let proof = build_range_proof_from(
+        &fixture.store,
+        &fixture.commit_id,
+        &[b"range.bin"],
+        32,
+        16,
+        None,
+    )
+    .unwrap();
+    let RangeProof::Mkdp(bytes) = proof else {
+        panic!("plain Blob must use MKDP")
+    };
+    assert_eq!(bytes, fs::read(directory().join("blob_range.bin")).unwrap());
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+    #[test]
+    fn mutated_spans_match_reference_reason(
+        seed in 0usize..3,
+        operation in 0u8..5,
+        at in any::<usize>(),
+        payload in proptest::collection::vec(any::<u8>(), 0..32),
+    ) {
+        let dir = directory();
+        let name = ["span_two_chunks", "span_first_zero", "span_three_chunks"][seed];
+        let trusted = mkit_core::hash::from_hex(
+            serde_json::from_slice::<Value>(&fs::read(dir.join(format!("{name}.json"))).unwrap())
+                .unwrap()["commit"].as_str().unwrap(),
+        ).unwrap();
+        let mut bytes = fs::read(dir.join(format!("{name}.bin"))).unwrap();
+        let index = at % bytes.len();
+        match operation {
+            0 => bytes[index] ^= 1,
+            1 => bytes.truncate(index),
+            2 => {
+                let next = (index + 1) % bytes.len();
+                bytes.swap(index, next);
+            }
+            3 => {
+                let length = payload.len().min(bytes.len() - index);
+                let duplicated = bytes[index..index + length].to_vec();
+                bytes.splice(index..index, duplicated);
+            }
+            _ => {
+                let length = payload.len().min(bytes.len() - index);
+                bytes.splice(index..index + length, payload);
+            }
+        }
+        let reference = span::verify(&trusted, &bytes).map(|span| span.bytes);
+        let product = verify_disclosure_span(&trusted, &bytes).map(|span| span.bytes);
+        match (reference, product) {
+            (Ok(expected), Ok(actual)) => prop_assert_eq!(actual, expected),
+            (Err(expected), Err(actual)) => prop_assert_eq!(actual.reason(), expected),
+            (left, right) => prop_assert!(false, "reference={left:?}, product={right:?}"),
+        }
+    }
+
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+    #[test]
+    fn built_range_round_trips(offset_seed in any::<u32>(), len_seed in any::<u32>()) {
+        static FIXTURE: OnceLock<common::Fixture> = OnceLock::new();
+        let fixture = FIXTURE.get_or_init(common::build_fixture);
+        let boundaries = chunk_boundaries(fixture);
+        let total = *boundaries.last().unwrap();
+        let offset = u64::from(offset_seed) % total;
+        let len = 1 + u64::from(len_seed) % (total - offset);
+        let proof = build_range_proof_from(
+            &fixture.store,
+            &fixture.commit_id,
+            &[b"chunked.bin"],
+            offset,
+            len,
+            Some(&boundaries),
+        ).unwrap();
+        let first = boundaries.partition_point(|&start| start <= offset) - 1;
+        let last = boundaries.partition_point(|&start| start < offset + len) - 1;
+        let actual = match proof {
+            RangeProof::Mkdp(bytes) => {
+                prop_assert_eq!(first, last);
+                let disclosed = verify_disclosure(&fixture.commit_id, &bytes).unwrap();
+                body(&disclosed).to_vec()
+            }
+            RangeProof::Mkds(bytes) => {
+                prop_assert!(first < last);
+                verify_disclosure_span(&fixture.commit_id, &bytes).unwrap().bytes
+            }
+            _ => unreachable!("non-exhaustive RangeProof"),
+        };
+        let plaintext = common::prng_bytes(0x1234_5678_9abc_def0, 3 * 1024 * 1024);
+        let begin = usize::try_from(offset).unwrap();
+        let end = usize::try_from(offset + len).unwrap();
+        prop_assert_eq!(actual.as_slice(), &plaintext[begin..end]);
+    }
 }

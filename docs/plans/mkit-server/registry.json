@@ -1868,21 +1868,40 @@
     ]
   },
   {
-    "id": "4.14",
-    "title": "Proofs: ?proof=1 inclusion and range disclosure; mkit-wasm round trip",
+    "id": "4.14a",
+    "title": "MKDS span verifier, wasm binding and boundary-aware range-proof builder",
     "milestone": "M4",
     "track": "core",
     "depends_on": [
-      "4.12",
       "4.3",
       "4.11"
     ],
     "size": "M",
-    "summary": "Query proof ranges: MKDP v2 within a chunk, MKDS v1 across chunks; mkit-core/mkit-wasm span verifiers, boundary-aware builder and Workers in-memory ObjectSource prefetch (R-109).",
+    "summary": "Stage 2: pure mkit-core MKDS v1 span verifier, mkit-wasm binding and boundary-aware MKDP/MKDS range-proof builder; no server dependency (R-161).",
     "human_action": false,
     "area_gates": [
       "rust",
       "wasm",
+      "golden"
+    ]
+  },
+  {
+    "id": "4.14b",
+    "title": "HTTP proof query ranges and Workers prefetch",
+    "milestone": "M4",
+    "track": "core",
+    "depends_on": [
+      "4.12",
+      "4.10",
+      "4.14a"
+    ],
+    "size": "M",
+    "summary": "Stage 2: serve MKDP/MKDS query ranges with 416 mapping and proof ETag; establish encoded size and declared_bytes before Admission, then use in-memory ObjectSource prefetch on Workers (R-161).",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
       "golden"
     ]
   },
@@ -1948,7 +1967,7 @@
       "4.8",
       "4.9",
       "4.10",
-      "4.14",
+      "4.14b",
       "4.15",
       "4.16",
       "4.17"
