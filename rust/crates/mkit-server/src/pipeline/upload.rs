@@ -210,7 +210,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
         let mode = upload_mode(&op, ahead.as_ref())?;
         tracing::debug!(stage = "replay_lookup", ?mode);
         if mode != UploadMode::Replay {
-            op.authz = pipe.authorize(&op).await?;
+            op.authz = pipe.authorize(&op).await?.0;
             super::fault!(pipe, AfterAuthorize, &op, a);
         }
         if mode == UploadMode::Fresh {

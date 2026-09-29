@@ -196,7 +196,14 @@ fn verify(
         headers,
     )
     .map_err(|e| ServerError::unauthenticated(e.0))?;
-    VerifiedAuth::try_from(&authorized)
+    let mut auth = VerifiedAuth::try_from(&authorized)?;
+    // `verify_headers_with` accepted this canonical decimal.
+    auth.created_at_ms = headers
+        .created_at
+        .as_deref()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(0);
+    Ok(auth)
 }
 
 /// An `UploadPack` header that differs from the signed commitment. The

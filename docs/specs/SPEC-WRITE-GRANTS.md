@@ -631,6 +631,13 @@ grants and the §8.2 and §8.3 ref-scope rules for configured
 multi-repository deployments. Grant expiry is checked when authorizing,
 so a grant that expires inside the bounded apply window can still commit.
 
+In an indexed deployment (SPEC-SERVER §9), a `u`-only `MATCH` is allowed only
+as a proven fast-forward (§8.2): the server proves the ancestry after
+verification and answers `write grant rejected: ref scope` when it cannot.
+An opaque deployment keeps answering `update without force needs indexed
+mode`. Indexed mode and this check are programmatic and not yet exposed by
+released adapters.
+
 ---
 
 ## 7. Verification order

@@ -225,6 +225,11 @@ pub struct VerifiedAuth {
     pub commitment: Commitment,
     /// Expiry, Unix epoch milliseconds; replay records outlive it.
     pub expires_at_ms: i64,
+    /// The signed `x-created-at`, Unix epoch milliseconds: when the client
+    /// signed, so what it knew of the repository is at least this old
+    /// (the ticketless §9.4 lag proxy, WP-4.17). `0` on a value built
+    /// without the envelope, which opens no lag window.
+    pub created_at_ms: i64,
 }
 
 impl TryFrom<&Authorized> for VerifiedAuth {
@@ -244,6 +249,7 @@ impl TryFrom<&Authorized> for VerifiedAuth {
             nonce: auth.nonce.clone(),
             commitment: Commitment::parse(&auth.commitment).map_err(|_| malformed())?,
             expires_at_ms: auth.expires_at,
+            created_at_ms: 0,
         })
     }
 }

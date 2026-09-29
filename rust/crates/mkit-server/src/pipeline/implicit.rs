@@ -226,7 +226,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
     /// The packmap ref's current id: the read-ahead snapshot when the
     /// store already read the key, a direct read otherwise.
-    async fn current_ref(
+    pub(super) async fn current_ref(
         &self,
         op: &Operation,
         ref_name: &str,
