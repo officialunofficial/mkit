@@ -1068,14 +1068,35 @@ Remote / sync:
   up-to-date`). `--format=json` emits one JSON object to stdout:
   `{"ok":true,"remote":"...","endpoint":"...","branch":"...",
   "remote_branch":"...","old":"<hex>|null","new":"<hex>","forced":<bool>,
-  "up_to_date":<bool>}` on success, or `{"ok":false,"rejected":true,
+  "up_to_date":<bool>,"steps":<n>}` on success (`steps` is 0 when up to date, otherwise the number of branch
+  advances the push took; `--all` reports the total plus `ref_count`), or
+  `{"ok":false,"rejected":true,
   "branch":"...","error":"..."}` on a non-fast-forward (CAS) rejection
   (`{"ok":false,"error":"..."}` for any other failure).
   On a V2 Connect remote, pushes at or above its advertised upload threshold
   open a signed ticket for each data pack and packmap node, then consume those
-  tickets with the branch advance. A single advance can carry six data packs;
-  a larger push asks you to push an ancestor commit first or have the operator
-  raise `max_pack_bytes`. Large packs upload in parts. Receipt files in the
+  tickets with the branch advance. A single advance can carry six data packs.
+  A push that needs more is split automatically along the branch's
+  first-parent history into several advances, each moving the branch to an
+  intermediate commit whose closure fits; nothing is uploaded ahead of its
+  advance. **Every intermediate state is published**: the remote branch, its
+  Stage 2 hooks, receipts and lifecycle events all fire once per advance, and
+  a failed push leaves the branch at the last published commit, which the
+  error names. Run `mkit push` again to resume from there (the
+  remote-tracking ref follows each advance). The first advance uses your usual
+  lease (or `--force`); every later one is a compare-and-swap on the previous
+  advance's commit, even under `--force`. Before uploading anything, the
+  client checks that your stored write grants cover every advance: a
+  non-owner key needs `c` to create the branch (or `u`/`f` to update it), and
+  an `f` grant for the later advances, on every server until indexed-mode
+  `u`-only fast-forwards land (R-148); the owner key needs no grant. A push
+  that would be refused midway is refused up front, with no advance
+  published. A single commit or merge that cannot be split (a merge always
+  lands whole) and still needs more than six packs is refused before any
+  upload, naming the commit; ask the operator to raise `max_pack_bytes`. On a
+  terminal the progress line reads `Writing objects (step 2/5)`; piped, a
+  `pushed step 2/5: branch now at <hex>` line follows each advance; `--quiet`
+  prints neither. Large packs upload in parts. Receipt files in the
   repository's common `upload-parts/` cache let the next `mkit push` resume
   the parts already accepted, provided the regenerated push plan is identical.
   After an interruption, run `mkit push` again to resume; the message reports

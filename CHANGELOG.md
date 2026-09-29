@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- CLI: a Connect push that needs more than six data packs per advance is now
+  split automatically along the branch's first-parent history instead of
+  failing with `PushTooLarge` after uploading six packs. Every intermediate
+  commit is a published state; the tracking ref follows each advance, so a
+  re-run resumes, and later advances always compare-and-swap on the previous
+  one. For a split push, stored write grants are checked for every advance before
+  anything is uploaded, and an unsplittable oversize commit or merge is refused before any
+  upload. `--format=json` reports `steps` (WP-1.17b).
 - Server: the native adapter delivers terminal outcomes (kind 8) to an
   embedder's `OutcomeSink` (`server::open_with_sink`) with a 5 s bound per
   call, stops a fire at its first failure and drains due outcomes on
