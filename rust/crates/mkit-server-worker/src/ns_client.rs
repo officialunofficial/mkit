@@ -43,6 +43,7 @@ pub trait NsTransport: MaybeSend + MaybeSync {
 pub struct DoNamespaceStore<T> {
     transport: T,
     probe_partition: Partition,
+    reserved_batch_ops: usize,
 }
 
 fn op(call: &NsCall) -> &'static str {
@@ -80,7 +81,15 @@ impl<T: NsTransport> DoNamespaceStore<T> {
         Self {
             transport,
             probe_partition,
+            reserved_batch_ops: 0,
         }
+    }
+
+    /// Reserve operations for an explicitly configured target-local apply seam.
+    #[must_use]
+    pub fn with_apply_reserve(mut self, ops: usize) -> Self {
+        self.reserved_batch_ops = ops;
+        self
     }
 
     /// The transport.
@@ -131,7 +140,9 @@ impl<T: NsTransport> DoNamespaceStore<T> {
 
 impl<T: NsTransport> NamespaceStore for DoNamespaceStore<T> {
     fn capabilities(&self) -> StoreCapabilities {
-        StoreCapabilities::full()
+        let mut caps = StoreCapabilities::full();
+        caps.reserved_batch_ops = self.reserved_batch_ops;
+        caps
     }
 
     async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
@@ -214,7 +225,13 @@ impl<T: NsTransport> NamespaceStore for DoNamespaceStore<T> {
     }
 
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
-        batch.validate(&self.capabilities())?;
+        let mut caps = self.capabilities();
+        // Only RefIndex targets append snapshot metadata. RefShard planners
+        // retain the full batch limit for writes and opportunistic pruning.
+        if !matches!(p, Partition::RefIndex { .. }) {
+            caps.reserved_batch_ops = 0;
+        }
+        batch.validate(&caps)?;
         let call = NsCall::Apply {
             batch: WireBatch::from(batch),
         };

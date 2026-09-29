@@ -121,6 +121,8 @@ remote-hooks = [
 # inert in Stage 1 (R-154, R-169): off by default, enabled by no adapter, and
 # it needs `PipelineConfig::http_objects`, which requires indexed mode.
 http-objects = []
+# Stage 2 published reader source; no adapter enables it by default.
+published-view = []
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # `fs` delegates ref CAS, the ref lock and atomic writes to FileTransport, so

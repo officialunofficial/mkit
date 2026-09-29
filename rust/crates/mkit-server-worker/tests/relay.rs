@@ -6,7 +6,11 @@ use common::{DoConfig, Loopback};
 use futures::executor::block_on;
 use mkit_server::pipeline::{D34Shards, ShardMap};
 use mkit_server::sql::SqlKvStore;
-use mkit_server::store::{codec, keys, outbox::OutboxBuilder, tickets::plan_membership};
+use mkit_server::store::{
+    codec, keys,
+    outbox::{MAX_RELAY_PUTS, OutboxBuilder},
+    tickets::plan_membership,
+};
 use mkit_server::timers::{TickBudget, registry::kinds, run_due};
 use mkit_server::{
     Batch, BatchOutcome, BlobKey, Key, ManualClock, NamespaceKey, NamespaceStore, RepoId, RepoName,
@@ -86,7 +90,8 @@ fn relay_uses_one_watermark_read_and_one_atomic_apply_per_target() {
     block_on(async {
         let dir = tempfile::tempdir().unwrap();
         let source = SqlKvStore::open(RusqliteConn::open_in_memory().unwrap()).unwrap();
-        let target = Loopback::store(dir.path().to_path_buf(), DoConfig::default());
+        let target =
+            Loopback::store(dir.path().to_path_buf(), DoConfig::default()).with_apply_reserve(3);
         let repo = RepoId {
             namespace: NamespaceKey::deployment_default(),
             name: RepoName::new("relay").unwrap(),
@@ -106,6 +111,18 @@ fn relay_uses_one_watermark_read_and_one_atomic_apply_per_target() {
             &mut builder,
             &mut batch.writes,
         );
+        // Fill the first target's relay row to its legal 96-operation cap.
+        let extra = (0..MAX_RELAY_PUTS - 1)
+            .map(|i| {
+                let mut pack = packs[0];
+                pack[2] = u8::try_from(i + 32).unwrap();
+                (keys::membership(&repo.name, &pack), Value::default())
+            })
+            .collect();
+        builder.relay(
+            &D34Shards.membership(&repo, &BlobKey::pack(packs[0])),
+            extra,
+        );
         builder
             .try_finish(&mut batch.preconditions, &mut batch.writes)
             .unwrap();
@@ -122,6 +139,10 @@ fn relay_uses_one_watermark_read_and_one_atomic_apply_per_target() {
             })
             .collect();
         assert_eq!(relay_rows.len(), 2);
+        assert_eq!(
+            codec::decode_relay(&relay_rows[0].1).unwrap().puts.len(),
+            MAX_RELAY_PUTS
+        );
         assert_eq!(
             source.apply(&source_partition, batch).await.unwrap(),
             BatchOutcome::Committed

@@ -462,23 +462,27 @@ Folded into WP-S1 §7.6/§7.8/§7.9 (adopted Q18 default). Every former dependen
 - **Tests:** 3-part pack with a fault after part 2, then resume; envelope parity against `auth-v2/part.json`.
 - **Size:** M (~900).
 
-### WP-1.21 Worker: published-view ref snapshot (R2/Cache) for readers
+### WP-1.21 Worker: published-view ref snapshot (R2/Cache) for readers (Stage 2)
 
-- **Depends on:** WP-1.28, WP-1.10, WP-1.8.
-- **Goal:** protect hot namespaces: snapshots of the published view (M1: equal to the live refs) **per ref-index
-  bucket** (R-73): each `RefIndex{bucket}` shard (16 per repo, hash-sharded) owns one R2 object
-  `snapshots/<ns>/<repo>/<bucket>` (versioned, conditional overwrite by version), fronted by the Cache API. The
-  bucket shard rewrites it from a **debounced** timer after the relay changes the bucket: at most one write per key
-  per second (R2 allows 1 write/s per key), coalescing every change since the last write; staleness is bounded by
-  the debounce interval (1 s default) plus relay lag. Unsigned `ListRefs` k-way merges the 16 bucket snapshots from
-  Cache/R2 (no DO call); private repos are dropped from the snapshots when the config cache (1.22) reports a
-  visibility change. Unsigned `ReadRef` is served from it only when the deployment opts in
-  (`READREF_FROM_SNAPSHOT`, default off until M2 signed reads let writers bypass it); push CAS always reads the ref
-  shard. Private repos are never snapshotted for anonymous readers (M2 enforces visibility).
-- **Tests:** snapshot freshness after an advance (within debounce + lag); version race keeps the newest; a burst of
-  100 advances to refs in one bucket produces ≤ ~1 R2 write/s for that key and no 429; hot-read load test on
-  staging (reads don't touch DOs); writers unaffected.
-- **Size:** M (~800).
+- **Depends on:** WP-1.28b, WP-1.10, WP-1.8 (R-175).
+- **Goal:** default-off `published-view` feature and explicit programmatic configuration. Each D34
+  `RefIndex` bucket on `RepoIndexShard` owns `snapshots/v1/<ns>/<repo>/<bucket>` in private R2.
+  Atomically seed kind 10 and bump a bucket-local generation with relay delivery; debounce 1 second,
+  conditional ETag replacement, one replacement/key/second, 64-row/32-KiB caps and live fallback.
+  Healthy staleness includes relay lag + debounce + Cache TTL (1 second): approximately relay lag +
+  2 seconds, not a numeric relay-delivery guarantee. Validity is 60 seconds, refreshed at 30 seconds.
+  Authorized anonymous ListRefs merges snapshots and live buckets with the existing token/2-MiB contract.
+  Hot reads make **no ref-index DO calls**, but retain the authoritative coordinator authorization call;
+  never cache visibility or authorization. Signed reads bypass snapshots; private repositories are skipped
+  and their obsolete snapshots removed. Unsigned ReadRef is programmatic opt-in, default off.
+  An inspection configuration refuses these reads until WP-5.4/5.5 supplies published values; no live fallback.
+- **Budget:** 16 × at most 3 bucket operations + coordinator = 49, reserving one read-hook call; no retries.
+  Cold deployment-guard discovery uses the live path. RefIndex alarms share one snapshot fire and an
+  eight-external-call cap with backup across all heads; the fixed RefShard 32+1+8+8 split is unchanged.
+- **Tests:** codec, routing, deletes/duplicate delivery, generations, debounce, conflicts/crashes,
+  interleaved upload, preserved wakes, cache failures/expiry, oversized fallback, mixed paging, privacy,
+  signed bypass, inspection refusal, call/heap bounds and local feature-on Worker CPU probe.
+- **Size:** M/L (bundled with 1.19, cap 2,500 production lines). No Stage 1 opt-in or app routes/bindings.
 
 ### WP-1.27 M1 conformance: D34, tickets and growth cases (wire + storage + load)
 
@@ -495,18 +499,21 @@ Folded into WP-S1 §7.6/§7.8/§7.9 (adopted Q18 default). Every former dependen
   buckets with a > 32 MiB total listing and every page ≤ 2 MiB.
 - **Size:** L (~1400).
 
-### WP-1.19 Staging `vcs-worker` deployment config and runbook
+### WP-1.19 Staging `vcs-worker` template and runbook (Stage 2, inert)
 
-- **Depends on:** WP-1.6, WP-1.8, WP-1.12, WP-1.14, WP-1.18, WP-1.21, WP-1.29.
-- **Goal:** `env.staging` in `apps/vcs-worker/wrangler.jsonc`: route/custom domain, `AUTH_AUDIENCE` = the staging
-  origin, `SERVER_MODE=multi`, `NAMESPACE_POLICY=allowlist` with the CI key namespace, R2 bucket
-  `mkit-vcs-objects-staging` (+ a backups prefix or bucket), the DO bindings and migration `v2`, `limits.cpu_ms`,
-  a current `compatibility_date`, placement vars (default none). Re-measure Worker completion CPU under staging R2,
-  then set the staging CPU limit and `MAX_PACK_BYTES` from that measurement (default 1 GiB, hard ceiling 4.995 GiB).
-  README runbook: deploy, backup/restore, alerts.
-- **HUMAN / CLOUDFLARE STEPS:** see 00-plan.md human-action checklist (hostname/zone, scoped API token, bucket,
-  first deploy, CI signer key, manual smoke).
-- **Size:** S (~300).
+- **Depends on:** WP-1.6, WP-1.8, WP-1.12, WP-1.14, WP-1.18, WP-1.21, WP-1.29, WP-1.30.
+- **Goal:** inert `apps/vcs-worker/staging/wrangler.staging.jsonc.template` and runbook (R-176),
+  copied to a real config only after REL-1. Uses `ADDRESSING=multi`, exact staging audience,
+  CI namespace allowlist, separate private packs/backups/published-snapshot R2 buckets,
+  all DO bindings and v1/v2 SQLite migrations; optional placement vars unset.
+  Explicit configured fetch/DO entrypoints and default-off feature are a later activation
+  change. No Stage 1 opt-in, binding, route mounting or provisioning.
+- **Post-REL ops:** hostname/zone, scoped token, three private buckets, backups/-only 35-day
+  retention, ticket/CI keys, first deployment and manual smoke. Confirm Paid before the
+  template's starting 100 ms allowance; Free CPU remains unproven. Measure deployed
+  ListRefs, snapshot alarms and multipart completion, then choose CPU and `MAX_PACK_BYTES`
+  (default 1 GiB, ceiling 4.995 GiB) before route mounting. Recovery remains WP-5.11b.
+- **Size:** S (~200 documentation/template lines).
 
 ### WP-1.20 CI: conformance and e2e against staging (M1 exit)
 
