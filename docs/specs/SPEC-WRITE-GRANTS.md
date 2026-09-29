@@ -15,9 +15,9 @@ owner schemes (`ed25519`, `secp256k1-eip191` and `webauthn-p256`, with
 the §4.3 rules against configured relying parties), and the stateless
 verifier (§7 steps 1 to 10, the §5.2 and §9.1 statement checks and the
 §10 registration check) are implemented. The Connect server enforces write
-grants, including the stored-epoch equality check in §7 step 11. Full §8.2
-ref-scope rules, epoch RPCs, signed reads and ssh/enc grant registration
-remain for later M2 work packages.
+grants, including the stored-epoch equality check in §7 step 11, the
+§8.2 and §8.3 ref-scope rules, and the unsigned grant-epoch RPCs. Signed
+reads and ssh/enc grant registration remain for later M2 work packages.
 Golden
 vectors ([SPEC-CONVENTIONS §5](SPEC-CONVENTIONS.md#5-golden-vectors-and-conformance-tests))
 land with each implementation; §13.1 lists those that exist and names
@@ -441,6 +441,10 @@ all of these hold:
    verifier's clock.
 6. The namespace policy serves the namespace
    ([SPEC-TRANSPORT-CONNECT §7.5](SPEC-TRANSPORT-CONNECT.md#75-namespace-and-write-policy)).
+   Under an Allowlist, the namespace must be listed; a `0x` namespace is
+   served only through an Allowlist. Under `Any`, an ed25519 namespace is
+   served for epoch changes only after an admitted write has created its
+   namespace record.
 7. `stored < new epoch <= stored + MAX_EPOCH_STEP`, computed without
    overflow. A namespace whose epoch is within `MAX_EPOCH_STEP` of the
    64-bit maximum can still be raised to that maximum and no further.
@@ -621,11 +625,9 @@ key, an authority source, or an owner-signed visibility statement
 `GetServerInfo` need no authorization.
 
 **Rollout (informative).** The Connect server enforces owner-signed write
-grants for configured multi-repository deployments. Until the full §8.2
-rules land, its interim ref gate requires `cuf` for a non-delete change,
-`d` for deletion, and any effective flag for BeginUpload; direct packmap
-UpdateRef is denied. Grant expiry is checked when authorizing, so a grant
-that expires inside the bounded apply window can still commit.
+grants and the §8.2 and §8.3 ref-scope rules for configured
+multi-repository deployments. Grant expiry is checked when authorizing,
+so a grant that expires inside the bounded apply window can still commit.
 
 ---
 
@@ -1158,6 +1160,9 @@ document's rules, independently of the Rust code.
   party, and a `clientDataJSON` nested exactly 64 deep with numbers that
   round to the largest finite binary64 value: `1.7976931348623158e308`
   and the integer 2^1024 − 2^970 − 1).
+
+The fixed secp256k1 and P-256 test seeds own real `0x` namespaces.
+Never allowlist those namespaces on a shared or staging deployment.
 - `reject/verify-secp256k1-*.json`, `reject/verify-webauthn-*.json`:
   signed statements that fail one §4, §4.1, §4.3 or §4.4 rule each,
   re-signed where needed so that only that rule fails: a high-`s`
