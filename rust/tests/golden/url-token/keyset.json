@@ -1,0 +1,16 @@
+{
+  "active_key_id": "8fd4250c7e19a226bb17ae00d988b536",
+  "active_public_key": "fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618",
+  "active_seed": "0909090909090909090909090909090909090909090909090909090909090909",
+  "json": "{\"version\":1,\"keys\":[{\"keyId\":\"8fd4250c7e19a226bb17ae00d988b536\",\"alg\":\"ed25519\",\"publicKey\":\"fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618\"},{\"keyId\":\"90bdeef49d5d2664e6ef317c3fc4dec4\",\"alg\":\"ed25519\",\"publicKey\":\"6e7a1cdd29b0b78fd13af4c5598feff4ef2a97166e3ca6f2e4fbfccd80505bf1\",\"notAfterMs\":\"1699999900000\"}]}",
+  "key_file": "active 0909090909090909090909090909090909090909090909090909090909090909\nretired 6e7a1cdd29b0b78fd13af4c5598feff4ef2a97166e3ca6f2e4fbfccd80505bf1 1699999000000\n",
+  "retired": [
+    {
+      "key_id": "90bdeef49d5d2664e6ef317c3fc4dec4",
+      "public_key": "6e7a1cdd29b0b78fd13af4c5598feff4ef2a97166e3ca6f2e4fbfccd80505bf1",
+      "retired_at_ms": 1699999000000
+    }
+  ],
+  "spec": "SPEC-SERVER §7.2",
+  "ttl_ms": 900000
+}

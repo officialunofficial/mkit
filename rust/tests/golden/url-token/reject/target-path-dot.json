@@ -1,0 +1,5 @@
+{
+  "expected_error": "invalid target",
+  "rule": "a nonempty path is `/`-joined entry names with no empty, `.` or `..` entry",
+  "token": "bWtpdC11cmwtdG9rZW46djEKaHR0cHM6Ly9hcGkuZXhhbXBsZS50ZXN0CmVkMjU1MTktZWE0YTZjNjNlMjljNTIwYWJlZjU1MDdiMTMyZWM1Zjk5NTQ3NzZhZWJlYmU3YjkyNDIxZWVhNjkxNDQ2ZDIyYy9yb29tLWEKcGF0aDpyZWZzL2hlYWRzL21haW46TGcKMAoxNzAwMDAwMDAwMDAwCjE3MDAwMDA5MDAwMDAKOGZkNDI1MGM3ZTE5YTIyNmJiMTdhZTAwZDk4OGI1MzY.f6Ig6vNs_Z22WtCmHGKzbj2Z8UKDX9FQBNa03pE0H_ovk6qn79Z-jmnjZHL-_GjpvzUyK37_OOr92LKebXqIDQ"
+}

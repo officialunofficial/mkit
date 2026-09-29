@@ -60,6 +60,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   presence guards for `ANY` and head/packmap pairing (WP-2.7).
 - Server: add unsigned grant-epoch RPCs with owner statements, bounded
   epoch transitions and completion after leased shards are fenced (WP-2.8).
+- Server: verify auth v2 on every signed read, including the framed
+  `DownloadPack` request, and add private repositories:
+  `SetRepoVisibility` in envelope and owner-statement modes, a
+  coordinator `rv` row, and `not_found` for every unauthorized private
+  read, indistinguishable from a missing repository (WP-2.9). A read that
+  carries auth headers but fails verification is now `unauthenticated`
+  instead of anonymous, and a grant header on an unsigned Multi request is
+  `unauthenticated` on every procedure.
+- Server: mint short-lived `mkit-url-token:v1` object URL tokens with
+  `IssueObjectUrl`, signed by a dedicated deployment key, with a two-phase
+  verification API and a key-set renderer for HTTP object serving
+  (WP-2.11).
 - Server: enforce owner-signed write grants under Multi/Owner, including
   `0x` namespaces, stored-epoch checks, and grant-scheme discovery.
   Adapter grant flags follow in WP-1.30b.
