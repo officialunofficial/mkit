@@ -20,8 +20,7 @@ pub enum ShardClass {
 }
 
 impl ShardClass {
-    /// Stable class label for physical storage pressure. Both index kinds
-    /// share the repository-index class and therefore its pressure label.
+    /// Stable class label for physical storage pressure.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -30,6 +29,17 @@ impl ShardClass {
             Self::RefShard => "ref",
             Self::RepoIndexShard => "repo_index",
             Self::ContentIndexShard => "content",
+        }
+    }
+
+    /// Physical partition-kind label, including the two index kinds served
+    /// by the same Durable Object class.
+    #[must_use]
+    pub const fn partition_label(self, p: &Partition) -> &'static str {
+        match p {
+            Partition::RepoIndex { .. } => "repo_index",
+            Partition::RefIndex { .. } => "ref_index",
+            _ => self.label(),
         }
     }
 

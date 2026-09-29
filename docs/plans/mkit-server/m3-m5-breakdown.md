@@ -487,8 +487,8 @@ Entry condition: M1 is merged. The M4 private-serving WPs (4.15) need M2 read au
       4. Stage index rows.
     - **MKPL node** (`transfer::decode_packlist`, `transfer.rs:130`): every listed pack is a member or ticketed in the same advance.
   - In `pre_receive` for `AdvanceRefs`, run `verify_push(new tips, History, source=repo index ∪ staged, known=verified-in-repo)`.
-  - On success, one ref-shard batch: head/packmap, local membership additions, the pack's `verified` state, and relay
-    outbox rows that flip the index rows to `verified` in the repo index shards.
+  - On success, direct index rows and the pack's `vs` Verified state commit in separate batches before the ref-shard
+    advance batch. That batch contains head/packmap, local membership additions and its existing relay outbox rows.
   - `AlreadyPresent` answers use membership only (M1 already enforces this, re-assert it here).
   - Native runs verification inline, bounded by limits advertised in GetServerInfo.
 - **PRD:** §6.5, §6.2 (MKPL tickets), §5.4 step 5, D3, D15.

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Core and wasm: verify MKDS v1 multi-chunk disclosure spans against a trusted
   commit and build boundary-aware MKDP/MKDS range proofs (WP-4.14a).
+- Server (WP-4.6): batch repository object-index range reads on Workers,
+  add bounded relay enqueue and delivery checks, increase paid relay
+  throughput, and report index pressure, lag, backlog, and lookup caps.
+- Server (WP-4.7): opt-in native indexed ingestion verifies ticketed packs
+  before ref publication, resolves member-only thin delta bases, checks all
+  consumed objects and packlists, and writes index rows before membership.
+- Core: expose decoded pack frame metadata, single-frame decoding, and an
+  additive resumable decode cursor for repository-scoped external bases.
 - Server Worker: stream verified multipart parts into CV-keyed R2 objects and
   verify the complete pack before publishing it; raise the ticketed pack cap
   to 1 GiB while retaining the 64 MiB single-upload limit (WP-1.12).

@@ -37,8 +37,8 @@ pub use content_index::{
 pub use error::{BoxError, StoreError};
 pub use kv::{
     Batch, BatchOutcome, Cursor, Key, KeyClasses, MAX_BATCH_BYTES, MAX_BATCH_OPS, MAX_KEY_BYTES,
-    MAX_VALUE_BYTES, MembershipMode, NamespaceStore, PartitionStats, Precondition, ScanPage,
-    StoreCapabilities, Value, Write,
+    MAX_SCAN_RANGES, MAX_VALUE_BYTES, MembershipMode, NamespaceStore, PartitionStats, Precondition,
+    RangeScan, ScanPage, StoreCapabilities, Value, Write,
 };
 pub use maintenance::{
     EXPORT_END, EXPORT_FORMAT_V1, EXPORT_MAGIC, ExportHeader, ExportPage, ExportReader,

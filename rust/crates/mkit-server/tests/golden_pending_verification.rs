@@ -87,6 +87,17 @@ fn golden_pending_verification() {
     assert_eq!(binary, [0x08, 0x88, 0x27]); // field 1, varint 5000
     let json = format!("{}\n", serde_json::to_string(&message).unwrap()).into_bytes();
     assert_eq!(json, b"{\"retryAfterMs\":5000}\n");
+    let built = mkit_server::indexed::pending(5_000);
+    assert_eq!(built.code(), Code::Unavailable);
+    assert_eq!(built.public_message(), "pack verification pending");
+    assert_eq!(built.http_status(), Some(503));
+    assert_eq!(
+        built.headers(),
+        &[("Retry-After".to_owned(), "5".to_owned())]
+    );
+    assert_eq!(built.details().len(), 1);
+    assert_eq!(built.details()[0].type_name, TYPE);
+    assert_eq!(built.details()[0].value.as_ref(), binary.as_slice());
 
     // Exercise the production ServerError conversion and Connect serializer.
     let error: ConnectError = ServerError::new(Code::Unavailable, "pack verification pending")

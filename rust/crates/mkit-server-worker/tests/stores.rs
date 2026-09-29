@@ -509,6 +509,45 @@ impl mkit_server::Metrics for PressureGauges {
     }
 }
 
+#[derive(Default)]
+struct PressureAlerts(std::sync::Mutex<Vec<(String, String, String)>>);
+
+struct AlertLayer(std::sync::Arc<PressureAlerts>);
+
+#[derive(Default)]
+struct AlertFields(std::collections::BTreeMap<String, String>);
+
+impl tracing::field::Visit for AlertFields {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.insert(
+            field.name().into(),
+            format!("{value:?}").trim_matches('"').into(),
+        );
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0.insert(field.name().into(), value.into());
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AlertLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut fields = AlertFields::default();
+        event.record(&mut fields);
+        if fields.0.get("event").map(String::as_str) == Some("storage_pressure") {
+            self.0.0.lock().expect("pressure alert capture lock").push((
+                fields.0["kind"].clone(),
+                fields.0["level"].clone(),
+                event.metadata().level().as_str().into(),
+            ));
+        }
+    }
+}
+
 #[test]
 fn committed_put_pressure_reads_physical_size_through_do_shim() {
     use mkit_server::ManualClock;
@@ -580,6 +619,90 @@ fn committed_put_pressure_reads_physical_size_through_do_shim() {
         block_on(serve(&store, &request(call), ShardClass::RefStore));
     }
     assert_eq!(metrics.0.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn index_pressure_labels_and_thresholds_cover_both_partition_kinds() {
+    use mkit_server::{ManualClock, RepoName};
+    use mkit_server_worker::classes::ShardClass;
+    use mkit_server_worker::ns_object::PressureStore;
+    use std::sync::Arc;
+    use tracing_subscriber::prelude::*;
+
+    let ns = NamespaceKey::deployment_default();
+    let repo = RepoName::new("one").unwrap();
+    for (partition, label) in [
+        (
+            Partition::RepoIndex {
+                ns: ns.clone(),
+                repo: repo.clone(),
+                prefix: 0,
+            },
+            "repo_index",
+        ),
+        (
+            Partition::RefIndex {
+                ns: ns.clone(),
+                repo: repo.clone(),
+                bucket: 0,
+            },
+            "ref_index",
+        ),
+    ] {
+        let config = capacity_above_empty(64 * 1024);
+        let conn = SimDoConn(RusqliteConn::open_in_memory().unwrap());
+        let inner = SqlKvStore::open_with_capacity(conn, config.capacity).unwrap();
+        let metrics = Arc::new(PressureGauges::default());
+        let alerts = Arc::new(PressureAlerts::default());
+        let store = PressureStore::new(
+            inner,
+            ShardClass::RepoIndexShard,
+            Arc::new(ManualClock::new(0)),
+            metrics.clone(),
+        );
+        tracing::subscriber::with_default(
+            tracing_subscriber::registry().with(AlertLayer(alerts.clone())),
+            || {
+                let mut key_id = 0;
+                for threshold in [70, 90] {
+                    while u128::from(store.conn().size_bytes().unwrap()) * 100
+                        < u128::from(config.capacity.soft_limit()) * threshold
+                    {
+                        assert!(key_id < 256, "pressure threshold was not reached");
+                        assert_eq!(
+                            block_on(store.apply(
+                                &partition,
+                                Batch::new().put(key(key_id), Value::new(vec![1; 1024]))
+                            ))
+                            .unwrap(),
+                            BatchOutcome::Committed
+                        );
+                        key_id += 1;
+                    }
+                    if threshold == 70 {
+                        assert!(
+                            u128::from(store.conn().size_bytes().unwrap()) * 100
+                                < u128::from(config.capacity.soft_limit()) * 90
+                        );
+                    }
+                }
+            },
+        );
+        let gauges = metrics.0.lock().unwrap();
+        assert!(gauges.len() >= 2);
+        assert!(
+            gauges
+                .iter()
+                .all(|(name, kind, _)| name == "mkit_server_partition_bytes" && kind == label)
+        );
+        assert_eq!(
+            alerts.0.lock().unwrap().as_slice(),
+            &[
+                (label.into(), "warn".into(), "WARN".into()),
+                (label.into(), "critical".into(), "ERROR".into())
+            ]
+        );
+    }
 }
 
 #[test]
