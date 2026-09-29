@@ -199,6 +199,8 @@ macro_rules! __with_kv_cases {
                 idx_blocked_on_add,
                 idx_hold_extension_keeps_max,
                 idx_expired_holds_pruned_on_mutation,
+                idx_holder_records_advance_seq_and_guard_removal,
+                idx_hold_and_holder_deadline_passed_writes_nothing,
             }
             object_index::{
                 idx_scan_many_default_and_prefix,

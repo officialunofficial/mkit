@@ -648,10 +648,13 @@ mod tests {
     #[test]
     fn export_import_roundtrip_is_identical() {
         let (a, b) = ([0x10; 32], [0xf0; 32]);
-        let idx = ContentIndex::new(MemoryKv::default());
+        let clock = std::sync::Arc::new(crate::ManualClock::new(0));
+        let idx = ContentIndex::new(MemoryKv::with_clock(clock));
         let holder = Holder::new(NamespaceKey::deployment_default(), repo());
         block_on(async {
-            idx.add_holder(&a, &holder, None, 1).await.unwrap();
+            idx.add_holder(&a, &holder, &[9; 32], None, 1)
+                .await
+                .unwrap();
             let held = idx.add_hold(&b, &[1; 32], 99, 2).await.unwrap();
             assert_eq!(held, HoldOutcome::Held);
             let entry = BlockEntry::new("r", 3);
