@@ -194,7 +194,7 @@ pub const VC_JOB: u8 = 0;
 pub const VC_FRAME: u8 = 1;
 /// A closure child still owed a member, keyed by object id.
 pub const VC_CHILD: u8 = 2;
-/// An external base already charged to the decode budget, keyed by object id.
+/// External-base charges keyed by a location digest, and object-keyed depth rows.
 pub const VC_BASE: u8 = 3;
 /// An extraction candidate, keyed by object id (WP-4.10b).
 pub const VC_CANDIDATE: u8 = 4;

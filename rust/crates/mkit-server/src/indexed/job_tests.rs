@@ -447,6 +447,7 @@ impl Rig {
             ticket,
             id,
             self.clock.as_ref(),
+            None,
         ))
         .unwrap();
     }
@@ -890,6 +891,50 @@ fn a_pack_needing_extraction_never_reaches_verified_here() {
     assert!(rig.check(&[(&ticket, id)], head).is_err());
 }
 
+#[test]
+fn a_single_entry_is_bounded_within_the_slice_resident_budget() {
+    let (object, bytes) = blob(7, 2 << 20);
+    let mut writer = PackWriter::new_raw_only();
+    writer.push_raw(object, &bytes).unwrap();
+    let pack = writer.finish().unwrap();
+    let mut rig = Rig::new();
+    rig.limits = SliceLimits::default();
+    rig.cfg.extract_min_bytes = 8 << 20;
+    let (ticket, id) = rig.add(&pack);
+    rig.create(&ticket, id);
+    rig.drive(|rig| rig.finished(&ticket.pack_id));
+    assert_eq!(
+        rig.job(&ticket.pack_id).unwrap().outcome,
+        Some(checkpoint::Outcome::DecodeBudget)
+    );
+    assert!(rejected(&rig, &ticket.pack_id).is_none());
+}
+
+#[test]
+fn rebuilding_job_rows_cannot_downgrade_an_already_verified_pack() {
+    let (pack, _) = tree_pack(1, 3_000);
+    let rig = Rig::new();
+    let (ticket, id) = rig.add(&pack);
+    rig.create(&ticket, id);
+    rig.drive(|rig| rig.finished(&ticket.pack_id));
+    let verified = rig.state(&ticket.pack_id).unwrap();
+    let key = keys::verify_job(&rig.repo.name, &ticket.pack_id);
+    let raw = block_on(rig.store.get(&rig.source(), &key)).unwrap();
+    block_on(scheduled::create_job(
+        rig.store.as_ref(),
+        &rig.source(),
+        &rig.repo,
+        &ticket,
+        id,
+        rig.clock.as_ref(),
+        raw,
+    ))
+    .unwrap();
+    *rig.windows.corrupt.lock().unwrap() = Some((pack.len() as u64 - 1, 0, false));
+    rig.tick();
+    assert_eq!(rig.state(&ticket.pack_id), Some(verified));
+}
+
 fn thin(base: Hash, base_raw: &[u8], target_raw: &[u8]) -> Vec<u8> {
     let mut writer = PackWriter::new();
     writer
@@ -943,6 +988,34 @@ fn an_external_base_waits_out_the_lag_window_then_ends_terminal_never_rejected()
         error.public_message(),
         "delta base not available in this repository"
     );
+}
+
+#[test]
+fn a_new_ticket_replaces_a_terminal_job_instead_of_inheriting_its_outcome() {
+    let (base, base_raw) = blob(1, 3_000);
+    let (_, target) = blob(2, 3_000);
+    let pack = thin(base, &base_raw, &target);
+    let rig = Rig::new();
+    let (ticket, id) = rig.add(&pack);
+    rig.create(&ticket, id);
+    rig.clock
+        .advance(i64::try_from(rig.cfg.relay_lag_bound_ms).unwrap());
+    rig.drive(|rig| rig.finished(&ticket.pack_id));
+    assert_eq!(
+        rig.job(&ticket.pack_id).unwrap().outcome,
+        Some(checkpoint::Outcome::BaseMissing)
+    );
+    let (fresh, fresh_id) = rig.add(&pack);
+    assert_eq!(
+        rig.check(&[(&fresh, fresh_id)], [1; 32])
+            .unwrap_err()
+            .public_message(),
+        "pack verification pending"
+    );
+    let job = rig.job(&ticket.pack_id).unwrap();
+    assert_eq!(job.ticket_id, fresh_id);
+    assert_eq!(job.created_at_ms, fresh.created_at_ms);
+    assert!(job.outcome.is_none());
 }
 
 #[test]
@@ -1263,6 +1336,40 @@ fn a_satisfying_member_pack_is_rechecked_at_the_advance() {
             .public_message(),
         "open closure"
     );
+}
+
+#[test]
+fn a_crash_cannot_lose_a_satisfying_member_pack() {
+    let (pack, _, head, (tree, tree_raw)) = split_packs();
+    for fail_at in 1..40 {
+        let rig = Rig::new();
+        seed_member(&rig, tree, &tree_raw);
+        let (ticket, id) = rig.add(&pack);
+        rig.create(&ticket, id);
+        let faulty = Faulty {
+            inner: rig.store.clone(),
+            applies: AtomicU32::new(0),
+            fail_at: AtomicU32::new(fail_at),
+        };
+        rig.drive_on(&faulty, |rig| rig.finished(&ticket.pack_id));
+        let job = rig.job(&ticket.pack_id).unwrap();
+        assert_eq!(job.satisfying.len(), 1, "crash at apply {fail_at}");
+        block_on(rig.store.apply(
+            &rig.source(),
+            Batch::new().delete(keys::membership(&rig.repo.name, &job.satisfying[0])),
+        ))
+        .unwrap();
+        assert_eq!(
+            rig.check(&[(&ticket, id)], head)
+                .unwrap_err()
+                .public_message(),
+            "repository membership not yet visible",
+            "crash at apply {fail_at} must retain the membership dependency"
+        );
+        if faulty.applies.load(Ordering::SeqCst) < fail_at {
+            break;
+        }
+    }
 }
 
 #[test]
@@ -1746,4 +1853,113 @@ fn the_advance_hands_the_fast_forward_check_the_staged_history_edges_up_to_the_w
         IndexedConfig::scheduled(1 << 30).max_ancestry_commits,
         super::SCHEDULED_MAX_ANCESTRY_COMMITS
     );
+}
+
+#[test]
+fn scheduled_history_stages_at_most_sixty_four_commits() {
+    let tree = Object::Tree(Tree {
+        entries: Vec::new(),
+    });
+    let tree_id = tree.id().unwrap();
+    let mut writer = PackWriter::new_raw_only();
+    writer
+        .push_raw(tree_id, &serialize(&tree).unwrap())
+        .unwrap();
+    let mut chain = Vec::new();
+    for n in 0..66_u8 {
+        let (commit, id) = signed_commit(
+            tree_id,
+            chain.last().copied().into_iter().collect(),
+            7,
+            &[n],
+        );
+        writer.push_raw(id, &serialize(&commit).unwrap()).unwrap();
+        chain.push(id);
+    }
+    let pack = writer.finish().unwrap();
+    let rig = Rig::new();
+    let (ticket, id) = rig.add(&pack);
+    rig.create(&ticket, id);
+    rig.drive(|rig| rig.finished(&ticket.pack_id));
+    let staged = rig.check(&[(&ticket, id)], chain[65]).unwrap();
+    assert_eq!(staged.parents.len(), 64);
+    assert!(!staged.parents.contains_key(&chain[1]));
+    assert!(staged.parents.contains_key(&chain[2]));
+}
+
+#[test]
+fn distinct_member_locations_of_one_base_are_each_charged() {
+    let (base, base_raw) = blob(1, 3_000);
+    let (middle, middle_raw) = blob(2, 3_000);
+    let mut writer = PackWriter::new();
+    writer.push_raw(base, &base_raw).unwrap();
+    writer
+        .push_delta(
+            &base,
+            &mkit_core::delta::encode(&base_raw, &middle_raw).unwrap(),
+        )
+        .unwrap();
+    let member_chain = writer.finish().unwrap();
+    let member_raw = (0..4_096)
+        .find_map(|salt| {
+            let (padding, raw) = blob(salt, 10);
+            let mut writer = PackWriter::new_raw_only();
+            writer.push_raw(base, &base_raw).unwrap();
+            writer.push_raw(padding, &raw).unwrap();
+            let bytes = writer.finish().unwrap();
+            (hash(&bytes) < hash(&member_chain)).then_some(bytes)
+        })
+        .unwrap();
+    let mut writer = PackWriter::new();
+    for (id, source, salt) in [(base, &base_raw, 3), (middle, &middle_raw, 4)] {
+        let (_, target) = blob(salt, 3_000);
+        writer
+            .push_delta(&id, &mkit_core::delta::encode(source, &target).unwrap())
+            .unwrap();
+    }
+    let consumed = writer.finish().unwrap();
+    for max_entries in [1, 4096] {
+        let mut rig = Rig::new();
+        rig.limits.max_entries = max_entries;
+        for pack in [&member_raw, &member_chain] {
+            let (ticket, _) = rig.add(pack);
+            let mut frames = Vec::new();
+            decode_entries_with(
+                pack,
+                &mut NoExternalBases,
+                DecodeLimits::default(),
+                |entry| {
+                    frames.push(FrameMeta {
+                        id: entry.id,
+                        frame_offset: entry.frame_offset,
+                        frame_length: entry.frame_length,
+                        wire_type: entry.wire_type,
+                        delta_base: entry.delta_base,
+                        decoded_size: entry.bytes.len() as u64,
+                    });
+                    Ok(())
+                },
+            )
+            .unwrap();
+            let mut batch = Batch::new().put(
+                keys::membership(&rig.repo.name, &ticket.pack_id),
+                Value::default(),
+            );
+            for entry in index_entries(&frames, 50).unwrap() {
+                batch = batch.put(
+                    keys::object_index(&rig.repo.name, &entry.object, &ticket.pack_id),
+                    codec::encode_object_index(&entry.object, &entry.value).unwrap(),
+                );
+            }
+            block_on(rig.store.apply(&rig.source(), batch)).unwrap();
+        }
+        let (ticket, id) = rig.add(&consumed);
+        rig.create(&ticket, id);
+        rig.drive(|rig| rig.finished(&ticket.pack_id));
+        assert_eq!(
+            rig.job(&ticket.pack_id).unwrap().external_bytes,
+            (2 * base_raw.len() + middle_raw.len()) as u64,
+            "entry cap {max_entries}"
+        );
+    }
 }

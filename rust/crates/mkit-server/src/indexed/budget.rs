@@ -50,21 +50,14 @@ impl SliceBudget {
     /// # Errors
     /// `StoreError::Unavailable`: a spent budget is not a CAS race.
     pub fn charge(&self) -> Result<(), StoreError> {
-        let mut used = self.used.load(Ordering::SeqCst);
-        loop {
-            if used >= self.limit {
-                return Err(StoreError::Unavailable(
-                    "verification slice subrequest budget exhausted".into(),
-                ));
-            }
-            match self
-                .used
-                .compare_exchange(used, used + 1, Ordering::SeqCst, Ordering::SeqCst)
-            {
-                Ok(_) => return Ok(()),
-                Err(seen) => used = seen,
-            }
-        }
+        self.used
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
+                (used < self.limit).then(|| used + 1)
+            })
+            .map(|_| ())
+            .map_err(|_| {
+                StoreError::Unavailable("verification slice subrequest budget exhausted".into())
+            })
     }
 }
 
@@ -143,22 +136,8 @@ impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
     }
 }
 
-/// A blob store whose reads are charged units (member frame reads).
-#[derive(Debug)]
-pub struct BudgetedBlobs<'a, B> {
-    inner: &'a B,
-    budget: &'a SliceBudget,
-}
-
-impl<'a, B> BudgetedBlobs<'a, B> {
-    /// `inner` charging `budget`.
-    #[must_use]
-    pub fn new(inner: &'a B, budget: &'a SliceBudget) -> Self {
-        Self { inner, budget }
-    }
-}
-
-impl<B: BlobStore> BlobStore for BudgetedBlobs<'_, B> {
+/// Blob reads use the same counter as namespace calls.
+impl<B: BlobStore> BlobStore for Budgeted<'_, B> {
     type Sink = B::Sink;
 
     async fn begin(&self, key: BlobKey, len: u64) -> Result<Self::Sink, StoreError> {

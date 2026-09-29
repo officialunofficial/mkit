@@ -17,9 +17,7 @@
 
 use super::{
     IndexedConfig,
-    budget::{
-        Budgeted, BudgetedBlobs, PackWindows, SliceBudget, Window, WindowError, is_exhausted,
-    },
+    budget::{Budgeted, PackWindows, SliceBudget, Window, WindowError, is_exhausted},
     checkpoint::{
         self, BaseRow, FrameRow, Kind, Outcome, Phase, VerifyJobV1, WINDOW_BYTES, decode_base,
         decode_frame, encode_base, encode_frame, encode_job, parse_reference,
@@ -201,7 +199,7 @@ where
             };
             let budget = SliceBudget::new(self.limits.max_subrequests);
             let remote = Budgeted::new(&self.remote, &budget);
-            let blobs = BudgetedBlobs::new(&self.blobs, &budget);
+            let blobs = Budgeted::new(&self.blobs, &budget);
             let run = Run {
                 h: self,
                 local: ctx.store,
@@ -285,8 +283,9 @@ struct SliceState {
     visiting: BTreeSet<(Hash, Hash, u64)>,
     frames: BTreeMap<Hash, FrameRow>,
     bases: BTreeMap<Hash, u32>,
-    charged: BTreeSet<Hash>,
+    charged: BTreeSet<(Hash, Hash, u64)>,
     writes: Vec<Write>,
+    settled: Vec<Write>,
     entry_idx: u64,
 }
 
@@ -298,7 +297,7 @@ struct Run<'a, S, R, B, W, X> {
     pack: Hash,
     budget: &'a SliceBudget,
     remote: &'a Budgeted<'a, R>,
-    blobs: &'a BudgetedBlobs<'a, B>,
+    blobs: &'a Budgeted<'a, B>,
     now: u64,
 }
 
@@ -314,6 +313,19 @@ where
     W: PackWindows,
     X: SliceExtension,
 {
+    /// Reserve two window buffers, the LRU, and eight entry-sized scratch
+    /// regions for carries, decoding, object parsing and retained member bases.
+    fn decode_limits(&self) -> DecodeLimits {
+        let limits = self.h.limits;
+        DecodeLimits::default().with_max_decoded_bytes(
+            limits
+                .resident_bytes
+                .saturating_sub(limits.window_bytes.saturating_mul(2))
+                .saturating_sub(CACHE_BYTES)
+                / 8,
+        )
+    }
+
     fn deadline(&self) -> u64 {
         now_ms(self.h.clock.as_ref()).saturating_add(10_000)
     }
@@ -351,7 +363,7 @@ where
         let (job, state) =
             checkpoint::read_job(self.local, self.source, &self.repo.name, &self.pack).await?;
         let Some((mut job, mut raw)) = job else {
-            return self.cleanup(timer).await;
+            return self.cleanup(timer, None, None).await;
         };
         let ticket = match self
             .local
@@ -359,7 +371,7 @@ where
             .await?
         {
             Some(value) => decode_ticket(&value)?,
-            None => return self.cleanup(timer).await,
+            None => return self.cleanup(timer, Some(raw), Some(job.ticket_id)).await,
         };
         if job.phase == Phase::Watch {
             return Ok(self.watch(timer, job, raw, state.is_none(), &ticket));
@@ -393,7 +405,6 @@ where
                 .step(&mut st, &mut job, state.as_ref(), &mut held)
                 .await;
         }
-        let mut guards = Vec::new();
         let delay = match result {
             Ok(delay) => delay,
             Err(Stop::Store(error)) => {
@@ -420,27 +431,25 @@ where
                 0
             }
             Err(Stop::Reject(message)) => {
-                self.reject(&job, state.as_ref(), held.as_ref(), message)
-                    .await?;
+                held = Some(self.reject(state.as_ref(), held.as_ref(), message).await?);
                 job.phase = Phase::Watch;
                 0
             }
         };
         // A slice that ended by itself is not a killed one.
         job.attempts = 0;
-        if let Some(pending) = &held {
-            guards.push(Precondition::Equals(
-                keys::verification(&self.repo.name, &self.pack),
-                pending.clone(),
-            ));
-        }
         self.flush(&mut st).await?;
         let mut batch = Batch::new()
             .require(Precondition::NotAfter(self.deadline()))
             .require(Precondition::Equals(self.job_key(), raw));
-        for guard in guards {
-            batch = batch.require(guard);
-        }
+        let vs = keys::verification(&self.repo.name, &self.pack);
+        batch = batch.require(match held.or_else(|| state.map(|(_, raw)| raw)) {
+            Some(raw) => Precondition::Equals(vs, raw),
+            None => Precondition::Absent(vs),
+        });
+        // Closure deletions and the satisfying-pack list commit together.
+        // A crash cannot discard the row before recording its dependency.
+        batch.writes.extend(st.settled);
         Ok(self.reschedule(timer, delay, batch.put(self.job_key(), encode_job(&job))))
     }
 
@@ -512,27 +521,31 @@ where
 
     async fn reject(
         &self,
-        job: &VerifyJobV1,
         state: Option<&(VerificationV1, Value)>,
         held: Option<&Value>,
         message: &'static str,
-    ) -> Result<(), StoreError> {
-        let prior = held.or_else(|| state.map(|(_, raw)| raw));
+    ) -> Result<Value, StoreError> {
+        if matches!(state, Some((VerificationV1::Verified { .. }, _))) {
+            return Err(StoreError::Unavailable(
+                "verified pack content unavailable".into(),
+            ));
+        }
+        let rejected = VerificationV1::Rejected {
+            code: "invalid_argument".into(),
+            message: message.into(),
+        };
         let written = state::write(
             self.local,
             self.source,
             &self.repo.name,
             &self.pack,
-            prior,
-            &VerificationV1::Rejected {
-                code: "invalid_argument".into(),
-                message: message.into(),
-            },
+            held.or_else(|| state.map(|(_, raw)| raw)),
+            &rejected,
             self.deadline(),
         )
         .await?;
         if !written {
-            tracing::error!(pack = %mkit_core::hash::to_hex(&job.ticket_id), "failed to persist rejected verification state");
+            tracing::error!(pack = %mkit_core::hash::to_hex(&self.pack), "failed to persist rejected verification state");
             self.h
                 .metrics
                 .incr(crate::telemetry::METRIC_INDEX_REJECTED_WRITE_FAILED, &[], 1);
@@ -540,7 +553,7 @@ where
                 "rejected state not persisted".into(),
             ));
         }
-        Ok(())
+        Ok(state::encode(&rejected))
     }
 
     /// Write out buffered idempotent rows.
@@ -563,7 +576,12 @@ where
     /// Delete a finished or abandoned job's rows, then `vs` unless the pack
     /// became a member (kind-2 self-cleaning, R-148). Local rows only, so
     /// several pages fit one fire.
-    async fn cleanup(&self, timer: &DueTimer) -> Result<Fired, StoreError> {
+    async fn cleanup(
+        &self,
+        timer: &DueTimer,
+        mut job: Option<Value>,
+        ticket: Option<Hash>,
+    ) -> Result<Fired, StoreError> {
         let (start, end) = keys::verify_range(&self.repo.name, &self.pack, None);
         for _ in 0..CLEANUP_ROUNDS {
             let page = self
@@ -571,6 +589,13 @@ where
                 .scan(self.source, &start, &end, None, CLEANUP_PAGE)
                 .await?;
             let mut batch = Batch::new().require(Precondition::NotAfter(self.deadline()));
+            batch = batch.require(match job.as_ref() {
+                Some(raw) => Precondition::Equals(self.job_key(), raw.clone()),
+                None => Precondition::Absent(self.job_key()),
+            });
+            if let Some(id) = ticket {
+                batch = batch.require(Precondition::Absent(keys::ticket(&id)));
+            }
             for (key, _) in &page.entries {
                 batch = batch.delete(key.clone());
             }
@@ -582,6 +607,10 @@ where
                 let key = keys::verification(&self.repo.name, &self.pack);
                 if !member && let Some(raw) = self.local.get(self.source, &key).await? {
                     batch = batch
+                        .require(Precondition::Absent(keys::membership(
+                            &self.repo.name,
+                            &self.pack,
+                        )))
                         .require(Precondition::Equals(key.clone(), raw))
                         .delete(key);
                 }
@@ -594,6 +623,9 @@ where
                 return Err(StoreError::Unavailable(
                     "verification cleanup contended".into(),
                 ));
+            }
+            if page.entries.iter().any(|(key, _)| *key == self.job_key()) {
+                job = None;
             }
         }
         Ok(self.reschedule(timer, 0, Batch::new()))
@@ -633,7 +665,7 @@ where
                 job.phase = Phase::Verify;
                 Ok(0)
             }
-            Phase::Verify => self.verify(job, state).await,
+            Phase::Verify => self.verify(job, state, held).await,
             Phase::Recheck => self.recheck(st, job).await,
             Phase::Watch => Ok(WATCH_POLL_MS),
         }
@@ -749,8 +781,7 @@ where
                 Err(_) => return Err(Stop::Reject("unknown upload type")),
             }
         }
-        let limits = DecodeLimits::default()
-            .with_max_decoded_bytes(self.h.limits.resident_bytes.saturating_sub(window_bytes));
+        let limits = self.decode_limits();
         let mut reader = if job.cursor.is_empty() {
             WindowReader::new(job.pack_len, window_bytes, limits, Some(self.pack))
         } else {
@@ -856,6 +887,7 @@ where
     ) -> Result<(), Stop> {
         let cap = self.h.cfg.max_delta_chain_depth;
         st.entry_idx = job.entries;
+        st.memo = MemberCache::default();
         let base = match &entry {
             PackEntry::Delta { base, .. } => Some(*base),
             PackEntry::Raw { .. } => None,
@@ -882,12 +914,7 @@ where
         {
             return Err(Stop::Outcome(Outcome::ExternalTooDeep));
         }
-        let limits = DecodeLimits::default().with_max_decoded_bytes(
-            self.h
-                .limits
-                .resident_bytes
-                .saturating_sub(self.h.limits.window_bytes),
-        );
+        let limits = self.decode_limits();
         let (id, bytes) =
             decode_entry_with(entry, &mut CacheBases(&st.cache), limits).map_err(|e| {
                 if matches!(e, PackError::PackfileTooLarge) {
@@ -939,6 +966,9 @@ where
                     self.row(keys::VC_CHILD, &child),
                     Value::default(),
                 ));
+                if st.writes.len() >= WRITE_BATCH {
+                    self.flush(st).await?;
+                }
             }
             if verify_object_signature(&object).is_err() {
                 job.bad_signature = true;
@@ -951,9 +981,6 @@ where
             st.cache.insert(id, Arc::from(bytes));
         }
         job.entries += 1;
-        if st.writes.len() >= WRITE_BATCH {
-            self.flush(st).await?;
-        }
         Ok(())
     }
 
@@ -983,12 +1010,7 @@ where
                     let window = self
                         .read(job, row.value.frame_offset, row.value.frame_length)
                         .await?;
-                    let limits = DecodeLimits::default().with_max_decoded_bytes(
-                        self.h
-                            .limits
-                            .resident_bytes
-                            .saturating_sub(self.h.limits.window_bytes),
-                    );
+                    let limits = self.decode_limits();
                     let (id, bytes) = decode_frame_with(
                         &window.bytes,
                         job.version,
@@ -1046,12 +1068,7 @@ where
         // The memory bound of the retained members. The decode budget itself
         // is charged per distinct base by `charge_bases`, from persisted rows,
         // so it does not depend on what earlier slices retained.
-        let memo_budget = self
-            .h
-            .limits
-            .resident_bytes
-            .saturating_sub(self.h.limits.window_bytes)
-            .saturating_sub(CACHE_BYTES);
+        let memo_budget = self.decode_limits().max_decoded_bytes;
         let (canonical, _) = resolve::member_object(
             self.blobs,
             self.remote,
@@ -1086,14 +1103,23 @@ where
         let fresh: Vec<_> = st
             .memo
             .rows()
-            .filter(|((id, ..), _)| !st.charged.contains(id))
-            .map(|((id, ..), (bytes, depth))| (*id, bytes.len() as u64, *depth))
+            .filter(|(location, _)| !st.charged.contains(*location))
+            .map(|(location, (bytes, depth))| (*location, bytes.len() as u64, *depth))
             .collect();
-        for (id, size, depth) in fresh {
-            st.charged.insert(id);
+        for ((id, pack, offset), size, depth) in fresh {
+            st.charged.insert((id, pack, offset));
+            let location = mkit_core::hash::domain_digest(
+                b"mkit:vc-base:v1\0",
+                &[
+                    id.as_slice(),
+                    pack.as_slice(),
+                    offset.to_be_bytes().as_slice(),
+                ]
+                .concat(),
+            );
             let prior = match self
                 .local
-                .get(self.source, &self.row(keys::VC_BASE, &id))
+                .get(self.source, &self.row(keys::VC_BASE, &location))
                 .await?
             {
                 Some(value) => Some(decode_base(&value)?),
@@ -1102,7 +1128,7 @@ where
             if prior.is_none_or(|row| row.entry == st.entry_idx) {
                 job.external_bytes = job.external_bytes.saturating_add(size);
                 st.writes.push(Write::Put(
-                    self.row(keys::VC_BASE, &id),
+                    self.row(keys::VC_BASE, &location),
                     encode_base(&BaseRow {
                         size,
                         depth,
@@ -1113,6 +1139,16 @@ where
             } else if let Some(row) = prior {
                 st.bases.insert(id, row.depth);
             }
+            // Object-keyed zero-size rows carry depth; location-keyed rows
+            // charge bytes. Equal bytes at different locations count twice.
+            st.writes.push(Write::Put(
+                self.row(keys::VC_BASE, &id),
+                encode_base(&BaseRow {
+                    size: 0,
+                    depth,
+                    entry: st.entry_idx,
+                }),
+            ));
         }
         if job.in_pack_bytes.saturating_add(job.external_bytes) > self.h.cfg.decode_budget {
             return Err(Stop::Outcome(Outcome::DecodeBudget));
@@ -1128,7 +1164,9 @@ where
     async fn closure(&self, st: &mut SliceState, job: &mut VerifyJobV1) -> Result<bool, Stop> {
         let (start, end) = keys::verify_range(&self.repo.name, &self.pack, Some(keys::VC_CHILD));
         for _ in 0..4 {
-            if self.budget.remaining() < ENTRY_RESERVE {
+            if self.budget.remaining() < ENTRY_RESERVE
+                || st.settled.len() + CLOSURE_CHUNK as usize > WRITE_BATCH
+            {
                 return Ok(false);
             }
             let cursor = (!job.scan.is_empty()).then(|| Cursor::new(job.scan.clone()));
@@ -1153,7 +1191,7 @@ where
                 let mut wanted = Vec::new();
                 for (id, row) in ids.iter().zip(present) {
                     if row.is_some() {
-                        st.writes.push(Write::Delete(self.row(keys::VC_CHILD, id)));
+                        st.settled.push(Write::Delete(self.row(keys::VC_CHILD, id)));
                     } else {
                         wanted.push(*id);
                     }
@@ -1177,14 +1215,14 @@ where
                                     }
                                     job.satisfying.push(located.pack);
                                 }
-                                st.writes.push(Write::Delete(self.row(keys::VC_CHILD, &id)));
+                                st.settled
+                                    .push(Write::Delete(self.row(keys::VC_CHILD, &id)));
                             }
                             Some(Err(_)) => return Err(Stop::Outcome(Outcome::ClosureCapped)),
                             _ => job.owed += 1,
                         }
                     }
                 }
-                self.flush(st).await?;
             }
             let Some(next) = page.next else {
                 job.scan.clear();
@@ -1294,6 +1332,7 @@ where
         &self,
         job: &mut VerifyJobV1,
         state: Option<&(VerificationV1, Value)>,
+        held: &mut Option<Value>,
     ) -> Result<u64, Stop> {
         let now = now_ms(self.h.clock.as_ref());
         match state {
@@ -1326,6 +1365,7 @@ where
                 {
                     return Err(unavailable("verification state contended"));
                 }
+                *held = Some(state::encode(&verified));
             }
         }
         if job.kind == Kind::Pack && job.owed > 0 {

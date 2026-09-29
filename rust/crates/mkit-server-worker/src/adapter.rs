@@ -269,7 +269,12 @@ impl WorkerConfig {
         config.single_upload_max_bytes = Some(SINGLE_PUT_MAX_BYTES);
         config.sharding = self.sharding;
         config.ticket_keys.clone_from(&self.ticket_keys);
-        config.indexed = self.indexed;
+        config.indexed = self.indexed.map(|mut indexed| {
+            indexed.max_ancestry_commits = indexed
+                .max_ancestry_commits
+                .min(mkit_server::indexed::SCHEDULED_MAX_ANCESTRY_COMMITS);
+            indexed
+        });
         if let Some(hooks) = &self.hooks {
             config.authorizer_role = hooks.authorizer_role;
         }
@@ -2941,6 +2946,18 @@ mod tests {
         assert!(indexed.max_pack_bytes <= indexed.decode_budget);
         assert_eq!(indexed.max_pack_bytes, config.max_pack_bytes);
         assert_eq!(config.pipeline_config().unwrap().indexed, Some(indexed));
+        assert_eq!(indexed.max_ancestry_commits, 64);
+        let mut enlarged = config.clone();
+        enlarged.indexed.as_mut().unwrap().max_ancestry_commits = 256;
+        assert_eq!(
+            enlarged
+                .pipeline_config()
+                .unwrap()
+                .indexed
+                .unwrap()
+                .max_ancestry_commits,
+            64
+        );
         // Free (or an unset plan) cannot run it: every subrequest is assigned.
         for plan in [Some("free"), None] {
             let extra: Vec<(&str, &str)> = plan.map(|plan| (PLAN_VAR, plan)).into_iter().collect();

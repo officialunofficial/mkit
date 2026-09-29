@@ -140,6 +140,35 @@ impl<B: BlobStore, S: NamespaceStore> Walk<'_, B, S> {
         staged: &StagedCommits,
         created_ms: u64,
     ) -> Result<Verdict, ServerError> {
+        if self.cfg.verification == crate::indexed::VerificationMode::Scheduled {
+            use crate::indexed::budget::{Budgeted, SliceBudget};
+            let budget = SliceBudget::new(256);
+            let walk = Walk {
+                blobs: &Budgeted::new(self.blobs, &budget),
+                store: &Budgeted::new(self.store, &budget),
+                shards: self.shards,
+                repo: self.repo,
+                cfg: self.cfg,
+                clock: self.clock,
+                metrics: self.metrics,
+            };
+            let result = walk.walk(to, from, staged, created_ms).await;
+            return if result.is_err() && budget.remaining() == 0 {
+                Ok(self.unchecked("subrequests"))
+            } else {
+                result
+            };
+        }
+        self.walk(to, from, staged, created_ms).await
+    }
+
+    async fn walk(
+        &self,
+        to: Hash,
+        from: Hash,
+        staged: &StagedCommits,
+        created_ms: u64,
+    ) -> Result<Verdict, ServerError> {
         if to == from {
             return Ok(Verdict::Descendant);
         }

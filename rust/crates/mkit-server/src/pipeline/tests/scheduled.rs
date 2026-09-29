@@ -87,10 +87,7 @@ impl<T: BlobStore> BlobStore for Ref<'_, T> {
 }
 
 fn scheduled() -> IndexedConfig {
-    IndexedConfig {
-        verification: VerificationMode::Scheduled,
-        ..IndexedConfig::default()
-    }
+    IndexedConfig::scheduled(1 << 30)
 }
 
 /// The alarms of `source`'s Durable Object until nothing verification-related is due.
@@ -100,7 +97,7 @@ fn alarms(env: &Env, source: &Partition, rounds: u32) {
         blobs: Ref(&env.pipe.blobs),
         windows: BlobWindows(&env.pipe.blobs),
         shards: env.pipe.shards.clone(),
-        cfg: scheduled(),
+        cfg: env.pipe.cfg.indexed.unwrap(),
         limits: SliceLimits {
             window_bytes: 64 << 10,
             ..SliceLimits::default()
@@ -439,5 +436,116 @@ fn fast_forward_only_works_over_scheduled_verification() {
             .unwrap()
             .map(|raw| codec::decode_ref_id(&raw).unwrap()),
         Some(id2)
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Upload, pending retry and ancestry denial share one fixture.
+fn update_only_grants_prove_scheduled_ancestry_after_verification() {
+    use mkit_attest::grant::RefScopes;
+    use mkit_core::object::{Object, Tree};
+    use mkit_core::pack::PackWriter;
+    use mkit_core::serialize::serialize;
+
+    let (mut env, owner, identity) = environment_with(Sharding::Single, scheduled());
+    env.pipe.cfg.grants = grants::config(&owner, AuthorizerRole::Check).grants;
+    let grantee = key(2);
+    let header = grants::grant(&owner, &grantee, |grant| {
+        grant.ref_scopes = Some(RefScopes::parse("refs/heads/main=u").unwrap());
+    });
+    let tree = Object::Tree(Tree {
+        entries: Vec::new(),
+    });
+    let (root, root_id) = history_commit(&[], 10);
+    let (child, child_id) = history_commit(&[root_id], 11);
+    let (fork, fork_id) = history_commit(&[root_id], 12);
+    let pack_of = |objects: &[&Object]| {
+        let mut writer = PackWriter::new_raw_only();
+        for object in objects {
+            writer
+                .push_raw(object.id().unwrap(), &serialize(object).unwrap())
+                .unwrap();
+        }
+        writer.finish().unwrap()
+    };
+    let first = pack_of(&[&tree, &root]);
+    let ticket = begin_and_upload(&env, &owner, &identity, &first, 400);
+    let request = signed(&owner, &identity, Procedure::AdvanceRefs, 401);
+    let repo = env.auth(&request).unwrap().repo().repo.clone();
+    let source = env.pipe.shards.ref_shard(&repo, HEAD);
+    assert_eq!(
+        advance(
+            &env,
+            &owner,
+            &identity,
+            401,
+            root_id,
+            hash(&first),
+            vec![ticket]
+        )
+        .unwrap_err()
+        .public_message(),
+        "pack verification pending"
+    );
+    alarms(&env, &source, 12);
+    advance(
+        &env,
+        &owner,
+        &identity,
+        401,
+        root_id,
+        hash(&first),
+        vec![ticket],
+    )
+    .unwrap();
+    let mut current = root_id;
+    let mut map = hash(&first);
+    for (number, object, head, denied) in
+        [(410, &child, child_id, false), (420, &fork, fork_id, true)]
+    {
+        let bytes = pack_of(&[object]);
+        let request = signed(&grantee, &identity, Procedure::BeginUpload, number)
+            .header("x-write-grant", &header);
+        let BeginUploadResult::Ticket { id, .. } = block_on(env.pipe.begin_upload(
+            &env.auth(&request).unwrap(),
+            HEAD,
+            &hash(&bytes),
+            bytes.len() as u64,
+        ))
+        .unwrap() else {
+            panic!("expected upload ticket")
+        };
+        super::indexed::upload(&env, &bytes, id);
+        let request = signed(&grantee, &identity, Procedure::AdvanceRefs, number + 1)
+            .header("x-write-grant", &header);
+        let attempt = || {
+            block_on(env.pipe.advance_refs_with_tickets(
+                &env.auth(&request).unwrap(),
+                upd(HEAD, Match(current), head),
+                upd(PACKMAP, Match(map), hash(&bytes)),
+                vec![id],
+            ))
+        };
+        assert_eq!(
+            attempt().unwrap_err().public_message(),
+            "pack verification pending"
+        );
+        alarms(&env, &source, 12);
+        if denied {
+            assert_eq!(
+                attempt().unwrap_err().public_message(),
+                "write grant rejected: ref scope"
+            );
+        } else {
+            assert_eq!(attempt().unwrap(), AdvanceOutcome::Committed);
+            current = head;
+            map = hash(&bytes);
+        }
+    }
+    assert_eq!(
+        block_on(env.pipe.meta.get(&source, &keys::ref_key(&repo.name, HEAD)))
+            .unwrap()
+            .map(|raw| codec::decode_ref_id(&raw).unwrap()),
+        Some(child_id)
     );
 }

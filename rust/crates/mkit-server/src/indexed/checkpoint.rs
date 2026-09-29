@@ -2,8 +2,9 @@
 //!
 //! One job per (repository, pack) lives in the consuming ref shard. Every row
 //! of a job sits under one prefix, so cleanup is a single range. Frame, child
-//! and base rows are pure functions of the pack, written idempotently ahead of
-//! the guarded job row that commits a slice, so a crash only replays them.
+//! and base rows are written idempotently ahead of the guarded job row that
+//! commits a slice. Settled children are deleted with that checkpoint, so a
+//! crash cannot discard the satisfying-pack dependency.
 
 use super::state::VerificationV1;
 use crate::repo::RepoName;
@@ -16,46 +17,13 @@ use crate::{NamespaceStore, Partition, StoreError, Value};
 use mkit_core::hash::Hash;
 use serde::{Deserialize, Serialize};
 
-/// Bytes read from R2 per slice: one window of the resumable decoder.
+/// New progress per slice: one window, plus the current window on resume.
 pub const WINDOW_BYTES: u64 = 16 << 20;
 /// Entries one slice decodes before its next checkpoint, at most.
 pub const DEFAULT_ENTRY_CAP: u32 = 4096;
 
-/// Serde adapters: hashes and cursor bytes are hex strings.
+/// Cursor bytes are hex strings; hashes use strict fixed-size JSON arrays.
 mod hex {
-    pub(super) mod one {
-        use mkit_core::hash::{Hash, from_hex, to_hex};
-        use serde::{Deserialize, Deserializer, Serialize, Serializer};
-        pub(in super::super) fn serialize<S: Serializer>(
-            hash: &Hash,
-            s: S,
-        ) -> Result<S::Ok, S::Error> {
-            to_hex(hash).serialize(s)
-        }
-        pub(in super::super) fn deserialize<'de, D: Deserializer<'de>>(
-            d: D,
-        ) -> Result<Hash, D::Error> {
-            from_hex(&String::deserialize(d)?).map_err(serde::de::Error::custom)
-        }
-    }
-    pub(super) mod many {
-        use mkit_core::hash::{Hash, from_hex, to_hex};
-        use serde::{Deserialize, Deserializer, Serialize, Serializer};
-        pub(in super::super) fn serialize<S: Serializer>(
-            hashes: &[Hash],
-            s: S,
-        ) -> Result<S::Ok, S::Error> {
-            hashes.iter().map(to_hex).collect::<Vec<_>>().serialize(s)
-        }
-        pub(in super::super) fn deserialize<'de, D: Deserializer<'de>>(
-            d: D,
-        ) -> Result<Vec<Hash>, D::Error> {
-            Vec::<String>::deserialize(d)?
-                .iter()
-                .map(|s| from_hex(s).map_err(serde::de::Error::custom))
-                .collect()
-        }
-    }
     pub(super) mod bytes {
         use serde::{Deserialize, Deserializer, Serialize, Serializer};
         pub(in super::super) fn serialize<S: Serializer>(
@@ -81,10 +49,11 @@ mod hex {
 
 /// Where a job is. `Recheck` and `Watch` follow `Verified`: the pack is
 /// usable by an advance from `Recheck` on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
     /// Window-by-window decode, hashing, signatures and frame rows.
+    #[default]
     Decode,
     /// Owed closure children looked up in the repository's members.
     ClosureResolve,
@@ -103,10 +72,11 @@ pub enum Phase {
 }
 
 /// What kind of upload a job verifies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     /// The first window is not read yet.
+    #[default]
     Unknown,
     /// An MKIT pack.
     Pack,
@@ -134,11 +104,10 @@ pub enum Outcome {
 }
 
 /// The persisted state of one job, guarded by `vc` sub-class 0.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VerifyJobV1 {
     /// The ticket this job serves; the job lives while that ticket does.
-    #[serde(with = "hex::one")]
     pub ticket_id: Hash,
     /// That ticket's creation time: the start of the membership lag window.
     pub created_at_ms: u64,
@@ -181,14 +150,12 @@ pub struct VerifyJobV1 {
     /// Whether the current closure pass is the final recheck.
     pub final_pass: bool,
     /// Distinct member packs that satisfied a child.
-    #[serde(with = "hex::many")]
     pub satisfying: Vec<Hash>,
     /// The last relay sequence this job enqueued.
     pub last_relay_seq: Option<u64>,
     /// When the final closure recheck finished.
     pub closure_final_at_ms: Option<u64>,
     /// The packs a packlist names.
-    #[serde(with = "hex::many")]
     pub packlist: Vec<Hash>,
     /// A terminal non-persisted result.
     pub outcome: Option<Outcome>,
@@ -202,28 +169,8 @@ impl VerifyJobV1 {
             ticket_id,
             created_at_ms,
             pack_len,
-            phase: Phase::Decode,
-            kind: Kind::Unknown,
-            version: 0,
-            cursor: Vec::new(),
-            etag: None,
-            entries: 0,
-            in_pack_bytes: 0,
-            external_bytes: 0,
-            windows_done: 0,
-            attempts: 0,
             entry_cap,
-            restarts: 0,
-            bad_signature: false,
-            extract_needed: false,
-            scan: Vec::new(),
-            owed: 0,
-            final_pass: false,
-            satisfying: Vec::new(),
-            last_relay_seq: None,
-            closure_final_at_ms: None,
-            packlist: Vec::new(),
-            outcome: None,
+            ..Self::default()
         }
     }
 
@@ -313,8 +260,8 @@ pub fn decode_frame(id: &Hash, value: &Value) -> Result<FrameRow, StoreError> {
     })
 }
 
-/// A charged external base: decoded size, chain depth and the entry that
-/// first needed it, so a replayed entry is charged exactly once.
+/// An external base row: location-keyed rows charge size once using the first
+/// entry marker; object-keyed zero-size rows retain the base's chain depth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BaseRow {
     /// Decoded size of the base object.

@@ -33,7 +33,7 @@ use crate::telemetry::Metrics;
 use crate::timers::registry::kinds;
 use mkit_core::hash::Hash;
 use mkit_core::object::ObjectType;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Owed children one advance reads per consumed pack before it gives up.
 const MAX_LOCAL_CLOSURE_IDS: usize = 4096;
@@ -42,13 +42,11 @@ const LOCAL_PAGE: u32 = 256;
 /// Owed children the advance looks up in the members itself, at most: the
 /// slices already did, so this only catches a member that appeared since.
 const MAX_ADVANCE_LOOKUP: usize = 64;
+/// Leaves 256 calls for Scheduled ancestry and 144 for the other stages.
+const ADVANCE_CALLS: u32 = 600;
 
 fn storage_failed() -> ServerError {
     ServerError::unavailable("object storage request failed")
-}
-
-fn now_ms(clock: &dyn Clock) -> u64 {
-    u64::try_from(clock.now_ms()).unwrap_or(0)
 }
 
 /// The retry hint of a pending answer: the windows a job still has to read,
@@ -95,6 +93,7 @@ fn outcome_error(outcome: Outcome, now: u64, ticket: &TicketV1, bound: u64) -> S
 
 /// Create the job of `ticket` and its first timer in one batch. Losing the
 /// race to another advance is success: the job exists.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_job<N: NamespaceStore>(
     store: &N,
     source: &Partition,
@@ -102,8 +101,9 @@ pub async fn create_job<N: NamespaceStore>(
     ticket: &TicketV1,
     ticket_id: Hash,
     clock: &dyn Clock,
+    prior: Option<Value>,
 ) -> Result<(), ServerError> {
-    let now = now_ms(clock);
+    let now = u64::try_from(clock.now_ms()).unwrap_or(0);
     let job = VerifyJobV1::new(
         ticket_id,
         ticket.created_at_ms,
@@ -113,7 +113,10 @@ pub async fn create_job<N: NamespaceStore>(
     let key = keys::verify_job(&repo.name, &ticket.pack_id);
     let batch = Batch::new()
         .require(Precondition::NotAfter(now.saturating_add(10_000)))
-        .require(Precondition::Absent(key.clone()))
+        .require(match prior {
+            Some(raw) => Precondition::Equals(key.clone(), raw),
+            None => Precondition::Absent(key.clone()),
+        })
         .put(key, encode_job(&job))
         .put(
             keys::timer(
@@ -139,48 +142,6 @@ struct Consumed<'a> {
     job: VerifyJobV1,
 }
 
-/// The type tag of a member object, reconstructed from its member pack: a
-/// head that no consumed pack holds must still be a commit, remix or tag.
-#[allow(clippy::too_many_arguments)]
-async fn member_head_type<B: BlobStore, N: NamespaceStore>(
-    blobs: &B,
-    store: &N,
-    shards: &dyn ShardMap,
-    repo: &RepoId,
-    head: Hash,
-    cfg: IndexedConfig,
-    (now, created): (u64, u64),
-    metrics: &dyn Metrics,
-) -> Result<u8, ServerError> {
-    let bound = cfg.relay_lag_bound_ms;
-    let found = resolve::locate_split(store, shards, repo, &[head], metrics).await?;
-    let located = match found.get(&head) {
-        Some(Ok(Some(located))) => *located,
-        Some(Err(_)) => {
-            return Err(ServerError::invalid_argument("object index limit exceeded"));
-        }
-        _ => return Err(closure_error(now, created, bound)),
-    };
-    let (bytes, _) = resolve::member_object(
-        blobs,
-        store,
-        shards,
-        repo,
-        head,
-        located,
-        cfg.max_delta_chain_depth,
-        cfg.decode_budget,
-        &mut resolve::MemberCache::default(),
-        &mut BTreeSet::new(),
-        metrics,
-    )
-    .await
-    .map_err(|failure| failure.public_error(now, created, bound))?;
-    let object = mkit_core::serialize::deserialize(&bytes)
-        .map_err(|_| ServerError::invalid_argument("object hash mismatch"))?;
-    Ok(object.object_type() as u8)
-}
-
 /// The history edges the fast-forward check reads (WP-4.17), in the shape the
 /// inline verifier stages them: the parents of the commits reachable from
 /// `head` in the consumed packs, at most `max_ancestry_commits` of them. A
@@ -195,62 +156,47 @@ async fn staged_commits<N: NamespaceStore>(
     head: Hash,
     cfg: IndexedConfig,
 ) -> Result<StagedCommits, ServerError> {
-    let limit = usize::try_from(cfg.max_ancestry_commits).unwrap_or(usize::MAX);
-    let packs: Vec<&Consumed<'_>> = ready.iter().filter(|c| c.job.kind == Kind::Pack).collect();
-    let mut parents: BTreeMap<Hash, Vec<Hash>> = BTreeMap::new();
+    let limit = cfg
+        .max_ancestry_commits
+        .min(super::SCHEDULED_MAX_ANCESTRY_COMMITS) as usize;
+    let packs: Vec<_> = ready.iter().filter(|c| c.job.kind == Kind::Pack).collect();
+    let mut parents = BTreeMap::new();
     let mut seen = BTreeSet::from([head]);
-    let mut frontier = vec![head];
-    while !frontier.is_empty() && parents.len() < limit {
-        let mut round: BTreeMap<Hash, Vec<Hash>> = BTreeMap::new();
-        for held in &packs {
-            let want: Vec<Hash> = frontier
-                .iter()
-                .copied()
-                .filter(|id| !round.contains_key(id))
-                .collect();
-            if want.is_empty() {
-                break;
-            }
-            let rows: Vec<_> = want
-                .iter()
-                .map(|id| {
-                    keys::verify_row(&repo.name, &held.ticket.pack_id, keys::VC_HISTORY, Some(id))
-                })
-                .collect();
-            let found = store
-                .get_many(source, &rows)
-                .await
-                .map_err(|_| storage_failed())?;
-            for (id, row) in want.into_iter().zip(found) {
-                let Some(raw) = row else { continue };
-                if raw.as_bytes().len() % 32 != 0 {
-                    return Err(storage_failed());
-                }
-                round.insert(
-                    id,
-                    raw.as_bytes()
-                        .chunks_exact(32)
-                        .filter_map(|p| Hash::try_from(p).ok())
-                        .collect(),
-                );
-            }
+    let mut frontier = VecDeque::from([head]);
+    while let Some(id) = frontier.pop_front() {
+        if parents.len() >= limit {
+            break;
         }
-        let mut next = Vec::new();
-        for id in std::mem::take(&mut frontier) {
-            let Some(edges) = round.remove(&id) else {
+        for held in &packs {
+            let key = keys::verify_row(
+                &repo.name,
+                &held.ticket.pack_id,
+                keys::VC_HISTORY,
+                Some(&id),
+            );
+            let Some(raw) = store
+                .get(source, &key)
+                .await
+                .map_err(|_| storage_failed())?
+            else {
                 continue;
             };
-            if parents.len() >= limit {
-                break;
+            if raw.as_bytes().len() % 32 != 0 {
+                return Err(storage_failed());
             }
+            let edges: Vec<Hash> = raw
+                .as_bytes()
+                .chunks_exact(32)
+                .map(|p| p.try_into().unwrap_or_default())
+                .collect();
             for parent in &edges {
                 if seen.insert(*parent) {
-                    next.push(*parent);
+                    frontier.push_back(*parent);
                 }
             }
             parents.insert(id, edges);
+            break;
         }
-        frontier = next;
     }
     Ok(StagedCommits {
         parents,
@@ -282,7 +228,42 @@ pub async fn check<B: BlobStore, N: NamespaceStore>(
     clock: &dyn Clock,
     metrics: &dyn Metrics,
 ) -> Result<StagedCommits, ServerError> {
-    let now = now_ms(clock);
+    let budget = super::budget::SliceBudget::new(ADVANCE_CALLS);
+    let result = check_inner(
+        &super::budget::Budgeted::new(blobs, &budget),
+        &super::budget::Budgeted::new(store, &budget),
+        shards,
+        repo,
+        source,
+        tickets,
+        ticket_ids,
+        head,
+        cfg,
+        clock,
+        metrics,
+    )
+    .await;
+    if result.is_err() && budget.remaining() == 0 {
+        return Err(ServerError::invalid_argument("object index limit exceeded"));
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn check_inner<B: BlobStore, N: NamespaceStore>(
+    blobs: &B,
+    store: &N,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    source: &Partition,
+    tickets: &[TicketV1],
+    ticket_ids: &[Hash],
+    head: Hash,
+    cfg: IndexedConfig,
+    clock: &dyn Clock,
+    metrics: &dyn Metrics,
+) -> Result<StagedCommits, ServerError> {
+    let now = u64::try_from(clock.now_ms()).unwrap_or(0);
     let bound = cfg.relay_lag_bound_ms;
     let wanted: Vec<_> = tickets
         .iter()
@@ -317,22 +298,12 @@ pub async fn check<B: BlobStore, N: NamespaceStore>(
             return Err(stored_error(code, message));
         }
         let Some(job) = job else {
-            create_job(store, source, repo, ticket, *id, clock).await?;
+            create_job(store, source, repo, ticket, *id, clock, None).await?;
             pending = Some(pending.map_or(1_000, |p: u64| p.max(1_000)));
             continue;
         };
         if job.ticket_id != *id {
-            // Another ticket's job still holds this pack's rows. Its own
-            // timer removes them once that ticket is gone; kick it.
-            let batch = Batch::new().put(
-                keys::timer(
-                    now,
-                    kinds::VERIFY.get(),
-                    &timer_reference(&repo.name, &ticket.pack_id),
-                ),
-                Value::default(),
-            );
-            let _ = store.apply(source, batch).await;
+            create_job(store, source, repo, ticket, *id, clock, rows[2 * i].clone()).await?;
             pending = Some(pending.unwrap_or(0).max(retry_after(None)));
             continue;
         }
@@ -486,28 +457,25 @@ pub async fn check<B: BlobStore, N: NamespaceStore>(
             break;
         }
     }
-    let created = tickets.first().map_or(now, |t| t.created_at_ms);
-    let head_type = match head_type {
-        Some(kind) => kind,
+    let created = tickets.iter().map(|t| t.created_at_ms).min().unwrap_or(now);
+    match head_type {
+        Some(t)
+            if t == ObjectType::Commit as u8
+                || t == ObjectType::Remix as u8
+                || t == ObjectType::Tag as u8 => {}
+        Some(_) => return Err(ServerError::invalid_argument("open closure")),
         None => {
-            member_head_type(
+            super::verify::verify_member_head(
                 blobs,
                 store,
                 shards,
                 repo,
                 head,
-                cfg,
-                (now, created),
-                metrics,
+                created,
+                (cfg, clock, metrics),
             )
-            .await?
+            .await?;
         }
-    };
-    if !matches!(
-        head_type,
-        t if t == ObjectType::Commit as u8 || t == ObjectType::Remix as u8 || t == ObjectType::Tag as u8
-    ) {
-        return Err(ServerError::invalid_argument("open closure"));
     }
 
     // MKPL: every listed pack is consumed or a member.

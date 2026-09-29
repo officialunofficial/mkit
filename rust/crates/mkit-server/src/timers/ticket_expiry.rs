@@ -71,23 +71,32 @@ async fn verification_cleanup<S: NamespaceStore>(
             ],
         )
         .await?;
-    if let [member, state, job] = rows.as_slice() {
-        if let (None, Some(raw)) = (member, state) {
-            batch
-                .preconditions
-                .push(Precondition::Equals(vs_key.clone(), raw.clone()));
-            batch.writes.push(Write::Delete(vs_key));
-        }
-        if job.is_some() {
-            batch.writes.push(Write::Put(
-                keys::timer(
-                    ctx.now_ms,
-                    kinds::VERIFY.get(),
-                    &crate::indexed::checkpoint::timer_reference(&ticket.repo, &ticket.pack_id),
-                ),
-                crate::store::Value::default(),
-            ));
-        }
+    let [member, state, job] = rows.as_slice() else {
+        return Err(StoreError::Corrupt(
+            "short verification cleanup read".into(),
+        ));
+    };
+    if let (None, Some(raw)) = (member, state) {
+        batch
+            .preconditions
+            .push(Precondition::Equals(vs_key.clone(), raw.clone()));
+        batch
+            .preconditions
+            .push(Precondition::Absent(keys::membership(
+                &ticket.repo,
+                &ticket.pack_id,
+            )));
+        batch.writes.push(Write::Delete(vs_key));
+    }
+    if job.is_some() {
+        batch.writes.push(Write::Put(
+            keys::timer(
+                ctx.now_ms,
+                kinds::VERIFY.get(),
+                &crate::indexed::checkpoint::timer_reference(&ticket.repo, &ticket.pack_id),
+            ),
+            crate::store::Value::default(),
+        ));
     }
     Ok(())
 }
