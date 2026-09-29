@@ -26,6 +26,21 @@ store and poll loop; `mkit-cli/src/remote_dispatch/packmap.rs` current commit
 set; Connect client wire and CLI receipt-store tests; native FS end-to-end
 ticketed upload and resume tests.
 
+## Grant revocation fences every leased ref shard
+
+**Always:** a grant epoch change reports success only after every leased
+ref shard has acknowledged the new epoch or its old lease has expired.
+Each granted write checks its epoch at authorization and again in its
+atomic ref-shard apply, including after a failed apply is replanned.
+
+**Because:** an owner must be able to treat a completed epoch update as
+revocation of every older grant, even when a write was already in flight.
+
+**If violated:** a stale grantee can commit after revocation has completed.
+
+**Enforced by:** `rust/crates/mkit-server-native/tests/epoch_leases.rs`
+on memory and SQLite, and the grant-epoch and ref-scope wire suites.
+
 ## ListRefs pages make bounded forward progress
 
 **Always:** a nonterminal ListRefs page contains at least one ref, its token

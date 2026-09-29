@@ -1,9 +1,11 @@
 //! M2 owner-signed write grants over real Connect requests.
 
 use buffa::Message;
+use k256::ecdsa::SigningKey as K1Key;
+use mkit_attest::eth;
 use mkit_attest::grant::{
     Capabilities, Grant, Namespace, OwnerScheme, RefScopes, RepoScope, RepositoryIdentity,
-    SignedHeader,
+    SignedHeader, WebAuthnAssertion, webauthn_challenge,
 };
 use mkit_core::hash::{from_hex, hash};
 use mkit_transport_connect::generated::__buffa::oneof::{
@@ -14,6 +16,9 @@ use mkit_transport_connect::generated::{
     AdvanceRefsResponse, BeginUploadRequest, BeginUploadResponse, ListRefsRequest,
     ListRefsResponse, UpdateRefResponse, UploadPartHeader, UploadPartRequest, UploadPartResponse,
 };
+use p256::ecdsa::signature::Signer as _;
+use p256::ecdsa::{Signature as P256Signature, SigningKey as P256Key};
+use sha2::{Digest, Sha256};
 
 use super::{
     A, B, CaseResult, Commit, Ctx, Exp, Failure, Signed, advance_req, ensure, repository,
@@ -28,30 +33,129 @@ pub const RP_ID: &str = "example.test";
 /// The origin configured for [`RP_ID`].
 pub const RP_ORIGIN: &str = "https://example.test";
 
-struct Owner(Signer);
+/// Fixed secp256k1 owner seed. It owns a real `0x` namespace: never
+/// allowlist it on a shared or staging deployment.
+const K1_SEED: [u8; 32] = [0x21; 32];
+/// Fixed P-256 owner seed. It owns a real `0x` namespace: never allowlist
+/// it on a shared or staging deployment.
+const P256_SEED: [u8; 32] = [0x31; 32];
+
+pub(super) enum Owner {
+    Ed(Signer),
+    K1(K1Key),
+    Web(P256Key),
+}
 
 impl Owner {
-    fn namespace(&self) -> Namespace {
-        Namespace::Ed25519(from_hex(&self.0.public_key_hex()).expect("valid grant fixture"))
+    pub(super) fn namespace(&self) -> Namespace {
+        match self {
+            Self::Ed(signer) => {
+                Namespace::Ed25519(from_hex(&signer.public_key_hex()).expect("valid grant fixture"))
+            }
+            Self::K1(key) => {
+                let point = key.verifying_key().to_sec1_point(false);
+                Namespace::Address(
+                    eth::address_secp256k1(
+                        &point.as_bytes()[1..]
+                            .try_into()
+                            .expect("valid grant fixture"),
+                    )
+                    .expect("valid grant fixture"),
+                )
+            }
+            Self::Web(key) => {
+                let point = key.verifying_key().to_sec1_point(false);
+                Namespace::Address(
+                    eth::address_p256(
+                        &point.as_bytes()[1..]
+                            .try_into()
+                            .expect("valid grant fixture"),
+                    )
+                    .expect("valid grant fixture"),
+                )
+            }
+        }
     }
 
-    fn signed_header(&self, grant: &Grant) -> String {
+    pub(super) fn signed_header(&self, grant: &Grant) -> String {
         let statement = grant.encode().expect("valid grant fixture");
+        self.signed_statement(&statement)
+    }
+
+    pub(super) fn signed_statement(&self, statement: &[u8]) -> String {
+        let (scheme, blob) = match self {
+            Self::Ed(signer) => (
+                OwnerScheme::Ed25519,
+                signer.sign_grant_statement(statement).to_vec(),
+            ),
+            Self::K1(key) => {
+                let (signature, recovery) =
+                    key.sign_prehash_recoverable(&eth::eip191_hash(statement));
+                let mut blob = signature.to_bytes().to_vec();
+                blob.push(27 + recovery.to_byte());
+                (OwnerScheme::Secp256k1Eip191, blob)
+            }
+            Self::Web(key) => {
+                let point = key.verifying_key().to_sec1_point(false);
+                let public_key: [u8; 64] = point.as_bytes()[1..]
+                    .try_into()
+                    .expect("valid grant fixture");
+                let mut authenticator_data = Sha256::digest(RP_ID.as_bytes()).to_vec();
+                authenticator_data.push(1); // user present
+                authenticator_data.extend_from_slice(&0u32.to_be_bytes());
+                let client_data_json = format!(
+                    r#"{{"type":"webauthn.get","challenge":"{}","origin":"{RP_ORIGIN}","crossOrigin":false}}"#,
+                    webauthn_challenge(statement),
+                ).into_bytes();
+                let signed = [
+                    authenticator_data.as_slice(),
+                    Sha256::digest(&client_data_json).as_slice(),
+                ]
+                .concat();
+                let signature: P256Signature = key.sign(&signed);
+                let assertion = WebAuthnAssertion {
+                    public_key,
+                    authenticator_data,
+                    client_data_json,
+                    signature: signature.normalize_s().to_bytes().into(),
+                };
+                (
+                    OwnerScheme::WebAuthnP256,
+                    assertion.encode().expect("valid grant fixture"),
+                )
+            }
+        };
         SignedHeader {
-            blob: self.0.sign_grant_statement(&statement).to_vec(),
-            statement,
-            scheme: OwnerScheme::Ed25519,
+            statement: statement.to_vec(),
+            scheme,
+            blob,
         }
         .encode()
         .expect("valid grant fixture")
     }
 }
 
-fn ed_owner(ctx: &Ctx) -> Result<Owner, Failure> {
-    Ok(Owner(ctx.v2_signer("repository-a")?))
+pub(super) fn k1_owner() -> Owner {
+    Owner::K1(K1Key::from_slice(&K1_SEED).expect("valid grant fixture"))
+}
+pub(super) fn web_owner() -> Owner {
+    Owner::Web(P256Key::from_slice(&P256_SEED).expect("valid grant fixture"))
 }
 
-fn repo(ctx: &Ctx, owner: &Owner) -> String {
+/// Fixed `0x` namespaces the in-process allowlist must admit for grant cases.
+///
+/// Their keys are public test seeds: never allowlist these namespaces on a
+/// shared or staging deployment.
+#[must_use]
+pub fn owner_namespaces() -> [Namespace; 2] {
+    [k1_owner().namespace(), web_owner().namespace()]
+}
+
+pub(super) fn ed_owner(ctx: &Ctx) -> Result<Owner, Failure> {
+    Ok(Owner::Ed(ctx.v2_signer("repository-a")?))
+}
+
+pub(super) fn repo(ctx: &Ctx, owner: &Owner) -> String {
     format!(
         "{}/{}-{}",
         owner.namespace(),
@@ -60,7 +164,7 @@ fn repo(ctx: &Ctx, owner: &Owner) -> String {
     )
 }
 
-fn grant(ctx: &Ctx, owner: &Owner, repo: &str, grantee: &Signer) -> Grant {
+pub(super) fn grant(ctx: &Ctx, owner: &Owner, repo: &str, grantee: &Signer) -> Grant {
     let now = now_ms();
     let WireAuth::AuthV2 { audience, .. } = &ctx.profile().auth else {
         unreachable!()
@@ -79,7 +183,25 @@ fn grant(ctx: &Ctx, owner: &Owner, repo: &str, grantee: &Signer) -> Grant {
     }
 }
 
-fn signed_update(ctx: &Ctx, grantee: &Signer, repo: &str, header: Option<&str>) -> Signed {
+/// [`grant`] at the owner's stored epoch, for the fixed `0x` owners whose
+/// epoch the epoch cases advance (SPEC-WRITE-GRANTS §8.2).
+pub(super) async fn grant_at_epoch(
+    ctx: &Ctx,
+    owner: &Owner,
+    repo: &str,
+    grantee: &Signer,
+) -> Result<Grant, Failure> {
+    let mut statement = grant(ctx, owner, repo, grantee);
+    statement.epoch = super::epochs::current(ctx, owner).await?;
+    Ok(statement)
+}
+
+pub(super) fn signed_update(
+    ctx: &Ctx,
+    grantee: &Signer,
+    repo: &str,
+    header: Option<&str>,
+) -> Signed {
     let mut signed = sign_unary(
         grantee,
         Rpc::UpdateRef,
@@ -97,7 +219,7 @@ fn signed_update(ctx: &Ctx, grantee: &Signer, repo: &str, header: Option<&str>) 
 async fn valid(ctx: Ctx, owner: Owner) -> CaseResult {
     let grantee = ctx.v2_signer("grant-grantee")?;
     let repo = repo(&ctx, &owner);
-    let header = owner.signed_header(&grant(&ctx, &owner, &repo, &grantee));
+    let header = owner.signed_header(&grant_at_epoch(&ctx, &owner, &repo, &grantee).await?);
     let signed = signed_update(&ctx, &grantee, &repo, Some(&header));
     want_ok(
         ctx.send::<UpdateRefResponse>(&signed).await?,
@@ -117,6 +239,14 @@ async fn valid(ctx: Ctx, owner: Owner) -> CaseResult {
 pub(super) async fn valid_ed25519(ctx: Ctx) -> CaseResult {
     let owner = ed_owner(&ctx)?;
     valid(ctx, owner).await
+}
+
+pub(super) async fn valid_secp256k1_eip191(ctx: Ctx) -> CaseResult {
+    valid(ctx, k1_owner()).await
+}
+
+pub(super) async fn valid_webauthn_p256(ctx: Ctx) -> CaseResult {
+    valid(ctx, web_owner()).await
 }
 
 pub(super) async fn push_flow(ctx: Ctx) -> CaseResult {
@@ -235,6 +365,18 @@ async fn denied(ctx: Ctx, owner: Owner, mutate: impl FnOnce(&mut Grant)) -> Case
     Ok(())
 }
 
+pub(super) async fn zero_x_without_grant_denied(ctx: Ctx) -> CaseResult {
+    let grantee = ctx.v2_signer("grant-grantee")?;
+    let repo = repo(&ctx, &k1_owner());
+    let signed = signed_update(&ctx, &grantee, &repo, None);
+    want_code(
+        ctx.send::<UpdateRefResponse>(&signed).await?,
+        "permission_denied",
+        "0x without grant",
+    )?;
+    Ok(())
+}
+
 pub(super) async fn wrong_audience(ctx: Ctx) -> CaseResult {
     let owner = ed_owner(&ctx)?;
     denied(ctx, owner, |g| {
@@ -338,6 +480,55 @@ pub(super) async fn not_yet_valid(ctx: Ctx) -> CaseResult {
     Ok(())
 }
 
+pub(super) async fn ed25519_scheme_on_0x_denied(ctx: Ctx) -> CaseResult {
+    let owner = k1_owner();
+    let ed_signer = ctx.v2_signer("repository-a")?;
+    let grantee = ctx.v2_signer("grant-grantee")?;
+    let repo = repo(&ctx, &owner);
+    let statement = grant_at_epoch(&ctx, &owner, &repo, &grantee)
+        .await?
+        .encode()
+        .expect("valid grant fixture");
+    let header = SignedHeader {
+        statement: statement.clone(),
+        scheme: OwnerScheme::Ed25519,
+        blob: ed_signer.sign_grant_statement(&statement).to_vec(),
+    }
+    .encode()
+    .expect("valid grant fixture");
+    let signed = signed_update(&ctx, &grantee, &repo, Some(&header));
+    want_code(
+        ctx.send::<UpdateRefResponse>(&signed).await?,
+        "permission_denied",
+        "Ed25519 on 0x",
+    )?;
+    Ok(())
+}
+
+pub(super) async fn webauthn_unconfigured_rp_denied(ctx: Ctx) -> CaseResult {
+    let owner = web_owner();
+    let grantee = ctx.v2_signer("grant-grantee")?;
+    let repo = repo(&ctx, &owner);
+    let statement = grant_at_epoch(&ctx, &owner, &repo, &grantee).await?;
+    let mut signed_header =
+        SignedHeader::parse(&owner.signed_header(&statement)).expect("valid grant fixture");
+    let mut assertion = WebAuthnAssertion::parse(&signed_header.blob).expect("valid grant fixture");
+    assertion.authenticator_data[..32].copy_from_slice(&Sha256::digest(b"other.example.test"));
+    signed_header.blob = assertion.encode().expect("valid grant fixture");
+    let signed = signed_update(
+        &ctx,
+        &grantee,
+        &repo,
+        Some(&signed_header.encode().expect("valid grant fixture")),
+    );
+    want_code(
+        ctx.send::<UpdateRefResponse>(&signed).await?,
+        "permission_denied",
+        "unconfigured relying party",
+    )?;
+    Ok(())
+}
+
 async fn bump(ctx: &Ctx, repository: &str) -> CaseResult {
     let owner = ctx.v2_signer("repository-a")?;
     let create = sign_unary(
@@ -400,7 +591,9 @@ pub(super) async fn new_epoch_grant_works(ctx: Ctx) -> CaseResult {
 
 pub(super) async fn owner_with_bad_grant_denied(ctx: Ctx) -> CaseResult {
     let owner = ed_owner(&ctx)?;
-    let owner_signer = &owner.0;
+    let Owner::Ed(owner_signer) = &owner else {
+        unreachable!()
+    };
     let repo = repo(&ctx, &owner);
     let signed = signed_update(&ctx, owner_signer, &repo, Some("bad"));
     want_code(

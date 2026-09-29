@@ -1228,8 +1228,8 @@ these holds:
    ([SPEC-WRITE-GRANTS §6](SPEC-WRITE-GRANTS.md#6-server-policy) and
    [§7](SPEC-WRITE-GRANTS.md#7-verification-order)). The Connect server
    enforces this path for configured multi-repository deployments.
-   Informative: the full §8.2 ref-scope rules and the grant-epoch RPCs are
-   not yet implemented.
+   Informative: the §8.2 ref-scope rules and grant-epoch RPCs are
+   implemented for configured multi-repository deployments.
 3. A deployment-defined authority source authorizes the signer for the
    repository. An example is a ledger's delegated-key record, checked
    against verified state. The deployment MUST document the source and

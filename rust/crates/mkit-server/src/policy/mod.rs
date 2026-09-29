@@ -2,6 +2,7 @@
 
 pub(crate) mod grants;
 mod namespace;
+pub(crate) mod ref_scopes;
 mod write;
 
 pub use grants::GrantConfig;

@@ -8,6 +8,10 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use mkit_attest::grant::{
+    AcceptedSchemes, Capabilities, EpochStatement, Grant, OwnerScheme, RefScopes, RepoScope,
+    RepositoryIdentity, SignedHeader,
+};
 use mkit_core::hash::{hash, to_hex};
 use mkit_core::protocol::RefWriteCondition;
 use mkit_core::repo_identity::Namespace;
@@ -26,8 +30,9 @@ use mkit_server::store::{
 use mkit_server::timers::{TickBudget, TimerRegistry, run_due};
 use mkit_server::upload::{UploadLimits, token::TicketKeys};
 use mkit_server::{
-    Addressing, AuthzFacts, Code, ManualClock, MemoryBlobStore, MemoryKv, MultiAddressing,
-    NamespaceStore, NoopMetrics, Operation, Procedure, RefUpdate, ServerError, UpdateRefResult,
+    Addressing, AuthzFacts, Code, GrantConfig, ManualClock, MemoryBlobStore, MemoryKv,
+    MultiAddressing, NamespaceStore, NoopMetrics, Operation, Procedure, RefUpdate, ServerError,
+    UpdateRefResult,
 };
 use mkit_server_conformance::wire::sign::{Signer, body_commitment};
 use mkit_server_native::{Blocking, RusqliteConn};
@@ -84,6 +89,9 @@ struct Controls {
     push: Gate,
     ack: Gate,
     scan_clock: Mutex<Option<Arc<ManualClock>>>,
+    fail_push_once: AtomicBool,
+    epoch_race_once: Mutex<Option<u64>>,
+    epoch_after_cas_once: Mutex<Option<u64>>,
 }
 struct Store<N> {
     inner: Arc<N>,
@@ -140,12 +148,33 @@ impl<N: NamespaceStore> NamespaceStore for Store<N> {
         self.inner.scan(p, start, end, after, limit).await
     }
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        if matches!(p, Partition::Coordinator(_))
+            && batch
+                .writes
+                .iter()
+                .any(|write| matches!(write, Write::Put(key, _) if *key == keys::grant_epoch()))
+        {
+            let raced = self.controls.epoch_race_once.lock().unwrap().take();
+            if let Some(epoch) = raced {
+                self.inner
+                    .apply(
+                        p,
+                        Batch::new().put(keys::grant_epoch(), codec::encode_u64(epoch)),
+                    )
+                    .await?;
+            }
+        }
         if matches!(p, Partition::Ref { .. })
             && batch
                 .writes
                 .iter()
                 .all(|w| matches!(w, Write::Put(k, _) if *k == keys::epoch_lease()))
         {
+            if self.controls.fail_push_once.swap(false, Ordering::SeqCst) {
+                return Err(StoreError::unavailable(std::io::Error::other(
+                    "injected epoch push failure",
+                )));
+            }
             self.controls.push.pause().await;
         }
         if matches!(p, Partition::Coordinator(_))
@@ -155,6 +184,23 @@ impl<N: NamespaceStore> NamespaceStore for Store<N> {
             self.controls.ack.pause().await;
         }
         let outcome = self.inner.apply(p, batch.clone()).await?;
+        if matches!(p, Partition::Coordinator(_))
+            && outcome == BatchOutcome::Committed
+            && batch
+                .writes
+                .iter()
+                .any(|write| matches!(write, Write::Put(key, _) if *key == keys::grant_epoch()))
+        {
+            let raced = self.controls.epoch_after_cas_once.lock().unwrap().take();
+            if let Some(epoch) = raced {
+                self.inner
+                    .apply(
+                        p,
+                        Batch::new().put(keys::grant_epoch(), codec::encode_u64(epoch)),
+                    )
+                    .await?;
+            }
+        }
         self.record(Call::Apply(p.clone(), batch, outcome.clone()));
         Ok(outcome)
     }
@@ -172,6 +218,7 @@ impl<N: NamespaceStore> NamespaceStore for Store<N> {
 struct Faults {
     a: Gate,
     b: Gate,
+    c: Gate,
     epochs: Mutex<Vec<Option<u64>>>,
 }
 struct FaultControl(Arc<Faults>);
@@ -189,6 +236,9 @@ impl FaultHooks for FaultControl {
         if point == FaultPoint::AfterLeaseGrant && d.fault.as_deref() == Some("b") {
             self.0.b.pause().await;
         }
+        if point == FaultPoint::AfterAuthorize && d.fault.as_deref() == Some("c") {
+            self.0.c.pause().await;
+        }
         Ok(())
     }
 }
@@ -196,6 +246,7 @@ impl FaultHooks for FaultControl {
 #[derive(Clone, Copy)]
 enum Reject {
     Allow,
+    Reserved,
     Challenge,
     Deny,
 }
@@ -217,7 +268,12 @@ impl Admission for Policy {
                 description: "test challenge".into(),
             })
         } else {
-            Ok(AdmissionDecision::allow(vec![]))
+            let allowed = AdmissionDecision::allow(vec![]);
+            Ok(if matches!(self.0, Reject::Reserved) {
+                allowed.with_reservation("s:epoch-race")
+            } else {
+                allowed
+            })
         }
     }
 }
@@ -250,6 +306,14 @@ fn pipeline<N: NamespaceStore>(
     );
     cfg.sharding = Sharding::D34;
     cfg.write_policy = WritePolicy::Owner;
+    cfg.grants = Some(
+        GrantConfig::new_allowing_loopback(
+            AUDIENCE,
+            AcceptedSchemes::of(&[OwnerScheme::Ed25519]),
+            vec![],
+        )
+        .unwrap(),
+    );
     cfg.write_quota = None;
     cfg.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap());
     Arc::new(
@@ -266,10 +330,28 @@ fn pipeline<N: NamespaceStore>(
     )
 }
 fn auth<N: NamespaceStore>(pipe: &Pipe<N>, token: Option<&str>) -> Authenticated {
-    let signer = Signer::new([1; 32], AUDIENCE, &identity());
+    auth_as(pipe, token, [1; 32], None)
+}
+
+fn auth_as<N: NamespaceStore>(
+    pipe: &Pipe<N>,
+    token: Option<&str>,
+    seed: [u8; 32],
+    grant: Option<&str>,
+) -> Authenticated {
+    auth_for(pipe, token, seed, grant, Procedure::UpdateRef)
+}
+
+fn auth_for<N: NamespaceStore>(
+    pipe: &Pipe<N>,
+    token: Option<&str>,
+    seed: [u8; 32],
+    grant: Option<&str>,
+    procedure: Procedure,
+) -> Authenticated {
+    let signer = Signer::new(seed, AUDIENCE, &identity());
     loop {
-        let mut envelope =
-            signer.envelope(Procedure::UpdateRef.connect_path(), body_commitment(BODY));
+        let mut envelope = signer.envelope(procedure.connect_path(), body_commitment(BODY));
         // The scenarios use controlled clocks from 0 through 135000 ms. This
         // fixed validity window stays valid while leases and store clocks move.
         envelope.created_at = 0;
@@ -278,10 +360,11 @@ fn auth<N: NamespaceStore>(pipe: &Pipe<N>, token: Option<&str>) -> Authenticated
         let carriage = signer.sign(&envelope);
         let authenticated = pipe
             .authenticate(&RequestMeta {
-                procedure: Procedure::UpdateRef,
+                procedure,
                 header: &|h| match h {
                     "x-mkit-test-fault" => token.map(str::to_owned),
                     "x-mkit-test-clock-skew-ms" if token == Some("skew") => Some("100000".into()),
+                    "x-write-grant" => grant.map(str::to_owned),
                     _ => carriage
                         .headers
                         .iter()
@@ -297,6 +380,66 @@ fn auth<N: NamespaceStore>(pipe: &Pipe<N>, token: Option<&str>) -> Authenticated
             return authenticated;
         }
     }
+}
+
+fn owner() -> Signer {
+    Signer::new([1; 32], AUDIENCE, &identity())
+}
+
+fn signed_grant(epoch: u64) -> String {
+    let statement = Grant {
+        namespace: Namespace::parse(identity().split_once('/').unwrap().0).unwrap(),
+        scope: RepoScope::Repository(RepositoryIdentity::parse(&identity()).unwrap()),
+        grantee: mkit_core::hash::from_hex(
+            &Signer::new([2; 32], AUDIENCE, &identity()).public_key_hex(),
+        )
+        .unwrap(),
+        capabilities: Capabilities::Write,
+        audiences: vec![AUDIENCE.into()],
+        ref_scopes: Some(RefScopes::parse("refs/heads/*=cufd").unwrap()),
+        epoch,
+        created_ms: 0,
+        expiry_ms: 240_000,
+        nonce: hash(format!("grant-{epoch}").as_bytes()),
+    }
+    .encode()
+    .unwrap();
+    SignedHeader {
+        statement: statement.clone(),
+        scheme: OwnerScheme::Ed25519,
+        blob: owner().sign_grant_statement(&statement).to_vec(),
+    }
+    .encode()
+    .unwrap()
+}
+
+fn signed_epoch(new_epoch: u64) -> String {
+    let statement = EpochStatement {
+        namespace: Namespace::parse(identity().split_once('/').unwrap().0).unwrap(),
+        new_epoch,
+        audiences: vec![AUDIENCE.into()],
+        created_ms: 0,
+        expiry_ms: 240_000,
+        nonce: hash(format!("epoch-{new_epoch}").as_bytes()),
+    }
+    .encode()
+    .unwrap();
+    SignedHeader {
+        statement: statement.clone(),
+        scheme: OwnerScheme::Ed25519,
+        blob: owner().sign_grant_statement(&statement).to_vec(),
+    }
+    .encode()
+    .unwrap()
+}
+
+fn granted_auth<N: NamespaceStore>(
+    pipe: &Pipe<N>,
+    token: Option<&str>,
+    epoch: u64,
+) -> Authenticated {
+    let grant = signed_grant(epoch);
+    auth_as(pipe, token, [2; 32], Some(&grant))
 }
 
 fn update(name: &str, byte: u8) -> RefUpdate {
@@ -1871,4 +2014,443 @@ backends!(
     recovered_loss_renewal_memory,
     recovered_loss_renewal_sqlite,
     recovered_loss_then_renew
+);
+
+async fn assert_grant_write_uncommitted<N: NamespaceStore>(
+    store: &Store<N>,
+    a: &Authenticated,
+    ref_name: &str,
+) {
+    let partition = shard(a, ref_name);
+    let replay = keys::replay(&a.auth.as_ref().unwrap().replay_scope);
+    assert!(
+        store
+            .inner
+            .get(&partition, &replay)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let (first, end) = keys::class_range(keys::TAG_QUOTA);
+    assert!(
+        store
+            .inner
+            .scan(&partition, &first, &end, None, 10)
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+}
+
+async fn revoke_during_authorize<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    _: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let faults = Arc::new(Faults::default());
+    let pipe = pipeline(store.clone(), clock, faults.clone(), Reject::Allow);
+    let owner_auth = auth(&pipe, None);
+    committed(&pipe, &owner_auth, REF, 1).await;
+    let granted = granted_auth(&pipe, Some("c"), 0);
+    faults.c.arm();
+    let task = {
+        let pipe = pipe.clone();
+        let granted = granted.clone();
+        tokio::spawn(async move { pipe.update_ref(&granted, update(REF, 2)).await })
+    };
+    faults.c.entered().await;
+    assert_eq!(pipe.set_grant_epoch(&signed_epoch(1)).await.unwrap(), 1);
+    faults.c.resume();
+    assert_eq!(
+        task.await.unwrap().unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    assert_eq!(
+        store
+            .inner
+            .get(
+                &shard(&owner_auth, REF),
+                &keys::ref_key(&owner_auth.repo().repo.name, REF)
+            )
+            .await
+            .unwrap(),
+        Some(codec::encode_ref_id(&[1; 32]))
+    );
+    assert_grant_write_uncommitted(&store, &granted, REF).await;
+}
+backends!(
+    revoke_during_authorize_memory,
+    revoke_during_authorize_sqlite,
+    revoke_during_authorize
+);
+
+async fn failed_push_then_expired_lease<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    store_clock: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let faults = Arc::new(Faults::default());
+    let pipe = pipeline(store.clone(), clock.clone(), faults.clone(), Reject::Allow);
+    let owner_auth = auth(&pipe, None);
+    committed(&pipe, &owner_auth, REF, 1).await;
+    clock.set(23_999);
+    store_clock.set(23_999);
+    let granted = granted_auth(&pipe, Some("a"), 0);
+    faults.a.arm();
+    let task = {
+        let pipe = pipe.clone();
+        let granted = granted.clone();
+        tokio::spawn(async move { pipe.update_ref(&granted, update(REF, 2)).await })
+    };
+    faults.a.entered().await;
+    store.controls.fail_push_once.store(true, Ordering::SeqCst);
+    assert!(pipe.set_grant_epoch(&signed_epoch(1)).await.is_err());
+    clock.set(31_000);
+    store_clock.set(31_000);
+    assert_eq!(pipe.set_grant_epoch(&signed_epoch(1)).await.unwrap(), 1);
+    faults.a.resume();
+    assert_eq!(
+        task.await.unwrap().unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    assert_eq!(
+        store
+            .inner
+            .get(
+                &shard(&owner_auth, REF),
+                &keys::ref_key(&owner_auth.repo().repo.name, REF)
+            )
+            .await
+            .unwrap(),
+        Some(codec::encode_ref_id(&[1; 32]))
+    );
+    assert_grant_write_uncommitted(&store, &granted, REF).await;
+    assert!(store.take().iter().any(|call| matches!(
+        call,
+        Call::Apply(
+            Partition::Ref { .. },
+            _,
+            BatchOutcome::DeadlinePassed { .. }
+        )
+    )));
+}
+backends!(
+    failed_push_then_expired_lease_memory,
+    failed_push_then_expired_lease_sqlite,
+    failed_push_then_expired_lease
+);
+
+async fn idle_shard_rejects_old_grant<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    store_clock: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        Arc::new(Faults::default()),
+        Reject::Allow,
+    );
+    let owner_auth = auth(&pipe, None);
+    committed(&pipe, &owner_auth, REF, 1).await;
+    clock.set(31_000);
+    store_clock.set(31_000);
+    assert_eq!(pipe.set_grant_epoch(&signed_epoch(1)).await.unwrap(), 1);
+    let idle = "refs/heads/idle";
+    let granted = granted_auth(&pipe, None, 0);
+    assert_eq!(
+        pipe.update_ref(&granted, update(idle, 2))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+    assert!(
+        store
+            .inner
+            .get(
+                &shard(&granted, idle),
+                &keys::ref_key(&granted.repo().repo.name, idle)
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_grant_write_uncommitted(&store, &granted, idle).await;
+}
+backends!(
+    idle_shard_rejects_old_grant_memory,
+    idle_shard_rejects_old_grant_sqlite,
+    idle_shard_rejects_old_grant
+);
+
+async fn expiry_races_ack<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    store_clock: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let faults = Arc::new(Faults::default());
+    let pipe = pipeline(store.clone(), clock.clone(), faults, Reject::Allow);
+    let owner_auth = auth(&pipe, None);
+    committed(&pipe, &owner_auth, REF, 1).await;
+    store.controls.ack.arm();
+    let task = {
+        let pipe = pipe.clone();
+        tokio::spawn(async move { pipe.set_grant_epoch(&signed_epoch(1)).await })
+    };
+    store.controls.ack.entered().await;
+    clock.set(31_000);
+    store_clock.set(31_000);
+    store.controls.ack.resume();
+    assert_eq!(task.await.unwrap().unwrap(), 1);
+    let granted = granted_auth(&pipe, None, 0);
+    assert_eq!(
+        pipe.update_ref(&granted, update(REF, 2))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+    assert_grant_write_uncommitted(&store, &granted, REF).await;
+}
+backends!(
+    expiry_races_ack_memory,
+    expiry_races_ack_sqlite,
+    expiry_races_ack
+);
+
+async fn pending_retry_completes<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    store_clock: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        Arc::new(Faults::default()),
+        Reject::Allow,
+    );
+    let owner_auth = auth(&pipe, None);
+    committed(&pipe, &owner_auth, REF, 1).await;
+    pipe.mark_lease_table_recovered(&owner_auth.repo().repo.namespace)
+        .await
+        .unwrap();
+    let statement = signed_epoch(1);
+    let error = pipe.set_grant_epoch(&statement).await.unwrap_err();
+    assert_eq!(error.code(), Code::Unavailable);
+    assert!(
+        error
+            .headers()
+            .iter()
+            .any(|(name, value)| name == "Retry-After" && value == "1")
+    );
+    clock.set(36_000);
+    store_clock.set(36_000);
+    assert_eq!(pipe.set_grant_epoch(&statement).await.unwrap(), 1);
+    let granted = granted_auth(&pipe, None, 0);
+    assert_eq!(
+        pipe.update_ref(&granted, update(REF, 2))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+    assert_grant_write_uncommitted(&store, &granted, REF).await;
+}
+backends!(
+    pending_retry_completes_memory,
+    pending_retry_completes_sqlite,
+    pending_retry_completes
+);
+
+async fn reserved_begin_epoch_mismatch<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    _: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let faults = Arc::new(Faults::default());
+    let owner_pipe = pipeline(store.clone(), clock.clone(), faults.clone(), Reject::Allow);
+    let owner_auth = auth(&owner_pipe, None);
+    committed(&owner_pipe, &owner_auth, REF, 1).await;
+    let reserved = pipeline(store.clone(), clock, faults.clone(), Reject::Reserved);
+    let grant = signed_grant(0);
+    let granted = auth_for(
+        &reserved,
+        Some("a"),
+        [2; 32],
+        Some(&grant),
+        Procedure::BeginUpload,
+    );
+    faults.a.arm();
+    let task = {
+        let reserved = reserved.clone();
+        let granted = granted.clone();
+        tokio::spawn(async move { reserved.begin_upload(&granted, REF, &[2; 32], 10).await })
+    };
+    faults.a.entered().await;
+    assert_eq!(
+        owner_pipe.set_grant_epoch(&signed_epoch(1)).await.unwrap(),
+        1
+    );
+    faults.a.resume();
+    assert_eq!(
+        task.await.unwrap().unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    assert_grant_write_uncommitted(&store, &granted, REF).await;
+    assert_eq!(
+        store
+            .inner
+            .get(
+                &shard(&owner_auth, REF),
+                &keys::ref_key(&owner_auth.repo().repo.name, REF)
+            )
+            .await
+            .unwrap(),
+        Some(codec::encode_ref_id(&[1; 32]))
+    );
+    let (first, end) = keys::class_range(keys::TAG_TICKET);
+    assert!(
+        store
+            .inner
+            .scan(&shard(&granted, REF), &first, &end, None, 10)
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    // TODO(WP-3.3): persist Aborted for reserved apply failures in the generic rule.
+}
+backends!(
+    reserved_begin_epoch_mismatch_memory,
+    reserved_begin_epoch_mismatch_sqlite,
+    reserved_begin_epoch_mismatch
+);
+
+async fn epoch_rpc_rules<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    _: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        Arc::new(Faults::default()),
+        Reject::Allow,
+    );
+    assert_eq!(
+        pipe.get_grant_epoch("ED25519-bad")
+            .await
+            .unwrap_err()
+            .code(),
+        Code::InvalidArgument
+    );
+    assert!(
+        store.take().is_empty(),
+        "bad grammar must not reach storage"
+    );
+    assert_eq!(
+        pipe.get_grant_epoch(
+            "ed25519-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        .await
+        .unwrap(),
+        0
+    );
+    assert!(
+        store.take().is_empty(),
+        "unserved namespace must not reach storage"
+    );
+    assert_eq!(
+        pipe.set_grant_epoch(&"x".repeat(8_193))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+    assert!(
+        store.take().is_empty(),
+        "oversize statement must not reach storage"
+    );
+    assert_eq!(
+        pipe.get_grant_epoch(identity().split_once('/').unwrap().0)
+            .await
+            .unwrap(),
+        0
+    );
+    // The business clock, not wall time, controls the statement's expiry.
+    clock.set(240_000);
+    assert_eq!(
+        pipe.set_grant_epoch(&signed_epoch(1))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+    clock.set(0);
+    // Another request wins the CAS with the same value: reclassify as Retry.
+    *store.controls.epoch_race_once.lock().unwrap() = Some(1);
+    assert_eq!(pipe.set_grant_epoch(&signed_epoch(1)).await.unwrap(), 1);
+    assert_eq!(
+        pipe.get_grant_epoch(identity().split_once('/').unwrap().0)
+            .await
+            .unwrap(),
+        1
+    );
+    // A concurrent higher epoch turns a proposed lower epoch into Reject.
+    *store.controls.epoch_race_once.lock().unwrap() = Some(3);
+    assert_eq!(
+        pipe.set_grant_epoch(&signed_epoch(2))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+    assert_eq!(
+        pipe.get_grant_epoch(identity().split_once('/').unwrap().0)
+            .await
+            .unwrap(),
+        3
+    );
+    // A second owner statement advances after our CAS but before our
+    // completion scan. The response must report the fenced stored epoch.
+    *store.controls.epoch_after_cas_once.lock().unwrap() = Some(5);
+    assert_eq!(pipe.set_grant_epoch(&signed_epoch(4)).await.unwrap(), 5);
+    assert_eq!(
+        pipe.get_grant_epoch(identity().split_once('/').unwrap().0)
+            .await
+            .unwrap(),
+        5
+    );
+    assert_no_epoch_accounting_rows(&store, &pipe).await;
+}
+
+async fn assert_no_epoch_accounting_rows<N: NamespaceStore>(store: &Store<N>, pipe: &Pipe<N>) {
+    let coordinator = coordinator(&auth(pipe, None));
+    for tag in [keys::TAG_REPLAY, keys::TAG_QUOTA] {
+        let (first, end) = keys::class_range(tag);
+        assert!(
+            store
+                .inner
+                .scan(&coordinator, &first, &end, None, 10)
+                .await
+                .unwrap()
+                .entries
+                .is_empty(),
+            "epoch RPC created an accounting row in {tag}"
+        );
+    }
+}
+backends!(
+    epoch_rpc_rules_memory,
+    epoch_rpc_rules_sqlite,
+    epoch_rpc_rules
 );

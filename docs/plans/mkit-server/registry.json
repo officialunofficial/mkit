@@ -1183,6 +1183,23 @@
     ]
   },
   {
+    "id": "2.6b",
+    "title": "Server: secp256k1-eip191 and webauthn-p256 grant wire conformance",
+    "milestone": "M2",
+    "track": "conformance",
+    "depends_on": [
+      "2.6"
+    ],
+    "size": "S",
+    "summary": "Restores five Single and D34 wire cases for 0x owner grants; tests only.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
     "id": "2.7",
     "title": "Server: ref scopes, packmap coverage and the delete flag",
     "milestone": "M2",

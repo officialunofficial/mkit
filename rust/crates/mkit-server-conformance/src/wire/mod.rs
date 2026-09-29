@@ -67,8 +67,11 @@
 //! | Case | Requires | Asserts |
 //! |---|---|---|
 //! | `grants.valid_ed25519` | `grants`, `multi-repo`, `auth-v2` | an ed25519 owner grants a write |
+//! | `grants.valid_secp256k1_eip191` | `grants`, `multi-repo`, `auth-v2` | a 0x secp256k1 owner grants a write |
+//! | `grants.valid_webauthn_p256` | `grants`, `multi-repo`, `auth-v2` | a 0x `WebAuthn` owner grants a write |
 //! | `grants.push_flow` | `grants`, `multi-repo`, `auth-v2` | `BeginUpload`, ticketed `UploadPack` and `AdvanceRefs` commit |
 //! | `grants.part_path_ignores_header` | `grants`, `multi-repo`, `auth-v2` | `UploadPart` ignores a malformed grant header |
+//! | `grants.zero_x_without_grant_denied` | `grants`, `multi-repo`, `auth-v2` | a 0x namespace requires a grant |
 //! | `grants.wrong_audience` | `grants`, `multi-repo`, `auth-v2` | audience mismatch denies |
 //! | `grants.repository_out_of_scope` | `grants`, `multi-repo`, `auth-v2` | repository scope denies another repo |
 //! | `grants.namespace_scope_covers_new_repo` | `grants`, `multi-repo`, `auth-v2` | namespace scope permits a new repo |
@@ -76,6 +79,8 @@
 //! | `grants.read_only_grant_for_write` | `grants`, `multi-repo`, `auth-v2` | read capability cannot write |
 //! | `grants.expired` | `grants`, `multi-repo`, `auth-v2`, `test-faults` | expiry denies |
 //! | `grants.not_yet_valid` | `grants`, `multi-repo`, `auth-v2`, `test-faults` | creation lead is bounded |
+//! | `grants.ed25519_scheme_on_0x_denied` | `grants`, `multi-repo`, `auth-v2` | owner scheme must match namespace |
+//! | `grants.webauthn_unconfigured_rp_denied` | `grants`, `multi-repo`, `auth-v2` | unknown relying party denies |
 //! | `grants.epoch_above_stored` | `grants`, `multi-repo`, `auth-v2` | a future epoch denies |
 //! | `grants.epoch_below_stored` | `grants`, `multi-repo`, `auth-v2`, `test-faults` | a revoked epoch denies |
 //! | `grants.new_epoch_grant_works` | `grants`, `multi-repo`, `auth-v2`, `test-faults` | a new epoch grant works |
@@ -85,6 +90,34 @@
 //! | `grants.oversize_header_denied` | `grants`, `multi-repo`, `auth-v2` | 8,193-byte header denies |
 //! | `grants.non_ascii_header_denied` | `grants`, `multi-repo`, `auth-v2` | non-ASCII header denies |
 //! | `grants.retry_with_changed_grant_returns_saved_result` | `grants`, `multi-repo`, `auth-v2` | replay precedes grant verification |
+//! | `ref_scopes.create_only_rejects_update` | `grants`, `multi-repo`, `auth-v2` | create only rejects update |
+//! | `ref_scopes.cu_grant_creates_but_match_update_denied_opaque` | `grants`, `multi-repo`, `auth-v2` | cu grant creates but match update denied opaque |
+//! | `ref_scopes.force_allows_non_ff` | `grants`, `multi-repo`, `auth-v2` | force allows non ff |
+//! | `ref_scopes.delete_needs_d` | `grants`, `multi-repo`, `auth-v2` | delete needs d |
+//! | `ref_scopes.any_on_absent_needs_c` | `grants`, `multi-repo`, `auth-v2` | any on absent needs c |
+//! | `ref_scopes.any_on_present_needs_f` | `grants`, `multi-repo`, `auth-v2` | any on present needs f |
+//! | `ref_scopes.direct_packmap_update_denied` | `grants`, `multi-repo`, `auth-v2` | direct packmap update denied |
+//! | `ref_scopes.head_only_update_ok` | `grants`, `multi-repo`, `auth-v2` | head only update ok |
+//! | `ref_scopes.advance_wrong_packmap_denied` | `grants`, `multi-repo`, `auth-v2` | advance wrong packmap denied |
+//! | `ref_scopes.rebaseline_push_under_head_scope` | `grants`, `multi-repo`, `auth-v2` | rebaseline push under head scope |
+//! | `ref_scopes.begin_upload_any_flag` | `grants`, `multi-repo`, `auth-v2` | begin upload any flag |
+//! | `ref_scopes.begin_upload_unmatched_denied` | `grants`, `multi-repo`, `auth-v2` | begin upload unmatched denied |
+//! | `epochs.get_unsigned_zero` | `grants`, `multi-repo` | get unsigned zero |
+//! | `epochs.get_ignores_auth_headers` | `grants`, `multi-repo` | get ignores auth headers |
+//! | `epochs.get_bad_namespace_invalid_argument` | `grants`, `multi-repo` | get bad namespace invalid argument |
+//! | `epochs.set_advances_and_get_reflects` | `grants`, `multi-repo` | set advances and get reflects |
+//! | `epochs.set_retry_same_epoch` | `grants`, `multi-repo` | set retry same epoch |
+//! | `epochs.set_over_step_denied` | `grants`, `multi-repo` | set over step |
+//! | `epochs.set_decrease_denied` | `grants`, `multi-repo` | set decrease |
+//! | `epochs.wrong_audience` | `grants`, `multi-repo` | wrong audience |
+//! | `epochs.expired` | `grants`, `multi-repo` | expired |
+//! | `epochs.not_yet_valid` | `grants`, `multi-repo` | not yet valid |
+//! | `epochs.scheme_not_advertised` | `grants`, `multi-repo` | scheme not advertised |
+//! | `epochs.namespace_not_served` | `grants`, `multi-repo` | namespace not served |
+//! | `epochs.oversize_statement` | `grants`, `multi-repo` | oversize statement |
+//! | `epochs.zero_x_secp256k1_statement` | `grants`, `multi-repo` | zero x secp256k1 statement |
+//! | `epochs.zero_x_webauthn_statement` | `grants`, `multi-repo` | zero x webauthn statement |
+//! | `epochs.old_grant_denied_new_grant_works_after_set` | `grants`, `multi-repo` | old grant denied new grant works after set |
 //! | `info.shape_and_policy` | | unauthenticated discovery reports consistent limits, policy and bounded private caching |
 //! | `info.ignores_repository_header` | | absent, nonexistent and malformed repository identities yield identical response bytes |
 //! | `policy.owner_write_allowed` | `namespace-policy`, `multi-repo`, `auth-v2` | an allowlisted namespace owner writes and reads its ref |
@@ -233,7 +266,7 @@
 // TODO(M1, tickets): `tickets.upload_part_*`,
 //   `tickets.complete_upload_*`,
 //   `growth.tickets_and_outbox_pruned` (WP-1.27).
-// TODO(M2, grants): `grants.write_*`, `grants.epoch_*`, `grants.revoked_*`.
+// TODO(M2, grants): native transport grant registration and the later read grants.
 // TODO(M2, signed-reads): `reads.signed_verified_in_full`,
 //   `reads.private_repo_not_found`, `reads.url_token_*`.
 // TODO(M3, admission): `admission.challenge_402_typed_detail` (HTTP 402,
@@ -260,6 +293,7 @@ use std::sync::Arc;
 use futures::FutureExt as _;
 use url::Url;
 
+pub use cases::grants::owner_namespaces as grant_owner_namespaces;
 pub use cases::grants::{RP_ID as GRANT_RP_ID, RP_ORIGIN as GRANT_RP_ORIGIN};
 pub use cases::{CASES, Case};
 pub use profile::{Feature, Milestone, Profile, ProfileSpec, QuotaLimits, WireAuth};
