@@ -11,9 +11,9 @@
 //! programmatic only.
 //!
 //! The pieces: [`route`] is the §2 parser, [`range`] the conditional and
-//! byte-range rules, [`resolve`] published resolution and the byte source
+//! byte-range rules, `resolve` published resolution and the byte source
 //! (extracted objects held by this repository, else its own pack entry),
-//! [`reach`] the reachability proof, [`body`] the length-enforcing body, and
+//! [`reach`] the reachability proof, `body` the length-enforcing body, and
 //! [`seams`] the hooks for admission (4.13), proofs (4.14b), tokens (4.15),
 //! mounting (4.16) and takedown (5.9a).
 

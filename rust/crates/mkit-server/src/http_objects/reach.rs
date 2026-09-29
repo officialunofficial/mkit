@@ -10,7 +10,7 @@
 //! history mode), and it stops at a tombstoned or blocked object
 //! ([`TakedownGate::stops_descent`]). A cap never aborts the walk: the
 //! object or subtree it hides is skipped and the walk reports
-//! [`Reach::Capped`] only if the target was not found anywhere else.
+//! `Capped` only if the target was not found anywhere else.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Mutex;
