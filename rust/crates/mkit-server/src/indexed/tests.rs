@@ -26,16 +26,16 @@ use crate::store::{
 };
 use crate::telemetry::NoopMetrics;
 
-const NOW: i64 = 1_700_000_000_000;
+pub(super) const NOW: i64 = 1_700_000_000_000;
 
-fn repo(name: &str) -> RepoId {
+pub(super) fn repo(name: &str) -> RepoId {
     RepoId {
         namespace: NamespaceKey::deployment_default(),
         name: RepoName::new(name).unwrap(),
     }
 }
 
-fn ticket(repo: &RepoId, bytes: &[u8], created_at_ms: u64) -> TicketV1 {
+pub(super) fn ticket(repo: &RepoId, bytes: &[u8], created_at_ms: u64) -> TicketV1 {
     TicketV1 {
         repo: repo.name.clone(),
         ref_name: "refs/heads/main".into(),
@@ -50,7 +50,12 @@ fn ticket(repo: &RepoId, bytes: &[u8], created_at_ms: u64) -> TicketV1 {
     }
 }
 
-fn upload(blobs: &MemoryBlobStore, bytes: &[u8]) {
+/// A stand-in id per consumed ticket: the pack id, unique per ticket.
+fn ticket_ids(tickets: &[TicketV1]) -> Vec<Hash> {
+    tickets.iter().map(|t| hash(&t.pack_id)).collect()
+}
+
+pub(super) fn upload(blobs: &MemoryBlobStore, bytes: &[u8]) {
     block_on(async {
         let mut sink = blobs
             .begin(BlobKey::pack(hash(bytes)), bytes.len() as u64)
@@ -61,7 +66,7 @@ fn upload(blobs: &MemoryBlobStore, bytes: &[u8]) {
     });
 }
 
-fn source(repo: &RepoId) -> Partition {
+pub(super) fn source(repo: &RepoId) -> Partition {
     SinglePartition.ref_shard(repo, "refs/heads/main")
 }
 
@@ -81,6 +86,7 @@ fn verify_store<S: NamespaceStore>(
         repo,
         &source(repo),
         tickets,
+        &ticket_ids(tickets),
         head,
         cfg,
         clock,
@@ -225,7 +231,8 @@ impl NamespaceStore for TimedKv {
                 &SinglePartition,
                 &repo,
                 &retry_source,
-                &[ticket],
+                std::slice::from_ref(&ticket),
+                &ticket_ids(std::slice::from_ref(&ticket)),
                 head,
                 IndexedConfig::default(),
                 self.clock.as_ref(),
@@ -732,7 +739,7 @@ fn thin_pack(base: Hash, base_bytes: &[u8], target_bytes: &[u8]) -> Vec<u8> {
     writer.finish().unwrap()
 }
 
-fn seed_member_raw(
+pub(super) fn seed_member_raw(
     blobs: &MemoryBlobStore,
     store: &MemoryKv,
     repo: &RepoId,

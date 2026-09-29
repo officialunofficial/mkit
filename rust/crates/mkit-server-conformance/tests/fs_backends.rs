@@ -187,6 +187,11 @@ const SKIPS: &[&str] = &[
     "idx_blocked_on_add",
     "idx_hold_extension_keeps_max",
     "idx_expired_holds_pruned_on_mutation",
+    "idx_holder_records_advance_seq_and_guard_removal",
+    "idx_hold_and_holder_deadline_passed_writes_nothing",
+    "idx_extend_hold_only_when_live",
+    "idx_holder_unless_blocked_releases_the_hold",
+    "idx_hold_alone_beats_commit_collect",
 ];
 
 /// An `FsBlobStore` in a temp dir it removes when dropped.
@@ -281,6 +286,19 @@ impl MultipartBlobStore for TempBlobs {
         parts: &[PartRef],
     ) -> Result<CommitOutcome, StoreError> {
         self.store.complete(key, session, plan, parts).await
+    }
+
+    async fn complete_with_root(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        parts: &[PartRef],
+        content_root: mkit_core::hash::Hash,
+    ) -> Result<CommitOutcome, StoreError> {
+        self.store
+            .complete_with_root(key, session, plan, parts, content_root)
+            .await
     }
 
     async fn abort(&self, key: BlobKey, session: &[u8]) -> Result<(), StoreError> {

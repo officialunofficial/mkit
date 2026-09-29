@@ -211,7 +211,7 @@ impl WorkerConfig {
             !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
         }) {
             return Err(ConfigError(
-                "indexed mode on Workers requires WP-4.8".into(),
+                "indexed mode on Workers requires WP-4.8 and WP-4.10b".into(),
             ));
         }
         let required =

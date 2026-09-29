@@ -4,7 +4,7 @@
 //! Single deployments serve `Partition::Namespace(root)` from the
 //! `REFSTORE` binding's `"root"` instance, retaining the M0 names (Q13).
 //! D34 kinds use the classes added by migration v2. Repository and ref-name
-//! indexes share one binding; WP-4.10a wires the content shards.
+//! indexes share one binding; WP-1.8 wires the content shards (R-131).
 
 use mkit_server::{NamespaceKey, Partition, StoreError};
 
@@ -16,7 +16,7 @@ pub const NS_COORD: &str = "NS_COORD";
 pub const REF_SHARD: &str = "REF_SHARD";
 /// D34 repo and ref-name index shards (WP-1.8).
 pub const REPO_INDEX: &str = "REPO_INDEX";
-/// Global `ContentIndex` shards (WP-4.10a).
+/// Global `ContentIndex` shards (WP-1.8, R-131).
 pub const CONTENT_INDEX: &str = "CONTENT_INDEX";
 
 /// The instance name of the deployment-default namespace.

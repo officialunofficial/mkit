@@ -1119,3 +1119,9 @@ fn sweep_removes_only_old_upload_temp_files() {
         "blobs are never touched"
     );
 }
+
+#[test]
+#[should_panic(expected = "alias a sibling namespace")]
+fn a_keyspace_cannot_alias_a_sibling_namespace() {
+    let _ = FsBlobStore::with_keyspace("/nonexistent", "Object-Offsets.");
+}

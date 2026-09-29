@@ -293,6 +293,11 @@ impl S3BlobStore {
                 format!("keyspace {keyspace:?} is not one plain segment").into(),
             ));
         }
+        if mkit_server::is_reserved_pack_keyspace(keyspace) {
+            return Err(StoreError::Invalid(
+                format!("keyspace {keyspace:?} aliases a sibling namespace").into(),
+            ));
+        }
         let builder = || {
             reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))

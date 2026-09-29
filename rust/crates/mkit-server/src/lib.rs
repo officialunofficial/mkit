@@ -83,7 +83,7 @@ pub use store::{
     MAX_BATCH_OPS, MAX_KEY_BYTES, MAX_SCAN_RANGES, MAX_VALUE_BYTES, MembershipMode,
     MultipartBlobStore, NamespaceStore, PackSink, PartRef, PartSink, Partition, PartitionStats,
     Precondition, RangeScan, ScanPage, StateCommitment, StoreCapabilities, StoreError,
-    StoreMaintenance, UnsupportedPartSink, Value, Write,
+    StoreMaintenance, UnsupportedPartSink, Value, Write, is_reserved_pack_keyspace,
 };
 pub use telemetry::{
     METRIC_LATENCY, METRIC_REQUESTS, METRIC_UPLOAD_BYTES, Metrics, NEVER_ECHO, NEVER_LOG,

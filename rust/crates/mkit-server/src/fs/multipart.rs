@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::{Bytes, BytesMut};
-use mkit_core::hash::{hash, to_hex_bytes};
+use mkit_core::hash::{Hash, hash, to_hex_bytes};
 use mkit_core::upload_parts::{PartHasher, PartPlan, merge_to_root};
 use mkit_transport_file::{create_dir_all_durably, sync_dir, temp_path};
 
@@ -56,8 +56,10 @@ fn session_dir(store: &FsBlobStore, session: &[u8]) -> Result<PathBuf, StoreErro
 }
 
 fn session_meta(key: BlobKey, len: u64, part_size: u64) -> Result<Vec<u8>, StoreError> {
-    if key.namespace() != BlobNamespace::Pack {
-        return Err(StoreError::Invalid("multipart requires a pack key".into()));
+    if !matches!(key.namespace(), BlobNamespace::Pack | BlobNamespace::Object) {
+        return Err(StoreError::Invalid(
+            "multipart requires a pack or object key".into(),
+        ));
     }
     let mut value = Vec::with_capacity(53);
     value.extend_from_slice(META_MAGIC);
@@ -344,6 +346,38 @@ impl MultipartBlobStore for FsBlobStore {
         plan: &PartPlan,
         parts: &[PartRef],
     ) -> Result<CommitOutcome, StoreError> {
+        self.complete_with(key, session, plan, parts, None).await
+    }
+
+    async fn complete_with_root(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        parts: &[PartRef],
+        content_root: Hash,
+    ) -> Result<CommitOutcome, StoreError> {
+        self.complete_with(key, session, plan, parts, Some(content_root))
+            .await
+    }
+
+    async fn abort(&self, key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
+        self.abort_session(key, session).await
+    }
+}
+
+impl FsBlobStore {
+    /// Complete a multipart upload against the key's hash (`None`) or an
+    /// object's content root.
+    async fn complete_with(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        parts: &[PartRef],
+        root: Option<Hash>,
+    ) -> Result<CommitOutcome, StoreError> {
+        let expected = key.expected_root(root)?;
         let meta = session_meta(key, plan.total(), plan.part_size())?;
         let dir = session_dir(self, session)?;
         let session_lock = session_lock(self, session)?;
@@ -376,7 +410,7 @@ impl MultipartBlobStore for FsBlobStore {
             cvs.push(cv);
         }
         if merge_to_root(plan, &cvs).map_err(|e| StoreError::Invalid(e.to_string().into()))?
-            != *key.hash()
+            != expected
         {
             return Err(StoreError::Invalid("merged part root mismatch".into()));
         }
@@ -418,7 +452,10 @@ impl MultipartBlobStore for FsBlobStore {
                 remaining -= n as u64;
             }
         }
-        let outcome = sink.commit().await?;
+        let outcome = match root {
+            Some(root) => sink.commit_with_root(root).await?,
+            None => sink.commit().await?,
+        };
         // The pack is durable. Cleanup failure is harmless; startup sweep
         // reclaims the directory after the ticket lifetime.
         if let Err(e) = fs::remove_dir_all(&dir).and_then(|()| sync_dir(&uploads(&self.root))) {
@@ -427,7 +464,7 @@ impl MultipartBlobStore for FsBlobStore {
         Ok(outcome)
     }
 
-    async fn abort(&self, key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
+    async fn abort_session(&self, key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
         let dir = session_dir(self, session)?;
         let session_lock = session_lock(self, session)?;
         let _guard = session_lock.lock().await;

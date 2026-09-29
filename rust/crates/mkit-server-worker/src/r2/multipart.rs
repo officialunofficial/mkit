@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use futures::StreamExt as _;
-use mkit_core::hash::to_hex_bytes;
+use mkit_core::hash::{Hash, to_hex_bytes};
 use mkit_core::upload_parts::{PartPlan, merge_to_root};
 use mkit_server::storage_error::StorageOp;
 use mkit_server::{
@@ -233,6 +233,47 @@ impl<B: ObjectBucket> MultipartBlobStore for R2BlobStore<B> {
         plan: &PartPlan,
         parts: &[PartRef],
     ) -> Result<CommitOutcome, StoreError> {
+        self.complete_with(key, session, plan, parts, None).await
+    }
+
+    async fn complete_with_root(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        parts: &[PartRef],
+        content_root: Hash,
+    ) -> Result<CommitOutcome, StoreError> {
+        self.complete_with(key, session, plan, parts, Some(content_root))
+            .await
+    }
+
+    fn single_put_limit(&self) -> Option<u64> {
+        Some(self.max_bytes)
+    }
+
+    async fn abort(&self, _key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
+        let prefix = session_prefix(self, session)?;
+        self.bucket
+            .delete(&format!("{prefix}meta"))
+            .await
+            .map_err(|e| backend_error(StorageOp::BlobPut, e))?;
+        self.delete_prefix(&prefix, None).await
+    }
+}
+
+impl<B: ObjectBucket> R2BlobStore<B> {
+    /// Complete a multipart upload against the key's hash (`None`) or an
+    /// object's content root.
+    async fn complete_with(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        parts: &[PartRef],
+        root: Option<Hash>,
+    ) -> Result<CommitOutcome, StoreError> {
+        let expected = key.expected_root(root)?;
         if self.head(&key).await?.is_some() {
             return Ok(CommitOutcome::AlreadyPresent);
         }
@@ -263,7 +304,7 @@ impl<B: ObjectBucket> MultipartBlobStore for R2BlobStore<B> {
             cvs.push(cv);
         }
         if merge_to_root(plan, &cvs).map_err(|e| StoreError::Invalid(e.to_string().into()))?
-            != *key.hash()
+            != expected
         {
             return Err(StoreError::Invalid("merged part root mismatch".into()));
         }
@@ -300,7 +341,10 @@ impl<B: ObjectBucket> MultipartBlobStore for R2BlobStore<B> {
                 return Err(StoreError::Invalid("stored part body underrun".into()));
             }
         }
-        let outcome = sink.commit().await?;
+        let outcome = match root {
+            Some(root) => sink.commit_with_root(root).await?,
+            None => sink.commit().await?,
+        };
         self.bucket
             .delete(&meta_key)
             .await
@@ -309,14 +353,5 @@ impl<B: ObjectBucket> MultipartBlobStore for R2BlobStore<B> {
             tracing::warn!(%error, "R2 multipart cleanup failed");
         }
         Ok(outcome)
-    }
-
-    async fn abort(&self, _key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
-        let prefix = session_prefix(self, session)?;
-        self.bucket
-            .delete(&format!("{prefix}meta"))
-            .await
-            .map_err(|e| backend_error(StorageOp::BlobPut, e))?;
-        self.delete_prefix(&prefix, None).await
     }
 }

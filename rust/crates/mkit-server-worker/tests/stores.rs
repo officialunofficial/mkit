@@ -56,6 +56,67 @@ fn upload_marker_r2_key_is_not_a_pack_key() {
 }
 
 #[test]
+fn r2_object_keys_are_sibling_namespaces_verified_against_a_root() {
+    let bucket = SimBucket::default();
+    let store = R2BlobStore::new(bucket.clone(), PACKS_KEYSPACE);
+    let content = vec![5_u8; 70_000];
+    let id = hash(b"an object id, not the content hash");
+    let object = BlobKey::object(id);
+    let offsets = BlobKey::object_offsets(id);
+    assert_eq!(
+        store.object_key(&object).unwrap(),
+        format!("objects/{}", object.to_hex())
+    );
+    assert_eq!(
+        store.object_key(&offsets).unwrap(),
+        format!("object-offsets/v1/{}", object.to_hex())
+    );
+    let prefixed = R2BlobStore::new(SimBucket::default(), "tenant/a/packs");
+    assert_eq!(
+        prefixed.object_key(&object).unwrap(),
+        format!("tenant/a/objects/{}", object.to_hex())
+    );
+    block_on(async {
+        let put = |root, len: u64| {
+            let (store, content) = (&store, &content);
+            async move {
+                let mut sink = store.begin(object, len).await?;
+                let len = usize::try_from(len).unwrap();
+                sink.write(Bytes::copy_from_slice(&content[..len])).await?;
+                sink.commit_with_root(root).await
+            }
+        };
+        // Wrong root: the withheld last byte is never sent, so the key
+        // stays absent (the put never completes).
+        assert!(matches!(
+            put(hash(b"wrong"), content.len() as u64).await,
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(store.head(&object).await.unwrap().is_none());
+        assert_eq!(bucket.objects(), 0);
+        // A plain commit refuses an object key.
+        let mut sink = store.begin(object, 1).await.unwrap();
+        sink.write(Bytes::from_static(b"x")).await.unwrap();
+        assert!(matches!(sink.commit().await, Err(StoreError::Invalid(_))));
+        assert!(store.head(&object).await.unwrap().is_none());
+        // Right root, then a 429 on the second write of the present key.
+        assert_eq!(
+            put(hash(&content), content.len() as u64).await.unwrap(),
+            CommitOutcome::Created
+        );
+        bucket.fail_next_puts(1);
+        assert_eq!(
+            put(hash(&content), content.len() as u64).await.unwrap(),
+            CommitOutcome::AlreadyPresent
+        );
+        assert_eq!(
+            store.head(&object).await.unwrap().map(|m| m.len),
+            Some(content.len() as u64)
+        );
+    });
+}
+
+#[test]
 fn r2_corrupted_part_cannot_publish_pack() {
     let bucket = SimBucket::default();
     let store = R2BlobStore::new(bucket.clone(), PACKS_KEYSPACE);
@@ -837,4 +898,10 @@ fn timer_reschedule_put_observes_pressure_through_do_shim() {
             expected
         )]
     );
+}
+
+#[test]
+#[should_panic(expected = "alias a sibling namespace")]
+fn r2_refuses_a_keyspace_that_aliases_a_sibling_namespace() {
+    let _ = R2BlobStore::new(SimBucket::default(), "Objects");
 }

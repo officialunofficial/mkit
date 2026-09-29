@@ -25,11 +25,19 @@
 //!    between 2 and 4 finds `deleting` set in [`ContentIndex::state`] and
 //!    resumes at step 3.
 //!
-//! **Holder rows are provisional.** WP-4.10a replaces these same-partition
-//! holder rows with rows sub-sharded by (object, hash(holder)), using a
-//! reserve → insert → count → mark protocol, and keeps the count on the
-//! state row here. Callers must not rely on scanning every holder of an
-//! object in one partition; the count is what GC reads.
+//! **Holder rows (R-131).** A holder row is a [`HolderRecord`]: the object's
+//! post-bump change sequence and the id of the operation (the consuming
+//! ticket) that recorded it. Every holder write, including a re-record of
+//! the same holder, advances the object's sequence, and a removal is
+//! conditional on the sequence the caller read
+//! ([`ContentIndex::remove_holder`]), so a removal never undoes a holder
+//! that was re-recorded after the read (SPEC-SERVER §13.3). The count on the
+//! state row is what GC reads. The rows stay in the object's content shard.
+//!
+//! **Deadlines.** Hold and holder batches carry a `NotAfter` deadline of
+//! `now_ms + `[`CONTENT_APPLY_WINDOW_MS`]: a batch that reaches the store
+//! after its plan-time blocklist and `deleting` reads went stale writes
+//! nothing and answers a retryable [`StoreError::Unavailable`] (§14.2).
 
 use mkit_core::hash::Hash;
 
@@ -56,6 +64,11 @@ pub const MAX_BLOCK_REASON_BYTES: usize = 256;
 /// outlive `MAX_APPLY_WINDOW` plus the relay-lag bound (00-plan P-21,
 /// P-23); the cap stops a caller from pinning an object indefinitely.
 pub const MAX_HOLD_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// How long a hold or holder batch may take to reach the store, from the
+/// `now_ms` its plan was made at (`NotAfter`, SPEC-WRITE-GRANTS §5.5). The
+/// same bound as `MAX_APPLY_WINDOW`.
+pub const CONTENT_APPLY_WINDOW_MS: u64 = 10_000;
 
 /// Optimistic re-plans (normative rule 3) before a contended mutation
 /// fails with a retryable [`StoreError::Unavailable`].
@@ -106,6 +119,27 @@ pub struct HolderPage {
     pub holders: Vec<Holder>,
     /// Resume point, if more holders may follow.
     pub next: Option<Cursor>,
+}
+
+/// A holder row's value (R-131).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HolderRecord {
+    /// The object's change sequence when the row was written (post-bump), so
+    /// the row is replaced, and a stale removal refused, by every later
+    /// write.
+    pub seq: u64,
+    /// The operation that recorded it: the consuming ticket id. Orphan
+    /// reconciliation (WP-5.3a) checks the ticket's liveness through it.
+    pub op_id: Hash,
+}
+
+impl HolderRecord {
+    /// A holder record.
+    #[must_use]
+    pub fn new(seq: u64, op_id: Hash) -> Self {
+        Self { seq, op_id }
+    }
 }
 
 /// A blocklist entry (PRD §6.7 takedown).
@@ -175,6 +209,10 @@ pub enum HoldOutcome {
 pub struct HolderOutcome {
     /// The holder row was not there before.
     pub newly_added: bool,
+    /// The object had no holder before this write.
+    pub first_holder: bool,
+    /// What the holder row now says.
+    pub record: HolderRecord,
     /// The object's blocklist entry, if blocked: the relay then takes the
     /// object down in the holding repo (R-75). The row is recorded either
     /// way, so a takedown finds the holder.
@@ -197,6 +235,8 @@ pub struct GcPlan {
 /// What a mutation saw, for its plan.
 struct Seen {
     probe: Option<Value>,
+    /// The auxiliary row a mutation named (the hold a holder releases).
+    aux: Option<Value>,
     blocked: Option<BlockEntry>,
 }
 
@@ -247,6 +287,39 @@ fn bumped(mut state: ObjectState, now_ms: u64) -> ObjectState {
     state
 }
 
+/// A store borrowed for one call, without cloning a Worker adapter or
+/// changing its partition routing: the relay's target, and the store a
+/// [`ContentIndex`] runs over during extraction.
+pub(crate) struct BorrowedStore<'a, S>(pub(crate) &'a S);
+
+impl<S: NamespaceStore> NamespaceStore for BorrowedStore<'_, S> {
+    fn capabilities(&self) -> super::kv::StoreCapabilities {
+        self.0.capabilities()
+    }
+    async fn get(&self, p: &Partition, k: &Key) -> Result<Option<Value>, StoreError> {
+        self.0.get(p, k).await
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&Cursor>,
+        limit: u32,
+    ) -> Result<super::kv::ScanPage, StoreError> {
+        self.0.scan(p, start, end, after, limit).await
+    }
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        self.0.apply(p, batch).await
+    }
+    async fn stats(&self, p: &Partition) -> Result<super::kv::PartitionStats, StoreError> {
+        self.0.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.0.probe().await
+    }
+}
+
 /// The `ContentIndex` layer over a store's content shards. The store must
 /// accept every key class and atomic multi-key batches; otherwise every
 /// mutation fails with [`StoreError::Unsupported`].
@@ -290,7 +363,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
             return Err(StoreError::Invalid("hold exceeds MAX_HOLD_TTL_MS".into()));
         }
         let key = keys::hold(object, hold_id);
-        self.mutate(object, now_ms, Some(&key), |seen, state| {
+        self.mutate(object, now_ms, Some(&key), None, true, |seen, state| {
             if let Some(entry) = &seen.blocked {
                 return Ok(Step::Stop(HoldOutcome::Blocked(entry.clone())));
             }
@@ -298,6 +371,44 @@ impl<S: NamespaceStore> ContentIndex<S> {
             let old = seen.probe.as_ref().map(codec::decode_hold).transpose()?;
             let expiry = old.map_or(expires_at_ms, |old| old.max(expires_at_ms));
             let put = Write::Put(key.clone(), codec::encode_hold(expiry));
+            Ok(Step::Commit(vec![put], HoldOutcome::Held))
+        })
+        .await
+    }
+
+    /// Extend hold `hold_id` on `object` to `expires_at_ms`, only if it is
+    /// still recorded and live at `now_ms`. A hold that is gone or expired
+    /// may already have been passed by GC, so it is not brought back: the
+    /// caller redoes from the `head` check.
+    ///
+    /// # Errors
+    /// [`StoreError::Invalid`] as for [`Self::add_hold`]; a retryable
+    /// [`StoreError::Unavailable`] while GC is deleting the object or when
+    /// the hold is no longer live.
+    pub async fn extend_hold(
+        &self,
+        object: &Hash,
+        hold_id: &Hash,
+        expires_at_ms: u64,
+        now_ms: u64,
+    ) -> Result<HoldOutcome, StoreError> {
+        if expires_at_ms <= now_ms {
+            return Err(StoreError::Invalid("hold already expired".into()));
+        }
+        if expires_at_ms - now_ms > MAX_HOLD_TTL_MS {
+            return Err(StoreError::Invalid("hold exceeds MAX_HOLD_TTL_MS".into()));
+        }
+        let key = keys::hold(object, hold_id);
+        self.mutate(object, now_ms, Some(&key), None, true, |seen, state| {
+            if let Some(entry) = &seen.blocked {
+                return Ok(Step::Stop(HoldOutcome::Blocked(entry.clone())));
+            }
+            refuse_while_deleting(state)?;
+            let old = seen.probe.as_ref().map(codec::decode_hold).transpose()?;
+            let Some(old) = old.filter(|old| *old > now_ms) else {
+                return Err(StoreError::unavailable("hold no longer live; retry"));
+            };
+            let put = Write::Put(key.clone(), codec::encode_hold(old.max(expires_at_ms)));
             Ok(Step::Commit(vec![put], HoldOutcome::Held))
         })
         .await
@@ -313,7 +424,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
         now_ms: u64,
     ) -> Result<(), StoreError> {
         let key = keys::hold(object, hold_id);
-        self.mutate(object, now_ms, None, |_, _| {
+        self.mutate(object, now_ms, None, None, true, |_, _| {
             Ok(Step::Commit(vec![Write::Delete(key.clone())], ()))
         })
         .await
@@ -321,51 +432,139 @@ impl<S: NamespaceStore> ContentIndex<S> {
 
     /// Record that `holder` holds `object` (idempotent), releasing hold
     /// `releases` in the same batch: a dedup hold is released only when its
-    /// holder row is recorded (PRD §6.7).
+    /// holder row is recorded (PRD §6.7). `op_id` is the consuming ticket.
+    /// Every call advances the object's sequence and rewrites the row, also
+    /// when the holder was already recorded (SPEC-SERVER §13.3), so the
+    /// count changes only for a new holder. A blocked object is still
+    /// recorded, and reported in the outcome.
     ///
     /// # Errors
     /// A retryable [`StoreError::Unavailable`] while GC is deleting the
-    /// object.
+    /// object, or when the batch missed its `NotAfter` deadline.
     pub async fn add_holder(
         &self,
         object: &Hash,
         holder: &Holder,
+        op_id: &Hash,
         releases: Option<&Hash>,
         now_ms: u64,
     ) -> Result<HolderOutcome, StoreError> {
+        self.holder_write(object, holder, op_id, releases, now_ms, false)
+            .await
+    }
+
+    /// Like [`Self::add_holder`], but a blocked object is not recorded: the
+    /// hold `releases` is deleted in the same guarded batch and the outcome
+    /// carries the block entry, so the caller fails the upload and the bytes
+    /// fall to ordinary GC (SPEC-SERVER §14.2). Used by extraction; the relay
+    /// still records blocked holders (R-75).
+    ///
+    /// # Errors
+    /// As [`Self::add_holder`].
+    pub async fn add_holder_unless_blocked(
+        &self,
+        object: &Hash,
+        holder: &Holder,
+        op_id: &Hash,
+        releases: Option<&Hash>,
+        now_ms: u64,
+    ) -> Result<HolderOutcome, StoreError> {
+        self.holder_write(object, holder, op_id, releases, now_ms, true)
+            .await
+    }
+
+    async fn holder_write(
+        &self,
+        object: &Hash,
+        holder: &Holder,
+        op_id: &Hash,
+        releases: Option<&Hash>,
+        now_ms: u64,
+        refuse_blocked: bool,
+    ) -> Result<HolderOutcome, StoreError> {
         let key = keys::holder(object, &holder.ns, &holder.repo)?;
         let release = releases.map(|id| keys::hold(object, id));
-        self.mutate(object, now_ms, Some(&key), |seen, state| {
-            refuse_while_deleting(state)?;
-            let newly_added = seen.probe.is_none();
-            if newly_added {
-                state.holders += 1;
-            }
-            let mut writes = vec![Write::Put(key.clone(), Value::default())];
-            writes.extend(release.clone().map(Write::Delete));
-            let outcome = HolderOutcome {
-                newly_added,
-                blocked: seen.blocked.clone(),
-            };
-            Ok(Step::Commit(writes, outcome))
-        })
+        self.mutate(
+            object,
+            now_ms,
+            Some(&key),
+            release.as_ref(),
+            true,
+            |seen, state| {
+                refuse_while_deleting(state)?;
+                if refuse_blocked && let Some(entry) = &seen.blocked {
+                    let record = HolderRecord::new(bumped(*state, now_ms).seq, *op_id);
+                    let writes = release.clone().map(Write::Delete).into_iter().collect();
+                    return Ok(Step::Commit(
+                        writes,
+                        HolderOutcome {
+                            newly_added: false,
+                            first_holder: false,
+                            record,
+                            blocked: Some(entry.clone()),
+                        },
+                    ));
+                }
+                // A hold that is gone or expired no longer protects the bytes the
+                // caller relied on: GC may have passed. Retry from the `head`.
+                if release.is_some()
+                    && !seen.aux.as_ref().is_some_and(|hold| {
+                        codec::decode_hold(hold).is_ok_and(|expires| expires > now_ms)
+                    })
+                {
+                    return Err(StoreError::unavailable("hold no longer live; retry"));
+                }
+                let newly_added = seen.probe.is_none();
+                let first_holder = state.holders == 0;
+                if newly_added {
+                    state.holders += 1;
+                }
+                // The sequence this write stores: `mutate` bumps it once more.
+                let record = HolderRecord::new(bumped(*state, now_ms).seq, *op_id);
+                let mut writes = vec![Write::Put(key.clone(), codec::encode_holder(&record))];
+                writes.extend(release.clone().map(Write::Delete));
+                let outcome = HolderOutcome {
+                    newly_added,
+                    first_holder,
+                    record,
+                    blocked: seen.blocked.clone(),
+                };
+                Ok(Step::Commit(writes, outcome))
+            },
+        )
         .await
     }
 
-    /// Remove `holder` of `object`; removing an absent holder is not an
-    /// error.
+    /// The record of `holder` of `object`, if recorded.
+    pub async fn holder_record(
+        &self,
+        object: &Hash,
+        holder: &Holder,
+    ) -> Result<Option<HolderRecord>, StoreError> {
+        let key = keys::holder(object, &holder.ns, &holder.repo)?;
+        let value = self.store.get(&content_shard(object), &key).await?;
+        value.as_ref().map(codec::decode_holder).transpose()
+    }
+
+    /// Remove `holder` of `object`, only if its row still carries
+    /// `expected_seq` (the sequence of the record the caller read). `true`
+    /// if it was removed; `false` (a no-op) when the holder is absent or was
+    /// written again since (SPEC-SERVER §13.3 step 4).
     pub async fn remove_holder(
         &self,
         object: &Hash,
         holder: &Holder,
+        expected_seq: u64,
         now_ms: u64,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         let key = keys::holder(object, &holder.ns, &holder.repo)?;
-        self.mutate(object, now_ms, Some(&key), |seen, state| {
-            if seen.probe.is_some() {
-                state.holders = state.holders.saturating_sub(1);
+        self.mutate(object, now_ms, Some(&key), None, true, |seen, state| {
+            let current = seen.probe.as_ref().map(codec::decode_holder).transpose()?;
+            if current.is_none_or(|record| record.seq != expected_seq) {
+                return Ok(Step::Stop(false));
             }
-            Ok(Step::Commit(vec![Write::Delete(key.clone())], ()))
+            state.holders = state.holders.saturating_sub(1);
+            Ok(Step::Commit(vec![Write::Delete(key.clone())], true))
         })
         .await
     }
@@ -411,7 +610,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
             return Err(StoreError::Invalid("block reason too long".into()));
         }
         let (key, value) = (keys::block(object), codec::encode_block_entry(entry));
-        self.mutate(object, now_ms, None, |_, _| {
+        self.mutate(object, now_ms, None, None, false, |_, _| {
             Ok(Step::Commit(
                 vec![Write::Put(key.clone(), value.clone())],
                 (),
@@ -423,7 +622,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
     /// Take `object` off the blocklist.
     pub async fn unblock(&self, object: &Hash, now_ms: u64) -> Result<(), StoreError> {
         let key = keys::block(object);
-        self.mutate(object, now_ms, None, |_, _| {
+        self.mutate(object, now_ms, None, None, false, |_, _| {
             Ok(Step::Commit(vec![Write::Delete(key.clone())], ()))
         })
         .await
@@ -517,7 +716,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
     /// `deleting` so the object can be uploaded again. A no-op if it is not
     /// set.
     pub async fn finish_collect(&self, object: &Hash, now_ms: u64) -> Result<(), StoreError> {
-        self.mutate(object, now_ms, None, |_, state| {
+        self.mutate(object, now_ms, None, None, false, |_, state| {
             if !state.deleting {
                 return Ok(Step::Stop(()));
             }
@@ -533,12 +732,17 @@ impl<S: NamespaceStore> ContentIndex<S> {
     /// written) or returns its writes. They commit after deletes of the
     /// expired holds read and before the new state row, guarded on the
     /// layout version and the state row (every change to the object's rows
-    /// rewrites it). Re-plans on a lost race.
+    /// rewrites it). Re-plans on a lost race. With `deadline`, the batch also
+    /// requires `NotAfter(now_ms + CONTENT_APPLY_WINDOW_MS)`, and a batch
+    /// that misses it is a retryable [`StoreError::Unavailable`] (a re-plan
+    /// would reuse the same stale `now_ms`).
     async fn mutate<T>(
         &self,
         object: &Hash,
         now_ms: u64,
         probe: Option<&Key>,
+        aux: Option<&Key>,
+        deadline: bool,
         plan: impl Fn(&Seen, &mut ObjectState) -> Result<Step<T>, StoreError>,
     ) -> Result<T, StoreError> {
         let p = content_shard(object);
@@ -549,13 +753,18 @@ impl<S: NamespaceStore> ContentIndex<S> {
             keys::block(object),
         ];
         read.extend(probe.cloned());
+        read.extend(aux.cloned());
         let (hold_start, hold_end) = keys::holds_of(object);
         for _ in 0..MAX_ATTEMPTS {
             let mut values = self.store.get_many(&p, &read).await?.into_iter();
             let (v, old, blocked) = (values.next(), values.next(), values.next());
             let (v, old, blocked) = (v.flatten(), old.flatten(), blocked.flatten());
+            // The optional rows follow the fixed ones, in this order.
+            let probed = probe.and_then(|_| values.next().flatten());
+            let auxiliary = aux.and_then(|_| values.next().flatten());
             let seen = Seen {
-                probe: values.next().flatten(),
+                probe: probed,
+                aux: auxiliary,
                 blocked: blocked
                     .as_ref()
                     .map(codec::decode_block_entry)
@@ -574,8 +783,13 @@ impl<S: NamespaceStore> ContentIndex<S> {
                 Step::Stop(out) => return Ok(out),
                 Step::Commit(writes, out) => (writes, out),
             };
-            let mut batch = guard_layout(Batch::new(), v.as_ref())?
-                .require(guard_state(&state_key, old.as_ref()));
+            let mut batch = Batch::new();
+            if deadline {
+                let by = now_ms.saturating_add(CONTENT_APPLY_WINDOW_MS);
+                batch = batch.require(Precondition::NotAfter(by));
+            }
+            let mut batch =
+                guard_layout(batch, v.as_ref())?.require(guard_state(&state_key, old.as_ref()));
             for (key, value) in holds.entries {
                 if codec::decode_hold(&value)? <= now_ms {
                     batch = batch.delete(key);
@@ -588,7 +802,12 @@ impl<S: NamespaceStore> ContentIndex<S> {
             );
             match self.store.apply(&p, batch).await? {
                 BatchOutcome::Committed => return Ok(out),
-                BatchOutcome::PreconditionFailed { .. } | BatchOutcome::DeadlinePassed { .. } => {}
+                BatchOutcome::DeadlinePassed { .. } => {
+                    return Err(StoreError::unavailable(
+                        "content index deadline passed; retry",
+                    ));
+                }
+                BatchOutcome::PreconditionFailed { .. } => {}
             }
         }
         Err(StoreError::unavailable("content index update contended"))
@@ -597,12 +816,22 @@ impl<S: NamespaceStore> ContentIndex<S> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use futures_executor::block_on;
 
     use super::*;
+    use crate::ManualClock;
     use crate::memory::MemoryKv;
 
     const GRACE: u64 = 1_000;
+    /// The consuming ticket every test holder is recorded under.
+    const OP: Hash = [0x0f; 32];
+
+    /// A store whose `NotAfter` clock never reaches a test's small times.
+    fn kv() -> MemoryKv {
+        MemoryKv::with_clock(Arc::new(ManualClock::new(0)))
+    }
 
     fn holder(repo: &str) -> Holder {
         Holder::new(
@@ -619,6 +848,14 @@ mod tests {
         block_on(idx.collectable(object, now, GRACE))
             .unwrap()
             .is_some()
+    }
+
+    /// Remove `repo`'s holder at the sequence its row carries now.
+    fn remove(idx: &ContentIndex<MemoryKv>, object: &Hash, repo: &str, now: u64) -> bool {
+        let Some(record) = block_on(idx.holder_record(object, &holder(repo))).unwrap() else {
+            return block_on(idx.remove_holder(object, &holder(repo), 0, now)).unwrap();
+        };
+        block_on(idx.remove_holder(object, &holder(repo), record.seq, now)).unwrap()
     }
 
     fn hold_row(idx: &ContentIndex<MemoryKv>, object: &Hash, id: &Hash) -> Option<u64> {
@@ -645,7 +882,7 @@ mod tests {
 
     #[test]
     fn content_index_collectable_rules() {
-        let idx = ContentIndex::new(MemoryKv::default());
+        let idx = ContentIndex::new(kv());
         let obj = [7; 32];
         // Never indexed: nothing holds it, its last change counts as 0, and
         // the plan is guarded on the absent state row.
@@ -658,9 +895,9 @@ mod tests {
                 .preconditions
                 .contains(&Precondition::Absent(keys::object_state(&obj)))
         );
-        block_on(idx.add_holder(&obj, &holder("a"), None, 10)).unwrap();
+        block_on(idx.add_holder(&obj, &holder("a"), &OP, None, 10)).unwrap();
         assert!(!collectable(&idx, &obj, 10 + GRACE * 10), "held");
-        block_on(idx.remove_holder(&obj, &holder("a"), 20)).unwrap();
+        remove(&idx, &obj, "a", 20);
         assert!(!collectable(&idx, &obj, 20 + GRACE - 1), "within grace");
         assert!(collectable(&idx, &obj, 20 + GRACE));
         // A live hold blocks collection; an expired one does not.
@@ -689,7 +926,7 @@ mod tests {
 
     #[test]
     fn content_index_gc_commit_beats_a_racing_upload() {
-        let idx = ContentIndex::new(MemoryKv::default());
+        let idx = ContentIndex::new(kv());
         let obj = [6; 32];
         block_on(idx.release_hold(&obj, &[0; 32], 1)).unwrap();
         let plan = block_on(idx.collectable(&obj, 1 + GRACE, GRACE))
@@ -704,7 +941,7 @@ mod tests {
             Err(StoreError::Unavailable(_))
         ));
         assert!(matches!(
-            block_on(idx.add_holder(&obj, &holder("a"), None, now)),
+            block_on(idx.add_holder(&obj, &holder("a"), &OP, None, now)),
             Err(StoreError::Unavailable(_))
         ));
         assert_eq!(hold_row(&idx, &obj, &[1; 32]), None);
@@ -729,7 +966,7 @@ mod tests {
 
     #[test]
     fn content_index_blocklist_on_add_paths() {
-        let idx = ContentIndex::new(MemoryKv::default());
+        let idx = ContentIndex::new(kv());
         let obj = [5; 32];
         let entry = BlockEntry::new("csam", 1);
         block_on(idx.block(&obj, &entry, 1)).unwrap();
@@ -740,17 +977,17 @@ mod tests {
         );
         assert_eq!(state(&idx, &obj), before, "a refused hold writes nothing");
         assert_eq!(hold_row(&idx, &obj, &[1; 32]), None);
-        let outcome = block_on(idx.add_holder(&obj, &holder("a"), None, 3)).unwrap();
+        let outcome = block_on(idx.add_holder(&obj, &holder("a"), &OP, None, 3)).unwrap();
         assert_eq!((outcome.newly_added, outcome.blocked), (true, Some(entry)));
         block_on(idx.unblock(&obj, 4)).unwrap();
         held(block_on(idx.add_hold(&obj, &[1; 32], 100, 5)));
-        let outcome = block_on(idx.add_holder(&obj, &holder("a"), None, 6)).unwrap();
+        let outcome = block_on(idx.add_holder(&obj, &holder("a"), &OP, None, 6)).unwrap();
         assert_eq!((outcome.newly_added, outcome.blocked), (false, None));
     }
 
     #[test]
     fn content_index_holds_extend_prune_and_cap() {
-        let idx = ContentIndex::new(MemoryKv::default());
+        let idx = ContentIndex::new(kv());
         let obj = [4; 32];
         held(block_on(idx.add_hold(&obj, &[1; 32], 500, 1)));
         held(block_on(idx.add_hold(&obj, &[1; 32], 300, 2)));
@@ -759,7 +996,7 @@ mod tests {
         assert_eq!(hold_row(&idx, &obj, &[1; 32]), Some(700));
         held(block_on(idx.add_hold(&obj, &[2; 32], 50, 4)));
         // A later mutation deletes the expired hold rows it reads.
-        block_on(idx.add_holder(&obj, &holder("a"), None, 600)).unwrap();
+        block_on(idx.add_holder(&obj, &holder("a"), &OP, None, 600)).unwrap();
         assert_eq!(hold_row(&idx, &obj, &[2; 32]), None);
         assert_eq!(hold_row(&idx, &obj, &[1; 32]), Some(700));
         assert!(matches!(
@@ -776,26 +1013,26 @@ mod tests {
 
     #[test]
     fn content_index_holder_add_idempotent() {
-        let idx = ContentIndex::new(MemoryKv::default());
+        let idx = ContentIndex::new(kv());
         let obj = [8; 32];
         for i in 0..3 {
-            let outcome = block_on(idx.add_holder(&obj, &holder("a"), None, 1)).unwrap();
+            let outcome = block_on(idx.add_holder(&obj, &holder("a"), &OP, None, 1)).unwrap();
             assert_eq!(outcome.newly_added, i == 0);
         }
-        block_on(idx.add_holder(&obj, &holder("b"), None, 1)).unwrap();
+        block_on(idx.add_holder(&obj, &holder("b"), &OP, None, 1)).unwrap();
         assert_eq!(state(&idx, &obj).holders, 2);
         let page = block_on(idx.holders(&obj, None, 1)).unwrap();
         assert_eq!(page.holders, vec![holder("a")]);
         let rest = block_on(idx.holders(&obj, page.next.as_ref(), 10)).unwrap();
         assert_eq!((rest.holders, rest.next), (vec![holder("b")], None));
         for _ in 0..2 {
-            block_on(idx.remove_holder(&obj, &holder("a"), 2)).unwrap();
+            remove(&idx, &obj, "a", 2);
         }
         assert_eq!(state(&idx, &obj).holders, 1);
         // Recording a holder releases its dedup hold in the same batch.
         held(block_on(idx.add_hold(&obj, &[2; 32], 100, 3)));
         let before = state(&idx, &obj).seq;
-        block_on(idx.add_holder(&obj, &holder("c"), Some(&[2; 32]), 4)).unwrap();
+        block_on(idx.add_holder(&obj, &holder("c"), &OP, Some(&[2; 32]), 4)).unwrap();
         assert_eq!(state(&idx, &obj).seq, before + 1);
         assert_eq!(state(&idx, &obj).holders, 2);
         assert_eq!(hold_row(&idx, &obj, &[2; 32]), None);
@@ -803,15 +1040,17 @@ mod tests {
 
     #[test]
     fn content_index_every_mutation_bumps_last_change() {
-        let idx = ContentIndex::new(MemoryKv::default());
+        let idx = ContentIndex::new(kv());
         let obj = [9; 32];
         let entry = BlockEntry::new("r", 1);
         let mut last = ObjectState::default();
         for (i, now) in (1_u64..).zip([10, 20, 15, 30, 40, 50, 60, 70]) {
+            let last_seq = last.seq;
             match i {
                 1 => block_on(idx.add_hold(&obj, &[1; 32], 99, now)).map(drop),
-                2 | 3 => block_on(idx.add_holder(&obj, &holder("a"), None, now)).map(drop),
-                4 | 5 => block_on(idx.remove_holder(&obj, &holder("a"), now)),
+                2 | 3 => block_on(idx.add_holder(&obj, &holder("a"), &OP, None, now)).map(drop),
+                4 => block_on(idx.remove_holder(&obj, &holder("a"), last_seq, now)).map(drop),
+                5 => block_on(idx.release_hold(&obj, &[9; 32], now)),
                 6 => block_on(idx.block(&obj, &entry, now)),
                 7 => block_on(idx.unblock(&obj, now)),
                 _ => block_on(idx.release_hold(&obj, &[1; 32], now)),
@@ -842,11 +1081,11 @@ mod tests {
 
     #[test]
     fn content_index_objects_in_different_shards_isolated() {
-        let idx = ContentIndex::new(MemoryKv::default());
+        let idx = ContentIndex::new(kv());
         let (a, mut b) = ([0x10; 32], [0x10; 32]);
         b[0] = 0x20;
         assert_ne!(content_shard(&a), content_shard(&b));
-        block_on(idx.add_holder(&a, &holder("x"), None, 1)).unwrap();
+        block_on(idx.add_holder(&a, &holder("x"), &OP, None, 1)).unwrap();
         held(block_on(idx.add_hold(&a, &[1; 32], 99, 1)));
         let entry = BlockEntry::new("r", 1);
         block_on(idx.block(&a, &entry, 1)).unwrap();
@@ -877,7 +1116,7 @@ mod tests {
 
     #[test]
     fn content_index_refuses_newer_layout_version() {
-        let idx = ContentIndex::new(MemoryKv::default());
+        let idx = ContentIndex::new(kv());
         let obj = [3; 32];
         let newer = Batch::new().put(
             keys::layout_version(),
@@ -885,12 +1124,184 @@ mod tests {
         );
         block_on(idx.store().apply(&content_shard(&obj), newer)).unwrap();
         assert!(matches!(
-            block_on(idx.add_holder(&obj, &holder("a"), None, 1)),
+            block_on(idx.add_holder(&obj, &holder("a"), &OP, None, 1)),
             Err(StoreError::Unsupported(_))
         ));
         assert!(matches!(
             block_on(idx.collectable(&obj, GRACE, GRACE)),
             Err(StoreError::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn content_index_holder_records_advance_seq_and_guard_removal() {
+        let idx = ContentIndex::new(kv());
+        let obj = [0x31; 32];
+        let (a, b) = ([1; 32], [2; 32]);
+        let first = block_on(idx.add_holder(&obj, &holder("a"), &a, None, 1)).unwrap();
+        assert!(first.newly_added && first.first_holder);
+        assert_eq!(first.record, HolderRecord::new(1, a));
+        let second = block_on(idx.add_holder(&obj, &holder("b"), &a, None, 2)).unwrap();
+        assert!(second.newly_added && !second.first_holder);
+        // A re-record advances the sequence and rewrites the row, and the
+        // count does not change.
+        let again = block_on(idx.add_holder(&obj, &holder("a"), &b, None, 3)).unwrap();
+        assert!(!again.newly_added && !again.first_holder);
+        assert_eq!(again.record, HolderRecord::new(3, b));
+        let stored = block_on(idx.holder_record(&obj, &holder("a"))).unwrap();
+        assert_eq!(stored, Some(again.record));
+        assert_eq!(state(&idx, &obj).holders, 2);
+        assert_eq!(state(&idx, &obj).seq, 3);
+        // A removal that read the first record is stale: a no-op that
+        // writes nothing, not even a sequence bump.
+        assert!(!block_on(idx.remove_holder(&obj, &holder("a"), 1, 4)).unwrap());
+        assert_eq!(state(&idx, &obj).seq, 3);
+        assert!(!block_on(idx.remove_holder(&obj, &holder("never"), 3, 4)).unwrap());
+        assert_eq!(state(&idx, &obj).holders, 2);
+        assert!(block_on(idx.remove_holder(&obj, &holder("a"), 3, 5)).unwrap());
+        let last = block_on(idx.add_holder(&obj, &holder("b"), &a, None, 6)).unwrap();
+        assert!(!last.first_holder);
+        assert!(block_on(idx.remove_holder(&obj, &holder("b"), last.record.seq, 7)).unwrap());
+        assert_eq!(state(&idx, &obj).holders, 0);
+        let refill = block_on(idx.add_holder(&obj, &holder("a"), &a, None, 8)).unwrap();
+        assert!(refill.first_holder, "no holder was left");
+    }
+
+    /// A store that commits a blocklist entry for `armed` between a
+    /// mutation's reads and its batch.
+    struct Racing {
+        kv: MemoryKv,
+        armed: std::sync::Mutex<Option<(Hash, BlockEntry)>>,
+    }
+
+    impl NamespaceStore for Racing {
+        fn capabilities(&self) -> crate::store::StoreCapabilities {
+            self.kv.capabilities()
+        }
+
+        async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
+            self.kv.get(p, key).await
+        }
+
+        async fn scan(
+            &self,
+            p: &Partition,
+            start: &Key,
+            end: &Key,
+            after: Option<&Cursor>,
+            limit: u32,
+        ) -> Result<crate::store::ScanPage, StoreError> {
+            self.kv.scan(p, start, end, after, limit).await
+        }
+
+        async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+            let race = self.armed.lock().unwrap().take();
+            if let Some((object, entry)) = race {
+                let raced = Batch::new()
+                    .put(keys::block(&object), codec::encode_block_entry(&entry))
+                    .put(
+                        keys::object_state(&object),
+                        codec::encode_object_state(&ObjectState::new(1, 0, 0, false)),
+                    );
+                self.kv.apply(&content_shard(&object), raced).await?;
+            }
+            self.kv.apply(p, batch).await
+        }
+
+        async fn stats(&self, p: &Partition) -> Result<crate::store::PartitionStats, StoreError> {
+            self.kv.stats(p).await
+        }
+
+        async fn probe(&self) -> Result<(), StoreError> {
+            self.kv.probe().await
+        }
+    }
+
+    #[test]
+    fn content_index_holds_and_holders_racing_block_see_the_block() {
+        let entry = BlockEntry::new("dmca", 1);
+        let racing = |object: Hash| {
+            ContentIndex::new(Racing {
+                kv: kv(),
+                armed: std::sync::Mutex::new(Some((object, entry.clone()))),
+            })
+        };
+        // The hold's guarded batch loses to the block; its re-plan refuses.
+        let obj = [0x41; 32];
+        let idx = racing(obj);
+        let hold = block_on(idx.add_hold(&obj, &[1; 32], 100, 2)).unwrap();
+        assert_eq!(hold, HoldOutcome::Blocked(entry.clone()));
+        assert_eq!(hold_row_in(&idx, &obj, &[1; 32]), None);
+        // The holder is recorded anyway (a takedown must find it) and
+        // reports the block.
+        let obj = [0x42; 32];
+        let idx = racing(obj);
+        let outcome = block_on(idx.add_holder(&obj, &holder("a"), &OP, None, 2)).unwrap();
+        assert_eq!(outcome.blocked, Some(entry.clone()));
+        assert!(outcome.newly_added);
+    }
+
+    fn hold_row_in(idx: &ContentIndex<Racing>, object: &Hash, id: &Hash) -> Option<u64> {
+        let key = keys::hold(object, id);
+        let v = block_on(idx.store().get(&content_shard(object), &key)).unwrap();
+        v.map(|v| codec::decode_hold(&v).unwrap())
+    }
+
+    #[test]
+    fn content_index_hold_and_holder_batches_carry_a_deadline() {
+        let clock = Arc::new(ManualClock::new(0));
+        let idx = ContentIndex::new(MemoryKv::with_clock(clock.clone()));
+        let obj = [0x51; 32];
+        held(block_on(idx.add_hold(&obj, &[1; 32], 100, 10)));
+        // The store's clock is past the plan's `now + window`: nothing is
+        // written, and the failure is the retryable kind.
+        clock.set(i64::try_from(10 + CONTENT_APPLY_WINDOW_MS + 1).unwrap());
+        let before = state(&idx, &obj);
+        let hold = block_on(idx.add_hold(&obj, &[2; 32], 200, 10));
+        assert!(matches!(hold, Err(StoreError::Unavailable(_))));
+        let holder_added = block_on(idx.add_holder(&obj, &holder("a"), &OP, None, 10));
+        assert!(matches!(holder_added, Err(StoreError::Unavailable(_))));
+        let removed = block_on(idx.remove_holder(&obj, &holder("a"), 1, 10));
+        assert!(
+            !removed.unwrap(),
+            "an absent holder is a no-op, before any write"
+        );
+        assert_eq!(state(&idx, &obj), before);
+        assert_eq!(hold_row(&idx, &obj, &[2; 32]), None);
+        assert_eq!(
+            block_on(idx.holder_record(&obj, &holder("a"))).unwrap(),
+            None
+        );
+        // A fresh plan time succeeds.
+        let now = 10 + CONTENT_APPLY_WINDOW_MS + 1;
+        assert!(block_on(idx.add_holder(&obj, &holder("a"), &OP, None, now)).is_ok());
+    }
+
+    #[test]
+    fn content_index_holder_releases_only_a_live_hold() {
+        let idx = ContentIndex::new(kv());
+        let obj = [0x61; 32];
+        // No hold at all, then an expired one: the holder batch refuses and
+        // writes nothing.
+        let none = block_on(idx.add_holder(&obj, &holder("a"), &OP, Some(&[1; 32]), 1));
+        assert!(matches!(none, Err(StoreError::Unavailable(_))));
+        held(block_on(idx.add_hold(&obj, &[1; 32], 50, 2)));
+        let before = state(&idx, &obj);
+        let late = block_on(idx.add_holder(&obj, &holder("a"), &OP, Some(&[1; 32]), 60));
+        assert!(matches!(late, Err(StoreError::Unavailable(_))));
+        assert_eq!(state(&idx, &obj).holders, before.holders);
+        assert_eq!(
+            block_on(idx.holder_record(&obj, &holder("a"))).unwrap(),
+            None
+        );
+        // A live hold is released with the holder.
+        held(block_on(idx.add_hold(&obj, &[2; 32], 500, 70)));
+        block_on(idx.add_holder(&obj, &holder("a"), &OP, Some(&[2; 32]), 80)).unwrap();
+        assert_eq!(hold_row(&idx, &obj, &[2; 32]), None);
+        assert!(
+            block_on(idx.holder_record(&obj, &holder("a")))
+                .unwrap()
+                .is_some()
+        );
     }
 }

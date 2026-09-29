@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 use futures_util::Stream;
-use mkit_core::hash::{Hasher, to_hex_bytes};
+use mkit_core::hash::{Hash, Hasher, to_hex_bytes};
 use mkit_server::storage_error::StorageOp;
 use mkit_server::{BlobKey, CommitOutcome, PackSink, StoreError};
 use sha2::{Digest as _, Sha256};
@@ -285,6 +285,32 @@ fn sink_gone() -> StoreError {
     StoreError::unavailable("upload spool lost to a cancelled write")
 }
 
+impl S3PackSink {
+    /// Verify the spool against `root` (the key's hash for `None`), then
+    /// `PUT` it.
+    async fn finish(mut self, root: Option<Hash>) -> Result<CommitOutcome, StoreError> {
+        if self.failed {
+            return Err(StoreError::Invalid("commit after a failed write".into()));
+        }
+        let expected = self.key.expected_root(root)?;
+        if self.written != self.declared {
+            return Err(StoreError::Invalid("blob length does not match".into()));
+        }
+        let spool = self.spool.take().ok_or_else(sink_gone)?;
+        // Verify first: nothing is sent for bytes that do not match.
+        if spool.blake3.ok_or_else(sink_gone)?.finalize() != expected {
+            return Err(StoreError::Invalid(
+                "blob hash does not match its key".into(),
+            ));
+        }
+        let sha256 = to_hex_bytes(&spool.sha256.finalize());
+        // The reservation is released when `self` drops, after the PUT.
+        self.store
+            .put_verified(&self.key, Arc::new(spool.file), self.declared, &sha256)
+            .await
+    }
+}
+
 impl PackSink for S3PackSink {
     async fn write(&mut self, chunk: Bytes) -> Result<(), StoreError> {
         if self.failed {
@@ -326,25 +352,12 @@ impl PackSink for S3PackSink {
         }
     }
 
-    async fn commit(mut self) -> Result<CommitOutcome, StoreError> {
-        if self.failed {
-            return Err(StoreError::Invalid("commit after a failed write".into()));
-        }
-        if self.written != self.declared {
-            return Err(StoreError::Invalid("blob length does not match".into()));
-        }
-        let spool = self.spool.take().ok_or_else(sink_gone)?;
-        // Verify first: nothing is sent for bytes that do not match.
-        if spool.blake3.ok_or_else(sink_gone)?.finalize() != *self.key.hash() {
-            return Err(StoreError::Invalid(
-                "blob hash does not match its key".into(),
-            ));
-        }
-        let sha256 = to_hex_bytes(&spool.sha256.finalize());
-        // The reservation is released when `self` drops, after the PUT.
-        self.store
-            .put_verified(&self.key, Arc::new(spool.file), self.declared, &sha256)
-            .await
+    async fn commit(self) -> Result<CommitOutcome, StoreError> {
+        self.finish(None).await
+    }
+
+    async fn commit_with_root(self, content_root: Hash) -> Result<CommitOutcome, StoreError> {
+        self.finish(Some(content_root)).await
     }
 
     /// Nothing was sent: dropping the spool discards the upload and its
