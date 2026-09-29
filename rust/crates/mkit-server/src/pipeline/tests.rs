@@ -3,6 +3,8 @@
 #[path = "tests_begin_parts.rs"]
 mod begin_parts;
 mod grants;
+#[cfg(feature = "http-objects")]
+mod http_objects;
 mod indexed;
 mod info;
 mod policy;

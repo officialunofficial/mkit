@@ -165,3 +165,114 @@ pub fn with_hook(body: HttpBody, hook: Option<EndHook>) -> HttpBody {
         HttpBody::Stream { len, stream } => wrap(stream, len, Some(hook)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::sync::{Arc, Mutex};
+
+    use futures::StreamExt as _;
+    use futures_executor::block_on;
+
+    use super::*;
+
+    type Ended = Arc<Mutex<Vec<(u64, Option<Code>)>>>;
+
+    fn hook(ended: &Ended) -> EndHook {
+        let ended = ended.clone();
+        Box::new(move |sent, result| {
+            ended
+                .lock()
+                .unwrap()
+                .push((sent, result.err().map(ServerError::code)));
+        })
+    }
+
+    fn source(pieces: Vec<Result<&'static [u8], StoreError>>) -> BoxStream<'static, Result<Bytes, StoreError>> {
+        Box::pin(futures::stream::iter(
+            pieces
+                .into_iter()
+                .map(|piece| piece.map(Bytes::from_static))
+                .collect::<Vec<_>>(),
+        ))
+    }
+
+    fn collect(body: HttpBody) -> Vec<Result<usize, Code>> {
+        let HttpBody::Stream { stream, .. } = body else {
+            panic!("expected a stream");
+        };
+        block_on(stream.map(|p| p.map(|b| b.len()).map_err(|e| e.code())).collect())
+    }
+
+    #[test]
+    fn an_exact_body_reports_its_end_once() {
+        let ended = Ended::default();
+        let body = exact(source(vec![Ok(b"abc"), Ok(b"de")]), 5, Some(hook(&ended)));
+        assert_eq!(collect(body), vec![Ok(3), Ok(2)]);
+        assert_eq!(*ended.lock().unwrap(), [(5, None)]);
+    }
+
+    #[test]
+    fn a_wrong_length_or_a_backend_failure_fails_the_body_and_the_hook() {
+        for (pieces, len, sent, want) in [
+            (vec![Ok(&b"abcd"[..])], 3, 0, vec![Err(Code::Unavailable)]),
+            (vec![Ok(&b"ab"[..])], 3, 2, vec![Ok(2), Err(Code::Unavailable)]),
+            (
+                vec![Ok(&b"ab"[..]), Err(StoreError::unavailable("SECRET backend detail"))],
+                4,
+                2,
+                vec![Ok(2), Err(Code::Unavailable)],
+            ),
+        ] {
+            let ended = Ended::default();
+            let got = collect(exact(source(pieces), len, Some(hook(&ended))));
+            assert_eq!(got, want);
+            assert_eq!(*ended.lock().unwrap(), [(sent, Some(Code::Unavailable))]);
+        }
+    }
+
+    #[test]
+    fn a_dropped_body_reports_canceled_with_what_was_sent() {
+        let ended = Ended::default();
+        let HttpBody::Stream { mut stream, .. } =
+            exact(source(vec![Ok(b"abc"), Ok(b"def")]), 6, Some(hook(&ended)))
+        else {
+            panic!();
+        };
+        assert_eq!(block_on(stream.next()).unwrap().unwrap().len(), 3);
+        drop(stream);
+        assert_eq!(*ended.lock().unwrap(), [(3, Some(Code::Canceled))]);
+    }
+
+    #[test]
+    fn a_backend_error_is_redacted_to_a_fixed_message() {
+        let body = exact(
+            source(vec![Err(StoreError::unavailable("SECRET backend detail"))]),
+            1,
+            None,
+        );
+        let HttpBody::Stream { mut stream, .. } = body else {
+            panic!();
+        };
+        let error = block_on(stream.next()).unwrap().unwrap_err();
+        assert!(!format!("{error:?} {error}").contains("SECRET"));
+        assert_eq!(error.public_message(), "object storage request failed");
+    }
+
+    #[test]
+    fn a_hook_also_covers_in_memory_and_empty_bodies() {
+        let ended = Ended::default();
+        let body = with_hook(HttpBody::Bytes(Bytes::from_static(b"xyz")), Some(hook(&ended)));
+        assert!(ended.lock().unwrap().is_empty(), "fires when consumed");
+        assert_eq!(collect(body), vec![Ok(3)]);
+        assert_eq!(*ended.lock().unwrap(), [(3, None)]);
+        with_hook(HttpBody::Empty, Some(hook(&ended)));
+        assert_eq!(ended.lock().unwrap()[1], (0, None));
+        // Without a hook the body is untouched.
+        assert!(matches!(
+            with_hook(HttpBody::Bytes(Bytes::new()), None),
+            HttpBody::Bytes(_)
+        ));
+    }
+}

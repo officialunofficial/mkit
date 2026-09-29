@@ -329,30 +329,29 @@ pub(crate) async fn open_leaf<B: BlobStore, N: NamespaceStore>(
         return Err(Miss::Unavailable);
     }
     let canonical = load(env, id, located, budget).await?;
+    let (ty, bytes) = represent(canonical)?;
+    Ok(Leaf {
+        id,
+        ty,
+        len: bytes.len() as u64,
+        source: Source::Inline(bytes),
+    })
+}
+
+/// The representation of a member reconstructed from its pack entry (§5.1):
+/// a Blob's data, or the canonical bytes of any other object. A pack-only
+/// Delta is never served, and a manifest here means its holder row is
+/// missing: the extracted copy is the only source of its content.
+fn represent(canonical: Arc<[u8]>) -> Result<(ObjectType, Bytes), Miss> {
     match type_of(&canonical) {
         Some(ObjectType::Delta) => Err(Miss::NotFound),
         Some(ObjectType::ChunkedBlob) => inconsistent("manifest without a holder"),
-        Some(ObjectType::Blob) => {
-            if (canonical.len() as u64) < BLOB_HEADER {
-                return inconsistent("short blob");
-            }
-            let bytes = Bytes::from_owner(canonical).slice(BLOB_HEADER_INDEX..);
-            Ok(Leaf {
-                id,
-                ty: ObjectType::Blob,
-                len: bytes.len() as u64,
-                source: Source::Inline(bytes),
-            })
-        }
-        Some(ty) => {
-            let bytes = Bytes::from_owner(canonical);
-            Ok(Leaf {
-                id,
-                ty,
-                len: bytes.len() as u64,
-                source: Source::Inline(bytes),
-            })
-        }
+        Some(ObjectType::Blob) if canonical.len() < BLOB_HEADER_INDEX => inconsistent("short blob"),
+        Some(ObjectType::Blob) => Ok((
+            ObjectType::Blob,
+            Bytes::from_owner(canonical).slice(BLOB_HEADER_INDEX..),
+        )),
+        Some(ty) => Ok((ty, Bytes::from_owner(canonical))),
         None => inconsistent("unknown object type"),
     }
 }
@@ -402,4 +401,33 @@ pub(crate) async fn open_body<B: BlobStore>(
         }
     };
     Ok(body::with_hook(body, hook.take()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bytes(prefix: &[u8]) -> Arc<[u8]> {
+        let mut all = prefix.to_vec();
+        all.resize(all.len().max(16), 0);
+        Arc::from(all)
+    }
+
+    #[test]
+    fn a_pack_entry_is_represented_by_its_type() {
+        let (ty, body) = represent(bytes(&[1, b'M', b'K', b'I', b'T', 1, 4, 0, 0, 0, 9, 9, 9, 9])).unwrap();
+        assert_eq!(ty, ObjectType::Blob);
+        assert_eq!(&body[..4], &[9, 9, 9, 9]);
+        let canonical = bytes(&[2, 1, 2, 3]);
+        let (ty, body) = represent(canonical.clone()).unwrap();
+        assert_eq!((ty, body.as_ref()), (ObjectType::Tree, &canonical[..]));
+        // A short Blob, an unknown tag and a manifest without a holder are
+        // inconsistent state.
+        for bad in [&[1_u8, 0, 0][..], &[0xee], &[5, 0, 0]] {
+            assert_eq!(represent(Arc::from(bad)).err(), Some(Miss::Unavailable));
+        }
+        // A Delta is never served.
+        assert_eq!(represent(bytes(&[6])).err(), Some(Miss::NotFound));
+        assert_eq!(type_of(&[]), None);
+    }
 }
