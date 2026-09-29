@@ -3,10 +3,15 @@
 //! writes nothing.
 use super::*;
 use crate::hooks::tests::{
-    MockChannel, Step, channel_of, client, failure_steps, invalid_admit_steps,
+    MockChannel, Step, channel_of, client_for, failure_steps, invalid_admit_steps,
 };
 use crate::hooks::{RemoteAdmission, RemoteAuthorizer};
 use crate::rt::ManualSleep;
+
+/// The hooks must name the origin the pipeline authenticates for.
+fn client(channel: MockChannel, sleep: ManualSleep) -> Arc<crate::hooks::HookClient<MockChannel>> {
+    client_for(channel, sleep, AUDIENCE)
+}
 
 fn env_with<H: HookSet>(hooks: H) -> Env<H> {
     let clock = clock();

@@ -7,7 +7,7 @@
 //!
 //! - [`HookChannel`] moves one Connect unary call (`POST <base>/<procedure>`,
 //!   `application/json`, `Connect-Protocol-Version: 1`). The native HTTPS
-//!   channel (WP-3.8) and the Workers binding (WP-3.9) implement it.
+//!   channel (WP-3.8) and the Workers binding (WP-3.9) will implement it.
 //! - [`HookSigner`] signs every request over its exact body bytes with the
 //!   `mkit-hook:v1` domain, a fresh 32-byte nonce and a validity of at most
 //!   300 s. Only a channel that reports [`HookChannel::isolated`] (a service
@@ -31,15 +31,19 @@
 //! # Credential safety
 //!
 //! Admit bodies carry admission credentials. Requests and responses are never
-//! logged or `Debug`-printed (the generated messages would print values),
-//! bodies are held in `Zeroizing` buffers, and every failure reason is a fixed
-//! string.
+//! logged or `Debug`-printed (the generated messages would print values), the
+//! request body is serialised once into an exactly sized `Zeroizing` buffer,
+//! the credential values of the message are wiped after the call, and every
+//! failure reason is a fixed string.
 //!
 //! # Not here
 //!
 //! Inspect, Event and `CachePurge` belong to later work (5.5, 5.2, 5.10), and a
 //! core-profile server must not accept inspector configuration (§18).
-//! `AuthorizeAllow.writer_view` is decoded but not yet used: core has no
+//! Until private-read authorization (§10.1, WP-2.9) lands, every read also
+//! calls Authorize, so a remote authorizer that fails denies public reads
+//! too; the §8 exception for a writer-view-only consultation is not yet
+//! implemented. `AuthorizeAllow.writer_view` is decoded but not yet used: core has no
 //! caller-view fact until §10.1 lands. Reservation-id uniqueness is enforced
 //! per partition by the pipeline, while §6.6 asks for it per audience:
 //! uniqueness across partitions is the hook's obligation.

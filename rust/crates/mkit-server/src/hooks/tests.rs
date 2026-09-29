@@ -137,17 +137,17 @@ pub(crate) fn signer() -> HookSigner {
 /// A signed client over `channel`, its clock at the golden time and a sleeper
 /// that never fires unless `sleep` says so.
 pub(crate) fn client(channel: MockChannel, sleep: ManualSleep) -> Arc<HookClient<MockChannel>> {
+    client_for(channel, sleep, SERVER_ORIGIN)
+}
+
+/// [`client`] for a server whose own origin is `origin`.
+pub(crate) fn client_for(
+    channel: MockChannel,
+    sleep: ManualSleep,
+    origin: &str,
+) -> Arc<HookClient<MockChannel>> {
     let clock: Arc<dyn Clock> = Arc::new(ManualClock::new(T));
-    Arc::new(
-        HookClient::new(
-            channel,
-            SERVER_ORIGIN,
-            Some(signer()),
-            clock,
-            Arc::new(sleep),
-        )
-        .unwrap(),
-    )
+    Arc::new(HookClient::new(channel, origin, Some(signer()), clock, Arc::new(sleep)).unwrap())
 }
 
 pub(crate) fn channel_of(client: &HookClient<MockChannel>) -> &MockChannel {
@@ -630,7 +630,15 @@ fn unknown_json_fields_are_ignored_and_an_absent_decision_is_not() {
     assert!(map::admit_answer(parsed).is_ok());
     let parsed: pb::AuthorizeResponse =
         serde_json::from_str(r#"{"newThing":1,"deny":{"code":"x","zzz":2}}"#).unwrap();
-    assert!(map::authorize_answer(parsed, &update_op()).is_err());
+    let err = map::authorize_answer(parsed, &update_op()).unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+    // A decision naming two members is malformed, not "the first one".
+    assert!(
+        serde_json::from_str::<pb::AdmitResponse>(
+            r#"{"allow":{"reservationId":"r"},"deny":{"code":"permission_denied"}}"#
+        )
+        .is_err()
+    );
     for empty in ["{}", r#"{"futureOnly":1}"#] {
         let parsed: pb::AuthorizeResponse = serde_json::from_str(empty).unwrap();
         assert!(unavailable(
@@ -766,12 +774,35 @@ fn authorize_with(step: Step, sleep: ManualSleep) -> Result<AuthzFacts, ServerEr
     block_on(authorizer.authorize(&update_op()))
 }
 
+/// A valid allow of exactly `len` bytes, padded with an unknown field.
+fn padded_allow(len: usize) -> String {
+    let frame = r#"{"allow":{"reservationId":"r"},"pad":""}"#.len();
+    format!(
+        r#"{{"allow":{{"reservationId":"r"}},"pad":"{}"}}"#,
+        "z".repeat(len - frame)
+    )
+}
+
+#[test]
+fn the_response_size_cap_is_exactly_64_kib() {
+    let at_cap = padded_allow(MAX_RESPONSE_BYTES);
+    assert_eq!(at_cap.len(), 65_536);
+    assert!(authorize_with(Step::json(&at_cap), ManualSleep::new()).is_ok());
+    assert!(admit_with(Step::json(&at_cap), ManualSleep::new()).is_ok());
+    let over = padded_allow(MAX_RESPONSE_BYTES + 1);
+    assert!(unavailable(
+        &authorize_with(Step::json(&over), ManualSleep::new()).unwrap_err()
+    ));
+    assert!(unavailable(
+        &admit_with(Step::json(&over), ManualSleep::new()).unwrap_err()
+    ));
+}
+
 /// Every way a hook call can fail or answer unusably (SPEC-SERVER §8).
 pub(crate) fn failure_steps() -> Vec<(&'static str, Step)> {
-    let big = format!(
-        r#"{{"allow":{{"reservationId":"r","externalRef":"{}"}}}}"#,
-        "z".repeat(70_000)
-    );
+    // Otherwise a valid decision for both Authorize and Admit, so only the
+    // size check can refuse it.
+    let big = padded_allow(MAX_RESPONSE_BYTES + 1);
     vec![
         (
             "transport",
@@ -996,6 +1027,23 @@ fn outcomes_ack_on_any_2xx_and_error_otherwise() {
 }
 
 #[test]
+fn the_outcome_response_golden_acknowledges_and_an_oversize_2xx_still_does() {
+    let empty: pb::OutcomeResponse = decode("outcome.response.json");
+    assert!(empty == pb::OutcomeResponse::default());
+    let golden = String::from_utf8(golden("outcome.response.json")).unwrap();
+    let sink = |step| RemoteOutcomes::new(client(MockChannel::new(step), ManualSleep::new()));
+    let row = outcome("r-1", OutcomeKind::Expired);
+    assert!(block_on(sink(Step::json(&golden)).deliver(&row)).is_ok());
+    // A channel that hit its cap hands back the status and max + 1 bytes.
+    let big = Step::Reply(
+        200,
+        Some("application/json"),
+        vec![b' '; MAX_RESPONSE_BYTES + 1],
+    );
+    assert!(block_on(sink(big).deliver(&row)).is_ok());
+}
+
+#[test]
 fn each_outcome_attempt_is_signed_afresh() {
     let client = client(MockChannel::new(Step::json("{}")), ManualSleep::new());
     let sink = RemoteOutcomes::new(client.clone());
@@ -1117,4 +1165,186 @@ fn a_channel_error_keeps_its_text_out_of_display_and_debug() {
         b"Payment fake-example-credential-not-valid".to_vec(),
     );
     assert!(!format!("{response:?}").contains("credential"));
+}
+
+#[test]
+fn every_attempt_stamps_the_clock_and_a_source_failure_fails_closed() {
+    struct Failing;
+    impl NonceSource for Failing {
+        fn fill(&self, _: &mut [u8; 32]) -> bool {
+            false
+        }
+    }
+    let clock = Arc::new(ManualClock::new(T));
+    let dynamic: Arc<dyn Clock> = clock.clone();
+    let channel = MockChannel::new(Step::json("{}"));
+    let hook = HookClient::new(
+        channel,
+        SERVER_ORIGIN,
+        Some(signer()),
+        dynamic,
+        Arc::new(ManualSleep::new()),
+    )
+    .unwrap()
+    .with_nonce_source(Arc::new(Fixed([7; 32])));
+    let hook = Arc::new(hook);
+    let sink = RemoteOutcomes::new(hook.clone());
+    let row = outcome("r-1", OutcomeKind::Expired);
+    block_on(sink.deliver(&row)).unwrap();
+    clock.advance(90_000);
+    block_on(sink.deliver(&row)).unwrap();
+    let created = |i: usize| -> i64 {
+        let seen = channel_of(&hook).seen.lock().unwrap();
+        seen[i]
+            .headers
+            .iter()
+            .find(|(n, _)| *n == "X-Mkit-Hook-Created-At")
+            .unwrap()
+            .1
+            .parse()
+            .unwrap()
+    };
+    assert_eq!(created(1) - created(0), 90_000);
+
+    let failing = HookClient::new(
+        MockChannel::new(Step::json("{}")),
+        SERVER_ORIGIN,
+        Some(signer()),
+        Arc::new(ManualClock::new(T)),
+        Arc::new(ManualSleep::new()),
+    )
+    .unwrap()
+    .with_nonce_source(Arc::new(Failing));
+    let failing = Arc::new(failing);
+    let err = block_on(RemoteAuthorizer::new(failing.clone()).authorize(&update_op())).unwrap_err();
+    assert!(unavailable(&err));
+    assert!(
+        channel_of(&failing).seen.lock().unwrap().is_empty(),
+        "nothing is sent unsigned"
+    );
+}
+
+struct Fixed([u8; 32]);
+impl NonceSource for Fixed {
+    fn fill(&self, nonce: &mut [u8; 32]) -> bool {
+        *nonce = self.0;
+        true
+    }
+}
+
+#[test]
+fn plain_http_is_loopback_only_and_an_origin_is_checked_even_unsigned() {
+    let clock: Arc<dyn Clock> = Arc::new(ManualClock::new(T));
+    let with_origin = |origin: &'static str, signed: bool| {
+        let mut channel = MockChannel::new(Step::Hang);
+        channel.audience = Some(origin);
+        channel.isolated = !signed;
+        HookClient::new(
+            channel,
+            SERVER_ORIGIN,
+            signed.then(signer),
+            clock.clone(),
+            Arc::new(ManualSleep::new()),
+        )
+        .map(|_| ())
+    };
+    for ok in [
+        "https://hooks.example.test",
+        "http://localhost:8787",
+        "http://127.0.0.1:9000",
+        "http://127.8.8.8",
+        "http://[::1]:9000",
+    ] {
+        assert_eq!(with_origin(ok, true), Ok(()), "{ok}");
+    }
+    for bad in [
+        "http://hooks.example.test",
+        "http://10.0.0.1",
+        "http://localhost.example.test",
+        "http://128.0.0.1",
+        "ftp://hooks.example.test",
+        "https://Hooks.Example.test",
+    ] {
+        assert_eq!(
+            with_origin(bad, true),
+            Err(HookConfigError::Audience("hook")),
+            "{bad}"
+        );
+    }
+    // An isolated channel that names an origin is held to the same rule.
+    assert_eq!(
+        with_origin("http://hooks.example.test", false),
+        Err(HookConfigError::Audience("hook"))
+    );
+}
+
+#[test]
+fn a_pipeline_audience_that_differs_from_the_adapters_is_refused() {
+    let hook = client(
+        MockChannel::new(Step::json(r#"{"allow":{"reservationId":"r"}}"#)),
+        ManualSleep::new(),
+    );
+    let admission = RemoteAdmission::new(hook.clone());
+    let op = begin_op();
+    let mut input = admit_input(&op, &[]);
+    input.audience = Some(SERVER_ORIGIN);
+    assert!(block_on(admission.admit(&input)).is_ok());
+    input.audience = Some("https://other.example.test");
+    let err = block_on(admission.admit(&input)).unwrap_err();
+    assert!(unavailable(&err));
+    assert_eq!(channel_of(&hook).seen.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn the_repository_a_hook_sees_is_the_wire_identity() {
+    use crate::repo::{Addressing, MultiAddressing};
+    let mut op = update_op();
+    let multi = Addressing::Multi(MultiAddressing::new());
+    let wire = format!("{NAMESPACE}/payments-demo");
+    let resolved = multi.resolve(Some(&wire), true).unwrap();
+    op.repo = resolved.repo;
+    assert_eq!(
+        map::authorize_request(&op, SERVER_ORIGIN)
+            .operation
+            .repository,
+        Some(resolved.identity)
+    );
+
+    let single = Addressing::Single {
+        repo: RepoId {
+            namespace: NamespaceKey::deployment_default(),
+            name: RepoName::new("room-a").unwrap(),
+        },
+    };
+    let resolved = single.resolve(Some("room-a"), true).unwrap();
+    op.repo = resolved.repo;
+    assert_eq!(
+        map::authorize_request(&op, SERVER_ORIGIN)
+            .operation
+            .repository,
+        Some(resolved.identity)
+    );
+}
+
+#[test]
+fn credentials_are_wiped_from_the_message_and_the_body_is_exactly_sized() {
+    let op = begin_op();
+    let creds = credentials();
+    let mut request = map::admit_request(&admit_input(&op, &creds), SERVER_ORIGIN);
+    let body = super::client::encode(&request).unwrap();
+    assert_eq!(*body, serde_json::to_vec(&request).unwrap());
+    assert_eq!(body.len(), body.capacity());
+    assert!(String::from_utf8_lossy(&body).contains(CREDENTIAL));
+    map::wipe(&mut request);
+    assert!(
+        request
+            .credential_headers
+            .iter()
+            .all(|h| h.value.as_deref() == Some(""))
+    );
+    assert!(
+        !serde_json::to_string(&request)
+            .unwrap()
+            .contains("fake-example-credential")
+    );
 }

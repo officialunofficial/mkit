@@ -29,9 +29,32 @@ pub struct HookRequest {
     /// How long the call may take. Core also enforces it, so a channel that
     /// can cancel the underlying request should.
     pub timeout: Duration,
-    /// Stop reading the response after this many bytes plus one and report
-    /// [`ChannelError::TooLarge`]. Core re-checks the length it receives.
+    /// Stop reading the response after this many bytes plus one. Return what
+    /// was read with the real status, so core sees the oversize itself and a
+    /// 2xx to a delivery still acknowledges (SPEC-SERVER §8); report
+    /// [`ChannelError::TooLarge`] only when no status is known. Core re-checks
+    /// the length it receives either way.
     pub max_response_bytes: usize,
+}
+
+impl HookRequest {
+    /// A request, for a channel's own tests.
+    #[must_use]
+    pub fn new(
+        procedure: &'static str,
+        headers: Vec<(&'static str, String)>,
+        body: Vec<u8>,
+        timeout: Duration,
+        max_response_bytes: usize,
+    ) -> Self {
+        Self {
+            procedure,
+            headers,
+            body: Zeroizing::new(body),
+            timeout,
+            max_response_bytes,
+        }
+    }
 }
 
 impl core::fmt::Debug for HookRequest {
@@ -84,10 +107,10 @@ pub enum ChannelError {
     /// The channel gave up waiting.
     #[error("hook call timed out")]
     Timeout,
-    /// The response exceeded `max_response_bytes`.
+    /// The response exceeded `max_response_bytes` and its status is unknown.
     #[error("hook response too large")]
     TooLarge,
-    /// Connection, TLS, binding or other failure. The text is operator-only.
+    /// Connection, TLS, binding or other failure. Core never prints the text.
     #[error("hook transport failed")]
     Transport(Redacted),
 }
@@ -96,7 +119,9 @@ pub enum ChannelError {
 pub trait HookChannel: MaybeSend + MaybeSync {
     /// The hook endpoint's canonical origin, the `<audience>` a signature
     /// binds (SPEC-SERVER §7.1). `None` for a channel with no origin, which is
-    /// then only usable unsigned and isolated.
+    /// then only usable unsigned and isolated. Plain `http://` is accepted
+    /// only for a loopback host (§6.1); any other channel must use TLS with
+    /// certificate verification and must not follow redirects.
     fn audience(&self) -> Option<&str>;
 
     /// Whether this is a platform service binding unreachable from the public

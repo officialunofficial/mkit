@@ -17,8 +17,6 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 /// The largest response body core accepts (SPEC-SERVER §6.6).
 pub const MAX_RESPONSE_BYTES: usize = 65_536;
 
-const SERVICE: &str = "/mkit.server.hooks.v1.HooksService/";
-
 /// A hook RPC this adapter calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rpc {
@@ -49,9 +47,47 @@ pub enum HookConfigError {
     /// must name one.
     #[error("a signed hook channel must report its canonical origin")]
     ChannelAudience,
-    /// The named origin is not a canonical HTTP(S) origin.
-    #[error("{0} is not a canonical origin")]
+    /// The named origin is not a canonical HTTP(S) origin, or is plain HTTP
+    /// to a host that is not loopback (SPEC-SERVER §6.1).
+    #[error("{0} is not a canonical origin (plain HTTP is loopback-only)")]
     Audience(&'static str),
+}
+
+/// Whether the authority of a canonical `http://` origin is a loopback host.
+fn loopback(authority: &str) -> bool {
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    host == "localhost"
+        || host == "::1"
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Counts the bytes a value serialises to, without keeping any.
+struct Counter(usize);
+
+impl std::io::Write for Counter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serialise into one exactly sized `Zeroizing` buffer. Growing a `Vec` while
+/// serialising would free unwiped partial copies of any credential inside.
+pub(super) fn encode<Req: Serialize>(request: &Req) -> Result<Zeroizing<Vec<u8>>, CallFailure> {
+    let fail = |_| CallFailure("request not encodable");
+    let mut size = Counter(0);
+    serde_json::to_writer(&mut size, request).map_err(fail)?;
+    let mut body = Zeroizing::new(Vec::with_capacity(size.0));
+    serde_json::to_writer(&mut *body, request).map_err(fail)?;
+    Ok(body)
 }
 
 /// Why a call produced no usable answer. The reason is a fixed string, never
@@ -100,9 +136,19 @@ impl<C: HookChannel> HookClient<C> {
         if signer.is_none() && !channel.isolated() {
             return Err(HookConfigError::SignerRequired);
         }
-        if signer.is_some() {
-            let origin = channel.audience().ok_or(HookConfigError::ChannelAudience)?;
-            validate_audience(origin).map_err(|_| HookConfigError::Audience("hook"))?;
+        // A channel that reports an origin is held to §6.1 whether or not it
+        // signs; a signed one must report it, since the signature binds it.
+        match (channel.audience(), signer.is_some()) {
+            (Some(origin), _) => {
+                let plain_remote = origin
+                    .strip_prefix("http://")
+                    .is_some_and(|rest| !loopback(rest));
+                if validate_audience(origin).is_err() || plain_remote {
+                    return Err(HookConfigError::Audience("hook"));
+                }
+            }
+            (None, true) => return Err(HookConfigError::ChannelAudience),
+            (None, false) => {}
         }
         Ok(Self {
             channel,
@@ -114,7 +160,9 @@ impl<C: HookChannel> HookClient<C> {
         })
     }
 
-    /// Replace the nonce source (tests reproduce vectors with a fixed one).
+    /// Replace the nonce source. A constant source makes the hook reject every
+    /// request after the first as a replay, so this fails closed; it exists
+    /// for tests that pin a signature.
     #[must_use]
     pub fn with_nonce_source(mut self, nonces: Arc<dyn NonceSource>) -> Self {
         self.nonces = nonces;
@@ -139,10 +187,7 @@ impl<C: HookChannel> HookClient<C> {
         request: &Req,
         timeout: Duration,
     ) -> Result<HookResponse, CallFailure> {
-        debug_assert!(rpc.path().starts_with(SERVICE));
-        let body = Zeroizing::new(
-            serde_json::to_vec(request).map_err(|_| CallFailure("request not encodable"))?,
-        );
+        let body = encode(request)?;
         let mut headers = vec![
             ("Content-Type", "application/json".to_owned()),
             ("Connect-Protocol-Version", "1".to_owned()),

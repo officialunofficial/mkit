@@ -3,7 +3,7 @@
 // Stage the `mkit.transport.v1.TransportService` and `grpc.health.v1.Health`
 // ConnectRPC server stubs and buffa message modules into $OUT_DIR for
 // `connectrpc::include_generated!()` (the `connect` feature only; without it
-// this script does nothing).
+// and without `remote-hooks` this script does nothing).
 //
 // Default path: copy the pre-generated sources committed under generated/
 // into $OUT_DIR. NO protoc required: Cloudflare Workers Builds, CI and
@@ -19,7 +19,6 @@
 // crate: that crate depends on `connectrpc` with `features = ["server"]`
 // (tokio/net, hyper-util server, libc), which does not build for
 // wasm32-unknown-unknown.
-
 //
 // The `remote-hooks` feature does the same for the `mkit.server.hooks.v1`
 // messages, with buffa alone (no ConnectRPC stubs: nothing here serves or

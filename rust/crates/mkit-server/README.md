@@ -55,7 +55,7 @@ and `wasm32-unknown-unknown`:
   `mkit.server.hooks.v1` adapter (SPEC-SERVER §§6-8). `RemoteAuthorizer`,
   `RemoteAdmission` and `RemoteOutcomes` implement the stage traits over a
   transport-agnostic `HookChannel` (the native HTTPS channel and the Workers
-  binding live in the adapter crates). Requests are Ed25519-signed over their
+  binding are WP-3.8 and WP-3.9). Requests are Ed25519-signed over their
   exact body (`HookSigner`), only an isolated service binding may go unsigned,
   and every Authorize or Admit failure answers retryable `unavailable` with no
   state written. It uses buffa messages with the JSON codec only, so it stays

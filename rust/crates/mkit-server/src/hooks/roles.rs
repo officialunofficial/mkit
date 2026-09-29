@@ -92,12 +92,21 @@ impl<C: HookChannel> Authorizer for RemoteAuthorizer<C> {
 
 impl<C: HookChannel> Admission for RemoteAdmission<C> {
     async fn admit(&self, input: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
-        let request = map::admit_request(input, self.client.server_audience());
-        let answer: pb::AdmitResponse = self
+        // The pipeline's own origin and this adapter's must agree, or an Admit
+        // and the Outcome for its reservation would name different audiences.
+        if input
+            .audience
+            .is_some_and(|origin| origin != self.client.server_audience())
+        {
+            return Err(map::unavailable("admission", "audience mismatch"));
+        }
+        let mut request = map::admit_request(input, self.client.server_audience());
+        let answer = self
             .client
-            .decide(Rpc::Admit, &request, self.timeout)
-            .await
-            .map_err(|failure| map::unavailable("admission", failure.0))?;
+            .decide::<_, pb::AdmitResponse>(Rpc::Admit, &request, self.timeout)
+            .await;
+        map::wipe(&mut request);
+        let answer = answer.map_err(|failure| map::unavailable("admission", failure.0))?;
         let decision = map::admit_answer(answer)?;
         validate_decision(&decision)?;
         Ok(decision)

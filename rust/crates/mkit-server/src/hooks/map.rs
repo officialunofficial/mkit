@@ -3,6 +3,7 @@
 
 use buffa::EnumValue;
 use mkit_core::refs::RefWriteCondition;
+use zeroize::Zeroize;
 
 use super::proto::v1 as pb;
 use super::proto::v1::__buffa::oneof as one;
@@ -121,6 +122,15 @@ pub(super) fn admit_request(input: &AdmissionInput<'_>, audience: &str) -> pb::A
             })
             .collect(),
         ..Default::default()
+    }
+}
+
+/// Wipe the admission credentials a request holds; call once it is sent.
+pub(super) fn wipe(request: &mut pb::AdmitRequest) {
+    for header in &mut request.credential_headers {
+        if let Some(value) = header.value.as_mut() {
+            value.zeroize();
+        }
     }
 }
 

@@ -13,8 +13,8 @@ pub const DOMAIN: &str = "mkit-hook:v1";
 /// The longest permitted validity interval.
 pub const MAX_VALIDITY: Duration = Duration::from_mins(5);
 /// The validity interval used unless configured otherwise.
-pub const DEFAULT_VALIDITY: Duration = Duration::from_millis(DEFAULT_VALIDITY_MS);
-const DEFAULT_VALIDITY_MS: u64 = 60_000;
+pub const DEFAULT_VALIDITY: Duration = Duration::from_mins(1);
+const DEFAULT_VALIDITY_MS: i64 = 60_000;
 
 /// A signer setting the spec refuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -65,7 +65,7 @@ impl HookSigner {
         Ok(Self {
             key_id,
             seed,
-            validity_ms: i64::try_from(DEFAULT_VALIDITY_MS).unwrap_or(60_000),
+            validity_ms: DEFAULT_VALIDITY_MS,
         })
     }
 
