@@ -211,6 +211,9 @@ pub struct PipelineConfig {
     pub begin_upload_threshold_bytes: u64,
     /// Accepted deployment upload MAC keys; first key signs.
     pub ticket_keys: Option<TicketKeys>,
+    /// URL-token key set and lifetime for `IssueObjectUrl`
+    /// (SPEC-WRITE-GRANTS §9.4); `None` answers `unimplemented`.
+    pub url_tokens: Option<crate::url_token::UrlTokenConfig>,
     /// Ticket lifetime, positive and strictly below seven days.
     pub ticket_ttl_ms: u64,
     /// Open-ticket bounds in each ref shard.
@@ -259,6 +262,7 @@ impl PipelineConfig {
             max_list_refs_page_size: DEFAULT_LIST_PAGE_LIMIT,
             begin_upload_threshold_bytes: u64::MAX,
             ticket_keys: None,
+            url_tokens: None,
             ticket_ttl_ms: 86_400_000,
             ticket_caps: TicketCaps {
                 per_ref: 1024,
@@ -520,6 +524,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             if grants.audience() != auth.audience() {
                 return Err(ServerError::invalid_argument(
                     "write grant audience must match auth v2 audience",
+                ));
+            }
+        }
+        if let Some(tokens) = &cfg.url_tokens {
+            if !matches!(cfg.auth, AuthMode::AuthV2(_)) {
+                return Err(ServerError::invalid_argument("URL tokens require auth v2"));
+            }
+            // §9.4: the URL-token key is dedicated; a shared ticket secret
+            // would let ticket MACs stand in for URL-token signatures.
+            if let Some(tickets) = &cfg.ticket_keys
+                && tickets.contains_secret(&tokens.keys().active_seed())
+            {
+                return Err(ServerError::invalid_argument(
+                    "the URL token key must differ from the upload ticket keys",
                 ));
             }
         }

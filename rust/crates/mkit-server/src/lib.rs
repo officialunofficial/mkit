@@ -49,6 +49,7 @@ pub mod store;
 pub mod telemetry;
 pub mod timers;
 pub mod upload;
+pub mod url_token;
 
 pub use error::{
     ADMISSION_CHALLENGE_TYPE, Code, ErrorDetail, InvalidHeader, Redacted, ServerError,
