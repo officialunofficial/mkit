@@ -1796,6 +1796,34 @@ fn golden_session_3_denies_a_non_owner_like_serve_root() {
     assert_eq!(sink.0, GOLDEN_3_OUT);
 }
 
+/// Implicit tickets need transport identity and the owner policy: a
+/// namespaced Single under `Open` — like a `mkit serve` that never set
+/// `--root` — has none, and plain Single never does either.
+#[test]
+fn implicit_tickets_require_owner_policy_on_single() {
+    let build = |policy: WritePolicy| {
+        let mut c = cfg(AuthMode::TransportIdentity);
+        c.addressing = Addressing::Single {
+            repo: peer_repo_id(OWNER, "room-a"),
+        };
+        c.write_policy = policy;
+        let clock = Arc::new(ManualClock::new(T0));
+        Pipeline::new(
+            MemoryBlobStore::default(),
+            MemoryKv::with_clock(clock.clone()),
+            Hooks::new(),
+            c,
+            clock,
+            Arc::new(NoopMetrics),
+        )
+        .unwrap()
+    };
+    assert!(build(WritePolicy::Owner).implicit_tickets());
+    assert!(!build(WritePolicy::Open).implicit_tickets());
+    let (plain, _) = mem();
+    assert!(!plain.implicit_tickets());
+}
+
 // ------------------------------------------------- WP-1.15 B9–B11
 //
 // The implicit transport-identity flows the enc listener runs: a bound
@@ -1823,6 +1851,12 @@ fn peer_repo_id(key: [u8; 32], name: &str) -> RepoId {
 /// An MKPL pack listing `packs`.
 fn mkpl(packs: &[Hash]) -> (Vec<u8>, Hash) {
     let bytes = mkit_core::transfer::encode_packlist(None, packs).unwrap();
+    let id = hash(&bytes);
+    (bytes, id)
+}
+
+fn mkpl_prev(prev: Hash, packs: &[Hash]) -> (Vec<u8>, Hash) {
+    let bytes = mkit_core::transfer::encode_packlist(Some(prev), packs).unwrap();
     let id = hash(&bytes);
     (bytes, id)
 }
@@ -2405,6 +2439,144 @@ fn packmap_listing_an_unknown_pack_is_refused() {
         &root(&repo_id.namespace),
         &repo_id.name,
         &ghost
+    ));
+}
+
+/// B10 checks the node chain too (Test 11): `prev` pointing at a node an
+/// earlier session uploaded but never consumed is neither pending nor a
+/// member, so the packmap is refused and writes nothing.
+#[test]
+fn packmap_prev_must_be_known() {
+    let (pipe, _, kv) = multi_pipeline([Namespace::Ed25519(OWNER)], Sharding::Single, Hooks::new());
+    let repo = peer_repo(OWNER, "room-a");
+    let repo_id = peer_repo_id(OWNER, "room-a");
+    let (data, data_id) = valid_pack();
+    let (m_bytes, m_id) = mkpl(&[data_id]);
+    // Session 1 uploads a data pack and the node M, then disconnects
+    // without the packmap write: M is neither pending next session nor a
+    // member.
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            upload_header(&data_id, Some(data.len() as u64)),
+            chunk(&data_id, Some(0), &data, true),
+            upload_header(&m_id, Some(m_bytes.len() as u64)),
+            chunk(&m_id, Some(0), &m_bytes, true),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert_eq!(frames.len(), 2, "two uploads, two responses");
+    // Session 2 uploads P2 and node N with prev = M, listing only P2.
+    let data2 = b"second pack bytes".to_vec();
+    let data2_id = hash(&data2);
+    let (n_bytes, n_id) = mkpl_prev(m_id, &[data2_id]);
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            upload_header(&data2_id, Some(data2.len() as u64)),
+            chunk(&data2_id, Some(0), &data2, true),
+            upload_header(&n_id, Some(n_bytes.len() as u64)),
+            chunk(&n_id, Some(0), &n_bytes, true),
+            update(PACKMAP, &n_id, Some(RefExpectation::Missing), None),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert!(matches!(frames[0].body, Some(Body::UploadPackResponse(_))));
+    assert!(matches!(frames[1].body, Some(Body::UploadPackResponse(_))));
+    assert_error(
+        &frames[2],
+        ErrorCode::InvalidRequest,
+        "packmap names packs not uploaded to this repository",
+    );
+    // The refusal wrote nothing: no ref, no membership, no `o` rows.
+    assert!(
+        kv.read(
+            &root(&repo_id.namespace),
+            &keys::ref_key(&repo_id.name, PACKMAP)
+        )
+        .is_none()
+    );
+    assert!(!member(
+        &kv,
+        &root(&repo_id.namespace),
+        &repo_id.name,
+        &data2_id
+    ));
+    assert!(!member(
+        &kv,
+        &root(&repo_id.namespace),
+        &repo_id.name,
+        &n_id
+    ));
+    assert!(o_rows(&kv, &root(&repo_id.namespace)).is_empty());
+}
+
+/// The `prev` acceptance cases (Test 11): `prev` pending in the same
+/// session, or already a member, is accepted.
+#[test]
+fn packmap_prev_pending_or_member_is_accepted() {
+    let (pipe, _, kv) = multi_pipeline([Namespace::Ed25519(OWNER)], Sharding::Single, Hooks::new());
+    let repo = peer_repo(OWNER, "room-a");
+    let repo_id = peer_repo_id(OWNER, "room-a");
+    let (data, data_id) = valid_pack();
+    let (l1_bytes, l1_id) = mkpl(&[data_id]);
+    // L2 links to L1 while both are still pending in this session.
+    let (l2_bytes, l2_id) = mkpl_prev(l1_id, &[data_id]);
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            upload_header(&data_id, Some(data.len() as u64)),
+            chunk(&data_id, Some(0), &data, true),
+            upload_header(&l1_id, Some(l1_bytes.len() as u64)),
+            chunk(&l1_id, Some(0), &l1_bytes, true),
+            upload_header(&l2_id, Some(l2_bytes.len() as u64)),
+            chunk(&l2_id, Some(0), &l2_bytes, true),
+            update(PACKMAP, &l2_id, Some(RefExpectation::Missing), None),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert!(matches!(frames[3].body, Some(Body::UpdateRefResponse(_))));
+    assert!(member(
+        &kv,
+        &root(&repo_id.namespace),
+        &repo_id.name,
+        &l2_id
+    ));
+    // The next push's node M2 names the committed node L2 as `prev`;
+    // membership makes it known.
+    let data2 = b"second pack bytes".to_vec();
+    let data2_id = hash(&data2);
+    let (m2_bytes, m2_id) = mkpl_prev(l2_id, &[data2_id]);
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            upload_header(&data2_id, Some(data2.len() as u64)),
+            chunk(&data2_id, Some(0), &data2, true),
+            upload_header(&m2_id, Some(m2_bytes.len() as u64)),
+            chunk(&m2_id, Some(0), &m2_bytes, true),
+            update(
+                PACKMAP,
+                &m2_id,
+                Some(RefExpectation::Match),
+                Some(&l2_id[..]),
+            ),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert!(matches!(frames[2].body, Some(Body::UpdateRefResponse(_))));
+    assert!(member(
+        &kv,
+        &root(&repo_id.namespace),
+        &repo_id.name,
+        &m2_id
     ));
 }
 

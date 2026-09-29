@@ -1645,10 +1645,11 @@ captured request bodies.
 packs uploaded and verified in the same session and repository; the
 packmap check only refuses. A session's pending set holds at most seven
 distinct packs, dies with the session, and is consumed by that session's
-next packmap write. A packmap naming a pack neither pending nor already a
-member of the bound repository is refused; the check never adds
-membership for a pack it merely names, and no reservation or outcome
-rows are created — there is no reservation to keep one outcome per.
+next packmap write. A packmap whose node, `prev` node or listed pack is
+neither pending nor already a member of the bound repository is refused;
+the check never adds membership for a pack it merely names, and no
+reservation or outcome rows are created — there is no reservation to
+keep one outcome per.
 
 **Because:** ssh and enc clients cannot carry signed upload tickets, so
 the transport binds them to the session instead. Letting the packmap

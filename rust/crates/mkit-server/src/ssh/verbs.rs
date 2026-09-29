@@ -14,7 +14,7 @@
 //! | `UpdateRef` | a valid name outside `refs/` | `INVALID_REQUEST`, [`REF_NAME_OUTSIDE_REFS`] |
 //! | `UpdateRef` | a CAS conflict | [`cas_conflict_body`] |
 //! | `UpdateRef` | `permission_denied` | `INVALID_REQUEST "write not permitted"` |
-//! | `UpdateRef` | a packmap naming an unknown pack (B10) | `INVALID_REQUEST`, [`IMPLICIT_PACKMAP_UNKNOWN`] |
+//! | `UpdateRef` | a packmap's node, `prev` or a listed pack unknown (B10) | `INVALID_REQUEST`, [`IMPLICIT_PACKMAP_UNKNOWN`] |
 //! | `UpdateRef` | any other | `INVALID_REQUEST "update ref failed"` |
 //! | `ListRefs` | any | `INTERNAL "list refs failed"` |
 //! | `DownloadPack` | any, before the header | `KEY_NOT_FOUND "pack not found"` |

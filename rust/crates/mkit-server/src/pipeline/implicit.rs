@@ -5,9 +5,10 @@
 //!
 //! The write itself stays an ordinary [`OpKind::UpdateRef`]: hooks see no
 //! new operation kind, and the session's pending set arrives out of band.
-//! The B10 check closes the reconnect hole — a packmap may name only
-//! packs pending in this session or already members, and it can only
-//! refuse, never grant membership.
+//! The B10 check closes the reconnect hole — a packmap's node, `prev`
+//! node, and listed packs may be only packs pending in this session or
+//! already members, and the check can only refuse, never grant
+//! membership.
 
 use std::collections::BTreeSet;
 
@@ -23,6 +24,8 @@ use super::{Authenticated, RefUpdate, StoredResult, UpdateRefResult};
 use super::{
     HookSet, OpKind, Operation, Pipeline, ServerError, StorageOp, internal, meta_error, store_error,
 };
+#[cfg(feature = "ssh")]
+use crate::policy::WritePolicy;
 use crate::repo::Addressing;
 #[cfg(feature = "ssh")]
 use crate::repo::NamespaceKey;
@@ -40,8 +43,9 @@ pub(crate) struct PendingPack {
     pub(crate) bytes: u64,
 }
 
-/// The B10 refusal, pinned on the ssh/enc wire: the packmap's MKPL node or
-/// a pack it lists is neither pending in this session nor already a member.
+/// The B10 refusal, pinned on the ssh/enc wire: the packmap's MKPL node,
+/// its `prev` node or a pack it lists is neither pending in this session
+/// nor already a member.
 pub(crate) const IMPLICIT_PACKMAP_UNKNOWN: &str =
     "packmap names packs not uploaded to this repository";
 
@@ -60,14 +64,18 @@ fn refuse() -> ServerError {
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Whether transport-identity writes consume session uploads as
     /// implicit tickets: under Multi addressing (the enc listener's bound
-    /// repository) or on a namespaced Single repository (the ssh root
-    /// mode's). Plain Single and the signed modes never do.
+    /// repository) or on a namespaced Single repository under the owner
+    /// policy (the ssh root mode's). Plain Single and the signed modes
+    /// never do.
     #[cfg(feature = "ssh")]
     pub(crate) fn implicit_tickets(&self) -> bool {
         matches!(self.cfg.auth, super::AuthMode::TransportIdentity)
             && match &self.cfg.addressing {
                 Addressing::Multi(_) => true,
-                Addressing::Single { repo } => repo.namespace != NamespaceKey::deployment_default(),
+                Addressing::Single { repo } => {
+                    repo.namespace != NamespaceKey::deployment_default()
+                        && self.cfg.write_policy == WritePolicy::Owner
+                }
             }
     }
 
@@ -113,9 +121,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     /// The B10 reconnect check, after authorization and before admission
-    /// or planning: the new packmap node's MKPL may name only packs that
-    /// are pending in this session or already members. Nothing is written
-    /// here and the check never grants membership — it only refuses.
+    /// or planning: the new packmap node itself, its `prev` node, and
+    /// every pack it lists may be only packs pending in this session or
+    /// already members. Nothing is written here and the check never
+    /// grants membership — it only refuses.
     pub(super) async fn check_implicit_packmap(
         &self,
         op: &Operation,
@@ -132,6 +141,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         let bytes = self.read_node(&node).await?;
         let listed = mkit_core::transfer::decode_packlist(&bytes).map_err(|_| refuse())?;
+        // One level of `prev` suffices: every committed node was itself
+        // pending-and-consumed or already a member, and its own `prev`
+        // was checked then.
+        if let Some(prev) = listed.prev
+            && !self.pack_known(op, &upd.name, prev, pending).await?
+        {
+            return Err(refuse());
+        }
         let mut packs = listed.packs;
         packs.sort_unstable();
         packs.dedup();

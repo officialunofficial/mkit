@@ -135,7 +135,9 @@ pub enum Addressing {
         /// The configured repository.
         repo: RepoId,
     },
-    /// Routes by `X-Repository`; not deployable until WP-1.14 handles ticket expiry (R-111(1)).
+    /// Routes by `X-Repository`. The adapters serve it (WP-1.30);
+    /// R-111(1)'s no-deployment-before-WP-1.14 rule still applies to the
+    /// whole branch (ticket expiry).
     Multi(MultiAddressing),
 }
 

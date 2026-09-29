@@ -213,8 +213,9 @@ serve only that repository.
 > rule: only a peer whose key is the bound repository's `ed25519-`
 > namespace may write (every other peer reads). Packs a session uploads
 > and verifies may be published by that session's packmap write — the
-> implicit form of upload tickets — and a packmap naming any other pack
-> is refused. Enc peers are NOT subject to the M2 write grants until M2
+> implicit form of upload tickets — and a packmap whose node, `prev`
+> node or listed pack is neither pending nor a member is refused. Enc
+> peers are NOT subject to the M2 write grants until M2
 > wires the grant check into the transport-identity path.
 
 The server's static key is the raw 32-byte ed25519 seed in

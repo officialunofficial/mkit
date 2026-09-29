@@ -195,8 +195,10 @@ sshd configuration — never by the peer, and never from the
 environment; see [SSH-SECURITY.md](../SSH-SECURITY.md) §5. Packs
 uploaded and verified in a session (at most seven between packmap
 writes) may be consumed into membership by that session's packmap
-write — the implicit form of the upload tickets signed writes use —
-and a packmap naming any other pack is refused.
+write — the implicit form of the upload tickets signed writes use. The
+packmap check only refuses: the node, its `prev` node, and every pack
+it lists must be pending in this session or already members, or the
+write is refused.
 
 ### 4.2 Conversation
 
