@@ -214,19 +214,17 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             super::fault!(pipe, AfterAuthorize, &op, a);
         }
         if mode == UploadMode::Fresh {
+            pipe.check_outbox_backpressure(&p, ahead.as_ref()).await?;
+            let credentials = super::admission::validate_credentials(&a.credential_capture)?;
             let mut input = AdmissionInput::new(&op);
+            input.credential_headers = &credentials;
             input.declared_bytes = declared;
             input.pack_id = Some(key);
-            let allowance = pipe.admit(input).await?;
-            // Transport-identity uploads can't satisfy a reservation:
-            // the implicit ticket's session membership is their only
-            // claim, so an admission that demands one fails closed
-            // before any blob is written (Connect's path is unchanged).
-            if matches!(pipe.cfg.auth, AuthMode::TransportIdentity)
-                && allowance.reservation.is_some()
-            {
-                return Err(ServerError::unimplemented(
-                    "admission reservations need mkit+https",
+            let allowance = pipe.admit_streaming(input).await?;
+            if let Some(rid) = &allowance.reservation {
+                pipe.abort_unsupported_stream(a, &p, rid).await?;
+                return Err(ServerError::failed_precondition(
+                    "admission reservations require BeginUpload",
                 ));
             }
             let charges = allowance.charges;
@@ -248,6 +246,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                     mark_repo_known: false,
                     lease: None,
                     rejection: None,
+                    pending: None,
                     begin: None,
                     advance: None,
                     implicit: None,
@@ -456,7 +455,8 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             .hooks
             .pre_receive()
             .check(&self.op, Some(&done.key.into()))
-            .await;
+            .await
+            .map_err(ServerError::strip_admission_shape);
         let Some(replay) = replay_guard(&self.op) else {
             return checked;
         };
@@ -483,6 +483,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             mark_repo_known: false,
             lease: None,
             rejection: rejection.as_ref(),
+            pending: None,
             begin: None,
             advance: None,
             implicit: None,

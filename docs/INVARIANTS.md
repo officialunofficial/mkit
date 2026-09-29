@@ -899,6 +899,29 @@ and `rust/tests/golden/disclosure/neg_incomplete_length_proof_set.*`;
 `mkit_core::verify::tests::len_proofs_on_chunk0_are_rejected` and
 `rust/tests/golden/disclosure/neg_len_proofs_on_chunk0.*` (SPEC-DISCLOSURE §4/§4.1).
 
+## MKDS spans bind every chunk to one authenticated byte range
+
+**Always:** an accepted MKDS container has one trusted commit, authenticated
+path and leaf, a complete preceding length-proof set, and consecutive chunk
+bundles. Its absolute boundaries come from verified canonical Blob content
+lengths. The requested range starts in the first included chunk and ends in
+the last, with no unnecessary last chunk. A malformed container returns its
+first SPEC-DISCLOSURE §8.2 reason and no partial output bytes. A range-proof
+builder checks untrusted boundary hints against the chunk bytes it reads and
+does not read a chunk after the span.
+
+**Because:** a chunk-size marker or unchecked hint is not a proof of a content
+boundary, and combining individually valid bundles from different contexts
+would not authenticate their concatenation as one requested range.
+
+**If violated:** a caller can receive bytes at the wrong absolute offset or
+from the wrong leaf, or accept an incomplete range as a valid disclosure.
+
+**Enforced by:** `mkit_core::verify::span` and its unit tests,
+`rust/crates/mkit-core/tests/golden_http_objects.rs` product/reference parity
+and builder byte-identity checks, and `rust/crates/mkit-wasm/tests/verify.rs`
+(WP-4.14a; SPEC-DISCLOSURE §8 and SPEC-HTTP-OBJECTS §5.2).
+
 ## Closure walks share one `children` function
 
 **Always:** every reachability walk &mdash; store-backed
@@ -1267,13 +1290,18 @@ non-owner and allowlist behavior. Grants and private reads remain M2.
 ## Ticket, reservation and outbox rows keep exactly one outcome per reservation
 
 **Always:** a ticket has a reservation-derived id and a unique guarded `o` row.
-Only a still-Ticketed row can become terminal. Consumption commits its outcome
+Only a still-Ticketed or Pending row can become terminal. Directly admitted
+writes first record Pending, then replace it with Committed or Aborted under
+an equality guard; BeginUpload replaces Pending with Ticketed. A pending
+apply's deadline precedes its reconcile timer, so a late apply cannot commit
+after an Aborted(ABANDONED) replacement. Consumption commits its outcome
 with ref publication and local membership; a missing pack with a present upload
 marker records `Aborted(PACK_MISSING)` in a separate guarded batch before the
 advance fails. A missing marker leaves the ticket open. Terminal outcomes stay
 durable until acknowledgement, which deletes their delivery index and subtracts
 the exact stored key/value byte count. Shared counters and sequence/backlog
-values are guarded once per batch.
+values are guarded once per batch. A zero-to-positive backlog transition adds
+one kind-8 delivery kick; delivery may repeat but never drops an unacked row.
 
 **Because:** consumption and expiry race; delivery may repeat or crash. An
 unguarded replacement could record two outcomes, erase a replacement ticket's
@@ -1287,8 +1315,8 @@ strict `store/codec.rs` decodes, and `mkit-server-conformance/src/storage/kv_cas
 creation, atomic publication, stale-ticket and acknowledgement cases over memory
 and SQLite. WP-1.10 exercises consumption and the defensive abort over native
 memory/SQLite and wire cases; the kind-2 expiry handler closes tickets with
-one guarded `Expired` row and best-effort session abort. WP-3.3 adds guarded
-Pending reservations, ReadServed, reconciliation and backlog enforcement.
+one guarded `Expired` row and best-effort session abort. WP-3.3 enforces guarded
+Pending reservations, ReadServed, reconciliation and backlog limits.
 ## Relay delivery advances durable per-source watermarks before source cleanup
 
 **Always:** relay rows for a source/target pair apply in sequence order. Each
@@ -1726,6 +1754,7 @@ expired identity, or a write can silently mint a new nonce.
 **Enforced by:** the Connect procedure classification and envelope tests,
 client retry tests, and `mkit_core::write_auth::verify_headers` checks over
 captured request bodies.
+
 ## Implicit transport-identity membership is session-bound
 
 **Always:** implicit (transport-identity) membership is granted only for
@@ -1733,11 +1762,10 @@ packs uploaded and verified in the same session and repository; the
 packmap check only refuses. A session's pending set holds at most seven
 distinct packs, dies with the session, and is consumed by that session's
 next packmap write. A packmap is refused when its node's `prev` is
-neither absent nor the packmap value the write replaces — every
-accepted packmap value was checked when written, so by induction the
-`prev` chain is exactly the ref's accepted history and one level
-suffices; ssh/enc never accept a packmap reset whose `prev` is
-non-empty and unrelated to the ref — when its node or a listed pack is
+neither absent nor the packmap value the write replaces, so the
+ssh/enc consuming write never adds a new non-member (values written
+over Connect are not chain-validated, so this guarantee covers values
+written over ssh/enc); it is also refused when its node or a listed pack is
 neither pending nor already a member of the bound repository (a pending
 packlist listed as a pack is refused: a packlist is a node, not a
 pack), or when it lists more than 1,024 packs; the check never adds
@@ -1759,3 +1787,22 @@ isolation across sessions and repositories.
 `mkit-server/src/ssh/tests.rs` pending/consume/reconnect/isolation
 cases, `mkit-cli/tests/serve_golden.rs` session-3 wire goldens, and
 `mkit-server-native/tests/enc_listener.rs` bound-repository cases.
+
+## Private repositories are indistinguishable from missing ones
+
+**Always:** an unauthorized read of a private repository answers the same
+`not_found` — code, message, details and headers — as a missing
+repository, from `ServerError::repository_not_found()`. A signed read
+verifies its envelope in full before any repository lookup and never
+creates or consumes a replay record.
+
+**Because:** SPEC-WRITE-GRANTS §9.2/§9.3; private repositories must not be
+enumerable, and reads must not spend replay capacity.
+
+**If violated:** private repository existence leaks through an error
+difference, or reads consume replay capacity.
+
+**Enforced by:** `pipeline::authorize_read` and `policy::read::decide`;
+the pipeline `private_repository_reads_return_the_missing_repository_error`
+and `a_signed_read_writes_no_replay_rows` tests; the connect_dispatch and
+wire `reads.private_not_found_byte_identical` cases.

@@ -169,7 +169,7 @@ impl Addressing {
                 if let Some(header) = header {
                     RepositoryIdentity::parse_bare_allowed(header).map_err(|_| invalid())?;
                     if header != identity {
-                        return Err(ServerError::not_found("repository not found"));
+                        return Err(ServerError::repository_not_found());
                     }
                 } else if signed {
                     return Err(ServerError::unauthenticated(

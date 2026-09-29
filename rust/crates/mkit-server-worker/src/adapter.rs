@@ -207,6 +207,13 @@ impl WorkerConfig {
     /// combination: `NAMESPACE_POLICY`/`NAMESPACE_ALLOWLIST`/
     /// `UNSAFE_OPEN_NAMESPACES` and `TICKET_KEYS` rules.
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        if var("INDEXED_MODE").is_some_and(|value| {
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        }) {
+            return Err(ConfigError(
+                "indexed mode on Workers requires WP-4.8".into(),
+            ));
+        }
         let required =
             |name: &str| var(name).ok_or_else(|| ConfigError(format!("{name} is not configured")));
         let audience = required(AUDIENCE_VAR)?;
@@ -469,15 +476,23 @@ where
         }
         ShardClass::RefShard => {
             let paid = plan.is_some_and(|p| p.trim().eq_ignore_ascii_case("paid"));
-            let max_per_tick = if paid { 4 } else { 2 };
-            // Paid: <= 4 fires x 8 targets x 2 calls = 64 per alarm,
-            // below Workers Paid's default 10,000 subrequests. Free:
+            let max_per_tick = if paid {
+                mkit_server::relay::WORKER_PAID_RELAY_FIRES
+            } else {
+                mkit_server::relay::WORKER_FREE_RELAY_FIRES
+            };
+            // Paid: <= 8 fires x 32 targets x 2 calls = 512 per alarm.
+            // Free:
             // <= 2 fires x 8 targets x 2 calls = 32, below its limit of 50.
             // The target-call cap also bounds chunking and contention retries.
             let mut budget = RelayBudget::default();
             budget.max_rows = 128;
-            budget.max_targets = 8;
-            budget.max_target_calls = Some(2);
+            budget.max_targets = if paid {
+                mkit_server::relay::WORKER_PAID_RELAY_TARGETS
+            } else {
+                mkit_server::relay::WORKER_FREE_RELAY_TARGETS
+            };
+            budget.max_target_calls = Some(mkit_server::relay::WORKER_RELAY_CALLS_PER_TARGET);
             let relay = match target {
                 Ok(target) => Some(RelayHandler {
                     target,
@@ -492,6 +507,7 @@ where
             registry.register(WorkerRelay {
                 relay,
                 max_per_tick,
+                metrics: Arc::new(crate::telemetry::ConsoleMetrics::default()),
             })
         }
         _ => registry,
@@ -523,9 +539,79 @@ where
     }
 }
 
+/// Register the outcome kinds on every class that holds `o`/`oq` rows:
+/// kind 8 (delivery, in-tree `NoOutcomes` sink that acknowledges locally)
+/// and kind 9 (reconcile). Both make no subrequests, so the Free-plan alarm
+/// budget below is unchanged. A missing audience retains kind-8 rows.
+#[must_use]
+pub fn with_outcome_timers<S>(
+    registry: mkit_server::timers::TimerRegistry<'static, S>,
+    class: crate::classes::ShardClass,
+    audience: Result<String, ConfigError>,
+) -> mkit_server::timers::TimerRegistry<'static, S>
+where
+    S: mkit_server::NamespaceStore,
+{
+    use crate::classes::ShardClass;
+    if !matches!(
+        class,
+        ShardClass::RefStore | ShardClass::NsCoordinator | ShardClass::RefShard
+    ) {
+        return registry;
+    }
+    let delivery = match audience {
+        Ok(audience) => Some(mkit_server::timers::outcome_delivery::OutcomeDelivery {
+            sink: mkit_server::pipeline::NoOutcomes,
+            audience,
+            metrics: Arc::new(crate::telemetry::ConsoleMetrics::default()),
+        }),
+        Err(error) => {
+            crate::log_failure(&format!(
+                "Worker outcome delivery configuration unavailable: {error}"
+            ));
+            None
+        }
+    };
+    registry
+        .register(WorkerOutcomeDelivery { delivery })
+        .register(mkit_server::timers::reservation_reconcile::ReservationReconcile)
+}
+
+struct WorkerOutcomeDelivery {
+    delivery: Option<
+        mkit_server::timers::outcome_delivery::OutcomeDelivery<mkit_server::pipeline::NoOutcomes>,
+    >,
+}
+
+impl<S: mkit_server::NamespaceStore> mkit_server::timers::TimerHandler<S>
+    for WorkerOutcomeDelivery
+{
+    fn kind(&self) -> mkit_server::timers::TimerKind {
+        mkit_server::timers::registry::kinds::OUTCOME_DELIVERY
+    }
+
+    // Each fire delivers at most 16 rows locally; no subrequests.
+    fn max_per_tick(&self) -> Option<u32> {
+        Some(4)
+    }
+
+    fn fire<'a>(
+        &'a self,
+        ctx: &'a mkit_server::timers::TimerCtx<'a, S>,
+        timer: &'a mkit_server::timers::DueTimer,
+    ) -> mkit_server::BoxFuture<'a, Result<mkit_server::timers::Fired, mkit_server::StoreError>>
+    {
+        match &self.delivery {
+            Some(delivery) => delivery.fire(ctx, timer),
+            None => Box::pin(async { Ok(mkit_server::timers::Fired::Retry) }),
+        }
+    }
+}
+
 struct WorkerRelay<T> {
     relay: Option<mkit_server::relay::RelayHandler<T>>,
     max_per_tick: u32,
+    metrics: Arc<dyn mkit_server::Metrics>,
 }
 
 struct WorkerLeaseSweep<T> {
@@ -572,7 +658,7 @@ impl<S: mkit_server::NamespaceStore, T: mkit_server::NamespaceStore>
     ) -> mkit_server::BoxFuture<'a, Result<mkit_server::timers::Fired, mkit_server::StoreError>>
     {
         match &self.relay {
-            Some(relay) => relay.fire(ctx, timer),
+            Some(relay) => Box::pin(relay.deliver_with_metrics(ctx, timer, self.metrics.as_ref())),
             None => Box::pin(async { Ok(mkit_server::timers::Fired::Retry) }),
         }
     }
@@ -1130,6 +1216,11 @@ mod glue {
                 PACKS_KEYSPACE,
             ),
         );
+        let registry = super::with_outcome_timers(
+            registry,
+            class,
+            WorkerConfig::from_env(env).map(|cfg| cfg.audience),
+        );
         let backup = BackupConfig::from_vars(|name| env.var(name).ok().map(|v| v.to_string()))
             .map_err(|error| {
                 BACKUPS_INVALID_LOG
@@ -1150,6 +1241,7 @@ mod glue {
         let registry = if let Some(config) = backup.clone() {
             // Free-plan alarm budget: at most 32 relay calls plus this
             // handler's single R2 put = 33 external subrequests, under 50.
+            // Kinds 8 and 9 (NoOutcomes, reconcile) make no external calls.
             registry.register(BackupHandler::new(
                 EnvBucket::new(env.clone(), BACKUPS_BINDING),
                 config,
@@ -1821,6 +1913,20 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&unavailable_json("a \"b\"")).unwrap();
         assert_eq!(v["code"], "unavailable");
         assert_eq!(v["message"], "a \"b\"");
+    }
+
+    #[test]
+    fn worker_refuses_indexed_mode_until_async_driver() {
+        for value in ["true", "1", "yes", "on"] {
+            let err =
+                WorkerConfig::from_vars(|name| (name == "INDEXED_MODE").then(|| value.to_owned()))
+                    .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("indexed mode on Workers requires WP-4.8"),
+                "{value}"
+            );
+        }
     }
 
     /// The Connect binding over memory stores, open auth, 1 MiB packs.

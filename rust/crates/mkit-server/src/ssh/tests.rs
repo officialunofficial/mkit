@@ -1905,6 +1905,8 @@ impl Admission for AdmissionSpy {
         Ok(AdmissionDecision::Allow {
             charges: Vec::new(),
             reservation: self.reservation.clone(),
+            response_headers: Vec::new(),
+            external_ref: None,
         })
     }
 }
@@ -2545,7 +2547,8 @@ fn eighth_pending_upload_is_refused_in_frame_sync() {
 }
 
 /// Admission returning a reservation under transport identity fails the
-/// upload closed (Test 10): nothing is stored or reserved.
+/// upload closed (Test 10): nothing is stored and the reservation is
+/// aborted.
 #[test]
 fn reserving_admission_fails_the_upload_closed() {
     let spy = AdmissionSpy {
@@ -2576,8 +2579,20 @@ fn reserving_admission_fails_the_upload_closed() {
     };
     assert_eq!(resp.exists, Some(false));
     assert!(!blob_present(&blobs, data_id));
+    // The unsupported stream is answered with exactly one Aborted outcome
+    // (#1212's `abort_unsupported_stream`), never a Pending or Committed one.
     let ns = NamespaceKey::from_namespace(&Namespace::Ed25519(OWNER));
-    assert!(o_rows(&kv, &root(&ns)).is_empty());
+    // Outbox bookkeeping (`oc`, `oq`, `os`) rides along; the reservation
+    // rows are the `o 00 <rid>` ones.
+    let rows: Vec<_> = o_rows(&kv, &root(&ns))
+        .into_iter()
+        .filter(|(key, _)| key.as_bytes().starts_with(b"o\0"))
+        .collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(matches!(
+        crate::store::codec::decode_reservation(&rows[0].1).unwrap(),
+        crate::store::codec::ReservationV1::Aborted { .. }
+    ));
 }
 
 /// B10 across a reconnect (Test 11): packs uploaded in session 1 are not
@@ -2683,6 +2698,61 @@ fn packmap_listing_an_unknown_pack_is_refused() {
         &repo_id.name,
         &ghost
     ));
+}
+
+/// L6 on the enc/ssh sibling: a stored `rv = private` gates reads on a
+/// Multi + Owner transport-identity pipeline even though it cannot verify
+/// a signer. A non-owner peer's read of a private repository is
+/// byte-identical to a read of a missing one. The owner's own private
+/// read also fails closed today (no signed envelope to prove the owner
+/// beyond the transport; R-137 carry-forward "owner private reads over
+/// enc"), so that too is the uniform `not_found`.
+#[test]
+fn private_repository_reads_are_not_found_over_transport_identity() {
+    let (pipe, _, kv) = multi_pipeline([Namespace::Ed25519(OWNER)], Sharding::Single, Hooks::new());
+    let repo = peer_repo(OWNER, "room-a");
+    let repo_id = peer_repo_id(OWNER, "room-a");
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [update(
+            "refs/heads/main",
+            &[0x55; 32],
+            Some(RefExpectation::Missing),
+            None,
+        )],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert!(
+        matches!(frames[0].body, Some(Body::UpdateRefResponse(_))),
+        "{:?}",
+        frames[0].body
+    );
+    // Public: a non-owner peer reads it.
+    let (_, public) = peer_run(&pipe, OTHER, &repo, [read_ref("refs/heads/main")]);
+    assert!(matches!(public[0].body, Some(Body::ReadRefResponse(_))));
+    // Mark it private.
+    let batch = Batch::new().put(
+        keys::repo_visibility(&repo_id.name),
+        codec::encode_repo_visibility(&codec::RepoVisibilityV1 {
+            visibility: codec::StoredVisibility::Private,
+            last_created_ms: 0,
+            last_statement_id: None,
+        }),
+    );
+    let coordinator = root(&repo_id.namespace);
+    assert_eq!(
+        block_on(kv.apply(&coordinator, batch)).unwrap(),
+        BatchOutcome::Committed
+    );
+    let missing = peer_repo(OWNER, "never-created");
+    let (_, absent) = peer_run(&pipe, OTHER, &missing, [read_ref("refs/heads/main")]);
+    assert!(matches!(absent[0].body, Some(Body::Error(_))));
+    let (_, stranger) = peer_run(&pipe, OTHER, &repo, [read_ref("refs/heads/main")]);
+    assert_eq!(stranger, absent, "private reads like a missing repository");
+    let (_, owner) = peer_run(&pipe, OWNER, &repo, [read_ref("refs/heads/main")]);
+    assert_eq!(owner, absent, "owner private reads fail closed over enc");
 }
 
 /// B10's `prev` rule (Test 11): on a consuming packmap write `prev` must

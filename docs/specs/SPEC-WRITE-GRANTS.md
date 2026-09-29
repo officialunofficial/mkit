@@ -16,8 +16,10 @@ the §4.3 rules against configured relying parties), and the stateless
 verifier (§7 steps 1 to 10, the §5.2 and §9.1 statement checks and the
 §10 registration check) are implemented. The Connect server enforces write
 grants, including the stored-epoch equality check in §7 step 11, the
-§8.2 and §8.3 ref-scope rules, and the unsigned grant-epoch RPCs. Signed
-reads and ssh/enc grant registration remain for later M2 work packages.
+§8.2 and §8.3 ref-scope rules, and the unsigned grant-epoch RPCs. It
+verifies signed reads (§9.2), enforces private-repository reads and both
+`SetRepoVisibility` modes (§9.1, §9.3), and mints URL tokens (§9.4).
+ssh/enc grant registration remains for later M2 work packages.
 Golden
 vectors ([SPEC-CONVENTIONS §5](SPEC-CONVENTIONS.md#5-golden-vectors-and-conformance-tests))
 land with each implementation; §13.1 lists those that exist and names
@@ -85,7 +87,7 @@ parameter** is configured per deployment, within the stated constraint.
 | `epoch_lease` | deployment parameter | 30 s | Greater than `margin`. | §5.4 |
 | `margin` | deployment parameter | 5 s | Greater than the worst clock skew between the namespace coordinator and any ref shard's storage backend. | §5.5 |
 | `MAX_APPLY_WINDOW` | deployment parameter | 10 s | Less than the auth v2 validity bound of 300 s. | §5.5 |
-| `url_token_ttl` | deployment parameter | 15 min | The longest token lifetime the deployment issues. | §9.4 |
+| `url_token_ttl` | deployment parameter | 15 min | The longest token lifetime the deployment issues; at most 24 h (`MAX_TTL`), which is also the longest lifetime a token statement may encode. | §9.4 |
 
 The values of `MAX_EPOCH_STEP`, `epoch_lease`, `margin`,
 `MAX_APPLY_WINDOW` and `url_token_ttl` are planner defaults and remain
@@ -818,6 +820,9 @@ unary write.
 
 The read procedures are `ListRefs`, `ReadRef`, `PackExists`,
 `DownloadPack`, `IssueObjectUrl`, and `GetReceipt` (STC §2.2).
+For `DownloadPack` the committed bytes are the uncompressed envelope
+`0x00`, the 4-byte big-endian message length and the message; a signed
+request whose body is compressed is `unauthenticated`.
 
 - A request that carries any auth v2 header (`X-Envelope-Version`,
   `X-Public-Key`, `X-Signature`) is signed, and the server MUST verify
@@ -894,7 +899,8 @@ token reveals nothing about the repository's contents.
 **Lifetime.** The token lives `min(ttl, url_token_ttl)` seconds, or
 `url_token_ttl` when `ttl` is 0. `url_token_ttl` defaults to 15 minutes
 and is the longest lifetime the deployment issues; a larger request is
-clamped, never refused.
+clamped, never refused. A deployment MUST NOT configure `url_token_ttl`
+above 24 hours.
 
 **Token statement.** Eight fields, encoded by the §3.1 rules:
 
@@ -913,7 +919,7 @@ mkit-url-token:v1
 |---|---|
 | `audience` | The issuing deployment's auth v2 audience. |
 | `repository` | The full repository identity (§7.4). |
-| `target` | `object:<64 lowercase hex object id>`, or `path:<ref>:<path>` where `<ref>` is a full ref name valid under SPEC-REFS §3 and `<path>` is the unpadded base64url of the UTF-8 path. The path is 0 to 1,024 bytes; an empty path names the root tree. A nonempty path consists of tree entry names joined by `/`, with no leading, trailing or repeated `/` and no `.` or `..` entry. Ref names contain no `:`, so the field splits at its first two `:`. |
+| `target` | `object:<64 lowercase hex object id>`, or `path:<ref>:<path>` where `<ref>` is a full ref name valid under SPEC-REFS §3 and `<path>` is the unpadded base64url of the UTF-8 path. The path is 0 to 1,024 bytes; an empty path names the root tree. A nonempty path consists of tree entry names joined by `/`, with no leading, trailing or repeated `/`, no `.` or `..` entry and no control character (Unicode category Cc). Ref names contain no `:`, so the field splits at its first two `:`. |
 | `epoch` | The namespace's stored epoch when the token was issued (§5). |
 | `issued`, `expiry` | Decimal millisecond timestamps, `issued < expiry`, `expiry - issued` at most `url_token_ttl`. |
 | `key id` | The first 16 bytes of the BLAKE3 of the signing key's 32-byte public key, as 32 lowercase hexadecimal digits. |
@@ -1109,10 +1115,12 @@ the workspace grant separator `mkit-workspace-grant:v1`.
 
 ### 13.1 Golden fixtures
 
-These fixtures under `rust/tests/golden/grants/` are this document's
-test vectors. `MANIFEST.txt` pins the BLAKE3 of every file, and
-`scripts/golden/grants_ref.py` rebuilds and checks each one from this
-document's rules, independently of the Rust code.
+These fixtures under `rust/tests/golden/grants/` and
+`rust/tests/golden/url-token/` are this document's test vectors. Each
+directory's `MANIFEST.txt` pins the BLAKE3 of every file, and
+`scripts/golden/grants_ref.py` and `scripts/golden/url_token_ref.py`
+rebuild and check them from this document's rules, independently of the
+Rust code.
 
 - `grant-statements.json`: canonical grant statements, each with its
   field values and grant id (§3.2, §3.4). They cover every capability
@@ -1183,14 +1191,14 @@ document's rules, independently of the Rust code.
 The fixed secp256k1 and P-256 test seeds own real `0x` namespaces.
 Never allowlist those namespaces on a shared or staging deployment.
 
-Planned, with the implementations that need them: fixtures under
-`rust/tests/golden/url-token/` and `rust/tests/golden/grants/` covering
-at least a URL token and a signed read.
+The signed-read golden is `rust/tests/golden/auth-v2/read.json` under
+SPEC-TRANSPORT-CONNECT; no further fixtures are planned here.
 
 Landed so far (each pinned by BLAKE3 in the directory's `MANIFEST.txt`):
 
 | Fixture | Pins |
 |---|---|
+| `rust/tests/golden/url-token/` | tokens (object, nested path, empty root path, 1,024-byte path, epochs 0 and 2^64−1), target fields, a rendered key set with an active and a retired key, and rejections (padding, standard alphabet, trailing bits, segment and field counts, domain, key id case, unknown key, foreign signature, issued ≥ expiry, `.`/`..`/`//`/edge slashes, 1,025-byte and non-UTF-8 paths), rebuilt by `scripts/golden/url_token_ref.py` (§9.4). |
 | `rust/tests/golden/grants/eth-primitives.json` | Keccak-256 of the empty string, `abc` and a 4,096-byte statement-shaped input, plus the differing SHA3-256 of the empty string (§4.1); two EIP-191 vectors (§4): the public `Some data` vector and the §3.4 example grant, each with its message, digest, private key, 65-byte `r‖s‖v` signature and recovered address; the high-`s` twin of each, which a verifier rejects and a client normalizes back (§4.4); the address, `x` and `y` of two secp256k1 and two P-256 keys, including `d = 1` on each curve (§4.1); one key per curve with `x ≥ p` whose reduction is on the curve, which a verifier rejects (§4.1); and a P-256 DER signature with high `s`, its low-`s` raw `r‖s`, and seven DER encodings a client rejects: a non-minimal integer, a trailing byte, a negative integer, a 33-byte integer, `r = 0`, `r = n` and a long-form length (§4.4). |
 
 ---
@@ -1199,7 +1207,7 @@ Landed so far (each pinned by BLAKE3 in the directory's `MANIFEST.txt`):
 
 | Version | Status | Changes |
 |---|---|---|
-| `1` | draft | Initial grant statement (audiences, ref scopes, capabilities), owner schemes, exact-epoch revocation with bounded epoch statements, epoch leases and the commit deadline, server policy, signed reads, private repositories and URL tokens, and server-side grants for ssh and enc (mkit#1085, mkit#1089). WP-4.11 adds the `token=` URL form and key-set publication, and amends token paths to 0–1024 bytes so an empty path names the root tree. Fix round 1 orders stateless token checks before the stored-epoch read. |
+| `1` | draft | Initial grant statement (audiences, ref scopes, capabilities), owner schemes, exact-epoch revocation with bounded epoch statements, epoch leases and the commit deadline, server policy, signed reads, private repositories and URL tokens, and server-side grants for ssh and enc (mkit#1085, mkit#1089). WP-4.11 adds the `token=` URL form and key-set publication, and amends token paths to 0–1024 bytes so an empty path names the root tree. Fix round 1 orders stateless token checks before the stored-epoch read. WP-2.9 pins the `DownloadPack` signed-read body; WP-2.11 lands the URL-token fixtures. Fix round 2 caps `url_token_ttl` at 24 h and excludes control characters from token paths. |
 
 ---
 

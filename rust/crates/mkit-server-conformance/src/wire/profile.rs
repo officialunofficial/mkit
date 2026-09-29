@@ -317,6 +317,7 @@ impl Profile {
             ),
             (Feature::AtomicAdvance, self.atomic_advance),
             (Feature::Quota, self.quota.is_some()),
+            (Feature::SignedReads, self.sign_reads),
         ];
         for (feature, on) in derived {
             if on {

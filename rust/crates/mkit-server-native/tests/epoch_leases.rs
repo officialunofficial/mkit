@@ -263,14 +263,17 @@ impl Authorizer for Policy {
 impl Admission for Policy {
     async fn admit(&self, _: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
         if matches!(self.0, Reject::Challenge) {
-            Ok(AdmissionDecision::Challenge {
-                challenges: vec![],
-                description: "test challenge".into(),
-            })
+            Ok(AdmissionDecision::challenge(
+                vec![mkit_server::pipeline::Challenge {
+                    scheme: "mpp".into(),
+                    value: "pay".into(),
+                }],
+                "test challenge",
+            ))
         } else {
             let allowed = AdmissionDecision::allow(vec![]);
             Ok(if matches!(self.0, Reject::Reserved) {
-                allowed.with_reservation("s:epoch-race")
+                allowed.with_reservation("epoch-race")
             } else {
                 allowed
             })
@@ -371,6 +374,7 @@ fn auth_for<N: NamespaceStore>(
                         .find(|(name, _)| name == h)
                         .map(|(_, value)| value.clone()),
                 },
+                header_values: None,
                 unary_body: Some(BODY),
                 transport_principal: None,
             })
@@ -2326,7 +2330,22 @@ async fn reserved_begin_epoch_mismatch<N: NamespaceStore + 'static>(
             .entries
             .is_empty()
     );
-    // TODO(WP-3.3): persist Aborted for reserved apply failures in the generic rule.
+    let outcome = store
+        .inner
+        .get(
+            &shard(&granted, REF),
+            &keys::reservation("epoch-race").unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        codec::decode_reservation(&outcome).unwrap(),
+        codec::ReservationV1::Aborted {
+            reason: codec::AbortReason::EpochMismatch,
+            ..
+        }
+    ));
 }
 backends!(
     reserved_begin_epoch_mismatch_memory,

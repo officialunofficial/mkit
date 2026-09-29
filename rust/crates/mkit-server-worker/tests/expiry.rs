@@ -92,3 +92,91 @@ async fn single_and_ref_shard_expiry_timers_fire() {
         ));
     }
 }
+
+/// Kinds 8 and 9 are registered wherever `o`/`oq` rows can live, so neither
+/// is re-armed as an unknown kind: a terminal row is delivered and acked, and
+/// an abandoned pending row is aborted, delivered and acked.
+#[tokio::test]
+async fn outcome_delivery_and_reconcile_fire_on_every_outcome_class() {
+    use mkit_server::store::codec::{AbortReason, PendingOp, ReservationV1};
+    use mkit_server::store::outbox::{OutboxBuilder, Terminal};
+    for class in [
+        ShardClass::RefStore,
+        ShardClass::RefShard,
+        ShardClass::NsCoordinator,
+    ] {
+        let partition = Partition::Namespace(NamespaceKey::deployment_default());
+        let store = MemoryKv::default();
+        let mut builder = OutboxBuilder::new(None, None).unwrap();
+        builder.abort_direct(
+            "done-rid",
+            Terminal::new(ReservationV1::Aborted {
+                repository: "repo".into(),
+                occurred_at_ms: 100,
+                reason: AbortReason::Unspecified,
+                detail: String::new(),
+            })
+            .unwrap(),
+        );
+        builder.pending(
+            "stale-rid",
+            None,
+            &ReservationV1::Pending {
+                repository: "repo".into(),
+                created_at_ms: 1,
+                reconcile_at_ms: 100,
+                op: PendingOp::Write,
+            },
+        );
+        let mut batch = Batch::new();
+        builder
+            .try_finish(&mut batch.preconditions, &mut batch.writes)
+            .unwrap();
+        assert_eq!(
+            store.apply(&partition, batch).await.unwrap(),
+            BatchOutcome::Committed
+        );
+        let registry = mkit_server_worker::adapter::with_outcome_timers(
+            timer_registry_with_blobs(
+                class,
+                Ok::<_, ConfigError>(MemoryKv::default()),
+                Some("free"),
+                MemoryBlobStore::default(),
+            ),
+            class,
+            Ok("https://server.example".to_owned()),
+        );
+        let mut fired = 0;
+        for _ in 0..4 {
+            fired += run_due(
+                &store,
+                &partition,
+                &registry,
+                &ManualClock::new(200),
+                200,
+                &TickBudget::default(),
+            )
+            .await
+            .unwrap()
+            .fired;
+        }
+        assert!(fired >= 3, "{class:?}: {fired}");
+        for rid in ["done-rid", "stale-rid"] {
+            assert!(
+                store
+                    .get(&partition, &keys::reservation(rid).unwrap())
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{class:?} {rid} was not delivered and acknowledged"
+            );
+        }
+        assert!(
+            store
+                .get(&partition, &keys::outcome_backlog())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}

@@ -178,6 +178,7 @@ macro_rules! __with_kv_cases {
                 kv_refs_membership_outcome_atomic,
                 kv_ticket_changed_precondition_writes_nothing,
                 kv_outcome_ack_exact_backlog,
+                kv_pending_terminal_arbitration,
             }
             durability::{
                 dur_cancelled_apply_is_all_or_nothing,
@@ -200,6 +201,10 @@ macro_rules! __with_kv_cases {
                 idx_expired_holds_pruned_on_mutation,
             }
             object_index::{
+                idx_scan_many_default_and_prefix,
+                idx_scan_many_empty_and_continuation,
+                idx_scan_many_forged_cursor,
+                idx_scan_many_range_limit,
                 idx_object_membership_gate_single,
                 idx_object_membership_gate_d34,
                 idx_object_paging_and_membership_delete,

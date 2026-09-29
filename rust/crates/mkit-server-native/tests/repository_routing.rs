@@ -41,6 +41,7 @@ fn authenticate<N: NamespaceStore>(
     pipe.authenticate(&RequestMeta {
         procedure,
         header: &lookup,
+        header_values: None,
         unary_body: Some(BODY),
         transport_principal: None,
     })

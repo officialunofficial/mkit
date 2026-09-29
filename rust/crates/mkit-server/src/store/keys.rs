@@ -26,6 +26,7 @@
 //! | coordinator namespace total | `qt 00 <window:be64>` | codec `NamespaceUsage` |
 //! | namespace record (`Coordinator`) | `nr 00` | codec `NamespaceRecord` |
 //! | repo record (`Coordinator`) | `rr 00 <repo>` | codec `RepoRecord` |
+//! | repository visibility (`Coordinator`) | `rv 00 <repo>` | codec `RepoVisibilityV1`; absent means public |
 //! | repo-known marker (ref shard) | `rk 00 <repo>` | empty |
 //! | grant epoch | `e 00` | be64; absent means 0, never written as 0 |
 //! | epoch lease (ref shard) | `el 00` | codec `EpochLease` |
@@ -38,6 +39,7 @@
 //! | open tickets per signer | `tu 00 <repo> 00 <ref> 00 <signer:32>` | be64; same rules |
 //! | ticket expiry timer | `w 00 <expires_at:be64> 02 <ticket_id:32>` | empty |
 //! | local membership | `m 00 <repo> 00 <pack:32>` | empty |
+//! | indexed verification state | `vs 00 <repo> 00 <pack:32>` | `VerificationV1` |
 //! | repository object index | `i 00 <repo> 00 <object:32> <pack:32>` | binary `IndexValue` |
 //! | reservation and outcome | `o 00 <reservation_id>` | codec `ReservationV1` |
 //! | outcome pending index | `oq 00 <seq:be64> <reservation_id>` | empty |
@@ -143,6 +145,9 @@ pub const TAG_REPO_KNOWN: &str = "rk";
 /// Repo registry tag: one row per repo of the namespace, in its
 /// coordinator partition. Bounded by repos, not refs.
 pub const TAG_REPO_REGISTRY: &str = "rr";
+/// Repository visibility tag (`Coordinator`): absent means public; the
+/// row may exist without `rr` (SPEC-WRITE-GRANTS §9.1).
+pub const TAG_REPO_VISIBILITY: &str = "rv";
 /// Namespace list tag, reserved until namespace enumeration under
 /// `namespace_policy = any` is needed (WP-1.29 backup). No M1 consumer
 /// or deployment-wide partition exists. A backend may keep its own metadata.
@@ -158,6 +163,8 @@ pub const TAG_TICKETS_PER_REF: &str = "tc";
 pub const TAG_TICKETS_PER_SIGNER: &str = "tu";
 /// Local repository membership tag.
 pub const TAG_MEMBERSHIP: &str = "m";
+/// Per-(repository, pack) verification state in the ref shard.
+pub const TAG_VERIFICATION: &str = "vs";
 /// Repository-scoped object index tag.
 pub const TAG_OBJECT_INDEX: &str = "i";
 /// Reservation and terminal outcome tag.
@@ -194,6 +201,8 @@ pub enum ParsedKey {
     NamespaceRecord,
     /// `rr 00 <repo>`.
     RepoRecord(RepoName),
+    /// `rv 00 <repo>`.
+    RepoVisibility(RepoName),
     /// `rk 00 <repo>`.
     RepoKnown(RepoName),
     /// `rh 00 <Partition::encode(source)>`. Never pruned.
@@ -274,6 +283,8 @@ pub enum ParsedKey {
         /// Pack id.
         pack_id: Hash,
     },
+    /// `vs 00 <repo> 00 <pack>`.
+    Verification { repo: RepoName, pack_id: Hash },
     /// `i 00 <repo> 00 <object> <pack>`.
     ObjectIndex {
         /// Repository.
@@ -411,6 +422,12 @@ pub fn namespace_record() -> Key {
 #[must_use]
 pub fn repo_record(repo: &RepoName) -> Key {
     key(TAG_REPO_REGISTRY, &[repo.as_str().as_bytes()])
+}
+
+/// `rv 00 <repo>`: the repository's visibility row in its coordinator.
+#[must_use]
+pub fn repo_visibility(repo: &RepoName) -> Key {
+    key(TAG_REPO_VISIBILITY, &[repo.as_str().as_bytes()])
 }
 
 /// `rk 00 <repo>`: the ref shard's repository registration marker.
@@ -616,6 +633,12 @@ pub fn tickets_per_signer(repo: &RepoName, name: &str, signer: &Hash) -> Result<
 #[must_use]
 pub fn membership(repo: &RepoName, pack: &Hash) -> Key {
     key(TAG_MEMBERSHIP, &[repo.as_str().as_bytes(), b"\0", pack])
+}
+
+/// `vs 00 <repo> 00 <pack>`; the ref shard holding the ticket owns it.
+#[must_use]
+pub fn verification(repo: &RepoName, pack: &Hash) -> Key {
+    key(TAG_VERIFICATION, &[repo.as_str().as_bytes(), b"\0", pack])
 }
 
 /// `i 00 <repo> 00 <object> <pack>`.
@@ -882,6 +905,7 @@ fn parse_named_ref(body: &[u8]) -> Option<(RepoName, String)> {
 /// Decode a key of any laid-out class; `None` for a malformed key or a
 /// reserved class.
 #[must_use]
+#[allow(clippy::too_many_lines)] // The key-class dispatch remains in one parser.
 pub fn parse(key: &Key) -> Option<ParsedKey> {
     let bytes = key.as_bytes();
     if bytes.len() > MAX_KEY_BYTES {
@@ -902,6 +926,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"ls" => parse_leased_shard(body)?,
         b"nr" if body.is_empty() => ParsedKey::NamespaceRecord,
         b"rr" => ParsedKey::RepoRecord(RepoName::new(text(body)?).ok()?),
+        b"rv" => ParsedKey::RepoVisibility(RepoName::new(text(body)?).ok()?),
         b"rh" => ParsedKey::RelayHighWater(Partition::decode(body).ok()?),
         b"rs" if body.is_empty() => ParsedKey::RelayScan,
         b"rk" => ParsedKey::RepoKnown(RepoName::new(text(body)?).ok()?),
@@ -918,6 +943,13 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"m" => {
             let sep = body.iter().position(|&b| b == 0)?;
             ParsedKey::Membership {
+                repo: RepoName::new(text(&body[..sep])?).ok()?,
+                pack_id: hash(&body[sep + 1..])?,
+            }
+        }
+        b"vs" => {
+            let sep = body.iter().position(|&b| b == 0)?;
+            ParsedKey::Verification {
                 repo: RepoName::new(text(&body[..sep])?).ok()?,
                 pack_id: hash(&body[sep + 1..])?,
             }
@@ -1030,6 +1062,7 @@ mod tests {
             TAG_OBJECT_STATE,
             TAG_NAMESPACE_RECORD,
             TAG_REPO_REGISTRY,
+            TAG_REPO_VISIBILITY,
             TAG_REPO_KNOWN,
             TAG_RELAY_HIGH_WATER,
             TAG_RELAY_SCAN,
@@ -1038,6 +1071,7 @@ mod tests {
             TAG_TICKETS_PER_REF,
             TAG_TICKETS_PER_SIGNER,
             TAG_MEMBERSHIP,
+            TAG_VERIFICATION,
             TAG_OBJECT_INDEX,
             TAG_RESERVATION,
             TAG_OUTCOME_PENDING,
@@ -1050,6 +1084,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One golden per key family, merged from two WPs.
     fn layouts_golden_bytes() {
         let s = [0x11; 32];
         let q = format!("root\n{}", "ab".repeat(32));
@@ -1064,7 +1099,12 @@ mod tests {
             ),
             (namespace_record(), b"nr\0".to_vec()),
             (repo_record(&repo("room-a")), b"rr\0room-a".to_vec()),
+            (repo_visibility(&repo("room-a")), b"rv\0room-a".to_vec()),
             (repo_known(&repo("room-a")), b"rk\0room-a".to_vec()),
+            (
+                verification(&repo("room-a"), &s),
+                [&b"vs\0room-a\0"[..], &[0x11; 32]].concat(),
+            ),
             (
                 ref_key(&repo("room-a"), "refs/heads/main"),
                 b"r\0room-a\0refs/heads/main".to_vec(),
@@ -1116,6 +1156,15 @@ mod tests {
         }
         assert_eq!(LAYOUT_VERSION, 1);
         assert!(!RESERVED_TAGS.contains(&TAG_OBJECT_INDEX));
+        assert!(!RESERVED_TAGS.contains(&TAG_VERIFICATION));
+        let state = verification(&repo("a"), &s);
+        assert_eq!(
+            parse(&state),
+            Some(ParsedKey::Verification {
+                repo: repo("a"),
+                pack_id: s,
+            })
+        );
         let index = object_index(&repo("a"), &s, &[0x22; 32]);
         assert_eq!(
             parse(&index),
@@ -1485,6 +1534,14 @@ mod tests {
             })
         );
     }
+    #[test]
+    fn repo_visibility_key_roundtrips() {
+        let key = repo_visibility(&repo("room-a"));
+        assert_eq!(key.as_bytes(), b"rv\0room-a");
+        assert_eq!(parse(&key), Some(ParsedKey::RepoVisibility(repo("room-a"))));
+        assert_eq!(parse(&Key::new(b"rv\0"[..].to_vec())), None);
+    }
+
     #[test]
     fn lease_keys_reject_malformed_payloads() {
         for bad in [

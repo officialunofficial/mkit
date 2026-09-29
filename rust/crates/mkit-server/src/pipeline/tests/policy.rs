@@ -20,6 +20,7 @@ impl Authorizer for PolicyHook {
             Ok(AuthzFacts {
                 owner: true,
                 grant: None,
+                ..AuthzFacts::default()
             })
         }
     }
@@ -184,14 +185,22 @@ fn check_policy_case(
         let observed = seen.lock().unwrap();
         assert_eq!(
             observed[0].authz,
-            AuthzFacts { owner, grant: None },
+            AuthzFacts {
+                owner,
+                grant: None,
+                caller_view: CallerView::Writer
+            },
             "{context}"
         );
     }
     if multi && allowed {
         assert_eq!(
             admitted.lock().unwrap()[0],
-            AuthzFacts { owner, grant: None },
+            AuthzFacts {
+                owner,
+                grant: None,
+                caller_view: CallerView::Writer
+            },
             "{context}"
         );
     }
@@ -448,7 +457,8 @@ fn namespaced_single_owner_policy() {
                 seen.lock().unwrap()[0].authz,
                 AuthzFacts {
                     owner: true,
-                    grant: None
+                    grant: None,
+                    caller_view: CallerView::Writer,
                 },
                 "{context}: the authorizer sees the established facts"
             );
@@ -456,7 +466,8 @@ fn namespaced_single_owner_policy() {
                 admitted.lock().unwrap()[0],
                 AuthzFacts {
                     owner: true,
-                    grant: None
+                    grant: None,
+                    caller_view: CallerView::Writer,
                 },
                 "{context}: a consuming-less write still runs admission"
             );
@@ -532,6 +543,7 @@ fn owner_policy_needs_a_self_certifying_namespace() {
                 .authenticate(&RequestMeta {
                     procedure: Procedure::UpdateRef,
                     header: &|_| None,
+                    header_values: None,
                     unary_body: None,
                     transport_principal: Some(Principal::SshForcedCommand { key: Some([1; 32]) }),
                 })
@@ -560,6 +572,21 @@ fn reads_keep_hook_behavior_and_invalid_multi_namespace_is_internal() {
         None,
         OpKind::ReadRef { name: HEAD.into() },
     );
+    // The read path folds in the repository-existence check.
+    assert_eq!(
+        now(e.pipe.authorize(&op)).unwrap_err().code(),
+        Code::NotFound
+    );
+    now(e.pipe.meta.inner.apply(
+        &e.pipe.shards.coordinator(&op.repo.namespace),
+        Batch::new().put(
+            keys::repo_record(&op.repo.name),
+            codec::encode_repo_record(&codec::RepoRecord {
+                created_at_ms: u64::try_from(T0).unwrap(),
+            }),
+        ),
+    ))
+    .unwrap();
     assert!(now(e.pipe.authorize(&op)).is_ok());
     op.kind = OpKind::UpdateRef(upd(HEAD, Any, A));
     assert_eq!(

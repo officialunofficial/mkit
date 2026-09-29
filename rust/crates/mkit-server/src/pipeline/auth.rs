@@ -29,14 +29,17 @@ pub enum AuthMode {
         /// The expected token.
         token: Redacted,
     },
-    /// Auth v2 on writes (`UpdateRef`, `AdvanceRefs`, `UploadPack`), with
-    /// the replay ledger and quota; reads are unsigned (`vcs-worker`
-    /// parity).
+    /// Auth v2 on writes, with the replay ledger and quota; a read that
+    /// carries an auth header is verified in full (SPEC-WRITE-GRANTS
+    /// §9.2), an unsigned read is anonymous.
     AuthV2(AuthV2Config),
     /// The binding supplies the principal (ssh forced command, enc peer).
     /// No replay ledger.
     TransportIdentity,
 }
+
+/// Multi-value header lookup supplied by a transport adapter.
+pub type HeaderValues<'a> = dyn Fn(&str) -> Vec<String> + 'a;
 
 /// Everything stage 0 needs, without any HTTP or Connect type.
 pub struct RequestMeta<'a> {
@@ -44,8 +47,11 @@ pub struct RequestMeta<'a> {
     pub procedure: Procedure,
     /// Looks a request header up by its lowercase name.
     pub header: &'a dyn Fn(&str) -> Option<String>,
-    /// The exact unary request bytes (the auth v2 body commitment); `None`
-    /// for streams.
+    /// All values for a header name. Bindings with single-value metadata may omit it.
+    pub header_values: Option<&'a HeaderValues<'a>>,
+    /// The exact unary request bytes (the auth v2 body commitment); for
+    /// `DownloadPack`, the exact framed request body `0x00‖len‖message`;
+    /// `None` for other streams.
     pub unary_body: Option<&'a [u8]>,
     /// The identity the transport established (ssh, enc).
     pub transport_principal: Option<Principal>,
@@ -64,7 +70,7 @@ impl fmt::Debug for RequestMeta<'_> {
 
 /// A request that passed stage 0, bound to the procedure it was
 /// authenticated for. Only [`super::Pipeline::authenticate`] builds one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Authenticated {
     /// Who the request acts as.
     pub principal: Principal,
@@ -72,6 +78,9 @@ pub struct Authenticated {
     pub auth: Option<VerifiedAuth>,
     /// A presented write grant, redacted from debug output.
     pub write_grant: Option<Redacted>,
+    /// Raw credential header values captured at authentication and validated
+    /// only when admission runs (SPEC-SERVER §6.6); never shown in diagnostics.
+    pub(super) credential_capture: Vec<super::admission::CapturedCredential>,
     /// Optional repository-local read-your-writes hint (outside auth v2).
     pub ref_hint: Option<String>,
     procedure: Procedure,
@@ -83,6 +92,17 @@ pub struct Authenticated {
     pub(crate) business_now_ms: i64,
     #[cfg(feature = "test-faults")]
     directives: super::TestDirectives,
+}
+
+impl fmt::Debug for Authenticated {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Authenticated")
+            .field("principal", &self.principal)
+            .field("auth", &self.auth)
+            .field("procedure", &self.procedure)
+            .field("repo", &self.repo)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Authenticated {
@@ -112,6 +132,15 @@ impl Authenticated {
     }
 }
 
+/// Whether `meta`'s request verifies in full under `mode`: under auth v2,
+/// every write but `SetRepoVisibility` (whose statement mode is unsigned
+/// by design, §9.1) and any request carrying an auth header marker.
+pub(crate) fn signed_request(mode: &AuthMode, meta: &RequestMeta<'_>) -> bool {
+    matches!(mode, AuthMode::AuthV2(_))
+        && (meta.procedure.is_write() && meta.procedure != Procedure::SetRepoVisibility
+            || auth_v2::carries_auth_headers(meta.header))
+}
+
 /// Stage 0 and 1 for `mode` at business time `now_ms`.
 pub(crate) fn authenticate(
     mode: &AuthMode,
@@ -121,17 +150,7 @@ pub(crate) fn authenticate(
     expected_repository: &str,
 ) -> Result<Authenticated, ServerError> {
     let procedure = meta.procedure;
-    let write_grant = if matches!(
-        procedure,
-        Procedure::UpdateRef
-            | Procedure::AdvanceRefs
-            | Procedure::BeginUpload
-            | Procedure::UploadPack
-    ) {
-        (meta.header)("x-write-grant").map(Redacted::new)
-    } else {
-        None
-    };
+    let presented_grant = (meta.header)("x-write-grant").map(Redacted::new);
     let (principal, auth) = match mode {
         AuthMode::Bearer { token } => {
             let got = (meta.header)("authorization").unwrap_or_default();
@@ -144,20 +163,28 @@ pub(crate) fn authenticate(
             }
             (Principal::BearerHolder, None)
         }
-        AuthMode::AuthV2(cfg) if procedure.is_write() => {
-            let auth = verify_auth_v2(cfg, expected_repository, meta, now_ms)?;
-            (
-                Principal::Signer {
-                    ed25519: auth.signer,
-                },
-                Some(auth),
-            )
+        AuthMode::AuthV2(cfg) => {
+            let must_sign = procedure.is_write() && procedure != Procedure::SetRepoVisibility;
+            if must_sign || auth_v2::carries_auth_headers(meta.header) {
+                // A request carrying any auth v2 marker verifies in full
+                // (SPEC-TRANSPORT-CONNECT §7.1); a failure never falls
+                // back to anonymous. Signed reads keep no replay ledger.
+                let auth = verify_auth_v2(cfg, expected_repository, meta, now_ms)?;
+                (
+                    Principal::Signer {
+                        ed25519: auth.signer,
+                    },
+                    Some(auth),
+                )
+            } else if procedure == Procedure::IssueObjectUrl {
+                return Err(ServerError::unauthenticated(
+                    "IssueObjectUrl requires auth v2 authorization",
+                ));
+            } else {
+                (Principal::Anonymous, None)
+            }
         }
-        // Reads stay unsigned under auth v2 (`vcs-worker` parity): auth
-        // headers on a read are ignored. SPEC-TRANSPORT-CONNECT §7.1 says a
-        // read that carries any auth v2 header MUST verify in full; that
-        // lands with signed reads in M2 (SPEC-WRITE-GRANTS §9.2).
-        AuthMode::Open | AuthMode::AuthV2(_) => (Principal::Anonymous, None),
+        AuthMode::Open => (Principal::Anonymous, None),
         AuthMode::TransportIdentity => (
             meta.transport_principal
                 .clone()
@@ -165,10 +192,14 @@ pub(crate) fn authenticate(
             None,
         ),
     };
+    // A presented grant is captured on any procedure
+    // (SPEC-WRITE-GRANTS §4.2); `authenticate_inner` rejects it on an
+    // unsigned Multi request, and a Single/Open deployment ignores it.
     Ok(Authenticated {
         principal,
         auth,
-        write_grant,
+        write_grant: presented_grant,
+        credential_capture: Vec::new(),
         procedure,
         repo,
         ref_hint: None,
@@ -187,7 +218,7 @@ fn verify_auth_v2(
 ) -> Result<VerifiedAuth, ServerError> {
     let headers = auth_v2::headers_from(meta.header);
     let path = meta.procedure.connect_path();
-    if meta.procedure.is_streaming() {
+    if meta.procedure.is_streaming() && meta.procedure != Procedure::DownloadPack {
         return auth_v2::verify_stream_for(cfg, repository, path, now_ms, &headers);
     }
     let body = meta.unary_body.ok_or_else(|| {

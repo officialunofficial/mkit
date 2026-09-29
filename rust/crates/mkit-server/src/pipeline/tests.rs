@@ -3,8 +3,11 @@
 #[path = "tests_begin_parts.rs"]
 mod begin_parts;
 mod grants;
+mod indexed;
 mod info;
 mod policy;
+mod url_token;
+mod visibility;
 
 use std::future::Future;
 use std::pin::{Pin, pin};
@@ -31,6 +34,7 @@ use crate::replay::{ReplayKey, ReplayRecord, ReplayState};
 use crate::repo::{NamespaceKey, RepoId, RepoName};
 use crate::rt::ManualClock;
 use crate::store::keys::LAYOUT_VERSION;
+use crate::store::outbox::{OutboxBuilder, Terminal};
 use crate::store::{
     Batch, Key, PartitionStats, Precondition, ScanPage, StoreCapabilities, Value, Write, codec,
     keys,
@@ -130,6 +134,7 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
         advance: Some(advance.clone()),
         implicit: None,
         rejection: None,
+        pending: None,
     };
     let mut snap = snapshot(&req, &[]);
     let tickets: Vec<_> = reservations
@@ -189,7 +194,7 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
 fn seven_ticket_advance_plans_a_valid_real_batch() {
     let batch = planned_ticket_advance(7);
     let ops = batch.preconditions.len() + batch.writes.len();
-    assert_eq!(ops, 88);
+    assert_eq!(ops, 89);
     for key in [
         keys::epoch_lease(),
         keys::layout_version(),
@@ -251,7 +256,7 @@ fn single_ticket_advance_guards_the_grant_epoch() {
     assert!(batch.preconditions.iter().any(|guard| matches!(guard,
         Precondition::Absent(key) if *key == keys::grant_epoch()
     )));
-    assert_eq!(batch.preconditions.len() + batch.writes.len(), 77);
+    assert_eq!(batch.preconditions.len() + batch.writes.len(), 78);
 }
 
 /// WP-1.15 B9's largest implicit batch: a packmap write consuming
@@ -319,6 +324,7 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
         mark_repo_known: true,
         begin: None,
         advance: None,
+        pending: None,
         implicit: Some(implicit),
         rejection: None,
     };
@@ -486,15 +492,19 @@ type AfterApplyHook = Box<dyn Fn(&MemoryKv, &Partition, &Batch, &BatchOutcome) +
 type ApplyHook = Box<dyn Fn(&MemoryKv, &Partition, &Batch) + Send + Sync>;
 
 /// A `MemoryKv` that records every key it sees and batch it applies, can
-/// run a hook before each apply and can yield at every call.
+/// run a hook before each apply, can yield at every call and can fail
+/// every read.
 struct Spy {
     inner: Arc<MemoryKv>,
     hook: Option<ApplyHook>,
     after_hook: Option<AfterApplyHook>,
     yields: bool,
+    fail_reads: bool,
     seen: Mutex<Vec<Key>>,
+    ops: Mutex<Vec<&'static str>>,
     batches: Mutex<Vec<Batch>>,
     calls: AtomicU32,
+    fail_next_apply: Arc<AtomicBool>,
 }
 
 impl Spy {
@@ -504,9 +514,12 @@ impl Spy {
             hook: None,
             after_hook: None,
             yields: false,
+            fail_reads: false,
             seen: Mutex::default(),
+            ops: Mutex::default(),
             batches: Mutex::default(),
             calls: AtomicU32::new(0),
+            fail_next_apply: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -518,13 +531,30 @@ impl Spy {
         self
     }
 
+    /// Every `get`/`get_many`/`scan` fails.
+    fn failing_reads(mut self) -> Self {
+        self.fail_reads = true;
+        self
+    }
+
     /// Backend round trips so far.
     fn calls(&self) -> u32 {
         self.calls.load(Ordering::SeqCst)
     }
 
-    async fn pause(&self) {
+    /// Keys seen, in call order.
+    fn seen(&self) -> Vec<Key> {
+        self.seen.lock().unwrap().clone()
+    }
+
+    /// Operation kinds seen, in call order.
+    fn ops(&self) -> Vec<&'static str> {
+        self.ops.lock().unwrap().clone()
+    }
+
+    async fn pause(&self, op: &'static str) {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.ops.lock().unwrap().push(op);
         if self.yields {
             YieldOnce::default().await;
         }
@@ -532,6 +562,13 @@ impl Spy {
 
     fn saw(&self, key: &Key) {
         self.seen.lock().unwrap().push(key.clone());
+    }
+
+    fn maybe_fail_read(&self) -> Result<(), StoreError> {
+        if self.fail_reads {
+            return Err(StoreError::unavailable("injected read fault"));
+        }
+        Ok(())
     }
 }
 
@@ -541,7 +578,8 @@ impl NamespaceStore for Spy {
     }
 
     async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
-        self.pause().await;
+        self.pause("get").await;
+        self.maybe_fail_read()?;
         self.saw(key);
         self.inner.get(p, key).await
     }
@@ -551,7 +589,8 @@ impl NamespaceStore for Spy {
         p: &Partition,
         keys: &[Key],
     ) -> Result<Vec<Option<Value>>, StoreError> {
-        self.pause().await;
+        self.pause("get_many").await;
+        self.maybe_fail_read()?;
         for k in keys {
             self.saw(k);
         }
@@ -566,13 +605,14 @@ impl NamespaceStore for Spy {
         after: Option<&crate::store::Cursor>,
         limit: u32,
     ) -> Result<ScanPage, StoreError> {
-        self.pause().await;
+        self.pause("scan").await;
+        self.maybe_fail_read()?;
         self.saw(start);
         self.inner.scan(p, start, end, after, limit).await
     }
 
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
-        self.pause().await;
+        self.pause("apply").await;
         for pre in &batch.preconditions {
             if let Precondition::Absent(k) | Precondition::Present(k) | Precondition::Equals(k, _) =
                 pre
@@ -587,6 +627,9 @@ impl NamespaceStore for Spy {
         self.batches.lock().unwrap().push(batch.clone());
         if let Some(hook) = &self.hook {
             hook(&self.inner, p, &batch);
+        }
+        if self.fail_next_apply.swap(false, Ordering::SeqCst) {
+            return Err(StoreError::unavailable("injected apply failure"));
         }
         let outcome = self.inner.apply(p, batch.clone()).await?;
         if let Some(hook) = &self.after_hook {
@@ -750,7 +793,9 @@ fn build<H: HookSet>(
     hooks: H,
     clock: Arc<ManualClock>,
 ) -> Env<H> {
-    if !hooks.admission().is_default() && matches!(cfg.auth, AuthMode::AuthV2(_)) {
+    if matches!(cfg.auth, AuthMode::AuthV2(_))
+        && (!hooks.admission().is_default() || matches!(cfg.addressing, Addressing::Multi(_)))
+    {
         cfg.ticket_keys.get_or_insert_with(|| {
             crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap()
         });
@@ -826,9 +871,22 @@ impl Req {
         nonce: &str,
         created: i64,
     ) -> Self {
+        Self::signed_for(key, procedure, REPO, body, nonce, created)
+    }
+
+    /// Signed with auth v2 for `repository` (a Multi wire identity) at
+    /// `created`, valid for 300 s.
+    fn signed_for(
+        key: &SigningKey,
+        procedure: Procedure,
+        repository: &str,
+        body: &[u8],
+        nonce: &str,
+        created: i64,
+    ) -> Self {
         let digest = to_hex(&hash(body));
         let commitment = format!("body:{digest}");
-        let mut req = Self::committed(key, procedure, &commitment, nonce, created);
+        let mut req = Self::committed_for(key, procedure, repository, &commitment, nonce, created);
         req.body = body.to_vec();
         req.header("x-digest", &digest)
     }
@@ -841,11 +899,24 @@ impl Req {
         nonce: &str,
         created: i64,
     ) -> Self {
+        Self::committed_for(key, procedure, REPO, commitment, nonce, created)
+    }
+
+    /// Signed over `commitment` for `repository` at `created`, valid for
+    /// 300 s, no body.
+    fn committed_for(
+        key: &SigningKey,
+        procedure: Procedure,
+        repository: &str,
+        commitment: &str,
+        nonce: &str,
+        created: i64,
+    ) -> Self {
         let expires = created + 300_000;
         let op = SignedOp {
             context: AuthContext {
                 audience: AUDIENCE,
-                repository: REPO,
+                repository,
             },
             procedure: procedure.connect_path(),
             commitment,
@@ -857,7 +928,7 @@ impl Req {
         let headers = vec![
             ("x-envelope-version", "2".to_owned()),
             ("x-audience", AUDIENCE.to_owned()),
-            ("x-repository", REPO.to_owned()),
+            ("x-repository", repository.to_owned()),
             ("x-public-key", to_hex(key.verifying_key().as_bytes())),
             ("x-signature", to_hex_bytes(&signature.to_bytes())),
             ("x-content-commitment", commitment.to_owned()),
@@ -897,6 +968,7 @@ impl<H: HookSet> Env<H> {
         self.pipe.authenticate(&RequestMeta {
             procedure: req.procedure,
             header: &lookup,
+            header_values: None,
             unary_body: Some(&req.body),
             transport_principal: req.principal.clone(),
         })
@@ -1130,6 +1202,182 @@ fn authv2_reads_need_no_signature() {
         code(block_on(env.pipe.read_ref(&list, HEAD))),
         Code::Unauthenticated
     );
+}
+
+/// The golden `auth-v2/read.json` fixture entry as a `Req` at `created_at + 1`.
+fn golden_read(index: usize) -> (Req, serde_json::Value) {
+    let fixtures: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../tests/golden/auth-v2/read.json")).unwrap();
+    let fixture = fixtures[index].clone();
+    let field = |name: &str| fixture[name].as_str().unwrap().to_owned();
+    let unhex = |hex: &str| {
+        hex.as_bytes()
+            .chunks(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect::<Vec<u8>>()
+    };
+    let req = Req {
+        procedure: Procedure::from_connect_path(&field("procedure")).unwrap(),
+        body: unhex(&field("body_hex")),
+        headers: vec![
+            ("x-envelope-version", "2".to_owned()),
+            ("x-audience", field("audience")),
+            ("x-repository", field("repository")),
+            ("x-public-key", field("public_key")),
+            ("x-signature", field("signature")),
+            ("x-digest", field("body_digest")),
+            ("x-content-commitment", field("commitment")),
+            (
+                "x-created-at",
+                fixture["created_at"].as_i64().unwrap().to_string(),
+            ),
+            (
+                "x-expires-at",
+                fixture["expires_at"].as_i64().unwrap().to_string(),
+            ),
+            ("idempotency-key", field("nonce")),
+        ],
+        principal: None,
+    };
+    (req, fixture)
+}
+
+/// An `AuthV2` pipeline routed by `X-Repository` (the read fixtures carry
+/// a namespaced `ed25519-…/name` identity).
+fn multi_env() -> Env {
+    use crate::repo::MultiAddressing;
+
+    let clock = clock();
+    let mut config = cfg(authv2());
+    config.addressing = Addressing::Multi(MultiAddressing::new());
+    config.write_policy = WritePolicy::Owner;
+    build(config, Spy::new(store(&clock)), Hooks::new(), clock)
+}
+
+#[test]
+fn authv2_signed_reads_verify_in_full() {
+    let env = env(authv2());
+    let reads = [
+        Procedure::ListRefs,
+        Procedure::ReadRef,
+        Procedure::PackExists,
+        Procedure::DownloadPack,
+        Procedure::GetReceipt,
+    ];
+    for (i, procedure) in reads.into_iter().enumerate() {
+        // DownloadPack commits to its framed body `0x00‖be32(len)‖msg`;
+        // at stage 0 the binding supplies it as `unary_body`.
+        let body = b"request".to_vec();
+        let req = Req::signed(
+            &key(5),
+            procedure,
+            &body,
+            &nonce(10 + u32::try_from(i).unwrap()),
+            T0,
+        );
+        let a = env.auth(&req).unwrap();
+        assert!(
+            matches!(a.principal, Principal::Signer { .. }),
+            "{procedure:?}"
+        );
+        assert!(a.auth.is_some(), "{procedure:?}");
+    }
+    // A signed read captures a presented grant (Multi scope, §4.2); an
+    // unsigned read stays anonymous and never signs out a replay record.
+    let granted = Req::signed(&key(5), Procedure::ReadRef, b"x", &nonce(30), T0)
+        .header("x-write-grant", "scheme.body");
+    assert!(env.auth(&granted).unwrap().write_grant.is_some());
+    let reads = [
+        Procedure::ListRefs,
+        Procedure::ReadRef,
+        Procedure::PackExists,
+        Procedure::DownloadPack,
+        Procedure::GetReceipt,
+    ];
+    let before = (env.count("p"), env.count("px"));
+    for procedure in reads {
+        let a = env
+            .auth(&Req::signed(&key(5), procedure, b"r", &nonce(40), T0))
+            .unwrap();
+        assert_ne!(a.principal, Principal::Anonymous, "{procedure:?}");
+    }
+    assert_eq!((env.count("p"), env.count("px")), before);
+}
+
+#[test]
+fn authv2_signed_read_failures_never_fall_back_to_anonymous() {
+    let env = env(authv2());
+    // A marker header without the rest of the envelope.
+    let marker_only = Req::unsigned(Procedure::ReadRef).header("x-signature", "ab");
+    assert_eq!(code(env.auth(&marker_only)), Code::Unauthenticated);
+    // Empty marker value still marks the request signed.
+    let empty_marker = Req::unsigned(Procedure::ListRefs).header("x-envelope-version", "");
+    assert_eq!(code(env.auth(&empty_marker)), Code::Unauthenticated);
+    // A wrong signature, a tampered body, an expired envelope.
+    let forged = Req::signed(&key(5), Procedure::ReadRef, b"x", &nonce(50), T0)
+        .header("x-signature", &"ff".repeat(64));
+    assert_eq!(code(env.auth(&forged)), Code::Unauthenticated);
+    let mut tampered = Req::signed(&key(5), Procedure::ListRefs, b"x", &nonce(51), T0);
+    tampered.body = b"other".to_vec();
+    assert_eq!(code(env.auth(&tampered)), Code::Unauthenticated);
+    let expired = Req::signed(&key(5), Procedure::ReadRef, b"x", &nonce(52), T0 - 400_000);
+    assert_eq!(code(env.auth(&expired)), Code::Unauthenticated);
+    // Unsigned reads still pass anonymously; IssueObjectUrl never does.
+    for procedure in [Procedure::ListRefs, Procedure::SetRepoVisibility] {
+        assert_eq!(
+            env.auth(&Req::unsigned(procedure)).unwrap().principal,
+            Principal::Anonymous,
+            "{procedure:?}"
+        );
+    }
+    assert_eq!(
+        code(env.auth(&Req::unsigned(Procedure::IssueObjectUrl))),
+        Code::Unauthenticated
+    );
+}
+
+#[test]
+fn multi_signed_read_scopes_to_the_resolved_repository() {
+    use mkit_core::repo_identity::Namespace;
+
+    let env = multi_env();
+    let signer = key(5).verifying_key().to_bytes();
+    let identity = format!("{}/{}", Namespace::Ed25519(signer), REPO);
+    let good = Req::signed_for(
+        &key(5),
+        Procedure::ListRefs,
+        &identity,
+        b"r",
+        &nonce(60),
+        T0,
+    );
+    let a = env.auth(&good).unwrap();
+    assert!(matches!(a.principal, Principal::Signer { .. }));
+    assert_eq!(a.repo().identity, identity);
+    // The same envelope sent for another repository identity fails.
+    let moved = good.clone().header("x-repository", &format!("{identity}x"));
+    assert_eq!(code(env.auth(&moved)), Code::Unauthenticated);
+}
+
+#[test]
+fn golden_signed_reads_verify_at_stage_0() {
+    let env = multi_env();
+    for index in [0usize, 1] {
+        let (req, fixture) = golden_read(index);
+        env.clock.set(fixture["created_at"].as_i64().unwrap() + 1);
+        let a = env.auth(&req).unwrap();
+        assert!(matches!(a.principal, Principal::Signer { .. }));
+        assert_eq!(
+            to_hex(&a.auth.unwrap().signer),
+            fixture["public_key"].as_str().unwrap(),
+            "entry {index}"
+        );
+    }
+    env.clock.set(T0);
+    // Forging the signature on the DownloadPack frame fails.
+    let (req, _) = golden_read(1);
+    let forged = req.header("x-signature", &"ff".repeat(64));
+    assert_eq!(code(env.auth(&forged)), Code::Unauthenticated);
 }
 
 #[test]
@@ -1627,13 +1875,15 @@ impl Admission for Fixed {
 fn admission_challenge_maps_to_permission_denied_and_writes_nothing() {
     let challenge = AdmissionDecision::Challenge {
         challenges: vec![Challenge {
-            scheme: "Payment".into(),
+            scheme: "mpp".into(),
             value: "id=1".into(),
         }],
         description: "pay".into(),
+        response_headers: Vec::new(),
     };
     let denied = AdmissionDecision::Deny(ServerError::permission_denied("no"));
-    for (decision, message) in [(challenge, "admission required"), (denied, "no")] {
+    for (decision, message, status) in [(challenge, "admission required", 402), (denied, "no", 403)]
+    {
         let clock = clock();
         let hooks = with_admission(Fixed(decision));
         let env = build(cfg(authv2()), Spy::new(store(&clock)), hooks, clock);
@@ -1644,9 +1894,600 @@ fn admission_challenge_maps_to_permission_denied_and_writes_nothing() {
             (err.code(), err.public_message()),
             (Code::PermissionDenied, message)
         );
-        assert!(err.details().is_empty() && err.http_status().is_none());
+        assert_eq!(err.http_status(), Some(status));
+        assert_eq!(err.details().is_empty(), status != 402);
+        if status == 402 {
+            assert!(
+                err.headers()
+                    .iter()
+                    .any(|(name, value)| name == "Cache-Control" && value == "no-store")
+            );
+        }
         assert!(env.batches().is_empty() && env.rows().is_empty());
     }
+}
+
+struct NumberedReservation(AtomicU32);
+impl Admission for NumberedReservation {
+    async fn admit(&self, _: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
+        let number = self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(AdmissionDecision::allow(Vec::new()).with_reservation(format!("reserved-{number}")))
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Exercises the full backlog transition and recovery in one fixture.
+fn reserved_commit_conflict_backpressure_and_recovery() {
+    let clock = clock();
+    let mut config = cfg(authv2());
+    config.outbox_backlog_cap = Some(OutboxBacklogCap {
+        rows: 1,
+        bytes: u64::MAX,
+    });
+    let env = build(
+        config,
+        Spy::new(store(&clock)),
+        with_admission(NumberedReservation(AtomicU32::new(0))),
+        clock.clone(),
+    );
+    let k = key(7);
+    let first = upd(HEAD, Missing, A);
+    assert_eq!(
+        env.update(&Req::update(&k, 1, &first, T0), &first).unwrap(),
+        UpdateRefResult::Committed
+    );
+    let first_row = now(env
+        .pipe
+        .meta
+        .get(&ns(), &keys::reservation("reserved-0").unwrap()))
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        codec::decode_reservation(&first_row).unwrap(),
+        codec::ReservationV1::Committed { .. }
+    ));
+    assert!(env.batches().iter().any(|batch| batch.writes.iter().any(|write| matches!(write, Write::Put(key, _) if *key == keys::timer((T0 as u64) + 41_000, 9, b"reserved-0")))));
+    let guarded = env.batches().into_iter().find(|batch| batch.preconditions.iter().any(|pre| matches!(pre, Precondition::Equals(key, _) if *key == keys::reservation("reserved-0").unwrap()))).unwrap();
+    assert!(guarded.preconditions.iter().any(
+        |pre| matches!(pre, Precondition::NotAfter(deadline) if *deadline <= T0 as u64 + 10_000)
+    ));
+
+    let conflict = upd(HEAD, Missing, B);
+    assert_eq!(
+        env.update(&Req::update(&k, 2, &conflict, T0), &conflict)
+            .unwrap(),
+        UpdateRefResult::Conflict { current: Some(A) }
+    );
+    let second_row = now(env
+        .pipe
+        .meta
+        .get(&ns(), &keys::reservation("reserved-1").unwrap()))
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        codec::decode_reservation(&second_row).unwrap(),
+        codec::ReservationV1::Aborted {
+            reason: codec::AbortReason::RefConflict,
+            ..
+        }
+    ));
+    assert_eq!(
+        codec::decode_backlog(
+            &now(env.pipe.meta.get(&ns(), &keys::outcome_backlog()))
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap()
+        .rows,
+        2
+    );
+
+    let third = upd(HEAD, Any, B);
+    let before = env.pipe.hooks.admission.0.load(Ordering::SeqCst);
+    let err = env
+        .update(&Req::update(&k, 3, &third, T0), &third)
+        .unwrap_err();
+    assert_eq!(
+        (err.code(), err.public_message()),
+        (Code::Unavailable, "outbox backlog; retry")
+    );
+    assert!(
+        err.headers()
+            .iter()
+            .any(|(name, value)| name == "Retry-After" && value == "30")
+    );
+    assert_eq!(env.pipe.hooks.admission.0.load(Ordering::SeqCst), before);
+    assert_eq!(env.metrics.count("mkit_server_outbox_backpressure"), 1);
+    assert_eq!(env.read(HEAD), Some(A));
+
+    let registry = crate::timers::TimerRegistry::new().register(
+        crate::timers::outcome_delivery::OutcomeDelivery {
+            sink: NoOutcomes,
+            audience: AUDIENCE.into(),
+            metrics: Arc::new(crate::NoopMetrics),
+        },
+    );
+    let report = now(crate::timers::run_due(
+        &env.pipe.meta,
+        &ns(),
+        &registry,
+        clock.as_ref(),
+        T0 as u64,
+        &crate::timers::TickBudget::default(),
+    ))
+    .unwrap();
+    assert_eq!(report.fired, 1);
+    assert!(
+        now(env.pipe.meta.get(&ns(), &keys::outcome_backlog()))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        env.update(&Req::update(&k, 3, &third, T0), &third).unwrap(),
+        UpdateRefResult::Committed
+    );
+}
+
+#[test]
+fn pending_guard_loss_commits_no_ref_and_does_not_replan() {
+    let clock = clock();
+    let raced = Arc::new(AtomicBool::new(false));
+    let once = raced.clone();
+    let store = Spy::new(store(&clock)).hook(move |inner, partition, batch| {
+        let key = keys::reservation("race-reservation").unwrap();
+        let prior = batch.preconditions.iter().find_map(|pre| match pre {
+            Precondition::Equals(found, value) if *found == key => Some(value.clone()),
+            _ => None,
+        });
+        if let Some(prior) = prior
+            && !once.swap(true, Ordering::SeqCst)
+        {
+            let mut outbox = crate::store::outbox::OutboxBuilder::new(None, None).unwrap();
+            outbox.outcome(
+                "race-reservation",
+                &prior,
+                crate::store::outbox::Terminal::new(codec::ReservationV1::Aborted {
+                    repository: REPO.into(),
+                    occurred_at_ms: T0 as u64 + 41_000,
+                    reason: codec::AbortReason::Abandoned,
+                    detail: String::new(),
+                })
+                .unwrap(),
+            );
+            let mut replacement = Batch::new();
+            outbox
+                .try_finish(&mut replacement.preconditions, &mut replacement.writes)
+                .unwrap();
+            assert_eq!(
+                now(inner.apply(partition, replacement)).unwrap(),
+                BatchOutcome::Committed
+            );
+        }
+    });
+    let env = build(
+        cfg(authv2()),
+        store,
+        with_admission(Fixed(
+            AdmissionDecision::allow(Vec::new()).with_reservation("race-reservation"),
+        )),
+        clock,
+    );
+    let update = upd(HEAD, Missing, A);
+    let err = env
+        .update(&Req::update(&key(7), 1, &update, T0), &update)
+        .unwrap_err();
+    assert_eq!(err.code(), Code::Unavailable);
+    assert_eq!(env.read(HEAD), None);
+    assert!(raced.load(Ordering::SeqCst));
+    let row = now(env
+        .pipe
+        .meta
+        .get(&ns(), &keys::reservation("race-reservation").unwrap()))
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        codec::decode_reservation(&row).unwrap(),
+        codec::ReservationV1::Aborted {
+            reason: codec::AbortReason::Abandoned,
+            ..
+        }
+    ));
+    assert_eq!(env.count("oq"), 1);
+    assert_eq!(env.batches().iter().filter(|batch| batch.writes.iter().any(|write| matches!(write, Write::Put(found, _) if *found == keys::ref_key(&repo_name(), HEAD)))).count(), 1);
+}
+
+#[test]
+fn invalid_admission_decisions_leave_no_metadata() {
+    let one = Challenge {
+        scheme: "mpp".into(),
+        value: "token".into(),
+    };
+    let decisions = [
+        AdmissionDecision::challenge(Vec::new(), ""),
+        AdmissionDecision::challenge(vec![one.clone(); 9], ""),
+        AdmissionDecision::challenge(
+            vec![Challenge {
+                scheme: "MPP".into(),
+                ..one.clone()
+            }],
+            "",
+        ),
+        AdmissionDecision::challenge(
+            vec![Challenge {
+                value: "x".repeat(8_193),
+                ..one.clone()
+            }],
+            "",
+        ),
+        AdmissionDecision::challenge(vec![one.clone()], "x".repeat(513)),
+        AdmissionDecision::challenge(
+            vec![Challenge {
+                value: "bad\n".into(),
+                ..one.clone()
+            }],
+            "",
+        ),
+        AdmissionDecision::challenge(vec![one.clone()], "").with_response_header("Set-Cookie", "x"),
+        AdmissionDecision::challenge(vec![one], "")
+            .with_response_header("PAYMENT-REQUIRED", "bad\t"),
+        AdmissionDecision::allow(Vec::new()).with_response_header("WWW-Authenticate", "x"),
+        AdmissionDecision::allow(Vec::new()).with_response_header("Payment-Receipt", "bad\n"),
+        AdmissionDecision::allow(Vec::new()).with_reservation("s:client"),
+        AdmissionDecision::allow(Vec::new()).with_reservation("bad/id"),
+        AdmissionDecision::allow(Vec::new()).with_external_ref("bad space"),
+        AdmissionDecision::allow(Vec::new()).with_external_ref("x".repeat(257)),
+    ];
+    for decision in decisions {
+        let clock = clock();
+        let env = build(
+            cfg(authv2()),
+            Spy::new(store(&clock)),
+            with_admission(Fixed(decision)),
+            clock,
+        );
+        let update = upd(HEAD, Missing, A);
+        let err = env
+            .update(&Req::update(&key(7), 1, &update, T0), &update)
+            .unwrap_err();
+        assert_eq!(
+            (err.code(), err.public_message()),
+            (Code::Unavailable, "admission unavailable")
+        );
+        assert!(env.batches().is_empty() && env.rows().is_empty());
+    }
+}
+
+#[test]
+fn admission_denial_sanitizes_long_and_control_messages() {
+    for message in ["x".repeat(513), "bad\nline".into()] {
+        let clock = clock();
+        let env = build(
+            cfg(authv2()),
+            Spy::new(store(&clock)),
+            with_admission(Fixed(AdmissionDecision::Deny(
+                ServerError::permission_denied(message),
+            ))),
+            clock,
+        );
+        let update = upd(HEAD, Missing, A);
+        let err = env
+            .update(&Req::update(&key(7), 1, &update, T0), &update)
+            .unwrap_err();
+        assert_eq!(
+            (err.code(), err.http_status(), err.public_message()),
+            (Code::PermissionDenied, Some(403), "admission denied")
+        );
+        assert!(err.details().is_empty() && err.headers().is_empty());
+        assert!(env.batches().is_empty());
+    }
+}
+
+struct SmugglingAuthorizer;
+impl Authorizer for SmugglingAuthorizer {
+    async fn authorize(&self, _: &Operation) -> Result<AuthzFacts, ServerError> {
+        Err(ServerError::admission_challenge(bytes::Bytes::from_static(
+            b"secret",
+        )))
+    }
+}
+struct SmugglingAdmission;
+impl Admission for SmugglingAdmission {
+    async fn admit(&self, _: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
+        Err(ServerError::admission_challenge(bytes::Bytes::from_static(
+            b"secret",
+        )))
+    }
+}
+struct SmugglingPreReceive;
+impl PreReceive for SmugglingPreReceive {
+    async fn check(
+        &self,
+        _: &Operation,
+        _: Option<&crate::store::BlobKey>,
+    ) -> Result<(), ServerError> {
+        Err(ServerError::admission_challenge(bytes::Bytes::from_static(
+            b"secret",
+        )))
+    }
+}
+
+#[test]
+fn only_stage_three_can_issue_a_challenge() {
+    let update = upd(HEAD, Missing, A);
+    let request = Req::update(&key(7), 1, &update, T0);
+    let authorizer_clock = clock();
+    let authorizer = build(
+        cfg(authv2()),
+        Spy::new(store(&authorizer_clock)),
+        Hooks {
+            authorizer: SmugglingAuthorizer,
+            admission: DefaultAdmission,
+            pre_receive: NoPreReceive,
+            receipts: NoReceipts,
+            outcomes: NoOutcomes,
+        },
+        authorizer_clock,
+    );
+    let admission_clock = clock();
+    let admission = build(
+        cfg(authv2()),
+        Spy::new(store(&admission_clock)),
+        with_admission(SmugglingAdmission),
+        admission_clock,
+    );
+    let pre_receive_clock = clock();
+    let pre_receive = build(
+        cfg(authv2()),
+        Spy::new(store(&pre_receive_clock)),
+        Hooks {
+            authorizer: OpenAuthorizer,
+            admission: DefaultAdmission,
+            pre_receive: SmugglingPreReceive,
+            receipts: NoReceipts,
+            outcomes: NoOutcomes,
+        },
+        pre_receive_clock,
+    );
+    for err in [
+        authorizer.update(&request, &update).unwrap_err(),
+        admission.update(&request, &update).unwrap_err(),
+        pre_receive.update(&request, &update).unwrap_err(),
+    ] {
+        assert_eq!(
+            (err.code(), err.http_status()),
+            (Code::PermissionDenied, Some(403))
+        );
+        assert!(err.details().is_empty() && err.headers().is_empty());
+    }
+}
+
+fn assert_one_abort<H: HookSet>(env: &Env<H>, rid: &str, reason: codec::AbortReason) {
+    let row = now(env.pipe.meta.get(&ns(), &keys::reservation(rid).unwrap()))
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(codec::decode_reservation(&row).unwrap(), codec::ReservationV1::Aborted { reason: actual, .. } if actual == reason)
+    );
+    assert_eq!(env.count("oq"), 1);
+    assert_eq!(
+        codec::decode_backlog(
+            &now(env.pipe.meta.get(&ns(), &keys::outcome_backlog()))
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap()
+        .rows,
+        1
+    );
+}
+
+struct RejectPreReceive;
+impl PreReceive for RejectPreReceive {
+    async fn check(
+        &self,
+        _: &Operation,
+        _: Option<&crate::store::BlobKey>,
+    ) -> Result<(), ServerError> {
+        Err(ServerError::permission_denied("pre receive refused"))
+    }
+}
+
+struct ReservedDefault;
+impl Admission for ReservedDefault {
+    async fn admit(&self, input: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
+        Ok(DefaultAdmission
+            .admit(input)
+            .await?
+            .with_reservation("quota-rid"))
+    }
+}
+
+#[test]
+fn reserved_pre_receive_and_quota_exits_each_write_one_abort() {
+    let update = upd(HEAD, Missing, A);
+    let request = Req::update(&key(7), 1, &update, T0);
+    let pre_clock = clock();
+    let pre = build(
+        cfg(authv2()),
+        Spy::new(store(&pre_clock)),
+        Hooks {
+            authorizer: OpenAuthorizer,
+            admission: Fixed(AdmissionDecision::allow(Vec::new()).with_reservation("pre-rid")),
+            pre_receive: RejectPreReceive,
+            receipts: NoReceipts,
+            outcomes: NoOutcomes,
+        },
+        pre_clock,
+    );
+    assert_eq!(
+        pre.update(&request, &update).unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    assert_one_abort(&pre, "pre-rid", codec::AbortReason::Unspecified);
+
+    let quota_clock = clock();
+    let mut config = cfg(authv2());
+    config.write_quota = Some(QuotaLimits {
+        window_ms: 60_000,
+        max_ops: 0,
+        max_bytes: u64::MAX,
+    });
+    let quota = build(
+        config,
+        Spy::new(store(&quota_clock)),
+        with_admission(ReservedDefault),
+        quota_clock,
+    );
+    assert_eq!(
+        quota.update(&request, &update).unwrap_err().code(),
+        Code::ResourceExhausted
+    );
+    assert_one_abort(&quota, "quota-rid", codec::AbortReason::Unspecified);
+}
+
+#[test]
+fn reserved_store_error_and_deadline_each_write_one_abort() {
+    for store_error in [false, true] {
+        let current = clock();
+        let mut spy = Spy::new(store(&current));
+        let fail = spy.fail_next_apply.clone();
+        let moved = current.clone();
+        spy.after_hook = Some(Box::new(move |_, _, batch, result| {
+            if !matches!(result, BatchOutcome::Committed) {
+                return;
+            }
+            let pending = batch.writes.iter().any(|write| matches!(write,
+                Write::Put(_, value) if matches!(codec::decode_reservation(value), Ok(codec::ReservationV1::Pending { .. }))));
+            if pending {
+                if store_error {
+                    fail.store(true, Ordering::SeqCst);
+                } else {
+                    moved.set(T0 + 11_000);
+                }
+            }
+        }));
+        let rid = if store_error {
+            "store-rid"
+        } else {
+            "deadline-rid"
+        };
+        let env = build(
+            cfg(authv2()),
+            spy,
+            with_admission(Fixed(
+                AdmissionDecision::allow(Vec::new()).with_reservation(rid),
+            )),
+            current,
+        );
+        let update = upd(HEAD, Missing, A);
+        let err = env
+            .update(&Req::update(&key(7), 1, &update, T0), &update)
+            .unwrap_err();
+        assert_eq!(
+            err.code(),
+            if store_error {
+                Code::Internal
+            } else {
+                Code::Unavailable
+            }
+        );
+        assert_one_abort(&env, rid, codec::AbortReason::Internal);
+        assert_eq!(env.read(HEAD), None);
+    }
+}
+
+struct GrantEpochZero;
+impl Authorizer for GrantEpochZero {
+    async fn authorize(&self, _: &Operation) -> Result<AuthzFacts, ServerError> {
+        Ok(AuthzFacts {
+            grant: Some(crate::op::GrantRef {
+                id: [9; 32],
+                epoch: 0,
+                presence_requirement: None,
+            }),
+            ..AuthzFacts::default()
+        })
+    }
+}
+
+#[test]
+fn reserved_grant_epoch_loss_writes_one_abort() {
+    let current = clock();
+    let mut spy = Spy::new(store(&current));
+    spy.after_hook = Some(Box::new(move |inner, partition, batch, result| {
+        if !matches!(result, BatchOutcome::Committed) {
+            return;
+        }
+        if batch.writes.iter().any(|write| {
+            matches!(write, Write::Put(_, value)
+            if matches!(codec::decode_reservation(value), Ok(codec::ReservationV1::Pending { .. })))
+        }) {
+            assert_eq!(
+                now(inner.apply(
+                    partition,
+                    Batch::new().put(keys::grant_epoch(), codec::encode_u64(1))
+                ))
+                .unwrap(),
+                BatchOutcome::Committed
+            );
+        }
+    }));
+    let env = build(
+        cfg(authv2()),
+        spy,
+        Hooks {
+            authorizer: GrantEpochZero,
+            admission: Fixed(AdmissionDecision::allow(Vec::new()).with_reservation("epoch-rid")),
+            pre_receive: NoPreReceive,
+            receipts: NoReceipts,
+            outcomes: NoOutcomes,
+        },
+        current,
+    );
+    let update = upd(HEAD, Missing, A);
+    let err = env
+        .update(&Req::update(&key(7), 1, &update, T0), &update)
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+    assert_one_abort(&env, "epoch-rid", codec::AbortReason::EpochMismatch);
+    assert_eq!(env.read(HEAD), None);
+}
+
+#[test]
+fn reservation_abort_reasons_follow_the_source_of_the_error() {
+    use codec::AbortReason;
+    use reservation::abort_reason;
+
+    assert_eq!(
+        abort_reason(
+            &ServerError::aborted_retryable("write contention; retry")
+                .with_abort_cause(AbortCause::Contention)
+        )
+        .0,
+        AbortReason::Internal
+    );
+    assert_eq!(
+        abort_reason(&ServerError::aborted_retryable(
+            "operation already in flight; retry"
+        ))
+        .0,
+        AbortReason::ReplayRace
+    );
+    assert_eq!(
+        abort_reason(&ServerError::permission_denied(
+            "pre-receive rejected epoch label"
+        ))
+        .0,
+        AbortReason::Unspecified
+    );
+    assert_eq!(
+        abort_reason(
+            &ServerError::aborted_retryable("namespace quota window advanced; retry")
+                .with_abort_cause(AbortCause::QuotaWindow)
+        )
+        .0,
+        AbortReason::Unspecified
+    );
 }
 
 #[test]
@@ -1738,6 +2579,7 @@ fn simple_index_batch(
         advance: None,
         implicit: None,
         rejection: None,
+        pending: None,
     };
     plan_write(&req, &snapshot(&req, values), &clock_at(5, None)).unwrap()
 }
@@ -1890,6 +2732,7 @@ fn plan_cas_any_missing_match_on_snapshot() {
             mark_repo_known: false,
             lease: None,
             rejection: None,
+            pending: None,
             begin: None,
             advance: None,
             implicit: None,
@@ -1946,6 +2789,7 @@ fn plan_conflict_writes_only_the_replay_record() {
         mark_repo_known: false,
         lease: None,
         rejection: None,
+        pending: None,
         begin: None,
         advance: None,
         implicit: None,
@@ -2017,6 +2861,7 @@ fn plan_quota_exhaustion_yields_no_batch() {
         mark_repo_known: false,
         lease: None,
         rejection: None,
+        pending: None,
         begin: None,
         advance: None,
         implicit: None,
@@ -2071,6 +2916,7 @@ proptest! {
             mark_repo_known: false,
                     lease: None,
             rejection: None,
+            pending: None,
                     begin: None,
             advance: None,
             implicit: None,
@@ -2693,6 +3539,7 @@ fn plan_signed_conflict_still_charges_quota() {
         mark_repo_known: false,
         lease: None,
         rejection: None,
+        pending: None,
         begin: None,
         advance: None,
         implicit: None,
@@ -2752,6 +3599,7 @@ fn plan_prune_fits_the_batch_op_cap() {
         mark_repo_known: false,
         lease: None,
         rejection: None,
+        pending: None,
         begin: None,
         advance: None,
         implicit: None,
@@ -2804,6 +3652,7 @@ fn prune_sampling_is_deterministic_one_in_eight() {
         mark_repo_known: false,
         lease: None,
         rejection: None,
+        pending: None,
         begin: None,
         advance: None,
         implicit: None,
@@ -2827,6 +3676,7 @@ fn admission_allow_constructor() {
     let AdmissionDecision::Allow {
         charges,
         reservation,
+        ..
     } = decision
     else {
         panic!("allow");
@@ -2900,7 +3750,7 @@ fn signed_deadline_is_capped_by_the_envelope() {
 fn deny_with_402_but_no_challenge_detail_is_403() {
     let paid = ServerError::permission_denied("pay").with_http_status(402);
     let challenge = ServerError::admission_challenge(bytes::Bytes::from_static(b"c"));
-    for (denial, status) in [(paid, 403), (challenge, 402)] {
+    for denial in [paid, challenge] {
         let clock = clock();
         let hooks = with_admission(Fixed(AdmissionDecision::Deny(denial)));
         let env = build(cfg(authv2()), Spy::new(store(&clock)), hooks, clock);
@@ -2910,8 +3760,9 @@ fn deny_with_402_but_no_challenge_detail_is_403() {
             .unwrap_err();
         assert_eq!(
             (err.code(), err.http_status()),
-            (Code::PermissionDenied, Some(status))
+            (Code::PermissionDenied, Some(403))
         );
+        assert!(err.details().is_empty() && err.headers().is_empty());
         assert!(env.rows().is_empty());
     }
 }
@@ -2927,6 +3778,7 @@ impl Authorizer for Granting {
                 epoch: 0,
                 presence_requirement: None,
             }),
+            ..AuthzFacts::default()
         })
     }
 }
@@ -3285,6 +4137,7 @@ fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
             install: false,
         }),
         rejection: None,
+        pending: None,
         begin: None,
         advance: None,
         implicit: None,
@@ -3397,6 +4250,7 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
             layout_version: false,
             mark_repo_known: false,
             rejection: None,
+            pending: None,
             begin: None,
             advance: None,
             implicit: None,
@@ -3562,4 +4416,355 @@ fn partition_full_counter_labels_every_partition_kind() {
         )));
     }
     assert_eq!(env.metrics.count(METRIC_PARTITION_FULL), 6);
+}
+
+// ------------------------------------------- review fixes (WP-3.2 / WP-3.3)
+
+/// Allows with a fresh reservation id and a receipt header.
+struct ReceiptReserved(&'static str, AtomicU32);
+impl Admission for ReceiptReserved {
+    async fn admit(&self, _: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
+        let n = self.1.fetch_add(1, Ordering::SeqCst);
+        Ok(AdmissionDecision::allow(Vec::new())
+            .with_reservation(format!("{}-{n}", self.0))
+            .with_response_header("Payment-Receipt", "receipt"))
+    }
+}
+
+fn reservation_row<H: HookSet>(env: &Env<H>, rid: &str) -> codec::ReservationV1 {
+    let row = now(env.pipe.meta.get(&ns(), &keys::reservation(rid).unwrap()))
+        .unwrap()
+        .unwrap();
+    codec::decode_reservation(&row).unwrap()
+}
+
+fn update_meta<H: HookSet>(
+    env: &Env<H>,
+    req: &Req,
+    u: &RefUpdate,
+) -> Result<(UpdateRefResult, ResponseMeta), ServerError> {
+    block_on(env.pipe.update_ref_with_meta(&env.auth(req)?, u.clone()))
+}
+
+#[test]
+fn same_nonce_loser_with_its_own_reservation_aborts_replay_race_without_receipt() {
+    let u = upd(HEAD, Missing, A);
+    let req = Req::update(&key(7), 1, &u, T0);
+    let auth = env(authv2()).auth(&req).unwrap().auth.unwrap();
+    let record = ReplayRecord {
+        fingerprint: auth.fingerprint,
+        expires_at_ms: auth.expires_at_ms,
+        state: ReplayState::Committed(StoredResult::UpdateRef(UpdateRefResult::Committed)),
+    };
+    let fired = AtomicBool::new(false);
+    let hook = move |kv: &MemoryKv, p: &Partition, batch: &Batch| {
+        // The winner commits its replay record just before the loser's apply.
+        let is_final = batch.preconditions.iter().any(
+            |pre| matches!(pre, Precondition::Absent(k) if *k == keys::replay(&auth.replay_scope)),
+        );
+        if is_final && !fired.swap(true, Ordering::SeqCst) {
+            let batch = Batch::new().put(
+                keys::replay(&auth.replay_scope),
+                codec::encode_replay_record(&record),
+            );
+            now(kv.apply(p, batch)).unwrap();
+        }
+    };
+    let clock = clock();
+    let env = build(
+        cfg(authv2()),
+        Spy::new(store(&clock)).hook(hook),
+        with_admission(ReceiptReserved("loser-rid", AtomicU32::new(0))),
+        clock,
+    );
+    let err = update_meta(&env, &req, &u).unwrap_err();
+    assert_eq!(err.code(), Code::Aborted);
+    assert!(err.headers().is_empty());
+    assert_one_abort(&env, "loser-rid-0", codec::AbortReason::ReplayRace);
+    assert_eq!(env.read(HEAD), None);
+}
+
+#[test]
+fn conflict_result_carries_no_receipt_headers() {
+    let clock = clock();
+    let env = build(
+        cfg(authv2()),
+        Spy::new(store(&clock)),
+        with_admission(ReceiptReserved("receipt-rid", AtomicU32::new(0))),
+        clock,
+    );
+    let first = upd(HEAD, Missing, A);
+    let (result, meta) = update_meta(&env, &Req::update(&key(7), 1, &first, T0), &first).unwrap();
+    assert_eq!(result, UpdateRefResult::Committed);
+    assert!(!meta.headers().is_empty());
+    let conflict = upd(HEAD, Missing, B);
+    let (result, meta) =
+        update_meta(&env, &Req::update(&key(7), 2, &conflict, T0), &conflict).unwrap();
+    assert_eq!(result, UpdateRefResult::Conflict { current: Some(A) });
+    assert!(meta.headers().is_empty());
+}
+
+#[test]
+fn abort_under_shard_counter_contention_retries_and_keeps_its_reason() {
+    let fired = AtomicBool::new(false);
+    let hook = move |kv: &MemoryKv, p: &Partition, batch: &Batch| {
+        // Another reservation settles on the same shard just before this
+        // abort applies, moving `os` and `oc` under it.
+        let is_abort = batch.preconditions.iter().any(|pre| {
+            matches!(pre, Precondition::Equals(k, _) if *k == keys::reservation("busy-rid").unwrap())
+        });
+        if is_abort && !fired.swap(true, Ordering::SeqCst) {
+            let values =
+                now(kv.get_many(p, &[keys::outbox_sequence(), keys::outcome_backlog()])).unwrap();
+            let mut builder = OutboxBuilder::new(
+                values.first().and_then(Option::as_ref),
+                values.get(1).and_then(Option::as_ref),
+            )
+            .unwrap();
+            builder.abort_direct(
+                "other-rid",
+                Terminal::new(codec::ReservationV1::Aborted {
+                    repository: REPO.into(),
+                    occurred_at_ms: 1,
+                    reason: codec::AbortReason::Unspecified,
+                    detail: String::new(),
+                })
+                .unwrap(),
+            );
+            let mut other = Batch::new();
+            builder
+                .try_finish(&mut other.preconditions, &mut other.writes)
+                .unwrap();
+            assert_eq!(now(kv.apply(p, other)).unwrap(), BatchOutcome::Committed);
+        }
+    };
+    let clock = clock();
+    let env = build(
+        cfg(authv2()),
+        Spy::new(store(&clock)).hook(hook),
+        Hooks {
+            authorizer: OpenAuthorizer,
+            admission: Fixed(AdmissionDecision::allow(Vec::new()).with_reservation("busy-rid")),
+            pre_receive: RejectPreReceive,
+            receipts: NoReceipts,
+            outcomes: NoOutcomes,
+        },
+        clock,
+    );
+    let u = upd(HEAD, Missing, A);
+    assert_eq!(
+        env.update(&Req::update(&key(7), 1, &u, T0), &u)
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+    assert!(matches!(
+        reservation_row(&env, "busy-rid"),
+        codec::ReservationV1::Aborted { reason: codec::AbortReason::Unspecified, ref detail, .. }
+            if detail == "pre receive refused"
+    ));
+    assert_eq!(
+        codec::decode_backlog(
+            &now(env.pipe.meta.get(&ns(), &keys::outcome_backlog()))
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap()
+        .rows,
+        2
+    );
+}
+
+#[test]
+fn reserved_replan_exhaustion_from_guard_contention_aborts_internal() {
+    let clock = clock();
+    let left = AtomicU32::new(MAX_REPLAN + 1);
+    let spy = Spy::new(store(&clock)).hook(move |kv, p, batch| {
+        // Break the layout guard of each write attempt (not the pending record).
+        let layout = keys::layout_version();
+        let guarded = batch.preconditions.iter().any(
+            |pre| matches!(pre, Precondition::Equals(k, _) | Precondition::Absent(k) if *k == layout),
+        );
+        if guarded
+            && left
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |l| l.checked_sub(1))
+                .is_ok()
+        {
+            let batch = if now(kv.get(p, &layout)).unwrap().is_some() {
+                Batch::new().delete(layout)
+            } else {
+                Batch::new().put(layout, codec::encode_u32(LAYOUT_VERSION))
+            };
+            now(kv.apply(p, batch)).unwrap();
+        }
+    });
+    let env = build(
+        cfg(authv2()),
+        spy,
+        with_admission(Fixed(
+            AdmissionDecision::allow(Vec::new()).with_reservation("contended-rid"),
+        )),
+        clock,
+    );
+    let u = upd(HEAD, Missing, A);
+    let err = env
+        .update(&Req::update(&key(7), 1, &u, T0), &u)
+        .unwrap_err();
+    assert_eq!(err.code(), Code::Aborted);
+    assert_one_abort(&env, "contended-rid", codec::AbortReason::Internal);
+}
+
+#[test]
+fn abort_reason_mapping_uses_typed_causes_not_message_text() {
+    use codec::AbortReason;
+    use reservation::abort_reason;
+    // The same words without the marker no longer map to RefConflict.
+    assert_eq!(
+        abort_reason(&ServerError::aborted_retryable("write contention; retry")).0,
+        AbortReason::ReplayRace
+    );
+    assert_eq!(
+        abort_reason(
+            &ServerError::aborted_retryable("anything").with_abort_cause(AbortCause::Contention)
+        )
+        .0,
+        AbortReason::Internal
+    );
+    assert_eq!(
+        abort_reason(&plan::epoch_moved()).0,
+        AbortReason::EpochMismatch
+    );
+}
+
+#[test]
+fn second_batch_with_a_nonempty_backlog_adds_no_second_delivery_kick() {
+    let clock = clock();
+    let mut config = cfg(authv2());
+    config.outbox_backlog_cap = None;
+    let env = build(
+        config,
+        Spy::new(store(&clock)),
+        with_admission(NumberedReservation(AtomicU32::new(0))),
+        clock,
+    );
+    let k = key(7);
+    for (n, target) in [(1, A), (2, B)] {
+        let u = upd(HEAD, Any, target);
+        env.update(&Req::update(&k, n, &u, T0), &u).unwrap();
+    }
+    let kicks = env
+        .batches()
+        .iter()
+        .flat_map(|batch| &batch.writes)
+        .filter(|write| {
+            matches!(write, Write::Put(key, _) if matches!(keys::parse(key), Some(keys::ParsedKey::Timer { kind: 8, .. })))
+        })
+        .count();
+    assert_eq!(kicks, 1);
+}
+
+#[test]
+fn backlog_over_cap_refuses_begin_upload_but_not_reads() {
+    let clock = clock();
+    let mut config = cfg(authv2());
+    config.outbox_backlog_cap = Some(OutboxBacklogCap { rows: 0, bytes: 0 });
+    config.ticket_keys =
+        Some(crate::upload::token::TicketKeys::new(vec![("t".into(), [7; 32])]).unwrap());
+    let kv = store(&clock);
+    now(kv.apply(
+        &ns(),
+        Batch::new().put(
+            keys::outcome_backlog(),
+            codec::encode_backlog(&codec::Backlog { rows: 1, bytes: 1 }),
+        ),
+    ))
+    .unwrap();
+    let env = build(
+        config,
+        Spy::new(kv),
+        with_admission(Fixed(AdmissionDecision::allow(Vec::new()))),
+        clock,
+    );
+    let req = Req::signed(&key(7), Procedure::BeginUpload, b"begin", &nonce(1), T0);
+    let err = block_on(env.pipe.begin_upload(&env.auth(&req).unwrap(), HEAD, &A, 1)).unwrap_err();
+    assert_eq!(
+        (err.code(), err.public_message()),
+        (Code::Unavailable, "outbox backlog; retry")
+    );
+    assert!(
+        err.headers()
+            .iter()
+            .any(|(name, value)| name == "Retry-After" && value == "30")
+    );
+    // Reads run no admission.
+    assert_eq!(env.read(HEAD), None);
+}
+
+#[test]
+fn duplicate_payment_header_is_denied_only_where_admission_runs() {
+    let clock = clock();
+    let env = build(
+        cfg(authv2()),
+        Spy::new(store(&clock)),
+        with_admission(Fixed(AdmissionDecision::allow(Vec::new()))),
+        clock,
+    );
+    let u = upd(HEAD, Missing, A);
+    let req = Req::update(&key(7), 1, &u, T0);
+    let lookup = |name: &str| {
+        req.headers
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.clone())
+    };
+    let values = |name: &str| {
+        if name.eq_ignore_ascii_case("payment-authorization") {
+            vec!["one".to_owned(), "two".to_owned()]
+        } else {
+            lookup(name).into_iter().collect()
+        }
+    };
+    let meta = RequestMeta {
+        procedure: req.procedure,
+        header: &lookup,
+        header_values: Some(&values),
+        unary_body: Some(&req.body),
+        transport_principal: None,
+    };
+    // Authentication no longer judges credentials it never forwards.
+    let a = env.pipe.authenticate(&meta).unwrap();
+    let err = block_on(env.pipe.update_ref(&a, u.clone())).unwrap_err();
+    assert_eq!(
+        (err.code(), err.public_message()),
+        (Code::PermissionDenied, "admission denied")
+    );
+    assert!(env.batches().is_empty());
+}
+
+#[test]
+fn pipeline_refuses_more_extra_credential_headers_than_fit() {
+    let clock = clock();
+    let mut config = cfg(authv2());
+    config.admission_credential_headers = (0..6).map(|i| format!("X-Extra-{i}")).collect();
+    let refused = Pipeline::new(
+        MemoryBlobStore::default(),
+        Spy::new(store(&clock)),
+        Hooks::new(),
+        config.clone(),
+        clock.clone(),
+        Arc::new(SpyMetrics::default()),
+    );
+    assert!(refused.is_err());
+    config.admission_credential_headers.truncate(5);
+    assert!(
+        Pipeline::new(
+            MemoryBlobStore::default(),
+            Spy::new(store(&clock)),
+            Hooks::new(),
+            config,
+            clock,
+            Arc::new(SpyMetrics::default()),
+        )
+        .is_ok()
+    );
 }

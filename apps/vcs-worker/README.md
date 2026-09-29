@@ -78,6 +78,11 @@ residency. Snapshots contain private ref names, signer keys, tickets and replay
 rows. Confirm the bucket's access policy before the first deployment.
 Keep `WORKERS_PLAN=free` on a Free account.
 
+Indexed mode is unavailable on Workers until WP-4.8. Workers Free cannot
+serve indexed mode: its 50-subrequest limit is below the budget for a single
+repository object-index lookup. Paid Workers use a relay budget of 32 targets
+per tick and eight ticks per alarm; Free keeps its smaller relay budget.
+
 For a backend move or recovery beyond PITR, collect a complete, compatible
 set of `.kvlog` partition snapshots from R2 into the native export directory
 layout. Select exactly one object for each `<kind>/<partition-hash>/`, normally
@@ -134,6 +139,10 @@ Like `SHARDING`, `ADDRESSING` is fixed for the deployment lifetime: the first
 request records the mode in a root marker (`am 00`), and redeploying with the
 other addressing over existing data is refused (`deployment addressing
 mismatch`). Unmarked data is a `single` deployment's.
+
+The guard probes `v` only in the root partition, so Single+D34 data written
+before multi-repository serving landed is not detected; D34 is unreleased with
+no deployments, so this is acceptable.
 
 - `NAMESPACE_POLICY=allowlist` (the default) admits only the namespaces in
   `NAMESPACE_ALLOWLIST`: canonical namespaces (`ed25519-<64 hex>` or

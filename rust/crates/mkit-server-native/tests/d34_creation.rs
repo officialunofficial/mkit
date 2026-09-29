@@ -204,10 +204,13 @@ impl Admission for Observe {
             .unwrap()
             .push(input.op.creation);
         if self.challenge {
-            Ok(AdmissionDecision::Challenge {
-                challenges: Vec::new(),
-                description: "test admission challenge".into(),
-            })
+            Ok(AdmissionDecision::challenge(
+                vec![mkit_server::pipeline::Challenge {
+                    scheme: "mpp".into(),
+                    value: "pay".into(),
+                }],
+                "test admission challenge",
+            ))
         } else {
             Ok(AdmissionDecision::allow(Vec::new()))
         }
@@ -613,6 +616,7 @@ fn authenticate<N: NamespaceStore>(
     pipe.authenticate(&RequestMeta {
         procedure,
         header: &lookup,
+        header_values: None,
         unary_body: Some(BODY),
         transport_principal: None,
     })

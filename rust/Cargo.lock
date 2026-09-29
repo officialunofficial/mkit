@@ -3273,6 +3273,7 @@ version = "0.4.2"
 dependencies = [
  "assert_cmd",
  "assert_fs",
+ "base64 0.23.1",
  "buffa",
  "bytes",
  "clap",
@@ -3283,6 +3284,7 @@ dependencies = [
  "flate2",
  "futures",
  "getrandom 0.4.3",
+ "hex",
  "http",
  "http-body-util",
  "hyper",

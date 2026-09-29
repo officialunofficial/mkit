@@ -364,3 +364,35 @@ fn single_is_the_default_and_unchanged() {
         assert_eq!(repo.name.as_str(), "room");
     }
 }
+
+/// `--indexed` needs ticketed verification, which the enc sibling pipeline
+/// (implicit consumption) cannot run, so `--indexed` + Multi + `--listen-enc`
+/// is a config-time error rather than a `Pipeline::new` failure at startup.
+#[cfg(all(feature = "enc", feature = "test-faults"))]
+#[test]
+fn indexed_with_multi_enc_is_refused_at_config_time() {
+    let f = fixture(&namespace(1));
+    let repository = format!("ed25519-{}/packs", "ab".repeat(32));
+    let peers = f.root.path().join("peers");
+    std::fs::write(&peers, format!("{}\n", "ab".repeat(32))).unwrap();
+    let flags = extra(
+        &multi(&f),
+        &[
+            "--listen-enc",
+            "127.0.0.1:0",
+            "--enc-repository",
+            &repository,
+            "--enc-authorized-peers",
+            common::s(&peers),
+            "--enc-server-key",
+            common::s(&f.root.path().join("server.key")),
+        ],
+    );
+    resolve(&flags).unwrap();
+    let (code, message) = refusal(&extra(&flags, &["--indexed"]));
+    assert_eq!(code, exit::USAGE, "{message}");
+    assert!(message.contains("--indexed"), "{message}");
+    assert!(message.contains("--listen-enc"), "{message}");
+    // Indexed alone (no enc listener) still resolves.
+    resolve(&extra(&multi(&f), &["--indexed"])).unwrap();
+}

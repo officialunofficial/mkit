@@ -21,6 +21,7 @@ pub mod commit;
 pub mod config_cmd;
 pub mod conflict;
 pub mod diff;
+pub mod epoch;
 pub mod fetch;
 pub mod for_each_ref;
 pub mod gc;
@@ -30,6 +31,7 @@ pub mod git;
 pub mod git_import;
 #[cfg(feature = "git-bridge")]
 pub mod git_tools;
+pub mod grant;
 pub mod hash_cmd;
 pub mod init;
 pub mod key;
@@ -77,6 +79,7 @@ pub mod update_ref;
 pub mod verify;
 pub mod verify_attest;
 pub mod verify_proof;
+pub mod visibility;
 pub mod worktree;
 
 use crate::exit;

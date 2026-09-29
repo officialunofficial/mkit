@@ -193,6 +193,51 @@ fn ticketed_upload_no_metadata_and_marker() {
 }
 
 #[test]
+fn ticketless_transport_reservation_fails_closed_with_one_abort() {
+    let clock = clock();
+    let env = build(
+        cfg(AuthMode::TransportIdentity),
+        Spy::new(store(&clock)),
+        with_admission(Fixed(
+            AdmissionDecision::allow(Vec::new()).with_reservation("stream-rid"),
+        )),
+        clock,
+    );
+    let mut request = Req::unsigned(Procedure::UploadPack);
+    request.principal = Some(Principal::SshForcedCommand { key: None });
+    let data = pack(16);
+    let err = upload(&env, &request, &data, 16).unwrap_err();
+    assert_eq!(err.code(), Code::FailedPrecondition);
+    assert!(!blob_present(&env, &data));
+    let row = now(env
+        .pipe
+        .meta
+        .get(&ns(), &keys::reservation("stream-rid").unwrap()))
+    .unwrap()
+    .unwrap();
+    assert!(
+        matches!(codec::decode_reservation(&row).unwrap(), codec::ReservationV1::Aborted {
+        reason: codec::AbortReason::Unspecified, detail, ..
+    } if detail == "reservations unsupported on this transport")
+    );
+    assert_eq!(env.count("oq"), 1);
+    assert_eq!(
+        codec::decode_backlog(
+            &now(env.pipe.meta.get(&ns(), &keys::outcome_backlog()))
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap()
+        .rows,
+        1
+    );
+    let kicks = env.batches().iter().flat_map(|batch| &batch.writes).filter(|write| {
+        matches!(write, Write::Put(key, _) if matches!(keys::parse(key), Some(keys::ParsedKey::Timer { kind: 8, .. })))
+    }).count();
+    assert_eq!(kicks, 1);
+}
+
+#[test]
 fn upload_threshold_enforced_before_store_and_transport_identity_exempt() {
     let single_clock = clock();
     let mut c = cfg(authv2());
@@ -756,6 +801,7 @@ fn upload_memory_bounded_by_one_chunk() {
         .authenticate(&RequestMeta {
             procedure: Procedure::UploadPack,
             header: &lookup,
+            header_values: None,
             unary_body: None,
             transport_principal: None,
         })
@@ -928,8 +974,12 @@ impl Admission for ChallengeAdmission {
     async fn admit(&self, _: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(AdmissionDecision::Challenge {
-            challenges: vec![],
+            challenges: vec![Challenge {
+                scheme: "mpp".into(),
+                value: "pay".into(),
+            }],
             description: "challenge".into(),
+            response_headers: Vec::new(),
         })
     }
 }
@@ -1502,4 +1552,197 @@ mod faults {
         }
         assert_eq!(env.batches().len(), 3);
     }
+}
+
+// ------------------------------------------- review fixes (WP-3.2 / WP-3.3)
+
+fn streaming_env<Ad: Admission>(
+    admission: Ad,
+    config: PipelineConfig,
+    kv: MemoryKv,
+    clock: Arc<ManualClock>,
+) -> Env<Hooks<OpenAuthorizer, Ad>> {
+    build(config, Spy::new(kv), with_admission(admission), clock)
+}
+
+fn ssh_request() -> Req {
+    let mut request = Req::unsigned(Procedure::UploadPack);
+    request.principal = Some(Principal::SshForcedCommand { key: None });
+    request
+}
+
+#[test]
+fn streaming_challenge_is_a_plain_permission_denied() {
+    let clock = clock();
+    let env = streaming_env(
+        ChallengeAdmission(Arc::new(AtomicU32::new(0))),
+        cfg(AuthMode::TransportIdentity),
+        store(&clock),
+        clock,
+    );
+    let data = pack(16);
+    let err = upload(&env, &ssh_request(), &data, 16).unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+    assert_ne!(err.http_status(), Some(402));
+    assert!(err.details().is_empty());
+    assert!(err.headers().is_empty());
+}
+
+fn seeded_backlog(clock: &Arc<ManualClock>) -> MemoryKv {
+    let kv = store(clock);
+    now(kv.apply(
+        &ns(),
+        Batch::new().put(
+            keys::outcome_backlog(),
+            codec::encode_backlog(&codec::Backlog { rows: 1, bytes: 1 }),
+        ),
+    ))
+    .unwrap();
+    kv
+}
+
+#[test]
+fn backlog_over_cap_refuses_a_fresh_stream_but_not_a_ticketed_one() {
+    let over = Some(OutboxBacklogCap { rows: 0, bytes: 0 });
+    let clock_a = clock();
+    let mut config = cfg(AuthMode::TransportIdentity);
+    config.outbox_backlog_cap = over;
+    let env = streaming_env(
+        Fixed(AdmissionDecision::allow(Vec::new())),
+        config,
+        seeded_backlog(&clock_a),
+        clock_a,
+    );
+    let data = pack(30);
+    let err = upload(&env, &ssh_request(), &data, 30).unwrap_err();
+    assert_eq!(
+        (err.code(), err.public_message()),
+        (Code::Unavailable, "outbox backlog; retry")
+    );
+    assert!(
+        err.headers()
+            .iter()
+            .any(|(name, value)| name == "Retry-After" && value == "30")
+    );
+
+    let clock_b = clock();
+    let mut config = cfg(authv2());
+    config.outbox_backlog_cap = over;
+    config.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap());
+    let env = streaming_env(
+        Fixed(AdmissionDecision::allow(Vec::new())),
+        config,
+        seeded_backlog(&clock_b),
+        clock_b,
+    );
+    let signer = key(7);
+    let token = ticket_token(&env, &signer, &data, [0x77; 32]);
+    assert_eq!(
+        ticketed_upload(&env, &signed_upload(&signer, &data, 2), &data, &token).unwrap(),
+        UploadMode::Ticketed
+    );
+}
+
+#[test]
+fn duplicate_payment_header_does_not_deny_a_ticketed_upload() {
+    let env = ticket_env();
+    let data = pack(30);
+    let signer = key(7);
+    let token = ticket_token(&env, &signer, &data, [0x77; 32]);
+    let req = signed_upload(&signer, &data, 1);
+    let lookup = |name: &str| {
+        req.headers
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.clone())
+    };
+    let values = |name: &str| {
+        if name.eq_ignore_ascii_case("payment-authorization") {
+            vec!["one".to_owned(), "two".to_owned()]
+        } else {
+            lookup(name).into_iter().collect()
+        }
+    };
+    let a = env
+        .pipe
+        .authenticate(&RequestMeta {
+            procedure: req.procedure,
+            header: &lookup,
+            header_values: Some(&values),
+            unary_body: None,
+            transport_principal: None,
+        })
+        .unwrap();
+    let id = hash(&data);
+    block_on(async {
+        let mut session = env
+            .pipe
+            .open_ticketed_upload(&a, Some(&id), Some(data.len() as u64), &token)
+            .await
+            .unwrap();
+        session
+            .push(Some(&id), Some(0), Bytes::copy_from_slice(&data), true)
+            .await
+            .unwrap();
+        session.finish().await.unwrap();
+    });
+}
+
+#[test]
+fn stream_abort_under_shard_counter_contention_still_writes_the_unsupported_row() {
+    let fired = AtomicBool::new(false);
+    let hook = move |kv: &MemoryKv, p: &Partition, batch: &Batch| {
+        let is_abort = batch.preconditions.iter().any(|pre| {
+            matches!(pre, Precondition::Absent(k) if *k == keys::reservation("stream-rid").unwrap())
+        });
+        if is_abort && !fired.swap(true, Ordering::SeqCst) {
+            let values =
+                now(kv.get_many(p, &[keys::outbox_sequence(), keys::outcome_backlog()])).unwrap();
+            let mut builder = crate::store::outbox::OutboxBuilder::new(
+                values.first().and_then(Option::as_ref),
+                values.get(1).and_then(Option::as_ref),
+            )
+            .unwrap();
+            builder.abort_direct(
+                "other-rid",
+                crate::store::outbox::Terminal::new(codec::ReservationV1::Aborted {
+                    repository: REPO.into(),
+                    occurred_at_ms: 1,
+                    reason: codec::AbortReason::Unspecified,
+                    detail: String::new(),
+                })
+                .unwrap(),
+            );
+            let mut other = Batch::new();
+            builder
+                .try_finish(&mut other.preconditions, &mut other.writes)
+                .unwrap();
+            now(kv.apply(p, other)).unwrap();
+        }
+    };
+    let clock = clock();
+    let env = build(
+        cfg(AuthMode::TransportIdentity),
+        Spy::new(store(&clock)).hook(hook),
+        with_admission(Fixed(
+            AdmissionDecision::allow(Vec::new()).with_reservation("stream-rid"),
+        )),
+        clock,
+    );
+    let mut request = Req::unsigned(Procedure::UploadPack);
+    request.principal = Some(Principal::SshForcedCommand { key: None });
+    let data = pack(16);
+    let err = upload(&env, &request, &data, 16).unwrap_err();
+    assert_eq!(err.code(), Code::FailedPrecondition);
+    let row = now(env
+        .pipe
+        .meta
+        .get(&ns(), &keys::reservation("stream-rid").unwrap()))
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        codec::decode_reservation(&row).unwrap(),
+        codec::ReservationV1::Aborted { reason: codec::AbortReason::Unspecified, detail, .. }
+            if detail == "reservations unsupported on this transport"
+    ));
 }

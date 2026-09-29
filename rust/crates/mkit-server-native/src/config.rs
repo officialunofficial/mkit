@@ -10,6 +10,8 @@ use std::time::Duration;
 use clap::{Args, ValueEnum};
 use http::HeaderValue;
 use mkit_server::auth_v2::AuthV2Config;
+#[cfg(feature = "test-faults")]
+use mkit_server::indexed::IndexedConfig;
 use mkit_server::pipeline::{AuthMode, PipelineConfig, Sharding};
 use mkit_server::policy::{NamespacePolicy, parse_namespace_allowlist};
 use mkit_server::sql::Capacity;
@@ -307,6 +309,26 @@ pub struct ServeArgs {
     /// Largest pack an upload may declare (default 4 GiB).
     #[arg(long, value_name = "N")]
     pub max_pack_bytes: Option<u64>,
+    /// Verify consumed packs and build repository object-index rows.
+    #[cfg(feature = "test-faults")]
+    #[arg(long)]
+    pub indexed: bool,
+    /// Indexed pack cap; defaults to 2 GiB.
+    #[cfg(feature = "test-faults")]
+    #[arg(long, value_name = "BYTES")]
+    pub indexed_max_pack_bytes: Option<u64>,
+    /// Whole-pack decode budget; defaults to 2 GiB.
+    #[cfg(feature = "test-faults")]
+    #[arg(long, value_name = "BYTES")]
+    pub indexed_decode_budget: Option<u64>,
+    /// Total delta-chain cap; defaults to 50.
+    #[cfg(feature = "test-faults")]
+    #[arg(long, value_name = "N")]
+    pub indexed_max_delta_chain_depth: Option<u32>,
+    /// Membership lag window; defaults to 60,000 ms.
+    #[cfg(feature = "test-faults")]
+    #[arg(long, value_name = "MS")]
+    pub indexed_relay_lag_bound_ms: Option<u64>,
     /// Deadline of a unary RPC.
     #[arg(long, value_name = "SECS", default_value_t = 30)]
     pub unary_timeout_secs: u64,
@@ -1208,6 +1230,7 @@ fn resolve_sharding(args: &ServeArgs) -> Result<Sharding, ConfigError> {
 ///
 /// # Errors
 /// A [`ConfigError`] with its exit code: see [`exit`].
+#[allow(clippy::too_many_lines)] // Keep startup flag validation and mapping together.
 pub fn resolve(
     args: &ServeArgs,
     env: &dyn Fn(&str) -> Option<String>,
@@ -1278,6 +1301,33 @@ pub fn resolve(
     let mut pipeline = PipelineConfig::new(addressing, auth, limits);
     pipeline.sharding = sharding;
     pipeline.ticket_keys = ticket_keys;
+    // The enc listener's sibling pipeline consumes implicitly and cannot
+    // run ticketed verification, so `Pipeline::new` refuses `indexed` with
+    // it (R-137); refuse here, before any pipeline is built.
+    #[cfg(all(feature = "test-faults", feature = "enc"))]
+    if args.indexed && multi && enc.is_some() {
+        return Err(usage(
+            "--indexed cannot be combined with --addressing multi and --listen-enc: \
+             implicit (enc) consumption skips ticketed pack verification",
+        ));
+    }
+    #[cfg(feature = "test-faults")]
+    if args.indexed {
+        let mut indexed = IndexedConfig::default();
+        if let Some(value) = args.indexed_max_pack_bytes {
+            indexed.max_pack_bytes = value;
+        }
+        if let Some(value) = args.indexed_decode_budget {
+            indexed.decode_budget = value;
+        }
+        if let Some(value) = args.indexed_max_delta_chain_depth {
+            indexed.max_delta_chain_depth = value;
+        }
+        if let Some(value) = args.indexed_relay_lag_bound_ms {
+            indexed.relay_lag_bound_ms = value;
+        }
+        pipeline.indexed = Some(indexed);
+    }
     let router = RouterOptions {
         unary_timeout: Duration::from_secs(args.unary_timeout_secs),
         stream_timeout: Duration::from_secs(args.stream_timeout_secs),

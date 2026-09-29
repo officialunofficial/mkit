@@ -123,8 +123,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .write_with(a, OpKind::UpdateRef(upd), Some(pending))
                 .await?
             {
-                StoredResult::UpdateRef(result) => Ok(result),
-                other => Err(super::stored_mismatch(&other)),
+                (StoredResult::UpdateRef(result), _) => Ok(result),
+                (other, _) => Err(super::stored_mismatch(&other)),
             }
         })
         .await

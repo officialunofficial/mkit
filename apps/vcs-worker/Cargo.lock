@@ -1005,6 +1005,7 @@ dependencies = [
  "bytes",
  "connectrpc",
  "connectrpc-build",
+ "ed25519-dalek",
  "futures",
  "futures-core",
  "http",

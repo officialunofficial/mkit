@@ -224,6 +224,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H
         self.pipe.authenticate(&RequestMeta {
             procedure,
             header: &header,
+            header_values: None,
             unary_body: None,
             transport_principal: Some(self.principal.clone()),
         })

@@ -12,12 +12,17 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use mkit_core::hash::{hash, to_hex};
+use mkit_core::object::{Commit, Identity, Object, Tree};
+use mkit_core::pack::PackWriter;
 use mkit_core::protocol::{PackKey, RefWriteCondition};
 use mkit_core::repo_identity::Namespace;
+use mkit_core::serialize::serialize;
+use mkit_core::sign::{KeyPair, sign_commit};
 use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan};
 use mkit_server::auth_v2::AuthV2Config;
 #[cfg(feature = "test-faults")]
 use mkit_server::fs::FsBlobStore;
+use mkit_server::indexed::{IndexedConfig, state};
 use mkit_server::pipeline::{
     Admission, AdmissionDecision, AdmissionInput, AuthMode, Authenticated, Authorizer, D34Shards,
     DefaultAdmission, Hooks, Pipeline, PipelineConfig, RequestMeta, ShardMap, Sharding,
@@ -248,10 +253,13 @@ impl Admission for Policy {
             assert_eq!(input.new_to_repo_bytes, Some(input.declared_bytes));
         }
         match self.0.rejection.load(Ordering::SeqCst) {
-            2 => Ok(AdmissionDecision::Challenge {
-                challenges: vec![],
-                description: "test challenge".into(),
-            }),
+            2 => Ok(AdmissionDecision::challenge(
+                vec![mkit_server::pipeline::Challenge {
+                    scheme: "mpp".into(),
+                    value: "pay".into(),
+                }],
+                "test challenge",
+            )),
             3 => Ok(AdmissionDecision::Deny(ServerError::permission_denied(
                 "test admission denial",
             ))),
@@ -347,6 +355,7 @@ fn auth<B: MultipartBlobStore, N: NamespaceStore, H: mkit_server::pipeline::Hook
                         .find(|(name, _)| name == h)
                         .map(|(_, v)| v.clone())
                 },
+                header_values: None,
                 unary_body: Some(BODY),
                 transport_principal: None,
             })
@@ -378,6 +387,7 @@ fn auth_other_repo<N: NamespaceStore>(
                 .find(|(name, _)| name == h)
                 .map(|(_, v)| v.clone())
         },
+        header_values: None,
         unary_body: Some(BODY),
         transport_principal: None,
     })
@@ -936,12 +946,23 @@ async fn race_with_bytes<N: NamespaceStore + 'static>(
         Ok(winner) => (winner, two, &b),
         Err(error) => (two.unwrap(), Err(error), &a),
     };
-    if same_nonce {
+    if same_nonce && reserved {
+        assert_eq!(loser.unwrap_err().code(), Code::Aborted);
+        assert_eq!(
+            replay(&store, mode, &a).await,
+            Some(StoredResult::BeginUpload(winner))
+        );
+    } else if same_nonce {
         assert_eq!(loser.unwrap(), winner);
         assert_eq!(
             replay(&store, mode, &a).await,
             Some(StoredResult::BeginUpload(winner))
         );
+    } else if reserved && cap {
+        let error = loser.unwrap_err();
+        assert_eq!(error.code(), Code::FailedPrecondition);
+        assert_eq!(error.public_message(), CAP_MESSAGE);
+        assert_eq!(replay(&store, mode, loser_auth).await, None);
     } else if reserved {
         let error = loser.unwrap_err();
         assert_eq!(error.code(), Code::Aborted);
@@ -960,6 +981,31 @@ async fn race_with_bytes<N: NamespaceStore + 'static>(
         assert_eq!(loser.unwrap(), winner);
     }
     let p = mode.partition(&a, REF);
+    if reserved {
+        let (start, end) = keys::class_range(keys::TAG_RESERVATION);
+        let rows = store
+            .inner
+            .scan(&p, &start, &end, None, 100)
+            .await
+            .unwrap()
+            .entries;
+        let aborts: Vec<_> = rows
+            .iter()
+            .filter_map(|(_, raw)| match codec::decode_reservation(raw).unwrap() {
+                codec::ReservationV1::Aborted { reason, .. } => Some(reason),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(aborts.len(), 1);
+        assert_eq!(
+            aborts[0],
+            if cap {
+                codec::AbortReason::Unspecified
+            } else {
+                codec::AbortReason::ReplayRace
+            }
+        );
+    }
     assert_eq!(
         codec::decode_u64(
             &store
@@ -1158,6 +1204,158 @@ macro_rules! backends {
 }
 backends!(lifecycle_memory, lifecycle_sqlite, lifecycle);
 
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn indexed_sqlite_verified_pack_reuse_rechecks_current_closure() {
+    let mode = Mode {
+        multi: true,
+        sharding: Sharding::Single,
+    };
+    let clock = Arc::new(ManualClock::new(0));
+    let conn = RusqliteConn::open_in_memory()
+        .unwrap()
+        .with_clock(clock.clone());
+    let store = Store::new(Blocking::new(SqlKvStore::open(conn).unwrap()));
+    let mut cfg = config(mode);
+    cfg.ticket_ttl_ms = 120_000;
+    cfg.indexed = Some(IndexedConfig::default());
+    let pipe = pipeline(
+        store.clone(),
+        MemoryBlobStore::default(),
+        Arc::new(Spy::default()),
+        cfg,
+        clock.clone(),
+    );
+
+    let tree = Object::Tree(Tree {
+        entries: Vec::new(),
+    });
+    let tree_id = tree.id().unwrap();
+    let signer = KeyPair::from_seed([9; 32]);
+    let mut commit = Commit::new_unannotated(
+        tree_id,
+        Vec::new(),
+        Identity::ed25519(signer.public.0),
+        signer.public.0,
+        b"indexed".to_vec(),
+        42,
+        [0; 64],
+    );
+    commit.signature = sign_commit(&commit, &signer).unwrap().0;
+    let commit = Object::Commit(commit);
+    let head = commit.id().unwrap();
+    let mut first = PackWriter::new_raw_only();
+    first.push_raw(head, &serialize(&commit).unwrap()).unwrap();
+    let mut second = PackWriter::new_raw_only();
+    second
+        .push_raw(tree_id, &serialize(&tree).unwrap())
+        .unwrap();
+    let packs = [first.finish().unwrap(), second.finish().unwrap()];
+
+    let mut tickets = Vec::new();
+    for pack in &packs {
+        let begin = auth(&pipe, mode, 1, Procedure::BeginUpload);
+        let BeginUploadResult::Ticket { id, token, .. } = pipe
+            .begin_upload(&begin, REF, &hash(pack), pack.len() as u64)
+            .await
+            .unwrap()
+        else {
+            panic!("expected ticket");
+        };
+        upload_ticket(&pipe, mode, pack, &token).await;
+        tickets.push(id);
+    }
+    let advance = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
+    let partition = mode.partition(&advance, REF);
+    let repo = advance.repo().repo.clone();
+    assert_eq!(
+        pipe.advance_refs_with_tickets(
+            &advance,
+            upd(REF, RefWriteCondition::Match([0x5a; 32]), head),
+            upd(
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Missing,
+                hash(&packs[1])
+            ),
+            tickets.clone(),
+        )
+        .await
+        .unwrap(),
+        mkit_core::protocol::AdvanceOutcome::HeadConflict
+    );
+    for pack in &packs {
+        let raw = store
+            .inner
+            .get(&partition, &keys::verification(&repo.name, &hash(pack)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            state::decode(&raw).unwrap(),
+            state::VerificationV1::Verified { .. }
+        ));
+    }
+    assert!(
+        store
+            .inner
+            .get(&partition, &keys::ref_key(&repo.name, REF))
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    clock.advance(i64::try_from(IndexedConfig::default().relay_lag_bound_ms).unwrap());
+    let advance = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
+    let error = pipe
+        .advance_refs_with_tickets(
+            &advance,
+            upd(REF, RefWriteCondition::Missing, head),
+            upd(
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Missing,
+                hash(&packs[0]),
+            ),
+            vec![tickets[0]],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert_eq!(error.public_message(), "open closure");
+    for key in [
+        keys::ref_key(&repo.name, REF),
+        keys::ref_key(&repo.name, "refs/mkit/packmap/main"),
+        keys::membership(&repo.name, &hash(&packs[0])),
+        keys::membership(&repo.name, &hash(&packs[1])),
+    ] {
+        assert!(store.inner.get(&partition, &key).await.unwrap().is_none());
+    }
+
+    let advance = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
+    assert_eq!(
+        pipe.advance_refs_with_tickets(
+            &advance,
+            upd(REF, RefWriteCondition::Missing, head),
+            upd(
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Missing,
+                hash(&packs[1])
+            ),
+            tickets,
+        )
+        .await
+        .unwrap(),
+        mkit_core::protocol::AdvanceOutcome::Committed
+    );
+    assert!(
+        store
+            .inner
+            .get(&partition, &keys::ref_key(&repo.name, REF))
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
 fn upload_auth<N: NamespaceStore>(pipe: &Pipe<N>, mode: Mode, pack: &[u8]) -> Authenticated {
     let signer = Signer::new([1; 32], AUDIENCE, &mode.identity());
     let mut envelope = signer.envelope(
@@ -1176,6 +1374,7 @@ fn upload_auth<N: NamespaceStore>(pipe: &Pipe<N>, mode: Mode, pack: &[u8]) -> Au
                 .find(|(name, _)| name == h)
                 .map(|(_, v)| v.clone())
         },
+        header_values: None,
         unary_body: None,
         transport_principal: None,
     })
@@ -1946,17 +2145,13 @@ async fn direct_ref_reservations_fail_closed<N: NamespaceStore>(
         clock,
     );
     let update = auth(&pipe, mode, 1, Procedure::UpdateRef);
-    let err = pipe
+    let result = pipe
         .update_ref(&update, upd(REF, RefWriteCondition::Missing, [3; 32]))
         .await
-        .unwrap_err();
-    assert_eq!(err.code(), Code::Unimplemented);
-    assert_eq!(
-        err.public_message(),
-        "admission reservations on ref writes land with WP-3.3"
-    );
+        .unwrap();
+    assert!(matches!(result, mkit_server::UpdateRefResult::Committed));
     let advance = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
-    let err = pipe
+    let result = pipe
         .advance_refs_with_tickets(
             &advance,
             upd(REF, RefWriteCondition::Missing, [3; 32]),
@@ -1968,23 +2163,50 @@ async fn direct_ref_reservations_fail_closed<N: NamespaceStore>(
             vec![],
         )
         .await
-        .unwrap_err();
-    assert_eq!(err.code(), Code::Unimplemented);
-    assert_eq!(
-        err.public_message(),
-        "admission reservations on ref writes land with WP-3.3"
-    );
+        .unwrap();
+    assert_eq!(result, mkit_core::protocol::AdvanceOutcome::HeadConflict);
     assert_eq!(spy.admissions.load(Ordering::SeqCst), 2);
     let p = mode.partition(&advance, REF);
-    for name in [REF, "refs/mkit/packmap/main"] {
-        assert!(
-            store
+    assert!(
+        store
+            .inner
+            .get(&p, &keys::ref_key(&advance.repo().repo.name, REF))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .inner
+            .get(
+                &p,
+                &keys::ref_key(&advance.repo().repo.name, "refs/mkit/packmap/main")
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    for (rid, committed) in [("admission-0", true), ("admission-1", false)] {
+        let row = codec::decode_reservation(
+            &store
                 .inner
-                .get(&p, &keys::ref_key(&advance.repo().repo.name, name))
+                .get(&p, &keys::reservation(rid).unwrap())
                 .await
                 .unwrap()
-                .is_none()
-        );
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(if committed {
+            matches!(row, codec::ReservationV1::Committed { .. })
+        } else {
+            matches!(
+                row,
+                codec::ReservationV1::Aborted {
+                    reason: codec::AbortReason::RefConflict,
+                    ..
+                }
+            )
+        });
     }
     for a in [&update, &advance] {
         assert!(
@@ -1993,7 +2215,7 @@ async fn direct_ref_reservations_fail_closed<N: NamespaceStore>(
                 .get(&p, &keys::replay(&a.auth.as_ref().unwrap().replay_scope))
                 .await
                 .unwrap()
-                .is_none()
+                .is_some()
         );
     }
 }
@@ -2851,6 +3073,7 @@ async fn unsupported_auth_modes_have_no_metadata_effects() {
             .authenticate(&RequestMeta {
                 procedure: Procedure::BeginUpload,
                 header: &|h| (h == "authorization").then(|| "Bearer test".into()),
+                header_values: None,
                 unary_body: Some(BODY),
                 transport_principal: Some(Principal::TransportPeer { ed25519: [1; 32] }),
             })
