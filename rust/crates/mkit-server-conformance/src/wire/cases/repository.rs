@@ -9,8 +9,8 @@ use mkit_transport_connect::generated::{
 };
 
 use super::{
-    A, B, C, CaseResult, Commit, Ctx, Exp, Failure, Signed, ensure, eventually_listed, sign_unary,
-    update_req, upload_msgs, want_code, want_ok,
+    A, B, C, CaseResult, Commit, Ctx, Exp, Failure, Signed, advance_req, ensure, eventually_listed,
+    sign_unary, update_req, upload_msgs, want_code, want_ok, want_outcome,
 };
 use crate::wire::client::{Rpc, frame};
 use crate::wire::sign::pack_commitment;
@@ -379,27 +379,49 @@ pub(super) async fn ticketed_upload_multi(ctx: Ctx) -> CaseResult {
 }
 /// Fixtures are planted in-process by the Multi baseline because Multi uploads
 /// still need tickets. Bytes equal `ctx.ns()`, with membership only in repo
-/// `packs` owned by `repository-a`; see the baseline's `plant_membership`.
+/// `packs` owned by `repository-a`; see the baseline's `plant_membership`. A
+/// served deployment seeds them over the wire ([`seed_membership`]), and a
+/// member-true read then polls: the membership relay may lag the commit.
 async fn pack_read(ctx: &Ctx, repository: &str, hint: Option<&str>, member: bool) -> CaseResult {
     let pack = ctx.ns().into_bytes();
     let id = hash(&pack);
-    let body = PackExistsRequest {
-        pack_id: Some(id.to_vec()),
-        ..Default::default()
+    // Member rows are all a live deployment will deliver; its relay may
+    // still be running, so member-true reads poll. `pack_exists` is the M0
+    // affordance for "pack is a member" (HEAD `packs/*`).
+    async fn exists<'a>(
+        ctx: &'a Ctx,
+        repository: &'a str,
+        id: [u8; 32],
+        hint: Option<&'a str>,
+    ) -> Result<bool, Failure> {
+        let body = PackExistsRequest {
+            pack_id: Some(id.to_vec()),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let mut headers = read_headers(ctx, Rpc::PackExists, &body, repository);
+        if let Some(hint) = hint {
+            headers.push(("x-mkit-ref".into(), hint.into()));
+        }
+        let reply: PackExistsResponse = want_ok(
+            ctx.client().unary(Rpc::PackExists, body, &headers).await?,
+            "membership PackExists",
+        )?;
+        Ok(reply.exists == Some(true))
     }
-    .encode_to_vec();
-    let mut headers = read_headers(ctx, Rpc::PackExists, &body, repository);
-    if let Some(hint) = hint {
-        headers.push(("x-mkit-ref".into(), hint.into()));
-    }
-    let reply: PackExistsResponse = want_ok(
-        ctx.client().unary(Rpc::PackExists, body, &headers).await?,
-        "membership PackExists",
-    )?;
+    let got = if member && !ctx.profile().planted_membership {
+        eventually_listed(
+            "membership PackExists",
+            || exists(ctx, repository, id, hint),
+            |m| *m,
+        )
+        .await?
+    } else {
+        exists(ctx, repository, id, hint).await?
+    };
     ensure!(
-        reply.exists == Some(member),
-        "PackExists with hint {hint:?}: expected {member}, got {:?}",
-        reply.exists
+        got == member,
+        "PackExists with hint {hint:?}: expected {member}, got {got}"
     );
     let body = frame(
         &DownloadPackRequest {
@@ -454,21 +476,79 @@ async fn pack_read(ctx: &Ctx, repository: &str, hint: Option<&str>, member: bool
     Ok(())
 }
 
-/// The planted membership fixtures exist only where a harness seeds them
-/// (`Profile::planted_membership`): an in-process baseline, never a served
-/// deployment.
-fn planted(ctx: &Ctx) -> CaseResult {
-    if !ctx.profile().planted_membership {
-        return Err(Failure::Skip(
-            "needs planted membership fixtures (in-process baseline only)".into(),
-        ));
+/// The membership fixtures a served deployment does not plant are seeded
+/// over the wire instead (M2): a real ticketed push by `repository`'s
+/// `repository-a` signer — a BeginUpload for `refs/heads/main`, the
+/// ticketed UploadPack of `ctx.ns()`'s bytes, and a ticketed AdvanceRefs
+/// head/packmap pair consuming the ticket into membership. The in-process
+/// baseline planted them already, so this is a no-op there.
+async fn seed_membership(ctx: &Ctx, repository: &str) -> CaseResult {
+    if ctx.profile().planted_membership {
+        return Ok(());
     }
-    Ok(())
+    use mkit_transport_connect::generated::__buffa::oneof::{
+        begin_upload_response::Result as BeginResult, upload_pack_request::Body as UploadBody,
+    };
+    use mkit_transport_connect::generated::{
+        AdvanceOutcome, AdvanceRefsResponse, BeginUploadRequest, BeginUploadResponse,
+    };
+
+    let pack = ctx.ns().into_bytes();
+    let id = hash(&pack);
+    let signer = ctx.v2_signer("repository-a")?;
+    let begin = BeginUploadRequest {
+        r#ref: Some("refs/heads/main".to_owned()),
+        pack_id: Some(id.to_vec()),
+        bytes: Some(pack.len() as u64),
+        ..Default::default()
+    };
+    let opened: BeginUploadResponse = want_ok(
+        ctx.send(&sign_unary(&signer, Rpc::BeginUpload, &begin, |env| {
+            env.repository = repository.to_string();
+        }))
+        .await?,
+        "membership seed BeginUpload",
+    )?;
+    let Some(BeginResult::Ticket(ticket)) = opened.result else {
+        return Err(Failure::Fail(format!(
+            "membership seed BeginUpload returned {opened:?}"
+        )));
+    };
+    let mut msgs = upload_msgs(&pack, 2);
+    if let Some(UploadBody::Header(header)) = &mut msgs[0].body {
+        header.ticket_token = ticket.token;
+    }
+    let mut envelope = signer.envelope(
+        Rpc::UploadPack.procedure(),
+        pack_commitment(&id, pack.len() as u64),
+    );
+    repository.clone_into(&mut envelope.repository);
+    let headers = signer.sign(&envelope).headers;
+    ensure!(
+        ctx.upload_with(&msgs, &headers).await?.is_none(),
+        "membership seed UploadPack failed"
+    );
+    // The head/packmap pair the ticket binds to, consuming it into the
+    // pack's membership in `repository`.
+    let mut advance = advance_req(
+        ("refs/heads/main", Exp::Missing, &A),
+        ("refs/mkit/packmap/main", Exp::Missing, &B),
+    );
+    advance.ticket_ids = vec![ticket.id.unwrap_or_default()];
+    let response: Result<AdvanceRefsResponse, _> = ctx
+        .send(&sign_unary(&signer, Rpc::AdvanceRefs, &advance, |env| {
+            env.repository = repository.to_string();
+        }))
+        .await?;
+    want_outcome(
+        response.map(|r| r.outcome.map_or(0, |o| o.to_i32())),
+        AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
+    )
 }
 
 pub(super) async fn isolation_packs(ctx: Ctx) -> CaseResult {
-    planted(&ctx)?;
     let (repo_a, repo_other_namespace) = identities(&ctx, "packs", "packs")?;
+    seed_membership(&ctx, &repo_a).await?;
     let namespace = repo_a
         .split_once('/')
         .ok_or("repository has no namespace")?
@@ -492,7 +572,11 @@ pub(super) async fn membership_read_your_writes(ctx: Ctx) -> CaseResult {
             "requires separate membership and ref shards (D34)".into(),
         ));
     }
-    planted(&ctx)?;
+    if !ctx.profile().planted_membership {
+        return Err(Failure::Skip(
+            "needs the membership index held undelivered; a served deployment's relay may deliver at any time".into(),
+        ));
+    }
     let (repository, _) = identities(&ctx, "packs", "unused")?;
     set(&ctx, &repository, "main", &A).await?;
     // No relay runs in this baseline: only refs/heads/main holds membership.
@@ -505,8 +589,8 @@ pub(super) async fn membership_read_your_writes(ctx: Ctx) -> CaseResult {
 }
 
 pub(super) async fn malformed_membership_hint(ctx: Ctx) -> CaseResult {
-    planted(&ctx)?;
     let (repo_a, repo_b) = identities(&ctx, "packs", "packs")?;
+    seed_membership(&ctx, &repo_a).await?;
     set(&ctx, &repo_a, "main", &A).await?;
     set(&ctx, &repo_b, "main", &B).await?;
     // A positive control proves the blob exists and malformed hints cannot

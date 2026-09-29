@@ -232,16 +232,21 @@
 //! | `repo.membership_read_your_writes` | `multi-repo`, `auth-v2`; D34 | unrelayed membership is visible only with its ref hint |
 //! | `repo.malformed_membership_hint_no_op` | `multi-repo`, `auth-v2` | malformed, unserved and oversized hints are ignored |
 //!
-//! The three planted membership cases run only against a target whose
-//! harness seeds membership fixtures (`Profile::planted_membership`); on
-//! any served deployment they skip with "needs planted membership
-//! fixtures (in-process baseline only)". The in-process Multi baseline
-//! seeds blob bytes `conformance/<run_id>/<case>` and their BLAKE3
-//! membership in repository `packs`, owned by that case's `repository-a`
-//! signer. Isolation and malformed-hint fixtures populate the membership
-//! index and `refs/heads/main`; read-your-writes populates only that ref
-//! shard and requires D34 (its D34 skip comes first). No relay runs while
-//! the read-your-writes case checks the lagging index.
+//! The three membership cases run against a target whose harness seeds
+//! membership fixtures (`Profile::planted_membership`); on a served
+//! deployment each seeds its own fixture through a real ticketed push —
+//! BeginUpload for `refs/heads/main`, the ticketed upload, and a ticketed
+//! AdvanceRefs pair consuming the ticket — by that case's `repository-a`
+//! signer into `<ns>/packs`, and member-true reads poll while the relay
+//! catches up. The in-process Multi baseline seeds blob bytes
+//! `conformance/<run_id>/<case>` and their BLAKE3 membership in
+//! repository `packs`, owned by that case's `repository-a` signer.
+//! Isolation and malformed-hint fixtures populate the membership index
+//! and `refs/heads/main`; read-your-writes populates only that ref shard
+//! and requires D34 (its D34 skip comes first, and on served deployments
+//! it still skips — the index cannot be held undelivered against a live
+//! relay). No relay runs while the read-your-writes case checks the
+//! lagging index.
 //!
 //! # The `test-faults` contract
 //!

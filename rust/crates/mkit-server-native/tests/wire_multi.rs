@@ -3,8 +3,9 @@
 //! `mkit-server serve` wiring (`config::resolve`, then `server::open`)
 //! started with `--addressing multi`: FS blobs under the root, `SQLite`
 //! metadata, auth v2, and the namespace allowlist this profile derives.
-//! The planted-membership cases seed fixtures only in the in-process
-//! baseline, so they skip here.
+//! The membership cases seed their fixture through a real ticketed push;
+//! only `membership_read_your_writes` still skips (it needs D34's held
+//! undelivered index).
 
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in tests
 
@@ -101,18 +102,12 @@ async fn wire_suite_multi_sqlite_auth_v2() {
             case.name.contains(filter) && case.requires.contains(&Feature::MultiRepo)
         }) {
             match case.name {
-                // The membership fixtures exist only in the in-process
-                // baseline; its read-your-writes case keeps its D34 reason.
+                // The read-your-writes case keeps its D34 skip; the other
+                // membership cases seed over the wire and run.
                 "repo.membership_read_your_writes" => assert!(
                     matches!(report.verdict(case.name), Some(Verdict::Skip(reason))
                         if reason == "requires separate membership and ref shards (D34)"),
                     "{} did not skip with its D34 reason",
-                    case.name
-                ),
-                "repo.isolation_packs" | "repo.malformed_membership_hint_no_op" => assert!(
-                    matches!(report.verdict(case.name), Some(Verdict::Skip(reason))
-                        if reason == "needs planted membership fixtures (in-process baseline only)"),
-                    "{} did not skip for planted membership",
                     case.name
                 ),
                 _ => assert!(

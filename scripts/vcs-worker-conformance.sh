@@ -31,8 +31,9 @@
 #                  ADDRESSING=multi and the namespace allowlist the run's
 #                  fixed seed and run id derive, then the Multi wire cases
 #                  (repo., repository., policy., tickets.advance_other_repository,
-#                  info.). The planted-membership cases skip: they need the
-#                  in-process baseline's fixtures.
+#                  info.). The membership cases seed their fixture over the
+#                  wire; only repo.membership_read_your_writes still skips —
+#                  its membership index must stay undelivered.
 #   -- ARGS        passed to every `mkit-server-conformance wire` run (e.g.
 #                  `-- --filter refs.`, `-- --list-refs 1000`).
 #
