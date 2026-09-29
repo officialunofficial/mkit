@@ -445,6 +445,67 @@ impl Admission for DefaultAdmission {
     }
 }
 
+/// One of two hook implementations, chosen when the server is configured: a
+/// local default or a remote adapter. It implements each stage trait both
+/// sides do and forwards [`Authorizer::is_open`] and [`Admission::is_default`],
+/// which the pipeline reads (an authority role refuses an open authorizer, and
+/// only the default admission carries the built-in quota).
+#[derive(Debug, Clone)]
+pub enum Choice<L, R> {
+    /// The first implementation.
+    Left(L),
+    /// The second implementation.
+    Right(R),
+}
+
+impl<L: Authorizer, R: Authorizer> Authorizer for Choice<L, R> {
+    fn is_open(&self) -> bool {
+        match self {
+            Self::Left(l) => l.is_open(),
+            Self::Right(r) => r.is_open(),
+        }
+    }
+
+    async fn authorize(&self, op: &Operation) -> Result<AuthzFacts, ServerError> {
+        match self {
+            Self::Left(l) => l.authorize(op).await,
+            Self::Right(r) => r.authorize(op).await,
+        }
+    }
+}
+
+impl<L: Admission, R: Admission> Admission for Choice<L, R> {
+    fn is_default(&self) -> bool {
+        match self {
+            Self::Left(l) => l.is_default(),
+            Self::Right(r) => r.is_default(),
+        }
+    }
+
+    async fn admit(&self, input: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
+        match self {
+            Self::Left(l) => l.admit(input).await,
+            Self::Right(r) => r.admit(input).await,
+        }
+    }
+}
+
+impl<L: OutcomeSink, R: OutcomeSink> OutcomeSink for Choice<L, R> {
+    async fn deliver(&self, outcome: &Outcome) -> Result<(), DeliveryError> {
+        match self {
+            Self::Left(l) => l.deliver(outcome).await,
+            Self::Right(r) => r.deliver(outcome).await,
+        }
+    }
+
+    async fn deliver_batch(&self, outcomes: &[Outcome]) -> Vec<Result<(), DeliveryError>> {
+        match self {
+            Self::Left(l) => l.deliver_batch(outcomes).await,
+            Self::Right(r) => r.deliver_batch(outcomes).await,
+        }
+    }
+}
+
 /// No pre-receive checks.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoPreReceive;

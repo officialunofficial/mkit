@@ -1,0 +1,13 @@
+// TEST-ONLY. A stand-in for a hook Worker (SPEC-SERVER §6, §7.3): it is what
+// `wrangler.hooks.jsonc`'s `ADMISSION_HOOK` service binding points at, so
+// scripts/vcs-worker-hooks.sh can drive the vcs-worker's hook channel under a
+// real local workerd. Not deployable, not a product: the 3.14 reference Worker
+// (docs/examples/mppx-admission-worker) is the model of a real one.
+{
+  "name": "mkit-hook-stub",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-09-09",
+  // Isolated by design (SPEC-SERVER §7.3): no public route.
+  "workers_dev": false,
+  "preview_urls": false
+}

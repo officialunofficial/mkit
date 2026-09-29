@@ -3583,6 +3583,7 @@ dependencies = [
  "testcontainers",
  "testcontainers-modules",
  "tokio",
+ "tokio-rustls",
  "tower",
  "tower-http",
  "tracing",

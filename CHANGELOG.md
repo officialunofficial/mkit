@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: the native server can run authorization, admission and outcome
+  delivery in a remote hook service over signed HTTPS (`--hook-authorize-url`,
+  `--hook-admit-url`, `--hook-outcome-url`, `--hook-key-file`, `--hook-timeout-secs`,
+  `--authorizer-role`; `mkit-server hook-key-list` prints the public key list).
+  Plain HTTP is loopback-only, redirects are never followed, the hook key must
+  differ from the ticket and enc keys, and a remote admission replaces the
+  default abuse quota. New in `mkit-server`: `pipeline::Choice`,
+  `hooks::HookVerifier` (the hook service's side of the signature),
+  `HookSigner::public_key`, `TicketKeys::contains_secret`; new in
+  `mkit-server-native`: `server::open_with` (WP-3.8).
+- Server: the Workers adapter can call a hook Worker over an unsigned
+  `ADMISSION_HOOK` service binding (`HOOK_ROLES`, `HOOK_TIMEOUT_MS`,
+  `AUTHORIZER_ROLE`), and `adapter::fetch_with` and `ns_object_with` take a
+  deployment's own `HookSet` and outcome sink (WP-3.9). The Queue outcome sink
+  and a signed Worker webhook are deferred (WP-3.9b).
 - Server (Stage 2, inert): `mkit-server` gains the default-off `http-objects`
   feature: `Pipeline::serve_http_object` serves repository objects and ref paths
   per SPEC-HTTP-OBJECTS (the URL grammar, published resolution, a bounded
