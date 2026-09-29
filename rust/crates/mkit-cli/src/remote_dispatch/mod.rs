@@ -2112,7 +2112,7 @@ pub fn pull_all_with(
     // per branch, around only the local unpack + remote-ref-publish window
     // (#642 — see `packmap::apply_fetched_chain`). No lock is held here
     // across the network transfer.
-    let n = fetch_objects(&store, &layout, tx, remote, require_signed)?;
+    let n = fetch_objects(&store, &layout, tx, remote, target_branch, require_signed)?;
     let remote_refs = crate::commands::list_remote_refs_parallel(&layout, remote)?
         .into_iter()
         .filter_map(|r| r.hash.map(|hash| (r.name, hash)))
@@ -2254,7 +2254,7 @@ pub fn fetch_all_with(
     // network transfer. See `packmap::resolve_and_download_chain` /
     // `apply_fetched_chain` and `fetch_objects_inner` below.
     let store = crate::commands::open_store_configured(&layout)?;
-    fetch_objects(&store, &layout, tx, remote, require_signed)
+    fetch_objects(&store, &layout, tx, remote, None, require_signed)
 }
 
 /// Reconstruct every remote `refs/heads/*` from its packmap chain and
@@ -2286,7 +2286,9 @@ pub fn fetch_all_with(
 /// survived), the very first symptom is exactly this closure check
 /// failing, not a download/unpack error — the retry has to cover both.
 ///
-/// Both ends fail loudly: an absent packmap is [`DispatchError::PackmapMissing`]
+/// Both ends fail loudly: an absent packmap beside a present head is
+/// [`DispatchError::PackmapMissing`] (a head absent too is a stale listing,
+/// STC §7.9: the branch is skipped and its tracking ref left untouched)
 /// and a present-but-incomplete packmap (even after the self-heal retry) is
 /// [`DispatchError::RemoteMissingObject`]. We never publish a
 /// remote-tracking ref to a closure we couldn't fully materialise locally.
@@ -2330,15 +2332,30 @@ pub fn fetch_all_with(
 /// #267 GC-prune race: `gc` takes the very same lock before computing its
 /// live set, so it can never observe a branch's objects on disk without
 /// that branch's ref already published.
+///
+/// `target_branch` (a `clone -b` / `pull` target) is fetched even when an
+/// eventual `ListRefs` (D34, STC §7.9) has not caught up with it: the branch
+/// is strongly read by name, fetched if present, and
+/// [`DispatchError::RemoteBranchMissing`] if absent. Never an exit-0 empty
+/// clone for `-b`.
 fn fetch_objects(
     store: &ObjectStore,
     layout: &RepoLayout,
     tx: &dyn Transport,
     remote: &str,
+    target_branch: Option<&str>,
     require_signed: bool,
 ) -> Result<usize, DispatchError> {
     let mut applied = AppliedPacks::load_or_empty(layout, remote);
-    let result = fetch_objects_inner(store, layout, tx, remote, &mut applied, require_signed);
+    let result = fetch_objects_inner(
+        store,
+        layout,
+        tx,
+        remote,
+        target_branch,
+        &mut applied,
+        require_signed,
+    );
     persist_record(&mut applied, remote);
     result
 }
@@ -2350,12 +2367,27 @@ fn fetch_objects_inner(
     layout: &RepoLayout,
     tx: &dyn Transport,
     remote: &str,
+    target_branch: Option<&str>,
     applied: &mut AppliedPacks,
     require_signed: bool,
 ) -> Result<usize, DispatchError> {
-    let remote_refs = tx
+    let mut remote_refs = tx
         .list_refs("refs/heads/")
         .map_err(|error| repository_operation_error(tx, error))?;
+    if let Some(branch) = target_branch
+        && !remote_refs.iter().any(|r| r.name == branch)
+    {
+        // The listing may be stale (eventual under D34): a strong read by
+        // name decides whether the branch exists. A transport error here
+        // propagates; only `Ok(None)` is the "no such branch" verdict.
+        match tx.read_ref(&format!("refs/heads/{branch}"))? {
+            Some(hash) => remote_refs.push(refs::Ref {
+                name: branch.to_owned(),
+                hash: Some(hash),
+            }),
+            None => return Err(DispatchError::RemoteBranchMissing(branch.to_owned())),
+        }
+    }
     let mut n = 0;
     // Batch every fetched branch's remote-tracking-ref write (#645): see
     // `push_all_with` for the same pattern and its rationale. `tracking.write`
@@ -2376,8 +2408,26 @@ fn fetch_objects_inner(
             // a format we degrade to: the push path ALWAYS advertises a packmap
             // before moving the branch ref. A real transport error (network blip,
             // auth) propagates unchanged — only `Ok(None)` is the explicit
-            // "no packmap" verdict, and it is now an error.
+            // "no packmap" verdict.
+            //
+            // The one exception is a stale listing (STC §7.9): `ListRefs` is
+            // eventual, so under D34 a branch deleted since the listing can
+            // still be named. Re-read the head strongly: absent too means the
+            // listing is stale, so skip the branch and write no tracking ref;
+            // present means corruption (a head and its packmap share a shard),
+            // which stays `PackmapMissing`. A transport error on the re-read
+            // propagates and never becomes a skip.
             let Some(chain_head) = tx.read_ref(&packmap_ref(&r.name))? else {
+                if tx.read_ref(&format!("refs/heads/{}", r.name))?.is_none() {
+                    if crate::progress::should_report(false) {
+                        eprintln!(
+                            "fetch: skipping branch `{}`: listed by an eventual ListRefs but \
+                             no longer present (deleted since the listing)",
+                            r.name
+                        );
+                    }
+                    continue;
+                }
                 return Err(DispatchError::PackmapMissing(r.name.clone()));
             };
 

@@ -58,10 +58,12 @@ The M1 exit criteria:
   revocation (revoke during an in-flight write, a paused write reaching its shard after lease expiry, an idle shard
   waking after a revocation, lease expiry racing an ack), many-ref write throughput in one repo,
   `BeginUpload` with a target ref, ticket caps, ListRefs merge pagination under the RPC limit, and bounded growth.
-- A real `mkit` push and clone works against staging.
-- Conformance runs against deployed staging (not only `wrangler dev`, whose DO bindings are always local). During the
+- ~~A real `mkit` push and clone works against staging.~~ **Superseded (R-154, R-159):** Stage 1's exit evidence is
+  local runs (`m1-exit-report.md`); staging is ops work after REL-1.
+- ~~Conformance runs against deployed staging (not only `wrangler dev`, whose DO bindings are always local). During the
   epic the orchestrator runs it locally against staging; the `server-staging.yml` workflow triggers only on `main`,
-  `schedule` or dispatch against `main`, and runs for the first time on the final PR to `main`.
+  `schedule` or dispatch against `main`, and runs for the first time on the final PR to `main`.~~ **Superseded
+  (R-154, R-159):** no staging run gates Stage 1; the suites run on native and `wrangler dev`.
 
 Consolidation changes (00-plan.md reconciliation log): WP-1.1 is folded into S1 (Q18). D34 adds WP-1.22 to WP-1.29
 and reshapes 1.7, 1.8, 1.9, 1.10, 1.14 and 1.21. The part-upload shape follows S1 §7.6 (stateless ticket token,
@@ -253,7 +255,8 @@ Folded into WP-S1 §7.6/§7.8/§7.9 (adopted Q18 default). Every former dependen
   relay; `ListRefs` k-way merges the buckets for a prefix behind an opaque cursor (the last emitted name), paginated
   with S1's fields and a **≤ 2 MiB** response budget (R-78: below connectrpc's default 4 MiB client message limit);
   `ReadRef` stays on the ref shard (strong). Flip the default of `--sharding` to `d34` for the native SQLite and
-  Worker deployments.
+  Worker deployments. **No single → D34 migration ships: superseded by R-123 and R-157** (a mismatched database is
+  refused; operators pin `--sharding single` / `SHARDING=single`).
 - **Known cost (R-82):** a live (signed or writer) ListRefs page reads all 16 buckets, i.e. 16 DO calls per page on
   Workers, issued at most 4 at a time (M0-16's fan-out cap). Unsigned ListRefs is served from the per-bucket
   snapshots (1.21) instead, and a scan-limit per bucket keeps each call small. Documented in the operator README.
@@ -474,15 +477,15 @@ Folded into WP-S1 §7.6/§7.8/§7.9 (adopted Q18 default). Every former dependen
 
 ### WP-1.27 M1 conformance: D34, tickets and growth cases (wire + storage + load)
 
-- **Depends on:** WP-1.9, WP-1.10, WP-1.14, WP-1.25, WP-1.26, WP-1.28.
+- **Depends on:** ~~WP-1.9, WP-1.10, WP-1.14, WP-1.25, WP-1.26, WP-1.28~~ **superseded by the registry (R-159): 1.9b, 1.10, 1.14, 1.25, 1.26b, 1.28c.**
 - **Goal:** add the M1 cases to `mkit-server-conformance` (milestone M1, features `MultiRepo`, `Tickets`):
   multi-repo isolation; namespace policy; `BeginUpload` with a target ref (ticket can't be consumed by another ref);
   open-ticket caps; lag windows for membership and ListRefs (using the relay-delay fault); **D36 read-your-writes:
   a pusher's `PackExists`/`DownloadPack` with `X-Mkit-Ref` sees its just-advanced packs immediately while the relay
   is delayed, and the header never reveals another repo's packs or a ref of another repo**; epoch-lease revocation
   (revoke during an in-flight write, the paused-write/failed-push/expired-lease case of R-63, idle shard waking
-  after a revocation, lease expiry racing an ack) via the test bump endpoint; many-ref write throughput in one repo (64 refs written concurrently; on staging assert
-  aggregate throughput ≥ 8× a single hot ref; on `wrangler dev` only correctness); bounded growth (replay, quota,
+  after a revocation, lease expiry racing an ack) via the test bump endpoint; many-ref write throughput in one repo (64 refs written concurrently; ~~on staging assert
+  aggregate throughput ≥ 8× a single hot ref~~ **superseded (R-154, R-159): no staging bar**; on `wrangler dev` only correctness); bounded growth (replay, quota,
   tickets and outbox key counts shrink back after load + clock skew); ListRefs merge pagination across ref-index
   buckets with a > 32 MiB total listing and every page ≤ 2 MiB.
 - **Size:** L (~1400).

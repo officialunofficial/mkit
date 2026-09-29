@@ -309,6 +309,12 @@ pub(crate) async fn run_timers<S: crate::NamespaceStore>(
                 target: crate::store::BorrowedStore(store),
                 hook: NoHook,
                 budget: RelayBudget::default(),
+            })
+            // Kind 5: the ref shard's namespace quota rollup, so a Multi
+            // conformance case can force one after skewing the clock.
+            .register(crate::timers::quota_rollup::QuotaRollup {
+                coordinator: crate::store::BorrowedStore(store),
+                metrics: crate::telemetry::NoopMetrics,
             });
         // Bounded: rows this registry doesn't know (for example other timer
         // kinds) can keep a tick stopped on budget with nothing fired.

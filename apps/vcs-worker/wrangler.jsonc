@@ -32,7 +32,9 @@
     "AUTH_REPOSITORY": "default",
     "WORKERS_PLAN": "free",
     // The root RefStore sharding marker refuses changes over existing data (R-94).
-    "SHARDING": "single"
+    // d34 is the default; a deployment holding single-sharded data must pin
+    // "single" (there is no migration, R-123), or every RPC answers 503.
+    "SHARDING": "d34"
     // ADDRESSING=multi serves every namespace its policy admits and
     // requires TICKET_KEYS. Like SHARDING, ADDRESSING installs a root marker
     // (`am 00`) on the first request; changing it over existing data is
@@ -41,6 +43,10 @@
     // comma-separated, `#` comments allowed. NAMESPACE_POLICY=any admits
     // every namespace and requires UNSAFE_OPEN_NAMESPACES=true (D27;
     // development only).
+    // Write grants are off unless GRANT_SCHEMES (comma-separated owner schemes)
+    // is set; it needs ADDRESSING=multi, and the audience is AUTH_AUDIENCE.
+    // WEBAUTHN_RPS lists relying parties as `id=origin[,origin...]` entries
+    // separated by `;` or newlines. Neither is shipped here.
     // Optional NAMESPACE_LOCATION_HINT / NAMESPACE_JURISDICTION are deployment-wide.
     // Jurisdiction (eu, us, fedramp) is fixed for the deployment lifetime:
     // changing it re-maps all names to new, empty objects.

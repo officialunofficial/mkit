@@ -1588,6 +1588,16 @@ existence oracle (§7.4).
 An index lags per bucket, so a listing need not reflect a single instant;
 a branch head and its packmap may appear at different ages.
 
+**Stale listings.** A client that fetches every listed branch MUST
+tolerate a listing that names a branch deleted since the listing. When
+the `ReadRef` of a listed branch's packmap finds no ref, the client MUST
+re-read `refs/heads/<name>` strongly. If that head is also absent, the
+listing was stale: the client MUST skip the branch and MUST NOT create or
+update its tracking ref. If the head is present, the remote is corrupt (a
+head and its packmap share one strongly consistent shard) and the client
+MUST fail. A transport error on either read MUST fail the fetch and MUST
+NOT be treated as a stale listing.
+
 **Read-your-writes for packs.** `PackExists` and `DownloadPack` MAY
 carry an optional header naming a ref of the same repository whose
 packmap listed the pack:
@@ -1685,6 +1695,7 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
+| `2` (WP-1.28c) | draft | §7.9 states the client rule for stale listings: a listed branch whose packmap and head are both strongly absent is skipped without a tracking ref; a present head with no packmap and any transport error stay failures. |
 | `2` (WP-1.15) | draft | §7.4's ssh/enc paragraph gains ssh root mode (`mkit serve --root`, one repository per process addressed by `<NAMESPACE>/<NAME>`) and the enc `--enc-repository` listener binding, and notes the same-session implicit-membership rule transport-identity sessions use in place of upload tickets (informative). |
 | `2` (WP-1.28b) | draft | §7.9 clarifies per-bucket ListRefs index lag and head/packmap age differences. |
 | `2` (WP-1.11b) | draft | §5 and §7.6: a part receipt bound to another ticket is an invalid receipt (`invalid_argument`), with no cross-ticket oracle. |

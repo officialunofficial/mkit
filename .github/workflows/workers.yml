@@ -366,11 +366,16 @@ jobs:
       - name: Install worker-build
         run: cargo install worker-build --locked --version 0.8.6
 
-      - name: Wire suite (release features)
+      # D34 is the default sharding (WP-1.28c); the explicit single phase
+      # keeps the snapshot round-trip and single-sharding growth coverage.
+      - name: Wire suite (release features, D34)
         run: scripts/vcs-worker-conformance.sh
 
-      - name: Wire suite (test-faults)
-        run: scripts/vcs-worker-conformance.sh --test-faults
+      - name: Wire suite (test-faults, D34, Multi)
+        run: scripts/vcs-worker-conformance.sh --test-faults --multi
+
+      - name: Wire suite (test-faults, single sharding)
+        run: scripts/vcs-worker-conformance.sh --test-faults --sharding single
 
   # Stable required-check name for branch protection. Always runs on PRs
   # (if: always()) so the status is never absent — closing the
