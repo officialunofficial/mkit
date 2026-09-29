@@ -1360,7 +1360,7 @@ parsing, unit call-count/isolation tests and Multi wire membership cases.
 **Always:** a batch that appends relay rows carries an epoch lease on its
 source shard. Only ref shards are relay sources. A new relay source class
 requires its own coordinator watermark design before it can append rows.
-This binds WP-1.10 (#1188), 4.10, 5.3b, 5.6 and 5.7b. The namespace
+This binds WP-1.10 (#1188), 4.7, 4.8, 4.10, 5.3b, 5.6 and 5.7b. The namespace
 watermark bounds every undelivered relay row's **commit time** from below;
 consumers compare it against `T + MAX_APPLY_WINDOW + margin`.
 

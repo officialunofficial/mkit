@@ -386,7 +386,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
         }
         tracing::warn!(shard = ?p, attempts = LEASE_GRANT_ATTEMPTS, "coordinator lease grant did not settle");
-        Err(internal("coordinator lease grant did not settle"))
+        Err(ServerError::aborted_retryable(
+            "coordinator lease grant contention",
+        ))
     }
 }
 
