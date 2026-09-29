@@ -1,0 +1,5 @@
+---
+source: crates/mkit-cli/tests/grant_e2e.rs
+expression: "owner.ok(&[\"grant\", \"list\", \"--check\", \"--remote\", \"origin\", \"--json\"])"
+---
+[{"id":"<hex>","namespace":"ed25519-<hex>","scope":"ed25519-<hex>/*","grantee":"<hex>","capabilities":"read","ref_scopes":"-","audiences":["http://127.0.0.1:<port>"],"epoch":3,"created_ms":<ms>,"expiry_ms":<ms>,"scheme":"ed25519","status":"valid","epoch_status":"stale epoch"},{"id":"<hex>","namespace":"ed25519-<hex>","scope":"ed25519-<hex>/*","grantee":"<hex>","capabilities":"read","ref_scopes":"-","audiences":["http://127.0.0.1:<port>"],"epoch":4,"created_ms":<ms>,"expiry_ms":<ms>,"scheme":"ed25519","status":"valid","epoch_status":"epoch current"},{"id":"<hex>","namespace":"ed25519-<hex>","scope":"ed25519-<hex>/*","grantee":"<hex>","capabilities":"read","ref_scopes":"-","audiences":["http://127.0.0.1:<port>"],"epoch":5,"created_ms":<ms>,"expiry_ms":<ms>,"scheme":"ed25519","status":"valid","epoch_status":"future epoch"}]

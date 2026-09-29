@@ -1331,7 +1331,7 @@
       "2.8"
     ],
     "size": "M",
-    "summary": "Adds mkit epoch show/bump and grant revoke as an epoch bump bound to the remote's audience, reporting which local grants become invalid.",
+    "summary": "Adds mkit epoch show/bump, grant revoke and mkit visibility set as statements bound to the remote's audience, waiting out Retry-After and reporting which local grants become invalid.",
     "human_action": false,
     "area_gates": [
       "rust",

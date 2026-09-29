@@ -1348,6 +1348,91 @@ Agent integration:
   claude mcp add mkit-repo -- mkit mcp --repository /path/to/repo
   ```
 
+Grants, epochs and repository visibility ([SPEC-WRITE-GRANTS](specs/SPEC-WRITE-GRANTS.md)):
+
+A *grant* is a statement signed by a namespace owner that lets a grantee's key
+read or write repositories in that namespace on a deployment. `mkit grant`
+manages the grants **you hold**; the store is a directory of files under the
+user config directory. It is not the operator-side `mkit-server grant register`
+(WP-2.12, for ssh/enc transport principals on a server): the two names are
+unrelated commands.
+
+- `mkit grant create --cap CAP --grantee HEX (--repo NAME | --all)
+  [--refs PATTERN=FLAGS]... [--audience ORIGIN]... [--ttl DURATION]
+  [--epoch N | --offline] [--namespace NS] [--remote REMOTE] [--store]`
+  &mdash; create an owner-signed grant and print its header (give it to the grantee).
+  `CAP` is `read`, `read,write` or `write` (`write,read` is accepted and spelled
+  canonically). `--refs` is `pattern=flags` with flags from `cufd`, required with
+  write and not allowed with read (a server without indexed mode cannot check a
+  fast-forward, so it applies an update to an existing ref only under `f`: use
+  `cuf`, not `cu`, for pushes that move a branch); audiences, ref scopes and flags are sorted and
+  deduplicated. `--ttl` is at most `30d` (default `7d`). The epoch defaults to the
+  remote's current one (`GetGrantEpoch`) or `0` with `--offline`; the audience
+  defaults to the trusted remote's origin. `--store` also adds it to your own store.
+- `mkit grant add [--remote REMOTE | --offline] <file|->` &mdash; verify a grant
+  header's owner signature and add it to your grant store. Idempotent on the same
+  grant id. Anything the verifier rejects is refused with the rule named. It then
+  makes one short attempt to ask the trusted (or `--remote`) deployment for the
+  namespace's epoch and warns when the grant's epoch is above it (see the epoch
+  rule below); if that check fails it warns and stores anyway, and `--offline`
+  skips it.
+- `mkit grant list [--check] [--remote REMOTE] [--json]` &mdash; id, namespace,
+  scope, capabilities, ref scopes, audiences, epoch, expiry and status
+  (`valid`, `expired`, `not yet valid`). `--check` asks the trusted (or named)
+  remote for each namespace's epoch and marks `stale epoch` / `future epoch`, only
+  for grants whose audiences include that remote (others are `unchecked`).
+  It never contacts an origin that a grant file merely names.
+- `mkit grant revoke <remote> [--namespace NS] [--audience ORIGIN]... [--prune]
+  [--timeout DURATION]` &mdash; sugar for `mkit epoch bump --by 1`. It first lists
+  the local grants the bump invalidates, and afterwards prints how to reissue.
+  A grant that also lists an audience the bump does not cover stays valid there:
+  it is listed as "still valid at ..." and kept. `--prune` deletes only the grants
+  every audience of which the bump covers, once it succeeds.
+- `mkit epoch show <remote> [--namespace NS] [--json]` &mdash; the epoch the remote
+  stores for a namespace (0 if never set).
+- `mkit epoch bump <remote> [--by N] [--namespace NS] [--audience ORIGIN]...
+  [--timeout DURATION] [--json]` &mdash; raise the epoch by `N` (1 to 1024,
+  default 1), revoking every grant issued at a lower epoch. The statement is signed
+  once. While the server answers `unavailable` with `Retry-After`, `bump` waits
+  (1 to 60 s per wait) and re-sends the **identical statement**, up to
+  `--timeout` (default `5m`). Ctrl-C cancels and says the bump may still finish on
+  the server; check `mkit epoch show` before running it again, because a new run
+  signs a new statement and would raise the epoch again.
+- `mkit visibility set <remote> public|private [--statement] [--audience ORIGIN]...
+  [--timeout DURATION]` &mdash; switch a repository between public and private.
+  By default it is a signed request with the repository signing key
+  (`transport_auth = envelope`, a trusted remote, and the owner's key). With
+  `--statement` it sends an owner-signed `mkit-repo-visibility:v1` statement
+  with no envelope, which any owner scheme can sign.
+
+Signing flags (`grant create`, `epoch bump`, `grant revoke`, `visibility set
+--statement`): the owner signs with the mkit signing key (`ed25519`, the
+default; the namespace is `ed25519-<pubkey>`) or, with `--scheme
+secp256k1-eip191`, with a software-keystore secp256k1 key (`key.secp256k1_ref`;
+the namespace is its `0x` address). A wallet or authenticator signs by import:
+`--print-statement` writes the exact statement bytes to stdout (the digest or
+challenge to sign goes to stderr); then rerun with `--statement-file <that
+file>` and either `--signature <hex>` (65 bytes `r‖s‖v`, `v` of 0, 1, 27 or 28,
+a high `s` is normalized) or `--webauthn-assertion <file>` (JSON with base64url
+`publicKey` (x‖y), `authenticatorData`, `clientDataJSON` and `signature`, DER or
+low-`s` raw). A `webauthn-p256` import is refused unless the user config pins the
+relying party with `grant.webauthn_rp = <rp_id> <origin>...`. Every header is
+verified locally before it is stored or sent.
+
+How a held grant is used: `mkit push`, `pull`, `fetch` and `clone` attach the best
+grant from your store to each signed request, for the key that signs them. Among
+the grants valid for the request, the **higher epoch wins**, then the most
+specific repository and ref scope, then the latest expiry, then the greater
+header bytes. A grant pre-issued for epoch *e*+1 therefore outranks a live
+epoch-*e* grant until the owner raises the epoch. A **write-only grant never
+implies read on a private repository** (only `GetReceipt` accepts it). Each signed
+read may prompt for a signature when your key needs a touch or a passphrase.
+Epochs are per deployment, so a grant lists the audiences it is valid at.
+The grant store directory is never followed through a symlink: if
+`$XDG_CONFIG_HOME/mkit/grants` is a symlink, mkit refuses it rather than trust
+where it points. Files are read without following symlinks and only files named
+`<64 hex>.grant` are considered.
+
 Config / keys / version:
 
 - `mkit keygen` &mdash; generate a new Ed25519 signing keypair.
@@ -1578,7 +1663,7 @@ Stored in `.mkit/config` as `key = value` lines &mdash; **except** security-sens
 keys, which are **user-scoped only** and ignored if set in a repo's
 `.mkit/config` (a hostile repo must not be able to redirect signing or trust).
 Those keys &mdash; `user.identity`, `signing_key`, `signer`, `key.*`, `attest.*`,
-`ssh.*`, `trusted_remote_endpoint`, `admission_helper`, and
+`ssh.*`, `trusted_remote_endpoint`, `admission_helper`, `grant.webauthn_rp`, and
 `remote.<name>.admission_headers` &mdash; live in the user config
 (`$XDG_CONFIG_HOME/mkit/config`); set them with `mkit config <key> <value>`,
 which routes them to the user scope automatically.
@@ -1604,6 +1689,7 @@ which routes them to the user scope automatically.
 | `key.secp256k1_ref` | `<backend>:<label>` | `software:default-secp256k1` | User-scoped secp256k1 ref |
 | `key.p256_ref` | `<backend>:<label>` | `software:default-p256` | User-scoped P-256 ref |
 | `attest.signer` | `repo-key` / `keystore` / `external` | `repo-key` | User-scoped attestation signer |
+| `grant.webauthn_rp` | `<rp_id> <origin>...` (repeatable; `\|` separates entries in one value) | unset | User-scoped only. Pins the `WebAuthn` relying parties `mkit grant`/`epoch`/`visibility` accept for `webauthn-p256` signatures; unset refuses them |
 
 Keystore backend names include `software`, `software-raw`, `macos-keychain`,
 `linux-secret-service`, `systemd-creds`, and `yubikey`
@@ -1739,6 +1825,7 @@ parsing stderr.
 | `.mkit/index.lock`                  | Held by commit/checkout/merge/rebase             |
 | `.mkit/COMMIT_EDITMSG`              | Scratch file for `mkit commit` without `-m`      |
 | `$XDG_CONFIG_HOME/mkit/config`      | User-level config (cross-repo defaults)          |
+| `$XDG_CONFIG_HOME/mkit/grants/`     | Your grant store: `<grant id>.grant` files (0700/0600), never repo-scoped |
 | `$XDG_DATA_HOME/mkit/keys/`         | User-level keystore (optional)                   |
 | `$XDG_CACHE_HOME/mkit/`             | User-level cache                                 |
 | `$XDG_STATE_HOME/mkit/`             | User-level state                                 |

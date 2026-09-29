@@ -1,0 +1,5 @@
+---
+source: crates/mkit-cli/tests/grant_e2e.rs
+expression: "owner.ok(&[\"epoch\", \"bump\", \"origin\", \"--json\"])"
+---
+{"namespace":"ed25519-<hex>","audiences":["http://127.0.0.1:<port>"],"previous":4,"epoch":5}

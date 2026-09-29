@@ -90,6 +90,7 @@ pub const REPO_FORBIDDEN_KEYS: &[&str] = &[
     "attest.external_signer_timeout_secs",
     "attest.secp256k1_key_path",
     "attest.p256_key_path",
+    "grant.webauthn_rp",
 ];
 
 /// User-scoped exact keys and the dynamic named-remote admission allowlist key.
@@ -160,6 +161,13 @@ pub struct Config {
     /// request authorization is a separate use of the ambient identity.
     /// Destination trust is checked before loading a signing key.
     pub transport_auth: String,
+    /// `grant.webauthn_rp`: the `WebAuthn` relying parties whose assertions
+    /// `mkit grant create --webauthn-assertion` and the grant store accept
+    /// (SPEC-WRITE-GRANTS §4.3). Each entry is `<rp_id> <origin>...`; the
+    /// key may repeat and one value may hold several entries separated by
+    /// `|`. User-scoped only (a repository must not choose which relying
+    /// party vouches for an owner).
+    pub grant_webauthn_rp: Vec<String>,
     /// Commit-signing selector. User-scoped only.
     pub signer: String,
     /// `pull.require_signed` — gates whether `clone`/`pull`/`fetch` verify
@@ -800,6 +808,9 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
         "ssh.user_known_hosts_file" => val.clone_into(&mut cfg.ssh_user_known_hosts_file),
         "ssh.identity_file" => val.clone_into(&mut cfg.ssh_identity_file),
         "transport_auth" => val.clone_into(&mut cfg.transport_auth),
+        "grant.webauthn_rp" => cfg
+            .grant_webauthn_rp
+            .extend(parse_pipe_list(val).into_iter().filter(|e| !e.is_empty())),
         "attest.default_algorithm" => val.clone_into(&mut cfg.attest.default_algorithm),
         "attest.signer" => val.clone_into(&mut cfg.attest.signer),
         "attest.external_signer_path" => val.clone_into(&mut cfg.attest.external_signer_path),
@@ -1434,10 +1445,62 @@ pub fn xdg_config_home() -> PathBuf {
     xdg("XDG_CONFIG_HOME", ".config")
 }
 
+/// The XDG config base for data that must never land in a working directory
+/// (the grant store): an absolute `XDG_CONFIG_HOME`, else `$HOME/.config`.
+///
+/// # Errors
+/// Neither is set to an absolute path.
+pub fn xdg_config_home_absolute() -> Result<PathBuf, String> {
+    absolute_config_home(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+    )
+}
+
+fn absolute_config_home(
+    xdg: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Result<PathBuf, String> {
+    if let Some(v) = xdg.map(PathBuf::from)
+        && v.is_absolute()
+    {
+        return Ok(v);
+    }
+    if let Some(h) = home.map(PathBuf::from)
+        && h.is_absolute()
+    {
+        return Ok(h.join(".config"));
+    }
+    Err(
+        "cannot locate the user config directory: set XDG_CONFIG_HOME or HOME to an absolute path"
+            .to_owned(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mkit_core::layout::RepoLayout;
+
+    #[test]
+    fn config_home_must_be_absolute() {
+        let os = |s: &str| Some(std::ffi::OsString::from(s));
+        assert_eq!(
+            absolute_config_home(os("/x"), os("/h")).unwrap(),
+            PathBuf::from("/x")
+        );
+        assert_eq!(
+            absolute_config_home(os("rel"), os("/h")).unwrap(),
+            PathBuf::from("/h/.config")
+        );
+        assert_eq!(
+            absolute_config_home(None, os("/h")).unwrap(),
+            PathBuf::from("/h/.config")
+        );
+        for (x, h) in [(None, None), (os(""), os("")), (os("rel"), os("rel"))] {
+            assert!(absolute_config_home(x, h).is_err());
+        }
+    }
     use tempfile::TempDir;
 
     #[test]
@@ -1925,6 +1988,13 @@ mod tests {
                 }
                 "attest.secp256k1_key_path" => cfg.attest.secp256k1_key_path.as_str(),
                 "attest.p256_key_path" => cfg.attest.p256_key_path.as_str(),
+                "grant.webauthn_rp" => {
+                    if cfg.grant_webauthn_rp.is_empty() {
+                        ""
+                    } else {
+                        "<non-empty>"
+                    }
+                }
                 // If a new key appears in `REPO_FORBIDDEN_KEYS` without
                 // an arm here, fail loudly — the developer must extend
                 // both the constant AND the meta-test together. Without

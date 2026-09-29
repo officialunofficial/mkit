@@ -28,7 +28,9 @@ use url::{Host, Url};
 
 use crate::admission::{AdmissionPolicy, respond_to_challenge, retry_once};
 use crate::envelope::{EnvelopeSigner, EnvelopeTransport, RetryIdentity};
-use crate::error::{ErrorContext, map_connect_error, pending_verification_delay};
+use crate::error::{
+    ErrorContext, map_connect_error, pending_retry_after, pending_verification_delay,
+};
 use crate::executor::TokioExecutor;
 use crate::grant::{GrantCondition, GrantOperation, GrantRef, GrantRequest, GrantSource};
 use crate::part_receipts::{MemoryPartReceiptStore, PartReceiptStore, StoredPart, TicketMetadata};
@@ -37,13 +39,56 @@ use crate::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::B
 use crate::proto::mkit::transport::v1::upload_part_request::Msg as PartWireMessage;
 use crate::proto::mkit::transport::v1::{
     AdvanceOutcome as ProtoAdvanceOutcome, AdvanceRefsRequest, BeginUploadRequest,
-    CompleteUploadRequest, DownloadPackRequest, GetServerInfoRequest, GetServerInfoResponse,
-    ListRefsRequest, PackChunk, PackExistsRequest, ReadRefRequest, RefExpectation,
+    CompleteUploadRequest, DownloadPackRequest, GetGrantEpochRequest, GetServerInfoRequest,
+    GetServerInfoResponse, ListRefsRequest, PackChunk, PackExistsRequest, ReadRefRequest,
+    RefExpectation, RepoVisibility, SetGrantEpochRequest, SetRepoVisibilityRequest,
     TransportServiceClient, UpdateRefRequest, UploadPackHeader, UploadPackRequest,
-    UploadPartHeader, UploadPartRequest,
+    UploadPartHeader, UploadPartRequest, set_repo_visibility_request::Mode as VisibilityWireMode,
 };
 use crate::receipt::{AdmissionReceipt, observe_receipts};
 use crate::status::StatusTransport;
+
+/// The auth v2 audience of a `mkit+https://` / `mkit+http://` URL: its
+/// origin, exactly as [`ConnectTransport`] signs requests for it. `None` for
+/// a URL [`ConnectTransport::connect`] would refuse.
+#[must_use]
+pub fn audience_from_url(url: &str) -> Option<String> {
+    let parsed = Url::parse(url.strip_prefix("mkit+")?).ok()?;
+    validate_http_scheme(&parsed).ok()?;
+    Some(parsed.origin().ascii_serialization())
+}
+
+/// The outcome of a grant-epoch or visibility RPC (SPEC-WRITE-GRANTS §5.3,
+/// §9.1). Revocation and a change to private are not complete until every
+/// copy of the old state is gone, so the server answers `unavailable` with a
+/// `Retry-After` until then. That is not an error: the caller sends the same
+/// request again after `retry_after`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Completion<T> {
+    /// The server finished and answered.
+    Done(T),
+    /// Still completing. `retry_after` is the server's `Retry-After`
+    /// (delay-seconds only), clamped to 1–60 s; missing or garbage is 1 s.
+    Pending { retry_after: Duration },
+}
+
+/// A repository visibility (SPEC-WRITE-GRANTS §9.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisibilityChoice {
+    Public,
+    Private,
+}
+
+/// The two modes of `SetRepoVisibility` (SPEC-WRITE-GRANTS §9.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisibilityRequest<'a> {
+    /// A signed auth v2 write by the repository owner. Needs an envelope
+    /// signer on the transport; a grant never authorizes it.
+    Envelope(VisibilityChoice),
+    /// An owner-signed `mkit-repo-visibility:v1` statement in the §4.2
+    /// encoding. Sent with no auth v2 envelope, and with `X-Repository`.
+    Statement(&'a str),
+}
 
 /// Capability discovery result, immutable for a transport's lifetime.
 #[derive(Debug, Clone)]
@@ -614,6 +659,18 @@ impl ConnectTransport {
         transport.backoff = backoff;
         transport.sleep = sleep;
         transport
+    }
+
+    /// The auth v2 audience this transport signs for: its origin.
+    #[must_use]
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    /// The repository this transport addresses.
+    #[must_use]
+    pub fn repository(&self) -> &RepositoryIdentity {
+        &self.repository
     }
 
     /// Discover and cache deployment capabilities for this instance's lifetime.
@@ -1807,6 +1864,132 @@ impl ConnectTransport {
         })
     }
 
+    /// `GetGrantEpoch` (SPEC-WRITE-GRANTS §5.3): the stored epoch of
+    /// `namespace` at this deployment, 0 if it was never set. Unsigned, and
+    /// with no `X-Repository`: the answer never depends on a repository.
+    ///
+    /// # Errors
+    ///
+    /// [`TransportError::InvalidRef`] for a namespace outside the grammar;
+    /// transport failures otherwise.
+    pub fn get_grant_epoch(&self, namespace: &str) -> TransportResult<Completion<u64>> {
+        self.retrying(|| self.get_grant_epoch_attempt(namespace))
+    }
+
+    /// One `GetGrantEpoch` attempt, without the retry ladder: for advisory
+    /// reads that must fail fast.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::get_grant_epoch`], on the first failure.
+    pub fn get_grant_epoch_once(&self, namespace: &str) -> TransportResult<Completion<u64>> {
+        self.get_grant_epoch_attempt(namespace)
+    }
+
+    fn get_grant_epoch_attempt(&self, namespace: &str) -> TransportResult<Completion<u64>> {
+        self.executor.block_on(async {
+            let result = self
+                .client
+                .get_grant_epoch_with_options(
+                    GetGrantEpochRequest {
+                        namespace: Some(namespace.to_owned()),
+                        ..Default::default()
+                    },
+                    CallOptions::default().with_timeout(self.unary_timeout),
+                )
+                .await;
+            completion(result, |resp| resp.into_owned().epoch)
+        })
+    }
+
+    /// `SetGrantEpoch` (SPEC-WRITE-GRANTS §5.3) with an owner-signed
+    /// `mkit-write-epoch:v1` statement in the §4.2 encoding. Unsigned (no
+    /// auth v2 envelope) and with no `X-Repository`. The server returns the
+    /// stored epoch once revocation completed, or `Pending`; send the
+    /// identical statement again after `retry_after` (§5.2: the same epoch is
+    /// a retry).
+    ///
+    /// # Errors
+    ///
+    /// [`TransportError::AccessDenied`] when the server rejects the statement
+    /// (a step above the bound, a decrease, a wrong audience, a bad
+    /// signature); transport failures otherwise.
+    pub fn set_grant_epoch(&self, signed_statement: &str) -> TransportResult<Completion<u64>> {
+        self.retrying(|| {
+            self.executor.block_on(async {
+                let result = self
+                    .client
+                    .set_grant_epoch_with_options(
+                        SetGrantEpochRequest {
+                            signed_statement: Some(signed_statement.to_owned()),
+                            ..Default::default()
+                        },
+                        CallOptions::default().with_timeout(self.unary_timeout),
+                    )
+                    .await;
+                completion(result, |resp| resp.into_owned().epoch)
+            })
+        })
+    }
+
+    /// `SetRepoVisibility` (SPEC-WRITE-GRANTS §9.1) for this transport's
+    /// repository, which travels only in `X-Repository`.
+    ///
+    /// * [`VisibilityRequest::Envelope`] is a signed auth v2 write. A fresh
+    ///   signature is made per call, which is safe to repeat: it sets a value.
+    ///   No grant is attached.
+    /// * [`VisibilityRequest::Statement`] carries no envelope.
+    ///
+    /// # Errors
+    ///
+    /// [`TransportError::AccessDenied`] for a rejected request;
+    /// [`TransportError::RemoteError`] for envelope mode without a signer;
+    /// transport failures otherwise.
+    pub fn set_repo_visibility(
+        &self,
+        request: VisibilityRequest<'_>,
+    ) -> TransportResult<Completion<()>> {
+        let (mode, identity) = match request {
+            VisibilityRequest::Envelope(choice) => {
+                if self.signer_key.is_none() {
+                    return Err(TransportError::RemoteError(
+                        "envelope-mode SetRepoVisibility needs a signing identity".into(),
+                    ));
+                }
+                let wire = match choice {
+                    VisibilityChoice::Public => RepoVisibility::REPO_VISIBILITY_PUBLIC,
+                    VisibilityChoice::Private => RepoVisibility::REPO_VISIBILITY_PRIVATE,
+                };
+                (
+                    VisibilityWireMode::Visibility(wire.into()),
+                    Some(RetryIdentity::new_at((self.now)()).map_err(TransportError::RemoteError)?),
+                )
+            }
+            VisibilityRequest::Statement(text) => {
+                (VisibilityWireMode::SignedStatement(text.to_owned()), None)
+            }
+        };
+        self.retrying(|| {
+            self.executor.block_on(async {
+                let mut options = CallOptions::default().with_timeout(self.unary_timeout);
+                if let Some(identity) = &identity {
+                    options = identity.apply(options);
+                }
+                let result = self
+                    .client
+                    .set_repo_visibility_with_options(
+                        SetRepoVisibilityRequest {
+                            mode: Some(mode.clone()),
+                            ..Default::default()
+                        },
+                        options,
+                    )
+                    .await;
+                completion(result, |_| Some(()))
+            })
+        })
+    }
+
     /// Drive `op` through the standard 5-attempt backoff ladder shared by
     /// every `mkit` transport. `op` is re-invoked from scratch on every
     /// attempt — every `Transport` method below builds and sends its
@@ -1822,6 +2005,24 @@ impl ConnectTransport {
     /// `Response`.
     fn retrying<T>(&self, op: impl FnMut() -> TransportResult<T>) -> TransportResult<T> {
         mkit_core::protocol::retrying(op, self.backoff, self.sleep)
+    }
+}
+
+/// Map an epoch or visibility RPC result: `done` extracts the value from a
+/// success (`None` is an invalid response), and a server `unavailable` with a
+/// `Retry-After` is [`Completion::Pending`].
+fn completion<R, T>(
+    result: Result<R, connectrpc::ConnectError>,
+    done: impl FnOnce(R) -> Option<T>,
+) -> TransportResult<Completion<T>> {
+    match result {
+        Ok(resp) => done(resp)
+            .map(Completion::Done)
+            .ok_or(TransportError::InvalidResponse),
+        Err(e) => pending_retry_after(&e).map_or_else(
+            || Err(map_connect_error(e, ErrorContext::Ref)),
+            |retry_after| Ok(Completion::Pending { retry_after }),
+        ),
     }
 }
 
@@ -2379,6 +2580,31 @@ mod tests {
     }
 
     // -- connect() + URL parsing --------------------------------------
+
+    #[test]
+    fn audience_from_url_matches_the_transport_audience() {
+        for url in [
+            "mkit+https://git.example.com/0x8ba1f109551bd432803012645ac136ddd64dba72/site",
+            "mkit+https://Git.Example.com:443/x",
+            "mkit+https://git.example.com:8443",
+            "mkit+http://127.0.0.1:8080/default",
+        ] {
+            let tx = ConnectTransport::connect(url).unwrap();
+            assert_eq!(
+                audience_from_url(url).as_deref(),
+                Some(tx.origin()),
+                "{url}"
+            );
+        }
+        for bad in [
+            "https://git.example.com",
+            "mkit+ftp://x",
+            "mkit+http://example.com",
+            "mkit+",
+        ] {
+            assert_eq!(audience_from_url(bad), None, "{bad}");
+        }
+    }
 
     #[test]
     fn connect_rejects_missing_mkit_prefix() {

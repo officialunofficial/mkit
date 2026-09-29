@@ -394,6 +394,12 @@ pub trait KeySigner: Send {
     fn public_key(&self) -> Result<PublicKeyBytes, Error>;
     fn keyid(&self) -> Result<KeyId, Error>;
     fn sign(&mut self, msg: &[u8]) -> Result<Vec<u8>, Error>;
+    // Defaulted: returns `Error::UnsupportedOperation`. See "Recoverable
+    // prehash signing" below.
+    fn sign_prehash_recoverable_secp256k1(
+        &mut self,
+        prehash: &[u8; 32],
+    ) -> Result<[u8; 65], Error>;
 }
 ```
 
@@ -415,6 +421,29 @@ Requirements:
 - secp256k1/P-256 signing follows existing `mkit-attest` semantics: ECDSA over
   SHA-256 of the supplied bytes, compact `r || s`, low-S canonical. DSSE passes
   the PAE bytes.
+
+**Recoverable prehash signing.** `sign` cannot produce the SPEC-WRITE-GRANTS
+`secp256k1-eip191` owner signature: it hashes with SHA-256 and returns no
+recovery byte, while that scheme signs a Keccak-256 digest and needs `v`.
+`sign_prehash_recoverable_secp256k1` is the one narrow addition for it:
+
+- The caller supplies the finished 32-byte digest. The signer returns
+  `r || s || v` with `s <= n / 2` and `v` of 27 or 28 (SPEC-WRITE-GRANTS §4.4).
+  The digest is signed as given; the signer adds no hashing or domain
+  separation.
+- Only a secp256k1 key held by the `software` or `software-raw` backend
+  implements it. Every other signer &mdash; the OS-native backends and
+  `YubiKey`, where secp256k1 is anyway `UnsupportedAlgorithm` &mdash; keeps the
+  default, which fails closed with `UnsupportedOperation`. A non-secp256k1
+  software key returns `UnsupportedAlgorithm`.
+- It never exports secret material, and callers must not fall back to
+  `KeyExporter` when it is unsupported: the caller reports that the key
+  cannot sign natively and offers the import path (an external wallet
+  signature) instead.
+- It signs an arbitrary digest, so it MUST NOT be reachable from a repository
+  configuration or from any surface that lets remote content choose the
+  digest. Its only caller is the owner-signing module of the CLI, which
+  hashes a statement the user has just built.
 
 ### 5.7 Keystore
 

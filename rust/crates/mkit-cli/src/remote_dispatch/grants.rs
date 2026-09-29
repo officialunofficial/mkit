@@ -1,13 +1,32 @@
-//! Local grant choice for the Connect client. WP-2.13 supplies the user store.
+//! Local grant choice for the Connect client, over the user grant store
+//! (`crate::grants::store`).
+//!
+//! Selection (WP-2.13, R-129, D-B2): filter to the grants valid for the
+//! request, rank the higher epoch first, then the P-18 rules (capability
+//! preference for reads, a grant that forces for an update (R-150), repository
+//! over namespace scope, the most specific ref scope, the latest expiry), then the greater header bytes so the choice
+//! never depends on directory order.
+//!
+//! Every candidate that survives the filter lists the request's audience and
+//! is in the request's namespace, so "higher epoch first, per (namespace,
+//! audience)" is a plain descending epoch among the survivors: a grant at
+//! another audience or namespace is never a candidate and cannot interfere.
+//! Nothing is pruned on import.
+//!
+//! Known downside: a grant pre-issued for epoch e+1 (SPEC-WRITE-GRANTS §5,
+//! informative) outranks a live epoch-e grant until the owner bumps the epoch.
+//! `mkit grant add` warns about it.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mkit_attest::grant::{
-    Capabilities, Capability, Grant, RefFlags, RepoScope, SignedHeader, packmap_head,
-};
+use mkit_attest::grant::{Capabilities, Capability, Grant, RefFlags, RepoScope, packmap_head};
 use mkit_core::hash::from_hex;
 use mkit_core::repo_identity::RepositoryIdentity;
 use mkit_transport_connect::{GrantCondition, GrantOperation, GrantRequest, GrantSource};
+
+use crate::grants::store::StoredGrant;
+#[cfg(test)]
+use mkit_attest::grant::SignedHeader;
 
 struct Candidate {
     header: String,
@@ -26,13 +45,24 @@ fn permits(flags: RefFlags, condition: GrantCondition) -> bool {
     }
 }
 
-/// A snapshot of encoded, owner-signed grant headers. The store in WP-2.13
-/// will populate it after checking owner signatures on import.
-#[allow(dead_code)] // Constructed by the WP-2.13 user grant store.
+/// A snapshot of encoded, owner-signed grant headers, built from the user
+/// grant store, which re-verified every owner signature when it loaded.
 pub(crate) struct LocalGrants(Vec<Candidate>);
 
 impl LocalGrants {
-    #[allow(dead_code)] // Constructed by the WP-2.13 user grant store.
+    pub(crate) fn from_stored(grants: impl IntoIterator<Item = StoredGrant>) -> Self {
+        Self(
+            grants
+                .into_iter()
+                .map(|stored| Candidate {
+                    header: stored.header,
+                    grant: stored.grant,
+                })
+                .collect(),
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn from_headers(headers: impl IntoIterator<Item = String>) -> Self {
         Self(
             headers
@@ -46,6 +76,7 @@ impl LocalGrants {
         )
     }
 
+    #[allow(clippy::too_many_lines)] // one filter-and-rank pass over the candidates
     fn select_at(&self, request: &GrantRequest<'_>, now: i64) -> Option<String> {
         let repository = RepositoryIdentity::parse_bare_allowed(request.repository).ok()?;
         let namespace = repository.namespace()?;
@@ -63,14 +94,14 @@ impl LocalGrants {
                 {
                     return None;
                 }
-                let (capability_rank, ref_rank) = match request.operation {
+                let (capability_rank, force_rank, ref_rank) = match request.operation {
                     GrantOperation::Read => {
                         let rank = match grant.capabilities {
                             Capabilities::ReadWrite => 3,
                             Capabilities::Read => 2,
                             Capabilities::Write => 1,
                         };
-                        (rank, 0)
+                        (rank, 0, 0)
                     }
                     GrantOperation::BeginUpload { ref_name } => {
                         if !grant.capabilities.allows(Capability::Write) {
@@ -95,7 +126,7 @@ impl LocalGrants {
                             })
                             .max()
                             .unwrap_or(0);
-                        (0, specificity)
+                        (0, 0, specificity)
                     }
                     GrantOperation::Write { refs } => {
                         if !grant.capabilities.allows(Capability::Write) {
@@ -103,6 +134,11 @@ impl LocalGrants {
                         }
                         let scopes = grant.ref_scopes.as_ref()?;
                         let mut rank = usize::MAX;
+                        // A server that can't check fast-forwards (every
+                        // Stage 1 deployment) applies a `MATCH` update only
+                        // under `f` (R-150). Prefer a grant that forces, and
+                        // fall back to a `u`-only one for a server that can.
+                        let mut forces = true;
                         for reference in refs {
                             // Packmap refs are covered through the head ref. Their own
                             // condition does not impose a second flag requirement, but
@@ -115,8 +151,14 @@ impl LocalGrants {
                                 continue;
                             }
                             let name = reference.name;
-                            if !permits(scopes.effective_flags(name), reference.condition) {
+                            let effective = scopes.effective_flags(name);
+                            if !permits(effective, reference.condition) {
                                 return None;
+                            }
+                            if reference.condition == GrantCondition::Match
+                                && !effective.contains(RefFlags::FORCE)
+                            {
+                                forces = false;
                             }
                             let specificity = scopes
                                 .entries()
@@ -134,7 +176,11 @@ impl LocalGrants {
                                 .unwrap_or(0);
                             rank = rank.min(specificity);
                         }
-                        (0, if refs.is_empty() { 0 } else { rank })
+                        (
+                            0,
+                            usize::from(forces),
+                            if refs.is_empty() { 0 } else { rank },
+                        )
                     }
                     // Part and any future operation are ineligible.
                     _ => return None,
@@ -142,11 +188,18 @@ impl LocalGrants {
                 let repo_rank = usize::from(matches!(grant.scope, RepoScope::Repository(_)));
                 Some((
                     candidate,
-                    (capability_rank, repo_rank, ref_rank, grant.expiry_ms),
+                    (
+                        grant.epoch,
+                        capability_rank,
+                        force_rank,
+                        repo_rank,
+                        ref_rank,
+                        grant.expiry_ms,
+                    ),
                 ))
             })
-            // Equal capability, scope, specificity and expiry fall back to the
-            // greater header bytes, so the choice never depends on the store's
+            // Equal epoch, capability, scope, specificity and expiry fall back
+            // to the greater header bytes, so the choice never depends on the store's
             // iteration order.
             .max_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.header.cmp(&b.0.header)))
             .map(|(candidate, _)| candidate.header.clone())
@@ -387,7 +440,9 @@ mod tests {
         let source = LocalGrants::from_headers(vec![broad.clone(), exact.clone()]);
         for (condition, expected) in [
             (GrantCondition::Missing, exact.as_str()),
-            (GrantCondition::Match, exact.as_str()),
+            // An update prefers the grant that can force (R-150), whatever
+            // the scope: an opaque server applies `MATCH` updates only under `f`.
+            (GrantCondition::Match, broad.as_str()),
             (GrantCondition::Any, broad.as_str()),
             (GrantCondition::Delete, broad.as_str()),
         ] {
@@ -414,7 +469,7 @@ mod tests {
         ];
         assert_eq!(
             source.select_at(&request(GrantOperation::Write { refs: &refs }), NOW),
-            Some(exact)
+            Some(broad.clone())
         );
         let irrelevant_exact = header(
             &format!("{NS}/photos"),
@@ -472,6 +527,165 @@ mod tests {
                 Some(grant),
             );
         }
+    }
+
+    /// The same header with a different epoch (the statement bytes change;
+    /// the fake signature is irrelevant to selection).
+    fn at_epoch(header: &str, epoch: u64) -> String {
+        let mut signed = SignedHeader::parse(header).unwrap();
+        let mut grant = Grant::parse(&signed.statement).unwrap();
+        grant.epoch = epoch;
+        signed.statement = grant.encode().unwrap();
+        signed.encode().unwrap()
+    }
+
+    #[test]
+    fn a_higher_epoch_outranks_scope_and_expiry() {
+        let live = header(
+            &format!("{NS}/photos"),
+            "write",
+            "refs/heads/main=cufd",
+            NOW,
+            NOW + 90_000,
+            "https://git.example.com",
+            KEY,
+        );
+        let refs = [GrantRef::new("refs/heads/main", GrantCondition::Match)];
+        let request = request(GrantOperation::Write { refs: &refs });
+        // A broader, longer-lived grant at a lower epoch loses to a narrower
+        // one at a higher epoch.
+        let stale = header(
+            &format!("{NS}/*"),
+            "write",
+            "refs/*=cufd",
+            NOW,
+            NOW + 100_000,
+            "https://git.example.com",
+            KEY,
+        );
+        let newer = at_epoch(&live, 3);
+        let stale = at_epoch(&stale, 2);
+        for order in [
+            vec![newer.clone(), stale.clone()],
+            vec![stale.clone(), newer.clone()],
+        ] {
+            assert_eq!(
+                LocalGrants::from_headers(order).select_at(&request, NOW),
+                Some(newer.clone())
+            );
+        }
+        // Equal epochs fall back to the P-18 rules: the repository-scoped grant.
+        let same_epoch_broad = at_epoch(&stale, 3);
+        assert_eq!(
+            LocalGrants::from_headers(vec![same_epoch_broad, newer.clone()])
+                .select_at(&request, NOW),
+            Some(newer)
+        );
+    }
+
+    #[test]
+    fn epochs_on_other_audiences_and_namespaces_do_not_interfere() {
+        let ours = at_epoch(
+            &header(
+                &format!("{NS}/photos"),
+                "read",
+                "-",
+                NOW,
+                NOW + 50_000,
+                "https://git.example.com",
+                KEY,
+            ),
+            1,
+        );
+        let other_audience = at_epoch(
+            &header(
+                &format!("{NS}/photos"),
+                "read",
+                "-",
+                NOW,
+                NOW + 90_000,
+                "https://other.example.com",
+                KEY,
+            ),
+            9,
+        );
+        let mut foreign_namespace = SignedHeader::parse(&other_audience).unwrap();
+        foreign_namespace.statement = String::from_utf8(foreign_namespace.statement)
+            .unwrap()
+            .replace("https://other.example.com", "https://git.example.com")
+            .replace(NS, "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+            .into_bytes();
+        let foreign_namespace = foreign_namespace.encode().unwrap();
+        assert_eq!(
+            LocalGrants::from_headers(vec![other_audience, foreign_namespace, ours.clone()])
+                .select_at(&request(GrantOperation::Read), NOW),
+            Some(ours)
+        );
+    }
+
+    #[test]
+    fn an_update_prefers_a_grant_that_forces_over_a_u_only_one() {
+        let update_only = header(
+            &format!("{NS}/photos"),
+            "write",
+            "refs/heads/main=u",
+            NOW,
+            NOW + 100_000,
+            "https://git.example.com",
+            KEY,
+        );
+        let forcing = header(
+            &format!("{NS}/*"),
+            "write",
+            "refs/heads/*=uf",
+            NOW,
+            NOW + 50_000,
+            "https://git.example.com",
+            KEY,
+        );
+        let matched = [GrantRef::new("refs/heads/main", GrantCondition::Match)];
+        let request = request(GrantOperation::Write { refs: &matched });
+        // The narrower, longer-lived `u` grant loses to the one that forces,
+        // in either source order; alone, it is still chosen.
+        for order in [
+            vec![update_only.clone(), forcing.clone()],
+            vec![forcing.clone(), update_only.clone()],
+        ] {
+            assert_eq!(
+                LocalGrants::from_headers(order).select_at(&request, NOW),
+                Some(forcing.clone())
+            );
+        }
+        assert_eq!(
+            LocalGrants::from_headers(vec![update_only.clone()]).select_at(&request, NOW),
+            Some(update_only.clone())
+        );
+        // A create (MISSING) has no such preference: scope specificity decides.
+        let created = [GrantRef::new("refs/heads/main", GrantCondition::Missing)];
+        let create_request = self::request(GrantOperation::Write { refs: &created });
+        let create_grant = header(
+            &format!("{NS}/photos"),
+            "write",
+            "refs/heads/main=c",
+            NOW,
+            NOW + 100_000,
+            "https://git.example.com",
+            KEY,
+        );
+        let forcing_create = header(
+            &format!("{NS}/*"),
+            "write",
+            "refs/heads/*=cf",
+            NOW,
+            NOW + 50_000,
+            "https://git.example.com",
+            KEY,
+        );
+        assert_eq!(
+            LocalGrants::from_headers(vec![forcing_create, create_grant.clone()])
+                .select_at(&create_request, NOW),
+            Some(create_grant)
+        );
     }
 
     #[test]
