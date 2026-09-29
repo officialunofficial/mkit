@@ -148,6 +148,7 @@ async fn outcome_delivery_and_reconcile_fire_on_every_outcome_class() {
             Some("free"),
             mkit_server::pipeline::NoOutcomes,
             std::sync::Arc::new(mkit_server::ManualSleep::new()),
+            std::sync::Arc::new(ManualClock::new(200)),
         );
         let mut fired = 0;
         for _ in 0..4 {

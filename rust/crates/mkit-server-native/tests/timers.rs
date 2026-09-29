@@ -775,9 +775,17 @@ impl mkit_server::pipeline::OutcomeSink for Sink {
 }
 
 async fn seed_outcomes(store: &TimerStore, rids: &[&str]) {
+    seed_outcomes_in(
+        store,
+        &Partition::Namespace(NamespaceKey::deployment_default()),
+        rids,
+    )
+    .await;
+}
+
+async fn seed_outcomes_in(store: &TimerStore, p: &Partition, rids: &[&str]) {
     use mkit_server::store::codec::{AbortReason, ReservationV1};
     use mkit_server::store::outbox::{OutboxBuilder, Terminal};
-    let p = Partition::Namespace(NamespaceKey::deployment_default());
     let mut builder = OutboxBuilder::new(None, None).unwrap();
     for rid in rids {
         builder.abort_direct(
@@ -795,7 +803,7 @@ async fn seed_outcomes(store: &TimerStore, rids: &[&str]) {
     builder
         .try_finish(&mut batch.preconditions, &mut batch.writes)
         .unwrap();
-    store.apply(&p, batch).await.unwrap();
+    store.apply(p, batch).await.unwrap();
 }
 
 fn sink_driver(store: &TimerStore, sink: Sink) -> TimerDriver {
@@ -886,9 +894,201 @@ fn a_real_sink_with_fs_layout_is_a_config_error() {
         &[],
     )
     .unwrap();
-    let err = server::open_with_sink(&cfg, Sink::default()).unwrap_err();
+    let err =
+        server::open_with_sink(&cfg, Sink::default(), server::SinkOptions::default()).unwrap_err();
     assert_eq!(err.code, mkit_server_native::exit::CONFIG_ERROR);
     assert!(err.message.contains("fs-layout"), "{}", err.message);
     // The local sink still opens.
     drop(server::open(&cfg).unwrap());
+}
+
+/// A sink whose first call blocks until released; every call is recorded.
+#[derive(Clone, Default)]
+struct GateSink {
+    seen: Arc<std::sync::Mutex<Vec<String>>>,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    first: Arc<std::sync::atomic::AtomicBool>,
+}
+impl mkit_server::pipeline::OutcomeSink for GateSink {
+    async fn deliver(
+        &self,
+        outcome: &mkit_server::pipeline::Outcome,
+    ) -> Result<(), mkit_server::pipeline::DeliveryError> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(outcome.reservation_id.clone());
+        if !self.first.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Ok(())
+    }
+}
+
+/// Stop during a pass with three partitions claimed: the two not yet run go
+/// back to due-now, and the drain delivers them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_during_a_pass_returns_the_unrun_claims_to_the_drain() {
+    let root = tempfile::tempdir().unwrap();
+    let store = open(&root.path().join("claims.sqlite3"));
+    for (index, name) in [&b"nalpha\0"[..], b"nbravo\0", b"ncharlie\0"]
+        .into_iter()
+        .enumerate()
+    {
+        let p = Partition::decode(name).unwrap();
+        seed_outcomes_in(&store, &p, &[&format!("rid-{index}")]).await;
+    }
+    let sink = GateSink::default();
+    let stop = Shutdown::new();
+    let task = TimerDriver::new(
+        store.clone(),
+        server::sqlite_timer_registry(
+            MemoryBlobStore::default(),
+            store.clone(),
+            String::new(),
+            sink.clone(),
+        ),
+        Arc::new(SystemClock),
+    )
+    .start_with_drain(stop.clone(), Duration::from_secs(5))
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), sink.entered.notified())
+        .await
+        .unwrap();
+    stop.trigger();
+    sink.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(sink.seen.lock().unwrap().len(), 3);
+}
+
+/// A sink that is slow but succeeds cannot hold shutdown past the drain
+/// deadline: it covers the pass already in flight when stop triggers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drain_deadline_covers_the_in_flight_pass() {
+    #[derive(Clone, Default)]
+    struct Slow(Arc<std::sync::atomic::AtomicUsize>);
+    impl mkit_server::pipeline::OutcomeSink for Slow {
+        async fn deliver(
+            &self,
+            _: &mkit_server::pipeline::Outcome,
+        ) -> Result<(), mkit_server::pipeline::DeliveryError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            Ok(())
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let store = open(&root.path().join("slow.sqlite3"));
+    let rids: Vec<String> = (0..16).map(|i| format!("r{i:02}")).collect();
+    let refs: Vec<&str> = rids.iter().map(String::as_str).collect();
+    seed_outcomes(&store, &refs).await;
+    let calls = Slow::default();
+    let stop = Shutdown::new();
+    let task = TimerDriver::new(
+        store.clone(),
+        server::sqlite_timer_registry(
+            MemoryBlobStore::default(),
+            store.clone(),
+            String::new(),
+            calls.clone(),
+        ),
+        Arc::new(SystemClock),
+    )
+    .start_with_drain(stop.clone(), Duration::from_millis(700))
+    .await
+    .unwrap();
+    while calls.0.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let started = std::time::Instant::now();
+    stop.trigger();
+    task.await.unwrap();
+    // The full fire needs about 4.8 s; the deadline cut it near 0.7 s.
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(calls.0.load(std::sync::atomic::Ordering::SeqCst) < 16);
+}
+
+/// Through `open_with_sink` and `serve_services`: an outcome committed while
+/// the listener drains (a request still in flight) is delivered before
+/// `serve_services` returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn outcome_committed_during_listener_drain_is_delivered_before_exit() {
+    use bytes::Bytes;
+    use futures::StreamExt as _;
+    let root = common::repo_root();
+    let db = root.path().join("meta.sqlite3");
+    let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = reserved.local_addr().unwrap();
+    drop(reserved);
+    let meta = format!("sqlite:{}", common::s(&db));
+    let cfg = common::resolve_with(
+        &[
+            "--listen",
+            &address.to_string(),
+            "--repo-root",
+            common::s(root.path()),
+            "--meta",
+            &meta,
+            "--unsafe-allow-any-peer",
+        ],
+        &[],
+    )
+    .unwrap();
+    let sink = Sink::default();
+    let opened =
+        server::open_with_sink(&cfg, sink.clone(), server::SinkOptions::default()).unwrap();
+    let store = opened.timers.as_ref().unwrap().store().clone();
+    let (services, locks) = opened.into_parts();
+    let shutdown = Shutdown::new();
+    let served = {
+        let cfg = cfg.clone();
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move { server::serve_services(&cfg, services, shutdown).await })
+    };
+    let stream = loop {
+        match tokio::net::TcpStream::connect(address).await {
+            Ok(stream) => break stream,
+            Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+        }
+    };
+    let (mut sender, conn) =
+        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
+            .await
+            .unwrap();
+    tokio::spawn(conn);
+    // A request that stays in flight until its body ends.
+    let (tx, rx) = futures::channel::mpsc::unbounded::<Bytes>();
+    let body = http_body_util::StreamBody::new(
+        rx.map(|b| Ok::<_, std::convert::Infallible>(hyper::body::Frame::data(b))),
+    );
+    let request = http::Request::post("/grpc.health.v1.Health/Check")
+        .header("host", address.to_string())
+        .header("content-type", "application/proto")
+        .body(body)
+        .unwrap();
+    let response = tokio::spawn(sender.send_request(request));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    shutdown.trigger();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The listener is draining; this request's commit still lands.
+    seed_outcomes(&store, &["late"]).await;
+    drop(tx);
+    let _ = response.await;
+    tokio::time::timeout(Duration::from_secs(15), served)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(*sink.seen.lock().unwrap(), ["late"]);
+    drop(locks);
 }

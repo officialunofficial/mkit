@@ -608,24 +608,53 @@ impl OutcomeBudget {
     }
 }
 
+/// Bound on one kind-8 sink call on a Worker (the wall-clock bound on a whole
+/// fire is twice this).
+pub const OUTCOME_SINK_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(5);
+/// Kind-8 rows (sink calls) per fire on the Free plan.
+pub const FREE_OUTCOME_ROWS_PER_FIRE: usize = 8;
+/// Kind-8 fires per alarm on the Free plan.
+pub const FREE_OUTCOME_FIRES_PER_ALARM: u32 = 1;
+/// Kind-8 rows (sink calls) per fire on the Paid plan.
+pub const PAID_OUTCOME_ROWS_PER_FIRE: usize = 16;
+/// Kind-8 fires per alarm on the Paid plan.
+pub const PAID_OUTCOME_FIRES_PER_ALARM: u32 = 4;
+
+/// The audience stamped on delivered outcomes: the deployment's canonical
+/// origin, as on native (`outcome_audience`). A hook client's
+/// `server_audience` must be taken from this value (R-162).
+#[must_use]
+pub fn outcome_audience(cfg: &WorkerConfig) -> String {
+    cfg.audience.clone()
+}
+
 /// The kind-8 budget for `plan` (`WORKERS_PLAN`), always applied: Free makes
-/// at most 16 sink calls per alarm (one fire of 16 rows), Paid at most 64
-/// (four fires). A sink call may be a subrequest, and a Free alarm allows 50:
-/// relay 32 + backup 1 + outcome 16 = 49 (`RefShard`, the class with all three).
+/// at most 8 sink calls per alarm (one fire of 8 rows), Paid at most 64 (four
+/// fires of 16). A sink call may be a subrequest, and a Free alarm allows 50.
+/// The Free split is fixed: relay 32 + backup 1 + outcome 8 + quota rollup
+/// at most 8 = 49 (`RefShard`, the class with all of them). The rollup is
+/// registered by WP-1.26b; until then those 8 are headroom.
 #[must_use]
 pub fn outcome_budget(plan: Option<&str>) -> OutcomeBudget {
     let paid = plan.is_some_and(|p| p.trim().eq_ignore_ascii_case("paid"));
-    OutcomeBudget {
-        fires_per_alarm: if paid { 4 } else { 1 },
-        rows_per_fire: mkit_server::timers::outcome_delivery::DEFAULT_MAX_ROWS,
+    if paid {
+        OutcomeBudget {
+            fires_per_alarm: PAID_OUTCOME_FIRES_PER_ALARM,
+            rows_per_fire: PAID_OUTCOME_ROWS_PER_FIRE,
+        }
+    } else {
+        OutcomeBudget {
+            fires_per_alarm: FREE_OUTCOME_FIRES_PER_ALARM,
+            rows_per_fire: FREE_OUTCOME_ROWS_PER_FIRE,
+        }
     }
 }
 
 /// Register the outcome kinds on every class that holds `o`/`oq` rows:
 /// kind 8 (delivery to `sink`; `NoOutcomes` acknowledges locally) and kind 9
 /// (reconcile). Each sink call is bounded by 5 s through `sleep`
-/// (`WorkerSleep` on Workers), a fire stops at its first failure, and the
-/// fire budget follows `plan` ([`outcome_budget`]). A missing audience retains
+/// (`WorkerSleep` on Workers; `clock` bounds a whole fire), a fire stops at
+/// its first failure, and the fire budget follows `plan` ([`outcome_budget`]). A missing audience retains
 /// kind-8 rows. A sink that names the server's audience (a hook client's
 /// `server_audience`) must take it from the same `audience` value (R-162).
 #[must_use]
@@ -636,6 +665,7 @@ pub fn with_outcome_timers<S, O>(
     plan: Option<&str>,
     sink: O,
     sleep: Arc<dyn mkit_server::Sleep>,
+    clock: Arc<dyn mkit_server::Clock>,
 ) -> mkit_server::timers::TimerRegistry<'static, S>
 where
     S: mkit_server::NamespaceStore,
@@ -657,7 +687,9 @@ where
                 Arc::new(crate::telemetry::ConsoleMetrics::default()),
                 sleep,
             )
-            .with_max_rows(budget.rows_per_fire),
+            .with_max_rows(budget.rows_per_fire)
+            .with_sink_timeout(OUTCOME_SINK_TIMEOUT)
+            .with_clock(clock),
         ),
         Err(error) => {
             crate::log_failure(&format!(
@@ -1337,10 +1369,11 @@ mod glue {
         let registry = super::with_outcome_timers(
             registry,
             class,
-            WorkerConfig::from_env(env).map(|cfg| cfg.audience),
+            WorkerConfig::from_env(env).map(|cfg| super::outcome_audience(&cfg)),
             plan.as_deref(),
             mkit_server::pipeline::NoOutcomes,
             Arc::new(crate::sleep::WorkerSleep),
+            Arc::new(WorkerClock),
         );
         let backup = BackupConfig::from_vars(|name| env.var(name).ok().map(|v| v.to_string()))
             .map_err(|error| {
@@ -1360,11 +1393,10 @@ mod glue {
             }
         });
         let registry = if let Some(config) = backup.clone() {
-            // Free-plan alarm budget (50 subrequests): at most 32 relay
-            // calls, this handler's single R2 put, and 16 kind-8 sink calls
-            // (`outcome_budget`) = 49. A quota rollup on the Worker would
-            // have to fit in the one that remains. Kind 9 makes no
-            // external calls, and `NoOutcomes` makes none either.
+            // Free-plan alarm budget (50 subrequests), fixed split: relay 32,
+            // this handler's single R2 put 1, kind-8 sink calls 8
+            // (`outcome_budget`), and the quota rollup (WP-1.26b) at most 8.
+            // Kind 9 makes no external calls, and `NoOutcomes` makes none.
             registry.register(BackupHandler::new(
                 EnvBucket::new(env.clone(), BACKUPS_BINDING),
                 config,
@@ -2052,6 +2084,75 @@ mod tests {
         }
     }
 
+    /// An admission that answers every write with a payment challenge, or
+    /// (`deny`) a refusal.
+    #[derive(Clone)]
+    struct Gate {
+        deny: bool,
+    }
+
+    impl mkit_server::pipeline::Admission for Gate {
+        async fn admit(
+            &self,
+            _: &mkit_server::pipeline::AdmissionInput<'_>,
+        ) -> Result<mkit_server::pipeline::AdmissionDecision, mkit_server::ServerError> {
+            if self.deny {
+                return Err(mkit_server::ServerError::permission_denied("no writes"));
+            }
+            Ok(mkit_server::pipeline::AdmissionDecision::challenge(
+                vec![mkit_server::pipeline::Challenge {
+                    scheme: "payment".to_owned(),
+                    value: "id=\"c1\"".to_owned(),
+                }],
+                "pay",
+            ))
+        }
+    }
+
+    /// The Connect binding with `admission` in front of writes.
+    fn gated_service(admission: Gate) -> connectrpc::ConnectRpcService {
+        use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig};
+        use mkit_server::upload::UploadLimits;
+        use mkit_server::{
+            Addressing, MemoryBlobStore, MemoryKv, NamespaceKey, NoopMetrics, RepoId, RepoName,
+            SystemClock,
+        };
+        let repo = RepoId {
+            namespace: NamespaceKey::deployment_default(),
+            name: RepoName::new("default").unwrap(),
+        };
+        let mut cfg = PipelineConfig::new(
+            Addressing::Single { repo },
+            AuthMode::AuthV2(
+                mkit_server::auth_v2::AuthV2Config::new("http://localhost", "default").unwrap(),
+            ),
+            UploadLimits {
+                max_total_bytes: 1 << 20,
+                max_chunks: 64,
+            },
+        );
+        cfg.ticket_keys = Some(
+            mkit_server::upload::token::TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap(),
+        );
+        let hooks = Hooks {
+            authorizer: mkit_server::pipeline::OpenAuthorizer,
+            admission,
+            pre_receive: mkit_server::pipeline::NoPreReceive,
+            receipts: mkit_server::pipeline::NoReceipts,
+            outcomes: mkit_server::pipeline::NoOutcomes,
+        };
+        let pipe = Pipeline::new(
+            MemoryBlobStore::default(),
+            MemoryKv::default(),
+            hooks,
+            cfg,
+            Arc::new(SystemClock),
+            Arc::new(NoopMetrics),
+        )
+        .unwrap();
+        mkit_server::connect::service(Arc::new(pipe))
+    }
+
     /// The Connect binding over memory stores, open auth, 1 MiB packs.
     fn open_service() -> connectrpc::ConnectRpcService {
         use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig};
@@ -2214,9 +2315,9 @@ mod tests {
         }
     }
 
-    /// A write carrying payment credentials, refused before admission (no
-    /// signature), leaves none of the credential values in any event or
-    /// span field. Platform invocation logs are outside this test.
+    /// A write carrying payment credentials, answered by a challenging or a
+    /// denying admission (402 / 403), leaves none of the credential values in
+    /// any event or span field. Platform invocation logs are outside this test.
     #[test]
     fn credentials_never_reach_the_adapters_tracing() {
         use tracing_subscriber::layer::SubscriberExt as _;
@@ -2225,23 +2326,38 @@ mod tests {
         let _guard = tracing::subscriber::set_default(subscriber);
         // The capture works: an event of ours shows up in it.
         tracing::info!(marker = "capture-works");
-        let req = http::Request::builder()
-            .method(http::Method::POST)
-            .uri("http://w.example/mkit.transport.v1.TransportService/UpdateRef")
-            .header("content-type", "application/json")
-            .header("connect-protocol-version", "1")
-            .header("payment-authorization", "pay-secret-0123")
-            .header("payment-signature", "paysig-secret-0123")
-            .header("authorization", "Payment scheme-secret-0123")
-            .body(LimitedBody::new(
-                frames(&[b"{\"name\":\"refs/heads/x\"}"]),
-                1024,
-                BodyWatch::default(),
-            ))
-            .unwrap();
-        let runtime = runtime();
-        let resp = runtime.block_on(dispatch_oneshot_body(open_service(), req));
-        let _ = runtime.block_on(resp.into_body().collect());
+        for (deny, expected) in [(false, 402u16), (true, 403)] {
+            let procedure = "/mkit.transport.v1.TransportService/UpdateRef";
+            let json = br#"{"name":"refs/heads/x","expectation":"REF_EXPECTATION_ANY","newId":"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="}"#;
+            let signed = mkit_server_conformance::wire::sign::Signer::new(
+                [5; 32],
+                "http://localhost",
+                "default",
+            )
+            .sign_body(procedure, json);
+            let mut builder = http::Request::builder()
+                .method(http::Method::POST)
+                .uri(format!("http://w.example{procedure}"))
+                .header("content-type", "application/json")
+                .header("connect-protocol-version", "1")
+                .header("payment-authorization", "pay-secret-0123")
+                .header("payment-signature", "paysig-secret-0123")
+                .header("authorization", "Payment scheme-secret-0123");
+            for (name, value) in &signed.headers {
+                builder = builder.header(name, value);
+            }
+            let req = builder
+                .body(LimitedBody::new(
+                    frames(&[json]),
+                    1024,
+                    BodyWatch::default(),
+                ))
+                .unwrap();
+            let runtime = runtime();
+            let resp = runtime.block_on(dispatch_oneshot_body(gated_service(Gate { deny }), req));
+            assert_eq!(resp.status().as_u16(), expected);
+            let _ = runtime.block_on(resp.into_body().collect());
+        }
         let out = captured.0.lock().unwrap().clone();
         for secret in [
             "pay-secret-0123",

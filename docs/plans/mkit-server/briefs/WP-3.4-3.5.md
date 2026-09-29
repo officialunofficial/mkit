@@ -70,10 +70,10 @@ payment requirement get one clear, fixed frame.
 - **B9. The sink seam:** `with_outcome_timers<S, O: OutcomeSink + 'static>` takes the sink, with `NoOutcomes` as the
   default.
 - **B10. The plan budget (D4):**
-  - on the **Free** plan, at most **16** kind-8 sink calls per alarm (`max_per_tick` 1 × 16 rows, or 4 × 4);
+  - on the **Free** plan, at most **8** kind-8 sink calls per alarm (`max_per_tick` 1 × 8 rows; review fix, was 16);
   - on **Paid**, 4 × 16;
   - always budget by plan;
-  - correct the Free-plan comment (relay 32 + backup 1 + rollup + outcome).
+  - correct the Free-plan comment (relay 32 + backup 1 + outcome 8 + rollup at most 8).
 - **B11. CORS (Worker):**
   - **Preflight allow:** `CORS_ALLOW_HEADERS` plus `authorization`, `payment-authorization`, `payment-signature` and
     `accept-payment`.
@@ -130,7 +130,7 @@ payment requirement get one clear, fixed frame.
 
 **3.5:**
 - `with_outcome_timers` with a capturing or failing sink;
-- the per-plan budget: at most 16 sink calls per alarm on Free;
+- the per-plan budget: at most 8 sink calls per alarm on Free;
 - the timeout via a fake sleeper;
 - the CORS header strings;
 - repeated `WWW-Authenticate` is preserved;

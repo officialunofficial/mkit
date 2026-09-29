@@ -438,9 +438,9 @@ With the `enc` feature (on by default), `enc::session_fn` serves enc
 sessions over a `TransportIdentity` pipeline (`Pipeline::with_auth` makes
 one beside yours) and `enc::serve` runs the listener.
 
-`server::open_with_sink(&cfg, sink)` is `open` with your `OutcomeSink` on
+`server::open_with_sink(&cfg, sink, SinkOptions::default())` is `open` with your `OutcomeSink` on
 kind 8 (`--meta sqlite` only: fs-layout has no timer driver, and a real sink
-with it is a config error). Each call is bounded by 5 s, a failure or timeout
+with it is a config error). Each call is bounded by `SinkOptions::timeout` (5 s) and a fire by twice that, a failure or timeout
 ends that fire and retries with backoff, and the sink must deduplicate by
 reservation id. A `RemoteOutcomes` client's `server_audience` must be
 `server::outcome_audience(&cfg)`, the value stamped on delivered outcomes.

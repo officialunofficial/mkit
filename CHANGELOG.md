@@ -35,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   traces, and an ssh or enc write that needs a payment answers
   `INVALID_REQUEST "payment required: use mkit+https"` (WP-3.4).
 - Server: the Workers adapter takes an outcome sink with the same per-call
-  timeout, budgets kind 8 by plan (Free: 16 sink calls per alarm), allows
+  timeout, budgets kind 8 by plan (Free: 8 sink calls per alarm), allows
   and exposes the payment headers for browsers and keeps repeated
   `WWW-Authenticate` fields (WP-3.5).
 - Server: `mkit serve --root <DIR>` serves the repositories under `<DIR>`

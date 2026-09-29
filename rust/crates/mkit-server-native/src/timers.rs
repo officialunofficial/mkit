@@ -174,6 +174,13 @@ impl TimerDriver {
         }
     }
 
+    /// The notifying store this driver runs over: a write committed through it
+    /// wakes the driver, as a request's commit does.
+    #[must_use]
+    pub fn store(&self) -> &TimerStore {
+        &self.store
+    }
+
     /// Rebuild timer heads and spawn on the current runtime.
     ///
     /// The returned task finishes its current tick on shutdown. Await it
@@ -227,8 +234,15 @@ impl TimerDriver {
         }
         // Claim every head due at this wake before running any tick.
         // Immediate puts cannot take a second turn before the other heads.
-        for partition in partitions {
+        let mut claimed = partitions.into_iter();
+        while let Some(partition) = claimed.next() {
             if stop.is_some_and(Shutdown::is_triggered) {
+                // Give the unrun claims back, due now, so the shutdown drain
+                // (or a restart, from `SQLite`) still runs them.
+                directory.lower(&partition, now);
+                for rest in claimed {
+                    directory.lower(&rest, now);
+                }
                 return Pass::Stopped;
             }
             // Concurrent puts create fresh entries; reports only lower them.
@@ -257,11 +271,36 @@ impl TimerDriver {
 
     async fn drive(self, stop: Shutdown, drain: Duration) {
         let directory = &self.store.inner().directory;
+        // Set once, when `stop` is first seen: the deadline covers the
+        // in-flight pass and the drain together.
+        let mut deadline: Option<tokio::time::Instant> = None;
         loop {
             if stop.is_triggered() {
                 break;
             }
-            match self.run_due_heads(Some(&stop)).await {
+            let pass = if drain.is_zero() {
+                self.run_due_heads(Some(&stop)).await
+            } else {
+                let running = self.run_due_heads(Some(&stop));
+                tokio::pin!(running);
+                tokio::select! {
+                    pass = &mut running => pass,
+                    () = stop.wait() => {
+                        let limit = tokio::time::Instant::now() + drain;
+                        deadline = Some(limit);
+                        if let Ok(pass) = tokio::time::timeout_at(limit, running).await {
+                            pass
+                        } else {
+                            tracing::warn!(
+                                ?drain,
+                                "shutdown drain deadline reached during the in-flight timer pass"
+                            );
+                            return;
+                        }
+                    }
+                }
+            };
+            match pass {
                 Pass::Ran => continue,
                 Pass::Stopped => break,
                 Pass::Idle => {}
@@ -283,7 +322,8 @@ impl TimerDriver {
         if drain.is_zero() {
             return;
         }
-        let drained = tokio::time::timeout(drain, async {
+        let limit = deadline.unwrap_or_else(|| tokio::time::Instant::now() + drain);
+        let drained = tokio::time::timeout_at(limit, async {
             while self.run_due_heads(None).await != Pass::Idle {}
         })
         .await;

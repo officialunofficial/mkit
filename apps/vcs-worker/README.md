@@ -113,8 +113,9 @@ route exists only for local conformance and must not be enabled in deployment.
 
 Kind 8 (terminal outcome delivery) calls its sink at most once per row and
 stops a fire at the first failure or 5 s timeout. It is budgeted by
-`WORKERS_PLAN` (unset means Free): at most 16 sink calls per alarm on Free
-(relay 32 + backup 1 + outcome 16 = 49 of the 50 subrequests) and 64 on Paid.
+`WORKERS_PLAN` (unset means Free): at most 8 sink calls per alarm on Free
+(relay 32 + backup 1 + outcome 8 + quota rollup at most 8 of the 50
+subrequests) and 64 on Paid.
 This deployment still uses the local `NoOutcomes` sink.
 
 Browsers may send `Authorization`, `Payment-Authorization`,

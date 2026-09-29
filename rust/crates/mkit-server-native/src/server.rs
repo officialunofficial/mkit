@@ -521,14 +521,48 @@ fn lock_root(root: &Path) -> Result<ServerLocks, ConfigError> {
 /// elsewhere or that is bound to another database (R-81), or a store that
 /// does not open; `TEMPFAIL` when the serve lock is not granted in time.
 pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
-    open_inner(cfg, NoOutcomes, false)
+    open_inner(
+        cfg,
+        Delivery {
+            sink: NoOutcomes,
+            real: false,
+            options: SinkOptions::default(),
+        },
+    )
+}
+
+/// Kind-8 delivery bounds for [`open_with_sink`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SinkOptions {
+    /// Bound on one sink call.
+    pub timeout: Duration,
+    /// Rows examined (and so sink calls attempted) per fire.
+    pub max_rows: usize,
+}
+
+impl Default for SinkOptions {
+    fn default() -> Self {
+        Self {
+            timeout: mkit_server::timers::outcome_delivery::DEFAULT_SINK_TIMEOUT,
+            max_rows: mkit_server::timers::outcome_delivery::DEFAULT_MAX_ROWS,
+        }
+    }
+}
+
+/// The sink and its bounds as they travel through `open`.
+struct Delivery<O> {
+    sink: O,
+    /// A caller-supplied sink, not the local acknowledger.
+    real: bool,
+    options: SinkOptions,
 }
 
 /// [`open`], delivering terminal outcomes (kind 8) to `sink` instead of
 /// acknowledging them locally. For embedders: the binary keeps the local
-/// sink until its hook flags land (WP-3.8). Each call is bounded by a 5 s
-/// timeout, a failure or timeout ends the fire and retries with backoff, and
-/// the shutdown drain (`--shutdown-drain-secs`) delivers what is due before
+/// sink until its hook flags land (WP-3.8, which wires `options` to flags).
+/// Each call is bounded by `options.timeout` (default 5 s) and a fire also by
+/// twice that in wall-clock time, a failure or timeout ends the fire and
+/// retries with backoff, and the shutdown drain (`--shutdown-drain-secs`) delivers what is due before
 /// exit. A sink that names the server's audience (a `RemoteOutcomes` client's
 /// `server_audience`) must take it from [`outcome_audience`].
 ///
@@ -538,8 +572,16 @@ pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
 pub fn open_with_sink<O: OutcomeSink + 'static>(
     cfg: &ServeConfig,
     sink: O,
+    options: SinkOptions,
 ) -> Result<Opened, ConfigError> {
-    open_inner(cfg, sink, true)
+    open_inner(
+        cfg,
+        Delivery {
+            sink,
+            real: true,
+            options,
+        },
+    )
 }
 
 /// The audience stamped on delivered outcomes: the auth-v2 audience, empty
@@ -555,8 +597,7 @@ pub fn outcome_audience(cfg: &ServeConfig) -> String {
 
 fn open_inner<O: OutcomeSink + 'static>(
     cfg: &ServeConfig,
-    sink: O,
-    real_sink: bool,
+    delivery: Delivery<O>,
 ) -> Result<Opened, ConfigError> {
     let locks = lock_root(&cfg.repo_root)?;
     let services = match &cfg.blob {
@@ -572,7 +613,7 @@ fn open_inner<O: OutcomeSink + 'static>(
                 Blocking::new(blobs),
                 &cfg.pipeline.addressing,
                 cfg,
-                (sink, real_sink),
+                delivery,
             )?
         }
         #[cfg(feature = "s3")]
@@ -583,7 +624,7 @@ fn open_inner<O: OutcomeSink + 'static>(
             open_s3(config, *spool_max_bytes, cfg)?,
             &cfg.pipeline.addressing,
             cfg,
-            (sink, real_sink),
+            delivery,
         )?,
     };
     Ok(Opened {
@@ -603,7 +644,7 @@ fn with_meta<B, O>(
     blobs: B,
     addressing: &Addressing,
     cfg: &ServeConfig,
-    (sink, real_sink): (O, bool),
+    delivery: Delivery<O>,
 ) -> Result<Services, ConfigError>
 where
     B: MultipartBlobStore + Clone + 'static,
@@ -611,7 +652,7 @@ where
 {
     match &cfg.meta {
         MetaChoice::FsLayout => {
-            if real_sink {
+            if delivery.real {
                 return Err(config_error(
                     "--meta fs-layout",
                     "outcome delivery needs the timer driver, which fs-layout metadata does \
@@ -641,8 +682,17 @@ where
             bind_database(&conn, &root_id, path)?;
             bind_sharding(&conn, cfg.pipeline.sharding, path)?;
             let meta = Blocking::new(TimerNotifying::new(meta));
-            let registry =
-                sqlite_timer_registry(blobs.clone(), meta.clone(), outcome_audience(cfg), sink);
+            let Delivery { sink, options, .. } = delivery;
+            let outcomes = OutcomeDelivery::new(
+                sink,
+                outcome_audience(cfg),
+                Arc::new(MetricsBridge),
+                Arc::new(TokioSleep),
+            )
+            .with_sink_timeout(options.timeout)
+            .with_max_rows(options.max_rows)
+            .with_clock(Arc::new(SystemClock));
+            let registry = sqlite_timer_registry_with(blobs.clone(), meta.clone(), outcomes);
             let driver = TimerDriver::new(meta.clone(), registry, Arc::new(SystemClock));
             let mut services = build_services(blobs, meta, cfg)?;
             services.timers = Some(driver);
@@ -672,7 +722,8 @@ where
         audience,
         Arc::new(MetricsBridge),
         Arc::new(TokioSleep),
-    );
+    )
+    .with_clock(Arc::new(SystemClock));
     sqlite_timer_registry_with(blobs, meta, delivery)
 }
 

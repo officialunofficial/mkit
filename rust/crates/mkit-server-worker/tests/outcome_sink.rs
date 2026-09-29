@@ -96,6 +96,7 @@ fn registry(
         plan,
         sink,
         sleep,
+        Arc::new(ManualClock::new(0)),
     )
 }
 
@@ -162,18 +163,18 @@ async fn a_hanging_sink_is_cut_by_the_timeout() {
 }
 
 #[tokio::test]
-async fn free_plan_makes_at_most_sixteen_sink_calls_per_alarm() {
+async fn free_plan_makes_at_most_eight_sink_calls_per_alarm() {
     let store = MemoryKv::default();
     seed(&store, 40).await;
     let sink = Sink::default();
     let registry = registry(Some("free"), sink.clone(), Arc::new(ManualSleep::new()));
     alarm(&store, &registry, 200).await;
-    assert_eq!(sink.calls.lock().unwrap().len(), 16);
+    assert_eq!(sink.calls.lock().unwrap().len(), 8);
     // An unset or unknown plan is the Free budget.
     for plan in [None, Some("other")] {
-        assert_eq!(outcome_budget(plan).sink_calls_per_alarm(), 16);
+        assert_eq!(outcome_budget(plan).sink_calls_per_alarm(), 8);
     }
-    assert_eq!(outcome_budget(Some("free")).sink_calls_per_alarm(), 16);
+    assert_eq!(outcome_budget(Some("free")).sink_calls_per_alarm(), 8);
     assert_eq!(outcome_budget(Some(" Paid ")).sink_calls_per_alarm(), 64);
 }
 
