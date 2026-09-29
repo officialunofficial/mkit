@@ -44,6 +44,36 @@ fn encoded_span(commit: Hash, offset: u64, len: u64, anchor: &[u8], chunks: &[Ve
     out
 }
 
+/// Read one LEB128 varint, returning its value and encoded length.
+fn read_varint(bytes: &[u8]) -> (u64, usize) {
+    let mut value = 0u64;
+    for (i, byte) in bytes.iter().enumerate() {
+        value |= u64::from(byte & 0x7f) << (7 * i);
+        if byte & 0x80 == 0 {
+            return (value, i + 1);
+        }
+    }
+    panic!("unterminated varint")
+}
+
+/// Encode a LEB128 varint; `pad` appends a redundant zero continuation group.
+fn encode_varint(mut value: u64, pad: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let byte = u8::try_from(value & 0x7f).unwrap();
+        value >>= 7;
+        if value == 0 && !pad {
+            out.push(byte);
+            return out;
+        }
+        out.push(byte | 0x80);
+        if value == 0 {
+            out.push(0);
+            return out;
+        }
+    }
+}
+
 fn body(disclosed: &Disclosed) -> &[u8] {
     match &disclosed.payload {
         DisclosedPayload::Object { bytes }
@@ -630,9 +660,15 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
         Some("span_encoding"),
         None,
     ));
-    // Structural failures must be diagnosed before any embedded MKDP verification.
+    // Structural failures must be diagnosed before any embedded MKDP
+    // verification. Each bad varint replaces the anchor's length prefix in an
+    // otherwise complete valid container, so a lenient reader would accept
+    // (or fail for a different reason) rather than stop with `span_encoding`.
+    let (anchor_len, anchor_len_bytes) = read_varint(&valid[53..]);
+    let rest = &valid[53 + anchor_len_bytes..];
     let mut nonminimal = valid[..53].to_vec();
-    nonminimal.extend_from_slice(&[0x80, 0x00]);
+    nonminimal.extend_from_slice(&encode_varint(anchor_len, true)); // padded with a zero group
+    nonminimal.extend_from_slice(rest);
     vectors.push((
         "neg_nonminimal_varint",
         fixture.commit_id,
@@ -640,8 +676,10 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
         Some("span_encoding"),
         None,
     ));
+    // The real length plus 2^32: a reader that truncates to u32 would accept.
     let mut over_u32 = valid[..53].to_vec();
-    over_u32.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x10]);
+    over_u32.extend_from_slice(&encode_varint(anchor_len + (1 << 32), false));
+    over_u32.extend_from_slice(rest);
     vectors.push((
         "neg_varint_over_u32",
         fixture.commit_id,
@@ -663,14 +701,18 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
         Some("span_anchor_invalid"),
         None,
     ));
+    // Count 1,000,001 followed by exactly that many zero-length vectors
+    // (the sidecar's `expand_to` zero-fills), so `count > remaining` cannot
+    // fire and only the 1,000,000 cap rejects the container.
     let mut excessive_count = valid[..53].to_vec();
     excessive_count.extend_from_slice(&[0, 0xc1, 0x84, 0x3d]); // anchor length 0; count 1,000,001
+    let excessive_expanded = excessive_count.len() + 1_000_001;
     vectors.push((
         "neg_chunk_count_too_large",
         fixture.commit_id,
         excessive_count,
         Some("span_encoding"),
-        None,
+        Some(excessive_expanded),
     ));
     vectors.push((
         "neg_oversize",
@@ -798,7 +840,7 @@ fn committed_http_object_goldens_verify() {
         } else {
             let mut bytes = bytes;
             if let Some(n) = want["expand_to"].as_u64() {
-                assert_eq!(n, (CAP + 1) as u64);
+                assert!(n >= bytes.len() as u64 && n <= (CAP + 1) as u64);
                 bytes.resize(usize::try_from(n).unwrap(), 0);
             }
             let got = span::verify(&trusted, &bytes);
@@ -904,8 +946,8 @@ fn boundary_aware_builder_matches_committed_bytes() {
                 hints,
             )
             .unwrap();
-            let bytes = match proof {
-                RangeProof::Mkdp(bytes) | RangeProof::Mkds(bytes) => bytes,
+            let (RangeProof::Mkdp(bytes) | RangeProof::Mkds(bytes)) = proof else {
+                unreachable!("non-exhaustive RangeProof")
             };
             assert_eq!(
                 bytes,
@@ -931,19 +973,21 @@ fn boundary_aware_builder_matches_committed_bytes() {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(32))]
+    #![proptest_config(ProptestConfig::with_cases(256))]
     #[test]
     fn mutated_spans_match_reference_reason(
+        seed in 0usize..3,
         operation in 0u8..5,
         at in any::<usize>(),
         payload in proptest::collection::vec(any::<u8>(), 0..32),
     ) {
         let dir = directory();
+        let name = ["span_two_chunks", "span_first_zero", "span_three_chunks"][seed];
         let trusted = mkit_core::hash::from_hex(
-            serde_json::from_slice::<Value>(&fs::read(dir.join("span_two_chunks.json")).unwrap())
+            serde_json::from_slice::<Value>(&fs::read(dir.join(format!("{name}.json"))).unwrap())
                 .unwrap()["commit"].as_str().unwrap(),
         ).unwrap();
-        let mut bytes = fs::read(dir.join("span_two_chunks.bin")).unwrap();
+        let mut bytes = fs::read(dir.join(format!("{name}.bin"))).unwrap();
         let index = at % bytes.len();
         match operation {
             0 => bytes[index] ^= 1,
@@ -1003,6 +1047,7 @@ proptest! {
                 prop_assert!(first < last);
                 verify_disclosure_span(&fixture.commit_id, &bytes).unwrap().bytes
             }
+            _ => unreachable!("non-exhaustive RangeProof"),
         };
         let plaintext = common::prng_bytes(0x1234_5678_9abc_def0, 3 * 1024 * 1024);
         let begin = usize::try_from(offset).unwrap();

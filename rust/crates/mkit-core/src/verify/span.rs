@@ -52,6 +52,7 @@ pub struct DisclosedSpan {
 
 /// First failed MKDS check, in SPEC-DISCLOSURE §8.2 order.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SpanError {
     /// Container exceeds 64 MiB.
     #[error("span_too_large")]
@@ -442,6 +443,7 @@ pub fn verify_disclosure_span(trusted: &Hash, bytes: &[u8]) -> Result<DisclosedS
 
 /// Encoded representation chosen for a requested range.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RangeProof {
     /// One MKDP v2 Range bundle.
     Mkdp(Vec<u8>),
@@ -451,8 +453,11 @@ pub enum RangeProof {
 
 /// Proof format, independent of encoded bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RangeProofKind {
+    /// The range lies within one chunk (or a plain Blob): one MKDP v2 bundle.
     Mkdp,
+    /// The range crosses a chunk boundary: one MKDS v1 container.
     Mkds,
 }
 
@@ -460,34 +465,57 @@ pub enum RangeProofKind {
 /// every preceding chunk needed for absolute length proofs and each span
 /// chunk, in ascending order.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Plan {
+    /// Proof format the range requires.
     pub kind: RangeProofKind,
+    /// Index of the chunk containing the first requested byte.
     pub first: usize,
+    /// Index of the chunk containing the last requested byte.
     pub last: usize,
+    /// Every chunk index that must be read: `0..=last`.
     pub needed_chunk_indices: Vec<usize>,
 }
 
 /// Typed builder and planner failures.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum RangeProofError {
+    /// The requested length is zero.
     #[error("range length must be nonzero")]
     ZeroLength,
+    /// `offset + len` (or a running chunk offset) overflows `u64`.
     #[error("range endpoint overflow")]
     OffsetOverflow,
+    /// The range extends past the end of the file.
     #[error("range is outside the file")]
     OutOfBounds,
+    /// Boundary hints are malformed, or were supplied for a plain Blob leaf
+    /// (which has no chunk boundaries).
     #[error("boundary hints must start at zero, strictly increase, and end at total_size")]
     InvalidBoundaries,
+    /// A boundary hint disagrees with the chunk's canonical Blob length.
     #[error("boundary hint differs from chunk {index}'s canonical Blob length")]
-    HintMismatch { index: usize },
+    HintMismatch {
+        /// Index of the first chunk whose hint is wrong.
+        index: usize,
+    },
+    /// A manifest chunk is not a canonical nonempty Blob.
     #[error("chunk {index} is not a canonical nonempty Blob")]
-    InvalidChunk { index: usize },
+    InvalidChunk {
+        /// Index of the offending chunk.
+        index: usize,
+    },
+    /// The encoded proof would exceed the 64 MiB cap.
     #[error("encoded proof exceeds 64 MiB")]
     ProofTooLarge,
+    /// The object source failed.
     #[error(transparent)]
     Store(#[from] StoreError),
+    /// A disclosure-building step failed.
     #[error(transparent)]
     Verify(#[from] VerifyError),
+    /// A source object failed to decode.
     #[error(transparent)]
     Decode(#[from] MkitError),
 }
@@ -1285,7 +1313,14 @@ mod tests {
         assert!(!reads.contains(&chunk_ids[3]));
         drop(reads);
         PRECEDING_LIVE.with(|live| assert_eq!(live.get(), 0));
-        PRECEDING_PEAK.with(|peak| assert!(peak.get() <= 1));
+        // Reading through chunk 1 needs only chunk 0's length proof, so each
+        // preceding chunk is live alone: the peak is exactly one, never more.
+        PRECEDING_PEAK.with(|peak| peak.set(0));
+        assert!(matches!(
+            build_range_proof_from(&source, &commit_id, &[b"file"], 6200, 1, None).unwrap(),
+            RangeProof::Mkdp(_)
+        ));
+        PRECEDING_PEAK.with(|peak| assert_eq!(peak.get(), 1));
         assert!(matches!(
             build_range_proof_from(
                 &source,
@@ -1296,6 +1331,100 @@ mod tests {
                 Some(&[0, 2000, 4048, 6096, 8192])
             ),
             Err(RangeProofError::HintMismatch { index: 0 })
+        ));
+    }
+    #[test]
+    fn inner_commit_bytes_must_hash_to_the_trusted_id() {
+        let (trusted, d) = valid();
+        let (id, commit_bytes, steps, payload) =
+            super::super::decode_disclosure(d.chunks[1]).unwrap();
+        let mut altered = commit_bytes.clone();
+        altered.push(0);
+        let forged = encode_disclosure(&id, &altered, &steps, &payload);
+        let container = encode_span(trusted, d.offset, d.len, d.anchor, &[d.chunks[0], &forged]);
+        let error = verify_disclosure_span(&trusted, &container).unwrap_err();
+        assert_eq!(error.reason(), "span_inner_invalid");
+        assert!(matches!(
+            error,
+            SpanError::InnerInvalid(VerifyError::CommitBytesHashMismatch)
+        ));
+    }
+
+    #[test]
+    fn invalid_boundary_hints_are_typed() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(temp.path())).unwrap();
+        let chunk = |b: u8| {
+            store
+                .write(
+                    &crate::serialize::serialize(&Object::Blob(Blob { data: vec![b; 10] }))
+                        .unwrap(),
+                )
+                .unwrap()
+        };
+        let cb = ChunkedBlob {
+            total_size: 20,
+            chunk_size: 10,
+            chunks: vec![chunk(1), chunk(2)],
+        };
+        let leaf = store
+            .write(&crate::serialize::serialize(&Object::ChunkedBlob(cb)).unwrap())
+            .unwrap();
+        let blob = store
+            .write(&crate::serialize::serialize(&Object::Blob(Blob { data: vec![9; 10] })).unwrap())
+            .unwrap();
+        let tree = Tree {
+            entries: vec![
+                TreeEntry {
+                    name: b"blob".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: blob,
+                },
+                TreeEntry {
+                    name: b"chunked".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: leaf,
+                },
+            ],
+        };
+        let tree_hash = store
+            .write(&crate::serialize::serialize(&Object::Tree(tree)).unwrap())
+            .unwrap();
+        let kp = KeyPair::from_seed([4; 32]);
+        let mut commit = Commit {
+            tree_hash,
+            parents: vec![],
+            author: Identity::ed25519(kp.public.0),
+            signer: kp.public.0,
+            message: b"hints".to_vec(),
+            timestamp: 1,
+            message_hash: ZERO,
+            content_digest: ZERO,
+            signature: [0; 64],
+        };
+        commit.signature = sign_commit(&commit, &kp).unwrap().0;
+        let commit_id = store
+            .write(&crate::serialize::serialize(&Object::Commit(commit)).unwrap())
+            .unwrap();
+        for bad in [
+            &[0u64, 20][..],
+            &[1, 10, 20],
+            &[0, 10, 19],
+            &[0, 10, 10],
+            &[0, 20, 10],
+        ] {
+            assert!(
+                matches!(
+                    build_range_proof_from(&store, &commit_id, &[b"chunked"], 0, 1, Some(bad)),
+                    Err(RangeProofError::InvalidBoundaries)
+                ),
+                "{bad:?}"
+            );
+        }
+        // A plain Blob has no boundaries, so any hint is invalid.
+        assert!(matches!(
+            build_range_proof_from(&store, &commit_id, &[b"blob"], 0, 1, Some(&[0, 10])),
+            Err(RangeProofError::InvalidBoundaries)
         ));
     }
 }

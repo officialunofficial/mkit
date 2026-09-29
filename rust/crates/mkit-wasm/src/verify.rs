@@ -211,7 +211,9 @@ impl VerifiedSpan {
 /// `span_start`, and `chunk_inner_root`. A `path` entry has `name` (UTF-8 or
 /// `null`), `name_hex`, and `mode`. The bytes are returned by the getter of
 /// the same [`VerifiedSpan`] and are never reverified. Input is capped at
-/// 64 MiB. Every error starts with a SPEC-DISCLOSURE §8.2 reason label.
+/// 64 MiB. Every error starts with a SPEC-DISCLOSURE §8.2 reason label,
+/// except a malformed `commit_id_hex`, which is not a §8.2 condition and
+/// starts with `invalid_input:`.
 ///
 /// # Errors
 ///
@@ -223,7 +225,7 @@ pub fn verify_disclosure_span(commit_id_hex: &str, bundle: &[u8]) -> Result<Veri
         return Err("span_too_large: container exceeds 64 MiB".into());
     }
     let commit_id = mkit_core::hash::from_hex(commit_id_hex)
-        .map_err(|_| "span_commit: expected 64 lowercase hex characters".to_string())?;
+        .map_err(|_| "invalid_input: commit id must be 64 lowercase hex characters".to_string())?;
     let d = verify::span::verify_disclosure_span(&commit_id, bundle)
         .map_err(|e| format!("{}: {e}", e.reason()))?;
     let json = serde_json::to_string(&serde_json::json!({

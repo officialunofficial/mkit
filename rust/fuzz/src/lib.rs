@@ -551,63 +551,167 @@ pub fn disclosure_decode_one_iteration(input: &[u8]) {
     let _ = mkit_core::verify::verify_disclosure(&commit_id, input);
 }
 
-/// Exercise the bounded MKDS structural pass on arbitrary bytes. The
-/// verifier's public entry point runs that pass before crypto.
-pub fn span_decode_one_iteration(input: &[u8]) {
-    let input = &input[..input.len().min(MAX_INPUT)];
-    let _ = mkit_core::verify::span::verify_disclosure_span(&[0u8; 32], input);
-}
-
 const GOOD_SPAN: &[u8] = include_bytes!("../../tests/golden/http-objects/span_two_chunks.bin");
 
-fn fixture_length(bytes: &[u8], cursor: &mut usize) -> usize {
-    let mut result = 0usize;
-    for shift in (0..35).step_by(7) {
-        let byte = bytes[*cursor];
-        *cursor += 1;
-        result |= usize::from(byte & 127) << shift;
-        if byte & 128 == 0 {
-            return result;
-        }
-    }
-    panic!("committed span has an invalid length")
-}
-
-fn fresh_span_from_golden() -> ([u8; 32], Vec<u8>) {
-    use mkit_core::verify::span::encode_span;
-
-    let commit: [u8; 32] = GOOD_SPAN[5..37].try_into().expect("committed commit id");
-    let offset = u64::from_be_bytes(GOOD_SPAN[37..45].try_into().expect("committed offset"));
-    let len = u64::from_be_bytes(GOOD_SPAN[45..53].try_into().expect("committed length"));
-    let mut cursor = 53;
-    let anchor_len = fixture_length(GOOD_SPAN, &mut cursor);
-    let anchor = &GOOD_SPAN[cursor..cursor + anchor_len];
-    cursor += anchor_len;
-    let count = fixture_length(GOOD_SPAN, &mut cursor);
-    let mut chunks = Vec::with_capacity(count);
-    for _ in 0..count {
-        let chunk_len = fixture_length(GOOD_SPAN, &mut cursor);
-        chunks.push(&GOOD_SPAN[cursor..cursor + chunk_len]);
-        cursor += chunk_len;
-    }
-    assert_eq!(cursor, GOOD_SPAN.len());
-    (commit, encode_span(commit, offset, len, anchor, &chunks))
-}
-
-/// Verify a newly encoded valid span, reject a guaranteed header mutation,
-/// and feed raw adversarial bytes through the product verifier.
-pub fn verify_span_one_iteration(input: &[u8]) {
+/// Exercise the MKDS verifier on arbitrary bytes. The trusted id is the
+/// committed fixture's real commit, and a copy of the input with that commit
+/// spliced into the header is also verified, so mutated containers get past
+/// the commit comparison and reach the anchor and chunk checks.
+pub fn span_decode_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(MAX_INPUT)];
-    let (commit, span) = fresh_span_from_golden();
-    assert_eq!(span, GOOD_SPAN);
-    let disclosed = mkit_core::verify::span::verify_disclosure_span(&commit, &span)
-        .expect("fresh span must verify");
-    assert_eq!(disclosed.bytes.len(), 20);
-
-    let mut mutated = span;
-    mutated[5] ^= input.first().copied().unwrap_or(1).max(1);
-    assert!(mkit_core::verify::span::verify_disclosure_span(&commit, &mutated).is_err());
+    let commit: [u8; 32] = GOOD_SPAN[5..37].try_into().expect("committed commit id");
     let _ = mkit_core::verify::span::verify_disclosure_span(&commit, input);
+    if input.len() >= 37 && input.starts_with(b"MKDS\x01") {
+        let mut patched = input.to_vec();
+        patched[5..37].copy_from_slice(&commit);
+        let _ = mkit_core::verify::span::verify_disclosure_span(&commit, &patched);
+    }
+}
+
+const SPAN_CHUNK: usize = 48;
+const SPAN_CHUNKS: usize = 4;
+
+/// A small chunked-file repository for [`verify_span_one_iteration_with`].
+pub struct SpanFixture {
+    _dir: tempfile::TempDir,
+    store: mkit_core::store::ObjectStore,
+    commit_id: [u8; 32],
+    plaintext: Vec<u8>,
+}
+
+/// Build a [`SpanFixture`]: one signed commit over a four-chunk file.
+pub fn build_span_fixture() -> SpanFixture {
+    use mkit_core::hash::ZERO;
+    use mkit_core::layout::RepoLayout;
+    use mkit_core::object::{
+        Blob, ChunkedBlob, Commit, EntryMode, Identity, Object, Tree, TreeEntry,
+    };
+    use mkit_core::sign::{KeyPair, sign_commit};
+    use mkit_core::store::ObjectStore;
+
+    const CHUNK: usize = SPAN_CHUNK;
+    const CHUNKS: usize = SPAN_CHUNKS;
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("store init");
+    let plaintext: Vec<u8> = (0..CHUNK * CHUNKS)
+        .map(|i| u8::try_from(i % 251).expect("byte") ^ 0x5a)
+        .collect();
+    let chunk_ids: Vec<[u8; 32]> = plaintext
+        .chunks(CHUNK)
+        .map(|c| {
+            let bytes = mkit_core::serialize::serialize(&Object::Blob(Blob { data: c.to_vec() }))
+                .expect("serialize chunk");
+            store.write(&bytes).expect("write chunk")
+        })
+        .collect();
+    let manifest = ChunkedBlob {
+        total_size: plaintext.len() as u64,
+        chunk_size: CHUNK as u32,
+        chunks: chunk_ids,
+    };
+    let leaf = store
+        .write(&mkit_core::serialize::serialize(&Object::ChunkedBlob(manifest)).expect("manifest"))
+        .expect("write manifest");
+    let tree = Tree {
+        entries: vec![TreeEntry {
+            name: b"f.bin".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: leaf,
+        }],
+    };
+    let tree_hash = store
+        .write(&mkit_core::serialize::serialize(&Object::Tree(tree)).expect("serialize tree"))
+        .expect("write tree");
+    let kp = KeyPair::from_seed([0x43; 32]);
+    let mut commit = Commit {
+        tree_hash,
+        parents: vec![],
+        author: Identity::ed25519(kp.public.0),
+        signer: kp.public.0,
+        message: b"span fuzz fixture".to_vec(),
+        timestamp: 1,
+        message_hash: ZERO,
+        content_digest: ZERO,
+        signature: [0u8; 64],
+    };
+    commit.signature = sign_commit(&commit, &kp).expect("sign commit").0;
+    let commit_id = store
+        .write(&mkit_core::serialize::serialize(&Object::Commit(commit)).expect("commit"))
+        .expect("write commit");
+
+    SpanFixture {
+        _dir: dir,
+        store,
+        commit_id,
+        plaintext,
+    }
+}
+
+/// Build a fresh fixture and run [`verify_span_one_iteration_with`].
+pub fn verify_span_one_iteration(input: &[u8]) {
+    verify_span_one_iteration_with(input, &build_span_fixture());
+}
+
+/// Build an input-driven range proof over the fixture, verify it, then flip
+/// an input-driven byte and require that any acceptance still returns the
+/// file's true plaintext for the range it names. Raw bytes also go through
+/// the verifier against the fixture's real commit.
+pub fn verify_span_one_iteration_with(input: &[u8], fixture: &SpanFixture) {
+    use mkit_core::verify::span::{RangeProof, build_range_proof_from};
+
+    const CHUNK: usize = SPAN_CHUNK;
+    const CHUNKS: usize = SPAN_CHUNKS;
+    let SpanFixture {
+        store,
+        commit_id,
+        plaintext,
+        ..
+    } = fixture;
+    let commit_id = *commit_id;
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let byte = |i: usize| u64::from(input.get(i).copied().unwrap_or(0));
+    let word = |i: usize| byte(i) | (byte(i + 1) << 8);
+
+    let total = plaintext.len() as u64;
+    let offset = word(0) % total;
+    let len = 1 + word(2) % (total - offset);
+    let boundaries: Vec<u64> = (0..=CHUNKS as u64).map(|i| i * CHUNK as u64).collect();
+    let hints = (byte(4) & 1 == 1).then_some(boundaries.as_slice());
+    let proof = build_range_proof_from(store, &commit_id, &[b"f.bin"], offset, len, hints)
+        .expect("in-range proof must build");
+    let expected = &plaintext
+        [usize::try_from(offset).expect("offset")..usize::try_from(offset + len).expect("end")];
+    let container = match proof {
+        RangeProof::Mkdp(bytes) => {
+            let disclosed = mkit_core::verify::verify_disclosure(&commit_id, &bytes)
+                .expect("fresh MKDP must verify");
+            assert!(matches!(
+                disclosed.payload,
+                mkit_core::verify::DisclosedPayload::Range { .. }
+            ));
+            return;
+        }
+        RangeProof::Mkds(bytes) => bytes,
+        _ => unreachable!("non-exhaustive RangeProof"),
+    };
+    let verified = mkit_core::verify::span::verify_disclosure_span(&commit_id, &container)
+        .expect("fresh span must verify");
+    assert_eq!(verified.bytes, expected);
+
+    let mut mutated = container;
+    let at = usize::try_from(word(5)).expect("position") % mutated.len();
+    mutated[at] ^= input.get(7).copied().unwrap_or(1).max(1);
+    if let Ok(accepted) = mkit_core::verify::span::verify_disclosure_span(&commit_id, &mutated) {
+        // A flipped header field may legitimately request another range, but
+        // whatever verifies must be that range's true plaintext.
+        let begin = usize::try_from(accepted.offset).expect("accepted offset");
+        assert_eq!(
+            accepted.bytes,
+            plaintext[begin..begin + accepted.bytes.len()],
+            "a mutated span verified bytes that are not the file's"
+        );
+    }
+    let _ = mkit_core::verify::span::verify_disclosure_span(&commit_id, input);
 }
 
 /// A small native `ObjectStore`-backed fixture for
@@ -1281,9 +1385,12 @@ mod tests {
 
     #[test]
     fn verify_span_target_runs_within_caps() {
-        run_iterated_unit(verify_span_one_iteration).expect("guardrails held");
+        let fixture = build_span_fixture();
+        run_iterated_unit_with(&fixture, verify_span_one_iteration_with).expect("guardrails held");
         for case in [&b""[..], b"MKDP\x02", &[0xff; 64][..]] {
-            run_one(case, verify_span_one_iteration).expect("guardrails held");
+            let started = Instant::now();
+            verify_span_one_iteration_with(case, &fixture);
+            assert!(started.elapsed() <= PER_ITER, "iteration exceeded PER_ITER");
         }
     }
 
