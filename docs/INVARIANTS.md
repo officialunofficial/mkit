@@ -899,6 +899,29 @@ and `rust/tests/golden/disclosure/neg_incomplete_length_proof_set.*`;
 `mkit_core::verify::tests::len_proofs_on_chunk0_are_rejected` and
 `rust/tests/golden/disclosure/neg_len_proofs_on_chunk0.*` (SPEC-DISCLOSURE §4/§4.1).
 
+## MKDS spans bind every chunk to one authenticated byte range
+
+**Always:** an accepted MKDS container has one trusted commit, authenticated
+path and leaf, a complete preceding length-proof set, and consecutive chunk
+bundles. Its absolute boundaries come from verified canonical Blob content
+lengths. The requested range starts in the first included chunk and ends in
+the last, with no unnecessary last chunk. A malformed container returns its
+first SPEC-DISCLOSURE §8.2 reason and no partial output bytes. A range-proof
+builder checks untrusted boundary hints against the chunk bytes it reads and
+does not read a chunk after the span.
+
+**Because:** a chunk-size marker or unchecked hint is not a proof of a content
+boundary, and combining individually valid bundles from different contexts
+would not authenticate their concatenation as one requested range.
+
+**If violated:** a caller can receive bytes at the wrong absolute offset or
+from the wrong leaf, or accept an incomplete range as a valid disclosure.
+
+**Enforced by:** `mkit_core::verify::span` and its unit tests,
+`rust/crates/mkit-core/tests/golden_http_objects.rs` product/reference parity
+and builder byte-identity checks, and `rust/crates/mkit-wasm/tests/verify.rs`
+(WP-4.14a; SPEC-DISCLOSURE §8 and SPEC-HTTP-OBJECTS §5.2).
+
 ## Closure walks share one `children` function
 
 **Always:** every reachability walk &mdash; store-backed

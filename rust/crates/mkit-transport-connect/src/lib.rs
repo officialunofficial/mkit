@@ -45,9 +45,9 @@ pub mod proto {
 }
 
 pub use client::{
-    ConnectTransport, PACK_TRANSFER_TIMEOUT, PENDING_INTERRUPTED_MESSAGE, PendingEvent,
-    ServerInfoView, TOKEN_ENV, UNARY_TIMEOUT, UploadEvent, UrlIdentityError,
-    repository_identity_from_url,
+    Completion, ConnectTransport, PACK_TRANSFER_TIMEOUT, PENDING_INTERRUPTED_MESSAGE, PendingEvent,
+    ServerInfoView, TOKEN_ENV, UNARY_TIMEOUT, UploadEvent, UrlIdentityError, VisibilityChoice,
+    VisibilityRequest, audience_from_url, repository_identity_from_url,
 };
 pub use envelope::EnvelopeSigner;
 pub use grant::{GrantCondition, GrantOperation, GrantRef, GrantRequest, GrantSource};

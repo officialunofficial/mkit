@@ -3,7 +3,7 @@
 - **Milestone/track:** M4 / core (pure mkit-core; may land during M0)
 - **Base:** `feat/mkit-server` at `392072d3` or later; **branch:** `mkit-server/wp-4-3-disclosure-source`
 - **Depends on:** P1 (merged)
-- **Unblocks:** 4.14 (proofs over the repository index or the global CAS)
+- **Unblocks:** 4.14a, 4.14b (proofs over the repository index or the global CAS)
 - **Parallel with:** 1.3, 2.3, 2.4a, 4.1. `verify.rs` overlaps with 4.2 (4.2 adds `mod push` next to `pub use closure`
   at :340; this WP edits :1268–1474). Different hunks; the later PR rebases.
 - **Size:** S (~200–300 changed lines incl. tests)

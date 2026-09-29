@@ -100,6 +100,31 @@ YubiKey):
 mkit key generate            # also: list | import | export | delete
 ```
 
+### Grants, epochs and visibility (private repos and delegated writes)
+
+An owner can let another key write to (or read a private) repository with a signed
+*grant*; the grantee stores it and `mkit push`/`clone` present it automatically.
+
+```sh
+mkit grant create --cap read,write --grantee <ed25519-pubkey-hex> --repo site \
+    --refs 'refs/heads/*=cuf' --ttl 7d > grant.txt   # owner: prints the grant header
+mkit grant add grant.txt                             # grantee: verify + store it
+mkit grant list [--check]                            # what you hold (--check: stale/future epoch)
+mkit epoch show <remote>                             # the namespace's current epoch
+mkit grant revoke <remote> [--prune]                 # owner: epoch bump, revokes older grants
+mkit visibility set <remote> private                 # owner: public|private (--statement for a wallet/passkey owner)
+```
+
+- `--cap` is `read`, `read,write` or `write`; writes need `--refs pattern=flags` (flags from `cufd`).
+  A server that can't check fast-forwards (every current deployment) applies an update only with `f`, so use `cuf`.
+- The owner signs with the mkit key by default; a wallet or passkey signs by
+  `--print-statement`, then `--statement-file f --signature HEX` (or `--webauthn-assertion`,
+  which needs `grant.webauthn_rp` in the user config).
+- Among usable grants the **higher epoch wins**; a grant issued for a future epoch
+  outranks a live one until the owner bumps the epoch. A write-only grant never lets you
+  read a private repository.
+- `mkit grant add` (your store) is unrelated to the operator-side `mkit-server grant register`.
+
 The signed author is auto-derived from the signing key (difference #4 above); set
 `user.identity` only to pin a different one.
 

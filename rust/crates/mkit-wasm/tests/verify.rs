@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use mkit_wasm::{
     blake3_hex, blob_bao_encode, blob_bao_slice, blob_bao_verify_slice, blob_encode,
     chunked_blob_decode, disclosure_payload_bytes, object_id, verify_chunk,
-    verify_closure_manifest, verify_closure_packs, verify_disclosure, verify_tree_entry,
-    wrap_object_id,
+    verify_closure_manifest, verify_closure_packs, verify_disclosure, verify_disclosure_span,
+    verify_tree_entry, wrap_object_id,
 };
 use serde_json::Value;
 
@@ -122,6 +122,121 @@ fn golden_disclosure_vectors_via_wasm() {
             other => panic!("{name}: unknown expect {other:?}"),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// HTTP-objects MKDS goldens
+// ---------------------------------------------------------------------------
+
+fn http_object_body(dir: &std::path::Path, name: &str, sidecar: &Value) -> Vec<u8> {
+    let Some(segments) = sidecar
+        .pointer("/recipe/segments")
+        .and_then(Value::as_array)
+    else {
+        return fs::read(dir.join(format!("{name}.bin"))).unwrap();
+    };
+    let mut bytes = Vec::new();
+    for segment in segments {
+        if let Some(source) = segment["source"].as_str() {
+            let base = fs::read(dir.join(source)).unwrap();
+            let offset = usize::try_from(segment["offset"].as_u64().unwrap()).unwrap();
+            let length = usize::try_from(segment["length"].as_u64().unwrap()).unwrap();
+            bytes.extend_from_slice(&base[offset..offset + length]);
+        } else {
+            bytes.extend_from_slice(&hex::decode(segment["hex"].as_str().unwrap()).unwrap());
+        }
+    }
+    bytes
+}
+
+#[test]
+fn golden_http_object_spans_via_wasm() {
+    let dir = golden_root().join("http-objects");
+    let mut seen_accept = 0;
+    let mut seen_reject = 0;
+    for entry in fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let name = path.file_stem().unwrap().to_str().unwrap();
+        if [
+            "url-parse",
+            "response-cases",
+            "object_shallow",
+            "object_root",
+            "chunk",
+            "in_chunk_range",
+            "blob_range",
+        ]
+        .contains(&name)
+        {
+            continue;
+        }
+        let sidecar = read_json(&path);
+        let mut bytes = http_object_body(&dir, name, &sidecar);
+        assert_eq!(
+            sidecar["size"],
+            serde_json::json!(bytes.len()),
+            "{name}: reconstructed size"
+        );
+        assert_eq!(sidecar["blake3"], blake3_hex(&bytes), "{name}: body digest");
+        let want = &sidecar["expect"];
+        if let Some(expand_to) = want["expand_to"].as_u64() {
+            bytes.resize(usize::try_from(expand_to).unwrap(), 0);
+        }
+        let commit = sidecar["commit"].as_str().unwrap();
+        if want["accept"] == true {
+            seen_accept += 1;
+            let span = verify_disclosure_span(commit, &bytes).unwrap();
+            let json: Value = serde_json::from_str(&span.json()).unwrap();
+            assert_eq!(json["commit_id"], commit, "{name}");
+            assert_eq!(json["leaf_id"], want["leaf"], "{name}");
+            assert_eq!(json["offset"], want["offset"], "{name}");
+            assert_eq!(json["bytes_len"], want["bytes_len"], "{name}");
+            assert_eq!(json["bytes_blake3"], want["bytes_blake3"], "{name}");
+            assert_eq!(json["signature_valid"], want["signature_valid"], "{name}");
+            let path_hex: Vec<_> = json["path"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|part| part["name_hex"].clone())
+                .collect();
+            assert_eq!(serde_json::json!(path_hex), want["path_hex"], "{name}");
+            assert_eq!(blake3_hex(&span.bytes()), want["bytes_blake3"], "{name}");
+        } else {
+            seen_reject += 1;
+            let reason = want["reject_reason"].as_str().unwrap();
+            let err = verify_disclosure_span(commit, &bytes).unwrap_err();
+            assert!(err.starts_with(reason), "{name}: {err}");
+        }
+    }
+    assert!(seen_accept >= 3);
+    assert!(seen_reject >= 15);
+}
+
+#[test]
+fn disclosure_exports_reject_the_other_format() {
+    let dir = golden_root().join("http-objects");
+    let single_bundle = fs::read(dir.join("in_chunk_range.bin")).unwrap();
+    let span_container = fs::read(dir.join("span_two_chunks.bin")).unwrap();
+    let commit = read_json(&dir.join("span_two_chunks.json"))["commit"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        verify_disclosure_span(&commit, &single_bundle)
+            .unwrap_err()
+            .starts_with("span_magic")
+    );
+    assert!(verify_disclosure(&commit, &span_container).is_err());
+}
+
+#[test]
+fn oversize_span_input_returns_reason() {
+    let bytes = vec![0u8; 64 * 1024 * 1024 + 1];
+    let err = verify_disclosure_span(&"00".repeat(32), &bytes).unwrap_err();
+    assert!(err.starts_with("span_too_large"), "{err}");
 }
 
 // ---------------------------------------------------------------------------

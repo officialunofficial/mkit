@@ -349,6 +349,7 @@ pub use closure::{
 };
 mod push;
 pub use push::{PushReport, verify_push};
+pub mod span;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -592,9 +593,58 @@ pub fn verify_path(
         Object::Remix(r) => (r.tree_hash, r.signer, verify_remix(r).is_ok()),
         other => return Err(VerifyError::NotACommitOrRemix(other.object_type())),
     };
+    verify_path_with_context(
+        steps,
+        &CommitContext {
+            tree_hash,
+            signer,
+            signature_valid,
+        },
+    )
+}
 
-    let mut expected_parent = tree_hash;
-    let mut leaf_id = tree_hash;
+/// Commit authentication shared by all bundles in one MKDS container.
+#[derive(Clone, Copy)]
+pub(crate) struct CommitContext {
+    tree_hash: Hash,
+    signer: [u8; 32],
+    signature_valid: bool,
+}
+
+impl CommitContext {
+    pub(crate) fn from_disclosed(d: &Disclosed) -> Self {
+        Self {
+            tree_hash: d.tree_hash,
+            signer: d.signer,
+            signature_valid: d.signature_valid,
+        }
+    }
+}
+
+/// Reuse a commit that the MKDS anchor has authenticated, but still bind
+/// each inner bundle's own commit bytes to the trusted id.
+pub(crate) fn verify_path_reusing_context(
+    commit_id: &Hash,
+    commit_bytes: &[u8],
+    steps: &[Step],
+    context: &CommitContext,
+) -> Result<PathVerified, VerifyError> {
+    if hash(commit_bytes) != *commit_id {
+        return Err(VerifyError::CommitBytesHashMismatch);
+    }
+    verify_path_with_context(steps, context)
+}
+
+fn verify_path_with_context(
+    steps: &[Step],
+    context: &CommitContext,
+) -> Result<PathVerified, VerifyError> {
+    if steps.len() > MAX_TREE_DEPTH {
+        return Err(VerifyError::TooManySteps(steps.len()));
+    }
+
+    let mut expected_parent = context.tree_hash;
+    let mut leaf_id = context.tree_hash;
     let mut path = Vec::with_capacity(steps.len());
     let last = steps.len().wrapping_sub(1);
     for (i, step) in steps.iter().enumerate() {
@@ -620,11 +670,11 @@ pub fn verify_path(
     }
 
     Ok(PathVerified {
-        tree_hash,
+        tree_hash: context.tree_hash,
         path,
         leaf_id,
-        signer,
-        signature_valid,
+        signer: context.signer,
+        signature_valid: context.signature_valid,
     })
 }
 
@@ -1230,6 +1280,40 @@ pub fn verify_disclosure(commit_id: &Hash, bundle: &[u8]) -> Result<Disclosed, V
     }
     let verified = verify_path(commit_id, &commit_bytes, &steps)?;
     let step_inner_roots: Vec<Hash> = steps.iter().map(|s| s.inner_root).collect();
+    let chunk_inner_root = match &payload {
+        PayloadWire::Chunk { inner_root, .. } => Some(*inner_root),
+        PayloadWire::Range {
+            chunk: Some(hdr), ..
+        } => Some(hdr.inner_root),
+        _ => None,
+    };
+    let payload = compose_payload(verified.leaf_id, payload)?;
+    Ok(Disclosed {
+        commit_id: *commit_id,
+        tree_hash: verified.tree_hash,
+        path: verified.path,
+        leaf_id: verified.leaf_id,
+        payload,
+        signer: verified.signer,
+        signature_valid: verified.signature_valid,
+        step_inner_roots,
+        chunk_inner_root,
+    })
+}
+
+/// MKDS-only verification path. The anchor authenticated `context`; the
+/// inner bundle still has to carry commit bytes hashing to `commit_id`.
+pub(crate) fn verify_disclosure_reusing_context(
+    commit_id: &Hash,
+    bundle: &[u8],
+    context: &CommitContext,
+) -> Result<Disclosed, VerifyError> {
+    let (wire_commit_id, commit_bytes, steps, payload) = decode_disclosure(bundle)?;
+    if wire_commit_id != *commit_id {
+        return Err(VerifyError::CommitIdMismatch);
+    }
+    let verified = verify_path_reusing_context(commit_id, &commit_bytes, &steps, context)?;
+    let step_inner_roots = steps.iter().map(|s| s.inner_root).collect();
     let chunk_inner_root = match &payload {
         PayloadWire::Chunk { inner_root, .. } => Some(*inner_root),
         PayloadWire::Range {

@@ -97,6 +97,28 @@ pub(super) fn sign_message(algorithm: Algorithm, secret: &[u8; 32], msg: &[u8]) 
     }
 }
 
+/// Recoverable secp256k1 signature over a finished digest: `r || s || v`
+/// with low `s` and `v` of 27 or 28 (SPEC-WRITE-GRANTS §4.4).
+pub(super) fn sign_prehash_recoverable_secp256k1(
+    secret: &[u8; 32],
+    prehash: &[u8; 32],
+) -> Result<[u8; 65]> {
+    let key = K256SigningKey::from_bytes(secret.into())
+        .map_err(|_| invalid_key_material(Algorithm::Secp256k1, "invalid secp256k1 scalar"))?;
+    let (sig, recovery) = key.sign_prehash_recoverable(prehash);
+    // Normalize regardless of what the library returns: a high `s` flips the
+    // recovery parity along with the scalar.
+    let low = sig.normalize_s();
+    let mut v = 27 + recovery.to_byte();
+    if low != sig {
+        v = if v == 27 { 28 } else { 27 };
+    }
+    let mut out = [0u8; 65];
+    out[..64].copy_from_slice(&low.to_bytes());
+    out[64] = v;
+    Ok(out)
+}
+
 pub(super) fn random_valid_secret(algorithm: Algorithm) -> Result<[u8; 32]> {
     let mut secret = [0u8; 32];
     for _ in 0..8 {

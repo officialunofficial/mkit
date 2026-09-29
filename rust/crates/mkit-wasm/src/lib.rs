@@ -56,7 +56,7 @@ pub use objects::{
     remix_decode, remix_encode_and_sign, remix_verify, tree_decode, tree_encode,
 };
 pub use verify::{
-    blob_bao_encode, blob_bao_slice, blob_bao_verify_slice, chunked_blob_decode,
+    VerifiedSpan, blob_bao_encode, blob_bao_slice, blob_bao_verify_slice, chunked_blob_decode,
     disclosure_payload_bytes, verify_chunk, verify_closure_manifest, verify_closure_packs,
-    verify_disclosure, verify_tree_entry, wrap_object_id,
+    verify_disclosure, verify_disclosure_span, verify_tree_entry, wrap_object_id,
 };

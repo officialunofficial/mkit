@@ -50,7 +50,7 @@ and one PR per WP. A group is done when all of its WPs have merged.
 | G17 | M3 Admission | M3: SPEC-SERVER, remote hooks and hook channels | 3.6, 3.7, 3.8, 3.9, 3.14 |
 | G18 | M3 Admission | M3: client 402 handling, admission_helper and M3 exit | 3.10, 3.11, 3.12, 3.13 |
 | G19 | M4 Indexed mode | M4: indexed ingestion, verification and D32 extraction | 4.1, 4.2, 4.4, 4.5, 4.6, 4.7, 4.8, 4.8a, 4.9, 4.10, 4.10a, 4.17 |
-| G20 | M4 Indexed mode | M4: HTTP serving, proofs, paid/private reads and M4 exit | 4.3, 4.11, 4.12, 4.13, 4.14, 4.15, 4.16, 4.18 |
+| G20 | M4 Indexed mode | M4: HTTP serving, proofs, paid/private reads and M4 exit | 4.3, 4.11, 4.12, 4.13, 4.14a, 4.14b, 4.15, 4.16, 4.18 |
 | G21 | M5 Lifecycle | M5: lifecycle specs, leases and GC | 5.1a, 5.1b-1, 5.1b-2, 5.1c, 5.2, 5.3a, 5.3b |
 | G22 | M5 Lifecycle | M5: published view and quarantine (ContentInspector) | 5.4, 5.5 |
 | G23 | M5 Lifecycle | M5: storage receipts (server signing and client storage) | 5.8, 5.12 |
@@ -182,7 +182,8 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 | 4.11 | G20 | Spec: HTTP serving and proofs (#1088) | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 4.12 | G20 | Server core: HTTP object serving (http-objects feature) | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 4.13 | G20 | Admission on HTTP reads (paid downloads) with ReadServed outcomes | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 4.14 | G20 | Proofs: ?proof=1 inclusion and range disclosure; mkit-wasm round trip | [M3–M5](m3-m5-breakdown.md) | | planned |
+| 4.14a | G20 | MKDS span verifier, wasm binding and boundary-aware range-proof builder | [M3–M5](m3-m5-breakdown.md) | | planned |
+| 4.14b | G20 | HTTP proof query ranges and Workers prefetch | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 4.15 | G20 | Private serving via M2 signed URLs and read auth | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 4.16 | G20 | Adapters: mount HTTP serving (axum and Workers fetch), Range reads, CORS | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 4.17 | G19 | Pre-receive policy hooks: allowed signers per ref, fast-forward-only grants | [M3–M5](m3-m5-breakdown.md) | | planned |
