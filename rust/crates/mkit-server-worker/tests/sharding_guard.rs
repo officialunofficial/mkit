@@ -583,6 +583,33 @@ fn fresh_roots_record_the_configured_addressing() {
 }
 
 #[test]
+fn housekeeping_rows_are_not_unmarked_data() {
+    // The object writes `bk`, `w` and `sm` before or without a commit;
+    // they are not a legacy single deployment's data (vcs-worker
+    // conformance's `--multi` phase hit exactly this on a fresh state).
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(&dir);
+    block_on(
+        store.apply(
+            &root(),
+            Batch::new()
+                .put(keys::backup_state(), Value::new(vec![1]))
+                .put(keys::timer(1, 1, b"x"), Value::default())
+                .put(keys::sharding_marker(), mode("single")),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        block_on(check_addressing(&store, true)).unwrap(),
+        Outcome::Ok
+    );
+    assert_eq!(
+        block_on(store.get(&root(), &keys::addressing_marker())).unwrap(),
+        Some(mode("multi"))
+    );
+}
+
+#[test]
 fn stored_addressing_refuses_the_other_mode() {
     for (stored, multi) in [(false, true), (true, false)] {
         let dir = tempfile::tempdir().unwrap();
@@ -615,10 +642,12 @@ fn stored_addressing_refuses_the_other_mode() {
 fn unmarked_root_data_refuses_multi_but_marks_single() {
     let repo = mkit_server::RepoName::new("default").unwrap();
     let data = || {
-        Batch::new().put(
-            keys::ref_key(&repo, "refs/heads/main"),
-            Value::new(vec![1; 32]),
-        )
+        Batch::new()
+            .put(
+                keys::ref_key(&repo, "refs/heads/main"),
+                Value::new(vec![1; 32]),
+            )
+            .put(keys::layout_version(), Value::default())
     };
     let dir = tempfile::tempdir().unwrap();
     let store = store(&dir);

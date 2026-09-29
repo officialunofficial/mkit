@@ -283,10 +283,11 @@ fn compare_addressing(observed: &Value, configured: AddressingMode) -> Outcome {
 }
 
 /// Run one request's independent addressing-marker check with its own store
-/// handle. `am 00` sorts before `sm 00` and both sort considerations aside,
-/// the scan skips the two markers: `am` itself is compared, `sm` was written
-/// by `check_mode` earlier in the same guarded step and is not data. At most
-/// three calls: get, scan, apply. A failed Absent uses its observation.
+/// handle. An absent `am` marker is legacy only when the root holds committed
+/// data: the layout-version row every first write installs. The housekeeping
+/// rows the object writes before or without one (`sm`, `bk` backup state,
+/// `w` timers) say nothing about addressing and are never data. At most
+/// three calls: get, get, apply. A failed Absent uses its observation.
 ///
 /// # Errors
 /// Backend errors are returned separately from definitive marker outcomes.
@@ -304,28 +305,7 @@ pub async fn check_addressing<S: NamespaceStore>(
     if let Some(observed) = store.get(&root, &marker).await? {
         return Ok(compare_addressing(&observed, configured));
     }
-    // `am` sorts first; `sm` is the only row that can precede data, so two
-    // entries decide. Any other row is an unmarked single deployment's data.
-    let rows = store
-        .scan(
-            &root,
-            &Key::new(Vec::new()),
-            &Key::new(vec![0xff; mkit_server::MAX_KEY_BYTES + 1]),
-            None,
-            2,
-        )
-        .await?;
-    let mut unmarked_data = false;
-    for (key, value) in &rows.entries {
-        if *key == marker {
-            return Ok(compare_addressing(value, configured));
-        }
-        if *key != keys::sharding_marker() {
-            unmarked_data = true;
-            break;
-        }
-    }
-    if unmarked_data && multi {
+    if multi && store.get(&root, &keys::layout_version()).await?.is_some() {
         return Ok(Outcome::AddressingMismatch {
             stored: AddressingMode::Single,
             configured,
