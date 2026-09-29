@@ -34,7 +34,9 @@ async fn create(
     // Resend the same bytes. miniflare's proxy drops a connection ("Network
     // connection lost"; the dev server continues) after a few thousand
     // requests. A lost response may already have committed; a new nonce
-    // would then fail the Missing precondition. Replay returns the stored ok.
+    // would then fail the Missing precondition. Replay returns the stored ok
+    // once the original commits; while it is still in flight the duplicate
+    // answers retryable `aborted` (STC §5), so a resend retries that too.
     let mut attempt = 0u32;
     loop {
         let failed = match ctx
@@ -44,16 +46,21 @@ async fn create(
         {
             Ok(Ok(value)) => return Ok(Ok(value)),
             Ok(Err(error)) if proxy_blip(&error.message) => error.to_string(),
+            Ok(Err(error)) if attempt > 0 && error.code == "aborted" => error.to_string(),
             Ok(Err(error)) => return Ok(Err(error)),
             Err(error) if proxy_blip(&error) => error,
             Err(error) => return Err(error),
         };
-        if attempt >= 4 {
+        if attempt >= 8 {
             return Err(failed);
         }
         attempt += 1;
         eprintln!("list fixture: proxy blip on write {i}, retry {attempt}: {failed}");
-        tokio::time::sleep(std::time::Duration::from_millis(200 * u64::from(attempt))).await;
+        // Up to about 5 s in total: an in-flight original took 2-3 s to commit.
+        tokio::time::sleep(std::time::Duration::from_millis(
+            (200 * u64::from(attempt)).min(1_000),
+        ))
+        .await;
     }
 }
 
@@ -172,7 +179,7 @@ pub(super) async fn large_response_within_limit(ctx: Ctx) -> CaseResult {
     while let Some(result) = writes.next().await {
         if !matches!(result, Ok(Ok(_))) {
             eprintln!(
-                "list.large_response_within_limit: write {done}/{n} failed after {:?} (chunk {:?})",
+                "list.large_response_within_limit: a write failed after {done}/{n} successful writes, {:?} (chunk {:?})",
                 started.elapsed(),
                 last_mark.elapsed()
             );

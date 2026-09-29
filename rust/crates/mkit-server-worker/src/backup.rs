@@ -709,7 +709,7 @@ mod tests {
         // Absolute wall time is load-sensitive: 2.5 s alone, 12 s under
         // nextest -j4. The 5 s regression check stays opt-in. The always-on
         // ceiling only rejects a pathological blow-up (a quadratic rescan).
-        let strict = std::env::var_os("MKIT_BACKUP_TIMING").is_some();
+        let strict = std::env::var("MKIT_BACKUP_TIMING").is_ok_and(|v| !v.is_empty() && v != "0");
         let budget = if strict { 5.0 } else { 120.0 };
         assert!(
             elapsed.as_secs_f64() < budget,

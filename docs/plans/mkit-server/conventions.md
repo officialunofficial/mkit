@@ -98,10 +98,10 @@ export TMPDIR="$HOME/.cache/mkit-test-tmp/<wp-id>"; mkdir -p "$TMPDIR"   # never
   - `mkit-cli`: `remote_dispatch::packmap::tests::verify_new_object_signatures_mixed_with_unsigned_object_kinds`, and the
     `branch_rename_commit_race` binary.
 
-  Since WP-M0-20, `rust/.config/nextest.toml` names exactly these: the ancestry, refs, batch, and packmap tests get a 300 s ceiling, and
+  `rust/.config/nextest.toml` names exactly these (since WP-M0-20; the backup override since the 2026-09-29 test-hygiene chore): the ancestry, refs, batch, and packmap tests get a 300 s ceiling, and
   `branch_rename_commit_race` runs with no other test beside it under 150 s. `sqlite_eighty_thousand_small_rows_at_cap_under_five_seconds`
-  also runs alone (its 5 s wall-clock check is opt-in via `MKIT_BACKUP_TIMING`; the always-on ceiling is 120 s). The measurements are in
-  [the M0 exit report](m0-exit-report.md#6-full-local-ci-just-ci-on-the-quiet-machine). Every other test keeps the 60 s
+  also runs alone (its 5 s wall-clock check is opt-in via `MKIT_BACKUP_TIMING`; the always-on ceiling is 120 s). The M0 measurements are in
+  [the M0 exit report](m0-exit-report.md#6-full-local-ci-just-ci-on-the-quiet-machine); the backup timings are in the chore PR (#1207). Every other test keeps the 60 s
   hang detection. A timeout in one of them, in a module your WP does not touch, is not a failure of your WP until it also
   fails **rerun alone** (`cargo nextest run -p <crate> -E 'test(=<name>)'`); report it as load-related only if it passes
   that way. A new test that needs more time gets its own exact-name override, not a module-wide one.

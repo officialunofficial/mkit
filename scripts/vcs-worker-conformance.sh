@@ -208,14 +208,19 @@ run_suite() {
     shift
     echo ">> running the wire suite (features: ${features}) $*"
     local status=0
-    # --list-parallel 1: miniflare's proxy drops UpdateRef ("Network connection
-    # lost"; the dev server continues) when several slow debug-wasm writes are
-    # in flight. One at a time stays on the Durable Object's own pace. Native
-    # runs keep the default of 8, which the write-gate regression needs.
+    # List fixture concurrency: miniflare's proxy drops UpdateRef ("Network
+    # connection lost"; the dev server continues) when several slow writes are
+    # in flight, so local runs pace to 1. CI keeps 8, the concurrent-UpdateRef
+    # load (and a throughput signal); the harness resends dropped writes.
+    # Override with VCS_LIST_PARALLEL.
+    local list_parallel="${VCS_LIST_PARALLEL:-}"
+    if [ -z "${list_parallel}" ]; then
+        if [ -n "${CI:-}" ]; then list_parallel=8; else list_parallel=1; fi
+    fi
     "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
         --repository "${REPOSITORY}" --random-signer --atomic-advance --fresh-target --milestone M1 \
         --max-pack-bytes "${MAX_PACK_BYTES}" --features "${features}" --sharding "${sharding}" \
-        --list-parallel 1 \
+        --list-parallel "${list_parallel}" \
         "$@" ${runner_args[@]+"${runner_args[@]}"} || status=$?
     if [ "${status}" -ne 0 ]; then
         echo "wire suite failed (exit ${status}); wrangler log tail:" >&2
