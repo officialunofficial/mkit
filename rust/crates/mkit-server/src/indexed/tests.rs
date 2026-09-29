@@ -792,7 +792,7 @@ pub(super) fn seed_member_raw(
     .unwrap();
 }
 
-fn seed_capped_index(store: &MemoryKv, repo: &RepoId, object: Hash) {
+pub(super) fn seed_capped_index(store: &MemoryKv, repo: &RepoId, object: Hash) {
     let value = crate::store::codec::encode_object_index(
         &object,
         &crate::store::index::IndexValue {

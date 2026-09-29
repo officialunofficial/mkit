@@ -29,6 +29,8 @@ pub const METRIC_RELAY_LEASE_LAG: &str = "mkit_server_relay_lease_lag_total";
 pub const METRIC_RELAY_LAG_EXCEEDED: &str = "mkit_server_relay_lag_exceeded_total";
 /// Gauge: source outbox rows inspected in the current relay window.
 pub const METRIC_RELAY_BACKLOG_ROWS: &str = "mkit_server_relay_backlog_rows";
+/// Gauge: subrequests the last scheduled-verification slice spent (WP-4.8).
+pub const METRIC_INDEX_SLICE_SUBREQUESTS: &str = "mkit_server_index_slice_subrequests";
 /// Counter: an object index lookup hit a bounded-work cap. Label: `reason`.
 pub const METRIC_INDEX_LOOKUP_CAPPED: &str = "mkit_server_index_lookup_capped_total";
 /// Counter: a content rejection could not be persisted in verification state.

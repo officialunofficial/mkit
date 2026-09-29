@@ -40,6 +40,7 @@
 //! | ticket expiry timer | `w 00 <expires_at:be64> 02 <ticket_id:32>` | empty |
 //! | local membership | `m 00 <repo> 00 <pack:32>` | empty |
 //! | indexed verification state | `vs 00 <repo> 00 <pack:32>` | `VerificationV1` |
+//! | scheduled-verification job (ref shard) | `vc 00 <repo> 00 <pack:32> <sub:u8> [<id:32>]` | sub 0 job `VerifyJobV1`; 1 frame; 2 closure child; 3 charged external base; 4 extraction candidate (WP-4.10b) |
 //! | repository object index | `i 00 <repo> 00 <object:32> <pack:32>` | binary `IndexValue` |
 //! | reservation and outcome | `o 00 <reservation_id>` | codec `ReservationV1` |
 //! | outcome pending index | `oq 00 <seq:be64> <reservation_id>` | empty |
@@ -55,8 +56,8 @@
 //! | object state (`ContentShard`) | `c 00 <object:32>` | codec `ObjectState` |
 //!
 //! Reserved tags ([`RESERVED_TAGS`]), each laid out by the work package
-//! that adds it: leases `l`, published pointers `pp`, tombstones `tb`, verification
-//! cursors `vc`, and the deployment's namespace list
+//! that adds it: leases `l`, published pointers `pp`, tombstones `tb`, and the
+//! deployment's namespace list
 //! [`TAG_NAMESPACE_LIST`] (WP-1.5; see `Partition` for enumeration). A
 //! new row adds its layout here, with a golden test.
 //!
@@ -165,6 +166,8 @@ pub const TAG_TICKETS_PER_SIGNER: &str = "tu";
 pub const TAG_MEMBERSHIP: &str = "m";
 /// Per-(repository, pack) verification state in the ref shard.
 pub const TAG_VERIFICATION: &str = "vs";
+/// Scheduled-verification job and checkpoint rows in the ref shard.
+pub const TAG_VERIFY_CURSOR: &str = "vc";
 /// Repository-scoped object index tag.
 pub const TAG_OBJECT_INDEX: &str = "i";
 /// Reservation and terminal outcome tag.
@@ -183,7 +186,18 @@ pub const TAG_OUTBOX_SEQUENCE: &str = "os";
 pub const TAG_OUTCOME_BACKLOG: &str = "oc";
 
 /// Tags whose layouts later work packages add. No M0 key uses them.
-pub const RESERVED_TAGS: &[&str] = &["tb", "l", "pp", "vc", TAG_NAMESPACE_LIST];
+pub const RESERVED_TAGS: &[&str] = &["tb", "l", "pp", TAG_NAMESPACE_LIST];
+
+/// [`TAG_VERIFY_CURSOR`] sub-classes: the job row.
+pub const VC_JOB: u8 = 0;
+/// A pack entry's frame, keyed by object id.
+pub const VC_FRAME: u8 = 1;
+/// A closure child still owed a member, keyed by object id.
+pub const VC_CHILD: u8 = 2;
+/// An external base already charged to the decode budget, keyed by object id.
+pub const VC_BASE: u8 = 3;
+/// An extraction candidate, keyed by object id (WP-4.10b).
+pub const VC_CANDIDATE: u8 = 4;
 
 /// A key decoded by [`parse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,6 +299,17 @@ pub enum ParsedKey {
     },
     /// `vs 00 <repo> 00 <pack>`.
     Verification { repo: RepoName, pack_id: Hash },
+    /// `vc 00 <repo> 00 <pack> <sub> [<id>]`.
+    VerifyCursor {
+        /// Repository.
+        repo: RepoName,
+        /// Pack id.
+        pack_id: Hash,
+        /// Sub-class, one of the `VC_*` constants.
+        sub: u8,
+        /// Object id, for every sub-class but the job row.
+        id: Option<Hash>,
+    },
     /// `i 00 <repo> 00 <object> <pack>`.
     ObjectIndex {
         /// Repository.
@@ -641,6 +666,40 @@ pub fn verification(repo: &RepoName, pack: &Hash) -> Key {
     key(TAG_VERIFICATION, &[repo.as_str().as_bytes(), b"\0", pack])
 }
 
+/// `vc 00 <repo> 00 <pack> 00`: the job row of a scheduled verification.
+#[must_use]
+pub fn verify_job(repo: &RepoName, pack: &Hash) -> Key {
+    verify_row(repo, pack, VC_JOB, None)
+}
+
+/// `vc 00 <repo> 00 <pack> <sub> [<id>]`; only the job row (`VC_JOB`) has no id.
+#[must_use]
+pub fn verify_row(repo: &RepoName, pack: &Hash, sub: u8, id: Option<&Hash>) -> Key {
+    key(
+        TAG_VERIFY_CURSOR,
+        &[
+            repo.as_str().as_bytes(),
+            b"\0",
+            pack,
+            &[sub],
+            id.map_or(&[][..], |id| &id[..]),
+        ],
+    )
+}
+
+/// Every row of one job (`sub` `None`), or of one sub-class.
+#[must_use]
+pub fn verify_range(repo: &RepoName, pack: &Hash, sub: Option<u8>) -> (Key, Key) {
+    let mut parts: Vec<&[u8]> = vec![repo.as_str().as_bytes(), b"\0", pack];
+    let sub = sub.map(|sub| [sub]);
+    if let Some(sub) = &sub {
+        parts.push(sub);
+    }
+    let start = key(TAG_VERIFY_CURSOR, &parts);
+    let end = successor(&start);
+    (start, end)
+}
+
 /// `i 00 <repo> 00 <object> <pack>`.
 #[must_use]
 pub fn object_index(repo: &RepoName, object: &Hash, pack: &Hash) -> Key {
@@ -954,6 +1013,22 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
                 pack_id: hash(&body[sep + 1..])?,
             }
         }
+        b"vc" => {
+            let sep = body.iter().position(|&b| b == 0)?;
+            let (pack, rest) = body[sep + 1..].split_first_chunk::<32>()?;
+            let (sub, id) = rest.split_first()?;
+            let id = match (*sub, id.len()) {
+                (VC_JOB, 0) => None,
+                (VC_FRAME..=VC_CANDIDATE, 32) => Some(hash(id)?),
+                _ => return None,
+            };
+            ParsedKey::VerifyCursor {
+                repo: RepoName::new(text(&body[..sep])?).ok()?,
+                pack_id: *pack,
+                sub: *sub,
+                id,
+            }
+        }
         b"i" => {
             let sep = body.iter().position(|&b| b == 0)?;
             let (object, pack_id) = body[sep + 1..].split_first_chunk::<32>()?;
@@ -1072,6 +1147,7 @@ mod tests {
             TAG_TICKETS_PER_SIGNER,
             TAG_MEMBERSHIP,
             TAG_VERIFICATION,
+            TAG_VERIFY_CURSOR,
             TAG_OBJECT_INDEX,
             TAG_RESERVATION,
             TAG_OUTCOME_PENDING,
@@ -1154,7 +1230,60 @@ mod tests {
         for (key, golden) in cases {
             assert_eq!(key.as_bytes(), golden.as_slice());
         }
+        let (a, s2) = (repo("a"), [0x22; 32]);
+        for (key, golden, sub, id) in [
+            (
+                verify_job(&a, &s),
+                [&b"vc\0a\0"[..], &s, &[0]].concat(),
+                VC_JOB,
+                None,
+            ),
+            (
+                verify_row(&a, &s, VC_FRAME, Some(&s2)),
+                [&b"vc\0a\0"[..], &s, &[1], &s2].concat(),
+                VC_FRAME,
+                Some(s2),
+            ),
+            (
+                verify_row(&a, &s, VC_CANDIDATE, Some(&s2)),
+                [&b"vc\0a\0"[..], &s, &[4], &s2].concat(),
+                VC_CANDIDATE,
+                Some(s2),
+            ),
+        ] {
+            assert_eq!(key.as_bytes(), golden.as_slice());
+            assert_eq!(
+                parse(&key),
+                Some(ParsedKey::VerifyCursor {
+                    repo: a.clone(),
+                    pack_id: s,
+                    sub,
+                    id,
+                })
+            );
+        }
+        let (start, end) = verify_range(&a, &s, None);
+        for sub in [VC_JOB, VC_FRAME, VC_BASE] {
+            let row = verify_row(&a, &s, sub, (sub != VC_JOB).then_some(&s2));
+            assert!(start <= row && row < end);
+        }
+        let (start, end) = verify_range(&a, &s, Some(VC_CHILD));
+        assert!(
+            !(start <= verify_row(&a, &s, VC_FRAME, Some(&s2))
+                && verify_row(&a, &s, VC_FRAME, Some(&s2)) < end)
+        );
+        assert!(start <= verify_row(&a, &s, VC_CHILD, Some(&s2)));
+        let other = verify_job(&a, &s2);
+        assert!(!(verify_range(&a, &s, None).0 <= other && other < verify_range(&a, &s, None).1));
+        for bad in [
+            [&b"vc\0a\0"[..], &s, &[0], &s2].concat(),
+            [&b"vc\0a\0"[..], &s, &[1]].concat(),
+            [&b"vc\0a\0"[..], &s, &[5], &s2].concat(),
+        ] {
+            assert_eq!(parse(&Key::new(bad)), None);
+        }
         assert_eq!(LAYOUT_VERSION, 1);
+        assert!(!RESERVED_TAGS.contains(&TAG_VERIFY_CURSOR));
         assert!(!RESERVED_TAGS.contains(&TAG_OBJECT_INDEX));
         assert!(!RESERVED_TAGS.contains(&TAG_VERIFICATION));
         let state = verification(&repo("a"), &s);

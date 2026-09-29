@@ -12,7 +12,8 @@ use crate::store::codec::{self, ReservationV1, TicketV1};
 use crate::store::outbox::{OutboxBuilder, Terminal};
 use crate::store::tickets::{self, CloseReason};
 use crate::store::{
-    Batch, BlobKey, MultipartBlobStore, NamespaceStore, Partition, StoreError, keys,
+    Batch, BlobKey, MultipartBlobStore, NamespaceStore, Partition, Precondition, StoreError, Write,
+    keys,
 };
 
 static ABORT_FAILURES: AtomicU64 = AtomicU64::new(0);
@@ -48,6 +49,47 @@ fn repository(partition: &Partition, ticket: &TicketV1) -> Result<String, StoreE
     RepositoryIdentity::parse_bare_allowed(&name)
         .map_err(|_| StoreError::Corrupt("invalid ticket repository".into()))?;
     Ok(name)
+}
+
+/// An unconsumed pack's verification state goes with its ticket (R-148); a
+/// scheduled job's rows go with it too, by the job's own timer, which this
+/// kicks (WP-4.8). A member pack keeps `vs`: GC removes it with `m`.
+async fn verification_cleanup<S: NamespaceStore>(
+    ctx: &TimerCtx<'_, S>,
+    ticket: &TicketV1,
+    batch: &mut Batch,
+) -> Result<(), StoreError> {
+    let vs_key = keys::verification(&ticket.repo, &ticket.pack_id);
+    let rows = ctx
+        .store
+        .get_many(
+            ctx.partition,
+            &[
+                keys::membership(&ticket.repo, &ticket.pack_id),
+                vs_key.clone(),
+                keys::verify_job(&ticket.repo, &ticket.pack_id),
+            ],
+        )
+        .await?;
+    if let [member, state, job] = rows.as_slice() {
+        if let (None, Some(raw)) = (member, state) {
+            batch
+                .preconditions
+                .push(Precondition::Equals(vs_key.clone(), raw.clone()));
+            batch.writes.push(Write::Delete(vs_key));
+        }
+        if job.is_some() {
+            batch.writes.push(Write::Put(
+                keys::timer(
+                    ctx.now_ms,
+                    kinds::VERIFY.get(),
+                    &crate::indexed::checkpoint::timer_reference(&ticket.repo, &ticket.pack_id),
+                ),
+                crate::store::Value::default(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl<S: NamespaceStore, B: MultipartBlobStore> TimerHandler<S> for TicketExpiry<B> {
@@ -135,6 +177,8 @@ impl<S: NamespaceStore, B: MultipartBlobStore> TimerHandler<S> for TicketExpiry<
                     })?,
                 );
                 outbox.try_finish(&mut batch.preconditions, &mut batch.writes)?;
+
+                verification_cleanup(ctx, &ticket, &mut batch).await?;
 
                 if let Some(session) = &ticket.upload_session
                     && let Err(error) = self
@@ -290,6 +334,60 @@ mod tests {
             .rows,
             1
         );
+    }
+
+    #[tokio::test]
+    async fn expiry_clears_an_unconsumed_packs_verification_and_kicks_its_job() {
+        use crate::indexed::state::{VerificationV1, encode};
+        for member in [false, true] {
+            let store = MemoryKv::default();
+            let t = ticket(4, 100, None);
+            plant(&store, &t, 100).await;
+            let vs = keys::verification(&t.repo, &t.pack_id);
+            let job = keys::verify_job(&t.repo, &t.pack_id);
+            let mut rows = Batch::new()
+                .put(
+                    vs.clone(),
+                    encode(&VerificationV1::Verified {
+                        pack_len: 1,
+                        verified_at_ms: 1,
+                    }),
+                )
+                .put(job.clone(), Value::default());
+            if member {
+                rows = rows.put(keys::membership(&t.repo, &t.pack_id), Value::default());
+            }
+            store.apply(&partition(), rows).await.unwrap();
+            assert_eq!(tick(&store, MemoryBlobStore::default(), 100).await.fired, 1);
+            // A member pack keeps `vs` (GC removes it with `m`); an unconsumed
+            // one loses it. Either way a scheduled job's timer is kicked to
+            // delete the job's rows.
+            assert_eq!(
+                store.get(&partition(), &vs).await.unwrap().is_some(),
+                member
+            );
+            let kick = keys::timer(
+                100,
+                kinds::VERIFY.get(),
+                &crate::indexed::checkpoint::timer_reference(&t.repo, &t.pack_id),
+            );
+            assert!(store.get(&partition(), &kick).await.unwrap().is_some());
+        }
+        // No verification rows: nothing extra is written.
+        let store = MemoryKv::default();
+        let t = ticket(5, 100, None);
+        plant(&store, &t, 100).await;
+        assert_eq!(tick(&store, MemoryBlobStore::default(), 100).await.fired, 1);
+        let (start, end) = keys::class_range(keys::TAG_TIMER);
+        let timers = store
+            .scan(&partition(), &start, &end, None, 10)
+            .await
+            .unwrap()
+            .entries;
+        assert!(!timers.iter().any(|(key, _)| matches!(
+            keys::parse(key),
+            Some(keys::ParsedKey::Timer { kind, .. }) if kind == kinds::VERIFY.get()
+        )));
     }
 
     #[tokio::test]
