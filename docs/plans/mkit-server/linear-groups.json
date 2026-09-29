@@ -294,10 +294,18 @@
  {
   "key": "G25",
   "ms": "Release",
-  "title": "M5 exit conformance and final release to main (0.5.0)",
+  "title": "M5 exit conformance and Stage 2 release to main",
   "wps": [
    "5.13",
-   "REL"
+   "REL-2"
+  ]
+ },
+ {
+  "key": "G26",
+  "ms": "Release",
+  "title": "Stage 1 release to main (0.5.0, core profile)",
+  "wps": [
+   "REL-1"
   ]
  }
 ]

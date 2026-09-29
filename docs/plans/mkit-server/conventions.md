@@ -9,16 +9,16 @@ wins. The PRD snapshot is [`prd-snapshot.md`](prd-snapshot.md); Linear is canoni
 - **No CI runs for `feat/mkit-server`.** Nothing changes GitHub workflow triggers, Cloud Build triggers or rulesets to cover the branch. WP-P0 (CI enablement) is **dropped**: PR #1094 was closed unmerged.
 - In place of CI, the evidence is the executor's local gate run (output in the PR body) and a clean adversarial review; all other merge rules are unchanged. The orchestrator re-runs the gate after rebasing and before squash-merging.
 - Three pre-existing workflows (`actionlint`, `docs-lint`, `crypto-stack-version`) have no branch filter and may fire automatically on PRs into the branch. Their results are **ignored**: nothing waits on them, and their triggers are not changed.
-- **CI runs once**, on the final PR that merges `feat/mkit-server` into `main` (WP-REL). All normal `main` gates apply there.
+- **CI runs on each merge-to-main PR**: WP-REL-1 (Stage 1) and WP-REL-2 (Stage 2) (R-154). All normal `main` gates apply there.
 - `workflow_dispatch` runs are never dispatched against `feat/mkit-server`.
-- A WP that adds CI wiring (new jobs, `server-staging.yml`, workflow changes) may add it, but it must trigger only on `main`, `schedule` or dispatch against `main`, never on the feature branch; it runs for the first time on the final PR to `main`. During the epic the same checks run **locally or against staging from the orchestrator's machine**, at the WP and at every milestone boundary, and the results go in the PR or the milestone report.
+- A WP that adds CI wiring (new jobs, `server-staging.yml`, workflow changes) may add it, but it must trigger only on `main`, `schedule` or dispatch against `main`, never on the feature branch; it runs for the first time on the WP-REL-1 PR to `main`. During the epic the same checks run **locally or against staging from the orchestrator's machine**, at the WP and at every milestone boundary, and the results go in the PR or the milestone report.
 
 ## Base branch
 
 - Every WP branches from and targets **`feat/mkit-server`**.
 - Start from a fresh fetch: `git fetch origin && git switch -c <branch> origin/feat/mkit-server`.
 - Stacked spec PRs (S2 on S1, S3 on S2) retarget to `feat/mkit-server` once their parent merges.
-- Nothing is released from `feat/mkit-server`. Crates publish and the workspace version moves to 0.5 only at WP-REL.
+- Nothing is released from `feat/mkit-server`. Crates publish and the workspace version moves only at a REL: 0.5.0 at WP-REL-1, the next minor at WP-REL-2 (R-154). Both merge with a merge commit, never a squash.
 
 ## Branch naming
 
