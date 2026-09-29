@@ -33,7 +33,8 @@ fn principal(principal: &Principal) -> pb::Principal {
         }
         .into(),
         Principal::SshForcedCommand { key: peer } => pb::SshForcedCommand {
-            ed25519_public_key: peer.as_ref().and_then(key),
+            // §6.2: an unknown key is sent as explicit empty bytes.
+            ed25519_public_key: Some(peer.as_ref().map_or_else(Vec::new, |k| k.to_vec())),
             ..Default::default()
         }
         .into(),
@@ -80,7 +81,13 @@ fn operation(op: &Operation, audience: &str) -> pb::Operation {
         repository: Some(repository(op)),
         procedure: Some(op.procedure().connect_path().to_owned()),
         principal: principal(&op.principal).into(),
-        idempotency_key: op.auth.as_ref().map(|auth| auth.nonce.clone()),
+        // SPEC-SERVER §6.2: the replay nonce is the idempotency key of a write
+        // and empty otherwise.
+        idempotency_key: op
+            .procedure()
+            .is_write()
+            .then(|| op.auth.as_ref().map(|auth| auth.nonce.clone()))
+            .flatten(),
         refs,
         owner: Some(op.authz.owner),
         grant: op

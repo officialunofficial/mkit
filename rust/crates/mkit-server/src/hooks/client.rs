@@ -43,6 +43,9 @@ pub enum HookConfigError {
     /// (SPEC-SERVER §7.1 versus §7.3).
     #[error("a non-isolated hook channel requires a signer")]
     SignerRequired,
+    /// An unsigned channel is a service binding, which has no origin.
+    #[error("an unsigned hook channel must not report an origin")]
+    UnsignedOrigin,
     /// Signing binds the hook endpoint's canonical origin, so the channel
     /// must name one.
     #[error("a signed hook channel must report its canonical origin")]
@@ -100,6 +103,9 @@ pub(crate) struct CallFailure(pub(crate) &'static str);
 pub struct HookClient<C> {
     channel: C,
     signer: Option<HookSigner>,
+    /// The channel's origin, validated once at construction; `Some` exactly
+    /// when the client signs.
+    hook_audience: Option<String>,
     server_audience: String,
     clock: Arc<dyn Clock>,
     sleep: Arc<dyn Sleep>,
@@ -136,10 +142,12 @@ impl<C: HookChannel> HookClient<C> {
         if signer.is_none() && !channel.isolated() {
             return Err(HookConfigError::SignerRequired);
         }
-        // A channel that reports an origin is held to §6.1 whether or not it
-        // signs; a signed one must report it, since the signature binds it.
+        // A signed channel must report its origin, since the signature binds
+        // it, and is held to §6.1; an unsigned one is a service binding and
+        // has none (§7.3).
         match (channel.audience(), signer.is_some()) {
-            (Some(origin), _) => {
+            (Some(_), false) => return Err(HookConfigError::UnsignedOrigin),
+            (Some(origin), true) => {
                 let plain_remote = origin
                     .strip_prefix("http://")
                     .is_some_and(|rest| !loopback(rest));
@@ -150,9 +158,11 @@ impl<C: HookChannel> HookClient<C> {
             (None, true) => return Err(HookConfigError::ChannelAudience),
             (None, false) => {}
         }
+        let hook_audience = channel.audience().map(str::to_owned);
         Ok(Self {
             channel,
             signer,
+            hook_audience,
             server_audience,
             clock,
             sleep,
@@ -194,8 +204,8 @@ impl<C: HookChannel> HookClient<C> {
         ];
         if let Some(signer) = &self.signer {
             let audience = self
-                .channel
-                .audience()
+                .hook_audience
+                .as_deref()
                 .ok_or(CallFailure("no hook origin"))?;
             let mut nonce = [0u8; 32];
             if !self.nonces.fill(&mut nonce) {

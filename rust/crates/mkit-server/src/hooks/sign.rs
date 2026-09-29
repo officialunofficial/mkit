@@ -74,7 +74,7 @@ impl HookSigner {
     /// # Errors
     /// [`SignerError::Validity`] outside 1 ms to [`MAX_VALIDITY`].
     pub fn with_validity(mut self, validity: Duration) -> Result<Self, SignerError> {
-        if validity.is_zero() || validity > MAX_VALIDITY {
+        if validity < Duration::from_millis(1) || validity > MAX_VALIDITY {
             return Err(SignerError::Validity);
         }
         self.validity_ms =

@@ -250,6 +250,10 @@ fn unavailable(err: &ServerError) -> bool {
 
 // ---- signing ---------------------------------------------------------------
 
+// The vectors go through `HookSigner::headers` directly, not a client call:
+// their bodies are the pretty-printed golden text, which the client (compact
+// JSON) never sends. `a_call_is_signed_over_its_exact_body_with_a_fresh_nonce_each_attempt`
+// and its neighbours cover the requests the client really sends.
 #[test]
 fn every_signature_vector_reproduces_byte_for_byte() {
     let file: serde_json::Value = serde_json::from_slice(&golden("signature.json")).unwrap();
@@ -303,6 +307,10 @@ fn signer_refuses_a_bad_key_id_validity_and_clock() {
     assert!(HookSigner::new("A.b_c-9", seed()).is_ok());
     let ok = || HookSigner::new("k", seed()).unwrap();
     assert!(ok().with_validity(Duration::ZERO).is_err());
+    assert_eq!(
+        ok().with_validity(Duration::from_micros(500)).unwrap_err(),
+        SignerError::Validity
+    );
     assert!(
         ok().with_validity(MAX_VALIDITY + Duration::from_millis(1))
             .is_err()
@@ -433,6 +441,12 @@ fn an_unsigned_hook_is_refused_unless_the_channel_is_isolated() {
             .iter()
             .all(|(n, _)| !n.starts_with("X-Mkit-Hook-"))
     );
+
+    let mut named_binding = MockChannel::new(Step::Hang);
+    named_binding.isolated = true;
+    let err =
+        HookClient::new(named_binding, SERVER_ORIGIN, None, clock.clone(), sleep()).unwrap_err();
+    assert_eq!(err, HookConfigError::UnsignedOrigin);
 
     let mut nameless = MockChannel::new(Step::Hang);
     nameless.audience = None;
@@ -855,6 +869,10 @@ pub(crate) fn failure_steps() -> Vec<(&'static str, Step)> {
         ("empty body", Step::json("")),
         ("absent oneof", Step::json("{}")),
         ("wrong type", Step::json(r#"{"allow":7}"#)),
+        (
+            "duplicate oneof",
+            Step::json(r#"{"allow":{"reservationId":"r"},"deny":{}}"#),
+        ),
         ("hang", Step::Hang),
     ]
 }
@@ -995,11 +1013,13 @@ pub(crate) fn invalid_admit_steps() -> Vec<(&'static str, Step)> {
 
 #[test]
 fn a_timeout_through_the_sleep_seam_is_unavailable_and_carries_the_call_timeout() {
-    let client = client(MockChannel::new(Step::Hang), ManualSleep::elapsed());
+    let sleep = ManualSleep::elapsed();
+    let client = client(MockChannel::new(Step::Hang), sleep.clone());
     let authorizer = RemoteAuthorizer::new(client.clone()).with_timeout(Duration::from_millis(250));
     assert!(unavailable(
         &block_on(authorizer.authorize(&update_op())).unwrap_err()
     ));
+    assert_eq!(sleep.requested(), [Duration::from_millis(250)]);
     let seen = channel_of(&client).seen.lock().unwrap();
     assert_eq!(seen[0].timeout, Duration::from_millis(250));
 }
@@ -1238,7 +1258,7 @@ impl NonceSource for Fixed {
 }
 
 #[test]
-fn plain_http_is_loopback_only_and_an_origin_is_checked_even_unsigned() {
+fn plain_http_is_loopback_only_and_an_unsigned_channel_names_no_origin() {
     let clock: Arc<dyn Clock> = Arc::new(ManualClock::new(T));
     let with_origin = |origin: &'static str, signed: bool| {
         let mut channel = MockChannel::new(Step::Hang);
@@ -1276,10 +1296,10 @@ fn plain_http_is_loopback_only_and_an_origin_is_checked_even_unsigned() {
             "{bad}"
         );
     }
-    // An isolated channel that names an origin is held to the same rule.
+    // An unsigned channel is a service binding: it names no origin at all.
     assert_eq!(
-        with_origin("http://hooks.example.test", false),
-        Err(HookConfigError::Audience("hook"))
+        with_origin("https://hooks.example.test", false),
+        Err(HookConfigError::UnsignedOrigin)
     );
 }
 
@@ -1352,4 +1372,90 @@ fn credentials_are_wiped_from_the_message_and_the_body_is_exactly_sized() {
             .unwrap()
             .contains("fake-example-credential")
     );
+}
+
+#[test]
+fn a_signed_read_sends_an_empty_idempotency_key_and_a_write_its_nonce() {
+    let read = granted_op(
+        OpKind::ReadRef {
+            name: "refs/heads/main".into(),
+        },
+        "b3",
+    );
+    assert_eq!(
+        map::authorize_request(&read, SERVER_ORIGIN)
+            .operation
+            .idempotency_key,
+        None
+    );
+    let write = update_op();
+    assert_eq!(
+        map::authorize_request(&write, SERVER_ORIGIN)
+            .operation
+            .idempotency_key,
+        Some("a2".repeat(32))
+    );
+}
+
+#[test]
+fn an_unknown_ssh_key_is_explicit_empty_bytes() {
+    let mut op = update_op();
+    op.principal = Principal::SshForcedCommand { key: None };
+    let request = value_of(&map::authorize_request(&op, SERVER_ORIGIN));
+    let key = &request["operation"]["principal"]["sshForcedCommand"];
+    assert!(key.get("ed25519PublicKey").is_some(), "{request}");
+}
+
+#[test]
+fn an_outcome_for_another_audience_is_not_delivered() {
+    let hook = client(MockChannel::new(Step::json("{}")), ManualSleep::new());
+    let sink = RemoteOutcomes::new(hook.clone());
+    let mut row = outcome("r-1", OutcomeKind::Expired);
+    row.audience = "https://other.example.test".to_owned();
+    let err = block_on(sink.deliver(&row)).unwrap_err();
+    assert_eq!(err.to_string(), "outcome delivery failed");
+    assert!(channel_of(&hook).seen.lock().unwrap().is_empty());
+    row.audience = SERVER_ORIGIN.to_owned();
+    block_on(sink.deliver(&row)).unwrap();
+}
+
+#[test]
+fn credentials_are_wiped_when_the_call_is_cancelled_or_unwinds() {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    struct Probe(Arc<AtomicUsize>);
+    impl super::roles::Wipe for Probe {
+        fn wipe(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let wipes = Arc::new(AtomicUsize::new(0));
+    // Dropped mid-call, on a future that never completes.
+    let held = super::roles::WipeOnDrop(Probe(wipes.clone()));
+    let mut call = Box::pin(async move {
+        let _held = held;
+        core::future::pending::<()>().await;
+    });
+    assert!(futures::FutureExt::now_or_never(&mut call).is_none());
+    assert_eq!(wipes.load(Ordering::SeqCst), 0);
+    drop(call);
+    assert_eq!(wipes.load(Ordering::SeqCst), 1);
+    // A panic unwinds through the guard.
+    let inner = wipes.clone();
+    let result = std::panic::catch_unwind(move || {
+        let _held = super::roles::WipeOnDrop(Probe(inner));
+        panic!("unwind");
+    });
+    assert!(result.is_err());
+    assert_eq!(wipes.load(Ordering::SeqCst), 2);
+
+    // And through the real adapter: a hung Admit dropped mid-call.
+    let hook = client(MockChannel::new(Step::Hang), ManualSleep::new());
+    let admission = RemoteAdmission::new(hook.clone());
+    let op = begin_op();
+    let creds = credentials();
+    let input = admit_input(&op, &creds);
+    let mut admit = Box::pin(admission.admit(&input));
+    assert!(futures::FutureExt::now_or_never(&mut admit).is_none());
+    drop(admit);
+    assert_eq!(channel_of(&hook).seen.lock().unwrap().len(), 1);
 }

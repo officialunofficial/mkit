@@ -162,6 +162,7 @@ where
 pub struct ManualSleep {
     fired: Arc<AtomicBool>,
     wake: Arc<tokio::sync::Notify>,
+    requested: Arc<std::sync::Mutex<Vec<Duration>>>,
 }
 
 impl ManualSleep {
@@ -179,6 +180,14 @@ impl ManualSleep {
         sleeper
     }
 
+    /// The duration of every sleep requested so far, in order.
+    #[must_use]
+    pub fn requested(&self) -> Vec<Duration> {
+        self.requested
+            .lock()
+            .map_or_else(|poisoned| poisoned.into_inner().clone(), |v| v.clone())
+    }
+
     /// Complete every current and future sleep.
     pub fn fire(&self) {
         self.fired.store(true, Ordering::SeqCst);
@@ -187,7 +196,11 @@ impl ManualSleep {
 }
 
 impl Sleep for ManualSleep {
-    fn sleep(&self, _duration: Duration) -> BoxFuture<'static, ()> {
+    fn sleep(&self, duration: Duration) -> BoxFuture<'static, ()> {
+        match self.requested.lock() {
+            Ok(mut requested) => requested.push(duration),
+            Err(poisoned) => poisoned.into_inner().push(duration),
+        }
         let (fired, wake) = (self.fired.clone(), self.wake.clone());
         Box::pin(async move {
             loop {

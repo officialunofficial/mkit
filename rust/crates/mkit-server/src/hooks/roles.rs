@@ -78,6 +78,27 @@ role!(RemoteAuthorizer);
 role!(RemoteAdmission);
 role!(RemoteOutcomes);
 
+/// What a [`WipeOnDrop`] holds: credential values that must not outlive the
+/// call that carried them.
+pub(super) trait Wipe {
+    fn wipe(&mut self);
+}
+
+impl Wipe for pb::AdmitRequest {
+    fn wipe(&mut self) {
+        map::wipe(self);
+    }
+}
+
+/// Wipes its value on drop, so a cancelled or panicking call wipes too.
+pub(super) struct WipeOnDrop<T: Wipe>(pub(super) T);
+
+impl<T: Wipe> Drop for WipeOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.wipe();
+    }
+}
+
 impl<C: HookChannel> Authorizer for RemoteAuthorizer<C> {
     async fn authorize(&self, op: &Operation) -> Result<AuthzFacts, ServerError> {
         let request = map::authorize_request(op, self.client.server_audience());
@@ -100,12 +121,12 @@ impl<C: HookChannel> Admission for RemoteAdmission<C> {
         {
             return Err(map::unavailable("admission", "audience mismatch"));
         }
-        let mut request = map::admit_request(input, self.client.server_audience());
+        // Wiped when this future finishes, is cancelled or unwinds.
+        let request = WipeOnDrop(map::admit_request(input, self.client.server_audience()));
         let answer = self
             .client
-            .decide::<_, pb::AdmitResponse>(Rpc::Admit, &request, self.timeout)
+            .decide::<_, pb::AdmitResponse>(Rpc::Admit, &request.0, self.timeout)
             .await;
-        map::wipe(&mut request);
         let answer = answer.map_err(|failure| map::unavailable("admission", failure.0))?;
         let decision = map::admit_answer(answer)?;
         validate_decision(&decision)?;
@@ -115,6 +136,13 @@ impl<C: HookChannel> Admission for RemoteAdmission<C> {
 
 impl<C: HookChannel> OutcomeSink for RemoteOutcomes<C> {
     async fn deliver(&self, outcome: &Outcome) -> Result<(), DeliveryError> {
+        // The row's audience and this adapter's must be one value (an Admit
+        // and its Outcome name the same origin); a mismatch is retried, and
+        // the operator fixes the wiring.
+        if !outcome.audience.is_empty() && outcome.audience != self.client.server_audience() {
+            tracing::warn!(reason = "audience mismatch", "remote outcome hook unusable");
+            return Err(DeliveryError::new("audience mismatch", None));
+        }
         let request = map::outcome_request(outcome);
         self.client
             .deliver(Rpc::Outcome, &request, self.timeout)
