@@ -5,8 +5,8 @@ use buffa::Message;
 use mkit_transport_connect::generated::{ListRefsRequest, ListRefsResponse, UpdateRefResponse};
 use std::time::{Duration, Instant};
 const TIMER: &str = "x-mkit-test-timer-ms";
-const RUN: &str = "x-mkit-test-run-timers";
-const SKEW: &str = "x-mkit-test-clock-skew-ms";
+pub(super) const RUN: &str = "x-mkit-test-run-timers";
+pub(super) const SKEW: &str = "x-mkit-test-clock-skew-ms";
 
 async fn create(ctx: &Ctx, name: &str, delay: &str) -> CaseResult {
     let body = update_req(name, Exp::Missing, &A).encode_to_vec();

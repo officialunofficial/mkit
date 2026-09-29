@@ -41,6 +41,7 @@ mkit-server serve [--listen <ADDR>] [--listen-enc <ADDR>] --repo-root <DIR>
     [--addressing single|multi]
     [--namespace-policy allowlist|any] [--namespace-allowlist <PATH>]
     [--unsafe-open-namespaces] [--enc-repository <NS>/<NAME>]
+    [--grant-schemes <TOKENS>] [--webauthn-rp <ID=ORIGINS>]... [--unsafe-allow-loopback-grants]
     [--max-pack-bytes N] [--unary-timeout-secs 30] [--stream-timeout-secs 3600]
     [--max-concurrency 256] [--queue-timeout-secs 5]
     [--max-connections 1024] [--header-read-timeout-secs 10] [--idle-timeout-secs 60]
@@ -181,6 +182,30 @@ Under `--addressing multi`, `--listen-enc` requires `--enc-repository
 (SPEC-TRANSPORT-CONNECT §7.4), and `--unsafe-allow-any-enc-peer` is
 refused: an enc session needs the repository its peer is authorized for.
 
+### Write grants
+
+Write grants (SPEC-WRITE-GRANTS) let a namespace owner delegate writes. They
+are off unless `--grant-schemes` is set, and need `--addressing multi` with
+`--auth auth-v2`: the grant audience is the deployment's own `--audience`, so
+there is no separate audience flag.
+
+- `--grant-schemes <TOKENS>`: the accepted owner schemes, comma-separated
+  (`ed25519`, `secp256k1-eip191`, `webauthn-p256`), advertised as
+  `GetServerInfo.grant_schemes`. A blank list or an unknown token is refused.
+- `--webauthn-rp <ID=ORIGINS>` (repeatable): a `WebAuthn` relying party,
+  `id=origin[,origin...]`, split on the first `=`. `webauthn-p256` requires one;
+  a duplicate id, or a relying party without `--grant-schemes`, is refused.
+- `--unsafe-allow-loopback-grants`: development only. Without it a loopback
+  `--audience` or relying party (`localhost`, `127.0.0.1`, `[::1]`) is refused:
+  every local deployment shares one, so a grant for it would verify at all of
+  them (SPEC-WRITE-GRANTS §3.2). The flag prints a warning banner.
+
+Every bad or partial value stops the server at startup (`USAGE` or
+`CONFIG_ERROR`); none degrades to "grants off". `mkit-attest` owns all
+validation beyond syntax. The `--listen-enc` sibling pipeline serves
+transport-identity sessions, which carry no grant header, so it runs without
+grants; registered grants over ssh and enc arrive with WP-2.12.
+
 ### The enc listener (`mkit+enc://`)
 
 `--listen-enc <ADDR>` serves `mkit+enc://` clients (SPEC-TRANSPORT-ENC):
@@ -261,14 +286,25 @@ Bounds, as for HTTP:
   `SQLite` file; `AdvanceRefs` is atomic. `--sqlite-max-bytes` (default 8
   GiB) caps the file: see "Capacity" below.
 
-`--sharding single` is the default: each namespace stays in one partition.
-`--sharding d34` requires `SQLite` metadata and routes each branch head and its
+`--sharding` defaults to `d34` with `--meta sqlite:<PATH>` and to `single`
+otherwise (fs-layout cannot run D34), and to `single` for `--addressing multi`
+with `--listen-enc`: ssh/enc sessions carry no ref hint, so under D34 enc/ssh
+membership reads are eventual (up to `RELAY_LAG_BOUND_MS`) and an enc clone
+right after a push can fail. An explicit `--sharding d34` with `--listen-enc`
+is allowed on that understanding. `single` keeps each namespace in one
+partition. `d34` requires `SQLite` metadata and routes each branch head and its
 `refs/mkit/packmap/<branch>` together into a ref partition, with configuration
 in the namespace coordinator. Any other `AdvanceRefs` pair is
 `invalid_argument`. D34's default write quota counts per ref partition;
-namespace totals arrive with WP-1.26. `ListRefs` under D34 reads the eventual
+a kind-5 rollup timer folds each shard's usage into namespace totals. `ListRefs` under D34 reads the eventual
 ref-name index. The conformance runner accepts the same
 `--sharding single|d34` option and runs its listing cases under both modes.
+
+**Breaking change (WP-1.28c).** A database written `single`, or written before
+`--sharding` existed and holding data, is refused under the D34 default with
+`CONFIG_ERROR`; there is no migration (R-123). Pass `--sharding single` to keep
+serving it. Under Single addressing the default write quota is now counted per
+(signer, branch) rather than per signer.
 
 One root never keeps refs in two places (R-81). `--meta sqlite:` refuses a
 root that already holds ref files. Otherwise, under the root's ref lock, it
@@ -495,7 +531,8 @@ To restore, stop the server, move the database and its `-wal` and `-shm`
 files aside, put the backup in the database's place, and start the server.
 Migrations run on open, so a backup from an older binary is brought forward.
 Restart with the same `--sharding` mode used by the backed-up database
-(R-93); its stored routing mode is checked on startup.
+(R-93); its stored routing mode is checked on startup. A `single` database
+needs `--sharding single`, since `d34` is the default with `--meta sqlite`.
 
 This physical backup covers one native `SQLite` database.
 
@@ -525,7 +562,8 @@ mkit-server restore --meta sqlite:/srv/mkit/new-meta.sqlite3 \
   --from /srv/backups/export-2026-09-27 --sharding d34
 ```
 
-`--sharding` must match the archive marker. `--epoch-at-least N` can set a
+`--sharding` defaults to the archive marker's mode and must match it when
+given. `--epoch-at-least N` can set a
 higher minimum grant epoch. Restore advances fresh coordinator epochs by at
 least 2^32, marks their lease tables recovered, re-keys relay sequences and removes backup
 timers/state. Keep traffic off the destination until the command succeeds;

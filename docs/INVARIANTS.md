@@ -1200,8 +1200,13 @@ the null behavior is documented in [the alarms API](https://developers.cloudflar
 
 ## Worker deployment sharding is bound before serving RPCs
 
-**Always:** a Worker isolate validates its configured sharding against `sm 00`
-in the root RefStore before serving RPCs. An unmarked root with rows is single.
+**Always:** a Worker isolate validates its configured sharding (`SHARDING`,
+default `d34`) against `sm 00` in the root RefStore before serving RPCs. An
+unmarked root with rows is single, so it answers 503 until `SHARDING=single` is
+pinned: there is no single to D34 migration (R-123). The native server's
+`bind_sharding` makes the same choice: a recorded or unmarked-with-data `single`
+database under the `d34` default (`--meta sqlite`) is `CONFIG_ERROR`, telling
+the operator to pass `--sharding single`.
 Each cold request runs its own check with its own store handle. The thread-local
 `RefCell<Option<Settled>>` caches only plain definitive data: success, mismatch
 or corruption. No future, promise or request handle crosses request contexts.

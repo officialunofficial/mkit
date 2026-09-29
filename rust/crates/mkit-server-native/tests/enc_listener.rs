@@ -66,6 +66,7 @@ struct EncServer {
     served: Option<tokio::task::JoinHandle<Result<(), mkit_transport_enc::EncInitError>>>,
     runtime: tokio::runtime::Runtime,
     _locks: server::ServerLocks,
+    _timers: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl EncServer {
@@ -78,7 +79,7 @@ impl EncServer {
         ];
         all.extend_from_slice(flags);
         let cfg = common::resolve_with(&all, &[]).unwrap();
-        let (services, locks) = server::open(&cfg).unwrap().into_parts();
+        let (mut services, locks) = server::open(&cfg).unwrap().into_parts();
         let service = services.enc.unwrap();
         let pubkey = raw_pubkey(&service.key);
         let opts = cfg.enc.clone().unwrap();
@@ -93,8 +94,14 @@ impl EncServer {
         let addr = listener.local_addr().unwrap();
         let shutdown = Shutdown::new();
         let stop = shutdown.clone();
+        // The relay driver delivers D34's indexes; absent under Single.
+        let _timers = services
+            .timers
+            .take()
+            .map(|driver| runtime.block_on(driver.start(shutdown.clone())).unwrap());
         let served = runtime.spawn(async move { enc::serve(listener, service, &opts, stop).await });
         Self {
+            _timers,
             addr,
             pubkey,
             shutdown,
@@ -697,6 +704,18 @@ fn multi_enc_start(
     repository: &str,
     allowlist: &str,
 ) -> (EncServer, tempfile::TempDir) {
+    multi_enc_start_sharding(root, peer, repository, allowlist, None)
+}
+
+/// [`multi_enc_start`] with an explicit `--sharding`; `None` takes the
+/// default, which is `single` for Multi with `--listen-enc` (R-157).
+fn multi_enc_start_sharding(
+    root: &Path,
+    peer: &PrivateKey,
+    repository: &str,
+    allowlist: &str,
+    sharding: Option<&str>,
+) -> (EncServer, tempfile::TempDir) {
     let aux = tempfile::tempdir().unwrap();
     let peers = aux.path().join("peers.txt");
     fs::write(
@@ -713,7 +732,7 @@ fn multi_enc_start(
     );
     let meta = format!("sqlite:{}", common::s(&aux.path().join("meta.sqlite3")));
     let key_path = aux.path().join("enc").join("server.key");
-    let flags = [
+    let mut flags = vec![
         "--listen",
         "127.0.0.1:0",
         "--addressing",
@@ -735,6 +754,9 @@ fn multi_enc_start(
         "--enc-repository",
         repository,
     ];
+    if let Some(mode) = sharding {
+        flags.extend(["--sharding", mode]);
+    }
     (EncServer::start(root, &flags), aux)
 }
 
@@ -777,6 +799,57 @@ fn enc_multi_bound_repository_roundtrips_the_owner() {
     assert_eq!(client.read_ref("refs/heads/main").unwrap(), Some(head));
     assert!(client.pack_exists(&key).unwrap());
     assert!(client.pack_exists(&mkpl_key).unwrap());
+    assert_eq!(client.download_pack(&key).unwrap(), bytes);
+}
+
+/// Under an explicit `--sharding d34` the enc session carries no ref hint, so
+/// membership reads are eventual (up to `RELAY_LAG_BOUND_MS`): the push lands
+/// and its pack membership becomes readable within the bound (polled, never slept).
+#[test]
+fn enc_multi_d34_membership_reads_are_eventual() {
+    use mkit_server::relay::RELAY_LAG_BOUND_MS;
+    let (_td, root) = enc_repo();
+    let peer = PrivateKey::from_seed(77);
+    let peer_ns = peer_namespace(&peer);
+    let repository = format!("{peer_ns}/room-a");
+    let (server, _aux) = multi_enc_start_sharding(
+        &root,
+        &peer,
+        &repository,
+        &format!("{peer_ns}\n"),
+        Some("d34"),
+    );
+    let client = server.client(77).unwrap();
+    let (bytes, key) = valid_pack();
+    client.upload_pack(&bytes, &key).unwrap();
+    let mkpl =
+        mkit_core::transfer::encode_packlist(None, std::slice::from_ref(key.as_bytes())).unwrap();
+    let mkpl_key = PackKey::new(hash(&mkpl));
+    client.upload_pack(&mkpl, &mkpl_key).unwrap();
+    client
+        .update_ref(
+            "refs/mkit/packmap/main",
+            RefWriteCondition::Missing,
+            mkpl_key.as_bytes(),
+        )
+        .unwrap();
+    let head = [0x42; 32];
+    client
+        .update_ref("refs/heads/main", RefWriteCondition::Missing, &head)
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(RELAY_LAG_BOUND_MS);
+    // Pack membership is the eventual read: no ref hint rides an enc session.
+    loop {
+        if matches!(client.pack_exists(&key), Ok(true)) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "pack membership stayed unreadable past RELAY_LAG_BOUND_MS"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert_eq!(client.read_ref("refs/heads/main").unwrap(), Some(head));
     assert_eq!(client.download_pack(&key).unwrap(), bytes);
 }
 

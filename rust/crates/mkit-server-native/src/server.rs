@@ -367,9 +367,9 @@ pub fn bind_sharding(conn: &RusqliteConn, mode: Sharding, db: &Path) -> Result<(
         exit::CONFIG_ERROR,
         format!(
             "mkit-server serve: --meta sqlite:{}: the database was written with --sharding \
-             {stored}, but this server was started with --sharding {wanted}. Changing an \
-             existing database's sharding would hide its refs, and there is no migration yet: \
-             start with --sharding {stored}.",
+             {stored}, but this server was started with --sharding {wanted} (the default with \
+             --meta sqlite is d34, or single for --addressing multi with --listen-enc). Changing an existing database's sharding would hide its refs \
+             and is never done silently: start with --sharding {stored}.",
             db.display()
         ),
     ))
@@ -968,7 +968,14 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(bind_sharding(&conn, Sharding::D34, &path).is_err());
+        let refused = bind_sharding(&conn, Sharding::D34, &path).unwrap_err();
+        assert_eq!(refused.code, exit::CONFIG_ERROR);
+        assert!(
+            refused.message.contains("start with --sharding single")
+                && !refused.message.contains("no migration yet"),
+            "{}",
+            refused.message
+        );
         bind_sharding(&conn, Sharding::Single, &path).unwrap();
     }
 }
