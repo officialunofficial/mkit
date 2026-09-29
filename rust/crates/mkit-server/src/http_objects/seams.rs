@@ -10,6 +10,7 @@ use super::body::EndHook;
 use super::reach::{Reachability, TtlReachability};
 use super::route::{Query, Target};
 use super::{HttpObjectResponse, HttpObjectsConfig};
+use crate::Procedure;
 use crate::repo::RepoId;
 use crate::{BoxFuture, MaybeSend, MaybeSync, Redacted, ServerError};
 
@@ -32,11 +33,15 @@ impl TokenGate for NoTokens {
     }
 }
 
-/// One admitted read (§7), filled by WP-4.13.
+/// One admitted read (§7), filled by WP-4.13, which adds the request's
+/// credential headers.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct AdmitRequest<'a> {
     /// The selected repository.
     pub repo: &'a RepoId,
+    /// `HttpGetObject` or `HttpGetRefPath`: the hook's `procedure` (§7).
+    pub procedure: Procedure,
     /// A HEAD declares the GET byte count but sends no body.
     pub head: bool,
     /// A ref path rather than an object id.
@@ -126,7 +131,10 @@ pub trait TakedownGate: MaybeSend + MaybeSync {
         false
     }
 
-    /// Decide for a leaf already proven a reachable member.
+    /// Decide for a leaf already proven a reachable member. A cached
+    /// reachability proof skips the walk and its [`Self::stops_descent`], so
+    /// this must also refuse a chunk that only a blocked or tombstoned
+    /// manifest reaches (§4).
     fn check<'a>(
         &'a self,
         repo: &'a RepoId,
@@ -150,6 +158,7 @@ impl TakedownGate for NoTakedown {
 
 /// A `?proof=1` request that resolved to a reachable leaf.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ProofRequest<'a> {
     /// The selected repository.
     pub repo: &'a RepoId,

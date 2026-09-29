@@ -6,8 +6,11 @@
 //!
 //! The walk follows commit and remix parents and trees, tree entries,
 //! manifest chunks and tag targets. It never follows remix `sources` or
-//! delta bases (`mkit_core::ops::graph::children` skips both), and it stops
-//! at a tombstoned or blocked object ([`TakedownGate::stops_descent`]).
+//! delta bases (the same edges as `mkit_core::ops::graph::children` in
+//! history mode), and it stops at a tombstoned or blocked object
+//! ([`TakedownGate::stops_descent`]). A cap never aborts the walk: the
+//! object or subtree it hides is skipped and the walk reports
+//! [`Reach::Capped`] only if the target was not found anywhere else.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Mutex;
@@ -25,11 +28,19 @@ const BATCH: usize = 256;
 /// Canonical manifest bytes without chunk hashes: prologue 6, `total_size`
 /// 8, `chunk_size` 4, `chunk_count` 4.
 const MANIFEST_FIXED: u64 = 22;
+/// The decode-side chunk-count cap of `mkit-core`'s deserializer
+/// (`MAX_CHUNKS`, `serialize.rs`): a larger manifest cannot exist.
+const MAX_MANIFEST_CHUNKS: u64 = 1_000_000;
+/// Least time between sweeps of a full [`TtlReachability`] table.
+const SWEEP_MS: u64 = 1_000;
 
 /// A source of positive reachability answers, consulted before the walk.
 pub trait Reachability: MaybeSend + MaybeSync {
     /// Whether `id` is already known to be reachable from a published ref of
-    /// `repo` as of `now_ms`. `false` means unknown, never unreachable.
+    /// `repo` as of `now_ms`. `false` means unknown, never unreachable. A
+    /// positive answer skips the walk, so it also skips the walk's takedown
+    /// stop predicate: [`TakedownGate::check`] must therefore refuse a leaf
+    /// that only a blocked or tombstoned manifest reaches.
     fn known_reachable<'a>(
         &'a self,
         repo: &'a RepoId,
@@ -39,16 +50,29 @@ pub trait Reachability: MaybeSend + MaybeSync {
 
     /// Record a proof: a walk found `id`, or a ref-path serve resolved it.
     fn record(&self, repo: &RepoId, id: &Hash, now_ms: u64);
+
+    /// Forget every proof of `repo`: a takedown, suspension or visibility
+    /// change (WP-5.9a) that cannot wait out the lag calls it.
+    fn invalidate(&self, repo: &RepoId);
 }
 
 /// The default: proofs live for `lag_ms`, in a table of at most
 /// `max_entries` rows. A rewind or ref deletion is therefore visible within
-/// the configured `reachability_lag`; nothing else invalidates a row.
+/// the configured `reachability_lag`; only [`Reachability::invalidate`]
+/// forgets one sooner.
 #[derive(Debug)]
 pub struct TtlReachability {
     lag_ms: u64,
     max_entries: usize,
-    rows: Mutex<BTreeMap<(RepoId, Hash), u64>>,
+    table: Mutex<Table>,
+}
+
+#[derive(Debug, Default)]
+struct Table {
+    rows: BTreeMap<(RepoId, Hash), u64>,
+    /// When expired rows were last swept: a full table of live rows is not
+    /// re-scanned on every record.
+    swept_ms: u64,
 }
 
 impl TtlReachability {
@@ -58,8 +82,14 @@ impl TtlReachability {
         Self {
             lag_ms,
             max_entries,
-            rows: Mutex::default(),
+            table: Mutex::default(),
         }
+    }
+
+    fn table(&self) -> std::sync::MutexGuard<'_, Table> {
+        self.table
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -71,29 +101,34 @@ impl Reachability for TtlReachability {
         now_ms: u64,
     ) -> BoxFuture<'a, Result<bool, ServerError>> {
         Box::pin(async move {
-            let rows = self
+            Ok(self
+                .table()
                 .rows
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            Ok(rows
                 .get(&(repo.clone(), *id))
                 .is_some_and(|expires| *expires > now_ms))
         })
     }
 
     fn record(&self, repo: &RepoId, id: &Hash, now_ms: u64) {
-        let mut rows = self
-            .rows
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if rows.len() >= self.max_entries {
-            rows.retain(|_, expires| *expires > now_ms);
+        let mut table = self.table();
+        if table.rows.len() >= self.max_entries && now_ms >= table.swept_ms.saturating_add(SWEEP_MS)
+        {
+            table.rows.retain(|_, expires| *expires > now_ms);
+            table.swept_ms = now_ms;
         }
         // A full table of live rows drops the new proof: the next request
         // walks again. Memory stays bounded.
-        if rows.len() < self.max_entries {
-            rows.insert((repo.clone(), *id), now_ms.saturating_add(self.lag_ms));
+        if table.rows.len() < self.max_entries {
+            table
+                .rows
+                .insert((repo.clone(), *id), now_ms.saturating_add(self.lag_ms));
         }
+    }
+
+    fn invalidate(&self, repo: &RepoId) {
+        self.table()
+            .rows
+            .retain(|(row_repo, _), _| row_repo != repo);
     }
 }
 
@@ -102,7 +137,8 @@ impl Reachability for TtlReachability {
 pub(crate) enum Reach {
     Reachable,
     Unreachable,
-    /// The walk or decode budget ran out: the uniform 404 and a metric.
+    /// A cap hid part of the graph and the target was not found elsewhere:
+    /// the uniform 404 and a metric.
     Capped,
 }
 
@@ -116,29 +152,74 @@ enum Kind {
 }
 
 /// Whether a `File` of `size` canonical bytes can be a manifest: an exact
-/// necessary condition, so a plain Blob is almost never decoded.
+/// necessary condition (`22 + 32n`, `n` at most the decode cap), so a plain
+/// Blob is decoded only about one time in 32, and never when it is too big
+/// to be one.
 fn manifest_sized(size: u64) -> bool {
-    size >= MANIFEST_FIXED && (size - MANIFEST_FIXED).is_multiple_of(32)
+    (MANIFEST_FIXED..=MANIFEST_FIXED + 32 * MAX_MANIFEST_CHUNKS).contains(&size)
+        && (size - MANIFEST_FIXED).is_multiple_of(32)
 }
 
-/// Queue the references of `object`; whether `target` is among them.
-fn expand(
-    object: &Object,
-    target: Hash,
-    seen: &mut BTreeSet<Hash>,
-    nodes: &mut VecDeque<Hash>,
-    work: &mut VecDeque<(Hash, Kind)>,
-) -> bool {
+/// The queues one walk drains, bounded by `cap` distinct objects so a wide
+/// tree cannot grow them without limit.
+struct Frontier {
+    cap: usize,
+    seen: BTreeSet<Hash>,
+    /// Commits, remixes and tags: history, walked after the trees.
+    nodes: VecDeque<Hash>,
+    /// Trees and files: tip trees are the likeliest targets.
+    work: VecDeque<(Hash, Kind)>,
+    /// A reference was not queued because of `cap`, or an object was skipped
+    /// because of the decode budget: the walk is incomplete.
+    incomplete: bool,
+}
+
+impl Frontier {
+    fn push(&mut self, id: Hash, kind: Kind) {
+        if self.seen.contains(&id) {
+            return;
+        }
+        if self.seen.len() >= self.cap {
+            self.incomplete = true;
+            return;
+        }
+        self.seen.insert(id);
+        match kind {
+            Kind::Node => self.nodes.push_back(id),
+            Kind::Tree | Kind::File => self.work.push_back((id, kind)),
+        }
+    }
+
+    /// The next batch: trees and files first, then history.
+    fn batch(&mut self) -> Vec<(Hash, Kind)> {
+        let mut batch = Vec::new();
+        if self.work.is_empty() {
+            while batch.len() < BATCH {
+                let Some(id) = self.nodes.pop_front() else {
+                    break;
+                };
+                batch.push((id, Kind::Node));
+            }
+        } else {
+            while batch.len() < BATCH {
+                let Some(item) = self.work.pop_front() else {
+                    break;
+                };
+                batch.push(item);
+            }
+        }
+        batch
+    }
+}
+
+/// Queue the references of `object`; whether `target` is among them. The
+/// comparison happens for every reference, queued or not.
+fn expand(object: &Object, target: Hash, frontier: &mut Frontier) -> bool {
     let mut found = false;
     let mut visit = |child: Hash, kind: Option<Kind>| {
         found |= child == target;
-        if let Some(kind) = kind
-            && seen.insert(child)
-        {
-            match kind {
-                Kind::Node => nodes.push_back(child),
-                _ => work.push_back((child, kind)),
-            }
+        if let Some(kind) = kind {
+            frontier.push(child, kind);
         }
     };
     match object {
@@ -175,7 +256,7 @@ fn expand(
     found
 }
 
-/// Search the published `tips` for `target`, deciding at most
+/// Search the published `tips` for `target`, queueing at most
 /// `max_walk_objects` objects and charging every decode to `budget`.
 pub(crate) async fn walk<B: BlobStore, N: NamespaceStore>(
     env: &Env<'_, B, N>,
@@ -184,38 +265,27 @@ pub(crate) async fn walk<B: BlobStore, N: NamespaceStore>(
     target: Hash,
     budget: &mut Budget,
 ) -> Result<Reach, Miss> {
-    let mut seen = BTreeSet::new();
-    let mut nodes: VecDeque<Hash> = VecDeque::new();
-    let mut work: VecDeque<(Hash, Kind)> = VecDeque::new();
+    let mut frontier = Frontier {
+        cap: env.cfg.max_walk_objects,
+        seen: BTreeSet::new(),
+        nodes: VecDeque::new(),
+        work: VecDeque::new(),
+        incomplete: false,
+    };
     for tip in tips {
         if *tip == target {
             return Ok(Reach::Reachable);
         }
-        if seen.insert(*tip) {
-            nodes.push_back(*tip);
-        }
+        frontier.push(*tip, Kind::Node);
     }
-    let mut decided = 0_usize;
     loop {
-        // Tip trees and everything below them first, then history.
-        let mut batch: Vec<(Hash, Kind)> = Vec::new();
-        if work.is_empty() {
-            while batch.len() < BATCH {
-                let Some(id) = nodes.pop_front() else { break };
-                batch.push((id, Kind::Node));
-            }
-        } else {
-            while batch.len() < BATCH {
-                let Some(item) = work.pop_front() else { break };
-                batch.push(item);
-            }
-        }
+        let batch = frontier.batch();
         if batch.is_empty() {
-            return Ok(Reach::Unreachable);
-        }
-        decided += batch.len();
-        if decided > env.cfg.max_walk_objects {
-            return Ok(Reach::Capped);
+            return Ok(if frontier.incomplete {
+                Reach::Capped
+            } else {
+                Reach::Unreachable
+            });
         }
         let ids: Vec<Hash> = batch.iter().map(|(id, _)| *id).collect();
         let kinds: BTreeMap<Hash, Kind> = batch.into_iter().collect();
@@ -223,23 +293,91 @@ pub(crate) async fn walk<B: BlobStore, N: NamespaceStore>(
             if takedown.stops_descent(env.repo, &id) {
                 continue;
             }
-            let kind = kinds[&id];
-            if kind == Kind::File && !manifest_sized(located.value.decoded_size) {
+            if kinds[&id] == Kind::File && !manifest_sized(located.value.decoded_size) {
                 continue;
             }
             let bytes = match resolve::load(env, id, located, budget).await {
                 Ok(bytes) => bytes,
-                Err(Miss::Capped) => return Ok(Reach::Capped),
+                // The budget cannot afford this one object: skip it, keep
+                // walking, and never claim the target unreachable.
+                Err(Miss::Capped) => {
+                    frontier.incomplete = true;
+                    continue;
+                }
                 Err(other) => return Err(other),
             };
             let Ok(object) = mkit_core::serialize::deserialize(&bytes) else {
                 tracing::warn!("member object failed to decode during a reachability walk");
                 return Err(Miss::Unavailable);
             };
-            let found = expand(&object, target, &mut seen, &mut nodes, &mut work);
-            if found {
+            if expand(&object, target, &mut frontier) {
                 return Ok(Reach::Reachable);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures_executor::block_on;
+
+    use super::*;
+    use crate::repo::{NamespaceKey, RepoName};
+
+    fn repo(name: &str) -> RepoId {
+        RepoId {
+            namespace: NamespaceKey::deployment_default(),
+            name: RepoName::new(name).unwrap(),
+        }
+    }
+
+    fn known(cache: &TtlReachability, repo: &RepoId, id: u8, now: u64) -> bool {
+        block_on(cache.known_reachable(repo, &[id; 32], now)).unwrap()
+    }
+
+    #[test]
+    fn a_proof_expires_after_the_lag_and_is_per_repository() {
+        let cache = TtlReachability::new(60_000, 8);
+        let (a, b) = (repo("a"), repo("b"));
+        cache.record(&a, &[1; 32], 1_000);
+        assert!(known(&cache, &a, 1, 60_999));
+        assert!(!known(&cache, &a, 1, 61_000));
+        assert!(!known(&cache, &b, 1, 1_000), "another repository's proof");
+        assert!(!known(&cache, &a, 2, 1_000));
+        cache.record(&a, &[2; 32], 1_000);
+        cache.record(&b, &[2; 32], 1_000);
+        cache.invalidate(&a);
+        assert!(!known(&cache, &a, 2, 1_001) && known(&cache, &b, 2, 1_001));
+    }
+
+    #[test]
+    fn a_full_table_is_bounded_and_sweeps_at_most_once_a_second() {
+        let cache = TtlReachability::new(10_000, 2);
+        let a = repo("a");
+        cache.record(&a, &[1; 32], 5_000);
+        cache.record(&a, &[2; 32], 5_000);
+        // Full of live rows: the new proof is dropped, never stored.
+        cache.record(&a, &[3; 32], 6_000);
+        assert!(!known(&cache, &a, 3, 6_000));
+        // Once the rows expire, the next record sweeps and stores.
+        cache.record(&a, &[3; 32], 16_000);
+        assert!(known(&cache, &a, 3, 16_000));
+        assert!(!known(&cache, &a, 1, 16_000));
+    }
+
+    #[test]
+    fn only_a_manifest_shaped_file_is_ever_decoded() {
+        for (size, want) in [
+            (0, false),
+            (21, false),
+            (22, true),
+            (23, false),
+            (54, true),
+            (22 + 32 * 1_000_000, true),
+            (22 + 32 * 1_000_001, false),
+            (10 + 300 * 1024 * 1024, false),
+        ] {
+            assert_eq!(manifest_sized(size), want, "{size}");
         }
     }
 }

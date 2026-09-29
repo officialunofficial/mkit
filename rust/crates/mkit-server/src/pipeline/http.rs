@@ -11,8 +11,8 @@ use mkit_core::object::ObjectType;
 use tracing::Instrument as _;
 
 use super::{
-    HookSet, MultipartBlobStore, NamespaceStore, OpKind, Operation, Pipeline, Principal, Procedure,
-    ms,
+    Authorizer, HookSet, MultipartBlobStore, NamespaceStore, OpKind, Operation, Pipeline,
+    Principal, Procedure, ms,
 };
 use crate::http_objects::range::{self, Selection};
 use crate::http_objects::reach::{self, Reach};
@@ -67,8 +67,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             return HttpObjectResponse::error(400);
         };
         // §3 step 5: a present token is prechecked before the repository
-        // lookup. A public repository ignores the result, and every
-        // repository is public until WP-4.15 adds the private-token branch.
+        // lookup. A public repository ignores the result, and a private one
+        // is the uniform 404 for an anonymous read until WP-4.15 adds the
+        // token-authorized branch, so nothing consumes it yet.
         if let Some(token) = &parsed.query.token {
             let _ = seams.tokens.precheck(&parsed.target, token);
         }
@@ -92,10 +93,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .await;
         match served {
             Ok(response) => {
-                if response.status < 400 {
-                    outcome.record(Ok(()));
-                } else {
-                    outcome.record(Err(&ServerError::new(Code::Unknown, "http")));
+                let code = match response.status {
+                    ..400 => None,
+                    402 | 403 | 451 => Some(Code::PermissionDenied),
+                    416 => Some(Code::OutOfRange),
+                    404 => Some(Code::NotFound),
+                    _ => Some(Code::Unknown),
+                };
+                match code {
+                    None => outcome.record(Ok(())),
+                    Some(code) => outcome.record(Err(&ServerError::new(code, "http"))),
                 }
                 response
             }
@@ -132,6 +139,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         self.authorize_read(&op)
             .await
             .map_err(|error| Fail::from_server_error(&error))?;
+        // An `Authority` hook classifies callers on an RPC read and is not
+        // consulted for an unsigned one; §3 step 6 runs the Authorizer for
+        // every HTTP read.
+        if self.cfg.authorizer_role == super::AuthorizerRole::Authority {
+            self.hooks
+                .authorizer()
+                .authorize(&op)
+                .await
+                .map_err(|error| Fail::from_server_error(&error))?;
+        }
 
         let env = Env {
             blobs: &self.blobs,
@@ -191,7 +208,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             TakedownVerdict::Respond(response) => return Ok(response),
         }
 
-        let leaf = resolve::open_leaf(&env, leaf_id, located, &mut budget).await?;
+        // The inline byte source has its own allowance: a long walk cannot
+        // starve the read of the object it just proved reachable.
+        let mut inline = Budget(cfg.max_inline_object_bytes);
+        let leaf = resolve::open_leaf(&env, leaf_id, located, &mut inline).await?;
         let ref_path = commit.is_some();
 
         // Proof representations belong to WP-4.14b.
@@ -220,11 +240,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             success.push(("X-Mkit-Commit", to_hex(commit)));
         }
 
+        // A configured Admission makes every success private, a 304
+        // included, without calling it for the 304 (§5.3).
+        let private_policy = seams.admission.is_configured();
+
         // §3 step 9: a matching validator, before Range and Admission.
         if range::if_none_match(&values("if-none-match"), &etag) {
-            let private = seams.admission.is_configured();
             let mut response = HttpObjectResponse::new(304)
-                .with_header("Cache-Control", cache_control(ref_path, private));
+                .with_header("Cache-Control", cache_control(ref_path, private_policy));
             response.headers.extend(success);
             return Ok(response);
         }
@@ -234,9 +257,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             let mut all = values(name);
             (all.len() == 1).then(|| all.remove(0))
         };
+        // Two `If-Range` headers are not one strong validator: no slicing.
+        let if_range = match values("if-range").len() {
+            0 => None,
+            1 => single("if-range"),
+            _ => Some(String::new()),
+        };
         let selected = range::select(
             single("range").as_deref(),
-            single("if-range").as_deref(),
+            if_range.as_deref(),
             &etag,
             leaf.len,
         );
@@ -255,6 +284,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .admission
             .admit(&AdmitRequest {
                 repo,
+                procedure: if ref_path {
+                    Procedure::HttpGetRefPath
+                } else {
+                    Procedure::HttpGetObject
+                },
                 head,
                 ref_path,
                 declared_bytes: selected_len,
@@ -288,15 +322,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .with_header("Accept-Ranges", "bytes")
             .with_header(
                 "Cache-Control",
-                cache_control(ref_path, admitted.private),
+                cache_control(ref_path, admitted.private || private_policy),
             )
             .with_header("Content-Length", selected_len.to_string())
             .with_header("Content-Type", content_type(&leaf));
         if let Some((start, end)) = window {
-            response = response.with_header(
-                "Content-Range",
-                format!("bytes {start}-{end}/{}", leaf.len),
-            );
+            response =
+                response.with_header("Content-Range", format!("bytes {start}-{end}/{}", leaf.len));
         }
         response.headers.extend(success);
         response.headers.extend(admitted.headers);
@@ -373,7 +405,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 Fail::Unavailable
             })?;
             for entry in page.refs {
-                if entry.name.starts_with(PACKMAP_PREFIX) || !crate::refs::is_served_ref_name(&entry.name)
+                if entry.name.starts_with(PACKMAP_PREFIX)
+                    || !crate::refs::is_served_ref_name(&entry.name)
                 {
                     continue;
                 }
@@ -385,9 +418,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             let Some(next) = page.next else {
                 return Ok((tips, false));
             };
-            last = Some(
-                super::list::decode_token(repo, &scan, &next).ok_or(Fail::Unavailable)?,
-            );
+            last = Some(super::list::decode_token(repo, &scan, &next).ok_or(Fail::Unavailable)?);
         }
     }
 }

@@ -61,8 +61,9 @@ pub struct HttpObjectsConfig {
     /// Largest object served from its pack entry rather than an extracted
     /// copy, at least `extract_min_bytes + 10`. Larger is 503.
     pub max_inline_object_bytes: u64,
-    /// Decode bytes one request may spend across resolution, the walk and
-    /// the inline byte source; at least `max_inline_object_bytes`.
+    /// Decode bytes one request may spend on resolution and the reachability
+    /// walk; at least `max_inline_object_bytes`. The inline byte source has
+    /// its own `max_inline_object_bytes` allowance on top.
     pub http_decode_budget: u64,
 }
 
@@ -105,7 +106,9 @@ pub struct HttpObjectRequest<'a> {
     pub method: &'a str,
     /// The escaped path.
     pub raw_path: &'a str,
-    /// The escaped query, without the `?`.
+    /// The escaped query, without the `?`. A trailing `?` with nothing after
+    /// it is `Some("")`, which is a 400 (§2); a mount that drops it must not
+    /// present it as `None`.
     pub raw_query: Option<&'a str>,
     /// Multi-value header lookup by lowercase name.
     pub headers: &'a HeaderValues<'a>,

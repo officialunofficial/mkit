@@ -256,7 +256,7 @@ mod tests {
     const VECTORS: &str = include_str!("../../../../tests/golden/http-objects/url-parse.json");
 
     fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
+        mkit_core::hash::to_hex_bytes(bytes)
     }
 
     /// Every row of `url-parse.json` against the product parser: accepted
@@ -371,7 +371,11 @@ mod tests {
     }
 
     fn escape(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("%{b:02X}")).collect()
+        use std::fmt::Write as _;
+        bytes.iter().fold(String::new(), |mut out, b| {
+            write!(out, "%{b:02X}").unwrap();
+            out
+        })
     }
 
     proptest! {

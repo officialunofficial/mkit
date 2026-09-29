@@ -12,7 +12,7 @@ use crate::{BoxStream, Code, ServerError};
 /// A response body. `Stream` carries its exact length: the stream errors
 /// instead of yielding more or fewer bytes.
 pub enum HttpBody {
-    /// No body (HEAD, 204, 304 and every error).
+    /// No body (HEAD, 204, 304 and every error but the canned 404).
     Empty,
     /// The whole body in memory.
     Bytes(Bytes),
@@ -189,7 +189,9 @@ mod tests {
         })
     }
 
-    fn source(pieces: Vec<Result<&'static [u8], StoreError>>) -> BoxStream<'static, Result<Bytes, StoreError>> {
+    fn source(
+        pieces: Vec<Result<&'static [u8], StoreError>>,
+    ) -> BoxStream<'static, Result<Bytes, StoreError>> {
         Box::pin(futures::stream::iter(
             pieces
                 .into_iter()
@@ -202,7 +204,11 @@ mod tests {
         let HttpBody::Stream { stream, .. } = body else {
             panic!("expected a stream");
         };
-        block_on(stream.map(|p| p.map(|b| b.len()).map_err(|e| e.code())).collect())
+        block_on(
+            stream
+                .map(|p| p.map(|b| b.len()).map_err(|e| e.code()))
+                .collect(),
+        )
     }
 
     #[test]
@@ -217,9 +223,17 @@ mod tests {
     fn a_wrong_length_or_a_backend_failure_fails_the_body_and_the_hook() {
         for (pieces, len, sent, want) in [
             (vec![Ok(&b"abcd"[..])], 3, 0, vec![Err(Code::Unavailable)]),
-            (vec![Ok(&b"ab"[..])], 3, 2, vec![Ok(2), Err(Code::Unavailable)]),
             (
-                vec![Ok(&b"ab"[..]), Err(StoreError::unavailable("SECRET backend detail"))],
+                vec![Ok(&b"ab"[..])],
+                3,
+                2,
+                vec![Ok(2), Err(Code::Unavailable)],
+            ),
+            (
+                vec![
+                    Ok(&b"ab"[..]),
+                    Err(StoreError::unavailable("SECRET backend detail")),
+                ],
                 4,
                 2,
                 vec![Ok(2), Err(Code::Unavailable)],
@@ -263,11 +277,17 @@ mod tests {
     #[test]
     fn a_hook_also_covers_in_memory_and_empty_bodies() {
         let ended = Ended::default();
-        let body = with_hook(HttpBody::Bytes(Bytes::from_static(b"xyz")), Some(hook(&ended)));
+        let body = with_hook(
+            HttpBody::Bytes(Bytes::from_static(b"xyz")),
+            Some(hook(&ended)),
+        );
         assert!(ended.lock().unwrap().is_empty(), "fires when consumed");
         assert_eq!(collect(body), vec![Ok(3)]);
         assert_eq!(*ended.lock().unwrap(), [(3, None)]);
-        with_hook(HttpBody::Empty, Some(hook(&ended)));
+        assert!(matches!(
+            with_hook(HttpBody::Empty, Some(hook(&ended))),
+            HttpBody::Empty
+        ));
         assert_eq!(ended.lock().unwrap()[1], (0, None));
         // Without a hook the body is untouched.
         assert!(matches!(

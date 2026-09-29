@@ -22,7 +22,7 @@ use crate::indexed::IndexedConfig;
 use crate::indexed::resolve::{self, DECODE_BUDGET_MESSAGE, MemberCache, ResolveFailure};
 use crate::pipeline::ShardMap;
 use crate::repo::RepoId;
-use crate::store::index::{LocatedObject, LookupError};
+use crate::store::index::{LocatedObject, LookupError, ObjectLookup};
 use crate::store::{BlobBody, BlobKey, BorrowedStore, ByteRange, ContentIndex, Holder};
 use crate::telemetry::Metrics;
 use crate::{BlobStore, NamespaceStore, ServerError};
@@ -80,18 +80,25 @@ pub(crate) fn type_of(canonical: &[u8]) -> Option<ObjectType> {
     })
 }
 
-/// This repository's membership row for `id`. A missing row and an
-/// unprovable one (`TooManyRows`, R-148: not retryable) are both misses.
+/// One index answer as a membership decision: a missing row and an
+/// unprovable one (`TooManyRows`, R-148: not retryable) are both "not a
+/// member"; a residual retryable cap is a failure of the request, never a
+/// silent miss.
+fn membership(answer: Option<&ObjectLookup>) -> Result<Option<LocatedObject>, Miss> {
+    match answer {
+        Some(Ok(Some(located))) => Ok(Some(*located)),
+        None | Some(Ok(None) | Err(LookupError::TooManyRows)) => Ok(None),
+        Some(Err(_)) => Err(Miss::Unavailable),
+    }
+}
+
+/// This repository's membership row for `id`.
 pub(crate) async fn locate<B: BlobStore, N: NamespaceStore>(
     env: &Env<'_, B, N>,
     id: Hash,
 ) -> Result<LocatedObject, Miss> {
     let found = resolve::locate_split(env.meta, env.shards, env.repo, &[id], env.metrics).await?;
-    match found.get(&id) {
-        Some(Ok(Some(located))) => Ok(*located),
-        None | Some(Ok(None) | Err(LookupError::TooManyRows)) => Err(Miss::NotFound),
-        Some(Err(_)) => Err(Miss::Unavailable),
-    }
+    membership(found.get(&id))?.ok_or(Miss::NotFound)
 }
 
 /// Locate several ids at once: the members among them, in id order.
@@ -100,13 +107,13 @@ pub(crate) async fn locate_many<B: BlobStore, N: NamespaceStore>(
     ids: &[Hash],
 ) -> Result<Vec<(Hash, LocatedObject)>, Miss> {
     let found = resolve::locate_split(env.meta, env.shards, env.repo, ids, env.metrics).await?;
-    Ok(found
-        .into_iter()
-        .filter_map(|(id, answer)| match answer {
-            Ok(Some(located)) => Some((id, located)),
-            _ => None,
-        })
-        .collect())
+    let mut members = Vec::new();
+    for (id, answer) in &found {
+        if let Some(located) = membership(Some(answer))? {
+            members.push((*id, located));
+        }
+    }
+    Ok(members)
 }
 
 /// The canonical bytes of a located member, charged to `budget`.
@@ -274,7 +281,10 @@ async fn sidecar_total<B: BlobStore>(blobs: &B, id: Hash, sidecar_len: u64) -> R
     let BlobBody::Bytes(tail) = body else {
         return inconsistent("sidecar tail");
     };
-    let tail: [u8; 8] = tail.as_ref().try_into().or_else(|_| inconsistent("sidecar tail"))?;
+    let tail: [u8; 8] = tail
+        .as_ref()
+        .try_into()
+        .or_else(|_| inconsistent("sidecar tail"))?;
     Ok(u64::from_le_bytes(tail))
 }
 
@@ -407,6 +417,31 @@ pub(crate) async fn open_body<B: BlobStore>(
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_retryable_cap_is_never_a_silent_miss() {
+        let located = LocatedObject {
+            pack: [1; 32],
+            value: crate::store::index::IndexValue {
+                frame_offset: 0,
+                frame_length: 1,
+                wire_type: 0,
+                decoded_size: 1,
+                chain_depth: 0,
+                delta_base: None,
+            },
+        };
+        assert_eq!(membership(Some(&Ok(Some(located)))), Ok(Some(located)));
+        for miss in [None, Some(&Ok(None)), Some(&Err(LookupError::TooManyRows))] {
+            assert_eq!(membership(miss), Ok(None));
+        }
+        for cap in [
+            LookupError::TooManyPages,
+            LookupError::TooManyMembershipReads,
+        ] {
+            assert_eq!(membership(Some(&Err(cap))), Err(Miss::Unavailable));
+        }
+    }
+
     fn bytes(prefix: &[u8]) -> Arc<[u8]> {
         let mut all = prefix.to_vec();
         all.resize(all.len().max(16), 0);
@@ -415,7 +450,10 @@ mod tests {
 
     #[test]
     fn a_pack_entry_is_represented_by_its_type() {
-        let (ty, body) = represent(bytes(&[1, b'M', b'K', b'I', b'T', 1, 4, 0, 0, 0, 9, 9, 9, 9])).unwrap();
+        let (ty, body) = represent(bytes(&[
+            1, b'M', b'K', b'I', b'T', 1, 4, 0, 0, 0, 9, 9, 9, 9,
+        ]))
+        .unwrap();
         assert_eq!(ty, ObjectType::Blob);
         assert_eq!(&body[..4], &[9, 9, 9, 9]);
         let canonical = bytes(&[2, 1, 2, 3]);

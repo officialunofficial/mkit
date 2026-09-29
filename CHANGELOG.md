@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `WEBAUTHN_RPS` vars and a `test-faults`-only `UNSAFE_LOOPBACK_GRANTS`, to
   configure write grants on Multi + auth v2 deployments. Any bad or partial
   value refuses to start; unset keeps grants off (WP-1.30b).
+
 - Server: in indexed mode, extract every ChunkedBlob (as its reassembled content,
   with a chunk-offset sidecar) and every file Blob of at least 64 KiB into the
   deployment-wide object store under its object id, before a pack is marked

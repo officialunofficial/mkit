@@ -36,9 +36,10 @@ const TAG_PACKMAP: &str = "refs/mkit/packmap/rel";
 type Calls = Arc<Mutex<Vec<(&'static str, BlobKey)>>>;
 
 /// How `SpyBlobs` answers a ranged `get` of an extracted object.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Reads {
     /// From the memory store.
+    #[default]
     Normal,
     /// The read fails after the length was confirmed.
     Fails,
@@ -48,12 +49,6 @@ enum Reads {
     Long,
     /// Lazily produced 64 KiB pieces; see `SpyBlobs::produced`.
     Pieces,
-}
-
-impl Default for Reads {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 /// A memory blob store that records every `get` and `head` by key and can
@@ -192,6 +187,14 @@ fn fixture() -> Fx {
 }
 
 fn fixture_with<H: HookSet>(hooks: H, http: HttpObjectsConfig) -> Fx<H> {
+    fixture_tweaked(hooks, http, |_| {})
+}
+
+fn fixture_tweaked<H: HookSet>(
+    hooks: H,
+    http: HttpObjectsConfig,
+    tweak: impl FnOnce(&mut PipelineConfig),
+) -> Fx<H> {
     let owner = key(7);
     let namespace = Namespace::Ed25519(*owner.verifying_key().as_bytes());
     let mut config = cfg(authv2());
@@ -207,6 +210,7 @@ fn fixture_with<H: HookSet>(hooks: H, http: HttpObjectsConfig) -> Fx<H> {
         ..crate::indexed::IndexedConfig::default()
     });
     config.http_objects = Some(http);
+    tweak(&mut config);
     let clock = clock();
     let metrics = Arc::new(SpyMetrics::default());
     let calls = Calls::default();
@@ -245,7 +249,11 @@ fn body_of(body: HttpBody) -> Vec<u8> {
             while let Some(piece) = stream.next().await {
                 out.extend_from_slice(&piece.unwrap());
             }
-            assert_eq!(out.len() as u64, len, "a stream carries its declared length");
+            assert_eq!(
+                out.len() as u64,
+                len,
+                "a stream carries its declared length"
+            );
             out
         }),
     }
@@ -336,7 +344,12 @@ impl<H: HookSet> Fx<H> {
     ) -> (AdvanceOutcome, Hash) {
         let identity = self.identity(name);
         let pack_id = hash(pack);
-        let begin = signed(&self.owner, &identity, Procedure::BeginUpload, self.number());
+        let begin = signed(
+            &self.owner,
+            &identity,
+            Procedure::BeginUpload,
+            self.number(),
+        );
         let BeginUploadResult::Ticket { id: ticket, .. } = block_on(self.pipe.begin_upload(
             &self.auth(&begin),
             head_ref,
@@ -359,7 +372,12 @@ impl<H: HookSet> Fx<H> {
                 .await
                 .unwrap();
         });
-        let advance = signed(&self.owner, &identity, Procedure::AdvanceRefs, self.number());
+        let advance = signed(
+            &self.owner,
+            &identity,
+            Procedure::AdvanceRefs,
+            self.number(),
+        );
         let outcome = block_on(self.pipe.advance_refs_with_tickets(
             &self.auth(&advance),
             upd(head_ref, conditions.0, head),
@@ -372,8 +390,16 @@ impl<H: HookSet> Fx<H> {
 
     /// Push `objects` to `refs/heads/main` of `name`, creating it or moving
     /// it from `previous`.
-    fn push(&self, name: &str, objects: &[&Object], head: Hash, previous: Option<(Hash, Hash)>) -> Hash {
-        let conditions = previous.map_or((Missing, Missing), |(head, pack)| (Match(head), Match(pack)));
+    fn push(
+        &self,
+        name: &str,
+        objects: &[&Object],
+        head: Hash,
+        previous: Option<(Hash, Hash)>,
+    ) -> Hash {
+        let conditions = previous.map_or((Missing, Missing), |(head, pack)| {
+            (Match(head), Match(pack))
+        });
         let (outcome, pack) = self.push_ref(name, objects, (HEAD, PACKMAP), head, conditions);
         assert_eq!(outcome, AdvanceOutcome::Committed);
         pack
@@ -579,7 +605,10 @@ fn serves_every_byte_source_by_id() {
     let got = fx.get(&fx.object_url("room", &id(&d.small)));
     assert_eq!(got.status, 200);
     assert_eq!(got.body, d.small_bytes);
-    assert_eq!(got.header("ETag"), Some(format!("\"{}\"", to_hex(&id(&d.small))).as_str()));
+    assert_eq!(
+        got.header("ETag"),
+        Some(format!("\"{}\"", to_hex(&id(&d.small))).as_str())
+    );
     assert_eq!(got.header("Content-Type"), Some("application/octet-stream"));
     assert_eq!(got.header("X-Mkit-Object-Type"), Some("blob"));
     assert_eq!(got.header("Cache-Control"), Some(IMMUTABLE));
@@ -602,7 +631,10 @@ fn serves_every_byte_source_by_id() {
         let got = fx.get(&fx.object_url("room", &id(object)));
         assert_eq!(got.status, 200);
         assert_eq!(got.body, serialize(object).unwrap());
-        assert_eq!(got.header("Content-Type"), Some("application/vnd.mkit.object"));
+        assert_eq!(
+            got.header("Content-Type"),
+            Some("application/vnd.mkit.object")
+        );
         assert_eq!(got.header("X-Mkit-Object-Type"), Some(ty));
     }
 }
@@ -679,7 +711,11 @@ fn ref_paths_resolve_to_the_leaf_and_carry_the_commit() {
         assert_eq!(got.body, want, "{file}");
         assert_eq!(got.header("X-Mkit-Commit"), Some(commit.as_str()), "{file}");
         assert_eq!(got.header("X-Mkit-Object-Type"), Some(ty), "{file}");
-        assert_eq!(got.header("Cache-Control"), Some("public, no-cache"), "{file}");
+        assert_eq!(
+            got.header("Cache-Control"),
+            Some("public, no-cache"),
+            "{file}"
+        );
         assert_eq!(got.header("Accept-Ranges"), Some("bytes"));
     }
     // The root and a subdirectory serve their canonical tree bytes.
@@ -688,7 +724,10 @@ fn ref_paths_resolve_to_the_leaf_and_carry_the_commit() {
         assert_eq!(got.status, 200, "{file:?}");
         assert_eq!(got.body, serialize(tree).unwrap());
         assert_eq!(got.header("X-Mkit-Object-Type"), Some("tree"));
-        assert_eq!(got.header("Content-Type"), Some("application/vnd.mkit.object"));
+        assert_eq!(
+            got.header("Content-Type"),
+            Some("application/vnd.mkit.object")
+        );
     }
 }
 
@@ -709,7 +748,11 @@ fn every_miss_is_the_same_404() {
         // An id no pack of this repository holds.
         fx.object_url("room", &gone),
         // A repository that does not exist, and a private one.
-        format!("/{}/-/objects/{}", fx.identity("missing"), to_hex(&id(&d.small))),
+        format!(
+            "/{}/-/objects/{}",
+            fx.identity("missing"),
+            to_hex(&id(&d.small))
+        ),
         fx.object_url("private", &id(&d.small)),
         fx.ref_url("private", "main", "small.txt"),
     ];
@@ -729,7 +772,10 @@ fn every_miss_is_the_same_404() {
     }
     // A conditional request cannot turn a miss into a 304.
     let etag = format!("\"{}\"", to_hex(&id(&d.small)));
-    let got = fx.get_with(&fx.ref_url("room", "gone", "x"), &[("if-none-match", &etag)]);
+    let got = fx.get_with(
+        &fx.ref_url("room", "gone", "x"),
+        &[("if-none-match", &etag)],
+    );
     assert_uniform_404(&got);
 }
 
@@ -750,7 +796,9 @@ fn a_ref_to_a_tag_peels_to_its_commit() {
     });
     let mut signed_tag = tag.clone();
     if let Object::Tag(t) = &mut signed_tag {
-        t.signature = mkit_core::sign::sign_tag(t, &KeyPair::from_seed([9; 32])).unwrap().0;
+        t.signature = mkit_core::sign::sign_tag(t, &KeyPair::from_seed([9; 32]))
+            .unwrap()
+            .0;
     }
     let (outcome, _) = fx.push_ref(
         "room",
@@ -763,7 +811,10 @@ fn a_ref_to_a_tag_peels_to_its_commit() {
     let got = fx.get(&fx.ref_url("room", "rel", "small.txt"));
     assert_eq!(got.status, 200);
     assert_eq!(got.body, d.small_bytes);
-    assert_eq!(got.header("X-Mkit-Commit"), Some(to_hex(&d.head()).as_str()));
+    assert_eq!(
+        got.header("X-Mkit-Commit"),
+        Some(to_hex(&d.head()).as_str())
+    );
 }
 
 /// A second history for `main`: a root commit over one new file.
@@ -792,7 +843,8 @@ fn an_orphaned_member_is_unreachable_until_the_cache_expires() {
     // The cached proof outlives the rewind for `reachability_lag_ms` only.
     let before = fx.get(&fx.object_url("room", &id(&d.big)));
     assert_eq!(before.status, 200);
-    fx.clock.advance(i64::try_from(http_cfg().reachability_lag_ms).unwrap());
+    fx.clock
+        .advance(i64::try_from(http_cfg().reachability_lag_ms).unwrap());
     assert_uniform_404(&fx.get(&fx.object_url("room", &id(&d.big))));
     // The new content is reachable, and the old ref-path content is gone.
     assert_eq!(fx.get(&fx.object_url("room", &id(&file))).status, 200);
@@ -919,7 +971,12 @@ fn a_chunk_only_blob_is_served_from_this_repositorys_pack_never_the_global_copy(
     // Repository `other` keeps the blob as a file: it is extracted and held.
     let file_root = tree(&[("file", EntryMode::Blob, &shared_blob)]);
     let other_head = commit(&file_root, &[], "file");
-    fx.push("other", &[&shared_blob, &file_root, &other_head], id(&other_head), None);
+    fx.push(
+        "other",
+        &[&shared_blob, &file_root, &other_head],
+        id(&other_head),
+        None,
+    );
     assert!(fx.holder("other", &id(&shared_blob)).is_some());
     assert_eq!(
         block_on(fx.pipe.blobs.inner.head(&BlobKey::object(id(&shared_blob))))
@@ -939,7 +996,10 @@ fn a_chunk_only_blob_is_served_from_this_repositorys_pack_never_the_global_copy(
     fx.clear_calls();
     let got = fx.get(&fx.object_url("room", &id(&shared_blob)));
     assert_eq!((got.status, got.body), (200, shared));
-    assert_eq!(fx.blob_calls(BlobKey::object(id(&shared_blob))), Vec::<&str>::new());
+    assert_eq!(
+        fx.blob_calls(BlobKey::object(id(&shared_blob))),
+        Vec::<&str>::new()
+    );
 }
 
 #[test]
@@ -953,7 +1013,10 @@ fn a_member_of_another_repository_is_a_404_that_never_reads_the_global_store() {
     for object in [&d.big, &d.manifest] {
         let got = fx.get(&fx.object_url("room", &id(object)));
         assert_uniform_404(&got);
-        for key in [BlobKey::object(id(object)), BlobKey::object_offsets(id(object))] {
+        for key in [
+            BlobKey::object(id(object)),
+            BlobKey::object_offsets(id(object)),
+        ] {
             assert_eq!(fx.blob_calls(key), Vec::<&str>::new());
         }
     }
@@ -983,10 +1046,18 @@ fn a_broken_extraction_is_a_503_never_a_guess() {
     // The object is back with the wrong length.
     let wrong = pattern(69_999, 2);
     block_on(async {
-        let sink = fx.pipe.blobs.inner.begin(object, wrong.len() as u64).await.unwrap();
+        let sink = fx
+            .pipe
+            .blobs
+            .inner
+            .begin(object, wrong.len() as u64)
+            .await
+            .unwrap();
         let mut sink = sink;
         sink.write(Bytes::from(wrong.clone())).await.unwrap();
-        sink.commit_with_root(mkit_core::hash::hash(&wrong)).await.unwrap();
+        sink.commit_with_root(mkit_core::hash::hash(&wrong))
+            .await
+            .unwrap();
     });
     assert_eq!(fx.get(&fx.object_url("room", &id(&d.big))).status, 503);
     assert_eq!(fx.get(&fx.ref_url("room", "main", "big.bin")).status, 503);
@@ -995,13 +1066,15 @@ fn a_broken_extraction_is_a_503_never_a_guess() {
     let holder = fx.holder("room", &id(&d.manifest)).unwrap();
     let repo = fx.repo_id("room");
     let content = crate::store::ContentIndex::new(crate::store::BorrowedStore(&fx.pipe.meta));
-    assert!(block_on(content.remove_holder(
-        &id(&d.manifest),
-        &crate::store::Holder::new(repo.namespace, repo.name),
-        holder.seq,
-        u64::try_from(T0).unwrap(),
-    ))
-    .unwrap());
+    assert!(
+        block_on(content.remove_holder(
+            &id(&d.manifest),
+            &crate::store::Holder::new(repo.namespace, repo.name),
+            holder.seq,
+            u64::try_from(T0).unwrap(),
+        ))
+        .unwrap()
+    );
     let got = fx.get(&fx.object_url("room", &id(&d.manifest)));
     assert_eq!(got.status, 503);
     // Everything else is unaffected.
@@ -1029,13 +1102,17 @@ fn a_pack_entry_over_the_inline_cap_is_a_503_with_a_metric() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One table over every byte source.
 fn ranges_and_conditionals_over_every_byte_source() {
     let (fx, d) = published();
     let whole = d.whole();
     // (URL, full content): an inline blob, an extracted blob, an extracted
     // manifest and the empty file.
     let sources = [
-        (fx.ref_url("room", "main", "small.txt"), d.small_bytes.clone()),
+        (
+            fx.ref_url("room", "main", "small.txt"),
+            d.small_bytes.clone(),
+        ),
         (fx.ref_url("room", "main", "big.bin"), d.big_bytes.clone()),
         (fx.ref_url("room", "main", "chunked.bin"), whole.clone()),
     ];
@@ -1049,7 +1126,10 @@ fn ranges_and_conditionals_over_every_byte_source() {
                 got.header("Content-Range"),
                 Some(format!("bytes {start}-{end}/{n}").as_str())
             );
-            assert_eq!(got.header("Content-Length"), Some((end - start + 1).to_string().as_str()));
+            assert_eq!(
+                got.header("Content-Length"),
+                Some((end - start + 1).to_string().as_str())
+            );
             assert_eq!(got.header("Accept-Ranges"), Some("bytes"));
         };
         partial("bytes=10-19", 10, 19);
@@ -1064,17 +1144,28 @@ fn ranges_and_conditionals_over_every_byte_source() {
             assert_eq!(got.header("Content-Range"), None);
         }
         // Unsatisfiable: 416 with the size, `no-store`, no body.
-        for range in [format!("bytes={n}-"), format!("bytes={}-{}", n + 5, n + 9), "bytes=-0".into()] {
+        for range in [
+            format!("bytes={n}-"),
+            format!("bytes={}-{}", n + 5, n + 9),
+            "bytes=-0".into(),
+        ] {
             let got = fx.get_with(url, &[("range", &range)]);
             assert_eq!(got.status, 416, "{range}");
-            assert_eq!(got.header("Content-Range"), Some(format!("bytes */{n}").as_str()));
+            assert_eq!(
+                got.header("Content-Range"),
+                Some(format!("bytes */{n}").as_str())
+            );
             assert_eq!(got.header("Cache-Control"), Some("no-store"));
             assert!(got.body.is_empty());
         }
         // A weak `If-Range`, or one that does not match, gives the full 200; a
         // matching strong one slices.
         let strong = fx.get(url).header("ETag").unwrap().to_owned();
-        for validator in [format!("W/{strong}"), "\"other\"".to_owned(), "Wed, 21 Oct 2015 07:28:00 GMT".to_owned()] {
+        for validator in [
+            format!("W/{strong}"),
+            "\"other\"".to_owned(),
+            "Wed, 21 Oct 2015 07:28:00 GMT".to_owned(),
+        ] {
             let got = fx.get_with(url, &[("range", "bytes=1-2"), ("if-range", &validator)]);
             assert_eq!((got.status, got.body.len()), (200, n), "{validator}");
         }
@@ -1084,24 +1175,47 @@ fn ranges_and_conditionals_over_every_byte_source() {
         let head = read(fx.request("HEAD", url, None, &[("range", "bytes=1-2")]));
         assert_eq!((head.status, head.body.len()), (206, 0));
         assert_eq!(head.header("Content-Length"), Some("2"));
-        assert_eq!(head.header("Content-Range"), Some(format!("bytes 1-2/{n}").as_str()));
+        assert_eq!(
+            head.header("Content-Range"),
+            Some(format!("bytes 1-2/{n}").as_str())
+        );
         // 304: weak comparison, `*` and lists; before Range; repeating the 200's
         // validator and metadata headers.
-        for header in [strong.clone(), format!("W/{strong}"), "*".into(), format!("\"x\", {strong}")] {
-            let got = fx.get_with(url, &[("if-none-match", &header), ("range", "bytes=1000000-")]);
+        for header in [
+            strong.clone(),
+            format!("W/{strong}"),
+            "*".into(),
+            format!("\"x\", {strong}"),
+        ] {
+            let got = fx.get_with(
+                url,
+                &[("if-none-match", &header), ("range", "bytes=1000000-")],
+            );
             assert_eq!(got.status, 304, "{header}");
             assert!(got.body.is_empty());
             let ok = fx.get(url);
-            for name in ["ETag", "Cache-Control", "X-Mkit-Object", "X-Mkit-Object-Type", "X-Mkit-Commit"] {
+            for name in [
+                "ETag",
+                "Cache-Control",
+                "X-Mkit-Object",
+                "X-Mkit-Object-Type",
+                "X-Mkit-Commit",
+            ] {
                 assert_eq!(got.header(name), ok.header(name), "{name}");
             }
             assert_eq!(got.header("Content-Length"), None);
         }
-        assert_eq!(fx.get_with(url, &[("if-none-match", "\"nope\"")]).status, 200);
+        assert_eq!(
+            fx.get_with(url, &[("if-none-match", "\"nope\"")]).status,
+            200
+        );
     }
     // A range across a chunk boundary of a manifest (chunk 1 is 60,000 bytes).
     let got = fx.get_with(&sources[2].0, &[("range", "bytes=59990-60010")]);
-    assert_eq!((got.status, got.body), (206, whole[59_990..=60_010].to_vec()));
+    assert_eq!(
+        (got.status, got.body),
+        (206, whole[59_990..=60_010].to_vec())
+    );
     // Every range of the empty file is unsatisfiable, and it still serves.
     let empty = fx.ref_url("room", "main", "empty");
     assert_eq!(fx.get(&empty).status, 200);
@@ -1113,7 +1227,10 @@ fn ranges_and_conditionals_over_every_byte_source() {
     // An extracted read asks the store for exactly the selected range.
     fx.clear_calls();
     fx.get_with(&sources[1].0, &[("range", "bytes=100-199")]);
-    assert_eq!(fx.blob_calls(BlobKey::object(id(&d.big))), vec!["head", "get"]);
+    assert_eq!(
+        fx.blob_calls(BlobKey::object(id(&d.big))),
+        vec!["head", "get"]
+    );
 }
 
 #[test]
@@ -1146,7 +1263,10 @@ fn precedence_before_the_repository_is_looked_up() {
         assert_eq!(got.status, 400, "{path} {query:?}");
         assert_eq!(got.header("Cache-Control"), Some("no-store"));
     }
-    assert!(az.seen.lock().unwrap().is_empty(), "no hook call for a 400 or 405");
+    assert!(
+        az.seen.lock().unwrap().is_empty(),
+        "no hook call for a 400 or 405"
+    );
     // Every response carries the security headers, errors included.
     for got in [
         fx.get("/malformed"),
@@ -1156,13 +1276,23 @@ fn precedence_before_the_repository_is_looked_up() {
         read(fx.request("OPTIONS", &url, None, &[])),
     ] {
         assert_eq!(got.header("X-Content-Type-Options"), Some("nosniff"));
-        assert_eq!(got.header("Content-Security-Policy"), Some("sandbox; default-src 'none'"));
+        assert_eq!(
+            got.header("Content-Security-Policy"),
+            Some("sandbox; default-src 'none'")
+        );
         assert_eq!(got.header("Referrer-Policy"), Some("no-referrer"));
     }
     // Step 6: the Authorizer runs for every read, as `anonymous`, whatever the
     // request carries, under the HTTP procedure names.
     az.seen.lock().unwrap().clear();
-    fx.get_with(&url, &[("authorization", "Bearer secret"), ("x-signature", "00"), ("x-repository", "other/repo")]);
+    fx.get_with(
+        &url,
+        &[
+            ("authorization", "Bearer secret"),
+            ("x-signature", "00"),
+            ("x-repository", "other/repo"),
+        ],
+    );
     fx.get(&fx.ref_url("room", "main", "small.txt"));
     assert_eq!(
         *az.seen.lock().unwrap(),
@@ -1236,7 +1366,11 @@ fn the_token_gate_runs_before_the_repository_lookup_and_a_public_repository_igno
     let got = read(fx.request("GET", &url, Some("token=abc.def"), &[]));
     assert_eq!(got.status, 200);
     // It also runs for a repository that does not exist, before the lookup.
-    let missing = format!("/{}/-/objects/{}", fx.identity("missing"), to_hex(&id(&d.small)));
+    let missing = format!(
+        "/{}/-/objects/{}",
+        fx.identity("missing"),
+        to_hex(&id(&d.small))
+    );
     assert_uniform_404(&read(fx.request("GET", &missing, Some("token=xyz"), &[])));
     assert_eq!(*gate.calls.lock().unwrap(), ["abc.def", "xyz"]);
 }
@@ -1263,7 +1397,10 @@ impl TakedownGate for Takedown {
     }
 }
 
-fn with_seams<H: HookSet>(fx: Fx<H>, edit: impl FnOnce(&mut crate::http_objects::HttpSeams)) -> Fx<H> {
+fn with_seams<H: HookSet>(
+    fx: Fx<H>,
+    edit: impl FnOnce(&mut crate::http_objects::HttpSeams),
+) -> Fx<H> {
     Fx {
         pipe: fx.pipe.with_http_seams(|mut seams| {
             edit(&mut seams);
@@ -1292,11 +1429,15 @@ fn takedown_runs_after_reachability_and_before_a_304() {
     // A verdict of 404 and a 451 both beat a matching validator.
     let etag = format!("\"{}\"", to_hex(&id(&d.small)));
     for (verdict, status) in [
-        ((|| TakedownVerdict::NotFound) as fn() -> TakedownVerdict, 404),
+        (
+            (|| TakedownVerdict::NotFound) as fn() -> TakedownVerdict,
+            404,
+        ),
         (
             || {
                 TakedownVerdict::Respond(
-                    HttpObjectResponse::error(451).with_header("Link", "<https://x.test>; rel=\"blocked-by\""),
+                    HttpObjectResponse::error(451)
+                        .with_header("Link", "<https://x.test>; rel=\"blocked-by\""),
                 )
             },
             451,
@@ -1417,7 +1558,9 @@ fn an_admission_challenge_is_the_response_and_a_denial_is_a_403() {
     assert_eq!(got.header("Cache-Control"), Some("no-store"));
 }
 
-struct Proofs(Mutex<Vec<(Hash, ObjectType, Option<Hash>, bool, Option<(u64, u64)>)>>);
+type ProofCall = (Hash, ObjectType, Option<Hash>, bool, Option<(u64, u64)>);
+
+struct Proofs(Mutex<Vec<ProofCall>>);
 
 impl ProofServer for Proofs {
     fn serve<'a>(
@@ -1451,7 +1594,12 @@ fn every_proof_request_goes_through_the_proof_seam_after_resolution() {
         assert_eq!(got.status, 416, "{query}");
         assert_eq!(got.header("Cache-Control"), Some("no-store"));
     }
-    let got = read(fx.request("GET", &fx.ref_url("room", "main", "chunked.bin"), Some("proof=1"), &[]));
+    let got = read(fx.request(
+        "GET",
+        &fx.ref_url("room", "main", "chunked.bin"),
+        Some("proof=1"),
+        &[],
+    ));
     assert_eq!(got.status, 416);
     // Resolution still comes first: a miss is the uniform 404, never a proof.
     let missing = fx.object_url("room", &[3; 32]);
@@ -1460,12 +1608,26 @@ fn every_proof_request_goes_through_the_proof_seam_after_resolution() {
     let proofs = Arc::new(Proofs(Mutex::default()));
     let fx = with_seams(fx, |s| s.proofs = proofs.clone());
     let got = read(fx.request("GET", &object, Some(&range), &[]));
-    assert_eq!((got.status, got.header("Accept-Ranges")), (200, Some("none")));
-    fx.request("GET", &fx.ref_url("room", "main", "big.bin"), Some("proof=1"), &[]);
+    assert_eq!(
+        (got.status, got.header("Accept-Ranges")),
+        (200, Some("none"))
+    );
+    fx.request(
+        "GET",
+        &fx.ref_url("room", "main", "big.bin"),
+        Some("proof=1"),
+        &[],
+    );
     assert_eq!(
         *proofs.0.lock().unwrap(),
         [
-            (id(&d.manifest), ObjectType::ChunkedBlob, None, false, Some((10, 19))),
+            (
+                id(&d.manifest),
+                ObjectType::ChunkedBlob,
+                None,
+                false,
+                Some((10, 19))
+            ),
             (id(&d.big), ObjectType::Blob, Some(d.head()), true, None),
         ]
     );
@@ -1484,6 +1646,8 @@ impl crate::http_objects::Reachability for Maintained {
     }
 
     fn record(&self, _: &RepoId, _: &Hash, _: u64) {}
+
+    fn invalidate(&self, _: &RepoId) {}
 }
 
 #[test]
@@ -1540,7 +1704,12 @@ fn an_extracted_body_is_length_checked_and_read_one_piece_at_a_time() {
         panic!("expected a stream");
     };
     assert_eq!(len, n as u64);
-    let produced = || fx.pipe.blobs.produced.load(std::sync::atomic::Ordering::SeqCst);
+    let produced = || {
+        fx.pipe
+            .blobs
+            .produced
+            .load(std::sync::atomic::Ordering::SeqCst)
+    };
     assert_eq!(produced(), 0);
     let first = block_on(stream.next()).unwrap().unwrap();
     assert_eq!((first.len(), produced()), (65_536, 1));
@@ -1621,11 +1790,26 @@ fn the_feature_needs_indexed_mode_and_sane_limits() {
     );
     let min = crate::indexed::IndexedConfig::default().extract_min_bytes;
     for limits in [
-        HttpObjectsConfig { max_walk_objects: 0, ..http_cfg() },
-        HttpObjectsConfig { reachability_lag_ms: 0, ..http_cfg() },
-        HttpObjectsConfig { reach_cache_entries: 0, ..http_cfg() },
-        HttpObjectsConfig { max_inline_object_bytes: min + 9, ..http_cfg() },
-        HttpObjectsConfig { http_decode_budget: http_cfg().max_inline_object_bytes - 1, ..http_cfg() },
+        HttpObjectsConfig {
+            max_walk_objects: 0,
+            ..http_cfg()
+        },
+        HttpObjectsConfig {
+            reachability_lag_ms: 0,
+            ..http_cfg()
+        },
+        HttpObjectsConfig {
+            reach_cache_entries: 0,
+            ..http_cfg()
+        },
+        HttpObjectsConfig {
+            max_inline_object_bytes: min + 9,
+            ..http_cfg()
+        },
+        HttpObjectsConfig {
+            http_decode_budget: http_cfg().max_inline_object_bytes - 1,
+            ..http_cfg()
+        },
     ] {
         let mut config = base();
         config.indexed = Some(crate::indexed::IndexedConfig::default());
@@ -1702,12 +1886,21 @@ fn a_token_and_the_raw_query_never_reach_a_log_line_or_a_response() {
         let (fx, d) = published();
         let query = format!("token={SECRET}");
         let secret_path = format!("/{}/-/refs/heads/main/-/small.txt", fx.identity("room"));
-        let missing = format!("/{}/-/objects/{}", fx.identity("nope"), to_hex(&id(&d.small)));
+        let missing = format!(
+            "/{}/-/objects/{}",
+            fx.identity("nope"),
+            to_hex(&id(&d.small))
+        );
         let broken = format!("{secret_path}%ZZ");
         fx.make_private("room");
         // Success, every kind of miss, a private repository, a bad URL, an
         // unauthorized hook and a broken store all carry the token.
-        for path in [&secret_path, &missing, &broken, &fx.object_url("room", &id(&d.big))] {
+        for path in [
+            &secret_path,
+            &missing,
+            &broken,
+            &fx.object_url("room", &id(&d.big)),
+        ] {
             let response = fx.request("GET", path, Some(&query), &[("authorization", SECRET)]);
             write!(rendered, "{response:?} ").unwrap();
         }
@@ -1715,7 +1908,12 @@ fn a_token_and_the_raw_query_never_reach_a_log_line_or_a_response() {
         let hooked = fixture_with(scripted(&az), http_cfg());
         hooked.push("room", &d.refs(), d.head(), None);
         *az.verdict.lock().unwrap() = Some(Code::Unavailable);
-        let response = hooked.request("GET", &hooked.object_url("room", &id(&d.small)), Some(&query), &[]);
+        let response = hooked.request(
+            "GET",
+            &hooked.object_url("room", &id(&d.small)),
+            Some(&query),
+            &[],
+        );
         write!(rendered, "{response:?}").unwrap();
     });
     let logs = capture.0.lock().unwrap().clone();
@@ -1752,7 +1950,6 @@ const OTHER_WORK_PACKAGES: &[&str] = &[
     "blocked_before_tombstone_before_304",
     "chunk_only_under_tombstoned_manifest",
     "chunk_only_under_blocked_untombstoned_manifest",
-    "not_modified_paid_policy",
     "not_modified_proof_paid_policy",
     "bearer_gated_public_id",
     "outside_content",
@@ -1803,7 +2000,10 @@ fn substitute(value: &str, row: &Row, head: &Hash) -> String {
 fn the_golden_response_rows_hold() {
     let table: serde_json::Value = serde_json::from_str(RESPONSES).unwrap();
     let (fx, d) = published();
-    let small = Row { leaf: id(&d.small), size: 100 };
+    let small = Row {
+        leaf: id(&d.small),
+        size: 100,
+    };
     let (mut uniform, mut covered) = (Vec::<Got>::new(), Vec::<String>::new());
     for case in table["cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
@@ -1815,20 +2015,34 @@ fn the_golden_response_rows_hold() {
         let by_id = fx.object_url("room", &id(&d.small));
         let by_ref = fx.ref_url("room", "main", "small.txt");
         let route_is_ref = request["route"] == "ref";
-        let target = if route_is_ref { by_ref.clone() } else { by_id.clone() };
+        let target = if route_is_ref {
+            by_ref.clone()
+        } else {
+            by_id.clone()
+        };
         let with_range = |headers: &[(&str, &str)]| fx.get_with(&target, headers);
-        let mut row = Row { leaf: small.leaf, size: 100 };
+        let mut row = Row {
+            leaf: small.leaf,
+            size: 100,
+        };
         let got = match name {
             "method_before_syntax" => read(fx.request("POST", "/malformed", None, &[])),
             "missing_repository" => fx.get_with(
-                &format!("/{}/-/objects/{}", fx.identity("missing"), to_hex(&id(&d.small))),
+                &format!(
+                    "/{}/-/objects/{}",
+                    fx.identity("missing"),
+                    to_hex(&id(&d.small))
+                ),
                 &[("if-none-match", &etag), ("payment-authorization", "x")],
             ),
             "authorizer_private" => {
                 let private = fixture();
                 private.push("room", &d.refs(), d.head(), None);
                 private.make_private("room");
-                private.get_with(&private.object_url("room", &id(&d.small)), &[("if-none-match", &etag)])
+                private.get_with(
+                    &private.object_url("room", &id(&d.small)),
+                    &[("if-none-match", &etag)],
+                )
             }
             "authorizer_not_found" | "authorizer_public" | "infrastructure_failure" => {
                 let az = Arc::new(Scripted::default());
@@ -1839,18 +2053,35 @@ fn the_golden_response_rows_hold() {
                     "authorizer_public" => Code::PermissionDenied,
                     _ => Code::Unavailable,
                 });
-                hooked.get_with(&hooked.object_url("room", &id(&d.small)), &[("if-none-match", &etag)])
+                hooked.get_with(
+                    &hooked.object_url("room", &id(&d.small)),
+                    &[("if-none-match", &etag)],
+                )
             }
-            "missing_ref" => fx.get_with(&fx.ref_url("room", "gone", "x"), &[("if-none-match", &etag)]),
-            "non_tree" => fx.get_with(&fx.ref_url("room", "main", "small.txt/x"), &[("if-none-match", &etag)]),
-            "missing_entry" => fx.get_with(&fx.ref_url("room", "main", "absent"), &[("if-none-match", &etag)]),
-            "nonmember" | "unreachable_id" | "pending" => {
-                fx.get_with(&fx.object_url("room", &[7; 32]), &[("if-none-match", &etag)])
-            }
+            "missing_ref" => fx.get_with(
+                &fx.ref_url("room", "gone", "x"),
+                &[("if-none-match", &etag)],
+            ),
+            "non_tree" => fx.get_with(
+                &fx.ref_url("room", "main", "small.txt/x"),
+                &[("if-none-match", &etag)],
+            ),
+            "missing_entry" => fx.get_with(
+                &fx.ref_url("room", "main", "absent"),
+                &[("if-none-match", &etag)],
+            ),
+            "nonmember" | "unreachable_id" | "pending" => fx.get_with(
+                &fx.object_url("room", &[7; 32]),
+                &[("if-none-match", &etag)],
+            ),
             "public_token_ignored" => read(fx.request("GET", &by_id, Some("token=nope"), &[])),
             "unsatisfiable_before_admission" => with_range(&[("range", "bytes=100-200")]),
             "not_modified_before_range_admission" => {
-                let admit = Arc::new(Admit { seen: Mutex::default(), ended: Arc::default(), challenge: true });
+                let admit = Arc::new(Admit {
+                    seen: Mutex::default(),
+                    ended: Arc::default(),
+                    challenge: true,
+                });
                 let paid = with_seams(fixture(), |s| s.admission = admit.clone());
                 paid.push("room", &d.refs(), d.head(), None);
                 let got = paid.get_with(
@@ -1860,20 +2091,38 @@ fn the_golden_response_rows_hold() {
                 assert!(admit.seen.lock().unwrap().is_empty());
                 got
             }
+            "not_modified_paid_policy" => {
+                let paid = with_seams(fixture(), |s| s.admission = Arc::new(Loose));
+                paid.push("room", &d.refs(), d.head(), None);
+                paid.get_with(
+                    &paid.object_url("room", &id(&d.small)),
+                    &[("if-none-match", &etag)],
+                )
+            }
             "public_id" | "public_ref" => fx.get(&target),
             "chunked_content" => {
-                row = Row { leaf: id(&d.manifest), size: 95_000 };
+                row = Row {
+                    leaf: id(&d.manifest),
+                    size: 95_000,
+                };
                 fx.get(&fx.object_url("room", &id(&d.manifest)))
             }
             "canonical_tree" => {
-                row = Row { leaf: id(&d.root), size: serialize(&d.root).unwrap().len() };
+                row = Row {
+                    leaf: id(&d.root),
+                    size: serialize(&d.root).unwrap().len(),
+                };
                 fx.get(&fx.object_url("room", &id(&d.root)))
             }
             "single_range" => with_range(&[("range", "bytes=10-19")]),
             "if_range_match" => with_range(&[("range", "bytes=10-19"), ("if-range", &etag)]),
-            "if_range_miss" => with_range(&[("range", "bytes=10-19"), ("if-range", "\"different\"")]),
+            "if_range_miss" => {
+                with_range(&[("range", "bytes=10-19"), ("if-range", "\"different\"")])
+            }
             "multi_range" => with_range(&[("range", "bytes=0-1,5-6")]),
-            other => panic!("golden row {other} is neither covered nor assigned to another work package"),
+            other => {
+                panic!("golden row {other} is neither covered nor assigned to another work package")
+            }
         };
         assert_eq!(got.status, case["expect"]["status"], "{name}");
         for (header, want) in case["expect"]["headers"].as_object().unwrap() {
@@ -1911,8 +2160,150 @@ fn the_golden_response_rows_hold() {
             "{name}"
         );
     }
-    assert_eq!((covered.len(), uniform.len()), (23, 9));
+    assert_eq!((covered.len(), uniform.len()), (24, 9));
     for got in &uniform[1..] {
-        assert_eq!((got.status, &got.headers, &got.body), (uniform[0].status, &uniform[0].headers, &uniform[0].body));
+        assert_eq!(
+            (got.status, &got.headers, &got.body),
+            (uniform[0].status, &uniform[0].headers, &uniform[0].body)
+        );
+    }
+}
+
+// ---- review fixes ------------------------------------------------------------
+
+/// Reachable only through a subtree that a cap or the decode budget hides
+/// from the walk's first pass: `(fx, target)` under the given limits.
+fn deep_target(http: HttpObjectsConfig, files: usize, oversized: bool) -> (Fx, Hash, Hash) {
+    let fx = fixture_with(Hooks::new(), http);
+    let target = blob(&pattern(20, 31));
+    let below = tree(&[("target", EntryMode::Blob, &target)]);
+    let filler: Vec<Object> = (0..files)
+        .map(|i| blob(&[u8::try_from(i).unwrap(); 3]))
+        .collect();
+    let names: Vec<String> = (0..files).map(|i| format!("f{i:03}")).collect();
+    // 22 + 32 * 200 bytes as a Blob's canonical form (10 + 6,412): the size
+    // of a manifest of 200 chunks, larger than the budget below.
+    let manifest_sized = blob(&pattern(6_412, 32));
+    let mut entries: Vec<(&str, EntryMode, &Object)> = filler
+        .iter()
+        .zip(&names)
+        .map(|(f, n)| (n.as_str(), EntryMode::Blob, f))
+        .collect();
+    if oversized {
+        entries.push(("a-oversized", EntryMode::Blob, &manifest_sized));
+    }
+    entries.push(("zz", EntryMode::Tree, &below));
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let root = tree(&entries);
+    let head = commit(&root, &[], "deep");
+    let mut objects: Vec<&Object> = filler.iter().collect();
+    objects.extend([&target, &below, &root, &head]);
+    if oversized {
+        objects.push(&manifest_sized);
+    }
+    fx.push("room", &objects, id(&head), None);
+    let sibling = id(filler.first().unwrap_or(&target));
+    (fx, id(&target), sibling)
+}
+
+#[test]
+fn an_object_the_budget_cannot_afford_does_not_abort_the_walk() {
+    // A manifest-sized file bigger than the decode budget is skipped; the
+    // walk still finds the target in the sibling subtree.
+    let http = HttpObjectsConfig {
+        max_inline_object_bytes: EXTRACT_MIN + 10,
+        http_decode_budget: 4_096,
+        ..http_cfg()
+    };
+    let (fx, target, _) = deep_target(http, 3, true);
+    assert_eq!(fx.get(&fx.object_url("room", &target)).status, 200);
+    assert_eq!(fx.metrics.count(METRIC_HTTP_REACH_CAPPED), 0);
+}
+
+#[test]
+fn a_wide_tree_is_bounded_by_the_walk_cap_but_never_hides_a_direct_child() {
+    let http = HttpObjectsConfig {
+        max_walk_objects: 6,
+        ..http_cfg()
+    };
+    let (fx, target, sibling) = deep_target(http, 30, false);
+    // The subtree past the cap is never queued: a capped 404 and a metric.
+    assert_uniform_404(&fx.get(&fx.object_url("room", &target)));
+    assert_eq!(fx.metrics.count(METRIC_HTTP_REACH_CAPPED), 1);
+    // A direct child of a decoded tree is compared even when it is not queued.
+    assert_eq!(fx.get(&fx.object_url("room", &sibling)).status, 200);
+    // The same repository is fully walkable under the default cap.
+    let (open, target, _) = deep_target(http_cfg(), 30, false);
+    assert_eq!(open.get(&open.object_url("room", &target)).status, 200);
+}
+
+#[test]
+fn the_authorizer_runs_for_an_anonymous_read_under_the_authority_role_too() {
+    let az = Arc::new(Scripted::default());
+    let fx = fixture_tweaked(scripted(&az), http_cfg(), |config| {
+        config.authorizer_role = AuthorizerRole::Authority;
+    });
+    let d = data();
+    fx.push("room", &d.refs(), d.head(), None);
+    az.seen.lock().unwrap().clear();
+    let url = fx.object_url("room", &id(&d.small));
+    assert_eq!(fx.get(&url).status, 200);
+    assert_eq!(
+        *az.seen.lock().unwrap(),
+        vec![(Procedure::HttpGetObject, "anonymous")]
+    );
+    *az.verdict.lock().unwrap() = Some(Code::PermissionDenied);
+    assert_eq!(fx.get(&url).status, 403);
+    *az.verdict.lock().unwrap() = Some(Code::NotFound);
+    assert_uniform_404(&fx.get(&url));
+}
+
+#[test]
+fn repeated_validators_never_widen_a_response() {
+    let (fx, d) = published();
+    let url = fx.ref_url("room", "main", "small.txt");
+    let etag = fx.get(&url).header("ETag").unwrap().to_owned();
+    // Two If-Range headers are not one matching strong validator: full 200.
+    let got = fx.get_with(
+        &url,
+        &[
+            ("range", "bytes=1-2"),
+            ("if-range", &etag),
+            ("if-range", "\"other\""),
+        ],
+    );
+    assert_eq!((got.status, got.body.len()), (200, d.small_bytes.len()));
+    // Two Range headers are ignored the same way.
+    let got = fx.get_with(&url, &[("range", "bytes=1-2"), ("range", "bytes=3-4")]);
+    assert_eq!((got.status, got.body.len()), (200, d.small_bytes.len()));
+}
+
+/// An admission that allows without asking for `private`: a configured
+/// Admission still makes every success private (§5.3).
+struct Loose;
+
+impl HttpAdmission for Loose {
+    fn admit<'a>(
+        &'a self,
+        _: &'a AdmitRequest<'a>,
+    ) -> crate::BoxFuture<'a, Result<AdmitDecision, ServerError>> {
+        Box::pin(async { Ok(AdmitDecision::Allow(Admitted::default())) })
+    }
+}
+
+#[test]
+fn a_configured_admission_makes_the_200_and_its_304_private_alike() {
+    let (fx, d) = published();
+    let fx = with_seams(fx, |s| s.admission = Arc::new(Loose));
+    for url in [
+        fx.object_url("room", &id(&d.small)),
+        fx.ref_url("room", "main", "small.txt"),
+    ] {
+        let ok = fx.get(&url);
+        let etag = ok.header("ETag").unwrap().to_owned();
+        let cached = fx.get_with(&url, &[("if-none-match", &etag)]);
+        assert_eq!((ok.status, cached.status), (200, 304));
+        assert!(ok.header("Cache-Control").unwrap().starts_with("private,"));
+        assert_eq!(ok.header("Cache-Control"), cached.header("Cache-Control"));
     }
 }

@@ -728,7 +728,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             Sharding::D34 => Arc::new(D34Shards),
         };
         #[cfg(feature = "http-objects")]
-        let http_seams = cfg.http_objects.as_ref().map(crate::http_objects::HttpSeams::new);
+        let http_seams = cfg
+            .http_objects
+            .as_ref()
+            .map(crate::http_objects::HttpSeams::new);
         Ok(Self {
             blobs,
             meta,

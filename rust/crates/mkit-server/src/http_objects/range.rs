@@ -190,7 +190,10 @@ mod tests {
         assert!(if_none_match(&v("W/\"abc\""), TAG));
         assert!(if_none_match(&v("*"), TAG));
         assert!(if_none_match(&v("\"x\", W/\"abc\" , \"y\""), TAG));
-        assert!(if_none_match(&[v("\"x\"")[0].clone(), v(TAG)[0].clone()], TAG));
+        assert!(if_none_match(
+            &[v("\"x\"")[0].clone(), v(TAG)[0].clone()],
+            TAG
+        ));
         assert!(!if_none_match(&v("\"x\", \"y\""), TAG));
         assert!(!if_none_match(&v("\"abcd\""), TAG));
         assert!(!if_none_match(&v("abc"), TAG));
