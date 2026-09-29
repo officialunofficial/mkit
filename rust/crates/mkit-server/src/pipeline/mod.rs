@@ -570,6 +570,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 || indexed.relay_lag_bound_ms == 0
                 || indexed.extract_min_bytes == 0
                 || indexed.max_ancestry_commits == 0
+                || indexed.max_ancestry_commits > crate::indexed::MAX_ANCESTRY_COMMITS_LIMIT
                 || indexed
                     .max_extract_bytes
                     .is_some_and(|max| max < indexed.max_pack_bytes)
@@ -1155,7 +1156,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             if tickets.iter().any(|id| !distinct.insert(id)) {
                 return Err(ServerError::invalid_argument("duplicate ticket id"));
             }
-            if !tickets.is_empty() || self.cfg.sharding == Sharding::D34 {
+            // A ref policy or indexed mode checks the head only (and its
+            // packmap through it), so the pair must be a real pair.
+            if !tickets.is_empty()
+                || self.cfg.sharding == Sharding::D34
+                || self.cfg.ref_policy.is_some()
+                || self.cfg.indexed.is_some()
+            {
                 let head_branch = head.name.strip_prefix("refs/heads/");
                 let packmap_branch = packmap
                     .name
@@ -1890,7 +1897,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 let tip = head
                     .new
                     .ok_or_else(|| ServerError::invalid_argument("delete consumes no tickets"))?;
-                ticket_ms = rows.first().map(|ticket| ticket.created_at_ms);
+                ticket_ms = rows.iter().map(|ticket| ticket.created_at_ms).min();
                 staged = crate::indexed::verify::verify_ticketed(
                     &self.blobs,
                     &self.meta,

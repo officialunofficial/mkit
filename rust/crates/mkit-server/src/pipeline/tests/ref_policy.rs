@@ -126,24 +126,13 @@ impl World {
         self.env.auth(&req).unwrap()
     }
 
-    /// Upload `objects` as one pack to a ticket for `branch`, then advance
-    /// the branch to `head` consuming it.
-    fn push(
-        &mut self,
-        branch: &str,
-        objects: &[&Object],
-        head: Hash,
-        condition: RefWriteCondition,
-    ) -> Result<AdvanceOutcome, ServerError> {
+    /// Upload `objects` as one pack to a ticket for `branch`.
+    fn begin(&mut self, branch: &str, objects: &[&Object]) -> Result<(Vec<u8>, Hash), ServerError> {
         let pack = pack_of(objects);
-        let (head_ref, packmap) = (
-            format!("refs/heads/{branch}"),
-            format!("refs/mkit/packmap/{branch}"),
-        );
         let auth = self.auth(Procedure::BeginUpload);
         let BeginUploadResult::Ticket { id, .. } = block_on(self.env.pipe.begin_upload(
             &auth,
-            &head_ref,
+            &format!("refs/heads/{branch}"),
             &hash(&pack),
             pack.len() as u64,
         ))?
@@ -151,13 +140,36 @@ impl World {
             panic!("expected an upload ticket");
         };
         super::indexed::upload(&self.env, &pack, id);
+        Ok((pack, id))
+    }
+
+    /// Advance `branch` to `head`, consuming the ticket of `pack`.
+    fn advance(
+        &mut self,
+        branch: &str,
+        (pack, ticket): &(Vec<u8>, Hash),
+        head: Hash,
+        condition: RefWriteCondition,
+    ) -> Result<AdvanceOutcome, ServerError> {
         let auth = self.auth(Procedure::AdvanceRefs);
         block_on(self.env.pipe.advance_refs_with_tickets(
             &auth,
-            upd(&head_ref, condition, head),
-            upd(&packmap, Any, hash(&pack)),
-            vec![id],
+            upd(&format!("refs/heads/{branch}"), condition, head),
+            upd(&format!("refs/mkit/packmap/{branch}"), Any, hash(pack)),
+            vec![*ticket],
         ))
+    }
+
+    /// Upload `objects` and advance `branch` to `head` in one go.
+    fn push(
+        &mut self,
+        branch: &str,
+        objects: &[&Object],
+        head: Hash,
+        condition: RefWriteCondition,
+    ) -> Result<AdvanceOutcome, ServerError> {
+        let ticket = self.begin(branch, objects)?;
+        self.advance(branch, &ticket, head, condition)
     }
 
     fn update_as(
@@ -352,32 +364,51 @@ fn signer_rule_allows_listed_signers_and_uncovered_refs_and_intersects() {
         w.update("refs/tags/v1", Missing, Some(A)).unwrap(),
         UpdateRefResult::Committed
     );
+    // `other` is in both sets, so the intersection lets it through (as a
+    // grantee: it does not own the namespace).
+    let header = grants::grant(&owner, &other, |grant| {
+        grant.ref_scopes = Some(RefScopes::parse("refs/heads/*=cufd").unwrap());
+    });
     let identity = w.identity.clone();
     let change = upd(HEAD, Missing, A);
     assert_eq!(
-        w.update_as((&other, &identity, T0), None, change)
-            .unwrap_err()
-            .code(),
-        // Not a namespace owner and holds no grant.
-        Code::PermissionDenied
+        w.update_as((&other, &identity, T0), Some(&header), change)
+            .unwrap(),
+        UpdateRefResult::Committed
     );
 }
 
 #[test]
 fn matching_signer_rule_denies_a_write_with_no_auth_v2_signer() {
-    let policy = RefPolicy::new(vec![rule("refs/heads/*", Some(&[&key(3)]), false)]);
-    let clock = clock();
-    let mut config = cfg(AuthMode::Open);
-    config.ref_policy = Some(policy);
-    let env = build(config, Spy::new(store(&clock)), Hooks::new(), clock);
-    denied(
-        &env.open_update(&upd(HEAD, Missing, A)).unwrap_err(),
-        SIGNER_MESSAGE,
-    );
-    assert_eq!(
-        env.open_update(&upd("refs/tags/v1", Missing, A)).unwrap(),
-        UpdateRefResult::Committed
-    );
+    let ssh = Principal::SshForcedCommand { key: None };
+    let bearer = || Req::unsigned(Procedure::UpdateRef).header("authorization", "Bearer tok");
+    let mut enc = Req::unsigned(Procedure::UpdateRef);
+    enc.principal = Some(ssh);
+    for (mode, request) in [
+        (AuthMode::Open, Req::unsigned(Procedure::UpdateRef)),
+        (
+            AuthMode::Bearer {
+                token: crate::error::Redacted::new("tok"),
+            },
+            bearer(),
+        ),
+        (AuthMode::TransportIdentity, enc),
+    ] {
+        let policy = RefPolicy::new(vec![rule("refs/heads/*", Some(&[&key(3)]), false)]);
+        let clock = clock();
+        let mut config = cfg(mode);
+        config.ref_policy = Some(policy);
+        let env = build(config, Spy::new(store(&clock)), Hooks::new(), clock);
+        denied(
+            &env.update(&request, &upd(HEAD, Missing, A)).unwrap_err(),
+            SIGNER_MESSAGE,
+        );
+        assert_eq!(
+            env.update(&request, &upd("refs/tags/v1", Missing, A))
+                .unwrap(),
+            UpdateRefResult::Committed
+        );
+    }
 }
 
 #[derive(Clone)]
@@ -614,13 +645,20 @@ fn any_on_a_fast_forward_only_ref_checks_the_observed_value() {
         UpdateRefResult::Committed
     );
     assert_eq!(w.value(HEAD), Some(id3));
-    // ANY creating an absent ref is allowed, and guarded as a creation.
-    let mut w = World::indexed(Some(ff_main()));
-    let [_, _, _, stray] = w.history();
+    // ANY creating an absent ref is allowed and guarded as a creation, and
+    // once present the same ref is checked against its observed value.
+    let any_branch = RefPolicy::new(vec![rule("refs/heads/*", None, true)]);
+    let mut w = World::indexed(Some(any_branch));
+    let [id1, _, _, stray] = w.history();
     assert_eq!(
         w.update("refs/heads/main2", Any, Some(stray)).unwrap(),
         UpdateRefResult::Committed
     );
+    denied(
+        &w.update("refs/heads/main2", Any, Some(id1)).unwrap_err(),
+        FF_MESSAGE,
+    );
+    assert_eq!(w.value("refs/heads/main2"), Some(stray));
 }
 
 fn update_only_grantee(w: &World, flags: &str) -> (SigningKey, String) {
@@ -863,16 +901,19 @@ fn ticketless_lag_window_follows_the_signed_created_at_clamped_to_now() {
         .update_as((&owner, &identity, T0), None, unknown.clone())
         .unwrap_err();
     assert_eq!(error.public_message(), NOT_VISIBLE);
-    // A future `created_at` is clamped to now and opens no longer window.
-    w.env.clock.advance(LAG_MS - 1_000);
-    let future = (&owner, identity.as_str(), T0 + LAG_MS - 1_000 + 20_000);
-    let error = w.update_as(future, None, unknown.clone()).unwrap_err();
-    assert_eq!(error.public_message(), NOT_VISIBLE);
-    w.env.clock.advance(LAG_MS);
-    let error = w
-        .update_as((&owner, &identity, T0), None, unknown)
-        .unwrap_err();
-    assert_eq!(error.public_message(), "open closure");
+    // The boundary follows the signed `x-created-at` exactly: a request
+    // signed 20 s ahead of the server clock (inside the permitted skew) turns
+    // permanent one window after that instant.
+    let future = w.req(&owner, &identity, Procedure::UpdateRef, T0 + 20_000);
+    let attempt = |w: &World| {
+        let auth = w.env.auth(&future).unwrap();
+        block_on(w.env.pipe.update_ref(&auth, unknown.clone())).unwrap_err()
+    };
+    assert_eq!(attempt(&w).public_message(), NOT_VISIBLE);
+    w.env.clock.advance(LAG_MS + 20_000 - 1);
+    assert_eq!(attempt(&w).public_message(), NOT_VISIBLE);
+    w.env.clock.advance(1);
+    assert_eq!(attempt(&w).public_message(), "open closure");
 }
 
 #[test]
@@ -898,4 +939,73 @@ fn opaque_and_default_configs_never_touch_the_policy_or_the_index() {
         UpdateRefResult::Committed
     );
     assert_eq!(w.unchecked(), 0);
+}
+
+#[test]
+fn ticketed_lag_window_runs_from_the_earliest_ticket() {
+    let mut w = World::indexed(Some(ff_main()));
+    let [id1, id2, id3, _] = w.history();
+    // main sits at c1 with c2 not yet visible; c4 (staged) reaches c1 only
+    // through member c3 -> c2.
+    w.set_ref(HEAD, &id1);
+    let row = w.hide(&id2);
+    let (c4, id4) = commit(&[id3], 5);
+    let ticket = w.begin("main", &[&c4]).unwrap();
+    let error = w.advance("main", &ticket, id4, Match(id1)).unwrap_err();
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(error.public_message(), NOT_VISIBLE);
+    // The ticket, not the request, opens the window: after it, permanent.
+    w.env.clock.advance(LAG_MS);
+    let error = w.advance("main", &ticket, id4, Match(id1)).unwrap_err();
+    denied(&error, FF_MESSAGE);
+    // Visible again: the same ticket now commits.
+    w.restore(&id2, row);
+    assert_eq!(
+        w.advance("main", &ticket, id4, Match(id1)).unwrap(),
+        AdvanceOutcome::Committed
+    );
+}
+
+#[test]
+fn walk_answers_do_not_depend_on_other_repositories() {
+    let mut answers = Vec::new();
+    for foreign_history in [false, true] {
+        let mut w = World::indexed(Some(ff_main()));
+        let (stray, stray_id) = commit(&[], 4);
+        let (c1, id1) = commit(&[], 1);
+        let (c2, id2) = commit(&[id1], 2);
+        if foreign_history {
+            w.push("main", &[&tree(), &c1], id1, Missing).unwrap();
+            w.push("other", &[&c2], id2, Missing).unwrap();
+        }
+        // Repository B holds only `stray`; `from` (c2) is a member of A or of
+        // nothing at all, and the answers must be byte-identical.
+        w.identity = w.other_identity("other");
+        w.push("main", &[&tree(), &stray], stray_id, Missing)
+            .unwrap();
+        let error = w.update(HEAD, Match(id2), Some(stray_id)).unwrap_err();
+        denied(&error, FF_MESSAGE);
+        answers.push((
+            error.code(),
+            error.public_message().to_owned(),
+            error.details().to_vec(),
+        ));
+    }
+    assert_eq!(answers[0], answers[1]);
+}
+
+#[test]
+fn a_ticketless_advance_must_pair_a_head_with_its_own_packmap() {
+    let mut w = World::indexed(Some(ff_main()));
+    let [_, id2, _, stray] = w.history();
+    // The head is a free branch but the second ref is protected `main`.
+    let auth = w.auth(Procedure::AdvanceRefs);
+    let error = block_on(w.env.pipe.advance_refs(
+        &auth,
+        upd("refs/heads/free", Missing, stray),
+        upd(HEAD, Any, stray),
+    ))
+    .unwrap_err();
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert_eq!(w.value(HEAD), Some(id2));
 }

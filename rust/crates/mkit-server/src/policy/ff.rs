@@ -17,7 +17,8 @@ use crate::{BlobStore, Clock, NamespaceStore, ServerError};
 use mkit_core::hash::Hash;
 
 /// A `u`-only `MATCH` write that is allowed only as a proven fast-forward
-/// (SPEC-WRITE-GRANTS §8.2), carried from stage 2 to stage 5.
+/// (SPEC-WRITE-GRANTS §8.2), carried from stage 2 to stage 5, where it must
+/// still describe the change being written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FastForward {
     pub name: String,
@@ -96,15 +97,20 @@ impl<B: BlobStore, S: NamespaceStore> Walk<'_, B, S> {
             Ok((bytes, _)) => bytes,
             Err(resolve::ResolveFailure::Missing) => return Ok(Step::Missed),
             Err(resolve::ResolveFailure::Capped) => {
-                return Ok(Step::Stop(self.unchecked("lookup")));
+                return Ok(Step::Stop(self.unchecked("base")));
             }
             Err(resolve::ResolveFailure::Other(error))
                 if error.code() == crate::Code::Unavailable =>
             {
                 return Err(error);
             }
-            Err(resolve::ResolveFailure::Other(_)) => {
-                return Ok(Step::Stop(self.unchecked("budget")));
+            Err(resolve::ResolveFailure::Other(error)) => {
+                let budget = error.public_message() == "pack exceeds indexed decode budget";
+                return Ok(Step::Stop(self.unchecked(if budget {
+                    "budget"
+                } else {
+                    "member"
+                })));
             }
         };
         Ok(
@@ -151,6 +157,9 @@ impl<B: BlobStore, S: NamespaceStore> Walk<'_, B, S> {
                     None => member.push(id),
                 }
             }
+            if edges.contains(&from) {
+                return Ok(Verdict::Descendant);
+            }
             reads = reads.saturating_add(u32::try_from(member.len()).unwrap_or(u32::MAX));
             if reads > self.cfg.max_ancestry_commits {
                 return Ok(self.unchecked("commits"));
@@ -192,5 +201,46 @@ impl<B: BlobStore, S: NamespaceStore> Walk<'_, B, S> {
             ));
         }
         Ok(Verdict::NotDescendant)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mkit_core::object::{Blob, Identity, Object, ObjectType, Remix, RemixSource, Tag};
+
+    #[test]
+    fn only_commit_and_remix_parents_are_history_edges() {
+        let author = Identity::ed25519([1; 32]);
+        let remix = Object::Remix(Remix {
+            tree_hash: [2; 32],
+            parents: vec![[3; 32]],
+            sources: vec![RemixSource {
+                upstream_id: [4; 32],
+                commit_hash: [5; 32],
+            }],
+            author: author.clone(),
+            signer: [1; 32],
+            message: Vec::new(),
+            timestamp: 0,
+            signature: [0; 64],
+        });
+        assert_eq!(history_parents(&remix), Some(vec![[3; 32]]));
+        let tag = Object::Tag(Tag {
+            target: [6; 32],
+            target_type: ObjectType::Commit,
+            name: b"v1".to_vec(),
+            tagger: author,
+            signer: [1; 32],
+            message: Vec::new(),
+            timestamp: 0,
+            signature: [0; 64],
+        });
+        // A tag is a descendant only of itself: its target is no edge.
+        assert_eq!(history_parents(&tag), Some(Vec::new()));
+        assert_eq!(
+            history_parents(&Object::Blob(Blob { data: Vec::new() })),
+            None
+        );
     }
 }

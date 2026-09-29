@@ -216,6 +216,52 @@ mod tests {
     }
 
     #[test]
+    fn indexed_required_flag_table_all_subsets() {
+        let name = "refs/heads/main";
+        let matched = change(name, RefWriteCondition::Match([2; 32]), false);
+        for bits in 0..16 {
+            let mut flags = RefFlags::EMPTY;
+            for (bit, flag) in [
+                RefFlags::CREATE,
+                RefFlags::UPDATE,
+                RefFlags::FORCE,
+                RefFlags::DELETE,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if bits & (1 << bit) != 0 {
+                    flags = flags.union(flag);
+                }
+            }
+            let (u, f) = (
+                flags.contains(RefFlags::UPDATE),
+                flags.contains(RefFlags::FORCE),
+            );
+            // Only the `MATCH` row changes in indexed mode: `u` without `f`
+            // yields the ancestry requirement instead of a denial.
+            let outcome = gate_with(&matched, true, |_| flags);
+            assert_eq!(outcome.is_ok(), u || f, "bits={bits}");
+            assert_eq!(
+                outcome.ok().and_then(|o| o.fast_forward).is_some(),
+                u && !f,
+                "bits={bits}"
+            );
+            for kind in [
+                change(name, RefWriteCondition::Missing, false),
+                change(name, RefWriteCondition::Match([2; 32]), true),
+                change(name, RefWriteCondition::Any, false),
+            ] {
+                assert_eq!(
+                    gate_with(&kind, true, |_| flags).ok(),
+                    gate_with(&kind, false, |_| flags).ok(),
+                    "bits={bits}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn update_only_needs_indexed_mode_and_yields_the_ancestry_requirement() {
         let matched = change("refs/heads/main", RefWriteCondition::Match([2; 32]), false);
         assert_eq!(

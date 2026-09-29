@@ -119,6 +119,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let Some(to) = update.new else {
             return Err(denied());
         };
+        // The carried requirement must still describe this very change.
+        if grant.is_some_and(|ff| {
+            ff.name != *subject
+                || ff.to != to
+                || update.condition != RefWriteCondition::Match(ff.from)
+        }) {
+            return Err(internal(
+                "fast-forward requirement does not match the write",
+            ));
+        }
         let from = match update.condition {
             RefWriteCondition::Match(from) => from,
             RefWriteCondition::Missing => return Ok(()),

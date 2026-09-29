@@ -63,8 +63,9 @@ pub struct IndexedConfig {
     /// `4 * max_pack_bytes` when the pipeline is built; a set value must be
     /// at least `max_pack_bytes`.
     pub max_extract_bytes: Option<u64>,
-    /// Most member commits one fast-forward check may read (WP-4.17), at
-    /// least 1. Beyond it the check is unproven and the write is denied.
+    /// Most member commits one fast-forward check may read (WP-4.17), from 1
+    /// to [`MAX_ANCESTRY_COMMITS_LIMIT`]. Beyond it the check is unproven and
+    /// the write is denied.
     pub max_ancestry_commits: u32,
 }
 
@@ -76,6 +77,9 @@ impl IndexedConfig {
             .unwrap_or_else(|| self.max_pack_bytes.saturating_mul(4))
     }
 }
+
+/// The largest accepted [`IndexedConfig::max_ancestry_commits`].
+pub const MAX_ANCESTRY_COMMITS_LIMIT: u32 = 65_536;
 
 /// The default [`IndexedConfig::max_ancestry_commits`].
 pub const DEFAULT_MAX_ANCESTRY_COMMITS: u32 = 256;

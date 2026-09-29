@@ -977,7 +977,10 @@ repository. A miss follows §9.4's lag window, measured from the request's
 signed `x-created-at` (clamped to the server's clock) because no ticket
 exists, and is then the permanent `open closure` failure, byte-identical
 whether or not the object exists in another repository. A capped lookup is
-`object index limit exceeded`. Opaque mode does not check the head.
+`object index limit exceeded`. Reconstructing the head follows §9.4's
+delta-base rules. Opaque mode does not check the head. An indexed server
+also requires a ticketless `AdvanceRefs` to pair `refs/heads/<x>` with
+`refs/mkit/packmap/<x>`.
 
 Object identity is checked on the reconstructed object, not on an
 unverified claim in an entry. A transport-level pack commitment does
@@ -1241,8 +1244,8 @@ within those bounds fails closed as the policy's `permission_denied`. A
 membership-dependent miss inside §9.4's lag window, with no other path to
 the current value, is the retryable `unavailable`
 `repository membership not yet visible` and is not stored; after the
-window it is the policy denial. The window runs from the consuming
-ticket's creation, or from the signed `x-created-at` (clamped to now)
+window it is the policy denial. The window runs from the creation of the earliest consumed
+ticket, or from the signed `x-created-at` (clamped to now)
 when the write consumes no ticket. `REF_EXPECTATION_ANY` on a present
 fast-forward-only ref is checked against the value the server observed and
 commits as `MATCH` on that value; `MISSING` and `ANY` on an absent ref
