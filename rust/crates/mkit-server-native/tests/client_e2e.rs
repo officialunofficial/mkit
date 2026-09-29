@@ -109,11 +109,18 @@ impl Served {
     }
 
     fn start_ticketed() -> Self {
-        Self::start_ticketed_capped("67108864")
+        Self::start_ticketed_with("67108864", None)
     }
 
-    /// A ticketed auth-v2 server advertising `max_pack_bytes`.
+    /// Single sharding, so a fetch right after a push sees the branch:
+    /// D34's `ListRefs` is eventual.
     fn start_ticketed_capped(max_pack_bytes: &str) -> Self {
+        Self::start_ticketed_with(max_pack_bytes, Some("single"))
+    }
+
+    /// A ticketed auth-v2 server advertising `max_pack_bytes`, with
+    /// `--sharding` set when given (the SQLite default is D34).
+    fn start_ticketed_with(max_pack_bytes: &str, sharding: Option<&str>) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -127,26 +134,26 @@ impl Served {
         );
         let (listener, origin) = runtime.block_on(common::listener());
         let meta = format!("sqlite:{}", common::s(&root.path().join("meta.sqlite3")));
-        let mut cfg = common::resolve_with(
-            &[
-                "--listen",
-                "127.0.0.1:0",
-                "--repo-root",
-                common::s(root.path()),
-                "--meta",
-                &meta,
-                "--ticket-key-file",
-                common::s(&ticket_file),
-                "--auth",
-                "auth-v2",
-                "--audience",
-                &origin,
-                "--max-pack-bytes",
-                max_pack_bytes,
-            ],
-            &[],
-        )
-        .unwrap();
+        let mut flags = vec![
+            "--listen",
+            "127.0.0.1:0",
+            "--repo-root",
+            common::s(root.path()),
+            "--meta",
+            &meta,
+            "--ticket-key-file",
+            common::s(&ticket_file),
+            "--auth",
+            "auth-v2",
+            "--audience",
+            &origin,
+            "--max-pack-bytes",
+            max_pack_bytes,
+        ];
+        if let Some(sharding) = sharding {
+            flags.extend(["--sharding", sharding]);
+        }
+        let mut cfg = common::resolve_with(&flags, &[]).unwrap();
         cfg.pipeline.begin_upload_threshold_bytes = 0;
         let opened = server::open(&cfg).unwrap();
         let shutdown = Shutdown::new();

@@ -598,7 +598,7 @@ where
     };
     let registry = match class {
         ShardClass::NsCoordinator | ShardClass::RefShard | ShardClass::RefStore => {
-            registry.register(WorkerQuotaRollup::new(target.map(SharedStore)))
+            registry.register(WorkerQuotaRollup::new(target.map(SharedStore), plan))
         }
         _ => registry,
     };
@@ -747,33 +747,111 @@ impl<T: mkit_server::NamespaceStore> mkit_server::NamespaceStore for SharedStore
     }
 }
 
-/// Fires kind-5 rollups per alarm tick on a Durable Object.
+/// Kind-5 rollups per alarm tick, and the coordinator calls one fire may make.
 ///
-/// Subrequests of one fire, from `quota_rollup.rs` (each store call on the
-/// coordinator stub counts): a live-window fire is the aggregate read plus its
-/// guarded write, 2; an expired-window fire adds the contribution prune (a
-/// read, a scan, the last-source read, two older-window scans and the
-/// guarded delete), 8 in all. Contention replans the aggregate at most
-/// `MAX_AGGREGATE_REPLANS` (8) times, 2 calls each. Four fires are thus 8
-/// calls typically and 32 when every fire is an expired window without
-/// contention, which alone fits Free's 50; beside a saturated relay tick
-/// (32) a Free alarm can meet the limit, and the failed call surfaces as a
-/// retryable `StoreError` (`Fired` failure with backoff), never a lost timer.
-const ROLLUP_FIRES_PER_TICK: u32 = 4;
+/// Free-plan alarm budget (50 subrequests): relay 32, backup 1, outcome
+/// delivery 8 (1 fire x 8) and the quota rollup at most 8, so Free runs one
+/// rollup fire per tick and caps that fire at [`FREE_ROLLUP_CALLS`] external
+/// calls. From `quota_rollup.rs`: a live-window fire is the aggregate read
+/// plus its guarded write (2 calls); an expired-window fire adds the
+/// contribution prune (a read, a scan, the last-source read, two
+/// older-window scans and the guarded delete), 8 in all; contention could
+/// replan the aggregate up to 8 times, so the cap turns the excess into a
+/// retryable `StoreError` (a failed fire, retried with backoff and resuming
+/// its prune), never a lost timer. Paid runs four fires uncapped (its
+/// alarm allows 1,000 subrequests).
+const PAID_ROLLUP_FIRES_PER_TICK: u32 = 4;
+const FREE_ROLLUP_FIRES_PER_TICK: u32 = 1;
+const FREE_ROLLUP_CALLS: u32 = 8;
+
+/// A store handle that fails the fire once `limit` calls were made since
+/// [`Self::reset`], so one rollup fire stays within its subrequest budget.
+struct BudgetedStore<T> {
+    inner: SharedStore<T>,
+    used: Arc<core::sync::atomic::AtomicU32>,
+    limit: u32,
+}
+
+impl<T> BudgetedStore<T> {
+    fn charge(&self) -> Result<(), mkit_server::StoreError> {
+        use core::sync::atomic::Ordering;
+        if self.used.fetch_add(1, Ordering::SeqCst) >= self.limit {
+            return Err(mkit_server::StoreError::Invalid(
+                "quota rollup subrequest budget exhausted".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl<T: mkit_server::NamespaceStore> mkit_server::NamespaceStore for BudgetedStore<T> {
+    fn capabilities(&self) -> mkit_server::StoreCapabilities {
+        self.inner.capabilities()
+    }
+    async fn get(
+        &self,
+        p: &mkit_server::Partition,
+        k: &mkit_server::Key,
+    ) -> Result<Option<mkit_server::Value>, mkit_server::StoreError> {
+        self.charge()?;
+        self.inner.get(p, k).await
+    }
+    async fn scan(
+        &self,
+        p: &mkit_server::Partition,
+        start: &mkit_server::Key,
+        end: &mkit_server::Key,
+        after: Option<&mkit_server::Cursor>,
+        limit: u32,
+    ) -> Result<mkit_server::ScanPage, mkit_server::StoreError> {
+        self.charge()?;
+        self.inner.scan(p, start, end, after, limit).await
+    }
+    async fn apply(
+        &self,
+        p: &mkit_server::Partition,
+        batch: mkit_server::Batch,
+    ) -> Result<mkit_server::BatchOutcome, mkit_server::StoreError> {
+        self.charge()?;
+        self.inner.apply(p, batch).await
+    }
+    async fn stats(
+        &self,
+        p: &mkit_server::Partition,
+    ) -> Result<mkit_server::PartitionStats, mkit_server::StoreError> {
+        self.charge()?;
+        self.inner.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), mkit_server::StoreError> {
+        self.charge()?;
+        self.inner.probe().await
+    }
+}
 
 /// A rollup handler whose coordinator client may be unavailable: a
 /// configuration error retains the timers, as [`WorkerRelay`] does.
 struct WorkerQuotaRollup<T> {
-    rollup:
-        Option<mkit_server::timers::quota_rollup::QuotaRollup<T, crate::telemetry::ConsoleMetrics>>,
+    rollup: Option<
+        mkit_server::timers::quota_rollup::QuotaRollup<
+            BudgetedStore<T>,
+            crate::telemetry::ConsoleMetrics,
+        >,
+    >,
+    used: Arc<core::sync::atomic::AtomicU32>,
     max_per_tick: u32,
 }
 
 impl<T> WorkerQuotaRollup<T> {
-    fn new(target: Result<T, ConfigError>) -> Self {
+    fn new(target: Result<SharedStore<T>, ConfigError>, plan: Option<&str>) -> Self {
+        let free = !plan.is_some_and(|p| p.trim().eq_ignore_ascii_case("paid"));
+        let used = Arc::new(core::sync::atomic::AtomicU32::new(0));
         let rollup = match target {
-            Ok(coordinator) => Some(mkit_server::timers::quota_rollup::QuotaRollup {
-                coordinator,
+            Ok(inner) => Some(mkit_server::timers::quota_rollup::QuotaRollup {
+                coordinator: BudgetedStore {
+                    inner,
+                    used: Arc::clone(&used),
+                    limit: if free { FREE_ROLLUP_CALLS } else { u32::MAX },
+                },
                 metrics: crate::telemetry::ConsoleMetrics::default(),
             }),
             Err(error) => {
@@ -785,12 +863,17 @@ impl<T> WorkerQuotaRollup<T> {
         };
         Self {
             rollup,
-            max_per_tick: ROLLUP_FIRES_PER_TICK,
+            used,
+            max_per_tick: if free {
+                FREE_ROLLUP_FIRES_PER_TICK
+            } else {
+                PAID_ROLLUP_FIRES_PER_TICK
+            },
         }
     }
 }
 
-impl<S: mkit_server::NamespaceStore, T: mkit_server::NamespaceStore>
+impl<S: mkit_server::NamespaceStore, T: mkit_server::NamespaceStore + 'static>
     mkit_server::timers::TimerHandler<S> for WorkerQuotaRollup<T>
 {
     fn kind(&self) -> mkit_server::timers::TimerKind {
@@ -807,6 +890,8 @@ impl<S: mkit_server::NamespaceStore, T: mkit_server::NamespaceStore>
         timer: &'a mkit_server::timers::DueTimer,
     ) -> mkit_server::BoxFuture<'a, Result<mkit_server::timers::Fired, mkit_server::StoreError>>
     {
+        // Fires in one tick run one after another: each starts a fresh budget.
+        self.used.store(0, core::sync::atomic::Ordering::SeqCst);
         match &self.rollup {
             Some(rollup) => rollup.fire(ctx, timer),
             None => Box::pin(async { Ok(mkit_server::timers::Fired::Retry) }),
@@ -1930,6 +2015,27 @@ mod tests {
             WorkerConfig::from_vars(vars(&pairs)).unwrap_err().0,
             "NAMESPACE_POLICY must be allowlist or any"
         );
+    }
+
+    /// One Free-plan rollup fire may make `limit` coordinator calls; the next
+    /// is a retryable `StoreError`, never a silent overrun.
+    #[test]
+    fn rollup_budget_fails_the_call_past_its_limit() {
+        use mkit_server::{Key, MemoryKv, NamespaceKey, NamespaceStore, Partition, StoreError};
+        let store = BudgetedStore {
+            inner: SharedStore(Arc::new(MemoryKv::default())),
+            used: Arc::new(core::sync::atomic::AtomicU32::new(0)),
+            limit: 2,
+        };
+        let partition = Partition::Namespace(NamespaceKey::deployment_default());
+        let key = Key::new(b"k".to_vec());
+        for _ in 0..2 {
+            assert_eq!(block_on(store.get(&partition, &key)).unwrap(), None);
+        }
+        assert!(matches!(
+            block_on(store.get(&partition, &key)),
+            Err(StoreError::Invalid(_))
+        ));
     }
 
     const RP: &str = "example.test=https://example.test";

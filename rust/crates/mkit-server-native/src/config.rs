@@ -1313,9 +1313,8 @@ fn resolve_max_pack(args: &ServeArgs) -> Result<u64, ConfigError> {
 fn resolve_sharding(args: &ServeArgs) -> Result<Sharding, ConfigError> {
     let sqlite = matches!(args.meta, Some(MetaArg::Sqlite(_)));
     match args.sharding {
-        None if sqlite => Ok(Sharding::D34),
+        None | Some(ShardingArg::D34) if sqlite => Ok(Sharding::D34),
         None | Some(ShardingArg::Single) => Ok(Sharding::Single),
-        Some(ShardingArg::D34) if sqlite => Ok(Sharding::D34),
         Some(ShardingArg::D34) => Err(ConfigError::new(
             exit::USAGE,
             format!("{PREFIX}: --sharding d34 requires --meta sqlite:<PATH>"),

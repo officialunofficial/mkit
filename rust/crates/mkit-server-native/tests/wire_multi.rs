@@ -133,6 +133,7 @@ async fn wire_suite_multi_sqlite_auth_v2() {
 /// needs — and its allowlist adds the fixed grant-owner test namespaces
 /// (`grant_owner_namespaces`; public seeds, so never in a shipped config).
 /// A `--listen-enc` binding beside it proves the sibling pipeline starts.
+#[allow(clippy::too_many_lines)] // Setup, flags and the four case groups.
 async fn grants_and_epochs(sharding: &str) {
     let aux = tempfile::tempdir().unwrap();
     let root = common::repo_root();
@@ -147,7 +148,7 @@ async fn grants_and_epochs(sharding: &str) {
         repository: "ignored-in-multi-mode".to_owned(),
         seed: [0x5e; 32],
     });
-    profile.run_id = "wire-grants".to_owned();
+    "wire-grants".clone_into(&mut profile.run_id);
     profile.milestone = Milestone::M2;
     profile.atomic_advance = true;
     profile.max_pack_bytes = MAX_PACK;

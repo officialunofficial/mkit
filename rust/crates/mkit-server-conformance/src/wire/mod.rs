@@ -213,10 +213,11 @@
 //! | `replay.advance_replay_equals_first_result` | `auth-v2`, `replay` | for a commit and for a conflict |
 //! | `replay.upload_replay_succeeds` | `auth-v2`, `replay` | |
 //! | `replay.expired_retry_rejected` | `auth-v2`, `replay`, `test-faults` | a cached result is not served past expiry |
-//! | `quota.ops_exhaustion_resource_exhausted` | `auth-v2`, `quota` | per signer |
-//! | `quota.bytes_exhaustion_resource_exhausted` | `auth-v2`, `quota` | refused at the header |
-//! | `quota.exhaustion_allocates_no_replay` | `auth-v2`, `replay`, `quota` | the nonce stays unspent |
-//! | `quota.replay_not_charged` | `auth-v2`, `replay`, `quota` | |
+//! | `quota.ops_exhaustion_resource_exhausted` | `auth-v2`, `quota`; not `multi-repo` | per signer (per branch under D34) |
+//! | `quota.bytes_exhaustion_resource_exhausted` | `auth-v2`, `quota`; not `multi-repo` | refused at the header |
+//! | `quota.exhaustion_allocates_no_replay` | `auth-v2`, `replay`, `quota`; not `multi-repo` | the nonce stays unspent |
+//! | `quota.replay_not_charged` | `auth-v2`, `replay`, `quota`; not `multi-repo` | |
+//! | `quota.namespace_cap_after_rollup` | `auth-v2`, `quota`, `multi-repo`, `test-faults` | D34 namespace cap across branches after a forced rollup |
 //! | `tickets.begin_upload_new` | `tickets`, `auth-v2` | a new ticket has an id, part geometry, expiry and token |
 //! | `tickets.begin_upload_idempotent` | `tickets`, `auth-v2` | a fresh nonce returns the live ticket, replay returns identical bytes, and another signer gets its own ticket |
 //! | `tickets.begin_upload_caps` | `tickets`, `auth-v2` | the open-ticket cap has its exact public error and leaves no replay row |
@@ -413,10 +414,12 @@ pub fn multi_allowlist_text(profile: &Profile) -> String {
 /// seeds: never allowlist them on a shared or staging deployment.
 #[must_use]
 pub fn grant_owner_allowlist_text() -> String {
-    grant_owner_namespaces()
-        .iter()
-        .map(|namespace| format!("{namespace}\n"))
-        .collect()
+    let mut text = String::new();
+    for namespace in grant_owner_namespaces() {
+        text.push_str(&namespace.to_string());
+        text.push('\n');
+    }
+    text
 }
 
 /// Run every case whose name contains `filter` (all when `None`) against

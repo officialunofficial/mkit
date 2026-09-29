@@ -139,11 +139,11 @@ fn rollup_config_failure_retries_the_stored_timer() {
 }
 
 #[test]
-fn rollup_fires_are_capped_at_four_per_alarm_on_every_plan() {
+fn rollup_fires_are_capped_at_one_per_alarm_on_free_and_four_on_paid() {
     block_on(async {
         let dir = tempfile::tempdir().unwrap();
         let target = Loopback::store(dir.path().to_path_buf(), DoConfig::default());
-        for plan in [None, Some("free"), Some("paid")] {
+        for (plan, cap) in [(None, 1), (Some("free"), 1), (Some("paid"), 4)] {
             let source = source();
             let partition = partition(ShardClass::RefShard);
             let mut batch = Batch::new();
@@ -163,8 +163,8 @@ fn rollup_fires_are_capped_at_four_per_alarm_on_every_plan() {
             )
             .await
             .unwrap();
-            assert_eq!(report.fired, 4, "plan {plan:?}");
-            assert_eq!(report.deferred, 5, "plan {plan:?}");
+            assert_eq!(report.fired, cap, "plan {plan:?}");
+            assert_eq!(report.deferred, 9 - cap, "plan {plan:?}");
         }
     });
 }
