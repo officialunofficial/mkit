@@ -311,6 +311,12 @@ pub enum OpKind {
         /// Pack digest.
         key: PackKey,
     },
+    /// Set the repository's visibility (envelope mode only; a
+    /// `signed_statement` request never becomes an `Operation`).
+    SetRepoVisibility {
+        /// The visibility to store.
+        visibility: mkit_attest::grant::Visibility,
+    },
 }
 
 impl OpKind {
@@ -326,6 +332,7 @@ impl OpKind {
             Self::PackExists { .. } => Procedure::PackExists,
             Self::UploadPack { .. } => Procedure::UploadPack,
             Self::DownloadPack { .. } => Procedure::DownloadPack,
+            Self::SetRepoVisibility { .. } => Procedure::SetRepoVisibility,
         }
     }
 }
@@ -750,6 +757,12 @@ mod tests {
                 Procedure::UploadPack,
             ),
             (OpKind::DownloadPack { key }, Procedure::DownloadPack),
+            (
+                OpKind::SetRepoVisibility {
+                    visibility: mkit_attest::grant::Visibility::Private,
+                },
+                Procedure::SetRepoVisibility,
+            ),
         ];
         for (kind, procedure) in cases {
             assert_eq!(kind.procedure(), procedure);

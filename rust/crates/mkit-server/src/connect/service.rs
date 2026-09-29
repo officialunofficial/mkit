@@ -17,6 +17,7 @@ use mkit_core::protocol::{AdvanceOutcome, PackKey};
 use super::error::recorded;
 use super::proto::mkit::transport::v1::__buffa::oneof::begin_upload_response::Result as BeginResult;
 use super::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::Body as DownloadBody;
+use super::proto::mkit::transport::v1::__buffa::oneof::set_repo_visibility_request::Mode as VisibilityMode;
 use super::proto::mkit::transport::v1::__buffa::oneof::upload_pack_request::Body as UploadBody;
 use super::proto::mkit::transport::v1::__buffa::oneof::upload_part_request::Msg as PartMsg;
 use super::proto::mkit::transport::v1::{
@@ -30,13 +31,15 @@ use super::proto::mkit::transport::v1::{
 };
 use super::proto::mkit::transport::v1::{
     GetGrantEpochRequest, GetGrantEpochResponse, IssueObjectUrlRequest, IssueObjectUrlResponse,
-    SetGrantEpochRequest, SetGrantEpochResponse, SetRepoVisibilityRequest,
+    RepoVisibility, SetGrantEpochRequest, SetGrantEpochResponse, SetRepoVisibilityRequest,
     SetRepoVisibilityResponse,
 };
 use super::{Shared, authenticated};
 use crate::error::ServerError;
 use crate::op::RefUpdate;
-use crate::pipeline::{Authenticated, DownloadChunk, HookSet, Pipeline, ServerInfo};
+use crate::pipeline::{
+    Authenticated, DownloadChunk, HookSet, Pipeline, ServerInfo, VisibilityRequest,
+};
 use crate::refs::{DigestField, UnusedExpectedId, condition_from_wire, hash_from_slice};
 use crate::replay::{BeginUploadResult, UpdateRefResult};
 use crate::rt::{send_wrap, send_wrap_stream};
@@ -599,12 +602,35 @@ where
 
     async fn set_repo_visibility(
         &self,
-        _ctx: RequestContext,
-        _request: ServiceRequest<'_, SetRepoVisibilityRequest>,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, SetRepoVisibilityRequest>,
     ) -> ServiceResult<SetRepoVisibilityResponse> {
-        // SECURITY: this path bypasses auth; the implementing WP-2.9 MUST add mode-specific authorization.
-        // TODO(WP-2.9): verify auth v2 or the owner statement before changing visibility.
-        Err(not_yet().into())
+        let a = authenticated(&ctx)?;
+        let req = match request.to_owned_message().mode {
+            Some(VisibilityMode::Visibility(visibility)) => match visibility.as_known() {
+                Some(RepoVisibility::REPO_VISIBILITY_PUBLIC) => {
+                    VisibilityRequest::Envelope(mkit_attest::grant::Visibility::Public)
+                }
+                Some(RepoVisibility::REPO_VISIBILITY_PRIVATE) => {
+                    VisibilityRequest::Envelope(mkit_attest::grant::Visibility::Private)
+                }
+                _ => return Err(ServerError::invalid_argument("invalid visibility").into()),
+            },
+            Some(VisibilityMode::SignedStatement(statement)) => {
+                VisibilityRequest::Statement(statement)
+            }
+            None => {
+                return Err(
+                    ServerError::invalid_argument("SetRepoVisibility requires a mode").into(),
+                );
+            }
+        };
+        let pipe = self.pipe.arc();
+        send_wrap(async move {
+            pipe.set_repo_visibility(&a, req).await?;
+            Response::ok(SetRepoVisibilityResponse::default())
+        })
+        .await
     }
 
     async fn issue_object_url(

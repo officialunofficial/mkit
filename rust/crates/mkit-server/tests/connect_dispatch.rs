@@ -22,6 +22,7 @@ use mkit_core::write_auth::{Context as AuthContext, Operation as SignedOp};
 use mkit_server::Procedure;
 use mkit_server::auth_v2::AuthV2Config;
 use mkit_server::connect::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::Body as DownloadBody;
+use mkit_server::connect::proto::mkit::transport::v1::__buffa::oneof::set_repo_visibility_request::Mode as VisibilityMode;
 use mkit_server::connect::proto::mkit::transport::v1::__buffa::oneof::upload_pack_request::Body as UploadBody;
 use mkit_server::connect::proto::mkit::transport::v1::__buffa::oneof::upload_part_request::Msg as PartMsg;
 use mkit_server::connect::proto::mkit::transport::v1::{
@@ -32,7 +33,8 @@ use mkit_server::connect::proto::mkit::transport::v1::{
     UploadPackRequest, UploadPartHeader, UploadPartRequest,
 };
 use mkit_server::connect::proto::mkit::transport::v1::{
-    GetGrantEpochRequest, IssueObjectUrlRequest, SetGrantEpochRequest, SetRepoVisibilityRequest,
+    GetGrantEpochRequest, IssueObjectUrlRequest, RepoVisibility, SetGrantEpochRequest,
+    SetRepoVisibilityRequest,
 };
 use mkit_server::connect::{self};
 use mkit_server::pipeline::{
@@ -1311,28 +1313,41 @@ async fn m2_stubs_reject_binary_and_json_without_writes_in_both_auth_modes() {
         );
         // The WP-2.9/2.11 procedures authenticate at stage 0 now: under
         // auth v2 an unsigned SetRepoVisibility passes anonymously
-        // (statement mode) to the unimplemented handler, IssueObjectUrl
-        // is never anonymous, and under Bearer every call needs a token.
+        // (statement mode) to the handler, which rejects a missing mode;
+        // IssueObjectUrl is never anonymous, and under Bearer every call
+        // needs a token.
         let stub = if auth_v2 {
-            "unimplemented"
+            "invalid_argument"
         } else {
             "unauthenticated"
         };
-        for rpc in ["SetRepoVisibility", "GetReceipt"] {
-            assert_eq!(
-                server
-                    .unary(rpc, &SetRepoVisibilityRequest::default(), &[])
-                    .await
-                    .code(),
-                stub,
-                "{rpc}"
-            );
-            assert_eq!(
-                server.json(rpc, &serde_json::json!({}), &[]).await.code(),
-                stub,
-                "{rpc} json"
-            );
+        for body in [
+            server
+                .unary(
+                    "SetRepoVisibility",
+                    &SetRepoVisibilityRequest::default(),
+                    &[],
+                )
+                .await
+                .code(),
+            server
+                .json("SetRepoVisibility", &serde_json::json!({}), &[])
+                .await
+                .code(),
+        ] {
+            assert_eq!(body, stub);
         }
+        assert_eq!(
+            server
+                .unary("GetReceipt", &SetRepoVisibilityRequest::default(), &[])
+                .await
+                .code(),
+            if auth_v2 {
+                "unimplemented"
+            } else {
+                "unauthenticated"
+            },
+        );
         assert_eq!(
             server
                 .unary("IssueObjectUrl", &IssueObjectUrlRequest::default(), &[])
@@ -1352,6 +1367,44 @@ async fn m2_stubs_reject_binary_and_json_without_writes_in_both_auth_modes() {
             );
         }
         assert_eq!(writes.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn set_repo_visibility_rejects_missing_and_invalid_modes() {
+    let server = setup(authv2()).multi().serve();
+    // No mode at all, binary and JSON.
+    for code in [
+        server
+            .unary(
+                "SetRepoVisibility",
+                &SetRepoVisibilityRequest::default(),
+                &[],
+            )
+            .await
+            .code(),
+        server
+            .json("SetRepoVisibility", &serde_json::json!({}), &[])
+            .await
+            .code(),
+    ] {
+        assert_eq!(code, "invalid_argument");
+    }
+    for visibility in [
+        RepoVisibility::Unspecified.into(),
+        buffa::EnumValue::from(99),
+    ] {
+        let reply = server
+            .unary(
+                "SetRepoVisibility",
+                &SetRepoVisibilityRequest {
+                    mode: Some(VisibilityMode::Visibility(visibility)),
+                    ..Default::default()
+                },
+                &[],
+            )
+            .await;
+        assert_eq!(reply.code(), "invalid_argument");
     }
 }
 

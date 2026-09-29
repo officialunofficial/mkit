@@ -415,6 +415,7 @@ enum ResultV1 {
     AdvanceHeadConflict,
     AdvancePackmapConflict,
     UploadPack,
+    RepoVisibility,
     BeginUploadAlreadyPresent,
     BeginUploadTicket {
         id: String,
@@ -909,6 +910,7 @@ pub fn encode_replay_record(record: &ReplayRecord) -> Value {
                     token_hex: to_hex_bytes(token),
                 },
                 StoredResult::UploadPack => ResultV1::UploadPack,
+                StoredResult::RepoVisibility => ResultV1::RepoVisibility,
                 StoredResult::Rejected(r) => ResultV1::Rejected {
                     code: r.code().as_str().to_owned(),
                     message: r.message().to_owned(),
@@ -965,6 +967,7 @@ pub fn decode_replay_record(value: &Value) -> Result<ReplayRecord, StoreError> {
                 })
             }
             ResultV1::UploadPack => StoredResult::UploadPack,
+            ResultV1::RepoVisibility => StoredResult::RepoVisibility,
             ResultV1::Rejected { code, message } => {
                 let code = CODES
                     .into_iter()
@@ -1553,6 +1556,7 @@ mod tests {
             StoredResult::AdvanceRefs(AdvanceOutcome::HeadConflict),
             StoredResult::AdvanceRefs(AdvanceOutcome::PackmapConflict),
             StoredResult::UploadPack,
+            StoredResult::RepoVisibility,
             StoredResult::Rejected(StoredRejection::new(Code::PermissionDenied, "no").unwrap()),
         ];
         let mut states: Vec<_> = results.into_iter().map(ReplayState::Committed).collect();
@@ -1616,6 +1620,7 @@ mod tests {
             committed(r#"{"kind":"advance_head_conflict"}"#),
             committed(r#"{"kind":"advance_packmap_conflict"}"#),
             committed(r#"{"kind":"upload_pack"}"#),
+            committed(r#"{"kind":"repo_visibility"}"#),
             committed(r#"{"kind":"rejected","code":"permission_denied","message":"no"}"#),
             r#"{"state":"in_flight","resumable":true}"#.to_owned(),
             r#"{"state":"in_flight","resumable":false}"#.to_owned(),

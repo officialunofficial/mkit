@@ -44,15 +44,18 @@ use core::future::Future;
 use core::time::Duration;
 use std::sync::Arc;
 
-use mkit_core::hash::{Hash, to_hex_bytes};
+use mkit_attest::grant::{Visibility, verify_visibility_statement};
+use mkit_core::hash::{Hash, to_hex, to_hex_bytes};
 use mkit_core::protocol::{AdvanceOutcome, PackKey};
-use mkit_core::repo_identity::Namespace;
+use mkit_core::repo_identity::{Namespace, RepositoryIdentity};
 use mkit_core::write_auth::MAX_CLOCK_LEAD_MS;
 use tracing::Instrument;
 
 use crate::download::DOWNLOAD_CHUNK_MAX;
 use crate::error::{ADMISSION_CHALLENGE_TYPE, InvalidHeader, ServerError};
-use crate::op::{AuthzFacts, CallerView, GrantRef, OpKind, Operation, Procedure, RefUpdate};
+use crate::op::{
+    AuthzFacts, CallerView, GrantRef, OpKind, Operation, Procedure, RefUpdate, VerifiedAuth,
+};
 use crate::policy::{
     AuthorizerRole, GrantConfig, NamespacePolicy, WritePolicy, grants, read as read_policy,
 };
@@ -62,14 +65,17 @@ use crate::quota::{
     QuotaLimits, QuotaScope, ViewStatus,
 };
 use crate::refs::{self, strip_listed_prefix, validate_ref_name};
-use crate::replay::{BeginUploadResult, ReplayDecision, StoredResult, UpdateRefResult, classify};
-use crate::repo::Addressing;
+use crate::replay::{
+    BeginUploadResult, ReplayDecision, ReplayRecord, ReplayState, StoredResult, UpdateRefResult,
+    classify,
+};
+use crate::repo::{Addressing, RepoId};
 use crate::rt::Clock;
 use crate::storage_error::{StorageOp, describe_and_map};
 use crate::store::tickets::TicketCaps;
 use crate::store::{
-    Batch, BatchOutcome, Key, KeyClasses, MultipartBlobStore, NamespaceStore, Partition,
-    StoreError, Value, codec, keys, read,
+    Batch, BatchOutcome, Key, KeyClasses, MAX_BATCH_OPS, MultipartBlobStore, NamespaceStore,
+    Partition, Precondition, StoreError, Value, codec, keys, read,
 };
 use crate::telemetry::{Metrics, Redactor};
 use crate::upload::{UploadLimits, token::TicketKeys};
@@ -316,6 +322,17 @@ pub struct RefEntry {
     pub id: Hash,
 }
 
+/// A `SetRepoVisibility` request: the signed envelope's choice or the
+/// unsigned owner-signed statement (SPEC-WRITE-GRANTS §9.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VisibilityRequest {
+    /// Envelope mode: the signed request's `visibility`.
+    Envelope(Visibility),
+    /// `signed_statement` mode: the encoded `scheme:statement:blob` header.
+    Statement(String),
+}
+
 /// The request pipeline over blobs `B`, metadata `N` and hooks `H`.
 pub struct Pipeline<B, N, H = Hooks> {
     blobs: B,
@@ -383,6 +400,14 @@ fn replay_answer(decision: ReplayDecision) -> Result<Option<StoredResult>, Serve
 
 fn ms(ms: i64) -> u64 {
     u64::try_from(ms).unwrap_or(0)
+}
+
+/// The `rv` codec's visibility for a statement/envelope [`Visibility`].
+fn stored_visibility(visibility: Visibility) -> codec::StoredVisibility {
+    match visibility {
+        Visibility::Public => codec::StoredVisibility::Public,
+        Visibility::Private => codec::StoredVisibility::Private,
+    }
 }
 
 fn validate_upload_ticket_config<H: HookSet>(
@@ -955,6 +980,333 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .is_some())
         })
         .await
+    }
+
+    /// `SetRepoVisibility` (SPEC-WRITE-GRANTS §9.1): the envelope mode is a
+    /// signed, replay-protected write of the `rv` row; the statement mode
+    /// verifies an unsigned owner-signed statement and keeps the newest
+    /// `created`. Only deployments where [`Self::visibility_applies`]
+    /// holds have visibility at all.
+    ///
+    /// # Errors
+    /// `unauthenticated` for an unsigned envelope request, `invalid_argument`
+    /// for a statement on a signed request, `failed_precondition` when the
+    /// deployment has no repository visibility, `permission_denied` for a
+    /// grant, a non-owner, an unserved namespace or a rejected statement.
+    pub async fn set_repo_visibility(
+        &self,
+        a: &Authenticated,
+        req: VisibilityRequest,
+    ) -> Result<(), ServerError> {
+        self.observe(a, async {
+            match (&req, a.auth.is_some()) {
+                (VisibilityRequest::Statement(_), true) => {
+                    return Err(ServerError::invalid_argument(
+                        "signed_statement is not allowed on a signed request",
+                    ));
+                }
+                (VisibilityRequest::Envelope(_), false) => {
+                    return Err(ServerError::unauthenticated(
+                        "visibility requires auth v2 authorization",
+                    ));
+                }
+                _ => {}
+            }
+            if !self.visibility_applies() {
+                return Err(ServerError::failed_precondition(
+                    "repository visibility is not supported by this deployment",
+                ));
+            }
+            let repo = &a.repo().repo;
+            let namespace = Namespace::parse(repo.namespace.as_str())
+                .map_err(|_| internal("invalid resolved Multi namespace"))?;
+            if let Addressing::Multi(multi) = &self.cfg.addressing
+                && let NamespacePolicy::Allowlist(allowed) = &multi.namespace_policy
+                && !allowed.contains(&namespace)
+            {
+                return Err(ServerError::permission_denied("namespace not served"));
+            }
+            let p = self.shards.coordinator(&repo.namespace);
+            let _gate = match &self.gate {
+                Some(gate) => Some(gate.enter(&p).await),
+                None => None,
+            };
+            match req {
+                VisibilityRequest::Envelope(visibility) => {
+                    self.visibility_envelope(a, repo, &p, visibility).await
+                }
+                VisibilityRequest::Statement(statement) => {
+                    self.visibility_statement(a, repo, &p, &statement).await
+                }
+            }
+        })
+        .await
+    }
+
+    /// Envelope mode: the stage-0 replay lookup, owner-or-hook
+    /// authorization mirroring the write branch (never a grant), then the
+    /// guarded `rv` write with its replay record.
+    async fn visibility_envelope(
+        &self,
+        a: &Authenticated,
+        repo: &RepoId,
+        p: &Partition,
+        visibility: Visibility,
+    ) -> Result<(), ServerError> {
+        if a.write_grant.is_some() {
+            return Err(ServerError::permission_denied(
+                "a grant never authorizes SetRepoVisibility",
+            ));
+        }
+        let op = self.identify(a, OpKind::SetRepoVisibility { visibility })?;
+        let auth = a.auth.as_ref().ok_or_else(|| {
+            ServerError::unauthenticated("visibility requires auth v2 authorization")
+        })?;
+        let replay_key = keys::replay(&auth.replay_scope);
+        let rv_key = keys::repo_visibility(&repo.name);
+        let rows = self
+            .meta
+            .get_many(p, &[replay_key.clone(), rv_key.clone()])
+            .await
+            .map_err(meta_error)?;
+        let mut rows = rows.into_iter();
+        let record = rows
+            .next()
+            .flatten()
+            .map(|v| codec::decode_replay_record(&v))
+            .transpose()
+            .map_err(meta_error)?;
+        let mut stored = rows.next().flatten();
+        match classify(record.as_ref(), &auth.fingerprint) {
+            ReplayDecision::New => {}
+            ReplayDecision::Return(StoredResult::RepoVisibility) => return Ok(()),
+            ReplayDecision::Return(other) => return Err(stored_mismatch(&other)),
+            ReplayDecision::FingerprintMismatch => {
+                return Err(ServerError::invalid_argument(
+                    "nonce reused for a different operation",
+                ));
+            }
+            ReplayDecision::Resume | ReplayDecision::RetryLater => {
+                return Err(ServerError::aborted_retryable(
+                    "operation already in flight; retry",
+                ));
+            }
+        }
+        let owner = matches!(
+            Namespace::parse(op.repo.namespace.as_str()),
+            Ok(Namespace::Ed25519(key)) if op.principal.ed25519() == Some(&key)
+        );
+        if self.cfg.authorizer_role == AuthorizerRole::Check && !owner {
+            return Err(ServerError::permission_denied(
+                "SetRepoVisibility not permitted",
+            ));
+        }
+        let mut authorized = op.clone();
+        authorized.authz = AuthzFacts {
+            grant: None,
+            owner,
+            caller_view: CallerView::Writer,
+        };
+        self.hooks.authorizer().authorize(&authorized).await?;
+        let mut replans = 0;
+        loop {
+            let (batch, prune) = self
+                .plan_visibility(p, auth, repo, visibility, stored.as_ref())
+                .await?;
+            match self.meta.apply(p, batch).await {
+                Ok(BatchOutcome::Committed) => return Ok(()),
+                Ok(BatchOutcome::DeadlinePassed { .. }) => {
+                    return Err(ServerError::unavailable("commit deadline passed; retry"));
+                }
+                Ok(BatchOutcome::PreconditionFailed { index, .. }) => {
+                    if index == 1 {
+                        // The replay guard failed: a request with this
+                        // nonce landed first; answer it as stage 0 does.
+                        let value = self.meta.get(p, &replay_key).await.map_err(meta_error)?;
+                        let record = value
+                            .as_ref()
+                            .map(codec::decode_replay_record)
+                            .transpose()
+                            .map_err(meta_error)?;
+                        return match classify(record.as_ref(), &auth.fingerprint) {
+                            ReplayDecision::Return(StoredResult::RepoVisibility) => Ok(()),
+                            ReplayDecision::Return(other) => Err(stored_mismatch(&other)),
+                            ReplayDecision::FingerprintMismatch => {
+                                Err(ServerError::invalid_argument(
+                                    "nonce reused for a different operation",
+                                ))
+                            }
+                            _ => Err(ServerError::aborted_retryable(
+                                "operation already in flight; retry",
+                            )),
+                        };
+                    }
+                    replans += 1;
+                    if replans > MAX_REPLAN {
+                        return Err(ServerError::aborted_retryable("write contention; retry"));
+                    }
+                    stored = self.meta.get(p, &rv_key).await.map_err(meta_error)?;
+                }
+                Err(StoreError::Full) => {
+                    return Err(self.partition_full(p, prune).await);
+                }
+                Err(e) => return Err(meta_error(e)),
+            }
+        }
+    }
+
+    /// One envelope attempt: deadline, replay `Absent`, the `rv` guard and
+    /// its new row, the replay record and expiry index, then up to 32
+    /// expired replay `(index, record)` deletes capped at `MAX_BATCH_OPS`.
+    /// Returns the commit batch plus the delete-only batch a full
+    /// partition can still apply.
+    async fn plan_visibility(
+        &self,
+        p: &Partition,
+        auth: &VerifiedAuth,
+        repo: &RepoId,
+        visibility: Visibility,
+        stored: Option<&Value>,
+    ) -> Result<(Batch, Option<Batch>), ServerError> {
+        let now = ms(self.clock.now_ms());
+        let window = u64::try_from(self.cfg.max_apply_window.as_millis()).unwrap_or(u64::MAX);
+        let deadline = now
+            .saturating_add(window)
+            .min(ms(auth.expires_at_ms).saturating_add(MAX_CLOCK_LEAD_MS.unsigned_abs()));
+        let replay_key = keys::replay(&auth.replay_scope);
+        let rv_key = keys::repo_visibility(&repo.name);
+        let row = stored
+            .map(codec::decode_repo_visibility)
+            .transpose()
+            .map_err(meta_error)?;
+        let mut batch = Batch::new()
+            .require(Precondition::NotAfter(deadline))
+            .require(Precondition::Absent(replay_key.clone()))
+            .require(match stored {
+                Some(value) => Precondition::Equals(rv_key.clone(), value.clone()),
+                None => Precondition::Absent(rv_key.clone()),
+            })
+            .put(
+                rv_key.clone(),
+                codec::encode_repo_visibility(&codec::RepoVisibilityV1 {
+                    visibility: stored_visibility(visibility),
+                    last_created_ms: row.as_ref().map_or(0, |r| r.last_created_ms),
+                    last_statement_id: row.and_then(|r| r.last_statement_id),
+                }),
+            )
+            .put(
+                replay_key.clone(),
+                codec::encode_replay_record(&ReplayRecord {
+                    fingerprint: auth.fingerprint,
+                    expires_at_ms: auth.expires_at_ms,
+                    state: ReplayState::Committed(StoredResult::RepoVisibility),
+                }),
+            )
+            .put(
+                keys::replay_expiry(ms(auth.expires_at_ms), &auth.replay_scope),
+                Value::default(),
+            );
+        let expired = read::expired_replay_keys(&self.meta, p, now, 32)
+            .await
+            .map_err(meta_error)?;
+        let mut prune = Batch::new().require(Precondition::NotAfter(deadline));
+        for (index, target) in &expired {
+            if batch.preconditions.len() + batch.writes.len() + 2 > MAX_BATCH_OPS {
+                break;
+            }
+            batch = batch.delete(index.clone()).delete(target.clone());
+            prune = prune.delete(index.clone()).delete(target.clone());
+        }
+        Ok((batch, (!prune.writes.is_empty()).then_some(prune)))
+    }
+
+    /// Statement mode: the owner-signed statement is its own
+    /// authorization; only a strictly newer `created` replaces the stored
+    /// one. No hook, no replay record, no admission.
+    async fn visibility_statement(
+        &self,
+        a: &Authenticated,
+        repo: &RepoId,
+        p: &Partition,
+        statement: &str,
+    ) -> Result<(), ServerError> {
+        let rejected = |e: mkit_attest::grant::GrantError| {
+            ServerError::permission_denied(format!("visibility statement rejected: {}", e.reason()))
+        };
+        if statement.len() > mkit_attest::grant::MAX_GRANT_HEADER_BYTES {
+            return Err(ServerError::permission_denied(
+                "visibility statement rejected: too long",
+            ));
+        }
+        let grants = self.cfg.grants.as_ref().ok_or_else(|| {
+            ServerError::permission_denied(
+                "visibility statement rejected: no owner schemes configured",
+            )
+        })?;
+        let identity = RepositoryIdentity::parse(&a.repo().identity)
+            .map_err(|_| internal("invalid resolved repository identity"))?;
+        let verified =
+            verify_visibility_statement(grants.verifier(), statement, &identity, a.business_now_ms)
+                .map_err(rejected)?;
+        let created = u64::try_from(verified.statement().created_ms)
+            .map_err(|_| rejected(mkit_attest::grant::GrantError::DecimalOutOfRange))?;
+        let id = to_hex(verified.id());
+        let rv_key = keys::repo_visibility(&repo.name);
+        let window = u64::try_from(self.cfg.max_apply_window.as_millis()).unwrap_or(u64::MAX);
+        let mut replans = 0;
+        loop {
+            let stored = self.meta.get(p, &rv_key).await.map_err(meta_error)?;
+            let row = stored
+                .as_ref()
+                .map(codec::decode_repo_visibility)
+                .transpose()
+                .map_err(meta_error)?;
+            match &row {
+                // The stored statement is this one: already applied.
+                Some(r)
+                    if r.last_created_ms == created
+                        && r.last_statement_id.as_deref() == Some(id.as_str()) =>
+                {
+                    return Ok(());
+                }
+                Some(r) if r.last_statement_id.is_some() && created <= r.last_created_ms => {
+                    return Err(ServerError::permission_denied(
+                        "visibility statement rejected: not newer than the stored statement",
+                    ));
+                }
+                _ => {}
+            }
+            let deadline = ms(self.clock.now_ms()).saturating_add(window);
+            let rv_guard = match &stored {
+                Some(value) => Precondition::Equals(rv_key.clone(), value.clone()),
+                None => Precondition::Absent(rv_key.clone()),
+            };
+            let batch = Batch::new()
+                .require(Precondition::NotAfter(deadline))
+                .require(rv_guard)
+                .put(
+                    rv_key.clone(),
+                    codec::encode_repo_visibility(&codec::RepoVisibilityV1 {
+                        visibility: stored_visibility(verified.statement().visibility),
+                        last_created_ms: created,
+                        last_statement_id: Some(id.clone()),
+                    }),
+                );
+            match self.meta.apply(p, batch).await {
+                Ok(BatchOutcome::Committed) => return Ok(()),
+                Ok(BatchOutcome::DeadlinePassed { .. }) => {
+                    return Err(ServerError::unavailable("commit deadline passed; retry"));
+                }
+                Ok(BatchOutcome::PreconditionFailed { .. }) => {
+                    replans += 1;
+                    if replans > MAX_REPLAN {
+                        return Err(ServerError::aborted_retryable("write contention; retry"));
+                    }
+                }
+                Err(StoreError::Full) => return Err(self.partition_full(p, None).await),
+                Err(e) => return Err(meta_error(e)),
+            }
+        }
     }
 
     /// Stages 0–3 of an `UploadPack` whose header declared `pack_id` and
