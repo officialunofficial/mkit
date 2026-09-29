@@ -105,6 +105,7 @@ export TMPDIR="$HOME/.cache/mkit-test-tmp/<wp-id>"; mkdir -p "$TMPDIR"   # never
   hang detection. A timeout in one of them, in a module your WP does not touch, is not a failure of your WP until it also
   fails **rerun alone** (`cargo nextest run -p <crate> -E 'test(=<name>)'`); report it as load-related only if it passes
   that way. A new test that needs more time gets its own exact-name override, not a module-wide one.
+  The allocator-metered tests (`multipart_bounded_heap`, `multipart_buffered_heap`) share the nextest test group `heap-bounds` (`max-threads = 1`, default and ci profiles); a new memory-bounding test joins that group.
 
 **Working directory rule:** every gate command in this plan (here, in `00-plan.md`, and in each brief) is run from the **repo root**. A line that starts with `cd rust && …` or `cd apps/<w> && …` means "in a fresh subshell from the repo root", i.e. `( cd rust && … )`. Never chain a bare `cd` into later root-relative commands. `buf` must run from the root, where `buf.yaml` lives.
 
