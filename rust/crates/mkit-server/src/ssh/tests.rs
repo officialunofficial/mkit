@@ -1830,11 +1830,7 @@ fn implicit_tickets_require_owner_policy_on_single() {
 /// epoch recheck — ssh/enc authentication stays grant-free.
 #[test]
 fn transport_identity_write_never_carries_a_grant() {
-    let (pipe, _, _) = multi_pipeline(
-        [Namespace::Ed25519(OWNER)],
-        Sharding::Single,
-        Hooks::new(),
-    );
+    let (pipe, _, _) = multi_pipeline([Namespace::Ed25519(OWNER)], Sharding::Single, Hooks::new());
     let verbs = Verbs::new(
         &pipe,
         Principal::TransportPeer { ed25519: OWNER },

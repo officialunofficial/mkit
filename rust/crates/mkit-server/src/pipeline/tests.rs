@@ -349,10 +349,7 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
     let relays = index_relays(&plan.batch);
     assert_eq!(relays.len(), packs.len() + 1);
     for relay in &relays {
-        assert!(
-            relay.puts.len() + relay.deletes.len()
-                <= crate::store::outbox::MAX_RELAY_PUTS
-        );
+        assert!(relay.puts.len() + relay.deletes.len() <= crate::store::outbox::MAX_RELAY_PUTS);
     }
     // No ticket, reservation or outcome rows: implicit membership carries
     // no carry-forward metadata.
