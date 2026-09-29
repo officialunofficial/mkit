@@ -27,6 +27,7 @@ mod download;
 mod faults;
 mod gate;
 mod hooks;
+mod implicit;
 mod info;
 mod lease;
 mod list;
@@ -41,6 +42,7 @@ mod upload;
 
 use core::future::Future;
 use core::time::Duration;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use mkit_core::hash::{Hash, to_hex_bytes};
@@ -83,12 +85,15 @@ pub use hooks::{
     Hooks, NoOutcomes, NoPreReceive, NoReceipts, OpenAuthorizer, OutboxRow, OutcomeSink,
     PreReceive, ReceiptSigner,
 };
+#[cfg(feature = "ssh")]
+pub(crate) use implicit::IMPLICIT_PACKMAP_UNKNOWN;
+pub(crate) use implicit::PendingPack;
 pub use info::ServerInfo;
 use outcome::Outcome;
 pub use parts::PartUploadSession;
 use plan::{
-    MAX_REPLAN, PRUNE_LIMIT, Plan, PlanClock, Planned, Snapshot, WriteKind, WriteRequest,
-    plan_write, prune_sampled,
+    ImplicitConsume, MAX_REPLAN, PRUNE_LIMIT, Plan, PlanClock, Planned, Snapshot, WriteKind,
+    WriteRequest, plan_write, prune_sampled,
 };
 pub use revocation::{MAX_EPOCH_STEP, RevokeBudget, RevokeProgress};
 pub use shard::{D34Shards, ShardMap, SinglePartition};
@@ -351,14 +356,11 @@ fn validate_upload_ticket_config<H: HookSet>(
     cfg: &PipelineConfig,
     hooks: &H,
 ) -> Result<(), ServerError> {
-    if matches!(cfg.addressing, Addressing::Multi(_))
-        && matches!(cfg.auth, AuthMode::TransportIdentity)
-    {
-        return Err(ServerError::invalid_argument(
-            "multi-repository deployments require auth v2 until transport identity carries tickets",
-        ));
-    }
+    // Transport identity carries no tickets: the ssh and enc transports
+    // earn pack membership implicitly (WP-1.15's session pending set), so
+    // neither the Multi refusal nor the ticket threshold applies to it.
     if cfg.begin_upload_threshold_bytes != u64::MAX
+        && !matches!(cfg.auth, AuthMode::TransportIdentity)
         && (!matches!(cfg.auth, AuthMode::AuthV2(_)) || cfg.ticket_keys.is_none())
     {
         return Err(ServerError::invalid_argument(
@@ -428,7 +430,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             (Addressing::Multi(_), WritePolicy::Open) => {
                 Some("write_policy open is single-repository only (SPEC-TRANSPORT-CONNECT §7.5)")
             }
-            (Addressing::Single { .. }, WritePolicy::Owner) => {
+            // Owner on Single is the ssh root mode's policy: it needs a
+            // self-certifying namespace (§7.4) to check principals against.
+            // A bare `root` Single has none and stays refused.
+            (Addressing::Single { repo }, WritePolicy::Owner)
+                if Namespace::parse(repo.namespace.as_str()).is_err() =>
+            {
                 Some("write_policy owner needs multi-repository addressing")
             }
             (Addressing::Multi(multi), _)
@@ -1062,8 +1069,21 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// A signed or unsigned unary write, stage by stage. In steady state
     /// a signed write costs two backend calls: one `get_many` before any
     /// hook runs (the replay record and the snapshot) and one `apply`.
-    #[allow(clippy::too_many_lines)] // Stage order and multipart session cleanup share this entry point.
     async fn write(&self, a: &Authenticated, kind: OpKind) -> Result<StoredResult, ServerError> {
+        self.write_with(a, kind, None).await
+    }
+
+    /// [`Self::write`], optionally consuming the session's pending packs
+    /// as implicit tickets (WP-1.15): the B10 packmap check runs after
+    /// authorization, admission is skipped exactly when `pending` is
+    /// non-empty, and under Multi the plan adds membership and relay rows.
+    #[allow(clippy::too_many_lines)] // Stage order and multipart session cleanup share this entry point.
+    async fn write_with(
+        &self,
+        a: &Authenticated,
+        kind: OpKind,
+        implicit: Option<&[PendingPack]>,
+    ) -> Result<StoredResult, ServerError> {
         let mut op = self.identify(a, kind)?;
         fault!(self, AfterAuthenticate, &op, a);
         let (kind, refs, p) = self.ref_writes(&op)?;
@@ -1104,8 +1124,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 return Ok(stored);
             }
         }
+        if let Some(pending) = implicit {
+            self.check_implicit_packmap(&op, pending).await?;
+        }
         let existing = self.begin_decision(&op, a, ahead.as_mut()).await?;
-        let allowance = if existing.is_some() || ticketed {
+        // An implicit consuming write skips admission exactly when it has
+        // pending packs to consume; an empty pending set runs admission
+        // like any other UpdateRef (the B10 check still applied).
+        let allowance = if existing.is_some() || ticketed || implicit.is_some_and(|p| !p.is_empty())
+        {
             Allowance::default()
         } else {
             let mut input = AdmissionInput::new(&op);
@@ -1182,7 +1209,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             };
             self.pre_receive(&op).await?;
             let write = (kind, refs.as_slice(), allowance.charges.as_slice());
-            self.plan_and_apply(&op, a, &p, write, ahead, (lease, begin.as_ref()))
+            self.plan_and_apply(&op, a, &p, write, ahead, (lease, begin.as_ref()), implicit)
                 .await
         }
         .await;
@@ -1558,18 +1585,41 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             // TODO(WP-2.9): private read authorization.
             return self.hooks.authorizer().authorize(op).await;
         }
-        let Addressing::Multi(multi) = &self.cfg.addressing else {
-            return self.hooks.authorizer().authorize(op).await;
-        };
+        match &self.cfg.addressing {
+            Addressing::Multi(multi) => {
+                let allowlist = match &multi.namespace_policy {
+                    NamespacePolicy::Allowlist(allowed) => Some(allowed),
+                    NamespacePolicy::Any { .. } => None,
+                };
+                self.owner_rule(op, allowlist).await
+            }
+            // Owner on a namespaced Single is the ssh root mode's rule;
+            // Open Single is the authorizer's alone, unchanged.
+            Addressing::Single { .. } if self.cfg.write_policy == WritePolicy::Owner => {
+                self.owner_rule(op, None).await
+            }
+            Addressing::Single { .. } => self.hooks.authorizer().authorize(op).await,
+        }
+    }
+
+    /// SPEC-TRANSPORT-CONNECT §7.5 rule 1: an allowlisted namespace whose
+    /// principal owns it (`ed25519-<key>` ↔ the Ed25519 principal). The
+    /// authorizer hook sees the established facts on success; under
+    /// `Check` a non-owner never reaches it.
+    async fn owner_rule(
+        &self,
+        op: &Operation,
+        allowlist: Option<&BTreeSet<Namespace>>,
+    ) -> Result<AuthzFacts, ServerError> {
         let namespace = Namespace::parse(op.repo.namespace.as_str())
-            .map_err(|_| internal("invalid resolved Multi namespace"))?;
-        if let NamespacePolicy::Allowlist(allowed) = &multi.namespace_policy
-            && !allowed.contains(&namespace)
-        {
+            .map_err(|_| internal("invalid resolved owner-policy namespace"))?;
+        if allowlist.is_some_and(|allowed| !allowed.contains(&namespace)) {
             return Err(ServerError::permission_denied("write not permitted"));
         }
         let owner = matches!(&namespace, Namespace::Ed25519(key)
             if op.principal.ed25519() == Some(key));
+        // TODO(WP-2.12): `0x` namespaces satisfy the grammar but no Ed25519
+        // principal owns one; their writes stay denied until then.
         // TODO(WP-2.6): rule 2 (grants).
         if self.cfg.authorizer_role == AuthorizerRole::Check && !owner {
             return Err(ServerError::permission_denied("write not permitted"));
@@ -1618,9 +1668,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         (kind, refs, charges): (WriteKind, &[RefUpdate], &[QuotaCharge]),
         ahead: Option<Snapshot>,
         (lease, begin): (Option<lease::LeaseWrite>, Option<&BeginWrite>),
+        implicit: Option<&[PendingPack]>,
     ) -> Result<StoredResult, ServerError> {
         let caps = self.meta.capabilities();
         let replay = upload::replay_guard(op);
+        // Single's packs live in the repo directory itself; only Multi
+        // plans `m` rows and relay for the consumed set.
+        let implicit_ids = implicit
+            .filter(|_| matches!(self.cfg.addressing, Addressing::Multi(_)))
+            .map(implicit::implicit_packs);
         let advance = match &op.kind {
             OpKind::AdvanceRefs { head, tickets, .. } if !tickets.is_empty() => {
                 Some(advance::AdvanceWrite {
@@ -1662,6 +1718,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             rejection: None,
             begin,
             advance,
+            implicit: implicit_ids.as_deref().map(|packs| ImplicitConsume {
+                packs,
+                repo_id: &op.repo,
+                source: p,
+                shards: self.shards.as_ref(),
+            }),
         };
         if caps.atomic_multi_key || replay.is_some() || !charges.is_empty() {
             return self.apply_atomic(op, a, p, &req, ahead).await;

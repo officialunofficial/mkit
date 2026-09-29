@@ -134,7 +134,7 @@ fn transport_identity_admission_starts() {
 
 #[test]
 fn finite_ticket_threshold_requires_auth_v2_and_keys() {
-    for auth in [AuthMode::Open, AuthMode::TransportIdentity, authv2()] {
+    for auth in [AuthMode::Open, authv2()] {
         let mut c = cfg(auth);
         c.begin_upload_threshold_bytes = 8;
         let err = Pipeline::new(
@@ -152,14 +152,11 @@ fn finite_ticket_threshold_requires_auth_v2_and_keys() {
             "a ticket threshold requires auth v2 and upload ticket keys"
         );
     }
-}
-
-#[test]
-fn multi_transport_identity_is_refused_at_startup() {
+    // Transport identity is exempt: its tickets are the session's own
+    // verified uploads, not signed tokens a threshold would mint.
     let mut c = cfg(AuthMode::TransportIdentity);
-    c.addressing = Addressing::Multi(MultiAddressing::new());
-    c.write_policy = WritePolicy::Owner;
-    let err = Pipeline::new(
+    c.begin_upload_threshold_bytes = 8;
+    Pipeline::new(
         MemoryBlobStore::default(),
         store(&clock()),
         Hooks::new(),
@@ -167,12 +164,23 @@ fn multi_transport_identity_is_refused_at_startup() {
         clock(),
         Arc::new(crate::NoopMetrics),
     )
-    .unwrap_err();
-    assert_eq!(err.code(), Code::InvalidArgument);
-    assert_eq!(
-        err.public_message(),
-        "multi-repository deployments require auth v2 until transport identity carries tickets"
-    );
+    .unwrap();
+}
+
+#[test]
+fn multi_transport_identity_builds() {
+    let mut c = cfg(AuthMode::TransportIdentity);
+    c.addressing = Addressing::Multi(MultiAddressing::new());
+    c.write_policy = WritePolicy::Owner;
+    Pipeline::new(
+        MemoryBlobStore::default(),
+        store(&clock()),
+        Hooks::new(),
+        c,
+        clock(),
+        Arc::new(crate::NoopMetrics),
+    )
+    .unwrap();
 }
 
 #[test]

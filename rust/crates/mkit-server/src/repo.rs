@@ -72,7 +72,8 @@ impl NamespaceKey {
     }
 
     /// A canonical namespace already validated by the shared grammar.
-    pub(crate) fn from_namespace(namespace: &Namespace) -> Self {
+    #[must_use]
+    pub fn from_namespace(namespace: &Namespace) -> Self {
         Self(namespace.to_string())
     }
 
@@ -155,9 +156,17 @@ impl Addressing {
         let invalid = || ServerError::invalid_argument("invalid X-Repository");
         match self {
             Self::Single { repo } => {
+                // A Single deployment under the reserved `root` namespace
+                // keeps its bare-name wire identity; a self-certifying
+                // namespace (`mkit serve --root`, WP-1.15) is part of it.
+                let identity = if repo.namespace == NamespaceKey::deployment_default() {
+                    repo.name.as_str().to_owned()
+                } else {
+                    format!("{}/{}", repo.namespace.as_str(), repo.name.as_str())
+                };
                 if let Some(header) = header {
                     RepositoryIdentity::parse_bare_allowed(header).map_err(|_| invalid())?;
-                    if header != repo.name.as_str() {
+                    if header != identity {
                         return Err(ServerError::not_found("repository not found"));
                     }
                 } else if signed {
@@ -167,7 +176,7 @@ impl Addressing {
                 }
                 Ok(ResolvedRepo {
                     repo: repo.clone(),
-                    identity: repo.name.as_str().to_owned(),
+                    identity,
                 })
             }
             Self::Multi(_) => {

@@ -10,13 +10,14 @@
 #![allow(clippy::unnecessary_wraps)]
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use futures_executor::block_on;
 use mkit_core::hash::{Hash, hash};
 use mkit_core::protocol::PackKey;
 use mkit_core::refs::RefWriteCondition;
+use mkit_core::repo_identity::Namespace;
 use mkit_rpc::mkit::common::v1::RefExpectation;
 use mkit_rpc::mkit::rpc::v1::ssh::{
     DownloadPack, DownloadPackHeader, Hello, ListRefs, PackChunk, PackExists, ReadRef, SshFrame,
@@ -25,16 +26,24 @@ use mkit_rpc::mkit::rpc::v1::ssh::{
 use mkit_rpc::mkit::rpc::v1::{Error as RpcError, ErrorCode, ProtocolVersion};
 
 use super::*;
-use crate::error::Redacted;
-use crate::pipeline::{AuthMode, HookSet, Hooks, Pipeline, PipelineConfig};
+use crate::error::{Redacted, ServerError};
+use crate::op::Procedure;
+use crate::pipeline::{
+    Admission, AdmissionDecision, AdmissionInput, AuthMode, D34Shards, HookSet, Hooks,
+    OpenAuthorizer, Pipeline, PipelineConfig, ShardMap, Sharding,
+};
+use crate::policy::{NamespacePolicy, WritePolicy};
 use crate::principal::Principal;
-use crate::repo::{Addressing, NamespaceKey, RepoId, RepoName};
+use crate::repo::{Addressing, MultiAddressing, NamespaceKey, RepoId, RepoName};
 use crate::rt::ManualClock;
 use crate::store::{
-    BlobKey, BlobStore, Key, MultipartBlobStore, NamespaceStore, Partition, UnsupportedPartSink,
+    Batch, BatchOutcome, BlobKey, BlobStore, Cursor, Key, MultipartBlobStore, NamespaceStore,
+    Partition, PartitionStats, ScanPage, StoreCapabilities, StoreError, UnsupportedPartSink, Value,
+    codec, keys,
 };
 use crate::telemetry::NoopMetrics;
 use crate::upload::UploadError;
+use crate::upload::token::TicketKeys;
 use crate::{MemoryBlobStore, MemoryFault, MemoryKv};
 
 type Body = ssh_frame::Body;
@@ -1676,6 +1685,854 @@ fn golden_session_2_matches_mkit_serve_over_memory_stores() {
     let out = replay_golden_2(&pipe);
     assert_same_frames(&out, GOLDEN_2_OUT);
     assert_eq!(out, GOLDEN_2_OUT);
+}
+
+/// The third golden session, `session-3.in.bin` (WP-1.15 B11): root
+/// mode — the Single namespaced `Owner` pipeline `mkit serve --root`
+/// builds — answering a NON-owner `--principal` key. The upload and the
+/// CAS-correct ref write are refused `INVALID_REQUEST "write not
+/// permitted"`, the read still answers, and the seeded ref does not
+/// move. `session-3.bin` is what the real
+/// `mkit serve --root <R> --principal <key> <ns>/<name>` binary wrote.
+struct Golden3 {
+    /// `refs/heads/main`'s seeded value, which the denied write must not
+    /// move.
+    ref_id: Hash,
+    input: Vec<u8>,
+}
+
+fn golden3() -> Golden3 {
+    let ref_id = [0x44; 32];
+    let pack = pack_bytes(64, 3);
+    let pack_id = hash(&pack);
+    let bodies = vec![
+        hello(),
+        upload_header(&pack_id, Some(pack.len() as u64)),
+        chunk(&pack_id, Some(0), &pack, true),
+        update(
+            BRANCH,
+            &[0x55; 32],
+            Some(RefExpectation::Match),
+            Some(&ref_id),
+        ),
+        read_ref(BRANCH),
+        close(),
+    ];
+    let mut input = Vec::new();
+    for body in bodies {
+        mkit_rpc::write_frame(&mut input, &frame(body)).unwrap();
+    }
+    Golden3 { ref_id, input }
+}
+
+const GOLDEN_3_IN: &[u8] = include_bytes!("../../../../tests/golden/ssh-serve/session-3.in.bin");
+const GOLDEN_3_OUT: &[u8] = include_bytes!("../../../../tests/golden/ssh-serve/session-3.bin");
+
+/// `run` with the session's established principal (e.g. an asserted
+/// `--principal` key in root mode), so a test can write as the owner.
+fn run_as<B: MultipartBlobStore, N: NamespaceStore, H: HookSet>(
+    pipe: &Pipeline<B, N, H>,
+    principal: Principal,
+    bodies: impl IntoIterator<Item = Option<Body>>,
+) -> (SessionEnd, Vec<SshFrame>) {
+    let mut sink = VecSink::default();
+    let end = block_on(serve_session(
+        pipe,
+        principal,
+        &mut script(bodies),
+        &mut sink,
+        &SessionConfig::new(SERVER_ID),
+    ));
+    let first = sink.frames.first().expect("a HelloResponse");
+    assert!(
+        matches!(first.body, Some(Body::HelloResponse(_))),
+        "got {:?}",
+        first.body
+    );
+    (end, sink.frames[1..].to_vec())
+}
+
+#[test]
+fn golden_session_3_denies_a_non_owner_like_serve_root() {
+    // The pipeline `mkit serve --root` builds for `<ns>/<name>`: a Single
+    // namespaced repository, Owner writes, transport identity.
+    let mut c = cfg(AuthMode::TransportIdentity);
+    c.addressing = Addressing::Single {
+        repo: peer_repo_id(OWNER, "room-a"),
+    };
+    c.write_policy = WritePolicy::Owner;
+    let clock = Arc::new(ManualClock::new(T0));
+    let pipe = Pipeline::new(
+        MemoryBlobStore::default(),
+        MemoryKv::with_clock(clock.clone()),
+        Hooks::new(),
+        c,
+        clock,
+        Arc::new(NoopMetrics),
+    )
+    .unwrap();
+    // Seed `refs/heads/main` as the owner; the replay must not move it.
+    let g = golden3();
+    assert_eq!(g.input, GOLDEN_3_IN, "the builder must produce the file");
+    let owner = Principal::SshForcedCommand { key: Some(OWNER) };
+    let (end, frames) = run_as(
+        &pipe,
+        owner,
+        [update(BRANCH, &g.ref_id, Some(RefExpectation::Any), None)],
+    );
+    assert_eq!(end, SessionEnd::Clean, "seeding failed: {frames:?}");
+
+    let mut src = ReadFrames(std::io::Cursor::new(g.input));
+    let mut sink = WriteFrames(Vec::new());
+    let end = block_on(serve_session(
+        &pipe,
+        Principal::SshForcedCommand { key: Some(OTHER) },
+        &mut src,
+        &mut sink,
+        &SessionConfig::new(SERVER_ID),
+    ));
+    assert_eq!(end, SessionEnd::Clean, "mkit serve exited OK");
+    assert_same_frames(&sink.0, GOLDEN_3_OUT);
+    assert_eq!(sink.0, GOLDEN_3_OUT);
+}
+
+// ------------------------------------------------- WP-1.15 B9–B11
+//
+// The implicit transport-identity flows the enc listener runs: a bound
+// repository (`SessionConfig.repository`), uploads accumulating as
+// session-local pending packs, and the packmap write consuming them into
+// membership.
+
+const OWNER: [u8; 32] = [0x0a; 32];
+const OTHER: [u8; 32] = [0x0b; 32];
+const BRANCH: &str = "refs/heads/main";
+const PACKMAP: &str = "refs/mkit/packmap/main";
+
+/// `<ed25519-namespace>/<name>`: the identity a bound session carries.
+fn peer_repo(key: [u8; 32], name: &str) -> String {
+    format!("{}/{name}", Namespace::Ed25519(key))
+}
+
+fn peer_repo_id(key: [u8; 32], name: &str) -> RepoId {
+    RepoId {
+        namespace: NamespaceKey::from_namespace(&Namespace::Ed25519(key)),
+        name: RepoName::new(name).unwrap(),
+    }
+}
+
+/// An MKPL pack listing `packs`.
+fn mkpl(packs: &[Hash]) -> (Vec<u8>, Hash) {
+    let bytes = mkit_core::transfer::encode_packlist(None, packs).unwrap();
+    let id = hash(&bytes);
+    (bytes, id)
+}
+
+/// Records the procedures admission saw. It reports `is_default` so a
+/// transport-identity pipeline still builds: the pipeline's refusal is
+/// for a *non-default* admission running beside implicit tickets.
+#[derive(Clone, Default)]
+struct AdmissionSpy {
+    seen: Arc<Mutex<Vec<Procedure>>>,
+    /// The reservation `admit` reports, when the test wants one.
+    reservation: Option<String>,
+}
+
+impl Admission for AdmissionSpy {
+    fn is_default(&self) -> bool {
+        true
+    }
+
+    async fn admit(&self, input: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
+        self.seen.lock().unwrap().push(input.op.procedure());
+        Ok(AdmissionDecision::Allow {
+            charges: Vec::new(),
+            reservation: self.reservation.clone(),
+        })
+    }
+}
+
+/// `Hooks` with `admission` swapped in.
+fn spy_hooks(admission: AdmissionSpy) -> Hooks<OpenAuthorizer, AdmissionSpy> {
+    let defaults = Hooks::new();
+    Hooks {
+        authorizer: defaults.authorizer,
+        admission,
+        pre_receive: defaults.pre_receive,
+        receipts: defaults.receipts,
+        outcomes: defaults.outcomes,
+    }
+}
+
+/// A `MemoryKv` behind an `Arc`, so a test keeps a handle after the
+/// pipeline takes ownership of the store.
+#[derive(Clone)]
+struct SharedKv(Arc<MemoryKv>);
+
+impl SharedKv {
+    /// The stored value at `key`, unwrapped.
+    fn read(&self, p: &Partition, key: &Key) -> Option<Value> {
+        block_on(NamespaceStore::get(self, p, key)).unwrap()
+    }
+}
+
+impl NamespaceStore for SharedKv {
+    fn capabilities(&self) -> StoreCapabilities {
+        self.0.capabilities()
+    }
+
+    async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
+        self.0.get(p, key).await
+    }
+
+    async fn get_many(
+        &self,
+        p: &Partition,
+        keys: &[Key],
+    ) -> Result<Vec<Option<Value>>, StoreError> {
+        self.0.get_many(p, keys).await
+    }
+
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&Cursor>,
+        limit: u32,
+    ) -> Result<ScanPage, StoreError> {
+        self.0.scan(p, start, end, after, limit).await
+    }
+
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        self.0.apply(p, batch).await
+    }
+
+    async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
+        self.0.stats(p).await
+    }
+
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.0.probe().await
+    }
+}
+
+/// A Multi transport-identity pipeline over memory stores, like the enc
+/// listener's: `allowlist` is the namespace write policy.
+fn multi_pipeline<H: HookSet>(
+    allowlist: impl IntoIterator<Item = Namespace>,
+    sharding: Sharding,
+    hooks: H,
+) -> (
+    Pipeline<MemoryBlobStore, SharedKv, H>,
+    MemoryBlobStore,
+    SharedKv,
+) {
+    let mut cfg = PipelineConfig::new(
+        Addressing::Multi(
+            MultiAddressing::new()
+                .with_namespace_policy(NamespacePolicy::Allowlist(allowlist.into_iter().collect())),
+        ),
+        AuthMode::TransportIdentity,
+        upload_limits(),
+    );
+    cfg.sharding = sharding;
+    cfg.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
+    let blobs = MemoryBlobStore::default();
+    let clock = Arc::new(ManualClock::new(T0));
+    let kv = SharedKv(Arc::new(MemoryKv::with_clock(clock.clone())));
+    let pipe = Pipeline::new(
+        blobs.clone(),
+        kv.clone(),
+        hooks,
+        cfg,
+        clock,
+        Arc::new(NoopMetrics),
+    )
+    .unwrap();
+    (pipe, blobs, kv)
+}
+
+/// A session bound to `repository` as `TransportPeer`, like the enc
+/// listener's: `Hello`, then `bodies`; returns the end and the frames
+/// after `HelloResponse`.
+fn peer_run<B: MultipartBlobStore, N: NamespaceStore, H: HookSet>(
+    pipe: &Pipeline<B, N, H>,
+    peer: [u8; 32],
+    repository: &str,
+    bodies: impl IntoIterator<Item = Option<Body>>,
+) -> (SessionEnd, Vec<SshFrame>) {
+    let mut cfg = SessionConfig::new(SERVER_ID);
+    cfg.repository = Some(repository.to_owned());
+    let mut src = script(bodies);
+    let mut sink = VecSink::default();
+    let end = block_on(serve_session(
+        pipe,
+        Principal::TransportPeer { ed25519: peer },
+        &mut src,
+        &mut sink,
+        &cfg,
+    ));
+    let first = sink.frames.first().expect("a HelloResponse");
+    assert!(
+        matches!(first.body, Some(Body::HelloResponse(_))),
+        "got {:?}",
+        first.body
+    );
+    (end, sink.frames[1..].to_vec())
+}
+
+/// The one partition `Sharding::Single` uses: the whole namespace.
+fn root(ns: &NamespaceKey) -> Partition {
+    Partition::Namespace(ns.clone())
+}
+
+/// Whether `m\0<name>\0<pack>` is stored in `partition`.
+fn member(kv: &SharedKv, partition: &Partition, name: &RepoName, pack: &Hash) -> bool {
+    kv.read(partition, &keys::membership(name, pack)).is_some()
+}
+
+/// The `o*` rows — reservations, pending outcomes, the outcome backlog —
+/// implicit consuming writes must never plan.
+fn o_rows(kv: &SharedKv, partition: &Partition) -> Vec<(Key, Value)> {
+    block_on(kv.scan(
+        partition,
+        &Key::new(b"o".to_vec()),
+        &Key::new(b"p".to_vec()),
+        None,
+        64,
+    ))
+    .unwrap()
+    .entries
+}
+
+/// B9's core flow (Test 10): uploads become pending, the packmap write
+/// consumes them into membership without running admission, and the head
+/// write — an ordinary `UpdateRef` — runs admission like always.
+#[test]
+fn implicit_packmap_consumes_pending_into_membership() {
+    let spy = AdmissionSpy::default();
+    let seen = spy.seen.clone();
+    let (pipe, _, kv) = multi_pipeline(
+        [Namespace::Ed25519(OWNER)],
+        Sharding::Single,
+        spy_hooks(spy),
+    );
+    let repo = peer_repo(OWNER, "room-a");
+    let repo_id = peer_repo_id(OWNER, "room-a");
+    let (data, data_id) = valid_pack();
+    let (mkpl_bytes, mkpl_id) = mkpl(&[data_id]);
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            upload_header(&data_id, Some(data.len() as u64)),
+            chunk(&data_id, Some(0), &data, true),
+            upload_header(&mkpl_id, Some(mkpl_bytes.len() as u64)),
+            chunk(&mkpl_id, Some(0), &mkpl_bytes, true),
+            exists(&data_id),
+            update(PACKMAP, &mkpl_id, Some(RefExpectation::Missing), None),
+            update(BRANCH, &[7; 32], Some(RefExpectation::Missing), None),
+            exists(&data_id),
+            download(Some(&data_id)),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert!(matches!(frames[0].body, Some(Body::UploadPackResponse(_))));
+    assert!(matches!(frames[1].body, Some(Body::UploadPackResponse(_))));
+    // Uploaded but unconsumed: membership, not the blob, answers exists.
+    let Some(Body::PackExistsResponse(resp)) = &frames[2].body else {
+        panic!("expected PackExistsResponse, got {:?}", frames[2].body);
+    };
+    assert_eq!(resp.exists, Some(false));
+    assert!(matches!(frames[3].body, Some(Body::UpdateRefResponse(_))));
+    assert!(matches!(frames[4].body, Some(Body::UpdateRefResponse(_))));
+    let Some(Body::PackExistsResponse(resp)) = &frames[5].body else {
+        panic!("expected PackExistsResponse, got {:?}", frames[5].body);
+    };
+    assert_eq!(resp.exists, Some(true));
+    assert_eq!(downloaded(&frames[6..], &data_id), data);
+    // Every pending pack became a member; no reservation or outcome rows.
+    assert!(member(
+        &kv,
+        &root(&repo_id.namespace),
+        &repo_id.name,
+        &data_id
+    ));
+    assert!(member(
+        &kv,
+        &root(&repo_id.namespace),
+        &repo_id.name,
+        &mkpl_id
+    ));
+    assert!(o_rows(&kv, &root(&repo_id.namespace)).is_empty());
+    // Admission ran for the two uploads and the ordinary head write only.
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            Procedure::UploadPack,
+            Procedure::UploadPack,
+            Procedure::UpdateRef
+        ]
+    );
+}
+
+/// The same flow under D34 (Test 10): the source shard keeps the `m`
+/// rows and queues a relay row toward each pack's membership index.
+#[test]
+fn implicit_packmap_queues_relay_rows_under_d34() {
+    let (pipe, _, kv) = multi_pipeline([Namespace::Ed25519(OWNER)], Sharding::D34, Hooks::new());
+    let repo = peer_repo(OWNER, "room-a");
+    let repo_id = peer_repo_id(OWNER, "room-a");
+    let (data, data_id) = valid_pack();
+    let (mkpl_bytes, mkpl_id) = mkpl(&[data_id]);
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            upload_header(&data_id, Some(data.len() as u64)),
+            chunk(&data_id, Some(0), &data, true),
+            upload_header(&mkpl_id, Some(mkpl_bytes.len() as u64)),
+            chunk(&mkpl_id, Some(0), &mkpl_bytes, true),
+            update(PACKMAP, &mkpl_id, Some(RefExpectation::Missing), None),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    for f in &frames {
+        assert!(
+            matches!(
+                f.body,
+                Some(Body::UploadPackResponse(_) | Body::UpdateRefResponse(_))
+            ),
+            "got {f:?}"
+        );
+    }
+    let source = D34Shards.ref_shard(&repo_id, PACKMAP);
+    assert!(member(&kv, &source, &repo_id.name, &data_id));
+    assert!(member(&kv, &source, &repo_id.name, &mkpl_id));
+    // The outbox sequence advanced and at least one relay row exists.
+    let seq = kv.read(&source, &keys::outbox_sequence());
+    let seq = seq.map(|v| codec::decode_u64(&v).unwrap());
+    assert!(seq.is_some_and(|s| s >= 1));
+    assert!(kv.read(&source, &keys::relay(1)).is_some());
+    // Membership, ticket and outcome rows never leave the source as `o*`.
+    let mut leftovers = o_rows(&kv, &source);
+    leftovers.retain(|(k, _)| !k.as_bytes().starts_with(b"or") && !k.as_bytes().starts_with(b"os"));
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+/// A CAS conflict keeps the pending set (Test 10); the corrected write
+/// consumes it.
+#[test]
+fn implicit_cas_conflict_keeps_pending() {
+    let (pipe, _, kv) = multi_pipeline([Namespace::Ed25519(OWNER)], Sharding::Single, Hooks::new());
+    let repo = peer_repo(OWNER, "room-a");
+    let repo_id = peer_repo_id(OWNER, "room-a");
+    let (data, data_id) = valid_pack();
+    let (mkpl_bytes, mkpl_id) = mkpl(&[data_id]);
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            upload_header(&data_id, Some(data.len() as u64)),
+            chunk(&data_id, Some(0), &data, true),
+            upload_header(&mkpl_id, Some(mkpl_bytes.len() as u64)),
+            chunk(&mkpl_id, Some(0), &mkpl_bytes, true),
+            // A losing CAS: expected the wrong current id.
+            update(
+                PACKMAP,
+                &mkpl_id,
+                Some(RefExpectation::Match),
+                Some(&[9; 32]),
+            ),
+            // The retry consumes the same pending set.
+            update(PACKMAP, &mkpl_id, Some(RefExpectation::Missing), None),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert!(matches!(frames[0].body, Some(Body::UploadPackResponse(_))));
+    assert!(matches!(frames[1].body, Some(Body::UploadPackResponse(_))));
+    let conflict = error(&frames[2]);
+    assert!(
+        conflict
+            .code
+            .is_some_and(|c| c == ErrorCode::InvalidRequest)
+    );
+    assert!(matches!(frames[3].body, Some(Body::UpdateRefResponse(_))));
+    assert!(member(
+        &kv,
+        &root(&repo_id.namespace),
+        &repo_id.name,
+        &data_id
+    ));
+    assert!(member(
+        &kv,
+        &root(&repo_id.namespace),
+        &repo_id.name,
+        &mkpl_id
+    ));
+}
+
+/// A write that is not a packmap does not consume (Test 10): the pending
+/// set survives a head write and nothing becomes a member until the
+/// packmap commits.
+#[test]
+fn head_write_consumes_nothing() {
+    let (pipe, _, kv) = multi_pipeline([Namespace::Ed25519(OWNER)], Sharding::Single, Hooks::new());
+    let repo = peer_repo(OWNER, "room-a");
+    let repo_id = peer_repo_id(OWNER, "room-a");
+    let (data, data_id) = valid_pack();
+    let (mkpl_bytes, mkpl_id) = mkpl(&[data_id]);
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            upload_header(&data_id, Some(data.len() as u64)),
+            chunk(&data_id, Some(0), &data, true),
+            upload_header(&mkpl_id, Some(mkpl_bytes.len() as u64)),
+            chunk(&mkpl_id, Some(0), &mkpl_bytes, true),
+            update(BRANCH, &[7; 32], Some(RefExpectation::Missing), None),
+            exists(&data_id),
+            update(PACKMAP, &mkpl_id, Some(RefExpectation::Missing), None),
+            exists(&data_id),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    for f in &frames[..3] {
+        assert!(
+            matches!(
+                f.body,
+                Some(Body::UploadPackResponse(_) | Body::UpdateRefResponse(_))
+            ),
+            "got {f:?}"
+        );
+    }
+    let Some(Body::PackExistsResponse(resp)) = &frames[3].body else {
+        panic!("expected PackExistsResponse, got {:?}", frames[3].body);
+    };
+    assert_eq!(resp.exists, Some(false), "a head write consumes nothing");
+    assert!(matches!(frames[4].body, Some(Body::UpdateRefResponse(_))));
+    let Some(Body::PackExistsResponse(resp)) = &frames[5].body else {
+        panic!("expected PackExistsResponse, got {:?}", frames[5].body);
+    };
+    assert_eq!(resp.exists, Some(true));
+    assert!(member(
+        &kv,
+        &root(&repo_id.namespace),
+        &repo_id.name,
+        &data_id
+    ));
+}
+
+/// The eighth distinct pending pack is refused before any session opens
+/// and its stream is drained in sync (Test 10).
+#[test]
+fn eighth_pending_upload_is_refused_in_frame_sync() {
+    let (pipe, blobs, _) =
+        multi_pipeline([Namespace::Ed25519(OWNER)], Sharding::Single, Hooks::new());
+    let repo = peer_repo(OWNER, "room-a");
+    let mut bodies = Vec::new();
+    for i in 0..7u8 {
+        let bytes = pack_bytes(64, i + 1);
+        let id = hash(&bytes);
+        bodies.push(upload_header(&id, Some(bytes.len() as u64)));
+        bodies.push(chunk(&id, Some(0), &bytes, true));
+    }
+    let eighth = pack_bytes(64, 9);
+    let eighth_id = hash(&eighth);
+    bodies.push(upload_header(&eighth_id, Some(eighth.len() as u64)));
+    bodies.push(chunk(&eighth_id, Some(0), &eighth, true));
+    bodies.push(exists(&eighth_id));
+    let (end, frames) = peer_run(&pipe, OWNER, &repo, bodies);
+    assert_eq!(end, SessionEnd::Clean);
+    for f in &frames[..7] {
+        assert!(
+            matches!(f.body, Some(Body::UploadPackResponse(_))),
+            "got {f:?}"
+        );
+    }
+    assert_error(
+        &frames[7],
+        ErrorCode::InvalidRequest,
+        "too many packs uploaded before a packmap update",
+    );
+    // The refused upload's chunks were drained: the next verb answers.
+    let Some(Body::PackExistsResponse(resp)) = &frames[8].body else {
+        panic!("expected PackExistsResponse, got {:?}", frames[8].body);
+    };
+    assert_eq!(resp.exists, Some(false));
+    assert!(!blob_present(&blobs, eighth_id));
+}
+
+/// Admission returning a reservation under transport identity fails the
+/// upload closed (Test 10): nothing is stored or reserved.
+#[test]
+fn reserving_admission_fails_the_upload_closed() {
+    let spy = AdmissionSpy {
+        reservation: Some("r:1".into()),
+        ..AdmissionSpy::default()
+    };
+    let (pipe, blobs, kv) = multi_pipeline(
+        [Namespace::Ed25519(OWNER)],
+        Sharding::Single,
+        spy_hooks(spy),
+    );
+    let repo = peer_repo(OWNER, "room-a");
+    let (data, data_id) = valid_pack();
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            upload_header(&data_id, Some(data.len() as u64)),
+            chunk(&data_id, Some(0), &data, true),
+            exists(&data_id),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert_error(&frames[0], ErrorCode::Internal, "upload failed");
+    let Some(Body::PackExistsResponse(resp)) = &frames[1].body else {
+        panic!("expected PackExistsResponse, got {:?}", frames[1].body);
+    };
+    assert_eq!(resp.exists, Some(false));
+    assert!(!blob_present(&blobs, data_id));
+    let ns = NamespaceKey::from_namespace(&Namespace::Ed25519(OWNER));
+    assert!(o_rows(&kv, &root(&ns)).is_empty());
+}
+
+/// B10 across a reconnect (Test 11): packs uploaded in session 1 are not
+/// known to session 2's packmap; the refusal writes nothing.
+#[test]
+fn packmap_in_a_new_session_names_nothing() {
+    let (pipe, _, kv) = multi_pipeline([Namespace::Ed25519(OWNER)], Sharding::Single, Hooks::new());
+    let repo = peer_repo(OWNER, "room-a");
+    let repo_id = peer_repo_id(OWNER, "room-a");
+    let (data, data_id) = valid_pack();
+    let (mkpl_bytes, mkpl_id) = mkpl(&[data_id]);
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            upload_header(&data_id, Some(data.len() as u64)),
+            chunk(&data_id, Some(0), &data, true),
+            upload_header(&mkpl_id, Some(mkpl_bytes.len() as u64)),
+            chunk(&mkpl_id, Some(0), &mkpl_bytes, true),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert_eq!(frames.len(), 2, "two uploads, two responses");
+    // A new session cannot claim the first session's packs.
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            update(PACKMAP, &mkpl_id, Some(RefExpectation::Missing), None),
+            exists(&mkpl_id),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert_error(
+        &frames[0],
+        ErrorCode::InvalidRequest,
+        "packmap names packs not uploaded to this repository",
+    );
+    // The refusal wrote nothing: no ref, no membership, no `o` rows.
+    let Some(Body::PackExistsResponse(resp)) = &frames[1].body else {
+        panic!("expected PackExistsResponse, got {:?}", frames[1].body);
+    };
+    assert_eq!(resp.exists, Some(false));
+    assert!(
+        kv.read(
+            &root(&repo_id.namespace),
+            &keys::ref_key(&repo_id.name, PACKMAP)
+        )
+        .is_none()
+    );
+    assert!(!member(
+        &kv,
+        &root(&repo_id.namespace),
+        &repo_id.name,
+        &data_id
+    ));
+    assert!(!member(
+        &kv,
+        &root(&repo_id.namespace),
+        &repo_id.name,
+        &mkpl_id
+    ));
+    assert!(o_rows(&kv, &root(&repo_id.namespace)).is_empty());
+}
+
+/// An MKPL naming a pack that is neither pending nor a member is refused
+/// (Test 11); the pending MKPL itself is not consumed either.
+#[test]
+fn packmap_listing_an_unknown_pack_is_refused() {
+    let (pipe, _, kv) = multi_pipeline([Namespace::Ed25519(OWNER)], Sharding::Single, Hooks::new());
+    let repo = peer_repo(OWNER, "room-a");
+    let repo_id = peer_repo_id(OWNER, "room-a");
+    let ghost = [0x99; 32];
+    let (mkpl_bytes, mkpl_id) = mkpl(&[ghost]);
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            upload_header(&mkpl_id, Some(mkpl_bytes.len() as u64)),
+            chunk(&mkpl_id, Some(0), &mkpl_bytes, true),
+            update(PACKMAP, &mkpl_id, Some(RefExpectation::Missing), None),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert!(matches!(frames[0].body, Some(Body::UploadPackResponse(_))));
+    assert_error(
+        &frames[1],
+        ErrorCode::InvalidRequest,
+        "packmap names packs not uploaded to this repository",
+    );
+    assert!(!member(
+        &kv,
+        &root(&repo_id.namespace),
+        &repo_id.name,
+        &mkpl_id
+    ));
+    assert!(!member(
+        &kv,
+        &root(&repo_id.namespace),
+        &repo_id.name,
+        &ghost
+    ));
+}
+
+/// A peer writes only its own namespace (Test 12): a bound repository in
+/// a foreign namespace, or in a namespace outside the allowlist, denies
+/// every write with `write not permitted` and allocates nothing.
+#[test]
+fn foreign_and_unlisted_namespaces_write_nothing() {
+    let foreign = peer_repo(OTHER, "room-b");
+    let (pipe, blobs, kv) =
+        multi_pipeline([Namespace::Ed25519(OWNER)], Sharding::Single, Hooks::new());
+    let (data, data_id) = valid_pack();
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &foreign,
+        [
+            upload_header(&data_id, Some(data.len() as u64)),
+            chunk(&data_id, Some(0), &data, true),
+            update(BRANCH, &[7; 32], Some(RefExpectation::Missing), None),
+            exists(&data_id),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert_error(&frames[0], ErrorCode::InvalidRequest, "write not permitted");
+    assert_error(&frames[1], ErrorCode::InvalidRequest, "write not permitted");
+    let Some(Body::PackExistsResponse(resp)) = &frames[2].body else {
+        panic!("expected PackExistsResponse, got {:?}", frames[2].body);
+    };
+    assert_eq!(resp.exists, Some(false));
+    let room_b = RepoName::new("room-b").unwrap();
+    let other_ns = peer_repo_id(OTHER, "room-b").namespace;
+    assert!(!blob_present(&blobs, data_id));
+    assert!(
+        kv.read(&root(&other_ns), &keys::repo_record(&room_b))
+            .is_none(),
+        "the denied write created no repo record"
+    );
+    assert!(
+        kv.read(&root(&other_ns), &keys::repo_known(&room_b))
+            .is_none(),
+        "the denied write created no repo-known marker"
+    );
+    // Even the peer's own namespace is denied when it is not allowlisted.
+    let own = peer_repo(OWNER, "room-a");
+    let (pipe, blobs, kv) =
+        multi_pipeline([Namespace::Ed25519(OTHER)], Sharding::Single, Hooks::new());
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &own,
+        [
+            upload_header(&data_id, Some(data.len() as u64)),
+            chunk(&data_id, Some(0), &data, true),
+            update(BRANCH, &[7; 32], Some(RefExpectation::Missing), None),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert_error(&frames[0], ErrorCode::InvalidRequest, "write not permitted");
+    assert_error(&frames[1], ErrorCode::InvalidRequest, "write not permitted");
+    assert!(!blob_present(&blobs, data_id));
+    let room_a = RepoName::new("room-a").unwrap();
+    let own_ns = peer_repo_id(OWNER, "room-a").namespace;
+    assert!(
+        kv.read(&root(&own_ns), &keys::repo_record(&room_a))
+            .is_none()
+    );
+}
+
+/// Repositories are isolated by membership (Test 13): a pack pushed to A
+/// is invisible to B even though the blob is shared.
+#[test]
+fn repositories_see_only_their_own_packs() {
+    let (pipe, blobs, kv) =
+        multi_pipeline([Namespace::Ed25519(OWNER)], Sharding::Single, Hooks::new());
+    let room_a = peer_repo(OWNER, "room-a");
+    let room_b = peer_repo(OWNER, "room-b");
+    let (data, data_id) = valid_pack();
+    let (mkpl_bytes, mkpl_id) = mkpl(&[data_id]);
+    // A takes the full implicit push.
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &room_a,
+        [
+            upload_header(&data_id, Some(data.len() as u64)),
+            chunk(&data_id, Some(0), &data, true),
+            upload_header(&mkpl_id, Some(mkpl_bytes.len() as u64)),
+            chunk(&mkpl_id, Some(0), &mkpl_bytes, true),
+            update(PACKMAP, &mkpl_id, Some(RefExpectation::Missing), None),
+            update(BRANCH, &[7; 32], Some(RefExpectation::Missing), None),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert_eq!(frames.len(), 4);
+    // B creates itself with a head write, then probes A's pack.
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &room_b,
+        [
+            update(BRANCH, &[8; 32], Some(RefExpectation::Missing), None),
+            exists(&data_id),
+            download(Some(&data_id)),
+            read_ref(BRANCH),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert!(matches!(frames[0].body, Some(Body::UpdateRefResponse(_))));
+    let Some(Body::PackExistsResponse(resp)) = &frames[1].body else {
+        panic!("expected PackExistsResponse, got {:?}", frames[1].body);
+    };
+    assert_eq!(resp.exists, Some(false), "A's pack must not leak to B");
+    assert_error(&frames[2], ErrorCode::KeyNotFound, "pack not found");
+    // B's own ref reads back, distinct from A's.
+    let Some(Body::ReadRefResponse(resp)) = &frames[3].body else {
+        panic!("expected ReadRefResponse, got {:?}", frames[3].body);
+    };
+    assert_eq!(resp.object_id.as_deref(), Some(&[8; 32][..]));
+    // The blob exists but no `m` row ties it to B.
+    assert!(blob_present(&blobs, data_id));
+    let room_b_id = peer_repo_id(OWNER, "room-b");
+    assert!(!member(
+        &kv,
+        &root(&room_b_id.namespace),
+        &room_b_id.name,
+        &data_id
+    ));
 }
 
 // --------------------------------------------------------------- fs stores

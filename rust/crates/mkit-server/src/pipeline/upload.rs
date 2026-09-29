@@ -213,7 +213,19 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             let mut input = AdmissionInput::new(&op);
             input.declared_bytes = declared;
             input.pack_id = Some(key);
-            let charges = pipe.admit(input).await?.charges;
+            let allowance = pipe.admit(input).await?;
+            // Transport-identity uploads can't satisfy a reservation:
+            // the implicit ticket's session membership is their only
+            // claim, so an admission that demands one fails closed
+            // before any blob is written (Connect's path is unchanged).
+            if matches!(pipe.cfg.auth, AuthMode::TransportIdentity)
+                && allowance.reservation.is_some()
+            {
+                return Err(ServerError::unimplemented(
+                    "admission reservations need mkit+https",
+                ));
+            }
+            let charges = allowance.charges;
             if op.auth.is_some() || !charges.is_empty() {
                 let req = WriteRequest {
                     repo: &op.repo.name,
@@ -233,6 +245,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                     rejection: None,
                     begin: None,
                     advance: None,
+                    implicit: None,
                 };
                 pipe.apply_atomic(&op, a, &p, &req, ahead).await?;
             }
@@ -466,6 +479,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             rejection: rejection.as_ref(),
             begin: None,
             advance: None,
+            implicit: None,
         };
         match pipe
             .apply_atomic(&self.op, &self.a, &self.p, &req, None)

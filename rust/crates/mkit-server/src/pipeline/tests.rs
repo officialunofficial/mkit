@@ -105,6 +105,7 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
         mark_repo_known: true,
         begin: None,
         advance: Some(advance.clone()),
+        implicit: None,
         rejection: None,
     };
     let mut snap = snapshot(&req, &[]);
@@ -211,6 +212,111 @@ fn single_ticket_advance_guards_the_grant_epoch() {
         Precondition::Absent(key) if *key == keys::grant_epoch()
     )));
     assert_eq!(batch.preconditions.len() + batch.writes.len(), 77);
+}
+
+/// WP-1.15 B9's largest implicit batch: a packmap write consuming
+/// `MAX_TICKETS_PER_ADVANCE` pending packs under D34, each routed to its
+/// own membership shard and therefore its own relay row. 26 KV ops:
+/// 6 preconditions (deadline, lease, layout, repo-known, the packmap CAS,
+/// the outbox sequence) and 20 writes (lease/layout/repo-known installs,
+/// the packmap ref, 7 membership puts, 7 relay rows, the relay timer and
+/// the sequence put).
+#[test]
+fn maximal_implicit_consume_plans_a_valid_batch() {
+    use crate::store::outbox::MAX_TICKETS_PER_ADVANCE;
+    let repo = RepoId {
+        namespace: NamespaceKey::from_namespace(&mkit_core::repo_identity::Namespace::Ed25519(
+            [1; 32],
+        )),
+        name: repo_name(),
+    };
+    let shards = D34Shards;
+    let source = shards.ref_shard(&repo, PACKMAP);
+    let packs: Vec<Hash> = (0..MAX_TICKETS_PER_ADVANCE)
+        .map(|i| {
+            let mut pack = [0; 32];
+            pack[0] = u8::try_from(i).unwrap() << 4;
+            pack[31] = u8::try_from(i).unwrap();
+            pack
+        })
+        .collect();
+    let targets: std::collections::BTreeSet<_> = packs
+        .iter()
+        .map(|pack| shards.membership(&repo, &crate::store::BlobKey::pack(*pack)))
+        .collect();
+    assert_eq!(
+        targets.len(),
+        packs.len(),
+        "each pack must route to its own membership shard"
+    );
+    let refs = [upd(PACKMAP, Missing, B)];
+    let implicit = ImplicitConsume {
+        packs: &packs,
+        repo_id: &repo,
+        source: &source,
+        shards: &shards,
+    };
+    let req = WriteRequest {
+        repo: &repo.name,
+        kind: WriteKind::UpdateRef,
+        refs: &refs,
+        replay: None,
+        charges: &[],
+        namespace_charge: None,
+        grant: None,
+        lease: Some(lease::LeaseWrite {
+            value: codec::EpochLease {
+                epoch: 1,
+                expires_at_ms: ms(T0) + 30_000,
+                config_version: 1,
+            },
+            install: true,
+        }),
+        layout_version: true,
+        mark_repo_known: true,
+        begin: None,
+        advance: None,
+        implicit: Some(implicit),
+        rejection: None,
+    };
+    let Planned::Apply(plan) = plan_write(&req, &snapshot(&req, &[]), &clock_at(5, None)).unwrap()
+    else {
+        panic!("expected a batch")
+    };
+    plan.batch.validate(&StoreCapabilities::full()).unwrap();
+    let ops = plan.batch.preconditions.len() + plan.batch.writes.len();
+    assert!(ops <= crate::store::MAX_BATCH_OPS, "{ops}");
+    assert_eq!(ops, 26, "adjust the note at MAX_TICKETS_PER_ADVANCE");
+    let writes_of = |wanted: fn(&keys::ParsedKey) -> bool| -> usize {
+        plan.batch
+            .writes
+            .iter()
+            .filter(|w| {
+                let (Write::Put(k, _) | Write::Delete(k)) = w;
+                keys::parse(k).is_some_and(|parsed| wanted(&parsed))
+            })
+            .count()
+    };
+    assert_eq!(
+        writes_of(|p| matches!(p, keys::ParsedKey::Membership { .. })),
+        packs.len()
+    );
+    assert_eq!(
+        writes_of(|p| matches!(p, keys::ParsedKey::Relay(_))),
+        packs.len()
+    );
+    // No ticket, reservation or outcome rows: implicit membership carries
+    // no carry-forward metadata.
+    assert_eq!(
+        writes_of(|p| matches!(
+            p,
+            keys::ParsedKey::Ticket(_)
+                | keys::ParsedKey::Reservation(_)
+                | keys::ParsedKey::OutcomePending { .. }
+                | keys::ParsedKey::OutcomeBacklog
+        )),
+        0
+    );
 }
 
 #[test]
@@ -1509,6 +1615,7 @@ fn plan_cas_any_missing_match_on_snapshot() {
             rejection: None,
             begin: None,
             advance: None,
+            implicit: None,
         };
         let values: Vec<_> = current.map(|id| ref_value(HEAD, id)).into_iter().collect();
         let planned = plan_write(&req, &snapshot(&req, &values), &clock_at(5, None)).unwrap();
@@ -1563,6 +1670,7 @@ fn plan_conflict_writes_only_the_replay_record() {
         rejection: None,
         begin: None,
         advance: None,
+        implicit: None,
     };
     let values = [ref_value(PACKMAP, A), ref_value(HEAD, B)];
     let Planned::Apply(plan) =
@@ -1632,6 +1740,7 @@ fn plan_quota_exhaustion_yields_no_batch() {
         rejection: None,
         begin: None,
         advance: None,
+        implicit: None,
     };
     let used = QuotaState {
         window_start: T0,
@@ -1684,6 +1793,7 @@ proptest! {
             rejection: None,
                     begin: None,
             advance: None,
+            implicit: None,
         };
         let mut values = Vec::new();
         for (name, current) in [(PACKMAP, currents.0), (HEAD, currents.1)] {
@@ -2304,6 +2414,7 @@ fn plan_signed_conflict_still_charges_quota() {
         rejection: None,
         begin: None,
         advance: None,
+        implicit: None,
     };
     let values = [ref_value(HEAD, A)];
     let clock = clock_at(ms(T0), None);
@@ -2361,6 +2472,7 @@ fn plan_prune_fits_the_batch_op_cap() {
         rejection: None,
         begin: None,
         advance: None,
+        implicit: None,
     };
     let mut snap = snapshot(&req, &[]);
     let limit = usize::try_from(PRUNE_LIMIT).unwrap();
@@ -2411,6 +2523,7 @@ fn prune_sampling_is_deterministic_one_in_eight() {
         rejection: None,
         begin: None,
         advance: None,
+        implicit: None,
     };
     let sampled = (0u8..=255)
         .filter(|b| {
@@ -2875,6 +2988,7 @@ fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
         rejection: None,
         begin: None,
         advance: None,
+        implicit: None,
     };
     let ahead = snapshot(
         &req,
@@ -2984,6 +3098,7 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
             rejection: None,
             begin: None,
             advance: None,
+            implicit: None,
             lease: Some(lease::LeaseWrite {
                 value: codec::EpochLease {
                     epoch: 7,
