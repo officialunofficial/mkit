@@ -38,6 +38,7 @@ struct TicketTransport {
     upload_lengths: Mutex<Vec<usize>>,
     max_pack_bytes: Option<u64>,
     ticket_threshold_bytes: Option<u64>,
+    tickets_per_advance: Option<usize>,
 }
 
 impl TicketTransport {
@@ -51,6 +52,7 @@ impl TicketTransport {
             upload_lengths: Mutex::new(Vec::new()),
             max_pack_bytes: None,
             ticket_threshold_bytes: Some(0),
+            tickets_per_advance: Some(7),
         }
     }
 }
@@ -91,7 +93,7 @@ impl Transport for TicketTransport {
     fn upload_limits(&self) -> UploadLimits {
         UploadLimits {
             max_pack_bytes: self.max_pack_bytes,
-            tickets_per_advance: Some(7),
+            tickets_per_advance: self.tickets_per_advance,
             ticket_threshold_bytes: self.ticket_threshold_bytes,
         }
     }
@@ -202,7 +204,7 @@ fn typed_ticket_failures_restart_once_and_landed_write_succeeds() {
 }
 
 #[test]
-fn seventh_data_pack_is_refused_before_upload() {
+fn seventh_data_pack_is_refused_before_its_begin_upload() {
     let repo = Repo::new();
     for i in 0_u64..18 {
         let bytes = filler(i * 2 + 1, 2048);
@@ -213,10 +215,11 @@ fn seventh_data_pack_is_refused_before_upload() {
     let tx = TicketTransport::new(Fault::None);
     let err = push(&repo, &tx, 4096).unwrap_err();
     assert!(
-        matches!(err, DispatchError::PushTooLarge { packs, limit: 6 } if packs > 6),
+        matches!(err, DispatchError::PushTooLarge { packs: 7, limit: 6 }),
         "{err:?}"
     );
-    assert_eq!(tx.uploads.load(Ordering::SeqCst), 0);
+    // The exact seal-time gate: six packs went up, the seventh never did.
+    assert_eq!(tx.uploads.load(Ordering::SeqCst), 6);
     assert_eq!(tx.advances.load(Ordering::SeqCst), 0);
 }
 
@@ -229,12 +232,35 @@ fn ticketless_multi_pack_push_is_not_subject_to_ticket_cap() {
     }
     repo.ok(&["add", "."]);
     repo.ok(&["commit", "-m", "many files"]);
+    // A V2 server whose threshold no pack reaches, and one reached without a
+    // signer (tickets_per_advance None): neither is subject to the cap.
+    for signer in [true, false] {
+        let mut tx = TicketTransport::new(Fault::None);
+        if signer {
+            tx.ticket_threshold_bytes = Some(u64::MAX);
+        } else {
+            tx.tickets_per_advance = None;
+        }
+        tx.max_pack_bytes = Some(4096);
+        push(&repo, &tx, 4096).unwrap();
+        assert!(tx.uploads.load(Ordering::SeqCst) > 6);
+        assert!(tx.largest_upload.load(Ordering::SeqCst) <= 4096);
+    }
+}
+
+#[test]
+fn compressible_push_is_not_refused_by_an_uncompressed_estimate() {
+    let repo = Repo::new();
+    // Highly compressible: about 60 KiB raw, far fewer bytes once packed.
+    for i in 0_u64..30 {
+        repo.write(&format!("c{i}.txt"), &vec![b'a' + (i % 26) as u8; 2048]);
+    }
+    repo.ok(&["add", "."]);
+    repo.ok(&["commit", "-m", "compressible"]);
     let mut tx = TicketTransport::new(Fault::None);
-    tx.ticket_threshold_bytes = Some(u64::MAX);
-    tx.max_pack_bytes = Some(4096);
-    push(&repo, &tx, 4096).unwrap();
-    assert!(tx.uploads.load(Ordering::SeqCst) > 6);
-    assert!(tx.largest_upload.load(Ordering::SeqCst) <= 4096);
+    tx.max_pack_bytes = Some(8192);
+    push(&repo, &tx, 8192).unwrap();
+    assert!(tx.uploads.load(Ordering::SeqCst) <= 6);
 }
 
 #[test]

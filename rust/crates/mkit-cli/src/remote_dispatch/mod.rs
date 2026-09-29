@@ -996,14 +996,11 @@ fn push_branch_once(
         }
     }
 
-    let estimated = estimate_pack_sizes(store, &plan, effective_cap, limits.max_pack_bytes)?;
-    let ticketed = estimated_ticketed_count(&estimated, limits);
-    if ticketed > 6 {
-        return Err(DispatchError::PushTooLarge {
-            packs: ticketed,
-            limit: 6,
-        });
-    }
+    // No pre-flight PushTooLarge: the estimate uses uncompressed sizes, so it
+    // would refuse pushes that compress into six packs. The seal-time gate is
+    // exact and still stops before the seventh ticketed pack's BeginUpload.
+    // (The re-baseline check above may use the conservative estimate: a false
+    // "too many" only keeps the append plan.)
 
     // Build the plan into one or more payload-bounded packs (splitting
     // when the plan exceeds `pack_payload_cap`, issue #831) and upload

@@ -1272,7 +1272,10 @@ impl ConnectTransport {
                 }
                 Err(CompleteSpecial::Ticket) => return Ok(Err(())),
                 Err(CompleteSpecial::InvalidReceipt) if from_disk && invalid_retry == 0 => {
-                    self.receipts.forget(&ticket.id)?;
+                    // Best-effort: the resend pass doesn't reload stored receipts.
+                    if let Err(error) = self.receipts.forget(&ticket.id) {
+                        log_receipt_cleanup_error("invalid receipt", &error);
+                    }
                 }
                 Err(CompleteSpecial::InvalidReceipt) => return Err(TransportError::ProtocolError),
             }

@@ -201,8 +201,7 @@ headers or a bearer token. The response MAY be cached with
 | `async_inspection` | Whether any asynchronous inspector is configured (SPEC-SERVER §10–§11). Writers MUST sign reads to see their own pending content that is not held. Held content is hidden from every caller, including when this field is false and a synchronous inspector holds it. |
 
 A client MUST NOT assume atomic advance without `atomic_advance = true`
-from this call.
-`atomic_advance` replaces the client-side opt-in of v1
+from this call. `atomic_advance` replaces the client-side opt-in of v1
 (§7.3): a client reads it here instead of from local configuration.
 
 ### 2.2 `GetReceipt`
