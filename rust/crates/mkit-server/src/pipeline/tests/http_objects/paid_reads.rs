@@ -126,6 +126,43 @@ fn served(fx: &Fx<PaidHooks>, n: u32, object: Hash, bytes: u64) {
 }
 
 #[test]
+fn missing_runtime_and_failed_pending_write_never_return_content() {
+    for missing_runtime in [false, true] {
+        let (fx, d, admission, tasks) = setup();
+        let fx = if missing_runtime {
+            with_seams(fx, |s| s.read_runtime = None)
+        } else {
+            fx.pipe
+                .meta
+                .fail_next_apply
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            fx
+        };
+        let got = fx.get(&fx.object_url("room", &id(&d.small)));
+        assert_eq!(got.status, 503);
+        assert_eq!(got.header("Cache-Control"), Some("no-store"));
+        assert!(got.header("ETag").is_none());
+        assert_ne!(got.body, d.small_bytes);
+        assert_eq!(
+            admission.calls.lock().unwrap().len(),
+            usize::from(!missing_runtime)
+        );
+        let repo = NamespaceKey::from_namespace(&Namespace::parse(&fx.namespace()).unwrap());
+        let partition = fx.pipe.shards.coordinator(&repo);
+        assert!(
+            block_on(
+                fx.pipe
+                    .meta
+                    .get(&partition, &keys::reservation("read-0").unwrap())
+            )
+            .unwrap()
+            .is_none()
+        );
+        tasks.join();
+    }
+}
+
+#[test]
 fn paid_get_head_range_and_bypass_input_are_exact() {
     let (fx, d, admission, tasks) = setup();
     let path = fx.object_url("room", &id(&d.big));

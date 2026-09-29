@@ -1936,6 +1936,14 @@ fn the_feature_needs_indexed_mode_and_sane_limits() {
     let min = crate::indexed::IndexedConfig::default().extract_min_bytes;
     for limits in [
         HttpObjectsConfig {
+            read_deadline: Duration::ZERO,
+            ..http_cfg()
+        },
+        HttpObjectsConfig {
+            read_reconcile_grace: Duration::ZERO,
+            ..http_cfg()
+        },
+        HttpObjectsConfig {
             max_walk_objects: 0,
             ..http_cfg()
         },
