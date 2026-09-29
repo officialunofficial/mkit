@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- CLI: a Connect push that needs more than six data packs per advance is now
+  split automatically along the branch's first-parent history instead of
+  failing with `PushTooLarge` after uploading six packs. Every intermediate
+  commit is a published state; the tracking ref follows each advance, so a
+  re-run resumes, and later advances always compare-and-swap on the previous
+  one. For a split push, stored write grants are checked for every advance before
+  anything is uploaded, and an unsplittable oversize commit or merge is refused before any
+  upload. `--format=json` reports `steps` (WP-1.17b).
 - Server: `mkit serve --root <DIR>` serves the repositories under `<DIR>`
   addressed by `<NAMESPACE>/<NAME>` (from the path argument or a strict
   `SSH_ORIGINAL_COMMAND`), one repository per process, with writes
