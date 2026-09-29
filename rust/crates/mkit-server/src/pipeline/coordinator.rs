@@ -70,6 +70,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let mut want = creation;
         for _ in 0..CREATION_ATTEMPTS {
             let mut batch = Batch::new();
+            if let Some(grant) = op.authz.grant {
+                let key = keys::grant_epoch();
+                let observed = self.meta.get(&p, &key).await.map_err(meta_error)?;
+                let epoch = observed
+                    .as_ref()
+                    .map(codec::decode_u64)
+                    .transpose()
+                    .map_err(meta_error)?
+                    .unwrap_or(0);
+                if epoch != grant.epoch {
+                    return Err(super::plan::epoch_moved());
+                }
+                batch = batch.require(super::lease::observed_guard(key, observed.as_ref()));
+            }
             if want.namespace {
                 let key = keys::namespace_record();
                 let record = codec::NamespaceRecord {

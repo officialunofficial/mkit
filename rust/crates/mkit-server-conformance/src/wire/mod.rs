@@ -66,6 +66,25 @@
 //!
 //! | Case | Requires | Asserts |
 //! |---|---|---|
+//! | `grants.valid_ed25519` | `grants`, `multi-repo`, `auth-v2` | an ed25519 owner grants a write |
+//! | `grants.push_flow` | `grants`, `multi-repo`, `auth-v2` | `BeginUpload`, ticketed `UploadPack` and `AdvanceRefs` commit |
+//! | `grants.part_path_ignores_header` | `grants`, `multi-repo`, `auth-v2` | `UploadPart` ignores a malformed grant header |
+//! | `grants.wrong_audience` | `grants`, `multi-repo`, `auth-v2` | audience mismatch denies |
+//! | `grants.repository_out_of_scope` | `grants`, `multi-repo`, `auth-v2` | repository scope denies another repo |
+//! | `grants.namespace_scope_covers_new_repo` | `grants`, `multi-repo`, `auth-v2` | namespace scope permits a new repo |
+//! | `grants.grantee_mismatch` | `grants`, `multi-repo`, `auth-v2` | grantee binding denies |
+//! | `grants.read_only_grant_for_write` | `grants`, `multi-repo`, `auth-v2` | read capability cannot write |
+//! | `grants.expired` | `grants`, `multi-repo`, `auth-v2`, `test-faults` | expiry denies |
+//! | `grants.not_yet_valid` | `grants`, `multi-repo`, `auth-v2`, `test-faults` | creation lead is bounded |
+//! | `grants.epoch_above_stored` | `grants`, `multi-repo`, `auth-v2` | a future epoch denies |
+//! | `grants.epoch_below_stored` | `grants`, `multi-repo`, `auth-v2`, `test-faults` | a revoked epoch denies |
+//! | `grants.new_epoch_grant_works` | `grants`, `multi-repo`, `auth-v2`, `test-faults` | a new epoch grant works |
+//! | `grants.owner_with_bad_grant_denied` | `grants`, `multi-repo`, `auth-v2` | owner cannot bypass a bad grant |
+//! | `grants.header_without_auth_unauthenticated` | `grants`, `multi-repo`, `auth-v2` | missing auth v2 denies |
+//! | `grants.duplicate_header_denied` | `grants`, `multi-repo`, `auth-v2` | duplicate header is malformed |
+//! | `grants.oversize_header_denied` | `grants`, `multi-repo`, `auth-v2` | 8,193-byte header denies |
+//! | `grants.non_ascii_header_denied` | `grants`, `multi-repo`, `auth-v2` | non-ASCII header denies |
+//! | `grants.retry_with_changed_grant_returns_saved_result` | `grants`, `multi-repo`, `auth-v2` | replay precedes grant verification |
 //! | `info.shape_and_policy` | | unauthenticated discovery reports consistent limits, policy and bounded private caching |
 //! | `info.ignores_repository_header` | | absent, nonexistent and malformed repository identities yield identical response bytes |
 //! | `policy.owner_write_allowed` | `namespace-policy`, `multi-repo`, `auth-v2` | an allowlisted namespace owner writes and reads its ref |
@@ -241,6 +260,7 @@ use std::sync::Arc;
 use futures::FutureExt as _;
 use url::Url;
 
+pub use cases::grants::{RP_ID as GRANT_RP_ID, RP_ORIGIN as GRANT_RP_ORIGIN};
 pub use cases::{CASES, Case};
 pub use profile::{Feature, Milestone, Profile, ProfileSpec, QuotaLimits, WireAuth};
 pub use report::{CaseReport, Report, Verdict};

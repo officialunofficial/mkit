@@ -24,7 +24,7 @@ mod begin;
 mod coordinator;
 mod download;
 #[cfg(feature = "test-faults")]
-mod faults;
+pub(crate) mod faults;
 mod gate;
 mod hooks;
 mod info;
@@ -38,6 +38,7 @@ mod shard;
 #[cfg(test)]
 mod tests;
 mod upload;
+mod watermark;
 
 use core::future::Future;
 use core::time::Duration;
@@ -52,7 +53,7 @@ use tracing::Instrument;
 use crate::download::DOWNLOAD_CHUNK_MAX;
 use crate::error::{ADMISSION_CHALLENGE_TYPE, InvalidHeader, ServerError};
 use crate::op::{AuthzFacts, OpKind, Operation, Procedure, RefUpdate};
-use crate::policy::{AuthorizerRole, NamespacePolicy, WritePolicy};
+use crate::policy::{AuthorizerRole, GrantConfig, NamespacePolicy, WritePolicy, grants};
 use crate::quota::{
     self, DEFAULT_WRITE_QUOTA, NamespaceCharge, NamespaceDecision, NamespaceView, QuotaCharge,
     QuotaLimits, QuotaScope, ViewStatus,
@@ -76,7 +77,8 @@ pub use download::{DownloadChunk, DownloadStream};
 #[cfg(feature = "test-faults")]
 pub use faults::{
     BUMP_EPOCH_HEADER, CLOCK_SKEW_HEADER, FAULT_HEADER, FailOnce, FaultHooks, FaultPoint,
-    LEASE_RECOVERED_HEADER, RUN_TIMERS_HEADER, TIMER_MS_HEADER, TestDirectives,
+    LEASE_RECOVERED_HEADER, RELAY_DELAY_MS_HEADER, RUN_TIMERS_HEADER, TIMER_MS_HEADER,
+    TestDirectives,
 };
 pub use hooks::{
     Admission, AdmissionDecision, AdmissionInput, Authorizer, Challenge, DefaultAdmission, HookSet,
@@ -140,6 +142,22 @@ pub enum Sharding {
     D34,
 }
 
+fn require_relay_source_lease(
+    sharding: Sharding,
+    has_lease: bool,
+    batch: &Batch,
+) -> Result<(), ServerError> {
+    if sharding == Sharding::D34
+        && !has_lease
+        && batch.writes.iter().any(|write| {
+            matches!(write, crate::store::Write::Put(key, _) if matches!(keys::parse(key), Some(keys::ParsedKey::Relay(_))))
+        })
+    {
+        return Err(internal("D34 relay batch lacks source epoch lease"));
+    }
+    Ok(())
+}
+
 /// A deployment's pipeline settings. Start from [`PipelineConfig::new`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -150,6 +168,8 @@ pub struct PipelineConfig {
     pub sharding: Sharding,
     /// How requests authenticate.
     pub auth: AuthMode,
+    /// Owner-signed write grant verifier for Multi/Owner deployments.
+    pub grants: Option<GrantConfig>,
     /// Write authorization policy; Open for Single, Owner for Multi.
     pub write_policy: WritePolicy,
     /// Role of the authorizer hook, defaulting to an additional check.
@@ -209,6 +229,7 @@ impl PipelineConfig {
             addressing,
             sharding: Sharding::Single,
             auth,
+            grants: None,
             upload_limits,
             part_size: mkit_core::upload_parts::MIN_PART_SIZE,
             max_parts: 10_000,
@@ -390,6 +411,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// policy combinations must be compatible;
     /// `any` requires non-default admission or its explicit unsafe override,
     /// and an authority authorizer must not be the open default.
+    #[allow(clippy::too_many_lines)] // Startup rejects incompatible storage, auth and grant combinations together.
     pub fn new(
         blobs: B,
         meta: N,
@@ -439,6 +461,25 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         };
         if let Some(message) = policy_refusal {
             return Err(ServerError::invalid_argument(message));
+        }
+        if let Some(grants) = &cfg.grants {
+            let AuthMode::AuthV2(auth) = &cfg.auth else {
+                return Err(ServerError::invalid_argument(
+                    "write grants require auth v2",
+                ));
+            };
+            if !matches!(cfg.addressing, Addressing::Multi(_))
+                || cfg.write_policy != WritePolicy::Owner
+            {
+                return Err(ServerError::invalid_argument(
+                    "write grants require Multi addressing and owner write policy",
+                ));
+            }
+            if grants.audience() != auth.audience() {
+                return Err(ServerError::invalid_argument(
+                    "write grant audience must match auth v2 audience",
+                ));
+            }
         }
         if cfg.authorizer_role == AuthorizerRole::Authority && hooks.authorizer().is_open() {
             return Err(ServerError::invalid_argument(
@@ -583,6 +624,21 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
     fn authenticate_inner(&self, meta: &RequestMeta<'_>) -> Result<Authenticated, ServerError> {
         let signed = matches!(self.cfg.auth, AuthMode::AuthV2(_)) && meta.procedure.is_write();
+        if matches!(self.cfg.addressing, Addressing::Multi(_))
+            && !signed
+            && matches!(
+                meta.procedure,
+                Procedure::UpdateRef
+                    | Procedure::AdvanceRefs
+                    | Procedure::BeginUpload
+                    | Procedure::UploadPack
+            )
+            && (meta.header)("x-write-grant").is_some()
+        {
+            return Err(ServerError::unauthenticated(
+                "write grant requires auth v2 authorization",
+            ));
+        }
         let repo = self
             .cfg
             .addressing
@@ -1084,6 +1140,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             op.creation = self.creation_facts(&op, ahead.as_ref()).await?;
             None
         };
+        if self.cfg.sharding == Sharding::Single {
+            let key = keys::grant_epoch();
+            if let Some(snapshot) = ahead.as_ref().filter(|snapshot| snapshot.contains(&key)) {
+                op.observed_epoch = Some(
+                    snapshot
+                        .get(&key)
+                        .map(codec::decode_u64)
+                        .transpose()
+                        .map_err(meta_error)?
+                        .unwrap_or(0),
+                );
+            }
+        }
         op.authz = self.authorize(&op).await?;
         fault!(self, AfterAuthorize, &op, a);
         let ticketed =
@@ -1255,7 +1324,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         let repo = a.repo().repo.clone();
         let principal = a.principal.clone();
-        Ok(Operation::new(repo, principal, a.auth.clone(), kind))
+        let mut op = Operation::new(repo, principal, a.auth.clone(), kind);
+        op.write_grant.clone_from(&a.write_grant);
+        op.business_now_ms = Some(a.business_now_ms);
+        Ok(op)
     }
 
     /// Multi reads require a repository registered in the namespace coordinator.
@@ -1560,13 +1632,41 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         {
             return Err(ServerError::permission_denied("write not permitted"));
         }
-        let owner = matches!(&namespace, Namespace::Ed25519(key)
-            if op.principal.ed25519() == Some(key));
-        // TODO(WP-2.6): rule 2 (grants).
-        if self.cfg.authorizer_role == AuthorizerRole::Check && !owner {
+        if op.write_grant.is_some()
+            && matches!(namespace, Namespace::Address(_))
+            && !matches!(&multi.namespace_policy, NamespacePolicy::Allowlist(_))
+        {
             return Err(ServerError::permission_denied("write not permitted"));
         }
-        let facts = AuthzFacts { owner, grant: None };
+        let grant = if let Some(header) = &op.write_grant {
+            let cfg = self.cfg.grants.as_ref().ok_or_else(|| {
+                grants::rejected(mkit_attest::grant::GrantError::SchemeNotAdvertised)
+            })?;
+            let verified = cfg.verify(header.expose(), op)?;
+            // Step 8 (ref scope) before step 11, which reads state and comes last.
+            grants::interim_ref_gate(&verified, &op.kind)?;
+            let observed = match self.cfg.sharding {
+                Sharding::Single => op.observed_epoch,
+                Sharding::D34 => op.leased_epoch,
+            };
+            if observed != Some(verified.epoch()) {
+                return Err(plan::epoch_moved());
+            }
+            tracing::debug!(grant_id = %to_hex_bytes(verified.id()), "write grant accepted");
+            Some(crate::op::GrantRef {
+                id: *verified.id(),
+                epoch: verified.epoch(),
+            })
+        } else {
+            None
+        };
+        let owner = grant.is_none()
+            && matches!(&namespace, Namespace::Ed25519(key)
+            if op.principal.ed25519() == Some(key));
+        if self.cfg.authorizer_role == AuthorizerRole::Check && !owner && grant.is_none() {
+            return Err(ServerError::permission_denied("write not permitted"));
+        }
+        let facts = AuthzFacts { grant, owner };
         // Both Authorize and Admit see the established owner/grant facts (§6.2).
         let mut authorized = op.clone();
         authorized.authz = facts.clone();
@@ -1744,6 +1844,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 prune,
                 prune_from,
             } = plan;
+            require_relay_source_lease(self.cfg.sharding, req.lease.is_some(), &batch)?;
+            #[cfg(feature = "test-faults")]
+            let batch = faults::delay_relay_batch(
+                batch,
+                a.test_directives(),
+                op,
+                ms(clock.business_now_ms),
+            );
             if req.kind != WriteKind::UploadReserve {
                 #[cfg(feature = "test-faults")]
                 {
@@ -1756,23 +1864,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             match self.meta.apply(p, batch).await {
                 Ok(BatchOutcome::Committed) => {
                     #[cfg(feature = "test-faults")]
-                    if let OpKind::UpdateRef(upd) = &op.kind
-                        && matches!(
-                            on_commit,
-                            StoredResult::UpdateRef(UpdateRefResult::Committed)
-                        )
-                    {
-                        let timer_partition = self.shards.ref_shard(&op.repo, &upd.name);
-                        faults::schedule_timer(
-                            a.test_directives(),
-                            &self.meta,
-                            &timer_partition,
-                            &op.repo.name,
-                            &upd.name,
-                            ms(clock.business_now_ms),
-                        )
+                    self.schedule_test_ref_timer(op, a, &on_commit, ms(clock.business_now_ms))
                         .await?;
-                    }
                     return Ok(on_commit);
                 }
                 Ok(BatchOutcome::DeadlinePassed { backend_now }) => {
@@ -1812,6 +1905,34 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 Err(e) => return Err(meta_error(e)),
             }
         }
+    }
+
+    #[cfg(feature = "test-faults")]
+    async fn schedule_test_ref_timer(
+        &self,
+        op: &Operation,
+        a: &Authenticated,
+        on_commit: &StoredResult,
+        now_ms: u64,
+    ) -> Result<(), ServerError> {
+        if let OpKind::UpdateRef(upd) = &op.kind
+            && matches!(
+                on_commit,
+                StoredResult::UpdateRef(UpdateRefResult::Committed)
+            )
+        {
+            let timer_partition = self.shards.ref_shard(&op.repo, &upd.name);
+            faults::schedule_timer(
+                a.test_directives(),
+                &self.meta,
+                &timer_partition,
+                &op.repo.name,
+                &upd.name,
+                now_ms,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// The deadline uses the injected clock unshifted; business time adds

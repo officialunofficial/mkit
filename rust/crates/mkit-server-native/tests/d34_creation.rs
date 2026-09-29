@@ -49,6 +49,7 @@ struct Controls {
     race: Mutex<Option<Arc<Barrier>>>,
     race_reads: AtomicUsize,
     fail_refs: AtomicBool,
+    fail_grants: AtomicUsize,
 }
 
 struct TestStore<N> {
@@ -133,6 +134,21 @@ impl<N: NamespaceStore> NamespaceStore for TestStore<N> {
 
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
         self.record(Call::Apply(p.clone()));
+        let writes_lease = batch.writes.iter().any(
+            |write| matches!(write, Write::Put(key, _) if key.as_bytes().starts_with(b"ls\0")),
+        );
+        if writes_lease
+            && self
+                .controls
+                .fail_grants
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+        {
+            return Ok(BatchOutcome::PreconditionFailed {
+                index: 3,
+                observed: None,
+            });
+        }
         let writes_ref = batch
             .writes
             .iter()
@@ -374,6 +390,31 @@ async fn registered<N: NamespaceStore>(
     assert!(repo.created_at_ms > 0);
 }
 
+fn assert_fresh_shard_calls(calls: &[Call], sharding: Sharding) {
+    assert_eq!(
+        calls.len(),
+        if sharding == Sharding::D34 { 5 } else { 3 },
+        "{sharding:?}: {calls:?}"
+    );
+    if sharding == Sharding::D34 {
+        assert!(matches!(
+            calls,
+            [
+                Call::Many(..),
+                Call::Scan(Partition::Ref { .. }),
+                Call::Many(..),
+                Call::Apply(..),
+                Call::Apply(..)
+            ]
+        ));
+    } else {
+        assert!(matches!(
+            calls,
+            [Call::Many(..), Call::Many(..), Call::Apply(..)]
+        ));
+    }
+}
+
 async fn creation_and_cost<N: NamespaceStore>(backend: N, sharding: Sharding) {
     let store = TestStore::new(backend);
     let (pipe, observed) = pipeline(store.clone(), sharding, multi(), false, false);
@@ -385,16 +426,33 @@ async fn creation_and_cost<N: NamespaceStore>(backend: N, sharding: Sharding) {
         UpdateRefResult::Committed
     );
     let calls = store.take_calls();
-    assert_eq!(calls.len(), 4, "{sharding:?}: {calls:?}");
-    assert!(matches!(
-        calls.as_slice(),
-        [
-            Call::Many(..),
-            Call::Many(..),
-            Call::Apply(..),
-            Call::Apply(..)
-        ]
-    ));
+    assert_eq!(
+        calls.len(),
+        if sharding == Sharding::D34 { 5 } else { 4 },
+        "{sharding:?}: {calls:?}"
+    );
+    assert!(if sharding == Sharding::D34 {
+        matches!(
+            calls.as_slice(),
+            [
+                Call::Many(..),
+                Call::Scan(Partition::Ref { .. }),
+                Call::Many(..),
+                Call::Apply(..),
+                Call::Apply(..)
+            ]
+        )
+    } else {
+        matches!(
+            calls.as_slice(),
+            [
+                Call::Many(..),
+                Call::Many(..),
+                Call::Apply(..),
+                Call::Apply(..)
+            ]
+        )
+    });
     registered(&store, sharding, &first).await;
 
     let steady = signed(&pipe, &identity("first"));
@@ -425,30 +483,16 @@ async fn creation_and_cost<N: NamespaceStore>(backend: N, sharding: Sharding) {
         .await
         .unwrap();
     let calls = store.take_calls();
-    let expected_calls = if sharding == Sharding::D34 { 4 } else { 3 };
-    assert_eq!(calls.len(), expected_calls, "{sharding:?}: {calls:?}");
-    if sharding == Sharding::D34 {
-        assert!(matches!(
-            calls.as_slice(),
-            [
-                Call::Many(..),
-                Call::Many(..),
-                Call::Apply(..),
-                Call::Apply(..)
-            ]
-        ));
-    } else {
-        assert!(matches!(
-            calls.as_slice(),
-            [Call::Many(..), Call::Many(..), Call::Apply(..)]
-        ));
-    }
+    assert_fresh_shard_calls(&calls, sharding);
 
     let second = signed(&pipe, &identity("second"));
     pipe.update_ref(&second, update("refs/heads/a", 4))
         .await
         .unwrap();
-    assert_eq!(store.take_calls().len(), 4);
+    assert_eq!(
+        store.take_calls().len(),
+        if sharding == Sharding::D34 { 5 } else { 4 }
+    );
     registered(&store, sharding, &second).await;
     let expected = vec![
         facts(true, true),
@@ -493,6 +537,29 @@ async fn creation_race<N: NamespaceStore>(backend: N, sharding: Sharding) {
             Some([value; 32])
         );
     }
+}
+
+async fn lease_grant_retries_contention<N: NamespaceStore>(backend: N) {
+    let store = TestStore::new(backend);
+    store.controls.fail_grants.store(4, Ordering::SeqCst);
+    let (pipe, _) = pipeline(store.clone(), Sharding::D34, multi(), false, false);
+    let auth = signed(&pipe, &identity("grant-race"));
+    assert_eq!(
+        pipe.update_ref(&auth, update("refs/heads/a", 1))
+            .await
+            .unwrap(),
+        UpdateRefResult::Committed
+    );
+    assert_eq!(store.controls.fail_grants.load(Ordering::SeqCst), 0);
+    let coordinator = coordinator(Sharding::D34, &auth);
+    assert_eq!(
+        store
+            .take_calls()
+            .iter()
+            .filter(|call| matches!(call, Call::Apply(p) if p == &coordinator))
+            .count(),
+        5
+    );
 }
 
 /// Two first writes to different repos of a new namespace: both observe
@@ -540,8 +607,12 @@ async fn no_state_on_rejection<N: NamespaceStore>(backend: N, sharding: Sharding
             Code::PermissionDenied
         );
         let calls = store.take_calls();
-        assert_eq!(calls.len(), 2);
-        assert!(calls.iter().all(|call| matches!(call, Call::Many(..))));
+        assert_eq!(calls.len(), if sharding == Sharding::D34 { 3 } else { 2 });
+        assert!(
+            calls
+                .iter()
+                .all(|call| matches!(call, Call::Many(..) | Call::Scan(..)))
+        );
         let p = coordinator(sharding, &auth);
         for key in [
             keys::namespace_record(),
@@ -647,7 +718,7 @@ async fn single_addressing<N: NamespaceStore>(backend: N, sharding: Sharding) {
         .unwrap();
     assert_eq!(
         store.take_calls().len(),
-        if sharding == Sharding::D34 { 4 } else { 2 }
+        if sharding == Sharding::D34 { 5 } else { 2 }
     );
     assert_eq!(
         *observed.admitted.lock().unwrap(),
@@ -694,6 +765,19 @@ backends!(
     creation_and_cost
 );
 backends!(creation_race_memory, creation_race_sqlite, creation_race);
+
+#[tokio::test]
+async fn lease_grant_retries_contention_memory() {
+    lease_grant_retries_contention(MemoryKv::default()).await;
+}
+
+#[tokio::test]
+async fn lease_grant_retries_contention_sqlite() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = RusqliteConn::open(dir.path().join("meta.sqlite3")).unwrap();
+    lease_grant_retries_contention(Blocking::new(SqlKvStore::open(conn).unwrap())).await;
+}
+
 backends!(
     creation_race_two_repos_memory,
     creation_race_two_repos_sqlite,
