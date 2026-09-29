@@ -160,6 +160,7 @@ ci-scripts:
     fi
     ( cd rust && cargo check -p mkit-wasm --target wasm32-unknown-unknown )
     ( cd rust && cargo check --locked -p mkit-server --target wasm32-unknown-unknown )
+    ( cd rust && cargo check --locked -p mkit-server --features remote-hooks --target wasm32-unknown-unknown )
     ( cd rust && cargo build --locked -p mkit-server-worker --target wasm32-unknown-unknown )
     bash scripts/wasm-ruzstd-check.sh
 
@@ -177,6 +178,7 @@ ci-server:
     ( cd rust && cargo nextest run --locked -p mkit-server -p mkit-server-native \
         -p mkit-server-conformance -p mkit-server-worker --all-features )
     ( cd rust && cargo check --locked -p mkit-server --target wasm32-unknown-unknown \
+        && cargo check --locked -p mkit-server --features remote-hooks --target wasm32-unknown-unknown \
         && cargo build --locked -p mkit-server-worker --target wasm32-unknown-unknown )
     bash scripts/check-cli-baseline.sh
 

@@ -51,6 +51,17 @@ and `wasm32-unknown-unknown`:
   (the `mkit` CLI, which depends on this crate with only `ssh` and `fs`)
   runs it over stdio under a blocking executor, and the native enc
   listener under tokio.
+- the `remote-hooks` feature (off by default): the `hooks` module, the
+  `mkit.server.hooks.v1` adapter (SPEC-SERVER §§6-8). `RemoteAuthorizer`,
+  `RemoteAdmission` and `RemoteOutcomes` implement the stage traits over a
+  transport-agnostic `HookChannel` (the native HTTPS channel and the Workers
+  binding live in the adapter crates). Requests are Ed25519-signed over their
+  exact body (`HookSigner`), only an isolated service binding may go unsigned,
+  and every Authorize or Admit failure answers retryable `unavailable` with no
+  state written. It uses buffa messages with the JSON codec only, so it stays
+  wasm-clean; the generated code is vendored under `generated/hooks/` (refresh
+  it with `scripts/regen-hooks-proto.sh`). A `Sleep` timeout seam, like
+  `Clock`, keeps deadlines runtime-agnostic.
 
 ## Crate map
 

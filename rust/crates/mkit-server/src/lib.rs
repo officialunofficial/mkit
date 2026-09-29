@@ -19,7 +19,8 @@
 //! synchronous `sql::SqlConn`; the `ssh` feature adds the `ssh` module, the
 //! `mkit.rpc.v1.ssh` session over the pipeline. The `connect` feature
 //! (default) adds the `mkit.transport.v1` Connect binding over the pipeline
-//! ([`connect::service`]).
+//! ([`connect::service`]); the `remote-hooks` feature adds the `hooks` module,
+//! the `mkit.server.hooks.v1` adapter over a transport-agnostic channel.
 
 pub mod auth_v2;
 #[cfg(feature = "connect")]
@@ -28,6 +29,8 @@ pub mod download;
 mod error;
 #[cfg(all(feature = "fs", not(target_arch = "wasm32")))]
 pub mod fs;
+#[cfg(feature = "remote-hooks")]
+pub mod hooks;
 pub mod indexed;
 #[cfg(any(test, feature = "memory"))]
 mod memory;
@@ -69,7 +72,10 @@ pub use replay::{
 pub use repo::{Addressing, MultiAddressing, NamespaceKey, RepoId, RepoName, ResolvedRepo};
 #[cfg(not(target_arch = "wasm32"))]
 pub use rt::SystemClock;
-pub use rt::{BoxFuture, BoxStream, Clock, ManualClock, MaybeSend, MaybeSync, Spawner, send_wrap};
+pub use rt::{
+    BoxFuture, BoxStream, Clock, Elapsed, ManualClock, ManualSleep, MaybeSend, MaybeSync, Sleep,
+    Spawner, send_wrap, with_timeout,
+};
 pub use store::{
     Batch, BatchOutcome, BlobBody, BlobKey, BlobMeta, BlobNamespace, BlobStore, BoxError,
     ByteRange, CommitOutcome, ContentIndex, Cursor, Key, KeyClasses, MAX_BATCH_BYTES,
