@@ -162,7 +162,12 @@ async fn sqlite_driver_fires_ticket_expiry() {
     let shutdown = Shutdown::new();
     let task = TimerDriver::new(
         store.clone(),
-        server::sqlite_timer_registry(MemoryBlobStore::default(), store.clone(), String::new()),
+        server::sqlite_timer_registry(
+            MemoryBlobStore::default(),
+            store.clone(),
+            String::new(),
+            mkit_server::pipeline::NoOutcomes,
+        ),
         Arc::new(SystemClock),
     )
     .start(shutdown.clone())
@@ -247,7 +252,12 @@ async fn sqlite_driver_fires_ticket_expiry_on_a_namespaced_partition() {
     let shutdown = Shutdown::new();
     let task = TimerDriver::new(
         store.clone(),
-        server::sqlite_timer_registry(MemoryBlobStore::default(), store.clone(), String::new()),
+        server::sqlite_timer_registry(
+            MemoryBlobStore::default(),
+            store.clone(),
+            String::new(),
+            mkit_server::pipeline::NoOutcomes,
+        ),
         Arc::new(SystemClock),
     )
     .start(shutdown.clone())
@@ -711,6 +721,7 @@ async fn sqlite_driver_delivers_outcomes_and_reconciles_pending_rows() {
             MemoryBlobStore::default(),
             store.clone(),
             "https://server.example".into(),
+            mkit_server::pipeline::NoOutcomes,
         ),
         Arc::new(SystemClock),
     )
@@ -739,4 +750,145 @@ async fn sqlite_driver_delivers_outcomes_and_reconciles_pending_rows() {
     .unwrap();
     shutdown.trigger();
     task.await.unwrap();
+}
+
+/// A sink for the drain tests: records every outcome, or never answers.
+#[derive(Clone, Default)]
+struct Sink {
+    seen: Arc<std::sync::Mutex<Vec<String>>>,
+    hang: bool,
+}
+impl mkit_server::pipeline::OutcomeSink for Sink {
+    async fn deliver(
+        &self,
+        outcome: &mkit_server::pipeline::Outcome,
+    ) -> Result<(), mkit_server::pipeline::DeliveryError> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(outcome.reservation_id.clone());
+        if self.hang {
+            std::future::pending::<()>().await;
+        }
+        Ok(())
+    }
+}
+
+async fn seed_outcomes(store: &TimerStore, rids: &[&str]) {
+    use mkit_server::store::codec::{AbortReason, ReservationV1};
+    use mkit_server::store::outbox::{OutboxBuilder, Terminal};
+    let p = Partition::Namespace(NamespaceKey::deployment_default());
+    let mut builder = OutboxBuilder::new(None, None).unwrap();
+    for rid in rids {
+        builder.abort_direct(
+            rid,
+            Terminal::new(ReservationV1::Aborted {
+                repository: "repo".into(),
+                occurred_at_ms: now(),
+                reason: AbortReason::Unspecified,
+                detail: String::new(),
+            })
+            .unwrap(),
+        );
+    }
+    let mut batch = Batch::new();
+    builder
+        .try_finish(&mut batch.preconditions, &mut batch.writes)
+        .unwrap();
+    store.apply(&p, batch).await.unwrap();
+}
+
+fn sink_driver(store: &TimerStore, sink: Sink) -> TimerDriver {
+    TimerDriver::new(
+        store.clone(),
+        server::sqlite_timer_registry(
+            MemoryBlobStore::default(),
+            store.clone(),
+            String::new(),
+            sink,
+        ),
+        Arc::new(SystemClock),
+    )
+}
+
+/// Outcomes due when the driver is told to stop are delivered before it
+/// exits: the driver's stop switch is already on, so the loop never runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_drain_delivers_due_outcomes_before_exit() {
+    let root = tempfile::tempdir().unwrap();
+    let store = open(&root.path().join("drain.sqlite3"));
+    seed_outcomes(&store, &["one", "two"]).await;
+    let sink = Sink::default();
+    let stop = Shutdown::new();
+    stop.trigger();
+    sink_driver(&store, sink.clone())
+        .start_with_drain(stop, Duration::from_secs(5))
+        .await
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(sink.seen.lock().unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_a_drain_due_outcomes_are_left_for_the_next_start() {
+    let root = tempfile::tempdir().unwrap();
+    let store = open(&root.path().join("nodrain.sqlite3"));
+    seed_outcomes(&store, &["one"]).await;
+    let sink = Sink::default();
+    let stop = Shutdown::new();
+    stop.trigger();
+    sink_driver(&store, sink.clone())
+        .start_with_drain(stop, Duration::ZERO)
+        .await
+        .unwrap()
+        .await
+        .unwrap();
+    assert!(sink.seen.lock().unwrap().is_empty());
+}
+
+/// A sink that never answers cannot hold shutdown past the drain deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_drain_deadline_is_respected_when_the_sink_hangs() {
+    let root = tempfile::tempdir().unwrap();
+    let store = open(&root.path().join("hang.sqlite3"));
+    seed_outcomes(&store, &["one"]).await;
+    let sink = Sink {
+        hang: true,
+        ..Sink::default()
+    };
+    let stop = Shutdown::new();
+    stop.trigger();
+    let started = std::time::Instant::now();
+    sink_driver(&store, sink.clone())
+        .start_with_drain(stop, Duration::from_millis(300))
+        .await
+        .unwrap()
+        .await
+        .unwrap();
+    // Cut by the drain deadline, well before the 5 s per-call sink timeout.
+    assert!(started.elapsed() < Duration::from_secs(4));
+    assert_eq!(sink.seen.lock().unwrap().len(), 1);
+}
+
+/// A real sink needs the timer driver, which fs-layout metadata lacks.
+#[test]
+fn a_real_sink_with_fs_layout_is_a_config_error() {
+    let root = common::repo_root();
+    let cfg = common::resolve_with(
+        &[
+            "--listen",
+            "127.0.0.1:0",
+            "--repo-root",
+            common::s(root.path()),
+            "--unsafe-allow-any-peer",
+        ],
+        &[],
+    )
+    .unwrap();
+    let err = server::open_with_sink(&cfg, Sink::default()).unwrap_err();
+    assert_eq!(err.code, mkit_server_native::exit::CONFIG_ERROR);
+    assert!(err.message.contains("fs-layout"), "{}", err.message);
+    // The local sink still opens.
+    drop(server::open(&cfg).unwrap());
 }

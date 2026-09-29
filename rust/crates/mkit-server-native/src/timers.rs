@@ -10,8 +10,8 @@ use mkit_server::timers::{
     RETRY_BACKOFF_MS, TickBudget, TimerRegistry, earliest_timer_put, run_due,
 };
 use mkit_server::{
-    Batch, BatchOutcome, Clock, Cursor, Key, NamespaceStore, Partition, PartitionStats, ScanPage,
-    StoreCapabilities, StoreError, Value,
+    Batch, BatchOutcome, BoxFuture, Clock, Cursor, Key, NamespaceStore, Partition, PartitionStats,
+    ScanPage, Sleep, StoreCapabilities, StoreError, Value,
 };
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -182,60 +182,89 @@ impl TimerDriver {
     /// # Errors
     /// A failed startup query, including a corrupt partition or timer key.
     pub async fn start(self, shutdown: Shutdown) -> Result<JoinHandle<()>, StoreError> {
+        self.start_with_drain(shutdown, Duration::ZERO).await
+    }
+
+    /// [`Self::start`], but after `stop` triggers the driver first runs every
+    /// partition due at or before now (repeatedly, until nothing is due) for
+    /// at most `drain` before it exits; zero skips the drain. `stop` is
+    /// separate from the listeners' switch so that work committed while they
+    /// drain is still delivered.
+    ///
+    /// # Errors
+    /// As [`Self::start`].
+    pub async fn start_with_drain(
+        self,
+        stop: Shutdown,
+        drain: Duration,
+    ) -> Result<JoinHandle<()>, StoreError> {
         let store = Arc::clone(self.store.inner());
         let heads = crate::blocking::on_pool(move || store.inner().timer_heads()).await?;
         let directory = &self.store.inner().directory;
         for (partition, due) in heads {
             directory.lower(&partition, due);
         }
-        Ok(tokio::spawn(self.drive(shutdown)))
+        Ok(tokio::spawn(self.drive(stop, drain)))
     }
 
     fn now(&self) -> u64 {
         u64::try_from(self.clock.now_ms()).unwrap_or(0)
     }
 
-    async fn drive(self, shutdown: Shutdown) {
+    /// Run every head due now. `Idle` when none was; `Stopped` when `stop`
+    /// triggered before every claimed head ran (a restart rebuilds them from
+    /// `SQLite`).
+    async fn run_due_heads(&self, stop: Option<&Shutdown>) -> Pass {
+        let directory = &self.store.inner().directory;
+        let now = self.now();
+        let partitions = directory
+            .heads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take_due(now);
+        if partitions.is_empty() {
+            return Pass::Idle;
+        }
+        // Claim every head due at this wake before running any tick.
+        // Immediate puts cannot take a second turn before the other heads.
+        for partition in partitions {
+            if stop.is_some_and(Shutdown::is_triggered) {
+                return Pass::Stopped;
+            }
+            // Concurrent puts create fresh entries; reports only lower them.
+            let next = match run_due(
+                &self.store,
+                &partition,
+                &self.registry,
+                self.clock.as_ref(),
+                now,
+                &TickBudget::default(),
+            )
+            .await
+            {
+                Ok(report) => report.next_wake_ms,
+                Err(error) => {
+                    tracing::warn!(%error, ?partition, "timer tick failed");
+                    Some(self.now().saturating_add(RETRY_BACKOFF_MS))
+                }
+            };
+            if let Some(due) = next {
+                directory.lower(&partition, due);
+            }
+        }
+        Pass::Ran
+    }
+
+    async fn drive(self, stop: Shutdown, drain: Duration) {
         let directory = &self.store.inner().directory;
         loop {
-            if shutdown.is_triggered() {
-                return;
+            if stop.is_triggered() {
+                break;
             }
-            let now = self.now();
-            let partitions = directory
-                .heads
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .take_due(now);
-            if !partitions.is_empty() {
-                // Claim every head due at this wake before running any tick.
-                // Immediate puts cannot take a second turn before the other heads.
-                for partition in partitions {
-                    if shutdown.is_triggered() {
-                        return;
-                    }
-                    // Concurrent puts create fresh entries; reports only lower them.
-                    let next = match run_due(
-                        &self.store,
-                        &partition,
-                        &self.registry,
-                        self.clock.as_ref(),
-                        now,
-                        &TickBudget::default(),
-                    )
-                    .await
-                    {
-                        Ok(report) => report.next_wake_ms,
-                        Err(error) => {
-                            tracing::warn!(%error, ?partition, "timer tick failed");
-                            Some(self.now().saturating_add(RETRY_BACKOFF_MS))
-                        }
-                    };
-                    if let Some(due) = next {
-                        directory.lower(&partition, due);
-                    }
-                }
-                continue;
+            match self.run_due_heads(Some(&stop)).await {
+                Pass::Ran => continue,
+                Pass::Stopped => break,
+                Pass::Idle => {}
             }
             let earliest = directory
                 .heads
@@ -246,10 +275,40 @@ impl TimerDriver {
                 .map(|(due, _)| *due);
             let delay = earliest.map_or(60_000, |due| due.saturating_sub(self.now()).min(60_000));
             tokio::select! {
-                () = shutdown.wait() => return,
+                () = stop.wait() => break,
                 () = directory.changed.notified() => {},
                 () = tokio::time::sleep(Duration::from_millis(delay)) => {},
             }
         }
+        if drain.is_zero() {
+            return;
+        }
+        let drained = tokio::time::timeout(drain, async {
+            while self.run_due_heads(None).await != Pass::Idle {}
+        })
+        .await;
+        if drained.is_err() {
+            tracing::warn!(
+                ?drain,
+                "shutdown drain deadline reached with timers still due"
+            );
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    Idle,
+    Ran,
+    Stopped,
+}
+
+/// The native [`Sleep`]: `tokio::time::sleep`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TokioSleep;
+
+impl Sleep for TokioSleep {
+    fn sleep(&self, duration: Duration) -> BoxFuture<'static, ()> {
+        Box::pin(tokio::time::sleep(duration))
     }
 }

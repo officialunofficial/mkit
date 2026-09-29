@@ -16,6 +16,8 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
+use mkit_server::pipeline::ADMISSION_EXPOSE_HEADERS;
+
 use crate::router::{CorsPolicy, RouterOptions};
 
 /// Framing slack over the pack cap for an `UploadPack` body: Connect
@@ -47,6 +49,14 @@ pub fn deadline_policy(timeout: Duration, streaming: bool) -> DeadlinePolicy {
         .with_enforce_on_streams(streaming)
 }
 
+/// Payment request headers a browser may send, besides `auth_v2`'s list
+/// (SPEC-TRANSPORT-CONNECT §5.1).
+const PAYMENT_ALLOW_HEADERS: [&str; 3] = [
+    "payment-authorization",
+    "payment-signature",
+    "accept-payment",
+];
+
 /// The CORS layer `opts` asks for, if any. A preflight is answered by the
 /// layer itself, so it never meets the auth interceptor.
 fn cors(opts: &RouterOptions) -> Option<CorsLayer> {
@@ -59,15 +69,23 @@ fn cors(opts: &RouterOptions) -> Option<CorsLayer> {
         .split(',')
         .map(str::trim)
         .chain(["authorization"])
+        .chain(PAYMENT_ALLOW_HEADERS)
         .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
         .chain(opts.cors_extra_allow_headers.iter().cloned())
+        .collect::<Vec<_>>();
+    // The admission challenge and receipt headers are always readable
+    // cross-origin; the deployment's own list only adds to them.
+    let expose = ADMISSION_EXPOSE_HEADERS
+        .iter()
+        .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
+        .chain(opts.cors_expose_headers.iter().cloned())
         .collect::<Vec<_>>();
     Some(
         CorsLayer::new()
             .allow_origin(origins)
             .allow_methods([Method::POST, Method::GET, Method::OPTIONS])
             .allow_headers(allow)
-            .expose_headers(opts.cors_expose_headers.clone())
+            .expose_headers(expose)
             .max_age(CORS_MAX_AGE),
     )
 }
