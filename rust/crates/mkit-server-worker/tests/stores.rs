@@ -81,8 +81,8 @@ fn r2_object_keys_are_sibling_namespaces_verified_against_a_root() {
             let (store, content) = (&store, &content);
             async move {
                 let mut sink = store.begin(object, len).await?;
-                sink.write(Bytes::copy_from_slice(&content[..len as usize]))
-                    .await?;
+                let len = usize::try_from(len).unwrap();
+                sink.write(Bytes::copy_from_slice(&content[..len])).await?;
                 sink.commit_with_root(root).await
             }
         };

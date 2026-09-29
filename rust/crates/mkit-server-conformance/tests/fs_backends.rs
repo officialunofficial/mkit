@@ -285,6 +285,19 @@ impl MultipartBlobStore for TempBlobs {
         self.store.complete(key, session, plan, parts).await
     }
 
+    async fn complete_with_root(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        parts: &[PartRef],
+        content_root: mkit_core::hash::Hash,
+    ) -> Result<CommitOutcome, StoreError> {
+        self.store
+            .complete_with_root(key, session, plan, parts, content_root)
+            .await
+    }
+
     async fn abort(&self, key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
         self.store.abort(key, session).await
     }

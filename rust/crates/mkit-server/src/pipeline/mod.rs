@@ -491,6 +491,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 || indexed.max_pack_bytes == 0
                 || indexed.max_pack_bytes > indexed.decode_budget
                 || indexed.relay_lag_bound_ms == 0
+                || indexed.extract_min_bytes == 0
+                || indexed.max_extract_bytes == 0
             {
                 return Err(ServerError::invalid_argument("invalid indexed limits"));
             }
@@ -1365,6 +1367,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     &op.repo,
                     &p,
                     &rows,
+                    tickets,
                     tip,
                     indexed,
                     self.clock.as_ref(),

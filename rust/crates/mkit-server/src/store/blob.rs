@@ -34,10 +34,10 @@ pub enum BlobNamespace {
     Pack,
     /// Proof that a ticket holder streamed and verified a pack.
     UploadMarker,
-    /// The reassembled content of a Blob or ChunkedBlob, keyed by its object
+    /// The reassembled content of a Blob or `ChunkedBlob`, keyed by its object
     /// id and shared by the whole deployment (SPEC-SERVER §9.6).
     Object,
-    /// The chunk-offset sidecar of an extracted ChunkedBlob, keyed by the
+    /// The chunk-offset sidecar of an extracted `ChunkedBlob`, keyed by the
     /// manifest's object id.
     ObjectOffsets,
 }
@@ -70,7 +70,7 @@ impl BlobKey {
         }
     }
 
-    /// Construct an offsets sidecar key for the ChunkedBlob `manifest_id`.
+    /// Construct an offsets sidecar key for the `ChunkedBlob` `manifest_id`.
     #[must_use]
     pub const fn object_offsets(manifest_id: Hash) -> Self {
         Self {
@@ -394,6 +394,27 @@ pub trait MultipartBlobStore: BlobStore {
         _parts: &[PartRef],
     ) -> impl Future<Output = Result<CommitOutcome, StoreError>> + MaybeSend {
         async { Err(StoreError::Unsupported("multipart uploads".into())) }
+    }
+
+    /// Atomically make a verified **object** visible: the parts' merged BLAKE3
+    /// root must equal `content_root` (the object key is an object id, not a
+    /// content hash). Plain [`Self::complete`] refuses object keys, as
+    /// [`PackSink::commit`] does. WP-4.10.
+    fn complete_with_root(
+        &self,
+        _key: BlobKey,
+        _session: &[u8],
+        _plan: &PartPlan,
+        _parts: &[PartRef],
+        _content_root: Hash,
+    ) -> impl Future<Output = Result<CommitOutcome, StoreError>> + MaybeSend {
+        async { Err(StoreError::Unsupported("multipart uploads".into())) }
+    }
+
+    /// The most bytes one [`BlobStore::begin`] upload can carry, or `None`
+    /// when unbounded. Objects longer than this are extracted in parts.
+    fn single_put_limit(&self) -> Option<u64> {
+        None
     }
 
     /// Reclaim an incomplete session. Repeated aborts succeed.

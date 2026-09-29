@@ -405,6 +405,27 @@ where
             .await
     }
 
+    async fn complete_with_root(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        parts: &[PartRef],
+        content_root: Hash,
+    ) -> Result<CommitOutcome, StoreError> {
+        let session = session.to_vec();
+        let plan = *plan;
+        let parts = parts.to_vec();
+        self.run(move |s| {
+            block_on(s.complete_with_root(key, &session, &plan, &parts, content_root))
+        })
+        .await
+    }
+
+    fn single_put_limit(&self) -> Option<u64> {
+        self.inner.single_put_limit()
+    }
+
     async fn abort(&self, key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
         let session = session.to_vec();
         self.run(move |s| block_on(s.abort(key, &session))).await

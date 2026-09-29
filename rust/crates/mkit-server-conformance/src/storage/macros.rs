@@ -105,6 +105,7 @@ macro_rules! __with_multipart_cases {
                 multipart_abort_then_session_gone,
                 multipart_chunked_writes,
                 multipart_crash_leftovers_invisible,
+                multipart_object_completes_only_against_its_root,
             }
         }
     };

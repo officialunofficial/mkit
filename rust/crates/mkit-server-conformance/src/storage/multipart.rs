@@ -209,6 +209,52 @@ pub async fn multipart_replace_verified_part<H: MultipartHarness>(h: H) -> Outco
     Ok(Pass)
 }
 
+/// An object key (an object id, not a content hash) completes only through
+/// `complete_with_root`: plain `complete` and a wrong root leave nothing
+/// visible, and the right root publishes the parts' bytes (WP-4.10).
+pub async fn multipart_object_completes_only_against_its_root<H: MultipartHarness>(
+    h: H,
+) -> Outcome {
+    let s = h.store();
+    let mut f = Fixture::new();
+    let root = *f.key.hash();
+    f.key = BlobKey::object(hash(b"an object id, not the content hash"));
+    let id = session(&s, &f).await?;
+    let parts = upload_all(&s, &f, &id).await?;
+    ensure_err!(
+        s.complete(f.key, &id, &f.plan, &parts).await,
+        StoreError::Invalid(_)
+    );
+    let wrong = hash(b"wrong root");
+    ensure_err!(
+        s.complete_with_root(f.key, &id, &f.plan, &parts, wrong)
+            .await,
+        StoreError::Invalid(_)
+    );
+    absent(&s, &f.key).await?;
+    ensure_eq!(
+        ok!(s
+            .complete_with_root(f.key, &id, &f.plan, &parts, root)
+            .await),
+        CommitOutcome::Created
+    );
+    ensure_eq!(
+        ok!(s.head(&f.key).await).map(|meta| meta.len),
+        Some(f.plan.total())
+    );
+    // A pack key refuses a content root, so no caller can bypass the key.
+    let pack = Fixture::new();
+    let id = session(&s, &pack).await?;
+    let parts = upload_all(&s, &pack, &id).await?;
+    ensure_err!(
+        s.complete_with_root(pack.key, &id, &pack.plan, &parts, root)
+            .await,
+        StoreError::Invalid(_)
+    );
+    absent(&s, &pack.key).await?;
+    Ok(Pass)
+}
+
 /// A failed CV check leaves the old verified part available.
 pub async fn multipart_cv_mismatch_keeps_old<H: MultipartHarness>(h: H) -> Outcome {
     let s = h.store();

@@ -29,6 +29,7 @@ pub use blob::{
     BlobBody, BlobKey, BlobMeta, BlobNamespace, BlobStore, ByteRange, CommitOutcome,
     MAX_BLOB_PIECE_BYTES, MultipartBlobStore, PackSink, PartRef, PartSink, UnsupportedPartSink,
 };
+pub(crate) use content_index::BorrowedStore;
 pub use content_index::{
     BlockEntry, CONTENT_APPLY_WINDOW_MS, ContentIndex, GcPlan, HoldOutcome, Holder, HolderOutcome,
     HolderPage, HolderRecord, INDEX_FANOUT, MAX_BLOCK_REASON_BYTES, MAX_HOLD_TTL_MS, ObjectState,

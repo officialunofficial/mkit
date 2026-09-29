@@ -285,6 +285,39 @@ fn bumped(mut state: ObjectState, now_ms: u64) -> ObjectState {
     state
 }
 
+/// A store borrowed for one call, without cloning a Worker adapter or
+/// changing its partition routing: the relay's target, and the store a
+/// [`ContentIndex`] runs over during extraction.
+pub(crate) struct BorrowedStore<'a, S>(pub(crate) &'a S);
+
+impl<S: NamespaceStore> NamespaceStore for BorrowedStore<'_, S> {
+    fn capabilities(&self) -> super::kv::StoreCapabilities {
+        self.0.capabilities()
+    }
+    async fn get(&self, p: &Partition, k: &Key) -> Result<Option<Value>, StoreError> {
+        self.0.get(p, k).await
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&Cursor>,
+        limit: u32,
+    ) -> Result<super::kv::ScanPage, StoreError> {
+        self.0.scan(p, start, end, after, limit).await
+    }
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        self.0.apply(p, batch).await
+    }
+    async fn stats(&self, p: &Partition) -> Result<super::kv::PartitionStats, StoreError> {
+        self.0.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.0.probe().await
+    }
+}
+
 /// The `ContentIndex` layer over a store's content shards. The store must
 /// accept every key class and atomic multi-key batches; otherwise every
 /// mutation fails with [`StoreError::Unsupported`].

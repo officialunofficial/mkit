@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use bytes::Bytes;
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
-use mkit_core::hash::to_hex_bytes;
+use mkit_core::hash::{Hash, to_hex_bytes};
 use mkit_core::upload_parts::{PartHasher, PartPlan, merge_to_root};
 use mkit_server::storage_error::StorageOp;
 use mkit_server::{BlobKey, BlobStore, CommitOutcome, MultipartBlobStore, PartRef, StoreError};
@@ -644,6 +644,42 @@ impl MultipartBlobStore for S3BlobStore {
         plan: &PartPlan,
         parts: &[PartRef],
     ) -> Result<CommitOutcome, StoreError> {
+        self.complete_with(key, session, plan, parts, None).await
+    }
+
+    async fn complete_with_root(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        parts: &[PartRef],
+        content_root: Hash,
+    ) -> Result<CommitOutcome, StoreError> {
+        self.complete_with(key, session, plan, parts, Some(content_root))
+            .await
+    }
+
+    fn single_put_limit(&self) -> Option<u64> {
+        Some(self.max_bytes)
+    }
+
+    async fn abort(&self, key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
+        self.abort_session(key, session).await
+    }
+}
+
+impl S3BlobStore {
+    /// Complete a multipart upload against the key's hash (`None`) or an
+    /// object's content root.
+    async fn complete_with(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        parts: &[PartRef],
+        root: Option<Hash>,
+    ) -> Result<CommitOutcome, StoreError> {
+        let expected = key.expected_root(root)?;
         if self.head(&key).await?.is_some() {
             return Ok(CommitOutcome::AlreadyPresent);
         }
@@ -672,7 +708,7 @@ impl MultipartBlobStore for S3BlobStore {
             );
         }
         if merge_to_root(plan, &cvs).map_err(|e| StoreError::Invalid(e.to_string().into()))?
-            != *key.hash()
+            != expected
         {
             return Err(StoreError::Invalid("merged part root mismatch".into()));
         }
@@ -740,7 +776,7 @@ impl MultipartBlobStore for S3BlobStore {
         Ok(outcome)
     }
 
-    async fn abort(&self, _key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
+    async fn abort_session(&self, _key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
         let prefix = self.session_prefix(session)?;
         self.delete_path(&format!("{prefix}meta")).await?;
         let paths = self.list_prefix(&prefix).await?;
