@@ -1418,3 +1418,147 @@ fn d34_ref_hint_obeys_pending_and_held_views_before_membership_relay() {
         .unwrap();
     }
 }
+
+struct UnavailablePublicationPolicy;
+impl clearance::PublicationPolicy for UnavailablePublicationPolicy {
+    fn prepare<'a>(
+        &'a self,
+        _: &'a Operation,
+        _: &'a crate::store::publication::Pair,
+    ) -> crate::BoxFuture<'a, Result<crate::store::publication::Advance, ServerError>> {
+        Box::pin(async { Err(ServerError::unavailable("inspection unavailable")) })
+    }
+    fn pack_available(&self, _: &RepoId, _: &Hash) -> bool {
+        false
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Exercise each deletion surface with retained obligations on both layouts.
+fn deletions_publish_without_waiting_for_inspection_or_closure() {
+    use crate::store::publication::{Advance, Clearance, Obligation, Pair, Publication};
+    for sharding in [Sharding::Single, Sharding::D34] {
+        for deleted_ref in [HEAD, PACKMAP, "refs/tags/t", "pair"] {
+            let (mut env, owner, identity) = environment_with_sharding(sharding);
+            let paired = deleted_ref == "pair";
+            let name = if paired { HEAD } else { deleted_ref };
+            let procedure = if paired {
+                Procedure::AdvanceRefs
+            } else {
+                Procedure::UpdateRef
+            };
+            let auth = env
+                .auth(&signed(&owner, &identity, procedure, 9800))
+                .unwrap();
+            let repo = &auth.repo().repo;
+            let source = env.pipe.shards.ref_shard(repo, name);
+            let sequence_name = crate::store::publication::sequence_ref(name);
+            let pair = Pair {
+                head: Some(A),
+                packmap: (name != "refs/tags/t").then_some(B),
+            };
+            let retained = Advance {
+                sequence: 1,
+                generation: 0,
+                value: pair.clone(),
+                additions: vec![],
+                dependencies: vec![],
+                external_bases: vec![],
+                obligations: vec![Obligation {
+                    id: [1; 32],
+                    state: Clearance::Held,
+                }],
+                state: Clearance::Held,
+                operation: [2; 32],
+            };
+            let retained_raw = retained.encode().unwrap();
+            let state = Publication {
+                sequence: 1,
+                ..Publication::default()
+            };
+            let mut batch = Batch::new()
+                .put(
+                    keys::publication(&repo.name, &sequence_name),
+                    state.encode().unwrap(),
+                )
+                .put(
+                    keys::advance(&repo.name, &sequence_name, 1),
+                    retained_raw.clone(),
+                );
+            for (reference, target) in crate::store::publication::value_refs(&sequence_name, &pair)
+            {
+                batch = batch.put(
+                    keys::ref_key(&repo.name, &reference),
+                    codec::encode_ref_id(&target.unwrap()),
+                );
+            }
+            block_on(env.pipe.meta.inner.apply(&source, batch)).unwrap();
+            env.pipe = env
+                .pipe
+                .with_publication_policy(Arc::new(UnavailablePublicationPolicy))
+                .unwrap();
+            let remove = |name: &str, target| RefUpdate {
+                name: name.into(),
+                new: None,
+                condition: Match(target),
+            };
+            if paired {
+                assert_eq!(
+                    block_on(
+                        env.pipe
+                            .advance_refs(&auth, remove(HEAD, A), remove(PACKMAP, B))
+                    )
+                    .unwrap(),
+                    AdvanceOutcome::Committed
+                );
+            } else {
+                let target = if name == PACKMAP { B } else { A };
+                assert_eq!(
+                    block_on(env.pipe.update_ref(&auth, remove(name, target))).unwrap(),
+                    UpdateRefResult::Committed
+                );
+            }
+            let state = block_on(crate::store::publication::read(
+                &env.pipe.meta.inner,
+                &source,
+                &repo.name,
+                &sequence_name,
+            ))
+            .unwrap();
+            assert_eq!((state.sequence, state.published, state.boundary), (2, 2, 2));
+            if paired {
+                assert_eq!(state.value, Pair::default());
+                assert_eq!(
+                    block_on(
+                        env.pipe
+                            .meta
+                            .inner
+                            .get(&source, &keys::published_ref(&repo.name, PACKMAP))
+                    )
+                    .unwrap(),
+                    None
+                );
+            }
+            assert_eq!(
+                block_on(
+                    env.pipe
+                        .meta
+                        .inner
+                        .get(&source, &keys::published_ref(&repo.name, name))
+                )
+                .unwrap(),
+                None
+            );
+            assert_eq!(
+                block_on(
+                    env.pipe
+                        .meta
+                        .inner
+                        .get(&source, &keys::advance(&repo.name, &sequence_name, 1))
+                )
+                .unwrap(),
+                Some(retained_raw)
+            );
+        }
+    }
+}

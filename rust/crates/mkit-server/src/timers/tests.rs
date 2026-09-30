@@ -90,8 +90,8 @@ async fn test_timer_d34_deletes_ref_and_enqueues_index_delete_without_lease() {
     assert_eq!(
         row.deletes,
         vec![
-            keys::ref_index_key(&repo.name, name),
-            keys::published_index(&repo.name, name)
+            keys::published_index(&repo.name, name),
+            keys::ref_index_key(&repo.name, name)
         ]
     );
 }

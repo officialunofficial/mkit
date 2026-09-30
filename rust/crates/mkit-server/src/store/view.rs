@@ -131,7 +131,9 @@ impl<S: NamespaceStore> NamespaceStore for ViewStore<'_, S> {
             limit,
         }];
         let mut pages = self.scan_many(p, &ranges).await?;
-        Ok(pages.remove(0))
+        pages
+            .pop()
+            .ok_or_else(|| StoreError::Corrupt("short view scan".into()))
     }
     async fn scan_many(
         &self,

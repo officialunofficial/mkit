@@ -3269,8 +3269,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         implicit_ids: Option<&[Hash]>,
         external_bases: &std::collections::BTreeSet<Hash>,
     ) -> Result<Option<crate::store::publication::Advance>, ServerError> {
+        // Deletions establish an immediate boundary without consulting inspection
+        // or verifying the surviving pair; older membership obligations remain retained.
         if let Some(policy) = &self.publication_policy
             && !req.refs.is_empty()
+            && req.refs.iter().all(|update| update.new.is_some())
         {
             let snapshot = ahead.get_or_insert_with(Snapshot::default);
             self.fill(p, snapshot, req.read_keys()).await?;

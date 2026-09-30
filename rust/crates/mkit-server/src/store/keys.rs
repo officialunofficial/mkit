@@ -1316,6 +1316,73 @@ mod tests {
     }
 
     #[test]
+    fn publication_key_goldens_and_strict_parsing() {
+        let repository = repo("a");
+        let name = "refs/heads/main";
+        let cases = [
+            (
+                publication(&repository, name),
+                b"pp\0a\0refs/heads/main".to_vec(),
+                ParsedKey::Publication {
+                    repo: repository.clone(),
+                    name: name.into(),
+                },
+            ),
+            (
+                advance(&repository, name, 0x0102_0304_0506_0708),
+                [
+                    b"av\0a\0refs/heads/main\0".as_slice(),
+                    &[1, 2, 3, 4, 5, 6, 7, 8],
+                ]
+                .concat(),
+                ParsedKey::Advance {
+                    repo: repository.clone(),
+                    name: name.into(),
+                    sequence: 0x0102_0304_0506_0708,
+                },
+            ),
+            (
+                published_ref(&repository, name),
+                b"pr\0a\0refs/heads/main".to_vec(),
+                ParsedKey::PublishedRef {
+                    repo: repository.clone(),
+                    name: name.into(),
+                },
+            ),
+            (
+                published_index(&repository, name),
+                b"py\0a\0refs/heads/main".to_vec(),
+                ParsedKey::PublishedIndex {
+                    repo: repository.clone(),
+                    name: name.into(),
+                },
+            ),
+            (
+                published_member(&repository, &[0x11; 32]),
+                [b"pm\0a\0".as_slice(), &[0x11; 32]].concat(),
+                ParsedKey::PublishedMember {
+                    repo: repository.clone(),
+                    pack_id: [0x11; 32],
+                },
+            ),
+        ];
+        for (key, golden, parsed) in cases {
+            assert_eq!(key.as_bytes(), golden);
+            assert_eq!(parse(&key), Some(parsed));
+        }
+        for bad in [
+            advance(&repository, name, 0).into_bytes().to_vec(),
+            [b"av\0a\0refs/heads/main\0".as_slice(), &[1; 7]].concat(),
+            [b"av\0a\0refs/heads/main\0".as_slice(), &[1; 9]].concat(),
+            b"pr\0a\0not-a-ref".to_vec(),
+            [b"pm\0a\0".as_slice(), &[1; 31]].concat(),
+            [b"pm\0a\0".as_slice(), &[1; 33]].concat(),
+        ] {
+            assert_eq!(parse(&Key::new(bad)), None);
+        }
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)] // One golden per key family, merged from two WPs.
     fn layouts_golden_bytes() {
         let s = [0x11; 32];

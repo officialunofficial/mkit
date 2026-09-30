@@ -13,6 +13,10 @@ impl PublishedSource for Source {
     fn inspection_configured(&self) -> bool {
         self.inspection.load(Ordering::SeqCst)
     }
+    fn uses_published_values(&self) -> bool {
+        // Switching inspection on simulates a source that still supplies live inputs.
+        !self.inspection.load(Ordering::SeqCst)
+    }
     fn read_ref_enabled(&self) -> bool {
         self.read_ref.load(Ordering::SeqCst)
     }
@@ -150,6 +154,9 @@ struct MixedSource {
     rows: Vec<(String, Hash)>,
 }
 impl PublishedSource for MixedSource {
+    fn uses_published_values(&self) -> bool {
+        true
+    }
     fn inspection_configured(&self) -> bool {
         false
     }

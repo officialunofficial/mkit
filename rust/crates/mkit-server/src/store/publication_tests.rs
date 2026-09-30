@@ -576,3 +576,37 @@ fn completed_obligation_free_advances_do_not_accumulate_retained_work() {
         );
     });
 }
+
+#[test]
+fn fully_published_maximum_sequence_has_an_empty_prefix() {
+    block_on(async {
+        let repository = repo();
+        let source = SinglePartition.ref_shard(&repository, "refs/heads/main");
+        let state = Publication {
+            sequence: u64::MAX,
+            published: u64::MAX,
+            boundary: u64::MAX,
+            generation: 0,
+            value: Pair::default(),
+        };
+        assert_eq!(
+            Publication::decode(Some(&state.encode().unwrap())).unwrap(),
+            state
+        );
+        // A late verdict can still clear retained membership below a deletion boundary.
+        let changed = advance(1, Clearance::Cleared);
+        assert_eq!(
+            prefix(
+                &MemoryKv::default(),
+                &source,
+                &repository.name,
+                "refs/heads/main",
+                &state,
+                &changed
+            )
+            .await
+            .unwrap(),
+            (u64::MAX, Pair::default())
+        );
+    });
+}

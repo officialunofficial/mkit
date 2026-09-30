@@ -79,6 +79,7 @@ fn planned_ticket_advance(count: usize) -> Batch {
 fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
     planned_ticket_publication(count, d34, false)
 }
+#[allow(clippy::too_many_lines)] // A complete ticket snapshot pins the maximal apply budget.
 fn planned_ticket_publication(count: usize, d34: bool, retained: bool) -> Batch {
     use crate::store::codec::{ReservationV1, TicketV1};
     let repo = RepoId {
@@ -2777,6 +2778,7 @@ fn incapable_authority_planner_request_refuses_generation() {
         let req = WriteRequest {
             authority_store,
             authority_generation: Some(0),
+            publication: None,
             repo: &name,
             kind: WriteKind::UpdateRef,
             refs: &refs,
@@ -5096,6 +5098,8 @@ fn prepared_publication_pair_cannot_survive_a_counterpart_guard_race() {
         vec![],
     );
     let req = WriteRequest {
+        authority_store: AuthorityStore::Guarded,
+        authority_generation: None,
         repo: &repo.name,
         kind: WriteKind::UpdateRef,
         refs: &refs,

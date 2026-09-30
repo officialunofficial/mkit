@@ -405,6 +405,9 @@ pub async fn prefix<S: NamespaceStore>(
             "publication prefix exceeds bound".into(),
         ));
     }
+    if state.published == state.sequence {
+        return Ok((state.published, state.value.clone()));
+    }
     let name = sequence_ref(name);
     let wanted: Vec<Key> = (state.published + 1..=state.sequence)
         .map(|sequence| keys::advance(repo, &name, sequence))

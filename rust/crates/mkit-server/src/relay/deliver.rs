@@ -179,9 +179,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
             );
         }
         let rh = keys::relay_high_water(ctx.partition)?;
-        let dispatch = self
-            .dispatch(&window.groups, &scan.blocked, &rh, ctx.now_ms)
-            .await;
+        let dispatch = self.dispatch(&window.groups, &scan.blocked, &rh).await;
         if !checkpoint_window(ctx, &rs_key, &mut scan_value, &mut scan, &window, &dispatch).await? {
             return Ok(Fired::Retry);
         }
@@ -225,13 +223,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         }
     }
 
-    async fn dispatch(
-        &self,
-        groups: &[TargetRows],
-        blocked: &[Partition],
-        rh: &Key,
-        now_ms: u64,
-    ) -> Dispatch {
+    async fn dispatch(&self, groups: &[TargetRows], blocked: &[Partition], rh: &Key) -> Dispatch {
         let mut progress = Dispatch {
             delivered: BTreeSet::new(),
             block: BTreeSet::new(),

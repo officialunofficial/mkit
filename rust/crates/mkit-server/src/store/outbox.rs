@@ -17,7 +17,8 @@ use super::{
 /// put and one relay-row share. An advance uses one signer and runs no
 /// admission (the quota planner asserts this in `pipeline::plan_namespace`),
 /// so `tu` and `tc` are each guarded/written once. Shared
-/// overhead is at most 31 (including publication guard/state, retained value and two published refs): deadline 1, lease guard/install 2, absent layout
+/// overhead is at most 31: publication guard/state 2, retained value 1,
+/// two published refs 2, deadline 1, lease guard/install 2, absent layout
 /// version guard/install 2, absent repo-known guard/install 2, two ref CAS
 /// pairs 4, replay 3, counters 4, outbox sequence/backlog 4, and relay kick
 /// 1, ref-index relay rows 2, and one outcome-delivery kick 1. These figures are D34's. On Single, a grant guard replaces the lease
@@ -137,7 +138,6 @@ impl OutboxBuilder {
             reservations: BTreeSet::new(),
             error: None,
             relay_at_ms: None,
-
             kick_at_ms: None,
         })
     }

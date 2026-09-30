@@ -21,7 +21,8 @@ impl TimerKind {
     }
 }
 
-/// Kind allocations. A new kind takes the next free number; numbers are never reused.
+/// Kind allocations. A new kind takes the next free number; shipped kinds are never reused.
+/// R-198 withdrew the unshipped kind 15, returning it to the unallocated range.
 ///
 /// | Numbers | Allocation |
 /// |---|---|
@@ -39,7 +40,7 @@ impl TimerKind {
 /// | 11 | Cache purge (WP-5.10) |
 /// | 12 | PUBLICATION_RECHECK (WP-5.4, R-182) |
 /// | 13..=14 | Reserved by the orchestrator |
-/// | 16..=0xEF | Production, unallocated |
+/// | 15..=0xEF | Production, unallocated |
 /// | 0xF0..=0xFE | Reserved for tests |
 /// | 0xFF | TEST (`test-faults` only) |
 pub mod kinds {

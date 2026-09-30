@@ -1946,6 +1946,7 @@ coherent PublicationPolicy serving-stop seam; HTTP and tokens remain anonymous.
 RPC identity/pending/held tests, private token/proof tests and existing authorization
 matrix cover the paths. The actual inspector/flag scheduler and cache purge remain
 WP-5.5a/5.6a responsibilities; this change does not claim their activation.
+
 ## External authority revocation fences final acceptance
 
 **Always:** with authority fencing enabled, a completed namespace generation
