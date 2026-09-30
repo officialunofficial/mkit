@@ -2720,6 +2720,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .iter()
             .map(|r| keys::ref_key(&op.repo.name, &r.name))
             .collect();
+        if self.cfg.sharding == Sharding::Single && caps.key_classes == KeyClasses::All {
+            wanted.extend([keys::authority_generation(), keys::lease_recovery()]);
+        }
         if caps.implicit_layout_version.is_none() {
             wanted.push(keys::layout_version());
         }

@@ -484,6 +484,9 @@ pub(crate) fn plan_write(
         }
         if req.authority_store == AuthorityStore::Guarded {
             pre.push(guard(keys::lease_recovery(), snap));
+            if req.authority_generation.is_none() {
+                pre.push(guard(keys::authority_generation(), snap));
+            }
         }
     }
     if let Some(generation) = req.authority_generation {

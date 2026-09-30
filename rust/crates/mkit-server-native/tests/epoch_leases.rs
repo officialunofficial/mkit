@@ -912,6 +912,23 @@ async fn expired_row_renewal<N: NamespaceStore + 'static>(
     assert_eq!(el(&store, &a, REF).await.epoch, 1);
 }
 
+async fn finish_bounded_revoke<N: NamespaceStore + 'static>(
+    pipe: &Pipe<N>,
+    ns: &mkit_server::NamespaceKey,
+) {
+    for _ in 0..4 {
+        if pipe
+            .revoke_step(ns, &RevokeBudget::new(10_000))
+            .await
+            .unwrap()
+            == RevokeProgress::Complete
+        {
+            return;
+        }
+    }
+    panic!("revocation did not complete within four additional bounded slices");
+}
+
 async fn push_race<N: NamespaceStore + 'static>(
     backend: N,
     clock: Arc<ManualClock>,
@@ -940,7 +957,12 @@ async fn push_race<N: NamespaceStore + 'static>(
     assert_eq!(el(&store, &a, REF).await.epoch, 1);
     assert_eq!(ls(&store, &a, REF).await.acked_epoch, 0);
     store.controls.push.resume();
-    assert_eq!(revoke.await.unwrap().unwrap(), RevokeProgress::Complete);
+    assert_eq!(
+        revoke.await.unwrap().unwrap(),
+        RevokeProgress::Pending { remaining: 1 }
+    );
+    assert_eq!(ls(&store, &a, REF).await.acked_epoch, 0);
+    finish_bounded_revoke(&pipe, &a.repo().repo.namespace).await;
     let calls = store.take();
     let pushes: Vec<_> = calls
         .iter()
@@ -1064,8 +1086,12 @@ fn assert_renewal_ops(calls: &[Call], old_timer: &Key, new_timer: &Key) {
         if b.writes.contains(&Write::Delete((*old_timer).clone())) && b.writes.iter().any(|w| matches!(w, Write::Put(k, _) if k == new_timer))));
     assert!(moved, "timer move must share the lease grant batch");
     assert!(calls.iter().any(|c| matches!(c, Call::Apply(Partition::Coordinator(_), b, BatchOutcome::Committed)
-        if b.writes.contains(&Write::Delete((*old_timer).clone())) && b.writes.len() == 3 && b.preconditions.len() == 4)),
-        "renewal still uses four guards and three writes");
+        if b.writes.contains(&Write::Delete((*old_timer).clone())) && b.writes.len() == 3 && b.preconditions.len() == 5
+            && b.preconditions.contains(&Precondition::Absent(keys::lease_recovery())))),
+        "renewal uses five guards including raw recovery mode and three writes");
+    assert!(calls.iter().any(|c| matches!(c,
+        Call::Many(Partition::Coordinator(_), keys) if keys.len() == 5 && keys.contains(&keys::lease_recovery())
+    )), "renewal preserves the five-row coordinator read");
     let renewal_ref_ops = calls
         .iter()
         .find_map(|c| match c {
@@ -1838,7 +1864,12 @@ async fn renewal_between_push_and_ack<N: NamespaceStore + 'static>(
     committed(&pipe, &a, REF, 2).await;
     assert_eq!(el(&store, &a, REF).await.expires_at_ms, 54_500);
     store.controls.ack.resume();
-    assert_eq!(revoke.await.unwrap().unwrap(), RevokeProgress::Complete);
+    assert_eq!(
+        revoke.await.unwrap().unwrap(),
+        RevokeProgress::Pending { remaining: 1 }
+    );
+    assert_eq!(ls(&store, &a, REF).await.acked_epoch, 0);
+    finish_bounded_revoke(&pipe, &ns).await;
     let row = ls(&store, &a, REF).await;
     let copy = el(&store, &a, REF).await;
     assert_eq!(

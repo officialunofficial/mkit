@@ -278,7 +278,17 @@ fn single_ticket_advance_guards_the_grant_epoch() {
         1
     );
     let ops = batch.preconditions.len() + batch.writes.len();
-    assert_eq!(ops, 79);
+    assert_eq!(
+        batch
+            .preconditions
+            .iter()
+            .filter(|guard| matches!(guard,
+                Precondition::Absent(key) if *key == keys::authority_generation()
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(ops, 80);
     assert!(ops <= crate::store::MAX_BATCH_OPS);
 }
 
@@ -2951,8 +2961,17 @@ fn plan_cas_any_missing_match_on_snapshot() {
                     plan.batch.writes,
                     vec![Write::Put(ref_value(HEAD, C).0, ref_value(HEAD, C).1)]
                 );
-                let guarded = plan.batch.preconditions.len() == 2;
+                let guarded = plan.batch.preconditions.iter().any(|guard| matches!(guard,
+                    Precondition::Absent(key) | Precondition::Equals(key, _) if *key == keys::ref_key(&name, HEAD)
+                ));
                 assert_eq!(guarded, condition != Any, "Any is never guarded");
+                for key in [keys::authority_generation(), keys::lease_recovery()] {
+                    assert!(
+                        plan.batch
+                            .preconditions
+                            .contains(&Precondition::Absent(key))
+                    );
+                }
             }
             Planned::Done(result) => {
                 assert!(!commits, "{condition:?} {current:?}");
@@ -3026,12 +3045,14 @@ fn plan_conflict_writes_only_the_replay_record() {
     assert_eq!(
         plan.batch.preconditions[1..],
         [
+            Precondition::Absent(keys::lease_recovery()),
+            Precondition::Absent(keys::authority_generation()),
             Precondition::Equals(values[0].0.clone(), values[0].1.clone()),
             Precondition::Equals(values[1].0.clone(), values[1].1.clone()),
             Precondition::Absent(keys::replay(&[1; 32])),
         ]
     );
-    assert_eq!(plan.replay_index, Some(3));
+    assert_eq!(plan.replay_index, Some(5));
 }
 
 fn charge(max_ops: u32) -> QuotaCharge {
