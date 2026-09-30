@@ -12,8 +12,9 @@ only that component lane; it leaves per-case integrated slots UNRUN.
 | Pin | Exact value / status |
 |---|---|
 | Phase 1 source checkpoint | `d1adfdddf8fce38643e7293a806e0a4a5d42054c`; source checkpoint only |
-| Phase 1 activation source checkpoint | `d46af16bf9ced385b1a5eacc6449595bdd10ab7a`; component validation in [phase-1-checkpoint.md](phase-1-checkpoint.md), cold-alarm ruling pending |
+| Phase 1 activation source checkpoint | `d46af16bf9ced385b1a5eacc6449595bdd10ab7a`; component validation in [phase-1-checkpoint.md](phase-1-checkpoint.md), cold-alarm repair #1247 open; integrated evidence UNRUN |
 | Phase 1 merged-input checkpoint | `cb2159c5551c2f82d2d861347da264297568982d`; not the final candidate |
+| Phase 1 refreshed merged-input checkpoint | `fbefda7964e82a010dee68f428d47c121e79b8fa`; base `cd680351bb499538c287b2197fcabd89c7783a95`, including #1245 and #1246; not the final candidate |
 | Final candidate SHA / reviewed diff | UNRUN |
 | Final origin feature SHA / merge-base / tree SHA | UNRUN |
 | Release Worker digest / features / compatibility date / config digest | UNRUN; build must exclude test-faults |
@@ -40,7 +41,8 @@ foundations to activation and no dependence on withdrawn R-196/R-197.
 | R-193 private scanner pack retrieval | `ade6179e973fd05e63c2853fdc33a507ca0fa9be` | [#1243](https://github.com/officialunofficial/mkit/pull/1243) merged; integrated gate UNRUN |
 | 5.10 / 5.11a purge/admin/audit | `e99e2b241959932150febb8a3bc4957b08134864` | [#1236](https://github.com/officialunofficial/mkit/pull/1236); reviews UNRUN |
 | 5.6a-1 acceptance / 5.6a-2 preservation | `bc114103f438a43a5785ab9dc92bf765a46b3807` / PENDING | 5.6a-2 pending; takedown activation fails closed |
-| Publication recheck timer 12 progress repair | UNRUN | [#1245](https://github.com/officialunofficial/mkit/pull/1245), required before phase 2; merge/review UNRUN |
+| Publication recheck timer 12 progress repair | `d89c37fb968d39c180228678bc09c77a12002fc9` | [#1245](https://github.com/officialunofficial/mkit/pull/1245) merged; integrated gate UNRUN |
+| Physical alarm bounds and cold fairness repair | PENDING | [#1247](https://github.com/officialunofficial/mkit/pull/1247), source `f07195914af704aa255f7430b5d93427f4d0c619`, open/unmerged; integrated gate UNRUN |
 | WP-4.18 self-reviews, correctness/security and spec/crypto | UNRUN | UNRUN |
 | WP-4.18 adversarial PR review | UNRUN | UNRUN |
 

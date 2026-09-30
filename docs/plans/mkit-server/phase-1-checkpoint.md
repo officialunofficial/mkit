@@ -1,6 +1,7 @@
 # WP-4.18 phase 1 checkpoint
 
-Status: independent phase-1 work committed; cold-alarm escalation still open.
+Status: phase 1 checkpoint; both separate budget repair rulings implemented.
+Timer-12 repair #1245 is merged; physical alarm repair #1247 is open/unmerged.
 This checkpoint does not complete launch activation or the integrated matrix.
 
 Production source: `d46af16bf9ced385b1a5eacc6449595bdd10ab7a`, based on origin feature
@@ -44,15 +45,21 @@ does not make D34 dependency publication immediate; Committed means Sent,
 never Delivered. Checks also corrected a hook-signing test fixture to reflect
 the new startup requirement and retained test-faults scanner configuration.
 
-## Outstanding ruling and phase 2
+## Separate repairs and phase 2
 
-[The cold-alarm finding](launch-budgets.md#unresolved-deterministic-findings)
-requires a user ruling under brief section D. SQL timer_heads aggregates all
-timer rows and materializes all logical heads, while the local TickBudget resets
-per head. A bounded indexed scan plus an in-memory cursor needs no new durable
-state, but repeated isolate restarts can starve later timers behind retained
-unknown/failing rows. A persistent cursor requires a separate authorized design
-and repair. Neither option has been inferred from elapsed time or implemented.
+The user ruled a bounded in-memory cursor with persisted backoff for cold
+fairness. [PR #1247](https://github.com/officialunofficial/mkit/pull/1247)
+implements it at `f07195914af704aa255f7430b5d93427f4d0c619`; it remains open and
+must merge before phase 2. The component gates passed 242 targeted tests and
+18 native timer integration tests, native/wasm32 clippy and fmt; both independent
+reviews closed without blocking findings. Its internal retry metadata preserves
+original due times and payloads, with guarded moves and bounded indexed scans.
+These results belong to that separate repair, not the integrated launch matrix.
+
+Refreshed phase-1 source: `fbefda7964e82a010dee68f428d47c121e79b8fa`, based on
+`cd680351bb499538c287b2197fcabd89c7783a95`; extraction, retrieval and publication
+recheck now use their merged implementations. Only preservation remains a
+startup prerequisite refusal. Refreshed component checks are recorded below.
 
 Phase 2 awaits the user's signal after preservation merges. It includes
 preservation/admin runtime integration, both embedding addenda, complete native
@@ -61,7 +68,31 @@ then an open PR into feat/mkit-server. External review, Cloudflare staging,
 CPU/memory/subrequest/cost and multicolo gates remain user-owned and UNRUN.
 
 The separately ruled bounded resumable publication recheck is
-[PR #1245](https://github.com/officialunofficial/mkit/pull/1245), source
-`3038c158`, open and unmerged. Its targeted 87 tests, fmt and native/wasm clippy
-passed; it must merge before phase 2. It does not fix or classify native timer
-flakes.
+[PR #1245](https://github.com/officialunofficial/mkit/pull/1245), merged at
+`d89c37fb968d39c180228678bc09c77a12002fc9`. It does not fix or classify native
+timer flakes.
+
+## Refreshed-base component verification
+
+Source `fbefda7964e82a010dee68f428d47c121e79b8fa`. Private TMPDIR and debug=0
+settings match the earlier component runs.
+
+| Check | Result | Local log / SHA-256 |
+|---|---|---|
+| Focused refreshed-base component tests | 82 passed | `phase1-base-refresh-tests.log` / `74116601c2efad6cb04b32304eef2dbf453bedc48456d92ed1dfef2c81cce3bd` |
+| Native all-target/all-feature clippy | PASS | `phase1-base-refresh-clippy-native.log` / `b70cde84dfcfab02cff4ae361ad2bed504961f63b6c2bf51d6108d46e02bcd77` |
+| Core/Worker all-feature wasm32 clippy | PASS | `phase1-base-refresh-clippy-wasm.log` / `c5009813b8fa58d0f7dd8cf9f98d07944cf28222ccadb0730bd9fdbec7a1d2b6` |
+| Rust formatting | PASS | `phase1-base-refresh-fmt.log` / `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+
+The focused run covers launch configuration, admin, private retrieval,
+publication recheck, content headers and shared budget/connection regressions.
+Harness validation (23 cases) and `git diff --check` also pass. Complete matrix,
+full gates and native timer-conformance remain phase 2 work.
+
+## Header policy reconciliation
+
+The refreshed base includes #1246's extension allowlist and safe filename
+headers. That conflicts with the original launch prompt's blanket octet-stream
+documentation requirement. A full clarification question is pending; no launch
+profile override or final header-policy evidence has been inferred. Phase 2
+must reconcile the README and runtime expectations with the user's ruling.

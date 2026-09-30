@@ -3,8 +3,9 @@
 Status: **phase 1 harness and coverage skeleton; complete matrix UNRUN**.
 The user resumes phase 2 after 5.6a-2 preservation merges. Extraction
 #1244 and private scanner retrieval #1243 have merged; their release wiring
-is activation work here. The bounded publication recheck timer 12 progress repair #1245 must also merge
-before phase 2 evidence. This document certifies no staging or review gate.
+is wired here. Bounded publication recheck timer 12 progress repair #1245 has
+merged; physical alarm bounds/backoff repair #1247 is open and must merge before
+phase 2 evidence. This document certifies no staging or review gate.
 
 The launch selects Paid indexed Multi/D34 with permanent retention, leases
 off and GC refused. HTTP objects, signed hooks, inspection and admin/takedown
@@ -74,7 +75,7 @@ Worker proof requests must remain unsupported.
 
 1. Merge the exact prerequisite versions and record every full SHA, PR and
    independent review outcome. Complete preservation and remove only its
-   corresponding activation refusal. Merge #1245; independently verify unchanged-base native timer
+   corresponding activation refusal. Merge #1247; independently verify unchanged-base native timer
    reproductions before classifying any remaining failure as a flake.
 2. Complete the itemized release probes in [launch-cases.json](launch-cases.json):
    optional no-inspector baseline; HTTP/token reads; signed HTTPS and isolated

@@ -2224,9 +2224,9 @@ accounting when the response is cancelled.
 regressions, measured scanner concurrency, Worker shared-budget clients and
 sixteen-head budget regression, and the request-context HTTP mount. Complete
 runtime lifetime evidence is pending phase 2. Cold SQL timer-head enumeration
-and repeated-restart fairness remain an explicitly escalated audit finding;
-this invariant does not claim that unresolved work is bounded. The separate
-resumable publication recheck repair (#1245) is required before phase 2.
+and repeated-restart fairness are repaired separately in open PR #1247;
+this invariant does not claim that unmerged work is bounded. The resumable
+publication recheck repair (#1245) is merged; integrated evidence is phase 2.
 
 ## HTTP file headers never interpolate raw filenames
 

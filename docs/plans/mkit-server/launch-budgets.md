@@ -70,61 +70,40 @@ with seventeen pending membership responses and measures occupancy and completio
 handlers are sequential, but phase 2 must also count R2 response body lifetimes
 and spawned completion/settlement work.
 
-## Unresolved deterministic findings
+## Deterministic findings and separate repairs
 
-The user has assigned the publication dependency issue to a separate fix,
-PR #1245 at `3038c158`: a 128-call bounded recheck sharing the existing
-1,000-call alarm budget. This PR is a phase 2 prerequisite and has not merged
-into the audited base. The original failure and its trigger remain below so
-phase 2 can verify the fix against the integrated physical alarm.
+The two budget findings were assigned to separate repairs. Their component
+checks do not certify the integrated launch matrix.
 
-1. **Publication recheck can exhaust forever.** `indexed/publication.rs::verify_inner`
-   reads a packmap node, inserts every `node.packs` into the dependency set,
-   then inserts closure packs and external bases. Each dependency list accepts
-   up to 4,096 items. D34 membership routing has 4,096 distinct prefixes
-   (`pipeline/shard/d34.rs::membership`). `timers/publication_recheck.rs::dependencies`
-   groups by shard and reads pages of eight keys. Thousands of distinct
-   prefixes therefore require thousands of routed reads; worst-case two
-   disjoint 4,096-item lists need 4,608 pages (3,584 groups of one plus 512
-   groups containing nine items), exceeding the 1,000-call physical alarm cap.
-   The existing comment's 8,192 is a safe looser bound.
+1. **Publication recheck progress: merged repair #1245.** Before the repair,
+   valid D34 packmaps could require more than the 1,000-call physical alarm
+   allowance, while every retry restarted at the first dependency. Each
+   dependency list can contain 4,096 items; adversarial routing can require
+   4,608 witness pages across two disjoint lists. The valid packmap limits and
+   shared allowance are unchanged. [PR #1245](https://github.com/officialunofficial/mkit/pull/1245)
+   merged at `d89c37fb968d39c180228678bc09c77a12002fc9`. Timer 12 now persists a
+   guarded witness position in its existing value, checks at most 128 routed
+   reads per fire, and invalidates progress when the guarded obligation,
+   dependency or generation changes. Phase 2 must verify progress with the
+   complete launch handler mix and pin actual release runtime evidence.
 
-   The dependency scan returns false at the first missing witness. Thus a
-   large list can pass the initial request's bounded work because an early
-   projected membership is missing; the request records Pending. Later,
-   available projections can require more than an alarm's allowance, and the
-   timer restarts from the beginning after every failure. Sync-only inspection
-   does not remove this path: `store/publication.rs::append` schedules kind 12
-   for every nonpublishable advance, including delayed cross-ref projections.
-   With other due kinds, even a dependency set below 1,000 calls can starve.
-   No current configuration limits packmap dependency count:
-   `max_ancestry_commits` bounds ancestry checks; `decode_budget` and pack size
-   limit bytes, not shard fanout. One small packmap node can name thousands of
-   packs. A solution must bound accepted launch dependency work before commit
-   and give it a usable shared alarm allocation, or use an already authorized
-   owning contract for resumable progress. A new durable cursor/state is outside
-   this work package. Activation cannot claim deterministic progress yet.
-
-2. **Cold logical-head work has no physical alarm scan bound.**
-   `sql/kv.rs::timer_heads` materializes every logical partition head without
-   paging or a limit. `worker/src/ns_object.rs::alarm` calls a fresh default
-   `TickBudget` for each head. That budget limits each logical tick to 512
-   examined rows, 128 commits, 32 attempts/kind and 10,000 injected-clock ms,
-   but a frozen clock and many logical heads do not bound the physical alarm's
-   aggregate local rows or resident head vector. The shared outgoing allowance
-   prevents excess external calls, but does not establish bounded cold local
-   scans or fairness. The existing physical v2 partial index is already `(key, part)`
-   (`sql/schema.rs:58`). An indexed raw timer window with LIMIT can bound
-   engine rows; adding GROUP BY/MIN/ORDER BY/LIMIT only bounds returned heads
-   while aggregating all timer rows. Unknown kinds remain unchanged at
-   `timers/mod.rs:281`; `next_wake` at lines 339–356 backs off five seconds
-   without updating that row. A volatile rotating cursor can provide warm
-   fairness, but restart resumes at the same retained earliest rows. With
-   more retained unknown rows than the window, unconditional cold restart
-   fairness needs a durable cursor or a change to retention semantics. The
-   user ruling on this tradeoff is pending; dependent implementation is paused.
-   Physical head enumeration and aggregate tick work need explicit bounded
-   measurement/enforcement before final activation evidence.
+2. **Physical alarm scan and cold fairness: open repair #1247.** The audited
+   base still materializes all logical heads with `timer_heads` and refreshes
+   `TickBudget` per head. The user's ruling uses a bounded indexed raw window,
+   a volatile rotating cursor, and persisted backoff in each retained timer
+   row; no durable cursor. [PR #1247](https://github.com/officialunofficial/mkit/pull/1247)
+   implements that ruling at `f07195914af704aa255f7430b5d93427f4d0c619` against
+   base `cd680351bb499538c287b2197fcabd89c7783a95`. Windows contain at most 64 raw
+   rows; one physical alarm shares 512 examined rows, 128 committed batches,
+   32 attempts per kind and 10,000 injected-clock milliseconds. Failed and
+   unknown kinds retain their payloads and original handler due times while
+   a guarded move advances their physical due time, starting at five seconds
+   and doubling to a ten-minute cap. Cold restarts therefore do not restore
+   the same failing prefix. Component gates passed: 242 targeted module tests,
+   18 native timer integration tests, native/wasm32 clippy and fmt, with two
+   independent reviews. It is open and unmerged; merge it before phase 2 and
+   measure the full handler mix on the integrated release Worker. Neither
+   component success nor an open PR fills the launch evidence slots.
 
 3. **Release extraction/retrieval/preservation accounting awaits dependencies.**
    WP-4.10b-2 (#1244) now supplies the real environment handler's

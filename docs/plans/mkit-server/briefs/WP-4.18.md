@@ -204,3 +204,5 @@ Run all current common/full/area local gates at final immutable head, plus compl
 Executor phase assignment: both embedding addenda will be implemented and verified in phase 2. The final binding production-line cap is 3,500 (addendum 2). Phase 1 removes the extraction and retrieval placeholders after merged PRs #1244 and #1243; only WP-5.6a-2 preservation remains a startup refusal. The separate timer-12 repair is PR #1245 (`3038c158`), to merge before phase 2.
 
 A configured custom purge sink is the expressly authorized embedding alternative to the environment-based signed HTTPS purge hook. Public/admin-separated mounting and programmatic RefPolicy/takedown options remain phase-2 work.
+
+Executor checkpoint update: timer-12 repair #1245 merged at `d89c37fb968d39c180228678bc09c77a12002fc9`. The cold-alarm ruling is implemented in open PR #1247, source `f07195914af704aa255f7430b5d93427f4d0c619`, and must merge before phase 2. Phase-1 base refresh is `fbefda7964e82a010dee68f428d47c121e79b8fa` on `cd680351bb499538c287b2197fcabd89c7783a95`. Neither repair grants integrated conformance evidence.

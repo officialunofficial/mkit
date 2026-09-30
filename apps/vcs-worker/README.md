@@ -422,10 +422,14 @@ the complete native and actual release Worker matrix before opening the PR.
 See the [conformance plan](../../docs/plans/mkit-server/launch-conformance.md)
 and [itemized evidence](../../docs/plans/mkit-server/launch-evidence.md).
 
-Worker object-byte HTTP responses always use `application/octet-stream`,
-`X-Content-Type-Options: nosniff` and
-`Content-Security-Policy: sandbox; default-src 'none'`. They never render
-untrusted repository content as active browser content. HTTP `?proof=1`
+Worker object-serving HTTP responses carry `X-Content-Type-Options: nosniff`
+and `Content-Security-Policy: sandbox; default-src 'none'`. Object-id file
+responses use `application/octet-stream`; the inherited base (#1246) selects
+ref-path file media types from the fixed extension allowlist in
+[SPEC-HTTP-OBJECTS §5](../../docs/specs/SPEC-HTTP-OBJECTS.md). HTML and SVG remain
+binary attachments. The original launch prompt's blanket octet-stream policy
+is awaiting clarification before phase 2; no launch override is implemented.
+HTTP `?proof=1`
 remains unsupported on the Worker, which advertises no proof capability;
 the native reference server advertises and serves proofs.
 

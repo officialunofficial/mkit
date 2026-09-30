@@ -8,8 +8,9 @@ by a skeleton or by a successful phase 1 refusal.
 Final WP-1.20 waits for 4.18. See the [archived full brief](briefs/WP-1.20-readiness.md),
 [D35 definition](staging-uno.md) and [operator runbook](launch-operations.md).
 
-Current merged-input checkpoint: `cb2159c5551c2f82d2d861347da264297568982d`,
-including extraction #1244 and retrieval #1243. This is a
+Current merged-input checkpoint: `fbefda7964e82a010dee68f428d47c121e79b8fa`,
+including extraction #1244, retrieval #1243 and timer-12 repair #1245;
+base `cd680351bb499538c287b2197fcabd89c7783a95` also includes HTTP headers #1246. This is a
 documentation reference, **not the final launch candidate**. Empty cells are
 intentional; no checkbox is satisfied by this document or by local wrangler.
 
@@ -20,8 +21,9 @@ row requires a full merged SHA, PR and independent review outcome in
 [launch-evidence.md](launch-evidence.md). A registry status is no passing gate.
 Extraction 4.10b-2 and retrieval R-193 have merged (#1244 / #1243).
 The checkpoint waits for 5.6a-2 preservation and user phase 2 resumption;
-#1245 publication recheck timer 12 progress repair must merge before complete
-local evidence; native timer flakes still need independent base reproduction.
+#1245 publication recheck timer 12 progress repair is merged. Physical alarm
+bounds/backoff repair #1247 is open and must merge before complete local
+evidence; native timer flakes still need independent base reproduction.
 
 | Prerequisite | Launch obligation / governing contract | Evidence link / result |
 |---|---|---|
