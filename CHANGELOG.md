@@ -19,6 +19,10 @@ train).
 
 ### Changed
 
+- *(core)* `list_refs`/tag/remote listing read each ref with a single
+  stack-buffer `read` (open+read+close) instead of `fs::read`'s extra
+  `statx` and EOF probe: −23% at 10k refs, −25% at 100 refs
+  (`refs_ops` bench).
 - *(core)* SPEC-DISCLOSURE v2: every `Step` and chunk header carries a
   mandatory 32-byte `inner_root` (bare BMT root of the parent Tree /
   ChunkedBlob). Bundle version byte is `2`; version `1` is a typed
