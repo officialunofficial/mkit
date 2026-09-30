@@ -1198,6 +1198,26 @@ cancellation must not hide a durable timer from the native driver.
 **Enforced by:** `mkit-server/src/timers/tests.rs` race and atomicity tests,
 `mkit-server-native/tests/timers.rs`, and the worker's pure alarm tests.
 
+## Physical timer alarms share bounds and retain cold fairness
+
+**Always:** Worker raw timer enumeration and every logical head share one
+512-row, 128-commit, 32-attempt-per-kind and 10-second injected-clock allowance.
+Enumeration uses bounded indexed raw windows. A volatile cursor rotates warm
+work; guarded failed/unknown-row moves persist capped exponential backoff for
+cold fairness. Retry moves preserve opaque payloads and original handler due
+times, never waive work, and require an absent destination.
+
+**Because:** a frozen Worker clock and repeated isolate restarts cannot bound
+unlimited head enumeration or prevent retained failures from pinning a window.
+
+**If violated:** one physical alarm can exceed its limits, or later durable work
+can remain permanently hidden behind failing or unknown rows.
+
+**Enforced by:** `timers::TickState`, `timers::run_due_with_state`,
+`mkit-server-worker::alarm::run_physical_alarm`, SQL indexed window/VM-step tests,
+and timer/alarm regressions for aggregate bounds, cold restarts and retained rows.
+See [the implementation contract](plans/mkit-server/timer-alarm-bounds.md).
+
 ## Worker shard classes reject foreign partition kinds
 
 **Always:** each Durable Object class accepts only its assigned partition kinds
@@ -1216,11 +1236,16 @@ class/partition cross-product in `mkit-server-worker/tests/stores.rs`.
 **Always:** after running due timers, the alarm handler re-reads the current
 alarm and retains the earlier of it and the tick's next wake. With default
 storage options and no intervening I/O, Cloudflare input gates protect this
-final read/write sequence from request delivery.
+final read/write sequence from request delivery. Every successor alarm is
+clamped strictly after a fresh reading of the object's clock, including a
+retained alarm or a dirty tick's immediate wake. Stored timer due times and
+tick budgets stay independent of this runtime wake scheduling.
 
 **Because:** `getAlarm` returns null during an alarm handler unless `setAlarm`
 has been called since it started. A timer Apply interleaved while a handler
 awaits non-storage I/O may install a new alarm.
+Rearming at the active alarm's timestamp can preserve its metadata without
+scheduling another callback when the runtime clock is frozen.
 
 **If violated:** the final tick reschedule or delete can overwrite that alarm,
 delaying or stranding a newly inserted timer.
@@ -1229,6 +1254,13 @@ delaying or stranding a newly inserted timer.
 regression tests. Gate semantics follow [Cloudflare's glossary](https://developers.cloudflare.com/durable-objects/reference/glossary/)
 and [storage transaction documentation](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#transaction);
 the null behavior is documented in [the alarms API](https://developers.cloudflare.com/durable-objects/api/alarms/#getalarm).
+`continuation_advances_a_frozen_alarm_clock` pins equal-clock scheduling;
+`scripts/vcs-worker-alarm-probe.mjs` exercises the real Rust driver across
+multiple bounded ticks using the pinned workerd runtime's clock, awaiting one
+explicit completion response after all fixture timers drain and their handlers
+finish;
+[workerd issue #6866](https://github.com/cloudflare/workerd/issues/6866) describes
+the equal-timestamp scheduling failure.
 
 ## Worker deployment sharding is bound before serving RPCs
 

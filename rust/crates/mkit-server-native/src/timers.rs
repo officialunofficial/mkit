@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use mkit_server::sql::SqlKvStore;
+use mkit_server::store::keys;
 use mkit_server::timers::{
     RETRY_BACKOFF_MS, TickBudget, TimerRegistry, earliest_timer_put, run_due,
 };
@@ -149,6 +150,8 @@ pub struct TimerDriver {
     store: TimerStore,
     registry: TimerRegistry<'static, TimerStore>,
     clock: Arc<dyn Clock>,
+    #[cfg(feature = "test-faults")]
+    test_timer_gate: Option<Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl fmt::Debug for TimerDriver {
@@ -171,7 +174,17 @@ impl TimerDriver {
             store,
             registry,
             clock,
+            #[cfg(feature = "test-faults")]
+            test_timer_gate: None,
         }
+    }
+
+    /// Share test tick exclusion with the pipeline's explicit timer directives.
+    #[cfg(feature = "test-faults")]
+    #[must_use]
+    pub fn with_test_timer_gate(mut self, gate: Arc<tokio::sync::Mutex<()>>) -> Self {
+        self.test_timer_gate = Some(gate);
+        self
     }
 
     /// The notifying store this driver runs over: a write committed through it
@@ -205,11 +218,26 @@ impl TimerDriver {
         stop: Shutdown,
         drain: Duration,
     ) -> Result<JoinHandle<()>, StoreError> {
-        let store = Arc::clone(self.store.inner());
-        let heads = crate::blocking::on_pool(move || store.inner().timer_heads()).await?;
         let directory = &self.store.inner().directory;
-        for (partition, due) in heads {
-            directory.lower(&partition, due);
+        // Native startup rebuilds the complete in-memory directory. Each SQL
+        // query still seeks a bounded window of raw rows through kv_timers.
+        let mut after = None;
+        loop {
+            let store = Arc::clone(self.store.inner());
+            let cursor = after.clone();
+            let window =
+                crate::blocking::on_pool(move || store.inner().timer_window(cursor.as_ref(), 512))
+                    .await?;
+            for timer in &window {
+                let Some(keys::ParsedKey::Timer { due_at_ms, .. }) = keys::parse(&timer.key) else {
+                    return Err(StoreError::Corrupt("timer window key".into()));
+                };
+                directory.lower(&timer.partition, due_at_ms);
+            }
+            after = window.last().cloned();
+            if window.len() < 512 {
+                break;
+            }
         }
         Ok(tokio::spawn(self.drive(stop, drain)))
     }
@@ -236,6 +264,11 @@ impl TimerDriver {
         // Immediate puts cannot take a second turn before the other heads.
         let mut claimed = partitions.into_iter();
         while let Some(partition) = claimed.next() {
+            #[cfg(feature = "test-faults")]
+            let _tick_guard = match &self.test_timer_gate {
+                Some(gate) => Some(gate.lock().await),
+                None => None,
+            };
             if stop.is_some_and(Shutdown::is_triggered) {
                 // Give the unrun claims back, due now, so the shutdown drain
                 // (or a restart, from `SQLite`) still runs them.
@@ -350,5 +383,73 @@ pub struct TokioSleep;
 impl Sleep for TokioSleep {
     fn sleep(&self, duration: Duration) -> BoxFuture<'static, ()> {
         Box::pin(tokio::time::sleep(duration))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::executor::block_on;
+    use mkit_server::ManualClock;
+
+    #[tokio::test]
+    async fn startup_rebuilds_partition_minima_beyond_the_first_sql_window() {
+        let sqlite = SqlKvStore::open(RusqliteConn::open_in_memory().unwrap()).unwrap();
+        let first = Partition::decode(b"nfirst\0").unwrap();
+        let last = Partition::decode(b"nlast\0").unwrap();
+        for reference in 0_u32..1_100 {
+            assert_eq!(
+                block_on(sqlite.apply(
+                    &first,
+                    Batch::new().put(
+                        keys::timer(10, 250, &reference.to_be_bytes()),
+                        Value::default()
+                    ),
+                ))
+                .unwrap(),
+                BatchOutcome::Committed
+            );
+        }
+        assert_eq!(
+            block_on(sqlite.apply(
+                &last,
+                Batch::new().put(keys::timer(20, 250, b"later"), Value::default())
+            ))
+            .unwrap(),
+            BatchOutcome::Committed
+        );
+        let store = Blocking::new(TimerNotifying::new(sqlite));
+        let stop = Shutdown::new();
+        stop.trigger();
+        TimerDriver::new(
+            store.clone(),
+            TimerRegistry::new(),
+            Arc::new(ManualClock::new(0)),
+        )
+        .start(stop)
+        .await
+        .unwrap()
+        .await
+        .unwrap();
+        let heads = store.inner().directory.heads.lock().unwrap();
+        assert_eq!(heads.partitions, BTreeMap::from([(first, 10), (last, 20)]));
+        assert_eq!(heads.ordered.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn startup_refuses_malformed_raw_timer_keys() {
+        let sqlite = SqlKvStore::open(RusqliteConn::open_in_memory().unwrap()).unwrap();
+        let partition = Partition::decode(b"ndefault\0").unwrap();
+        block_on(sqlite.apply(
+            &partition,
+            Batch::new().put(Key::new(b"w\0bad".to_vec()), Value::default()),
+        ))
+        .unwrap();
+        let store = Blocking::new(TimerNotifying::new(sqlite));
+        let driver = TimerDriver::new(store, TimerRegistry::new(), Arc::new(ManualClock::new(0)));
+        assert!(matches!(
+            driver.start(Shutdown::new()).await,
+            Err(StoreError::Corrupt(_))
+        ));
     }
 }

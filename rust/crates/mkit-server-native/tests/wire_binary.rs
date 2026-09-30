@@ -185,6 +185,25 @@ async fn check(origin: &str, profile: Profile) {
     );
 }
 
+async fn check_timers(origin: &str, profile: Profile) {
+    let target = WireTarget {
+        base_url: origin.parse().unwrap(),
+        profile,
+    };
+    let report = run(&target, Some("timers.")).await;
+    common::judge(&report, DIVERGENCES);
+    for name in [
+        "timers.directive_fires_due",
+        "timers.fire_on_schedule",
+        "timers.redelivery_is_idempotent",
+    ] {
+        assert!(
+            matches!(report.verdict(name), Some(Verdict::Pass(_))),
+            "{name} did not pass"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn binary_fs_layout_bearer() {
     let root = common::repo_root();
@@ -215,12 +234,24 @@ async fn binary_fs_layout_bearer() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn binary_fs_sqlite_auth_v2() {
-    fs_sqlite_auth_v2("single", false).await;
+    fs_sqlite_auth_v2("single", false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn binary_fs_sqlite_auth_v2_d34() {
-    fs_sqlite_auth_v2("d34", false).await;
+    fs_sqlite_auth_v2("d34", false, false).await;
+}
+
+#[cfg(feature = "test-faults")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn binary_fs_sqlite_auth_v2_timers() {
+    fs_sqlite_auth_v2("single", false, true).await;
+}
+
+#[cfg(feature = "test-faults")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn binary_fs_sqlite_auth_v2_d34_timers() {
+    fs_sqlite_auth_v2("d34", false, true).await;
 }
 
 #[cfg(not(feature = "test-faults"))]
@@ -358,15 +389,15 @@ async fn binary_indexed_pending_verification_wire() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn binary_fs_sqlite_multipart() {
-    fs_sqlite_auth_v2("single", true).await;
+    fs_sqlite_auth_v2("single", true, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn binary_fs_sqlite_multipart_d34() {
-    fs_sqlite_auth_v2("d34", true).await;
+    fs_sqlite_auth_v2("d34", true, false).await;
 }
 
-async fn fs_sqlite_auth_v2(sharding: &str, multipart: bool) {
+async fn fs_sqlite_auth_v2(sharding: &str, multipart: bool, timers_only: bool) {
     let root = common::repo_root();
     let ticket_file = root.path().join("ticket.keys");
     common::secret_file(
@@ -424,7 +455,9 @@ async fn fs_sqlite_auth_v2(sharding: &str, multipart: bool) {
             profile.features.insert(Feature::EpochLeases);
         }
     }
-    if multipart {
+    if timers_only {
+        check_timers(&origin, profile).await;
+    } else if multipart {
         let target = WireTarget {
             base_url: origin.parse().unwrap(),
             profile,
@@ -452,6 +485,17 @@ async fn fs_sqlite_auth_v2(sharding: &str, multipart: bool) {
 #[cfg(feature = "s3")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn binary_s3_sqlite_auth_v2() {
+    s3_sqlite_auth_v2(false).await;
+}
+
+#[cfg(all(feature = "s3", feature = "test-faults"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn binary_s3_sqlite_auth_v2_timers() {
+    s3_sqlite_auth_v2(true).await;
+}
+
+#[cfg(feature = "s3")]
+async fn s3_sqlite_auth_v2(timers_only: bool) {
     use mkit_server_conformance::fake_s3::{DEFAULT_BUCKET, FakeS3};
 
     let fake = FakeS3::start();
@@ -505,9 +549,15 @@ async fn binary_s3_sqlite_auth_v2() {
     profile.features.insert(Feature::Timers);
     #[cfg(feature = "test-faults")]
     profile.features.insert(Feature::TestFaults);
-    check(&origin, profile).await;
+    if timers_only {
+        check_timers(&origin, profile).await;
+    } else {
+        check(&origin, profile).await;
+    }
     assert!(server.stop().success());
-    assert!(!fake.keys(DEFAULT_BUCKET).is_empty());
+    if !timers_only {
+        assert!(!fake.keys(DEFAULT_BUCKET).is_empty());
+    }
     assert!(!root.path().join("packs").exists());
 }
 

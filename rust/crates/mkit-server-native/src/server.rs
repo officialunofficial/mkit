@@ -446,6 +446,7 @@ fn build_services<B, N, H>(
     meta: N,
     cfg: &ServeConfig,
     hooks: H,
+    #[cfg(feature = "test-faults")] test_timer_gate: Arc<tokio::sync::Mutex<()>>,
 ) -> Result<Services, ConfigError>
 where
     B: MultipartBlobStore + Clone + 'static,
@@ -485,6 +486,8 @@ where
     // serialize each partition's writes here rather than race them
     // through re-plans.
     .with_write_gate();
+    #[cfg(feature = "test-faults")]
+    let pipeline = pipeline.with_test_timer_gate(test_timer_gate);
     #[cfg(feature = "hooks")]
     let pipeline = if let Some(settings) = cfg.hooks.as_ref().filter(|s| !s.inspect.is_empty()) {
         let built = crate::hooks::build::build(Some(settings), &outcome_audience(cfg))?;
@@ -810,7 +813,14 @@ where
             };
             let meta = FsLayoutStore::open(&cfg.repo_root, repo)
                 .map_err(|e| config_error("--meta fs-layout", e))?;
-            build_services(blobs, Blocking::new(meta), cfg, hooks)
+            build_services(
+                blobs,
+                Blocking::new(meta),
+                cfg,
+                hooks,
+                #[cfg(feature = "test-faults")]
+                Arc::new(tokio::sync::Mutex::new(())),
+            )
         }
         MetaChoice::Sqlite { path, capacity } => {
             let root_id = claim_root_for_sqlite(&cfg.repo_root, path)?;
@@ -846,7 +856,18 @@ where
                 registry
             };
             let driver = TimerDriver::new(meta.clone(), registry, Arc::new(SystemClock));
-            let mut services = build_services(blobs, meta, cfg, hooks)?;
+            #[cfg(feature = "test-faults")]
+            let test_timer_gate = Arc::new(tokio::sync::Mutex::new(()));
+            #[cfg(feature = "test-faults")]
+            let driver = driver.with_test_timer_gate(Arc::clone(&test_timer_gate));
+            let mut services = build_services(
+                blobs,
+                meta,
+                cfg,
+                hooks,
+                #[cfg(feature = "test-faults")]
+                test_timer_gate,
+            )?;
             services.timers = Some(driver);
             services.pressure = Some(PressureMonitor::new(conn, *capacity));
             Ok(services)

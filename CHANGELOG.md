@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Added local conformance/evidence skeleton; complete runtime evidence and
   embedding addenda are pending phase 2.
 
+- Server/Worker: bound raw timer-alarm enumeration and share tick limits across
+  logical heads. Persist capped exponential backoff in the existing timer row
+  for cold fairness, preserving payloads and original handler due times. The
+  unshipped timer key codec gains retry metadata; timer payloads reserve enough
+  headroom for a guarded move within the existing batch limit.
+- Server/Worker: keep immediate alarm continuations strictly after the current
+  clock so bounded ticket, outcome and relay cleanup cannot strand an alarm
+  chain. Native test timer directives share tick exclusion with the autonomous
+  driver, making due-timer and redelivery conformance deterministic.
+
 - Server/Worker (WP-4.16b, R-201): ordinary ref-path file responses now select
   Content-Type from a fixed extension allowlist and include inline/attachment
   filenames with RFC 5987 encoding and a sanitized ASCII fallback. HEAD and
