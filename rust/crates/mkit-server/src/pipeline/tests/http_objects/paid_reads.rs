@@ -775,6 +775,106 @@ fn proof_challenge_denial_revalidation_caps_and_context_never_build() {
     tasks.join();
 }
 
+#[test]
+fn proof_caps_stop_chunk_metadata_lookups_before_missing_later_chunk() {
+    let (mut fx, d, admission, tasks) = setup();
+    let proofs = Arc::new(Proofs(Mutex::default()));
+    fx = with_seams(fx, |s| s.proofs = proofs.clone());
+    let repo = fx.repo_id("room");
+    let partition = fx.pipe.shards.object_index(&repo, &id(&d.chunks[1]));
+    let (start, end) = keys::object_index_range(&repo.name, &id(&d.chunks[1]));
+    let rows = block_on(fx.pipe.meta.inner.scan(&partition, &start, &end, None, 10)).unwrap();
+    assert!(!rows.entries.is_empty());
+    let mut batch = Batch::new();
+    for (key, _) in rows.entries {
+        batch = batch.delete(key);
+    }
+    block_on(fx.pipe.meta.inner.apply(&partition, batch)).unwrap();
+    let path = fx.ref_url("room", "main", "chunked.bin");
+    for (query, expected_lookups) in [("proof=1&range=0-1", 0), ("proof=1&range=90000-90000", 1)] {
+        let cfg = fx.pipe.cfg.http_objects.as_mut().unwrap();
+        cfg.max_proof_content_bytes = 1;
+        cfg.max_proof_bundle_bytes = 1_000;
+        fx.pipe.meta.seen.lock().unwrap().clear();
+        let before = fx.pipe.meta.calls();
+        assert_eq!(read(fx.request("GET", &path, Some(query), &[])).status, 416);
+        // The oversized prefix stops at the first preceding chunk; the
+        // missing second chunk must never override the encoded-cap result.
+        let seen = fx.pipe.meta.seen();
+        for (index, chunk) in d.chunks.iter().enumerate() {
+            let (start, _) = keys::object_index_range(&repo.name, &id(chunk));
+            assert_eq!(
+                seen.iter().filter(|key| **key == start).count(),
+                usize::from(index == 0) * expected_lookups
+            );
+        }
+        assert!(fx.pipe.meta.calls() - before < 30);
+    }
+    assert!(admission.calls.lock().unwrap().is_empty());
+    assert!(proofs.0.lock().unwrap().is_empty());
+    tasks.join();
+}
+
+struct TombstonedProofLeaf(Hash);
+impl TakedownGate for TombstonedProofLeaf {
+    fn stops_descent(&self, _: &RepoId, id: &Hash) -> bool {
+        *id == self.0
+    }
+    fn check<'a>(
+        &'a self,
+        _: &'a RepoId,
+        id: &'a Hash,
+    ) -> BoxFuture<'a, Result<TakedownVerdict, ServerError>> {
+        Box::pin(async move {
+            Ok(if *id == self.0 {
+                TakedownVerdict::Respond(HttpObjectResponse::error(451))
+            } else {
+                TakedownVerdict::Clear
+            })
+        })
+    }
+}
+
+#[test]
+fn proof_context_miss_precedes_tombstone_but_valid_context_keeps_451() {
+    let (fx, d, admission, tasks) = setup();
+    let leaf = id(&d.small);
+    let proofs = Arc::new(Proofs(Mutex::default()));
+    let fx = with_seams(fx, |s| {
+        s.takedown = Arc::new(TombstonedProofLeaf(leaf));
+        s.proofs = proofs.clone();
+    });
+    let path = fx.object_url("room", &leaf);
+    let valid = format!("proof=1&commit={}&path=small.txt", to_hex(&d.head()));
+    for method in ["GET", "HEAD"] {
+        for query in [
+            valid.replace("small.txt", "big.bin"),
+            valid.replace("small.txt", "missing"),
+            valid.replace(&to_hex(&d.head()), &to_hex(&[99; 32])),
+        ] {
+            let got = read(fx.request(method, &path, Some(&query), &[("if-none-match", "*")]));
+            let missing = read(fx.request(
+                method,
+                &fx.object_url("room", &[98; 32]),
+                Some(&query),
+                &[("if-none-match", "*")],
+            ));
+            assert_eq!(got.status, 404);
+            assert_eq!(
+                (got.status, &got.headers, &got.body),
+                (missing.status, &missing.headers, &missing.body)
+            );
+        }
+        let got = read(fx.request(method, &path, Some(&valid), &[("if-none-match", "*")]));
+        assert_eq!(got.status, 451);
+        assert!(got.header("ETag").is_none());
+        assert!(got.header("X-Mkit-Object").is_none());
+    }
+    assert!(admission.calls.lock().unwrap().is_empty());
+    assert!(proofs.0.lock().unwrap().is_empty());
+    tasks.join();
+}
+
 struct FailedProof(bool);
 impl ProofServer for FailedProof {
     fn build<'a>(

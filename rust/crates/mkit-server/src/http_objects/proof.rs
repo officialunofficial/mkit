@@ -83,7 +83,8 @@ pub(crate) async fn context<B: BlobStore, N: NamespaceStore>(
     if current != expected {
         return Err(Fail::NotFound);
     }
-    clear(gate, env, current).await?;
+    // The caller checks the terminal leaf separately, preserving its 451
+    // only after this exact context is established. Stops above it are 404.
     let located = resolve::locate(env, current).await?;
     let bytes = resolve::load(env, current, located, budget).await?;
     let leaf = mkit_core::serialize::deserialize(&bytes).map_err(|_| Fail::Unavailable)?;
@@ -134,7 +135,16 @@ impl Context {
                 if b >= cb.total_size {
                     return Err(Fail::ProofRange);
                 }
-                let mut lengths = Vec::new();
+                let mut sizer = proof_size::ChunkedRangeSizer::new(
+                    self.commit_len,
+                    &self.steps,
+                    u32::try_from(cb.chunks.len()).map_err(|_| Fail::ProofRange)?,
+                    a,
+                    len,
+                    env.cfg.max_proof_bundle_bytes,
+                )
+                .map_err(|_| Fail::ProofRange)?;
+                let mut selected = None;
                 let mut total = 0u64;
                 for id in &cb.chunks {
                     let located = resolve::locate(env, *id).await?;
@@ -148,20 +158,12 @@ impl Context {
                     if total > cb.total_size {
                         return Err(Fail::Unavailable);
                     }
-                    lengths.push(length);
-                    if b < total {
+                    if let Some(plan) = sizer.push(length).map_err(|_| Fail::ProofRange)? {
+                        selected = Some(plan);
                         break;
                     }
                 }
-                let plan = proof_size::chunked_range_proof_size(
-                    self.commit_len,
-                    &self.steps,
-                    u32::try_from(cb.chunks.len()).map_err(|_| Fail::ProofRange)?,
-                    &lengths,
-                    a,
-                    len,
-                )
-                .map_err(|_| Fail::ProofRange)?;
+                let plan = selected.ok_or(Fail::ProofRange)?;
                 span = plan.kind == mkit_core::verify::span::RangeProofKind::Mkds;
                 plan.encoded_size
             } else if self.ty == ObjectType::Blob {

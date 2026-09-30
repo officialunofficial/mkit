@@ -243,16 +243,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             }
         };
 
-        // §3 step 8: takedown.
-        match seams
+        // Keep the leaf verdict until proof context has passed step 7.
+        // An invalid context must not learn this leaf's tombstone at step 8.
+        let takedown = seams
             .takedown
             .check(repo, &leaf_id)
             .await
-            .map_err(|error| Fail::from_server_error(&error))?
-        {
-            TakedownVerdict::Clear => {}
-            TakedownVerdict::NotFound => return Err(Fail::NotFound),
-            TakedownVerdict::Respond(response) => return Ok(response),
+            .map_err(|error| Fail::from_server_error(&error))?;
+        if matches!(takedown, TakedownVerdict::NotFound) {
+            return Err(Fail::NotFound);
         }
 
         // Proof context validation precedes validators and payment. Explicit
@@ -283,6 +282,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         } else {
             None
         };
+        // §3 step 8: a reachable leaf in a valid proof context may return 451.
+        if let TakedownVerdict::Respond(response) = takedown {
+            return Ok(response);
+        }
         let ref_path = matches!(parsed.target, Target::Ref { .. });
         let mut inline = Budget(cfg.max_inline_object_bytes);
         // Proofs use canonical manifests, including when no extracted file

@@ -73,3 +73,68 @@ impl ProofServer for NativeProofs {
         })
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    struct PendingSource(Option<tokio::sync::oneshot::Sender<()>>);
+    impl ProofSource for PendingSource {
+        fn read(&mut self, _: Hash) -> BoxFuture<'_, Result<Vec<u8>, ServerError>> {
+            Box::pin(async move {
+                self.0.take().unwrap().send(()).unwrap();
+                core::future::pending().await
+            })
+        }
+    }
+
+    #[test]
+    fn native_proof_cancellation_releases_the_blocking_source_reader() {
+        // One blocking slot makes a leaked receiver observable: the sentinel
+        // cannot run until the canceled proof releases its worker.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.block_on(async {
+                let (started, wait) = tokio::sync::oneshot::channel();
+                let task = tokio::spawn(async move {
+                    let request = PreparedProof {
+                        commit: [1; 32],
+                        leaf: [2; 32],
+                        path: vec![],
+                        range: None,
+                        encoded_len: 1,
+                        span: false,
+                    };
+                    NativeProofs
+                        .build(&request, &mut PendingSource(Some(started)))
+                        .await
+                });
+                tokio::time::timeout(std::time::Duration::from_secs(5), wait)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+                let sentinel = tokio::task::spawn_blocking(|| 42);
+                assert_eq!(
+                    tokio::time::timeout(std::time::Duration::from_secs(5), sentinel)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    42
+                );
+            });
+        }));
+        // Runtime drop waits for blocking tasks. Even a failed assertion
+        // must use bounded shutdown before propagating its panic.
+        runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+        if let Err(error) = outcome {
+            std::panic::resume_unwind(error);
+        }
+    }
+}

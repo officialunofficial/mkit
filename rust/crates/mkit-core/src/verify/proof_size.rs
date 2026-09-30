@@ -164,84 +164,162 @@ pub fn chunked_range_proof_size(
     offset: u64,
     len: u64,
 ) -> Result<EncodedRangePlan, RangeProofError> {
-    if len == 0 {
-        return Err(RangeProofError::ZeroLength);
+    let mut sizer = ChunkedRangeSizer::new(
+        commit_bytes,
+        steps,
+        total_chunks,
+        offset,
+        len,
+        MAX_BUNDLE_BYTES as u64,
+    )?;
+    for &content in chunk_content_lengths {
+        if let Some(plan) = sizer.push(content)? {
+            return Ok(plan);
+        }
     }
-    let end = offset
-        .checked_add(len)
-        .ok_or(RangeProofError::OffsetOverflow)?;
-    if total_chunks > crate::serialize::MAX_CHUNKS {
-        return Err(VerifyError::TooManyChunks.into());
+    Err(RangeProofError::OutOfBounds)
+}
+
+/// Incremental wire sizing with constant retained metadata. Feed only the
+/// lengths through the selected span; caps stop collection as soon as the
+/// encoded prefix alone proves the complete representation is too large.
+#[derive(Debug)]
+pub struct ChunkedRangeSizer {
+    prefix: u128,
+    count: u32,
+    offset: u64,
+    end: u64,
+    cap: u64,
+    preceding: u128,
+    cursor: u64,
+    index: usize,
+    first: Option<usize>,
+    container: u128,
+    finished: bool,
+}
+
+impl ChunkedRangeSizer {
+    /// Start metadata sizing with a deployment cap no greater than 64 MiB.
+    ///
+    /// # Errors
+    /// Zero length, offset overflow, invalid prefix/count or oversized prefix.
+    pub fn new(
+        commit_bytes: u64,
+        steps: &[PrefixStep],
+        total_chunks: u32,
+        offset: u64,
+        len: u64,
+        max_encoded_size: u64,
+    ) -> Result<Self, RangeProofError> {
+        if len == 0 {
+            return Err(RangeProofError::ZeroLength);
+        }
+        let end = offset
+            .checked_add(len)
+            .ok_or(RangeProofError::OffsetOverflow)?;
+        if total_chunks > crate::serialize::MAX_CHUNKS {
+            return Err(VerifyError::TooManyChunks.into());
+        }
+        let mut sizer = Self {
+            prefix: prefix_size(commit_bytes, steps)?,
+            count: total_chunks
+                .checked_add(1)
+                .ok_or(VerifyError::TooManyChunks)?,
+            offset,
+            end,
+            cap: max_encoded_size.min(MAX_BUNDLE_BYTES as u64),
+            preceding: 0,
+            cursor: 0,
+            index: 0,
+            first: None,
+            container: 0,
+            finished: false,
+        };
+        sizer.check(sizer.prefix)?;
+        // A zero-chunk manifest cannot satisfy any nonempty range.
+        sizer.finished = total_chunks == 0;
+        Ok(sizer)
     }
-    let count = total_chunks
-        .checked_add(1)
-        .ok_or(VerifyError::TooManyChunks)?;
-    let prefix = prefix_size(commit_bytes, steps)?;
-    let mut preceding = 0;
-    let mut cursor = 0u64;
-    let mut first = None;
-    let mut container = 0;
-    for (index, &content) in chunk_content_lengths.iter().enumerate() {
+
+    fn check(&self, size: u128) -> Result<u64, RangeProofError> {
+        let size = capped(size)?;
+        if size > self.cap {
+            Err(RangeProofError::ProofTooLarge)
+        } else {
+            Ok(size)
+        }
+    }
+
+    /// Add one canonical Blob content length, excluding its ten header bytes.
+    /// Returns the exact final plan at the last selected chunk.
+    ///
+    /// # Errors
+    /// Invalid length/count, overflow or a provably exceeded encoded cap.
+    #[allow(clippy::too_many_lines)] // Mirrors the MKDP/MKDS wire fields in one sizing transition.
+    pub fn push(&mut self, content: u64) -> Result<Option<EncodedRangePlan>, RangeProofError> {
+        let index = self.index;
         let position = u32::try_from(index)
             .ok()
             .and_then(|n| n.checked_add(1))
-            .filter(|&n| n < count)
+            .filter(|&n| n < self.count && !self.finished)
             .ok_or(RangeProofError::OutOfBounds)?;
         let canonical = canonical_length(content, index)?;
-        let next = cursor
+        let next = self
+            .cursor
             .checked_add(content)
             .ok_or(RangeProofError::OffsetOverflow)?;
-        if first.is_none() && offset >= next {
+        let plan = if self.first.is_none() && self.offset >= next {
             let slice = bao_slice_size(canonical, 0, 10)?;
-            preceding += 36 + proof_size(count, &[position])? + vector_size(slice);
-            capped(prefix + preceding)?;
+            self.preceding += 36 + proof_size(self.count, &[position])? + vector_size(slice);
+            self.check(self.prefix + self.preceding)?;
+            None
         } else {
-            let first_index = *first.get_or_insert(index);
-            let chunk_proof = proof_size(count, &[0, position])?;
+            let first_index = *self.first.get_or_insert(index);
+            let chunk_proof = proof_size(self.count, &[0, position])?;
             if index == first_index {
-                let single = end <= next;
+                let single = self.end <= next;
                 let (local_offset, selected_len) = if single {
-                    (offset - cursor, len)
+                    (self.offset - self.cursor, self.end - self.offset)
                 } else {
                     (0, 1)
                 };
                 let slice = bao_slice_size(canonical, local_offset + 10, selected_len)?;
-                let range_size = capped(
-                    prefix
+                let range_size = self.check(
+                    self.prefix
                         + 81
                         + chunk_proof
                         + 16
                         + vector_size(slice)
                         + varint_size(first_index as u64)
-                        + preceding,
+                        + self.preceding,
                 )?;
                 if single {
-                    return Ok(EncodedRangePlan {
+                    self.finished = true;
+                    return Ok(Some(EncodedRangePlan {
                         kind: RangeProofKind::Mkdp,
                         first: index,
                         last: index,
                         encoded_size: range_size,
-                    });
+                    }));
                 }
-                container = 53 + vector_size(range_size);
+                self.container = 53 + vector_size(range_size);
             }
-            let chunk_size = capped(prefix + 48 + chunk_proof + vector_size(canonical))?;
-            container += vector_size(chunk_size);
-            capped(container)?;
-            if end <= next {
-                return Ok(EncodedRangePlan {
-                    kind: RangeProofKind::Mkds,
-                    first: first_index,
-                    last: index,
-                    encoded_size: capped(
-                        container + varint_size((index - first_index + 1) as u64),
-                    )?,
-                });
-            }
-        }
-        cursor = next;
+            let chunk_size = self.check(self.prefix + 48 + chunk_proof + vector_size(canonical))?;
+            self.container += vector_size(chunk_size);
+            let encoded_size =
+                self.check(self.container + varint_size((index - first_index + 1) as u64))?;
+            (self.end <= next).then_some(EncodedRangePlan {
+                kind: RangeProofKind::Mkds,
+                first: first_index,
+                last: index,
+                encoded_size,
+            })
+        };
+        self.cursor = next;
+        self.index += 1;
+        self.finished = plan.is_some();
+        Ok(plan)
     }
-    Err(RangeProofError::OutOfBounds)
 }
 
 #[cfg(test)]
@@ -422,5 +500,136 @@ mod tests {
         let result = chunked_range_proof_size(200, &[], 50000, &[100], 99, 1).unwrap();
         assert_eq!((result.first, result.last), (0, 0));
         assert!(matches!(result.kind, RangeProofKind::Mkdp));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One fixture matrix compares metadata with both canonical builders.
+    fn incremental_sizing_matches_builders_across_varint_and_merkle_edges() {
+        use super::super::span::{RangeProof, build_range_proof_from, verify_disclosure_span};
+        use crate::layout::RepoLayout;
+        use crate::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+        use crate::serialize::serialize;
+        use crate::sign::{KeyPair, sign_commit};
+        use crate::store::ObjectStore;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(temp.path())).unwrap();
+        for (count, name_len) in [
+            (2, 127),
+            (3, 128),
+            (7, 255),
+            (8, 1),
+            (9, 1),
+            (127, 1),
+            (128, 1),
+            (129, 1),
+        ] {
+            let lengths: Vec<u64> = (0..count)
+                .map(|i| [1, 1013, 1014, 1015, 2038][i % 5])
+                .collect();
+            let chunks: Vec<_> = lengths
+                .iter()
+                .enumerate()
+                .map(|(i, &len)| {
+                    store
+                        .write(
+                            &serialize(&Object::Blob(Blob {
+                                data: vec![i as u8; len as usize],
+                            }))
+                            .unwrap(),
+                        )
+                        .unwrap()
+                })
+                .collect();
+            let manifest = Object::ChunkedBlob(ChunkedBlob {
+                total_size: lengths.iter().sum(),
+                chunk_size: 0,
+                chunks,
+            });
+            let leaf = store.write(&serialize(&manifest).unwrap()).unwrap();
+            let name = vec![b'f'; name_len];
+            let tree = Object::Tree(Tree {
+                entries: vec![
+                    TreeEntry {
+                        name: b"a".to_vec(),
+                        mode: EntryMode::Blob,
+                        object_hash: leaf,
+                    },
+                    TreeEntry {
+                        name: name.clone(),
+                        mode: EntryMode::Blob,
+                        object_hash: leaf,
+                    },
+                    TreeEntry {
+                        name: b"z".to_vec(),
+                        mode: EntryMode::Blob,
+                        object_hash: leaf,
+                    },
+                ],
+            });
+            let root = store.write(&serialize(&tree).unwrap()).unwrap();
+            let key = KeyPair::from_seed([3; 32]);
+            let mut commit = Commit::new_unannotated(
+                root,
+                vec![],
+                Identity::ed25519(key.public.0),
+                key.public.0,
+                vec![],
+                1,
+                [0; 64],
+            );
+            commit.signature = sign_commit(&commit, &key).unwrap().0;
+            let canonical = serialize(&Object::Commit(commit)).unwrap();
+            let id = store.write(&canonical).unwrap();
+            let steps = [PrefixStep {
+                name_len,
+                position: 1,
+                leaf_count: 3,
+            }];
+            let total = lengths.iter().sum::<u64>();
+            for (offset, len) in [(0, total), (total - 1, 1), (1, total - 2)] {
+                let plan = chunked_range_proof_size(
+                    canonical.len() as u64,
+                    &steps,
+                    count as u32,
+                    &lengths,
+                    offset,
+                    len,
+                )
+                .unwrap();
+                let built =
+                    build_range_proof_from(&store, &id, &[&name], offset, len, None).unwrap();
+                let bytes = match built {
+                    RangeProof::Mkdp(bytes) => {
+                        assert_eq!(plan.kind, RangeProofKind::Mkdp);
+                        super::super::verify_disclosure(&id, &bytes).unwrap();
+                        bytes
+                    }
+                    RangeProof::Mkds(bytes) => {
+                        assert_eq!(plan.kind, RangeProofKind::Mkds);
+                        verify_disclosure_span(&id, &bytes).unwrap();
+                        bytes
+                    }
+                };
+                assert_eq!(
+                    plan.encoded_size,
+                    bytes.len() as u64,
+                    "count={count}, offset={offset}, len={len}"
+                );
+                let mut sizer = ChunkedRangeSizer::new(
+                    canonical.len() as u64,
+                    &steps,
+                    count as u32,
+                    offset,
+                    len,
+                    plan.encoded_size - 1,
+                )
+                .unwrap();
+                assert!(lengths.iter().any(|&length| matches!(
+                    sizer.push(length),
+                    Err(RangeProofError::ProofTooLarge)
+                )));
+            }
+        }
     }
 }

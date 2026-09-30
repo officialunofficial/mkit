@@ -2085,10 +2085,23 @@ const RESPONSES: &str =
 const GOLDEN_LEAF: &str = "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f";
 const GOLDEN_COMMIT: &str = "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145";
 
-/// Rows this work package does not decide: CORS (WP-4.16), bearer gating and
-/// the key document (WP-4.16 and the deployment mode), private and token
-/// paths (WP-4.15), Admission (WP-4.13), proofs (WP-4.14b), takedown
-/// (WP-5.9a) and redirects (WP-4.16).
+/// Rows run against the native builder and mount in
+/// mkit-server-native/tests/http_mount.rs::native_proof_response_goldens_hold.
+const NATIVE_PROOF_ROWS: &[&str] = &[
+    "not_modified_proof_paid_policy",
+    "outside_content",
+    "proof_content_cap",
+    "proof_encoded_cap",
+    "unsupported_leaf",
+    "proof_object",
+    "proof_ref",
+    "proof_blob_range",
+    "proof_span",
+    "proof_private",
+    "proof_paid",
+];
+
+/// Remaining rows owned by mounts, tokens, admission, publication or takedown.
 const OTHER_WORK_PACKAGES: &[&str] = &[
     "preflight_before_auth",
     "syntax_before_bearer",
@@ -2103,12 +2116,7 @@ const OTHER_WORK_PACKAGES: &[&str] = &[
     "blocked_before_tombstone_before_304",
     "chunk_only_under_tombstoned_manifest",
     "chunk_only_under_blocked_untombstoned_manifest",
-    "not_modified_proof_paid_policy",
     "bearer_gated_public_id",
-    "outside_content",
-    "proof_content_cap",
-    "proof_encoded_cap",
-    "unsupported_leaf",
     "challenge",
     "admission_deny",
     "private_id",
@@ -2116,12 +2124,6 @@ const OTHER_WORK_PACKAGES: &[&str] = &[
     "paid",
     "paid_ref",
     "head",
-    "proof_object",
-    "proof_ref",
-    "proof_blob_range",
-    "proof_span",
-    "proof_private",
-    "proof_paid",
     "receipt",
     "public_redirect",
     "admitted_ref_served_directly",
@@ -2160,7 +2162,7 @@ fn the_golden_response_rows_hold() {
     let (mut uniform, mut covered) = (Vec::<Got>::new(), Vec::<String>::new());
     for case in table["cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
-        if OTHER_WORK_PACKAGES.contains(&name) {
+        if OTHER_WORK_PACKAGES.contains(&name) || NATIVE_PROOF_ROWS.contains(&name) {
             continue;
         }
         let request = &case["request"];
@@ -2309,7 +2311,9 @@ fn the_golden_response_rows_hold() {
     for case in table["cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
         assert!(
-            covered.iter().any(|c| c == name) || OTHER_WORK_PACKAGES.contains(&name),
+            covered.iter().any(|c| c == name)
+                || OTHER_WORK_PACKAGES.contains(&name)
+                || NATIVE_PROOF_ROWS.contains(&name),
             "{name}"
         );
     }

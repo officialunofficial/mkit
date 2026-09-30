@@ -142,8 +142,21 @@ fn authenticate(pipe: &TestPipeline, signer: &Signer, procedure: Procedure) -> A
     .unwrap()
 }
 
-#[allow(clippy::too_many_lines)] // Real ticketed publish fixture covers the complete indexed path.
 async fn fixture(redirect: bool, with_tokens: bool) -> Fixture {
+    fixture_chunks(redirect, with_tokens, &CHUNKS).await
+}
+
+async fn fixture_chunks(redirect: bool, with_tokens: bool, content: &[&[u8]]) -> Fixture {
+    fixture_config(redirect, with_tokens, content, HttpObjectsConfig::default()).await
+}
+
+#[allow(clippy::too_many_lines)] // Real ticketed publish fixture covers the complete indexed path.
+async fn fixture_config(
+    redirect: bool,
+    with_tokens: bool,
+    content: &[&[u8]],
+    mut http: HttpObjectsConfig,
+) -> Fixture {
     let owner = Signer::new([7; 32], AUDIENCE, "unused");
     let namespace = Namespace::parse(&format!("ed25519-{}", owner.public_key_hex())).unwrap();
     let identity = format!("{namespace}/room");
@@ -164,7 +177,6 @@ async fn fixture(redirect: bool, with_tokens: bool) -> Fixture {
     let mut indexed = IndexedConfig::default();
     indexed.extract_min_bytes = 1024;
     cfg.indexed = Some(indexed);
-    let mut http = HttpObjectsConfig::default();
     http.redirect_public_refs = redirect;
     cfg.http_objects = Some(http);
     let tokens = with_tokens.then(token_config);
@@ -185,7 +197,7 @@ async fn fixture(redirect: bool, with_tokens: bool) -> Fixture {
         data: CONTENT.to_vec(),
     });
     let object = blob.id().unwrap();
-    let chunks: Vec<_> = CHUNKS
+    let chunks: Vec<_> = content
         .iter()
         .map(|bytes| {
             Object::Blob(Blob {
@@ -194,7 +206,7 @@ async fn fixture(redirect: bool, with_tokens: bool) -> Fixture {
         })
         .collect();
     let manifest = Object::ChunkedBlob(ChunkedBlob {
-        total_size: CHUNKS.iter().map(|bytes| bytes.len() as u64).sum(),
+        total_size: content.iter().map(|bytes| bytes.len() as u64).sum(),
         chunk_size: 0,
         chunks: chunks.iter().map(|chunk| chunk.id().unwrap()).collect(),
     });
@@ -1466,4 +1478,247 @@ async fn native_proof_syntax_bounds_and_context_errors_precede_payment() {
         admission.0.lock().unwrap().is_empty(),
         "failed selection or context called payment admission"
     );
+}
+
+#[tokio::test]
+async fn native_proofs_ignore_corrupt_offsets_and_never_read_after_span() {
+    let fx = fixture(false, false).await;
+    let junk = Bytes::from_static(b"MKOF-invalid-offsets");
+    let mut sink = fx
+        .blobs
+        .begin(BlobKey::object_offsets(fx.manifest), junk.len() as u64)
+        .await
+        .unwrap();
+    sink.write(junk.clone()).await.unwrap();
+    sink.commit_with_root(hash(&junk)).await.unwrap();
+    // Removing the final chunk's bytes cannot affect a span ending in chunk 1.
+    // Its membership metadata stays intact, so this checks canonical reads.
+    let chunk = Object::Blob(Blob {
+        data: CHUNKS[2].to_vec(),
+    })
+    .id()
+    .unwrap();
+    let repo = mkit_server::RepoId {
+        namespace: NamespaceKey::from_namespace(&fx.namespace),
+        name: RepoName::new("room").unwrap(),
+    };
+    let (start, end) = keys::object_index_range(&repo.name, &chunk);
+    let partition = Partition::Namespace(repo.namespace);
+    let page = fx
+        .meta
+        .scan(&partition, &start, &end, None, 10)
+        .await
+        .unwrap();
+    assert!(!page.entries.is_empty());
+    // The shared pack cannot be removed. Corrupt only this frame's indexed
+    // offset: any accidental post-span read would fail reconstruction.
+    let mut batch = Batch::new();
+    for (key, value) in page.entries {
+        let mut index = codec::decode_object_index(&chunk, &value).unwrap();
+        index.frame_offset = u64::MAX - index.frame_length;
+        batch = batch.put(key, codec::encode_object_index(&chunk, &index).unwrap());
+    }
+    fx.meta.apply(&partition, batch).await.unwrap();
+    let url = format!(
+        "{}&range=6143-6144",
+        pinned_proof(&fx, fx.manifest, "chunked.bin")
+    );
+    let commit = fx.commit;
+    let router = build_router(Arc::new(fx.pipe), &options(&[]));
+    let response = request(&router, "GET", &url, &[]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let length = response.headers()["content-length"]
+        .to_str()
+        .unwrap()
+        .parse::<usize>()
+        .unwrap();
+    let encoded = body(response).await;
+    assert_eq!(encoded.len(), length);
+    assert_eq!(
+        verify_disclosure_span(&commit, &encoded).unwrap().bytes,
+        [11, 22]
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Execute the proof-owned response table over a real native mount.
+async fn native_proof_response_goldens_hold() {
+    const OWNED: &[&str] = &[
+        "not_modified_proof_paid_policy",
+        "outside_content",
+        "proof_content_cap",
+        "proof_encoded_cap",
+        "unsupported_leaf",
+        "proof_object",
+        "proof_ref",
+        "proof_blob_range",
+        "proof_span",
+        "proof_private",
+        "proof_paid",
+    ];
+    const GOLDEN_LEAF: &str = "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f";
+    const GOLDEN_COMMIT: &str = "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145";
+    let table: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/golden/http-objects/response-cases.json"
+    ))
+    .unwrap();
+    let mut covered = 0;
+    for case in table["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        if !OWNED.contains(&name) {
+            continue;
+        }
+        // The golden span range 10-19 straddles this fixture's first edge.
+        let mut http = HttpObjectsConfig::default();
+        if name == "proof_content_cap" {
+            http.max_proof_content_bytes = 1;
+        }
+        if name == "proof_encoded_cap" {
+            http.max_proof_bundle_bytes = 1;
+        }
+        let fx = fixture_config(
+            false,
+            name == "proof_private",
+            &[&[11; 15], &[22; 25]],
+            http,
+        )
+        .await;
+        let (leaf, file) = match name {
+            "proof_blob_range" | "outside_content" | "proof_content_cap" => (fx.object, "big.bin"),
+            "unsupported_leaf" => (fx.root, ""),
+            _ => (fx.manifest, "chunked.bin"),
+        };
+        let mut url = if case["request"]["route"] == "ref" {
+            format!("{}?proof=1", fx.ref_url(file))
+        } else {
+            pinned_proof(&fx, leaf, file)
+        };
+        if matches!(
+            name,
+            "proof_blob_range"
+                | "proof_span"
+                | "proof_paid"
+                | "proof_content_cap"
+                | "unsupported_leaf"
+        ) {
+            url.push_str("&range=10-19");
+        }
+        if name == "outside_content" {
+            url.push_str("&range=20000-20000");
+        }
+        let admission = Arc::new(ProofAdmission::default());
+        let challenge = matches!(
+            name,
+            "outside_content" | "proof_content_cap" | "proof_encoded_cap" | "unsupported_leaf"
+        );
+        // Use the seam to make an erroneous admission visible as402, while
+        // recording every call for the no-admission assertions.
+        let configured =
+            challenge || matches!(name, "proof_paid" | "not_modified_proof_paid_policy");
+        if name == "proof_private" {
+            fx.make_private().await;
+            let token = fx
+                .tokens
+                .as_ref()
+                .unwrap()
+                .mint(
+                    AUDIENCE,
+                    &fx.identity,
+                    &UrlTarget::Object(leaf),
+                    0,
+                    now_ms(),
+                    60,
+                )
+                .unwrap();
+            url.push_str("&token=");
+            url.push_str(token.expose());
+        }
+        let commit = fx.commit;
+        let mut pipe = fx.pipe;
+        if configured {
+            let recorder = admission.clone();
+            pipe = pipe.with_http_seams(|mut seams| {
+                seams.admission = Arc::new(GoldenAdmission {
+                    recorder,
+                    challenge,
+                });
+                seams
+            });
+        }
+        let router = build_router(Arc::new(pipe), &options(&[]));
+        let validator = format!("\"{}.{}.object\"", to_hex(&commit), to_hex(&leaf));
+        let mut headers = vec![("range", "bytes=1-2")];
+        if name == "not_modified_proof_paid_policy" {
+            headers.push(("if-none-match", &validator));
+        }
+        let response = request(&router, "GET", &url, &headers).await;
+        assert_eq!(
+            response.status().as_u16(),
+            u16::try_from(case["expect"]["status"].as_u64().unwrap()).unwrap(),
+            "{name}"
+        );
+        for (header, expected) in case["expect"]["headers"].as_object().unwrap() {
+            let mut expected = expected
+                .as_str()
+                .unwrap()
+                .replace(GOLDEN_LEAF, &to_hex(&leaf))
+                .replace(GOLDEN_COMMIT, &to_hex(&commit));
+            if name == "proof_private" && header == "Cache-Control" {
+                let actual = response.headers()[header].to_str().unwrap();
+                let ttl = actual
+                    .strip_prefix("private, max-age=")
+                    .unwrap()
+                    .strip_suffix(", immutable")
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap();
+                assert!(ttl <= 60);
+                expected = expected.replace("max-age=60", &format!("max-age={ttl}"));
+            }
+            assert_eq!(response.headers()[header], expected, "{name}: {header}");
+        }
+        for header in case["expect"]["absent_headers"].as_array().unwrap() {
+            assert!(
+                !response.headers().contains_key(header.as_str().unwrap()),
+                "{name}"
+            );
+        }
+        if configured {
+            assert_eq!(
+                admission.0.lock().unwrap().len(),
+                usize::from(name == "proof_paid"),
+                "{name}: admission count"
+            );
+        }
+        let bytes = body(response).await;
+        if let Some(expected) = case["expect"]["body_bytes"].as_u64() {
+            assert_eq!(
+                u64::try_from(bytes.len()).unwrap(),
+                expected,
+                "{name}: body length"
+            );
+        }
+        covered += 1;
+    }
+    assert_eq!(covered, OWNED.len());
+}
+
+struct GoldenAdmission {
+    recorder: Arc<ProofAdmission>,
+    challenge: bool,
+}
+impl HttpAdmission for GoldenAdmission {
+    fn admit<'a>(
+        &'a self,
+        request: &'a AdmitRequest<'a>,
+    ) -> BoxFuture<'a, Result<AdmitDecision, ServerError>> {
+        Box::pin(async move {
+            let allowed = self.recorder.admit(request).await?;
+            Ok(if self.challenge {
+                AdmitDecision::Respond(HttpObjectResponse::error(402))
+            } else {
+                allowed
+            })
+        })
+    }
 }
