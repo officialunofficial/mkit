@@ -3,6 +3,8 @@
 Local Stage 1 evidence for [MKIT-29](https://linear.app/officialunofficial/issue/MKIT-29),
 SPEC-SERVER §18 and PRD §8, on 2026-09-29. Initial evidence used `feat/mkit-server` at `85c4adf3`
 plus WP-1.27; the final integration rerun includes `b0bbbba2` (#1225).
+Full gate summaries below are from the executor; the targeted post-review
+amendment checks are recorded separately.
 This work finishes an interrupted executor's snapshot (`525a4dba`).
 Runs used macOS, Rust 1.95.0, cargo-nextest 0.9.133 and wrangler 4.134.0 on a shared
 machine; these are correctness results, not throughput measurements.
@@ -15,10 +17,13 @@ integration tree. Default Worker D34 needed its one permitted network-flake
 retry; failed earlier attempts and their separate continuations remain below.
 Isolation, policy, tickets, D34 lag/hinted reads, lease renewal, 64-ref
 correctness, paging and bounded-growth evidence follows.
-Exact expiry during an acknowledgement remains an in-crate race, an explicit
-deviation from A2/B1(g): request clock skew changes business time, while lease
-observation, revocation and acknowledgement use real time. No new pause or clock
-transition was added. Staging remains deferred per R-154.
+**M1 exit accepted locally under amended R-159.** The orchestrator moved exact
+expiry during an acknowledgement to in-crate evidence: `expiry_races_ack_memory`
+and `expiry_races_ack_sqlite` in `mkit-server-native/tests/epoch_leases.rs`.
+Request skew changes business time only, so that race cannot be deterministic
+on the wire without the excluded pause faults. Wire coverage is bump, idle-shard
+wake and lease expiry before revocation completes, with no ack in flight.
+No new pause or clock transition was added. Staging remains deferred per R-154.
 
 ## 1. Native nextest and build gates
 
@@ -50,6 +55,18 @@ parent `b0bbbba2` in 0.120 s.
 The initial native timeout diagnostics passed alone: CLI stateful export in
 21.290 s and relay schedule property in 21.443 s. Both passed in the final full
 suites and on unchanged parent `85c4adf3` (12.251 s and 10.055 s respectively).
+
+The post-review R-159 amendment passed fmt, conformance all-targets/all-features
+clippy with warnings denied, and all four wire registry/doc-table unit tests.
+The selected `baseline_pipeline_memory::pipeline_grants_single_and_d34` and
+`wire_multi::wire_grants_and_epochs_d34` lane tests both passed in 63.339 s.
+Their TAP totals are **108/0/0** and **55/0/1** (pass/fail/skip), respectively;
+both explicitly passed `leases.lease_expires_before_revocation_completes`.
+The memory lane now explicitly requires both D34 lease cases to pass. Its updated
+row below replaces the executor's 106-case result. The native counts are unchanged.
+The log is `$HOME/.cache/mkit-test-tmp/wp-1-27-review/renamed-lease-lanes.log`.
+Worker evidence predates the rename; its assertions and feature requirements are
+unchanged, and its mandatory pass check uses the new name.
 
 ## 2. Native wire lanes
 
@@ -86,7 +103,9 @@ same `tickets.advance_ticket_bindings` case used by Single. D34 with test-faults
 passes `lag.list_refs_window`, `lag.membership_window` and
 `repo.d36_hint_reads_during_lag`; the latter performs a real ticketed push, reads
 the pack through `X-Mkit-Ref` before relay delivery, and checks another repository
-with the same ref name. Grant lanes run both idle-shard and expired-lease renewal.
+with the same ref name. Grant lanes run idle-shard renewal and
+`leases.lease_expires_before_revocation_completes`: the warm lease expires before
+revocation is requested and completes, with no acknowledgement in flight.
 
 The native-only ignored listing lane runs separately:
 
@@ -120,7 +139,7 @@ rows combine Single and D34); every positive run has zero failures.
 | D34 Multi namespace cap after rollup | 1 | 0 |
 | Multipart | 3 | 1 |
 | Multi repository/policy/tickets/info | 18 | 8 |
-| Grants, Single and D34 | 106 | 0 |
+| Grants, Single and D34 (post-review) | 108 | 0 |
 | Signed reads, Single and D34 | 41 | 1 |
 | Expiry timer, physical session abort, Single and D34 | 2 | 0 |
 
@@ -239,7 +258,7 @@ opening 64 large multipart tickets exceeded the default quota. The final case
 opens one multipart session, sufficient to prove abort, and small remaining
 tickets. The tables distinguish successful phases from the earlier failed full-suite retries.
 
-## 5. Epoch-lease evidence and wire deviation
+## 5. Epoch-lease evidence under amended R-159
 
 All **48** native `epoch_leases` integration tests passed in the final server run.
 `expiry_races_ack_memory` passed in 0.064 s and `expiry_races_ack_sqlite` in
@@ -249,11 +268,13 @@ All **48** native `epoch_leases` integration tests passed in the final server ru
 Both backends also cover revoke-during-authorize, the failed revocation push with
 an expired lease (R-63), paused and cancelled renewals, and renewal between push
 and acknowledgement. The wire idle case renews an unwarmed shard at the new
-epoch. The expired wire case waits 31 real seconds before revocation, then proves
-that the old grant cannot change the warm ref and that the new grant can.
-It does **not** reproduce expiry during an in-flight acknowledgement: the existing
-skew header cannot advance that real clock, and A2 forbids adding a pause fault.
-The exact in-crate race is the remaining evidence boundary for adversarial review.
+epoch. `leases.lease_expires_before_revocation_completes` waits 31 real seconds
+before requesting revocation, then proves that the old grant cannot change the
+warm ref and that the new grant can. No acknowledgement is in flight.
+The orchestrator amended R-159 after review to accept `expiry_races_ack_memory`
+and `expiry_races_ack_sqlite` as the deterministic expiry/ack evidence, alongside
+revoke-during-write and R-63. The existing skew header cannot advance the lease
+clock, and no new pause fault is added. This satisfies the amended M1 scope.
 
 ## 6. Skips and deferred work
 
@@ -288,5 +309,5 @@ tables and the precise case-level skip reasons from the saved final logs.
 push/clone smoke, and the ≥8× many-ref throughput bar on staging. Cloudflare
 placement and production platform limits were not exercised by these local runs.
 No staging deployment, workflow dispatch, tag, registry publication or PR merge was
-performed. The deterministic wire expiry/ack race needs an approved clock seam;
+performed by the executor. Expiry/ack evidence is in-crate per amended R-159;
 native growth continues to skip without the optional stats route.

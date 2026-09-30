@@ -497,7 +497,7 @@ if [ "${multi}" -eq 1 ]; then
                 case "${filter}" in
                     leases.) if [ "${sharding}" = d34 ]; then
                         require_pass leases.idle_shard_renews_at_new_epoch \
-                            leases.expired_lease_renews_at_new_epoch
+                            leases.lease_expires_before_revocation_completes
                     fi ;;
                     repo.) require_pass repo.isolation_replay
                         if [ "${sharding}" = d34 ]; then require_pass repo.d36_hint_reads_during_lag; fi ;;

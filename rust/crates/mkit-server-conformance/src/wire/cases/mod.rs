@@ -307,7 +307,7 @@ cases! {
     "indexed.pending_verification_unavailable" => indexed::pending_verification_unavailable, M4, [IndexedMode, MultiRepo, Tickets, AuthV2, TestFaults], [];
     "leases.bump_completes_and_writes_continue" => leases::bump_completes_and_writes_continue, M1, [EpochLeases, TestFaults], [MultiRepo];
     "leases.idle_shard_renews_at_new_epoch" => leases::idle_shard_renews_at_new_epoch, M2, [EpochLeases, Grants, MultiRepo, AuthV2, TestFaults], [];
-    "leases.expired_lease_renews_at_new_epoch" => leases::expired_lease_renews_at_new_epoch, M2, [EpochLeases, Grants, MultiRepo, AuthV2, TestFaults], [];
+    "leases.lease_expires_before_revocation_completes" => leases::lease_expires_before_revocation_completes, M2, [EpochLeases, Grants, MultiRepo, AuthV2, TestFaults], [];
     "lag.list_refs_window" => lag::list_refs_window, M1, [AuthV2, TestFaults], [MultiRepo];
     "lag.membership_window" => repository::membership_lag_window, M1, [MultiRepo, AuthV2, Tickets, TestFaults], [];
     "info.shape_and_policy" => info::shape_and_policy, M1, [], [];

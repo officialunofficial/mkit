@@ -787,6 +787,7 @@ async fn pipeline_d34_multi_membership() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)] // Explicit grant/epoch case table and D34 lease checks.
 async fn pipeline_grants_single_and_d34() {
     for sharding in [
         mkit_server::pipeline::Sharding::Single,
@@ -804,6 +805,10 @@ async fn pipeline_grants_single_and_d34() {
         #[cfg(feature = "test-faults")]
         profile.features.insert(Feature::TestFaults);
         profile.sharding_d34 = sharding == mkit_server::pipeline::Sharding::D34;
+        #[cfg(feature = "test-faults")]
+        if profile.sharding_d34 {
+            profile.features.insert(Feature::EpochLeases);
+        }
         let auth = |origin: &str| AuthMode::AuthV2(AuthV2Config::new(origin, "").unwrap());
         let (origin, _) = serve_sharding(
             auth,
@@ -884,6 +889,17 @@ async fn pipeline_grants_single_and_d34() {
             let report = run(&target, Some(case)).await;
             common::judge(&report, PIPELINE_DIVERGENCES);
             assert_eq!(report.passes(), [case], "{case} did not run and pass");
+        }
+        #[cfg(feature = "test-faults")]
+        if target.profile.sharding_d34 {
+            for case in [
+                "leases.idle_shard_renews_at_new_epoch",
+                "leases.lease_expires_before_revocation_completes",
+            ] {
+                let report = run(&target, Some(case)).await;
+                common::judge(&report, PIPELINE_DIVERGENCES);
+                assert_eq!(report.passes(), [case], "{case} did not run and pass");
+            }
         }
     }
 }

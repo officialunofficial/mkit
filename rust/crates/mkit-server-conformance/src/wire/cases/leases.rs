@@ -121,11 +121,12 @@ pub(super) async fn idle_shard_renews_at_new_epoch(ctx: Ctx) -> CaseResult {
     Ok(())
 }
 
-/// A shard whose real-clock lease has expired renews at epoch 1 and refuses
-/// the epoch-0 grant it had accepted before, even on a skewed request. (An expiry racing an
-/// in-flight acknowledgement needs a paused write: it stays in-crate, as
-/// `expiry_races_ack` in `mkit-server-native/tests/epoch_leases.rs`.)
-pub(super) async fn expired_lease_renews_at_new_epoch(ctx: Ctx) -> CaseResult {
+/// The warm shard's lease expires before revocation is requested and completes;
+/// no acknowledgement is in flight. The shard then renews at epoch 1 and refuses
+/// its old grant, even on a skewed request. Per amended R-159, the ack race stays
+/// in-crate: `expiry_races_ack_memory` and `expiry_races_ack_sqlite` in
+/// `mkit-server-native/tests/epoch_leases.rs`.
+pub(super) async fn lease_expires_before_revocation_completes(ctx: Ctx) -> CaseResult {
     let (grantee, repo, [old, new]) = warm_then_bump(&ctx, true).await?;
     let denied = write(&ctx, &grantee, &repo, ("main", &B), (&old, SKEW_MS));
     want_code(

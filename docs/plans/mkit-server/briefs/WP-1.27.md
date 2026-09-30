@@ -10,9 +10,10 @@ and under `wrangler dev`. `docs/plans/mkit-server/m1-exit-report.md` records the
    - Staging runs, the "≥ 8× on staging" bar and the staging push/clone smoke are **Stage 2**, owned by 1.19 and 1.20.
    - List them as "deferred per R-154" in the report.
 2. **R-159's 1.27 scope decisions:**
-   - **Epoch-lease wire cases:** bump (exists), idle-shard wake, and expiry racing an ack **via clock skew only**. No
-     new pause faults. Revoke-during-write and R-63 stay in-crate (`mkit-server-native/tests/epoch_leases.rs`) and
-     are cited in the report.
+   - **Epoch-lease scope (R-159, amended by the orchestrator after review):** wire cases cover bump, idle-shard
+     wake, and lease expiry before revocation completes, with no acknowledgement in flight. No new pause faults.
+     Expiry racing an ack stays in-crate (`mkit-server-native/tests/epoch_leases.rs::expiry_races_ack_memory` and
+     `expiry_races_ack_sqlite`), alongside revoke-during-write and R-63; all are cited in the report.
    - **The over-32 MiB listing** is a **native-only** wire case. The Worker keeps 1,000 refs (R-134).
    - A **partition-scoped Worker stats hook**, so `growth.*` runs under D34, which is now the default.
    - The exit evidence is `m1-exit-report.md`, from local runs, with no staging.
