@@ -2073,7 +2073,24 @@ guards, immutable action/inventory pages, fresh pipeline denial checks and audit
 intent activation, including contextual HTTP manifest checks, ticketless closure
 and bounded namespace purge, with source tests and independent reviews. Gate
 exceptions are recorded in the implementation contract; production takedown
-activation remains gated on WP-5.6a-2 and launch gates.
+activation remains gated on WP-5.6a-2/3 and launch gates.
+
+## Lean preservation cannot imply completed takedown (WP-5.6a-2 contract)
+
+**Always:** accepted requests retain denial and durable acquisition/discovery
+responsibility. Verified restricted copies do not imply final holders or real
+completion. Launch discovery sweeps finite roots (Single: sole Root) after the
+safety cut and relay watermark. Any supports denial/preservation and sweeps
+provable named/known-holder namespaces, never claiming discovery or takedown
+completion without the post-launch catalog. Admin replay stores no preserved bytes, and
+each read freshly checks authority/retention and verifies emitted pieces.
+Per-action purge cannot delete another action's copy or lift denial.
+**Because:** late holders, stale replay and shared preservation storage can lose
+responsibility or expose unverified bytes. **If violated:** completion is false,
+preserved bytes leak, or another action loses evidence. **Enforcement status:**
+normative SPEC-SERVER §18 and R-190; runtime enforcement and regression evidence
+remain required WP-5.6a-2/3 work. PR2 owns copy/retention/hold arbitration; PR3
+owns the restricted admin catalog. Activation stays fixed false in PR2.
 
 ## External authority revocation fences final acceptance
 

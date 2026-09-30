@@ -6,7 +6,7 @@
 //! Automatic state, purge work and outbox events commit in their source partition;
 //! the existing relay atomically appends the root audit and advances its watermark.
 
-mod auth;
+pub(crate) mod auth;
 mod automatic;
 mod ledger;
 #[cfg(test)]

@@ -3,6 +3,76 @@ use crate::adapter::ConfigError;
 use mkit_server::admin::Config;
 /// Operator public keys are configured only through this Worker secret.
 pub const KEYS_SECRET: &str = "ADMIN_KEYS";
+/// User-provisioned restricted R2 bucket, separate from serving STORAGE.
+pub const PRESERVATION_BINDING: &str = "PRESERVATION";
+/// Required role key seed, available only as a Worker secret.
+pub const RECEIPT_SECRET: &str = "RECEIPT_NOTICE_KEY";
+/// Default-off launch preservation configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TakedownSettings {
+    /// Explicit positive preservation lifetime.
+    pub retention_ms: u64,
+    /// Required receipt-and-notice public key publication.
+    pub publication: mkit_server::takedown::PublicationConfig,
+}
+pub(crate) fn takedown(
+    var: &impl Fn(&str) -> Option<String>,
+    admin: Option<&Config>,
+    indexed: bool,
+    _addressing: &mkit_server::Addressing,
+    paid: bool,
+    tickets: Option<&mkit_server::upload::token::TicketKeys>,
+) -> Result<Option<TakedownSettings>, ConfigError> {
+    let enabled = match var("TAKEDOWN_ENABLED").as_deref() {
+        None | Some("false") => false,
+        Some("true") => true,
+        _ => return Err(ConfigError("TAKEDOWN_ENABLED must be true or false".into())),
+    };
+    if !enabled {
+        if ["PRESERVATION_RETENTION_MS", RECEIPT_SECRET, "RECEIPT_KEYS"]
+            .iter()
+            .any(|name| var(name).is_some())
+        {
+            return Err(ConfigError(
+                "preservation settings require TAKEDOWN_ENABLED=true".into(),
+            ));
+        }
+        return Ok(None);
+    }
+    let admin = admin.ok_or_else(|| ConfigError("takedown requires ADMIN_KEYS".into()))?;
+    if !indexed || !paid {
+        return Err(ConfigError(
+            "takedown requires indexed opt-in on Workers Paid".into(),
+        ));
+    }
+    let retention_ms = var("PRESERVATION_RETENTION_MS")
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .ok_or_else(|| {
+            ConfigError("explicit positive PRESERVATION_RETENTION_MS required".into())
+        })?;
+    let seed = var(RECEIPT_SECRET)
+        .ok_or_else(|| ConfigError("RECEIPT_NOTICE_KEY secret required".into()))?;
+    let list = var("RECEIPT_KEYS")
+        .ok_or_else(|| ConfigError("RECEIPT_KEYS publication required".into()))?;
+    let publication = mkit_server::takedown::PublicationConfig::parse(seed.trim(), &list)
+        .map_err(|e| ConfigError(e.to_string()))?;
+    admin
+        .check_separation(publication.public_keys())
+        .map_err(|e| ConfigError(e.to_string()))?;
+    if tickets.is_some_and(|keys| {
+        publication
+            .public_keys()
+            .iter()
+            .any(|key| keys.contains_ed25519_public(key))
+    }) {
+        return Err(ConfigError("receipt key repeats ticket key".into()));
+    }
+    Ok(Some(TakedownSettings {
+        retention_ms,
+        publication,
+    }))
+}
 /// Parse keys and reject reuse of ticket/MAC and URL-token keys.
 /// # Errors
 /// A malformed, empty or overlapping key list.
@@ -32,8 +102,65 @@ pub fn parse(
     Ok(Some(config))
 }
 #[cfg(any(target_arch = "wasm32", test))]
-fn supported_path(path: &str) -> bool {
-    path == mkit_server::admin::AUDIT_PATH || path == mkit_server::admin::PURGE_PATH
+pub(crate) fn shards(
+    sharding: mkit_server::pipeline::Sharding,
+) -> std::sync::Arc<dyn mkit_server::pipeline::ShardMap> {
+    match sharding {
+        mkit_server::pipeline::Sharding::Single => {
+            std::sync::Arc::new(mkit_server::pipeline::SinglePartition)
+        }
+        _ => std::sync::Arc::new(mkit_server::pipeline::D34Shards),
+    }
+}
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn work(
+    env: &worker::Env,
+    cfg: &crate::adapter::WorkerConfig,
+    budget: &mkit_server::purge::SliceBudget,
+) -> Result<
+    mkit_server::takedown::work::Work<
+        crate::ns_client::DoNamespaceStore<crate::ns_client::StubTransport>,
+        crate::r2::WorkerBlobStore,
+        crate::r2::WorkerBlobStore,
+    >,
+    ConfigError,
+> {
+    let settings = cfg
+        .takedown
+        .as_ref()
+        .ok_or_else(|| ConfigError("preservation disabled".into()))?;
+    let indexed = cfg
+        .indexed
+        .as_ref()
+        .ok_or_else(|| ConfigError("preservation requires indexed storage".into()))?;
+    let blob = |binding, keyspace| {
+        crate::r2::R2BlobStore::new(
+            crate::r2::EnvBucket::new(env.clone(), binding).with_alarm_budget(budget.clone()),
+            keyspace,
+        )
+    };
+    Ok(mkit_server::takedown::work::Work {
+        metadata: crate::ns_client::DoNamespaceStore::new(
+            crate::ns_client::StubTransport::new(env.clone(), cfg.placement.clone()),
+            cfg.probe_partition(),
+        )
+        .with_alarm_budget(budget.clone()),
+        serving: blob(cfg.blob_binding, crate::r2::PACKS_KEYSPACE),
+        preserved: blob(PRESERVATION_BINDING, "preserved"),
+        root: cfg.probe_partition(),
+        shards: shards(cfg.sharding),
+        addressing: cfg.addressing.clone(),
+        retention_ms: settings.retention_ms,
+        discovery_margin_ms: indexed.relay_lag_bound_ms,
+        profile: mkit_server::takedown::acquisition::Profile::scheduled(),
+        clock: std::sync::Arc::new(crate::clock::WorkerClock),
+    })
+}
+#[cfg(any(target_arch = "wasm32", test))]
+fn supported_path(path: &str, enabled: bool) -> bool {
+    path == mkit_server::admin::AUDIT_PATH
+        || path == mkit_server::admin::PURGE_PATH
+        || enabled && path == mkit_server::admin::TAKEDOWN_PATH
 }
 #[cfg(any(target_arch = "wasm32", test))]
 fn purge_enabled(cfg: &crate::adapter::WorkerConfig) -> bool {
@@ -53,7 +180,8 @@ pub(crate) async fn serve(
     let Some(config) = &cfg.admin else {
         return worker::Response::error("admin disabled", 404);
     };
-    if !supported_path(&req.path()) {
+    let enabled = mkit_server::takedown::ACTIVATED && cfg.takedown.is_some();
+    if !supported_path(&req.path(), enabled) {
         return worker::Response::error("admin operation unavailable", 404);
     }
     if req.method() != worker::Method::Post {
@@ -78,8 +206,18 @@ pub(crate) async fn serve(
             crate::ns_client::StubTransport::new(env.clone(), cfg.placement.clone()),
             cfg.probe_partition(),
         );
-        let engine = Engine::new(store, cfg.probe_partition(), config.clone())
+        let mut engine = Engine::new(store.clone(), cfg.probe_partition(), config.clone())
             .with_purge(purge_enabled(cfg));
+        if enabled {
+            // Workers run on one thread; the shared core operations interface uses Arc.
+            #[allow(clippy::arc_with_non_send_sync)]
+            let operations = std::sync::Arc::new(mkit_server::takedown::Service::new(
+                store,
+                cfg.probe_partition(),
+                shards(cfg.sharding),
+            ));
+            engine = engine.with_operations(operations);
+        }
         engine
             .handle(
                 &path,
@@ -103,12 +241,135 @@ pub(crate) async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn operator_config(public: [u8; 32]) -> Config {
+        Config::parse("https://server.example", &serde_json::json!({"version":1,"keys":[{"keyId":"operator","alg":"ed25519","publicKey":mkit_core::hash::to_hex(&public),"roles":["all"]}]}).to_string()).unwrap()
+    }
+    struct PreservationFixture {
+        vars: std::collections::BTreeMap<&'static str, String>,
+        admin: Config,
+        addressing: mkit_server::Addressing,
+        operator: [u8; 32],
+        receipt: [u8; 32],
+    }
+    impl PreservationFixture {
+        fn new() -> Self {
+            let receipt =
+                mkit_server::hooks::HookSigner::new("receipt", zeroize::Zeroizing::new([17; 32]))
+                    .unwrap()
+                    .public_key();
+            let operator =
+                mkit_server::hooks::HookSigner::new("operator", zeroize::Zeroizing::new([18; 32]))
+                    .unwrap()
+                    .public_key();
+            let list = serde_json::json!({"version":1,"keys":[{"keyId":mkit_core::hash::to_hex(&mkit_core::hash::hash(&receipt)),"alg":"ed25519","publicKey":mkit_core::hash::to_hex(&receipt)}]}).to_string();
+            Self {
+                vars: std::collections::BTreeMap::from([
+                    ("TAKEDOWN_ENABLED", "true".to_owned()),
+                    ("PRESERVATION_RETENTION_MS", "12345".to_owned()),
+                    (RECEIPT_SECRET, mkit_core::hash::to_hex(&[17; 32])),
+                    ("RECEIPT_KEYS", list),
+                ]),
+                admin: operator_config(operator),
+                addressing: mkit_server::Addressing::Single {
+                    repo: mkit_server::RepoId {
+                        namespace: mkit_server::NamespaceKey::deployment_default(),
+                        name: mkit_server::RepoName::new("repo").unwrap(),
+                    },
+                },
+                operator,
+                receipt,
+            }
+        }
+        fn settings(
+            &self,
+            indexed: bool,
+            paid: bool,
+        ) -> Result<Option<TakedownSettings>, ConfigError> {
+            takedown(
+                &|key| self.vars.get(key).cloned(),
+                Some(&self.admin),
+                indexed,
+                &self.addressing,
+                paid,
+                None,
+            )
+        }
+    }
+    #[test]
+    fn preservation_requires_explicit_retention_and_publication() {
+        let mut fixture = PreservationFixture::new();
+        assert_eq!(
+            fixture.settings(true, true).unwrap().unwrap().retention_ms,
+            12345
+        );
+        for required in ["PRESERVATION_RETENTION_MS", RECEIPT_SECRET, "RECEIPT_KEYS"] {
+            let removed = fixture.vars.remove(required).unwrap();
+            assert!(fixture.settings(true, true).is_err(), "{required}");
+            fixture.vars.insert(required, removed);
+        }
+        fixture.vars.insert("TAKEDOWN_ENABLED", "invalid".into());
+        assert!(fixture.settings(true, true).is_err());
+        fixture.vars.insert("TAKEDOWN_ENABLED", "true".into());
+        fixture.vars.insert("PRESERVATION_RETENTION_MS", "0".into());
+        assert!(fixture.settings(true, true).is_err());
+        assert!(
+            takedown(&|_| None, None, false, &fixture.addressing, false, None)
+                .unwrap()
+                .is_none()
+        );
+    }
+    #[test]
+    fn preservation_requires_indexed_paid_and_accepts_all_namespace_policies() {
+        let mut fixture = PreservationFixture::new();
+        assert!(fixture.settings(false, true).is_err());
+        assert!(fixture.settings(true, false).is_err());
+        fixture.addressing = mkit_server::Addressing::Multi(
+            mkit_server::MultiAddressing::new().with_namespace_policy(
+                mkit_server::policy::NamespacePolicy::Any {
+                    unsafe_without_admission: true,
+                },
+            ),
+        );
+        assert_eq!(
+            fixture.settings(true, true).unwrap().unwrap().retention_ms,
+            12345
+        );
+        fixture.addressing = mkit_server::Addressing::Multi(
+            mkit_server::MultiAddressing::new().with_namespace_policy(
+                mkit_server::policy::NamespacePolicy::Allowlist(
+                    [mkit_core::repo_identity::Namespace::parse(&format!(
+                        "ed25519-{}",
+                        mkit_core::hash::to_hex(&fixture.operator)
+                    ))
+                    .unwrap()]
+                    .into(),
+                ),
+            ),
+        );
+        assert!(fixture.settings(true, true).is_ok());
+    }
+    #[test]
+    fn preservation_role_keys_stay_separate_after_rotation() {
+        let mut fixture = PreservationFixture::new();
+        fixture.admin = operator_config(fixture.receipt);
+        assert!(fixture.settings(true, true).is_err());
+        fixture.admin = operator_config(fixture.operator);
+        let mut retired: serde_json::Value =
+            serde_json::from_str(&fixture.vars["RECEIPT_KEYS"]).unwrap();
+        retired["keys"].as_array_mut().unwrap().push(serde_json::json!({"keyId":mkit_core::hash::to_hex(&mkit_core::hash::hash(&fixture.operator)),"alg":"ed25519","publicKey":mkit_core::hash::to_hex(&fixture.operator),"notAfterMs":"1"}));
+        fixture.vars.insert("RECEIPT_KEYS", retired.to_string());
+        assert!(
+            fixture.settings(true, true).is_err(),
+            "retired receipt keys cannot become admin keys"
+        );
+    }
     #[test]
     fn manual_purge_is_exposed_and_takedown_stays_unexposed() {
-        assert!(supported_path(mkit_server::admin::AUDIT_PATH));
-        assert!(supported_path(mkit_server::admin::PURGE_PATH));
+        assert!(supported_path(mkit_server::admin::AUDIT_PATH, false));
+        assert!(supported_path(mkit_server::admin::PURGE_PATH, false));
         assert!(!supported_path(
-            "/mkit.server.admin.v1.AdminService/Takedown"
+            "/mkit.server.admin.v1.AdminService/Takedown",
+            false
         ));
     }
 
@@ -187,5 +448,18 @@ mod tests {
                 .unwrap()
                 .enabled()
         );
+    }
+
+    #[test]
+    fn configured_storage_cannot_enable_takedown_intake() {
+        let fixture = PreservationFixture::new();
+        let configured = fixture.settings(true, true).unwrap().is_some();
+        assert!(configured);
+        assert!(!supported_path(
+            mkit_server::admin::TAKEDOWN_PATH,
+            mkit_server::takedown::ACTIVATED && configured
+        ));
+        assert!(supported_path(mkit_server::admin::TAKEDOWN_PATH, true));
+        let _shards = shards(mkit_server::pipeline::Sharding::Single);
     }
 }

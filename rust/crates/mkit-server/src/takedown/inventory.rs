@@ -79,6 +79,94 @@ fn add_digest(digest: &mut Hash, id: &Hash, row: &Value) {
         *a ^= b;
     }
 }
+/// A bounded inventory traversal whose aggregate is checked against the seal.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct InventoryCursor {
+    after: Option<Vec<u8>>,
+    count: u64,
+    digest: Hash,
+}
+pub(super) async fn has_seal<S: NamespaceStore>(
+    store: &S,
+    pack: &Hash,
+) -> Result<bool, StoreError> {
+    let Some(raw) = store.get(&content_shard(pack), &head_key(pack)).await? else {
+        return Ok(false);
+    };
+    let head: Head = decode(&raw)?;
+    if head.version != 1 || !head.complete {
+        return Err(bad());
+    }
+    Ok(true)
+}
+pub(super) async fn next<S: NamespaceStore>(
+    store: &S,
+    pack: &Hash,
+    mut state: InventoryCursor,
+) -> Result<(InventoryCursor, Vec<(Hash, Entry)>, bool), StoreError> {
+    let raw = store
+        .get(&content_shard(pack), &head_key(pack))
+        .await?
+        .ok_or_else(bad)?;
+    let head: Head = decode(&raw)?;
+    if head.version != 1 || !head.complete || state.count > head.count {
+        return Err(bad());
+    }
+    let start = Key::new([keys::block(pack).as_bytes(), b"\0inventory\0"].concat());
+    let mut end = start.as_bytes().to_vec();
+    *end.last_mut().ok_or_else(bad)? = 1;
+    let after = state.after.clone().map(crate::Cursor::new);
+    let page = store
+        .scan(
+            &content_shard(pack),
+            &start,
+            &Key::new(end),
+            after.as_ref(),
+            SCAN_ROWS,
+        )
+        .await?;
+    let mut entries = Vec::new();
+    for (key, raw) in page.entries {
+        let id: Hash = key
+            .as_bytes()
+            .strip_prefix(start.as_bytes())
+            .ok_or_else(bad)?
+            .try_into()
+            .map_err(|_| bad())?;
+        if store
+            .get(&content_shard(pack), &marker_key(pack, &id))
+            .await?
+            .as_ref()
+            .map(Value::as_bytes)
+            != Some(entry_digest(&id, &raw).as_slice())
+        {
+            return Err(bad());
+        }
+        let entry: Entry = decode(&raw)?;
+        if entry.version != 1 || entry.kind > 7 {
+            return Err(bad());
+        }
+        denial::encode_actions(vec![entry.references.clone()])?;
+        state.count = state.count.checked_add(1).ok_or_else(bad)?;
+        add_digest(&mut state.digest, &id, &raw);
+        entries.push((id, entry));
+    }
+    if page
+        .next
+        .as_ref()
+        .is_some_and(|next| after.as_ref() == Some(next))
+    {
+        return Err(bad());
+    }
+    state.after = page.next.map(|next| next.as_bytes().to_vec());
+    let done = state.after.is_none();
+    if state.count > head.count || done && (state.count, state.digest) != (head.count, head.digest)
+    {
+        return Err(bad());
+    }
+    Ok((state, entries, done))
+}
 /// The first occurrence owns an entry, like the write-once object index.
 /// Pages are staged first; entry, parent descriptor and running seal share one CAS.
 pub async fn stage<S: NamespaceStore>(

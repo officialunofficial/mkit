@@ -34,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Valid large D34 packmaps no longer stall at the whole-alarm call limit.
   Its internal timer-value codec changes; reset unsupported pre-launch stores.
 
+- Docs (WP-5.6a-2/3, R-190): specify finite root sweeps and support Any denial/
+  preservation with incomplete discovery pending the post-launch catalog.
+  Distinguish verified preservation from unresolved completion; require byte-free
+  admin replay and fresh audited verified streams. §14.7 signing/publication and
+  full-profile requirements remain. PR2 owns preservation/retention/hold core; PR3
+  owns the restricted admin catalog. Activation stays off; no completed gates claimed.
+
 - Server/Worker (default-off, WP-4.10b-2, R-186): complete consumed-group extraction
   with closure before effects, native union counts, bounded job header/body guards,
   resumable delta reconstruction and root-checked multipart uploads. Hold renewal
@@ -49,7 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Server (WP-5.6a-1, R-190): independent V2 denial actions, verified pack inventory
   and signed, audited pending takedown intents; manual PurgeCache returns a purge
   id asynchronously and audits completion. Preservation and production takedown
-  activation await WP-5.6a-2. Timer 15 is TAKEDOWN_WORK; no new key tag or migration.
+  activation await WP-5.6a-2/3. Timer 15 is TAKEDOWN_WORK; no new key tag or migration.
 
 - Server (WP-5.5a, R-200): synchronous added-pack file inspection before apply,
   fail-closed retries without replay, signed remote Inspect, and advertised
