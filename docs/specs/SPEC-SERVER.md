@@ -664,6 +664,8 @@ Object bytes MUST NOT be sent in the Inspect request. Inspectors that
 need bytes MUST fetch them through a deployment-private channel, never
 through the public serving path, which serves only published content.
 That private channel MUST be accessible only to authorized inspectors.
+The optional additive `InspectRequest.scanner_retrieval = 5` carries only
+the private retrieval metadata defined in §11.4; it contains no object bytes.
 
 `InspectResponse.verdict` selects one alternative:
 
@@ -1862,6 +1864,102 @@ Removing an inspector with outstanding obligations MUST NOT silently
 waive them. Only an audited admin action under §16 MAY waive them;
 until then they remain outstanding. §14 defines takedown rewrite
 mechanics, while §16 defines the admin release and audit contract.
+
+### 11.4 Private scanner pack retrieval (R-193, launch)
+
+Launch inspection MAY enable a separate private retrieval channel on native
+and Workers servers. It is disabled by default, Paid-only, and MUST NOT be
+activated before the launch activation gate (WP-4.18). Without enablement,
+the route MUST NOT be mounted. It grants no public-serving, write, admin,
+or preservation-read permission. Global denial under §14 MUST remain
+authoritative, including for staged packs and trusted scanners.
+
+An enabled PRE_RECEIVE call MUST include `scanner_retrieval`, an
+`InspectRetrieval` message with the following fields:
+
+| Field | Meaning |
+|---|---|
+| `endpoint_path = 1` | Origin-relative private path `/_mkit/scanner/pack`. |
+| `capability = 2` | Opaque MAC-authenticated capability for this call. |
+| `expires_at_ms = 3` | Exclusive unsigned Unix epoch-millisecond expiry. |
+| `packs = 4` | Ordered added packs as `InspectPack { bytes id = 1; uint64 length = 2; }`; each id is 32 bytes and length is the raw staged pack length. |
+
+The server MUST mint a fresh capability for every Inspect call, including
+retries that preserve the same logical `inspection_id` (§11.2). It MUST
+bind the server's canonical origin as audience, the inspection id, full
+repository identity, ref and upload signer, exact ordered pack ids and
+lengths, all corresponding upload ticket ids, mint/expiry times and a fresh
+random nonce. Expiry MUST be no later than the hook timeout plus 1,000 ms
+after minting, with an absolute maximum lifetime of 301,000 ms.
+Outgoing hook signing continues to use §7's separate key and fresh nonce.
+
+The versioned token is
+`r1.<key-id>.<lowercase-hex JSON claims>.<64 lowercase-hex MAC>`.
+The MAC is keyed BLAKE3 over the literal UTF-8 domain
+`mkit-scanner-retrieval:v1\n` followed by the exact serialized claims bytes.
+The retrieval MAC key MUST be a dedicated random 32-byte secret with
+active/retained rotation. It MUST NOT be reused for another role. Startup
+MUST refuse a collision with any configured role's secret or public key,
+including the Ed25519 public key derived from a configured secret.
+
+The scanner MUST send `POST /_mkit/scanner/pack` with a JSON body of at
+most 16,384 bytes. The body names `capability` and `pack_id` (64 lowercase
+hex digits), and MAY name unsigned `start` and `end_inclusive` together.
+The request MUST carry a valid STC auth-v2 envelope signed by a key in
+the deployment's dedicated scanner Ed25519 allowlist, with audience equal
+to the server origin, repository equal to the capability's repository,
+and signature binding the exact body bytes and route path. Scanner keys
+MUST NOT be reused for another configured role; startup MUST refuse reuse.
+The capability alone is insufficient authority, as is a scanner signature
+without the matching capability.
+
+The route MUST serve only the named bound pack's raw staged bytes, without
+decoding entries or classifying objects. The scanner decodes packs itself,
+verifies object ids against Inspect metadata, and derives chunk membership
+by decoding manifests. A complete read of at most 1 MiB returns HTTP 200
+with `application/octet-stream`. A valid bounded range of at most 1 MiB
+returns HTTP 206 with that type and `Content-Range: bytes start-end/length`.
+Larger packs require bounded ranges; invalid or oversized ranges MUST fail
+uniformly as below. The route MUST emit no cache headers, MUST NOT use
+Workers Caching, and MUST bound storage calls and resident response bytes.
+Global-denial checks MAY prefetch the first descriptor page from at most
+eight shards concurrently, retaining at most 4 MiB of raw descriptor values.
+Keys, cursors and collection overhead MUST also remain bounded.
+Descriptor continuations and nested inventory, chunk and action proofs
+MUST remain sequential with their existing page and proof-context bounds.
+Every shard and nested proof MUST still be checked afresh under the
+request's shared 8,500-operation budget; prefetch grants no cache-based
+authorization.
+
+Informative: an added pack may use an external delta base permitted by §9.4.
+To decode that pack, the scanner needs an independently authorized resolver
+or a retained local cache for the base. The retrieval capability remains
+limited to the advance's raw added packs; it grants no authority to retrieve
+external base objects or earlier packs.
+
+At request time, the server MUST check BOTH that the capability is
+unexpired and that every upload ticket bound to the requested pack still
+exists, is open and unexpired, and matches its bound repository, ref,
+signer, pack identity and length. Successful apply consumes the ticket;
+terminal close or ticket expiry is an abort for this channel. Each makes
+retrieval return `not_found`, even with an otherwise valid unexpired
+capability. No new durable lifetime state or key tag is introduced.
+
+A fail-closed attempt, including scanner unavailability or an invalid
+verdict, leaves tickets open. Its capability intentionally remains usable
+until capability expiry while those tickets remain open. A retry
+re-inspects the same packs with the same inspection id and a fresh
+capability. The scanner is a trusted role and the short expiry bounds
+this retrieval window; returning from a failed attempt is not a terminal
+ticket close.
+
+Every retrieval failure MUST return the same HTTP 404 `not_found` answer,
+including missing or incorrect capability, unknown or disallowed scanner
+key, invalid signature, expiry, unknown or foreign pack, closed/consumed
+or expired ticket, and an active global block. Storage or proof failure
+MUST fail closed with the same answer. No error may disclose whether
+the pack or ticket exists. Authorization and global-denial checks MUST
+precede reading pack bytes.
 
 ## 12. Storage leases and lifecycle events
 
@@ -3613,6 +3711,9 @@ serving stops remain governed by §§10–11, subject to the launch amendments:
 only sync/fail-closed inspectors, at most four, one complete batch each, and a
 whole-advance input bound of `inspect_batch_max_objects` (positive and at most
 10,000; default 10,000), advertised as optional `inspection_max_objects`.
+Optional scanner byte retrieval follows §11.4: a dedicated capability and
+scanner-signed request, checked against current open upload tickets and
+global denial, with no inline bytes or durable attempt-lifetime state.
 The inspected set is every `Blob` and `ChunkedBlob` entry of the added packs,
 surplus included and ids deduplicated, using `BLOB` and `CHUNKED_FILE` respectively;
 chunk-only blobs MAY be `BLOB` and `CHUNK` is unused (§11.1). Earlier membership
@@ -3688,6 +3789,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 | Version | Status | Change |
 |---|---|---|
 | 1 | draft | Bounded resumable publication rechecks retain a binding and witness position in the existing timer-12 value, guard checkpoints against obligation/generation changes, and preserve valid dependency limits. Unsupported pre-launch timer values require store reset (R-198 B1). |
+| 1 | draft | R-193 additive Inspect retrieval metadata (§6.4, §11.4), private raw added-pack reads with dedicated MAC capability and scanner auth-v2 keys, bounded ranges, uniform not_found and global denial. Current open-ticket state plus short capability expiry defines lifetime; fail-closed attempts remain readable until expiry, and retries preserve inspection_id while minting fresh capabilities. Default-off, Paid-only; activation waits for WP-4.18. |
 | 1 | draft | R-190 pending launch takedown: repository-local object or whole-pack input (additive admin `pack_id = 9`), independent immediate denial and unresolved preservation work; production activation awaits preservation. Manual PurgeCache accepts asynchronously with audited completion. |
 | 1 | draft | R-200 launch inspection: sync/fail-closed only, at most four inspectors, positive whole-advance bound <=10,000 advertised as inspection_max_objects, conservative header/job-count refusal before enumeration with the existing index-limit error; one batch each and PRE_RECEIVE quarantine rejects. Inspect added-pack Blob/ChunkedBlob entries, surplus included, as BLOB/CHUNKED_FILE; chunk-only blobs MAY be BLOB, CHUNK unused. Earlier membership was synchronously inspected; activation requires an empty store. Enumerate frame/checkpoint pages of <=1,000 rows without inspection role reads. No durable continuation/marker; async, holds, quarantine, full classification and unrestricted multi-batch inspection deferred to WP-5.5c (§11, §18). |
 | 1 | draft | Launch admin foundation subset: signed framework, gapless audit/ReadAuditLog and automatic purge delivery; manual PurgeCache deferred. Automatic audit uses committed source relay events and atomic root append/dedup/watermark. |

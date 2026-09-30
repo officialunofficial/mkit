@@ -447,12 +447,16 @@ impl Rig {
     }
 
     fn job(&self, pack: &Hash) -> Option<VerifyJobV1> {
-        block_on(
-            self.store
-                .get(&self.source(), &keys::verify_job(&self.repo.name, pack)),
-        )
+        block_on(super::checkpoint::read_job(
+            self.store.as_ref(),
+            &self.source(),
+            &self.repo.name,
+            pack,
+        ))
         .unwrap()
-        .map(|raw| decode_job(&raw).unwrap())
+        .0
+        .filter(|(job, _)| !job.gone)
+        .map(|(job, _)| job)
     }
 
     fn state(&self, pack: &Hash) -> Option<VerificationV1> {
@@ -1606,7 +1610,14 @@ fn a_closed_ticket_takes_the_job_rows_and_an_unconsumed_packs_vs_with_it() {
         }
         block_on(rig.store.apply(&rig.source(), close)).unwrap();
         rig.clock.advance(400_000);
-        rig.drive(|rig| rows_left(rig, &ticket.pack_id) == 0);
+        rig.drive(|rig| rows_left(rig, &ticket.pack_id) == 1);
+        let tombstone = block_on(rig.store.get(
+            &rig.source(),
+            &keys::verify_job(&rig.repo.name, &ticket.pack_id),
+        ))
+        .unwrap()
+        .unwrap();
+        assert!(checkpoint::decode_job(&tombstone).unwrap().gone);
         assert_eq!(
             rig.state(&ticket.pack_id).is_some(),
             consumed,
@@ -2215,9 +2226,33 @@ fn co_consumed_jobs_share_the_decode_budget() {
             rig.drive(|r| r.finished(&t.pack_id));
         }
         let scheduled = rig.check(&[(&first_t, first_id), (&second_t, second_id)], head);
-        let error = scheduled.unwrap_err();
-        assert_eq!(error.code(), crate::error::Code::InvalidArgument);
-        assert_eq!(error.public_message(), "pack exceeds indexed decode budget");
+        let mut oracle = Rig::new();
+        oracle.cfg = rig.cfg;
+        let native_tickets = [oracle.add(&pack), oracle.add(&second)];
+        let native = block_on(crate::indexed::verify::verify_ticketed(
+            oracle.blobs.as_ref(),
+            oracle.store.as_ref(),
+            oracle.shards.as_ref(),
+            &oracle.repo,
+            &oracle.source(),
+            &native_tickets
+                .iter()
+                .map(|(t, _)| t.clone())
+                .collect::<Vec<_>>(),
+            &native_tickets.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+            head,
+            oracle.cfg,
+            oracle.clock.as_ref(),
+            oracle.recorder.as_ref(),
+        ));
+        if duplicate {
+            assert_eq!(scheduled.unwrap(), native.unwrap());
+        } else {
+            let error = scheduled.unwrap_err();
+            assert_eq!(error.code(), crate::error::Code::InvalidArgument);
+            assert_eq!(error.public_message(), native.unwrap_err().public_message());
+            assert_eq!(error.public_message(), "pack exceeds indexed decode budget");
+        }
         assert!(rejected(&rig, &first_t.pack_id).is_none());
         assert!(rejected(&rig, &second_t.pack_id).is_none());
     }
@@ -2239,14 +2274,21 @@ fn interrupted_closure_and_recheck_slices_shrink_then_end_terminal() {
             phase
         };
         job.final_pass = true;
-        block_on(rig.store.apply(
+        let raw = block_on(rig.store.get(
             &rig.source(),
-            Batch::new().put(
-                keys::verify_job(&rig.repo.name, &ticket.pack_id),
-                checkpoint::encode_job(&job),
-            ),
+            &keys::verify_job(&rig.repo.name, &ticket.pack_id),
         ))
+        .unwrap()
         .unwrap();
+        let batch = checkpoint::write_job(
+            Batch::new(),
+            &mut job,
+            Some(&raw),
+            &rig.repo.name,
+            &ticket.pack_id,
+        )
+        .unwrap();
+        block_on(rig.store.apply(&rig.source(), batch)).unwrap();
         if phase == Phase::Recheck {
             rig.clock.advance(1_000);
             rig.tick();
@@ -2770,6 +2812,14 @@ fn seven_captured_job_guards_have_an_explicit_opaque_etag_byte_ledger() {
                 .unwrap();
             compact = compact.require(Precondition::Equals(key.clone(), raw.clone()));
             let mut job = decode_job(&raw).unwrap();
+            block_on(super::checkpoint::hydrate_job(
+                rig.store.as_ref(),
+                &rig.source(),
+                &rig.repo.name,
+                &ticket.pack_id,
+                &mut job,
+            ))
+            .unwrap();
             assert_eq!(job.entries, if packlists { 0 } else { 3 });
             assert_eq!(
                 job.outcome,
@@ -2929,3 +2979,12 @@ fn verified_duplicate_pack_rebuild_keeps_both_tickets_and_first_decode_owner() {
             .is_some()
     );
 }
+
+#[path = "extraction_tests.rs"]
+mod extraction_tests;
+
+#[path = "scheduled_reclaim_tests.rs"]
+mod scheduled_reclaim_tests;
+
+#[path = "header_tests.rs"]
+mod header_tests;

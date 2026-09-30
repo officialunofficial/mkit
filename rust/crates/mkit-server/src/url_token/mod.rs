@@ -134,6 +134,13 @@ pub struct UrlTokenKeys {
 }
 
 impl UrlTokenKeys {
+    /// Check role separation without exposing the active seed.
+    pub(crate) fn contains_secret(&self, material: &[u8; 32]) -> bool {
+        use subtle::ConstantTimeEq as _;
+        let seed = Zeroizing::new(self.active.to_bytes());
+        bool::from(seed.ct_eq(material))
+    }
+
     /// Signing `active` seed plus the retired verification set.
     ///
     /// # Errors

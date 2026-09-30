@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 use super::extract::Kind;
-#[cfg(test)]
 use crate::store::StoreError;
 use crate::store::Value;
 
@@ -105,7 +104,6 @@ impl Projection {
     /// Bound page geometry to the frozen job's verified frame before any
     /// reference-page query. The caller also checks the source/job guards and
     /// completes the reference digest scan before freezing group selection.
-    #[cfg(test)]
     pub(super) fn validate_frame(
         &self,
         frame: &super::checkpoint::FrameRow,
@@ -175,7 +173,6 @@ impl Projection {
         Value::new(out)
     }
 
-    #[cfg(test)]
     pub(super) fn decode(owner: &Hash, value: &Value) -> Result<Self, StoreError> {
         let b = value.as_bytes();
         if b.len() != 82 || b[0] != 2 || b[1] > 3 || &b[2..34] != owner {
@@ -241,7 +238,6 @@ impl Projection {
         Value::new(out)
     }
 
-    #[cfg(test)]
     pub(super) fn decode_page<'a>(
         &self,
         index: u32,

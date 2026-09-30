@@ -54,6 +54,7 @@ mod purge;
 mod ref_policy;
 mod reservation;
 mod revocation;
+mod scanner_retrieval;
 mod shard;
 mod staging;
 #[cfg(test)]
@@ -265,6 +266,8 @@ pub struct PipelineConfig {
     pub begin_upload_threshold_bytes: u64,
     /// Accepted deployment upload MAC keys; first key signs.
     pub ticket_keys: Option<TicketKeys>,
+    /// Default-off private raw-pack scanner retrieval, with dedicated keys.
+    pub scanner_retrieval: Option<Arc<crate::scanner_retrieval::RetrievalConfig>>,
     /// URL-token key set and lifetime for `IssueObjectUrl`
     /// (SPEC-WRITE-GRANTS §9.4); `None` answers `unimplemented`.
     pub url_tokens: Option<crate::url_token::UrlTokenConfig>,
@@ -353,6 +356,7 @@ impl PipelineConfig {
             max_list_refs_page_size: DEFAULT_LIST_PAGE_LIMIT,
             begin_upload_threshold_bytes: u64::MAX,
             ticket_keys: None,
+            scanner_retrieval: None,
             url_tokens: None,
             admin_keys: Vec::new(),
             purge: None,
@@ -604,6 +608,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         clock: Arc<dyn Clock>,
         metrics: Arc<dyn Metrics>,
     ) -> Result<Self, ServerError> {
+        crate::scanner_retrieval::service::validate_config(&cfg)?;
         if let Some(purge) = &cfg.purge {
             purge.validate().map_err(meta_error)?;
         }
@@ -1052,6 +1057,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         {
             return Err(ServerError::unauthenticated(
                 "admin key cannot authenticate client calls",
+            ));
+        }
+        if a.principal.ed25519().is_some_and(|key| {
+            self.cfg
+                .scanner_retrieval
+                .as_ref()
+                .is_some_and(|config| config.scanner_keys().any(|public| &public == key))
+        }) {
+            return Err(ServerError::unauthenticated(
+                "scanner key cannot authenticate client calls",
             ));
         }
         // Credentials are captured for admission, which only signed writes
@@ -3598,8 +3613,22 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .await?;
             #[cfg(feature = "remote-hooks")]
             if let Some(set) = inspected {
-                self.inspect_advance(op, &prepared.value, set.clone().finalize())
-                    .await?;
+                let assignment = if self.cfg.scanner_retrieval.is_some() {
+                    let advance = req
+                        .advance
+                        .as_ref()
+                        .ok_or_else(|| internal("retrieval requires tickets"))?;
+                    Some(Self::retrieval_assignment(op, advance, snapshot, set)?)
+                } else {
+                    None
+                };
+                self.inspect_advance(
+                    op,
+                    &prepared.value,
+                    set.clone().finalize(),
+                    assignment.as_ref(),
+                )
+                .await?;
             }
             Ok(Some(prepared))
         } else {

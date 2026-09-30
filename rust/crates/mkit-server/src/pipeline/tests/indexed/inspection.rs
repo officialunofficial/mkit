@@ -336,6 +336,90 @@ fn unavailable_has_no_replay_and_retry_reuses_inspection_id() {
     assert_eq!(calls[0], calls[1]);
 }
 
+// R-193 B3 escalation evidence: the lifetime inputs of an active inspection
+// and its returned fail-closed attempt are identical on both placements.
+#[test]
+fn unavailable_inspection_leaves_active_lifetime_rows_unchanged() {
+    struct LifetimeProbe {
+        name: String,
+        store: Arc<MemoryKv>,
+        partition: Partition,
+        keys: Vec<Key>,
+        observed: Mutex<Option<Vec<Option<Value>>>>,
+    }
+    impl ContentInspector for LifetimeProbe {
+        fn id(&self) -> &str {
+            &self.name
+        }
+        fn inspect<'a>(
+            &'a self,
+            _: &'a Operation,
+            _: &'a str,
+            _: &'a [InspectObject],
+        ) -> crate::BoxFuture<'a, Result<InspectVerdict, ServerError>> {
+            Box::pin(async move {
+                let rows = self
+                    .store
+                    .get_many(&self.partition, &self.keys)
+                    .await
+                    .unwrap();
+                *self.observed.lock().unwrap() = Some(rows);
+                Err(ServerError::unavailable("scanner unavailable"))
+            })
+        }
+    }
+
+    for sharding in [Sharding::Single, Sharding::D34] {
+        let (mut env, owner, identity) = environment_with_sharding(sharding);
+        let (bytes, head, tickets, pack_id) = upload_file_fixture(&env, &owner, &identity, 10600);
+        let request = signed(&owner, &identity, Procedure::AdvanceRefs, 10602);
+        let auth = env.auth(&request).unwrap();
+        let repo = &auth.repo().repo;
+        let partition = env.pipe.shards.ref_shard(repo, HEAD);
+        let ticket_keys: Vec<_> = tickets.iter().map(keys::ticket).collect();
+        let ticket_rows = block_on(env.pipe.meta.get_many(&partition, &ticket_keys)).unwrap();
+        let mut lifecycle_keys = ticket_keys;
+        for (id, raw) in tickets.iter().zip(&ticket_rows) {
+            let ticket = codec::decode_ticket(raw.as_ref().unwrap()).unwrap();
+            let reservation_key = keys::reservation(&ticket.reservation_id).unwrap();
+            let reservation = block_on(env.pipe.meta.get(&partition, &reservation_key))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                codec::decode_reservation(&reservation).unwrap(),
+                codec::ReservationV1::Ticketed { ticket_id: *id }
+            );
+            lifecycle_keys.push(reservation_key);
+        }
+        lifecycle_keys.extend([
+            keys::replay(&auth.auth.as_ref().unwrap().replay_scope),
+            keys::publication(&repo.name, HEAD),
+            keys::ref_key(&repo.name, HEAD),
+            keys::ref_key(&repo.name, PACKMAP),
+            keys::membership(&repo.name, &pack_id),
+        ]);
+        let probe = Arc::new(LifetimeProbe {
+            name: "lifetime-probe".into(),
+            store: env.pipe.meta.inner.clone(),
+            partition: partition.clone(),
+            keys: lifecycle_keys,
+            observed: Mutex::default(),
+        });
+        configure(&mut env, vec![probe.clone()], 10_000);
+        let (_, result) = advance(&env, &owner, &identity, &bytes, head, tickets, 10602);
+        assert_eq!(result.unwrap_err().code(), Code::Unavailable);
+        assert!(replay(&env, &request).is_none());
+        let after = block_on(probe.store.get_many(&partition, &probe.keys)).unwrap();
+        assert_eq!(probe.observed.lock().unwrap().as_ref().unwrap(), &after);
+        assert!(
+            block_on(env.pipe.blobs.head(&BlobKey::pack(pack_id)))
+                .unwrap()
+                .is_some()
+        );
+        assert_advance_unmoved(&env, &env.auth(&request).unwrap().repo().repo, &[pack_id]);
+    }
+}
+
 #[test]
 fn inspection_upper_bound_rejects_before_hooks_with_existing_input_limit_replay_behavior() {
     let (mut env, owner, identity) = environment();

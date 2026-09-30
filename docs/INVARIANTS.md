@@ -5,6 +5,34 @@ single crate or spec. Each entry states the invariant, why it matters, and
 what breaks when it is violated. A regression test enforces each one; find
 it by the file path listed under "Enforced by".
 
+## Private scanner retrieval requires current ticket and global-denial checks
+
+**Always:** scanner byte reads require both a dedicated short-lived capability
+and an allowlisted scanner auth-v2 signature over the exact private request.
+Every ticket bound to the requested raw pack must still be open and unexpired
+at request time, and global denial must permit the bytes. Apply consumption,
+terminal close, ticket expiry or capability expiry yields the same `not_found`
+as a missing pack. Fail-closed inspection leaves tickets open, so retrieval
+intentionally survives that attempt only until capability expiry. Retries keep
+the inspection id and mint a fresh capability.
+
+**Because:** staged bytes are absent from the public serving view, and private
+inspection authority must remain bounded without weakening global blocks or
+introducing an existence oracle.
+
+**If violated:** a scanner can read foreign, expired or blocked staged content,
+or reveal whether a pack exists through error differences.
+
+**Enforced by:** `rust/crates/mkit-server/src/scanner_retrieval/` capability,
+current-ticket and denial checks with shared call/response bounds;
+`rust/crates/mkit-server/src/takedown/denial.rs` prefetches at most eight
+first descriptor pages with at most 4 MiB of raw descriptor values plus
+bounded key, cursor and collection overhead; continuations and
+nested inventory/chunk/action proofs remain sequential with their existing
+bounds, and existing callers remain serial; core,
+native and Worker scanner retrieval regression suites. The native and Worker
+mounts are default-off; Worker release activation awaits WP-4.18.
+
 ## Ticketed pushes bind uploaded bytes to one paired advance
 
 **Always:** a Connect push opens a signed ticket for each pack that needs one,
@@ -2045,8 +2073,8 @@ unverified bytes or falsely authorize reuse in another repository.
 
 **Enforced by:** `r2/object_multipart.rs`, R2 object sink/completion root
 pins, bounded-object multipart model tests, and the local R2 runtime probe.
-The parent WP-4.10b must establish canonical identity plus immutable verified
-source evidence in its first bounded source pass; that integration is pending.
+WP-4.10b establishes canonical identity and immutable verified source evidence
+in its first bounded source pass before opening a root-pinned upload session.
 
 ### Pending holder work protects bytes beyond hold TTL (WP-4.10b foundation)
 
@@ -2065,8 +2093,49 @@ content relay hook atomically commits holder/count/c changes, ordinary hold and
 exact pending-row release, and the watermark. A late blocked holder retains a
 durable takedown request for WP-5.6a. No permissive release API is exposed.
 
-WP-4.10b-1 keeps Extract fail-closed. Source verification, holder enqueue/renewal
-and extraction-driver integration remain WP-4.10b-2 work.
+WP-4.10b-1 keeps Extract fail-closed. WP-4.10b-2 supplies source verification,
+holder enqueue/renewal and the opt-in driver; release exposure waits for WP-4.18.
+
+
+### Scheduled extraction freezes closure and protects source lifetimes (WP-4.10b-2)
+
+**Always:** extraction effects begin only after the complete consumed union has
+passed closure and deterministic selection. Object counts and canonical-byte
+reports deduplicate by ID. Peer reuse guards bounded job headers whose generation
+binds immutable member-list bodies. A stale header or generation cannot authorize
+reuse, replacement, cleanup or an extraction effect.
+
+**Because:** a missing source can invalidate the entire push, and completed peer
+member lists can be too large to fit raw CAS guards together. Header generations
+prove the lifetime of immutable facts without buffering native's staged map.
+
+**If violated:** a partial group can publish unwanted bytes or falsely report
+Verified; large legitimate reused groups can become permanently unclaimable.
+
+**Enforced by:** `indexed/checkpoint.rs`, `scheduled.rs` and `job/extraction.rs`;
+`header_tests`, `scheduled_reclaim_tests` and native-oracle `extraction_tests`
+cover header/body mutation, six groups with 256 members, union counts, closure lag,
+replaced/expired tickets and canceled owners. Gone tombstones retain generations.
+
+### Delta source reconstruction advances with bounded live memory (WP-4.10b-2)
+
+**Always:** each unfinished extraction-source reconstruction alarm persists one
+lookup prefix or one ancestry/decode step. Only a previous canonical accumulator
+and one decoded frame are resident; descriptors and fragments use existing vc4.
+Every decoded frame and accumulator matches its core object identity before upload, and
+completed source charge advances atomically with the chunk cursor. Restart cannot
+lose or double that charge.
+
+**Because:** a native-valid 50-hop source can exceed a single alarm's 256 calls
+while fitting its 48 MiB live-memory allowance. Retrying a whole chain would stall.
+
+**If violated:** a valid push never progresses, a replay changes quota accounting,
+or unverified canonical content reaches the object store.
+
+**Enforced by:** `job/extraction/member.rs` and the guarded `Stop::Yield` path.
+`extraction_budget_tests` compares native results, per-alarm progress/calls and
+restart midway through a 50-hop chain, including 250 KiB nodes and the exact
+whole-source decode-budget boundary. Apply validation retains 100 ops / 1 MiB.
 
 ## Launch inspection checks the complete bounded set before apply
 

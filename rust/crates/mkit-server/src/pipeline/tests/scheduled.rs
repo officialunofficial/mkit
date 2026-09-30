@@ -210,17 +210,23 @@ fn a_pending_advance_leaves_no_trace_and_the_same_nonce_commits_after_the_slices
     );
     alarms(&env, &source, 12);
     assert_eq!(attempt().unwrap(), AdvanceOutcome::Committed);
-    // The ticket is consumed, and the finished job's rows follow it.
+    // The ticket is consumed; facts clear while a generation tombstone prevents ABA.
     alarms(&env, &source, 3);
     env.clock.advance(3_600_000);
     alarms(&env, &source, 3);
     let (start, end) = keys::verify_range(&repo.name, &pack_id, None);
-    assert!(
-        block_on(env.pipe.meta.scan(&source, &start, &end, None, 10))
-            .unwrap()
-            .entries
-            .is_empty()
+    let cleaned = block_on(env.pipe.meta.scan(&source, &start, &end, None, 10)).unwrap();
+    assert!(cleaned.next.is_none());
+    assert_eq!(
+        cleaned.entries.len(),
+        1,
+        "only the generation tombstone survives"
     );
+    assert_eq!(cleaned.entries[0].0, keys::verify_job(&repo.name, &pack_id));
+    let tombstone = crate::indexed::checkpoint::decode_job(&cleaned.entries[0].1).unwrap();
+    assert!(tombstone.gone);
+    assert!(tombstone.generation > 0);
+    assert!(tombstone.member_body_id.is_none());
     assert!(
         block_on(
             env.pipe
