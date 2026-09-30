@@ -30,3 +30,8 @@ PR 2, WP-5.6a-2: verified preservation and admin reads.
 Don't defer anything else to fit the caps. If either PR would pass its cap, stop and report the measured count.
 
 The [launch brief and historical base brief](WP-5.6a.md) remain binding except where this approval overrides them.
+
+Latest user cap ruling: PR1 counts non-test production Rust lines only. Docs,
+proto, copied briefs and generated code are excluded. The cap is raised to 2,800
+Rust lines for the remaining fixes and gates; stop and report if it would pass
+2,800. Activation remains off until WP-5.6a-2.

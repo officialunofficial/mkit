@@ -216,6 +216,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Exercise signed acceptance, replay and disabled configuration together.
     async fn signed_native_purge_requires_configured_delivery_and_audits_disabled_result() {
         use ed25519_dalek::{Signer as _, SigningKey};
         let signer = SigningKey::from_bytes(&[71; 32]);

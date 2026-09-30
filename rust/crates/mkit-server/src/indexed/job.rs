@@ -1528,7 +1528,22 @@ where
     ) -> Result<u64, Stop> {
         let now = now_ms(self.h.clock.as_ref());
         if job.kind == Kind::Packlist {
-            for child in &job.packlist {
+            // Verify owns scan after decoding; checkpoint its inventory position.
+            let mut offset = if job.scan.is_empty() {
+                0
+            } else {
+                codec::decode_u64(&Value::new(job.scan.clone()))?
+            };
+            let start =
+                usize::try_from(offset).map_err(|_| unavailable("invalid inventory cursor"))?;
+            let children = job
+                .packlist
+                .get(start..)
+                .ok_or_else(|| unavailable("invalid inventory cursor"))?;
+            for child in children {
+                if self.budget.remaining() < ENTRY_RESERVE {
+                    return Ok(1);
+                }
                 crate::takedown::inventory::dependency(
                     self.remote,
                     &self.pack,
@@ -1537,9 +1552,12 @@ where
                     now,
                 )
                 .await?;
+                offset += 1;
+                job.scan = offset.to_be_bytes().to_vec();
             }
         }
         crate::takedown::inventory::complete(self.remote, &self.pack, job.pack_len, now).await?;
+        job.scan.clear();
         match state {
             Some((VerificationV1::Rejected { .. }, _)) => {
                 job.phase = Phase::Watch;

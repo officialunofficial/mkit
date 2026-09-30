@@ -1947,6 +1947,27 @@
     "area_gates": ["rust", "wasm", "workers", "conf-wrangler"]
   },
   {
+    "id": "4.10b-1",
+    "title": "Worker: protection and bounded upload prerequisites",
+    "milestone": "M4",
+    "track": "worker",
+    "depends_on": [
+      "4.8",
+      "4.10",
+      "4.10b-multipart"
+    ],
+    "size": "L",
+    "summary": "Merged R-186 protection prerequisite: guarded holder delivery and exact gp ownership release, durable ct/timer-13 Ready handoff, bounded projections and upload callbacks. FailClosedExtraction remains registered; the full extraction driver belongs to 4.10b-2. Takedown consumption belongs to 5.6a-2.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
+      "conf-wrangler"
+    ],
+    "status": "merged"
+  },
+  {
     "id": "4.10b",
     "title": "Worker: extraction slices and content relay hook",
     "milestone": "M4",
@@ -2442,10 +2463,11 @@
     "milestone": "M5",
     "track": "core",
     "depends_on": [
-      "5.6a-1"
+      "5.6a-1",
+      "4.10b-1"
     ],
     "size": "L",
-    "summary": "R-190 part 2: verified canonical preservation, checkpointed discovery and retention, legal holds, restricted audited streaming reads and native/Worker configuration/templates. Timer 15 TAKEDOWN_WORK and existing b subkeys only. User provisions storage. ct/timer-13 consumer integrates only if 4.10b-1 is merged; otherwise explicit carry-forward. Cap 2,600 non-test lines including docs.",
+    "summary": "R-190 part 2: verified canonical preservation, checkpointed discovery and retention, legal holds, restricted audited streaming reads and native/Worker configuration/templates. Timer 15 TAKEDOWN_WORK and existing b subkeys only. User provisions storage. Merged 4.10b-1 supplies the actual ct/timer-13 codec; its owning consumer is required here, with durable acceptance before acknowledgment. Cap 2,600 non-test lines including docs.",
     "human_action": true,
     "area_gates": [
       "rust",

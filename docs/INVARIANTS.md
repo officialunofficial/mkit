@@ -1988,8 +1988,10 @@ blocked manifest. Acceptance remains incomplete with preservation pending.
 or turn acceptance into completion. **If violated:** blocked bytes become reusable
 or a request loses preservation responsibility. **Enforcement work:** ContentIndex V2
 guards, immutable action/inventory pages, fresh pipeline denial checks and audited
-intent activation. HTTP helper wiring and namespace purge remain incomplete;
-production takedown activation remains gated on WP-5.6a-2 and launch gates.
+intent activation, including contextual HTTP manifest checks, ticketless closure
+and bounded namespace purge, with source tests and independent reviews. Gate
+exceptions are recorded in the implementation contract; production takedown
+activation remains gated on WP-5.6a-2 and launch gates.
 
 ## External authority revocation fences final acceptance
 

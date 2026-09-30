@@ -142,7 +142,7 @@ mod tests {
         );
         hooks.http = Some(crate::hooks::config::HttpVars {
             endpoint: crate::hooks::fetch::Endpoint::new("https://hooks.example").unwrap(),
-            validity: std::time::Duration::from_secs(60),
+            validity: std::time::Duration::from_mins(1),
         });
         cfg.hooks = Some(hooks);
         assert!(purge_enabled(&cfg));

@@ -1,6 +1,7 @@
 //! Host backend contract: production DO client and an R2 bucket model share
-//! the same dispatcher counter. EnvBucket's wasm charge sites require wasm
+//! the same dispatcher counter. `EnvBucket`'s wasm charge sites require wasm
 //! validation; this model does not claim to execute the Workers JS runtime.
+#![allow(clippy::unwrap_used)] // Invalid test fixtures must fail immediately.
 mod common;
 
 use std::collections::BTreeSet;

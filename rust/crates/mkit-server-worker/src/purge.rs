@@ -139,6 +139,7 @@ impl<S: NamespaceStore, T: NamespaceStore, C: CacheDelete> LocalInvalidation
     ) -> BoxFuture<'a, Result<Option<u32>, StoreError>> {
         self.local.invalidate(request, cursor, budget)
     }
+    #[allow(clippy::too_many_lines)] // One checkpoint machine owns catalog traversal and cache deletion.
     fn invalidate_checkpoint<'a>(
         &'a self,
         request: &'a Request,
@@ -173,7 +174,7 @@ impl<S: NamespaceStore, T: NamespaceStore, C: CacheDelete> LocalInvalidation
                 serde_json::from_slice(checkpoint).map_err(|_| bad_position())?
             };
             if checkpoint.len() > 4096
-                || pos.after.as_ref().is_some_and(|c| c.is_empty())
+                || pos.after.as_ref().is_some_and(Vec::is_empty)
                 || (pos.done && pos.after.is_some())
                 || (pos.done && pos.repository.is_none())
                 || (pos.paths && pos.repository.is_none() && pos.cursor != 0)
@@ -644,7 +645,7 @@ mod tests {
                 .apply(
                     &partition,
                     Batch::new().put(
-                        keys::repo_record(&RepoName::new(&format!("repo-{index:02}")).unwrap()),
+                        keys::repo_record(&RepoName::new(format!("repo-{index:02}")).unwrap()),
                         codec::encode_repo_record(&codec::RepoRecord { created_at_ms: 1 }),
                     ),
                 )
