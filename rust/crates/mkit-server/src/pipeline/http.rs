@@ -466,7 +466,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
                 let mut source = crate::http_objects::proof::RepositorySource {
                     env: Env {
                         blobs: &self.blobs,
-                        meta: &self.meta,
+                        meta: &view,
                         shards: self.shards.as_ref(),
                         repo,
                         indexed,
@@ -571,8 +571,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
 
     /// The published ref values and whether enumeration hit its row or page
     /// budget. Packmaps are excluded from tips but charged to the scan budget.
-    /// Refs are read from their shards: pending content never
-    /// reaches a ref value (indexed advances publish verified packs only).
+    /// Refs are read through the published facade, even when a live advance
+    /// is verified but still awaits clearance.
     async fn published_tips(&self, repo: &RepoId, cap: usize) -> Result<(Vec<Hash>, bool), Fail> {
         let view = crate::store::view::ViewStore {
             store: &self.meta,

@@ -1933,8 +1933,9 @@ reservations, incorrect byte accounting or prefix-dependent memory exhaustion.
 
 **Enforced by:** common HTTP `proof`/`paid_reads` tests, native mount verifier round
 trips, core structural/golden sizing tests and the existing bounded prefix builder
-tests. Publication reachability and held-state enforcement await integration
-with WP-5.4's published facade (R-198). Native mounts remain opt-in; Workers
+tests. Preparation, reachability and post-admission canonical reads share
+WP-5.4's reader facade and serving-stop seam; cached leaves cannot authorize
+an orphan commit or bypass held membership. Native mounts remain opt-in; Workers
 prefetch is WP-4.14b-2.
 
 ## Published refs and durable dependency work (WP-5.4)

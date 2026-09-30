@@ -639,7 +639,7 @@ Entry condition: M1 is merged. The M4 private-serving WPs (4.15) need M2 read au
 
 ### WP-4.14b: HTTP proofs aggregate (R-187)
 - **Depends on:** merged WP-4.13, WP-4.14b-1, WP-4.14b-2.
-- **Goal:** Deliver both native/core and Workers proof serving before launch.
+- **Goal:** Deliver native/core proofs; Workers proof serving follows after launch (R-200).
 
 ### WP-4.14b-1: HTTP proofs, native and core
 - **Depends on:** WP-4.12, merged WP-4.13, WP-4.14a, WP-5.4 published view.

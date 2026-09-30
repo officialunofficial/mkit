@@ -97,7 +97,7 @@ touched wasm crates + `scripts/check-wasm-dep-graph.sh`; `proto` = `buf lint`, `
 **Dropped:** M0-R (Q11 = no), WP-1.1 (folded into S1, Q18), WP-2.1 (folded into S2, Q19). **Added by
 consolidation:** 1.21–1.29 (D34 and coordinator inputs), 4.8a (windowed reader), 4.10a (ContentIndex shards), REL.
 **Split by review 01 (R-72):** M0-02 → M0-02a + M0-02b, M0-05 → M0-05a + M0-05b (the old ids no longer exist).
-**Split for R-161:** 4.14 → 4.14a (core and wasm) + 4.14b (HTTP and Workers); both are on the launch serving dependency path (R-185). R-187 further splits 4.14b into 4.14b-1 (native/core) and 4.14b-2 (Workers after 4.10b); the 4.14b row is their aggregate.
+**Split for R-161:** 4.14 → 4.14a (core and wasm) + 4.14b (HTTP and Workers); both are on the launch serving dependency path (R-185). R-187 further splits 4.14b into 4.14b-1 (native/core) and 4.14b-2 (Workers after 4.10b, deferred post-launch by R-200); the 4.14b row is their aggregate.
 `registry.json` carries the same columns, including `area_gates`.
 Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 

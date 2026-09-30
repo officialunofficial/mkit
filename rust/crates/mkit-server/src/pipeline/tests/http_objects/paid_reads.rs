@@ -916,6 +916,53 @@ fn proof_build_failure_and_planned_length_mismatch_abort_reservation() {
     }
 }
 
+struct StopDuringProof(Arc<AtomicBool>);
+impl ProofServer for StopDuringProof {
+    fn build<'a>(
+        &'a self,
+        request: &'a PreparedProof,
+        source: &'a mut dyn ProofSource,
+    ) -> BoxFuture<'a, Result<Vec<u8>, ServerError>> {
+        Box::pin(async move {
+            // Preparation and admission succeeded. The coherent stop becomes
+            // visible before the builder's first canonical read.
+            self.0.store(true, Ordering::SeqCst);
+            source.read(request.commit).await?;
+            Ok(vec![0; usize::try_from(request.encoded_len).unwrap()])
+        })
+    }
+}
+
+#[test]
+fn proof_build_rechecks_publication_stop_and_aborts_reservation() {
+    let (mut fx, d, admission, tasks) = setup();
+    let stopped = Arc::new(AtomicBool::new(false));
+    fx.pipe = fx
+        .pipe
+        .with_publication_policy(Arc::new(ServingStop(stopped.clone())))
+        .unwrap();
+    let fx = with_seams(fx, |s| s.proofs = Arc::new(StopDuringProof(stopped)));
+    let query = format!("proof=1&commit={}&path=small.txt", to_hex(&d.head()));
+    let got = read(fx.request(
+        "GET",
+        &fx.object_url("room", &id(&d.small)),
+        Some(&query),
+        &[],
+    ));
+    assert_eq!(got.status, 503);
+    assert_eq!(got.header("Cache-Control"), Some("no-store"));
+    assert!(got.header("ETag").is_none());
+    assert!(matches!(
+        reservation(&fx, 0),
+        ReservationV1::Aborted {
+            reason: AbortReason::Internal,
+            ..
+        }
+    ));
+    assert_eq!(admission.calls.lock().unwrap().len(), 1);
+    tasks.join();
+}
+
 #[test]
 fn proof_drop_before_or_after_first_byte_settles_once() {
     for poll in [false, true] {
