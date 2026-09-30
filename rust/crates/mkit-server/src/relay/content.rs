@@ -45,7 +45,7 @@ impl ContentTakedownV1 {
     }
     /// Refuse unknown, truncated, trailing or noncanonical values.
     pub fn decode(value: &Value) -> Result<Self, StoreError> {
-        fn field<'a>(bytes: &mut &'a [u8]) -> Result<Value, StoreError> {
+        fn field(bytes: &mut &[u8]) -> Result<Value, StoreError> {
             let (len, tail) = bytes.split_first_chunk::<2>().ok_or_else(bad)?;
             let (value, rest) = tail
                 .split_at_checked(usize::from(u16::from_be_bytes(*len)))
@@ -173,6 +173,7 @@ impl RelayHook for HolderRelayHook {
             ))
         })
     }
+    #[allow(clippy::too_many_lines)] // Fold all holder/count/protection effects into one atomic target plan.
     fn before_apply_observed<'a>(
         &'a self,
         target: &'a Partition,

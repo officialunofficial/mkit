@@ -806,7 +806,7 @@ where
     T: mkit_server::NamespaceStore + 'static,
 {
     use crate::classes::ShardClass;
-    use mkit_server::relay::{NoHook, RelayBudget, RelayHandler};
+    use mkit_server::relay::{RelayBudget, RelayHandler};
     use mkit_server::timers::{TimerRegistry, lease_sweep::LeaseSweep};
 
     // One target client serves the class's relay or lease sweep and its rollup.
@@ -856,7 +856,12 @@ where
             let relay = match target.clone().map(SharedStore) {
                 Ok(target) => Some(RelayHandler {
                     target,
-                    hook: NoHook,
+                    hook: mkit_server::relay::HolderRelayHook {
+                        #[cfg(target_arch = "wasm32")]
+                        clock: Arc::new(crate::clock::WorkerClock),
+                        #[cfg(not(target_arch = "wasm32"))]
+                        clock: Arc::new(mkit_server::SystemClock),
+                    },
                     budget,
                 }),
                 Err(error) => {
@@ -869,6 +874,9 @@ where
                 max_per_tick,
                 metrics: Arc::new(crate::telemetry::ConsoleMetrics::default()),
             })
+        }
+        ShardClass::ContentIndexShard => {
+            registry.register(mkit_server::relay::TakedownRequestTimer)
         }
         _ => registry,
     };
@@ -1134,8 +1142,8 @@ impl<T: mkit_server::NamespaceStore> mkit_server::NamespaceStore for SharedStore
 /// older-window scans and the guarded delete), 8 in all; contention could
 /// replan the aggregate up to 8 times, so the cap turns the excess into a
 /// retryable `StoreError` (a failed fire, retried with backoff and resuming
-/// its prune), never a lost timer. Paid runs four fires uncapped (its
-/// alarm allows 1,000 subrequests).
+/// its prune), never a lost timer. Paid runs four fires with the same
+/// eight-call cap, reserving at most 32 coordinator calls per alarm.
 const PAID_ROLLUP_FIRES_PER_TICK: u32 = 4;
 const FREE_ROLLUP_FIRES_PER_TICK: u32 = 1;
 const FREE_ROLLUP_CALLS: u32 = 8;
@@ -1254,7 +1262,7 @@ impl<T> WorkerQuotaRollup<T> {
                 coordinator: BudgetedStore {
                     inner,
                     used: Arc::clone(&used),
-                    limit: if free { FREE_ROLLUP_CALLS } else { u32::MAX },
+                    limit: FREE_ROLLUP_CALLS,
                 },
                 metrics: crate::telemetry::ConsoleMetrics::default(),
             }),
@@ -1304,7 +1312,7 @@ impl<S: mkit_server::NamespaceStore, T: mkit_server::NamespaceStore + 'static>
 }
 
 struct WorkerRelay<T> {
-    relay: Option<mkit_server::relay::RelayHandler<T>>,
+    relay: Option<mkit_server::relay::RelayHandler<T, mkit_server::relay::HolderRelayHook>>,
     max_per_tick: u32,
     metrics: Arc<dyn mkit_server::Metrics>,
 }
@@ -2197,6 +2205,11 @@ mod glue {
             R2BlobStore::new(
                 EnvBucket::new(env.clone(), crate::r2::STORAGE_BINDING),
                 PACKS_KEYSPACE,
+            )
+            .with_deferred_abort(
+                !plan
+                    .as_deref()
+                    .is_some_and(|p| p.trim().eq_ignore_ascii_case("paid")),
             ),
         );
         let registry = super::with_outcome_timers(
@@ -2973,6 +2986,221 @@ mod tests {
         let range = RangeScan::new(Key::new(b"a".to_vec()), Key::new(b"z".to_vec()), None, 10);
         block_on(store.scan_many(&p, &[range.clone(), range])).unwrap();
         assert_eq!(store.used.load(core::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn worker_registry_delivers_a_current_96_effect_generic_relay_in_two_calls() {
+        use mkit_server::store::{codec, keys, outbox::OutboxBuilder};
+        use mkit_server::timers::{TickBudget, run_due};
+        use mkit_server::{
+            Batch, Key, ManualClock, MemoryKv, NamespaceKey, NamespaceStore, Partition, RepoName,
+            Value,
+        };
+        let clock = Arc::new(ManualClock::new(100));
+        let local = MemoryKv::with_clock(clock.clone());
+        let remote = Arc::new(MemoryKv::with_clock(clock.clone()));
+        let calls = Arc::new(core::sync::atomic::AtomicU32::new(0));
+        let source = Partition::Ref {
+            ns: NamespaceKey::deployment_default(),
+            repo: RepoName::new("room").unwrap(),
+            shard_ref: "refs/heads/main".into(),
+        };
+        let target = Partition::ContentShard(0);
+        let mut builder = OutboxBuilder::new(None, None).unwrap();
+        builder.relay_at(50);
+        builder.relay(
+            &target,
+            (0..96_u8)
+                .map(|n| (Key::new(vec![b'x', n]), Value::new(vec![n])))
+                .collect(),
+        );
+        let mut batch = Batch::new();
+        builder
+            .try_finish(&mut batch.preconditions, &mut batch.writes)
+            .unwrap();
+        block_on(local.apply(&source, batch)).unwrap();
+        let registry = timer_registry(
+            crate::classes::ShardClass::RefShard,
+            Ok(BudgetedStore {
+                inner: SharedStore(remote.clone()),
+                used: calls.clone(),
+                limit: 2,
+            }),
+            Some("free"),
+        );
+        let report = block_on(run_due(
+            &local,
+            &source,
+            &registry,
+            clock.as_ref(),
+            100,
+            &TickBudget::default(),
+        ))
+        .unwrap();
+        assert_eq!(report.fired, 1);
+        assert_eq!(calls.load(core::sync::atomic::Ordering::SeqCst), 2);
+        for n in 0..96_u8 {
+            assert_eq!(
+                block_on(remote.get(&target, &Key::new(vec![b'x', n]))).unwrap(),
+                Some(Value::new(vec![n]))
+            );
+        }
+        assert_eq!(
+            block_on(remote.get(&target, &keys::relay_high_water(&source).unwrap())).unwrap(),
+            Some(codec::encode_u64(1))
+        );
+        let object = [0x78; 32];
+        let hold = [0x79; 32];
+        let identity = mkit_server::store::PendingHolderV1::new(
+            mkit_server::store::Holder::new(
+                NamespaceKey::deployment_default(),
+                RepoName::new("room").unwrap(),
+            ),
+            source.clone(),
+            [0x7a; 32],
+            object,
+            hold,
+            [0x7b; 32],
+        )
+        .unwrap();
+        let idx = mkit_server::store::ContentIndex::new(SharedStore(remote.clone()));
+        assert_eq!(
+            block_on(idx.add_hold(&object, &hold, 20_000, 100)).unwrap(),
+            mkit_server::store::HoldOutcome::Held
+        );
+        assert_eq!(
+            block_on(idx.protect_pending_holder(&object, &hold, &identity, 100)).unwrap(),
+            mkit_server::store::HoldOutcome::Held
+        );
+        let destination = mkit_server::store::content_shard(&object);
+        let os = block_on(local.get(&source, &keys::outbox_sequence())).unwrap();
+        let mut builder = OutboxBuilder::new(os.as_ref(), None).unwrap();
+        builder.relay_at(50);
+        builder.relay(
+            &destination,
+            vec![(
+                keys::pending_holder(&object, &hold),
+                identity.encode().unwrap(),
+            )],
+        );
+        let mut batch = Batch::new();
+        builder
+            .try_finish(&mut batch.preconditions, &mut batch.writes)
+            .unwrap();
+        block_on(local.apply(&source, batch)).unwrap();
+        calls.store(0, core::sync::atomic::Ordering::SeqCst);
+        block_on(run_due(
+            &local,
+            &source,
+            &registry,
+            clock.as_ref(),
+            100,
+            &TickBudget::default(),
+        ))
+        .unwrap();
+        assert_eq!(calls.load(core::sync::atomic::Ordering::SeqCst), 2);
+        assert!(
+            block_on(remote.get(
+                &destination,
+                &keys::holder(&object, &identity.holder.ns, &identity.holder.repo).unwrap()
+            ))
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            block_on(remote.get(&destination, &keys::pending_holder(&object, &hold)))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            block_on(remote.get(&destination, &keys::hold(&object, &hold)))
+                .unwrap()
+                .is_none()
+        );
+        let content = timer_registry::<MemoryKv, MemoryKv>(
+            crate::classes::ShardClass::ContentIndexShard,
+            Ok(MemoryKv::default()),
+            Some("paid"),
+        );
+        assert!(format!("{content:?}").contains("TimerKind(13)"));
+    }
+
+    #[test]
+    fn paid_rollup_backlog_is_bounded_and_resumes_until_drained() {
+        use mkit_server::store::{codec, keys};
+        use mkit_server::timers::{TickBudget, TimerRegistry, run_due};
+        use mkit_server::{
+            Batch, ManualClock, MemoryKv, NamespaceKey, NamespaceStore, Partition, RepoName,
+        };
+        let clock = Arc::new(ManualClock::new(700_000));
+        let coordinator = Arc::new(MemoryKv::with_clock(clock.clone()));
+        let namespace = NamespaceKey::deployment_default();
+        let target = Partition::Coordinator(namespace.clone());
+        let shard = Partition::Ref {
+            ns: namespace.clone(),
+            repo: RepoName::new("room").unwrap(),
+            shard_ref: "refs/heads/main".into(),
+        };
+        for n in 0..65 {
+            let source = Partition::Ref {
+                ns: namespace.clone(),
+                repo: RepoName::new("room").unwrap(),
+                shard_ref: format!("refs/heads/{n}"),
+            };
+            block_on(coordinator.apply(
+                &target,
+                Batch::new().put(
+                    keys::quota_contribution(0, &source).unwrap(),
+                    codec::encode_namespace_usage(mkit_server::quota::NamespaceUsage {
+                        ops: 1,
+                        bytes: 1,
+                    }),
+                ),
+            ))
+            .unwrap();
+        }
+        let handler = WorkerQuotaRollup::new(Ok(SharedStore(coordinator.clone())), Some("paid"));
+        let used = handler.used.clone();
+        let registry = TimerRegistry::new().register(handler);
+        let local = MemoryKv::with_clock(clock.clone());
+        let timer = keys::timer(
+            60_000,
+            mkit_server::timers::registry::kinds::QUOTA_ROLLUP.get(),
+            &1_u64.to_be_bytes(),
+        );
+        block_on(local.apply(&shard, Batch::new().put(timer, codec::encode_u64(60_000)))).unwrap();
+        let (start, end) = keys::quota_namespace_before(keys::TAG_QUOTA_CONTRIBUTION, 1);
+        for attempt in 0..20 {
+            let report = block_on(run_due(
+                &local,
+                &shard,
+                &registry,
+                clock.as_ref(),
+                u64::try_from(mkit_server::Clock::now_ms(clock.as_ref())).unwrap(),
+                &TickBudget::default(),
+            ))
+            .unwrap();
+            assert_eq!(report.fired, 1);
+            // The ninth attempted call fails before reaching the coordinator.
+            assert!(used.load(core::sync::atomic::Ordering::SeqCst) <= 9);
+            let remaining = block_on(coordinator.scan(&target, &start, &end, None, 100)).unwrap();
+            if attempt == 0 {
+                assert!(
+                    !remaining.entries.is_empty(),
+                    "bounded prune must retain its continuation"
+                );
+                assert!(
+                    remaining.entries.len() < 65,
+                    "committed prune pages survive retry"
+                );
+            }
+            if report.next_wake_ms.is_none() {
+                assert!(remaining.entries.is_empty());
+                return;
+            }
+            clock.advance(60_000);
+        }
+        panic!("bounded Paid rollup failed to finish its backlog");
     }
 
     const RP: &str = "example.test=https://example.test";

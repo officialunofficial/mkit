@@ -89,6 +89,7 @@ fn outcome_error(outcome: Outcome, now: u64, ticket: &TicketV1, bound: u64) -> S
         Outcome::ExtractionUnavailable => {
             ServerError::unavailable("pack extraction is not available on this deployment")
         }
+        Outcome::ObjectBlocked => ServerError::permission_denied("object blocked"),
     }
 }
 
@@ -143,9 +144,86 @@ struct Consumed<'a> {
     job: VerifyJobV1,
 }
 
+/// A new Advance may release a failed group only before extraction effects.
+/// The exact failed observation is included in the replacement transaction.
+async fn failed_group<N: NamespaceStore>(
+    store: &N,
+    source: &Partition,
+    repo: &RepoId,
+    job: &VerifyJobV1,
+) -> Result<Option<Precondition>, ServerError> {
+    for member in &job.extraction_group {
+        let ticket = keys::ticket(&member.ticket);
+        if store
+            .get(source, &ticket)
+            .await
+            .map_err(|_| storage_failed())?
+            .is_none()
+        {
+            return Ok(Some(Precondition::Absent(ticket)));
+        }
+        let state = keys::verification(&repo.name, &member.pack);
+        if let Some(raw) = store
+            .get(source, &state)
+            .await
+            .map_err(|_| storage_failed())?
+            && matches!(
+                super::state::decode(&raw).map_err(|_| storage_failed())?,
+                VerificationV1::Rejected { .. }
+            )
+        {
+            return Ok(Some(Precondition::Equals(state, raw)));
+        }
+        let key = keys::verify_job(&repo.name, &member.pack);
+        if let Some(raw) = store
+            .get(source, &key)
+            .await
+            .map_err(|_| storage_failed())?
+            && super::checkpoint::decode_job(&raw)
+                .map_err(|_| storage_failed())?
+                .outcome
+                .is_some()
+        {
+            return Ok(Some(Precondition::Equals(key, raw)));
+        }
+    }
+    Ok(None)
+}
+
+/// A finished source remains pinned while an older group uses its facts.
+/// Guard every finished peer before changing that source's retention group.
+async fn finished_peers<N: NamespaceStore>(
+    store: &N,
+    source: &Partition,
+    repo: &RepoId,
+    job: &VerifyJobV1,
+) -> Result<Vec<Precondition>, ServerError> {
+    let mut guards = Vec::new();
+    for member in &job.extraction_group {
+        if member.ticket == job.ticket_id {
+            continue;
+        }
+        let key = keys::verify_job(&repo.name, &member.pack);
+        let raw = store
+            .get(source, &key)
+            .await
+            .map_err(|_| storage_failed())?;
+        if let Some(raw) = raw {
+            let peer = super::checkpoint::decode_job(&raw).map_err(|_| storage_failed())?;
+            if !peer.usable() && peer.outcome.is_none() {
+                return Err(super::pending(retry_after(Some(&peer))));
+            }
+            guards.push(Precondition::Equals(key, raw));
+        } else {
+            guards.push(Precondition::Absent(key));
+        }
+    }
+    Ok(guards)
+}
+
 /// Claim every new member together. Waiting on a foreign unfinished group
 /// creates no partial group: A+B and B+C serialize before either can extract.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One atomic group claim.
 async fn claim_extraction_group<N: NamespaceStore>(
     store: &N,
     source: &Partition,
@@ -179,11 +257,70 @@ async fn claim_extraction_group<N: NamespaceStore>(
                 .map_err(|_| storage_failed())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let new = jobs
+    let mut packs = BTreeSet::new();
+    for (i, ticket) in tickets.iter().enumerate() {
+        if let Some(VerificationV1::Rejected { code, message }) = &states[i] {
+            return Err(stored_error(code, message));
+        }
+        if !packs.insert(ticket.pack_id)
+            && !matches!(states[i], Some(VerificationV1::Verified { pack_len, .. })
+                    if pack_len == ticket.bytes)
+        {
+            // BeginUpload cannot produce two live tickets with this binding.
+            // Synthetic fresh duplicates follow native's Pending behavior;
+            // never claim contradictory owners for one pack-keyed job.
+            return Err(super::pending(1_000));
+        }
+    }
+    let mut new = jobs
         .iter()
         .zip(ticket_ids)
-        .map(|(job, id)| job.as_ref().is_none_or(|job| job.ticket_id != *id))
+        .enumerate()
+        .map(|(i, (job, id))| {
+            job.as_ref().is_none_or(|job| {
+                job.ticket_id != *id
+                    && !(job.usable()
+                        && job.pack_len == tickets[i].bytes
+                        && matches!(states[i], Some(VerificationV1::Verified { pack_len, .. })
+                            if pack_len == tickets[i].bytes)
+                        && tickets.iter().zip(ticket_ids).any(|(ticket, owner)| {
+                            *owner == job.ticket_id && ticket.pack_id == tickets[i].pack_id
+                        }))
+            })
+        })
         .collect::<Vec<_>>();
+    let mut release = Vec::new();
+    for (i, job) in jobs.iter().enumerate() {
+        let Some(job) = job else {
+            continue;
+        };
+        let changed = job
+            .extraction_group
+            .iter()
+            .map(|m| (m.pack, m.ticket))
+            .ne(tickets
+                .iter()
+                .zip(ticket_ids)
+                .map(|(t, id)| (t.pack_id, *id)));
+        let before_effects = job
+            .extraction
+            .as_ref()
+            .is_none_or(|x| x.stage <= 2 && x.object.is_none());
+        if changed
+            && before_effects
+            && let Some(witness) = failed_group(store, source, repo, job).await?
+        {
+            new[i] |= !job.usable();
+            release.push(witness);
+        } else if new[i] && !job.usable() {
+            // The ticket index includes the signer, so another signer can
+            // legitimately hold a distinct ticket for this same pack.
+            return Err(super::pending(retry_after(Some(job))));
+        }
+        if new[i] && job.usable() {
+            release.extend(finished_peers(store, source, repo, job).await?);
+        }
+    }
     if !new.iter().any(|new| *new) {
         return Ok(false);
     }
@@ -206,7 +343,7 @@ async fn claim_extraction_group<N: NamespaceStore>(
             }
             // A coherent group was committed atomically. Finding an unfinished
             // existing member alongside an unclaimed one means a foreign group
-            // owns it (or a legacy job is still running).
+            // owns it.
             return Err(super::pending(retry_after(Some(job))));
         }
         group.push(ExtractionGroupMember {
@@ -218,6 +355,11 @@ async fn claim_extraction_group<N: NamespaceStore>(
         });
     }
     let mut batch = Batch::new().require(Precondition::NotAfter(now.saturating_add(10_000)));
+    for guard in release {
+        if !batch.preconditions.contains(&guard) {
+            batch.preconditions.push(guard);
+        }
+    }
     for (i, (ticket, id)) in tickets.iter().zip(ticket_ids).enumerate() {
         let job_key = keys::verify_job(&repo.name, &ticket.pack_id);
         let state_key = keys::verification(&repo.name, &ticket.pack_id);
@@ -234,7 +376,11 @@ async fn claim_extraction_group<N: NamespaceStore>(
                 None => Precondition::Absent(key),
             });
         }
-        if new[i] {
+        if new[i]
+            && !tickets[..i]
+                .iter()
+                .any(|prior| prior.pack_id == ticket.pack_id)
+        {
             let mut job = VerifyJobV1::new(
                 *id,
                 ticket.created_at_ms,
@@ -250,6 +396,18 @@ async fn claim_extraction_group<N: NamespaceStore>(
                 ),
                 Value::default(),
             );
+        } else if let Some(prior) = &jobs[i]
+            && prior.usable()
+            && prior.extraction_group != group
+        {
+            for guard in finished_peers(store, source, repo, prior).await? {
+                if !batch.preconditions.contains(&guard) {
+                    batch.preconditions.push(guard);
+                }
+            }
+            let mut retained = prior.clone();
+            retained.extraction_group.clone_from(&group);
+            batch = batch.put(job_key, encode_job(&retained));
         }
     }
     match store
@@ -411,6 +569,7 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
         return Err(super::pending(1_000));
     }
     let mut ready = Vec::with_capacity(tickets.len());
+    let mut ready_packs = BTreeSet::new();
     let mut pending: Option<u64> = None;
     for (i, (ticket, id)) in tickets.iter().zip(ticket_ids).enumerate() {
         let job = rows[2 * i]
@@ -431,7 +590,17 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
             pending = Some(pending.map_or(1_000, |p: u64| p.max(1_000)));
             continue;
         };
-        if job.ticket_id != *id {
+        let verified = matches!(
+            &state,
+            Some(VerificationV1::Verified { pack_len, .. }) if *pack_len == ticket.bytes
+        );
+        let same_request_owner = tickets
+            .iter()
+            .zip(ticket_ids)
+            .any(|(other, owner)| *owner == job.ticket_id && other.pack_id == ticket.pack_id);
+        if job.ticket_id != *id
+            && !(job.usable() && job.pack_len == ticket.bytes && verified && same_request_owner)
+        {
             create_job(store, source, repo, ticket, *id, clock, rows[2 * i].clone()).await?;
             pending = Some(pending.unwrap_or(0).max(retry_after(None)));
             continue;
@@ -439,15 +608,15 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
         if let Some(outcome) = job.outcome {
             return Err(outcome_error(outcome, now, ticket, bound));
         }
-        let verified = matches!(
-            &state,
-            Some(VerificationV1::Verified { pack_len, .. }) if *pack_len == ticket.bytes
-        );
         if !(job.usable() && verified) {
             pending = Some(pending.unwrap_or(0).max(retry_after(Some(&job))));
             continue;
         }
-        ready.push(Consumed { ticket, job });
+        // Pack facts and decode charges belong to the consumed pack union.
+        // Every ticket is still validated and consumed by the advance planner.
+        if ready_packs.insert(ticket.pack_id) {
+            ready.push(Consumed { ticket, job });
+        }
     }
     if let Some(ms) = pending {
         return Err(super::pending(ms));

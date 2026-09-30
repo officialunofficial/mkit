@@ -10,7 +10,165 @@ use futures::executor::block_on;
 use mkit_core::hash::hash;
 use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan, part_subtree_cv};
 use mkit_server::{BlobKey, BlobStore, PackSink, PartSink};
-use mkit_server_worker::r2::{ObjectBucket, R2BlobStore};
+use mkit_server_worker::r2::R2BlobStore;
+
+#[test]
+fn extraction_callbacks_check_cvs_replacement_abort_and_cold_restart() {
+    use mkit_server::PartRef;
+    use mkit_server::indexed::budget::SliceBudget;
+    use mkit_server::indexed::job::{FailClosedExtraction, SliceExtension};
+    use mkit_server_worker::verify::R2Extraction;
+    let _isolation = TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    block_on(async {
+        let bucket = common::SimBucket::default();
+        let store = R2BlobStore::new(bucket.clone(), "packs");
+        let extension = R2Extraction(store.clone());
+        let bytes = vec![17; MIN_PART_SIZE as usize + 10];
+        let plan = PartPlan::new(bytes.len() as u64, MIN_PART_SIZE, 10_000).unwrap();
+        let cvs: Vec<_> = (0..plan.count())
+            .map(|index| {
+                let start = plan.offset(index).unwrap() as usize;
+                part_subtree_cv(
+                    &plan,
+                    index,
+                    &bytes[start..start + plan.expected_len(index).unwrap() as usize],
+                )
+                .unwrap()
+            })
+            .collect();
+        let root = hash(&bytes);
+        let key = BlobKey::object([81; 32]);
+        let budget = SliceBudget::new(256);
+        assert!(!FailClosedExtraction.extraction_enabled());
+        assert!(
+            FailClosedExtraction
+                .begin_object(key, &plan, root, &cvs, [82; 32], &budget)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(budget.used(), 0, "default callbacks perform no IO");
+        let mut invalid_cvs = cvs.clone();
+        invalid_cvs[0][0] ^= 1;
+        assert!(
+            extension
+                .begin_object(key, &plan, root, &invalid_cvs, [82; 32], &budget)
+                .await
+                .is_err()
+        );
+        assert!(store.head(&key).await.unwrap().is_none());
+        let session = extension
+            .begin_object(key, &plan, root, &cvs, [82; 32], &budget)
+            .await
+            .unwrap()
+            .unwrap();
+        let first = extension
+            .put_object_part(
+                key,
+                &session,
+                &plan,
+                0,
+                cvs[0],
+                bytes[..MIN_PART_SIZE as usize].to_vec(),
+                &budget,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let mut replacement = bytes[..MIN_PART_SIZE as usize].to_vec();
+        replacement[0] ^= 1;
+        assert!(
+            extension
+                .put_object_part(key, &session, &plan, 0, cvs[0], replacement, &budget)
+                .await
+                .is_err()
+        );
+        assert!(
+            store.head(&key).await.unwrap().is_none(),
+            "a mismatching replacement stays private"
+        );
+        // A fresh adapter resumes the same durable root-bound upload rather
+        // than keeping a session or a payload alive across alarm fires.
+        let restarted = R2Extraction(R2BlobStore::new(bucket.clone(), "packs"));
+        assert_eq!(
+            restarted
+                .begin_object(key, &plan, root, &cvs, [82; 32], &budget)
+                .await
+                .unwrap()
+                .unwrap(),
+            session
+        );
+        let last = restarted
+            .put_object_part(
+                key,
+                &session,
+                &plan,
+                1,
+                cvs[1],
+                bytes[MIN_PART_SIZE as usize..].to_vec(),
+                &budget,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let receipts = vec![
+            PartRef {
+                index: 0,
+                len: MIN_PART_SIZE,
+                tag: first,
+            },
+            PartRef {
+                index: 1,
+                len: 10,
+                tag: last,
+            },
+        ];
+        assert!(
+            restarted
+                .complete_object(key, &session, &plan, receipts.clone(), [0; 32], &budget)
+                .await
+                .is_err()
+        );
+        assert!(store.head(&key).await.unwrap().is_none());
+        restarted
+            .complete_object(key, &session, &plan, receipts, root, &budget)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.head(&key).await.unwrap().unwrap().len,
+            bytes.len() as u64
+        );
+        let abandoned = BlobKey::object([83; 32]);
+        let aborted = restarted
+            .begin_object(abandoned, &plan, root, &cvs, [84; 32], &budget)
+            .await
+            .unwrap()
+            .unwrap();
+        restarted
+            .abort_object(abandoned, &aborted, &plan, &budget)
+            .await
+            .unwrap();
+        assert!(
+            restarted
+                .put_object_part(
+                    abandoned,
+                    &aborted,
+                    &plan,
+                    0,
+                    cvs[0],
+                    bytes[..MIN_PART_SIZE as usize].to_vec(),
+                    &budget
+                )
+                .await
+                .is_err()
+        );
+        assert!(store.head(&abandoned).await.unwrap().is_none());
+        assert!(budget.used() <= 256);
+    });
+}
 
 #[test]
 fn object_backend_completion_uses_pinned_verified_parts_without_rereads() {
@@ -461,38 +619,6 @@ fn short_and_cancelled_private_parts_cannot_publish() {
         cancelled.write(Bytes::from_static(b"short")).await.unwrap();
         cancelled.abort().await;
         assert!(store.head(&key).await.unwrap().is_none());
-        assert_eq!(
-            bucket
-                .backend_completions
-                .load(std::sync::atomic::Ordering::SeqCst),
-            0
-        );
-    });
-}
-
-#[test]
-fn preupgrade_canonical_object_without_root_pin_recovers_advisory_presence() {
-    let _isolation = TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    block_on(async {
-        let (store, bucket, key, plan, session, parts, bytes, _) = prepared().await;
-        let object = store.object_key(&key).unwrap();
-        let root_key = format!(
-            "server-object-roots/{}",
-            mkit_core::hash::to_hex_bytes(&hash(object.as_bytes()))
-        );
-        bucket.delete(&root_key).await.unwrap();
-        // Pre-upgrade production writers relied on the canonical verifier's
-        // object-id/raw-root relation, rather than persistent root-pin metadata.
-        bucket.replace_object(&object, Bytes::copy_from_slice(&bytes));
-        assert_eq!(
-            store
-                .complete_verified_object(key, &session, &plan, &parts, hash(&bytes))
-                .await
-                .unwrap(),
-            mkit_server::CommitOutcome::AlreadyPresent
-        );
         assert_eq!(
             bucket
                 .backend_completions

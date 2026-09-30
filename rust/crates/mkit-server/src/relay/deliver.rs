@@ -292,6 +292,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
     }
 
     /// Returns the committed/duplicate prefix, retaining progress if a later chunk fails.
+    #[allow(clippy::too_many_lines)] // One loop owns prefix shrinking, retry accounting and atomic delivery.
     async fn deliver_target(
         &self,
         target: &Partition,
@@ -323,16 +324,14 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                     return result;
                 }
                 let declared = loop {
-                    let keys = match self
+                    let Ok(keys) = self
                         .hook
                         .read_keys(target, &rows[result.completed..prefix_end])
-                    {
-                        Ok(keys) => keys.into_iter().collect::<BTreeSet<_>>(),
-                        Err(_) => {
-                            result.failed = true;
-                            return result;
-                        }
+                    else {
+                        result.failed = true;
+                        return result;
                     };
+                    let keys = keys.into_iter().collect::<BTreeSet<_>>();
                     if keys.len() + usize::from(!keys.contains(rh)) <= MAX_HOOK_READ_KEYS {
                         break keys;
                     }

@@ -6,6 +6,7 @@ pub mod budget;
 pub mod checkpoint;
 pub mod classify;
 pub mod entries;
+mod etag;
 mod extract;
 pub mod job;
 pub mod resolve;

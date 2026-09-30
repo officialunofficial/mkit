@@ -56,6 +56,8 @@ use mkit_core::transfer::decode_packlist;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
+mod extraction;
+
 /// Fixed work units of one slice. A Worker fixes them for its plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SliceLimits {
@@ -107,13 +109,68 @@ const WATCH_POLL_MS: u64 = 3_600_000;
 /// Distinct member packs one job may depend on.
 const MAX_SATISFYING: usize = index::MAX_LOOKUP_IDS;
 
-/// The extraction seam of the `Extract` phase. WP-4.10b implements
-/// extraction on Workers; until then the default fails closed so `Verified`
-/// still implies "extracted" (R-163).
+/// The existing extraction extension of the `Extract` phase. Enabled Workers
+/// use the internal upload callbacks; the disconnected default fails closed.
 pub trait SliceExtension: crate::MaybeSend + crate::MaybeSync {
     /// Whether `object` must be extracted into the object store before its
     /// pack is `Verified`.
     fn needs_extraction(&self, object: &Object, cfg: &IndexedConfig) -> bool;
+
+    /// Whether this existing extension supplies the internal upload callbacks.
+    fn extraction_enabled(&self) -> bool {
+        false
+    }
+
+    /// Start a root-pinned private object session after all source CVs verify.
+    fn begin_object<'a>(
+        &'a self,
+        _key: crate::BlobKey,
+        _plan: &'a mkit_core::upload_parts::PartPlan,
+        _root: Hash,
+        _cvs: &'a [Hash],
+        _operation: Hash,
+        _budget: &'a SliceBudget,
+    ) -> BoxFuture<'a, Result<Option<Vec<u8>>, StoreError>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    /// Verify and commit one bounded private part, returning its opaque receipt.
+    fn put_object_part<'a>(
+        &'a self,
+        _key: crate::BlobKey,
+        _session: &'a [u8],
+        _plan: &'a mkit_core::upload_parts::PartPlan,
+        _index: u32,
+        _cv: Hash,
+        _bytes: Vec<u8>,
+        _budget: &'a SliceBudget,
+    ) -> BoxFuture<'a, Result<Option<Vec<u8>>, StoreError>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    /// Publish only the exact root-pinned parts selected by these receipts.
+    fn complete_object<'a>(
+        &'a self,
+        _key: crate::BlobKey,
+        _session: &'a [u8],
+        _plan: &'a mkit_core::upload_parts::PartPlan,
+        _parts: Vec<crate::PartRef>,
+        _root: Hash,
+        _budget: &'a SliceBudget,
+    ) -> BoxFuture<'a, Result<Option<crate::CommitOutcome>, StoreError>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    /// Abort the private session; the default extension has no session.
+    fn abort_object<'a>(
+        &'a self,
+        _key: crate::BlobKey,
+        _session: &'a [u8],
+        _plan: &'a mkit_core::upload_parts::PartPlan,
+        _budget: &'a SliceBudget,
+    ) -> BoxFuture<'a, Result<(), StoreError>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Every `ChunkedBlob` and every Blob of at least `extract_min_bytes` needs
@@ -279,6 +336,7 @@ impl DeltaBaseSource for CacheBases<'_> {
 /// Per-slice memory: nothing in it is authoritative, rows are.
 #[derive(Default)]
 struct SliceState {
+    guards: Vec<Precondition>,
     job_guard: Option<Value>,
     cache: Lru,
     memo: MemberCache,
@@ -361,6 +419,7 @@ where
         fired
     }
 
+    #[allow(clippy::too_many_lines)] // Phase results and their guarded checkpoint commit together.
     async fn slice_inner(&self, timer: &DueTimer) -> Result<Fired, StoreError> {
         let (job, state) =
             checkpoint::read_job(self.local, self.source, &self.repo.name, &self.pack).await?;
@@ -372,11 +431,24 @@ where
             .get(self.source, &keys::ticket(&job.ticket_id))
             .await?
         {
-            Some(value) => decode_ticket(&value)?,
+            Some(value) => Some(decode_ticket(&value)?),
+            None if job.phase == Phase::Extract
+                && job.extraction.as_ref().is_some_and(|x| x.object.is_some()) =>
+            {
+                None
+            }
             None => return self.cleanup(timer, Some(raw), Some(job.ticket_id)).await,
         };
         if job.phase == Phase::Watch {
-            return Ok(self.watch(timer, job, raw, state.is_none(), &ticket));
+            return Ok(self.watch(
+                timer,
+                job,
+                raw,
+                state.is_none(),
+                ticket
+                    .as_ref()
+                    .ok_or_else(|| StoreError::Corrupt("missing watch ticket".into()))?,
+            ));
         }
         if matches!(
             job.phase,
@@ -405,7 +477,7 @@ where
             && job.phase != ran
             && job.phase != Phase::Watch
             // Enter guarded lookup phases from a durable phase checkpoint.
-            && !matches!(job.phase, Phase::ClosureResolve | Phase::Recheck)
+            && !matches!(job.phase, Phase::ClosureResolve | Phase::Recheck | Phase::Extract)
             && chained < 6
             && self.budget.remaining() >= ENTRY_RESERVE
         {
@@ -460,6 +532,7 @@ where
         // Closure deletions and the satisfying-pack list commit together.
         // A crash cannot discard the row before recording its dependency.
         batch.writes.extend(st.settled);
+        batch.preconditions.extend(st.guards);
         Ok(self.reschedule(timer, delay, batch.put(self.job_key(), encode_job(&job))))
     }
 
@@ -601,6 +674,29 @@ where
         mut job: Option<Value>,
         ticket: Option<Hash>,
     ) -> Result<Fired, StoreError> {
+        if let Some(raw) = &job {
+            let current = checkpoint::decode_job(raw)?;
+            for member in &current.extraction_group {
+                if member.pack == self.pack {
+                    continue;
+                }
+                if let Some(peer) = self
+                    .local
+                    .get(
+                        self.source,
+                        &keys::verify_job(&self.repo.name, &member.pack),
+                    )
+                    .await?
+                {
+                    let peer = checkpoint::decode_job(&peer)?;
+                    if peer.extraction_group == current.extraction_group
+                        && peer.phase == Phase::Extract
+                    {
+                        return Ok(self.reschedule(timer, 1_000, Batch::new()));
+                    }
+                }
+            }
+        }
         let (start, end) = keys::verify_range(&self.repo.name, &self.pack, None);
         for _ in 0..CLEANUP_ROUNDS {
             let page = self
@@ -678,6 +774,9 @@ where
             Phase::EmitIndex => self.emit(job).await,
             Phase::AwaitDelivery => self.await_delivery(job).await,
             Phase::Extract => {
+                if self.h.extension.extraction_enabled() {
+                    return self.extraction(st, job).await;
+                }
                 if job.extract_needed {
                     return Err(Stop::Outcome(Outcome::ExtractionUnavailable));
                 }
@@ -692,15 +791,35 @@ where
 
     /// One bounded read of the pack, bound to the job's etag.
     async fn read(&self, job: &mut VerifyJobV1, offset: u64, len: u64) -> Result<Window, Stop> {
+        let etag = super::etag::resolve(
+            self.local,
+            self.source,
+            &self.repo.name,
+            &self.pack,
+            job.etag.as_deref(),
+        )
+        .await?;
         self.budget.charge()?;
         match self
             .h
             .windows
-            .read(&self.pack, offset, len, job.etag.as_deref())
+            .read(&self.pack, offset, len, etag.as_deref())
             .await
         {
             Ok(window) => {
-                job.etag.get_or_insert_with(|| window.etag.clone());
+                if job.etag.is_none() {
+                    job.etag = Some(
+                        super::etag::capture(
+                            self.local,
+                            self.source,
+                            &self.repo.name,
+                            &self.pack,
+                            &window.etag,
+                            self.deadline(),
+                        )
+                        .await?,
+                    );
+                }
                 Ok(window)
             }
             Err(WindowError::EtagChanged) => Err(Stop::Restart),

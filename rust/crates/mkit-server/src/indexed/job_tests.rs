@@ -1867,6 +1867,28 @@ fn the_budgeted_store_charges_one_unit_per_call_however_many_keys() {
 }
 
 #[test]
+fn ranged_blob_reads_reserve_both_r2_requests_before_reading() {
+    let store = MemoryBlobStore::default();
+    let budget = super::budget::SliceBudget::new(3);
+    let budgeted = super::budget::Budgeted::new(&store, &budget);
+    let key = BlobKey::object([87; 32]);
+    block_on(async {
+        let mut sink = store.begin(key, 2).await.unwrap();
+        sink.write(Bytes::from_static(b"ok")).await.unwrap();
+        sink.commit_with_root(hash(b"ok")).await.unwrap();
+        let range = Some(ByteRange {
+            start: 0,
+            end_inclusive: 1,
+        });
+        assert!(budgeted.get(&key, range).await.unwrap().is_some());
+        assert_eq!(budget.used(), 2);
+        let error = budgeted.get(&key, range).await.unwrap_err();
+        assert!(super::budget::is_exhausted(&error));
+    });
+    assert_eq!(budget.used(), 3);
+}
+
+#[test]
 fn a_child_that_became_a_member_after_the_job_looked_is_found_by_the_advance() {
     let (commit_pack, _, head, (tree, tree_raw)) = split_packs();
     let rig = Rig::new();
@@ -2528,3 +2550,274 @@ fn large_manifest_reference_pages_resume_after_partial_decode_writes() {
         ));
     }
 }
+
+#[derive(Clone)]
+struct OpaqueEtagWindows {
+    inner: Arc<Windows>,
+    padding: usize,
+}
+
+impl PackWindows for OpaqueEtagWindows {
+    fn read<'a>(
+        &'a self,
+        pack: &'a Hash,
+        offset: u64,
+        len: u64,
+        etag: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Window, WindowError>> {
+        Box::pin(async move {
+            let padding = "x".repeat(self.padding);
+            let prior = etag
+                .map(|value| value.strip_prefix(&padding).ok_or(WindowError::EtagChanged))
+                .transpose()?;
+            let mut window = self.inner.read(pack, offset, len, prior).await?;
+            window.etag.insert_str(0, &padding);
+            Ok(window)
+        })
+    }
+}
+
+#[test]
+fn seven_captured_job_guards_have_an_explicit_opaque_etag_byte_ledger() {
+    use crate::store::{MAX_BATCH_BYTES, MAX_VALUE_BYTES, Precondition};
+    for (padding, packlists) in [(171, false), (150_000, false), (171, true), (150_000, true)] {
+        let rig = Rig::new();
+        let packs: Vec<_> = (0..7)
+            .map(|n| {
+                if !packlists {
+                    return tree_pack(1, 70_000 + n).0;
+                }
+                let ids: Vec<Hash> = (0..263_u16)
+                    .map(|id| {
+                        let mut hash = [255; 32];
+                        hash[..2].copy_from_slice(&id.to_be_bytes());
+                        hash[31] = n as u8;
+                        hash
+                    })
+                    .collect();
+                mkit_core::transfer::encode_packlist(None, &ids).unwrap()
+            })
+            .collect();
+        let tickets: Vec<_> = packs.iter().map(|pack| rig.add(pack)).collect();
+        let refs: Vec<_> = tickets.iter().map(|(ticket, id)| (ticket, *id)).collect();
+        assert!(rig.check(&refs, [0; 32]).is_err());
+        assert!(tickets.iter().all(|(t, _)| {
+            rig.job(&t.pack_id)
+                .is_some_and(|job| job.extraction_group.len() == 7)
+        }));
+        let ordinary = rig.handler();
+        let handler = VerifyTimer {
+            remote: ordinary.remote,
+            blobs: ordinary.blobs,
+            windows: OpaqueEtagWindows {
+                inner: ordinary.windows,
+                padding,
+            },
+            shards: ordinary.shards,
+            cfg: ordinary.cfg,
+            limits: ordinary.limits,
+            lease: ordinary.lease,
+            clock: ordinary.clock,
+            metrics: ordinary.metrics,
+            extension: ordinary.extension,
+        };
+        let registry =
+            TimerRegistry::new()
+                .register(handler)
+                .register(crate::relay::RelayHandler {
+                    target: Shared(rig.store.clone()),
+                    hook: crate::relay::NoHook,
+                    budget: crate::relay::RelayBudget::default(),
+                });
+        for _ in 0..300 {
+            if tickets.iter().all(|(t, _)| rig.finished(&t.pack_id)) {
+                break;
+            }
+            block_on(run_due(
+                rig.store.as_ref(),
+                &rig.source(),
+                &registry,
+                rig.clock.as_ref(),
+                rig.clock.now_ms() as u64,
+                &TickBudget::default(),
+            ))
+            .unwrap();
+            rig.clock.advance(1_000);
+        }
+        assert!(tickets.iter().all(|(t, _)| rig.finished(&t.pack_id)));
+        let mut batch = Batch::new().require(Precondition::NotAfter(u64::MAX));
+        let mut compact = Batch::new().require(Precondition::NotAfter(u64::MAX));
+        let mut values = 0;
+        let mut keys_bytes = 0;
+        for (ticket, _) in &tickets {
+            let key = keys::verify_job(&rig.repo.name, &ticket.pack_id);
+            let raw = block_on(rig.store.get(&rig.source(), &key))
+                .unwrap()
+                .unwrap();
+            compact = compact.require(Precondition::Equals(key.clone(), raw.clone()));
+            let mut job = decode_job(&raw).unwrap();
+            assert_eq!(job.entries, if packlists { 0 } else { 3 });
+            assert_eq!(
+                job.outcome,
+                if packlists {
+                    None
+                } else {
+                    Some(super::checkpoint::Outcome::ExtractionUnavailable)
+                }
+            );
+            assert!(raw.as_bytes().len() <= MAX_VALUE_BYTES);
+            assert!(job.cursor.is_empty());
+            assert_eq!(job.packlist.len(), if packlists { 263 } else { 0 });
+            assert_eq!(job.extraction_group.len(), 7);
+            // Preserve the original opaque-byte ledger as a diagnostic. The
+            // current producer guards only its compact content-bound token.
+            assert_eq!(job.etag.as_ref().unwrap().len(), 64);
+            job.etag = block_on(super::etag::resolve(
+                rig.store.as_ref(),
+                &rig.source(),
+                &rig.repo.name,
+                &ticket.pack_id,
+                job.etag.as_deref(),
+            ))
+            .unwrap();
+            let raw = super::checkpoint::encode_job(&job);
+            values += raw.as_bytes().len();
+            keys_bytes += key.as_bytes().len();
+            batch = batch.require(Precondition::Equals(key, raw));
+        }
+        eprintln!(
+            "guard ledger: packlists={packlists}, padding={padding}, values={values}, keys={keys_bytes}, total={}, limit={MAX_BATCH_BYTES}",
+            values + keys_bytes
+        );
+        compact.validate(&rig.store.capabilities()).unwrap();
+        if padding == 171 {
+            batch.validate(&rig.store.capabilities()).unwrap();
+        } else {
+            assert!(values + keys_bytes > MAX_BATCH_BYTES);
+            assert!(matches!(
+                batch.validate(&rig.store.capabilities()),
+                Err(StoreError::Invalid(_))
+            ));
+        }
+    }
+}
+
+#[test]
+fn scheduled_distinct_tickets_for_one_verified_pack_match_native_reuse() {
+    let rig = Rig::new();
+    let (pack, head) = tree_pack(1, 1_000);
+    let (first, first_id) = rig.add(&pack);
+    rig.create(&first, first_id);
+    rig.drive(|rig| rig.finished(&first.pack_id));
+    let (second, second_id) = rig.add(&pack);
+    assert_ne!(first_id, second_id);
+    assert_eq!(first.pack_id, second.pack_id);
+    // Both ticket rows are valid and the pack has already completed verification.
+    // Native's independent fixture accepts this exact two-ticket shape.
+    rig.check(&[(&first, first_id), (&second, second_id)], head)
+        .unwrap();
+}
+
+#[test]
+fn scheduled_fresh_duplicate_pack_tickets_stay_pending_without_claiming_one_identity() {
+    let rig = Rig::new();
+    let (pack, head) = tree_pack(1, 1_000);
+    let (first, first_id) = rig.add(&pack);
+    let (second, second_id) = rig.add(&pack);
+    let items = [(&first, first_id), (&second, second_id)];
+    for _ in 0..2 {
+        assert_eq!(
+            rig.check(&items, head).unwrap_err().public_message(),
+            "pack verification pending"
+        );
+        assert!(
+            rig.job(&first.pack_id).is_none(),
+            "fresh duplicate pack tickets must not freeze one last-writer identity"
+        );
+        assert!(rig.state(&first.pack_id).is_none());
+    }
+}
+
+#[test]
+fn duplicate_tickets_preserve_the_first_stored_rejection() {
+    let rig = Rig::new();
+    let (pack, head) = tree_pack(1, 1_000);
+    let (first, first_id) = rig.add(&pack);
+    let (second, second_id) = rig.add(&pack);
+    let state = VerificationV1::Rejected {
+        code: "invalid_argument".into(),
+        message: "bad pack".into(),
+    };
+    block_on(super::state::write(
+        rig.store.as_ref(),
+        &rig.source(),
+        &rig.repo.name,
+        &first.pack_id,
+        None,
+        &state,
+        u64::MAX,
+    ))
+    .unwrap();
+    assert_eq!(
+        rig.check(&[(&first, first_id), (&second, second_id)], head)
+            .unwrap_err()
+            .public_message(),
+        "bad pack"
+    );
+    assert!(rig.job(&first.pack_id).is_none());
+}
+
+#[test]
+fn verified_duplicate_pack_rebuild_keeps_both_tickets_and_first_decode_owner() {
+    let rig = Rig::new();
+    let (pack, head) = tree_pack(1, 1_000);
+    let (first, first_id) = rig.add(&pack);
+    let (second, second_id) = rig.add(&pack);
+    block_on(super::state::write(
+        rig.store.as_ref(),
+        &rig.source(),
+        &rig.repo.name,
+        &first.pack_id,
+        None,
+        &VerificationV1::Verified {
+            pack_len: first.bytes,
+            verified_at_ms: NOW as u64,
+        },
+        u64::MAX,
+    ))
+    .unwrap();
+    let items = [(&first, first_id), (&second, second_id)];
+    assert_eq!(
+        rig.check(&items, head).unwrap_err().public_message(),
+        "pack verification pending"
+    );
+    let job = rig.job(&first.pack_id).unwrap();
+    assert_eq!(job.ticket_id, first_id);
+    assert_eq!(job.extraction_group.len(), 2);
+    assert_eq!(job.extraction_group[0].ticket, first_id);
+    assert_eq!(job.extraction_group[1].ticket, second_id);
+    assert!(
+        job.extraction_group
+            .iter()
+            .all(|member| member.already_verified)
+    );
+    rig.drive(|rig| rig.finished(&first.pack_id));
+    let facts = rig.check(&items, head).unwrap();
+    assert_eq!(facts.objects, 3);
+    assert!(
+        block_on(rig.store.get(&rig.source(), &keys::ticket(&first_id)))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        block_on(rig.store.get(&rig.source(), &keys::ticket(&second_id)))
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[path = "extraction_tests.rs"]
+mod extraction_tests;
+
+#[path = "scheduled_reclaim_tests.rs"]
+mod scheduled_reclaim_tests;

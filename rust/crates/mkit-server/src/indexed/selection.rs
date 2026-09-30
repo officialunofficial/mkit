@@ -2,6 +2,7 @@
 //! already-Verified packs. Facts are derived only from verified decoded bytes;
 //! repository/global-store presence never changes the selection.
 
+#[cfg(test)]
 use std::collections::{BTreeMap, BTreeSet};
 
 use mkit_core::hash::{Hash, Hasher};
@@ -9,6 +10,7 @@ use mkit_core::object::Object;
 use mkit_core::ops::graph::{ClosureMode, children};
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 use super::extract::Kind;
 use crate::store::{StoreError, Value};
 
@@ -46,12 +48,14 @@ impl SelectionFact {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn encode(&self) -> Value {
         let mut bytes = vec![1];
         serde_json::to_writer(&mut bytes, self).expect("selection DTO serializes");
         Value::new(bytes)
     }
 
+    #[cfg(test)]
     pub(super) fn decode(value: &Value) -> Result<Self, StoreError> {
         let Some((&1, bytes)) = value.as_bytes().split_first() else {
             return Err(StoreError::Corrupt("bad selection fact version".into()));
@@ -96,6 +100,56 @@ impl Projection {
         }
     }
 
+    /// Bound page geometry to the frozen job's verified frame before any
+    /// reference-page query. The caller also checks the source/job guards and
+    /// completes the reference digest scan before freezing group selection.
+    pub(super) fn validate_frame(
+        &self,
+        frame: &super::checkpoint::FrameRow,
+        pack_len: u64,
+        decoded_bytes: u64,
+    ) -> Result<(), StoreError> {
+        use mkit_core::object::ObjectType;
+        let size = frame.value.decoded_size;
+        let refs = u64::from(self.references);
+        let typed = match self.kind {
+            0 => {
+                frame.object_type == ObjectType::Blob as u8
+                    && self.size.checked_add(10) == Some(size)
+                    && refs == 0
+            }
+            1 => {
+                frame.object_type == ObjectType::ChunkedBlob as u8
+                    && refs.checked_mul(32).and_then(|n| n.checked_add(22)) == Some(size)
+            }
+            2 => {
+                frame.object_type == ObjectType::Tree as u8
+                    && self.size == 0
+                    && refs <= u64::from(mkit_core::serialize::MAX_TREE_ENTRIES)
+                    && refs
+                        .checked_mul(38)
+                        .and_then(|n| n.checked_add(10))
+                        .is_some_and(|minimum| minimum <= size)
+            }
+            3 => matches!(frame.object_type, 3 | 4 | 7) && refs == 0 && self.size == 0,
+            _ => false,
+        };
+        if !typed
+            || size > decoded_bytes
+            || frame.value.frame_length == 0
+            || frame
+                .value
+                .frame_offset
+                .checked_add(frame.value.frame_length)
+                .is_none_or(|end| end > pack_len)
+        {
+            return Err(StoreError::Corrupt(
+                "selection frame geometry mismatch".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn reference_hasher(owner: &Hash, kind: u8) -> Hasher {
         let mut hash = Hasher::new();
         hash.update(b"mkit-selection-references:v2");
@@ -105,7 +159,7 @@ impl Projection {
     }
 
     pub(super) fn pages(&self) -> u32 {
-        self.references.div_ceil(REFERENCES_PER_PAGE as u32)
+        self.references.div_ceil(128)
     }
 
     pub(super) fn encode(&self) -> Value {
@@ -126,11 +180,25 @@ impl Projection {
         let result = Self {
             owner: *owner,
             kind: b[1],
-            size: u64::from_be_bytes(b[34..42].try_into().unwrap()),
-            references: u32::from_be_bytes(b[42..46].try_into().unwrap()),
-            digest: b[50..82].try_into().unwrap(),
+            size: u64::from_be_bytes(
+                b[34..42]
+                    .try_into()
+                    .map_err(|_| StoreError::Corrupt("bad selection geometry".into()))?,
+            ),
+            references: u32::from_be_bytes(
+                b[42..46]
+                    .try_into()
+                    .map_err(|_| StoreError::Corrupt("bad selection geometry".into()))?,
+            ),
+            digest: b[50..82]
+                .try_into()
+                .map_err(|_| StoreError::Corrupt("bad selection geometry".into()))?,
         };
-        if u32::from_be_bytes(b[46..50].try_into().unwrap()) != result.pages()
+        if u32::from_be_bytes(
+            b[46..50]
+                .try_into()
+                .map_err(|_| StoreError::Corrupt("bad selection geometry".into()))?,
+        ) != result.pages()
             || (matches!(result.kind, 0 | 3) && result.references != 0)
             || (matches!(result.kind, 2 | 3) && result.size != 0)
         {
@@ -179,11 +247,18 @@ impl Projection {
             || b.len() < 89
             || b[0] != 3
             || Self::decode(&self.owner, &Value::new(b[1..83].to_vec()))? != *self
-            || u32::from_be_bytes(b[83..87].try_into().unwrap()) != index
+            || u32::from_be_bytes(
+                b[83..87]
+                    .try_into()
+                    .map_err(|_| StoreError::Corrupt("bad selection geometry".into()))?,
+            ) != index
         {
             return Err(StoreError::Corrupt("bad selection reference page".into()));
         }
-        let count = usize::from(u16::from_be_bytes(b[87..89].try_into().unwrap()));
+        let count =
+            usize::from(u16::from_be_bytes(b[87..89].try_into().map_err(|_| {
+                StoreError::Corrupt("bad selection geometry".into())
+            })?));
         let expected = (self.references as usize - index as usize * REFERENCES_PER_PAGE)
             .min(REFERENCES_PER_PAGE);
         if count != expected || b.len() != 89 + count * 32 {
@@ -191,7 +266,7 @@ impl Projection {
                 "bad selection reference page geometry".into(),
             ));
         }
-        Ok(b[89..].chunks_exact(32).map(|id| id.try_into().unwrap()))
+        Ok(b[89..].as_chunks::<32>().0.iter().copied())
     }
 }
 
@@ -208,6 +283,7 @@ impl SelectionFact {
 /// The native union rule, operating without retaining decoded Blob payloads.
 /// Group drivers may accumulate referenced identities in bounded persistent
 /// rows; this function is also the native reference implementation.
+#[cfg(test)]
 pub(super) fn select_facts(
     facts: &BTreeMap<Hash, SelectionFact>,
     min_bytes: u64,
@@ -264,7 +340,7 @@ mod paging_tests {
         let mut hash = Projection::reference_hasher(&owner, projection.kind);
         let mut consumed = 0;
         for (index, refs) in fact.references().chunks(REFERENCES_PER_PAGE).enumerate() {
-            let index = index as u32;
+            let index = u32::try_from(index).unwrap();
             let value = projection.encode_page(index, refs);
             assert!(value.as_bytes().len() <= crate::store::MAX_VALUE_BYTES);
             for id in projection.decode_page(index, &value).unwrap() {
@@ -307,9 +383,13 @@ mod paging_tests {
         let projection = Projection::from_fact(owner, &fact);
         let mut recovered = Vec::new();
         for (index, refs) in fact.references().chunks(REFERENCES_PER_PAGE).enumerate() {
-            let value = projection.encode_page(index as u32, refs);
+            let value = projection.encode_page(u32::try_from(index).unwrap(), refs);
             assert!(value.as_bytes().len() < 9 * 1024);
-            recovered.extend(projection.decode_page(index as u32, &value).unwrap());
+            recovered.extend(
+                projection
+                    .decode_page(u32::try_from(index).unwrap(), &value)
+                    .unwrap(),
+            );
         }
         assert_eq!(recovered, fact.references());
         assert_eq!(projection.kind, 2);
@@ -334,5 +414,38 @@ mod paging_tests {
             .writes
             .extend((0..90).map(|_| Write::Put(key.clone(), value.clone())));
         batch.validate(&StoreCapabilities::full()).unwrap();
+    }
+    #[test]
+    fn frame_binding_rejects_unbounded_or_foreign_facts_before_page_queries() {
+        use super::super::checkpoint::FrameRow;
+        use crate::store::index::IndexValue;
+        let frame = FrameRow {
+            value: IndexValue {
+                frame_offset: 12,
+                frame_length: 59,
+                wire_type: 0,
+                decoded_size: 54,
+                chain_depth: 0,
+                delta_base: None,
+            },
+            object_type: 5,
+            external: None,
+        };
+        let fact = SelectionFact::Manifest {
+            size: 42,
+            chunks: vec![[1; 32]],
+        };
+        let mut projection = Projection::from_fact([2; 32], &fact);
+        projection.validate_frame(&frame, 1000, 54).unwrap();
+        projection.references = u32::MAX;
+        assert!(projection.validate_frame(&frame, 1000, 54).is_err());
+        projection.references = 1;
+        projection.kind = 0;
+        assert!(projection.validate_frame(&frame, 1000, 54).is_err());
+        projection.kind = 1;
+        assert!(projection.validate_frame(&frame, 1000, 53).is_err());
+        let mut outside = frame;
+        outside.value.frame_offset = u64::MAX;
+        assert!(projection.validate_frame(&outside, 1000, 54).is_err());
     }
 }

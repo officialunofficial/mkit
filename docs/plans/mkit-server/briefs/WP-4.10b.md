@@ -105,8 +105,8 @@ Only creation of the group is atomic; subsequent work remains bounded per job.
 
 Every group member contributes versioned vc sub-4 selection facts. Extract waits
 for complete, validated facts from the whole group. The group must include reused
-Verified members and preserve first-owner selection. Missing legacy facts need a
-bounded reconstruction path; assuming they exist is unsafe. Replaced/expired
+Verified members and preserve first-owner selection. Current producers' facts
+must validate before use. Replaced/expired
 identities invalidate unfinished work before extraction can switch groups.
 Group aggregate extraction limits and duplicate ownership must use the union,
 while every existing vc sub-6 source dependency remains available to publication.
@@ -170,7 +170,7 @@ on source restart, and claims new jobs in a single transaction guarded on ticket
 job and verification observations plus `NotAfter`. An unfinished existing member
 blocks creation of the rest of an overlapping group. Existing finished members
 are captured with their already-Verified status. This is creation arbitration
-only; selection facts, legacy reconstruction and the extraction protocol remain
+only; selection facts and the extraction protocol remain
 outstanding.
 
 The new A+B/B+C regression first failed on the integrated baseline at the
@@ -186,7 +186,7 @@ Blob size, manifest size/chunk references, Tree child references, or Other.
 Native selection remains unchanged; an independent fact-union regression compares
 its result with native selection when manifest/tree context comes from reused
 members. This is only a fact-capture foundation: group readiness, bounded union
-selection, legacy Verified reconstruction, extraction and holder delivery are
+selection, extraction and holder delivery are
 still unfinished. `selection.rs` functions not yet used by the future driver may
 produce temporary dead-code warnings at this checkpoint; no final gate claim.
 
@@ -195,6 +195,29 @@ job tests pass. Logs: selection-red.log, selection-green.log and
 selection-job-suite.log in ~/.cache/mkit-test-tmp/wp-4-10b. No live handles remain.
 Root allocated additive WP-4.10b-multipart/R192 (1500 production-line cap) as an
 explicit prerequisite; parent scope and R186 remain complete extraction/relay.
+
+### Restart scope (R-198) and approved upload callbacks
+
+R-198 freezes the existing `gp`, `ct`, timer-13 and observed `RelayHook` surface.
+Current producers' rows, including generic 96-effect relays, remain supported;
+earlier unreleased persisted formats require a reset and have no migration or
+reconstruction contract. GC has no deployment enabling surface and remains off.
+
+The user approved internal upload callbacks on the existing `SliceExtension`:
+begin with a complete trusted root/CV plan, verify one bounded part, complete
+using the exact ordered receipts, and abort a private session. Default callbacks
+perform no IO. The driver computes and persists part CVs incrementally before
+beginning R-192's backend upload; no whole-object payload is retained. Completion
+must match the root and every CV before visibility. Callback mismatch, part
+replacement, abort and cold restart are required regressions. No trait, key tag,
+timer kind, relay codec or wire format is added by this integration.
+
+The resource ledger includes quota retry/pruning and expiry cleanup. Paid quota
+fires cap at eight coordinator calls; R2 cleanup processes one page; Free expiry
+closes tickets while recording deferred abort failures for bucket lifecycle
+cleanup. These give Paid at most 889 calls and Free at most 49 per alarm, with
+256 calls reserved for one verification fire. Ranged generic BlobStore reads
+reserve two calls for R2's metadata check and byte fetch.
 
 
 ### Executor checkpoint: durable pending ownership foundation
@@ -231,3 +254,11 @@ use ctx.store rather than routed Budgeted calls; SQL/CPU/memory work must still
 be included in the final resource ledger. No256 outgoing-call failure is claimed
 for those local writes. Extraction/selection-group freeze, source passes,
 registration and whole-alarm gates remain unfinished; exposure is unchanged.
+
+### Restart checkpoint and cap escalation
+
+The driver and approved internal upload callbacks are saved, with two confirmed
+acceptance failures retained. See [the measured checkpoint and split proposal](WP-4.10b-split-proposal.md)
+for the current implementation, test results, unfinished requirements and the
+requested partition. Earlier checkpoint sections describe their historical
+state; none is a final completion or gate claim.

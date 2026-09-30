@@ -101,6 +101,8 @@ pub enum Outcome {
     DecodeBudget,
     /// The pack needs extraction, which the Worker cannot do yet (WP-4.10b).
     ExtractionUnavailable,
+    /// A selected object became blocked before a holder could be queued.
+    ObjectBlocked,
 }
 
 /// One immutable member of the Advance that claimed an extraction group.
@@ -124,8 +126,11 @@ pub struct ExtractionGroupMember {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VerifyJobV1 {
-    /// Ordered, atomically claimed first-Advance extraction context. Empty
-    /// identifies a legacy job whose facts require bounded reconstruction.
+    /// Bounded extraction cursors; bulk parts, receipts and offsets stay in vc4.
+    #[serde(default)]
+    pub extraction: Option<ExtractionV1>,
+    /// Ordered, atomically claimed first-Advance extraction context. Standalone
+    /// jobs await a consuming Advance before an extraction group is claimed.
     #[serde(default)]
     pub extraction_group: Vec<ExtractionGroupMember>,
     /// The ticket this job serves; the job lives while that ticket does.
@@ -182,6 +187,62 @@ pub struct VerifyJobV1 {
     pub packlist: Vec<Hash>,
     /// A terminal non-persisted result.
     pub outcome: Option<Outcome>,
+}
+
+/// Resumable driver progress. Every bulk row is keyed by the frozen group digest.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtractionV1 {
+    /// Immutable decoded member descriptors captured before effects.
+    pub sources: Vec<ExtractionSource>,
+    /// Domain separated group identity.
+    pub group: Hash,
+    /// Scan, selection, source verification, upload, offsets, enqueue or delivery.
+    pub stage: u8,
+    /// Group scan's member cursor.
+    pub member: usize,
+    /// Frame scan cursor.
+    pub scan: Vec<u8>,
+    /// Union canonical bytes.
+    pub staged_bytes: u64,
+    /// Union selected content bytes.
+    pub selected_bytes: u64,
+    /// Current selected object.
+    pub object: Option<Hash>,
+    /// Declared current object length.
+    pub length: u64,
+    /// Next chunk to resolve.
+    pub chunk: u32,
+    /// Bytes already consumed from the current canonical chunk.
+    pub chunk_offset: u64,
+    /// Verified content bytes stored in bounded local fragments.
+    pub written: u64,
+    /// Parts whose CV was computed.
+    pub cvs: u32,
+    /// Content root computed before any publication.
+    pub root: Option<Hash>,
+    /// Root pinned opaque backend session.
+    pub session: Vec<u8>,
+    /// Parts committed to the backend.
+    pub uploaded: u32,
+    /// Atomic holder outbox sequence.
+    pub relay: Option<u64>,
+}
+
+/// Identity of one verified source's selection facts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtractionSource {
+    /// Ordered immutable group member.
+    pub member: ExtractionGroupMember,
+    /// Bounded content addressed `ETag` token.
+    pub etag: Option<String>,
+    /// Canonical source pack version.
+    pub version: u32,
+    /// Completed frame count.
+    pub entries: u64,
+    /// Canonical bytes this source decoded.
+    pub decoded: u64,
 }
 
 impl VerifyJobV1 {

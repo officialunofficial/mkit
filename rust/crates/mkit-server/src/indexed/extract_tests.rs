@@ -2182,3 +2182,126 @@ fn durable_selection_facts_include_reused_manifest_and_tree_context() {
     );
     assert!(SelectionFact::decode(&Value::new(vec![255])).is_err());
 }
+
+#[test]
+fn native_distinct_tickets_for_one_pack_preserve_fresh_pending_and_verified_reuse() {
+    let w = World::new();
+    let repo = repo("duplicate-pack-tickets");
+    let (file, raw, _) = blob_object(&content(19, BIG));
+    let (tree, tree_raw, head, commit_raw) = commit_of(&[("file", file)]);
+    let pack = pack_of(&[(file, &raw), (tree, &tree_raw), (head, &commit_raw)]);
+    upload(&w.blobs, &pack);
+    let tickets: Vec<_> = (0..2)
+        .map(|n| {
+            let mut t = ticket(&repo, &pack, NOW as u64);
+            t.reservation_id = format!("s:duplicate-{n}");
+            t
+        })
+        .collect();
+    let ids: Vec<_> = tickets
+        .iter()
+        .map(|t| crate::store::tickets::ticket_id(&t.reservation_id))
+        .collect();
+    assert_ne!(ids[0], ids[1]);
+    for (t, id) in tickets.iter().zip(&ids) {
+        block_on(w.store.apply(
+            &source(&repo),
+            Batch::new().put(keys::ticket(id), crate::store::codec::encode_ticket(t)),
+        ))
+        .unwrap();
+    }
+    let verify = |ts: &[TicketV1], ids: &[Hash]| {
+        block_on(verify_ticketed(
+            &w.blobs,
+            &w.store,
+            &SinglePartition,
+            &repo,
+            &source(&repo),
+            ts,
+            ids,
+            head,
+            IndexedConfig::default(),
+            w.clock.as_ref(),
+            &NoopMetrics,
+        ))
+    };
+    let error = verify(&tickets, &ids).unwrap_err();
+    assert_eq!(error.public_message(), "pack verification pending");
+    assert!(w.stored(&file).is_none());
+    assert!(
+        block_on(super::state::read(
+            &w.store,
+            &source(&repo),
+            &repo.name,
+            &tickets[0].pack_id
+        ))
+        .unwrap()
+        .is_none(),
+        "native error cleanup releases its own first Pending lease"
+    );
+    assert_eq!(
+        verify(&tickets, &ids).unwrap_err().public_message(),
+        "pack verification pending"
+    );
+    // Complete one ticket. Distinct tickets for an already-Verified pack reuse
+    // its facts without extraction; no native production behavior is changed.
+    verify(&tickets[..1], &ids[..1]).unwrap();
+    let holder = keys::holder(&file, &repo.namespace, &repo.name).unwrap();
+    let before = block_on(w.store.get(&content_shard(&file), &holder))
+        .unwrap()
+        .unwrap();
+    verify(&tickets, &ids).unwrap();
+    assert_eq!(
+        block_on(w.store.get(&content_shard(&file), &holder)).unwrap(),
+        Some(before)
+    );
+    assert_eq!(w.stored(&file), Some(BIG as u64));
+}
+
+#[test]
+fn native_duplicate_object_across_distinct_packs_is_owned_by_first_pack() {
+    let w = World::new();
+    let repo = repo("duplicate-object-packs");
+    let (file, raw, _) = blob_object(&content(23, BIG));
+    let (tree, tree_raw, head, commit_raw) = commit_of(&[("file", file)]);
+    let first = pack_of(&[(file, &raw)]);
+    let second = pack_of(&[(file, &raw), (tree, &tree_raw), (head, &commit_raw)]);
+    assert_ne!(hash(&first), hash(&second));
+    upload(&w.blobs, &first);
+    upload(&w.blobs, &second);
+    run(
+        &w.blobs,
+        &w.store,
+        &repo,
+        &[&first, &second],
+        head,
+        IndexedConfig::default(),
+        w.clock.as_ref(),
+    )
+    .unwrap();
+    let holder = keys::holder(&file, &repo.namespace, &repo.name).unwrap();
+    let raw_holder = block_on(w.store.get(&content_shard(&file), &holder))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        crate::store::codec::decode_holder(&raw_holder)
+            .unwrap()
+            .op_id,
+        ticket_id(&repo, &first)
+    );
+    for pack in [&first, &second] {
+        assert!(matches!(
+            block_on(super::state::read(
+                &w.store,
+                &source(&repo),
+                &repo.name,
+                &hash(pack)
+            ))
+            .unwrap()
+            .unwrap()
+            .0,
+            super::state::VerificationV1::Verified { .. }
+        ));
+    }
+    assert_eq!(w.stored(&file), Some(BIG as u64));
+}

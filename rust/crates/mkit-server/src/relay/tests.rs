@@ -2575,6 +2575,154 @@ async fn declared_hook_snapshot_and_watermark_use_two_routed_methods() {
 }
 
 #[tokio::test]
+async fn current_generic_96_effect_rows_fit_with_the_holder_hook() {
+    let local = memory();
+    let remote = RoutedMethods {
+        inner: memory(),
+        calls: AtomicUsize::new(0),
+        lost_reply: AtomicBool::new(false),
+    };
+    let destination = target(0);
+    let puts = (0..96_u8)
+        .map(|n| (Key::new(vec![b'x', n]), Value::new(vec![n])))
+        .collect();
+    append(&local, &destination, puts, 50).await;
+    let h = RelayHandler {
+        target: remote,
+        hook: HolderRelayHook {
+            clock: Arc::new(ManualClock::new(100)),
+        },
+        budget: RelayBudget {
+            max_target_calls: Some(2),
+            ..RelayBudget::default()
+        },
+    };
+    fire(&h, &local).await.unwrap();
+    assert_eq!(h.target.calls.load(Ordering::SeqCst), 2);
+    for n in 0..96_u8 {
+        assert_eq!(
+            h.target
+                .inner
+                .get(&destination, &Key::new(vec![b'x', n]))
+                .await
+                .unwrap(),
+            Some(Value::new(vec![n]))
+        );
+    }
+    assert!(queued(&local).await.is_empty());
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One atomic delivery scenario includes setup and state assertions.
+async fn holder_re_records_bump_once_and_duplicate_intents_fold() {
+    let local = memory();
+    let remote = RoutedMethods {
+        inner: memory(),
+        calls: AtomicUsize::new(0),
+        lost_reply: AtomicBool::new(false),
+    };
+    let object = [0x72; 32];
+    let destination = crate::store::content_shard(&object);
+    let h = RelayHandler {
+        target: remote,
+        hook: HolderRelayHook {
+            clock: Arc::new(ManualClock::new(100)),
+        },
+        budget: RelayBudget {
+            max_target_calls: Some(2),
+            ..RelayBudget::default()
+        },
+    };
+    for generation in 0..2_u8 {
+        let hold = [0x73 + generation; 32];
+        let identity = crate::store::PendingHolderV1::new(
+            crate::store::Holder::new(
+                NamespaceKey::deployment_default(),
+                RepoName::new("a").unwrap(),
+            ),
+            source(),
+            [0x75; 32],
+            object,
+            hold,
+            [0x76 + generation; 32],
+        )
+        .unwrap();
+        let idx = crate::store::ContentIndex::new(crate::store::BorrowedStore(&h.target.inner));
+        assert_eq!(
+            idx.add_hold(&object, &hold, 10_000, 100).await.unwrap(),
+            crate::store::HoldOutcome::Held
+        );
+        assert_eq!(
+            idx.protect_pending_holder(&object, &hold, &identity, 100)
+                .await
+                .unwrap(),
+            crate::store::HoldOutcome::Held
+        );
+        let before = codec::decode_object_state(
+            &h.target
+                .inner
+                .get(&destination, &keys::object_state(&object))
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        // Two different relay sequences can carry the same durable intent.
+        for _ in 0..2 {
+            append(
+                &local,
+                &destination,
+                vec![(
+                    keys::pending_holder(&object, &hold),
+                    identity.encode().unwrap(),
+                )],
+                50,
+            )
+            .await;
+        }
+        let calls = h.target.calls.load(Ordering::SeqCst);
+        fire(&h, &local).await.unwrap();
+        assert_eq!(h.target.calls.load(Ordering::SeqCst) - calls, 2);
+        assert!(queued(&local).await.is_empty());
+        let after = codec::decode_object_state(
+            &h.target
+                .inner
+                .get(&destination, &keys::object_state(&object))
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            after.holders, 1,
+            "the same holder keeps one conservative count"
+        );
+        assert_eq!(
+            after.seq,
+            before.seq + 1,
+            "a distinct re-record bumps once; duplicate intents do not"
+        );
+        assert!(
+            h.target
+                .inner
+                .get(&destination, &keys::pending_holder(&object, &hold))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            h.target
+                .inner
+                .get(&destination, &keys::hold(&object, &hold))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep the lost-reply boundary and all atomic effects together.
 async fn holder_delivery_lost_reply_is_atomic_and_never_double_bumps() {
     let local = memory();
     let object = [0x42; 32];
@@ -2598,10 +2746,16 @@ async fn holder_delivery_lost_reply_is_atomic_and_never_double_bumps() {
         [0x45; 32],
     )
     .unwrap();
-    idx.add_hold(&object, &hold, 10_000, 100).await.unwrap();
-    idx.protect_pending_holder(&object, &hold, &identity, 100)
-        .await
-        .unwrap();
+    assert_eq!(
+        idx.add_hold(&object, &hold, 10_000, 100).await.unwrap(),
+        crate::store::HoldOutcome::Held
+    );
+    assert_eq!(
+        idx.protect_pending_holder(&object, &hold, &identity, 100)
+            .await
+            .unwrap(),
+        crate::store::HoldOutcome::Held
+    );
     append(
         &local,
         &p,
@@ -2679,6 +2833,7 @@ async fn holder_delivery_lost_reply_is_atomic_and_never_double_bumps() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // The durable handoff is checked through materialization and protection release.
 async fn late_blocked_holder_after_ttl_retains_real_takedown_handoff() {
     let local = memory();
     let object = [0x46; 32];
@@ -2702,10 +2857,16 @@ async fn late_blocked_holder_after_ttl_retains_real_takedown_handoff() {
         [0x49; 32],
     )
     .unwrap();
-    idx.add_hold(&object, &hold, 10_000, 100).await.unwrap();
-    idx.protect_pending_holder(&object, &hold, &identity, 100)
-        .await
-        .unwrap();
+    assert_eq!(
+        idx.add_hold(&object, &hold, 10_000, 100).await.unwrap(),
+        crate::store::HoldOutcome::Held
+    );
+    assert_eq!(
+        idx.protect_pending_holder(&object, &hold, &identity, 100)
+            .await
+            .unwrap(),
+        crate::store::HoldOutcome::Held
+    );
     let blocked = crate::store::BlockEntry::new("late", 101);
     idx.block(&object, &blocked, 101).await.unwrap();
     append(
@@ -2723,7 +2884,7 @@ async fn late_blocked_holder_after_ttl_retains_real_takedown_handoff() {
     let h = RelayHandler {
         target: remote,
         hook: HolderRelayHook {
-            clock: Arc::new(ManualClock::new(now as i64)),
+            clock: Arc::new(ManualClock::new(i64::try_from(now).unwrap())),
         },
         budget: RelayBudget {
             max_target_calls: Some(2),
