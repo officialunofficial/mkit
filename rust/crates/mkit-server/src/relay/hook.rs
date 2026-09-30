@@ -8,6 +8,12 @@ use crate::store::{Partition, Precondition, StoreError, Write, codec::RelayV1};
 /// Added effects must fit the batch limits and tolerate repeated delivery.
 /// An error leaves this target's rows queued and does not block other targets.
 pub trait RelayHook: MaybeSend + MaybeSync {
+    /// Target-local extensions may reserve operations before a remote apply.
+    /// The relay shrinks groups until their base effects and this reserve fit.
+    fn reserved_ops(&self, _target: &Partition, _rows: &[(u64, RelayV1)]) -> usize {
+        0
+    }
+
     /// Extend the atomic target batch, or fail delivery for this target.
     fn before_apply<'a>(
         &'a self,

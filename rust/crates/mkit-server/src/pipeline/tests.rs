@@ -5084,6 +5084,32 @@ fn pipeline_refuses_more_extra_credential_headers_than_fit() {
 mod published_view;
 
 #[test]
+fn admin_keys_cannot_authenticate_client_transport_principals() {
+    let admin = key(1);
+    let admin_key = *admin.verifying_key().as_bytes();
+    let mut c = cfg(AuthMode::TransportIdentity);
+    c.admin_keys = vec![admin_key];
+    let clock = clock();
+    let e = build(c, Spy::new(store(&clock)), Hooks::new(), clock);
+    for principal in [
+        Principal::TransportPeer { ed25519: admin_key },
+        Principal::SshForcedCommand {
+            key: Some(admin_key),
+        },
+    ] {
+        let mut req = Req::unsigned(Procedure::UpdateRef);
+        req.principal = Some(principal);
+        assert_eq!(e.auth(&req).unwrap_err().code(), Code::Unauthenticated);
+    }
+    let mut req = Req::unsigned(Procedure::UpdateRef);
+    req.principal = Some(Principal::TransportPeer {
+        ed25519: *key(2).verifying_key().as_bytes(),
+    });
+    assert!(e.auth(&req).is_ok(), "distinct client key remains usable");
+    assert!(e.batches().is_empty());
+}
+
+#[test]
 fn prepared_publication_pair_cannot_survive_a_counterpart_guard_race() {
     use crate::store::publication::{Pair, Publication};
     let repo = repo();
