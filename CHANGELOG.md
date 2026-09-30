@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chain. Native test timer directives share tick exclusion with the autonomous
   driver, making due-timer and redelivery conformance deterministic.
 
+- Server/Worker (WP-4.16b, R-201): ordinary ref-path file responses now select
+  Content-Type from a fixed extension allowlist and include inline/attachment
+  filenames with RFC 5987 encoding and a sanitized ASCII fallback. HEAD and
+  ranges share the headers; SVG/HTML remain binary attachments. Security,
+  object-id routes, proofs, caching and private-token rules are unchanged.
+
 - Server: publication timer 12 resumes bounded dependency checks across alarms
   and restarts after guarded obligation, dependency or generation changes.
   Valid large D34 packmaps no longer stall at the whole-alarm call limit.
