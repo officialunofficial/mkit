@@ -1,7 +1,7 @@
 # M3 exit report (WP-3.7b, WP-3.12, WP-3.13)
 
-Evidence from merged base `bf27f6fc` (including WP-1.27 and WP-4.13/4.15),
-on 2026-09-29. Machine: macOS aarch64, Rust 1.95.0. Builds used
+Evidence from merged base `d9ff5f96` (including WP-1.27, WP-4.13/4.15,
+WP-4.16 and the R-185 launch plan), on 2026-09-29–30. Machine: macOS aarch64, Rust 1.95.0. Builds used
 `CARGO_PROFILE_DEV_DEBUG=0`, `CARGO_PROFILE_TEST_DEBUG=0`, this worktree's
 own target directory, and `$HOME/.cache/mkit-test-tmp/3-12-3-13` as a
 nonsymlinked TMPDIR. Other executors were active. Worker runs used
@@ -14,8 +14,10 @@ escalations are resolved. The kind-8 correction is a separate commit, and
 all 15 M3 wire cases run without Section D skips. Native helper e2e and
 Worker admission, CORS, outcomes and Free-plan eventual delivery pass.
 The verification table below distinguishes complete runs, isolated reruns
-and unchanged-parent comparisons. Full just ci passes on the merged tree;
+and unchanged-parent comparisons. Full just ci passes before the final WP-4.16/R-185 merge;
 Worker M1 network-loss failures are recorded with isolated and parent evidence.
+After the final adapter merge, strict workspace clippy/docs and the
+complete 15-case Worker M3 phase pass; the server gate and wasm checks repeat.
 
 ## 1. Core outcome completion correction and native lanes
 
@@ -203,16 +205,16 @@ expected payment credential or receipt values.
 | Core kind-8 regression | Old handler fails; all 13 corrected outcome tests pass; kind8-regression-red.log, kind8-final.log |
 | Complete serial just ci-server | Passed: 2,227 passed, seven skipped; wasm/core/Worker/CLI-baseline checks pass; ci-server-kind8-serial.log |
 | Four-crate nextest | Passed: 2,734 passed, 16 skipped, no retries (CI profile, four threads); four-crate-kind8-ci-final.log |
-| Full just ci | Passed with repository default profile/four threads: signers 57, workspace 6,021, pure-Rust decoder 1,108 and ignored-lane 16; fuzz/doctests/version/enc/security/docs/geiger/scripts/interop pass; just-ci-merged-default-final.log |
+| Full just ci | Before final adapter/plan merge, passed with repository default profile/four threads: signers 57, workspace 6,021, pure-Rust decoder 1,108 and ignored-lane 16; fuzz/doctests/version/enc/security/docs/geiger/scripts/interop pass; just-ci-merged-default-final.log |
 | Full merged-tree server gate | Passed: 2,258 passed, eight skipped; wasm checks and CLI baseline pass; ci-server-merged-final.log |
-| Full Worker test-faults/hooks | All 15 M3 cases pass without skips; worker-full-kind8.log; Merged full script stops on 11 inherited M1 network-loss failures; all 15 M3 cases pass separately without skips; worker-full-merged-final.log, worker-hooks-merged-final.log |
+| Full Worker test-faults/hooks | All 15 M3 cases pass without skips; worker-full-kind8.log; Merged full script stops on 11 inherited M1 network-loss failures; all 15 M3 cases pass separately without skips; worker-full-merged-final.log, worker-hooks-final-base.log |
 | Default Worker | 82 passed, zero failed, 121 skipped, cold-start 30/30; worker-default-kind8-restored.log; Merged build/cold-start pass; 80 passed, four inherited Miniflare network-loss failures, 130 skips; all four pass alone; worker-default-merged-final.log, worker-default-merged-isolated.log, worker-default-three-parts-isolated.log |
-| Workspace strict all-target/all-feature clippy | Passed; workspace-clippy-merged-final.log |
-| All-feature workspace doctests / warnings-as-errors docs | Passed; doctests-merged-final.log; warnings-as-errors docs also pass before merge and repeat in just ci |
-| Root strict wasm32 clippy/builds | Passed for RPC hooks, server remote-hooks, Worker default and test-faults; wasm-clippy-merged-final.log; actual builds in wasm-clippy-build-kind8.log and merged ci-scripts |
+| Workspace strict all-target/all-feature clippy | Passed; clippy-final-base.log |
+| All-feature workspace doctests / warnings-as-errors docs | Passed; doctests-merged-final.log; warnings-as-errors docs pass again after final merge; docs-final-base.log |
+| Root strict wasm32 clippy/builds | Passed for RPC hooks, server remote-hooks, Worker default and test-faults; wasm-final-base.log; actual builds in wasm-clippy-build-kind8.log and merged ci-scripts |
 | RPC semver | 196 checks pass, 58 skip against merged b0bbbba2; semver-rpc-kind8.log |
 | Generation freshness | Passed; generated-fresh-merged-final.log |
-| All five apps locked metadata | Passed, including refreshed published-view-probe lock; apps-locked-metadata-merged-final.log |
+| All apps and new HTTP probe locked metadata | Passed, including refreshed published-view-probe lock; metadata-final-base.log, http-probe-metadata-final.log |
 | Actual native release guards | Minimal and hook-enabled builds pass; server-release-kind8-guard.log, server-release-hooks-merged-guard.log |
 | Default Worker compiled-marker scan / default config test | No new markers; config test passes; worker-release-vars-merged-final.log |
 | Worker app host/wasm clippy, fmt and tests | Passed; worker-app-host-wasm.log |
@@ -302,12 +304,16 @@ change is proposed. Gates are not waived by this review.
 | B7 | Report and PRD mapping, README and registry; both adapter behavior demonstrated; §6 records full gates |
 | B8 | R-172/R-173 and separate CHANGELOG lines for all three WPs |
 
-Base bf27f6fc is merged, including WP-1.27 and paid/private HTTP reads.
-Both sides of adjacent CHANGELOG, wire-table, configuration and runner
-changes are retained. All three resolved escalations are implemented;
+Base d9ff5f96 is merged, including WP-1.27, paid/private HTTP reads,
+the WP-4.16 adapter mounts and R-185. This local M3 exit is distinct
+from the new single launch gate; the brief still authorizes no staging.
+Both sides of adjacent CHANGELOG, wire-table, configuration, registry
+and runner changes are retained. The six Worker/probe lockfiles pass
+locked metadata after refreshing the new HTTP mount probe offline. All three resolved escalations are implemented;
 none is a scope carry-forward.
 
-Scope carry-forwards: staging after REL-1 (R-154), enabling hooks in the
+Scope carry-forwards: real staging delegated to 1.19/1.20 as a pre-launch
+gate under R-185 (none in this bundle), enabling hooks in the
 REL-1 native release feature pin, Queue sink 3.9b, RemoteError sanitization
 (R-140), platform invocation-log capture at staging (R-166 B13), and an
 optional actual-mkit-process helper lane. There is no staging evidence.
