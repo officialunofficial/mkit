@@ -7,12 +7,7 @@
 // Each class delegates its key-value protocol and alarm to NsObject.
 
 use mkit_server_worker::adapter;
-use mkit_server_worker::classes::ShardClass;
-use mkit_server_worker::ns_object::NsObject;
-use worker::{
-    Context, DurableObject, Env, Request, Response, Result, State, durable_object, event,
-    wasm_bindgen,
-};
+use worker::{Context, Env, Request, Response, Result, event};
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
@@ -22,7 +17,12 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     }
     #[cfg(feature = "test-faults")]
     if req.path() == "/__mkit_test/hook-fetch" {
-        let mode = req.url()?.query_pairs().find(|(key,_)| key == "mode").map(|(_,v)| v.into_owned()).unwrap_or_default();
+        let mode = req
+            .url()?
+            .query_pairs()
+            .find(|(key, _)| key == "mode")
+            .map(|(_, v)| v.into_owned())
+            .unwrap_or_default();
         return mkit_server_worker::hooks::fetch_probe::run(&mode).await;
     }
     #[cfg(feature = "http-objects")]
@@ -34,113 +34,4 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     }
 }
 
-/// The deployment-default namespace's partition: one SQLite key-value
-/// store, capped for the `WORKERS_PLAN` var.
-#[durable_object]
-pub struct RefStore {
-    object: NsObject,
-}
-
-impl DurableObject for RefStore {
-    fn new(state: State, env: Env) -> Self {
-        Self {
-            object: adapter::ns_object(state, &env, ShardClass::RefStore),
-        }
-    }
-
-    async fn fetch(&self, req: Request) -> Result<Response> {
-        self.object.handle(req).await
-    }
-
-    async fn alarm(&self) -> Result<Response> {
-        self.object.alarm().await
-    }
-}
-
-/// The `NsCoordinator` partition store, with the deployment capacity and timer registry.
-#[durable_object]
-pub struct NsCoordinator {
-    object: NsObject,
-}
-
-impl DurableObject for NsCoordinator {
-    fn new(state: State, env: Env) -> Self {
-        Self {
-            object: adapter::ns_object(state, &env, ShardClass::NsCoordinator),
-        }
-    }
-
-    async fn fetch(&self, req: Request) -> Result<Response> {
-        self.object.handle(req).await
-    }
-
-    async fn alarm(&self) -> Result<Response> {
-        self.object.alarm().await
-    }
-}
-
-/// The `RefShard` partition store, with the deployment capacity and timer registry.
-#[durable_object]
-pub struct RefShard {
-    object: NsObject,
-}
-
-impl DurableObject for RefShard {
-    fn new(state: State, env: Env) -> Self {
-        Self {
-            object: adapter::ns_object(state, &env, ShardClass::RefShard),
-        }
-    }
-
-    async fn fetch(&self, req: Request) -> Result<Response> {
-        self.object.handle(req).await
-    }
-
-    async fn alarm(&self) -> Result<Response> {
-        self.object.alarm().await
-    }
-}
-
-/// The `RepoIndexShard` partition store, with the deployment capacity and timer registry.
-#[durable_object]
-pub struct RepoIndexShard {
-    object: NsObject,
-}
-
-impl DurableObject for RepoIndexShard {
-    fn new(state: State, env: Env) -> Self {
-        Self {
-            object: adapter::ns_object(state, &env, ShardClass::RepoIndexShard),
-        }
-    }
-
-    async fn fetch(&self, req: Request) -> Result<Response> {
-        self.object.handle(req).await
-    }
-
-    async fn alarm(&self) -> Result<Response> {
-        self.object.alarm().await
-    }
-}
-
-/// The `ContentIndexShard` partition store, with the deployment capacity and timer registry.
-#[durable_object]
-pub struct ContentIndexShard {
-    object: NsObject,
-}
-
-impl DurableObject for ContentIndexShard {
-    fn new(state: State, env: Env) -> Self {
-        Self {
-            object: adapter::ns_object(state, &env, ShardClass::ContentIndexShard),
-        }
-    }
-
-    async fn fetch(&self, req: Request) -> Result<Response> {
-        self.object.handle(req).await
-    }
-
-    async fn alarm(&self) -> Result<Response> {
-        self.object.alarm().await
-    }
-}
+mkit_server_worker::durable_objects!();

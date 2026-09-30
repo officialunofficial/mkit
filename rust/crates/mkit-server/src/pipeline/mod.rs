@@ -682,12 +682,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .min(indexed.max_pack_bytes);
         }
         if let Some(policy) = &cfg.ref_policy {
-            policy.validate()?;
-            if policy.has_fast_forward_rule() && cfg.indexed.is_none() {
-                return Err(ServerError::invalid_argument(
-                    "fast-forward-only ref rules require indexed mode",
-                ));
-            }
+            policy.validate_for_indexed(cfg.indexed.is_some())?;
         }
         #[cfg(feature = "http-objects")]
         if let Some(http) = &cfg.http_objects {

@@ -49,9 +49,11 @@ fn supported_path(path: &str, cfg: &crate::adapter::WorkerConfig) -> bool {
 }
 #[cfg(any(target_arch = "wasm32", test))]
 fn purge_enabled(cfg: &crate::adapter::WorkerConfig) -> bool {
-    cfg.hooks
-        .as_ref()
-        .is_some_and(|hooks| hooks.roles.cache_purge && hooks.http.is_some())
+    cfg.custom_purge.is_some()
+        || cfg
+            .hooks
+            .as_ref()
+            .is_some_and(|hooks| hooks.roles.cache_purge && hooks.http.is_some())
 }
 
 #[cfg(target_arch = "wasm32")]

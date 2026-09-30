@@ -87,8 +87,8 @@ checks do not certify the integrated launch matrix.
    dependency or generation changes. Phase 2 must verify progress with the
    complete launch handler mix and pin actual release runtime evidence.
 
-2. **Physical alarm scan and cold fairness: open repair #1247.** The audited
-   base still materializes all logical heads with `timer_heads` and refreshes
+2. **Physical alarm scan and cold fairness: merged repair #1247.** The earlier
+   base materialized all logical heads with `timer_heads` and refreshed
    `TickBudget` per head. The user's ruling uses a bounded indexed raw window,
    a volatile rotating cursor, and persisted backoff in each retained timer
    row; no durable cursor. [PR #1247](https://github.com/officialunofficial/mkit/pull/1247)
@@ -101,9 +101,12 @@ checks do not certify the integrated launch matrix.
    and doubling to a ten-minute cap. Cold restarts therefore do not restore
    the same failing prefix. Component gates passed: 242 targeted module tests,
    18 native timer integration tests, native/wasm32 clippy and fmt, with two
-   independent reviews. It is open and unmerged; merge it before phase 2 and
-   measure the full handler mix on the integrated release Worker. Neither
-   component success nor an open PR fills the launch evidence slots.
+   independent reviews. It merged at `e45def2fe1855a531d0149727bf6678fc8145c3c`, after the
+   deterministic native conformance repair #1248 at
+   `12e4ce4998145a959c4fc400e02b6ad546812090`. The launch branch includes both
+   at merge `7a2d1bf039e0853fb53d5e8e78d4d449782196ca`. Rerun the timer/alarm
+   matrix without old native flake exceptions and measure the full handler mix
+   on the integrated release Worker. Component success does not fill these slots.
 
 3. **Release extraction/retrieval/preservation accounting awaits dependencies.**
    WP-4.10b-2 (#1244) now supplies the real environment handler's

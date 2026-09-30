@@ -424,11 +424,16 @@ and [itemized evidence](../../docs/plans/mkit-server/launch-evidence.md).
 
 Worker object-serving HTTP responses carry `X-Content-Type-Options: nosniff`
 and `Content-Security-Policy: sandbox; default-src 'none'`. Object-id file
-responses use `application/octet-stream`; the inherited base (#1246) selects
+responses use `application/octet-stream`; the launch adopts #1246 and selects
 ref-path file media types from the fixed extension allowlist in
 [SPEC-HTTP-OBJECTS §5](../../docs/specs/SPEC-HTTP-OBJECTS.md). HTML and SVG remain
-binary attachments. The original launch prompt's blanket octet-stream policy
-is awaiting clarification before phase 2; no launch override is implemented.
+binary attachments. Successful ref-path file responses include
+`Content-Disposition` with a sanitized ASCII `filename` and an octet-preserving,
+percent-encoded `filename*`; HEAD and 206 ranges use the same policy. JSON is
+an attachment; the listed image, text, and PDF extensions are inline. Other
+extensions use binary attachments. The server does not sniff content. Non-file
+objects and native proof routes retain their specified media types. The rule
+does not add file headers to 304 or error responses.
 HTTP `?proof=1`
 remains unsupported on the Worker, which advertises no proof capability;
 the native reference server advertises and serves proofs.
@@ -452,24 +457,70 @@ grants access to earlier packs or public object URLs. Proof-prefetch concurrency
 is at most six responses, with 512 KiB pages (up to 3 MiB raw data, within the
 4 MiB bound); nested checks remain sequential under the shared 8,500-op budget.
 
-## Embedding addenda (phase 2 pending)
+## Embedding API (supported, 0.x)
 
-The WP-4.18 embedding addenda are assigned to phase 2. Their supported 0.x
-surface, combined publication/Outcome/purge DO builder, optional host-only
-admin entrypoint, programmatic ref policy/takedown controls, DO class glue
-and `embedded-worker` example remain **pending**. The final documentation
-must state the supported API and call out breaking changes in CHANGELOG;
-the crate remains `publish = false`, used as a git dependency pinned to the
-release tag. Existing adapter entrypoints alone do not certify these addenda.
+The supported wasm embedding entrypoints below share the production adapter.
+Breaking 0.x changes are called out in CHANGELOG. Runtime acceptance is
+recorded separately in the launch evidence matrix.
+The crate stays `publish = false`; consume it as a git dependency pinned to
+the release tag.
 
-The future embedded example must prove a streamed in-process `UploadPart`
-under actual wrangler. Its envelope audience must equal WorkerConfig's
-`AUTH_AUDIENCE` (the exact public origin) regardless of the constructed
-request URL. In-process dispatch shares the caller's isolate CPU, memory
-and subrequest limits. The phase 2 API/source review must document reserved
-Connect/admin, `/-/`, `/.well-known/mkit-*`, `/_mkit/` and test-only
-`/__mkit_test/` paths; a host can choose another prefix such as `/_uno/`.
-Namespaces and repository names cannot begin with `_`.
+| Current API | Purpose and boundary |
+|---|---|
+| `adapter::serve_with(req, env, &cfg, make_hooks)` | Dispatch a constructed Worker request with an explicit `WorkerConfig` and custom hooks |
+| `adapter::fetch_with(req, env, make_hooks)` | Parse environment configuration before dispatching with custom hooks |
+| `adapter::fetch_with_context(req, env, context)` | Retain the request context for configured paid HTTP response settlement; requires `http-objects` |
+| `WorkerConfig` | Audience, addressing, sharding, keys, launch selection, and optional mounts; parsing validates complete environment configuration |
+| `http_mount::WorkerHttpMountConfig::with_context(context)` | Attach the host fetch context to programmatic HTTP serving and settlement |
+| `adapter::ns_object_with(state, &env, class, make_sink)` | Construct a DO with a custom Outcome sink and environment configuration |
+| `adapter::ns_object_configured(state, &env, class, publication)` | Configure published snapshots with the environment Outcome sink; requires `published-view` |
+| `ns_object::NsObject`, `classes::ShardClass` | Route DO requests and alarms using the correct one of the five shard classes |
+| `mkit_server::pipeline::{HookSet, Authorizer, Admission, OutcomeSink}` | Implement business decisions and durable Outcome delivery outside the adapter |
+
+Use `embedding::NsObjectBuilder::new(state, &env, class, config_result)` with
+`with_published_view(publication)` and `build_with(make_sink)` to combine
+published snapshots with custom Outcome delivery. `with_purge(sink, local)`
+also installs the actual `Arc<dyn PurgeSink>` and `LocalInvalidation` on durable
+retries. Keep fetch and DO factories on the same configuration. For a takedown
+environment, use `WorkerConfig::from_env_with_purge(env, PurgeHooks::new(sink,
+local))` so the custom sink participates in startup validation and replaces the
+signed HTTPS `cache-purge` requirement. Admin keys and complete preservation
+remain mandatory; preservation activation still refuses until WP-5.6a-2.
+Custom purge delivery requires `WORKERS_PLAN=paid`; Free alarm calls are
+already reserved. The custom sink must acknowledge all selected global cache variants; local
+invalidation must charge the provided budget and return a resumable checkpoint.
+
+`mkit_server_worker::durable_objects!(config_factory, sink_factory)` generates
+RefStore, NsCoordinator, RefShard, RepoIndexShard and ContentIndexShard with
+fetch/alarm delegation. `config_factory(&Env)` returns
+`Result<WorkerConfig, ConfigError>`; `sink_factory(&Env, &WorkerConfig)` returns
+the Outcome sink. `durable_objects!()` uses environment configuration and hooks.
+Both the reference deployment and [embedded example](../embedded-worker/README.md)
+use this macro. Cross-crate wasm compilation and runtime acceptance are recorded
+in [launch-evidence.md](../../docs/plans/mkit-server/launch-evidence.md).
+
+Set `WorkerConfig::admin_on_public_path = false` to keep AdminService off public
+fetch and call `adapter::serve_admin_with(req, env, &cfg)` on host-routed admin
+requests. The canonical signed AdminService path and ADMIN_KEYS authentication
+remain required. No keys means disabled in both modes. Programmatic
+`WorkerConfig::ref_policy` accepts `mkit_server::policy::{RefPolicy, RefRule}`
+for signer restrictions and fast-forward rules. A fast-forward-only
+`refs/tags/*` rule requires indexed mode; it is not a separate no-delete policy.
+There is no general no-delete knob. Programmatic `takedown_denial` requires the
+same preservation foundation. `WorkerConfig::validate()` checks these changes
+before store access; fetch and DO construction call it automatically.
+
+The example transfers the incoming ReadableStream to a constructed request for
+`serve_with`, including streamed `UploadPart`. Its envelope audience must equal
+WorkerConfig's `AUTH_AUDIENCE` (the exact public origin) regardless of the
+constructed request URL. In-process dispatch shares the caller's isolate CPU,
+memory and subrequest limits. Attach the host Context with
+`WorkerHttpMountConfig::with_context(context)` when enabling HTTP read settlement.
+Reserved paths are `/mkit.transport.v1.TransportService/`,
+`/mkit.server.admin.v1.AdminService/`, any path containing `/-/` when HTTP serving
+is mounted, `/.well-known/mkit-*`, `/_mkit/`, and `/__mkit_test/` in test builds.
+A host can choose another prefix such as `/_uno/`. Namespaces and repository
+names cannot begin with `_`.
 
 The minimal profile uses the default build without optional features.
 Core publication semantics are mandatory; `published-view` adds optional
@@ -484,9 +535,16 @@ artifact, and record the wasm file's raw byte count and deterministic gzip
 | Profile without optional HTTP or signed HTTPS | `worker-build --release` | UNRUN | UNRUN | UNRUN |
 | HTTP objects / tokens | `worker-build --release --features http-objects` | UNRUN | UNRUN | UNRUN |
 | Signed HTTPS hooks | `worker-build --release --features signed-http-hooks` | UNRUN | UNRUN | UNRUN |
+| HTTP plus signed HTTPS | `worker-build --release --features http-objects,signed-http-hooks` | UNRUN | UNRUN | UNRUN |
 | HTTP plus signed HTTPS and published snapshots | `worker-build --release --features launch` | UNRUN | UNRUN | UNRUN |
 
 The aggregate `launch` build enables `http-objects`, `signed-http-hooks` and
 `published-view`; runtime features remain configuration opt-ins. Add the
-example's independent wasm32 build and actual wrangler evidence to
+example's independent wasm32 build and actual release wrangler evidence to
 [B4.embedding](../../docs/plans/mkit-server/launch-evidence.md).
+
+Cloudflare's [September 4, 2026 size-limit change](https://developers.cloudflare.com/changelog/post/2026-09-04-increased-worker-size-limit/)
+sets a 64 MiB uncompressed bundle limit on Free and Paid plans. The bundle
+includes the wasm and JavaScript shim, so the table's wasm size alone is not
+full bundle acceptance. gzip is informational; there is no compressed-size
+limit. No deploy or cloud-account call is required for these local measurements.

@@ -2235,6 +2235,25 @@ native launch/scanner startup validation, and focused launch, discovery and
 real native scanner HTTP tests. Full release Worker conformance, preservation
 and embedding addenda remain phase-2 gates recorded in `launch-evidence.md`.
 
+## Embedded fetch and Durable Objects share validated configuration
+
+**Always:** embedded fetch and DO factories use the same Worker configuration,
+including publication, Outcome delivery and custom purge/local invalidation.
+Programmatic ref rules validate before store access. Host-routed admin retains
+the canonical signed path and ADMIN_KEYS authentication. The signed audience
+is the public configuration origin even for a constructed internal request.
+
+**Because:** separate fetch and alarm configuration can acknowledge work with
+the wrong sink or bypass the policy and authentication selected by the host.
+
+**If violated:** durable delivery diverges from accepted work, or internal
+dispatch authorizes a different audience or operator.
+
+**Enforced by:** Worker `validate`, `serve_with`, `serve_admin_with`, the combined
+`NsObjectBuilder` and shared-config `durable_objects!` factories. Host regression
+coverage is in `embedding.rs`; cross-crate wasm and streamed local runtime
+acceptance are recorded separately in the launch evidence matrix.
+
 ## Launch backend work shares limits and response lifetimes
 
 **Always:** ticket proofs and implicit packmap checks retain at most six

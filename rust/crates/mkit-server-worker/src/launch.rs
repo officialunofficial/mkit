@@ -13,6 +13,42 @@ fn error(message: impl Into<String>) -> ConfigError {
     ConfigError(message.into())
 }
 
+/// Check supported programmatic changes against the parsed launch contract.
+pub(crate) fn validate_programmatic(cfg: &WorkerConfig) -> Result<(), ConfigError> {
+    if cfg.launch.is_some()
+        && (cfg.indexed.is_none_or(|indexed| {
+            indexed.verification != mkit_server::indexed::VerificationMode::Scheduled
+        }) || cfg.ticket_keys.is_none()
+            || !matches!(cfg.addressing, mkit_server::Addressing::Multi(_))
+            || cfg.sharding != mkit_server::pipeline::Sharding::D34)
+    {
+        return Err(error(
+            "launch requires scheduled indexed Multi, D34 and TICKET_KEYS",
+        ));
+    }
+    #[cfg(feature = "http-objects")]
+    if let Some(mount) = &cfg.http_mount {
+        mount
+            .http_objects
+            .validate(mount.indexed.extract_min_bytes)
+            .map_err(|e| error(e.to_string()))?;
+        if cfg.launch.is_some() {
+            if cfg.url_tokens.is_none() {
+                return Err(error("HTTP_OBJECTS requires dedicated URL_TOKEN_KEYS"));
+            }
+            if cfg.indexed != Some(mount.indexed) {
+                return Err(error(
+                    "launch HTTP and verification must use the same indexed configuration",
+                ));
+            }
+            if mount.http_objects.admit_reads && cfg.hooks.as_ref().is_none_or(|v| !v.roles.admit) {
+                return Err(error("HTTP_ADMIT_READS requires the admit hook role"));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn boolean(var: &impl Fn(&str) -> Option<String>, name: &str) -> Result<bool, ConfigError> {
     match var(name).as_deref() {
         None | Some("false") => Ok(false),
@@ -222,10 +258,11 @@ fn validate_preservation(
         if cfg.admin.is_none() {
             return Err(error("TAKEDOWN_ENABLED requires nonempty ADMIN_KEYS"));
         }
-        if cfg
-            .hooks
-            .as_ref()
-            .is_none_or(|v| !v.roles.cache_purge || v.http.is_none())
+        if cfg.custom_purge.is_none()
+            && cfg
+                .hooks
+                .as_ref()
+                .is_none_or(|v| !v.roles.cache_purge || v.http.is_none())
         {
             return Err(error("TAKEDOWN_ENABLED requires signed HTTPS cache-purge"));
         }

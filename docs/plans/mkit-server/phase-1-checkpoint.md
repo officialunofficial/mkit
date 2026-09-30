@@ -1,7 +1,8 @@
 # WP-4.18 phase 1 checkpoint
 
 Status: phase 1 checkpoint; both separate budget repair rulings implemented.
-Timer-12 repair #1245 is merged; physical alarm repair #1247 is open/unmerged.
+Timer-12 #1245, physical alarm #1247 and native conformance #1248 are merged.
+The phase 2 input merge is `7a2d1bf039e0853fb53d5e8e78d4d449782196ca`.
 This checkpoint does not complete launch activation or the integrated matrix.
 
 Production source: `d46af16bf9ced385b1a5eacc6449595bdd10ab7a`, based on origin feature
@@ -49,8 +50,10 @@ the new startup requirement and retained test-faults scanner configuration.
 
 The user ruled a bounded in-memory cursor with persisted backoff for cold
 fairness. [PR #1247](https://github.com/officialunofficial/mkit/pull/1247)
-implements it at `f07195914af704aa255f7430b5d93427f4d0c619`; it remains open and
-must merge before phase 2. The component gates passed 242 targeted tests and
+implements it at `f07195914af704aa255f7430b5d93427f4d0c619` and merged as
+`e45def2fe1855a531d0149727bf6678fc8145c3c`. Native timer repair #1248 merged as
+`12e4ce4998145a959c4fc400e02b6ad546812090`; prior flake exceptions do not apply
+to phase 2 reruns. The component gates passed 242 targeted tests and
 18 native timer integration tests, native/wasm32 clippy and fmt; both independent
 reviews closed without blocking findings. Its internal retry metadata preserves
 original due times and payloads, with guarded moves and bounded indexed scans.
@@ -61,7 +64,8 @@ Refreshed phase-1 source: `fbefda7964e82a010dee68f428d47c121e79b8fa`, based on
 recheck now use their merged implementations. Only preservation remains a
 startup prerequisite refusal. Refreshed component checks are recorded below.
 
-Phase 2 awaits the user's signal after preservation merges. It includes
+The user has authorized phase 2 for the available prerequisites. Preservation
+and its admin/takedown integration remain blocked until 5.6a-2 merges. Phase 2 includes
 preservation/admin runtime integration, both embedding addenda, complete native
 and actual opted-in release Worker probes, final full gates and fresh reviews,
 then an open PR into feat/mkit-server. External review, Cloudflare staging,
@@ -89,10 +93,15 @@ publication recheck, content headers and shared budget/connection regressions.
 Harness validation (23 cases) and `git diff --check` also pass. Complete matrix,
 full gates and native timer-conformance remain phase 2 work.
 
-## Header policy reconciliation
+## Resolved header policy
 
-The refreshed base includes #1246's extension allowlist and safe filename
-headers. That conflicts with the original launch prompt's blanket octet-stream
-documentation requirement. A full clarification question is pending; no launch
-profile override or final header-policy evidence has been inferred. Phase 2
-must reconcile the README and runtime expectations with the user's ruling.
+The user ruled that launch adopts merged #1246's extension allowlist and safe
+filename headers. Ordinary successful ref-path file responses select media
+type and inline/attachment disposition from the final decoded extension;
+object-id Blob/ChunkedBlob responses remain `application/octet-stream`.
+HEAD and 206 follow the same file policy. A sanitized ASCII filename and an
+octet-preserving encoded `filename*` prevent header injection. No content
+sniffing occurs. Nosniff and the sandbox CSP remain mandatory. Non-file,
+proof, 304, and error representations retain their specified behavior.
+The ruling resolves the documentation question; actual launch runtime header
+evidence remains UNRUN in [launch-evidence.md](launch-evidence.md).

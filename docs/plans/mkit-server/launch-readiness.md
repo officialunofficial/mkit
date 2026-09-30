@@ -8,9 +8,10 @@ by a skeleton or by a successful phase 1 refusal.
 Final WP-1.20 waits for 4.18. See the [archived full brief](briefs/WP-1.20-readiness.md),
 [D35 definition](staging-uno.md) and [operator runbook](launch-operations.md).
 
-Current merged-input checkpoint: `fbefda7964e82a010dee68f428d47c121e79b8fa`,
+Current merged-input checkpoint: `7a2d1bf039e0853fb53d5e8e78d4d449782196ca`,
 including extraction #1244, retrieval #1243 and timer-12 repair #1245;
-base `cd680351bb499538c287b2197fcabd89c7783a95` also includes HTTP headers #1246. This is a
+base `e45def2fe1855a531d0149727bf6678fc8145c3c` includes HTTP headers #1246,
+physical timer bounds #1247 and deterministic native timer conformance #1248. This is a
 documentation reference, **not the final launch candidate**. Empty cells are
 intentional; no checkbox is satisfied by this document or by local wrangler.
 
@@ -20,10 +21,18 @@ Reconcile this list with the final [registry](registry.json) at phase 2. Each
 row requires a full merged SHA, PR and independent review outcome in
 [launch-evidence.md](launch-evidence.md). A registry status is no passing gate.
 Extraction 4.10b-2 and retrieval R-193 have merged (#1244 / #1243).
-The checkpoint waits for 5.6a-2 preservation and user phase 2 resumption;
+The user authorized phase 2 for the available prerequisites; preservation-dependent
+activation and runtime evidence wait for 5.6a-2 preservation.
 #1245 publication recheck timer 12 progress repair is merged. Physical alarm
-bounds/backoff repair #1247 is open and must merge before complete local
-evidence; native timer flakes still need independent base reproduction.
+bounds/backoff #1247 and native conformance #1248 are also merged. Timer/alarm
+reruns require fresh results; previous native timer flake exceptions no longer
+apply, and any remaining failure must be reported.
+
+The resolved header ruling adopts merged #1246: successful ordinary ref-path
+files use its extension media/disposition allowlist and safe filename headers.
+Object-id file responses stay binary. All byte-serving responses retain nosniff
+and the sandbox CSP; non-file, native proof, 304, and error policies remain
+specified separately. Actual release header evidence is UNRUN.
 
 | Prerequisite | Launch obligation / governing contract | Evidence link / result |
 |---|---|---|

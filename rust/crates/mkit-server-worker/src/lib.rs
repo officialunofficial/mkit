@@ -30,6 +30,20 @@
 //! defaulting to none. Jurisdiction is fixed for the deployment lifetime:
 //! changing it re-maps every object name to new, empty objects.
 //!
+//! # Embedding (supported, 0.x)
+//! `adapter::serve_with` accepts constructed streaming requests and a custom
+//! `HookSet`; `adapter::fetch_with` parses the environment first. Configure the
+//! same `adapter::WorkerConfig` on fetch and `embedding::NsObjectBuilder` to
+//! combine snapshots, custom outcome delivery and `embedding::PurgeHooks`.
+//! `durable_objects!` generates all five DO exports for these factories.
+//! Host-routed operators use `adapter::serve_admin_with` with `ADMIN_KEYS`;
+//! `WorkerConfig::admin_on_public_path` disables the public mount.
+//! Programmatic ref rules and takedown denial are validated before serving.
+//! The signed audience is the exact public origin, regardless of a constructed
+//! request's URL. Dispatch shares the host isolate's resource budgets.
+//! Breaking 0.x changes are called out in CHANGELOG; this unpublished crate
+//! is consumed as a git dependency pinned to the release tag.
+//!
 //! Everything that touches a `worker` handle is compiled for `wasm32`
 //! only. The logic around it is generic over small backend traits
 //! ([`r2::ObjectBucket`], [`ns_client::NsTransport`]) and tested on the
@@ -55,6 +69,7 @@ pub mod backup;
 pub mod classes;
 pub mod clock;
 pub mod do_sql;
+pub mod durable_objects;
 pub mod embedding;
 #[cfg(feature = "test-faults")]
 pub mod faults;

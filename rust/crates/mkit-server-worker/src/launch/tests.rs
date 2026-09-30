@@ -27,6 +27,31 @@ fn check(v: &BTreeMap<String, String>) -> Result<WorkerConfig, ConfigError> {
 }
 
 #[test]
+fn programmatic_launch_changes_cannot_disable_the_extraction_driver() {
+    let mut cfg = check(&vars()).unwrap();
+    assert!(cfg.validate().is_ok());
+    cfg.indexed.as_mut().unwrap().verification = mkit_server::indexed::VerificationMode::Inline;
+    assert!(cfg.validate().unwrap_err().0.contains("scheduled indexed"));
+    cfg.indexed = None;
+    assert!(cfg.validate().unwrap_err().0.contains("scheduled indexed"));
+}
+
+#[cfg(feature = "http-objects")]
+#[test]
+fn programmatic_http_mount_validates_before_early_responses() {
+    let mut cfg = check(&vars()).unwrap();
+    cfg.http_mount = Some(crate::http_mount::WorkerHttpMountConfig {
+        indexed: cfg.indexed.unwrap(),
+        http_objects: mkit_server::http_objects::HttpObjectsConfig::default(),
+        options: mkit_server::http_objects::mount::HttpMountOptions::default(),
+        read_runtime: None,
+    });
+    assert!(cfg.validate().unwrap_err().0.contains("URL_TOKEN_KEYS"));
+    cfg.http_mount.as_mut().unwrap().http_objects.read_deadline = std::time::Duration::ZERO;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
 fn launch_profile_is_paid_indexed_permanent_and_optional_features_are_off() {
     let cfg = parse(&vars()).unwrap();
     assert_eq!(cfg.launch, Some(LaunchConfig { takedown: false }));

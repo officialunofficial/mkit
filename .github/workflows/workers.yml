@@ -50,6 +50,7 @@ on:
       - 'apps/repo-worker/**'
       - 'apps/keys-worker/**'
       - 'apps/vcs-worker/**'
+      - 'apps/embedded-worker/**'
       - 'apps/mkit-worker-common/**'
       - 'apps/workspace-worker/**'
       - 'rust/Cargo.lock'
@@ -64,6 +65,7 @@ on:
       - 'rust/crates/mkit-server-conformance/**'
       - 'rust/crates/mkit-transport-connect/**'
       - 'scripts/vcs-worker-conformance.sh'
+      - 'scripts/embedded-worker-conformance.*'
       - 'proto/mkit/transport/v1/**'
   # No `paths:` filter on pull_request: the workflow ALWAYS triggers on PRs so
   # its required check (workers-gate) is never absent. The `ci` job is gated
@@ -113,6 +115,7 @@ jobs:
               - 'apps/repo-worker/**'
               - 'apps/keys-worker/**'
               - 'apps/vcs-worker/**'
+              - 'apps/embedded-worker/**'
               - 'apps/mkit-worker-common/**'
               - 'rust/Cargo.lock'
               - 'rust/Cargo.toml'
@@ -125,6 +128,7 @@ jobs:
               - 'rust/crates/mkit-server-worker/**'
               - 'rust/crates/mkit-server-conformance/**'
               - 'scripts/vcs-worker-conformance.sh'
+              - 'scripts/embedded-worker-conformance.*'
               - 'proto/mkit/transport/v1/**'
             workspace:
               - '.github/workflows/workers.yml'
@@ -169,6 +173,7 @@ jobs:
             apps/repo-worker -> apps/repo-worker/target
             apps/keys-worker -> apps/keys-worker/target
             apps/vcs-worker -> apps/vcs-worker/target
+            apps/embedded-worker -> apps/embedded-worker/target
             apps/mkit-worker-common -> apps/mkit-worker-common/target
           prefix-key: "rust-ci-workers"
           cache-on-failure: false
@@ -261,6 +266,14 @@ jobs:
       - name: vcs-worker - Test (lib)
         working-directory: apps/vcs-worker
         run: cargo test --lib
+
+      - name: embedded-worker - Check formatting
+        working-directory: apps/embedded-worker
+        run: cargo fmt --check
+
+      - name: embedded-worker - Clippy (wasm32)
+        working-directory: apps/embedded-worker
+        run: cargo clippy --locked --target wasm32-unknown-unknown -- -D warnings
 
   workspace:
     name: Workspace typecheck, tests, and production bundle

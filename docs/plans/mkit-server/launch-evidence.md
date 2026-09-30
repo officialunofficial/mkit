@@ -1,20 +1,29 @@
 # Launch evidence record (WP-4.18 / R-194)
 
-Status: **phase 1 skeleton; complete local matrix UNRUN; external gates UNRUN**.
+Status: **phase 2 authorized; complete local matrix UNRUN; external gates UNRUN**.
 No integrated case below is a PASS claim. Extraction #1244 and retrieval #1243 are merged
 inputs, not evidence of their opted-in release integration. Fill actual
 results after executing at the pinned candidate, using the
 [local harness](launch-conformance.md). A component harness PASS records
 only that component lane; it leaves per-case integrated slots UNRUN.
+Preservation-dependent cases await 5.6a-2. The resolved #1246 header ruling
+adopts its extension allowlist and safe filenames; it records no runtime PASS.
+See [launch-runtime-coverage.md](launch-runtime-coverage.md) for current
+coverage boundaries and the concrete remaining release probes.
+The [phase 2 implementation checkpoint](launch-phase-2-checkpoint.md) records
+targeted compilation checks and the sandbox denial that prevented native
+timer execution and committing the current edits. No timer flake exception
+or integrated PASS is inferred from that checkpoint.
 
 ## Immutable pins
 
 | Pin | Exact value / status |
 |---|---|
 | Phase 1 source checkpoint | `d1adfdddf8fce38643e7293a806e0a4a5d42054c`; source checkpoint only |
-| Phase 1 activation source checkpoint | `d46af16bf9ced385b1a5eacc6449595bdd10ab7a`; component validation in [phase-1-checkpoint.md](phase-1-checkpoint.md), cold-alarm repair #1247 open; integrated evidence UNRUN |
+| Phase 1 activation source checkpoint | `d46af16bf9ced385b1a5eacc6449595bdd10ab7a`; component validation in [phase-1-checkpoint.md](phase-1-checkpoint.md), historical checkpoint before cold-alarm repair #1247; integrated evidence UNRUN |
 | Phase 1 merged-input checkpoint | `cb2159c5551c2f82d2d861347da264297568982d`; not the final candidate |
 | Phase 1 refreshed merged-input checkpoint | `fbefda7964e82a010dee68f428d47c121e79b8fa`; base `cd680351bb499538c287b2197fcabd89c7783a95`, including #1245 and #1246; not the final candidate |
+| Timer/alarm merged-input checkpoint | `7a2d1bf039e0853fb53d5e8e78d4d449782196ca`; includes #1247 and #1248 |
 | Final candidate SHA / reviewed diff | UNRUN |
 | Final origin feature SHA / merge-base / tree SHA | UNRUN |
 | Release Worker digest / features / compatibility date / config digest | UNRUN; build must exclude test-faults |
@@ -42,7 +51,8 @@ foundations to activation and no dependence on withdrawn R-196/R-197.
 | 5.10 / 5.11a purge/admin/audit | `e99e2b241959932150febb8a3bc4957b08134864` | [#1236](https://github.com/officialunofficial/mkit/pull/1236); reviews UNRUN |
 | 5.6a-1 acceptance / 5.6a-2 preservation | `bc114103f438a43a5785ab9dc92bf765a46b3807` / PENDING | 5.6a-2 pending; takedown activation fails closed |
 | Publication recheck timer 12 progress repair | `d89c37fb968d39c180228678bc09c77a12002fc9` | [#1245](https://github.com/officialunofficial/mkit/pull/1245) merged; integrated gate UNRUN |
-| Physical alarm bounds and cold fairness repair | PENDING | [#1247](https://github.com/officialunofficial/mkit/pull/1247), source `f07195914af704aa255f7430b5d93427f4d0c619`, open/unmerged; integrated gate UNRUN |
+| Physical alarm bounds and cold fairness repair | `e45def2fe1855a531d0149727bf6678fc8145c3c` | [#1247](https://github.com/officialunofficial/mkit/pull/1247) merged; integrated rerun UNRUN |
+| Deterministic native timer conformance | `12e4ce4998145a959c4fc400e02b6ad546812090` | [#1248](https://github.com/officialunofficial/mkit/pull/1248) merged; old timer flake exceptions removed |
 | WP-4.18 self-reviews, correctness/security and spec/crypto | UNRUN | UNRUN |
 | WP-4.18 adversarial PR review | UNRUN | UNRUN |
 
@@ -64,7 +74,7 @@ separate. Native proofs and Worker proof refusal are deliberately distinct.
 | B4.scanner-bytes | UNRUN | UNRUN | Assigned immutable staged added-pack ranges; external delta bases require independent authorization/cache |
 | B4.scanner-denial | UNRUN | UNRUN | Uniform no-oracle auth/grant/replay/expiry/terminal/block denial |
 | B4.publication | UNRUN | UNRUN | Coherent paired refs and published-reader/authorized-live-writer behavior |
-| B4.public-reads | UNRUN | UNRUN | Pack/index/HTTP/token/ref/snapshot/cache surfaces |
+| B4.public-reads | UNRUN | UNRUN | Pack/index/HTTP/token/ref/snapshot/cache surfaces; #1246 file extension/filename GET/HEAD/206/304 policy |
 | B4.native-proofs | UNRUN | UNRUN | Native proof verification; Worker reachable proof request unsupported |
 | B4.writer-reuse | UNRUN | UNRUN | Upload/multipart/dedup/AlreadyPresent/reuse/delta/global denial |
 | B4.authority-races | UNRUN | UNRUN | Revocation at upload/backend/marker/apply, retries/restart |
@@ -91,7 +101,7 @@ separate. Native proofs and Worker proof refusal are deliberately distinct.
 | Full just ci / area server and script/security/proto/vector gates | UNRUN |
 | Default-off release regression | UNRUN |
 | Opted-in release Worker complete matrix | UNRUN |
-| Known timer flakes on unchanged base, then isolated reruns | UNRUN; record SHA and actual outcomes before classification |
+| Timer/alarm rerun after #1247/#1248 | UNRUN; no prior native timer flake exception applies; report any failure |
 | Self-review findings and fix SHA / affected reruns | UNRUN |
 
 ## User-owned external slots

@@ -305,16 +305,27 @@ pub(crate) fn register_from_env_budgeted<S: NamespaceStore>(
     plan: Option<&str>,
     alarm_budget: Option<mkit_server::purge::SliceBudget>,
 ) -> TimerRegistry<'static, S> {
-    use crate::adapter::WorkerConfig;
-    use crate::clock::WorkerClock;
-    use crate::ns_client::{StubTransport, WorkerNamespaceStore};
-    use crate::r2::{EnvBucket, R2BlobStore, STORAGE_BINDING};
-    use crate::telemetry::ConsoleMetrics;
-
-    let Ok(cfg) = WorkerConfig::from_env(env) else {
+    let Ok(cfg) = crate::adapter::WorkerConfig::from_env(env) else {
         return registry;
     };
-    let bucket = || EnvBucket::new(env.clone(), STORAGE_BINDING);
+    register_configured_budgeted(registry, env, class, plan, alarm_budget, &cfg)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn register_configured_budgeted<S: NamespaceStore>(
+    registry: TimerRegistry<'static, S>,
+    env: &worker::Env,
+    class: ShardClass,
+    plan: Option<&str>,
+    alarm_budget: Option<mkit_server::purge::SliceBudget>,
+    cfg: &crate::adapter::WorkerConfig,
+) -> TimerRegistry<'static, S> {
+    use crate::clock::WorkerClock;
+    use crate::ns_client::{StubTransport, WorkerNamespaceStore};
+    use crate::r2::{EnvBucket, R2BlobStore};
+    use crate::telemetry::ConsoleMetrics;
+
+    let bucket = || EnvBucket::new(env.clone(), cfg.blob_binding);
     let probe = cfg.probe_partition();
     #[cfg(feature = "test-faults")]
     let windows = MidPackCrash(R2Windows(bucket()));
@@ -334,7 +345,7 @@ pub(crate) fn register_from_env_budgeted<S: NamespaceStore>(
     registry.register(crate::purge::Budgeted {
         handler: VerifyTimer {
             remote: WorkerNamespaceStore::new(
-                StubTransport::new(env.clone(), cfg.placement),
+                StubTransport::new(env.clone(), cfg.placement.clone()),
                 probe,
             ),
             extension: R2Extraction(blobs.clone()),

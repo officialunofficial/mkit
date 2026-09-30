@@ -1,11 +1,21 @@
 # Paid launch conformance (WP-4.18 / R-194)
 
-Status: **phase 1 harness and coverage skeleton; complete matrix UNRUN**.
-The user resumes phase 2 after 5.6a-2 preservation merges. Extraction
+Status: **phase 2 authorized; complete matrix UNRUN**.
+Available prerequisite integration can proceed. Preservation/admin/takedown
+runtime activation waits for 5.6a-2 preservation to merge. Extraction
 #1244 and private scanner retrieval #1243 have merged; their release wiring
 is wired here. Bounded publication recheck timer 12 progress repair #1245 has
-merged; physical alarm bounds/backoff repair #1247 is open and must merge before
-phase 2 evidence. This document certifies no staging or review gate.
+merged. Physical alarm bounds/backoff #1247 and deterministic native timer
+conformance #1248 are merged at the phase 2 input checkpoint. Rerun timer/alarm
+checks without prior native flake exceptions. This document certifies no staging or review gate.
+
+The resolved header ruling adopts merged #1246. Successful ordinary ref-path
+files select Content-Type and inline/attachment disposition from the fixed
+extension allowlist, including HEAD and 206. They include a sanitized ASCII
+filename and an octet-preserving encoded `filename*`, with nosniff and the
+sandbox CSP. Object-id file responses remain `application/octet-stream`;
+non-file objects, native proofs, 304, and errors retain their specified policy.
+Byte content is never sniffed. Header ruling resolution is not runtime evidence.
 
 The launch selects Paid indexed Multi/D34 with permanent retention, leases
 off and GC refused. HTTP objects, signed hooks, inspection and admin/takedown
@@ -25,6 +35,8 @@ B3 request/alarm requirements. `native` and `worker` in that file are source
 and component coverage landmarks. `phase2` states the required integrated
 probe, not an assertion that the probe already exists. Its matching evidence
 slots are [launch-evidence.md](launch-evidence.md).
+The [runtime coverage plan](launch-runtime-coverage.md) distinguishes existing
+component checks from the proposed actual release probes for all 23 cases.
 
 From a clean, committed candidate in this worktree:
 
@@ -75,8 +87,9 @@ Worker proof requests must remain unsupported.
 
 1. Merge the exact prerequisite versions and record every full SHA, PR and
    independent review outcome. Complete preservation and remove only its
-   corresponding activation refusal. Merge #1247; independently verify unchanged-base native timer
-   reproductions before classifying any remaining failure as a flake.
+   corresponding activation refusal. The branch includes #1247 and #1248; rerun
+   timer/alarm checks without the prior native flake exceptions and report any
+   failure. A new flake classification still needs unchanged-base evidence.
 2. Complete the itemized release probes in [launch-cases.json](launch-cases.json):
    optional no-inspector baseline; HTTP/token reads; signed HTTPS and isolated
    binding hooks; sync inspection plus R-193 retrieval; admin/takedown with
@@ -96,9 +109,10 @@ Worker proof requests must remain unsupported.
    100-op/seven-ticket applies, six outgoing connections, bounded cold-head
    scans and explicit headroom. Refer to [launch-budgets.md](launch-budgets.md).
    Frozen-clock and simultaneous due-kind tests must prove progress as well
-   as an upper bound. Cold-head bounding/fairness remains an unresolved
-   phase 1 audit finding until its approved implementation is reviewed;
-   no runtime evidence or ruling is inferred from this skeleton. HTTP settlement must retain the request's waitUntil
+   as an upper bound. Cold-head bounding and fairness use the separately
+   reviewed, merged #1247 repair; pin its exact version in integrated evidence.
+   Component review does not supply actual release runtime evidence.
+   HTTP settlement must retain the request's waitUntil
    lifetime and durable completion/reconcile arbiter after disconnect.
 5. Run all common/full/area gates, then two independent self-reviews. Record
    exact case pass/fail/skip counts and log hashes. Any deterministic local
@@ -109,7 +123,7 @@ An unchanged-base flake record includes full baseline SHA, exact command,
 initial failure log and up to three isolated reruns, with their actual results.
 Do not fix an unrelated native timer flake in this activation lane or turn
 an unexecuted test into an accepted skip. Phase 1 remains a committed checkpoint;
-the PR opens only after the user resumes phase 2 and its gates complete.
+the PR opens only after phase 2's prerequisites and gates complete.
 
 ## Phase 2 embedding addenda
 
@@ -124,5 +138,5 @@ API changes. Verify the constructed request's auth envelope uses the exact
 WorkerConfig audience regardless of its local URL. An in-process streamed
 UploadPart must pass actual wrangler, sharing the host isolate's CPU, memory
 and subrequest budget. Measure raw/gzip release wasm for each feature variant;
-fill the [README slots](../../../apps/vcs-worker/README.md#embedding-addenda-phase-2-pending).
+fill the [README slots](../../../apps/vcs-worker/README.md#embedding-api-phase-2-in-progress).
 No ListRepos protocol addition is included.

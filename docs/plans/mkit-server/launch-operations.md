@@ -10,7 +10,7 @@ Use the [D35 definition](staging-uno.md) and [readiness record](launch-readiness
 1. User confirms the completed candidate SHA, independent implementation reviews,
    whole-launch external review and the separate authorization for isolated
    staging. Confirm final 4.18 profile grammar and artifact digest; do not use
-   `test-faults` to bypass the release adapter's current indexed-mode refusal.
+   `test-faults` to bypass complete startup validation or missing prerequisites.
 2. User records exact staging Worker/DO namespace and bucket identifiers,
    canonical server/hook/scanner/purge audiences, placement and Paid account.
    Provision private staging resources with all five DO classes, serving,
@@ -145,6 +145,14 @@ publish-on-unavailable and clear deadlines. There are no inspection holds,
 hold review operations or publication Events. Native proofs are required
 reference evidence; Worker `?proof=1` remains unsupported and discovery must
 omit proof capability.
+
+Launch adopts #1246's fixed extension allowlist for successful ordinary
+ref-path files. Check GET, HEAD, and 206 media/disposition headers, both safe
+filename forms, nosniff, and the sandbox CSP. HTML and SVG remain binary
+attachments. Object-id file responses remain `application/octet-stream`;
+non-file and native proof responses use their specified media types. Confirm
+304 and errors do not inherit ref-file headers. Do not sniff content or replace
+this policy with a blanket octet-stream rule.
 
 The Uno Kit demo uses `any` plus `UNSAFE_OPEN_NAMESPACES=true`. Its takedown
 responses must report incomplete holder discovery while enforcing configured

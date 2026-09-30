@@ -164,6 +164,7 @@ ci-scripts:
     ( cd rust && cargo check --locked -p mkit-server --features remote-hooks --target wasm32-unknown-unknown )
     ( cd rust && cargo check --locked -p mkit-server --features http-objects --target wasm32-unknown-unknown )
     ( cd rust && cargo build --locked -p mkit-server-worker --target wasm32-unknown-unknown )
+    ( cd apps/embedded-worker && cargo clippy --locked --target wasm32-unknown-unknown -- -D warnings )
     bash scripts/wasm-ruzstd-check.sh
 
 # The MKIT-29 M0 exit gate in one command (WP-M0-20): the mkit-server

@@ -15,7 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Worker HTTP mounts retain read settlement in the fetch context; ticket and
   implicit packmap checks use at most six simultaneous backend responses.
   Added local conformance/evidence skeleton; complete runtime evidence and
-  embedding addenda are pending phase 2.
+  preservation integration remains pending phase 2.
+- Worker embedding (supported, 0.x): combine programmatic configuration,
+  published snapshots, custom Outcome and purge sinks in `NsObjectBuilder`;
+  generate the five DO classes with `durable_objects!`. Host-routed admin
+  dispatch retains ADMIN_KEYS authentication, and programmatic ref policies
+  validate before serving. Add a service-binding streamed-upload example and
+  its wasm check. These APIs are unpublished, consumed at a pinned git tag.
 
 - Server/Worker: bound raw timer-alarm enumeration and share tick limits across
   logical heads. Persist capped exponential backoff in the existing timer row

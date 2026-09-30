@@ -180,6 +180,15 @@ pub struct WorkerConfig {
     pub launch: Option<crate::launch::LaunchConfig>,
     /// Default-off signed operator keys, independent of client credentials.
     pub admin: Option<mkit_server::admin::Config>,
+    /// Mount `AdminService` on public fetch; false leaves only `serve_admin_with`.
+    /// Programmatic only; operator authentication is unchanged in either mode.
+    pub admin_on_public_path: bool,
+    /// Programmatic ref signer and fast-forward rules; no environment grammar.
+    pub ref_policy: Option<mkit_server::policy::RefPolicy>,
+    /// Programmatic global takedown denial; requires complete preservation.
+    pub takedown_denial: bool,
+    /// An embedder's actual purge sink and local invalidation, instead of HTTPS.
+    pub custom_purge: Option<crate::embedding::PurgeHooks>,
     /// Default-off private scanner retrieval, available only to Paid inspection.
     pub scanner_retrieval: Option<Arc<mkit_server::scanner_retrieval::RetrievalConfig>>,
     /// Optional dedicated deployment-authority keys (`AUTHORITY_FENCE`, `AUTHORITY_KEYS`).
@@ -228,7 +237,7 @@ pub struct WorkerConfig {
     /// Feature-gated `URL_TOKEN_KEYS`/`URL_TOKEN_TTL`; no mount is enabled by these vars.
     #[cfg(feature = "http-objects")]
     pub url_tokens: Option<mkit_server::url_token::UrlTokenConfig>,
-    /// Stage 2 only, programmatic opt-in; environment parsing always leaves None.
+    /// Programmatic snapshot opt-in; environment parsing always leaves None.
     #[cfg(feature = "published-view")]
     pub published_view: Option<crate::published_view::PublishedViewConfig>,
     /// `TEST_QUOTA_OPS`, `TEST_QUOTA_BYTES` and `TEST_QUOTA_WINDOW_MS`,
@@ -281,6 +290,7 @@ impl WorkerConfig {
         use mkit_server::upload::UploadLimits;
 
         self.check_launch_readiness()?;
+        crate::launch::validate_programmatic(self)?;
         #[cfg(feature = "published-view")]
         if let Some(config) = &self.published_view {
             crate::published_view::PublishedViewConfig::new(config.deployment.clone())
@@ -318,6 +328,8 @@ impl WorkerConfig {
             .as_ref()
             .map_or_else(Vec::new, mkit_server::admin::Config::public_keys);
         config.indexed = self.indexed;
+        config.ref_policy.clone_from(&self.ref_policy);
+        config.takedown_denial = self.takedown_denial;
         if self.launch.is_some() {
             config.begin_upload_threshold_bytes = 0;
         }
@@ -331,25 +343,12 @@ impl WorkerConfig {
             indexed.max_ancestry_commits = indexed.max_ancestry_commits.min(64);
             indexed
         });
-        if let Some(hooks) = &self.hooks {
-            config.authorizer_role = hooks.authorizer_role;
-            if hooks.roles.inspect {
-                if config.indexed.is_none()
-                    || config.ticket_keys.is_none()
-                    || config.write_policy == mkit_server::policy::WritePolicy::Open
-                {
-                    return Err(ConfigError("inspection requires indexed mode, restricted writes and upload ticket keys".into()));
-                }
-                config.begin_upload_threshold_bytes = 0;
-            }
-            if hooks.roles.cache_purge {
-                config.purge = Some(mkit_server::purge::PurgeConfig::new(
-                    self.audience.clone(),
-                    true,
-                    true,
-                ));
-            }
+        if let Some(policy) = &config.ref_policy {
+            policy
+                .validate_for_indexed(config.indexed.is_some())
+                .map_err(|e| bad(&e))?;
         }
+        self.configure_hooks_and_purge(&mut config)?;
         config.grants = self
             .grants
             .as_ref()
@@ -376,6 +375,38 @@ impl WorkerConfig {
         Ok(config)
     }
 
+    fn configure_hooks_and_purge(
+        &self,
+        config: &mut mkit_server::pipeline::PipelineConfig,
+    ) -> Result<(), ConfigError> {
+        if let Some(hooks) = &self.hooks {
+            config.authorizer_role = hooks.authorizer_role;
+            if hooks.roles.inspect {
+                if config.indexed.is_none()
+                    || config.ticket_keys.is_none()
+                    || config.write_policy == mkit_server::policy::WritePolicy::Open
+                {
+                    return Err(ConfigError("inspection requires indexed mode, restricted writes and upload ticket keys".into()));
+                }
+                config.begin_upload_threshold_bytes = 0;
+            }
+            if hooks.roles.cache_purge {
+                config.purge = Some(mkit_server::purge::PurgeConfig::new(
+                    self.audience.clone(),
+                    true,
+                    true,
+                ));
+            }
+        }
+        if let Some(purge) = &self.custom_purge {
+            config.purge = Some(
+                mkit_server::purge::PurgeConfig::new(self.audience.clone(), true, true)
+                    .with_local(purge.local.clone()),
+            );
+        }
+        Ok(())
+    }
+
     /// The settings from `var`, which looks a Worker var up by name.
     ///
     /// # Errors
@@ -392,7 +423,47 @@ impl WorkerConfig {
         Ok(cfg)
     }
 
+    /// Parse with an actual custom purger as the alternative to signed HTTPS.
+    /// # Errors
+    /// Incomplete configuration, key role conflicts or unavailable prerequisites.
+    pub fn from_vars_with_purge(
+        var: impl Fn(&str) -> Option<String>,
+        purge: crate::embedding::PurgeHooks,
+    ) -> Result<Self, ConfigError> {
+        let cfg = Self::parse_vars_with_purge(&var, Some(purge))?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Validate programmatic changes before accepting requests or constructing DOs.
+    /// # Errors
+    /// Invalid policy, incomplete opt-ins or unavailable prerequisites.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        self.pipeline_config().map(|_| ())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn validate_runtime(&self, env: &worker::Env) -> Result<(), ConfigError> {
+        self.validate()?;
+        if self.custom_purge.is_some()
+            && !env
+                .var(PLAN_VAR)
+                .is_ok_and(|plan| plan.to_string().trim().eq_ignore_ascii_case("paid"))
+        {
+            return Err(ConfigError(
+                "custom purge requires WORKERS_PLAN=paid: Free alarm calls are already reserved"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn check_launch_readiness(&self) -> Result<(), ConfigError> {
+        if self.takedown_denial {
+            return Err(ConfigError(
+                "launch takedown requires WP-5.6a-2 verified preservation".into(),
+            ));
+        }
         if let Some(launch) = &self.launch {
             launch.check_prerequisites()?;
         }
@@ -403,6 +474,14 @@ impl WorkerConfig {
     // are validated before the phase-1 prerequisite refusals.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn parse_vars(var: &impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        Self::parse_vars_with_purge(var, None)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn parse_vars_with_purge(
+        var: &impl Fn(&str) -> Option<String>,
+        custom_purge: Option<crate::embedding::PurgeHooks>,
+    ) -> Result<Self, ConfigError> {
         let indexed_requested = var(INDEXED_MODE_VAR).is_some_and(|value| {
             !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
         });
@@ -534,6 +613,10 @@ impl WorkerConfig {
                 .map_err(|_| ConfigError("ADMIN_KEYS must differ from URL-token keys".into()))?;
         }
         let mut cfg = Self {
+            admin_on_public_path: true,
+            ref_policy: None,
+            takedown_denial: launch.as_ref().is_some_and(|cfg| cfg.takedown),
+            custom_purge,
             launch,
             admin,
             scanner_retrieval,
@@ -576,12 +659,34 @@ impl WorkerConfig {
     /// As [`Self::from_vars`].
     #[cfg(target_arch = "wasm32")]
     pub fn from_env(env: &worker::Env) -> Result<Self, ConfigError> {
-        let cfg = Self::parse_vars(&|name| {
-            env.secret(name)
-                .ok()
-                .map(|secret| secret.to_string())
-                .or_else(|| env.var(name).ok().map(|value| value.to_string()))
-        })?;
+        Self::from_env_using_purge(env, None)
+    }
+
+    /// Parse bindings and opt-ins with a custom purger configured at startup.
+    /// # Errors
+    /// As `from_env`, including the preservation prerequisite refusal.
+    #[cfg(target_arch = "wasm32")]
+    pub fn from_env_with_purge(
+        env: &worker::Env,
+        purge: crate::embedding::PurgeHooks,
+    ) -> Result<Self, ConfigError> {
+        Self::from_env_using_purge(env, Some(purge))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn from_env_using_purge(
+        env: &worker::Env,
+        purge: Option<crate::embedding::PurgeHooks>,
+    ) -> Result<Self, ConfigError> {
+        let cfg = Self::parse_vars_with_purge(
+            &|name| {
+                env.secret(name)
+                    .ok()
+                    .map(|secret| secret.to_string())
+                    .or_else(|| env.var(name).ok().map(|value| value.to_string()))
+            },
+            purge,
+        )?;
         crate::hooks::config::HookVars::check_binding(
             cfg.hooks.as_ref(),
             env.service(crate::hooks::config::BINDING).is_ok(),
@@ -1933,10 +2038,12 @@ mod faults {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+pub(crate) use glue::build_ns_object;
 #[cfg(all(target_arch = "wasm32", feature = "http-objects"))]
 pub use glue::fetch_with_context;
 #[cfg(target_arch = "wasm32")]
-pub use glue::{fetch, fetch_with, ns_object, ns_object_with, serve, serve_with};
+pub use glue::{fetch, fetch_with, ns_object, ns_object_with, serve, serve_admin_with, serve_with};
 #[cfg(all(target_arch = "wasm32", feature = "published-view"))]
 pub use glue::{fetch_configured, ns_object_configured};
 
@@ -2041,7 +2148,13 @@ mod glue {
                         meta.clone(),
                         cfg.probe_partition(),
                     )))
-                    .with_local(Arc::new(crate::purge::local_cache(cfg))),
+                    .with_local(cfg.custom_purge.as_ref().map_or_else(
+                        || {
+                            Arc::new(crate::purge::local_cache(cfg))
+                                as Arc<dyn mkit_server::purge::LocalInvalidation>
+                        },
+                        |custom| custom.local.clone(),
+                    )),
             );
         }
         #[cfg(feature = "published-view")]
@@ -2221,6 +2334,46 @@ mod glue {
         serve_with(req, env, cfg, hooks_from_env).await
     }
 
+    /// Serve the authenticated operator mount on an embedder-selected path.
+    /// Pass the `AdminService` path after host routing; operator signatures and
+    /// `ADMIN_KEYS` are checked by the same mount as public fetch.
+    /// # Errors
+    /// Runtime response construction failures.
+    pub async fn serve_admin_with(
+        req: Request,
+        env: Env,
+        cfg: &WorkerConfig,
+    ) -> worker::Result<Response> {
+        if let Err(error) = cfg
+            .validate_runtime(&env)
+            .and_then(|()| hooks_from_env(&env, cfg).map(|_| ()))
+        {
+            return json_response(unavailable_json(&error.0), 503);
+        }
+        let meta = WorkerNamespaceStore::new(
+            StubTransport::new(env.clone(), cfg.placement.clone()),
+            cfg.probe_partition(),
+        )
+        .with_budget(mkit_server::indexed::budget::SliceBudget::new(9000));
+        let checked = match check_mode(&meta, cfg.sharding).await {
+            Ok(Outcome::Ok) => {
+                check_addressing(
+                    &meta,
+                    matches!(cfg.addressing, mkit_server::Addressing::Multi(_)),
+                )
+                .await
+            }
+            outcome => outcome,
+        };
+        if let Err(error) = checked
+            .map_err(crate::sharding_guard::GuardError::Storage)
+            .and_then(Outcome::into_result)
+        {
+            return json_response(unavailable_json(error.public_message()), 503);
+        }
+        crate::admin::serve(req, env, cfg).await
+    }
+
     /// [`serve`] over hooks built by `make_hooks`.
     ///
     /// # Errors
@@ -2235,6 +2388,9 @@ mod glue {
         H: HookSet + 'static,
         F: FnOnce(&Env, &WorkerConfig) -> Result<H, ConfigError>,
     {
+        if let Err(error) = cfg.validate_runtime(&env) {
+            return json_response(unavailable_json(&error.0), 503);
+        }
         #[cfg(feature = "http-objects")]
         if crate::http_mount::glue::mounted_request(&req, cfg) {
             let method = req.method();
@@ -2311,17 +2467,10 @@ mod glue {
                 503,
             )?));
         }
-        if req.path().starts_with(mkit_server::admin::PREFIX) {
+        if cfg.admin_on_public_path && req.path().starts_with(mkit_server::admin::PREFIX) {
             // Parse hook configuration/signing too: invalid role separation must
             // refuse the operator route before its authenticated effect.
-            if let Err(error) = crate::hooks::build::hooks_from_env(&env, cfg) {
-                return json_response(
-                    serde_json::json!({"code":"unavailable","message":error.to_string()})
-                        .to_string(),
-                    503,
-                );
-            }
-            return crate::admin::serve(req, env, cfg).await;
+            return serve_admin_with(req, env, cfg).await;
         }
         #[cfg(feature = "test-faults")]
         if let Some(response) = test::backup_round_trip(&mut req, &env, cfg).await? {
@@ -2465,7 +2614,8 @@ mod glue {
         O: OutcomeSink + 'static,
         F: FnOnce(&Env, &WorkerConfig) -> Result<O, ConfigError>,
     {
-        ns_object_inner(state, env, class, make_sink, None)
+        crate::embedding::NsObjectBuilder::new(state, env, class, WorkerConfig::from_env(env))
+            .build_with(make_sink)
     }
 
     /// Explicit Stage 2 DO construction, paired with `fetch_configured`.
@@ -2477,26 +2627,19 @@ mod glue {
         class: crate::classes::ShardClass,
         config: crate::published_view::PublishedViewConfig,
     ) -> NsObject {
-        ns_object_inner(
-            state,
-            env,
-            class,
-            crate::hooks::build::sink_from_env,
-            Some(config),
-        )
+        crate::embedding::NsObjectBuilder::new(state, env, class, WorkerConfig::from_env(env))
+            .with_published_view(config)
+            .build_with(crate::hooks::build::sink_from_env)
     }
 
     // Keep the one-time DO construction and typed handler wiring together.
     #[allow(clippy::too_many_lines, clippy::arc_with_non_send_sync)] // Worker futures are single-threaded; core shares Arc on both targets.
-    fn ns_object_inner<O, F>(
+    pub(crate) fn build_ns_object<O, F>(
         state: State,
         env: &Env,
         class: crate::classes::ShardClass,
+        cfg: Result<WorkerConfig, ConfigError>,
         make_sink: F,
-        #[cfg(feature = "published-view")] published_view: Option<
-            crate::published_view::PublishedViewConfig,
-        >,
-        #[cfg(not(feature = "published-view"))] _published_view: Option<()>,
     ) -> NsObject
     where
         O: OutcomeSink + 'static,
@@ -2508,15 +2651,8 @@ mod glue {
             worker::console_error!("{e}; using the Workers Free cap");
             free
         });
-        let cfg = WorkerConfig::from_env(env);
-        #[cfg(feature = "published-view")]
-        let cfg = cfg.and_then(|mut cfg| {
-            if published_view.is_some() {
-                cfg.published_view = published_view;
-            }
-            if cfg.published_view.is_some() {
-                cfg.pipeline_config()?;
-            }
+        let cfg = cfg.and_then(|cfg| {
+            cfg.validate_runtime(env)?;
             Ok(cfg)
         });
         let target = cfg.as_ref().map_err(Clone::clone).map(|cfg| {
@@ -2565,7 +2701,11 @@ mod glue {
             registry.register(crate::purge::Budgeted {
                 handler: mkit_server::timers::ticket_expiry::TicketExpiry {
                     blobs: R2BlobStore::new(
-                        EnvBucket::new(env.clone(), crate::r2::STORAGE_BINDING),
+                        EnvBucket::new(
+                            env.clone(),
+                            cfg.as_ref()
+                                .map_or(crate::r2::STORAGE_BINDING, |cfg| cfg.blob_binding),
+                        ),
                         PACKS_KEYSPACE,
                     )
                     .with_deferred_abort(
@@ -2592,36 +2732,45 @@ mod glue {
         );
         // Kind 7: registered for an indexed Paid deployment, with the merged
         // extraction driver required before Verified becomes visible.
-        let registry = crate::verify::register_from_env_budgeted(
-            registry,
-            env,
-            class,
-            plan.as_deref(),
-            alarm_budget.clone(),
-        );
+        let registry = if let Ok(cfg) = &cfg {
+            crate::verify::register_configured_budgeted(
+                registry,
+                env,
+                class,
+                plan.as_deref(),
+                alarm_budget.clone(),
+                cfg,
+            )
+        } else {
+            registry
+        };
         let registry = if let (Ok(cfg), Some(budget)) = (&cfg, &alarm_budget) {
-            match crate::hooks::build::purge_from_env(env, cfg) {
-                Ok(Some(sink)) => registry.register(crate::purge::NamespaceDelivery {
-                    delivery: mkit_server::purge::PurgeDelivery::new(
-                        Arc::new(mkit_server::purge::NoLocalCache),
-                        Some(Arc::new(sink)),
-                        budget.clone(),
-                    ),
-                    local: crate::purge::local_cache(cfg),
-                    remote: WorkerNamespaceStore::new(
-                        StubTransport::new(env.clone(), cfg.placement.clone()),
-                        cfg.probe_partition(),
-                    ),
-                    sharding: cfg.sharding,
-                    single: match &cfg.addressing {
-                        mkit_server::Addressing::Single { repo } => Some(repo.clone()),
-                        _ => None,
-                    },
-                }),
-                Ok(None) => registry,
-                Err(error) => {
-                    crate::log_failure(&format!("purge sink unavailable: {error}"));
-                    registry
+            if let Some(custom) = &cfg.custom_purge {
+                registry.register(custom.delivery(budget.clone()))
+            } else {
+                match crate::hooks::build::purge_from_env(env, cfg) {
+                    Ok(Some(sink)) => registry.register(crate::purge::NamespaceDelivery {
+                        delivery: mkit_server::purge::PurgeDelivery::new(
+                            Arc::new(mkit_server::purge::NoLocalCache),
+                            Some(Arc::new(sink)),
+                            budget.clone(),
+                        ),
+                        local: crate::purge::local_cache(cfg),
+                        remote: WorkerNamespaceStore::new(
+                            StubTransport::new(env.clone(), cfg.placement.clone()),
+                            cfg.probe_partition(),
+                        ),
+                        sharding: cfg.sharding,
+                        single: match &cfg.addressing {
+                            mkit_server::Addressing::Single { repo } => Some(repo.clone()),
+                            _ => None,
+                        },
+                    }),
+                    Ok(None) => registry,
+                    Err(error) => {
+                        crate::log_failure(&format!("purge sink unavailable: {error}"));
+                        registry
+                    }
                 }
             }
         } else {
