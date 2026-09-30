@@ -25,7 +25,7 @@ optimize for scalability". The `feat/scoped-workspaces` coordination notes were 
 - **No CI runs for `feat/mkit-server`.** Nothing changes GitHub workflow triggers, Cloud Build triggers or rulesets to cover the branch. WP-P0 (CI enablement) is **dropped**: PR #1094 was closed unmerged.
 - In place of CI, the evidence is the executor's local gate run (output in the PR body) and a clean adversarial review; all other merge rules are unchanged. The orchestrator re-runs the gate after rebasing and before squash-merging.
 - Three pre-existing workflows (`actionlint`, `docs-lint`, `crypto-stack-version`) have no branch filter and may fire automatically on PRs into the branch. Their results are **ignored**: nothing waits on them, and their triggers are not changed.
-- **CI runs on each merge-to-main PR**: WP-REL-1 (Stage 1) and WP-REL-2 (Stage 2) (R-154). All normal `main` gates apply there.
+- **CI runs on the single launch merge-to-main PR**, WP-REL-1 (R-185). All normal `main` gates apply there. WP-REL-2 tracks post-launch follow-ups; it is not a second launch.
 - `workflow_dispatch` runs are never dispatched against `feat/mkit-server`.
 - A WP that adds CI wiring (new jobs, `server-staging.yml`, workflow changes) may add it, but it must trigger only on `main`, `schedule` or dispatch against `main`, never on the feature branch; it runs for the first time on the final PR to `main`. During the epic the same checks run **locally or against staging from the orchestrator's machine**, at the WP and at every milestone boundary, and the results go in the PR or the milestone report.
 
@@ -78,11 +78,11 @@ touched wasm crates + `scripts/check-wasm-dep-graph.sh`; `proto` = `buf lint`, `
   `apps/vcs-worker/Cargo.lock`.
 - File-overlap hazards (e.g. `rust/Cargo.toml` members, `scripts/check-wasm-dep-graph.sh`, `SPEC-TRANSPORT-CONNECT.md`,
   `workers.yml`, `wrangler.jsonc`): merge in registry order; the later PR rebases.
-- Nothing is released from `feat/mkit-server`. Crates publish and the version bumps only at a REL: WP-REL-1 bumps to 0.5.0 and first publishes the mkit-server crates; WP-REL-2 bumps to the next minor (R-154).
+- Nothing is released from `feat/mkit-server`. The single launch, WP-REL-1, bumps to 0.5.0, publishes the mkit-server crates and cuts the release; `feat/mkit-server` → `main` uses a merge commit, never squash. WP-REL-2 tracks post-launch follow-ups (R-185).
 
 **Milestone boundary routine** (at each exit-gate WP: M0-20, 1.20, 2.15, 3.13, 4.18, 5.13):
 1. The exit-gate WP runs its checklist and records evidence in the PR (native and `wrangler dev`; DO bindings are always
-   local in `wrangler dev`). Deployed-staging evidence is ops work after each REL, not a gate (R-154).
+   local in `wrangler dev`). Real Cloudflare staging (1.19/1.20), including measured CPU, subrequests and cost, gates the launch before REL-1 (R-185).
 2. The user signs off the milestone.
 3. The orchestrator re-runs the interface reconciliation for the next milestone **against the merged code** (not this plan),
    writes the detailed executor briefs for that milestone (rolling wave) into `docs/plans/mkit-server/briefs/`, updates
@@ -93,11 +93,11 @@ touched wasm crates + `scripts/check-wasm-dep-graph.sh`; `proto` = `buf lint`, `
 
 ## 2. Work-package registry
 
-137 registry entries: P 2, S 3, M0 22, M1 34, M2 16, M3 15, M4 22, M5 23 (including WP-REL-1 and WP-REL-2, the two merge-to-main releases, R-154).
+146 registry entries: P 2, S 3, M0 22, M1 35, M2 18, M3 18, M4 22, M5 26 (including the historical split 5.5, WP-REL-1 single launch and WP-REL-2 post-launch follow-ups, R-185).
 **Dropped:** M0-R (Q11 = no), WP-1.1 (folded into S1, Q18), WP-2.1 (folded into S2, Q19). **Added by
 consolidation:** 1.21–1.29 (D34 and coordinator inputs), 4.8a (windowed reader), 4.10a (ContentIndex shards), REL.
 **Split by review 01 (R-72):** M0-02 → M0-02a + M0-02b, M0-05 → M0-05a + M0-05b (the old ids no longer exist).
-**Split for R-161:** 4.14 → 4.14a (core and wasm) + 4.14b (HTTP and Workers); both are Stage 2.
+**Split for R-161:** 4.14 → 4.14a (core and wasm) + 4.14b (HTTP and Workers); both are on the launch serving dependency path (R-185).
 `registry.json` carries the same columns, including `area_gates`.
 Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 
@@ -158,12 +158,12 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 | 1.15 | ssh and enc: multi-repo addressing, --principal, implicit session tickets | M1 | cli | 1.5, 1.10, 1.30 | M | rust,cli | no |
 | 1.16 | Client: X-Repository everywhere, identity validation, GetServerInfo, ListRefs paging, ref hint | M1 | client | 1.2, 1.6 | M | rust,cli | no |
 | 1.17 | Client: BeginUpload with target ref, ticket threading, nonce/re-sign rule | M1 | client | 1.16, 1.10 | L | rust,cli | no |
-| 1.17b | Client: split large pushes along first-parent history (R-164; Stage 2, R-154) | M1 | client | 1.17 | M | rust,cli | no |
+| 1.17b | Client: split large pushes along first-parent history (R-164; post-launch, R-185) | M1 | client | 1.17 | M | rust,cli | no |
 | 1.18 | Client: resumable part upload with client-held receipts | M1 | client | 1.17, 1.3, 1.11a | M | rust,cli | no |
 | 1.21 | Worker: published-view ref snapshots per ref-index bucket (R2/Cache, debounced) for readers | M1 | worker | 1.28b, 1.10, 1.8 | M | rust,workers,conf-wrangler,staging | no |
 | 1.27 | M1 conformance: D34, tickets and growth cases (wire, storage, load) | M1 | conformance | 1.9b, 1.10, 1.14, 1.25, 1.26b, 1.28c | L | rust,conf-native,conf-wrangler | no |
 | 1.30 | Adapters: Multi addressing mode and policy flags | M1 | native | 1.5, 1.10 | M | rust,wasm,workers,conf-native,conf-wrangler | no |
-| 1.19 | Staging vcs-worker deployment config and runbook | M1 | ops | 1.6, 1.8, 1.12, 1.14, 1.18, 1.21, 1.29, 1.30 | S | workers,ci-yaml | yes |
+| 1.19 | Staging template and pre-launch Workers activation runbook (R-176, R-185) | M1 | ops | 1.6, 1.8, 1.12, 1.14, 1.18, 1.21, 1.29, 1.30 | S | workers,ci-yaml | yes |
 | 1.20 | CI: conformance and e2e against deployed staging (M1 exit) | M1 | conformance | 1.19, 1.27, 1.13, 1.15 | S | ci-yaml,staging | yes |
 | 2.2 | Proto additions for M2 | M2 | proto | S2, 1.2 | S | rust,proto,full | no |
 | 2.3 | mkit-attest: Keccak-256, EIP-191, secp256k1 recovery, address derivation | M2 | crypto | S2 | M | rust,wasm,sec,golden | no |
@@ -181,6 +181,7 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 | 2.13 | CLI: mkit grant create/add/list and the client grant store | M2 | cli | 2.5, 2.10 | L | rust,cli,docs | no |
 | 2.14 | CLI: mkit grant revoke and mkit epoch | M2 | cli | 2.13, 2.8 | M | rust,cli,docs | no |
 | 2.15 | Staging: enable M2 features and run M2 conformance (M2 exit) | M2 | ops | 2.7, 2.8, 2.9, 2.11, 2.12, 2.14 | S | ci-yaml,staging | yes |
+| 2.16 | Namespace authority-generation fence for external-authority writes | M2 | core | 2.8, 3.7 | L | rust,wasm,proto,conf-native,conf-wrangler,docs | no |
 | 1.30b | Adapters: grant flags and relying-party config | M2 | native | 1.30, 2.6 | M | rust,wasm,workers,conf-native,conf-wrangler | no |
 | 3.1 | Proto: AdmissionChallenge error detail and goldens | M3 | proto | S3, 1.2 | S | rust,proto,wasm,golden | no |
 | 3.2 | Core: two-phase Admission (Allow/Challenge/Deny), 402 mapping, GetServerInfo fields | M3 | core | 3.1 | M | rust,wasm | no |
@@ -189,9 +190,11 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 | 3.5 | Worker adapter: outbox delivery timer kind, CORS/redaction | M3 | worker | 3.3 | S | rust,wasm,workers,conf-wrangler | no |
 | 3.6 | Spec: SPEC-SERVER v1 (M3 sections) and the mkit.server.hooks.v1 proto | M3 | spec | S3, M0-20 | M | docs,proto,golden | yes |
 | 3.7 | Core: remote-hook adapter (remote-hooks feature) | M3 | core | 3.6, 3.3 | M | rust,wasm | no |
+| 3.7b | Public hooks.v1 types and mkit-hook:v1 verifier in mkit-rpc | M3 | core | 3.7, 3.8 | M | rust,wasm,proto | no |
 | 3.8 | Native hook channels: signed HTTPS hook channel and hook flags | M3 | native | 3.7, 3.4 | M | rust,conf-native | no |
 | 3.9 | Worker hook channels: service binding and HookSet-generic entry points | M3 | worker | 3.7, 3.5 | M | rust,wasm,workers,conf-wrangler | no |
-| 3.9b | Worker Queue outcome sink and spec amendment (Stage 2, R-154) | M3 | worker | 3.9 | S | rust,wasm,workers,conf-wrangler,docs | yes |
+| 3.9b | Worker Queue outcome sink and spec amendment (optional post-launch, R-185) | M3 | worker | 3.9 | S | rust,wasm,workers,conf-wrangler,docs | yes |
+| 3.9c | Worker signed HTTP hook channel | M3 | worker | 3.9, 3.7b | L | rust,wasm,workers,conf-wrangler | no |
 | 3.10 | Client: 402 detection -> AdmissionRequired, receipt passthrough | M3 | client | 3.1 | M | rust,cli | no |
 | 3.11 | Client: admission_helper, header allowlist and hard-reserved set (D30) | M3 | client | 3.10 | L | rust,cli,docs | no |
 | 3.12 | Stub MPP hook server and helper; end-to-end tests (M3 exit) | M3 | conformance | 3.8, 3.9, 3.11 | L | rust,conf-native,conf-wrangler | no |
@@ -226,115 +229,83 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 | 5.2 | Leases and lifecycle states: model, enforcement, events | M5 | core | 5.1a, 3.5, 4.18, 2.15 | L | rust,conf-native,conf-wrangler | no |
 | 5.3a | GC mark: roots, pins, grace, gc_pending; mark → wait → re-check protocol | M5 | core | 5.2, 4.10 | L | rust,conf-native | no |
 | 5.3b | GC sweep: membership drop, holder removal, zero-holder deletion, adapters | M5 | core | 5.3a | L | rust,conf-native,conf-wrangler | no |
-| 5.4 | Published view: (head, packmap) pointer storage and caller view on every read path | M5 | core | 5.2 | L | rust,conf-native,conf-wrangler | no |
-| 5.5 | ContentInspector: sync checks, async quarantine, clearance, hit -> takedown | M5 | core | 5.4, 3.7, 5.6 | L | rust,conf-native | no |
-| 5.6 | Takedown core: tombstones, blocklist (checked by the relay), preservation store, per-repo views, suspension | M5 | core | 5.1b-1, 4.10, 5.2, 5.10 | L | rust,conf-native,conf-wrangler | yes |
+| 5.4 | Published view: (head, packmap) pointer storage and caller view on every read path | M5 | core | 2.9, 1.10, 1.28b, 1.21, 3.3 | L | rust,conf-native,conf-wrangler,docs | no |
+| 5.5 | ContentInspector (split into 5.5a/5.5b): sync checks, async quarantine, clearance, hit -> takedown | M5 | core | 5.5a, 5.5b | L | rust,conf-native | no |
+| 5.5a | ContentInspector without takedown completion: obligations, holds, serving stops, hit handoff, remote Inspect | M5 | core | 5.4, 3.9c, 4.8 | L | rust,wasm,workers,conf-native,conf-wrangler | no |
+| 5.5b | Inspector takedown completion | M5 | core | 5.5a, 5.6 | L | rust,conf-native,conf-wrangler | no |
+| 5.6 | Takedown core: tombstones, blocklist (checked by the relay), preservation store, per-repo views, suspension | M5 | core | 5.1b-1, 4.10, 5.10 | L | rust,conf-native,conf-wrangler | yes |
 | 5.7a | mkit-core: delta-safe pack rewrite primitive | M5 | core | 4.2 | M | rust,wasm | no |
 | 5.7b | Server: rewrite orchestration, packlist chain rebuild, packmap CAS | M5 | core | 5.7a, 5.6 | L | rust,conf-native | no |
 | 5.8 | Storage receipts: ReceiptSigner, receipt key, key list, AdvanceRefs field | M5 | core | 5.1c, 5.2 | L | rust,conf-native,golden | yes |
 | 5.9a | Server: RedactionNotice detail, HTTP 451, notice signing | M5 | core | 5.7b, 5.8, 5.1b-1 | M | rust,conf-native | no |
 | 5.9b | Client: redaction-aware fetch and push re-plan | M5 | client | 5.9a | M | rust,cli | no |
-| 5.10 | CachePurger hook and purge triggers, remote delivery after admin spec | M5 | core | 5.2, 5.1b-2 | S | rust | no |
-| 5.11a | Admin API framework: signed envelope, replay protection, audit log | M5 | core | 5.1b-2, 4.18, 2.15 | L | rust,proto,conf-native | yes |
+| 5.10 | CachePurger hook and purge triggers (before takedown) | M5 | core | 5.4, 5.1b-2 | S | rust | no |
+| 5.11a | Admin API framework: signed envelope, replay protection, audit log | M5 | core | 5.1b-2, 4.18, 2.9 | L | rust,proto,conf-native | yes |
 | 5.11b | Admin operations and the mkit-server admin CLI | M5 | native | 5.11a, 5.6, 5.2, 5.14 | L | rust,conf-native | no |
 | 5.12 | Client: receipt storage under .mkit/receipts (not GC roots, not pushed) | M5 | client | 5.8 | S | rust,cli,docs | no |
 | 5.13 | Conformance: lifecycle wire suite (M5 exit) | M5 | conformance | 5.3b, 5.5, 5.7b, 5.9b, 5.10, 5.11b, 5.12 | L | rust,conf-native,conf-wrangler,staging | yes |
 | 5.14 | Reinstatement via server-side pack rewrite | M5 | core | 5.6, 5.7b, 5.1b-1 | M | rust,conf-native | no |
-| REL-1 | Stage 1 merge to main: 0.5.0 bump, publish mkit-server crates, first server release (core profile) | M3 | release | 1.27, 1.30b, 2.14, 3.13, 3.14 | S | full,ci-yaml | yes |
-| REL-2 | Stage 2 merge to main: next-minor bump, full-profile server release | M5 | release | REL-1, 1.20, 2.15, 4.13, 4.18, 5.13 | S | full,ci-yaml | yes |
+| 5.15 | Publication Event delivery | M5 | core | 5.4, 3.3 | L | rust,wasm,proto,conf-native,conf-wrangler,docs | no |
+| REL-1 | Single Workers launch for Uno: 0.5.0 bump, publish crates, release and merge to main | M3 | release | 1.27, 1.30b, 2.14, 3.13, 3.14, 3.9c, 2.16, 5.4, 5.5a, 5.15, 4.18, 5.6, 5.11a, 1.20 | S | full,ci-yaml | yes |
+| REL-2 | Post-launch follow-ups | M5 | release | REL-1, 1.20, 2.15, 4.13, 4.18, 5.13 | S | full,ci-yaml | yes |
 
 ---
 
-## 3. Global DAG, parallel waves and critical paths
+## 3. Launch mapping, delivery and critical path (R-185)
 
-**DAG.** The `depends-on` column is the DAG (hard dependencies only). Cross-milestone structure:
+**One launch.** R-185 supersedes R-154's Stage 1/Stage 2 delivery. Launch includes everything merged so far plus
+all Workers-critical work for the Uno monorepo ([UNO-403](https://linear.app/officialunofficial/issue/UNO-403),
+[UNO-404](https://linear.app/officialunofficial/issue/UNO-404)), at the full quality bar. Uno deploys directly on
+Workers; native stays maintained as the reference and test server. Milestone/track labels still organize work;
+they do not define separate releases. Historical Stage 1/Stage 2 and inertness wording in earlier R-rows and
+briefs records the original merge-time state; this section governs launch scope, activation and staging timing.
 
-```text
-P1 ─┬→ S1 ─┬→ S2 (→ crypto 2.3/2.4/2.5 may start early)
-    │      └→ S3
-    ├→ pure mkit-core WPs that may start early: 4.1, 4.2, 4.3, then 1.3 (after S1), 4.8a, 5.7a
-    └→ M0 (M0-01 … M0-20, incl. 02a/02b, 05a/05b) ─→ M1 (1.2 … 1.20; 1.24 and 1.4 start at M0 exit)
-                              ├→ M2 identity (entry 1.20; 2.2 …)       ─┐
-                              ├→ M3 money (entry 1.20; 3.6 needs only M0 exit) ─┐
-                              └→ M4 content (entry 1.20; spec 4.4 after 3.6)    ├→ M5 (entry 4.18 + 2.15) → REL
-   Cross-track edges: 4.13 ← 3.3 (paid reads); 4.15 ← 2.9, 2.11; 4.17 ← 2.7; 5.2/5.11a ← 2.15, 4.18; 5.5 ← 3.7; 5.1a ← 3.6
-   Review-01 edges (R-70, R-71): M0-16 ← M0-05b, M0-06 (features `test-faults`, `connect`); 1.28 ← 1.8 (DO classes before
-   the D34 flip); 5.6 ← 5.10 (CachePurger before takedown); M0-09's `fs` feature moved to M0-10 (no M0-09 ← M0-08 edge)
-```
+| Former mapping | Current delivery |
+|---|---|
+| Stage 1, including its terminal set 1.27, 1.30b, 2.14, 3.13, 3.14 | Included in the single launch; remaining prerequisites still gate it |
+| Stage 2 work already merged, plus the Workers-critical path below | Included in the same launch; Workers indexed serving and inspection get production opt-in and activation |
+| All other Stage 2 / remaining work | Post-launch follow-ups, in plan order (REL-2 tracking aggregate) |
+| Native-only extras, including 2.12 and native serving extras | Post-launch; native reference/test maintenance continues |
+| 3.9b Queue outcome sink and owner-approval bridge | Deferred and optional |
 
-Soft ordering (not in the DAG): M0-15 rebases onto S1 if both are open (both edit SPEC-TRANSPORT-CONNECT); M0-18 prefers
-M0-14 merged first so the shipped binary has the enc listener.
+**Critical path, in priority order.** Registry `depends_on` lists hard implementation prerequisites;
+this order schedules the launch bundles, and includes already merged implementations. For example,
+5.5a needs 4.8's verifier even though the serving bundle is listed later.
 
-**Waves.** Earliest wave per WP (longest dependency chain from the roots). Everything in a wave can run concurrently once
-its predecessors have merged; in practice cap concurrent executors at ~4 to keep review load and rebases manageable.
+1. **3.9c + 2.16, one bundle:** Worker signed HTTP hook channel and namespace authority-generation fence.
+   The channel reuses 3.9 and 3.7b; the fence reuses 2.8 and 3.7, with an independent authority generation
+   set by a deployment-authority key, separate from the grant epoch.
+2. **5.4:** published view, with the launch-profile spec amendment. Explicit foundations are 2.9 signed reads,
+   1.10 ticketed advances, 1.28b ref-index relay, 1.21 snapshots and 3.3 durable outbox, rather than 5.2 leases.
+3. **5.5a + 5.15 + remote Inspect:** obligations, holds, serving stops, purge scheduling, retained roots and
+   durable hit handoff, without takedown completion; publication Event delivery extracted from 5.2.
+   Held bytes stay unavailable to every caller. Hits remain unresolved until verified completion;
+   a no-op takedown stub is insufficient. Remote Inspect uses the signed Worker HTTP channel to Uno.
+   Events are durably recorded and delivered at least once: Committed means Sent; Delivered follows
+   published-prefix advancement, not just Inspect Pass. Receivers deduplicate and handle Event/Outcome reordering.
+4. **Worker serving: 4.8 → 4.10b → 4.16 → 4.18**, including production opt-in and activation, plus the
+   serving/proof prerequisites in the registry (including 4.14b). Native serving extras follow launch.
+5. **Launch takedown and admin:** 5.6 and the inspection review subset of 5.11 (signed/audited framework in 5.11a).
+   Pull forward review and purge foundations wherever 5.5a needs them. Lease-independent purge foundations
+   are in 5.10; full admin/CLI operations in 5.11b and inspector takedown completion in 5.5b follow launch.
+6. **Real Cloudflare staging, 1.19/1.20, before launch:** activate the launch profile, run conformance/e2e and
+   measure CPU, subrequests and cost. Local wrangler measurements do not establish production sizing.
+   Run from the orchestrator's machine; staging workflows remain main-only, with no feature-branch dispatch.
+7. **Launch release (REL-1):** version bump, crate publishing, signed release and the `feat/mkit-server` → `main`
+   merge commit. Before launch, the user runs an external full-code-and-spec review of the entire launch scope;
+   the orchestrator validates findings against the code, and validated fixes receive an adversarial review.
 
-| wave | runnable together once predecessors merge | milestone(s) |
-|---|---|---|
-| 0 | P1 | P |
-| 1 | S1, M0-01, 4.1, 4.2, 4.3 | S, M0, M4 |
-| 2 | S2, S3, M0-02a, M0-04, 1.3, 4.8a, 5.7a | S, M0, M1, M4, M5 |
-| 3 | M0-02b, M0-05a, 2.3, 2.4 | M0, M2 |
-| 4 | M0-03, M0-05b, 2.5 | M0, M2 |
-| 5 | M0-06, M0-08, M0-09 | M0 |
-| 6 | M0-07, M0-12, M0-16 | M0 |
-| 7 | M0-10, M0-17 | M0 |
-| 8 | M0-11, M0-14, M0-18 | M0 |
-| 9 | M0-15, M0-19 | M0 |
-| 10 | M0-13 | M0 |
-| 11 | M0-20 | M0 |
-| 12 | 1.2, 1.4, 1.24, 3.6 | M1, M3 |
-| 13 | 1.22, 3.14, 4.4 | M1, M3, M4 |
-| 14 | 1.5, 1.7, 1.25, 1.8, 4.11, 5.1a | M1, M4, M5 |
-| 15 | 1.6, 1.23, 1.26, 1.29, 4.14a, 5.1b-1, 5.1b-2, 5.1c | M1, M4, M5 |
-| 16 | 1.28a, 1.9, 1.16 | M1 |
-| 17 | 1.10, 1.11 | M1 |
-| 18 | 1.12, 1.13, 1.15, 1.17, 1.28b, 1.30 | M1 |
-| 19 | 1.14, 1.17b, 1.18, 1.21, 1.28c | M1 |
-| 20 | 1.27, 1.19 | M1 |
-| 21 | 1.20 | M1 |
-| 22 | 2.2, 2.10, 3.1, 4.5, 4.9, 4.10a | M2, M3, M4 |
-| 23 | 2.6, 2.13, 3.2, 3.10, 4.6, 4.7 | M2, M3, M4 |
-| 24 | 2.7, 2.8, 2.9, 3.3, 3.11, 4.8, 4.10, 1.30b | M2, M3, M4 |
-| 25 | 2.11, 2.12, 2.14, 3.4, 3.5, 3.7, 4.10b, 4.12, 4.17 | M2, M3, M4 |
-| 26 | 2.15, 3.8, 3.9, 4.13, 4.14b, 4.15, 4.16 | M2, M3, M4 |
-| 27 | 3.12, 3.9b, 4.18 | M3, M4 |
-| 28 | 3.13, 5.2, 5.11a | M3, M5 |
-| 29 | 5.3a, 5.4, 5.8, 5.10 | M5 |
-| 30 | 5.3b, 5.6, 5.12 | M5 |
-| 31 | 5.5, 5.7b | M5 |
-| 32 | 5.9a, 5.14 | M5 |
-| 33 | 5.9b, 5.11b | M5 |
-| 34 | 5.13 | M5 |
-| 35 | REL | M5 |
+**Launch profile, recorded here; spec text lands with 5.4.** Indexed mode, serving and inspection without
+storage leases; permanent retention and GC disabled. 5.4 must amend SPEC-SERVER §12.1/§18 and explicitly
+permit unresolved inspection-hit handoff before activation. This plan does not itself amend normative text
+or claim conformance to the existing full profile. Leases, GC and receipts (5.2, 5.3a/b, 5.8) follow launch.
+Storage leases are distinct from the existing D34 epoch leases and the 2.16 authority fence.
 
-**Critical paths per milestone.**
-
-| milestone | critical path inside the milestone (size-weighted: S=1, M=2, L=3) | PRs |
-|---|---|---|
-| P | P1 | 1 (weight 1) |
-| S | S1 → S2 | 2 (weight 6) |
-| M0 | M0-01 → M0-02a → M0-05a → M0-05b → M0-06 → M0-07 → M0-10 → M0-14 → M0-15 → M0-13 → M0-20 | 11 (weight 25) |
-| M1 | 1.4 → 1.22 → 1.7 → 1.23 → 1.9 → 1.11 → 1.12 → 1.14 → 1.27 → 1.20 | 10 (weight 25) |
-| M2 | 2.4 → 2.5 → 2.6 → 2.9 → 2.11 → 2.15 | 6 (weight 14) |
-| M3 | 3.1 → 3.2 → 3.3 → 3.7 → 3.8 → 3.12 → 3.13 | 7 (weight 15) |
-| M4 | 4.4 → 4.5 → 4.7 → 4.10 → 4.12 → 4.14b → 4.18 | 7 (weight 18) |
-| M5 | 5.1a → 5.2 → 5.10 → 5.6 → 5.7b → 5.14 → 5.11b → 5.13 → REL | 9 (weight 21) |
-
-**Overall critical path by PR count** (36 PRs, 36 waves 0–35):
-`P1 → M0-01 → M0-02a → M0-05a → M0-05b → M0-06 → M0-07 → M0-10 → M0-14 → M0-15 → M0-13 → M0-20 → 1.4 → 1.22 → 1.7 → 1.23 → 1.9 → 1.11 → 1.12 → 1.14 → 1.19 → 1.20 → 4.5 → 4.7 → 4.10 → 4.12 → 4.14b → 4.18 → 5.2 → 5.10 → 5.6 → 5.7b → 5.9a → 5.9b → 5.13 → REL`
-
-**Overall critical path by size weight** (weight 86, 36 PRs); it differs only in M1 (1.27 instead of 1.19) and at the M5
-tail (5.14 → 5.11b instead of 5.9a → 5.9b):
-`P1 → M0-01 → M0-02a → M0-05a → M0-05b → M0-06 → M0-07 → M0-10 → M0-14 → M0-15 → M0-13 → M0-20 → 1.4 → 1.22 → 1.7 → 1.23 → 1.9 → 1.11 → 1.12 → 1.14 → 1.27 → 1.20 → 4.5 → 4.7 → 4.10 → 4.12 → 4.14b → 4.18 → 5.2 → 5.10 → 5.6 → 5.7b → 5.14 → 5.11b → 5.13 → REL`
-
-Review 01 lengthened the chain by two PRs (was 35 counting the since-dropped P0): the M0-05 split adds one serial step (M0-02b and M0-03 stay off
-the chain because the pipeline needs only M0-02a), and 5.10 now precedes 5.6.
-
-The chain runs through the M0 serial foundation, the M1 D34/ticket core, then the M4 indexed-serving core (M4 is longer than
-M2 or M3, so M2/M3 run in its shadow), then M5 takedown. Levers: start 3.6 (SPEC-SERVER), 4.4, 4.11 and 5.1a–c spec drafting
-as soon as their deps allow (they are off the implementation chain); land the pure mkit-core WPs (1.3, 4.1, 4.2, 4.3, 4.8a,
-5.7a) during M0; keep M1's four parallel tracks (tickets 1.9–1.14, leases 1.25–1.26, index/snapshot 1.23/1.28/1.21, client
-1.16–1.18) staffed.
+**Post-launch order.** Continue remaining WPs in plan/dependency order: 5.5b completes inspector takedown;
+5.2 → 5.3a → 5.3b and 5.8 add leases, GC and receipts; full admin, native-only extras and other remaining work
+follow their registry prerequisites. REL-2 is a follow-up tracking aggregate, with no mandated second launch
+or next-minor version bump. The registry remains the dependency DAG; former static wave/weighted-release
+calculations are replaced by this launch schedule.
 
 ---
 
@@ -346,7 +317,7 @@ as soon as their deps allow (they are off the implementation chain); land the pu
 | # | Topic | Default adopted | Source | Affects |
 |---|---|---|---|---|
 | Q1 | M0 exit "tokio-free baseline" | **Server-free CLI**: no axum, SQLite or `mkit-server-native` in `mkit-cli`'s default graph (plus no hyper `server`/connectrpc `server`/`axum` features; `mkit serve` builds no runtime), enforced by `scripts/check-cli-baseline.sh` | User | M0-13, M0-20, every CLI WP |
-| Q2 | Publishing | `mkit-server` crates published and workspace bumped to 0.5 at the Stage 1 merge-to-main release (WP-REL-1, R-154), not before; `mkit-server` has no `publish = false` (mkit-cli depends on it); `-native`, `-conformance` publishable at REL; `-worker` never | User | M0-01/10/13/15/18, REL |
+| Q2 | Publishing | `mkit-server` crates published and workspace bumped to 0.5 at the single Workers launch (WP-REL-1, R-185), not before; `mkit-server` has no `publish = false` (mkit-cli depends on it); `-native`, `-conformance` publishable at REL; `-worker` never | User | M0-01/10/13/15/18, REL |
 | Q3/Q4 | FS stores and ssh metadata | `fs` feature on `mkit-server`; `mkit serve` uses file refs (`FsLayoutStore`) for good; SQLite required when auth-v2 is on | User | M0-08, M0-10, M0-13, 1.15, 2.12 |
 | Q5 | In-flight replay | Keep `UploadPack` retry-resume in M0; other in-flight → retryable `aborted` | User | M0-02a, M0-05b, M0-17 |
 | Q6 | `mkit-server-worker` location | `rust/crates/mkit-server-worker`, workspace member, unpublished | User | M0-16 |
@@ -595,7 +566,7 @@ ContentIndex/export/hooks → M0-02b, unary pipeline → M0-05a, streaming/fault
 | R-151 | WP-2.8 grant epochs | Unsigned GetGrantEpoch/SetGrantEpoch live in `pipeline/epoch.rs` and Connect handlers, outside Procedure and independent of X-Repository. Get parses the namespace first and reads no store for an unserved allowlist namespace. Set bounds the statement before decoding, verifies with the business clock, checks the served namespace, CASes via shared `epoch_transition` with lost-CAS reclassification, then rechecks the stored epoch around each completion scan so a concurrent advance returns only the epoch actually fenced; it spends at most five revoke slices or five seconds before `unavailable` with `Retry-After: 1`; any valid same-epoch statement is a retry. Under Any, check 6 requires an existing namespace record from an admitted write; `0x` is served only through Allowlist. Single returns unimplemented. Memory and SQLite native pipeline tests cover the in-flight, failed-push/expired-lease (R-63), idle-shard, ack, pending-retry, and reserved-BeginUpload races. The reserved failure's separate Aborted row moves to WP-3.3's generic post-Allow reservation rule; the current test pins no commit. This supersedes the breakdown's identical-bytes retry wording, omitted check 6, `handlers/epoch.rs` and wire race paths. WP-2.9 must include Worker config-cache completion and use the same signed-statement size rule. WP-2.12 decides ticketless UploadPack's epoch source, keeps GrantConfig constructors stable, and must be brief-gated on 1.15+1.30. WP-2.14 uses the client epoch RPCs. Accepted: a replayed valid statement re-runs the bounded completion scan (at most five slices or five seconds) until it expires, because completion is not memoized and every statement is re-verified; and Get answers 0 for a namespace no longer served (allowlist removal, or Any without a namespace record) even when an epoch is stored, which is harmless because an unserved namespace cannot write. | 2.8, 2.9, 2.12, 2.14, 3.3 |
 | R-152 | WP-2.9 signed reads and private repositories | Under auth v2 a read carrying `X-Envelope-Version`, `X-Public-Key` or `X-Signature` is verified in full at stage 0 (a failure is `unauthenticated`, never anonymous) with no replay lookup or record; `IssueObjectUrl` must be signed. `DownloadPack` is verified over its framed body `0x00‖be32(len)‖message`, rebuilt in the interceptor from the single decoded envelope (≤1 KiB); a signed `DownloadPack` with a non-identity streaming content-encoding is rejected. A grant header without auth v2 is `unauthenticated` on every procedure of every deployment (SPEC-WRITE-GRANTS §4.2; review fix, superseding the 2.6 Single/Open ignore). `GetReceipt`, `SetRepoVisibility` and `IssueObjectUrl` are `Procedure` variants with an exhaustive read/write class; `GetServerInfo`, `GetGrantEpoch` and `SetGrantEpoch` stay outside. `SetRepoVisibility` exists only on Multi + `write_policy = owner` + auth v2 (any other deployment answers `failed_precondition`, checked before the mode and auth match); a stored `rv = private` gates reads on every Multi + owner-policy pipeline whatever its auth mode (a non-auth-v2 sibling cannot authenticate an owner, so private repositories are `not_found` there). It is stored in the coordinator row `rv 00 <repo>` (absent = public), which can exist without `rr`, so a repository made private before its first push is created private. Every read does one coordinator `get_many{rr, rv, e}`; a store failure is `unavailable`. **No visibility cache (orchestrator decision)**, so `SetRepoVisibility(private)` completes on commit; the P-22 isolate cache stays deferred and any WP that adds one MUST add the §9.1 completion wait. Unauthorized private reads, including hook denials and hook failures, answer the one `ServerError::repository_not_found()`. A presented grant is verified statelessly before the coordinator read and its epoch compared with the coordinator `e`. `caller_view` is carried in `AuthzFacts` inside the pipeline only; M2 serves live refs to everyone, so no handler consumes it yet. A `check` hook keeps its pre-2.9 power to deny public reads (SPEC-HTTP-OBJECTS §3 step 6) but never confers the writer view; an `authority` hook on a public read only classifies. `SetRepoVisibility` envelope mode is replay-protected in the **coordinator** partition (replay row committed with the `rv` write, expired `px` rows pruned in the same batch), authorized by the owner key or an authority hook, never a grant; statement mode verifies an owner-signed statement and accepts only a greater `created` (identical bytes succeed without a write only while the stored visibility still equals the statement's; envelope writes stamp `last_created_ms = max(stored, now)`, so an older statement cannot undo them). Statement mode needs `GrantConfig` (owner schemes); without it only envelope mode works. A presented grant is the only path to a private read: the authority hook is never consulted for it (an old-epoch, expired or foreign grant reads `not_found`), and a signed read of a missing repository pays the same hook round trip as a private one and discards it. The namespace allowlist applies to both modes (orchestrator decision). Carry-forward to WP-1.21: snapshots never serve private repositories, signed reads bypass snapshots, and a snapshot that caches visibility must be waited for or purged before `SetRepoVisibility(private)` reports completion. | 1.21, 2.13, 2.14, 4.12, 4.15, 5.8 |
 | R-153 | WP-2.11 URL tokens | The spec wins over the breakdown: a token binds no `caller_view`; it has an `epoch` field (the coordinator epoch at issue); paths are 0–1,024 bytes and an empty path names the root tree; verification has two phases; minting is not feature-gated. `mkit_server::url_token` is un-gated and wasm-clean (`ed25519-dalek` is now a direct dependency, `base64` non-optional). `PipelineConfig.url_tokens: Option<UrlTokenConfig>` (keys + ttl, default 15 min, at most 24 h); without it `IssueObjectUrl` is `unimplemented`, checked first. One active dedicated Ed25519 key plus retired keys, each accepted until `retired_at + url_token_ttl`; the key file is `active <64-hex seed>` plus `retired <64-hex public key> <retired_at_ms>` lines. `Pipeline::new` refuses URL tokens without auth v2 and a URL-token seed equal to a ticket key; WP-5.8 MUST add the same refusal for its receipt key. The TTL is clamped, never refused; the server never resolves the target. Hand-offs: WP-4.12/4.15 call `precheck` before any repository lookup, then `check_binding`, then compare the epoch (or use `url_token::verify`), and ignore the result for public repositories; WP-4.15 notes that refs outside `refs/` or with a `-` segment cannot be served over HTTP; WP-4.16 mounts `/.well-known/mkit-url-token-keys.json` from `UrlTokenKeys::key_set_json` with `Cache-Control: public, max-age=300`. `UrlTokenConfig::new(keys)` defaults the lifetime to 15 min; `with_ttl_ms` sets it (at most 24 h, SPEC-WRITE-GRANTS §1.1). `Pipeline::with_auth` clears `url_tokens`: sibling enc/ssh pipelines mint none. Carry-forward to WP-4.16 (R-136 records the move from WP-1.30b): adapter flags `--url-token-key-file` and `--url-token-ttl` (native) and the matching Worker bindings, and the native enc server key must be kept separate from the URL-token seed (key separation). | 1.30b, 4.12, 4.15, 4.16, 5.8 |
-| R-154 | Two-stage delivery (user, 2026-09-28) | **Stage 1** merges to `main` once complete: all of M1 except 1.21 (published-view snapshots), 1.19 and 1.20 (staging); all of M2 except 2.12 (ssh/enc grant registry) and 2.15 (M2 staging); all of M3; then the Stage 1 REL. It closes #1084, #1085, #1086, #1089 and #1090. Work already merged for later stages (M4 object index and indexed ingestion, M5 specs, 5.7a) ships inert: indexed mode is off by default and specs are docs. **Stage 2** follows on `feat/mkit-server` and merges to `main` in a second REL: M4 async verification, extraction and HTTP serving (#1088), all of M5 (#1091, #1092), 2.12, 1.21, 1.17b and the staging WPs 1.19, 1.20 and 2.15. Staging deployment is ops work after each merge, not a gate: the final PR's CI and the conformance suites (1.27, 3.13) gate Stage 1. The M5 staging-exit edges (2.15, 4.18) stay as they are for Stage 2.  **Verification (2026-09-28):** no Stage 1 WP depends on a Stage 2 WP except the old REL, now split into REL-1 (deps 1.27, 2.14, 3.13, 3.14) and REL-2 (REL-1 plus the old REL deps). WP-1.30 and WP-1.30b (adapter Multi mode and grant flags) are Stage 1: without 1.30b, grants can't be configured on real adapters. Stage 1 servers conform to the SPEC-SERVER §18 **core profile** (`indexed_mode`, `leases` and `async_inspection` false, receipt keys empty, no admin service). Indexed mode therefore stays unexposed in Stage 1: WP-4.7 ships it as programmatic configuration only, and its adapter flags and the startup opt-in arrive with Stage 2 (WP-4.18/5.2), because SPEC-SERVER §12.1 requires per-ref storage leases in indexed deployments. `IssueObjectUrl` answers `unimplemented` in Stage 1 because no adapter configures URL-token keys until WP-4.16. 3.9 must make the Worker adapter generic over `HookSet`, so a Workers business layer can plug in through remote hooks. 3.13 and 1.27 run locally and under `wrangler dev`; their staging runs move to after REL-1. Known Stage 1 limitations, all addressed in Stage 2: no content inspection or takedown (implementers scan out of band); no storage leases or GC (unreferenced upload bytes accumulate; bucket lifecycle rules cover only `server-uploads/`); no HTTP object serving; D34 ListRefs reads 16 buckets per page until 1.21's snapshots. REL-1 merges with a merge commit, never a squash, so Stage 2 continues on `feat/mkit-server`; `main` is merged back into the branch after REL-1 and before each later sync. REL-1 bumps to 0.5.0; REL-2 to the next minor. Carry-forwards earlier assigned to WP-REL (for example the M0 exit report's `wasm-ruzstd-check.sh` CI wiring) move to REL-1. | REL-1, REL-2, 1.19, 1.20, 1.30b, 2.15, 3.9, 3.13, 4.7, 5.2 |
+| R-154 | Two-stage delivery (user, 2026-09-28; **superseded by R-185**) | **Stage 1** merges to `main` once complete: all of M1 except 1.21 (published-view snapshots), 1.19 and 1.20 (staging); all of M2 except 2.12 (ssh/enc grant registry) and 2.15 (M2 staging); all of M3; then the Stage 1 REL. It closes #1084, #1085, #1086, #1089 and #1090. Work already merged for later stages (M4 object index and indexed ingestion, M5 specs, 5.7a) ships inert: indexed mode is off by default and specs are docs. **Stage 2** follows on `feat/mkit-server` and merges to `main` in a second REL: M4 async verification, extraction and HTTP serving (#1088), all of M5 (#1091, #1092), 2.12, 1.21, 1.17b and the staging WPs 1.19, 1.20 and 2.15. Staging deployment is ops work after each merge, not a gate: the final PR's CI and the conformance suites (1.27, 3.13) gate Stage 1. The M5 staging-exit edges (2.15, 4.18) stay as they are for Stage 2.  **Verification (2026-09-28):** no Stage 1 WP depends on a Stage 2 WP except the old REL, now split into REL-1 (deps 1.27, 2.14, 3.13, 3.14) and REL-2 (REL-1 plus the old REL deps). WP-1.30 and WP-1.30b (adapter Multi mode and grant flags) are Stage 1: without 1.30b, grants can't be configured on real adapters. Stage 1 servers conform to the SPEC-SERVER §18 **core profile** (`indexed_mode`, `leases` and `async_inspection` false, receipt keys empty, no admin service). Indexed mode therefore stays unexposed in Stage 1: WP-4.7 ships it as programmatic configuration only, and its adapter flags and the startup opt-in arrive with Stage 2 (WP-4.18/5.2), because SPEC-SERVER §12.1 requires per-ref storage leases in indexed deployments. `IssueObjectUrl` answers `unimplemented` in Stage 1 because no adapter configures URL-token keys until WP-4.16. 3.9 must make the Worker adapter generic over `HookSet`, so a Workers business layer can plug in through remote hooks. 3.13 and 1.27 run locally and under `wrangler dev`; their staging runs move to after REL-1. Known Stage 1 limitations, all addressed in Stage 2: no content inspection or takedown (implementers scan out of band); no storage leases or GC (unreferenced upload bytes accumulate; bucket lifecycle rules cover only `server-uploads/`); no HTTP object serving; D34 ListRefs reads 16 buckets per page until 1.21's snapshots. REL-1 merges with a merge commit, never a squash, so Stage 2 continues on `feat/mkit-server`; `main` is merged back into the branch after REL-1 and before each later sync. REL-1 bumps to 0.5.0; REL-2 to the next minor. Carry-forwards earlier assigned to WP-REL (for example the M0 exit report's `wasm-ruzstd-check.sh` CI wiring) move to REL-1. | REL-1, REL-2, 1.19, 1.20, 1.30b, 2.15, 3.9, 3.13, 4.7, 5.2 |
 | R-155 | WP-2.13 client grant store | Decisions D-B1 (native `secp256k1-eip191` by software-keystore prehash signing), D-B2 (higher epoch first per namespace and audience, no pruning on import), D-B3 (a WebAuthn import needs a pinned relying party) and D-B6 (one raw header per `<id>.grant`) are all recorded below; D-B4 and D-B5 are in R-156. The user grant store is `$XDG_CONFIG_HOME/mkit/grants/<grant id>.grant`: one raw SPEC-WRITE-GRANTS §4.2 header per file, directory 0700, files 0600, atomic writes. It is never repository-scoped and no config key, flag or repository path relocates it (SPEC-CONFIG-SECURITY). Load re-parses and re-verifies every file, skips a bad one with one warning, is bounded to 1,024 files of 16 KiB each, and refuses a group- or world-writable directory. `mkit grant create\|add\|list` share one owner-signing module with `epoch bump` and `visibility set`: `ed25519` with the mkit signing key; `secp256k1-eip191` natively with a software-keystore key through the new defaulted `KeySigner::sign_prehash_recoverable_secp256k1` (software and software-raw only, no secret export, SPEC-KEYSTORE §5.6); a wallet EIP-191 signature or a WebAuthn assertion by `--print-statement`, then `--statement-file` with `--signature` or `--webauthn-assertion`, normalized (`v` of 0/1, high `s`, DER) and verified before use. A WebAuthn import is refused without the user-only `grant.webauthn_rp` pin. Selection (D-B2, R-129): among grants valid for the request the higher epoch ranks first (per namespace and audience), then P-18, then header bytes; nothing is pruned on import, so a grant pre-issued for epoch e+1 outranks a live epoch-e grant until the bump, and `grant add` warns. R-150 carry-forward: `GrantSource` cannot carry `indexed_mode` (A8), so a `MATCH` update ranks a grant with `f` first, and `cu` grants should be issued as `cuf` while servers are opaque. The spec wins over the breakdown in three places: `--cap write,read` is accepted and respelled `read,write`; the store is keyed by grant id, not (audience, namespace); native EIP-191 needed the keystore prehash API. `grant list --check` asks only the trusted (or named) remote, never an origin a grant file names. The client `mkit grant add` store is unrelated to the operator-side `mkit-server grant register` (WP-2.12, Stage 2). Accepted deviation from the breakdown (orchestrator, review): after the epoch rule, a grant carrying `f` ranks first for a `MATCH` update; `BeginUpload` ranking has no `f` preference. `get_grant_epoch` landed with this WP's commits because `grant create` reads the epoch with it. | 2.10, 2.13, 2.14 |
 | R-156 | WP-2.14 epoch and visibility commands | D-B4 (the `visibility set` command lives in 2.14) and D-B5 (a concrete `ConnectTransport` opener plus a `Completion` enum, no `TransportError` variant, R-128) apply. `ConnectTransport::{get_grant_epoch, set_grant_epoch, set_repo_visibility}` return `Completion::{Done, Pending { retry_after }}`. An `unavailable` is `Pending` only when it carries a `Retry-After` header (any other `unavailable` is an error); `Retry-After` is delay-seconds only, clamped to 1–60 s, and missing or garbage is 1 s. A transport-level failure or a proxy error has no `Retry-After` and stays an error for the ordinary retry ladder. `--timeout` is a wall-clock bound from the first send; Ctrl-C is observed between attempts, not inside an RPC in flight. `grant add` compares epochs with one short `GetGrantEpoch` attempt and only warns on failure. `grant revoke --prune` deletes a lower-epoch grant only when the bump covers every one of its audiences (the statement actually sent, imports included). Carry-forwards: the store's warnings repeat and re-verify on each transport open (L10; cache per process in a later CLI WP); a symlinked `grants/` directory is refused (documented in CLI.md); clone should fall back to the user-level key when the destination has none (a later CLI WP; CLI.md documents the user-level `signing_key` workaround). `open_connect_trusted` opens the concrete transport behind the credential-trust gate; the epoch RPCs and statement-mode visibility never use the ambient identity. `mkit epoch show\|bump`: a step over 1,024 is refused locally; the bump signs once and re-sends identical bytes up to `--timeout` (default 5 min), and a cancelled or timed-out bump says it may still finish. `mkit grant revoke [--prune]` lists the local grants the bump invalidates first. `mkit visibility set <remote> public\|private [--statement]`: envelope mode is a signed auth v2 write (needs `transport_auth = envelope` and a trusted remote; it re-signs on each attempt because it sets a value), statement mode signs `mkit-repo-visibility:v1` through the owner-signing module and is sent unsigned with `X-Repository`. `envelope.rs` classifies `SetRepoVisibility` per request; a body that does not decode is signed, never sent bare. A loopback audience is refused unless the remote is a loopback `mkit+http://` remote. E1 (a real in-process server: grantee push, revocation, reissue, prune, step bound; a stub for the `Retry-After` loop) is covered. **E2 (done, follow-up PR after #1214): the real `mkit` binary against the in-process server covers `visibility set` in envelope and statement mode (an ed25519 owner, `GrantConfig` on), a private-repository clone by the owner key and by a read grantee (`grant create --cap read`, then `grant add`), `not_found` for a write-only grantee, for a signed caller with no grant and for an anonymous one, `epoch bump` revoking the read grant with a reissue at the new epoch working, and an older unsubmitted `public` statement failing to undo a later envelope flip to private (#1214's L1 rule).** | 2.9, 2.13, 2.14, 2.15 |
 | R-157 | WP-1.28c D34 default and stale-listing tolerance | **Native:** `--sharding` is optional; absent means `d34` with `--meta sqlite:<PATH>` and `single` otherwise (fs-layout cannot run D34); an explicit `d34` without SQLite stays `USAGE`. **Enc exception:** `--addressing multi` with `--listen-enc` and no `--sharding` defaults to `single` (`--help` and the native README say so), because ssh/enc sessions carry no ref hint and D34 membership reads are then eventual: an enc clone right after a push can fail. An explicit `--sharding d34` with `--listen-enc` is allowed: enc/ssh membership reads are eventual (up to `RELAY_LAG_BOUND_MS`) under D34, pinned by `enc_multi_d34_membership_reads_are_eventual` (bounded polling, no fixed sleep). `restore` defaults to the export marker's mode and refuses a disagreeing flag. There is no migration (R-123): a native database recorded `single`, or unmarked with data, under the new default fails `CONFIG_ERROR` telling the operator to pass `--sharding single`; the Worker keeps answering 503 until `SHARDING="single"` is pinned. **Worker:** `SHARDING` unset means `d34` and `wrangler.jsonc` sets it. Breaking-change CHANGELOG line; under Single addressing the default quota is now per (signer, branch). Core defaults stay single (`Sharding::default()`, `PipelineConfig::new`, `mkit serve`). **Client:** when a listed branch's packmap `ReadRef` is `None`, the client strongly re-reads `refs/heads/<name>`: also absent means a stale listing (skip, no tracking ref, one `eprintln` note in verbose mode). With a target branch (`clone -b`, fetch of a named branch) that the listing lacks, `pull_all_with` strongly reads `refs/heads/<b>` and fetches it if present, else `RemoteBranchMissing`; a target-branch clone never exits 0 empty; present stays `PackmapMissing`; a transport error stays an error (STC §7.9 gains the normative sentence). **Scripts and CI:** `scripts/vcs-worker-conformance.sh` defaults to `--sharding d34`; `workers.yml` runs the release D34 phase, a `--test-faults --multi` D34 phase and an explicit `--test-faults --sharding single` phase (snapshot round trip and single growth). Native tests that are about single behaviour pin `--sharding single` (the three wire suites; `enc_multi_bound_repository_roundtrips_the_owner` now runs on the Multi+enc default, single). A real push then clone/fetch e2e runs on D34 with bounded polling of `list_refs` (the #1216 split-push test no longer pins `--sharding single`). A `client_e2e` D34 variant polls the listing for at most `RELAY_LAG_BOUND_MS`. | 1.27, 1.21, REL-1 |
@@ -616,6 +587,8 @@ ContentIndex/export/hooks → M0-02b, unary pipeline → M0-05a, streaming/fault
 | R-176 | WP-1.19 staging template (Stage 2, inert) | Standalone `apps/vcs-worker/staging/wrangler.staging.jsonc.template` is never loaded by builds/deploys; copy and activate after REL-1. `ADDRESSING=multi`, CI allowlist/audience placeholders, distinct private R2 buckets, five DO bindings and v1/v2 migrations, optional placement vars unset. Runbook covers scoped provisioning, 35-day backups/-only retention, ticket secrets, explicit configured fetch/DO opt-in, CPU/pack remeasurement and smoke/recovery/disable operations. Paid/100 ms is an unvalidated template starting allowance, conditional on account confirmation; Free production CPU is unproven. No Stage 1 vars, bindings, routes, feature opt-in or deployment. Worker restore remains 5.11b; staging CI is 1.20. | 1.19, 1.20, 5.11b, REL-1 |
 | R-177 | WP-4.13 paid HTTP reads (Stage 2, inert) | Default-off `http-objects` plus programmatic `HttpObjectsConfig.admit_reads` (default false). GET and HEAD use unary admission at step 11 with anonymous input, selected GET length, no pack/signer/grant/idempotency key, false creation and known zero new-to-repo bytes. Selected credentials share the Connect selector: every selected header rejects comma joining, correcting R-138/#1212. Canonical protobuf JSON 402, repeated challenge headers, no-store, no success metadata; HEAD omits the body. Admission-configured 304 is private without a charge. Reservation-bearing allowances atomically record Pending(Read) before the response; `read_deadline` defaults to 300 s from creation, and `read_reconcile_grace` defaults to 60 s. Conditional OutboxBuilder settlement counts bytes handed to the response stream: partial failures use ReadServed(actual); failures before any byte use Aborted(INTERNAL); successful HEAD uses ReadServed(0). Normal completion awaits a retained task, cancellation spawns through HttpReadRuntime (native tasks / Worker request wait_until, wired by 4.16); I/O retries retain the count within grace and reconciliation uses the same arbiter. Preserve 4.12 open_leaf ordering. 4.14b must join proof selection to common admission; 4.16 supplies runtime/mounts and suppresses shared caching. No adapter, key configuration, or Stage 1 route changes. | 4.13, 4.14b, 4.16 |
 | R-178 | WP-4.15 private HTTP URL-token reads (Stage 2, inert) | TokenGate retains a redacted Prechecked result: syntax/key/signature before repository lookup; a separate rr/rv read determines existence and visibility; private reads bind audience/repository/target/expiry/lifetime before the separate strong coordinator epoch read. Public reads discard every token result and do not read the epoch. The HTTP-only branch in read_policy::decide permits a verified token plus Authorizer Allow, with anonymous principal/view and published resolution; it grants no RPC or writer access. Targets are object:hex or path:full-ref:base64url(decoded UTF-8 joined path), root included; proof selectors do not alter the target and non-UTF-8 cannot match. Missing/private-invalid responses are byte-identical, including HEAD. Private ids and commit-pinned proofs use private, max-age=floor(remaining lifetime), immutable; ref paths/proofs use private, no-cache. Admissions compose without widening token freshness. No token claims or credentials in Debug. All active/retained token public keys are checked against ticket secrets; UrlTokenKeys::public_keys permits 4.16 to compare hook/enc and future receipt/admin roles without exporting seeds. Carry-forward: 4.16 must suppress shared-cache lookup/insertion, wire runtime retention, native/Worker opt-in adapters/CORS/key document/diagnostic redaction and role-key comparisons. 4.14b owns proof construction and must join common paid admission. Default-off feature/configuration and no Stage 1 token keys keep IssueObjectUrl unimplemented. | 4.15, 4.16, 4.14b |
+| R-179 | WP-4.16 HTTP adapter mounts (Stage 2, inert) | Default-off native/Worker `http-objects` forwards the core feature; explicit programmatic indexed + HTTP configuration and a mount opt-in are required. Dispatch retains original escaped paths and trailing empty queries, selects objects by `/-/` and leaves RPC dispatch exact. Bodies stream without collection; repeated response fields and selected Content-Length survive; HEAD has no body on any status. Read CORS covers every response (default wildcard or allowed-origin echo with Vary: Origin, no credentials), including unauthenticated OPTIONS, 304, errors and challenges. Native tracing omits queries and Worker URL errors use fixed redacted diagnostics. No shared-cache operations are used for object serving. The separate well-known key document publishes active/retained keys with public max-age=300 outside bearer/payment gates. Native feature-gated key-file/TTL flags and Worker URL_TOKEN_KEYS/URL_TOKEN_TTL parse existing grammar and compare active/retained public keys against ticket, hook and native enc roles without seed export; Worker service bindings have no hook signing key. Optional public-ref redirects occur only after prior checks, preserve the explicit repository prefix, exclude private/proof requests and are disabled with configured admission. Native settlement tasks survive body cancellation; Worker embedders provide request-lifetime retention. Production startup/mount exposure and serving conformance remain 4.18/5.2; deployment manifests and release features are unchanged. | 4.16, 4.18, 5.2 |
+| R-185 | Single Workers launch for Uno (user/orchestrator, 2026-09-29) | Supersedes R-154: one launch of everything merged so far plus the Workers-critical path for the Uno monorepo (UNO-403/UNO-404), at the full quality bar; all other work becomes post-launch follow-ups in plan order. Pre-launch external full-code-and-spec review covers the whole launch scope; findings are validated against code and fixes get adversarial review. Uno deploys on Workers; native remains the maintained reference/test server, with 2.12 and native serving extras post-launch. Order: 3.9c + 2.16 as one bundle → 5.4 plus launch-profile spec amendment → 5.5a + 5.15 plus remote Inspect → Worker serving 4.8 → 4.10b → 4.16 → 4.18 (production opt-in/activation) → launch-needed 5.6 and 5.11 review subset → real Cloudflare staging 1.19/1.20 before launch (CPU, subrequests, cost) → REL-1 version bump, crate publishing, release and feat → main merge commit. Launch profile: indexed mode, serving and inspection without storage leases, permanent retention, GC disabled; normative text arrives with 5.4, including unresolved hit handoff. Leases, GC and receipts (5.2, 5.3a/b, 5.8) follow launch. 5.5 splits into launch 5.5a and post-launch 5.5b; 5.15 extracts publication Event delivery from 5.2. 3.9b Queue outcome sink and owner-approval bridge stay deferred/optional; REL-2 tracks post-launch follow-ups. Overrides earlier stage/inertness and post-REL-1 activation/staging timing (including R-148, R-159, R-169, R-170, R-175, R-176, R-179) for the launch profile. | REL-1, REL-2, 3.9c, 2.16, 5.4, 5.5a, 5.5b, 5.15, 4.8, 4.10b, 4.16, 4.18, 5.6, 5.10, 5.11a, 1.19, 1.20 |
 
 ## 6. Human-action checklist
 
@@ -640,7 +613,7 @@ ContentIndex/export/hooks → M0-02b, unary pipeline → M0-05a, streaming/fault
 | M5 | 5.8 | Generate the receipt+notice key, install as a secret, publish the key list | Key custody |
 | M5 | 5.11a | Generate the admin key, install its public key, decide custody | Key custody |
 | Before REL-1 | REL-1, M0-19 | Allow GitHub Actions to create packages in the `officialunofficial` org (org Settings → Packages → package creation), so the release workflow can push the first `ghcr.io/officialunofficial/mkit-server` image | Org admin |
-| REL-1, REL-2 | REL-1, REL-2 | Merge `feat/mkit-server` → `main` **with a merge commit, never squash** (Stage 2 continues on the same branch); run the mkit-release flow (signed tag; `cargo publish --workspace` rather than release-plz when the signed tag precedes publishing; org `CRATES_PACKAGE_KEY`); after the release, check the ghcr `mkit-server` package is private and linked to the repo | User |
+| Launch | REL-1 | Merge `feat/mkit-server` → `main` **with a merge commit, never squash** (R-185 single launch); run the mkit-release flow (signed tag; `cargo publish --workspace` rather than release-plz when the signed tag precedes publishing; org `CRATES_PACKAGE_KEY`); after the release, check the ghcr `mkit-server` package is private and linked to the repo | User |
 | After REL-1 publish | REL-1 | Add the team owners to every newly published crate (`mkit-server`, `mkit-server-native`, `mkit-server-conformance`): `cargo owner --add github:<org>:<team> <crate>` with the same team that co-owns the existing mkit crates | crates.io owner |
 
 ---

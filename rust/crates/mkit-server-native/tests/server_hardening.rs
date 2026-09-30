@@ -43,7 +43,7 @@ const UPLOAD_PACK: &str = "/mkit.transport.v1.TransportService/UploadPack";
 const DOWNLOAD_PACK: &str = "/mkit.transport.v1.TransportService/DownloadPack";
 const TOKEN: &str = "hardening-token";
 
-fn pipeline(auth: AuthMode) -> Arc<Pipeline<MemoryBlobStore, MemoryKv, Hooks>> {
+fn pipeline(auth: AuthMode) -> Arc<Pipeline<MemoryBlobStore, Arc<MemoryKv>, Hooks>> {
     let repo = RepoId {
         namespace: NamespaceKey::deployment_default(),
         name: RepoName::new("default").unwrap(),
@@ -55,7 +55,7 @@ fn pipeline(auth: AuthMode) -> Arc<Pipeline<MemoryBlobStore, MemoryKv, Hooks>> {
     let cfg = PipelineConfig::new(Addressing::Single { repo }, auth, limits);
     let pipe = Pipeline::new(
         MemoryBlobStore::default(),
-        MemoryKv::default(),
+        Arc::new(MemoryKv::default()),
         Hooks::new(),
         cfg,
         Arc::new(SystemClock),

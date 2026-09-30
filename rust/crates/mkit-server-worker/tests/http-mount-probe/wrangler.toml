@@ -1,0 +1,4 @@
+# Test fixture only. probe.py always starts wrangler dev --local.
+# The probe supplies its generated script and state directory under its own TMPDIR.
+name = "mkit-server-worker-http-mount-probe"
+compatibility_date = "2026-09-09"

@@ -18,6 +18,7 @@
 //! mounting (4.16) and takedown (5.9a).
 
 mod body;
+pub mod mount;
 mod paid;
 pub mod range;
 pub mod reach;
@@ -36,7 +37,12 @@ pub use seams::{
     UnsupportedProofs,
 };
 
-use crate::pipeline::HeaderValues;
+/// Header lookup safe to retain across a native response future.
+#[cfg(not(target_arch = "wasm32"))]
+pub type HttpHeaderValues<'a> = dyn Fn(&str) -> Vec<String> + Sync + 'a;
+/// Workers run request futures on one thread.
+#[cfg(target_arch = "wasm32")]
+pub type HttpHeaderValues<'a> = dyn Fn(&str) -> Vec<String> + 'a;
 use crate::{Code, ServerError};
 
 /// Counter: ref enumeration or a reachability walk hit its row, page or
@@ -61,6 +67,8 @@ pub struct HttpObjectsConfig {
     pub max_walk_objects: usize,
     /// Run the Admission hook for GET and HEAD at step 11. Default off.
     pub admit_reads: bool,
+    /// Opt-in public ref redirects after all earlier checks; disabled with admission.
+    pub redirect_public_refs: bool,
     /// Maximum paid transmission time from reservation creation.
     pub read_deadline: core::time::Duration,
     /// Time reserved for completion persistence before abandonment (default 60 s).
@@ -84,6 +92,7 @@ impl Default for HttpObjectsConfig {
         Self {
             max_walk_objects: 50_000,
             admit_reads: false,
+            redirect_public_refs: false,
             read_deadline: core::time::Duration::from_mins(5),
             read_reconcile_grace: core::time::Duration::from_mins(1),
             reachability_lag_ms: 60_000,
@@ -153,7 +162,7 @@ pub struct HttpObjectRequest<'a> {
     /// that drops it must not present it as `None`.
     pub raw_query: Option<RedactedQuery<'a>>,
     /// Multi-value header lookup by lowercase name.
-    pub headers: &'a HeaderValues<'a>,
+    pub headers: &'a HttpHeaderValues<'a>,
     /// Header names as received by the adapter, including repeated fields.
     /// Credential forwarding preserves this spelling; values stay in `headers`.
     pub header_names: &'a [&'a str],

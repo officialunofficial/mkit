@@ -281,6 +281,15 @@ pub struct ServeArgs {
     /// first signs and every listed key verifies. Without it, read `MKIT_TICKET_KEYS`.
     #[arg(long, value_name = "PATH")]
     pub ticket_key_file: Option<PathBuf>,
+    /// Dedicated URL-token key file: `active <seed>` and retained public keys.
+    /// Stage 2 only; does not enable indexed serving or mount routes.
+    #[cfg(feature = "http-objects")]
+    #[arg(long, value_name = "PATH")]
+    pub url_token_key_file: Option<PathBuf>,
+    /// Maximum URL-token lifetime in seconds (default 900, maximum 86400).
+    #[cfg(feature = "http-objects")]
+    #[arg(long, value_name = "SECONDS")]
+    pub url_token_ttl: Option<u64>,
     /// Auth v2: the deployment's canonical origin, byte for byte as
     /// clients sign it (e.g. `https://vcs.example`).
     #[arg(long, value_name = "ORIGIN")]
@@ -1455,6 +1464,8 @@ pub fn resolve(
     pipeline.sharding = sharding;
     pipeline.ticket_keys = ticket_keys;
     pipeline.grants = grants;
+    #[cfg(feature = "http-objects")]
+    crate::http_mount::resolve_tokens(args, &mut pipeline)?;
     // The enc listener's sibling pipeline consumes implicitly and cannot
     // run ticketed verification, so `Pipeline::new` refuses `indexed` with
     // it (R-137); refuse here, before any pipeline is built.

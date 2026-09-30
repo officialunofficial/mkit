@@ -31,6 +31,18 @@ const ALLOW: &str = "GET, HEAD, OPTIONS";
 const PACKMAP_PREFIX: &str = "refs/mkit/packmap/";
 
 impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pipeline<B, N, H> {
+    /// Whether this pipeline can mount HTTP object routes. Opaque pipelines cannot.
+    #[must_use]
+    pub fn http_objects_enabled(&self) -> bool {
+        self.cfg.indexed.is_some() && self.cfg.http_objects.is_some()
+    }
+
+    /// Public-key publication configuration; never exposes seeds.
+    #[must_use]
+    pub fn url_token_config(&self) -> Option<&crate::url_token::UrlTokenConfig> {
+        self.cfg.url_tokens.as_ref()
+    }
+
     /// Replace the inert seams of an HTTP-objects pipeline: admission
     /// (WP-4.13), proofs (WP-4.14b), tokens (WP-4.15), takedown (WP-5.9a) or
     /// a maintained reachable set (WP-5.3a). A pipeline built without
@@ -46,7 +58,24 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
     /// `anonymous`, whatever credentials the request carries (§7); the
     /// raw path, query and any token are never logged.
     pub async fn serve_http_object(&self, req: &HttpObjectRequest<'_>) -> HttpObjectResponse {
-        let mut response = self.serve_http_inner(req).await;
+        self.serve_http_with_runtime(req, None).await
+    }
+
+    /// Adapter-provided retained settlement runtime for this request.
+    pub async fn serve_http_object_with_runtime(
+        &self,
+        req: &HttpObjectRequest<'_>,
+        runtime: crate::http_objects::HttpReadRuntime,
+    ) -> HttpObjectResponse {
+        self.serve_http_with_runtime(req, Some(runtime)).await
+    }
+
+    async fn serve_http_with_runtime(
+        &self,
+        req: &HttpObjectRequest<'_>,
+        runtime: Option<crate::http_objects::HttpReadRuntime>,
+    ) -> HttpObjectResponse {
+        let mut response = self.serve_http_inner(req, runtime).await;
         if req.method == "HEAD" {
             // Content-Length already describes the GET body.
             response.body = HttpBody::Empty;
@@ -54,10 +83,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         response
     }
 
-    async fn serve_http_inner(&self, req: &HttpObjectRequest<'_>) -> HttpObjectResponse {
+    async fn serve_http_inner(
+        &self,
+        req: &HttpObjectRequest<'_>,
+        runtime: Option<crate::http_objects::HttpReadRuntime>,
+    ) -> HttpObjectResponse {
         let (Some(_), Some(seams)) = (&self.cfg.http_objects, &self.http_seams) else {
             return HttpObjectResponse::not_found();
         };
+        let mut seams = seams.clone();
+        if let Some(runtime) = runtime {
+            seams.read_runtime = Some(runtime);
+        }
         match req.method {
             "OPTIONS" => return HttpObjectResponse::new(204).with_header("Allow", ALLOW),
             "GET" | "HEAD" => {}
@@ -89,7 +126,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             .unwrap_or_default();
         let mut outcome = self.outcome_for(procedure, "anonymous", &identity);
         let served = async {
-            self.serve_repository(req, seams, &parsed, &repo, token)
+            self.serve_repository(req, &seams, &parsed, &repo, token)
                 .await
         }
         .instrument(outcome.span.clone())
@@ -295,25 +332,27 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
 
         // §3 step 11: read Admission, when configured.
         let first = |name: &str| (req.headers)(name).into_iter().next();
-        let meta = super::RequestMeta {
-            procedure: op.procedure(),
-            header: &first,
-            header_values: Some(req.headers),
-            unary_body: None,
-            transport_principal: None,
-        };
-        let credentials = if private_policy {
-            super::admission::validate_credentials(
-                &super::admission::capture_http_credentials(
-                    &meta,
-                    &self.cfg.admission_credential_headers,
-                    req.header_names,
+        let credentials = {
+            let meta = super::RequestMeta {
+                procedure: op.procedure(),
+                header: &first,
+                header_values: Some(req.headers),
+                unary_body: None,
+                transport_principal: None,
+            };
+            if private_policy {
+                super::admission::validate_credentials(
+                    &super::admission::capture_http_credentials(
+                        &meta,
+                        &self.cfg.admission_credential_headers,
+                        req.header_names,
+                    )
+                    .map_err(|e| Fail::from_server_error(&e))?,
                 )
-                .map_err(|e| Fail::from_server_error(&e))?,
-            )
-            .map_err(|e| Fail::from_server_error(&e))?
-        } else {
-            Vec::new()
+                .map_err(|e| Fail::from_server_error(&e))?
+            } else {
+                Vec::new()
+            }
         };
         let request = AdmitRequest {
             repo,
@@ -342,6 +381,22 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
                 AdmitDecision::Respond(response) => return Ok(response),
             }
         };
+
+        // §8: public ref redirects retain the original repository prefix.
+        // All earlier checks, including validators and Range, have already run.
+        if cfg.redirect_public_refs && ref_path && expiry.is_none() && !private_policy {
+            let prefix = req
+                .raw_path
+                .split_once("/-/")
+                .map_or("", |(prefix, _)| prefix);
+            return Ok(HttpObjectResponse::new(302)
+                .with_header(
+                    "Location",
+                    format!("{prefix}/-/objects/{}", to_hex(&leaf_id)),
+                )
+                .with_header("Cache-Control", "no-cache")
+                .with_header("Content-Length", "0"));
+        }
 
         // §3 step 12: 200 or 206.
         let mut hook = admitted.on_end;
