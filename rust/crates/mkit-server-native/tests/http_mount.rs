@@ -16,7 +16,8 @@ use mkit_core::protocol::{AdvanceOutcome, RefWriteCondition};
 use mkit_core::repo_identity::Namespace;
 use mkit_core::serialize::serialize;
 use mkit_core::sign::{KeyPair, sign_commit};
-use mkit_core::verify::{DisclosedPayload, verify_disclosure, verify_disclosure_span};
+use mkit_core::verify::span::verify_disclosure_span;
+use mkit_core::verify::{DisclosedPayload, verify_disclosure};
 use mkit_server::auth_v2::AuthV2Config;
 use mkit_server::http_objects::mount::HttpMountOptions;
 use mkit_server::http_objects::{
@@ -780,7 +781,12 @@ async fn redirects_are_explicit_and_relative_and_proofs_never_redirect() {
                 assert!(body(response).await.is_empty());
             }
             let response = request(&router, method, &format!("{path}?proof=1"), &[]).await;
-            assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()["content-type"],
+                "application/vnd.mkit.disclosure"
+            );
+            assert_eq!(response.headers()["accept-ranges"], "none");
             assert!(!response.headers().contains_key("location"));
         }
     }
