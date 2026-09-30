@@ -299,7 +299,12 @@ pub fn append(
     if deleted {
         state.boundary = state.sequence;
         state.published = state.sequence;
-        state.value = advance.value.clone();
+        // A partial deletion removes its component immediately, but must not
+        // publish the surviving live component from an uncleared advance.
+        state.value = Pair {
+            head: advance.value.head.and(state.value.head),
+            packmap: advance.value.packmap.and(state.value.packmap),
+        };
         project_refs(repo, &name, source, shards, &state.value, writes, outbox);
     } else if advance.state.publishable() && state.published + 1 == state.sequence {
         state.published = state.sequence;

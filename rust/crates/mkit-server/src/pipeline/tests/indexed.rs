@@ -1458,7 +1458,7 @@ fn deletions_publish_without_waiting_for_inspection_or_closure() {
                 packmap: (name != "refs/tags/t").then_some(B),
             };
             let retained = Advance {
-                sequence: 1,
+                sequence: 2,
                 generation: 0,
                 value: pair.clone(),
                 additions: vec![],
@@ -1472,8 +1472,14 @@ fn deletions_publish_without_waiting_for_inspection_or_closure() {
                 operation: [2; 32],
             };
             let retained_raw = retained.encode().unwrap();
+            let previous = Pair {
+                head: Some(C),
+                packmap: (name != "refs/tags/t").then_some([0xdd; 32]),
+            };
             let state = Publication {
-                sequence: 1,
+                sequence: 2,
+                published: 1,
+                value: previous.clone(),
                 ..Publication::default()
             };
             let mut batch = Batch::new()
@@ -1482,13 +1488,21 @@ fn deletions_publish_without_waiting_for_inspection_or_closure() {
                     state.encode().unwrap(),
                 )
                 .put(
-                    keys::advance(&repo.name, &sequence_name, 1),
+                    keys::advance(&repo.name, &sequence_name, 2),
                     retained_raw.clone(),
                 );
             for (reference, target) in crate::store::publication::value_refs(&sequence_name, &pair)
             {
                 batch = batch.put(
                     keys::ref_key(&repo.name, &reference),
+                    codec::encode_ref_id(&target.unwrap()),
+                );
+            }
+            for (reference, target) in
+                crate::store::publication::value_refs(&sequence_name, &previous)
+            {
+                batch = batch.put(
+                    keys::published_ref(&repo.name, &reference),
                     codec::encode_ref_id(&target.unwrap()),
                 );
             }
@@ -1525,7 +1539,26 @@ fn deletions_publish_without_waiting_for_inspection_or_closure() {
                 &sequence_name,
             ))
             .unwrap();
-            assert_eq!((state.sequence, state.published, state.boundary), (2, 2, 2));
+            assert_eq!((state.sequence, state.published, state.boundary), (3, 3, 3));
+            let expected = Pair {
+                head: (!paired && name == PACKMAP).then_some(C),
+                packmap: (!paired && name == HEAD).then_some([0xdd; 32]),
+            };
+            assert_eq!(state.value, expected);
+            for (reference, target) in
+                crate::store::publication::value_refs(&sequence_name, &expected)
+            {
+                assert_eq!(
+                    block_on(
+                        env.pipe
+                            .meta
+                            .inner
+                            .get(&source, &keys::published_ref(&repo.name, &reference))
+                    )
+                    .unwrap(),
+                    target.map(|id| codec::encode_ref_id(&id))
+                );
+            }
             if paired {
                 assert_eq!(state.value, Pair::default());
                 assert_eq!(
@@ -1554,7 +1587,7 @@ fn deletions_publish_without_waiting_for_inspection_or_closure() {
                     env.pipe
                         .meta
                         .inner
-                        .get(&source, &keys::advance(&repo.name, &sequence_name, 1))
+                        .get(&source, &keys::advance(&repo.name, &sequence_name, 2))
                 )
                 .unwrap(),
                 Some(retained_raw)

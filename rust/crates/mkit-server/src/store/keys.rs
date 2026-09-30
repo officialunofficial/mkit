@@ -45,7 +45,7 @@
 //! | open tickets per ref | `tc 00 <repo> 00 <ref>` | be64; absent means 0, deleted at 0 |
 //! | open tickets per signer | `tu 00 <repo> 00 <ref> 00 <signer:32>` | be64; same rules |
 //! | ticket expiry timer | `w 00 <expires_at:be64> 02 <ticket_id:32>` | empty |
-//! | local membership | `m 00 <repo> 00 <pack:32>` | empty |
+//! | local membership | `m 00 <repo> 00 <pack:32>` | empty (immediate upload) or v1 clearance witness |
 //! | indexed verification state | `vs 00 <repo> 00 <pack:32>` | `VerificationV1` |
 //! | scheduled-verification job (ref shard) | `vc 00 <repo> 00 <pack:32> <sub:u8> [<id:32>]` | sub 0 job `VerifyJobV1`; 1 frame; 2 closure child; 3 charged external base; 4 extraction candidate (WP-4.10b); 5 history edges (parents); 6 external source pack dependency |
 //! | repository object index | `i 00 <repo> 00 <object:32> <pack:32>` | binary `IndexValue` |
