@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server (Stage 2, inert): default-off `http-objects` adapter features mount
+  raw escaped HTTP object routes with streaming Range/HEAD, read CORS on
+  every response, query-free diagnostics, and public URL-token key documents.
+  Native token key-file/TTL flags and Worker token secrets use dedicated keys;
+  retained keys also cannot repeat hook or enc keys. Public ref redirects are
+  explicitly opt-in and disabled with admission (WP-4.16, R-179).
+
 - Server (Stage 2, inert): URL tokens now authorize private HTTP object
   and ref-path reads through staged signature, stateless binding and epoch
   checks, while preserving anonymous published access and Authorizer checks.

@@ -1866,3 +1866,22 @@ without a future alarm wake.
 
 **Enforced by:** core `pipeline/tests/published.rs` and Worker
 `published_view/tests.rs`; runtime feature/configuration are off by default (Stage 2).
+
+## HTTP adapter mounts remain explicitly opt-in
+
+**Always:** the native and Worker HTTP-object adapter features are default
+off, and a mount requires explicit indexed and HTTP configuration plus
+adapter opt-in. Mounted requests retain escaped paths and empty queries,
+stream without collecting bodies, suppress every HEAD body, apply read
+CORS to every response and perform no shared-cache operations. URL-token
+active and retained public keys remain distinct from other deployment roles.
+
+**Because:** Stage 1 must not expose indexed content, private content must
+not enter shared caches, and URI normalization or query logging could
+reinterpret paths or disclose bearer capabilities.
+
+**If violated:** a deployment exposes routes unintentionally, leaks private
+content or tokens, or serves a different object from the requested URL.
+
+**Enforced by:** native `tests/http_mount.rs`, Worker `http_mount` tests,
+ default feature/startup configuration, and the release feature gate.
