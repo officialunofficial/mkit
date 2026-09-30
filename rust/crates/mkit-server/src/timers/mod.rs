@@ -187,13 +187,35 @@ async fn fire_timer<S: NamespaceStore>(
                 .delete(key)
                 .put(new_key, value)
         }
-        Ok(Fired::Retry) | Err(_) => return FireOutcome::Failed,
+        Ok(Fired::Retry) => {
+            #[cfg(feature = "test-faults")]
+            tracing::warn!(kind = timer.kind.get(), "test timer requested retry");
+            return FireOutcome::Failed;
+        }
+        Err(error) => {
+            #[cfg(feature = "test-faults")]
+            tracing::warn!(kind = timer.kind.get(), %error, "test timer handler failed");
+            #[cfg(not(feature = "test-faults"))]
+            let _ = error;
+            return FireOutcome::Failed;
+        }
     };
     let put_due = earliest_timer_put(&batch);
     match ctx.store.apply(ctx.partition, batch).await {
         Ok(BatchOutcome::Committed) => FireOutcome::Committed(put_due),
         Ok(BatchOutcome::PreconditionFailed { .. }) => FireOutcome::Raced,
-        Ok(BatchOutcome::DeadlinePassed { .. }) | Err(_) => FireOutcome::Failed,
+        Ok(BatchOutcome::DeadlinePassed { .. }) => {
+            #[cfg(feature = "test-faults")]
+            tracing::warn!(kind = timer.kind.get(), "test timer deadline passed");
+            FireOutcome::Failed
+        }
+        Err(error) => {
+            #[cfg(feature = "test-faults")]
+            tracing::warn!(kind = timer.kind.get(), %error, "test timer apply failed");
+            #[cfg(not(feature = "test-faults"))]
+            let _ = error;
+            FireOutcome::Failed
+        }
     }
 }
 
