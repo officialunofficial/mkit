@@ -256,7 +256,7 @@ impl MemberCache {
     }
 
     /// The retained locations, with their canonical bytes and total depth.
-    pub(super) fn rows(&self) -> impl Iterator<Item = (&Location, (&Arc<[u8]>, &u32))> {
+    pub(crate) fn rows(&self) -> impl Iterator<Item = (&Location, (&Arc<[u8]>, &u32))> {
         self.rows
             .iter()
             .map(|(location, (bytes, depth))| (location, (bytes, depth)))
@@ -297,7 +297,51 @@ pub fn member_object<'a, B: BlobStore, S: NamespaceStore>(
     visiting: &'a mut BTreeSet<Location>,
     metrics: &'a dyn Metrics,
 ) -> BoxFuture<'a, Result<ResolvedMember, ResolveFailure>> {
+    member_object_inner(
+        blobs, store, shards, repo, id, located, cap, budget, memo, visiting, metrics, true,
+    )
+}
+
+/// Restricted canonical acquisition; never used by serving or byte reuse.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn member_object_for_preservation<'a, B: BlobStore, S: NamespaceStore>(
+    blobs: &'a B,
+    store: &'a S,
+    shards: &'a dyn ShardMap,
+    repo: &'a RepoId,
+    id: Hash,
+    located: LocatedObject,
+    cap: u32,
+    budget: u64,
+    memo: &'a mut MemberCache,
+    visiting: &'a mut BTreeSet<Location>,
+    metrics: &'a dyn Metrics,
+) -> BoxFuture<'a, Result<ResolvedMember, ResolveFailure>> {
+    member_object_inner(
+        blobs, store, shards, repo, id, located, cap, budget, memo, visiting, metrics, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
+    blobs: &'a B,
+    store: &'a S,
+    shards: &'a dyn ShardMap,
+    repo: &'a RepoId,
+    id: Hash,
+    located: LocatedObject,
+    cap: u32,
+    budget: u64,
+    memo: &'a mut MemberCache,
+    visiting: &'a mut BTreeSet<Location>,
+    metrics: &'a dyn Metrics,
+    enforce_denial: bool,
+) -> BoxFuture<'a, Result<ResolvedMember, ResolveFailure>> {
     Box::pin(async move {
+        if enforce_denial {
+            crate::takedown::denial::require_clear(store, &id).await?;
+            crate::takedown::denial::require_clear(store, &located.pack).await?;
+        }
         let location = (id, located.pack, located.value.frame_offset);
         let available = budget
             .checked_sub(memo.retained_bytes)
@@ -364,8 +408,19 @@ pub fn member_object<'a, B: BlobStore, S: NamespaceStore>(
                         _ => return Err(ResolveFailure::Missing),
                     },
                 };
-                let (canonical, base_depth) = member_object(
-                    blobs, store, shards, repo, base, next, cap, budget, memo, visiting, metrics,
+                let (canonical, base_depth) = member_object_inner(
+                    blobs,
+                    store,
+                    shards,
+                    repo,
+                    base,
+                    next,
+                    cap,
+                    budget,
+                    memo,
+                    visiting,
+                    metrics,
+                    enforce_denial,
                 )
                 .await?;
                 base_bytes = Some((base, canonical));

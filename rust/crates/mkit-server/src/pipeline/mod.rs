@@ -300,6 +300,8 @@ pub struct PipelineConfig {
     pub outbox_backlog_cap: Option<OutboxBacklogCap>,
     /// Indexed ingestion and pre-receive verification, off by default.
     pub indexed: Option<crate::indexed::IndexedConfig>,
+    /// Global takedown proofs. Programmatic only until preservation is integrated.
+    pub takedown_denial: bool,
     /// Per-ref allowed signers and fast-forward-only rules (SPEC-SERVER
     /// §9.7). Programmatic only and Stage 2: no adapter exposes it. A
     /// fast-forward-only rule needs `indexed`.
@@ -371,6 +373,7 @@ impl PipelineConfig {
                 bytes: 64 * 1024 * 1024,
             }),
             indexed: None,
+            takedown_denial: false,
             ref_policy: None,
             #[cfg(feature = "http-objects")]
             http_objects: None,
@@ -622,6 +625,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     "authority keys must differ from URL-token keys",
                 ));
             }
+        }
+        if cfg.takedown_denial && cfg.indexed.is_none() {
+            return Err(ServerError::invalid_argument(
+                "takedown denial requires indexed mode",
+            ));
         }
         if let Some(indexed) = &cfg.indexed {
             if !matches!(cfg.auth, AuthMode::AuthV2(_))
@@ -2351,7 +2359,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     write,
                     ahead,
                     (lease, begin.as_ref()),
-                    (pending.as_ref(), implicit, &staged.external_bases),
+                    (
+                        pending.as_ref(),
+                        implicit,
+                        &staged.external_bases,
+                        &staged.denial_ids,
+                    ),
                 )
                 .await
             }
@@ -2760,7 +2773,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             writer: caller == CallerView::Writer,
             policy: self.publication_policy.as_deref(),
         };
-        read::is_member(
+        let member = read::is_member(
             &view,
             self.shards.as_ref(),
             &a.repo().repo,
@@ -2768,7 +2781,35 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             a.ref_hint.as_deref(),
         )
         .await
-        .map_err(meta_error)
+        .map_err(meta_error)?;
+        if member && self.cfg.indexed.is_some() {
+            match crate::takedown::denial::require_clear(&self.meta, &key.0).await {
+                Ok(()) => {}
+                Err(e) if e.public_message() == "object blocked" => return Ok(false),
+                Err(e) => return Err(e),
+            }
+        }
+        if member
+            && self.cfg.takedown_denial
+            && let Some(cfg) = self.cfg.indexed.as_ref()
+        {
+            return match crate::takedown::denial::require_pack_clear(
+                &self.blobs,
+                &self.meta,
+                self.shards.as_ref(),
+                &a.repo().repo,
+                &key.0,
+                cfg,
+                self.metrics.as_ref(),
+            )
+            .await
+            {
+                Ok(()) => Ok(true),
+                Err(e) if e.public_message() == "object blocked" => Ok(false),
+                Err(e) => Err(e),
+            };
+        }
+        Ok(member)
     }
 
     /// A unary write's ref writes in decision order (packmap first) and
@@ -3204,9 +3245,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         (kind, refs, charges): (WriteKind, &[RefUpdate], &[QuotaCharge]),
         ahead: Option<Snapshot>,
         (lease, begin): (Option<lease::LeaseWrite>, Option<&BeginWrite>),
-        (pending, implicit, external_bases): (
+        (pending, implicit, external_bases, denial_ids): (
             Option<&reservation::PendingGuard>,
             Option<&[PendingPack]>,
+            &std::collections::BTreeSet<Hash>,
             &std::collections::BTreeSet<Hash>,
         ),
     ) -> Result<StoredResult, ServerError> {
@@ -3222,6 +3264,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .map(implicit::implicit_packs);
         let advance = self.publication_ticket_write(op, a, p)?;
         let mut req = WriteRequest {
+            denial_ids: Some(denial_ids),
             authority_store: plan::AuthorityStore::from_capabilities(self.meta.capabilities()),
             authority_generation: op.authz.authority_generation,
             repo: &op.repo.name,
@@ -3470,6 +3513,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let skew_ms = a.business_skew_ms;
         let (mut replans, mut deadline_missed, mut prune_ok) = (0, false, true);
         let mut first_attempt = true;
+        let denial_budget = crate::indexed::budget::SliceBudget::new(9000);
         loop {
             let mut clock = self.plan_clock(skew_ms, &req);
             let base = ahead.take().unwrap_or_default();
@@ -3483,6 +3527,22 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 clock = self.plan_clock(skew_ms, &req);
             }
             first_attempt = false;
+            if let (Some(ids), Some(cfg)) = (req.denial_ids, self.cfg.indexed.as_ref())
+                && self.cfg.takedown_denial
+                && !ids.is_empty()
+            {
+                crate::takedown::denial::require_repo_clear(
+                    &self.blobs,
+                    &self.meta,
+                    self.shards.as_ref(),
+                    &op.repo,
+                    ids,
+                    cfg,
+                    self.metrics.as_ref(),
+                    &denial_budget,
+                )
+                .await?;
+            }
             let plan = match plan_write(&req, &snap, &clock)? {
                 Planned::Done(result) => return Ok(result),
                 Planned::Apply(plan) => plan,

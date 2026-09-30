@@ -256,6 +256,7 @@ struct ReadInput {
 enum Action {
     Read(u64, u32),
     Failure(ServerError),
+    Extension(Json),
 }
 impl<S: NamespaceStore> Engine<S> {
     #[allow(clippy::too_many_lines)] // Authentication, durable nonce reservation and terminal audited dispatch share one lifecycle.
@@ -268,6 +269,7 @@ impl<S: NamespaceStore> Engine<S> {
         now: i64,
     ) -> Result<Response, ServerError> {
         let verified = self.config.verify(path, headers, wire, now)?;
+        let budget = crate::indexed::budget::SliceBudget::new(9_000);
         let nonce_key = key("an", verified.replay_key.as_bytes());
         let nonce = Nonce {
             digest: verified.digest.clone(),
@@ -302,9 +304,12 @@ impl<S: NamespaceStore> Engine<S> {
                         )
                         .await;
                 }
-                return old
+                let result = old
                     .result
-                    .ok_or_else(|| ServerError::new(Code::Aborted, "admin request is in flight"));
+                    .ok_or_else(|| ServerError::new(Code::Aborted, "admin request is in flight"))?;
+                return self
+                    .finish_extension(&verified, wire, decoded.as_ref(), result, now, &budget)
+                    .await;
             }
             _ => {
                 return Err(ServerError::new(
@@ -313,6 +318,7 @@ impl<S: NamespaceStore> Engine<S> {
                 ));
             }
         }
+        let decoded_reply = decoded.clone();
         let action = if !verified.roles.contains("all")
             && !verified.roles.contains(if path == AUDIT_PATH {
                 "audit"
@@ -350,6 +356,12 @@ impl<S: NamespaceStore> Engine<S> {
                         u32::try_from(size)
                             .map_err(|_| auth::invalid("invalid audit page size"))?,
                     ))
+                } else if path == super::PURGE_PATH
+                    || path == super::TAKEDOWN_PATH && self.operations.is_some()
+                {
+                    let input = serde_json::from_slice(body)
+                        .map_err(|_| auth::invalid("invalid admin JSON"))?;
+                    Ok(Action::Extension(input))
                 } else {
                     Err(ServerError::new(
                         Code::Unimplemented,
@@ -361,8 +373,18 @@ impl<S: NamespaceStore> Engine<S> {
                 Err(error) => Action::Failure(error),
             }
         };
-        self.complete(&verified, &nonce_key, &nonce_value, action, now)
-            .await
+        let response = self
+            .complete(&verified, &nonce_key, &nonce_value, action, now, &budget)
+            .await?;
+        self.finish_extension(
+            &verified,
+            wire,
+            decoded_reply.as_ref(),
+            response,
+            now,
+            &budget,
+        )
+        .await
     }
 
     async fn conflict(
@@ -371,7 +393,16 @@ impl<S: NamespaceStore> Engine<S> {
         now: i64,
         message: &str,
     ) -> Result<Response, ServerError> {
-        let result = Response::error(&auth::invalid(message));
+        self.record_result(verified, now, Response::error(&auth::invalid(message)))
+            .await
+    }
+
+    async fn record_result(
+        &self,
+        verified: &Verified,
+        now: i64,
+        result: Response,
+    ) -> Result<Response, ServerError> {
         for _ in 0..RETRIES {
             let old = self
                 .store
@@ -416,6 +447,7 @@ impl<S: NamespaceStore> Engine<S> {
         nonce_value: &Value,
         action: Action,
         now: i64,
+        budget: &crate::indexed::budget::SliceBudget,
     ) -> Result<Response, ServerError> {
         let now = u64::try_from(now)
             .map_err(|_| ServerError::new(Code::Unavailable, "invalid backend clock"))?;
@@ -426,12 +458,62 @@ impl<S: NamespaceStore> Engine<S> {
                 .await
                 .map_err(store_error)?;
             let head = decode_head(old.as_ref())?;
-            let batch = guarded(Batch::new(), head_key(), old);
+            let mut batch = guarded(Batch::new(), head_key(), old);
+            let mut metadata = (String::new(), String::new(), Vec::new(), String::new());
             let response = match &action {
                 Action::Failure(error) => Response::error(error),
                 Action::Read(from, size) => {
                     let result = self.read_page(&head, *from, *size).await;
                     result.unwrap_or_else(|e| Response::error(&e))
+                }
+                Action::Extension(input) => {
+                    let planned = if verified.path == super::PURGE_PATH {
+                        self.plan_purge(input, now).await
+                    } else if let Some(service) = &self.operations {
+                        service
+                            .plan(&verified.path, input, &verified.digest, now, budget)
+                            .await
+                    } else {
+                        Err(ServerError::new(
+                            Code::Unimplemented,
+                            "admin operation unavailable",
+                        ))
+                    };
+                    match planned {
+                        Err(error) => Response::error(&error),
+                        Ok(prepared) => {
+                            metadata = (
+                                prepared.operation_id,
+                                prepared.label,
+                                prepared.targets,
+                                prepared.details,
+                            );
+                            let replay = if metadata.0.is_empty() {
+                                Ok(OperationReplay::New(Batch::new()))
+                            } else {
+                                plan_operation(
+                                    &self.store,
+                                    &self.partition,
+                                    &metadata.0,
+                                    &verified.path,
+                                    &verified.digest,
+                                    prepared.response.clone(),
+                                )
+                                .await
+                            };
+                            match replay {
+                                Ok(OperationReplay::Existing(result)) => result,
+                                Ok(OperationReplay::New(replay)) => {
+                                    batch.preconditions.extend(prepared.batch.preconditions);
+                                    batch.writes.extend(prepared.batch.writes);
+                                    batch.preconditions.extend(replay.preconditions);
+                                    batch.writes.extend(replay.writes);
+                                    prepared.response
+                                }
+                                Err(error) => Response::error(&error),
+                            }
+                        }
+                    }
                 }
             };
             let (entry, next) = audit_entry(
@@ -440,11 +522,11 @@ impl<S: NamespaceStore> Engine<S> {
                 &verified.path,
                 &verified.digest,
                 &verified.nonce,
-                "",
-                "",
-                &[],
+                &metadata.0,
+                &metadata.1,
+                &metadata.2,
                 &response,
-                "",
+                &metadata.3,
                 now,
             )?;
             let terminal = Nonce {
@@ -472,6 +554,146 @@ impl<S: NamespaceStore> Engine<S> {
             Code::Unavailable,
             "admin acceptance contention",
         ))
+    }
+
+    async fn finish_extension(
+        &self,
+        verified: &Verified,
+        wire: &BodyCapture,
+        decoded: Option<&Result<Vec<u8>, ServerError>>,
+        response: Response,
+        now: i64,
+        budget: &crate::indexed::budget::SliceBudget,
+    ) -> Result<Response, ServerError> {
+        if response.status != 200 || verified.path != super::TAKEDOWN_PATH {
+            return Ok(response);
+        }
+        let Some(service) = &self.operations else {
+            return Err(ServerError::unavailable("takedown service unavailable"));
+        };
+        if !verified.roles.contains("moderation") && !verified.roles.contains("all") {
+            return self
+                .record_result(
+                    verified,
+                    now,
+                    Response::error(&ServerError::permission_denied(
+                        "admin key lacks required role",
+                    )),
+                )
+                .await;
+        }
+        let bytes = match decoded {
+            Some(Ok(bytes)) => bytes.as_slice(),
+            Some(Err(error)) => {
+                return self
+                    .record_result(verified, now, Response::error(error))
+                    .await;
+            }
+            None => &wire.bytes,
+        };
+        let input = serde_json::from_slice(payload(&verified.path, bytes)?)
+            .map_err(|_| auth::invalid("invalid admin JSON"))?;
+        match service
+            .after_commit(
+                &verified.path,
+                &input,
+                response,
+                u64::try_from(now).map_err(|_| auth::invalid("invalid clock"))?,
+                budget,
+            )
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                self.record_result(verified, now, Response::error(&error))
+                    .await
+            }
+        }
+    }
+
+    async fn plan_purge(&self, input: &Json, now: u64) -> Result<super::Prepared, ServerError> {
+        if !self.purge_enabled {
+            return Err(ServerError::failed_precondition(
+                "purge interface not configured",
+            ));
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Input {
+            #[serde(alias = "operation_id")]
+            operation_id: String,
+            #[serde(default)]
+            repository: String,
+            #[serde(default)]
+            namespace: String,
+            #[serde(default, alias = "url_paths")]
+            url_paths: Vec<String>,
+            #[serde(default, alias = "object_ids")]
+            object_ids: Vec<String>,
+            #[serde(default)]
+            refs: Vec<String>,
+            reason: String,
+            #[serde(default, alias = "operator_label")]
+            operator_label: String,
+        }
+        let input: Input = serde_json::from_value(input.clone())
+            .map_err(|_| auth::invalid("invalid PurgeCache JSON"))?;
+        if !auth::identifier(&input.operation_id, 128, true)
+            || input.reason.is_empty()
+            || input.reason.len() > 4096
+            || input.operator_label.len() > 256
+            || input
+                .reason
+                .chars()
+                .chain(input.operator_label.chars())
+                .any(char::is_control)
+        {
+            return Err(auth::invalid("invalid purge identity or reason"));
+        }
+        let id = to_hex(&hash(
+            format!(
+                "mkit-manual-purge:v1\0{}\0{}",
+                self.config.audience, input.operation_id
+            )
+            .as_bytes(),
+        ));
+        let request = crate::purge::Request {
+            purge_id: id.clone(),
+            audience: self.config.audience.clone(),
+            repository: input.repository,
+            namespace: input.namespace,
+            trigger: crate::purge::Trigger::Manual,
+            url_paths: input.url_paths,
+            object_ids: input.object_ids,
+            refs: input.refs,
+        };
+        request
+            .validate()
+            .map_err(|_| auth::invalid("invalid purge selectors"))?;
+        let rows = self
+            .store
+            .get_many(
+                &self.partition,
+                &[
+                    crate::store::keys::outcome_backlog(),
+                    crate::store::keys::cache_purge_generation(request.scope()),
+                ],
+            )
+            .await
+            .map_err(store_error)?;
+        if rows.len() != 2 {
+            return Err(ServerError::new(Code::DataLoss, "invalid purge state"));
+        }
+        let batch = crate::purge::plan_enqueue(&request, now, rows[0].as_ref(), rows[1].as_ref())
+            .map_err(store_error)?;
+        Ok(super::Prepared {
+            batch,
+            response: Response::json(&json!({"purgeId":id})),
+            operation_id: input.operation_id,
+            label: input.operator_label,
+            targets: vec![request.scope().into()],
+            details: input.reason,
+        })
     }
 
     async fn read_page(&self, head: &Head, from: u64, size: u32) -> Result<Response, ServerError> {

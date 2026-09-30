@@ -155,6 +155,8 @@ pub(crate) struct WriteRequest<'a> {
     pub(crate) authority_store: AuthorityStore,
     /// The repository whose refs are written.
     pub(crate) repo: &'a RepoName,
+    /// Fresh authoritative denial inputs retained across optimistic retries.
+    pub(crate) denial_ids: Option<&'a std::collections::BTreeSet<Hash>>,
     /// What the refs are.
     pub(crate) kind: WriteKind,
     /// Ref writes in decision order: `[update]`, or `[packmap, head]`, so a

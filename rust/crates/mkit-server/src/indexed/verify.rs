@@ -1,4 +1,5 @@
 //! Inline verification before a ticketed advance commits.
+use crate::store::keys;
 
 use super::{
     IndexedConfig,
@@ -77,6 +78,8 @@ pub struct StagedCommits {
     pub bytes: u64,
     /// Every external source pack used by any consumed entry, including surplus objects.
     pub external_bases: BTreeSet<Hash>,
+    /// Current decoded IDs and all reused chain sources for fresh denial at apply.
+    pub denial_ids: BTreeSet<Hash>,
 }
 
 /// The `parents` of a history object; `None` for a blob, tree or manifest.
@@ -422,6 +425,7 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
     let mut staged_bytes = 0u64;
     let mut external_bases = BTreeSet::new();
     let mut staged_owner = BTreeMap::new();
+    let mut denial_ids = BTreeSet::new();
     let mut work = Vec::with_capacity(tickets.len());
     let mut packlists = Vec::new();
     for ticket in tickets {
@@ -535,6 +539,17 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
                     )
                     .await);
                 };
+                for child in &list.packs {
+                    crate::takedown::inventory::dependency(
+                        store,
+                        &ticket.pack_id,
+                        ticket.bytes,
+                        child,
+                        now_ms(clock),
+                    )
+                    .await
+                    .map_err(|_| storage_failed())?;
+                }
                 packlists.push((ticket.created_at_ms, list.packs));
                 work.push(PackWork {
                     ticket: ticket.clone(),
@@ -673,6 +688,18 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
                             )
                         })?;
                         renew_all_pending(store, source, repo, acquired, clock).await?;
+                        denial_ids.extend(memo.rows().map(|((id, _, _), _)| *id));
+                        for ((id, _, _), _) in memo.rows() {
+                            crate::takedown::inventory::dependency(
+                                store,
+                                &ticket.pack_id,
+                                ticket.bytes,
+                                id,
+                                now_ms(clock),
+                            )
+                            .await
+                            .map_err(|_| storage_failed())?;
+                        }
                         bases.0.insert(base, canonical);
                         depths.insert(base, depth);
                         probe
@@ -821,6 +848,9 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
             }
         }
     }
+    for id in staged.keys() {
+        crate::takedown::denial::require_clear(store, id).await?;
+    }
     for (id, (_, object, _)) in &staged {
         if verify_object_signature(object).is_err() {
             let owner = staged_owner[id];
@@ -965,10 +995,25 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
         staged: &staged,
         staged_bytes,
         resolved: std::sync::atomic::AtomicU64::new(0),
+        denial_ids: std::sync::Mutex::new(BTreeSet::new()),
     };
     for pack in &work {
         if !pack.needs_index {
             continue;
+        }
+        for entry in &pack.entries {
+            let (_, object, _) = staged.get(&entry.object).ok_or_else(storage_failed)?;
+            crate::takedown::inventory::stage(
+                store,
+                &pack.ticket.pack_id,
+                pack.ticket.bytes,
+                &entry.object,
+                object,
+                entry.value.delta_base,
+                now_ms(clock),
+            )
+            .await
+            .map_err(|_| storage_failed())?;
         }
         let plan = index::plan_index_rows_direct(
             shards,
@@ -983,6 +1028,9 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
             renew_all_pending(store, source, repo, acquired, clock).await?;
             let mut batch = Batch::new().require(Precondition::NotAfter(deadline(clock)));
             for (key, value) in direct.puts {
+                if let Some(keys::ParsedKey::ObjectIndex { object, .. }) = keys::parse(&key) {
+                    crate::takedown::denial::require_clear(store, &object).await?;
+                }
                 batch = batch.put(key, value);
             }
             if !matches!(
@@ -1036,6 +1084,14 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
                 }
             }
         }
+        crate::takedown::inventory::complete(
+            store,
+            &pack.ticket.pack_id,
+            pack.ticket.bytes,
+            now_ms(clock),
+        )
+        .await
+        .map_err(|_| storage_failed())?;
         renew_all_pending(store, source, repo, acquired, clock).await?;
         let raw = &acquired[&pack.ticket.pack_id].raw;
         if !state::write(
@@ -1061,7 +1117,21 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
         .iter()
         .filter_map(|(id, (_, object, _))| Some((*id, history_parents(object)?)))
         .collect();
+    denial_ids.extend(
+        extractor
+            .denial_ids
+            .into_inner()
+            .map_err(|_| storage_failed())?,
+    );
+    for (_, object, _) in staged.values() {
+        if let Object::ChunkedBlob(cb) = object {
+            denial_ids.extend(cb.chunks.iter().copied());
+        }
+    }
+    denial_ids.extend(staged.keys().copied());
+    denial_ids.extend(tickets.iter().map(|ticket| ticket.pack_id));
     Ok(StagedCommits {
+        denial_ids,
         parents,
         objects: staged.len(),
         bytes: staged_bytes,

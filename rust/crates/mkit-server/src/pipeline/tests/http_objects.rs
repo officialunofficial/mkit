@@ -2528,3 +2528,5 @@ fn held_serving_stop_overrides_warm_reachability_extracted_bytes_and_proofs() {
     );
     assert!(proofs.0.lock().unwrap().is_empty());
 }
+
+mod takedown_denial;

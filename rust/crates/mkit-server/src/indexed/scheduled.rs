@@ -76,6 +76,7 @@ fn stored_error(code: &str, message: &str) -> ServerError {
 /// The permanent answer for a terminal job outcome.
 fn outcome_error(outcome: Outcome, now: u64, ticket: &TicketV1, bound: u64) -> ServerError {
     match outcome {
+        Outcome::Blocked => ServerError::permission_denied("object blocked"),
         Outcome::BaseMissing => resolve::missing_base(now, ticket.created_at_ms, bound),
         Outcome::BaseCapped => {
             ServerError::failed_precondition("delta base not available in this repository")
@@ -199,6 +200,7 @@ async fn staged_commits<N: NamespaceStore>(
         }
     }
     Ok(StagedCommits {
+        denial_ids: BTreeSet::new(),
         parents,
         objects: ready
             .iter()
@@ -560,6 +562,37 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
         }
     }
     let mut staged = staged_commits(store, source, repo, &ready, head, cfg).await?;
+    for held in &ready {
+        staged.denial_ids.insert(held.ticket.pack_id);
+        let rows = std::sync::Mutex::new(&mut staged.denial_ids);
+        crate::takedown::inventory::visit(store, &held.ticket.pack_id, false, |id, row| {
+            let rows = &rows;
+            async move {
+                rows.lock()
+                    .map_err(|_| crate::store::StoreError::unavailable("denial inputs poisoned"))?
+                    .insert(id);
+                if row.kind == 5 {
+                    for page in 0..row.references.pages.len() {
+                        let ids = crate::takedown::denial::page(store, &row.references, page)
+                            .await
+                            .map_err(|_| {
+                                crate::store::StoreError::unavailable(
+                                    "manifest inventory unavailable",
+                                )
+                            })?;
+                        rows.lock()
+                            .map_err(|_| {
+                                crate::store::StoreError::unavailable("denial inputs poisoned")
+                            })?
+                            .extend(ids);
+                    }
+                }
+                Ok(false)
+            }
+        })
+        .await
+        .map_err(|_| storage_failed())?;
+    }
     // vc6 includes every intermediate external source, even for surplus entries
     // and sources co-consumed by this advance; publication must not waive them.
     staged.external_bases = dependencies

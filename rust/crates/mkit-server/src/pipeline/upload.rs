@@ -238,6 +238,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             let charges = allowance.charges;
             if op.auth.is_some() || !charges.is_empty() {
                 let req = WriteRequest {
+                    denial_ids: None,
                     authority_store: super::plan::AuthorityStore::from_capabilities(
                         pipe.meta.capabilities(),
                     ),
@@ -542,6 +543,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             return Self::lapsed(checked);
         }
         let req = WriteRequest {
+            denial_ids: None,
             authority_store: super::plan::AuthorityStore::from_capabilities(
                 pipe.meta.capabilities(),
             ),

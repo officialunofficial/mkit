@@ -3557,7 +3557,28 @@ requirements follow the deployment's declared launch scope.
 | Signed admin framework (§16.1–§16.4) | Dedicated role keys, exact request signatures, durable nonce/result replay and persistent operation-id deduplication. Disabled unless keys are configured. |
 | Audit (§16.6) | Gapless chain and ReadAuditLog, including authenticated reads/failures and automatic purge actions. |
 | Purge (§16.7) | Automatic durable purge intents and signed retry delivery; serving fences remain authoritative before acknowledgement. |
-| Manual PurgeCache and other admin procedures | Deferred to later launch work; no manual purge route in this foundation. |
+| Manual PurgeCache | Optional asynchronous acceptance and audited completion under R-190 below. |
+| Other admin procedures | Supported only by completed launch work; never advertise unimplemented operations. |
+
+**Pending takedown implementation (R-190).** A launch CONTENT `Takedown` names
+one repository for canonical source validation and exactly one of 1–256 distinct
+blob/manifest `object_ids` or one whole `pack_id` (admin schema field 9). This
+request shape overrides §16.5's repository-free CONTENT shape for this subset.
+An omitted level selects CONTENT; an omitted `reason_token` selects `manual`.
+Supplied tokens MUST retain §14.6's grammar; reason remains private audit text.
+Successful acceptance MUST durably bind the operation to verified immutable
+action descriptors and activate every requested denial before returning success.
+It returns `complete = false`; acceptance MUST NOT imply verified preservation,
+holder discovery or repository/global completion. The pending record MUST retain
+preservation work. Production takedown activation MUST remain refused until the
+preservation implementation, required §14.7 configuration and launch conformance
+gates are complete. This intermediate implementation does not waive §14's full
+completion requirements or offer preservation/reinstatement/review operations.
+Manual `PurgeCache` MAY be supported independently: acceptance MUST atomically
+commit its audit, replay result and timer-11 purge intent, return the purge id,
+and expose completion through the audit log rather than synchronous delivery.
+The [R-190 implementation layout](../plans/mkit-server/WP-5.6a-1-contract.md)
+records the staged metadata and follow-up intake seams; it is not activation evidence.
 
 Automatic purge audit delivery MAY use the existing outbox relay. The triggering
 state apply MUST atomically record the purge intent, its delivery timer and the
@@ -3572,6 +3593,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | R-190 pending launch takedown: repository-local object or whole-pack input (additive admin `pack_id = 9`), independent immediate denial and unresolved preservation work; production activation awaits preservation. Manual PurgeCache accepts asynchronously with audited completion. |
 | 1 | draft | Launch admin foundation subset: signed framework, gapless audit/ReadAuditLog and automatic purge delivery; manual PurgeCache deferred. Automatic audit uses committed source relay events and atomic root append/dedup/watermark. |
 | 1 | draft | Launch profile permits indexed permanent retention with `leases = false` and GC disabled (§12.1, §18); publication transitions use Event field 7 with operation correlation, durable recording and at-least-once delivery (§12.4). Committed means Sent, never Delivered (§6.5; WP-5.4). |
 | 1 | draft | Authority-ticket streams use bounded physical-byte checkpoints independent of client framing, retaining pre/post staging and final acceptance checks (§6.2.1; WP-2.16). |

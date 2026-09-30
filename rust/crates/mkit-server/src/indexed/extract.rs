@@ -427,6 +427,7 @@ pub(super) struct Extractor<'a, B, S> {
     pub staged_bytes: u64,
     /// Member bytes resolved so far in this advance, bases included.
     pub resolved: AtomicU64,
+    pub denial_ids: std::sync::Mutex<BTreeSet<Hash>>,
 }
 
 impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
@@ -724,6 +725,7 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
         id: &Hash,
         located: &BTreeMap<Hash, crate::store::index::ObjectLookup>,
     ) -> Result<Cow<'_, [u8]>, ExtractError> {
+        crate::takedown::denial::require_clear(self.store, id).await?;
         if let Some((canonical, object, _)) = self.staged.get(id) {
             // Borrowed: a staged chunk is never copied a second time. (Only a
             // Blob is byte-hashed; a merkelized type is malformed here anyway.)
@@ -754,6 +756,10 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
             self.metrics,
         )
         .await;
+        self.denial_ids
+            .lock()
+            .map_err(|_| inconsistent())?
+            .extend(cache.rows().map(|((id, _, _), _)| *id));
         let total = self
             .resolved
             .load(Ordering::Relaxed)

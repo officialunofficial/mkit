@@ -377,6 +377,115 @@ mod tests {
         calls: u32,
         recorded: Arc<AtomicU32>,
     }
+
+    #[derive(Clone)]
+    struct NamespaceSink(Arc<Mutex<Vec<Request>>>);
+    impl PurgeSink for NamespaceSink {
+        fn deliver<'a>(&'a self, request: &'a Request) -> BoxFuture<'a, Result<(), StoreError>> {
+            Box::pin(async move {
+                self.0.lock().unwrap().push(request.clone());
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "published-view")]
+    async fn manual_namespace_purge_enumerates_registered_repositories_across_cold_slices() {
+        use mkit_server::store::{codec, keys};
+        use std::collections::BTreeSet;
+        let store = Arc::new(MemoryKv::default());
+        let partition = Partition::Coordinator(NamespaceKey::deployment_default());
+        for name in ["repo", "other"] {
+            store
+                .apply(
+                    &partition,
+                    Batch::new().put(
+                        keys::repo_record(&RepoName::new(name).unwrap()),
+                        codec::encode_repo_record(&codec::RepoRecord { created_at_ms: 1 }),
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        let mut work = request("manual-namespace");
+        work.repository.clear();
+        work.namespace = "root".into();
+        work.trigger = Trigger::Manual;
+        work.url_paths = vec!["/object".into(), "/proof".into()];
+        store
+            .apply(&partition, plan_enqueue(&work, 10, None, None).unwrap())
+            .await
+            .unwrap();
+        let cache = Cache::default();
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let clock = ManualClock::new(10);
+        for tick in 0..80 {
+            let now = 10 + tick * 1_000_000;
+            clock.set(i64::try_from(now).unwrap());
+            let budget = SliceBudget::new(6);
+            let registry = TimerRegistry::new().register(PurgeDelivery::new(
+                Arc::new(LocalCache {
+                    cache: cache.clone(),
+                    snapshot_deployment: Some("fixture-deployment".into()),
+                }),
+                Some(Arc::new(NamespaceSink(delivered.clone()))),
+                budget.clone(),
+            ));
+            run_due(
+                &store,
+                &partition,
+                &registry,
+                &clock,
+                now,
+                &TickBudget::new(1, 1, 16, 1000),
+            )
+            .await
+            .unwrap();
+            assert!(
+                budget.used() <= 6,
+                "catalog reads and cache deletes share the slice allowance"
+            );
+            if read_request(&store, &partition, &work.purge_id)
+                .await
+                .unwrap()
+                .is_none()
+            {
+                break;
+            }
+        }
+        assert!(
+            read_request(&store, &partition, &work.purge_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "a finite namespace catalog must complete after bounded cold slices"
+        );
+        let mut expected = remote_snapshot_keys(&work);
+        expected.extend(
+            work.url_paths
+                .iter()
+                .map(|path| format!("{}{path}", work.audience)),
+        );
+        assert_eq!(
+            cache
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+        assert_eq!(*delivered.lock().unwrap(), [work]);
+        assert!(
+            store
+                .get(&partition, &keys::outcome_backlog())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
     impl<S: NamespaceStore> TimerHandler<S> for HandlerCalls {
         fn kind(&self) -> TimerKind {
             TimerKind::new(self.kind)

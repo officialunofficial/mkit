@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server (WP-5.6a-1, R-190): independent V2 denial actions, verified pack inventory
+  and signed, audited pending takedown intents; manual PurgeCache returns a purge
+  id asynchronously and audits completion. Preservation and production takedown
+  activation await WP-5.6a-2. Timer 15 is TAKEDOWN_WORK; no new key tag or migration.
+
 - WP-5.10: durable timer-11 automatic cache purge intents, signed global delivery
   with stable ids and fresh nonces, local invalidation and snapshot refill fences.
 - WP-5.11a: default-off signed admin framework with separate role keys, durable

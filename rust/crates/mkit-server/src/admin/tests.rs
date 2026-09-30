@@ -61,6 +61,328 @@ fn partition() -> Partition {
 fn purge_body() -> serde_json::Value {
     json!({"operationId":"operation-1","repository":"root/repo","reason":"manual","operatorLabel":"on-call"})
 }
+
+async fn purge_timers(store: &MemoryKv) -> Vec<(crate::Key, Value)> {
+    store
+        .scan(
+            &partition(),
+            &crate::Key::new(b"w\0".to_vec()),
+            &crate::Key::new(b"w\x01".to_vec()),
+            None,
+            100,
+        )
+        .await
+        .unwrap()
+        .entries
+}
+
+#[tokio::test]
+async fn manual_purge_acceptance_is_durable_and_operation_replay_cannot_duplicate_work() {
+    use crate::store::{codec, keys};
+    let store = std::sync::Arc::new(MemoryKv::default());
+    let engine = Engine::new(store.clone(), partition(), config(&["moderation"])).with_purge(true);
+    let input = purge_body();
+    let (headers, body) = request(PURGE_PATH, &input, 80);
+    let accepted = engine.handle(PURGE_PATH, &headers, &body, 100).await;
+    assert_eq!(accepted.status, 200);
+    let result: serde_json::Value = serde_json::from_slice(&accepted.body).unwrap();
+    let id = result["purgeId"].as_str().unwrap();
+    assert!(!id.is_empty());
+    let pending = crate::purge::read_request(&store, &partition(), id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.repository, "root/repo");
+    assert_eq!(pending.trigger, crate::purge::Trigger::Manual);
+    let timers = purge_timers(&store).await;
+    assert_eq!(timers.len(), 1);
+    assert!(
+        matches!(keys::parse(&timers[0].0), Some(keys::ParsedKey::Timer { kind: 11, reference, .. }) if reference == id.as_bytes())
+    );
+    let backlog = store
+        .get(&partition(), &keys::outcome_backlog())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(codec::decode_backlog(&backlog).unwrap().rows, 1);
+    let generation = store
+        .get(&partition(), &keys::cache_purge_generation("root/repo"))
+        .await
+        .unwrap();
+    assert_eq!(
+        engine.handle(PURGE_PATH, &headers, &body, 101).await,
+        accepted
+    );
+    assert_eq!(head(&store).await, 1);
+    let restarted =
+        Engine::new(store.clone(), partition(), config(&["moderation"])).with_purge(true);
+    let (headers, body) = request(PURGE_PATH, &input, 81);
+    assert_eq!(
+        restarted.handle(PURGE_PATH, &headers, &body, 200).await,
+        accepted
+    );
+    assert_eq!(head(&store).await, 2);
+    let mut changed = input.clone();
+    changed["repository"] = json!("root/other");
+    let (headers, body) = request(PURGE_PATH, &changed, 82);
+    assert_eq!(
+        restarted
+            .handle(PURGE_PATH, &headers, &body, 300)
+            .await
+            .status,
+        400
+    );
+    assert_eq!(head(&store).await, 3);
+    assert_eq!(purge_timers(&store).await, timers);
+    assert_eq!(
+        store
+            .get(&partition(), &keys::outcome_backlog())
+            .await
+            .unwrap(),
+        Some(backlog)
+    );
+    assert_eq!(
+        store
+            .get(&partition(), &keys::cache_purge_generation("root/repo"))
+            .await
+            .unwrap(),
+        generation
+    );
+    assert!(
+        store
+            .get(&partition(), &keys::cache_purge_generation("root/other"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        crate::purge::read_request(&store, &partition(), id)
+            .await
+            .unwrap(),
+        Some(pending)
+    );
+    let reader = Engine::new(store.clone(), partition(), config(&["audit"]));
+    let (headers, body) = request(AUDIT_PATH, &json!({"fromSeq":"1","pageSize":100}), 83);
+    let audit = page(&reader.handle(AUDIT_PATH, &headers, &body, 301).await);
+    assert_eq!(audit["entries"][0]["operationId"], "operation-1");
+    assert_eq!(audit["entries"][0]["operatorLabel"], "on-call");
+    assert_eq!(audit["entries"][0]["details"], "manual");
+    assert_eq!(audit["entries"][2]["result"]["code"], "invalid_argument");
+}
+
+#[tokio::test]
+async fn manual_purge_role_and_mixed_credentials_cannot_enqueue_work() {
+    let store = std::sync::Arc::new(MemoryKv::default());
+    let moderator =
+        Engine::new(store.clone(), partition(), config(&["moderation"])).with_purge(true);
+    let audit_only = Engine::new(store.clone(), partition(), config(&["audit"]));
+    let (mut headers, body) = request(PURGE_PATH, &purge_body(), 84);
+    headers.push(("x-write-grant".into(), "client-grant".into()));
+    assert_eq!(
+        moderator
+            .handle(PURGE_PATH, &headers, &body, 100)
+            .await
+            .status,
+        400
+    );
+    assert_eq!(head(&store).await, 0);
+    assert!(purge_timers(&store).await.is_empty());
+    headers.pop();
+    assert_eq!(
+        audit_only
+            .handle(PURGE_PATH, &headers, &body, 101)
+            .await
+            .status,
+        403
+    );
+    assert_eq!(head(&store).await, 1);
+    assert!(purge_timers(&store).await.is_empty());
+    assert!(
+        store
+            .get(&partition(), &crate::store::keys::outcome_backlog())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut invalid = purge_body();
+    invalid["urlPaths"] = json!(["/objects/secret?token=never"]);
+    let (headers, body) = request(PURGE_PATH, &invalid, 85);
+    assert_eq!(
+        moderator
+            .handle(PURGE_PATH, &headers, &body, 102)
+            .await
+            .status,
+        400
+    );
+    assert_eq!(head(&store).await, 2);
+    assert!(purge_timers(&store).await.is_empty());
+    let (headers, body) = request(PURGE_PATH, &purge_body(), 86);
+    assert_eq!(
+        moderator
+            .handle(PURGE_PATH, &headers, &body, 103)
+            .await
+            .status,
+        200
+    );
+    assert_eq!(purge_timers(&store).await.len(), 1);
+    let (headers, body) = request(AUDIT_PATH, &json!({"fromSeq":"1","pageSize":100}), 87);
+    let audit = page(&audit_only.handle(AUDIT_PATH, &headers, &body, 104).await);
+    assert_eq!(audit["entries"][0]["result"]["code"], "permission_denied");
+    assert_eq!(audit["entries"][1]["result"]["code"], "invalid_argument");
+    assert_eq!(audit["entries"][2]["result"]["code"], "ok");
+}
+
+struct RestartPurgeSink(std::sync::Arc<std::sync::Mutex<Vec<crate::purge::Request>>>);
+impl crate::purge::PurgeSink for RestartPurgeSink {
+    fn deliver<'a>(
+        &'a self,
+        request: &'a crate::purge::Request,
+    ) -> crate::BoxFuture<'a, Result<(), crate::StoreError>> {
+        Box::pin(async move {
+            let mut calls = self.0.lock().unwrap();
+            calls.push(request.clone());
+            if calls.len() == 1 {
+                Err(crate::StoreError::unavailable("global purge unavailable"))
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn manual_purge_completion_is_audited_only_after_durable_global_acknowledgement() {
+    use crate::purge::{NoLocalCache, PurgeDelivery, SliceBudget};
+    use crate::timers::{TickBudget, TimerRegistry, run_due};
+    use std::sync::{Arc, Mutex};
+    let store = Arc::new(MemoryKv::default());
+    let engine = Engine::new(store.clone(), partition(), config(&["moderation"])).with_purge(true);
+    let (headers, body) = request(PURGE_PATH, &purge_body(), 88);
+    let accepted = engine.handle(PURGE_PATH, &headers, &body, 100).await;
+    assert_eq!(accepted.status, 200);
+    let json: serde_json::Value = serde_json::from_slice(&accepted.body).unwrap();
+    let id = json["purgeId"].as_str().unwrap();
+    let work = crate::purge::read_request(&store, &partition(), id)
+        .await
+        .unwrap()
+        .unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let registry = || {
+        TimerRegistry::new().register(PurgeDelivery::new(
+            Arc::new(NoLocalCache),
+            Some(Arc::new(RestartPurgeSink(calls.clone()))),
+            SliceBudget::new(2),
+        ))
+    };
+    let clock = crate::ManualClock::new(100);
+    run_due(
+        &store,
+        &partition(),
+        &registry(),
+        &clock,
+        100,
+        &TickBudget::new(1, 1, 16, 1000),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        head(&store).await,
+        1,
+        "failed delivery cannot audit completion"
+    );
+    assert_eq!(
+        crate::purge::read_request(&store, &partition(), id)
+            .await
+            .unwrap(),
+        Some(work.clone())
+    );
+    let queued = purge_timers(&store).await;
+    assert_eq!(queued.len(), 1);
+    let Some(crate::store::keys::ParsedKey::Timer { due_at_ms, .. }) =
+        crate::store::keys::parse(&queued[0].0)
+    else {
+        panic!("retry timer expected");
+    };
+    clock.set(i64::try_from(due_at_ms).unwrap());
+    run_due(
+        &store,
+        &partition(),
+        &registry(),
+        &clock,
+        due_at_ms,
+        &TickBudget::new(1, 1, 16, 1000),
+    )
+    .await
+    .unwrap();
+    assert_eq!(*calls.lock().unwrap(), [work.clone(), work]);
+    assert_eq!(head(&store).await, 2);
+    assert!(purge_timers(&store).await.is_empty());
+    assert!(
+        crate::purge::read_request(&store, &partition(), id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get(&partition(), &crate::store::keys::outcome_backlog())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // A fresh signed retry after completion replays acceptance without resurrecting work.
+    let (headers, body) = request(PURGE_PATH, &purge_body(), 89);
+    assert_eq!(
+        engine
+            .handle(
+                PURGE_PATH,
+                &headers,
+                &body,
+                i64::try_from(due_at_ms).unwrap()
+            )
+            .await,
+        accepted
+    );
+    assert!(purge_timers(&store).await.is_empty());
+    let reader = Engine::new(store.clone(), partition(), config(&["audit"]));
+    let (headers, body) = request(AUDIT_PATH, &json!({"fromSeq":"1","pageSize":100}), 90);
+    let audit = page(
+        &reader
+            .handle(
+                AUDIT_PATH,
+                &headers,
+                &body,
+                i64::try_from(due_at_ms).unwrap(),
+            )
+            .await,
+    );
+    assert_eq!(audit["entries"][1]["actor"], "system:timer");
+    assert_eq!(
+        audit["entries"][1]["procedure"],
+        "system:timer/PurgeCacheComplete"
+    );
+    assert_eq!(audit["entries"][1]["targets"], json!([id]));
+    assert_eq!(audit["entries"][1]["result"]["code"], "ok");
+    assert_eq!(
+        audit["entries"][1]["prevHash"],
+        audit["entries"][0]["entryHash"]
+    );
+    run_due(
+        &store,
+        &partition(),
+        &registry(),
+        &clock,
+        due_at_ms,
+        &TickBudget::new(1, 1, 16, 1000),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        head(&store).await,
+        4,
+        "empty timer run cannot append completion twice"
+    );
+}
 async fn head(store: &MemoryKv) -> u64 {
     store
         .get(&partition(), &crate::Key::new(b"ah\0".to_vec()))
@@ -149,7 +471,8 @@ async fn read_export_fixes_snapshot_before_auditing_and_replays_exact_bytes() {
     assert_eq!(exported["entries"][0]["entryHash"], exported["chainHead"]);
     assert_eq!(exported["nextSeq"], "2");
     assert_eq!(head(&store).await, 2);
-    let restarted = Engine::new(store.clone(), partition(), config(&["moderation"]));
+    let restarted =
+        Engine::new(store.clone(), partition(), config(&["moderation"])).with_purge(true);
     assert_eq!(
         restarted.handle(AUDIT_PATH, &headers, &body, 3).await,
         first

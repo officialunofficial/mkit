@@ -22,7 +22,7 @@ impl TimerKind {
 }
 
 /// Kind allocations. A new kind takes the next free number; shipped kinds are never reused.
-/// R-198 withdrew the unshipped kind 15, returning it to the unallocated range.
+/// R-190 allocates kind 15 to checkpointed takedown and preservation work.
 ///
 /// | Numbers | Allocation |
 /// |---|---|
@@ -41,7 +41,8 @@ impl TimerKind {
 /// | 12 | PUBLICATION_RECHECK (WP-5.4, R-182) |
 /// | 13 | CONTENT_TAKEDOWN_REQUEST (reserved for WP-4.10b, R-198) |
 /// | 14 | INSPECTION (reserved for WP-5.5a, R-198) |
-/// | 15..=0xEF | Production, unallocated |
+/// | 15 | TAKEDOWN_WORK (WP-5.6a, R-190) |
+/// | 16..=0xEF | Production, unallocated |
 /// | 0xF0..=0xFE | Reserved for tests |
 /// | 0xFF | TEST (`test-faults` only) |
 pub mod kinds {
@@ -67,6 +68,8 @@ pub mod kinds {
     pub const CACHE_PURGE: super::TimerKind = super::TimerKind::new(11);
     /// Retained inspection and published-membership dependency clearance.
     pub const PUBLICATION_RECHECK: super::TimerKind = super::TimerKind::new(12);
+    /// Preservation acquisition, holder discovery and audited retention purge.
+    pub const TAKEDOWN_WORK: super::TimerKind = super::TimerKind::new(15);
     /// Ref deletion used only by test drivers and directives.
     #[cfg(feature = "test-faults")]
     pub const TEST: super::TimerKind = super::TimerKind::new(0xFF);

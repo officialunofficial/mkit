@@ -207,6 +207,21 @@ impl<S: NamespaceStore> TimerHandler<S> for PurgeDelivery {
                 .require(Precondition::Equals(key.clone(), value))
                 .require(guard(keys::outcome_backlog(), prior.as_ref()))
                 .delete(key);
+            if request.trigger == super::Trigger::Manual {
+                // Manual intents are accepted in the deployment operator
+                // partition, so completion and its audit commit together.
+                let audit = crate::admin::plan_system(
+                    ctx.store,
+                    ctx.partition,
+                    "system:timer",
+                    "system:timer/PurgeCacheComplete",
+                    &[request.purge_id.clone()],
+                    ctx.now_ms,
+                )
+                .await?;
+                batch.preconditions.extend(audit.preconditions);
+                batch.writes.extend(audit.writes);
+            }
             batch = if backlog.rows == 0 {
                 batch.delete(keys::outcome_backlog())
             } else {

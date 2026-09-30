@@ -181,14 +181,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             .authorize_http_read(&op, &parsed.target, seams, token)
             .await?;
 
+        let denial_budget = crate::indexed::budget::SliceBudget::new(9000);
+        let proof_meta = crate::indexed::budget::Budgeted::new(&self.meta, &denial_budget);
+        let proof_blobs = crate::indexed::budget::Budgeted::new(&self.blobs, &denial_budget);
         let view = crate::store::view::ViewStore {
-            store: &self.meta,
+            store: &proof_meta,
             repo,
             writer: false,
             policy: self.publication_policy.as_deref(),
         };
         let env = Env {
-            blobs: &self.blobs,
+            blobs: &proof_blobs,
             meta: &view,
             shards: self.shards.as_ref(),
             repo,
@@ -220,11 +223,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             }
             Target::Object(id) => {
                 let located = resolve::locate(&env, *id).await?;
-                if !seams
-                    .reachability
-                    .known_reachable(repo, id, now)
-                    .await
-                    .map_err(|error| Fail::from_server_error(&error))?
+                if self.cfg.takedown_denial
+                    || !seams
+                        .reachability
+                        .known_reachable(repo, id, now)
+                        .await
+                        .map_err(|error| Fail::from_server_error(&error))?
                 {
                     self.prove_reachable(&env, seams, id, &mut budget).await?;
                     seams.reachability.record(repo, id, now);
@@ -233,6 +237,37 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             }
         };
 
+        for id in [&leaf_id, &located.pack] {
+            crate::takedown::denial::require_clear(&proof_meta, id)
+                .await
+                .map_err(|e| {
+                    if e.public_message() == "object blocked" {
+                        Fail::NotFound
+                    } else {
+                        Fail::Unavailable
+                    }
+                })?;
+        }
+        if self.cfg.takedown_denial {
+            crate::takedown::denial::require_repo_clear(
+                &self.blobs,
+                &self.meta,
+                self.shards.as_ref(),
+                repo,
+                &std::collections::BTreeSet::from([leaf_id]),
+                indexed,
+                self.metrics.as_ref(),
+                &denial_budget,
+            )
+            .await
+            .map_err(|e| {
+                if e.public_message() == "object blocked" {
+                    Fail::NotFound
+                } else {
+                    Fail::Unavailable
+                }
+            })?;
+        }
         // §3 step 8: takedown.
         match seams
             .takedown
@@ -409,7 +444,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             }
             HttpBody::Empty
         } else {
-            match resolve::open_body(&self.blobs, &leaf, window, &mut hook).await {
+            match resolve::open_body(&proof_blobs, &leaf, window, &mut hook).await {
                 Ok(body) => body,
                 Err(miss) => {
                     if let Some(hook) = hook.take() {
@@ -451,13 +486,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
     /// Prove `id` reachable from a published ref, or fail the request.
     async fn prove_reachable(
         &self,
-        env: &Env<'_, B, impl NamespaceStore>,
+        env: &Env<'_, impl crate::BlobStore, impl NamespaceStore>,
         seams: &HttpSeams,
         id: &Hash,
         budget: &mut Budget,
     ) -> Result<(), Fail> {
         let (tips, truncated) = self
-            .published_tips(env.repo, env.cfg.max_walk_objects)
+            .published_tips(env.meta, env.repo, env.cfg.max_walk_objects)
             .await?;
         let reached = if truncated {
             Reach::Capped
@@ -479,9 +514,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
     /// budget. Packmaps are excluded from tips but charged to the scan budget.
     /// Refs are read from their shards: pending content never
     /// reaches a ref value (indexed advances publish verified packs only).
-    async fn published_tips(&self, repo: &RepoId, cap: usize) -> Result<(Vec<Hash>, bool), Fail> {
+    async fn published_tips(
+        &self,
+        store: &impl NamespaceStore,
+        repo: &RepoId,
+        cap: usize,
+    ) -> Result<(Vec<Hash>, bool), Fail> {
         let view = crate::store::view::ViewStore {
-            store: &self.meta,
+            store,
             repo,
             writer: false,
             policy: self.publication_policy.as_deref(),
