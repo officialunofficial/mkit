@@ -12,9 +12,13 @@ pub(crate) struct Context {
     pub commit: Hash,
     pub leaf: Hash,
     pub path: Vec<Vec<u8>>,
-    pub ty: ObjectType,
     commit_len: u64,
     steps: Vec<PrefixStep>,
+    located: crate::store::index::LocatedObject,
+}
+
+pub(crate) struct Metadata {
+    pub ty: ObjectType,
     leaf_len: u64,
     manifest: Option<ChunkedBlob>,
 }
@@ -86,26 +90,35 @@ pub(crate) async fn context<B: BlobStore, N: NamespaceStore>(
     // The caller checks the terminal leaf separately, preserving its 451
     // only after this exact context is established. Stops above it are 404.
     let located = resolve::locate(env, current).await?;
-    let bytes = resolve::load(env, current, located, budget).await?;
-    let leaf = mkit_core::serialize::deserialize(&bytes).map_err(|_| Fail::Unavailable)?;
-    let ty = leaf.object_type();
-    let manifest = match leaf {
-        Object::ChunkedBlob(cb) => Some(cb),
-        _ => None,
-    };
     Ok(Context {
         commit,
         leaf: current,
         path: path.to_vec(),
-        ty,
         commit_len,
         steps,
-        leaf_len: bytes.len() as u64,
-        manifest,
+        located,
     })
 }
 
 impl Context {
+    /// Load representation metadata only after the terminal 451 decision.
+    pub(crate) async fn metadata<B: BlobStore, N: NamespaceStore>(
+        &self,
+        env: &Env<'_, B, N>,
+        budget: &mut Budget,
+    ) -> Result<Metadata, Fail> {
+        let bytes = resolve::load(env, self.leaf, self.located, budget).await?;
+        let leaf = mkit_core::serialize::deserialize(&bytes).map_err(|_| Fail::Unavailable)?;
+        Ok(Metadata {
+            ty: leaf.object_type(),
+            leaf_len: bytes.len() as u64,
+            manifest: match leaf {
+                Object::ChunkedBlob(cb) => Some(cb),
+                _ => None,
+            },
+        })
+    }
+
     pub(crate) fn etag(&self, range: Option<(u64, u64)>) -> String {
         let selector = range.map_or_else(|| "object".to_owned(), |(a, b)| format!("range-{a}-{b}"));
         format!(
@@ -121,6 +134,7 @@ impl Context {
         &self,
         env: &Env<'_, B, N>,
         gate: &dyn TakedownGate,
+        metadata: &Metadata,
         range: Option<(u64, u64)>,
     ) -> Result<PreparedProof, Fail> {
         let mut span = false;
@@ -132,7 +146,7 @@ impl Context {
             if len > env.cfg.max_proof_content_bytes {
                 return Err(Fail::ProofRange);
             }
-            if let Some(cb) = &self.manifest {
+            if let Some(cb) = &metadata.manifest {
                 if b >= cb.total_size {
                     return Err(Fail::ProofRange);
                 }
@@ -168,11 +182,11 @@ impl Context {
                 let plan = selected.ok_or(Fail::ProofRange)?;
                 span = plan.kind == mkit_core::verify::span::RangeProofKind::Mkds;
                 plan.encoded_size
-            } else if self.ty == ObjectType::Blob {
+            } else if metadata.ty == ObjectType::Blob {
                 proof_size::blob_range_proof_size(
                     self.commit_len,
                     &self.steps,
-                    self.leaf_len,
+                    metadata.leaf_len,
                     a,
                     len,
                 )
@@ -181,7 +195,7 @@ impl Context {
                 return Err(Fail::ProofRange);
             }
         } else {
-            proof_size::object_proof_size(self.commit_len, &self.steps, self.leaf_len)
+            proof_size::object_proof_size(self.commit_len, &self.steps, metadata.leaf_len)
                 .map_err(|_| Fail::ProofRange)?
         };
         if encoded_len > env.cfg.max_proof_bundle_bytes {

@@ -292,6 +292,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         if let TakedownVerdict::Respond(response) = takedown {
             return Ok(response);
         }
+        let metadata = if let Some(context) = &context {
+            Some(context.metadata(&env, &mut budget).await?)
+        } else {
+            None
+        };
         let ref_path = matches!(parsed.target, Target::Ref { .. });
         let mut inline = Budget(cfg.max_inline_object_bytes);
         // Proofs use canonical manifests, including when no extracted file
@@ -304,9 +309,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         // Required canonical chunks are authorization dependencies too.
         // Prepare their metadata before validators, but defer selector/cap
         // errors so a matching validator still precedes a 416 (§3 step 9).
-        let proof = if let Some(context) = &context {
+        let proof = if let (Some(context), Some(metadata)) = (&context, &metadata) {
             match context
-                .select(&env, seams.takedown.as_ref(), parsed.query.range)
+                .select(&env, seams.takedown.as_ref(), metadata, parsed.query.range)
                 .await
             {
                 Ok(proof) => Some(Ok(proof)),
@@ -320,7 +325,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             || format!("\"{}\"", to_hex(&leaf_id)),
             |c| c.etag(parsed.query.range),
         );
-        let ty = context
+        let ty = metadata
             .as_ref()
             .map(|c| c.ty)
             .or_else(|| leaf.as_ref().map(|l| l.ty))

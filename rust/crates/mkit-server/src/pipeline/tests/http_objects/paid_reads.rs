@@ -917,6 +917,38 @@ fn proof_context_miss_precedes_tombstone_but_valid_context_keeps_451() {
     tasks.join();
 }
 
+#[test]
+fn proof_tombstones_precede_terminal_leaf_decode_budget() {
+    let (mut fx, d, admission, tasks) = setup();
+    let config = fx.pipe.cfg.http_objects.as_mut().unwrap();
+    config.max_inline_object_bytes = EXTRACT_MIN + 10;
+    config.http_decode_budget = 4096;
+    config.validate(EXTRACT_MIN).unwrap();
+    let leaf = id(&d.big);
+    let proofs = Arc::new(Proofs(Mutex::default()));
+    let fx = with_seams(fx, |s| {
+        s.takedown = Arc::new(TombstonedProofLeaf(leaf));
+        s.proofs = proofs.clone();
+    });
+    for method in ["GET", "HEAD"] {
+        for (path, query) in [
+            (fx.ref_url("room", "main", "big.bin"), "proof=1".to_owned()),
+            (
+                fx.object_url("room", &leaf),
+                format!("proof=1&commit={}&path=big.bin", to_hex(&d.head())),
+            ),
+        ] {
+            let got = read(fx.request(method, &path, Some(&query), &[("if-none-match", "*")]));
+            assert_eq!(got.status, 451);
+            assert!(got.header("ETag").is_none());
+            assert!(got.header("X-Mkit-Object").is_none());
+        }
+    }
+    assert!(admission.calls.lock().unwrap().is_empty());
+    assert!(proofs.0.lock().unwrap().is_empty());
+    tasks.join();
+}
+
 struct FailedProof(bool);
 impl ProofServer for FailedProof {
     fn build<'a>(
