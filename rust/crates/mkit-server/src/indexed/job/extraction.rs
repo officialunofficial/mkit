@@ -1033,7 +1033,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
     }
     async fn offsets(
         &self,
-        st: &mut SliceState,
+        _st: &mut SliceState,
         job: &VerifyJobV1,
         x: &mut ExtractionV1,
     ) -> Result<(), Stop> {
