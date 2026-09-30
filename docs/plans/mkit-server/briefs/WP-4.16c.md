@@ -73,3 +73,15 @@ Type and module names, the batch size, and error types. Record them in the PR bo
 - the vcs-worker default conformance on a free port.
 
 Do the self-review, then open the PR.
+
+## Execution ruling (user, 2026-09-30)
+
+Bounded canonical ancestor reads are allowed for object_sizes authorization,
+exactly as for the HTTP id route. Requested-object sizes must come only from
+indexed metadata, with no requested-object byte reads. One manifest serves all
+its chunks. Share one reachability walk and one set-based global-denial pass per
+batch, reusing eligible positive reachability proofs. The denial API refactor
+uses the same data and descriptor scan, adds no state, and is allowed under
+R-198. Bound and assert batch calls within the existing 9,000-call Worker
+physical allowance and 8,500-call core share; stop and report numbers if even
+one shared pass plus walk cannot fit. read_canonical shares the same proofs.

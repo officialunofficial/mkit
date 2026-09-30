@@ -89,3 +89,61 @@ integrates generation-aware publication, an invalidated repository uses live
 reads rather than accepting a refreshed snapshot. Future inspector callers in
 RepoIndex must integrate that published/serving authority seam before enabling
 inspection snapshots.
+
+## In-process canonical object prefetch (WP-4.16c)
+
+With `http-objects` and explicit indexed/HTTP configuration, construct the
+request's pipeline using `adapter::embedding_pipeline(env, cfg, hooks,
+&request_budget, ...)`, then call `pipeline.object_reader(repo, ReaderView::Public)`.
+The optional final `snapshot_warm` argument exists with `published-view`; use
+`false` for an ordinary request. Share the request's existing 9,000-call physical
+`SliceBudget` with the constructor. The native equivalent is
+`Pipeline::object_reader`; native and Worker adapters re-export `ReaderView`
+and `ObjectReader`. This API uses the shared core and adds no HTTP mount or wire.
+
+`Public` is anonymous: public repositories, published refs and membership.
+`Owner(&request_meta)` requires a verified auth-v2 `ListRefs` envelope for this
+repository's owner or valid write grant. It uses the existing auth stage at
+construction and again per batch, including grant-epoch checks. Passing the view
+variant alone confers no authority. Owners use live refs and membership;
+publication holds and global denial still filter objects. Blocked IDs, anonymous reads of private repositories
+and unreachable IDs return `None`, matching id-route absence.
+
+Each call accepts at most **16 IDs**, preserves order and duplicates, and caps
+core work at **8,500 calls** inside the request's physical allowance. It shares
+one bounded reachability walk (with eligible positive-cache proofs) and one
+set-based global-denial descriptor pass. Every store operation is charged;
+authorization and external seams reserve calls conservatively. Exhausted call,
+decode or denial-context budgets fail closed with `unavailable`. Canonical
+response bytes, including duplicate IDs, also fit `http_decode_budget`.
+
+`read_canonical` returns serialized Blob, Tree, Commit, Remix, Tag and
+**ChunkedBlob manifest** bytes, never pack-only Delta encodings.
+`object_sizes` returns indexed uncompressed content sizes: Blob payload length
+and other objects' canonical serialized length. It performs **no requested-object
+byte reads**. Authorization may read canonical commit/tree/tag/manifest
+ancestors; one manifest authorizes all requested chunks, without a read per
+chunk. The restriction also covers delta bases used to reconstruct ancestors.
+If a requested ancestor would need expansion to prove another requested ID,
+request their sizes in separate batches; an incomplete proof returns
+`unavailable` rather than reading the requested ancestor or claiming absence.
+
+Prefetch the commit, trees, manifests and selected chunks asynchronously, then
+insert the returned bytes into the wasm-clean synchronous source:
+
+```rust,ignore
+let reader = pipeline.object_reader(repo, ReaderView::Public).await?;
+let mut source = mkit_core::store::MemorySource::default();
+for (id, bytes) in ids.iter().zip(reader.read_canonical(&ids).await?) {
+    if let Some(bytes) = bytes { source.insert(*id, bytes)?; }
+}
+let bundle = mkit_core::verify::build_disclosure_from(
+    &source, &commit, &[b"file.bin"], mkit_core::verify::Selector::Object,
+)?;
+let verified = mkit_core::verify::verify_disclosure(&commit, &bundle)?;
+```
+
+`MemorySource` verifies each read, including Merkle object identities. Core
+`diff_trees` and related builders use the same source synchronously. Hosts bound
+aggregate prefetched memory and retain request authorization; there is no
+blocking or `block_on` bridge inside the async reader.

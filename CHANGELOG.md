@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Core/server (WP-4.16c, R-202): in-process canonical object prefetch for
+  embedders, including ChunkedBlob manifests and indexed content sizes;
+  verified public/owner views share bounded reachability and global-denial
+  proofs. Add wasm-clean `store::MemorySource` for synchronous disclosures
+  and diffs, with native and Worker embedding entry points. No wire change.
+
 - Server/Worker (default-off, WP-4.10b-2, R-186): complete consumed-group extraction
   with closure before effects, native union counts, bounded job header/body guards,
   resumable delta reconstruction and root-checked multipart uploads. Hold renewal

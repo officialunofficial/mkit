@@ -218,12 +218,17 @@ pub type ResolvedMember = (Arc<[u8]>, u32);
 /// charged once, even when multiple deltas reuse it as an external base.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemberCache {
+    no_reads: BTreeSet<Hash>,
     rows: BTreeMap<Location, ResolvedMember>,
     retained_bytes: u64,
     remaining_work: Option<u32>,
 }
 
 impl MemberCache {
+    #[cfg(feature = "http-objects")]
+    pub(crate) fn forbid_reads(&mut self, ids: &BTreeSet<Hash>) {
+        self.no_reads.clone_from(ids);
+    }
     pub(crate) fn with_work_budget(limit: u32) -> Self {
         Self {
             remaining_work: Some(limit),
@@ -338,6 +343,9 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
     enforce_denial: bool,
 ) -> BoxFuture<'a, Result<ResolvedMember, ResolveFailure>> {
     Box::pin(async move {
+        if memo.no_reads.contains(&id) {
+            return Err(budget_exceeded().into());
+        }
         if enforce_denial {
             crate::takedown::denial::require_clear(store, &id).await?;
             crate::takedown::denial::require_clear(store, &located.pack).await?;

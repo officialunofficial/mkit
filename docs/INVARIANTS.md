@@ -5,6 +5,28 @@ single crate or spec. Each entry states the invariant, why it matters, and
 what breaks when it is violated. A regression test enforces each one; find
 it by the file path listed under "Enforced by".
 
+## In-process object reads retain id-route authority and bounded proofs
+
+**Always:** canonical prefetch binds a repository and a verified view. Public
+reads require anonymous published/public reachability; owner reads require a
+current auth-v2 owner or write-grant envelope and writer authorization. Each
+16-ID batch shares one bounded reachability walk and one authoritative global
+denial descriptor pass, inside the 8,500-call core share. Indexed size queries
+never load a requested object's bytes, including as a delta reconstruction base;
+canonical ancestor reads may prove reachability. MemorySource verifies integrity
+on every synchronous read, including Merkle object identities.
+
+**Because:** embedders need manifests and proof inputs with HTTP's privacy and
+takedown guarantees, without async blocking, per-chunk reads or per-ID scans.
+
+**If violated:** a caller can obtain private, pending or blocked objects, exhaust
+a Worker invocation through repeated proofs, or trust corrupted prefetched bytes.
+
+**Enforced by:** `pipeline::object_reader`, shared `http_objects::reach::walk_many`,
+`takedown::denial::object_denials`, budgeted stores and the indexed member-cache
+read prohibition; reader presence/call-count/poisoned-frame/grant-revocation tests;
+native HTTP disclosure byte parity; `store::memory` integrity tests.
+
 ## Private scanner retrieval requires current ticket and global-denial checks
 
 **Always:** scanner byte reads require both a dedicated short-lived capability

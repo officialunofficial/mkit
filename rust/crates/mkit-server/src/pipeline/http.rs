@@ -207,6 +207,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             policy: self.publication_policy.as_deref(),
         };
         let env = Env {
+            no_reads: &std::collections::BTreeSet::new(),
             blobs: &proof_blobs,
             meta: &view,
             shards: self.shards.as_ref(),
@@ -514,6 +515,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             let opened = if let Some(proof) = &proof {
                 let mut source = crate::http_objects::proof::RepositorySource {
                     env: Env {
+                        no_reads: &std::collections::BTreeSet::new(),
                         blobs: &proof_blobs,
                         meta: &view,
                         shards: self.shards.as_ref(),
@@ -600,7 +602,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         budget: &mut Budget,
     ) -> Result<(), Fail> {
         let (tips, truncated) = self
-            .published_tips(env.meta, env.repo, env.cfg.max_walk_objects)
+            .reader_tips(env.meta, env.repo, env.cfg.max_walk_objects, false)
             .await?;
         let reached = if truncated {
             Reach::Capped
@@ -618,19 +620,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         }
     }
 
-    /// The published ref values and whether enumeration hit its row or page
-    /// budget. Packmaps are excluded from tips but charged to the scan budget.
-    /// Refs are read through the budgeted published facade.
-    async fn published_tips(
+    /// Enumerate view-selected refs with bounded rows/pages; packmaps only spend budget.
+    pub(super) async fn reader_tips(
         &self,
         store: &impl NamespaceStore,
         repo: &RepoId,
         cap: usize,
+        writer: bool,
     ) -> Result<(Vec<Hash>, bool), Fail> {
         let view = crate::store::view::ViewStore {
             store,
             repo,
-            writer: false,
+            writer,
             policy: self.publication_policy.as_deref(),
         };
         let scan = crate::refs::list_scan_prefix("refs/");

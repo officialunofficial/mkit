@@ -2166,6 +2166,26 @@
     ]
   },
   {
+    "id": "4.16c",
+    "title": "In-process canonical object reader for embedders (UNO-420)",
+    "milestone": "M4",
+    "track": "core",
+    "depends_on": [
+      "4.16",
+      "5.4",
+      "5.6a-1"
+    ],
+    "size": "S",
+    "summary": "R-202: async prefetch with verified public/owner views, shared bounded reachability and global denial, indexed sizes without requested-object reads, and synchronous wasm-clean MemorySource; no wire or spec change.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
+      "conf-native"
+    ]
+  },
+  {
     "id": "4.17",
     "title": "Pre-receive policy hooks: allowed signers per ref, fast-forward-only grants",
     "milestone": "M4",
