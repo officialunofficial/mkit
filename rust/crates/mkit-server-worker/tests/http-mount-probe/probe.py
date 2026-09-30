@@ -47,7 +47,7 @@ def verify():
         206, b"bcd", "3", "bytes 1-3/6"
     )
     passed.append("streamed Range exact Content-Length")
-    for expected in [200, 206, 302, 304, 400, 402, 404, 405, 416, 503]:
+    for expected in [200, 206, 302, 304, 400, 401, 402, 403, 404, 405, 416, 451, 503]:
         status, headers, body = request(f"/public/{expected}", "HEAD")
         assert status == expected and body == b""
         assert headers["content-length"] == ("3" if expected == 206 else "6")

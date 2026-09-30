@@ -325,7 +325,9 @@ mod tests {
 
     #[test]
     fn head_has_no_body_on_every_status_and_keeps_repeated_metadata() {
-        for status in [200, 206, 302, 304, 400, 402, 404, 405, 416, 503] {
+        for status in [
+            200, 206, 302, 304, 400, 401, 402, 403, 404, 405, 416, 451, 503,
+        ] {
             let mut response = HttpObjectResponse::new(status)
                 .with_header("Content-Length", "123")
                 .with_header("WWW-Authenticate", "Payment first")
