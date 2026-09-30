@@ -16,7 +16,7 @@ use super::{
     IndexedConfig,
     checkpoint::{
         ExtractionGroupMember, Kind, Outcome, Phase, VerifyJobV1, WINDOW_BYTES, decode_frame,
-        encode_job, timer_reference,
+        hydrate_job, timer_reference, write_job,
     },
     resolve,
     state::VerificationV1,
@@ -89,6 +89,13 @@ fn outcome_error(outcome: Outcome, now: u64, ticket: &TicketV1, bound: u64) -> S
         Outcome::ExtractionUnavailable => {
             ServerError::unavailable("pack extraction is not available on this deployment")
         }
+        Outcome::ObjectBlocked => ServerError::permission_denied("object blocked"),
+        Outcome::ClosureMissing | Outcome::OpenClosure => {
+            ServerError::invalid_argument("open closure")
+        }
+        Outcome::PacklistMissing => {
+            ServerError::invalid_argument("packlist lists a pack that is not in this repository")
+        }
     }
 }
 
@@ -105,7 +112,7 @@ pub async fn create_job<N: NamespaceStore>(
     prior: Option<Value>,
 ) -> Result<(), ServerError> {
     let now = u64::try_from(clock.now_ms()).unwrap_or(0);
-    let job = VerifyJobV1::new(
+    let mut job = VerifyJobV1::new(
         ticket_id,
         ticket.created_at_ms,
         ticket.bytes,
@@ -114,11 +121,10 @@ pub async fn create_job<N: NamespaceStore>(
     let key = keys::verify_job(&repo.name, &ticket.pack_id);
     let batch = Batch::new()
         .require(Precondition::NotAfter(now.saturating_add(10_000)))
-        .require(match prior {
-            Some(raw) => Precondition::Equals(key.clone(), raw),
+        .require(match &prior {
+            Some(raw) => Precondition::Equals(key.clone(), raw.clone()),
             None => Precondition::Absent(key.clone()),
         })
-        .put(key, encode_job(&job))
         .put(
             keys::timer(
                 now,
@@ -127,6 +133,8 @@ pub async fn create_job<N: NamespaceStore>(
             ),
             Value::default(),
         );
+    let batch = write_job(batch, &mut job, prior.as_ref(), &repo.name, &ticket.pack_id)
+        .map_err(|_| storage_failed())?;
     match store
         .apply(source, batch)
         .await
@@ -143,6 +151,83 @@ struct Consumed<'a> {
     job: VerifyJobV1,
 }
 
+/// A new Advance may release a failed group only before extraction effects.
+/// The exact failed observation is included in the replacement transaction.
+async fn failed_group<N: NamespaceStore>(
+    store: &N,
+    source: &Partition,
+    repo: &RepoId,
+    job: &VerifyJobV1,
+) -> Result<Option<Precondition>, ServerError> {
+    for member in &job.extraction_group {
+        let ticket = keys::ticket(&member.ticket);
+        if store
+            .get(source, &ticket)
+            .await
+            .map_err(|_| storage_failed())?
+            .is_none()
+        {
+            return Ok(Some(Precondition::Absent(ticket)));
+        }
+        let state = keys::verification(&repo.name, &member.pack);
+        if let Some(raw) = store
+            .get(source, &state)
+            .await
+            .map_err(|_| storage_failed())?
+            && matches!(
+                super::state::decode(&raw).map_err(|_| storage_failed())?,
+                VerificationV1::Rejected { .. }
+            )
+        {
+            return Ok(Some(Precondition::Equals(state, raw)));
+        }
+        let key = keys::verify_job(&repo.name, &member.pack);
+        if let Some(raw) = store
+            .get(source, &key)
+            .await
+            .map_err(|_| storage_failed())?
+            && {
+                let peer = super::checkpoint::decode_job(&raw).map_err(|_| storage_failed())?;
+                peer.gone || peer.outcome.is_some()
+            }
+        {
+            return Ok(Some(Precondition::Equals(key, raw)));
+        }
+    }
+    Ok(None)
+}
+
+/// A finished source remains pinned while an older group uses its facts.
+/// Guard every finished peer before changing that source's retention group.
+async fn finished_peers<N: NamespaceStore>(
+    store: &N,
+    source: &Partition,
+    repo: &RepoId,
+    job: &VerifyJobV1,
+) -> Result<Vec<Precondition>, ServerError> {
+    let mut guards = Vec::new();
+    for member in &job.extraction_group {
+        if member.ticket == job.ticket_id {
+            continue;
+        }
+        let key = keys::verify_job(&repo.name, &member.pack);
+        let raw = store
+            .get(source, &key)
+            .await
+            .map_err(|_| storage_failed())?;
+        if let Some(raw) = raw {
+            let peer = super::checkpoint::decode_job(&raw).map_err(|_| storage_failed())?;
+            if !peer.gone && !peer.usable() && peer.outcome.is_none() {
+                return Err(super::pending(retry_after(Some(&peer))));
+            }
+            guards.push(Precondition::Equals(key, raw));
+        } else {
+            guards.push(Precondition::Absent(key));
+        }
+    }
+    Ok(guards)
+}
+
 /// Claim every new member together. Waiting on a foreign unfinished group
 /// creates no partial group: A+B and B+C serialize before either can extract.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One atomic group claim.
@@ -155,6 +240,7 @@ async fn claim_extraction_group<N: NamespaceStore>(
     rows: &[Option<Value>],
     clock: &dyn Clock,
     bound: u64,
+    head: Hash,
 ) -> Result<bool, ServerError> {
     let now = u64::try_from(clock.now_ms()).unwrap_or(0);
     let jobs = tickets
@@ -194,13 +280,13 @@ async fn claim_extraction_group<N: NamespaceStore>(
             return Err(super::pending(1_000));
         }
     }
-    let new = jobs
-        .iter()
-        .zip(ticket_ids)
-        .enumerate()
-        .map(|(i, (job, id))| {
-            job.as_ref().is_none_or(|job| {
-                job.ticket_id != *id
+    let mut new =
+        jobs.iter()
+            .zip(ticket_ids)
+            .enumerate()
+            .map(|(i, (job, id))| {
+                job.as_ref().is_none_or(|job| {
+                job.gone || job.ticket_id != *id
                     && !(job.usable()
                         && job.pack_len == tickets[i].bytes
                         && matches!(states[i], Some(VerificationV1::Verified { pack_len, .. })
@@ -209,8 +295,44 @@ async fn claim_extraction_group<N: NamespaceStore>(
                             *owner == job.ticket_id && ticket.pack_id == tickets[i].pack_id
                         }))
             })
-        })
-        .collect::<Vec<_>>();
+            })
+            .collect::<Vec<_>>();
+    let mut release = Vec::new();
+    for (i, job) in jobs.iter().enumerate() {
+        let Some(job) = job else {
+            continue;
+        };
+        if job.gone {
+            continue;
+        }
+        let changed = job.extraction_head != Some(head)
+            || job
+                .extraction_group
+                .iter()
+                .map(|m| (m.pack, m.ticket))
+                .ne(tickets
+                    .iter()
+                    .zip(ticket_ids)
+                    .map(|(t, id)| (t.pack_id, *id)));
+        let before_effects = job
+            .extraction
+            .as_ref()
+            .is_none_or(|x| x.object.is_none() && (x.stage <= 2 || (10..=13).contains(&x.stage)));
+        if changed
+            && before_effects
+            && let Some(witness) = failed_group(store, source, repo, job).await?
+        {
+            new[i] |= !job.usable();
+            release.push(witness);
+        } else if new[i] && !job.usable() && !(before_effects && job.outcome.is_some()) {
+            // The ticket index includes the signer, so another signer can
+            // legitimately hold a distinct ticket for this same pack.
+            return Err(super::pending(retry_after(Some(job))));
+        }
+        if new[i] && job.usable() {
+            release.extend(finished_peers(store, source, repo, job).await?);
+        }
+    }
     if !new.iter().any(|new| *new) {
         return Ok(false);
     }
@@ -245,6 +367,11 @@ async fn claim_extraction_group<N: NamespaceStore>(
         });
     }
     let mut batch = Batch::new().require(Precondition::NotAfter(now.saturating_add(10_000)));
+    for guard in release {
+        if !batch.preconditions.contains(&guard) {
+            batch.preconditions.push(guard);
+        }
+    }
     for (i, (ticket, id)) in tickets.iter().zip(ticket_ids).enumerate() {
         let job_key = keys::verify_job(&repo.name, &ticket.pack_id);
         let state_key = keys::verification(&repo.name, &ticket.pack_id);
@@ -273,7 +400,16 @@ async fn claim_extraction_group<N: NamespaceStore>(
                 super::checkpoint::DEFAULT_ENTRY_CAP,
             );
             job.extraction_group.clone_from(&group);
-            batch = batch.put(job_key, encode_job(&job)).put(
+            job.extraction_head = Some(head);
+            batch = write_job(
+                batch,
+                &mut job,
+                rows[2 * i].as_ref(),
+                &repo.name,
+                &ticket.pack_id,
+            )
+            .map_err(|_| storage_failed())?
+            .put(
                 keys::timer(
                     now,
                     kinds::VERIFY.get(),
@@ -281,6 +417,25 @@ async fn claim_extraction_group<N: NamespaceStore>(
                 ),
                 Value::default(),
             );
+        } else if let Some(prior) = &jobs[i]
+            && prior.usable()
+            && prior.extraction_group != group
+        {
+            for guard in finished_peers(store, source, repo, prior).await? {
+                if !batch.preconditions.contains(&guard) {
+                    batch.preconditions.push(guard);
+                }
+            }
+            let mut retained = prior.clone();
+            retained.extraction_group.clone_from(&group);
+            batch = write_job(
+                batch,
+                &mut retained,
+                rows[2 * i].as_ref(),
+                &repo.name,
+                &ticket.pack_id,
+            )
+            .map_err(|_| storage_failed())?;
         }
     }
     match store
@@ -293,6 +448,91 @@ async fn claim_extraction_group<N: NamespaceStore>(
             Err(super::pending(1_000))
         }
     }
+}
+
+/// Reuse frozen group totals, otherwise merge sorted frame streams.
+/// One 64-row raw page is live at a time; retained stream heads are only IDs/sizes.
+async fn union_totals<N: NamespaceStore>(
+    store: &N,
+    source: &Partition,
+    repo: &RepoId,
+    ready: &[Consumed<'_>],
+) -> Result<(usize, u64), ServerError> {
+    struct Stream {
+        pack: Hash,
+        cursor: Option<Cursor>,
+        done: bool,
+        rows: VecDeque<(Hash, u64)>,
+    }
+    let ids = ready
+        .iter()
+        .map(|held| held.ticket.pack_id)
+        .collect::<BTreeSet<_>>();
+    for x in ready.iter().filter_map(|held| held.job.extraction.as_ref()) {
+        let members = x
+            .sources
+            .iter()
+            .map(|s| s.member.pack)
+            .collect::<BTreeSet<_>>();
+        if x.stage == 2 && x.object.is_none() && members == ids {
+            return Ok((
+                usize::try_from(x.staged_objects).map_err(|_| storage_failed())?,
+                x.staged_bytes,
+            ));
+        }
+    }
+    let mut streams = ready
+        .iter()
+        .filter(|c| c.job.kind == Kind::Pack)
+        .map(|c| Stream {
+            pack: c.ticket.pack_id,
+            cursor: None,
+            done: false,
+            rows: VecDeque::new(),
+        })
+        .collect::<Vec<_>>();
+    let (mut objects, mut bytes) = (0usize, 0u64);
+    loop {
+        for stream in &mut streams {
+            if stream.rows.is_empty() && !stream.done {
+                let (start, end) =
+                    keys::verify_range(&repo.name, &stream.pack, Some(keys::VC_FRAME));
+                let page = store
+                    .scan(source, &start, &end, stream.cursor.as_ref(), 64)
+                    .await
+                    .map_err(|_| storage_failed())?;
+                for (key, raw) in page.entries {
+                    let Some(keys::ParsedKey::VerifyCursor { id: Some(id), .. }) =
+                        keys::parse(&key)
+                    else {
+                        return Err(storage_failed());
+                    };
+                    let frame = decode_frame(&id, &raw).map_err(|_| storage_failed())?;
+                    stream.rows.push_back((id, frame.value.decoded_size));
+                }
+                stream.done = page.next.is_none();
+                stream.cursor = page.next;
+            }
+        }
+        let Some((id, size)) = streams.iter().filter_map(|s| s.rows.front()).min().copied() else {
+            break;
+        };
+        for stream in &mut streams {
+            if stream
+                .rows
+                .front()
+                .is_some_and(|(candidate, _)| *candidate == id)
+            {
+                let (_, actual_size) = stream.rows.pop_front().ok_or_else(storage_failed)?;
+                if actual_size != size {
+                    return Err(storage_failed());
+                }
+            }
+        }
+        objects = objects.checked_add(1).ok_or_else(storage_failed)?;
+        bytes = bytes.checked_add(size).ok_or_else(storage_failed)?;
+    }
+    Ok((objects, bytes))
 }
 
 /// The history edges the fast-forward check reads (WP-4.17), in the shape the
@@ -308,6 +548,7 @@ async fn staged_commits<N: NamespaceStore>(
     ready: &[Consumed<'_>],
     head: Hash,
     cfg: IndexedConfig,
+    totals: (usize, u64),
 ) -> Result<StagedCommits, ServerError> {
     let limit = cfg
         .max_ancestry_commits
@@ -351,17 +592,12 @@ async fn staged_commits<N: NamespaceStore>(
             break;
         }
     }
+    let (objects, bytes) = totals;
     Ok(StagedCommits {
         parents,
-        objects: ready
-            .iter()
-            .map(|c| usize::try_from(c.job.entries).unwrap_or(usize::MAX))
-            .fold(0, usize::saturating_add),
+        objects,
         external_bases: BTreeSet::new(),
-        bytes: ready
-            .iter()
-            .map(|c| c.job.in_pack_bytes)
-            .fold(0, u64::saturating_add),
+        bytes,
     })
 }
 
@@ -436,7 +672,7 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
         return Err(storage_failed());
     }
     if claim_extraction_group(
-        store, source, repo, tickets, ticket_ids, &rows, clock, bound,
+        store, source, repo, tickets, ticket_ids, &rows, clock, bound, head,
     )
     .await?
     {
@@ -459,8 +695,8 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
         if let Some(VerificationV1::Rejected { code, message }) = &state {
             return Err(stored_error(code, message));
         }
-        let Some(job) = job else {
-            create_job(store, source, repo, ticket, *id, clock, None).await?;
+        let Some(mut job) = job.filter(|job| !job.gone) else {
+            create_job(store, source, repo, ticket, *id, clock, rows[2 * i].clone()).await?;
             pending = Some(pending.map_or(1_000, |p: u64| p.max(1_000)));
             continue;
         };
@@ -489,15 +725,18 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
         // Pack facts and decode charges belong to the consumed pack union.
         // Every ticket is still validated and consumed by the advance planner.
         if ready_packs.insert(ticket.pack_id) {
+            hydrate_job(store, source, &repo.name, &ticket.pack_id, &mut job)
+                .await
+                .map_err(|_| storage_failed())?;
             ready.push(Consumed { ticket, job });
         }
     }
     if let Some(ms) = pending {
         return Err(super::pending(ms));
     }
-    let decoded_total = ready.iter().fold(0_u64, |sum, held| {
-        sum.saturating_add(held.job.in_pack_bytes)
-            .saturating_add(held.job.external_bytes)
+    let totals = union_totals(store, source, repo, &ready).await?;
+    let decoded_total = ready.iter().fold(totals.1, |sum, held| {
+        sum.saturating_add(held.job.external_bytes)
     });
     if decoded_total > cfg.decode_budget {
         return Err(ServerError::invalid_argument(
@@ -730,7 +969,7 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
             return Err(packlist_error(now, list.ticket.created_at_ms, bound));
         }
     }
-    let mut staged = staged_commits(store, source, repo, &ready, head, cfg).await?;
+    let mut staged = staged_commits(store, source, repo, &ready, head, cfg, totals).await?;
     // vc6 includes every intermediate external source, even for surplus entries
     // and sources co-consumed by this advance; publication must not waive them.
     staged.external_bases = dependencies

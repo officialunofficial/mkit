@@ -321,19 +321,39 @@ pub(crate) fn register_from_env_budgeted<S: NamespaceStore>(
     let windows = MidPackCrash(R2Windows(bucket()));
     #[cfg(not(feature = "test-faults"))]
     let windows = R2Windows(bucket());
-    with_verification_timers_budgeted(
-        registry,
-        class,
-        cfg.indexed,
-        cfg.authority_fence.is_some(),
-        plan,
-        WorkerNamespaceStore::new(StubTransport::new(env.clone(), cfg.placement), probe),
-        R2BlobStore::new(bucket(), PACKS_KEYSPACE),
-        windows,
-        Arc::new(WorkerClock),
-        Arc::new(ConsoleMetrics::default()),
-        alarm_budget,
-    )
+    let Some(indexed) = cfg
+        .indexed
+        .filter(|c| c.verification == VerificationMode::Scheduled)
+    else {
+        return registry;
+    };
+    if class != ShardClass::RefShard || !plan.is_some_and(|p| p.trim().eq_ignore_ascii_case("paid"))
+    {
+        return registry;
+    }
+    let blobs = R2BlobStore::new(bucket(), PACKS_KEYSPACE);
+    registry.register(crate::purge::Budgeted {
+        handler: VerifyTimer {
+            remote: WorkerNamespaceStore::new(
+                StubTransport::new(env.clone(), cfg.placement),
+                probe,
+            ),
+            extension: R2Extraction(blobs.clone()),
+            blobs,
+            windows,
+            shards: Arc::new(D34Shards),
+            cfg: indexed,
+            limits: SliceLimits::default(),
+            lease: LeaseParams {
+                authority_fence: cfg.authority_fence.is_some(),
+                ..LeaseParams::default()
+            },
+            clock: Arc::new(WorkerClock),
+            metrics: Arc::new(ConsoleMetrics::default()),
+        },
+        budget: alarm_budget,
+        calls: 256,
+    })
 }
 
 #[cfg(test)]

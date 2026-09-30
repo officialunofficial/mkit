@@ -1,0 +1,166 @@
+# WP-4.10b-2 resource and lifetime proof (R-186)
+
+This is the extraction driver follow-up to WP-4.10b-1. It changes internal Rust
+checkpoints inside existing `vc`; it adds no tag, timer kind, relay codec, wire
+format, trait or cross-partition seam. Indexed mode remains release-default-off
+until WP-4.18. Both parts share R-186.
+
+**Working checkpoint, not acceptance:** the whole-phase resource analysis below
+does not prove completion for every valid source. A native-valid 2,002-byte member
+chunk reached through 50 separate delta packs stalls the current Scheduled
+preflight at chunk 0 / written 0. Three successive fires consume 254/255/255
+remote/R2 leaf requests and retry without advancing. The fresh consumed pack is
+421 bytes and contains a manifest, tree and commit (362 canonical bytes).
+The regression uses unchanged producer-generated index values and checks native
+first. Its failing assertion remains in `extraction_budget_tests.rs`; evidence
+is retained in the executor's `final-resource-red.log`. Bounded incremental
+member reconstruction is still required; raising the 256-call allowance or
+rejecting this otherwise valid push is not a solution. Full gates and PR2
+completion remain pending.
+
+## Whole alarm and verification calls
+
+The real RefShard registration uses `R2Extraction` only for Paid Scheduled
+indexed mode. A verification fire reserves **256 calls** from the merged alarm's
+shared **1,000-call** counter before running. There is at most one kind-7 fire per
+alarm. Stores, pack ranges and object uploads then consume its own 256-call
+counter before doing IO. Exhaustion fails the current slice; its durable cursor
+replays. The next alarm starts a new counter. Source lookup, lease renewal,
+block/hold/protection reads and retries use the same slice counter.
+
+The frozen component ledger remains Paid **889** and Free **49**, including
+24 paid expiry calls. This is not the merged alarm total: purge,
+snapshot/admin and other merged consumers also reserve from the shared
+1,000-call counter. They yield when their reservation cannot fit. Free retains
+49 of 50 calls and refuses Scheduled indexed verification; the driver cannot be
+registered there. No allowance or fire quota has increased.
+
+The approved callbacks on existing `SliceExtension` default to no-op:
+`extraction_enabled`, `begin_object`, `put_object_part`, `complete_object` and
+`abort_object`. R2 reserves at most **8 / 3 / 7 / 2** calls respectively for the
+four upload callbacks before their IO. Small object/root-bound completion
+reserves six. The generic verification registration retains `FailClosedExtraction`;
+the actual Worker environment registration uses the driver. Existing
+implementors do not change.
+
+## Whole extraction phase memory
+
+The project's allowance is **48 MiB**, not the isolate's platform limit. These
+bounds describe simultaneously live buffers, including raw storage rows and
+Worker JS copies, rather than just the final object buffer. Heap/CPU measurements
+on deployed staging remain an activation gate in WP-4.18.
+
+- **Canonical reconstruction.** Reserve two windows W, the 8 MiB LRU and eight
+  entry-sized regions E=(48 MiB-2W-8 MiB)/8. Default W=16 MiB gives E=1 MiB.
+  Source frames are checked *before* range reads: encoded length is at most
+  max(W,E)+128 bytes, decoded size is at most E, and actual dependency depth is
+  bounded. In-pack recursion strictly decreases validated chain depth. Member
+  resolution has its existing retained-canonical and bounded-frame limits.
+  Parsing, delta output, temporary bases, source object and R2 range copies fit
+  the reserved regions. An encoded frame plus the other entry buffers leaves
+  an entry-sized margin at default windows; bounded headers/body/metadata fit
+  that margin. No original decoder windows survive into later upload phases.
+- **Projection and payload reads.** At most eight raw KV values are fetched
+  together (at most 4 MiB under the 512 KiB value cap), plus one transient SQL/JS
+  row. Projection page geometry/digest and exact payload fragment lengths are
+  validated. Payload fragments are normally 128 KiB, so eight valid fragments
+  occupy 1 MiB. The sole assembled part is at most 8 MiB. Canonical source
+  scratch, bounded headers and multipart metadata are included; this phase
+  stays below 24 MiB. No whole file is assembled.
+- **Preflight and upload.** A first bounded pass reconstructs and charges
+  repository-local canonical sources, even on dedup. It computes part CVs and
+  their merged root before opening a root-pinned R-192 session. A second pass
+  reconstructs and verifies each part before passing it to R2. Native's charge
+  convention is preserved, including repeated manifest chunk occurrences;
+  replayed checkpoints cannot reset the group counter. At most 10,000 parts/CVs
+  and a 1,024-byte session are permitted by the existing multipart limits.
+- **Completion.** No part payload or original decoder window is retained.
+  Receipts are fetched eight at a time, each at most 1,089 bytes, and moved into
+  the callback. R-192's full bounded root/CV metadata is verified before backend
+  completion. A conservative ledger at 10,000 maximum-sized receipts/ETags is
+  10,890,000 receipt bytes + 0.8 MiB container space + 0.5 MiB CV capacity +
+  10,240,000 Rust ETag bytes + 0.32 MiB tuples + two 2 MiB metadata buffers +
+  20,480,000 UTF-16 JS ETag bytes: about **45.3 MiB**. Reserve another 1 MiB for
+  JS objects/array and 0.5 MiB for headers, hydrated body and temporaries:
+  **under 47 MiB**. The Worker SDK builds JS part objects directly; it does not
+  serialize the entire part array into another JSON string. The callback moves
+  receipt tags instead of duplicating another eleven MiB. CVs must match
+  exact plan geometry, and oversized receipts are rejected before accumulation.
+- **Offsets.** Manifest references are bounded by E. Offset rows are read in
+  batches of eight and decoded as exact u64s; the output starts at zero,
+  increases monotonically, and ends at the verified file length. The encoded
+  sidecar and the one-MiB streaming pieces stay inside the reconstruction
+  allowance. Empty chunks/empty manifests retain native's offsets.
+- **Advance union reporting.** Completed exact groups reuse their frozen
+  distinct-object count and canonical-byte total. Other current producer rows
+  merge sorted frame streams with one 64-row raw page at a time, retaining only
+  IDs and sizes from previous pages. The SQL lookahead is at most 65 raw rows,
+  32.5 MiB, plus one transient JS row and small heads/guards: below 35 MiB.
+  The DO/SQL adapter moves raw values into KV values, without cloning a whole
+  page or retaining a complete JS row array.
+
+A real 8 MiB+99-byte multipart driver test observes PREFLIGHT, UPLOAD and COMPLETE
+using at most eight raw rows. Native-oracle tests cover charge stability, exact
+union counts/bytes and duplicate-byte decode-budget boundaries. Corrupt checkpoint
+counters, cursors and frame geometry fail closed before oversized allocation.
+
+## Apply bounds and immutable job facts
+
+All applies retain the existing **100-operation** and **1 MiB** caps. Auxiliary
+writes split at the actual store's validated operation/byte limit, with the exact
+owning header and NotAfter. Final checkpoint/protection/relay plans retain exact
+observations and deadlines. Generic current 96-effect relays still work.
+
+The vc0 header is versioned, bounded by **16 KiB**, and contains state, generation
+and immutable body identity. Completed satisfying-member/MKPL lists are a separate
+content-addressed vc4 body. Any header mutation advances generation; a body change
+writes another immutable body and advances generation in the same apply. Cleanup
+first CASes the header to a Gone tombstone and retains that generation forever.
+It cannot erase a reused live generation or permit same-ticket ABA.
+
+Peer reuse guards only peer headers. Seven ready groups each with six other
+peers need at most 49 distinct observed headers; allowing seven rewritten
+headers gives 56 x 16 KiB = **917,504 bytes**, leaving **131,072 bytes** for bounded
+keys, tickets/state observations and timers. Exact Batch validation remains the
+final check. Actual six-group/256-member fixture measurements are recorded in the
+PR body; the complete immutable bodies never enter peer guards.
+
+Cleanup retains facts for a matching unfinished peer while its ticket is live or
+an object is already started/draining. Ticketless pre-effect peers do not retain
+each other forever. The Gone CAS guards peer headers and observed ticket presence
+or absence, so a concurrent claim or revived ticket defeats stale cleanup.
+
+## Group, closure and ticket decisions
+
+Selection uses the complete ordered consumed union, with first-pack ownership,
+chunk-only Blob exclusion, direct file references and already-Verified sources.
+The group's closure, dependencies, satisfying members, packlists and head are
+validated before the first hold/protection/upload effect. Missing unstaged content
+waits only through its source owner's allowed membership lag, then reports
+native's closure error. A genuinely later member can retry that pre-effect error.
+Started objects retain their durable progress on terminal failure.
+
+Distinct tickets naming the same pack are all validated and consumed normally.
+Pack facts, extraction ownership and counts are deduplicated by pack ID; the
+first consumed ticket owns extraction. The immutable native object union also
+deduplicates canonical IDs and byte totals across different packs. External-base
+charges retain R-171's conservative per-pack convention; extraction member-source
+charges retain native's per-occurrence convention. Neither duplicate ticket can
+cause a second extraction or release another ticket's protection.
+
+The group charge identity excludes the changing immutable member-list body ID;
+body observations still guard closure/freeze. Adding a satisfying member cannot
+reset charges accumulated by another owner. Frozen source identity includes pack,
+ticket, length, age, ETag, version and decoded facts. Exact header observations
+prove its lifetime, including benign post-freeze member-list growth.
+
+Fresh block/deleting checks precede effects. Lease renewal precedes protection,
+part publication, object/root-bound commit and holder enqueue; a lost lease
+fails closed. Queued holder delivery can drain beyond ticket expiry/ordinary TTL
+under durable gp, while holds are renewed. Verify follows target holder delivery.
+The frozen target hook handles duplicate delivery, conservative counts and late
+blocked durable takedown requests; request execution remains WP-5.6a.
+
+Launch retains permanent objects, has no GC-enabling path and keeps GC off.
+No migration, old-build compatibility, GC machinery or new protocol foundation
+is introduced.

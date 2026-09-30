@@ -56,6 +56,8 @@ use mkit_core::transfer::decode_packlist;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
+mod extraction;
+
 /// Fixed work units of one slice. A Worker fixes them for its plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SliceLimits {
@@ -107,9 +109,8 @@ const WATCH_POLL_MS: u64 = 3_600_000;
 /// Distinct member packs one job may depend on.
 const MAX_SATISFYING: usize = index::MAX_LOOKUP_IDS;
 
-/// The extraction seam of the `Extract` phase. WP-4.10b implements
-/// extraction on Workers; until then the default fails closed so `Verified`
-/// still implies "extracted" (R-163).
+/// The existing extraction extension of the `Extract` phase. Enabled Workers
+/// use the internal upload callbacks; the disconnected default fails closed.
 pub trait SliceExtension: crate::MaybeSend + crate::MaybeSync {
     /// Whether `object` must be extracted into the object store before its
     /// pack is `Verified`.
@@ -335,6 +336,7 @@ impl DeltaBaseSource for CacheBases<'_> {
 /// Per-slice memory: nothing in it is authoritative, rows are.
 #[derive(Default)]
 struct SliceState {
+    guards: Vec<Precondition>,
     job_guard: Option<Value>,
     cache: Lru,
     memo: MemberCache,
@@ -417,22 +419,39 @@ where
         fired
     }
 
+    #[allow(clippy::too_many_lines)] // Phase results and their guarded checkpoint commit together.
     async fn slice_inner(&self, timer: &DueTimer) -> Result<Fired, StoreError> {
         let (job, state) =
             checkpoint::read_job(self.local, self.source, &self.repo.name, &self.pack).await?;
         let Some((mut job, mut raw)) = job else {
             return self.cleanup(timer, None, None).await;
         };
+        if job.gone {
+            return self.cleanup(timer, Some(raw), None).await;
+        }
         let ticket = match self
             .local
             .get(self.source, &keys::ticket(&job.ticket_id))
             .await?
         {
-            Some(value) => decode_ticket(&value)?,
+            Some(value) => Some(decode_ticket(&value)?),
+            None if job.phase == Phase::Extract
+                && job.extraction.as_ref().is_some_and(|x| x.object.is_some()) =>
+            {
+                None
+            }
             None => return self.cleanup(timer, Some(raw), Some(job.ticket_id)).await,
         };
         if job.phase == Phase::Watch {
-            return Ok(self.watch(timer, job, raw, state.is_none(), &ticket));
+            return self.watch(
+                timer,
+                job,
+                &raw,
+                state.is_none(),
+                ticket
+                    .as_ref()
+                    .ok_or_else(|| StoreError::Corrupt("missing watch ticket".into()))?,
+            );
         }
         if matches!(
             job.phase,
@@ -461,7 +480,7 @@ where
             && job.phase != ran
             && job.phase != Phase::Watch
             // Enter guarded lookup phases from a durable phase checkpoint.
-            && !matches!(job.phase, Phase::ClosureResolve | Phase::Recheck)
+            && !matches!(job.phase, Phase::ClosureResolve | Phase::Recheck | Phase::Extract)
             && chained < 6
             && self.budget.remaining() >= ENTRY_RESERVE
         {
@@ -507,7 +526,7 @@ where
         self.flush(&mut st).await?;
         let mut batch = Batch::new()
             .require(Precondition::NotAfter(self.deadline()))
-            .require(Precondition::Equals(self.job_key(), raw));
+            .require(Precondition::Equals(self.job_key(), raw.clone()));
         let vs = keys::verification(&self.repo.name, &self.pack);
         batch = batch.require(match held.or_else(|| state.map(|(_, raw)| raw)) {
             Some(raw) => Precondition::Equals(vs, raw),
@@ -516,7 +535,10 @@ where
         // Closure deletions and the satisfying-pack list commit together.
         // A crash cannot discard the row before recording its dependency.
         batch.writes.extend(st.settled);
-        Ok(self.reschedule(timer, delay, batch.put(self.job_key(), encode_job(&job))))
+        batch.preconditions.extend(st.guards);
+        let batch =
+            checkpoint::write_job(batch, &mut job, Some(&raw), &self.repo.name, &self.pack)?;
+        Ok(self.reschedule(timer, delay, batch))
     }
 
     /// A finished job waits for its ticket to close; the timer's next look is
@@ -526,24 +548,30 @@ where
         &self,
         timer: &DueTimer,
         mut job: VerifyJobV1,
-        raw: Value,
+        raw: &Value,
         vs_missing: bool,
         ticket: &TicketV1,
-    ) -> Fired {
-        if vs_missing && job.outcome.is_none() {
-            job.restart();
+    ) -> Result<Fired, StoreError> {
+        let resume = job.closure_retry();
+        if resume || (vs_missing && job.outcome.is_none()) {
+            if resume {
+                job.phase = Phase::Extract;
+            } else {
+                job.restart();
+            }
             let batch = Batch::new()
                 .require(Precondition::NotAfter(self.deadline()))
-                .require(Precondition::Equals(self.job_key(), raw))
-                .put(self.job_key(), encode_job(&job));
-            return self.reschedule(timer, 0, batch);
+                .require(Precondition::Equals(self.job_key(), raw.clone()));
+            let batch =
+                checkpoint::write_job(batch, &mut job, Some(raw), &self.repo.name, &self.pack)?;
+            return Ok(self.reschedule(timer, 0, batch));
         }
         let delay = ticket
             .expires_at_ms
             .saturating_add(1)
             .saturating_sub(self.now)
             .min(WATCH_POLL_MS);
-        self.reschedule(timer, delay, Batch::new())
+        Ok(self.reschedule(timer, delay, Batch::new()))
     }
 
     fn reschedule(&self, timer: &DueTimer, delay_ms: u64, batch: Batch) -> Fired {
@@ -579,11 +607,11 @@ where
             }
         }
         job.attempts += 1;
-        let next = encode_job(job);
         let batch = Batch::new()
             .require(Precondition::NotAfter(self.deadline()))
-            .require(Precondition::Equals(self.job_key(), raw.clone()))
-            .put(self.job_key(), next.clone());
+            .require(Precondition::Equals(self.job_key(), raw.clone()));
+        let batch = checkpoint::write_job(batch, job, Some(raw), &self.repo.name, &self.pack)?;
+        let next = encode_job(job);
         Ok(matches!(
             self.local.apply(self.source, batch).await?,
             BatchOutcome::Committed
@@ -657,6 +685,67 @@ where
         mut job: Option<Value>,
         ticket: Option<Hash>,
     ) -> Result<Fired, StoreError> {
+        let mut peer_guards = Vec::new();
+        if let Some(raw) = &job {
+            let current = checkpoint::decode_job(raw)?;
+            for member in &current.extraction_group {
+                if member.pack == self.pack {
+                    continue;
+                }
+                let key = keys::verify_job(&self.repo.name, &member.pack);
+                if let Some(raw) = self.local.get(self.source, &key).await? {
+                    let peer = checkpoint::decode_job(&raw)?;
+                    if peer.extraction_group == current.extraction_group
+                        && !peer.gone
+                        && !peer.usable()
+                        && (peer.outcome.is_none() || peer.closure_retry())
+                    {
+                        let ticket_key = keys::ticket(&peer.ticket_id);
+                        let ticket_raw = self.local.get(self.source, &ticket_key).await?;
+                        let live = ticket_raw
+                            .as_ref()
+                            .map(decode_ticket)
+                            .transpose()?
+                            .is_some_and(|t| t.expires_at_ms > self.now);
+                        if live || peer.extraction.as_ref().is_some_and(|x| x.object.is_some()) {
+                            return Ok(self.reschedule(timer, 1_000, Batch::new()));
+                        }
+                        peer_guards.push(match ticket_raw {
+                            Some(raw) => Precondition::Equals(ticket_key, raw),
+                            None => Precondition::Absent(ticket_key),
+                        });
+                    }
+                    peer_guards.push(Precondition::Equals(key, raw));
+                } else {
+                    peer_guards.push(Precondition::Absent(key));
+                }
+            }
+        }
+        if let Some(raw) = &job
+            && !checkpoint::decode_job(raw)?.gone
+        {
+            let mut gone = VerifyJobV1 {
+                gone: true,
+                members_loaded: true,
+                ..VerifyJobV1::default()
+            };
+            let mut batch = Batch::new()
+                .require(Precondition::NotAfter(self.deadline()))
+                .require(Precondition::Equals(self.job_key(), raw.clone()));
+            batch.preconditions.extend(peer_guards);
+            if let Some(id) = ticket {
+                batch = batch.require(Precondition::Absent(keys::ticket(&id)));
+            }
+            let batch =
+                checkpoint::write_job(batch, &mut gone, Some(raw), &self.repo.name, &self.pack)?;
+            if !matches!(
+                self.local.apply(self.source, batch).await?,
+                BatchOutcome::Committed
+            ) {
+                return Err(StoreError::Unavailable("cleanup header contended".into()));
+            }
+            job = Some(encode_job(&gone));
+        }
         let (start, end) = keys::verify_range(&self.repo.name, &self.pack, None);
         for _ in 0..CLEANUP_ROUNDS {
             let page = self
@@ -672,7 +761,9 @@ where
                 batch = batch.require(Precondition::Absent(keys::ticket(&id)));
             }
             for (key, _) in &page.entries {
-                batch = batch.delete(key.clone());
+                if *key != self.job_key() {
+                    batch = batch.delete(key.clone());
+                }
             }
             if page.next.is_none() {
                 let member = self
@@ -698,9 +789,6 @@ where
                 return Err(StoreError::Unavailable(
                     "verification cleanup contended".into(),
                 ));
-            }
-            if page.entries.iter().any(|(key, _)| *key == self.job_key()) {
-                job = None;
             }
         }
         Ok(self.reschedule(timer, 0, Batch::new()))
@@ -734,6 +822,9 @@ where
             Phase::EmitIndex => self.emit(job).await,
             Phase::AwaitDelivery => self.await_delivery(job).await,
             Phase::Extract => {
+                if self.h.extension.extraction_enabled() {
+                    return self.extraction(st, job).await;
+                }
                 if job.extract_needed {
                     return Err(Stop::Outcome(Outcome::ExtractionUnavailable));
                 }
@@ -1137,14 +1228,27 @@ where
                 .filter(|row| row.value.frame_offset < before)
             {
                 Some(row) => {
+                    let limits = self.decode_limits();
+                    let maximum = self.h.limits.window_bytes.max(limits.max_decoded_bytes);
+                    if row.value.frame_length > maximum.saturating_add(128)
+                        || row.value.decoded_size > limits.max_decoded_bytes
+                        || row.value.chain_depth > self.h.cfg.max_delta_chain_depth
+                    {
+                        return Err(StoreError::Corrupt("invalid source frame".into()).into());
+                    }
                     if let Some(next) = row.value.delta_base {
+                        if self.frame_row(st, &next).await?.is_some_and(|p| {
+                            p.value.frame_offset < row.value.frame_offset
+                                && p.value.chain_depth >= row.value.chain_depth
+                        }) {
+                            return Err(StoreError::Corrupt("invalid source chain".into()).into());
+                        }
                         self.ensure_base(st, job, next, row.value.frame_offset)
                             .await?;
                     }
                     let window = self
                         .read(job, row.value.frame_offset, row.value.frame_length)
                         .await?;
-                    let limits = self.decode_limits();
                     let (id, bytes) = decode_frame_with(
                         &window.bytes,
                         job.version,

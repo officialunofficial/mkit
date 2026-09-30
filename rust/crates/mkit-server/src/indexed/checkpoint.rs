@@ -13,7 +13,7 @@ use crate::store::{
     index::{IndexEntry, IndexValue},
     keys,
 };
-use crate::{NamespaceStore, Partition, StoreError, Value};
+use crate::{Batch, NamespaceStore, Partition, StoreError, Value};
 use mkit_core::hash::Hash;
 use serde::{Deserialize, Serialize};
 
@@ -95,12 +95,20 @@ pub enum Outcome {
     BaseCapped,
     /// A closure lookup hit an index cap.
     ClosureCapped,
+    /// Whole-group closure was still open after the membership lag window.
+    ClosureMissing,
+    /// A named pack was still not a member after the membership lag window.
+    PacklistMissing,
+    /// The claimed head has a type that cannot be a history tip.
+    OpenClosure,
     /// In-pack plus external chain depth passed the cap.
     ExternalTooDeep,
     /// The decode budget, or one object past the Worker's resident cap.
     DecodeBudget,
     /// The pack needs extraction, which the Worker cannot do yet (WP-4.10b).
     ExtractionUnavailable,
+    /// A selected object became blocked before a holder could be queued.
+    ObjectBlocked,
 }
 
 /// One immutable member of the Advance that claimed an extraction group.
@@ -123,7 +131,22 @@ pub struct ExtractionGroupMember {
 /// The persisted state of one job, guarded by `vc` sub-class 0.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)] // Independent pack facts, lifetime and hydration markers.
 pub struct VerifyJobV1 {
+    /// Monotone across every mutation and retained Gone header.
+    pub generation: u64,
+    /// Cleanup retained this header after deleting its facts and bodies.
+    pub gone: bool,
+    /// Immutable satisfying-member and packlist body in this pack's vc4 range.
+    pub member_body_id: Option<Hash>,
+    /// Only hydrated jobs may replace the member lists.
+    #[serde(skip)]
+    pub members_loaded: bool,
+    /// First consuming Advance's immutable head, checked before effects.
+    pub extraction_head: Option<Hash>,
+    /// Bounded extraction cursors; bulk parts, receipts and offsets stay in vc4.
+    #[serde(default)]
+    pub extraction: Option<ExtractionV1>,
     /// Ordered, atomically claimed first-Advance extraction context. Standalone
     /// jobs await a consuming Advance before an extraction group is claimed.
     #[serde(default)]
@@ -173,18 +196,92 @@ pub struct VerifyJobV1 {
     /// Whether the current closure pass is the final recheck.
     pub final_pass: bool,
     /// Distinct member packs that satisfied a child.
+    #[serde(skip)]
     pub satisfying: Vec<Hash>,
     /// The last relay sequence this job enqueued.
     pub last_relay_seq: Option<u64>,
     /// When the final closure recheck finished.
     pub closure_final_at_ms: Option<u64>,
     /// The packs a packlist names.
+    #[serde(skip)]
     pub packlist: Vec<Hash>,
     /// A terminal non-persisted result.
     pub outcome: Option<Outcome>,
 }
 
+/// Resumable driver progress. Every bulk row is keyed by the frozen group digest.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtractionV1 {
+    /// Immutable decoded member descriptors captured before effects.
+    pub sources: Vec<ExtractionSource>,
+    /// Domain separated group identity.
+    pub group: Hash,
+    /// Scan, selection, source verification, upload, offsets, enqueue or delivery.
+    pub stage: u8,
+    /// Group scan's member cursor.
+    pub member: usize,
+    /// Frame scan cursor.
+    #[serde(with = "hex::bytes")]
+    pub scan: Vec<u8>,
+    /// Distinct canonical objects in the frozen group.
+    pub staged_objects: u64,
+    /// Union canonical bytes.
+    pub staged_bytes: u64,
+    /// Union selected content bytes.
+    pub selected_bytes: u64,
+    /// Current selected object.
+    pub object: Option<Hash>,
+    /// Declared current object length.
+    pub length: u64,
+    /// Next chunk to resolve.
+    pub chunk: u32,
+    /// Bytes already consumed from the current canonical chunk.
+    pub chunk_offset: u64,
+    /// Verified content bytes stored in bounded local fragments.
+    pub written: u64,
+    /// Parts whose CV was computed.
+    pub cvs: u32,
+    /// Content root computed before any publication.
+    pub root: Option<Hash>,
+    /// Root pinned opaque backend session.
+    #[serde(with = "hex::bytes")]
+    pub session: Vec<u8>,
+    /// Parts committed to the backend.
+    pub uploaded: u32,
+    /// Atomic holder outbox sequence.
+    pub relay: Option<u64>,
+}
+
+/// Identity of one verified source's selection facts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtractionSource {
+    /// Ordered immutable group member.
+    pub member: ExtractionGroupMember,
+    /// Bounded content addressed `ETag` token.
+    pub etag: Option<String>,
+    /// Canonical source pack version.
+    pub version: u32,
+    /// Completed frame count.
+    pub entries: u64,
+    /// Canonical bytes this source decoded.
+    pub decoded: u64,
+    /// Immutable member lists validated by the frozen closure barrier.
+    pub member_body_id: Option<Hash>,
+}
+
 impl VerifyJobV1 {
+    pub(super) fn closure_retry(&self) -> bool {
+        matches!(
+            self.outcome,
+            Some(Outcome::ClosureMissing | Outcome::PacklistMissing | Outcome::BaseCapped)
+        ) && self
+            .extraction
+            .as_ref()
+            .is_some_and(|x| x.object.is_none() && (x.stage <= 2 || (10..=13).contains(&x.stage)))
+    }
+
     /// A job for `ticket`, at the start of `Decode`.
     #[must_use]
     pub fn new(ticket_id: Hash, created_at_ms: u64, pack_len: u64, entry_cap: u32) -> Self {
@@ -194,6 +291,7 @@ impl VerifyJobV1 {
             pack_len,
             entry_cap,
             closure_cap: 4,
+            members_loaded: true,
             ..Self::default()
         }
     }
@@ -209,6 +307,7 @@ impl VerifyJobV1 {
         *self = Self {
             restarts: self.restarts.saturating_add(1),
             extraction_group: self.extraction_group.clone(),
+            extraction_head: self.extraction_head,
             ..fresh
         };
     }
@@ -216,7 +315,7 @@ impl VerifyJobV1 {
     /// Whether an advance may rely on the pack: verified, extracted, indexed.
     #[must_use]
     pub fn usable(&self) -> bool {
-        self.outcome.is_none() && matches!(self.phase, Phase::Recheck | Phase::Watch)
+        !self.gone && self.outcome.is_none() && matches!(self.phase, Phase::Recheck | Phase::Watch)
     }
 }
 
@@ -236,7 +335,147 @@ pub fn decode_job(value: &Value) -> Result<VerifyJobV1, StoreError> {
     let Some((&CODEC_V1, body)) = value.as_bytes().split_first() else {
         return Err(StoreError::Corrupt("bad verification job version".into()));
     };
-    serde_json::from_slice(body).map_err(|_| StoreError::Corrupt("bad verification job".into()))
+    let job: VerifyJobV1 = serde_json::from_slice(body)
+        .map_err(|_| StoreError::Corrupt("bad verification job".into()))?;
+    validate_header(&job, value)?;
+    Ok(job)
+}
+
+/// Every guarded header is small even with seven source snapshots. Window
+/// cursors are at most 4KiB; extraction starts only after that cursor clears.
+pub const MAX_JOB_HEADER_BYTES: usize = 16 << 10;
+
+fn validate_header(job: &VerifyJobV1, raw: &Value) -> Result<(), StoreError> {
+    let bounded = raw.as_bytes().len() <= MAX_JOB_HEADER_BYTES
+        && job.cursor.len() <= 4096
+        && job.scan.len() <= 324
+        && job.etag.as_ref().is_none_or(|e| e.len() <= 64)
+        && job.extraction_group.len() <= crate::store::outbox::MAX_TICKETS_PER_ADVANCE
+        && job.extraction.as_ref().is_none_or(|x| {
+            job.cursor.is_empty()
+                && x.scan.len() <= 324
+                && x.session.len() <= 1024
+                && x.cvs <= 10_000
+                && x.uploaded <= 10_000
+                && x.stage <= 13
+                && x.member <= x.sources.len()
+                && x.sources.len() <= crate::store::outbox::MAX_TICKETS_PER_ADVANCE
+                && x.sources
+                    .iter()
+                    .all(|s| s.etag.as_ref().is_none_or(|e| e.len() <= 64))
+        });
+    if bounded {
+        Ok(())
+    } else {
+        Err(StoreError::Corrupt("oversized job header".into()))
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemberLists {
+    satisfying: Vec<Hash>,
+    packlist: Vec<Hash>,
+}
+
+fn member_id(bytes: &[u8]) -> Hash {
+    let mut h = mkit_core::hash::Hasher::new();
+    h.update(b"mkit-job-members:v1");
+    h.update(bytes);
+    h.finalize()
+}
+fn member_key(repo: &RepoName, pack: &Hash, id: &Hash) -> crate::Key {
+    keys::verify_row(repo, pack, keys::VC_CANDIDATE, Some(id))
+}
+
+/// Append a generation-bumped header and, only when changed, its immutable
+/// lists. The caller must guard the exact prior header and its deadline.
+pub fn write_job(
+    mut batch: Batch,
+    job: &mut VerifyJobV1,
+    prior: Option<&Value>,
+    repo: &RepoName,
+    pack: &Hash,
+) -> Result<Batch, StoreError> {
+    let old = prior.map(decode_job).transpose()?;
+    job.generation = old
+        .as_ref()
+        .map_or(0, |j| j.generation)
+        .checked_add(1)
+        .ok_or_else(|| StoreError::Corrupt("job generation overflow".into()))?;
+    let old_body = old.as_ref().and_then(|j| j.member_body_id);
+    if job.members_loaded {
+        if job.satisfying.len() > crate::store::index::MAX_LOOKUP_IDS
+            || job.packlist.len()
+                > crate::store::index::MAX_LOOKUP_IDS
+                    + crate::store::outbox::MAX_TICKETS_PER_ADVANCE
+        {
+            return Err(StoreError::Corrupt("oversized job member lists".into()));
+        }
+        job.member_body_id = if job.satisfying.is_empty() && job.packlist.is_empty() {
+            None
+        } else {
+            let mut bytes = vec![CODEC_V1];
+            serde_json::to_writer(
+                &mut bytes,
+                &MemberLists {
+                    satisfying: job.satisfying.clone(),
+                    packlist: job.packlist.clone(),
+                },
+            )
+            .map_err(StoreError::unavailable)?;
+            let id = member_id(&bytes);
+            if Some(id) != old_body {
+                batch = batch.put(member_key(repo, pack, &id), Value::new(bytes));
+            }
+            Some(id)
+        };
+    } else if job.member_body_id != old_body {
+        return Err(StoreError::Corrupt(
+            "unloaded job member lists changed".into(),
+        ));
+    }
+    let header = encode_job(job);
+    validate_header(job, &header)?;
+    Ok(batch.put(keys::verify_job(repo, pack), header))
+}
+
+/// Hydrate a header without expanding any peer's guarded value. Bodies are
+/// content addressed and remain immutable until the job's guarded cleanup.
+pub async fn hydrate_job<S: NamespaceStore>(
+    store: &S,
+    source: &Partition,
+    repo: &RepoName,
+    pack: &Hash,
+    job: &mut VerifyJobV1,
+) -> Result<(), StoreError> {
+    if !job.gone
+        && let Some(id) = job.member_body_id
+    {
+        let raw = store
+            .get(source, &member_key(repo, pack, &id))
+            .await?
+            .ok_or_else(|| StoreError::Unavailable("job member body disappeared".into()))?;
+        let Some((&CODEC_V1, bytes)) = raw.as_bytes().split_first() else {
+            return Err(StoreError::Corrupt("bad job member body version".into()));
+        };
+        if member_id(raw.as_bytes()) != id {
+            return Err(StoreError::Corrupt("bad job member body digest".into()));
+        }
+        let lists: MemberLists = serde_json::from_slice(bytes)
+            .map_err(|_| StoreError::Corrupt("bad job member body".into()))?;
+        if lists.satisfying.len() > crate::store::index::MAX_LOOKUP_IDS
+            || lists.packlist.len()
+                > crate::store::index::MAX_LOOKUP_IDS
+                    + crate::store::outbox::MAX_TICKETS_PER_ADVANCE
+        {
+            return Err(StoreError::Corrupt("oversized job member body".into()));
+        }
+        job.satisfying = lists.satisfying;
+        job.packlist = lists.packlist;
+    }
+    job.members_loaded = true;
+    Ok(())
 }
 
 /// A pack entry as the job recorded it. First occurrence wins.
@@ -359,9 +598,15 @@ pub async fn read_job<S: NamespaceStore>(
         .await?;
     let [job, state] = <[_; 2]>::try_from(rows)
         .map_err(|_| StoreError::Corrupt("short verification read".into()))?;
+    let job = if let Some(raw) = job {
+        let mut job = decode_job(&raw)?;
+        hydrate_job(store, source, repo, pack, &mut job).await?;
+        Some((job, raw))
+    } else {
+        None
+    };
     Ok((
-        job.map(|raw| decode_job(&raw).map(|job| (job, raw)))
-            .transpose()?,
+        job,
         state
             .map(|raw| super::state::decode(&raw).map(|state| (state, raw)))
             .transpose()?,
@@ -378,7 +623,10 @@ mod tests {
         job.cursor = vec![0xab, 0x01];
         job.satisfying = vec![[2; 32]];
         job.outcome = Some(Outcome::BaseMissing);
-        assert_eq!(decode_job(&encode_job(&job)).unwrap(), job);
+        let header = decode_job(&encode_job(&job)).unwrap();
+        assert!(header.satisfying.is_empty());
+        assert!(!header.members_loaded);
+        assert_eq!(header.outcome, job.outcome);
         assert!(decode_job(&Value::new(b"\x02{}".to_vec())).is_err());
         let frame = FrameRow {
             value: IndexValue {
