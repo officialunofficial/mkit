@@ -57,6 +57,8 @@ pub mod do_sql;
 #[cfg(feature = "test-faults")]
 pub mod faults;
 pub mod hooks;
+#[cfg(feature = "http-objects")]
+pub mod http_mount;
 pub mod naming;
 pub mod ns_client;
 pub mod ns_object;

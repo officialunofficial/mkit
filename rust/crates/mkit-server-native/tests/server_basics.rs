@@ -106,7 +106,7 @@ impl NamespaceStore for SlowKv {
 fn pipeline<N: NamespaceStore + 'static>(
     meta: N,
     auth: AuthMode,
-) -> Arc<Pipeline<MemoryBlobStore, N, Hooks>> {
+) -> Arc<Pipeline<MemoryBlobStore, Arc<N>, Hooks>> {
     let repo = RepoId {
         namespace: NamespaceKey::deployment_default(),
         name: RepoName::new("default").unwrap(),
@@ -118,7 +118,7 @@ fn pipeline<N: NamespaceStore + 'static>(
     let cfg = PipelineConfig::new(Addressing::Single { repo }, auth, limits);
     let pipe = Pipeline::new(
         MemoryBlobStore::default(),
-        meta,
+        Arc::new(meta),
         Hooks::new(),
         cfg,
         Arc::new(SystemClock),
@@ -350,7 +350,7 @@ async fn cors_preflight_allows_payment_headers_and_never_reaches_admission() {
         Some(mkit_server::upload::token::TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap());
     let pipe = Pipeline::new(
         MemoryBlobStore::default(),
-        MemoryKv::default(),
+        Arc::new(MemoryKv::default()),
         hooks,
         cfg,
         Arc::new(SystemClock),

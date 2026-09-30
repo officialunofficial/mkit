@@ -25,6 +25,8 @@ workspace = true
 
 [features]
 default = ["sqlite", "http", "s3", "enc", "hooks"]
+# Stage 2 only: explicit programmatic configuration and mount opt-in also required.
+http-objects = ["http", "mkit-server/http-objects"]
 # Test-only timer handlers and pipeline directives; absent from release builds.
 test-faults = ["mkit-server/test-faults"]
 # `S3BlobStore`: content-addressed blobs in an S3-compatible bucket, signed

@@ -61,6 +61,9 @@ pub struct RouterOptions {
     /// Headers whose values never reach a trace: [`mkit_server::NEVER_LOG`]
     /// plus the deployment's extras.
     pub redactor: Redactor,
+    /// Explicit Stage 2 HTTP mount opt-in; also requires indexed HTTP configuration.
+    #[cfg(feature = "http-objects")]
+    pub http_objects: Option<mkit_server::http_objects::mount::HttpMountOptions>,
 }
 
 impl Default for RouterOptions {
@@ -75,6 +78,8 @@ impl Default for RouterOptions {
             cors_extra_allow_headers: Vec::new(),
             cors_expose_headers: Vec::new(),
             redactor: Redactor::default(),
+            #[cfg(feature = "http-objects")]
+            http_objects: None,
         }
     }
 }
@@ -105,7 +110,7 @@ const LONG: [Procedure; 1] = [Procedure::CompleteUpload];
 /// # use std::sync::Arc;
 /// # use mkit_server::pipeline::{Hooks, Pipeline};
 /// # use mkit_server::{MemoryBlobStore, MemoryKv};
-/// # fn demo(pipeline: Arc<Pipeline<MemoryBlobStore, MemoryKv, Hooks>>) {
+/// # fn demo(pipeline: Arc<Pipeline<MemoryBlobStore, Arc<MemoryKv>, Hooks>>) {
 /// use mkit_server_native::{RouterOptions, build_router};
 ///
 /// let mkit = build_router(pipeline, &RouterOptions::default());
@@ -121,7 +126,7 @@ const LONG: [Procedure; 1] = [Procedure::CompleteUpload];
 pub fn build_router<B, N, H>(pipeline: Arc<Pipeline<B, N, H>>, opts: &RouterOptions) -> axum::Router
 where
     B: MultipartBlobStore + 'static,
-    N: NamespaceStore + 'static,
+    N: NamespaceStore + Clone + 'static,
     H: HookSet + 'static,
 {
     let bearer = match pipeline.auth_mode() {
@@ -132,7 +137,7 @@ where
         .with_deadline_policy(layers::deadline_policy(opts.unary_timeout, false));
     let streaming = mkit_server::connect::service(Arc::clone(&pipeline))
         .with_deadline_policy(layers::deadline_policy(opts.stream_timeout, true));
-    let long = mkit_server::connect::service(pipeline)
+    let long = mkit_server::connect::service(Arc::clone(&pipeline))
         .with_deadline_policy(layers::deadline_policy(opts.stream_timeout, false));
     let router = STREAMING
         .iter()
@@ -145,5 +150,19 @@ where
             router.route_service(procedure.connect_path(), long.clone())
         })
         .fallback_service(unary);
-    layers::apply(router, opts, bearer.as_deref())
+    let cap = crate::guard::CapLayer::new(opts.max_concurrency, opts.queue_timeout);
+    #[cfg(feature = "http-objects")]
+    if let Some(mount) = &opts.http_objects
+        && pipeline.http_objects_enabled()
+    {
+        let router = layers::apply(router, opts, bearer.as_deref(), None);
+        return crate::http_mount::mount(
+            router,
+            pipeline,
+            mount.clone(),
+            opts.redactor.clone(),
+            cap,
+        );
+    }
+    layers::apply(router, opts, bearer.as_deref(), Some(cap))
 }
