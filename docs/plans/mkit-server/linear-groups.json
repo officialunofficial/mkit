@@ -160,7 +160,8 @@
    "2.8",
    "2.9",
    "2.11",
-   "2.12"
+   "2.12",
+   "2.16"
   ]
  },
  {
@@ -193,8 +194,11 @@
   "wps": [
    "3.6",
    "3.7",
+   "3.7b",
    "3.8",
    "3.9",
+   "3.9b",
+   "3.9c",
    "3.14"
   ]
  },
@@ -261,10 +265,13 @@
  {
   "key": "G22",
   "ms": "M5 Lifecycle",
-  "title": "M5: published view and quarantine (ContentInspector)",
+  "title": "M5: launch published view, inspector/hit handoff and publication Events; post-launch takedown completion",
   "wps": [
    "5.4",
-   "5.5"
+   "5.5",
+   "5.5a",
+   "5.5b",
+   "5.15"
   ]
  },
  {
@@ -295,7 +302,7 @@
  {
   "key": "G25",
   "ms": "Release",
-  "title": "M5 exit conformance and Stage 2 release to main",
+  "title": "Post-launch follow-ups and M5 exit conformance (R-185)",
   "wps": [
    "5.13",
    "REL-2"
@@ -304,7 +311,7 @@
  {
   "key": "G26",
   "ms": "Release",
-  "title": "Stage 1 release to main (0.5.0, core profile)",
+  "title": "Single Workers launch for Uno (0.5.0, R-185)",
   "wps": [
    "REL-1"
   ]

@@ -7,10 +7,12 @@
 //! raise it. During recovery, a rebuilt missing row can precede shard installation;
 //! the lr hold-off fences completion until every surviving old deadline has passed.
 
+use super::ShardMap;
 use crate::op::{Creation, Operation};
 use crate::quota::NamespaceUsage;
 use crate::relay::relay_watermark;
-use crate::repo::Addressing;
+use crate::repo::{Addressing, RepoId, RepoName};
+use crate::rt::Clock;
 use crate::store::{
     Batch, BatchOutcome, MultipartBlobStore, NamespaceStore, Partition, Precondition, StoreError,
     Value, codec, keys,
@@ -108,17 +110,54 @@ struct LeaseGrant {
 // Keep grant retries local to this path; creation has a different retry bound.
 const LEASE_GRANT_ATTEMPTS: usize = 8;
 
+/// The lease timing a grant needs, apart from the rest of the pipeline's
+/// configuration, so the relay seam ([`renew_for_relay`]) can run without a
+/// pipeline. Defaults equal [`super::PipelineConfig::new`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaseParams {
+    /// Require the independent authority generation in the shared lease lifecycle.
+    pub authority_fence: bool,
+    /// Coordinator epoch lease duration, in milliseconds.
+    pub epoch_lease_ms: u64,
+    /// Clock-skew safety margin, in milliseconds.
+    pub lease_margin_ms: u64,
+    /// Minimum useful lease budget before renewing, in milliseconds.
+    pub min_lease_budget_ms: u64,
+}
+
+impl Default for LeaseParams {
+    fn default() -> Self {
+        Self {
+            authority_fence: false,
+            epoch_lease_ms: 30_000,
+            lease_margin_ms: 5_000,
+            min_lease_budget_ms: 1_000,
+        }
+    }
+}
+
+impl From<&super::PipelineConfig> for LeaseParams {
+    fn from(cfg: &super::PipelineConfig) -> Self {
+        Self {
+            authority_fence: cfg.authority_fence.is_some(),
+            epoch_lease_ms: cfg.epoch_lease_ms,
+            lease_margin_ms: cfg.lease_margin_ms,
+            min_lease_budget_ms: cfg.min_lease_budget_ms,
+        }
+    }
+}
+
 fn grant_batch(
     read: &CoordinatorLease,
-    op: &Operation,
+    repo: &RepoName,
     p: &Partition,
     now: u64,
     created_at_ms: u64,
-    cfg: &super::PipelineConfig,
+    cfg: &LeaseParams,
 ) -> Result<LeaseGrant, ServerError> {
     let shard_ref = shard_ref(p)?;
-    let ls_key = keys::leased_shard(&op.repo.name, shard_ref);
-    let reference = lease_reference(&op.repo.name, shard_ref);
+    let ls_key = keys::leased_shard(repo, shard_ref);
+    let reference = lease_reference(repo, shard_ref);
     let epoch = read.epoch();
     let old = read
         .shard
@@ -169,7 +208,7 @@ fn grant_batch(
     };
     let creation = read.creation();
     let nr_key = keys::namespace_record();
-    let rr_key = keys::repo_record(&op.repo.name);
+    let rr_key = keys::repo_record(repo);
     let namespace = match &read.namespace {
         Some(value) => codec::decode_namespace_record(value).map_err(meta_error)?,
         None => codec::NamespaceRecord {
@@ -190,7 +229,7 @@ fn grant_batch(
         })
         .require(observed_guard(keys::grant_epoch(), read.epoch.as_ref()))
         .require(observed_guard(ls_key.clone(), read.shard.as_ref()));
-    if cfg.authority_fence.is_some() {
+    if read.authority_generation.is_some() {
         batch = batch.require(observed_guard(
             keys::authority_generation(),
             read.authority.as_ref(),
@@ -229,6 +268,177 @@ fn grant_batch(
         value,
         batch,
     })
+}
+
+/// Read the coordinator rows a grant plans from and the shard's relay
+/// watermark. `source` serves the ref shard `p`; `coordinator_store` the
+/// namespace coordinator (the same store, except on a Worker's timer).
+#[allow(clippy::too_many_arguments)]
+async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
+    source: &L,
+    coordinator_store: &M,
+    shards: &dyn ShardMap,
+    clock: &dyn Clock,
+    repo_id: &RepoId,
+    p: &Partition,
+    observed_el: Option<codec::EpochLease>,
+    seed_window: Option<u64>,
+    authority_fence: bool,
+) -> Result<CoordinatorLease, ServerError> {
+    let mut wanted = vec![
+        keys::namespace_record(),
+        keys::repo_record(&repo_id.name),
+        keys::grant_epoch(),
+        keys::leased_shard(&repo_id.name, shard_ref(p)?),
+        keys::lease_recovery(),
+        keys::authority_generation(),
+    ];
+    if let Some(window) = seed_window {
+        wanted.push(keys::quota_total(window));
+    }
+    let reported = match relay_watermark(source, p, ms(clock.now_ms())).await {
+        Ok(value) => value,
+        Err(StoreError::Corrupt(reason)) => {
+            tracing::warn!(shard = ?p, %reason, "renewal cannot decode relay outbox; reporting zero");
+            0
+        }
+        Err(error) => return Err(meta_error(error)),
+    };
+    let rows = coordinator_store
+        .get_many(&shards.coordinator(&repo_id.namespace), &wanted)
+        .await
+        .map_err(meta_error)?;
+    if rows.len() != wanted.len() {
+        return Err(internal("lease get_many returned the wrong row count"));
+    }
+    let [namespace, repo, epoch, shard, recovery, authority] = &rows[..6] else {
+        return Err(internal("lease get_many returned the wrong row count"));
+    };
+    let quota_seed = seed_window
+        .map(|window| {
+            rows[6]
+                .as_ref()
+                .map(codec::decode_namespace_usage)
+                .transpose()
+                .map(|total| (window, total.unwrap_or_default()))
+                .map_err(meta_error)
+        })
+        .transpose()?;
+    if let Some(value) = namespace {
+        codec::decode_namespace_record(value).map_err(meta_error)?;
+    }
+    if let Some(value) = repo {
+        codec::decode_repo_record(value).map_err(meta_error)?;
+    }
+    if namespace.is_none() && repo.is_some() {
+        return Err(internal("repository registered without a namespace"));
+    }
+    if let Some(value) = shard {
+        codec::decode_leased_shard(value).map_err(meta_error)?;
+    }
+    let read = CoordinatorLease {
+        namespace: namespace.clone(),
+        repo: repo.clone(),
+        epoch: epoch.clone(),
+        authority: authority.clone(),
+        authority_generation: if authority_fence || observed_el.is_some_and(|el| el.authority_generation.is_some()) {
+            Some(authority.as_ref().map(codec::decode_u64).transpose().map_err(meta_error)?.unwrap_or(0))
+        } else { None },
+        leased_epoch: epoch
+            .as_ref()
+            .map(codec::decode_u64)
+            .transpose()
+            .map_err(meta_error)?
+            .unwrap_or(0),
+        shard: shard.clone(),
+        observed_el,
+        recovery: recovery
+            .as_ref()
+            .map(codec::decode_lease_recovery)
+            .transpose()
+            .map_err(meta_error)?,
+        relay_watermark_ms: reported,
+        quota_seed,
+    };
+    Ok(read)
+}
+
+/// Least remaining lease (before the margin) a relay enqueue needs: its own
+/// commit deadline and the margin fit in it.
+const RELAY_LEASE_BUDGET_MS: u64 = 15_000;
+
+/// The source epoch lease for an index relay enqueue that a timer performs,
+/// not an `AdvanceRefs` (WP-4.8, D-1). The lease lasts 30 s and a decode
+/// slice can outlast it, but only pipeline batches renew and install it. This
+/// runs the same coordinator transaction as `Pipeline::admit_lease` (the one
+/// `grant_batch`, so `ls` and `acked_epoch` follow the advance's rules) and
+/// installs `el` in its own batch guarded by the value it observed, instead of
+/// in an advance batch. A lease with `RELAY_LEASE_BUDGET_MS` left is
+/// returned as it is. The raw value is what the relay batches guard; a batch
+/// that loses the lease fails, it does not commit.
+///
+/// `local` serves the ref shard `p`; `meta` the coordinator.
+///
+/// # Errors
+/// A mapped storage error, or `aborted` after repeated contention.
+pub async fn renew_for_relay<L: NamespaceStore, M: NamespaceStore>(
+    local: &L,
+    meta: &M,
+    shards: &dyn ShardMap,
+    clock: &dyn Clock,
+    repo: &RepoId,
+    p: &Partition,
+    params: &LeaseParams,
+) -> Result<Value, ServerError> {
+    for _ in 0..LEASE_GRANT_ATTEMPTS {
+        let raw = local
+            .get(p, &keys::epoch_lease())
+            .await
+            .map_err(meta_error)?;
+        let observed = raw
+            .as_ref()
+            .map(codec::decode_epoch_lease)
+            .transpose()
+            .map_err(meta_error)?;
+        let now = ms(clock.now_ms());
+        if let (Some(raw), Some(lease)) = (&raw, observed)
+            && (!params.authority_fence || lease.authority_generation.is_some())
+            && lease
+                .expires_at_ms
+                .checked_sub(params.lease_margin_ms)
+                .and_then(|end| end.checked_sub(now))
+                .is_some_and(|budget| budget >= RELAY_LEASE_BUDGET_MS)
+        {
+            return Ok(raw.clone());
+        }
+        let read = read_lease_rows(local, meta, shards, clock, repo, p, observed, None, params.authority_fence).await?;
+        let grant = grant_batch(&read, &repo.name, p, now, now, params)?;
+        match meta
+            .apply(&shards.coordinator(&repo.namespace), grant.batch)
+            .await
+            .map_err(meta_error)?
+        {
+            BatchOutcome::Committed => {}
+            BatchOutcome::PreconditionFailed { .. } => continue,
+            BatchOutcome::DeadlinePassed { .. } => {
+                return Err(internal("lease grant had no deadline"));
+            }
+        }
+        let value = codec::encode_epoch_lease(&grant.value);
+        let install = Batch::new()
+            .require(Precondition::NotAfter(now.saturating_add(10_000)))
+            .require(observed_guard(keys::epoch_lease(), raw.as_ref()))
+            .put(keys::epoch_lease(), value.clone());
+        if matches!(
+            local.apply(p, install).await.map_err(meta_error)?,
+            BatchOutcome::Committed
+        ) {
+            return Ok(value);
+        }
+    }
+    Err(ServerError::aborted_retryable(
+        "coordinator lease grant contention",
+    ))
 }
 
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
@@ -272,92 +482,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         observed_el: Option<codec::EpochLease>,
         seed_window: Option<u64>,
     ) -> Result<CoordinatorLease, ServerError> {
-        let mut wanted = vec![
-            keys::namespace_record(),
-            keys::repo_record(&op.repo.name),
-            keys::grant_epoch(),
-            keys::leased_shard(&op.repo.name, shard_ref(p)?),
-            keys::lease_recovery(),
-            keys::authority_generation(),
-        ];
-        if let Some(window) = seed_window {
-            wanted.push(keys::quota_total(window));
-        }
-        let reported = match relay_watermark(&self.meta, p, ms(self.clock.now_ms())).await {
-            Ok(value) => value,
-            Err(StoreError::Corrupt(reason)) => {
-                tracing::warn!(shard = ?p, %reason, "renewal cannot decode relay outbox; reporting zero");
-                0
-            }
-            Err(error) => return Err(meta_error(error)),
-        };
-        let rows = self
-            .meta
-            .get_many(&self.shards.coordinator(&op.repo.namespace), &wanted)
-            .await
-            .map_err(meta_error)?;
-        if rows.len() != wanted.len() {
-            return Err(internal("lease get_many returned the wrong row count"));
-        }
-        let [namespace, repo, epoch, shard, recovery, authority] = &rows[..6] else {
-            return Err(internal("lease get_many returned the wrong row count"));
-        };
-        let quota_seed = seed_window
-            .map(|window| {
-                rows[6]
-                    .as_ref()
-                    .map(codec::decode_namespace_usage)
-                    .transpose()
-                    .map(|total| (window, total.unwrap_or_default()))
-                    .map_err(meta_error)
-            })
-            .transpose()?;
-        if let Some(value) = namespace {
-            codec::decode_namespace_record(value).map_err(meta_error)?;
-        }
-        if let Some(value) = repo {
-            codec::decode_repo_record(value).map_err(meta_error)?;
-        }
-        if namespace.is_none() && repo.is_some() {
-            return Err(internal("repository registered without a namespace"));
-        }
-        if let Some(value) = shard {
-            codec::decode_leased_shard(value).map_err(meta_error)?;
-        }
-        let read = CoordinatorLease {
-            namespace: namespace.clone(),
-            repo: repo.clone(),
-            epoch: epoch.clone(),
-            authority: authority.clone(),
-            authority_generation: if self.cfg.authority_fence.is_some() {
-                Some(
-                    authority
-                        .as_ref()
-                        .map(codec::decode_u64)
-                        .transpose()
-                        .map_err(meta_error)?
-                        .unwrap_or(0),
-                )
-            } else {
-                None
-            },
-            leased_epoch: epoch
-                .as_ref()
-                .map(codec::decode_u64)
-                .transpose()
-                .map_err(meta_error)?
-                .unwrap_or(0),
-            shard: shard.clone(),
+        read_lease_rows(
+            &self.meta,
+            &self.meta,
+            self.shards.as_ref(),
+            self.clock.as_ref(),
+            &op.repo,
+            p,
             observed_el,
-            recovery: recovery
-                .as_ref()
-                .map(codec::decode_lease_recovery)
-                .transpose()
-                .map_err(meta_error)?,
-            relay_watermark_ms: reported,
-            quota_seed,
-        };
-        Ok(read)
+            seed_window,
+            self.cfg.authority_fence.is_some(),
+        )
+        .await
     }
 
     pub(super) async fn admit_lease(
@@ -396,7 +532,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
             let now = ms(self.clock.now_ms());
             let created_at_ms = ms(self.clock.now_ms().saturating_add(skew_ms));
-            let grant = grant_batch(&read, op, p, now, created_at_ms, &self.cfg)?;
+            let grant = grant_batch(
+                &read,
+                &op.repo.name,
+                p,
+                now,
+                created_at_ms,
+                &LeaseParams::from(&self.cfg),
+            )?;
             match self
                 .meta
                 .apply(&coordinator, grant.batch)

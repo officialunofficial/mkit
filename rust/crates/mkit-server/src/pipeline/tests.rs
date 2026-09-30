@@ -11,6 +11,7 @@ mod policy;
 mod ref_policy;
 #[cfg(feature = "remote-hooks")]
 mod remote_hooks;
+mod scheduled;
 mod url_token;
 mod visibility;
 

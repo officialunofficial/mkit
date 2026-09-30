@@ -18,6 +18,21 @@ fn environment() -> (Env, SigningKey, String) {
 }
 
 fn environment_with_sharding(sharding: Sharding) -> (Env, SigningKey, String) {
+    environment_with(sharding, crate::indexed::IndexedConfig::default())
+}
+
+pub(super) fn environment_with(
+    sharding: Sharding,
+    indexed: crate::indexed::IndexedConfig,
+) -> (Env, SigningKey, String) {
+    environment_with_policy(sharding, indexed, None)
+}
+
+pub(super) fn environment_with_policy(
+    sharding: Sharding,
+    indexed: crate::indexed::IndexedConfig,
+    ref_policy: Option<crate::policy::RefPolicy>,
+) -> (Env, SigningKey, String) {
     let owner = key(7);
     let namespace = Namespace::Ed25519(*owner.verifying_key().as_bytes());
     let identity = format!("{namespace}/{REPO}");
@@ -30,7 +45,8 @@ fn environment_with_sharding(sharding: Sharding) -> (Env, SigningKey, String) {
     config.sharding = sharding;
     config.ticket_keys =
         Some(crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
-    config.indexed = Some(crate::indexed::IndexedConfig::default());
+    config.indexed = Some(indexed);
+    config.ref_policy = ref_policy;
     let clock = clock();
     (
         build(config, Spy::new(store(&clock)), Hooks::new(), clock),
@@ -96,7 +112,7 @@ fn signed_objects() -> (Object, Object, Hash) {
     (tree, commit, head)
 }
 
-fn pack() -> (Vec<u8>, Hash) {
+pub(super) fn pack() -> (Vec<u8>, Hash) {
     let (tree, commit, head) = signed_objects();
     let mut writer = PackWriter::new_raw_only();
     writer
@@ -106,7 +122,7 @@ fn pack() -> (Vec<u8>, Hash) {
     (writer.finish().unwrap(), head)
 }
 
-fn split_pack() -> (Vec<u8>, Vec<u8>, Hash) {
+pub(super) fn split_pack() -> (Vec<u8>, Vec<u8>, Hash) {
     let (tree, commit, head) = signed_objects();
     let mut first = PackWriter::new_raw_only();
     first.push_raw(head, &serialize(&commit).unwrap()).unwrap();
@@ -134,7 +150,7 @@ pub(super) fn upload(env: &Env, pack: &[u8], ticket_id: Hash) {
     });
 }
 
-fn begin_and_upload(
+pub(super) fn begin_and_upload(
     env: &Env,
     owner: &SigningKey,
     identity: &str,
@@ -155,7 +171,7 @@ fn begin_and_upload(
     id
 }
 
-fn assert_advance_unmoved(env: &Env, repo: &RepoId, packs: &[Hash]) {
+pub(super) fn assert_advance_unmoved(env: &Env, repo: &RepoId, packs: &[Hash]) {
     let source = env.pipe.shards.ref_shard(repo, HEAD);
     for key in [
         keys::ref_key(&repo.name, HEAD),
