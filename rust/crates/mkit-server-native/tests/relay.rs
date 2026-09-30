@@ -843,6 +843,7 @@ async fn plant_sql_schedule(source: &FaultSql, partition: &Partition, schedule: 
         for (offset, destination) in chunk.iter().enumerate() {
             let seq = u64::try_from(chunk_index * 90 + offset + 1).unwrap();
             let row = codec::RelayV1 {
+                publication_era: false,
                 at_ms: 100,
                 target: Partition::ContentShard(*destination),
                 puts: vec![(

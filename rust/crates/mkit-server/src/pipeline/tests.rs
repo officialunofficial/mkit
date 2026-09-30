@@ -77,6 +77,14 @@ fn planned_ticket_advance(count: usize) -> Batch {
 
 #[allow(clippy::too_many_lines)] // A full ticket snapshot and its expected maximal planner shape.
 fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
+    planned_ticket_publication(count, d34, true, false)
+}
+fn planned_ticket_publication(
+    count: usize,
+    d34: bool,
+    initializing: bool,
+    retained: bool,
+) -> Batch {
     use crate::store::codec::{ReservationV1, TicketV1};
     let repo = RepoId {
         namespace: NamespaceKey::deployment_default(),
@@ -113,6 +121,33 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
         fingerprint: [2; 32],
         expires_at_ms: T0 + 60_000,
     };
+    let mut record = clearance::immediate(
+        crate::store::publication::Pair {
+            head: Some(C),
+            packmap: Some(B),
+        },
+        [1; 32],
+        vec![],
+    );
+    if retained {
+        record
+            .obligations
+            .push(crate::store::publication::Obligation {
+                id: [8; 32],
+                state: crate::store::publication::Clearance::Cleared,
+            });
+    }
+    let migration = if initializing {
+        crate::store::migration::Prepared::empty(&repo.name)
+    } else {
+        let raw = crate::store::migration::State::Managed.encode();
+        let seal = Value::new(vec![1]);
+        crate::store::migration::Prepared {
+            preconditions: crate::store::migration::guards(&repo.name, Some(&raw), Some(&seal))
+                .unwrap(),
+            writes: vec![],
+        }
+    };
     let req = WriteRequest {
         repo: &repo.name,
         kind: WriteKind::AdvanceRefs,
@@ -141,10 +176,11 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
         implicit: None,
         rejection: None,
         publication: Some(clearance::PublicationWrite {
+            migration: Some(migration),
             repo: &repo,
             source: &source,
             shards,
-            prepared: None,
+            prepared: Some(&record),
         }),
         pending: None,
     };
@@ -203,10 +239,28 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
 }
 
 #[test]
+fn seven_ticket_publication_initialization_and_steady_bounds_are_real_batches() {
+    for (d34, initializing, retained, expected) in [
+        (true, true, false, 97),
+        (true, true, true, 98),
+        (true, false, false, 95),
+        (true, false, true, 96),
+        (false, true, false, 86),
+        (false, true, true, 87),
+        (false, false, false, 84),
+        (false, false, true, 85),
+    ] {
+        let batch = planned_ticket_publication(7, d34, initializing, retained);
+        assert_eq!(batch.preconditions.len() + batch.writes.len(), expected);
+        batch.validate(&StoreCapabilities::full()).unwrap();
+    }
+}
+
+#[test]
 fn seven_ticket_advance_plans_a_valid_real_batch() {
     let batch = planned_ticket_advance(7);
     let ops = batch.preconditions.len() + batch.writes.len();
-    assert_eq!(ops, 94);
+    assert_eq!(ops, 97);
     for key in [
         keys::epoch_lease(),
         keys::layout_version(),
@@ -225,8 +279,10 @@ fn seven_ticket_advance_plans_a_valid_real_batch() {
                 .any(|w| matches!(w, Write::Put(k, _) if *k == key))
         );
     }
+    // This immediate, obligation-free advance omits the retained av row;
+    // the shared maximum also allows a retained completed inspection record.
     assert_eq!(
-        ops,
+        ops + 1,
         crate::store::outbox::MAX_TICKETS_PER_ADVANCE * 9
             + crate::store::outbox::ADVANCE_SHARED_OPS
     );
@@ -268,7 +324,7 @@ fn single_ticket_advance_guards_the_grant_epoch() {
     assert!(batch.preconditions.iter().any(|guard| matches!(guard,
         Precondition::Absent(key) if *key == keys::grant_epoch()
     )));
-    assert_eq!(batch.preconditions.len() + batch.writes.len(), 83);
+    assert_eq!(batch.preconditions.len() + batch.writes.len(), 86);
 }
 
 /// WP-1.15 B9's largest implicit batch: a packmap write consuming
@@ -712,6 +768,7 @@ fn single_sharding_watermark_reads_namespace_outbox() {
         u64::try_from(T0).unwrap()
     );
     let row = codec::RelayV1 {
+        publication_era: false,
         at_ms: u64::try_from(T0).unwrap() - 5,
         target: ns(),
         puts: vec![(Key::new(&b"x\0"[..]), Value::default())],
@@ -4804,3 +4861,104 @@ fn pipeline_refuses_more_extra_credential_headers_than_fit() {
 #[cfg(feature = "published-view")]
 #[path = "tests/published.rs"]
 mod published_view;
+
+#[test]
+fn prepared_publication_pair_cannot_survive_a_counterpart_guard_race() {
+    use crate::store::publication::{Pair, Publication};
+    let repo = repo();
+    let source = SinglePartition.ref_shard(&repo, HEAD);
+    let refs = [upd(HEAD, Match(A), B)];
+    let prepared = clearance::immediate(
+        Pair {
+            head: Some(B),
+            packmap: Some(C),
+        },
+        [0; 32],
+        vec![],
+    );
+    let req = WriteRequest {
+        repo: &repo.name,
+        kind: WriteKind::UpdateRef,
+        refs: &refs,
+        ref_index: None,
+        replay: None,
+        charges: &[],
+        namespace_charge: None,
+        grant: None,
+        lease: None,
+        layout_version: false,
+        mark_repo_known: false,
+        begin: None,
+        advance: None,
+        implicit: None,
+        rejection: None,
+        pending: None,
+        publication: Some(clearance::PublicationWrite {
+            migration: None,
+            repo: &repo,
+            source: &source,
+            shards: &SinglePartition,
+            prepared: Some(&prepared),
+        }),
+    };
+    let values = [
+        (keys::ref_key(&repo.name, HEAD), codec::encode_ref_id(&A)),
+        (keys::ref_key(&repo.name, PACKMAP), codec::encode_ref_id(&C)),
+    ];
+    let snapshot_before = snapshot(&req, &values);
+    let Planned::Apply(first) = plan_write(&req, &snapshot_before, &clock_at(0, None)).unwrap()
+    else {
+        panic!("apply")
+    };
+    let kv = store(&Arc::new(ManualClock::new(0)));
+    now(kv.apply(
+        &source,
+        values
+            .iter()
+            .fold(Batch::new(), |b, (k, v)| b.put(k.clone(), v.clone())),
+    ))
+    .unwrap();
+    // A concurrent packmap-only write changes the retained publication state.
+    let current = Publication {
+        sequence: 1,
+        published: 1,
+        value: Pair {
+            head: Some(A),
+            packmap: Some(B),
+        },
+        ..Default::default()
+    };
+    let state_key = keys::publication(&repo.name, HEAD);
+    let raw = current.encode().unwrap();
+    now(kv.apply(
+        &source,
+        Batch::new()
+            .put(keys::ref_key(&repo.name, PACKMAP), codec::encode_ref_id(&B))
+            .put(state_key.clone(), raw.clone()),
+    ))
+    .unwrap();
+    assert!(matches!(
+        now(kv.apply(&source, first.batch)).unwrap(),
+        BatchOutcome::PreconditionFailed { .. }
+    ));
+    let fresh = snapshot(
+        &req,
+        &[
+            (values[0].0.clone(), values[0].1.clone()),
+            (values[1].0.clone(), codec::encode_ref_id(&B)),
+            (state_key, raw),
+        ],
+    );
+    let error = plan_write(&req, &fresh, &clock_at(0, None)).unwrap_err();
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(error.public_message(), "publication pair changed; retry");
+    assert_eq!(
+        now(read::read_ref(&kv, &source, &repo.name, HEAD)).unwrap(),
+        Some(A)
+    );
+    assert!(
+        now(kv.get(&source, &keys::advance(&repo.name, HEAD, 2)))
+            .unwrap()
+            .is_none()
+    );
+}

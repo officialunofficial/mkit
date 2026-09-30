@@ -906,6 +906,7 @@ fn maximal_chunk_fits_target_and_more_puts_split_in_seq_order() {
         })
         .collect();
     let encoded_size = codec::encode_relay(&RelayV1 {
+        publication_era: false,
         at_ms: 12,
         target: target(0),
         puts: puts[..MAX_RELAY_PUTS].to_vec(),
@@ -1375,6 +1376,7 @@ async fn malformed_queue_key_before_first_sequence_blocks_later_delivery() {
         let s = memory();
         let h = handler(Instrumented::new());
         let valid = RelayV1 {
+            publication_era: false,
             at_ms: 50,
             target: target(0),
             puts: vec![(order_key(2), codec::encode_u64(2))],
@@ -1419,6 +1421,7 @@ async fn malformed_suffix_between_cursor_and_next_sequence_blocks_delivery() {
     let malformed = Key::new([keys::relay(1).as_bytes(), b"\xff"].concat());
     assert!(keys::relay(1) < malformed && malformed < keys::relay(2));
     let valid = RelayV1 {
+        publication_era: false,
         at_ms: 50,
         target: target(0),
         puts: vec![(order_key(2), codec::encode_u64(2))],
@@ -1470,6 +1473,7 @@ async fn plant_schedule<S: NamespaceStore>(store: &S, schedule: &[u16]) {
         for (index, destination) in chunk.iter().enumerate() {
             let seq = u64::try_from(offset * 90 + index + 1).unwrap();
             let row = RelayV1 {
+                publication_era: false,
                 at_ms: 50,
                 target: target(*destination),
                 puts: vec![(order_key(seq), codec::encode_u64(seq))],

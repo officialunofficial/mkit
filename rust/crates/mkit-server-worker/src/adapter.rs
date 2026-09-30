@@ -826,6 +826,12 @@ where
         }
         _ => registry,
     };
+    let registry = match class {
+        ShardClass::RefStore | ShardClass::RefShard | ShardClass::RepoIndexShard => {
+            registry.register(mkit_server::timers::publication_migration::PublicationMigration)
+        }
+        _ => registry,
+    };
     #[cfg(feature = "test-faults")]
     let registry = registry.register(mkit_server::timers::test_kind::TestTimer);
     registry

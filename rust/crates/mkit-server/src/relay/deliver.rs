@@ -179,7 +179,9 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
             );
         }
         let rh = keys::relay_high_water(ctx.partition)?;
-        let dispatch = self.dispatch(&window.groups, &scan.blocked, &rh).await;
+        let dispatch = self
+            .dispatch(&window.groups, &scan.blocked, &rh, ctx.now_ms)
+            .await;
         if !checkpoint_window(ctx, &rs_key, &mut scan_value, &mut scan, &window, &dispatch).await? {
             return Ok(Fired::Retry);
         }
@@ -223,7 +225,13 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         }
     }
 
-    async fn dispatch(&self, groups: &[TargetRows], blocked: &[Partition], rh: &Key) -> Dispatch {
+    async fn dispatch(
+        &self,
+        groups: &[TargetRows],
+        blocked: &[Partition],
+        rh: &Key,
+        now_ms: u64,
+    ) -> Dispatch {
         let mut progress = Dispatch {
             delivered: BTreeSet::new(),
             block: BTreeSet::new(),
@@ -261,7 +269,14 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                 .map(|(seq, row, _, _)| (*seq, row.clone()))
                 .collect::<Vec<_>>();
             let result = self
-                .deliver_target(target, rh, &target_rows, call_limit, selected < max_targets)
+                .deliver_target(
+                    target,
+                    rh,
+                    &target_rows,
+                    call_limit,
+                    selected < max_targets,
+                    now_ms,
+                )
                 .await;
             calls = calls.saturating_add(result.calls);
             selected += u32::from(result.selected);
@@ -296,6 +311,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         rows: &[(u64, RelayV1)],
         call_limit: Option<u32>,
         allow_apply: bool,
+        now_ms: u64,
     ) -> TargetResult {
         let mut result = TargetResult {
             completed: 0,
@@ -311,16 +327,25 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                 }
                 result.calls = result.calls.saturating_add(1);
                 let snapshot = async {
-                    let observed = self.target.get(target, rh).await?;
+                    let repo = super::publication::repository(target, rows)?;
+                    let mut wanted = vec![rh.clone()];
+                    if let Some(repo) = &repo {
+                        wanted.extend(super::publication::markers(repo));
+                    }
+                    let mut captured = self.target.get_many(target, &wanted).await?;
+                    if captured.len() != wanted.len() {
+                        return Err(StoreError::Corrupt("short relay target read".into()));
+                    }
+                    let observed = captured.remove(0);
                     let hw = observed
                         .as_ref()
                         .map(codec::decode_u64)
                         .transpose()?
                         .unwrap_or(0);
-                    Ok::<_, StoreError>((observed, hw))
+                    Ok::<_, StoreError>((observed, hw, repo, captured))
                 }
                 .await;
-                let (observed, hw) = match snapshot {
+                let (observed, hw, repository, markers) = match snapshot {
                     Ok(snapshot) => snapshot,
                     Err(error) => {
                         tracing::warn!(?target, %error, "relay watermark read failed");
@@ -336,8 +361,50 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                     return result;
                 }
                 result.selected = true;
+                let migration = if let Some(repo) = &repository {
+                    match super::publication::initialize(
+                        repo,
+                        markers[0].as_ref(),
+                        markers[1].as_ref(),
+                        now_ms,
+                    ) {
+                        Ok(Some(batch)) => {
+                            if call_limit.is_some_and(|cap| result.calls >= cap) {
+                                return result;
+                            }
+                            result.calls = result.calls.saturating_add(1);
+                            let _ = self.target.apply(target, batch).await;
+                            return result;
+                        }
+                        Ok(None) => match crate::store::migration::guards(
+                            repo,
+                            markers[0].as_ref(),
+                            markers[1].as_ref(),
+                        ) {
+                            Ok(guards) => guards,
+                            Err(_) => {
+                                result.failed = true;
+                                return result;
+                            }
+                        },
+                        Err(error) => {
+                            tracing::warn!(?target, %error, "publication relay deferred");
+                            result.failed = true;
+                            return result;
+                        }
+                    }
+                } else {
+                    vec![]
+                };
                 let Some((batch, end)) = self
-                    .prepare_target_batch(target, rh, rows, observed.as_ref(), result.completed)
+                    .prepare_target_batch(
+                        target,
+                        rh,
+                        rows,
+                        observed.as_ref(),
+                        result.completed,
+                        &migration,
+                    )
                     .await
                 else {
                     result.failed = true;
@@ -377,6 +444,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         rows: &[(u64, RelayV1)],
         observed: Option<&Value>,
         start: usize,
+        migration: &[Precondition],
     ) -> Option<(Batch, usize)> {
         let base = Batch::new().require(match observed {
             Some(value) => Precondition::Equals(rh.clone(), value.clone()),
@@ -394,6 +462,12 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         // combined group rather than stalling rows that fit individually.
         loop {
             let mut batch = target_batch(rh, observed, &rows[start..end]);
+            batch.preconditions.extend_from_slice(migration);
+            if !migration.is_empty()
+                && super::publication::project(&rows[start..end], &mut batch).is_err()
+            {
+                return None;
+            }
             if let Err(error) = self
                 .hook
                 .before_apply(

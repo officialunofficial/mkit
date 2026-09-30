@@ -56,7 +56,13 @@ impl<S: NamespaceStore> NamespaceStore for PairStore<'_, S> {
         self.store.capabilities()
     }
     async fn get(&self, p: &Partition, k: &Key) -> Result<Option<Value>, StoreError> {
-        Ok(self.member(k, self.store.get(p, k).await?))
+        let row = self.store.get(p, k).await?;
+        if matches!(keys::parse(k), Some(keys::ParsedKey::Membership { .. }))
+            && let Some(raw) = &row
+        {
+            store::publication::Witness::decode(raw)?;
+        }
+        Ok(self.member(k, row))
     }
     async fn get_many(
         &self,
@@ -85,13 +91,13 @@ impl<S: NamespaceStore> NamespaceStore for PairStore<'_, S> {
     }
     async fn scan(
         &self,
-        p: &Partition,
-        s: &Key,
-        e: &Key,
-        a: Option<&Cursor>,
-        l: u32,
+        partition: &Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&Cursor>,
+        limit: u32,
     ) -> Result<ScanPage, StoreError> {
-        self.store.scan(p, s, e, a, l).await
+        self.store.scan(partition, start, end, after, limit).await
     }
     async fn scan_many(&self, p: &Partition, r: &[RangeScan]) -> Result<Vec<ScanPage>, StoreError> {
         self.store.scan_many(p, r).await

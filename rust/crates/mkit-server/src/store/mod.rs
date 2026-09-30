@@ -51,3 +51,9 @@ pub use maintenance::{
     import_stream,
 };
 pub use partition::Partition;
+
+#[cfg(test)]
+mod view_tests;
+
+/// Durable, bounded legacy publication initialization.
+pub mod migration;

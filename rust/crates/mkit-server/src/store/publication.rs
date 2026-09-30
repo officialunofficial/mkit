@@ -1,7 +1,7 @@
-//! RefShard authority for paired publication and retained inspection obligations.
+//! `RefShard` authority for paired publication and retained inspection obligations.
 //!
 //! Sequence, value, membership and relay work join the caller's guarded apply.
-//! Ref/RepoIndex projections are witnesses, never evidence of live membership.
+//! Ref/`RepoIndex` projections are witnesses, never evidence of live membership.
 use std::collections::BTreeSet;
 
 use mkit_core::hash::Hash;
@@ -156,7 +156,7 @@ impl Publication {
     }
 }
 
-/// A versioned local membership or published RepoIndex witness.
+/// A versioned local membership or published `RepoIndex` witness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Witness {
     /// Membership generation, invalidated by repository deletion.
@@ -296,10 +296,6 @@ pub fn append(
     }
     let key = keys::publication(&repo.name, &name);
     pre.push(guard(key.clone(), prior));
-    writes.push(Write::Put(
-        keys::advance(&repo.name, &name, advance.sequence),
-        advance.encode()?,
-    ));
     if deleted {
         state.boundary = state.sequence;
         state.published = state.sequence;
@@ -309,6 +305,14 @@ pub fn append(
         state.published = state.sequence;
         state.value = advance.value.clone();
         project_refs(repo, &name, source, shards, &state.value, writes, outbox);
+    }
+    // Completed obligation-free values need no retained work once the prefix
+    // includes them. Keep blocked intermediates and every inspection obligation.
+    if advance.sequence > state.published || !advance.obligations.is_empty() {
+        writes.push(Write::Put(
+            keys::advance(&repo.name, &name, advance.sequence),
+            advance.encode()?,
+        ));
     }
     project_members(repo, source, shards, &advance, writes, outbox);
     writes.push(Write::Put(key, state.encode()?));
@@ -324,6 +328,7 @@ fn project_refs(
     writes: &mut Vec<Write>,
     outbox: &mut OutboxBuilder,
 ) {
+    outbox.publication_era();
     for (name, id) in value_refs(name, value) {
         let key = keys::published_ref(&repo.name, &name);
         writes.push(id.map_or_else(
@@ -348,6 +353,7 @@ fn project_members(
     writes: &mut Vec<Write>,
     outbox: &mut OutboxBuilder,
 ) {
+    outbox.publication_era();
     for pack in &advance.additions {
         let witness = Witness {
             generation: advance.generation,

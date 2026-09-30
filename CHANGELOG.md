@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **WP-5.4:** add persistent paired published refs, versioned membership and durable
+  cross-ref dependency rechecks; route reader RPCs, snapshots, tokens and HTTP
+  bytes/proofs through published values while retaining writer visibility and
+  serving stops. Specify indexed permanent-retention launch without storage leases
+  or GC, and publication Events: Committed means Sent; Delivered requires the
+  contiguous published prefix.
+
 - Server: kind-8 completion uses the guarded fresh backlog, preserving delivery
   after a concurrent outcome append (WP-3.13; correction to #1219).
 

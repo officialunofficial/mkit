@@ -1354,3 +1354,35 @@ fn unstaged_head_lag_window_uses_earliest_consumed_ticket_in_either_order() {
         assert_eq!(error.public_message(), "open closure");
     }
 }
+
+#[test]
+fn every_surplus_consumed_delta_exports_its_external_source_pack() {
+    let repo = repo("one");
+    let clock = Arc::new(ManualClock::new(NOW));
+    let store = MemoryKv::with_clock(clock.clone());
+    let blobs = MemoryBlobStore::default();
+    let (good, head) = good_pack();
+    let (base, raw_base) = blob(b"unreachable base");
+    let (_, raw_target) = blob(b"unreachable target");
+    seed_member_raw(&blobs, &store, &repo, base, &raw_base);
+    let mut writer = PackWriter::new_raw_only();
+    writer.push_raw(base, &raw_base).unwrap();
+    let base_pack = hash(&writer.finish().unwrap());
+    let thin = thin_pack(base, &raw_base, &raw_target);
+    upload(&blobs, &good);
+    upload(&blobs, &thin);
+    let staged = verify(
+        &blobs,
+        &store,
+        &repo,
+        &[
+            ticket(&repo, &good, NOW as u64),
+            ticket(&repo, &thin, NOW as u64),
+        ],
+        head,
+        IndexedConfig::default(),
+        &clock,
+    )
+    .unwrap();
+    assert_eq!(staged.external_bases, BTreeSet::from([base_pack]));
+}

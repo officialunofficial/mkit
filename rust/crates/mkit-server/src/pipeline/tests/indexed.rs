@@ -532,7 +532,7 @@ fn indexed_concurrent_lease_has_no_replay_row_and_retry_commits() {
 fn indexed_seven_ticket_advance_adds_no_batch_rows() {
     // Publication adds one guard, one retained advance, two paired values and
     // one sequence write to the former 89/78-operation ticket batches.
-    for (sharding, expected) in [(Sharding::D34, 94), (Sharding::Single, 83)] {
+    for (sharding, expected) in [(Sharding::D34, 97), (Sharding::Single, 86)] {
         let d34 = sharding == Sharding::D34;
         let batch = planned_ticket_advance_mode(7, d34);
         assert_eq!(batch.preconditions.len() + batch.writes.len(), expected);
@@ -872,7 +872,7 @@ fn indexed_limits_of_zero_are_refused_at_construction() {
     }
 }
 
-struct InspectionPolicy(crate::store::publication::Clearance);
+pub(super) struct InspectionPolicy(pub(super) crate::store::publication::Clearance);
 impl clearance::PublicationPolicy for InspectionPolicy {
     fn prepare<'a>(
         &'a self,
@@ -985,6 +985,7 @@ fn no_inspector_real_advance_reader_and_writer_views_are_identical() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One real advance exercises both caller views and both byte RPCs.
 fn inspection_pending_is_writer_visible_but_held_bytes_are_absent_for_everyone() {
     let (mut env, owner, identity) = environment();
     env.pipe = env
@@ -1091,6 +1092,196 @@ fn inspection_pending_is_writer_visible_but_held_bytes_are_absent_for_everyone()
         block_on(env.pipe.meta.inner.apply(
             &p,
             Batch::new().put(keys::membership(&r.name, &pack_id), w.encode()),
+        ))
+        .unwrap();
+    }
+}
+
+#[test]
+fn head_only_and_packmap_only_updates_verify_the_unchanged_counterpart() {
+    let (mut env, owner, identity) = environment();
+    let (bytes, head) = pack();
+    let map_bytes = encode_packlist(None, &[hash(&bytes)]).unwrap();
+    let map = hash(&map_bytes);
+    let tickets = vec![
+        begin_and_upload(&env, &owner, &identity, &bytes, 9200),
+        begin_and_upload(&env, &owner, &identity, &map_bytes, 9201),
+    ];
+    let a = env
+        .auth(&signed(&owner, &identity, Procedure::AdvanceRefs, 9202))
+        .unwrap();
+    block_on(env.pipe.advance_refs_with_tickets(
+        &a,
+        upd(HEAD, Missing, head),
+        upd(PACKMAP, Missing, map),
+        tickets,
+    ))
+    .unwrap();
+    // A second valid history object is a member, but absent from main's packmap.
+    let tree = Object::Tree(Tree {
+        entries: Vec::new(),
+    });
+    let signer = KeyPair::from_seed([8; 32]);
+    let mut commit = Commit::new_unannotated(
+        tree.id().unwrap(),
+        Vec::new(),
+        Identity::ed25519(signer.public.0),
+        signer.public.0,
+        b"other".to_vec(),
+        42,
+        [0; 64],
+    );
+    commit.signature = sign_commit(&commit, &signer).unwrap().0;
+    let object = Object::Commit(commit);
+    let other_head = object.id().unwrap();
+    let mut writer = PackWriter::new_raw_only();
+    for object in [&tree, &object] {
+        writer
+            .push_raw(object.id().unwrap(), &serialize(object).unwrap())
+            .unwrap();
+    }
+    let other = writer.finish().unwrap();
+    let other_map = encode_packlist(None, &[hash(&other)]).unwrap();
+    let tickets = vec![
+        begin_and_upload(&env, &owner, &identity, &other, 9203),
+        begin_and_upload(&env, &owner, &identity, &other_map, 9204),
+    ];
+    let a = env
+        .auth(&signed(&owner, &identity, Procedure::AdvanceRefs, 9205))
+        .unwrap();
+    block_on(env.pipe.advance_refs_with_tickets(
+        &a,
+        upd(HEAD, Match(head), other_head),
+        upd(PACKMAP, Match(map), hash(&other_map)),
+        tickets,
+    ))
+    .unwrap();
+    env.pipe = env
+        .pipe
+        .with_publication_policy(Arc::new(InspectionPolicy(
+            crate::store::publication::Clearance::Cleared,
+        )))
+        .unwrap();
+    for (name, old, new) in [(HEAD, other_head, head), (PACKMAP, hash(&other_map), map)] {
+        let a = env
+            .auth(&signed(&owner, &identity, Procedure::UpdateRef, 9206))
+            .unwrap();
+        let error = block_on(env.pipe.update_ref(&a, upd(name, Match(old), new))).unwrap_err();
+        assert_eq!(error.public_message(), "open closure");
+        let repo = &a.repo().repo;
+        let p = env.pipe.shards.ref_shard(repo, HEAD);
+        assert_eq!(
+            block_on(crate::store::publication::read(
+                &env.pipe.meta,
+                &p,
+                &repo.name,
+                HEAD
+            ))
+            .unwrap()
+            .sequence,
+            2
+        );
+        assert_eq!(
+            block_on(read::read_ref(&env.pipe.meta, &p, &repo.name, HEAD)).unwrap(),
+            Some(other_head)
+        );
+        assert_eq!(
+            block_on(read::read_ref(&env.pipe.meta, &p, &repo.name, PACKMAP)).unwrap(),
+            Some(hash(&other_map))
+        );
+    }
+}
+
+#[test]
+fn d34_ref_hint_obeys_pending_and_held_views_before_membership_relay() {
+    let (mut env, owner, identity) = environment_with_sharding(Sharding::D34);
+    env.pipe = env
+        .pipe
+        .with_publication_policy(Arc::new(InspectionPolicy(
+            crate::store::publication::Clearance::Pending,
+        )))
+        .unwrap();
+    let (bytes, head) = pack();
+    let pack_id = hash(&bytes);
+    let node = encode_packlist(None, &[pack_id]).unwrap();
+    let tickets = vec![
+        begin_and_upload(&env, &owner, &identity, &bytes, 9300),
+        begin_and_upload(&env, &owner, &identity, &node, 9301),
+    ];
+    let a = env
+        .auth(&signed(&owner, &identity, Procedure::AdvanceRefs, 9302))
+        .unwrap();
+    block_on(env.pipe.advance_refs_with_tickets(
+        &a,
+        upd(HEAD, Missing, head),
+        upd(PACKMAP, Missing, hash(&node)),
+        tickets,
+    ))
+    .unwrap();
+    let repo = &a.repo().repo;
+    let p = env.pipe.shards.ref_shard(repo, HEAD);
+    assert!(
+        block_on(env.pipe.meta.get(
+            &env.pipe.shards.membership(repo, &BlobKey::pack(pack_id)),
+            &keys::membership(&repo.name, &pack_id)
+        ))
+        .unwrap()
+        .is_none()
+    );
+    for procedure in [Procedure::PackExists, Procedure::DownloadPack] {
+        let reader = env
+            .auth(
+                &Req::unsigned(procedure)
+                    .header("x-repository", &identity)
+                    .header("x-mkit-ref", HEAD),
+            )
+            .unwrap();
+        let writer = env
+            .auth(&signed(&owner, &identity, procedure, 9303).header("x-mkit-ref", HEAD))
+            .unwrap();
+        if procedure == Procedure::PackExists {
+            assert!(!block_on(env.pipe.pack_exists(&reader, PackKey(pack_id))).unwrap());
+            assert!(block_on(env.pipe.pack_exists(&writer, PackKey(pack_id))).unwrap());
+        } else {
+            assert_eq!(
+                block_on(env.pipe.download(&reader, PackKey(pack_id)))
+                    .err()
+                    .unwrap()
+                    .code(),
+                Code::NotFound
+            );
+            assert!(block_on(env.pipe.download(&writer, PackKey(pack_id))).is_ok());
+        }
+        let key = keys::membership(&repo.name, &pack_id);
+        let mut w = crate::store::publication::Witness::decode(
+            &block_on(env.pipe.meta.get(&p, &key)).unwrap().unwrap(),
+        )
+        .unwrap();
+        w.held = true;
+        block_on(
+            env.pipe
+                .meta
+                .inner
+                .apply(&p, Batch::new().put(key, w.encode())),
+        )
+        .unwrap();
+        for auth in [&reader, &writer] {
+            if procedure == Procedure::PackExists {
+                assert!(!block_on(env.pipe.pack_exists(auth, PackKey(pack_id))).unwrap());
+            } else {
+                assert_eq!(
+                    block_on(env.pipe.download(auth, PackKey(pack_id)))
+                        .err()
+                        .unwrap()
+                        .code(),
+                    Code::NotFound
+                );
+            }
+        }
+        w.held = false;
+        block_on(env.pipe.meta.inner.apply(
+            &p,
+            Batch::new().put(keys::membership(&repo.name, &pack_id), w.encode()),
         ))
         .unwrap();
     }

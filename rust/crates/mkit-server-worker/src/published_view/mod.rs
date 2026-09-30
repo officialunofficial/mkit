@@ -19,7 +19,7 @@ pub const MAX_ROWS: usize = 64;
 pub const MAX_BYTES: usize = 32 * 1024;
 /// `Cache` residence, independently checked as well as sent to the `Cache` API.
 pub const CACHE_TTL_MS: u64 = 1000;
-/// Finite freshness window; expired data always takes the live path.
+/// Finite freshness window; expiry falls back to the published index.
 pub const VALIDITY_MS: u64 = 60_000;
 /// Quiet public and private buckets are revisited before expiry.
 pub const REFRESH_MS: u64 = 30_000;
@@ -33,7 +33,7 @@ pub const SNAPSHOTS_BINDING: &str = "PUBLISHED_SNAPSHOTS";
 pub struct PublishedViewConfig {
     /// Unique deployment identity; changing deployments must change this value.
     pub deployment: String,
-    /// No inspection source is wired until WP-5.4/5.5. True refuses live fallback.
+    /// Records inspection activation. Snapshots and fallback both use published inputs.
     pub inspection_configured: bool,
     /// Unsigned `ReadRef` opt-in; signed reads always bypass snapshots.
     pub unsigned_read_ref: bool,

@@ -839,6 +839,7 @@ where
         })
         .register(delivery)
         .register(mkit_server::timers::reservation_reconcile::ReservationReconcile)
+        .register(mkit_server::timers::publication_migration::PublicationMigration)
         .register(
             mkit_server::timers::publication_recheck::PublicationRecheck {
                 target: meta.clone(),

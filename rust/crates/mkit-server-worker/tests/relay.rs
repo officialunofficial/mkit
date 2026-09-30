@@ -398,6 +398,7 @@ fn worker_relay_defers_chunks_after_two_target_calls_per_fire() {
                     .map(|key| (Key::new(vec![key]), codec::encode_u64(seq)))
                     .collect();
                 let row = codec::RelayV1 {
+                    publication_era: false,
                     at_ms: 100,
                     target: destination.clone(),
                     puts,

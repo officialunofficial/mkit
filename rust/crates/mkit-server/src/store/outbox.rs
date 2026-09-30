@@ -17,13 +17,13 @@ use super::{
 /// put and one relay-row share. An advance uses one signer and runs no
 /// admission (the quota planner asserts this in `pipeline::plan_namespace`),
 /// so `tu` and `tc` are each guarded/written once. Shared
-/// overhead is at most 31 (including publication guard/state, retained value and two published refs): deadline 1, lease guard/install 2, absent layout
+/// overhead is at most 35 (including publication guard/state, retained value, two published refs, and initial era-marker guards/puts): deadline 1, lease guard/install 2, absent layout
 /// version guard/install 2, absent repo-known guard/install 2, two ref CAS
 /// pairs 4, replay 3, counters 4, outbox sequence/backlog 4, and relay kick
 /// 1, ref-index relay rows 2, and one outcome-delivery kick 1. These figures are D34's. On Single, a grant guard replaces the lease
 /// pair and there is no relay share or relay kick, so seven tickets cost
-/// `8 * 7 + 27 = 83`. The real maximal planner batches are tested
-/// separately. On D34, seven tickets cost `9 * 7 + 31 = 94` ops before
+/// `8 * 7 + 31 = 87`. The real maximal planner batches are tested
+/// separately. On D34, seven tickets cost `9 * 7 + 35 = 98` ops before
 /// opportunistic pruning.
 ///
 /// The same constant caps an implicit transport-identity session's pending
@@ -33,7 +33,7 @@ use super::{
 /// (`maximal_implicit_consume_plans_a_valid_batch`).
 pub const MAX_TICKETS_PER_ADVANCE: usize = 7;
 /// The advance batch's ops outside the per-ticket and per-signer ones.
-pub const ADVANCE_SHARED_OPS: usize = 31;
+pub const ADVANCE_SHARED_OPS: usize = 35;
 const _: () = assert!(MAX_TICKETS_PER_ADVANCE * 9 + ADVANCE_SHARED_OPS <= MAX_BATCH_OPS);
 
 /// Maximum operations (puts plus deletes) per relay row; two ops guard/advance rh,
@@ -110,6 +110,7 @@ pub struct OutboxBuilder {
     reservations: BTreeSet<String>,
     error: Option<StoreError>,
     relay_at_ms: Option<u64>,
+    publication_era: bool,
     kick_at_ms: Option<u64>,
 }
 
@@ -136,6 +137,7 @@ impl OutboxBuilder {
             reservations: BTreeSet::new(),
             error: None,
             relay_at_ms: None,
+            publication_era: false,
             kick_at_ms: None,
         })
     }
@@ -329,6 +331,11 @@ impl OutboxBuilder {
         self.remember(result);
     }
 
+    /// Mark every queued row in this atomic source batch as publication-era.
+    pub fn publication_era(&mut self) {
+        self.publication_era = true;
+    }
+
     /// Stamp relay rows and schedule their immediate source-side kick.
     pub fn relay_at(&mut self, now_ms: u64) {
         self.relay_at_ms = Some(now_ms);
@@ -380,6 +387,7 @@ impl OutboxBuilder {
             .relay_at_ms
             .ok_or_else(|| StoreError::Invalid("relay rows need relay_at".into()))?;
         let mut row = RelayV1 {
+            publication_era: self.publication_era,
             at_ms,
             target,
             puts: Vec::new(),

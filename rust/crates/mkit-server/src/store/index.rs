@@ -175,6 +175,7 @@ fn plan_index_rows_inner(
             }
         } else {
             let mut row = RelayV1 {
+                publication_era: false,
                 at_ms,
                 target: target.clone(),
                 puts: Vec::new(),
@@ -201,6 +202,7 @@ fn plan_index_rows_inner(
                     codec::encode_relay(&row)?;
                     plan.relay.push(row);
                     row = RelayV1 {
+                        publication_era: false,
                         at_ms,
                         target: target.clone(),
                         puts: Vec::new(),

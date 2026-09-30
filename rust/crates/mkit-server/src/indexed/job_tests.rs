@@ -2053,7 +2053,8 @@ fn external_source_membership_is_rechecked_after_verification() {
             ),
         ))
         .unwrap();
-        let (target, head) = signed_commit(tree_id, Vec::new(), 7, b"new head");
+        let (target, _) = signed_commit(tree_id, Vec::new(), 7, b"unreachable delta");
+        let (visible, head) = signed_commit(tree_id, Vec::new(), 7, b"visible head");
         let mut writer = PackWriter::new();
         writer
             .push_raw(tree_id, &serialize(&tree).unwrap())
@@ -2064,6 +2065,9 @@ fn external_source_membership_is_rechecked_after_verification() {
                 &mkit_core::delta::encode(&middle_raw, &serialize(&target).unwrap()).unwrap(),
             )
             .unwrap();
+        writer
+            .push_raw(head, &serialize(&visible).unwrap())
+            .unwrap();
         let pack = writer.finish().unwrap();
         let (ticket, id) = rig.add(&pack);
         rig.create(&ticket, id);
@@ -2073,7 +2077,11 @@ fn external_source_membership_is_rechecked_after_verification() {
             fail_at: AtomicU32::new(fail_at),
         };
         rig.drive_on(&faulty, |r| r.finished(&ticket.pack_id));
-        rig.check(&[(&ticket, id)], head).unwrap();
+        let staged = rig.check(&[(&ticket, id)], head).unwrap();
+        assert_eq!(
+            staged.external_bases,
+            BTreeSet::from([q_id, member.pack_id])
+        );
         for dependency in [q_id, member.pack_id] {
             assert!(
                 block_on(rig.store.has(

@@ -1428,6 +1428,13 @@ The scheduled work MUST be retained until completed and MUST run within
 a bounded time. The same rule applies when takedown replacement packs
 become published.
 
+Informative: a retained periodic timer per blocked advance can satisfy this
+scheduling requirement without an unbounded cross-ref reverse index. It must
+survive restarts, recheck delayed membership projections without client traffic,
+and remain scheduled while dependencies, inspection obligations, holds, hits,
+or replacement dependencies remain outstanding. Timer completion is guarded
+against concurrent obligation and generation changes; a timer cannot waive work.
+
 A pack added by another advance that has not cleared or resolved blocks
 clearance. `AlreadyPresent` establishes live membership, not published
 membership. Thus branch B reusing a pack from pending branch A cannot
@@ -1703,7 +1710,7 @@ That profile MUST NOT accept lease terms or advertise lease, GC or receipt
 support that it does not implement. Leases, GC and receipts remain full-profile
 requirements when applicable to its configuration.
 
-For a deployment that supports leases, The ref shard
+For a deployment that supports leases, the ref shard
 holds the per-ref terms; the namespace coordinator holds the
 repository-level default and propagates changes with `config_version`.
 An explicit per-ref lease overrides that default while the repository
@@ -1822,8 +1829,11 @@ Changes to terms or overrides issue a §15 lease storage receipt; an
 `EXPIRY` transition does not. The admin API wire, authentication, and
 audit-log contract is in §16; this section defines the lease semantics.
 
-In indexed mode, the server MUST consult a deployment storage-lease
-policy hook only when creating a ref with no lease record. The decision
+In indexed deployments that support storage leases, the server MUST consult
+a deployment storage-lease policy hook only when creating a ref with no lease
+record. The launch profile with `leases = false` selects explicit permanent
+retention by deployment configuration and MUST NOT invoke this hook or accept
+lease terms. The decision
 MUST be one of explicit terms, inheritance of the repository default,
 or explicit permanent retention. These last two are distinct: inheritance
 follows later default changes, while explicit permanent retention does not.
@@ -3391,7 +3401,7 @@ Reserved: this section is specified with M5 (see the version history).
 
 ## 18. Conformance scope
 
-A server conforms to one of two profiles and advertises which through
+A server conforms to one of three profiles and advertises which through
 `GetServerInfo` (STC §2.1). A client MUST NOT assume a feature of the full
 profile unless the server advertises it.
 
@@ -3414,8 +3424,8 @@ implements §2–§5) and:
   receipt key fields are empty (§15.5), it issues no redaction notices, and it
   mounts no admin service (§16.1).
 
-**Launch profile.** An indexed server MAY implement §§2–11 and HTTP object
-serving while advertising `leases = false`, retaining all repository content
+**Launch profile.** An indexed server MAY implement §§2–11, including
+inspection and HTTP object serving without storage leases, while advertising `leases = false`, retaining all repository content
 permanently and disabling GC. It MUST refuse lease terms, advertise empty
 receipt key fields and issue no storage receipts. The lease, GC and receipt
 requirements of §§12–13 and §15 do not apply to this profile; configured Event

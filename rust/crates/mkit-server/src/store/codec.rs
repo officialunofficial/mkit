@@ -282,6 +282,8 @@ pub enum ReservationV1 {
 /// An idempotent relay of upserts and deletes to one partition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayV1 {
+    /// Source-authored publication protocol; absent on pre-publication legacy rows.
+    pub publication_era: bool,
     /// Writer plan-time lower bound on commit time. V1 changed in place before deployment.
     pub at_ms: u64,
     /// Destination partition.
@@ -330,6 +332,8 @@ pub struct Backlog {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RelayDtoV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    publication_version: Option<u8>,
     at_ms: u64,
     target: String,
     puts: Vec<(String, String)>,
@@ -771,6 +775,7 @@ pub fn encode_relay(relay: &RelayV1) -> Result<Value, StoreError> {
         }
     }
     let value = encode_json(&RelayDtoV1 {
+        publication_version: relay.publication_era.then_some(1),
         at_ms: relay.at_ms,
         target: to_hex_bytes(&relay.target.encode()?),
         puts: relay
@@ -799,6 +804,9 @@ pub fn encode_relay(relay: &RelayV1) -> Result<Value, StoreError> {
 pub fn decode_relay(value: &Value) -> Result<RelayV1, StoreError> {
     check_value_limit(value)?;
     let dto: RelayDtoV1 = decode_json(value, "bad relay")?;
+    if dto.publication_version.is_some_and(|version| version != 1) {
+        return Err(corrupt("unsupported publication relay version"));
+    }
     let target = Partition::decode(&hex_bytes(&dto.target)?)?;
     let puts: Vec<(Key, Value)> = dto
         .puts
@@ -826,6 +834,7 @@ pub fn decode_relay(value: &Value) -> Result<RelayV1, StoreError> {
         deletes.push(key);
     }
     Ok(RelayV1 {
+        publication_era: dto.publication_version == Some(1),
         at_ms: dto.at_ms,
         target,
         puts,
@@ -1467,6 +1476,7 @@ mod tests {
     #[test]
     fn relay_and_backlog_codec_golden_roundtrip_and_rejections() {
         let relay = RelayV1 {
+            publication_era: false,
             at_ms: 123,
             target: Partition::Namespace(crate::repo::NamespaceKey::deployment_default()),
             puts: vec![(Key::new(b"m\0a\0".to_vec()), Value::new(vec![]))],
@@ -1516,6 +1526,7 @@ mod tests {
             assert!(decode_relay(&value).is_err());
         }
         let oversized = RelayV1 {
+            publication_era: false,
             at_ms: 123,
             target: relay.target.clone(),
             puts: vec![(Key::new(vec![0; MAX_KEY_BYTES + 1]), Value::new(vec![]))],

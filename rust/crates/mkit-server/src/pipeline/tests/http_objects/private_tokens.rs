@@ -427,3 +427,97 @@ fn corrupt_epoch_fails_closed_after_binding_and_public_reads_ignore_it() {
     assert_eq!(with_token(&fx, "GET", &path, &valid, &[]).status, 200);
     assert!(!epoch_read(&fx));
 }
+
+#[test]
+fn valid_private_url_tokens_and_proofs_cannot_expose_pending_content() {
+    let tokens = tokens();
+    let az = Arc::new(Scripted::default());
+    let mut fx = fixture_tweaked(scripted(&az), http_cfg(), |c| {
+        c.url_tokens = Some(tokens.clone());
+    });
+    fx.pipe = fx
+        .pipe
+        .with_publication_policy(Arc::new(super::super::indexed::InspectionPolicy(
+            crate::store::publication::Clearance::Pending,
+        )))
+        .unwrap();
+    let d = data();
+    let mut writer = PackWriter::new_raw_only();
+    for object in &d.all {
+        writer
+            .push_raw(id(object), &serialize(object).unwrap())
+            .unwrap();
+    }
+    let pack = writer.finish().unwrap();
+    let map = mkit_core::transfer::encode_packlist(None, &[hash(&pack)]).unwrap();
+    let identity = fx.identity("room");
+    let mut tickets = Vec::new();
+    for bytes in [&pack, &map] {
+        let req = signed(&fx.owner, &identity, Procedure::BeginUpload, fx.number());
+        let BeginUploadResult::Ticket { id: ticket, .. } =
+            block_on(
+                fx.pipe
+                    .begin_upload(&fx.auth(&req), HEAD, &hash(bytes), bytes.len() as u64),
+            )
+            .unwrap()
+        else {
+            panic!("ticket")
+        };
+        block_on(async {
+            let mut sink = fx
+                .pipe
+                .blobs
+                .begin(BlobKey::pack(hash(bytes)), bytes.len() as u64)
+                .await
+                .unwrap();
+            sink.write(Bytes::copy_from_slice(bytes)).await.unwrap();
+            sink.commit().await.unwrap();
+            write_upload_marker(&fx.pipe.blobs, &ticket, &hash(bytes))
+                .await
+                .unwrap();
+        });
+        tickets.push(ticket);
+    }
+    let req = signed(&fx.owner, &identity, Procedure::AdvanceRefs, fx.number());
+    assert_eq!(
+        block_on(fx.pipe.advance_refs_with_tickets(
+            &fx.auth(&req),
+            upd(HEAD, Missing, d.head()),
+            upd(PACKMAP, Missing, hash(&map)),
+            tickets
+        ))
+        .unwrap(),
+        AdvanceOutcome::Committed
+    );
+    fx.make_private("room");
+    let proofs = Arc::new(Proofs(Mutex::new(Vec::new())));
+    let fx = with_seams(fx, |s| s.proofs = proofs.clone());
+    for (path, target) in [
+        (
+            fx.object_url("room", &id(&d.small)),
+            UrlTarget::Object(id(&d.small)),
+        ),
+        (
+            fx.ref_url("room", "main", "small.txt"),
+            UrlTarget::path(HEAD, "small.txt").unwrap(),
+        ),
+    ] {
+        let token = mint(&fx, &tokens, &target, 0);
+        for method in ["GET", "HEAD"] {
+            assert_eq!(with_token(&fx, method, &path, &token, &[]).status, 404);
+            let query = if matches!(target, UrlTarget::Object(_)) {
+                format!(
+                    "token={token}&proof=1&commit={}&path=small.txt",
+                    to_hex(&d.head())
+                )
+            } else {
+                format!("token={token}&proof=1")
+            };
+            assert_eq!(
+                read(fx.request(method, &path, Some(&query), &[])).status,
+                404
+            );
+        }
+    }
+    assert!(proofs.0.lock().unwrap().is_empty());
+}

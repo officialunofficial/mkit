@@ -180,6 +180,8 @@ impl WriteRequest<'_> {
         {
             let name = crate::store::publication::sequence_ref(&update.name);
             out.push(keys::publication(self.repo, &name));
+            out.push(crate::store::migration::key(self.repo));
+            out.push(crate::store::migration::seal_key(self.repo));
             out.push(keys::ref_key(self.repo, &name));
             if let Some(packmap) = mkit_attest::grant::head_packmap(&name) {
                 out.push(keys::ref_key(self.repo, &packmap));
@@ -520,6 +522,10 @@ pub(crate) fn plan_write(
             && !req.refs.is_empty()
             && let Some(publication) = &req.publication
         {
+            if let Some(migration) = &publication.migration {
+                pre.extend(migration.preconditions.clone());
+                puts.extend(migration.writes.clone());
+            }
             let name = crate::store::publication::sequence_ref(&req.refs[0].name);
             let pair = super::clearance::resulting_pair(req.repo, req.refs, snap)?;
             let additions = tickets

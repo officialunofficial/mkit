@@ -79,6 +79,43 @@ pub async fn dependencies<S: NamespaceStore, T: NamespaceStore>(
     Ok(true)
 }
 
+fn location(
+    partition: &Partition,
+    key: &Key,
+) -> Result<(RepoId, String, u64, &'static dyn ShardMap), StoreError> {
+    let Some(keys::ParsedKey::Advance {
+        repo,
+        name,
+        sequence,
+    }) = keys::parse(key)
+    else {
+        return Err(StoreError::Corrupt(
+            "invalid publication timer reference".into(),
+        ));
+    };
+    let ns = match partition {
+        Partition::Namespace(ns) | Partition::Ref { ns, .. } => ns.clone(),
+        _ => {
+            return Err(StoreError::Corrupt(
+                "publication timer on wrong partition".into(),
+            ));
+        }
+    };
+    let repo = RepoId {
+        namespace: ns,
+        name: repo,
+    };
+    let shards: &dyn ShardMap = if matches!(partition, Partition::Namespace(_)) {
+        &SinglePartition
+    } else {
+        &D34Shards
+    };
+    if shards.ref_shard(&repo, &name) != *partition {
+        return Err(StoreError::Corrupt("misrouted publication timer".into()));
+    }
+    Ok((repo, name, sequence, shards))
+}
+
 impl<S: NamespaceStore, T: NamespaceStore> TimerHandler<S> for PublicationRecheck<T> {
     fn kind(&self) -> TimerKind {
         kinds::PUBLICATION_RECHECK
@@ -93,36 +130,7 @@ impl<S: NamespaceStore, T: NamespaceStore> TimerHandler<S> for PublicationRechec
     ) -> BoxFuture<'a, Result<Fired, StoreError>> {
         Box::pin(async move {
             let key = Key::new(timer.reference.clone());
-            let Some(keys::ParsedKey::Advance {
-                repo,
-                name,
-                sequence,
-            }) = keys::parse(&key)
-            else {
-                return Err(StoreError::Corrupt(
-                    "invalid publication timer reference".into(),
-                ));
-            };
-            let ns = match ctx.partition {
-                Partition::Namespace(ns) | Partition::Ref { ns, .. } => ns.clone(),
-                _ => {
-                    return Err(StoreError::Corrupt(
-                        "publication timer on wrong partition".into(),
-                    ));
-                }
-            };
-            let repo = RepoId {
-                namespace: ns,
-                name: repo,
-            };
-            let shards: &dyn ShardMap = if matches!(ctx.partition, Partition::Namespace(_)) {
-                &SinglePartition
-            } else {
-                &D34Shards
-            };
-            if shards.ref_shard(&repo, &name) != *ctx.partition {
-                return Err(StoreError::Corrupt("misrouted publication timer".into()));
-            }
+            let (repo, name, sequence, shards) = location(ctx.partition, &key)?;
             let wanted = [
                 key.clone(),
                 keys::publication(&repo.name, &name),
@@ -148,13 +156,10 @@ impl<S: NamespaceStore, T: NamespaceStore> TimerHandler<S> for PublicationRechec
             }
             let mut batch =
                 Batch::new().require(Precondition::NotAfter(ctx.now_ms.saturating_add(10_000)));
-            if changed.state.publishable() {
-                return Ok(Fired::Done(batch));
-            }
             // A hold/hit has no automatic completion. Neither unavailable nor
             // the passage of time waives an obligation or takedown.
             if changed.generation != state.generation
-                || changed.state != Clearance::Pending
+                || !(changed.state == Clearance::Pending || changed.state.publishable())
                 || changed.obligations.iter().any(|o| !o.state.publishable())
                 || !dependencies(
                     ctx.store,
@@ -174,6 +179,13 @@ impl<S: NamespaceStore, T: NamespaceStore> TimerHandler<S> for PublicationRechec
                     value: timer.value.clone(),
                     batch,
                 });
+            }
+            if changed.state.publishable() {
+                batch.preconditions.extend([
+                    Precondition::Equals(key, raw.clone()),
+                    Precondition::Equals(wanted[1].clone(), state_raw.clone()),
+                ]);
+                return Ok(Fired::Done(batch));
             }
             changed.state = Clearance::Cleared;
             let eligible = publication::prefix(

@@ -1164,7 +1164,25 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         .await
                         .map_err(meta_error)?
                     {
-                        return Ok(rows.into_iter().find(|(n, _)| n == name).map(|(_, id)| id));
+                        if !self.meta.capabilities().atomic_multi_key
+                            || matches!(
+                                crate::store::migration::observe(
+                                    &self.meta,
+                                    &partition,
+                                    &op.repo.name
+                                )
+                                .await
+                                .map_err(meta_error)?,
+                                crate::store::migration::State::Managed
+                            )
+                        {
+                            if self.meta.capabilities().atomic_multi_key
+                                && !source.uses_published_values()
+                            {
+                                return Err(ServerError::unavailable("published view unavailable"));
+                            }
+                            return Ok(rows.into_iter().find(|(n, _)| n == name).map(|(_, id)| id));
+                        }
                     }
                 }
             }
@@ -2205,7 +2223,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     write,
                     ahead,
                     (lease, begin.as_ref()),
-                    (pending.as_ref(), implicit),
+                    (pending.as_ref(), implicit, &staged.external_bases),
                 )
                 .await
             }
@@ -2680,6 +2698,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if let Some(update) = refs.first() {
             let name = crate::store::publication::sequence_ref(&update.name);
             wanted.push(keys::publication(&op.repo.name, &name));
+            wanted.push(crate::store::migration::key(&op.repo.name));
+            wanted.push(crate::store::migration::seal_key(&op.repo.name));
             wanted.push(keys::ref_key(&op.repo.name, &name));
             if let Some(packmap) = mkit_attest::grant::head_packmap(&name) {
                 wanted.push(keys::ref_key(&op.repo.name, &packmap));
@@ -3003,7 +3023,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         (kind, refs, charges): (WriteKind, &[RefUpdate], &[QuotaCharge]),
         ahead: Option<Snapshot>,
         (lease, begin): (Option<lease::LeaseWrite>, Option<&BeginWrite>),
-        (pending, implicit): (Option<&reservation::PendingGuard>, Option<&[PendingPack]>),
+        (pending, implicit, external_bases): (
+            Option<&reservation::PendingGuard>,
+            Option<&[PendingPack]>,
+            &std::collections::BTreeSet<Hash>,
+        ),
     ) -> Result<StoredResult, ServerError> {
         let caps = self.meta.capabilities();
         let replay = upload::replay_guard(op);
@@ -3015,26 +3039,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 !pending.is_empty() && matches!(self.cfg.addressing, Addressing::Multi(_))
             })
             .map(implicit::implicit_packs);
-        let advance = match &op.kind {
-            OpKind::AdvanceRefs { head, tickets, .. } if !tickets.is_empty() => {
-                Some(advance::AdvanceWrite {
-                    ids: tickets,
-                    signer: op
-                        .auth
-                        .as_ref()
-                        .ok_or_else(|| {
-                            ServerError::failed_precondition("invalid or expired upload ticket")
-                        })?
-                        .signer,
-                    head_ref: &head.name,
-                    repo_id: &op.repo,
-                    repository: &a.repo().identity,
-                    source: p,
-                    shards: self.shards.as_ref(),
-                })
-            }
-            _ => None,
-        };
+        let advance = self.publication_ticket_write(op, a, p)?;
         let mut req = WriteRequest {
             repo: &op.repo.name,
             kind,
@@ -3061,6 +3066,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             rejection: None,
             publication: (caps.atomic_multi_key && !refs.is_empty()).then_some(
                 clearance::PublicationWrite {
+                    migration: None,
                     repo: &op.repo,
                     source: p,
                     shards: self.shards.as_ref(),
@@ -3078,79 +3084,34 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }),
         };
         let mut ahead = ahead;
-        let prepared = if let Some(policy) = &self.publication_policy
-            && !refs.is_empty()
-        {
+        if req.publication.is_some() {
             let snapshot = ahead.get_or_insert_with(Snapshot::default);
             self.fill(p, snapshot, req.read_keys()).await?;
-            let pair = clearance::resulting_pair(&op.repo.name, refs, snapshot)?;
-            let mut prepared = policy.prepare(op, &pair).await?;
-            if prepared.value != pair {
-                return Err(internal("publication policy changed the resulting pair"));
-            }
-            // Membership dependencies belong to the server, not to an
-            // inspector's verdict. An Inspect Pass alone cannot publish.
-            prepared.generation =
-                crate::store::publication::Publication::decode(snapshot.get(&keys::publication(
-                    &op.repo.name,
-                    &crate::store::publication::sequence_ref(&refs[0].name),
-                )))
-                .map_err(meta_error)?
-                .generation;
-            prepared.additions = if let Some(advance) = &req.advance {
-                advance
-                    .ids
-                    .iter()
-                    .map(|id| {
-                        snapshot
-                            .get(&keys::ticket(id))
-                            .ok_or_else(|| internal("publication ticket missing"))
-                            .and_then(|raw| {
-                                codec::decode_ticket(raw)
-                                    .map(|t| t.pack_id)
-                                    .map_err(meta_error)
-                            })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-            } else {
-                implicit_ids.clone().unwrap_or_default()
-            };
-            crate::indexed::publication::verify(
-                &self.blobs,
+            let migration = crate::store::migration::prepare(
                 &self.meta,
-                self.shards.as_ref(),
-                &op.repo,
-                &pair,
-                mkit_attest::grant::head_packmap(&crate::store::publication::sequence_ref(
-                    &refs[0].name,
-                ))
-                .is_some(),
-                &mut prepared,
-                policy.as_ref(),
-                self.cfg
-                    .indexed
-                    .ok_or_else(|| internal("publication requires indexed mode"))?,
-                self.metrics.as_ref(),
+                p,
+                &op.repo.name,
+                snapshot.get(&crate::store::migration::key(&op.repo.name)),
+                snapshot.get(&crate::store::migration::seal_key(&op.repo.name)),
+                u64::try_from(self.clock.now_ms()).unwrap_or(0),
+            )
+            .await
+            .map_err(meta_error)?;
+            req.publication
+                .as_mut()
+                .expect("publication context")
+                .migration = Some(migration);
+        }
+        let prepared = self
+            .prepare_publication(
+                op,
+                p,
+                &req,
+                &mut ahead,
+                implicit_ids.as_deref(),
+                external_bases,
             )
             .await?;
-            if prepared.state.publishable()
-                && !crate::timers::publication_recheck::dependencies(
-                    &self.meta,
-                    &self.meta,
-                    p,
-                    self.shards.as_ref(),
-                    &op.repo,
-                    &prepared,
-                )
-                .await
-                .map_err(meta_error)?
-            {
-                prepared.state = crate::store::publication::Clearance::Pending;
-            }
-            Some(prepared)
-        } else {
-            None
-        };
         if let Some(publication) = &mut req.publication {
             publication.prepared = prepared.as_ref();
         }
@@ -3177,6 +3138,130 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             WriteKind::UpdateRef => StoredResult::UpdateRef(UpdateRefResult::Committed),
             _ => StoredResult::AdvanceRefs(AdvanceOutcome::Committed),
         })
+    }
+
+    fn publication_ticket_write<'a>(
+        &'a self,
+        op: &'a Operation,
+        a: &'a Authenticated,
+        p: &'a Partition,
+    ) -> Result<Option<advance::AdvanceWrite<'a>>, ServerError> {
+        Ok(match &op.kind {
+            OpKind::AdvanceRefs { head, tickets, .. } if !tickets.is_empty() => {
+                Some(advance::AdvanceWrite {
+                    ids: tickets,
+                    signer: op
+                        .auth
+                        .as_ref()
+                        .ok_or_else(|| {
+                            ServerError::failed_precondition("invalid or expired upload ticket")
+                        })?
+                        .signer,
+                    head_ref: &head.name,
+                    repo_id: &op.repo,
+                    repository: &a.repo().identity,
+                    source: p,
+                    shards: self.shards.as_ref(),
+                })
+            }
+            _ => None,
+        })
+    }
+
+    /// Prepare inspection against the complete resulting pair before any write.
+    async fn prepare_publication(
+        &self,
+        op: &Operation,
+        p: &Partition,
+        req: &WriteRequest<'_>,
+        ahead: &mut Option<Snapshot>,
+        implicit_ids: Option<&[Hash]>,
+        external_bases: &std::collections::BTreeSet<Hash>,
+    ) -> Result<Option<crate::store::publication::Advance>, ServerError> {
+        if let Some(policy) = &self.publication_policy
+            && !req.refs.is_empty()
+        {
+            let snapshot = ahead.get_or_insert_with(Snapshot::default);
+            self.fill(p, snapshot, req.read_keys()).await?;
+            let pair = clearance::resulting_pair(&op.repo.name, req.refs, snapshot)?;
+            let mut prepared = policy.prepare(op, &pair).await?;
+            if prepared.value != pair {
+                return Err(internal("publication policy changed the resulting pair"));
+            }
+            // Membership dependencies belong to the server, not to an
+            // inspector's verdict. An Inspect Pass alone cannot publish.
+            prepared.generation =
+                crate::store::publication::Publication::decode(snapshot.get(&keys::publication(
+                    &op.repo.name,
+                    &crate::store::publication::sequence_ref(&req.refs[0].name),
+                )))
+                .map_err(meta_error)?
+                .generation;
+            prepared.additions = if let Some(advance) = &req.advance {
+                advance
+                    .ids
+                    .iter()
+                    .map(|id| {
+                        snapshot
+                            .get(&keys::ticket(id))
+                            .ok_or_else(|| internal("publication ticket missing"))
+                            .and_then(|raw| {
+                                codec::decode_ticket(raw)
+                                    .map(|t| t.pack_id)
+                                    .map_err(meta_error)
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                implicit_ids.map(<[Hash]>::to_vec).unwrap_or_default()
+            };
+            crate::indexed::publication::verify(
+                &self.blobs,
+                &self.meta,
+                self.shards.as_ref(),
+                &op.repo,
+                &pair,
+                mkit_attest::grant::head_packmap(&crate::store::publication::sequence_ref(
+                    &req.refs[0].name,
+                ))
+                .is_some(),
+                &mut prepared,
+                policy.as_ref(),
+                self.cfg
+                    .indexed
+                    .ok_or_else(|| internal("publication requires indexed mode"))?,
+                self.metrics.as_ref(),
+            )
+            .await?;
+            prepared.external_bases = prepared
+                .external_bases
+                .iter()
+                .copied()
+                .chain(external_bases.iter().copied())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            if prepared.external_bases.len() > crate::store::publication::MAX_ADVANCE_ITEMS {
+                return Err(ServerError::invalid_argument("object index limit exceeded"));
+            }
+            if prepared.state.publishable()
+                && !crate::timers::publication_recheck::dependencies(
+                    &self.meta,
+                    &self.meta,
+                    p,
+                    self.shards.as_ref(),
+                    &op.repo,
+                    &prepared,
+                )
+                .await
+                .map_err(meta_error)?
+            {
+                prepared.state = crate::store::publication::Clearance::Pending;
+            }
+            Ok(Some(prepared))
+        } else {
+            Ok(None)
+        }
     }
 
     /// [`Self::apply_loop`] on a store with atomic multi-key batches, which

@@ -6,9 +6,9 @@ use crate::rt::{BoxFuture, MaybeSend, MaybeSync};
 use crate::store::publication::{Advance, Clearance, Pair};
 use mkit_core::hash::Hash;
 
-/// Prepared inspection obligations and verified pair dependencies.
-/// Implementations must verify that the resulting packmap reconstructs the
-/// entire head closure, including on head-only and packmap-only UpdateRef.
+/// Trusted inspection obligations and immediate serving-stop policy.
+/// The pipeline verifies the entire resulting pair and derives dependencies,
+/// including on head-only and packmap-only `UpdateRef`; policy cannot omit them.
 /// This does not confer authorization; the pipeline has already authorized.
 pub trait PublicationPolicy: MaybeSend + MaybeSync {
     /// Prepare the stable advance record from a verified resulting pair.
@@ -30,6 +30,7 @@ pub(crate) struct PublicationWrite<'a> {
     pub source: &'a crate::Partition,
     pub shards: &'a dyn super::ShardMap,
     pub prepared: Option<&'a Advance>,
+    pub migration: Option<crate::store::migration::Prepared>,
 }
 
 pub(crate) fn resulting_pair(

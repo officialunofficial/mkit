@@ -41,6 +41,16 @@ async fn apply(
     let oc = kv.get(&p, &keys::outcome_backlog()).await.unwrap();
     let mut outbox = OutboxBuilder::new(os.as_ref(), oc.as_ref()).unwrap();
     let mut b = Batch::new();
+    if kv
+        .get(&p, &crate::store::migration::key(&repo.name))
+        .await
+        .unwrap()
+        .is_none()
+    {
+        let migration = crate::store::migration::Prepared::empty(&repo.name);
+        b.preconditions.extend(migration.preconditions);
+        b.writes.extend(migration.writes);
+    }
     let state = append(
         &repo,
         name,
@@ -394,5 +404,196 @@ fn own_additions_never_satisfy_an_external_delta_dependency() {
             keys::advance(&r.name, "refs/heads/main", 1).as_bytes(),
         );
         assert!(kv.get(&p, &timer).await.unwrap().is_some());
+    });
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keeps delayed relay ordering and restarted durable rechecks in one regression"
+)]
+fn d34_delayed_cross_ref_delta_relays_wake_durable_work_after_restart() {
+    block_on(async {
+        use crate::relay::{NoHook, RelayBudget, RelayHandler};
+        use crate::rt::ManualClock;
+        use crate::timers::publication_recheck::PublicationRecheck;
+        use crate::timers::{TickBudget, TimerRegistry, run_due};
+        use std::sync::Arc;
+        let clock = Arc::new(ManualClock::new(0));
+        let kv = Arc::new(MemoryKv::with_clock(clock.clone()));
+        let shards = D34Shards;
+        let repository = repo();
+        let blocked_source = shards.ref_shard(&repository, "refs/heads/b");
+        let mut blocked = advance(4, Clearance::Pending);
+        blocked.dependencies = vec![[3; 32]];
+        blocked.external_bases = vec![[9; 32]];
+        apply(&kv, &shards, "refs/heads/b", blocked, false).await;
+        let tick = |at| clock.set(at);
+        let budget = TickBudget::default();
+        let rechecks = TimerRegistry::new().register(PublicationRecheck { target: kv.clone() });
+        run_due(&kv, &blocked_source, &rechecks, clock.as_ref(), 0, &budget)
+            .await
+            .unwrap();
+        apply(
+            &kv,
+            &shards,
+            "refs/heads/a",
+            advance(1, Clearance::Cleared),
+            false,
+        )
+        .await;
+        apply(
+            &kv,
+            &shards,
+            "refs/heads/c",
+            advance(7, Clearance::Cleared),
+            false,
+        )
+        .await;
+        let relays = TimerRegistry::new().register(RelayHandler {
+            target: kv.clone(),
+            hook: NoHook,
+            budget: RelayBudget::default(),
+        });
+        // These projections are already in the managed era; initialization
+        // is covered separately from this delayed dependency-wakeup regression.
+        for name in [
+            "refs/heads/a",
+            "refs/mkit/packmap/a",
+            "refs/heads/c",
+            "refs/mkit/packmap/c",
+        ] {
+            let target = shards.ref_index(&repository, name);
+            if kv
+                .get(&target, &crate::store::migration::key(&repository.name))
+                .await
+                .unwrap()
+                .is_none()
+            {
+                let mode = crate::store::migration::Prepared::empty(&repository.name);
+                let mut batch = Batch::new();
+                batch.preconditions.extend(mode.preconditions);
+                batch.writes.extend(mode.writes);
+                assert_eq!(
+                    kv.apply(&target, batch).await.unwrap(),
+                    BatchOutcome::Committed
+                );
+            }
+        }
+        for pack in [[3; 32], [9; 32]] {
+            let target = shards.membership(&repository, &BlobKey::pack(pack));
+            let mode = crate::store::migration::Prepared::empty(&repository.name);
+            let mut batch = Batch::new();
+            batch.preconditions.extend(mode.preconditions);
+            batch.writes.extend(mode.writes);
+            assert_eq!(
+                kv.apply(&target, batch).await.unwrap(),
+                BatchOutcome::Committed
+            );
+        }
+        // Deliver C before A: no global ordering across source refs is assumed.
+        tick(5_000);
+        let source_c = shards.ref_shard(&repository, "refs/heads/c");
+        run_due(&kv, &source_c, &relays, clock.as_ref(), 5_000, &budget)
+            .await
+            .unwrap();
+        run_due(
+            &kv,
+            &blocked_source,
+            &rechecks,
+            clock.as_ref(),
+            5_000,
+            &budget,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read(&kv, &blocked_source, &repository.name, "refs/heads/b")
+                .await
+                .unwrap()
+                .published,
+            0
+        );
+        // A'shards authoritative membership alone cannot bypass its delayed projection.
+        assert!(
+            kv.get(
+                &shards.ref_shard(&repository, "refs/heads/a"),
+                &keys::membership(&repository.name, &[3; 32])
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
+        tick(10_000);
+        let source_a = shards.ref_shard(&repository, "refs/heads/a");
+        run_due(&kv, &source_a, &relays, clock.as_ref(), 10_000, &budget)
+            .await
+            .unwrap();
+        let restarted = TimerRegistry::new().register(PublicationRecheck { target: kv.clone() });
+        run_due(
+            &kv,
+            &blocked_source,
+            &restarted,
+            clock.as_ref(),
+            10_000,
+            &budget,
+        )
+        .await
+        .unwrap();
+        let state = read(&kv, &blocked_source, &repository.name, "refs/heads/b")
+            .await
+            .unwrap();
+        assert_eq!((state.published, state.sequence), (1, 1));
+        assert_eq!(state.value, advance(4, Clearance::Cleared).value);
+        let timer = keys::timer(
+            15_000,
+            crate::timers::registry::kinds::PUBLICATION_RECHECK.get(),
+            keys::advance(&repository.name, "refs/heads/b", 1).as_bytes(),
+        );
+        assert!(kv.get(&blocked_source, &timer).await.unwrap().is_none());
+    });
+}
+
+#[test]
+fn completed_obligation_free_advances_do_not_accumulate_retained_work() {
+    block_on(async {
+        let kv = MemoryKv::default();
+        let repository = repo();
+        let source = SinglePartition.ref_shard(&repository, "refs/heads/main");
+        for value in 1..=64 {
+            let state = apply(
+                &kv,
+                &SinglePartition,
+                "refs/heads/main",
+                advance(value, Clearance::Cleared),
+                false,
+            )
+            .await;
+            assert_eq!(state.sequence, state.published);
+            assert!(
+                kv.get(
+                    &source,
+                    &keys::advance(&repository.name, "refs/heads/main", state.sequence)
+                )
+                .await
+                .unwrap()
+                .is_none()
+            );
+        }
+        let mut retained = advance(65, Clearance::Cleared);
+        retained.obligations.push(Obligation {
+            id: [9; 32],
+            state: Clearance::Cleared,
+        });
+        let state = apply(&kv, &SinglePartition, "refs/heads/main", retained, false).await;
+        assert!(
+            kv.get(
+                &source,
+                &keys::advance(&repository.name, "refs/heads/main", state.sequence)
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
     });
 }

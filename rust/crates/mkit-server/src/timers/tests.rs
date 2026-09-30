@@ -87,7 +87,13 @@ async fn test_timer_d34_deletes_ref_and_enqueues_index_delete_without_lease() {
         })
         .unwrap();
     assert_eq!(row.target, D34Shards.ref_index(&repo, name));
-    assert_eq!(row.deletes, vec![keys::ref_index_key(&repo.name, name)]);
+    assert_eq!(
+        row.deletes,
+        vec![
+            keys::ref_index_key(&repo.name, name),
+            keys::published_index(&repo.name, name)
+        ]
+    );
 }
 
 fn partition() -> Partition {

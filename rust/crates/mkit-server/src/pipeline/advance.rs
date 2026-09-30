@@ -124,6 +124,7 @@ fn reservation<'a>(snap: &'a Snapshot, id: &Hash, t: &TicketV1) -> Result<&'a Va
 }
 
 /// Append ticket closure, terminal outcomes and membership to the same ref batch.
+#[allow(clippy::too_many_arguments)] // One atomic fragment has explicit input and output slices.
 pub(super) fn plan_consumption(
     snap: &Snapshot,
     advance: &AdvanceWrite<'_>,

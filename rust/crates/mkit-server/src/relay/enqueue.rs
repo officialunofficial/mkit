@@ -256,6 +256,7 @@ mod tests {
     }
     fn row(n: u16) -> RelayV1 {
         RelayV1 {
+            publication_era: false,
             at_ms: 1_000,
             target: source(),
             puts: vec![(

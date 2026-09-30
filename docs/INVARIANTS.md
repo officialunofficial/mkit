@@ -1911,3 +1911,37 @@ content or tokens, or serves a different object from the requested URL.
 
 **Enforced by:** native `tests/http_mount.rs`, Worker `http_mount` tests,
  default feature/startup configuration, and the release feature gate.
+
+
+## Published refs and durable dependency work (WP-5.4)
+
+**Always:** branch head and packmap publish as one pair at the greatest contiguous
+cleared-or-resolved prefix. Ref deletion establishes a boundary without resetting
+its sequence; late clearance may publish retained membership but cannot resurrect
+an old ref. **Because:** live commits and completed inspection are different
+facts. **If violated:** readers can observe uncleared or resurrected content.
+Enforced by `store/publication.rs` guarded append/clear/prefix and paired RefShard
+planning; out-of-order and deletion/recreation tests assert the boundary.
+
+**Always:** inspection-enabled publication accounts for every external source
+used by every consumed entry, including unreachable surplus entries and every
+intermediate source in a delta chain. Own additions never waive external-base
+publication. Blocked advances retain kind-12 work until all dependencies and
+obligations complete; holds/hits cannot auto-clear. **Because:** an inspector Pass
+and live membership do not establish reader-visible dependencies. **If violated:**
+pending content can become public through cross-ref reuse or an external delta.
+Enforced by native MemberCache exports, Scheduled vc6 exports, server pair
+verification and guarded PublicationRecheck. Native surplus and Scheduled
+fault/restart chain tests pin exports; Single/D34 relay/restart tests prove progress
+without client traffic. Paid Worker activation reserves one bounded fire; Free
+retains unknown timers and inspection is not activated there.
+
+**Always:** private-read authorization precedes view selection. Readers use
+published refs/membership; writers retain live refs and pending membership, but
+held bytes are absent to both. **Because:** view classification cannot grant
+permission or turn quarantine into a distribution channel. **If violated:**
+private or held content leaks. Enforced by read_policy, ViewStore and the trusted
+coherent PublicationPolicy serving-stop seam; HTTP and tokens remain anonymous.
+RPC identity/pending/held tests, private token/proof tests and existing authorization
+matrix cover the paths. The actual inspector/flag scheduler and cache purge remain
+WP-5.5a/5.6a responsibilities; this change does not claim their activation.

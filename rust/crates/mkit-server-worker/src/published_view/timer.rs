@@ -258,6 +258,12 @@ impl<B: SnapshotBucket, N: NamespaceStore> SnapshotHandler<B, N> {
         };
         // On Worker these local SQL futures finish synchronously, before the
         // first external await; generation and rows describe one captured view.
+        if !matches!(
+            mkit_server::store::migration::observe(ctx.store, ctx.partition, repo).await?,
+            mkit_server::store::migration::State::Managed
+        ) {
+            return Err(StoreError::unavailable("publication migration incomplete"));
+        }
         let captured_at_ms = self.now();
         let view = mkit_server::store::view::ViewStore {
             store: ctx.store,
@@ -276,6 +282,12 @@ impl<B: SnapshotBucket, N: NamespaceStore> SnapshotHandler<B, N> {
             u32::try_from(MAX_ROWS + 1).unwrap_or(u32::MAX),
         )
         .await?;
+        if !matches!(
+            mkit_server::store::migration::observe(ctx.store, ctx.partition, repo).await?,
+            mkit_server::store::migration::State::Managed
+        ) {
+            return Err(StoreError::unavailable("publication migration incomplete"));
+        }
         let envelope = Envelope {
             partition: ctx.partition.clone(),
             generation: state.generation,

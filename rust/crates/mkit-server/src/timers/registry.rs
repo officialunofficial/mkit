@@ -38,7 +38,9 @@ impl TimerKind {
 /// | 10 | PUBLISHED_VIEW (Worker only, WP-1.21) |
 /// | 11 | Cache purge (WP-5.10) |
 /// | 12 | PUBLICATION_RECHECK (WP-5.4, R-182) |
-/// | 13..=0xEF | Production, unallocated |
+/// | 13..=14 | Reserved by the orchestrator |
+/// | 15 | PUBLICATION_MIGRATION (WP-5.4, R-182) |
+/// | 16..=0xEF | Production, unallocated |
 /// | 0xF0..=0xFE | Reserved for tests |
 /// | 0xFF | TEST (`test-faults` only) |
 pub mod kinds {
@@ -62,6 +64,8 @@ pub mod kinds {
     pub const PUBLISHED_VIEW: super::TimerKind = super::TimerKind::new(10);
     /// Retained inspection and published-membership dependency clearance.
     pub const PUBLICATION_RECHECK: super::TimerKind = super::TimerKind::new(12);
+    /// Bounded legacy publication-era initialization.
+    pub const PUBLICATION_MIGRATION: super::TimerKind = super::TimerKind::new(15);
     /// Ref deletion used only by test drivers and directives.
     #[cfg(feature = "test-faults")]
     pub const TEST: super::TimerKind = super::TimerKind::new(0xFF);
