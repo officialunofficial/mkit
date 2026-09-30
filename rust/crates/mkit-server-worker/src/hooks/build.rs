@@ -178,12 +178,23 @@ mod glue {
             if let Some(fence) = &cfg.authority_fence {
                 other_keys.extend(fence.public_keys());
             }
+            if let Some(retrieval) = &cfg.scanner_retrieval {
+                other_keys.extend(retrieval.scanner_keys());
+                crate::scanner_retrieval::check_hook_seed(retrieval, key.as_deref())?;
+            }
             let signer = super::super::config::http_signer(
                 key,
                 http,
                 cfg.ticket_keys.as_ref(),
                 &other_keys,
             )?;
+            if let Some(retrieval) = &cfg.scanner_retrieval {
+                retrieval
+                    .check_role_keys(&[signer.public_key()], &[])
+                    .map_err(|_| {
+                        ConfigError("scanner retrieval keys must differ from hook keys".into())
+                    })?;
+            }
             (
                 WorkerChannel::Http(FetchChannel::new(http.endpoint.clone())),
                 Some(signer),

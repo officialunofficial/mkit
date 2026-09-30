@@ -1,8 +1,7 @@
 //! Synchronous `PRE_RECEIVE` inspection over the existing signed hook channels.
 //!
-//! Calls carry metadata only. Scanner byte retrieval through an authorized,
-//! deployment-private channel is the R-193 follow-up; public object serving
-//! cannot supply unpublished content (SPEC-SERVER §6.4).
+//! Calls carry metadata and optional R-193 raw-pack retrieval credentials only.
+//! Public object serving cannot supply unpublished content (SPEC-SERVER §6.4).
 
 use core::time::Duration;
 use std::collections::BTreeSet;
@@ -89,12 +88,23 @@ impl<C: HookChannel> RemoteInspector<C> {
         inspection_id: &str,
         objects: &[pb::InspectObject],
     ) -> Result<InspectVerdict, ServerError> {
+        self.inspect_request(op, inspection_id, objects, None).await
+    }
+
+    async fn inspect_request(
+        &self,
+        op: &Operation,
+        inspection_id: &str,
+        objects: &[pb::InspectObject],
+        retrieval: Option<pb::InspectRetrieval>,
+    ) -> Result<InspectVerdict, ServerError> {
         if self.name.is_empty() || inspection_id.is_empty() || !objects.iter().all(valid_object) {
             return Err(map::unavailable("inspection", "invalid request metadata"));
         }
         let request = pb::InspectRequest {
             operation: map::authorize_request(op, self.client.server_audience()).operation,
             objects: objects.to_vec(),
+            scanner_retrieval: retrieval.into(),
             phase: Some(pb::InspectPhase::INSPECT_PHASE_PRE_RECEIVE.into()),
             inspection_id: Some(inspection_id.to_owned()),
             ..Default::default()
@@ -111,6 +121,20 @@ impl<C: HookChannel> RemoteInspector<C> {
 impl<C: HookChannel> crate::pipeline::inspection::ContentInspector for RemoteInspector<C> {
     fn id(&self) -> &str {
         self.id()
+    }
+
+    fn retrieval_timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    fn inspect_with_retrieval<'a>(
+        &'a self,
+        op: &'a Operation,
+        id: &'a str,
+        objects: &'a [pb::InspectObject],
+        retrieval: Option<pb::InspectRetrieval>,
+    ) -> crate::BoxFuture<'a, Result<InspectVerdict, ServerError>> {
+        Box::pin(self.inspect_request(op, id, objects, retrieval))
     }
 
     fn inspect<'a>(
@@ -310,5 +334,82 @@ mod tests {
                 .1
         };
         assert_ne!(nonce(0), nonce(1));
+    }
+    #[test]
+    fn retrieval_descriptor_is_metadata_and_covered_by_hook_signature() {
+        use crate::pipeline::inspection::ContentInspector as _;
+        use crate::scanner_retrieval::{Assignment, PackGrant, RetrievalConfig};
+        use mkit_core::hash::to_hex;
+        let client = client(
+            MockChannel::new(Step::json(r#"{"pass":{}}"#)),
+            ManualSleep::new(),
+        );
+        let remote = RemoteInspector::new("scanner", client.clone());
+        let scanner = ed25519_dalek::SigningKey::from_bytes(&[0x65; 32]);
+        let config = RetrievalConfig::parse(
+            &format!("active current {}", to_hex(&[0x64; 32])),
+            &to_hex(&scanner.verifying_key().to_bytes()),
+        )
+        .unwrap();
+        let assignment = Assignment {
+            namespace: "default".into(),
+            repo_name: "test".into(),
+            repository: "test".into(),
+            ref_name: "refs/heads/main".into(),
+            signer: [0x66; 32],
+            packs: vec![PackGrant {
+                id: [0x67; 32],
+                length: 123,
+                tickets: vec![[0x68; 32]],
+            }],
+        };
+        let op = Operation::new(
+            RepoId {
+                namespace: NamespaceKey::deployment_default(),
+                name: RepoName::new("test").unwrap(),
+            },
+            Principal::Anonymous,
+            None,
+            OpKind::UpdateRef(RefUpdate {
+                name: "refs/heads/main".into(),
+                condition: RefWriteCondition::Missing,
+                new: Some([0x33; 32]),
+            }),
+        );
+        let descriptors: Vec<_> = (0..2)
+            .map(|_| {
+                config
+                    .mint(
+                        "https://vcs.example",
+                        "inspection:stable",
+                        &assignment,
+                        remote.retrieval_timeout(),
+                        100,
+                    )
+                    .unwrap()
+            })
+            .collect();
+        for descriptor in &descriptors {
+            assert_eq!(
+                block_on(remote.inspect_with_retrieval(
+                    &op,
+                    "inspection:stable",
+                    &objects(),
+                    Some(descriptor.clone()),
+                ))
+                .unwrap(),
+                InspectVerdict::Pass
+            );
+        }
+        let seen = channel_of(&client).seen.lock().unwrap();
+        for (call, descriptor) in seen.iter().zip(&descriptors) {
+            crate::hooks::tests::verify(call);
+            let request: pb::InspectRequest = serde_json::from_slice(&call.body).unwrap();
+            assert_eq!(request.scanner_retrieval.as_option(), Some(descriptor));
+            assert_eq!(request.objects, objects());
+            assert_eq!(request.inspection_id.as_deref(), Some("inspection:stable"));
+        }
+        assert_ne!(descriptors[0].capability, descriptors[1].capability);
+        assert_ne!(seen[0].body, seen[1].body);
     }
 }

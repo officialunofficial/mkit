@@ -698,3 +698,82 @@ fn inspection_configuration_refuses_fifth_inspector() {
     settings.inspect.push("https://scanner5.example".into());
     assert!(mkit_server_native::hooks::build::build(Some(&settings), AUDIENCE).is_err());
 }
+
+#[test]
+#[cfg(feature = "test-faults")]
+fn scanner_retrieval_is_explicit_and_requires_dedicated_roles() {
+    use mkit_server_conformance::wire::sign::Signer;
+    let rig = Rig::new();
+    let list = rig.root.path().join("scanner-namespaces");
+    std::fs::write(
+        &list,
+        "ed25519-0101010101010101010101010101010101010101010101010101010101010101",
+    )
+    .unwrap();
+    let mut flags = vec![
+        "--addressing",
+        "multi",
+        "--namespace-allowlist",
+        common::s(&list),
+        "--indexed",
+        "--hook-inspect-url",
+        HOOK,
+        "--hook-key-file",
+        common::s(&rig.key),
+    ];
+    let mac = format!("active retrieve-1 {}", "7".repeat(64));
+    let scanner = Signer::new([8; 32], AUDIENCE, "").public_key_hex();
+    let env = [
+        ("SCANNER_RETRIEVAL_KEYS", mac.as_str()),
+        ("SCANNER_KEYS", scanner.as_str()),
+    ];
+    let disabled = rig.resolve(&flags, &[]).unwrap();
+    refused(
+        rig.resolve(&flags, &env),
+        exit::CONFIG_ERROR,
+        "scanner retrieval",
+    );
+    assert!(disabled.pipeline.scanner_retrieval.is_none());
+    flags.push("--scanner-retrieval");
+    refused(
+        rig.resolve(&flags, &[]),
+        exit::CONFIG_ERROR,
+        "scanner retrieval",
+    );
+    refused(
+        rig.resolve(&flags, &env[..1]),
+        exit::CONFIG_ERROR,
+        "scanner retrieval",
+    );
+    let enabled = rig.resolve(&flags, &env).unwrap();
+    assert!(enabled.pipeline.scanner_retrieval.is_some());
+    for (mac, scanner) in [
+        (format!("active retrieve-1 {SEED_HEX}"), scanner.clone()),
+        (
+            mac.clone(),
+            Signer::new([0x22; 32], AUDIENCE, "").public_key_hex(),
+        ),
+        (
+            format!(
+                "active retrieve-1 {}",
+                Signer::new([0x22; 32], AUDIENCE, "").public_key_hex()
+            ),
+            scanner,
+        ),
+    ] {
+        refused(
+            rig.resolve(
+                &flags,
+                &[("SCANNER_RETRIEVAL_KEYS", &mac), ("SCANNER_KEYS", &scanner)],
+            ),
+            exit::CONFIG_ERROR,
+            "scanner retrieval",
+        );
+    }
+    let absent_inspector = ["--scanner-retrieval"];
+    refused(
+        rig.resolve(&absent_inspector, &[]),
+        exit::CONFIG_ERROR,
+        "scanner retrieval",
+    );
+}

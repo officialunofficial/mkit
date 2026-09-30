@@ -83,18 +83,58 @@ token does not replace mkit message authentication.
 |---|---|---|
 | CI write/read signer | Namespace is allowlisted under `allowlist`; demo `any` admits every self-certifying namespace. Private seed is `MKIT_STAGING_SIGNER_SEED` in the approved CI secret store | User owns CI signer; it grants no scanner, admin or preservation permission |
 | Tickets and multipart receipts | `TICKET_KEYS` secret: one `<key-id> <64 hex>` entry per line; first signs, all verify | Dedicated random 32-byte MAC secrets; existing [rotation contract](upload-key-rotation.md) |
-| Signed outgoing hooks | `MKIT_HOOK_KEY` secret: `<key-id> <64 hex seed>`; `HOOK_URL` HTTPS, `HOOK_ROLES`, timeout and signature validity | Receiver trusts public hook key list under SPEC-SERVER §7; existing `signed-http-hooks` opt-in. Inspect role requires R-193; publication Event role is post-launch; 4.18 integrates |
+| Signed outgoing hooks | `MKIT_HOOK_KEY` secret: `<key-id> <64 hex seed>`; `HOOK_URL` HTTPS, `HOOK_ROLES`, timeout and signature validity | Receiver trusts public hook key list under SPEC-SERVER §7; existing `signed-http-hooks` opt-in. Inspect role uses R-193; publication Event role is post-launch; 4.18 integrates |
 | Optional isolated hook binding | `ADMISSION_HOOK` service binding instead of `HOOK_URL` | Mutually exclusive channels; unsigned exception only for the isolated nonpublic §7.3 channel. It does not authorize a public scanner route |
 | Deployment authority fence | `AUTHORITY_FENCE=true`, `AUTHORITY_KEYS` configured public key list with namespace permissions; private signer stays with Uno operator | Existing 2.16 contract requires `AUTHORIZER_ROLE=authority` and authorize hook. 4.18 decides final profile wiring |
-| Incoming scanner | Dedicated Ed25519 scanner public allowlist; private scanner key stays with scanner; separate server-issued capability key | Route, secret names, capability grammar, audience, rotation/revocation and collision checks **pending R-193**. Scanner gets only assigned PRE_RECEIVE canonical reads; global block denied. No launch inspection holds |
+| Incoming scanner | `SCANNER_KEYS`: newline-separated 64-hex Ed25519 public keys; private keys stay with scanner. `SCANNER_RETRIEVAL_KEYS` secret: one `active <key-id> <64-hex secret>` plus optional `retained <key-id> <64-hex secret> <retired_at_ms>` lines | R-193: `POST /_mkit/scanner/pack` requires a dedicated retrieval MAC capability and scanner auth-v2 signature with server-origin audience and exact body/path/repository binding. Only raw added packs in the capability; global blocks always deny. Default-off native `--scanner-retrieval` / Worker `SCANNER_RETRIEVAL=true`, Paid-only and integrated by 4.18. Missing/conflicting keys and configured role reuse refuse startup; no Workers Caching or cache headers |
 | Admin | Dedicated public admin key list, §16.3 JSON with roles; private signing keys offline / HSM | `ADMIN_KEYS`; `audit` for ReadAuditLog, appropriate dedicated moderation/preservation roles for takedown/ReadPreserved. Never client bearer/write/hook authentication. No hold review or Reinstate mount |
 | Purge sink | CachePurge is signed with a deployment **hook** key under §7, to the sink's canonical audience; sink trusts its configured public key list | Signed HTTPS `cache-purge` hook required when takedown is enabled. Isolated binding alone cannot satisfy that opt-in. No new purge-signature domain or admin key reuse. Manual PurgeCache is **5.6a**, asynchronous with purge id and audited completion |
 | URL tokens | Dedicated `URL_TOKEN_KEYS` secret and optional `URL_TOKEN_TTL`; existing HTTP feature grammar | Separate active/retained keys; requires `HTTP_OBJECTS=true` and an `http-objects` build. 4.18 activates |
 | Preservation signing | Explicit preservation retention, dedicated §15 receipt-and-notice signing key and published §15.5 key list | Required by §14.7 even for lean takedown; exact bindings/config **pending 5.6a-2 / 4.18**. This requirement does not enable storage receipts or notices |
 
 Use [SPEC-SERVER §§7, 14.7 and 16](../../specs/SPEC-SERVER.md) and the final
-merged key matrix as authority. Missing scanner/admin/preservation contracts
+merged key matrix as authority. Missing admin/preservation contracts
 are integration work, not permission to substitute another role's key.
+
+Scanner capabilities use the opaque versioned `r1` codec in SPEC-SERVER §11.4.
+`SCANNER_RETRIEVAL_KEYS` starts with exactly one active line and accepts at
+most 15 retained lines. Key ids are unique, 1–32 characters of
+`[A-Za-z0-9._-]`; retirement times are unsigned canonical decimal Unix
+milliseconds. `SCANNER_KEYS` accepts 1–32 distinct, non-weak public keys.
+Blank lines and whole-line `#` comments are ignored in both settings.
+Each Inspect call mints a fresh capability, including retries with a stable
+inspection id. Its lifetime is the hook timeout plus 1,000 ms, at most
+301,000 ms, and every requested pack's bound tickets are read afresh: apply
+consumption, terminal close or ticket expiry ends access. Fail-closed
+attempts leave tickets open and remain readable only until capability expiry.
+Use bounded ranges of at most 1 MiB; larger packs cannot be fetched in one
+response. Retain old capability verification keys for 301,000 ms after
+rotation on every instance. Neither capability nor scanner key grants
+write, admin or preservation-read access.
+The route bounds its complete shared denial/ticket/blob call budget at
+8,500 backend operations; Worker adapter work fits within the existing
+9,000-call invocation ceiling. Request bodies are capped at 16 KiB and
+pack response bodies at 1 MiB. Inventory proof paging uses the existing
+verified metadata; the route does not decode or classify pack entries.
+Scanner global-denial checks prefetch up to eight shards' first descriptor
+pages concurrently, retaining at most 4 MiB of raw descriptor values,
+plus bounded key, cursor and collection overhead.
+Continuations and nested inventory, chunk and action proofs remain sequential
+with their existing limits. All checks are fresh; existing serving callers
+remain serial.
+
+At 4.18, measure cold and warm global-denial proof latency and all ranges
+needed to decode each pack against the actual Inspect timeout before
+activation. Worker `HOOK_TIMEOUT_MS` remains 5,000 ms by default and at most
+30,000 ms; the native/core 300,000 ms retrieval timeout ceiling does not
+raise that Worker limit. Host tests exercise the production Worker DO/R2
+adapters with two-pack independent decoding and range reads. Local mounted
+diagnostics included capability expiry and a runtime restart, and establish
+no production timing or mounted-scanner conformance claim. At 4.18, measure
+latency and resource use on the actual deployment profile; production
+activation remains off pending that gate.
+Scanner deployment also needs its independent authorized
+resolver or retained cache for external delta bases (§11.4).
 
 Future staging automation uses only secret names `CLOUDFLARE_API_TOKEN`,
 `CLOUDFLARE_ACCOUNT_ID`, `MKIT_STAGING_SIGNER_SEED` and variable

@@ -32,6 +32,8 @@ mod router;
 #[cfg(feature = "s3")]
 pub mod s3;
 #[cfg(feature = "http")]
+mod scanner_retrieval;
+#[cfg(feature = "http")]
 pub mod server;
 #[cfg(feature = "http")]
 mod shutdown;
