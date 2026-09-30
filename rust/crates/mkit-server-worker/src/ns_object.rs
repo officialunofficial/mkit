@@ -833,8 +833,15 @@ mod object {
             let current = self.storage.get_alarm().await?;
             // A request can interleave while a backup awaits R2. Its timer
             // Put must survive this handler's final set/delete decision.
-            let action =
-                alarm_after_tick_with_dirty(current, next_wake, now, self.alarm_dirty.get());
+            // The tick may have awaited I/O. Use a fresh clock reading so an
+            // immediate continuation is strictly after the runtime's current
+            // alarm, rather than rearming the timestamp it is completing.
+            let action = alarm_after_tick_with_dirty(
+                current,
+                next_wake,
+                self.now_ms(),
+                self.alarm_dirty.get(),
+            );
             let result = match action {
                 AlarmAction::Set(next) => self.set_alarm(next).await,
                 AlarmAction::Delete => self.storage.delete_alarm().await,
@@ -843,7 +850,9 @@ mod object {
                 crate::log_failure(&format!("timer alarm update failed: {error}"));
             }
             if self.alarm_dirty.replace(false)
-                && let Err(error) = self.set_alarm(i64::try_from(now).unwrap_or(i64::MAX)).await
+                && let AlarmAction::Set(next) =
+                    alarm_after_tick_with_dirty(None, None, self.now_ms(), true)
+                && let Err(error) = self.set_alarm(next).await
             {
                 crate::log_failure(&format!("timer alarm update failed: {error}"));
             }

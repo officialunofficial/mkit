@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server/Worker: keep immediate alarm continuations strictly after the current
+  clock so bounded ticket, outcome and relay cleanup cannot strand an alarm
+  chain. Native test timer directives share tick exclusion with the autonomous
+  driver, making due-timer and redelivery conformance deterministic.
+
 - Server/Worker (default-off, WP-4.10b-2, R-186): complete consumed-group extraction
   with closure before effects, native union counts, bounded job header/body guards,
   resumable delta reconstruction and root-checked multipart uploads. Hold renewal
