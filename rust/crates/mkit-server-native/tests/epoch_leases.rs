@@ -1103,8 +1103,8 @@ fn assert_renewal_ops(calls: &[Call], old_timer: &Key, new_timer: &Key) {
         .unwrap();
     assert_eq!(
         renewal_ref_ops,
-        (5, 7),
-        "the ref batch keeps its lease installation and adds the index relay"
+        (6, 11),
+        "the ref batch guards publication and writes live and published refs with their index relays"
     );
 }
 

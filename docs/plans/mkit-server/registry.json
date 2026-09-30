@@ -2233,7 +2233,7 @@
       "2.15"
     ],
     "size": "L",
-    "summary": "Per-ref leases in ref shards with timer-driven active/grace/suspended/deleted transitions, a LeasePolicy hook, and exactly-once lifecycle events through the outbox.",
+    "summary": "Per-ref leases in ref shards with timer-driven active/grace/suspended/deleted transitions, a LeasePolicy hook, and durably recorded lifecycle events with at-least-once delivery through the outbox.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -2289,7 +2289,7 @@
       "3.3"
     ],
     "size": "L",
-    "summary": "Launch: published (head, packmap) pointers, retained advances and contiguous clearance; writer/live and reader/published views on every read path, including X-Mkit-Ref, snapshots, tokens, HTTP bytes/proofs and caches. Explicit dependencies provide signed reads, ticketed advances, ref-index relay, snapshots and durable outbox. Includes the launch-profile spec amendment permitting indexed serving/inspection without storage leases, permanent retention and GC disabled; unresolved inspection-hit handoff is explicit (R-185).",
+    "summary": "Launch: published (head, packmap) pointers, retained advances and contiguous clearance; writer/live and reader/published views on every read path, including X-Mkit-Ref, snapshots, tokens, HTTP bytes/proofs and caches. Explicit dependencies provide signed reads, ticketed advances, ref-index relay, snapshots and durable outbox. Includes the launch-profile spec amendment permitting indexed serving/inspection without storage leases, permanent retention and GC disabled; durable unresolved inspection-hit handoff is a later 5.5a seam and its normative launch exception belongs to 5.6a (HANDOFF/R-190).",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -2327,7 +2327,7 @@
       "4.8"
     ],
     "size": "L",
-    "summary": "Launch: durable inspection obligations and stable IDs, sync checks, async clearance, holds and serving stops across every byte/reuse/cache path, purge scheduling and retained roots. Hits durably hand off to takedown and stay unresolved until verified completion; a no-op does not resolve them. Wire metadata-only remote Inspect through native HTTP and the signed Worker channel. Pull forward audited review/purge foundations as needed; the 5.4 spec amendment permits deferred completion (R-185).",
+    "summary": "Launch: durable inspection obligations and stable IDs, sync checks, async clearance, holds and serving stops across every byte/reuse/cache path, purge scheduling and retained roots. Hits durably hand off to takedown and stay unresolved until verified completion; a no-op does not resolve them. Wire metadata-only remote Inspect through native HTTP and the signed Worker channel. Pull forward audited review/purge foundations as needed; the lean 5.6a spec amendment permits unresolved requests under HANDOFF/R-190; 5.4 does not waive takedown completion.",
     "human_action": false,
     "area_gates": [
       "rust",

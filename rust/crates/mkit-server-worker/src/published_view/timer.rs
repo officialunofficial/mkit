@@ -75,7 +75,7 @@ pub fn extend_relay(
         };
         matches!(
             keys::parse(key),
-            Some(keys::ParsedKey::RefIndexEntry { .. })
+            Some(keys::ParsedKey::PublishedIndex { .. })
         )
     });
     if !changes_index {
@@ -259,8 +259,14 @@ impl<B: SnapshotBucket, N: NamespaceStore> SnapshotHandler<B, N> {
         // On Worker these local SQL futures finish synchronously, before the
         // first external await; generation and rows describe one captured view.
         let captured_at_ms = self.now();
-        let scan = IndexBucket {
+        let view = mkit_server::store::view::ViewStore {
             store: ctx.store,
+            repo: &identity,
+            writer: false,
+            policy: None,
+        };
+        let scan = IndexBucket {
+            store: &view,
             partition: ctx.partition,
         }
         .scan(

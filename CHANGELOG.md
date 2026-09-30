@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server (WP-5.4, R-198): remove compatibility with unreleased publication stores;
+  reset existing stores. Hold authority belongs to post-launch WP-5.5c; timer 15 and `pv` are freed.
+
+- **WP-5.4:** add persistent paired published refs, versioned membership and durable
+  cross-ref dependency rechecks; route reader RPCs, snapshots, tokens and HTTP
+  bytes/proofs through published values while retaining writer visibility and
+  serving stops. Specify indexed permanent-retention launch without storage leases
+  or GC, and publication Events: Committed means Sent; Delivered requires the
+  contiguous published prefix.
+
 - Docs: add the early Uno launch-readiness skeleton (WP-1.20, R-195 / R-198):
   D35 environment/key roles, operator reset/rollback/rotation/drills, empty
   user-owned evidence slots and a DRAFT user-only REL-1 prompt. Final readiness

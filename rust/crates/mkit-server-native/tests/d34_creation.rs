@@ -327,7 +327,7 @@ async fn real_index_listing<N: NamespaceStore>(backend: N, names: &[String]) {
                 .apply(
                     &target,
                     Batch::new().put(
-                        keys::ref_index_key(&auth.repo().repo.name, name),
+                        keys::published_index(&auth.repo().repo.name, name),
                         codec::encode_ref_id(&value),
                     ),
                 )
@@ -393,7 +393,7 @@ async fn index_corruption_unavailable<N: NamespaceStore>(backend: N) {
         .apply(
             &wrong,
             Batch::new().put(
-                keys::ref_index_key(&auth.repo().repo.name, name),
+                keys::published_index(&auth.repo().repo.name, name),
                 codec::encode_ref_id(&[9; 32]),
             ),
         )

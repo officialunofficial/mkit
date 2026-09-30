@@ -44,7 +44,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_mkit-server");
 // ---------------------------------------------------------------------------
 // A slow store, for the timeout and concurrency tests.
 
-/// [`MemoryKv`] whose `get` sleeps `delay` and counts calls in flight.
+/// [`MemoryKv`] whose reads sleep `delay` and counts calls in flight.
 #[derive(Clone)]
 struct SlowKv {
     inner: Arc<MemoryKv>,
@@ -80,6 +80,10 @@ impl NamespaceStore for SlowKv {
         p: &Partition,
         keys: &[Key],
     ) -> Result<Vec<Option<Value>>, StoreError> {
+        let n = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(n, Ordering::SeqCst);
+        tokio::time::sleep(self.delay).await;
+        self.now.fetch_sub(1, Ordering::SeqCst);
         self.inner.get_many(p, keys).await
     }
     async fn scan(
