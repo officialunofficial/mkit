@@ -495,6 +495,7 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
     let mut staged_owner = BTreeMap::new();
     let mut denial_ids = BTreeSet::new();
     let mut work = Vec::with_capacity(tickets.len());
+    let mut raw_packs = BTreeSet::new();
     let mut packlists = Vec::new();
     for ticket in tickets {
         renew_all_pending(store, source, repo, acquired, clock).await?;
@@ -626,6 +627,7 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
                 });
             }
             UploadType::Pack => {
+                raw_packs.insert(ticket.pack_id);
                 let Ok(base_ids) = delta_base_hashes(&bytes) else {
                     return Err(reject_content(
                         store,
@@ -1205,6 +1207,9 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
                 }
             })
             .collect();
+        for pack in raw_packs {
+            set.add_raw_pack(pack);
+        }
         set.defer_native(entries);
     }
     Ok(StagedCommits {

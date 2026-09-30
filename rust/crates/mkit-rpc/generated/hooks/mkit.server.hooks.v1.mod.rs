@@ -44,6 +44,8 @@ pub mod __buffa {
         reg.register_json_any(super::__ADMIT_CHALLENGE_JSON_ANY);
         reg.register_json_any(super::__CHALLENGE_JSON_ANY);
         reg.register_json_any(super::__INSPECT_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__INSPECT_RETRIEVAL_JSON_ANY);
+        reg.register_json_any(super::__INSPECT_PACK_JSON_ANY);
         reg.register_json_any(super::__INSPECT_OBJECT_JSON_ANY);
         reg.register_json_any(super::__INSPECT_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__INSPECT_DEFER_JSON_ANY);

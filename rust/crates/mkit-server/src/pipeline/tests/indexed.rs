@@ -1730,3 +1730,6 @@ fn ticketless_reuse_rechecks_file_in_another_source_pack_with_and_without_policy
 }
 #[cfg(feature = "remote-hooks")]
 mod inspection;
+
+#[cfg(feature = "remote-hooks")]
+mod scanner_retrieval;

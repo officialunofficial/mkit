@@ -377,6 +377,9 @@ pub struct ServeArgs {
     #[cfg(feature = "hooks")]
     #[command(flatten)]
     pub hooks: crate::hooks::config::HookArgs,
+    /// Enable private scanner retrieval (`SCANNER_RETRIEVAL_KEYS` and `SCANNER_KEYS`).
+    #[arg(long)]
+    pub scanner_retrieval: bool,
     /// Deadline of a unary RPC.
     #[arg(long, value_name = "SECS", default_value_t = 30)]
     pub unary_timeout_secs: u64,
@@ -1576,6 +1579,7 @@ pub fn resolve(
             }
         }
     }
+    crate::scanner_retrieval::resolve(args, &mut pipeline, env)?;
     let router = RouterOptions {
         unary_timeout: Duration::from_secs(args.unary_timeout_secs),
         stream_timeout: Duration::from_secs(args.stream_timeout_secs),

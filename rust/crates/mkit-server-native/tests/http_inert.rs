@@ -31,7 +31,7 @@ fn pipeline() -> Pipeline<MemoryBlobStore, Arc<MemoryKv>, Hooks> {
             max_chunks: 64,
         },
     );
-    assert!(cfg.indexed.is_none() && cfg.url_tokens.is_none());
+    assert!(cfg.indexed.is_none() && cfg.url_tokens.is_none() && cfg.scanner_retrieval.is_none());
     #[cfg(feature = "http-objects")]
     assert!(cfg.http_objects.is_none());
     Pipeline::new(
@@ -54,6 +54,7 @@ async fn default_configuration_does_not_mount_objects_or_key_document() {
     for path in [
         "/-/objects/0000000000000000000000000000000000000000000000000000000000000000",
         "/.well-known/mkit-url-token-keys.json",
+        "/_mkit/scanner/pack",
     ] {
         for method in ["GET", "OPTIONS"] {
             let response = router
@@ -122,4 +123,24 @@ fn url_token_flags_follow_the_explicit_adapter_feature() {
     assert!(args.url_token_key_file.is_none() && args.url_token_ttl.is_none());
     #[cfg(not(feature = "http-objects"))]
     let _ = args;
+}
+
+#[test]
+#[cfg(not(feature = "test-faults"))]
+fn shipped_scanner_retrieval_refuses_activation_before_the_launch_gate() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join(".mkit")).unwrap();
+    let args = Serve::try_parse_from([
+        "serve",
+        "--repo-root",
+        root.path().to_str().unwrap(),
+        "--listen",
+        "127.0.0.1:0",
+        "--unsafe-allow-any-peer",
+        "--scanner-retrieval",
+    ])
+    .unwrap()
+    .args;
+    let error = mkit_server_native::config::resolve(&args, &|_| None).unwrap_err();
+    assert!(error.message.contains("4.18"), "{error}");
 }

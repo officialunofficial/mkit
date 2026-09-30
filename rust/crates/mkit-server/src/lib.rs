@@ -51,6 +51,7 @@ pub mod relay;
 mod replay;
 mod repo;
 mod rt;
+pub mod scanner_retrieval;
 #[cfg(feature = "sql")]
 pub mod sql;
 #[cfg(feature = "ssh")]

@@ -34,6 +34,7 @@ pub struct InspectionSet {
     limit: usize,
     objects: BTreeMap<Hash, InspectObject>,
     added_entries: u64,
+    raw_packs: BTreeSet<Hash>,
     pending: Option<Added>,
 }
 
@@ -73,6 +74,7 @@ impl InspectionSet {
             limit,
             objects: BTreeMap::new(),
             added_entries: 0,
+            raw_packs: BTreeSet::new(),
             pending: None,
         }
     }
@@ -98,11 +100,22 @@ impl InspectionSet {
         Ok(())
     }
 
+    pub(super) fn add_raw_pack(&mut self, id: Hash) {
+        self.raw_packs.insert(id);
+    }
+
+    /// Verified raw additions; excludes packlist nodes without new byte reads.
+    #[cfg(feature = "remote-hooks")]
+    pub(crate) fn raw_packs(&self) -> &BTreeSet<Hash> {
+        &self.raw_packs
+    }
+
     pub(super) fn defer_native(&mut self, entries: Vec<NativeEntry>) {
         self.pending = Some(Added::Native(entries));
     }
 
     pub(super) fn defer_scheduled(&mut self, packs: Vec<ScheduledPack>, source: crate::Partition) {
+        self.raw_packs.extend(packs.iter().map(|pack| pack.pack));
         self.pending = Some(Added::Scheduled(source, packs));
     }
 
