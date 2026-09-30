@@ -337,6 +337,22 @@ impl Client {
         self.send(req).await
     }
 
+    /// An OPTIONS preflight with caller-supplied headers.
+    pub async fn options(&self, path: &str, headers: &[(String, String)]) -> Result<Reply, String> {
+        let mut request = http::Request::builder()
+            .method("OPTIONS")
+            .uri(format!("{}{path}", self.base));
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        self.send(
+            request
+                .body(Bytes::new())
+                .map_err(|_| "building preflight")?,
+        )
+        .await
+    }
+
     /// `GET {base}{path}`.
     ///
     /// # Errors

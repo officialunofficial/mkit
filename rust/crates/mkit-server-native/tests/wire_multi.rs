@@ -321,3 +321,19 @@ async fn wire_grants_and_epochs_single() {
 async fn wire_grants_and_epochs_d34() {
     grants_and_epochs("d34").await;
 }
+
+#[cfg(feature = "hooks")]
+#[tokio::test]
+async fn wire_m3_multi_admission() {
+    common::mpp::suite(
+        &[
+            "--addressing".into(),
+            "multi".into(),
+            "--namespace-policy".into(),
+            "any".into(),
+            "--unsafe-open-namespaces".into(),
+        ],
+        &["admission."],
+    )
+    .await;
+}

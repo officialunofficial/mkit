@@ -31,12 +31,18 @@ all = { level = "warn", priority = -1 }
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
 
 [features]
+# Runtime-free public hook messages, JSON codec and Ed25519 authentication.
+hooks = ["buffa/json", "dep:ed25519-dalek", "dep:zeroize", "dep:serde", "dep:serde_json"]
 # Opt-in `arbitrary::Arbitrary` derives on all generated wire types,
 # for fuzzing / property tests (used by the rust/fuzz harness). Off by
 # default so downstream consumers don't pull in `arbitrary`.
 arbitrary = ["dep:arbitrary", "buffa/arbitrary"]
 
 [dependencies]
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc", "zeroize"], optional = true }
+zeroize = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 arbitrary = { version = "1", optional = true }
 buffa = "0.9.1"
 thiserror = "2"
