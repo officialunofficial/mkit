@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server (WP-5.6a-3, R-190): add signed moderation GetTakedown/ListTakedowns,
+  atomic audited SetLegalHold and freshly verified ReadPreserved streaming.
+  Replay stores byte-free read descriptors; each attempt rechecks authority and
+  retention. Add separate v1 status fields for acquisition, verification,
+  discovery, legal hold and purged copies. Activation remains off until 4.18.
+
 - Server/Worker (WP-4.16b, R-201): ordinary ref-path file responses now select
   Content-Type from a fixed extension allowlist and include inline/attachment
   filenames with RFC 5987 encoding and a sanitized ASCII fallback. HEAD and

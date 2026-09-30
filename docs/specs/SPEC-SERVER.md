@@ -3823,6 +3823,15 @@ one action's purge MUST NOT delete another action's copy or remove denial.
 Legal hold MUST guard timed purge. A purged copy or an expired copy without an
 active hold MUST fail closed on read.
 
+The existing v1 `TakedownRecord` reports `acquisition_pending`,
+`preservation_verified`, `discovery_status`, `legal_hold` and
+`preservation_purged` separately from `complete`. Discovery status is one of
+`pending`, `in_progress`, `incomplete` or `complete`; an Any deployment MUST
+NOT report `complete`. Verification is historical canonical verification,
+not a promise of availability after purge or retention expiry. The launch
+profile MUST report actual takedown `complete = false` while its completion
+obligations remain unresolved.
+
 For launch `ReadPreserved`, the nonce ledger MUST contain only a bounded,
 byte-free result descriptor binding the request to its action/object/range or
 terminal error. It MUST NOT cache preserved response bytes. A completed nonce
@@ -3859,6 +3868,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 | Version | Status | Change |
 |---|---|---|
 | 1 | draft | Bounded resumable publication rechecks retain a binding and witness position in the existing timer-12 value, guard checkpoints against obligation/generation changes, and preserve valid dependency limits. Unsupported pre-launch timer values require store reset (R-198 B1). |
+| 1 | draft | R-190 restricted takedown administration (WP-5.6a-3): additive acquisition, verification, discovery, legal-hold and purge status fields in existing v1 TakedownRecord; signed audited reads and atomic holds, byte-free replay and freshly verified Connect streaming. No new protocol or wire version. |
 | 1 | draft | R-190 lean launch preservation: finite allowlist/Single Root safety-cut sweeps; Any supports denial/preservation and incomplete known-namespace discovery pending the post-launch catalog. Pending, verified preservation and real completion stay distinct. Restricted ReadPreserved uses byte-free replay descriptors and fresh audited verified streams; full-profile and §14.7 key/list requirements remain. No schema fields or versions change in this amendment. |
 | 1 | draft | R-193 additive Inspect retrieval metadata (§6.4, §11.4), private raw added-pack reads with dedicated MAC capability and scanner auth-v2 keys, bounded ranges, uniform not_found and global denial. Current open-ticket state plus short capability expiry defines lifetime; fail-closed attempts remain readable until expiry, and retries preserve inspection_id while minting fresh capabilities. Default-off, Paid-only; activation waits for WP-4.18. |
 | 1 | draft | R-190 pending launch takedown: repository-local object or whole-pack input (additive admin `pack_id = 9`), independent immediate denial and unresolved preservation work; production activation awaits preservation. Manual PurgeCache accepts asynchronously with audited completion. |

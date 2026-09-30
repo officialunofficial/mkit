@@ -74,6 +74,14 @@ message TakedownRecord {
   int64 created_at_ms = 8;
   int64 retention_until_ms = 9;
   string reason_token = 10;
+  // Launch progress is independent of actual repository/global completion.
+  bool acquisition_pending = 11;
+  // Historical verification; availability also depends on retention and purge.
+  bool preservation_verified = 12;
+  // pending, in_progress, incomplete or complete; Any never claims complete.
+  string discovery_status = 13;
+  bool legal_hold = 14;
+  bool preservation_purged = 15;
 }
 message GetTakedownResponse { TakedownRecord takedown = 1; }
 message ListTakedownsRequest {

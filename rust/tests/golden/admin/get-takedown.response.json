@@ -1,0 +1,18 @@
+{
+  "takedown": {
+    "takedownId": "take:1",
+    "level": "TAKEDOWN_LEVEL_CONTENT",
+    "repository": "root/repo",
+    "namespace": "root",
+    "reason": "review",
+    "complete": false,
+    "createdAtMs": "100",
+    "retentionUntilMs": "1000",
+    "reasonToken": "policy",
+    "acquisitionPending": false,
+    "preservationVerified": true,
+    "discoveryStatus": "incomplete",
+    "legalHold": true,
+    "preservationPurged": false
+  }
+}
