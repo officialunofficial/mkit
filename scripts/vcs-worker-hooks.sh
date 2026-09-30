@@ -41,6 +41,9 @@ ORIGIN="http://127.0.0.1:${PORT}"
 STUB="http://127.0.0.1:${STUB_PORT}"
 REPOSITORY="default"
 CASE="refs.update_any_then_read"
+authority=0
+if [ "${1:-}" = --authority ]; then authority=1; shift; fi
+if [ $# -ne 0 ]; then echo "usage: $0 [--authority]" >&2; exit 2; fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/vcs-worker-hooks.XXXXXX")"
 main_pid=""
@@ -110,8 +113,18 @@ echo ">> building apps/vcs-worker (worker-build --release)"
 
 start_wrangler stub apps/vcs-worker/tests/hook-stub "${STUB_PORT}" --config wrangler.jsonc
 stub_pid="${started_pid}"
-start_wrangler main apps/vcs-worker "${PORT}" --config wrangler.hooks.jsonc \
-    --var "AUTH_AUDIENCE:${ORIGIN}" --var "AUTH_REPOSITORY:${REPOSITORY}" --var "SHARDING:single"
+if [ "${authority}" -eq 1 ]; then
+    ns="ed25519-0101010101010101010101010101010101010101010101010101010101010101"
+    start_wrangler main apps/vcs-worker "${PORT}" --config wrangler.hooks.jsonc \
+        --var "AUTH_AUDIENCE:${ORIGIN}" --var "ADDRESSING:multi" --var "SHARDING:d34" \
+        --var "NAMESPACE_POLICY:allowlist" --var "NAMESPACE_ALLOWLIST:${ns}" \
+        --var "HOOK_ROLES:authorize,admit,outcome" --var "AUTHORIZER_ROLE:authority" \
+        --var "AUTHORITY_FENCE:true" \
+        --var "AUTHORITY_KEYS:deployment ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c ${ns}"
+else
+    start_wrangler main apps/vcs-worker "${PORT}" --config wrangler.hooks.jsonc \
+        --var "AUTH_AUDIENCE:${ORIGIN}" --var "AUTH_REPOSITORY:${REPOSITORY}" --var "SHARDING:single"
+fi
 main_pid="${started_pid}"
 
 echo ">> waiting for grpc.health.v1.Health/Check to report SERVING (up to 120 s)"
@@ -129,6 +142,14 @@ done
 if ! grep -q '\[connected\]' "${work}/main/wrangler.log"; then
     # The binding connects when the stub registers; give it a moment.
     sleep 5
+fi
+
+if [ "${authority}" -eq 1 ]; then
+    MKIT_AUTHORITY_PROBE_URL="${ORIGIN}" MKIT_AUTHORITY_STUB_URL="${STUB}" \
+        cargo test --locked --manifest-path rust/Cargo.toml -p mkit-server-conformance \
+            --test authority_worker -- --ignored
+    echo ">> actual Worker D34 authority probe passed"
+    exit 0
 fi
 
 # run_case <outfile>: one write case through the wire runner; its exit status.

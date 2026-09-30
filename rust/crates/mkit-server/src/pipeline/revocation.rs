@@ -348,6 +348,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // The guarded push-before-ack sequence preserves both independently updated generations.
     async fn push_and_ack(
         &self,
         coordinator: &Partition,

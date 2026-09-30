@@ -450,6 +450,13 @@ pub(crate) fn plan_write(
         if current != generation {
             return Err(crate::authority::moved());
         }
+        if tickets.as_ref().is_some_and(|tickets| {
+            tickets
+                .iter()
+                .any(|ticket| ticket.authority_generation != Some(generation))
+        }) {
+            return Err(crate::authority::moved());
+        }
         if req.lease.is_none() {
             pre.push(guard(keys::authority_generation(), snap));
         }

@@ -320,7 +320,8 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                 &a.repo().identity,
                 &auth.signer,
             )?;
-            pipe.check_ticket_generation(&op.repo.namespace, claims.authority_generation).await?;
+            pipe.check_ticket_generation(&op.repo.namespace, claims.authority_generation)
+                .await?;
             op.authz.authority_generation = claims.authority_generation;
             if claims.pack_id != key.0 || claims.bytes != declared {
                 return Err(ServerError::new(
@@ -447,7 +448,11 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
         }
         super::fault!(pipe, AfterBlobCommit, &self.op, &self.a);
         if let Some(ticket_id) = self.ticket_id {
-            pipe.check_ticket_generation(&self.op.repo.namespace, self.op.authz.authority_generation).await?;
+            pipe.check_ticket_generation(
+                &self.op.repo.namespace,
+                self.op.authz.authority_generation,
+            )
+            .await?;
             write_upload_marker(&pipe.blobs, &ticket_id, &done.key.0)
                 .await
                 .map_err(|e| store_error(StorageOp::BlobPut, e))?;

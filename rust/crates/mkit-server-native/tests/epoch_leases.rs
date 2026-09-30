@@ -249,6 +249,7 @@ enum Reject {
     Reserved,
     Challenge,
     Deny,
+    Authority(Option<u64>),
 }
 struct Policy(Reject);
 impl Authorizer for Policy {
@@ -256,12 +257,17 @@ impl Authorizer for Policy {
         if matches!(self.0, Reject::Deny) {
             Err(ServerError::permission_denied("test denial"))
         } else {
-            Ok(AuthzFacts::default())
+            let mut facts = AuthzFacts::default();
+            facts.authority_generation = match self.0 {
+                Reject::Authority(generation) => generation,
+                _ => None,
+            };
+            Ok(facts)
         }
     }
 }
 impl Admission for Policy {
-    async fn admit(&self, _: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
+    async fn admit(&self, input: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
         if matches!(self.0, Reject::Challenge) {
             Ok(AdmissionDecision::challenge(
                 vec![mkit_server::pipeline::Challenge {
@@ -272,7 +278,9 @@ impl Admission for Policy {
             ))
         } else {
             let allowed = AdmissionDecision::allow(vec![]);
-            Ok(if matches!(self.0, Reject::Reserved) {
+            Ok(if matches!(self.0, Reject::Authority(_)) {
+                allowed.with_reservation(input.idempotency_key.unwrap())
+            } else if matches!(self.0, Reject::Reserved) {
                 allowed.with_reservation("epoch-race")
             } else {
                 allowed
@@ -317,6 +325,17 @@ fn pipeline<N: NamespaceStore>(
         )
         .unwrap(),
     );
+    if matches!(rejection, Reject::Authority(_)) {
+        cfg.authorizer_role = mkit_server::policy::AuthorizerRole::Authority;
+        cfg.authority_fence = Some(
+            mkit_server::authority::AuthorityFence::parse(&format!(
+                "deployment {} {}",
+                Signer::new([7; 32], AUDIENCE, "unused").public_key_hex(),
+                identity().split_once('/').unwrap().0
+            ))
+            .unwrap(),
+        );
+    }
     cfg.write_quota = None;
     cfg.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap());
     Arc::new(
@@ -2474,4 +2493,349 @@ backends!(
     epoch_rpc_rules_memory,
     epoch_rpc_rules_sqlite,
     epoch_rpc_rules
+);
+
+fn signed_authority(generation: u64) -> String {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ed25519_dalek::Signer as _;
+    let text = format!(
+        "mkit-authority-generation:v1\ndeployment\n{}\n{generation}\n{AUDIENCE}\n0\n240000\n{}",
+        identity().split_once('/').unwrap().0,
+        to_hex(&hash(b"authority-nonce"))
+    );
+    let signature = ed25519_dalek::SigningKey::from_bytes(&[7; 32]).sign(&hash(text.as_bytes()));
+    format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(text),
+        URL_SAFE_NO_PAD.encode(signature.to_bytes())
+    )
+}
+
+#[allow(clippy::too_many_lines)] // One paused-write regression also proves fresh authorization and committed replay after revocation.
+async fn authority_paused<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    store_clock: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let faults = Arc::new(Faults::default());
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        faults.clone(),
+        Reject::Authority(Some(0)),
+    );
+    let initial = auth(&pipe, None);
+    committed(&pipe, &initial, REF, 1).await;
+    // R-63: an already authorized delegate is paused at the final atomic apply.
+    let delegate = auth_as(&pipe, Some("a"), [2; 32], None);
+    faults.a.arm();
+    let task = {
+        let pipe = pipe.clone();
+        let delegate = delegate.clone();
+        tokio::spawn(async move { pipe.update_ref(&delegate, update(REF, 2)).await })
+    };
+    faults.a.entered().await;
+    assert_eq!(
+        pipe.set_authority_generation(&signed_authority(1))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        pipe.set_authority_generation(&signed_authority(1))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        ls(&store, &initial, REF).await.acked_authority_generation,
+        Some(1)
+    );
+    assert_eq!(
+        el(&store, &initial, REF).await.authority_generation,
+        Some(1)
+    );
+    faults.a.resume();
+    assert_eq!(
+        task.await.unwrap().unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    assert_grant_write_uncommitted(&store, &delegate, REF).await;
+    let aborted = store
+        .inner
+        .get(
+            &shard(&delegate, REF),
+            &keys::reservation(&delegate.auth.as_ref().unwrap().nonce).unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        codec::decode_reservation(&aborted).unwrap(),
+        codec::ReservationV1::Aborted {
+            reason: codec::AbortReason::EpochMismatch,
+            ..
+        }
+    ));
+    assert_eq!(
+        pipe.get_grant_epoch(identity().split_once('/').unwrap().0)
+            .await
+            .unwrap(),
+        0
+    );
+    // A stale reply must not gain a fresh generation by renewing its lease.
+    clock.set(31_000);
+    store_clock.set(31_000);
+    let stale = auth_as(&pipe, None, [2; 32], None);
+    assert_eq!(
+        pipe.update_ref(&stale, update(REF, 3))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+    let fresh = pipeline(
+        store.clone(),
+        clock.clone(),
+        faults.clone(),
+        Reject::Authority(Some(1)),
+    );
+    let current = auth_as(&fresh, None, [2; 32], None);
+    assert_eq!(
+        fresh.update_ref(&current, update(REF, 4)).await.unwrap(),
+        UpdateRefResult::Committed
+    );
+    // Replay of a committed result after a newer barrier is not new acceptance.
+    assert_eq!(
+        fresh
+            .set_authority_generation(&signed_authority(2))
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        fresh.update_ref(&current, update(REF, 4)).await.unwrap(),
+        UpdateRefResult::Committed
+    );
+    assert_eq!(
+        fresh
+            .set_authority_generation(&signed_authority(1))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+}
+backends!(
+    authority_paused_memory,
+    authority_paused_sqlite,
+    authority_paused
+);
+
+async fn authority_missing_and_recovery<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    store_clock: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let faults = Arc::new(Faults::default());
+    let missing = pipeline(
+        store.clone(),
+        clock.clone(),
+        faults.clone(),
+        Reject::Authority(None),
+    );
+    let a = auth_as(&missing, None, [2; 32], None);
+    assert_eq!(
+        missing
+            .update_ref(&a, update(REF, 1))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::Unavailable
+    );
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        faults,
+        Reject::Authority(Some(0)),
+    );
+    let a = auth_as(&pipe, None, [2; 32], None);
+    committed(&pipe, &a, REF, 1).await;
+    // R-151: failed push cannot acknowledge; expiration plus backend NotAfter fences delayed writes.
+    store.controls.fail_push_once.store(true, Ordering::SeqCst);
+    assert_eq!(
+        pipe.set_authority_generation(&signed_authority(1))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::Internal
+    );
+    assert_eq!(
+        ls(&store, &a, REF).await.acked_authority_generation,
+        Some(0)
+    );
+    clock.set(31_000);
+    store_clock.set(31_000);
+    assert_eq!(
+        pipe.set_authority_generation(&signed_authority(1))
+            .await
+            .unwrap(),
+        1
+    );
+    pipe.mark_lease_table_recovered(&a.repo().repo.namespace)
+        .await
+        .unwrap();
+    assert_eq!(
+        pipe.set_authority_generation(&signed_authority(2))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::Unavailable
+    );
+    clock.set(66_000);
+    store_clock.set(66_000);
+    assert_eq!(
+        pipe.set_authority_generation(&signed_authority(2))
+            .await
+            .unwrap(),
+        2
+    );
+}
+backends!(
+    authority_missing_recovery_memory,
+    authority_missing_recovery_sqlite,
+    authority_missing_and_recovery
+);
+
+async fn authority_during_authorize_and_begin<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    _: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let faults = Arc::new(Faults::default());
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        faults.clone(),
+        Reject::Authority(Some(0)),
+    );
+    let a = auth(&pipe, None);
+    committed(&pipe, &a, REF, 1).await;
+    let stale = auth_as(&pipe, Some("c"), [2; 32], None);
+    faults.c.arm();
+    let task = {
+        let pipe = pipe.clone();
+        tokio::spawn(async move { pipe.update_ref(&stale, update(REF, 2)).await })
+    };
+    faults.c.entered().await;
+    pipe.set_authority_generation(&signed_authority(1))
+        .await
+        .unwrap();
+    faults.c.resume();
+    assert_eq!(
+        task.await.unwrap().unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    let fresh = pipeline(
+        store.clone(),
+        clock,
+        faults.clone(),
+        Reject::Authority(Some(1)),
+    );
+    let a = auth_for(&fresh, Some("a"), [2; 32], None, Procedure::BeginUpload);
+    faults.a.arm();
+    let task = {
+        let fresh = fresh.clone();
+        let a = a.clone();
+        tokio::spawn(async move { fresh.begin_upload(&a, REF, &[2; 32], 10).await })
+    };
+    faults.a.entered().await;
+    fresh
+        .set_authority_generation(&signed_authority(2))
+        .await
+        .unwrap();
+    faults.a.resume();
+    assert_eq!(
+        task.await.unwrap().unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    let (first, end) = keys::class_range(keys::TAG_TICKET);
+    assert!(
+        store
+            .inner
+            .scan(&shard(&a, REF), &first, &end, None, 10)
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    let reservation = store
+        .inner
+        .get(
+            &shard(&a, REF),
+            &keys::reservation(&a.auth.as_ref().unwrap().nonce).unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        codec::decode_reservation(&reservation).unwrap(),
+        codec::ReservationV1::Aborted {
+            reason: codec::AbortReason::EpochMismatch,
+            ..
+        }
+    ));
+}
+backends!(
+    authority_authorize_begin_memory,
+    authority_authorize_begin_sqlite,
+    authority_during_authorize_and_begin
+);
+
+async fn authority_visibility<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    _: Arc<ManualClock>,
+) {
+    use mkit_attest::grant::Visibility;
+    use mkit_server::pipeline::VisibilityRequest;
+    let store = Store::new(backend);
+    let faults = Arc::new(Faults::default());
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        faults.clone(),
+        Reject::Authority(Some(0)),
+    );
+    let a = auth(&pipe, None);
+    committed(&pipe, &a, REF, 1).await;
+    let delegate = auth_for(&pipe, None, [2; 32], None, Procedure::SetRepoVisibility);
+    pipe.set_repo_visibility(&delegate, VisibilityRequest::Envelope(Visibility::Public))
+        .await
+        .unwrap();
+    pipe.set_authority_generation(&signed_authority(1))
+        .await
+        .unwrap();
+    let stale = auth_for(&pipe, None, [2; 32], None, Procedure::SetRepoVisibility);
+    assert_eq!(
+        pipe.set_repo_visibility(&stale, VisibilityRequest::Envelope(Visibility::Private))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+    let fresh = pipeline(store, clock, faults, Reject::Authority(Some(1)));
+    let current = auth_for(&fresh, None, [2; 32], None, Procedure::SetRepoVisibility);
+    fresh
+        .set_repo_visibility(&current, VisibilityRequest::Envelope(Visibility::Private))
+        .await
+        .unwrap();
+}
+backends!(
+    authority_visibility_memory,
+    authority_visibility_sqlite,
+    authority_visibility
 );

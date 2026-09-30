@@ -47,6 +47,7 @@ struct Model {
 impl Model {
     fn lease(epoch: u64, expires_at_ms: u64) -> EpochLease {
         EpochLease {
+            authority_generation: None,
             epoch,
             expires_at_ms,
             config_version: 1,

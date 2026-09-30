@@ -216,7 +216,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     return Err(internal("ticket index binding mismatch"));
                 }
                 if ticket.expires_at_ms > now {
-                    if self.cfg.authority_fence.is_some() && ticket.authority_generation != op.authz.authority_generation { return Err(crate::authority::moved()); }
+                    if self.cfg.authority_fence.is_some()
+                        && ticket.authority_generation != op.authz.authority_generation
+                    {
+                        return Err(crate::authority::moved());
+                    }
                     let (keys, audience) = self.ticket_config()?;
                     return Ok(Some(result(keys, audience, &a.repo().identity, &ticket)));
                 }
@@ -380,7 +384,11 @@ pub(super) fn plan(
             }),
         })),
         Err(TicketPlanError::Existing(ticket)) if !open.reserved => {
-            if spec.authority_generation.is_some() && ticket.authority_generation != spec.authority_generation { return Err(crate::authority::moved()); }
+            if spec.authority_generation.is_some()
+                && ticket.authority_generation != spec.authority_generation
+            {
+                return Err(crate::authority::moved());
+            }
             let key = keys::ticket(&tickets::ticket_id(&ticket.reservation_id));
             let raw = snap
                 .get(&key)

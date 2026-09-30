@@ -32,9 +32,10 @@ use super::proto::mkit::transport::v1::{
     UploadPackResponse, UploadPartRequest, UploadPartResponse, UploadTicket,
 };
 use super::proto::mkit::transport::v1::{
-    GetAuthorityGenerationRequest, GetAuthorityGenerationResponse, SetAuthorityGenerationRequest, SetAuthorityGenerationResponse, GetGrantEpochRequest, GetGrantEpochResponse, IssueObjectUrlRequest, IssueObjectUrlResponse,
-    RepoVisibility, SetGrantEpochRequest, SetGrantEpochResponse, SetRepoVisibilityRequest,
-    SetRepoVisibilityResponse,
+    GetAuthorityGenerationRequest, GetAuthorityGenerationResponse, GetGrantEpochRequest,
+    GetGrantEpochResponse, IssueObjectUrlRequest, IssueObjectUrlResponse, RepoVisibility,
+    SetAuthorityGenerationRequest, SetAuthorityGenerationResponse, SetGrantEpochRequest,
+    SetGrantEpochResponse, SetRepoVisibilityRequest, SetRepoVisibilityResponse,
 };
 use super::{Shared, authenticated};
 use crate::error::ServerError;

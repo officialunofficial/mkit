@@ -723,3 +723,11 @@ only public ref GET/HEAD without a proof may redirect after the normal
 checks, to a relative object URL preserving the repository prefix.
 Configured admission disables redirects. Traces record method and escaped
 path only; credentials and queries are redacted.
+
+Enable `--authority-fence` with repeated `--authority-key` values in the grammar
+`<key-id> <64 lowercase hex public key> <namespace[,namespace...]>`. This requires
+Multi addressing, auth v2, transactional metadata and an Authority hook. The
+keys are dedicated deployment-authority verification keys, separate from owner,
+hook, ticket and URL-token keys. `GetAuthorityGeneration` and
+`SetAuthorityGeneration` use SPEC-SERVER §6.2.1 outside auth-v2; pending completion
+returns `unavailable` and `Retry-After: 1`. Fencing is off by default.

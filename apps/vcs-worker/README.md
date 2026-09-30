@@ -370,3 +370,10 @@ timeout/cancellation. Decisions fail closed; durable outcomes retain their
 existing retry/acknowledgement and Free 1×8 alarm budget. The secret must
 differ from every accepted ticket secret and configured role key. Custom
 `fetch_with`/`serve_with` entry points retain their injected hooks.
+
+Optional namespace fencing uses `AUTHORITY_FENCE=true` and `AUTHORITY_KEYS`
+(secret), one `<key-id> <64 lowercase hex public key> <namespace[,namespace...]>`
+line per dedicated deployment-authority key. It requires Multi addressing and
+`AUTHORIZER_ROLE=authority`; every write allowance must carry the namespace's
+`authority_generation`. SPEC-SERVER §6.2.1 defines signed setter statements and
+completion. Default is off; launch activation is WP-4.18.

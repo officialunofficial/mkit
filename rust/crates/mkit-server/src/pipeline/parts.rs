@@ -92,7 +92,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
     }
 
     async fn push_inner(&mut self, chunk: Bytes) -> Result<(), ServerError> {
-        self.pipe.check_ticket_generation(&self.namespace, self.generation).await?;
+        self.pipe
+            .check_ticket_generation(&self.namespace, self.generation)
+            .await?;
         if chunk.is_empty() {
             return Err(ServerError::invalid_argument("empty upload part chunk"));
         }
@@ -139,7 +141,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
     }
 
     async fn finish_inner(&mut self) -> Result<Vec<u8>, ServerError> {
-        self.pipe.check_ticket_generation(&self.namespace, self.generation).await?;
+        self.pipe
+            .check_ticket_generation(&self.namespace, self.generation)
+            .await?;
         let sink = self
             .sink
             .take()
@@ -221,7 +225,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             &a.repo().identity,
             &auth.signer,
         )?;
-        self.check_ticket_generation(&a.repo().repo.namespace, claims.authority_generation).await?;
+        self.check_ticket_generation(&a.repo().repo.namespace, claims.authority_generation)
+            .await?;
         Ok(claims)
     }
 
@@ -310,7 +315,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         receipts: &[Vec<u8>],
     ) -> Result<(), ServerError> {
         self.observe(a, async {
-            let claims = self.part_ticket(a, Procedure::CompleteUpload, token).await?;
+            let claims = self
+                .part_ticket(a, Procedure::CompleteUpload, token)
+                .await?;
             let plan = PartPlan::new(claims.bytes, claims.part_size, self.cfg.max_parts)
                 .map_err(part_error)?;
             if u32::try_from(receipts.len()) != Ok(plan.count()) {

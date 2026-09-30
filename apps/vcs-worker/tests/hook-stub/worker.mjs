@@ -13,6 +13,7 @@
 
 const SERVICE = '/mkit.server.hooks.v1.HooksService/';
 const state = (globalThis.__mkitHook ??= {
+  generation: '0',
   admit: 'allow',
   outcome: 'ok',
   admits: [],
@@ -29,6 +30,7 @@ const json = (body, status = 200) =>
 function control(url) {
   if (url.pathname === '/__recorded') return json(state);
   if (url.pathname === '/__mode') {
+    state.generation = url.searchParams.get('generation') ?? state.generation;
     state.admit = url.searchParams.get('admit') ?? state.admit;
     state.outcome = url.searchParams.get('outcome') ?? state.outcome;
     return json({ admit: state.admit, outcome: state.outcome });
@@ -67,6 +69,7 @@ export default {
     }
     const body = await request.json();
     switch (url.pathname.slice(SERVICE.length)) {
+      case 'Authorize': return json({ allow: { authorityGeneration: state.generation, writerView: true } });
       case 'Admit': {
         state.admits.push({
           audience: body.operation?.audience,

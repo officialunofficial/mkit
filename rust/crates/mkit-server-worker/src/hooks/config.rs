@@ -338,7 +338,7 @@ mod http_tests {
     fn vars() -> HttpVars {
         HttpVars {
             endpoint: super::super::fetch::Endpoint::new("https://hooks.example/prefix").unwrap(),
-            validity: Duration::from_millis(60_000),
+            validity: Duration::from_mins(1),
         }
     }
     fn parse(pairs: &[(&str, &str)]) -> Result<Option<HookVars>, ConfigError> {
@@ -422,7 +422,7 @@ mod http_tests {
         if cfg!(feature = "signed-http-hooks") {
             assert_eq!(
                 parsed.unwrap().unwrap().http.unwrap().validity,
-                Duration::from_secs(60)
+                Duration::from_mins(1)
             );
         } else {
             assert!(parsed.is_err());

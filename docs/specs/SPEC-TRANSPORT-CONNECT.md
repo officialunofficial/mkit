@@ -142,6 +142,8 @@ same trait `mkit-transport-http`/`-s3`/`-ssh`/`-enc` implement today.
 | *(none &mdash; upload ticket, M1)* | `BeginUpload` (§7.6) | unary |
 | *(none &mdash; one part of a ticketed upload, M1)* | `UploadPart` (§7.6) | client-streaming |
 | *(none &mdash; completes a multipart upload, M1)* | `CompleteUpload` (§7.6) | unary |
+| *(none &mdash; reads a namespace authority generation)* | `GetAuthorityGeneration` (SPEC-SERVER §6.2.1) | unary |
+| *(none &mdash; raises a namespace authority generation)* | `SetAuthorityGeneration` (SPEC-SERVER §6.2.1) | unary |
 | *(none &mdash; reads a namespace's grant epoch, M2)* | `GetGrantEpoch` ([SPEC-WRITE-GRANTS §5.3](SPEC-WRITE-GRANTS.md#53-rpcs)) | unary |
 | *(none &mdash; raises a namespace's grant epoch, M2)* | `SetGrantEpoch` ([SPEC-WRITE-GRANTS §5.3](SPEC-WRITE-GRANTS.md#53-rpcs)) | unary |
 | *(none &mdash; sets a repository's visibility, M2)* | `SetRepoVisibility` ([SPEC-WRITE-GRANTS §9.1](SPEC-WRITE-GRANTS.md#91-visibility)) | unary |
@@ -905,6 +907,12 @@ is `unauthenticated`. A signed read is idempotent: the server checks the
 validity window only, and records and looks up no replay entry, so the
 replay rules below apply to writes only. `GetServerInfo`,
 `GetGrantEpoch` and `SetGrantEpoch` stay unsigned.
+`GetAuthorityGeneration { namespace } -> { generation }` and
+`SetAuthorityGeneration { signed_statement } -> { generation }` also carry no
+auth-v2 envelope or repository selector. They are disabled by default;
+SPEC-SERVER §6.2.1 defines deployment-authority statement verification, monotonic
+targets, and the bounded completion barrier. Pending completion is `unavailable`
+with `Retry-After` in delay-seconds. The generation is independent of grant epochs.
 When a pending `SetGrantEpoch` or `SetRepoVisibility` call returns `unavailable`, its retry hint is a `Retry-After` response header in delay-seconds (SPEC-WRITE-GRANTS §5.3, §9.1).
 
 The validity interval MUST be positive and at most 300,000 ms; sender clocks
@@ -1298,8 +1306,10 @@ if the pack were absent (SPEC-SERVER §10.3).
 **Ticket token.** `token` is an opaque, server-authenticated value that
 binds the ticket id, audience, repository, signer, `pack_id`, `bytes`,
 `part_size`, `expires`, and the id of the key that authenticates it.
-The server verifies a token without consulting any strongly consistent
-metadata. A client treats the token as opaque. How the server
+Token authenticity is verified without consulting strongly consistent metadata.
+When namespace authority fencing is enabled, the token also binds the authority
+generation and the server MUST check it against the current namespace generation
+before ticket-only staging and completion (SPEC-SERVER §6.2.1). A client treats the token as opaque. How the server
 authenticates tokens is deployment-defined (informative: a message
 authentication code under a deployment secret, rotated by key id).
 
@@ -1695,6 +1705,7 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
+| `2` (WP-2.16) | draft | Additive namespace Get/SetAuthorityGeneration RPCs outside auth-v2, with deployment-authority statements and pending completion hints. |
 | `2` (WP-1.28c) | draft | §7.9 states the client rule for stale listings: a listed branch whose packmap and head are both strongly absent is skipped without a tracking ref; a present head with no packmap and any transport error stay failures. |
 | `2` (WP-1.15) | draft | §7.4's ssh/enc paragraph gains ssh root mode (`mkit serve --root`, one repository per process addressed by `<NAMESPACE>/<NAME>`) and the enc `--enc-repository` listener binding, and notes the same-session implicit-membership rule transport-identity sessions use in place of upload tickets (informative). |
 | `2` (WP-1.28b) | draft | §7.9 clarifies per-bucket ListRefs index lag and head/packmap age differences. |

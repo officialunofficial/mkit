@@ -1905,3 +1905,21 @@ content or tokens, or serves a different object from the requested URL.
 
 **Enforced by:** native `tests/http_mount.rs`, Worker `http_mount` tests,
  default feature/startup configuration, and the release feature gate.
+
+## External authority revocation fences final acceptance
+
+**Always:** with authority fencing enabled, a completed namespace generation
+barrier prevents every older Authority allowance from accepting a new write.
+Facts survive retries, visibility writes compare the coordinator generation,
+and D34 writes guard generation-bearing leases and backend deadlines. Ticket
+staging checks the ticket's generation. Grant epochs remain independent.
+
+**Because:** stopping future hook allowances cannot revoke an allowance already
+paused between authorization and durable acceptance.
+
+**If violated:** a revoked delegate can commit after revocation was acknowledged.
+
+**Enforced by:** the atomic plan, visibility and ticket guards and shared lease
+renewal/completion; memory/SQLite authority tests in
+`rust/crates/mkit-server-native/tests/epoch_leases.rs`. Deployment activation is
+optional and requires an Authority hook with explicit generation facts.

@@ -141,13 +141,16 @@ mod glue {
         }
         let (channel, signer) = if let Some(http) = http {
             #[cfg(feature = "http-objects")]
-            let other_keys = cfg
+            let mut other_keys = cfg
                 .url_tokens
                 .as_ref()
                 .map(|t| t.keys().public_keys().collect::<Vec<_>>())
                 .unwrap_or_default();
             #[cfg(not(feature = "http-objects"))]
-            let other_keys = Vec::new();
+            let mut other_keys = Vec::new();
+            if let Some(fence) = &cfg.authority_fence {
+                other_keys.extend(fence.public_keys());
+            }
             let signer = super::super::config::http_signer(
                 key,
                 http,

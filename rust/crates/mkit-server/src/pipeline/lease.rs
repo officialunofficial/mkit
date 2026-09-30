@@ -32,7 +32,7 @@ pub(super) struct LeaseWrite {
 
 pub(super) enum LeaseObservation {
     Usable(codec::EpochLease),
-    Renew(CoordinatorLease),
+    Renew(Box<CoordinatorLease>),
 }
 
 pub(super) struct CoordinatorLease {
@@ -147,6 +147,7 @@ impl From<&super::PipelineConfig> for LeaseParams {
     }
 }
 
+#[allow(clippy::too_many_lines)] // One shared atomic grant guards both barriers and updates creation, lease and sweep rows.
 fn grant_batch(
     read: &CoordinatorLease,
     repo: &RepoName,
@@ -291,8 +292,12 @@ async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
         keys::grant_epoch(),
         keys::leased_shard(&repo_id.name, shard_ref(p)?),
         keys::lease_recovery(),
-        keys::authority_generation(),
     ];
+    let authority_fence =
+        authority_fence || observed_el.is_some_and(|el| el.authority_generation.is_some());
+    if authority_fence {
+        wanted.push(keys::authority_generation());
+    }
     if let Some(window) = seed_window {
         wanted.push(keys::quota_total(window));
     }
@@ -311,12 +316,17 @@ async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
     if rows.len() != wanted.len() {
         return Err(internal("lease get_many returned the wrong row count"));
     }
-    let [namespace, repo, epoch, shard, recovery, authority] = &rows[..6] else {
+    let [namespace, repo, epoch, shard, recovery] = &rows[..5] else {
         return Err(internal("lease get_many returned the wrong row count"));
+    };
+    let authority = if authority_fence {
+        rows[5].clone()
+    } else {
+        None
     };
     let quota_seed = seed_window
         .map(|window| {
-            rows[6]
+            rows[5 + usize::from(authority_fence)]
                 .as_ref()
                 .map(codec::decode_namespace_usage)
                 .transpose()
@@ -341,9 +351,18 @@ async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
         repo: repo.clone(),
         epoch: epoch.clone(),
         authority: authority.clone(),
-        authority_generation: if authority_fence || observed_el.is_some_and(|el| el.authority_generation.is_some()) {
-            Some(authority.as_ref().map(codec::decode_u64).transpose().map_err(meta_error)?.unwrap_or(0))
-        } else { None },
+        authority_generation: if authority_fence {
+            Some(
+                authority
+                    .as_ref()
+                    .map(codec::decode_u64)
+                    .transpose()
+                    .map_err(meta_error)?
+                    .unwrap_or(0),
+            )
+        } else {
+            None
+        },
         leased_epoch: epoch
             .as_ref()
             .map(codec::decode_u64)
@@ -411,7 +430,18 @@ pub async fn renew_for_relay<L: NamespaceStore, M: NamespaceStore>(
         {
             return Ok(raw.clone());
         }
-        let read = read_lease_rows(local, meta, shards, clock, repo, p, observed, None, params.authority_fence).await?;
+        let read = read_lease_rows(
+            local,
+            meta,
+            shards,
+            clock,
+            repo,
+            p,
+            observed,
+            None,
+            params.authority_fence,
+        )
+        .await?;
         let grant = grant_batch(&read, &repo.name, p, now, now, params)?;
         match meta
             .apply(&shards.coordinator(&repo.namespace), grant.batch)
@@ -470,9 +500,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 return Ok(LeaseObservation::Usable(lease));
             }
         }
-        Ok(LeaseObservation::Renew(
+        Ok(LeaseObservation::Renew(Box::new(
             self.read_lease(op, p, observed_el, seed_window).await?,
-        ))
+        )))
     }
 
     async fn read_lease(
@@ -503,7 +533,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         observed: LeaseObservation,
         skew_ms: i64,
     ) -> Result<(Creation, LeaseWrite), ServerError> {
-        let LeaseObservation::Renew(mut read) = observed else {
+        let LeaseObservation::Renew(read) = observed else {
             let LeaseObservation::Usable(value) = observed else {
                 unreachable!()
             };
@@ -515,6 +545,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 },
             ));
         };
+        let mut read = *read;
         let coordinator = self.shards.coordinator(&op.repo.namespace);
         for _ in 0..LEASE_GRANT_ATTEMPTS {
             if op

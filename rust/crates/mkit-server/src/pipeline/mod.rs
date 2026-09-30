@@ -20,9 +20,9 @@
 //! advance) and `mkit serve` over ssh (`TransportIdentity`).
 
 mod admission;
-mod authority;
 mod advance;
 mod auth;
+mod authority;
 mod begin;
 mod coordinator;
 mod download;
@@ -587,6 +587,27 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             return Err(ServerError::invalid_argument(
                 "authority fencing requires Multi, auth v2, an Authority hook and transactional storage",
             ));
+        }
+        if let Some(fence) = &cfg.authority_fence {
+            if fence.public_keys().any(|key| {
+                cfg.ticket_keys
+                    .as_ref()
+                    .is_some_and(|tickets| tickets.contains_ed25519_public(&key))
+            }) {
+                return Err(ServerError::invalid_argument(
+                    "authority keys must differ from ticket keys",
+                ));
+            }
+            #[cfg(feature = "http-objects")]
+            if fence.public_keys().any(|key| {
+                cfg.url_tokens
+                    .as_ref()
+                    .is_some_and(|tokens| tokens.keys().public_keys().any(|public| public == key))
+            }) {
+                return Err(ServerError::invalid_argument(
+                    "authority keys must differ from URL-token keys",
+                ));
+            }
         }
         if let Some(indexed) = &cfg.indexed {
             if !matches!(cfg.auth, AuthMode::AuthV2(_))
@@ -1462,6 +1483,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Envelope mode: the stage-0 replay lookup, owner-or-hook
     /// authorization mirroring the write branch (never a grant), then the
     /// guarded `rv` write with its replay record.
+    #[allow(clippy::too_many_lines)] // Replay, authorization and both guarded visibility retries share one lifecycle.
     async fn visibility_envelope(
         &self,
         a: &Authenticated,
@@ -1611,7 +1633,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .authorize(&authorized)
             .await
             .map_err(ServerError::strip_admission_shape)?;
-        self.merge_authority_facts(&mut authorized.authz, returned)?;
+        self.merge_authority_facts(&mut authorized.authz, &returned)?;
         Ok(authorized.authz)
     }
 
@@ -2869,7 +2891,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     fn merge_authority_facts(
         &self,
         built_in: &mut AuthzFacts,
-        returned: AuthzFacts,
+        returned: &AuthzFacts,
     ) -> Result<(), ServerError> {
         if self.cfg.authorizer_role == AuthorizerRole::Authority
             && self.cfg.authority_fence.is_some()
@@ -2983,7 +3005,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .authorize(&authorized)
             .await
             .map_err(ServerError::strip_admission_shape)?;
-        self.merge_authority_facts(&mut facts, returned)?;
+        self.merge_authority_facts(&mut facts, &returned)?;
         Ok((facts, fast_forward))
     }
 

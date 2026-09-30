@@ -3511,6 +3511,7 @@ name = "mkit-server-conformance"
 version = "0.4.2"
 dependencies = [
  "axum",
+ "base64 0.23.1",
  "buffa",
  "bytes",
  "clap",
@@ -3544,6 +3545,7 @@ name = "mkit-server-native"
 version = "0.4.2"
 dependencies = [
  "axum",
+ "base64 0.23.1",
  "buffa",
  "bytes",
  "clap",

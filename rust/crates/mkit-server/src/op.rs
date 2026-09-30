@@ -526,7 +526,13 @@ mod tests {
 
     /// `TransportService` RPCs that deliberately stay outside `Procedure`:
     /// unauthenticated forever (SPEC-WRITE-GRANTS §5.3, §9.2; STC §2.1).
-    const EXEMPT: [&str; 5] = ["GetServerInfo", "GetGrantEpoch", "SetGrantEpoch", "GetAuthorityGeneration", "SetAuthorityGeneration"];
+    const EXEMPT: [&str; 5] = [
+        "GetServerInfo",
+        "GetGrantEpoch",
+        "SetGrantEpoch",
+        "GetAuthorityGeneration",
+        "SetAuthorityGeneration",
+    ];
 
     #[test]
     fn every_transport_rpc_is_classified_or_exempt() {
