@@ -108,8 +108,8 @@ fn pipe(blobs: MemoryBlobStore, keys: TicketKeys, clock: Arc<ManualClock>) -> Te
     pipe_with(blobs, keys, clock)
 }
 
-fn signed<B: MultipartBlobStore>(
-    pipe: &Pipeline<B, NoMeta>,
+fn signed<B: MultipartBlobStore, N: NamespaceStore>(
+    pipe: &Pipeline<B, N>,
     signer: &SigningKey,
     procedure: Procedure,
     commitment: &str,
@@ -984,7 +984,7 @@ fn part_pipeline_forwards_chunks_without_buffering_a_part() {
         writes.iter().sum::<usize>(),
         usize::try_from(MIN_PART_SIZE).unwrap()
     );
-    assert!(writes.iter().all(|size| *size <= 128 * 1024));
+    assert!(writes.iter().all(|size| *size <= 256 * 1024));
     assert!(writes.len() > 1);
 }
 
@@ -1058,8 +1058,9 @@ impl NamespaceStore for CompletionGeneration {
 struct PausedCompletion {
     inner: MemoryBlobStore,
     phase: &'static str,
-    gate: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
+    gate: Arc<Mutex<Option<futures::channel::oneshot::Receiver<()>>>>,
     heads: std::sync::atomic::AtomicUsize,
+    stage_writes: Arc<std::sync::atomic::AtomicUsize>,
 }
 impl PausedCompletion {
     async fn pause(&self, phase: &str) {
@@ -1072,10 +1073,15 @@ impl PausedCompletion {
     }
 }
 impl BlobStore for PausedCompletion {
-    type Sink = crate::memory::MemoryPackSink;
+    type Sink = PausedPack;
     async fn begin(&self, key: BlobKey, len: u64) -> Result<Self::Sink, StoreError> {
         self.pause("marker").await;
-        self.inner.begin(key, len).await
+        Ok(PausedPack {
+            inner: self.inner.begin(key, len).await?,
+            gate: self.gate.clone(),
+            phase: self.phase,
+            writes: self.stage_writes.clone(),
+        })
     }
     async fn get(
         &self,
@@ -1097,8 +1103,34 @@ impl BlobStore for PausedCompletion {
         self.inner.delete(key).await
     }
 }
+struct PausedPack {
+    inner: crate::memory::MemoryPackSink,
+    phase: &'static str,
+    gate: Arc<Mutex<Option<futures::channel::oneshot::Receiver<()>>>>,
+    writes: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl PackSink for PausedPack {
+    async fn write(&mut self, bytes: Bytes) -> Result<(), StoreError> {
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.write(bytes).await?;
+        if self.phase == "part-write" {
+            let gate = self.gate.lock().unwrap().take();
+            if let Some(gate) = gate {
+                gate.await.unwrap();
+            }
+        }
+        Ok(())
+    }
+    async fn commit(self) -> Result<CommitOutcome, StoreError> {
+        self.inner.commit().await
+    }
+    async fn abort(self) {
+        self.inner.abort().await;
+    }
+}
 impl MultipartBlobStore for PausedCompletion {
-    type PartSink = crate::memory::MemoryPartSink;
+    type PartSink = PausedStage;
     const MAX_PARTS: u32 = 10_000;
     fn supports_multipart(&self) -> bool {
         true
@@ -1119,7 +1151,12 @@ impl MultipartBlobStore for PausedCompletion {
         index: u32,
         cv: [u8; 32],
     ) -> Result<Self::PartSink, StoreError> {
-        self.inner.begin_part(key, session, plan, index, cv).await
+        Ok(PausedStage {
+            inner: self.inner.begin_part(key, session, plan, index, cv).await?,
+            gate: self.gate.clone(),
+            phase: self.phase,
+            writes: self.stage_writes.clone(),
+        })
     }
     async fn complete(
         &self,
@@ -1139,6 +1176,32 @@ impl MultipartBlobStore for PausedCompletion {
     async fn abort(&self, key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
         self.pause("abort").await;
         self.inner.abort(key, session).await
+    }
+}
+struct PausedStage {
+    inner: crate::memory::MemoryPartSink,
+    phase: &'static str,
+    gate: Arc<Mutex<Option<futures::channel::oneshot::Receiver<()>>>>,
+    writes: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl PartSink for PausedStage {
+    async fn write(&mut self, bytes: Bytes) -> Result<(), StoreError> {
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.write(bytes).await?;
+        if self.phase == "part-write" {
+            let gate = self.gate.lock().unwrap().take();
+            if let Some(gate) = gate {
+                gate.await.unwrap();
+            }
+        }
+        Ok(())
+    }
+    async fn commit(self) -> Result<Vec<u8>, StoreError> {
+        self.inner.commit().await
+    }
+    async fn abort(self) {
+        self.inner.abort().await;
     }
 }
 #[test]
@@ -1195,8 +1258,9 @@ fn authority_completion_rechecks_after_backend_and_marker_awaits() {
         let paused = PausedCompletion {
             inner: blobs.clone(),
             phase,
-            gate: Mutex::new(Some(gate)),
+            gate: Arc::new(Mutex::new(Some(gate))),
             heads: AtomicUsize::new(0),
+            stage_writes: Arc::new(AtomicUsize::new(0)),
         };
         let mut pipe = Pipeline::new(
             paused,
@@ -1244,5 +1308,205 @@ fn authority_completion_rechecks_after_backend_and_marker_awaits() {
         if phase != "marker" {
             assert!(block_on(blobs.head(&marker)).unwrap().is_none(), "{phase}");
         }
+    }
+}
+
+#[test]
+fn authority_staging_checks_before_and_after_coalesced_backend_write() {
+    use std::{
+        future::Future,
+        sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+        task::{Context, Poll},
+    };
+    for during_write in [false, true] {
+        let blobs = MemoryBlobStore::default();
+        let data = data(2, 5);
+        let claims = claims(&blobs, &data, &signer());
+        let plan = PartPlan::new(claims.bytes, claims.part_size, 10_000).unwrap();
+        let cv = part_subtree_cv(&plan, 0, part(&plan, &data, 0)).unwrap();
+        let template = pipe(blobs.clone(), keys(), Arc::new(ManualClock::new(T0)));
+        let a = part_auth(&template, &signer(), &claims, 0, &cv, MIN_PART_SIZE, 91);
+        let generation = Arc::new(AtomicU64::new(0));
+        let writes = Arc::new(AtomicUsize::new(0));
+        let (resume, gate) = futures::channel::oneshot::channel();
+        let paused = PausedCompletion {
+            inner: blobs,
+            phase: if during_write { "part-write" } else { "before" },
+            gate: Arc::new(Mutex::new(Some(gate))),
+            heads: AtomicUsize::new(0),
+            stage_writes: writes.clone(),
+        };
+        let mut pipe = Pipeline::new(
+            paused,
+            CompletionGeneration(generation.clone()),
+            Hooks::new(),
+            template.cfg,
+            Arc::new(ManualClock::new(T0)),
+            Arc::new(NoopMetrics),
+        )
+        .unwrap();
+        // Isolate the physical staging helper, as the completion-await fixture does.
+        pipe.cfg.authority_fence = Some(
+            crate::authority::AuthorityFence::parse(&format!(
+                "deployment {} ed25519-{}",
+                to_hex(SigningKey::from_bytes(&[8; 32]).verifying_key().as_bytes()),
+                "04".repeat(32)
+            ))
+            .unwrap(),
+        );
+        let sink = block_on(pipe.blobs.begin_part(
+            BlobKey::pack(claims.pack_id),
+            &claims.upload_session,
+            &plan,
+            0,
+            cv,
+        ))
+        .unwrap();
+        let mut session = PartUploadSession {
+            pipe: &pipe,
+            ticket: claims.ticket_id,
+            namespace: NamespaceKey::deployment_default(),
+            generation: Some(0),
+            index: 0,
+            subtree: cv,
+            len: MIN_PART_SIZE,
+            seen: 0,
+            staging: super::super::staging::StagingBuffer::default(),
+            sink: Some(sink),
+            failed: None,
+            outcome: pipe.outcome(&a),
+        };
+        if during_write {
+            let mut push = Box::pin(session.push(Bytes::copy_from_slice(
+                &data[..super::super::staging::STAGING_BYTES],
+            )));
+            let waker = futures::task::noop_waker();
+            let mut context = Context::from_waker(&waker);
+            assert!(matches!(push.as_mut().poll(&mut context), Poll::Pending));
+            assert_eq!(writes.load(Ordering::SeqCst), 1);
+            generation.store(1, Ordering::SeqCst);
+            resume.send(()).unwrap();
+            assert_eq!(block_on(push).unwrap_err().code(), Code::PermissionDenied);
+        } else {
+            block_on(session.push(Bytes::copy_from_slice(
+                &data[..super::super::staging::STAGING_BYTES - 1],
+            )))
+            .unwrap();
+            assert_eq!(writes.load(Ordering::SeqCst), 0);
+            generation.store(1, Ordering::SeqCst);
+            assert_eq!(
+                block_on(session.push(Bytes::from_static(b"x")))
+                    .unwrap_err()
+                    .code(),
+                Code::PermissionDenied
+            );
+            assert_eq!(writes.load(Ordering::SeqCst), 0);
+        }
+        assert_eq!(
+            block_on(session.finish()).unwrap_err().code(),
+            Code::PermissionDenied
+        );
+    }
+}
+
+#[test]
+fn authority_single_staging_checks_before_and_after_coalesced_backend_write() {
+    use std::{
+        future::Future,
+        sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+        task::{Context, Poll},
+    };
+    for during_write in [false, true] {
+        let blobs = MemoryBlobStore::default();
+        let mut claims = claims(&blobs, &data(2, 5), &signer());
+        let data = vec![7; super::super::staging::STAGING_BYTES + 1];
+        claims.pack_id = hash(&data);
+        claims.bytes = data.len() as u64;
+        claims.authority_generation = Some(0);
+        claims.upload_session.clear();
+        let template = pipe(blobs.clone(), keys(), Arc::new(ManualClock::new(T0)));
+        let generation = Arc::new(AtomicU64::new(0));
+        let writes = Arc::new(AtomicUsize::new(0));
+        let (resume, gate) = futures::channel::oneshot::channel();
+        let paused = PausedCompletion {
+            inner: blobs,
+            phase: if during_write { "part-write" } else { "before" },
+            gate: Arc::new(Mutex::new(Some(gate))),
+            heads: AtomicUsize::new(0),
+            stage_writes: writes.clone(),
+        };
+        let mut pipe = Pipeline::new(
+            paused,
+            CompletionGeneration(generation.clone()),
+            Hooks::new(),
+            template.cfg,
+            Arc::new(ManualClock::new(T0)),
+            Arc::new(NoopMetrics),
+        )
+        .unwrap();
+        // Isolate the staging helper from production Multi+Authority startup validation.
+        pipe.cfg.authority_fence = Some(
+            crate::authority::AuthorityFence::parse(&format!(
+                "deployment {} ed25519-{}",
+                to_hex(SigningKey::from_bytes(&[8; 32]).verifying_key().as_bytes()),
+                "04".repeat(32)
+            ))
+            .unwrap(),
+        );
+        let a = signed(
+            &pipe,
+            &signer(),
+            Procedure::UploadPack,
+            &format!("pack:{}:{}", to_hex(&claims.pack_id), claims.bytes),
+            92,
+        );
+        let mut session = block_on(pipe.open_ticketed_upload(
+            &a,
+            Some(&claims.pack_id),
+            Some(claims.bytes),
+            &keys().mint(&claims),
+        ))
+        .unwrap();
+        if during_write {
+            let mut push = Box::pin(session.push(
+                Some(&claims.pack_id),
+                Some(0),
+                Bytes::copy_from_slice(&data[..super::super::staging::STAGING_BYTES]),
+                false,
+            ));
+            let waker = futures::task::noop_waker();
+            let mut context = Context::from_waker(&waker);
+            assert!(matches!(push.as_mut().poll(&mut context), Poll::Pending));
+            assert_eq!(writes.load(Ordering::SeqCst), 1);
+            generation.store(1, Ordering::SeqCst);
+            resume.send(()).unwrap();
+            assert_eq!(block_on(push).unwrap_err().code(), Code::PermissionDenied);
+        } else {
+            block_on(session.push(
+                Some(&claims.pack_id),
+                Some(0),
+                Bytes::copy_from_slice(&data[..super::super::staging::STAGING_BYTES - 1]),
+                false,
+            ))
+            .unwrap();
+            assert_eq!(writes.load(Ordering::SeqCst), 0);
+            generation.store(1, Ordering::SeqCst);
+            assert_eq!(
+                block_on(session.push(
+                    Some(&claims.pack_id),
+                    Some((super::super::staging::STAGING_BYTES - 1) as u64),
+                    Bytes::from_static(b"x"),
+                    false
+                ))
+                .unwrap_err()
+                .code(),
+                Code::PermissionDenied
+            );
+            assert_eq!(writes.load(Ordering::SeqCst), 0);
+        }
+        assert_eq!(
+            block_on(session.finish()).unwrap_err().code(),
+            Code::PermissionDenied
+        );
     }
 }

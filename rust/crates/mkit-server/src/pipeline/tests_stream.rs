@@ -161,6 +161,19 @@ fn ticketed_upload<H: HookSet>(
     })
 }
 
+fn assert_only_ticket_mode_reads<H: HookSet>(env: &Env<H>) {
+    assert!(
+        env.pipe
+            .meta
+            .seen()
+            .iter()
+            .all(|key| key == &keys::authority_generation() || key == &keys::lease_recovery())
+    );
+    assert!(env.pipe.meta.ops().iter().all(|op| *op == "get_many"));
+    assert!(env.pipe.meta.calls() <= 64, "bounded ticket mode reads");
+    assert!(env.batches().is_empty());
+}
+
 #[test]
 fn ticketed_upload_no_metadata_and_marker() {
     let env = ticket_env();
@@ -177,7 +190,7 @@ fn ticketed_upload_no_metadata_and_marker() {
         );
         assert!(blob_present(&env, &data));
         assert!(now(env.pipe.blobs.head(&marker)).unwrap().is_some());
-        assert_eq!(env.pipe.meta.calls(), 0);
+        assert_only_ticket_mode_reads(&env);
         assert!(env.batches().is_empty());
         assert!(env.rows().is_empty());
     }
@@ -432,7 +445,7 @@ fn ticketed_upload_failures_leave_no_marker() {
     ))
     .unwrap_err();
     assert_eq!(err.code(), Code::FailedPrecondition);
-    assert_eq!(env.pipe.meta.calls(), 0);
+    assert_only_ticket_mode_reads(&env);
     assert!(!blob_present(&env, &data));
     let (marker, _) = upload_marker(&[0x55; 32], &hash(&data));
     assert!(now(env.pipe.blobs.head(&marker)).unwrap().is_none());
@@ -494,7 +507,7 @@ fn ticketed_stream_error_aborts_without_pack_or_marker() {
     let (marker, _) = upload_marker(&ticket_id, &id);
     assert!(!blob_present(&env, &data));
     assert!(now(env.pipe.blobs.head(&marker)).unwrap().is_none());
-    assert_eq!(env.pipe.meta.calls(), 0);
+    assert_only_ticket_mode_reads(&env);
 }
 
 #[test]
@@ -528,7 +541,7 @@ fn ticketed_wrong_digest_stores_neither_pack_nor_marker() {
     let (marker, _) = upload_marker(&ticket_id, &id);
     assert!(!blob_present(&env, &data));
     assert!(now(env.pipe.blobs.head(&marker)).unwrap().is_none());
-    assert_eq!(env.pipe.meta.calls(), 0);
+    assert_only_ticket_mode_reads(&env);
 }
 
 // ------------------------------------------------------------- uploads
@@ -1009,7 +1022,7 @@ fn ticketed_upload_skips_authorizer_admission_and_pre_receive() {
         UploadMode::Ticketed
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert_eq!(env.pipe.meta.calls(), 0);
+    assert_only_ticket_mode_reads(&env);
 }
 
 fn refusing(code: Code) -> Env<Hooks<OpenAuthorizer, DefaultAdmission, Refuse>> {
@@ -1311,7 +1324,7 @@ mod faults {
             UploadMode::Ticketed
         );
         assert!(now(env.pipe.blobs.head(&marker)).unwrap().is_some());
-        assert_eq!(env.pipe.meta.calls(), 0);
+        assert_only_ticket_mode_reads(&env);
     }
 
     struct RecordPoints(Arc<Mutex<Vec<FaultPoint>>>);

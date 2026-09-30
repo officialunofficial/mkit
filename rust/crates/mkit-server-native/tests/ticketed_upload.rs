@@ -31,8 +31,8 @@ use mkit_server_native::{Blocking, RusqliteConn};
 const AUDIENCE: &str = "http://localhost:9876";
 const MARKER_DOMAIN: &[u8] = b"mkit-upload-marker:v1\0";
 
-/// Every metadata method panics. A completed upload therefore proves it never
-/// consulted either metadata backend, including less common read methods.
+/// Only the authoritative ag/lr mode read is allowed. Every business metadata
+/// operation panics, including writes and less common read methods.
 struct NoMeta<N>(N);
 
 impl<N: NamespaceStore> NamespaceStore for NoMeta<N> {
@@ -42,8 +42,19 @@ impl<N: NamespaceStore> NamespaceStore for NoMeta<N> {
     async fn get(&self, _: &Partition, _: &Key) -> Result<Option<Value>, StoreError> {
         panic!("ticketed metadata get")
     }
-    async fn get_many(&self, _: &Partition, _: &[Key]) -> Result<Vec<Option<Value>>, StoreError> {
-        panic!("ticketed metadata get_many")
+    async fn get_many(
+        &self,
+        p: &Partition,
+        keys: &[Key],
+    ) -> Result<Vec<Option<Value>>, StoreError> {
+        assert_eq!(
+            keys,
+            &[
+                mkit_server::store::keys::authority_generation(),
+                mkit_server::store::keys::lease_recovery()
+            ]
+        );
+        self.0.get_many(p, keys).await
     }
     async fn scan(
         &self,

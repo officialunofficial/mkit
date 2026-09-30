@@ -1581,6 +1581,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Exhaustive fixture includes both fence checkpoint kinds.
     fn parse_roundtrip_every_class() {
         let s = [0x22; 32];
         let q = scope();

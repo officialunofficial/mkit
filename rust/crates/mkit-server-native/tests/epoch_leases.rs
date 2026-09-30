@@ -305,6 +305,26 @@ fn pipeline<N: NamespaceStore>(
     faults: Arc<Faults>,
     rejection: Reject,
 ) -> Arc<Pipe<N>> {
+    pipeline_with_uploads(
+        store,
+        clock,
+        faults,
+        rejection,
+        MemoryBlobStore::default(),
+        UploadLimits {
+            max_total_bytes: 1024,
+            max_chunks: 4,
+        },
+    )
+}
+fn pipeline_with_uploads<N: NamespaceStore>(
+    store: Store<N>,
+    clock: Arc<ManualClock>,
+    faults: Arc<Faults>,
+    rejection: Reject,
+    blobs: MemoryBlobStore,
+    limits: UploadLimits,
+) -> Arc<Pipe<N>> {
     let defaults = Hooks::new();
     let hooks = Hooks {
         authorizer: Policy(rejection),
@@ -320,10 +340,7 @@ fn pipeline<N: NamespaceStore>(
             ),
         )),
         AuthMode::AuthV2(AuthV2Config::new(AUDIENCE, "").unwrap()),
-        UploadLimits {
-            max_total_bytes: 1024,
-            max_chunks: 4,
-        },
+        limits,
     );
     cfg.sharding = Sharding::D34;
     cfg.write_policy = WritePolicy::Owner;
@@ -354,16 +371,9 @@ fn pipeline<N: NamespaceStore>(
     cfg.write_quota = None;
     cfg.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap());
     Arc::new(
-        Pipeline::new(
-            MemoryBlobStore::default(),
-            store,
-            hooks,
-            cfg,
-            clock,
-            Arc::new(NoopMetrics),
-        )
-        .unwrap()
-        .with_faults(FaultControl(faults)),
+        Pipeline::new(blobs, store, hooks, cfg, clock, Arc::new(NoopMetrics))
+            .unwrap()
+            .with_faults(FaultControl(faults)),
     )
 }
 fn auth<N: NamespaceStore>(pipe: &Pipe<N>, token: Option<&str>) -> Authenticated {
@@ -3159,4 +3169,281 @@ async fn authority_activation_before_business_creation_preserves_recovery_and_wa
         .await
         .unwrap();
     assert!(check_recovery(&store, &coordinator, None).await.is_ok());
+}
+
+fn stream_auth<N: NamespaceStore>(
+    pipe: &Pipe<N>,
+    procedure: Procedure,
+    commitment: String,
+) -> Authenticated {
+    let signer = owner();
+    let mut envelope = signer.envelope(procedure.connect_path(), commitment);
+    envelope.created_at = 0;
+    envelope.expires_at = 240_000;
+    let carriage = signer.sign(&envelope);
+    pipe.authenticate(&RequestMeta {
+        procedure,
+        header: &|name| {
+            carriage
+                .headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        },
+        header_values: None,
+        unary_body: None,
+        transport_principal: None,
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Same valid bytes exercise both ticket protocols and every framing.
+async fn authority_stream_metadata_work_is_independent_of_framing() {
+    use bytes::Bytes;
+    use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan, part_subtree_cv};
+    use mkit_server::store::{BlobKey, MultipartBlobStore};
+    use mkit_server::upload::token::TicketClaims;
+    use mkit_server_conformance::wire::sign::pack_commitment;
+    let data = vec![17; 8193];
+    for enabled in [false, true] {
+        for multipart in [false, true] {
+            let store = Store::new(MemoryKv::default());
+            let clock = Arc::new(ManualClock::new(100));
+            let blobs = MemoryBlobStore::default();
+            let pipe = pipeline_with_uploads(
+                store.clone(),
+                clock,
+                Arc::new(Faults::default()),
+                if enabled {
+                    Reject::Authority(Some(0))
+                } else {
+                    Reject::Allow
+                },
+                blobs.clone(),
+                UploadLimits {
+                    max_total_bytes: 64 * 1024 * 1024,
+                    max_chunks: u32::MAX,
+                },
+            );
+            if enabled {
+                pipe.set_authority_generation(&signed_authority(0))
+                    .await
+                    .unwrap();
+            }
+            let first = vec![5; usize::try_from(MIN_PART_SIZE).unwrap()];
+            let pack = if multipart {
+                [first.as_slice(), data.as_slice()].concat()
+            } else {
+                data.clone()
+            };
+            let pack_id = hash(&pack);
+            let session = if multipart {
+                blobs
+                    .begin_multipart(BlobKey::pack(pack_id), pack.len() as u64, MIN_PART_SIZE)
+                    .await
+                    .unwrap()
+            } else {
+                Vec::new()
+            };
+            let claims = TicketClaims {
+                authority_generation: enabled.then_some(0),
+                ticket_id: [19; 32],
+                audience: AUDIENCE.into(),
+                repository: identity(),
+                signer: mkit_core::hash::from_hex(&owner().public_key_hex()).unwrap(),
+                pack_id,
+                bytes: pack.len() as u64,
+                part_size: MIN_PART_SIZE,
+                expires_at_ms: 240_000,
+                upload_session: session,
+            };
+            let token = TicketKeys::new(vec![("test".into(), [9; 32])])
+                .unwrap()
+                .mint(&claims);
+            let plan =
+                PartPlan::new(MIN_PART_SIZE + data.len() as u64, MIN_PART_SIZE, 10_000).unwrap();
+            let index = u32::from(multipart);
+            let cv = if multipart {
+                part_subtree_cv(&plan, index, &data).unwrap()
+            } else {
+                [0; 32]
+            };
+            let mut receipts = Vec::new();
+            if multipart {
+                store.take();
+                let first_cv = part_subtree_cv(&plan, 0, &first).unwrap();
+                let a = stream_auth(
+                    &pipe,
+                    Procedure::UploadPart,
+                    format!(
+                        "part:{}:0:{}:{}",
+                        to_hex(&claims.ticket_id),
+                        to_hex(&first_cv),
+                        MIN_PART_SIZE
+                    ),
+                );
+                let mut part = pipe.open_part(&a, &token, 0).await.unwrap();
+                part.push(Bytes::copy_from_slice(&first)).await.unwrap();
+                receipts.push(part.finish().await.unwrap());
+                let calls = store.take().len();
+                assert_eq!(calls, 68);
+                eprintln!("full8MiB part metadata calls: enabled={enabled} calls={calls}");
+            }
+            let mut baseline = None;
+            for framing in [64 * 1024, 4 * 1024, 1] {
+                for replay in [false, true] {
+                    store.take();
+                    if multipart {
+                        let a = stream_auth(
+                            &pipe,
+                            Procedure::UploadPart,
+                            format!(
+                                "part:{}:{index}:{}:{}",
+                                to_hex(&claims.ticket_id),
+                                to_hex(&cv),
+                                data.len()
+                            ),
+                        );
+                        let mut part = pipe.open_part(&a, &token, index).await.unwrap();
+                        for chunk in data.chunks(framing) {
+                            part.push(Bytes::copy_from_slice(chunk)).await.unwrap();
+                        }
+                        let receipt = part.finish().await.unwrap();
+                        receipts.truncate(1);
+                        receipts.push(receipt);
+                    } else {
+                        let a = stream_auth(
+                            &pipe,
+                            Procedure::UploadPack,
+                            pack_commitment(&pack_id, claims.bytes),
+                        );
+                        let mut upload = pipe
+                            .open_ticketed_upload(&a, Some(&pack_id), Some(claims.bytes), &token)
+                            .await
+                            .unwrap();
+                        let mut offset = 0;
+                        for chunk in data.chunks(framing) {
+                            let end = offset + chunk.len();
+                            upload
+                                .push(
+                                    Some(&pack_id),
+                                    Some(offset as u64),
+                                    Bytes::copy_from_slice(chunk),
+                                    end == data.len(),
+                                )
+                                .await
+                                .unwrap();
+                            offset = end;
+                        }
+                        upload.finish().await.unwrap();
+                    }
+                    let calls = store.take().len();
+                    let expected = *baseline.get_or_insert(calls);
+                    assert_eq!(
+                        calls, expected,
+                        "enabled={enabled} multipart={multipart} framing={framing} replay={replay}"
+                    );
+                    assert!(calls <= 50, "whole request metadata calls={calls}");
+                    eprintln!(
+                        "stream calls: enabled={enabled} multipart={multipart} framing={framing} replay={replay} calls={calls}"
+                    );
+                }
+            }
+            if !multipart {
+                let large = Bytes::from(vec![23; 64 * 1024 * 1024]);
+                let mut full = claims.clone();
+                full.ticket_id = [20; 32];
+                full.pack_id = hash(&large);
+                full.bytes = large.len() as u64;
+                let token = TicketKeys::new(vec![("test".into(), [9; 32])])
+                    .unwrap()
+                    .mint(&full);
+                let a = stream_auth(
+                    &pipe,
+                    Procedure::UploadPack,
+                    pack_commitment(&full.pack_id, full.bytes),
+                );
+                store.take();
+                let mut upload = pipe
+                    .open_ticketed_upload(&a, Some(&full.pack_id), Some(full.bytes), &token)
+                    .await
+                    .unwrap();
+                for offset in (0..large.len()).step_by(64 * 1024) {
+                    let end = (offset + 64 * 1024).min(large.len());
+                    upload
+                        .push(
+                            Some(&full.pack_id),
+                            Some(offset as u64),
+                            large.slice(offset..end),
+                            end == large.len(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                upload.finish().await.unwrap();
+                let calls = store.take().len();
+                assert_eq!(calls, 517);
+                eprintln!("full64MiB single metadata calls: enabled={enabled} calls={calls}");
+            }
+            let mut stale_part = None;
+            if enabled && multipart {
+                let a = stream_auth(
+                    &pipe,
+                    Procedure::UploadPart,
+                    format!(
+                        "part:{}:{index}:{}:{}",
+                        to_hex(&claims.ticket_id),
+                        to_hex(&cv),
+                        data.len()
+                    ),
+                );
+                let mut part = pipe.open_part(&a, &token, index).await.unwrap();
+                part.push(Bytes::copy_from_slice(&data)).await.unwrap();
+                stale_part = Some(part);
+            }
+            if multipart {
+                for replay in [false, true] {
+                    store.take();
+                    let a = auth_for(&pipe, None, [1; 32], None, Procedure::CompleteUpload);
+                    pipe.complete_upload(&a, &token, &receipts).await.unwrap();
+                    let calls = store.take().len();
+                    assert!(calls <= 50);
+                    eprintln!("completion calls: enabled={enabled} replay={replay} calls={calls}");
+                }
+            }
+            if enabled {
+                if let Some(part) = stale_part {
+                    pipe.set_authority_generation(&signed_authority(1))
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        part.finish().await.unwrap_err().code(),
+                        Code::PermissionDenied
+                    );
+                } else {
+                    let a = stream_auth(
+                        &pipe,
+                        Procedure::UploadPack,
+                        pack_commitment(&pack_id, claims.bytes),
+                    );
+                    let mut upload = pipe
+                        .open_ticketed_upload(&a, Some(&pack_id), Some(claims.bytes), &token)
+                        .await
+                        .unwrap();
+                    upload
+                        .push(Some(&pack_id), Some(0), Bytes::copy_from_slice(&data), true)
+                        .await
+                        .unwrap();
+                    pipe.set_authority_generation(&signed_authority(1))
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        upload.finish().await.unwrap_err().code(),
+                        Code::PermissionDenied
+                    );
+                }
+            }
+        }
+    }
 }

@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Add optional namespace authority-generation fencing with dedicated deployment-authority statements, native/Worker configuration, independent D34 lease barriers and generation-bound upload tickets (WP-2.16).
+  Ticket streams coalesce legal client frames into bounded 256 KiB storage
+  checkpoints, preserving revocation checks within Worker request budgets.
 
 - WP-3.9c: default-off signed HTTPS Worker hooks with canonical origin signing,
   manual redirects, streamed response limits and aborting call timeouts.

@@ -443,6 +443,17 @@ reservation. This covers ref advances/deletes, ticketless upload acceptance,
 reserved `BeginUpload`, and authority envelope visibility writes. Upload tickets
 MUST bind the generation; ticket-only uploads and multipart operations MUST
 reject stale generations before staging additional bytes and before completion.
+Client-frame validation MUST remain independent of storage-write checkpoints.
+Implementations MAY privately coalesce frames in a bounded 256 KiB buffer;
+private buffering is not backend staging. Each actual staging write MUST check
+the authoritative generation before and after its backend await. Completion,
+authenticated part receipts, and verification markers retain their independent
+final checks. A revoked stream MUST stage no subsequent checkpoint or succeed
+at completion; an already in-flight checkpoint may leave unaccepted shared bytes.
+For the Worker 64 MiB single-upload limit this requires at most 512 routed
+staging checks plus five opening/finalization checks, regardless of framing.
+The default 8 MiB part requires at most 64 staging checks plus four receipt
+boundary checks; multipart completion independently requires three checks.
 Already accepted inspection/publication work is not cancelled by this fence.
 
 `GetAuthorityGeneration` and `SetAuthorityGeneration` are namespace-level RPCs
@@ -3480,6 +3491,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Authority-ticket streams use bounded physical-byte checkpoints independent of client framing, retaining pre/post staging and final acceptance checks (§6.2.1; WP-2.16). |
 | 1 | draft | Optional independent namespace authority generations, deployment-authority statements, lease completion and ticket fencing (§6.2.1; WP-2.16). |
 | `1` (WP-3.13) | draft | §6.3 preserves repeated challenge order while allowing RFC 9110 combination on platforms that fold fields; mirrors STC §5.1. |
 | 1 | draft | §9.7 clarifications: rules intersect, a packmap is covered through its head, a missing auth v2 signer denies, ancestry semantics and bounds, and the allowed-signer set MAY be checked before verification and at `BeginUpload`; §9.3 requires a ticketless indexed head to be a member commit, remix or tag (WP-4.17). |

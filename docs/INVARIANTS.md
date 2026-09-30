@@ -77,20 +77,21 @@ format, subject and key-window checks. Runtime issuance, replay and field
 exclusion are specified in SPEC-SERVER §15 and await WP-5.8 implementation
 and conformance coverage.
 
-## Ticketed UploadPack touches no metadata and always leaves a marker
+## Ticketed UploadPack writes no business metadata and requires a marker
 
 **Always:** a ticketed UploadPack verifies the signed pack commitment and
 ticket before reading bytes, streams the complete pack through a verifying
 blob sink, and writes a content-addressed marker in the upload-marker
-namespace after the pack commit. It makes no `NamespaceStore` call, quota
-charge, replay row, authorization, admission or `pre_receive` call.
+namespace after the pack commit. Only bounded authoritative generation/mode
+reads are permitted; it writes no metadata row and makes no quota charge,
+replay reservation, authorization, admission or `pre_receive` call.
 
 **Because:** the marker proves that a holder of this ticket supplied and
 verified these pack bytes. WP-1.10 requires it with the pack blob before
 consuming the ticket, even when another repository already stored the pack.
 
 **If violated:** an advance could attach a globally present pack without an
-upload, or a ticketed stream could depend on another shard's metadata.
+upload, or a ticketed stream could create business metadata or bypass revocation.
 
 **Enforced by:** `mkit-server` pipeline tests `ticketed_upload_no_metadata_and_marker`,
 `ticketed_upload_failures_leave_no_marker`, and `upload::marker::tests::golden_upload_marker_v1`;
@@ -1918,7 +1919,10 @@ content or tokens, or serves a different object from the requested URL.
 barrier prevents every older Authority allowance from accepting a new write.
 Facts survive retries, visibility writes compare the coordinator generation,
 and D34 writes guard generation-bearing leases and backend deadlines. Ticket
-staging checks the ticket's generation before and after backend awaits. Durable
+staging coalesces client frames in at most 256 KiB of private buffering and
+checks the ticket's generation before and after every actual backend write,
+plus receipt, completion and marker boundaries. Metadata work depends on
+declared bytes, never the number of client frames. Durable
 mode at generation zero prevents a disabled executor from accepting through a
 fenced lease, fresh shard, visibility operation or ticket. Initial activation
 finishes its barrier before granting ready leases and creates no accounting

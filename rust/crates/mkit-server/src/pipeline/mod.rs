@@ -51,6 +51,7 @@ mod ref_policy;
 mod reservation;
 mod revocation;
 mod shard;
+mod staging;
 #[cfg(test)]
 mod tests;
 mod upload;

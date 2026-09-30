@@ -23,14 +23,21 @@ impl Endpoint {
     pub fn new(text: &str) -> Result<Self, ConfigError> {
         let bad =
             || ConfigError("HOOK_URL must be HTTPS without userinfo, query or fragment".into());
-        let url = url::Url::parse(text).map_err(|_| bad())?;
-        // Reject even empty userinfo, which Url's username accessor erases.
-        let authority = text
-            .split_once("://")
-            .map(|(_, rest)| rest.split('/').next().unwrap_or(rest));
+        // The parser erases empty userinfo even with special-scheme slash or
+        // backslash normalization; retain its authoritative syntax observation.
+        let credentials = core::cell::Cell::new(false);
+        let violation = |kind| {
+            if kind == url::SyntaxViolation::EmbeddedCredentials {
+                credentials.set(true);
+            }
+        };
+        let url = url::Url::options()
+            .syntax_violation_callback(Some(&violation))
+            .parse(text)
+            .map_err(|_| bad())?;
         if url.scheme() != "https"
             || url.host().is_none()
-            || authority.is_some_and(|s| s.contains('@'))
+            || credentials.get()
             || !url.username().is_empty()
             || url.password().is_some()
             || url.query().is_some()
@@ -205,13 +212,19 @@ mod tests {
     use super::*;
     #[test]
     fn https_origin_prefix_and_redaction() {
-        let endpoint = Endpoint::new("HTTPS://Hooks.Example:443/secret/prefix/").unwrap();
-        assert_eq!(endpoint.origin(), "https://hooks.example");
-        assert_eq!(
-            endpoint.url("/procedure"),
-            "https://hooks.example/secret/prefix/procedure"
-        );
-        assert!(!format!("{endpoint:?}").contains("secret"));
+        for url in [
+            "HTTPS://Hooks.Example:443/secret/prefix/",
+            "https:////Hooks.Example:443/secret/prefix/",
+            "https:Hooks.Example/secret/prefix/",
+        ] {
+            let endpoint = Endpoint::new(url).unwrap();
+            assert_eq!(endpoint.origin(), "https://hooks.example");
+            assert_eq!(
+                endpoint.url("/procedure"),
+                "https://hooks.example/secret/prefix/procedure"
+            );
+            assert!(!format!("{endpoint:?}").contains("secret"));
+        }
     }
     #[test]
     fn invalid_urls_do_not_leak() {
@@ -220,6 +233,12 @@ mod tests {
             "http://hooks.example",
             "https://secret@hooks.example",
             "https://@hooks.example",
+            "https:@hooks.example",
+            "https:////@hooks.example",
+            "https:/@hooks.example",
+            r"https:\@hooks.example",
+            r"https:\\@hooks.example",
+            "https://:secret@hooks.example",
             "https://hooks.example/?secret",
             "https://hooks.example/#secret",
             "",

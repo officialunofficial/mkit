@@ -48,7 +48,8 @@ fn multipart_error(op: StorageOp, err: StoreError) -> ServerError {
 }
 
 /// One part stream. The store owns its bounded hasher and staged bytes; this
-/// handle keeps only the byte count and authenticated commitment.
+/// handle keeps the byte count, authenticated commitment and at most 256 KiB
+/// of private buffering before an authority-checked storage write.
 pub struct PartUploadSession<'p, B: MultipartBlobStore, N, H> {
     pipe: &'p Pipeline<B, N, H>,
     ticket: [u8; 32],
@@ -58,6 +59,7 @@ pub struct PartUploadSession<'p, B: MultipartBlobStore, N, H> {
     subtree: [u8; 32],
     len: u64,
     seen: u64,
+    staging: super::staging::StagingBuffer,
     sink: Option<B::PartSink>,
     failed: Option<ServerError>,
     outcome: Outcome,
@@ -91,10 +93,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
         result
     }
 
-    async fn push_inner(&mut self, chunk: Bytes) -> Result<(), ServerError> {
-        self.pipe
-            .check_ticket_generation(&self.namespace, self.generation)
-            .await?;
+    async fn push_inner(&mut self, mut chunk: Bytes) -> Result<(), ServerError> {
         if chunk.is_empty() {
             return Err(ServerError::invalid_argument("empty upload part chunk"));
         }
@@ -107,16 +106,28 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
                 "part data exceeds the part length",
             ));
         }
+        while !chunk.is_empty() {
+            if let Some(bytes) = self.staging.push(&mut chunk) {
+                self.stage(bytes).await?;
+            }
+        }
+        self.seen = next;
+        Ok(())
+    }
+
+    async fn stage(&mut self, bytes: Bytes) -> Result<(), ServerError> {
+        self.pipe
+            .check_ticket_generation(&self.namespace, self.generation)
+            .await?;
         self.sink
             .as_mut()
             .ok_or_else(|| ServerError::internal("part stream is closed", "missing part sink"))?
-            .write(chunk)
+            .write(bytes)
             .await
             .map_err(|e| multipart_error(StorageOp::MultipartPart, e))?;
         self.pipe
             .check_ticket_generation(&self.namespace, self.generation)
             .await?;
-        self.seen = next;
         Ok(())
     }
 
@@ -144,6 +155,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
     }
 
     async fn finish_inner(&mut self) -> Result<Vec<u8>, ServerError> {
+        if let Some(bytes) = self.staging.finish() {
+            self.stage(bytes).await?;
+        }
         self.pipe
             .check_ticket_generation(&self.namespace, self.generation)
             .await?;
@@ -305,6 +319,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 subtree,
                 len,
                 seen: 0,
+                staging: super::staging::StagingBuffer::default(),
                 sink: Some(sink),
                 failed: None,
                 outcome,
