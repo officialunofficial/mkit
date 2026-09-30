@@ -28,6 +28,7 @@ fn statement(audience: &str, generation: u64) -> String {
         URL_SAFE_NO_PAD.encode(signature.to_bytes())
     )
 }
+#[allow(clippy::too_many_lines)] // One serial Worker scenario keeps its barrier and ticket state together.
 #[tokio::test]
 #[ignore = "requires disposable local Worker D34 and the hook stub"]
 async fn worker_d34_authority_barrier_rejects_stale_facts_and_ticket_staging() {
@@ -39,10 +40,10 @@ async fn worker_d34_authority_barrier_rejects_stale_facts_and_ticket_staging() {
     let signer = Signer::new([2; 32], &origin, &format!("{NS}/fenced"));
     let path = Rpc::UpdateRef.procedure();
     let body=serde_json::to_vec(&json!({"name":"refs/heads/fence","newId":STANDARD.encode([1u8;32]),"expectation":"REF_EXPECTATION_ANY"})).unwrap();
-    let signed = signer.sign_body(path, &body);
+    let envelope = signer.sign_body(path, &body);
     assert_eq!(
         client
-            .post(path, "application/json", &signed.headers, body.clone())
+            .post(path, "application/json", &envelope.headers, body.clone())
             .await
             .unwrap()
             .status,
@@ -80,7 +81,7 @@ async fn worker_d34_authority_barrier_rejects_stale_facts_and_ticket_staging() {
     // An old result can replay without recommitting.
     assert_eq!(
         client
-            .post(path, "application/json", &signed.headers, body.clone())
+            .post(path, "application/json", &envelope.headers, body.clone())
             .await
             .unwrap()
             .status,
@@ -107,9 +108,9 @@ async fn worker_d34_authority_barrier_rejects_stale_facts_and_ticket_staging() {
         &json!({"ref":"refs/heads/fence","packId":STANDARD.encode([3u8;32]),"bytes":"10"}),
     )
     .unwrap();
-    let signed = signer.sign_body(begin_path, &begin);
+    let envelope = signer.sign_body(begin_path, &begin);
     let response = client
-        .post(begin_path, "application/json", &signed.headers, begin)
+        .post(begin_path, "application/json", &envelope.headers, begin)
         .await
         .unwrap();
     assert_eq!(
@@ -130,13 +131,13 @@ async fn worker_d34_authority_barrier_rejects_stale_facts_and_ticket_staging() {
         200
     );
     let complete = serde_json::to_vec(&json!({"ticketToken":token})).unwrap();
-    let signed = signer.sign_body(Rpc::CompleteUpload.procedure(), &complete);
+    let envelope = signer.sign_body(Rpc::CompleteUpload.procedure(), &complete);
     assert_eq!(
         client
             .post(
                 Rpc::CompleteUpload.procedure(),
                 "application/json",
-                &signed.headers,
+                &envelope.headers,
                 complete
             )
             .await
