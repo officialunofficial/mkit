@@ -1632,7 +1632,7 @@ replacement corrupts an unrelated branch's closure.
 **Enforced by:** normative SPEC-SERVER §14 and the redaction wire goldens.
 Runtime enforcement remains for the takedown, rewrite, and serving WPs.
 
-## Admin authority and audit continuity (specified, implementation pending)
+## Admin authority and audit continuity (launch foundations)
 
 **Always:** administrative effects require a valid `mkit-admin:v1` signature
 from a key whose deployment-wide roles permit the procedure. A `RENEWAL` or
@@ -1652,8 +1652,12 @@ preserved bytes.
 **If violated:** a replay or wrong-role key changes protected content, or a
 missing audit segment conceals an administrative action.
 
-**Enforced by:** normative SPEC-SERVER §16 and its admin goldens. Runtime
-enforcement and behavioral conformance remain pending.
+**Enforced by:** `mkit-server/src/admin` authentication, replay ledger and audit
+export, default-off native/Worker mounts, and the existing source relay/root
+apply extension. Automatic purge intent, kind-11 timer and audit event commit
+with the triggering state change; audit append, dedup receipt and watermark
+commit together after source commit. Purge delivery does not await audit.
+Manual purge, review, leases, takedown and pruning consumers remain later work.
 
 ## BeginUpload decisions and replay share the write batch
 

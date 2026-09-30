@@ -107,8 +107,6 @@ pub fn router<S: NamespaceStore + Clone + 'static>(
         store,
         partition(pipeline.sharding),
         settings.config.clone(),
-        // R-198 defers manual PurgeCache to WP-5.6a.
-        false,
     ));
     let dispatch = move |req: Request| {
         let engine = Arc::clone(&engine);
@@ -158,7 +156,7 @@ fn response(reply: mkit_server::admin::Response) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mkit_server::memory::MemoryKv;
+    use mkit_server::MemoryKv;
     use tower::ServiceExt;
 
     #[tokio::test]

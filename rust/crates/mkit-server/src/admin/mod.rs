@@ -6,6 +6,7 @@
 //! on the audit head commits acceptance, audit and replay before success.
 
 mod auth;
+mod automatic;
 mod ledger;
 #[cfg(test)]
 mod tests;
@@ -16,7 +17,8 @@ use serde::{Deserialize, Serialize};
 use crate::{Code, NamespaceStore, Partition, ServerError};
 
 pub use auth::{Config, HEADER_NAMES};
-pub use ledger::{SystemAudit, plan_system};
+pub use automatic::{AuditRelayHook, AuditReserveHook, SystemAudit, extend_audit_batch};
+pub use ledger::{OperationReplay, plan_operation, plan_system};
 
 /// Canonical admin path prefix; never rewrite paths before verification.
 pub const PREFIX: &str = "/mkit.server.admin.v1.AdminService/";
@@ -130,16 +132,14 @@ pub struct Engine<S> {
     store: S,
     partition: Partition,
     config: Config,
-    purge_enabled: bool,
 }
 impl<S: NamespaceStore> Engine<S> {
-    /// Build an admin framework; manual purge requires an installed purger.
-    pub fn new(store: S, partition: Partition, config: Config, purge_enabled: bool) -> Self {
+    /// Build the signed audit export framework.
+    pub fn new(store: S, partition: Partition, config: Config) -> Self {
         Self {
             store,
             partition,
             config,
-            purge_enabled,
         }
     }
     /// Dispatch exact signed bytes. Adapters must reject decompression errors

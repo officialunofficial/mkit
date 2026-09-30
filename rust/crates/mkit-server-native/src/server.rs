@@ -808,7 +808,12 @@ where
             .with_sink_timeout(options.timeout)
             .with_max_rows(options.max_rows)
             .with_clock(Arc::new(SystemClock));
-            let registry = sqlite_timer_registry_with(blobs.clone(), meta.clone(), outcomes);
+            let registry = sqlite_timer_registry_with_audit(
+                blobs.clone(),
+                meta.clone(),
+                outcomes,
+                crate::admin::partition(cfg.pipeline.sharding),
+            );
             #[cfg(feature = "hooks")]
             let registry = if let Some(sink) =
                 crate::purge::build(cfg.hooks.as_ref(), &outcome_audience(cfg))?
@@ -862,6 +867,24 @@ where
     B: MultipartBlobStore + Clone + 'static,
     O: OutcomeSink + 'static,
 {
+    sqlite_timer_registry_with_audit(
+        blobs,
+        meta,
+        delivery,
+        crate::admin::partition(Sharding::Single),
+    )
+}
+
+fn sqlite_timer_registry_with_audit<B, O>(
+    blobs: B,
+    meta: TimerStore,
+    delivery: OutcomeDelivery<O>,
+    root: mkit_server::Partition,
+) -> mkit_server::timers::TimerRegistry<'static, TimerStore>
+where
+    B: MultipartBlobStore + Clone + 'static,
+    O: OutcomeSink + 'static,
+{
     let registry = mkit_server::timers::TimerRegistry::new()
         .register(mkit_server::timers::ticket_expiry::TicketExpiry { blobs })
         .register(
@@ -870,7 +893,7 @@ where
         )
         .register(mkit_server::relay::RelayHandler {
             target: meta.clone(),
-            hook: mkit_server::relay::NoHook,
+            hook: mkit_server::admin::AuditRelayHook::new(meta.clone(), root),
             budget: mkit_server::relay::RelayBudget::default(),
         })
         .register(delivery)

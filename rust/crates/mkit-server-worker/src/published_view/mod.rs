@@ -1,5 +1,7 @@
 //! Stage 2 published ref snapshots. Nothing is constructed by Stage 1 entrypoints.
 mod codec;
+mod fence;
+pub use fence::fenced_reader;
 #[cfg(target_arch = "wasm32")]
 mod runtime;
 mod timer;

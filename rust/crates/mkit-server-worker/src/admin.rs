@@ -72,7 +72,7 @@ pub(crate) async fn serve(
                 crate::ns_client::StubTransport::new(env.clone(), cfg.placement.clone()),
                 cfg.probe_partition(),
             );
-            let engine = Engine::new(store.clone(), cfg.probe_partition(), config.clone(), false);
+            let engine = Engine::new(store, cfg.probe_partition(), config.clone());
             let reply = engine
                 .handle(
                     &path,

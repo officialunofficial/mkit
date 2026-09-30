@@ -87,6 +87,9 @@ pub fn build_signed<C: HookChannel>(
     let Some(vars) = vars else {
         return Ok(built);
     };
+    if vars.roles.cache_purge && signer.is_none() {
+        return Err(ConfigError("cache-purge requires a signing key".into()));
+    }
     let client = Arc::new(
         HookClient::new(channel, server_audience, signer, clock, sleep)
             .map_err(|e| ConfigError(format!("hook client: {e}")))?,

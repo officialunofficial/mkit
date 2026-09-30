@@ -5,11 +5,11 @@ use serde_json::{Value as Json, json};
 
 use crate::{
     Batch, BatchOutcome, Code, Key, NamespaceStore, Partition, Precondition, ServerError,
-    StoreError, Value, purge, store::keys,
+    StoreError, Value,
 };
 
 use super::{
-    AUDIT_PATH, BodyCapture, Engine, Headers, MAX_BODY, PURGE_PATH, Response,
+    AUDIT_PATH, BodyCapture, Engine, Headers, MAX_BODY, Response,
     auth::{self, Verified},
     payload,
 };
@@ -18,9 +18,9 @@ const RETRIES: usize = 16;
 const PAGE_BYTES: usize = 256 * 1024;
 
 #[derive(Default, Serialize, Deserialize)]
-struct Head {
-    seq: u64,
-    hash: String,
+pub(super) struct Head {
+    pub(super) seq: u64,
+    pub(super) hash: String,
 }
 #[derive(Serialize, Deserialize)]
 struct Nonce {
@@ -36,10 +36,61 @@ struct Operation {
     result: Response,
 }
 
+/// A durable operation replay or an acceptance batch for a new operation.
+#[derive(Debug)]
+pub enum OperationReplay {
+    /// The original response, including stable action identity and pending state.
+    Existing(Response),
+    /// Merge this guarded batch with the operation's action and audit acceptance.
+    New(Batch),
+}
+/// Plan persistent operation-id deduplication after authentication and role checks.
+/// A new action must commit this batch atomically with its audit and intent.
+/// # Errors
+/// Invalid identities, changed logical requests, or unavailable/corrupt storage.
+pub async fn plan_operation<S: NamespaceStore>(
+    store: &S,
+    partition: &Partition,
+    operation_id: &str,
+    path: &str,
+    digest: &str,
+    result: Response,
+) -> Result<OperationReplay, ServerError> {
+    if !auth::identifier(operation_id, 128, true)
+        || !path.starts_with(super::PREFIX)
+        || digest
+            .strip_prefix("body:")
+            .and_then(auth::hex::<32>)
+            .is_none()
+    {
+        return Err(auth::invalid("invalid operation replay identity"));
+    }
+    let key = key("ao", operation_id.as_bytes());
+    if let Some(value) = store.get(partition, &key).await.map_err(store_error)? {
+        let first: Operation = decode(&value)?;
+        if first.digest != digest || first.path != path {
+            return Err(auth::invalid(
+                "operation id reused with a different request",
+            ));
+        }
+        return Ok(OperationReplay::Existing(first.result));
+    }
+    let value = encode(&Operation {
+        digest: digest.into(),
+        path: path.into(),
+        result,
+    })?;
+    Ok(OperationReplay::New(
+        Batch::new()
+            .require(Precondition::Absent(key.clone()))
+            .put(key, value),
+    ))
+}
+
 fn key(tag: &str, suffix: &[u8]) -> Key {
     Key::new([tag.as_bytes(), b"\0", suffix].concat())
 }
-fn head_key() -> Key {
+pub(super) fn head_key() -> Key {
     key("ah", b"")
 }
 fn entry_key(seq: u64) -> Key {
@@ -48,7 +99,7 @@ fn entry_key(seq: u64) -> Key {
 fn store_error(_: StoreError) -> ServerError {
     ServerError::new(Code::Unavailable, "admin storage unavailable")
 }
-fn encode<T: Serialize>(value: &T) -> Result<Value, ServerError> {
+pub(super) fn encode<T: Serialize>(value: &T) -> Result<Value, ServerError> {
     let bytes = serde_json::to_vec(value)
         .map_err(|_| ServerError::new(Code::Internal, "admin encoding failed"))?;
     if bytes.len() > crate::MAX_VALUE_BYTES {
@@ -59,11 +110,11 @@ fn encode<T: Serialize>(value: &T) -> Result<Value, ServerError> {
     }
     Ok(Value::new(bytes))
 }
-fn decode<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T, ServerError> {
+pub(super) fn decode<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T, ServerError> {
     serde_json::from_slice(value.as_bytes())
         .map_err(|_| ServerError::new(Code::DataLoss, "corrupt admin ledger"))
 }
-fn guarded(batch: Batch, key: Key, old: Option<Value>) -> Batch {
+pub(super) fn guarded(batch: Batch, key: Key, old: Option<Value>) -> Batch {
     batch.require(match old {
         Some(value) => Precondition::Equals(key, value),
         None => Precondition::Absent(key),
@@ -76,7 +127,7 @@ fn previous(head: &Head) -> String {
         head.hash.clone()
     }
 }
-fn decode_head(value: Option<&Value>) -> Result<Head, ServerError> {
+pub(super) fn decode_head(value: Option<&Value>) -> Result<Head, ServerError> {
     let head: Head = value.map_or_else(|| Ok(Head::default()), decode)?;
     if head.seq > 0 && auth::hex::<32>(&head.hash).is_none() {
         return Err(ServerError::new(Code::DataLoss, "corrupt audit head"));
@@ -99,7 +150,7 @@ fn hash_entry(entry: &Json) -> Result<String, ServerError> {
     Ok(to_hex(&hash(&bytes)))
 }
 #[allow(clippy::too_many_arguments)] // Every fixed canonical audit field is explicit at its three append sites.
-fn audit_entry(
+pub(super) fn audit_entry(
     head: &Head,
     actor: &str,
     path: &str,
@@ -194,84 +245,6 @@ pub async fn plan_system<S: NamespaceStore>(
     Ok(batch)
 }
 
-/// Audits automatic purge acceptance in the deployment's root partition before
-/// any namespace or repository effect. Stable intents make a cross-DO retry
-/// resume the accepted action without appending another audit entry.
-#[derive(Clone, Debug)]
-pub struct SystemAudit<S> {
-    store: S,
-    root: Partition,
-}
-impl<S> SystemAudit<S> {
-    /// The metadata store and the same root partition used by [`Engine`].
-    pub fn new(store: S, root: Partition) -> Self {
-        Self { store, root }
-    }
-}
-impl<S: NamespaceStore> purge::AutomaticAudit for SystemAudit<S> {
-    fn plan<'a>(
-        &'a self,
-        _partition: &'a Partition,
-        request: &'a purge::Request,
-        now_ms: u64,
-    ) -> crate::BoxFuture<'a, Result<Batch, StoreError>> {
-        Box::pin(async move {
-            let intent_key = key("ai", request.purge_id.as_bytes());
-            let intent = serde_json::to_vec(request)
-                .map(Value::new)
-                .map_err(|_| StoreError::Invalid("invalid automatic purge intent".into()))?;
-            if intent.as_bytes().len() > crate::MAX_VALUE_BYTES {
-                return Err(StoreError::Invalid("automatic intent too large".into()));
-            }
-            for _ in 0..RETRIES {
-                if let Some(old) = self.store.get(&self.root, &intent_key).await? {
-                    if old != intent {
-                        return Err(StoreError::Invalid("automatic purge id reused".into()));
-                    }
-                    return Ok(Batch::new());
-                }
-                let actor = match request.trigger {
-                    purge::Trigger::Takedown | purge::Trigger::Suspension => "system:inspector",
-                    purge::Trigger::LeaseDeletion => "system:timer",
-                    _ => "system:relay",
-                };
-                let mut batch = plan_system(
-                    &self.store,
-                    &self.root,
-                    actor,
-                    &format!("{actor}/cache-purge"),
-                    &[request.scope().to_owned()],
-                    now_ms,
-                )
-                .await?;
-                batch = batch
-                    .require(Precondition::Absent(intent_key.clone()))
-                    .put(intent_key.clone(), intent.clone());
-                if self.store.apply(&self.root, batch).await? == BatchOutcome::Committed {
-                    return Ok(Batch::new());
-                }
-            }
-            Err(StoreError::Invalid("automatic audit contention".into()))
-        })
-    }
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
-struct PurgeInput {
-    #[serde(alias = "operation_id")]
-    operation_id: String,
-    repository: String,
-    namespace: String,
-    #[serde(alias = "url_paths")]
-    url_paths: Vec<String>,
-    #[serde(alias = "object_ids")]
-    object_ids: Vec<String>,
-    refs: Vec<String>,
-    reason: String,
-    #[serde(alias = "operator_label")]
-    operator_label: String,
-}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReadInput {
@@ -281,14 +254,9 @@ struct ReadInput {
     page_size: Json,
 }
 enum Action {
-    Purge(purge::Request, String, String),
     Read(u64, u32),
     Failure(ServerError),
 }
-fn bounded_text(s: &str, max: usize) -> bool {
-    s.len() <= max && !s.chars().any(char::is_control)
-}
-
 impl<S: NamespaceStore> Engine<S> {
     #[allow(clippy::too_many_lines)] // Authentication, durable nonce reservation and terminal audited dispatch share one lifecycle.
     pub(super) async fn dispatch(
@@ -363,44 +331,7 @@ impl<S: NamespaceStore> Engine<S> {
                     return Err(auth::invalid("decoded admin request exceeds 1 MiB"));
                 }
                 let body = payload(path, &bytes)?;
-                if path == PURGE_PATH {
-                    let input: PurgeInput = serde_json::from_slice(body)
-                        .map_err(|_| auth::invalid("invalid PurgeCache JSON"))?;
-                    if !auth::identifier(&input.operation_id, 128, true)
-                        || !bounded_text(&input.reason, 512)
-                        || !bounded_text(&input.operator_label, 128)
-                    {
-                        return Err(auth::invalid("invalid admin operation id, reason or label"));
-                    }
-                    let request = purge::Request {
-                        purge_id: format!(
-                            "purge:{}",
-                            to_hex(&hash(
-                                format!("{}\n{}", verified.actor, verified.nonce).as_bytes()
-                            ))
-                        ),
-                        audience: self.config.audience.clone(),
-                        repository: input.repository,
-                        namespace: input.namespace,
-                        trigger: purge::Trigger::Manual,
-                        url_paths: input.url_paths,
-                        object_ids: input.object_ids,
-                        refs: input.refs,
-                    };
-                    request
-                        .validate()
-                        .map_err(|_| auth::invalid("invalid purge selectors"))?;
-                    if !self.purge_enabled {
-                        return Err(ServerError::failed_precondition(
-                            "no cache purge interface configured",
-                        ));
-                    }
-                    Ok(Action::Purge(
-                        request,
-                        input.operation_id,
-                        input.operator_label,
-                    ))
-                } else if path == AUDIT_PATH {
+                if path == AUDIT_PATH {
                     let input: ReadInput = serde_json::from_slice(body)
                         .map_err(|_| auth::invalid("invalid ReadAuditLog JSON"))?;
                     let number = |j: &Json| {
@@ -495,107 +426,12 @@ impl<S: NamespaceStore> Engine<S> {
                 .await
                 .map_err(store_error)?;
             let head = decode_head(old.as_ref())?;
-            let mut batch = guarded(Batch::new(), head_key(), old);
-            let (response, operation, label, targets) = match &action {
-                Action::Failure(error) => (Response::error(error), "", "", Vec::new()),
+            let batch = guarded(Batch::new(), head_key(), old);
+            let response = match &action {
+                Action::Failure(error) => Response::error(error),
                 Action::Read(from, size) => {
                     let result = self.read_page(&head, *from, *size).await;
-                    (
-                        result.unwrap_or_else(|e| Response::error(&e)),
-                        "",
-                        "",
-                        Vec::new(),
-                    )
-                }
-                Action::Purge(request, operation, label) => {
-                    let operation_key = key("ao", operation.as_bytes());
-                    if let Some(value) = self
-                        .store
-                        .get(&self.partition, &operation_key)
-                        .await
-                        .map_err(store_error)?
-                    {
-                        let first: Operation = decode(&value)?;
-                        if first.digest != verified.digest || first.path != verified.path {
-                            let response = Response::error(&auth::invalid(
-                                "operation id reused with a different request",
-                            ));
-                            (
-                                response,
-                                operation.as_str(),
-                                label.as_str(),
-                                vec![request.scope().to_owned()],
-                            )
-                        } else {
-                            // Cross-nonce operation retries preserve the first accepted
-                            // identity/result without creating another action or audit.
-                            let terminal = Nonce {
-                                digest: verified.digest.clone(),
-                                path: verified.path.clone(),
-                                expiry_ms: verified.expiry_ms,
-                                result: Some(first.result.clone()),
-                            };
-                            let batch = Batch::new()
-                                .require(Precondition::Equals(
-                                    nonce_key.clone(),
-                                    nonce_value.clone(),
-                                ))
-                                .put(nonce_key.clone(), encode(&terminal)?);
-                            if self
-                                .store
-                                .apply(&self.partition, batch)
-                                .await
-                                .map_err(store_error)?
-                                != BatchOutcome::Committed
-                            {
-                                return Err(ServerError::new(
-                                    Code::Aborted,
-                                    "admin nonce completion raced",
-                                ));
-                            }
-                            return Ok(first.result);
-                        }
-                    } else {
-                        let backlog = self
-                            .store
-                            .get(&self.partition, &keys::outcome_backlog())
-                            .await
-                            .map_err(store_error)?;
-                        let generation = self
-                            .store
-                            .get(
-                                &self.partition,
-                                &keys::cache_purge_generation(request.scope()),
-                            )
-                            .await
-                            .map_err(store_error)?;
-                        let planned = purge::plan_enqueue(
-                            request,
-                            now,
-                            backlog.as_ref(),
-                            generation.as_ref(),
-                        )
-                        .map_err(store_error)?;
-                        batch.preconditions.extend(planned.preconditions);
-                        batch.writes.extend(planned.writes);
-                        let response = Response::json(&json!({"purgeId":request.purge_id}));
-                        batch = batch
-                            .require(Precondition::Absent(operation_key.clone()))
-                            .put(
-                                operation_key,
-                                encode(&Operation {
-                                    digest: verified.digest.clone(),
-                                    path: verified.path.clone(),
-                                    result: response.clone(),
-                                })?,
-                            );
-                        (
-                            response,
-                            operation.as_str(),
-                            label.as_str(),
-                            vec![request.scope().to_owned()],
-                        )
-                    }
+                    result.unwrap_or_else(|e| Response::error(&e))
                 }
             };
             let (entry, next) = audit_entry(
@@ -604,9 +440,9 @@ impl<S: NamespaceStore> Engine<S> {
                 &verified.path,
                 &verified.digest,
                 &verified.nonce,
-                operation,
-                label,
-                &targets,
+                "",
+                "",
+                &[],
                 &response,
                 "",
                 now,
@@ -617,7 +453,7 @@ impl<S: NamespaceStore> Engine<S> {
                 expiry_ms: verified.expiry_ms,
                 result: Some(response.clone()),
             };
-            batch = batch
+            let batch = batch
                 .require(Precondition::Equals(nonce_key.clone(), nonce_value.clone()))
                 .put(entry_key(next.seq), encode(&entry)?)
                 .put(head_key(), encode(&next)?)
@@ -663,38 +499,52 @@ impl<S: NamespaceStore> Engine<S> {
                 .to_owned()
         };
         let mut bytes = 0usize;
-        while next <= head.seq && entries.len() < size as usize {
-            let row = self
+        // Eight bounded values use at most 4 MiB before decoding. A full
+        // 100-entry page costs at most thirteen DO reads, rather than 100.
+        'pages: while next <= head.seq && entries.len() < size as usize {
+            let count = (size as usize - entries.len()).min(8).min(
+                usize::try_from(head.seq - next)
+                    .unwrap_or(usize::MAX)
+                    .saturating_add(1),
+            );
+            let keys: Vec<_> = (0..count).map(|i| entry_key(next + i as u64)).collect();
+            let rows = self
                 .store
-                .get(&self.partition, &entry_key(next))
+                .get_many(&self.partition, &keys)
                 .await
-                .map_err(store_error)?
-                .ok_or_else(|| ServerError::new(Code::DataLoss, "audit sequence gap"))?;
-            if bytes.saturating_add(row.as_bytes().len()) > PAGE_BYTES && !entries.is_empty() {
-                break;
+                .map_err(store_error)?;
+            if rows.len() != count {
+                return Err(ServerError::new(Code::DataLoss, "invalid audit read count"));
             }
-            bytes = bytes.saturating_add(row.as_bytes().len());
-            let mut entry: Json = decode(&row)?;
-            let entry_hash = hash_entry(&entry)?;
-            if entry["seq"].as_str().and_then(auth::decimal_u64) != Some(next)
-                || entry["prevHash"] != previous_hash
-                || entry["entryHash"] != entry_hash
-            {
-                return Err(ServerError::new(
-                    Code::DataLoss,
-                    "audit chain continuity failure",
-                ));
+            for row in rows {
+                let row =
+                    row.ok_or_else(|| ServerError::new(Code::DataLoss, "audit sequence gap"))?;
+                if bytes.saturating_add(row.as_bytes().len()) > PAGE_BYTES && !entries.is_empty() {
+                    break 'pages;
+                }
+                bytes = bytes.saturating_add(row.as_bytes().len());
+                let mut entry: Json = decode(&row)?;
+                let entry_hash = hash_entry(&entry)?;
+                if entry["seq"].as_str().and_then(auth::decimal_u64) != Some(next)
+                    || entry["prevHash"] != previous_hash
+                    || entry["entryHash"] != entry_hash
+                {
+                    return Err(ServerError::new(
+                        Code::DataLoss,
+                        "audit chain continuity failure",
+                    ));
+                }
+                previous_hash = entry_hash;
+                for field in ["prevHash", "entryHash"] {
+                    let raw = auth::hex::<32>(entry[field].as_str().unwrap_or(""))
+                        .ok_or_else(|| ServerError::new(Code::DataLoss, "invalid audit hash"))?;
+                    entry[field] = json!(STANDARD.encode(raw));
+                }
+                entries.push(entry);
+                next = next
+                    .checked_add(1)
+                    .ok_or_else(|| ServerError::new(Code::DataLoss, "audit sequence overflow"))?;
             }
-            previous_hash = entry_hash;
-            for field in ["prevHash", "entryHash"] {
-                let raw = auth::hex::<32>(entry[field].as_str().unwrap_or(""))
-                    .ok_or_else(|| ServerError::new(Code::DataLoss, "invalid audit hash"))?;
-                entry[field] = json!(STANDARD.encode(raw));
-            }
-            entries.push(entry);
-            next = next
-                .checked_add(1)
-                .ok_or_else(|| ServerError::new(Code::DataLoss, "audit sequence overflow"))?;
         }
         if next > head.seq && previous_hash != previous(head) {
             return Err(ServerError::new(

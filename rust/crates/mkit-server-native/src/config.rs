@@ -1571,6 +1571,7 @@ pub fn resolve(
                     shared_caches: true,
                     remote_sink: true,
                     audit: None,
+                    local: None,
                 });
             }
         }

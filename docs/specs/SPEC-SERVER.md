@@ -3485,12 +3485,33 @@ implements §2–§5) and:
 configuration, including §9–§16. An indexed deployment MUST support per-ref
 storage leases (§12.1).
 
+**Launch admin subset.** A launch deployment MAY explicitly offer the following
+admin foundation without claiming the full §16 procedure set. It MUST state
+its supported subset in its deployment documentation, and MUST NOT advertise
+unimplemented operations. The remaining lease, GC, inspection and takedown
+requirements follow the deployment's declared launch scope.
+
+| Surface | Launch foundation |
+|---|---|
+| Signed admin framework (§16.1–§16.4) | Dedicated role keys, exact request signatures, durable nonce/result replay and persistent operation-id deduplication. Disabled unless keys are configured. |
+| Audit (§16.6) | Gapless chain and ReadAuditLog, including authenticated reads/failures and automatic purge actions. |
+| Purge (§16.7) | Automatic durable purge intents and signed retry delivery; serving fences remain authoritative before acknowledgement. |
+| Manual PurgeCache and other admin procedures | Deferred to later launch work; no manual purge route in this foundation. |
+
+Automatic purge audit delivery MAY use the existing outbox relay. The triggering
+state apply MUST atomically record the purge intent, its delivery timer and the
+audit event. The root target MUST commit audit append, source-identity
+deduplication and relay watermark advancement together. The audit chain follows
+arrival order and retains the source event's occurred time. Purge delivery MUST
+NOT depend on successful audit delivery.
+
 The mapping of profiles to conformance-suite cases is specified with M5.
 
 ## 19. Version history
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Launch admin foundation subset: signed framework, gapless audit/ReadAuditLog and automatic purge delivery; manual PurgeCache deferred. Automatic audit uses committed source relay events and atomic root append/dedup/watermark. |
 | 1 | draft | Authority-ticket streams use bounded physical-byte checkpoints independent of client framing, retaining pre/post staging and final acceptance checks (§6.2.1; WP-2.16). |
 | 1 | draft | Optional independent namespace authority generations, deployment-authority statements, lease completion and ticket fencing (§6.2.1; WP-2.16). |
 | `1` (WP-3.13) | draft | §6.3 preserves repeated challenge order while allowing RFC 9110 combination on platforms that fold fields; mirrors STC §5.1. |

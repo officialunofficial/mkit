@@ -974,3 +974,52 @@ fn full_reserved_target_batch_and_three_local_writes_commit_atomically() {
     ));
     assert_eq!(state(&store).generation, 2);
 }
+
+#[test]
+fn purge_during_snapshot_refill_cannot_return_stale_rows() {
+    let clock = Arc::new(ManualClock::new(1000));
+    let bucket = Bucket::new(clock.clone());
+    *bucket.object.lock().unwrap() = Some(SnapshotObject {
+        etag: "old".into(),
+        stored_at_ms: 1000,
+        bytes: envelope(1, 1000).encode().unwrap(),
+    });
+    let store = Arc::new(MemoryKv::default());
+    let changed = store.clone();
+    let cache = Cache::default();
+    *cache.put_hook.lock().unwrap() = Some(Box::new(move || {
+        changed
+            .apply(
+                &D34Shards.coordinator(&repo().namespace),
+                Batch::new().put(
+                    keys::cache_purge_generation("root/sample"),
+                    Value::new(1001u64.to_be_bytes().to_vec()),
+                ),
+            )
+            .now_or_never()
+            .unwrap()
+            .unwrap();
+    }));
+    let reader = SnapshotReader {
+        bucket,
+        cache,
+        config: PublishedViewConfig::new("purge-fence").unwrap(),
+        clock,
+    };
+    let reader = fenced_reader(
+        Arc::new(reader),
+        store.clone(),
+        mkit_server::pipeline::Sharding::D34,
+    );
+    assert!(
+        block_on(reader.bucket(&repo(), &partition(), 1000))
+            .unwrap()
+            .is_none()
+    );
+    // Retained R2/cache bytes stay fenced on a cold retry before global ack.
+    assert!(
+        block_on(reader.bucket(&repo(), &partition(), 1000))
+            .unwrap()
+            .is_none()
+    );
+}

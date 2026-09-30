@@ -1,6 +1,6 @@
 # Ruling requested: automatic purge audit across partitions
 
-Work stopped at the user's request on 2026-09-30. No PR or push.
+Resolved by the user on 2026-09-30. Implementation resumed using the existing outbox relay; this document preserves the source evidence behind the ruling.
 
 ## Question for the orchestrator
 
@@ -16,10 +16,13 @@ Please specify the allowed acceptance/completion audit semantics and recovery ow
 - SPEC-SERVER §16.6 requires automatic purge system entries and a gapless chain; original B6 requires durable action intent before effects and resumable cross-DO effects. R-198 requires the automatic purge intent in the triggering apply and requires a ruling before new cross-partition machinery.
 - The added `automatic_audit_does_not_commit_when_trigger_apply_loses` test captures the desired same-partition atomicity. It remains unrun and is expected to fail on the checkpoint; no containment/protocol fix was applied after the stop.
 
-## Checkpoint and remaining work
+## User ruling
 
-Independent edits unexpose manual PurgeCache, move Worker admin dispatch after persisted mode guards, require a signed empty purge acknowledgement, honor native hook timeout, and correct the 5.11a/4.18 dependency order without cycles. Regression tests accompany these edits; final verification is pending.
+The outbox relay is the existing cross-partition mechanism. Automatic actions join the audit chain through it:
 
-Still outstanding: the ruling and automatic audit fix; Worker timer/local invalidation wiring; snapshot refill fencing; ReadAuditLog request-budget batching; launch subset/spec/readme/changelog completion; final gates, independent self-review and PR.
+1. Remove the pre-apply `ai` intent and premature success entry. An automatic action is audited only after its state change commits.
+2. The caller's state-change apply atomically commits the purge intent, its timer kind 11 in the same partition, and an outbox row carrying the action, source partition and operation identity, occurred time and purge id. Purge delivery does not depend on audit append.
+3. A root target hook appends the gapless chain idempotently on source identity. Redelivery appends nothing; lost replies are safe. The watermark advances in the same apply as the append. Chain order is arrival order; entries retain the source occurred time.
+4. Count the added source outbox row and keep the target apply at 100 operations or fewer. Cover source-apply failure, duplicate/reordered delivery, commit-before-relay recovery and chain continuity.
 
-Clean `origin/feat/mkit-server` at `4d1c8fd4` reproduces the two mkit-attest wasm clippy errors (signer_external.rs:329 and store.rs:235) and the mkit-server wasm collapsible-if error (pipeline/mod.rs:591). They remain untouched. `just ci-security` passed. Workspace clippy found a branch-owned zero-sized-map-values lint in the new purge acknowledgement type; it remains unresolved in this stopped checkpoint. Other final gates were not completed.
+Stop only if targeting root requires a new relay codec or partition kind. The existing `RelayV1` target already encodes `Partition::Namespace` and `Partition::Coordinator`, so that stop condition does not apply.

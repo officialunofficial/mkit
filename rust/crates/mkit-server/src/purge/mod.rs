@@ -20,6 +20,8 @@ pub struct PurgeConfig {
     pub remote_sink: bool,
     /// Durable acceptance/audit seam for automatic triggers.
     pub audit: Option<std::sync::Arc<dyn AutomaticAudit>>,
+    /// Immediate request-side invalidation; timer 11 durably retries failures.
+    pub local: Option<std::sync::Arc<dyn LocalInvalidation>>,
 }
 impl core::fmt::Debug for PurgeConfig {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -30,14 +32,15 @@ impl core::fmt::Debug for PurgeConfig {
             .finish_non_exhaustive()
     }
 }
-/// Accept and audit automatic work before it changes serving state.
+/// Plan automatic audit outbox work in the same apply as its serving-state change.
 pub trait AutomaticAudit: crate::MaybeSend + crate::MaybeSync {
-    /// Returned effects belong to `partition`; cross-partition acceptance must
-    /// be durably completed before returning, and deduplicated by purge id.
+    /// Returned effects belong to `partition`; the caller atomically commits
+    /// these source-local relay rows alongside the automatic purge intent.
     fn plan<'a>(
         &'a self,
         partition: &'a crate::Partition,
         request: &'a Request,
+        operation_id: &'a str,
         now_ms: u64,
     ) -> crate::BoxFuture<'a, Result<Batch, StoreError>>;
 }
@@ -50,12 +53,19 @@ impl PurgeConfig {
             shared_caches,
             remote_sink,
             audit: None,
+            local: None,
         }
     }
     /// Attach the automatic action audit/acceptance implementation.
     #[must_use]
     pub fn with_audit(mut self, audit: std::sync::Arc<dyn AutomaticAudit>) -> Self {
         self.audit = Some(audit);
+        self
+    }
+    /// Attach immediate local invalidation alongside the durable timer handler.
+    #[must_use]
+    pub fn with_local(mut self, local: std::sync::Arc<dyn LocalInvalidation>) -> Self {
+        self.local = Some(local);
         self
     }
     /// Refuse invalid origins and shared caches without a global purger.

@@ -1603,7 +1603,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
             match self.meta.apply(p, batch).await {
                 Ok(BatchOutcome::Committed) => {
-                    self.invalidate_local_cache(repo);
+                    self.invalidate_local_cache(repo).await;
                     return Ok(());
                 }
                 Ok(BatchOutcome::DeadlinePassed { .. }) => {
@@ -1850,7 +1850,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             batch.writes.extend(purge.writes);
             match self.meta.apply(p, batch).await {
                 Ok(BatchOutcome::Committed) => {
-                    self.invalidate_local_cache(repo);
+                    self.invalidate_local_cache(repo).await;
                     return Ok(());
                 }
                 Ok(BatchOutcome::DeadlinePassed { .. }) => {

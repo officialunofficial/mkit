@@ -327,6 +327,13 @@ impl WorkerConfig {
         });
         if let Some(hooks) = &self.hooks {
             config.authorizer_role = hooks.authorizer_role;
+            if hooks.roles.cache_purge {
+                config.purge = Some(mkit_server::purge::PurgeConfig::new(
+                    self.audience.clone(),
+                    true,
+                    true,
+                ));
+            }
         }
         config.grants = self
             .grants
@@ -836,16 +843,28 @@ where
     S: mkit_server::NamespaceStore,
     T: mkit_server::NamespaceStore + 'static,
 {
+    timer_registry_budgeted(class, target, plan, None)
+}
+
+fn timer_registry_budgeted<
+    S: mkit_server::NamespaceStore,
+    T: mkit_server::NamespaceStore + 'static,
+>(
+    class: crate::classes::ShardClass,
+    target: Result<T, ConfigError>,
+    plan: Option<&str>,
+    alarm_budget: Option<mkit_server::purge::SliceBudget>,
+) -> mkit_server::timers::TimerRegistry<'static, S> {
     use crate::classes::ShardClass;
-    use mkit_server::relay::{NoHook, RelayBudget, RelayHandler};
+    use mkit_server::relay::{RelayBudget, RelayHandler};
     use mkit_server::timers::{TimerRegistry, lease_sweep::LeaseSweep};
 
     // One target client serves the class's relay or lease sweep and its rollup.
-    let target = target.map(|store| Arc::new(store));
+    let target = target.map(|store| SharedStore(Arc::new(store), alarm_budget.clone()));
     let registry = TimerRegistry::new();
     let registry = match class {
         ShardClass::NsCoordinator => {
-            let source = match target.clone().map(SharedStore) {
+            let source = match target.clone() {
                 Ok(source) => Some(source),
                 Err(error) => {
                     crate::log_failure(&format!(
@@ -865,47 +884,62 @@ where
                 max_per_tick,
             })
         }
-        ShardClass::RefShard => {
-            let paid = plan.is_some_and(|p| p.trim().eq_ignore_ascii_case("paid"));
-            let max_per_tick = if paid {
-                mkit_server::relay::WORKER_PAID_RELAY_FIRES
-            } else {
-                mkit_server::relay::WORKER_FREE_RELAY_FIRES
-            };
-            // Paid: <= 8 fires x 32 targets x 2 calls = 512 per alarm.
-            // Free:
-            // <= 2 fires x 8 targets x 2 calls = 32, below its limit of 50.
-            // The target-call cap also bounds chunking and contention retries.
-            let mut budget = RelayBudget::default();
-            budget.max_rows = 128;
-            budget.max_targets = if paid {
-                mkit_server::relay::WORKER_PAID_RELAY_TARGETS
-            } else {
-                mkit_server::relay::WORKER_FREE_RELAY_TARGETS
-            };
-            budget.max_target_calls = Some(mkit_server::relay::WORKER_RELAY_CALLS_PER_TARGET);
-            let relay = match target.clone().map(SharedStore) {
-                Ok(target) => Some(RelayHandler {
-                    target,
-                    hook: NoHook,
-                    budget,
-                }),
-                Err(error) => {
-                    crate::log_failure(&format!("Worker relay configuration unavailable: {error}"));
-                    None
-                }
-            };
-            registry.register(WorkerRelay {
-                relay,
-                max_per_tick,
-                metrics: Arc::new(crate::telemetry::ConsoleMetrics::default()),
-            })
-        }
         _ => registry,
+    };
+    let registry = if class == ShardClass::RefShard
+        || alarm_budget.is_some()
+            && matches!(
+                class,
+                ShardClass::NsCoordinator | ShardClass::RefStore | ShardClass::RepoIndexShard
+            ) {
+        let paid = plan.is_some_and(|p| p.trim().eq_ignore_ascii_case("paid"));
+        let max_per_tick = if paid {
+            mkit_server::relay::WORKER_PAID_RELAY_FIRES
+        } else {
+            mkit_server::relay::WORKER_FREE_RELAY_FIRES
+        };
+        // Paid: <= 8 fires x 32 targets x 2 calls = 512 per alarm.
+        // Free:
+        // <= 2 fires x 8 targets x 2 calls = 32, below its limit of 50.
+        // The target-call cap also bounds chunking and contention retries.
+        let mut budget = RelayBudget::default();
+        budget.max_rows = 128;
+        budget.max_targets = if paid {
+            mkit_server::relay::WORKER_PAID_RELAY_TARGETS
+        } else {
+            mkit_server::relay::WORKER_FREE_RELAY_TARGETS
+        };
+        budget.max_target_calls = Some(mkit_server::relay::WORKER_RELAY_CALLS_PER_TARGET);
+        let relay = match target.clone() {
+            Ok(target) => Some(RelayHandler {
+                target,
+                hook: mkit_server::admin::AuditReserveHook::new(if class == ShardClass::RefStore {
+                    mkit_server::Partition::Namespace(
+                        mkit_server::NamespaceKey::deployment_default(),
+                    )
+                } else {
+                    mkit_server::Partition::Coordinator(
+                        mkit_server::NamespaceKey::deployment_default(),
+                    )
+                }),
+                budget,
+            }),
+            Err(error) => {
+                crate::log_failure(&format!("Worker relay configuration unavailable: {error}"));
+                None
+            }
+        };
+        registry.register(WorkerRelay {
+            relay,
+            max_per_tick,
+            metrics: Arc::new(crate::telemetry::ConsoleMetrics::default()),
+        })
+    } else {
+        registry
     };
     let registry = match class {
         ShardClass::NsCoordinator | ShardClass::RefShard | ShardClass::RefStore => {
-            registry.register(WorkerQuotaRollup::new(target.map(SharedStore), plan))
+            registry.register(WorkerQuotaRollup::new(target, plan))
         }
         _ => registry,
     };
@@ -1019,6 +1053,23 @@ where
     S: mkit_server::NamespaceStore,
     O: mkit_server::pipeline::OutcomeSink + 'static,
 {
+    with_outcome_timers_budgeted(registry, class, audience, plan, sink, sleep, clock, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn with_outcome_timers_budgeted<
+    S: mkit_server::NamespaceStore,
+    O: mkit_server::pipeline::OutcomeSink + 'static,
+>(
+    registry: mkit_server::timers::TimerRegistry<'static, S>,
+    class: crate::classes::ShardClass,
+    audience: Result<String, ConfigError>,
+    plan: Option<&str>,
+    sink: O,
+    sleep: Arc<dyn mkit_server::Sleep>,
+    clock: Arc<dyn mkit_server::Clock>,
+    alarm_budget: Option<mkit_server::purge::SliceBudget>,
+) -> mkit_server::timers::TimerRegistry<'static, S> {
     use crate::classes::ShardClass;
     if !matches!(
         class,
@@ -1047,9 +1098,13 @@ where
         }
     };
     registry
-        .register(WorkerOutcomeDelivery {
-            delivery,
-            max_per_tick: budget.fires_per_alarm,
+        .register(crate::purge::Budgeted {
+            handler: WorkerOutcomeDelivery {
+                delivery,
+                max_per_tick: budget.fires_per_alarm,
+            },
+            budget: alarm_budget,
+            calls: u32::try_from(budget.rows_per_fire).unwrap_or(u32::MAX),
         })
         .register(mkit_server::timers::reservation_reconcile::ReservationReconcile)
 }
@@ -1087,11 +1142,23 @@ where
 
 /// A shared handle on the deployment's target client, so one client serves
 /// two handlers of a class without requiring `T: Clone`.
-struct SharedStore<T>(Arc<T>);
+struct SharedStore<T>(Arc<T>, Option<mkit_server::purge::SliceBudget>);
+
+impl<T> SharedStore<T> {
+    fn charge(&self) -> Result<(), mkit_server::StoreError> {
+        if self.1.as_ref().is_some_and(|budget| !budget.charge(1)) {
+            Err(mkit_server::StoreError::unavailable(
+                "alarm operation budget exhausted",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
 
 impl<T> Clone for SharedStore<T> {
     fn clone(&self) -> Self {
-        Self(Arc::clone(&self.0))
+        Self(Arc::clone(&self.0), self.1.clone())
     }
 }
 
@@ -1104,6 +1171,7 @@ impl<T: mkit_server::NamespaceStore> mkit_server::NamespaceStore for SharedStore
         p: &mkit_server::Partition,
         k: &mkit_server::Key,
     ) -> Result<Option<mkit_server::Value>, mkit_server::StoreError> {
+        self.charge()?;
         self.0.get(p, k).await
     }
     async fn has(
@@ -1111,6 +1179,7 @@ impl<T: mkit_server::NamespaceStore> mkit_server::NamespaceStore for SharedStore
         p: &mkit_server::Partition,
         k: &mkit_server::Key,
     ) -> Result<bool, mkit_server::StoreError> {
+        self.charge()?;
         self.0.has(p, k).await
     }
     async fn get_many(
@@ -1118,6 +1187,7 @@ impl<T: mkit_server::NamespaceStore> mkit_server::NamespaceStore for SharedStore
         p: &mkit_server::Partition,
         keys: &[mkit_server::Key],
     ) -> Result<Vec<Option<mkit_server::Value>>, mkit_server::StoreError> {
+        self.charge()?;
         self.0.get_many(p, keys).await
     }
     async fn scan_many(
@@ -1125,6 +1195,7 @@ impl<T: mkit_server::NamespaceStore> mkit_server::NamespaceStore for SharedStore
         p: &mkit_server::Partition,
         ranges: &[mkit_server::RangeScan],
     ) -> Result<Vec<mkit_server::ScanPage>, mkit_server::StoreError> {
+        self.charge()?;
         self.0.scan_many(p, ranges).await
     }
     async fn scan(
@@ -1135,6 +1206,7 @@ impl<T: mkit_server::NamespaceStore> mkit_server::NamespaceStore for SharedStore
         after: Option<&mkit_server::Cursor>,
         limit: u32,
     ) -> Result<mkit_server::ScanPage, mkit_server::StoreError> {
+        self.charge()?;
         self.0.scan(p, start, end, after, limit).await
     }
     async fn apply(
@@ -1142,15 +1214,18 @@ impl<T: mkit_server::NamespaceStore> mkit_server::NamespaceStore for SharedStore
         p: &mkit_server::Partition,
         batch: mkit_server::Batch,
     ) -> Result<mkit_server::BatchOutcome, mkit_server::StoreError> {
+        self.charge()?;
         self.0.apply(p, batch).await
     }
     async fn stats(
         &self,
         p: &mkit_server::Partition,
     ) -> Result<mkit_server::PartitionStats, mkit_server::StoreError> {
+        self.charge()?;
         self.0.stats(p).await
     }
     async fn probe(&self) -> Result<(), mkit_server::StoreError> {
+        self.charge()?;
         self.0.probe().await
     }
 }
@@ -1335,7 +1410,7 @@ impl<S: mkit_server::NamespaceStore, T: mkit_server::NamespaceStore + 'static>
 }
 
 struct WorkerRelay<T> {
-    relay: Option<mkit_server::relay::RelayHandler<T>>,
+    relay: Option<mkit_server::relay::RelayHandler<T, mkit_server::admin::AuditReserveHook>>,
     max_per_tick: u32,
     metrics: Arc<dyn mkit_server::Metrics>,
 }
@@ -1786,7 +1861,7 @@ mod glue {
         #[cfg(feature = "published-view")] snapshot_warm: bool,
     ) -> Result<WorkerPipeline<H>, ConfigError> {
         let bad = |e: &dyn core::fmt::Display| ConfigError(e.to_string());
-        let config = cfg.pipeline_config()?;
+        let mut config = cfg.pipeline_config()?;
         let blobs = R2BlobStore::new(
             EnvBucket::new(env.clone(), cfg.blob_binding),
             PACKS_KEYSPACE,
@@ -1802,6 +1877,18 @@ mod glue {
         } else {
             meta
         };
+        if let Some(purge) = config.purge.take() {
+            config.purge = Some(
+                purge
+                    .with_audit(Arc::new(mkit_server::admin::SystemAudit::new(
+                        meta.clone(),
+                        cfg.probe_partition(),
+                    )))
+                    .with_local(Arc::new(crate::purge::local_cache(cfg))),
+            );
+        }
+        #[cfg(feature = "published-view")]
+        let snapshot_fence = config.purge.as_ref().map(|_| meta.clone());
         #[cfg(feature = "test-faults")]
         let faulted = blobs.clone();
         let pipe = Pipeline::new(
@@ -1828,12 +1915,20 @@ mod glue {
             .clone()
             .filter(|c| snapshot_warm || c.inspection_configured)
         {
-            pipe.with_published_source(crate::published_view::shared_reader(
+            let source = crate::published_view::shared_reader(
                 crate::published_view::WorkerSnapshotBucket(env.clone()),
                 crate::published_view::WorkerCache,
                 config,
                 Arc::new(WorkerClock),
-            ))
+            );
+            // Paid purge deployments add two strong coordinator reads around
+            // snapshot reads/fills; cached bytes never bypass the durable fence.
+            let source = if let Some(store) = &snapshot_fence {
+                crate::published_view::fenced_reader(source, store.clone(), cfg.sharding)
+            } else {
+                source
+            };
+            pipe.with_published_source(source)
         } else {
             pipe
         };
@@ -2233,16 +2328,30 @@ mod glue {
             },
             Err(error) => (Err(error.clone()), None),
         };
-        let registry = super::timer_registry_with_blobs(
+        let alarm_budget = plan
+            .as_deref()
+            .filter(|plan| plan.trim().eq_ignore_ascii_case("paid"))
+            .map(|_| mkit_server::purge::SliceBudget::new(crate::purge::ALARM_OPERATIONS));
+        let registry =
+            super::timer_registry_budgeted(class, target, plan.as_deref(), alarm_budget.clone());
+        let registry = if matches!(
             class,
-            target,
-            plan.as_deref(),
-            R2BlobStore::new(
-                EnvBucket::new(env.clone(), crate::r2::STORAGE_BINDING),
-                PACKS_KEYSPACE,
-            ),
-        );
-        let registry = super::with_outcome_timers(
+            crate::classes::ShardClass::RefStore | crate::classes::ShardClass::RefShard
+        ) {
+            registry.register(crate::purge::Budgeted {
+                handler: mkit_server::timers::ticket_expiry::TicketExpiry {
+                    blobs: R2BlobStore::new(
+                        EnvBucket::new(env.clone(), crate::r2::STORAGE_BINDING),
+                        PACKS_KEYSPACE,
+                    ),
+                },
+                budget: alarm_budget.clone(),
+                calls: 1,
+            })
+        } else {
+            registry
+        };
+        let registry = super::with_outcome_timers_budgeted(
             registry,
             class,
             audience,
@@ -2250,10 +2359,33 @@ mod glue {
             MaybeSink(sink),
             Arc::new(crate::sleep::WorkerSleep),
             Arc::new(WorkerClock),
+            alarm_budget.clone(),
         );
         // Kind 7 (WP-4.8): registered only for an indexed Paid deployment,
         // which no release build can be.
-        let registry = crate::verify::register_from_env(registry, env, class, plan.as_deref());
+        let registry = crate::verify::register_from_env_budgeted(
+            registry,
+            env,
+            class,
+            plan.as_deref(),
+            alarm_budget.clone(),
+        );
+        let registry = if let (Ok(cfg), Some(budget)) = (&cfg, &alarm_budget) {
+            match crate::hooks::build::purge_from_env(env, cfg) {
+                Ok(Some(sink)) => registry.register(mkit_server::purge::PurgeDelivery::new(
+                    Arc::new(crate::purge::local_cache(cfg)),
+                    Some(Arc::new(sink)),
+                    budget.clone(),
+                )),
+                Ok(None) => registry,
+                Err(error) => {
+                    crate::log_failure(&format!("purge sink unavailable: {error}"));
+                    registry
+                }
+            }
+        } else {
+            registry
+        };
         let backup = BackupConfig::from_vars(|name| env.var(name).ok().map(|v| v.to_string()))
             .map_err(|error| {
                 BACKUPS_INVALID_LOG
@@ -2286,7 +2418,11 @@ mod glue {
             // 1 + outcome delivery <= 8 + quota rollup <= 8 = 49 of 50 (see
             // `outcome_budget`; each remote hook call is one service-binding
             // subrequest). Kind 9 makes no external calls.
-            let handler = BackupHandler::new(EnvBucket::new(env.clone(), BACKUPS_BINDING), config);
+            let handler = crate::purge::Budgeted {
+                handler: BackupHandler::new(EnvBucket::new(env.clone(), BACKUPS_BINDING), config),
+                budget: alarm_budget.clone(),
+                calls: 1,
+            };
             #[cfg(feature = "published-view")]
             if let Some(alarm) = &snapshot_alarm {
                 registry.register(crate::published_view::AlarmLimited {
@@ -2303,11 +2439,15 @@ mod glue {
         };
         #[cfg(feature = "published-view")]
         let registry = if let (Some(alarm), Ok(coordinator)) = (&snapshot_alarm, snapshot_target) {
-            registry.register(crate::published_view::SnapshotHandler {
-                bucket: crate::published_view::WorkerSnapshotBucket(env.clone()),
-                coordinator,
-                clock: Arc::new(WorkerClock),
-                alarm: alarm.clone(),
+            registry.register(crate::purge::Budgeted {
+                handler: crate::published_view::SnapshotHandler {
+                    bucket: crate::published_view::WorkerSnapshotBucket(env.clone()),
+                    coordinator,
+                    clock: Arc::new(WorkerClock),
+                    alarm: alarm.clone(),
+                },
+                budget: alarm_budget.clone(),
+                calls: 3,
             })
         } else {
             registry
@@ -2315,6 +2455,7 @@ mod glue {
         let object = NsObject::new(state, class)
             .0
             .with_capacity(capacity)
+            .with_alarm_budget(alarm_budget)
             .with_registry(registry);
         #[cfg(feature = "published-view")]
         let object = if let Some(alarm) = snapshot_alarm {
@@ -2671,6 +2812,53 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "signed-http-hooks")]
+    fn purge_configuration_is_default_off_paid_only_and_enables_only_the_sink() {
+        let mut pairs = vec![
+            (AUDIENCE_VAR, "https://vcs.example"),
+            (REPOSITORY_VAR, "default"),
+        ];
+        assert!(
+            WorkerConfig::from_vars(vars(&pairs))
+                .unwrap()
+                .pipeline_config()
+                .unwrap()
+                .purge
+                .is_none()
+        );
+        pairs.extend([
+            ("HOOK_ROLES", "cache-purge"),
+            ("HOOK_URL", "https://hooks.example"),
+        ]);
+        assert!(WorkerConfig::from_vars(vars(&pairs)).is_err());
+        pairs.push((PLAN_VAR, "paid"));
+        let config = WorkerConfig::from_vars(vars(&pairs)).unwrap();
+        let purge = config.pipeline_config().unwrap().purge.unwrap();
+        assert!(purge.shared_caches && purge.remote_sink);
+        assert_eq!(purge.audience, "https://vcs.example");
+        let roles = config.hooks.unwrap().roles;
+        assert!(roles.cache_purge && !roles.admit && !roles.authorize && !roles.outcome);
+    }
+
+    #[test]
+    fn paid_relay_and_quota_clients_charge_the_same_alarm_budget_before_calls() {
+        use futures::executor::block_on;
+        use mkit_server::NamespaceStore;
+        let budget = mkit_server::purge::SliceBudget::new(2);
+        let store = SharedStore(
+            Arc::new(mkit_server::MemoryKv::default()),
+            Some(budget.clone()),
+        );
+        let partition =
+            mkit_server::Partition::Namespace(mkit_server::NamespaceKey::deployment_default());
+        let key = mkit_server::Key::new(b"test".to_vec());
+        block_on(store.get(&partition, &key)).unwrap();
+        block_on(store.clone().apply(&partition, mkit_server::Batch::new())).unwrap();
+        assert!(block_on(store.get(&partition, &key)).is_err());
+        assert_eq!(budget.used(), 2);
+    }
+
+    #[test]
     fn ticket_keys_are_optional_validated_and_passed_to_the_pipeline() {
         let base = [
             (AUDIENCE_VAR, "https://vcs.example"),
@@ -2931,7 +3119,7 @@ mod tests {
     fn rollup_budget_fails_the_call_past_its_limit() {
         use mkit_server::{Key, MemoryKv, NamespaceKey, NamespaceStore, Partition, StoreError};
         let store = BudgetedStore {
-            inner: SharedStore(Arc::new(MemoryKv::default())),
+            inner: SharedStore(Arc::new(MemoryKv::default()), None),
             used: Arc::new(core::sync::atomic::AtomicU32::new(0)),
             limit: 2,
         };
@@ -2960,7 +3148,7 @@ mod tests {
         let used = Arc::new(core::sync::atomic::AtomicU32::new(0));
         let handler = mkit_server::timers::quota_rollup::QuotaRollup {
             coordinator: BudgetedStore {
-                inner: SharedStore(coordinator),
+                inner: SharedStore(coordinator, None),
                 used: Arc::clone(&used),
                 limit: FREE_ROLLUP_CALLS,
             },
@@ -3006,7 +3194,7 @@ mod tests {
         assert!(used.load(core::sync::atomic::Ordering::SeqCst) <= FREE_ROLLUP_CALLS);
         // One charge per batched read, whatever its width.
         let store = BudgetedStore {
-            inner: SharedStore(Arc::new(MemoryKv::default())),
+            inner: SharedStore(Arc::new(MemoryKv::default()), None),
             used: Arc::new(core::sync::atomic::AtomicU32::new(0)),
             limit: 100,
         };

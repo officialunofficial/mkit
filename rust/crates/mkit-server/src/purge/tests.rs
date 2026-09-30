@@ -138,7 +138,7 @@ async fn cold_slices_resume_local_cursor_and_reserve_budget_before_global_delive
             &p,
             &registry,
             &clock,
-            now as u64,
+            u64::try_from(now).unwrap(),
             &TickBudget::new(1, 1, 16, 1000),
         )
         .await

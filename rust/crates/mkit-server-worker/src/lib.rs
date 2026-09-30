@@ -65,6 +65,7 @@ pub mod ns_client;
 pub mod ns_object;
 #[cfg(feature = "published-view")]
 pub mod published_view;
+pub mod purge;
 pub mod r2;
 pub mod sharding_guard;
 pub mod sleep;

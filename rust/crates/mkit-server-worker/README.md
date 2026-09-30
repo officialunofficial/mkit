@@ -58,3 +58,26 @@ activation may return `unavailable` with `Retry-After: 1` until its bounded leas
 barrier completes. Repeating the signed target resumes durable progress; it does
 not create a namespace or charge first-write creation. Restore must preserve the
 authority mode and generation, then declare real lease-table recovery.
+
+## Launch purge and audit configuration
+
+`ADMIN_KEYS` contains the SPEC-SERVER §16.3 public-key list as a Worker secret.
+It defaults off and mounts only `ReadAuditLog`; manual `PurgeCache` is deferred
+to WP-5.6a. Admin requests use a separate signed envelope and cannot authenticate
+client writes. Operator keys must differ from ticket, token, hook and authority
+keys. Persisted sharding/addressing checks run before operator dispatch.
+
+For a global purger, explicitly include `cache-purge` in `HOOK_ROLES`, set an
+HTTPS `HOOK_URL` and the `MKIT_HOOK_KEY` signing secret, and use `WORKERS_PLAN=paid`.
+A purge-only role list does not enable Authorize, Admit or Outcome. Invalid or
+unsigned purge configuration refuses startup. The signed sink must acknowledge
+with an empty JSON object; retries keep the body/id and use fresh nonces.
+
+Automatic callers accept repository-scoped intents in the triggering state apply.
+The colo-local Cache API deletes paths and all existing snapshot cache keys.
+Namespace suspension consumers must use those repository intents; this foundation
+does not expose namespace manual acceptance. Gated entrypoints keep Workers
+Caching disabled. The existing snapshot seam strongly checks durable invalidation
+before and after lookup/refill, so retained R2 bytes cannot resurrect an invalidated
+snapshot. Root audit append and its relay watermark share the target SQL apply.
+All Paid alarm heads share one external-operation allowance.
