@@ -1,7 +1,7 @@
 # Launch evidence record (WP-4.18 / R-194)
 
 Status: **phase 1 skeleton; complete local matrix UNRUN; external gates UNRUN**.
-No row below is a PASS claim. Extraction #1244 and retrieval #1243 are merged
+No integrated case below is a PASS claim. Extraction #1244 and retrieval #1243 are merged
 inputs, not evidence of their opted-in release integration. Fill actual
 results after executing at the pinned candidate, using the
 [local harness](launch-conformance.md). A component harness PASS records
@@ -12,6 +12,7 @@ only that component lane; it leaves per-case integrated slots UNRUN.
 | Pin | Exact value / status |
 |---|---|
 | Phase 1 source checkpoint | `d1adfdddf8fce38643e7293a806e0a4a5d42054c`; source checkpoint only |
+| Phase 1 activation source checkpoint | `d46af16bf9ced385b1a5eacc6449595bdd10ab7a`; component validation in [phase-1-checkpoint.md](phase-1-checkpoint.md), cold-alarm ruling pending |
 | Phase 1 merged-input checkpoint | `cb2159c5551c2f82d2d861347da264297568982d`; not the final candidate |
 | Final candidate SHA / reviewed diff | UNRUN |
 | Final origin feature SHA / merge-base / tree SHA | UNRUN |
