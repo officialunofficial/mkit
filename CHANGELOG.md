@@ -7,19 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-<<<<<<< HEAD
 - HTTP ref-path files: serve MP4, WebM, MP3, Ogg, WAV, HEIC, Markdown and CSV
   inline with their media types, preserving encoded filenames, security headers
   and byte ranges. Dangerous extensions remain binary attachments.
 
-=======
->>>>>>> origin/feat/mkit-server
 - HTTP object readback accepts streamed chunk-offset sidecar tails from R2.
 
 - Indexed verification, extraction and preservation count canonical Blob framing
   around the 1 MiB payload boundary while retaining the 48 MiB slice allowance.
 
-<<<<<<< HEAD
 - Server conformance: add a debug-only memory-backed in-process HTTP host for
   contract tests, with origin-bound auth-v2, signed loopback hook support, and
   an explicitly advanced manual clock.
@@ -32,8 +28,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller canonical byte limits and typed object metadata. Deprecated mixed
   `object_sizes` remains available. Unshipped metadata codecs require fresh stores.
 
-=======
->>>>>>> origin/feat/mkit-server
 - Worker embedding: supplied Admission, Authorizer/Authority and OutcomeSink
   capabilities satisfy launch validation without an unused external hook channel.
   `fetch_with` now takes explicit `HookCapabilities`; shared config factories use
@@ -800,6 +794,10 @@ train).
   (`zstd::bulk::decompress`) used to decode concatenated frames and skip
   skippable ones. mkit's `PackWriter` never produced such payloads.
   Pre-production policy: no compatibility path.
+- *(core)* `list_refs`/tag/remote listing read each ref with a single
+  stack-buffer `read` (open+read+close) instead of `fs::read`'s extra
+  `statx` and EOF probe: −23% at 10k refs, −25% at 100 refs
+  (`refs_ops` bench).
 - *(core)* SPEC-DISCLOSURE v2: every `Step` and chunk header carries a
   mandatory 32-byte `inner_root` (bare BMT root of the parent Tree /
   ChunkedBlob). Bundle version byte is `2`; version `1` is a typed
