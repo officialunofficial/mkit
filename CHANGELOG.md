@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server/Worker: bound raw timer-alarm enumeration and share tick limits across
+  logical heads. Persist capped exponential backoff in the existing timer row
+  for cold fairness, preserving payloads and original handler due times. The
+  unshipped timer key codec gains retry metadata; timer payloads reserve enough
+  headroom for a guarded move within the existing batch limit.
+
 - Server/Worker (default-off, WP-4.10b-2, R-186): complete consumed-group extraction
   with closure before effects, native union counts, bounded job header/body guards,
   resumable delta reconstruction and root-checked multipart uploads. Hold renewal

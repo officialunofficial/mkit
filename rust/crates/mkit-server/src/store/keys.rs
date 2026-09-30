@@ -44,7 +44,7 @@
 //! | ticket idempotency | `ti 00 <repo> 00 <ref> 00 <pack:32> <signer:32>` | raw ticket id |
 //! | open tickets per ref | `tc 00 <repo> 00 <ref>` | be64; absent means 0, deleted at 0 |
 //! | open tickets per signer | `tu 00 <repo> 00 <ref> 00 <signer:32>` | be64; same rules |
-//! | ticket expiry timer | `w 00 <expires_at:be64> 02 <ticket_id:32>` | empty |
+//! | ticket expiry timer | `w 00 <due_at:be64> 02 <attempt:u8> <original_due:be64> <ticket_id:32>` | empty |
 //! | local membership | `m 00 <repo> 00 <pack:32>` | empty (immediate upload) or v1 clearance witness |
 //! | indexed verification state | `vs 00 <repo> 00 <pack:32>` | `VerificationV1` |
 //! | scheduled-verification job (ref shard) | `vc 00 <repo> 00 <pack:32> <sub:u8> [<id:32>]` | sub 0 job `VerifyJobV1`; 1 frame; 2 closure child; 3 charged external base; 4 extraction candidate (WP-4.10b); 5 history edges (parents); 6 external source pack dependency |
@@ -63,7 +63,7 @@
 //! | admin operation replay | `ao 00 <operation_id>` | durable result |
 //! | admin audit entry | `ae 00 <seq:be64>` | canonical audit chain entry |
 //! | automatic audit event/receipt | `ai 00 <source partition + purge id hash:64 lowercase hex>` | relay event and root deduplication receipt |
-//! | timer (owned by `timers`) | `w 00 <due_at:be64> <kind:u8> <ref>` | codec per kind |
+//! | timer (owned by `timers`) | `w 00 <due_at:be64> <kind:u8> <attempt:u8> <original_due:be64> <ref>` | opaque codec per kind |
 //! | holder (`ContentShard`) | `h 00 <object:32> <ns> 00 <repo>` | codec `HolderRecord` (`HolderV1`: `seq`, `op_id`) |
 //! | GC hold (`ContentShard`) | `g 00 <object:32> <hold_id:32>` | codec `hold` |
 //! | blocklist (`ContentShard`) | `b 00 <object:32>` | codec `BlockEntry` |
@@ -433,9 +433,9 @@ pub enum ParsedKey {
     FenceCursor(u8),
     /// `lrc 00`.
     LeaseReconcile,
-    /// `w 00 <due_at> <kind> <ref>`.
+    /// `w 00 <due_at> <kind> <attempt> <original_due> <ref>`.
     Timer {
-        /// Due time, Unix ms.
+        /// Physical wake time, Unix ms; [`timer_retry_state`] retains handler time.
         due_at_ms: u64,
         /// Timer kind.
         kind: u8,
@@ -967,10 +967,58 @@ pub fn backup_state() -> Key {
     key(TAG_BACKUP_STATE, &[])
 }
 
-/// `w 00 <due_at> <kind> <reference>` (owned by `timers`).
+/// Highest persisted infrastructure retry attempt; later retries stay capped.
+pub const MAX_TIMER_RETRY_ATTEMPT: u8 = 8;
+
+/// A newly scheduled timer with zero retries and its own semantic due time.
+/// `w 00 <due_at> <kind> 00 <due_at> <reference>` (owned by `timers`).
 #[must_use]
 pub fn timer(due_at_ms: u64, kind: u8, reference: &[u8]) -> Key {
-    key(TAG_TIMER, &[&due_at_ms.to_be_bytes(), &[kind], reference])
+    timer_retry(due_at_ms, kind, reference, due_at_ms, 0)
+}
+
+/// Move an existing timer's physical wake while retaining its handler identity.
+/// The value remains the opaque, unchanged kind-specific payload.
+#[must_use]
+pub fn timer_retry(
+    due_at_ms: u64,
+    kind: u8,
+    reference: &[u8],
+    original_due_at_ms: u64,
+    attempt: u8,
+) -> Key {
+    key(
+        TAG_TIMER,
+        &[
+            &due_at_ms.to_be_bytes(),
+            &[kind, attempt],
+            &original_due_at_ms.to_be_bytes(),
+            reference,
+        ],
+    )
+}
+
+/// The original handler due time and capped infrastructure retry attempt.
+/// Invalid or unsupported timer-key encodings have no retry state.
+#[must_use]
+pub fn timer_retry_state(key: &Key) -> Option<(u64, u8)> {
+    let body = key.as_bytes().strip_prefix(b"w\0")?;
+    let (_, _, original_due, attempt, _) = timer_parts(body)?;
+    Some((original_due, attempt))
+}
+
+fn timer_parts(body: &[u8]) -> Option<(u64, u8, u64, u8, &[u8])> {
+    let (due_at_ms, rest) = be64(body)?;
+    let (&kind, rest) = rest.split_first()?;
+    let (&attempt, rest) = rest.split_first()?;
+    let (original_due, reference) = be64(rest)?;
+    if attempt > MAX_TIMER_RETRY_ATTEMPT
+        || original_due > due_at_ms
+        || attempt == 0 && original_due != due_at_ms
+    {
+        return None;
+    }
+    Some((due_at_ms, kind, original_due, attempt, reference))
 }
 
 /// `h 00 <object> <ns> 00 <repo>`.
@@ -1302,8 +1350,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         }
         b"qs" | b"qv" | b"qt" | b"qc" => parse_namespace_quota(tag, body)?,
         b"w" => {
-            let (due_at_ms, rest) = be64(body)?;
-            let (&kind, reference) = rest.split_first()?;
+            let (due_at_ms, kind, _, _, reference) = timer_parts(body)?;
             ParsedKey::Timer {
                 due_at_ms,
                 kind,
@@ -1358,6 +1405,42 @@ mod tests {
 
     fn scope() -> QuotaScope {
         QuotaScope::for_signer(&NamespaceKey::deployment_default(), &[0xab; 32])
+    }
+
+    #[test]
+    fn timer_retry_metadata_preserves_opaque_reference_and_original_due() {
+        let reference = b"\0\xffarbitrary\0reference";
+        let initial = timer(17, 255, reference);
+        assert_eq!(timer_retry_state(&initial), Some((17, 0)));
+        let retried = timer_retry(600_017, 255, reference, 17, MAX_TIMER_RETRY_ATTEMPT);
+        assert_eq!(
+            timer_retry_state(&retried),
+            Some((17, MAX_TIMER_RETRY_ATTEMPT))
+        );
+        assert_eq!(
+            parse(&retried),
+            Some(ParsedKey::Timer {
+                due_at_ms: 600_017,
+                kind: 255,
+                reference: Bytes::copy_from_slice(reference),
+            })
+        );
+        assert!(initial < retried, "physical due remains the leading index");
+    }
+
+    #[test]
+    fn timer_retry_parser_refuses_invalid_or_truncated_metadata() {
+        for invalid in [
+            timer_retry(10, 12, b"work", 10, MAX_TIMER_RETRY_ATTEMPT + 1),
+            timer_retry(10, 12, b"work", 11, 1),
+            timer_retry(10, 12, b"work", 9, 0),
+            Key::new(b"w\0\0\0\0\0\0\0\0\x0a\x0c\0".to_vec()),
+            Key::new(b"w\0\0\0\0\0\0\0\0\x0a\x0cwork".to_vec()),
+        ] {
+            assert_eq!(parse(&invalid), None);
+            assert_eq!(timer_retry_state(&invalid), None);
+        }
+        assert_eq!(timer_retry_state(&grant_epoch()), None);
     }
 
     fn all_tags() -> Vec<&'static str> {
@@ -1534,7 +1617,13 @@ mod tests {
             ),
             (
                 timer(1, 7, b"refs/heads/x"),
-                [&b"w\0"[..], &[0, 0, 0, 0, 0, 0, 0, 1, 7], b"refs/heads/x"].concat(),
+                [
+                    &b"w\0"[..],
+                    &[0, 0, 0, 0, 0, 0, 0, 1, 7, 0],
+                    &[0, 0, 0, 0, 0, 0, 0, 1],
+                    b"refs/heads/x",
+                ]
+                .concat(),
             ),
             (
                 holder(&s, &NamespaceKey::deployment_default(), &repo("a")).unwrap(),
@@ -1728,7 +1817,13 @@ mod tests {
             ),
             (
                 timer(seq, 2, &pack),
-                [&b"w\0"[..], &[1, 2, 3, 4, 5, 6, 7, 8, 2], &pack].concat(),
+                [
+                    &b"w\0"[..],
+                    &[1, 2, 3, 4, 5, 6, 7, 8, 2, 0],
+                    &[1, 2, 3, 4, 5, 6, 7, 8],
+                    &pack,
+                ]
+                .concat(),
                 ParsedKey::Timer {
                     due_at_ms: seq,
                     kind: 2,

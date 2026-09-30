@@ -18,7 +18,10 @@ fn takedown_work_timer_key_golden() {
     let kind = registry::kinds::TAKEDOWN_WORK.get();
     assert_eq!(kind, 15);
     let key = keys::timer(100, kind, b"action-1");
-    assert_eq!(key.as_bytes(), b"w\0\0\0\0\0\0\0\0\x64\x0faction-1");
+    assert_eq!(
+        key.as_bytes(),
+        b"w\0\0\0\0\0\0\0\0\x64\x0f\0\0\0\0\0\0\0\0\x64action-1"
+    );
     assert!(matches!(keys::parse(&key), Some(keys::ParsedKey::Timer {
         due_at_ms: 100, kind: 15, reference
     }) if reference.as_ref() == b"action-1"));
@@ -288,7 +291,7 @@ async fn per_kind_fairness_and_repeated_drain() {
 async fn global_budgets_and_kind_override() {
     for (budget, action, want_fired) in [
         (TickBudget::new(1, 32, 512, 10_000), Action::Done, 1),
-        (TickBudget::new(128, 32, 1, 10_000), Action::Done, 1),
+        (TickBudget::new(128, 32, 1, 10_000), Action::Done, 0),
         (
             TickBudget::new(128, 32, 512, 10),
             Action::Advance(Arc::new(ManualClock::new(100))),
@@ -307,7 +310,10 @@ async fn global_budgets_and_kind_override() {
         let report = tick(&store, &registry, &clock, &budget).await;
         assert!(report.stopped_on_budget);
         assert_eq!(report.fired, want_fired);
-        assert_eq!(report.next_wake_ms, Some(100));
+        assert_eq!(
+            report.next_wake_ms,
+            Some(if want_fired == 0 { 5100 } else { 100 })
+        );
     }
     let store = memory();
     for id in 0..3 {
@@ -356,7 +362,7 @@ async fn unknown_rows_are_retained_with_backoff() {
             report.unknown,
             report.next_wake_ms
         ),
-        (0, 512, 512, Some(5100))
+        (0, 128, 128, Some(100))
     );
     assert!(report.stopped_on_budget);
     assert_eq!(store.stats(&partition()).await.unwrap().keys, Some(600));
@@ -377,7 +383,10 @@ async fn handler_failures_remain_and_backoff_is_capped_by_future() {
         assert_eq!((report.failed, report.next_wake_ms), (1, Some(5100)));
         assert!(
             store
-                .get(&partition(), &timer(1, 1, 1))
+                .get(
+                    &partition(),
+                    &keys::timer_retry(5100, 1, &1_u32.to_be_bytes(), 1, 1)
+                )
                 .await
                 .unwrap()
                 .is_some()
@@ -523,7 +532,7 @@ fn registry_rejects_duplicate() {
 #[tokio::test]
 async fn apply_full_and_deadline_are_failed_without_effects() {
     for (store, action) in [
-        (memory().with_capacity_limit(15), Action::LargeEffect),
+        (memory().with_capacity_limit(24), Action::LargeEffect),
         (memory(), Action::Deadline),
     ] {
         let key = timer(1, 1, 1);
@@ -540,7 +549,17 @@ async fn apply_full_and_deadline_are_failed_without_effects() {
             (report.failed, report.fired, report.next_wake_ms),
             (1, 0, Some(5100))
         );
-        assert!(store.get(&partition(), &key).await.unwrap().is_some());
+        assert!(store.get(&partition(), &key).await.unwrap().is_none());
+        assert!(
+            store
+                .get(
+                    &partition(),
+                    &keys::timer_retry(5100, 1, &1_u32.to_be_bytes(), 1, 1)
+                )
+                .await
+                .unwrap()
+                .is_some()
+        );
         assert!(store.get(&partition(), &effect()).await.unwrap().is_none());
     }
 }
@@ -579,4 +598,258 @@ async fn raced_with_deferred_and_nothing_fired_backs_off() {
     .await;
     assert_eq!((report.fired, report.raced, report.deferred), (0, 1, 1));
     assert_eq!(report.next_wake_ms, Some(100 + RETRY_BACKOFF_MS));
+}
+
+#[tokio::test]
+async fn failed_timer_is_physically_redated_without_losing_payload() {
+    let store = memory();
+    let old = timer(1, 1, 1);
+    let payload = Value::new(b"retained-work".to_vec());
+    store
+        .apply(&partition(), Batch::new().put(old.clone(), payload.clone()))
+        .await
+        .unwrap();
+    let registry = TimerRegistry::new().register(Handler(1, Action::Retry, None));
+    tick(
+        &store,
+        &registry,
+        &ManualClock::new(100),
+        &TickBudget::default(),
+    )
+    .await;
+    assert!(
+        store.get(&partition(), &old).await.unwrap().is_none(),
+        "failed timer pins the physical head"
+    );
+    let (start, end) = keys::class_range(keys::TAG_TIMER);
+    let page = store
+        .scan(&partition(), &start, &end, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].1, payload);
+    assert!(matches!(
+        keys::parse(&page.entries[0].0),
+        Some(keys::ParsedKey::Timer {
+            due_at_ms: 5100,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn retry_backoff_survives_restart_and_caps_without_waiving_rows() {
+    let store = memory();
+    let payload = Value::new(b"opaque".to_vec());
+    store
+        .apply(
+            &partition(),
+            Batch::new().put(timer(1, 1, 1), payload.clone()),
+        )
+        .await
+        .unwrap();
+    let mut now = 100;
+    for attempt in 1_u8..=12 {
+        // A fresh registry, clock and tick state model a cold restart.
+        let clock = ManualClock::new(i64::try_from(now).unwrap());
+        let registry = TimerRegistry::new().register(Handler(1, Action::Retry, None));
+        let report = run_due(
+            &store,
+            &partition(),
+            &registry,
+            &clock,
+            now,
+            &TickBudget::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((report.failed, report.fired), (1, 0));
+        let delay = (RETRY_BACKOFF_MS * (1_u64 << (attempt.min(8) - 1))).min(MAX_RETRY_BACKOFF_MS);
+        assert_eq!(report.next_wake_ms, Some(now + delay));
+        let (start, end) = keys::class_range(keys::TAG_TIMER);
+        let page = store
+            .scan(&partition(), &start, &end, None, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.entries.len(),
+            1,
+            "backoff must neither duplicate nor delete work"
+        );
+        assert_eq!(page.entries[0].1, payload);
+        assert_eq!(
+            keys::timer_retry_state(&page.entries[0].0),
+            Some((1, attempt.min(8)))
+        );
+        now += delay;
+    }
+    // A newly available handler still executes retained work after the cap.
+    let registry = TimerRegistry::new().register(Handler(1, Action::Done, None));
+    let report = run_due(
+        &store,
+        &partition(),
+        &registry,
+        &ManualClock::new(i64::try_from(now).unwrap()),
+        now,
+        &TickBudget::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!((report.fired, report.failed), (1, 0));
+    assert_eq!(store.stats(&partition()).await.unwrap().keys, Some(0));
+}
+
+#[tokio::test]
+async fn backoff_guard_cannot_overwrite_concurrent_payload_or_destination() {
+    let store = Racing {
+        inner: memory(),
+        changed: AtomicBool::new(false),
+    };
+    put(&store, timer(1, 1, 1)).await;
+    let registry = TimerRegistry::new().register(Handler(1, Action::Retry, None));
+    let report = tick(
+        &store,
+        &registry,
+        &ManualClock::new(100),
+        &TickBudget::default(),
+    )
+    .await;
+    assert_eq!(report.raced, 1);
+    assert_eq!(
+        store.get(&partition(), &timer(1, 1, 1)).await.unwrap(),
+        Some(Value::new(b"changed".to_vec()))
+    );
+    assert_eq!(store.stats(&partition()).await.unwrap().keys, Some(1));
+
+    let store = memory();
+    let old = timer(1, 1, 1);
+    let destination = keys::timer_retry(5100, 1, &1_u32.to_be_bytes(), 1, 1);
+    store
+        .apply(
+            &partition(),
+            Batch::new()
+                .put(old.clone(), Value::new(b"original".to_vec()))
+                .put(destination.clone(), Value::new(b"other".to_vec())),
+        )
+        .await
+        .unwrap();
+    let registry = TimerRegistry::new().register(Handler(1, Action::Retry, None));
+    let report = tick(
+        &store,
+        &registry,
+        &ManualClock::new(100),
+        &TickBudget::default(),
+    )
+    .await;
+    assert_eq!(report.raced, 1);
+    assert_eq!(
+        store.get(&partition(), &old).await.unwrap(),
+        Some(Value::new(b"original".to_vec()))
+    );
+    assert_eq!(
+        store.get(&partition(), &destination).await.unwrap(),
+        Some(Value::new(b"other".to_vec()))
+    );
+}
+
+struct OriginalDue;
+impl<S: NamespaceStore> TimerHandler<S> for OriginalDue {
+    fn kind(&self) -> TimerKind {
+        TimerKind::new(1)
+    }
+    fn fire<'a>(
+        &'a self,
+        ctx: &'a TimerCtx<'a, S>,
+        timer: &'a DueTimer,
+    ) -> BoxFuture<'a, Result<Fired, StoreError>> {
+        Box::pin(async move {
+            assert_eq!(timer.due_at_ms, 1);
+            assert_eq!(timer.value.as_bytes(), b"payload");
+            if ctx.now_ms == 100 {
+                Ok(Fired::Retry)
+            } else {
+                Ok(Fired::Reschedule {
+                    due_at_ms: ctx.now_ms + 100,
+                    value: timer.value.clone(),
+                    batch: Batch::new(),
+                })
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn retry_preserves_handler_due_and_success_resets_retry_metadata() {
+    let store = memory();
+    store
+        .apply(
+            &partition(),
+            Batch::new().put(timer(1, 1, 1), Value::new(b"payload".to_vec())),
+        )
+        .await
+        .unwrap();
+    let registry = TimerRegistry::new().register(OriginalDue);
+    let first = run_due(
+        &store,
+        &partition(),
+        &registry,
+        &ManualClock::new(100),
+        100,
+        &TickBudget::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.failed, 1);
+    let second = run_due(
+        &store,
+        &partition(),
+        &registry,
+        &ManualClock::new(5100),
+        5100,
+        &TickBudget::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!((second.fired, second.next_wake_ms), (1, Some(5200)));
+    let key = timer(5200, 1, 1);
+    assert_eq!(keys::timer_retry_state(&key), Some((5200, 0)));
+    assert_eq!(
+        store.get(&partition(), &key).await.unwrap(),
+        Some(Value::new(b"payload".to_vec()))
+    );
+}
+
+#[tokio::test]
+async fn exact_commit_boundary_keeps_unexamined_future_timers_awake() {
+    let store = memory();
+    for id in 0..2 {
+        put(&store, timer(1, 1, id)).await;
+    }
+    put(&store, timer(300, 1, 9)).await;
+    let registry = TimerRegistry::new().register(Handler(1, Action::Done, None));
+    let report = tick(
+        &store,
+        &registry,
+        &ManualClock::new(100),
+        &TickBudget::new(2, 32, 512, 10_000),
+    )
+    .await;
+    assert_eq!(report.fired, 2);
+    assert!(report.stopped_on_budget);
+    assert_eq!(report.next_wake_ms, Some(100));
+    let resumed = tick(
+        &store,
+        &registry,
+        &ManualClock::new(100),
+        &TickBudget::default(),
+    )
+    .await;
+    assert_eq!(resumed.next_wake_ms, Some(300));
+    assert!(
+        store
+            .get(&partition(), &timer(300, 1, 9))
+            .await
+            .unwrap()
+            .is_some()
+    );
 }

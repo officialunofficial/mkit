@@ -1,5 +1,8 @@
 //! Partition-local timers, shared by native and Durable Object drivers.
 
+mod budget;
+pub use budget::TickState;
+
 pub mod lease_sweep;
 pub mod outcome_delivery;
 pub mod publication_recheck;
@@ -22,6 +25,8 @@ pub use registry::{TimerHandler, TimerKind, TimerRegistry};
 
 /// Delay before retrying failed or unknown timers, avoiding a busy loop.
 pub const RETRY_BACKOFF_MS: u64 = 5_000;
+/// Largest persisted retry delay, including after an isolate restart.
+pub const MAX_RETRY_BACKOFF_MS: u64 = 600_000;
 const PAGE_SIZE: u32 = 64;
 
 /// The row handed to a kind-specific codec and handler.
@@ -66,7 +71,7 @@ pub enum Fired {
     /// No effect now; try again later (counts as a failure for backoff).
     Retry,
 }
-/// Work limits for one partition tick.
+/// Work limits shared by every logical partition of one physical tick.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
 pub struct TickBudget {
@@ -151,12 +156,6 @@ fn min_due(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 fn time_prefix(now: u64) -> Key {
     Key::new([&b"w\0"[..], &now.to_be_bytes()].concat())
 }
-fn exhausted(report: &RunReport, clock: &dyn Clock, start: i64, budget: &TickBudget) -> bool {
-    report.fired >= budget.max_fired
-        || report.scanned >= budget.max_scanned
-        || u64::try_from(clock.now_ms().saturating_sub(start)).unwrap_or(0) >= budget.max_elapsed_ms
-}
-
 enum FireOutcome {
     Committed(Option<u64>),
     Raced,
@@ -179,11 +178,12 @@ async fn fire_timer<S: NamespaceStore>(
             batch,
         }) => {
             let new_key = keys::timer(due_at_ms, timer.kind.get(), &timer.reference);
-            if new_key == key {
+            if due_at_ms == timer.due_at_ms || new_key == key {
                 return FireOutcome::Failed;
             }
             batch
                 .require(Precondition::Equals(key.clone(), timer.value.clone()))
+                .require(Precondition::Absent(new_key.clone()))
                 .delete(key)
                 .put(new_key, value)
         }
@@ -219,10 +219,11 @@ async fn fire_timer<S: NamespaceStore>(
     }
 }
 
-/// Fire due rows in key order, with fair kind caps and atomic row-value guards.
+/// Fire one partition with its own allowance. Physical drivers should use
+/// [`run_due_with_state`] and share a single [`TickState`] across their heads.
 ///
 /// # Errors
-/// Only a failed scan escapes the tick. Handler and apply errors count as failures.
+/// Scan errors escape. Handler/apply failures remain durable timer work.
 pub async fn run_due<S: NamespaceStore>(
     store: &S,
     p: &Partition,
@@ -231,7 +232,24 @@ pub async fn run_due<S: NamespaceStore>(
     now_ms: u64,
     budget: &TickBudget,
 ) -> Result<RunReport, StoreError> {
-    let start_time = clock.now_ms();
+    let mut state = TickState::new(clock, *budget);
+    run_due_with_state(store, p, registry, clock, now_ms, &mut state).await
+}
+
+/// Fire a partition without refreshing physical-alarm limits. Scans reserve
+/// their returned rows and one portable SQL lookahead row before processing.
+/// Retry moves preserve the handler's original due time and opaque payload.
+///
+/// # Errors
+/// Only scan errors escape; failed retry moves retain the guarded original row.
+pub async fn run_due_with_state<S: NamespaceStore>(
+    store: &S,
+    p: &Partition,
+    registry: &TimerRegistry<'_, S>,
+    clock: &dyn Clock,
+    now_ms: u64,
+    state: &mut TickState,
+) -> Result<RunReport, StoreError> {
     let (start, class_end) = keys::class_range(keys::TAG_TIMER);
     let end = now_ms
         .checked_add(1)
@@ -241,116 +259,199 @@ pub async fn run_due<S: NamespaceStore>(
         partition: p,
         now_ms,
     };
-    let mut report = RunReport::default();
-    let mut per_kind = [0u32; 256];
-    let mut warned = [false; 256];
+    let mut run = PartitionRun::new();
     let mut cursor = None;
-    let mut committed_due = None;
     'pages: loop {
-        if exhausted(&report, clock, start_time, budget) {
-            report.stopped_on_budget = true;
+        if state.exhausted(clock) || state.remaining_scanned() < 2 {
+            run.report.stopped_on_budget = true;
             break;
         }
-        let page = store
-            .scan(
-                p,
-                &start,
-                &end,
-                cursor.as_ref(),
-                PAGE_SIZE.min(budget.max_scanned - report.scanned),
-            )
-            .await?;
+        let limit = PAGE_SIZE.min(state.remaining_scanned() - 1);
+        let page = store.scan(p, &start, &end, cursor.as_ref(), limit).await?;
+        // SQL scans use LIMIT limit+1. Charge conservatively on other backends.
+        let rows = u32::try_from(page.entries.len()).unwrap_or(limit);
+        let _ = state.charge_scan(rows + 1);
         for (key, value) in page.entries {
-            if exhausted(&report, clock, start_time, budget) {
-                report.stopped_on_budget = true;
+            if state.work_exhausted(clock) {
+                run.report.stopped_on_budget = true;
                 break 'pages;
             }
-            report.scanned += 1;
-            let Some(keys::ParsedKey::Timer {
-                due_at_ms,
-                kind,
-                reference,
-            }) = keys::parse(&key)
-            else {
-                // Malformed rows are retained, like an unknown codec, for repair.
-                report.unknown += 1;
-                if !warned[0] {
-                    tracing::warn!("malformed timer row");
-                    warned[0] = true;
-                }
-                continue;
-            };
-            let timer = DueTimer {
-                due_at_ms,
-                kind: TimerKind::new(kind),
-                reference,
-                value,
-            };
-            let Some(handler) = registry.get(timer.kind) else {
-                report.unknown += 1;
-                if !warned[usize::from(kind)] {
-                    tracing::warn!(kind, "unknown timer kind");
-                    warned[usize::from(kind)] = true;
-                }
-                continue;
-            };
-            let count = &mut per_kind[usize::from(kind)];
-            // A zero cap would defer the kind forever with no wake.
-            if *count >= handler.max_per_tick().unwrap_or(budget.max_per_kind).max(1) {
-                report.deferred += 1;
-                continue;
-            }
-            *count += 1;
-            match fire_timer(handler, &ctx, &timer, key).await {
-                FireOutcome::Committed(put_due) => {
-                    report.fired += 1;
-                    committed_due = min_due(committed_due, put_due);
-                }
-                FireOutcome::Raced => report.raced += 1,
-                FireOutcome::Failed => report.failed += 1,
-            }
+            run.report.scanned += 1;
+            process_row(&ctx, registry, key, value, state, &mut run).await;
         }
         match page.next {
             Some(next) => cursor = Some(next),
             None => break,
         }
     }
-    let future_due = if !report.stopped_on_budget && now_ms < u64::MAX {
-        store
-            .scan(p, &end, &class_end, None, 1)
-            .await?
-            .entries
-            .first()
-            .and_then(|(key, _)| match keys::parse(key) {
-                Some(keys::ParsedKey::Timer { due_at_ms, .. }) => Some(due_at_ms),
-                _ => None,
-            })
-    } else {
-        None
-    };
-    report.next_wake_ms = next_wake(&report, now_ms, future_due, committed_due);
-    Ok(report)
-}
-
-fn next_wake(
-    report: &RunReport,
-    now_ms: u64,
-    future_due: Option<u64>,
-    committed_due: Option<u64>,
-) -> Option<u64> {
-    // A raced row may still be due (its value changed, or the handler's own
-    // precondition failed), so it counts like a deferred or failed timer.
-    let pending = report.deferred > 0 || report.raced > 0;
-    let next = if (report.stopped_on_budget || pending) && report.fired > 0 {
+    // If the future range cannot be examined, keep a wake even when the
+    // final due page happened to end exactly at the commit/clock allowance.
+    if now_ms < u64::MAX && (state.work_exhausted(clock) || state.remaining_scanned() < 2) {
+        run.report.stopped_on_budget = true;
+    }
+    let future_due =
+        if !state.work_exhausted(clock) && state.remaining_scanned() >= 2 && now_ms < u64::MAX {
+            let page = store.scan(p, &end, &class_end, None, 1).await?;
+            let _ = state.charge_scan(2);
+            page.entries
+                .first()
+                .and_then(|(key, _)| match keys::parse(key) {
+                    Some(keys::ParsedKey::Timer { due_at_ms, .. }) => Some(due_at_ms),
+                    _ => None,
+                })
+        } else {
+            None
+        };
+    let pending = run.report.stopped_on_budget || run.retained_due;
+    let next = if pending && run.progress {
         Some(now_ms)
-    } else if report.failed > 0
-        || report.unknown > 0
-        || report.raced > 0
-        || report.stopped_on_budget
-    {
-        min_due(future_due, Some(now_ms.saturating_add(RETRY_BACKOFF_MS)))
+    } else if pending {
+        Some(now_ms.saturating_add(RETRY_BACKOFF_MS))
     } else {
         future_due
     };
-    min_due(next, committed_due).map(|due| due.max(now_ms))
+    run.report.next_wake_ms =
+        min_due(min_due(next, future_due), run.committed_due).map(|due| due.max(now_ms));
+    Ok(run.report)
+}
+
+struct PartitionRun {
+    report: RunReport,
+    warned: [bool; 256],
+    retained_due: bool,
+    committed_due: Option<u64>,
+    progress: bool,
+}
+impl PartitionRun {
+    fn new() -> Self {
+        Self {
+            report: RunReport::default(),
+            warned: [false; 256],
+            retained_due: false,
+            committed_due: None,
+            progress: false,
+        }
+    }
+}
+
+async fn process_row<S: NamespaceStore>(
+    ctx: &TimerCtx<'_, S>,
+    registry: &TimerRegistry<'_, S>,
+    key: Key,
+    value: Value,
+    state: &mut TickState,
+    run: &mut PartitionRun,
+) {
+    let Some(keys::ParsedKey::Timer {
+        kind, reference, ..
+    }) = keys::parse(&key)
+    else {
+        // Corrupt encodings cannot safely be moved; retain them for repair.
+        run.report.unknown += 1;
+        run.retained_due = true;
+        if !run.warned[0] {
+            tracing::warn!("malformed timer row");
+            run.warned[0] = true;
+        }
+        return;
+    };
+    let Some((original_due, attempt)) = keys::timer_retry_state(&key) else {
+        run.retained_due = true;
+        return;
+    };
+    let timer = DueTimer {
+        due_at_ms: original_due,
+        kind: TimerKind::new(kind),
+        reference,
+        value,
+    };
+    let Some(handler) = registry.get(timer.kind) else {
+        run.report.unknown += 1;
+        if !run.warned[usize::from(kind)] {
+            tracing::warn!(kind, "unknown timer kind");
+            run.warned[usize::from(kind)] = true;
+        }
+        match backoff(ctx, &timer, key, attempt).await {
+            FireOutcome::Committed(due) => {
+                state.committed();
+                run.progress = true;
+                run.committed_due = min_due(run.committed_due, due);
+            }
+            FireOutcome::Raced => {
+                run.report.raced += 1;
+                run.retained_due = true;
+            }
+            FireOutcome::Failed => {
+                run.report.failed += 1;
+                run.retained_due = true;
+            }
+        }
+        return;
+    };
+    if !state.claim_attempt(timer.kind, handler.max_per_tick()) {
+        run.report.deferred += 1;
+        run.retained_due = true;
+        return;
+    }
+    match fire_timer(handler, ctx, &timer, key.clone()).await {
+        FireOutcome::Committed(put_due) => {
+            state.committed();
+            run.report.fired += 1;
+            run.progress = true;
+            run.committed_due = min_due(run.committed_due, put_due);
+        }
+        FireOutcome::Raced => {
+            run.report.raced += 1;
+            run.retained_due = true;
+        }
+        FireOutcome::Failed => {
+            run.report.failed += 1;
+            // Failed handler effects are discarded; only its timer moves.
+            match backoff(ctx, &timer, key, attempt).await {
+                FireOutcome::Committed(due) => {
+                    state.committed();
+                    run.progress = true;
+                    run.committed_due = min_due(run.committed_due, due);
+                }
+                FireOutcome::Raced => {
+                    run.report.raced += 1;
+                    run.retained_due = true;
+                }
+                FireOutcome::Failed => run.retained_due = true,
+            }
+        }
+    }
+}
+
+async fn backoff<S: NamespaceStore>(
+    ctx: &TimerCtx<'_, S>,
+    timer: &DueTimer,
+    key: Key,
+    attempt: u8,
+) -> FireOutcome {
+    let next_attempt = attempt.saturating_add(1).min(keys::MAX_TIMER_RETRY_ATTEMPT);
+    let delay = RETRY_BACKOFF_MS
+        .saturating_mul(1_u64 << (next_attempt - 1))
+        .min(MAX_RETRY_BACKOFF_MS);
+    let due = ctx.now_ms.saturating_add(delay);
+    let next_key = keys::timer_retry(
+        due,
+        timer.kind.get(),
+        &timer.reference,
+        timer.due_at_ms,
+        next_attempt,
+    );
+    if next_key == key {
+        return FireOutcome::Failed;
+    }
+    let batch = Batch::new()
+        .require(Precondition::Equals(key.clone(), timer.value.clone()))
+        .require(Precondition::Absent(next_key.clone()))
+        .delete(key)
+        .put(next_key, timer.value.clone());
+    match ctx.store.apply(ctx.partition, batch).await {
+        Ok(BatchOutcome::Committed) => FireOutcome::Committed(Some(due)),
+        Ok(BatchOutcome::PreconditionFailed { .. }) => FireOutcome::Raced,
+        Ok(BatchOutcome::DeadlinePassed { .. }) | Err(_) => FireOutcome::Failed,
+    }
 }

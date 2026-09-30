@@ -30,9 +30,28 @@ pub(super) const SCAN_AFTER: &str = "SELECT key, value FROM kv \
      WHERE part = ?1 AND key > ?2 AND key < ?3 ORDER BY key LIMIT ?4";
 pub(super) const STATS: &str =
     "SELECT COUNT(*), SUM(length(key) + length(value)) FROM kv WHERE part = ?1";
-/// Earliest timer key per partition; predicate matches the partial index verbatim.
-pub const TIMER_HEADS: &str =
-    "SELECT part, MIN(key) FROM kv WHERE key >= x'7700' AND key < x'7701' GROUP BY part";
+/// Bounded first window over the existing timer index, including raw malformed keys.
+pub const TIMER_WINDOW_START: &str = "SELECT part, key FROM kv INDEXED BY kv_timers \
+     WHERE key >= x'7700' AND key < x'7701' ORDER BY key, part LIMIT ?1";
+/// Resume strictly after an index position; no aggregation or implicit wrap.
+// Keep the composite cursor first: SQLite otherwise chooses the fixed prefix
+// lower bound and filters every preceding timer instead of seeking the cursor.
+pub const TIMER_WINDOW_AFTER: &str = "SELECT part, key FROM kv INDEXED BY kv_timers \
+     WHERE (key, part) > (?1, ?2) AND key >= x'7700' AND key < x'7701' \
+     ORDER BY key, part LIMIT ?3";
+
+/// One raw timer-index row and the exclusive position for its successor.
+///
+/// Advancing by the raw key, including unregistered kinds and malformed timer
+/// keys, prevents bounded enumeration from restarting at the same unknown row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimerCursor {
+    /// Raw timer key; parsing belongs to the driver, after accounting the row.
+    pub key: Key,
+    /// Logical partition sharing the physical SQL database.
+    pub partition: Partition,
+}
+
 pub(super) const PROBE: &str = "SELECT 1";
 
 /// The `get_many` statement for `n` keys (`?2` … `?{n+1}`).
@@ -50,10 +69,10 @@ pub(super) fn get_many_sql(n: usize) -> String {
 /// With a [`Capacity`], an ordinary batch holding a put returns
 /// [`StoreError::Full`] once the database uses [`Capacity::soft_limit`] bytes
 /// or more, checked inside its transaction. Delete-only batches and bounded,
-/// guarded relay-scan checkpoints and relay timer reschedules may use the
-/// reserve above that limit. The timer exception preserves immediate relay
-/// rescheduling after progress on a full shard; without it the timer runner
-/// would retry after its 5-second backoff.
+/// guarded relay-scan checkpoints, relay timer reschedules, and guarded timer
+/// retry moves may use the reserve above that limit. These timer exceptions
+/// preserve immediate relay rescheduling and persisted infrastructure backoff
+/// on a full shard.
 /// An engine `Full` on a delete-only batch is reported as
 /// [`StoreError::Unavailable`], never `Full`.
 ///
@@ -156,23 +175,46 @@ impl<C: SqlConn> SqlKvStore<C> {
         }
     }
 
-    /// Earliest timer due in each partition, using the timer partial index.
+    /// Read at most `limit` raw timer rows in `(key, partition)` index order.
+    ///
+    /// No row is fetched beyond the allowance, and several rows may name the
+    /// same partition. An empty window marks the end; the caller decides when
+    /// to wrap by passing `None`. The cursor need not still exist in storage.
     ///
     /// # Errors
-    /// Store errors for failed queries or corrupt partition/key encodings.
-    pub fn timer_heads(&self) -> Result<Vec<(Partition, u64)>, StoreError> {
+    /// Zero limit, failed queries, corrupt partition encodings or result columns.
+    pub fn timer_window(
+        &self,
+        after: Option<&TimerCursor>,
+        limit: u32,
+    ) -> Result<Vec<TimerCursor>, StoreError> {
+        if limit == 0 {
+            return Err(StoreError::Invalid(
+                "timer window limit must be positive".into(),
+            ));
+        }
+        let (sql, params) = match after {
+            None => (
+                TIMER_WINDOW_START,
+                vec![SqlValue::Integer(i64::from(limit))],
+            ),
+            Some(cursor) => (
+                TIMER_WINDOW_AFTER,
+                vec![
+                    SqlValue::Blob(cursor.key.as_bytes().to_vec()),
+                    SqlValue::Blob(cursor.partition.encode()?.to_vec()),
+                    SqlValue::Integer(i64::from(limit)),
+                ],
+            ),
+        };
         self.conn
-            .query(TIMER_HEADS, &[])?
+            .query(sql, &params)?
             .into_iter()
             .map(|mut row| {
-                let partition = Partition::decode(&blob(&mut row, 0)?)?;
-                let key = Key::new(blob(&mut row, 1)?);
-                match crate::store::keys::parse(&key) {
-                    Some(crate::store::keys::ParsedKey::Timer { due_at_ms, .. }) => {
-                        Ok((partition, due_at_ms))
-                    }
-                    _ => Err(StoreError::Corrupt("timer head key".into())),
-                }
+                Ok(TimerCursor {
+                    partition: Partition::decode(&blob(&mut row, 0)?)?,
+                    key: Key::new(blob(&mut row, 1)?),
+                })
             })
             .collect()
     }
@@ -270,6 +312,7 @@ where
         && batch.has_put()
         && !is_relay_scan_checkpoint(&batch)
         && !is_relay_timer_reschedule(&batch)
+        && !is_timer_retry_move(&batch)
         && conn.size_bytes()? >= limit
     {
         return Err(SqlError::Full);
@@ -312,15 +355,22 @@ fn is_relay_scan_checkpoint(batch: &Batch) -> bool {
 // immediate instead of taking the runner's 5-second retry backoff. The
 // guarded old row is deleted before the empty replacement; this exception
 // cannot create another timer or write data.
-fn is_relay_timer_reschedule(batch: &Batch) -> bool {
+pub(super) fn is_relay_timer_reschedule(batch: &Batch) -> bool {
     let (
-        [Precondition::Equals(old_key, old_value)],
+        [
+            Precondition::Equals(old_key, old_value),
+            Precondition::Absent(absent),
+        ],
         [Write::Delete(deleted), Write::Put(new_key, new_value)],
     ) = (batch.preconditions.as_slice(), batch.writes.as_slice())
     else {
         return false;
     };
-    if old_key != deleted || !old_value.as_bytes().is_empty() || !new_value.as_bytes().is_empty() {
+    if old_key != deleted
+        || absent != new_key
+        || !old_value.as_bytes().is_empty()
+        || !new_value.as_bytes().is_empty()
+    {
         return false;
     }
     let (
@@ -342,6 +392,54 @@ fn is_relay_timer_reschedule(batch: &Batch) -> bool {
         && new_kind == old_kind
         && old_ref == new_ref
         && new_due > old_due
+}
+
+// A guarded infrastructure retry only relocates one opaque timer payload.
+// The destination guard prevents collision, including unknown timer kinds.
+pub(super) fn is_timer_retry_move(batch: &Batch) -> bool {
+    let (
+        [
+            Precondition::Equals(old_key, old_value),
+            Precondition::Absent(absent),
+        ],
+        [Write::Delete(deleted), Write::Put(new_key, new_value)],
+    ) = (batch.preconditions.as_slice(), batch.writes.as_slice())
+    else {
+        return false;
+    };
+    if old_key != deleted || absent != new_key || old_value != new_value {
+        return false;
+    }
+    let (
+        Some(keys::ParsedKey::Timer {
+            due_at_ms: old_due,
+            kind: old_kind,
+            reference: old_ref,
+        }),
+        Some(keys::ParsedKey::Timer {
+            due_at_ms: new_due,
+            kind: new_kind,
+            reference: new_ref,
+        }),
+        Some((old_original, old_attempt)),
+        Some((new_original, new_attempt)),
+    ) = (
+        keys::parse(old_key),
+        keys::parse(new_key),
+        keys::timer_retry_state(old_key),
+        keys::timer_retry_state(new_key),
+    )
+    else {
+        return false;
+    };
+    new_due > old_due
+        && new_kind == old_kind
+        && new_ref == old_ref
+        && new_original == old_original
+        && new_attempt
+            == old_attempt
+                .saturating_add(1)
+                .min(keys::MAX_TIMER_RETRY_ATTEMPT)
 }
 
 fn entry(mut row: Row) -> Result<(Key, Value), SqlError> {
