@@ -92,6 +92,7 @@ MAX_BUFFERED_BYTES=1048576
 test_faults=0
 sharding=d34
 multi=0
+hooks=0
 runner_args=()
 # Under D34 a ListRefs page scans 16 buckets and each lag poll re-lists, so the
 # 10,000-ref case would take many minutes in miniflare; 1,000 exercises paging
@@ -101,6 +102,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --test-faults) test_faults=1 ;;
         --multi) multi=1 ;;
+        --hooks) hooks=1 ;;
         --sharding)
             if [ $# -lt 2 ] || { [ "$2" != single ] && [ "$2" != d34 ]; }; then
                 echo "--sharding requires single or d34" >&2; exit 2
@@ -363,6 +365,10 @@ if [ "${test_faults}" -eq 1 ]; then
     build_args+=(--features test-faults)
 fi
 
+if [ "${hooks}" -eq 1 ]; then
+    build_args=(--release --features test-faults,signed-http-hooks)
+fi
+
 echo ">> building the conformance runner"
 cargo build --manifest-path rust/Cargo.toml -p mkit-server-conformance \
     --bin mkit-server-conformance
@@ -539,3 +545,9 @@ if [ "${multi}" -eq 1 ]; then
     fi
 fi
 echo ">> vcs-worker conformance passed"
+
+# The hooks phase includes real workerd timer and HTTP cancellation probes.
+if [ "${hooks}" -eq 1 ]; then
+    stop_server
+    node scripts/vcs-worker-hooks-probe.mjs
+fi

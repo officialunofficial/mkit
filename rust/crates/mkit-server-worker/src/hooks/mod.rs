@@ -16,3 +16,7 @@ pub mod config;
 
 /// Signed HTTPS hook transport (WP-3.9c).
 pub mod fetch;
+
+#[cfg(all(target_arch = "wasm32", feature = "test-faults"))]
+#[doc(hidden)]
+pub mod fetch_probe;
