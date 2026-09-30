@@ -360,7 +360,6 @@ impl WorkerConfig {
             .transpose()?;
         let max_pack_bytes = var(MAX_PACK_BYTES_VAR).map_or(Ok(MAX_PACK_BYTES), |value| {
             value
-                .trim()
                 .parse::<u64>()
                 .ok()
                 .filter(|n| *n > 0 && *n <= MAX_PACK_BYTES_CEILING)
