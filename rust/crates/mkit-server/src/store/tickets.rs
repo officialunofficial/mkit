@@ -15,6 +15,8 @@ use mkit_core::hash::Hash;
 /// Caller-validated upload geometry and binding, plus the business clock.
 #[derive(Debug, Clone)]
 pub struct TicketSpec {
+    /// Authority generation authorized when this ticket was created.
+    pub authority_generation: Option<u64>,
     /// Repository name within this partition's namespace.
     pub repo: RepoName,
     /// Target ref (wire normalization is WP-1.9).
@@ -42,6 +44,7 @@ pub struct TicketSpec {
 impl TicketSpec {
     fn record(&self) -> TicketV1 {
         TicketV1 {
+            authority_generation: self.authority_generation,
             repo: self.repo.clone(),
             ref_name: self.ref_name.clone(),
             signer: self.signer,

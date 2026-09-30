@@ -35,7 +35,7 @@ pub struct HookRoles {
 }
 
 /// The parsed hook vars.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookVars {
     /// The stages that are remote.
     pub roles: HookRoles,
@@ -43,6 +43,8 @@ pub struct HookVars {
     pub timeout: Duration,
     /// `AUTHORIZER_ROLE`.
     pub authorizer_role: AuthorizerRole,
+    /// Signed HTTPS channel; absent uses the service binding.
+    pub http: Option<HttpVars>,
 }
 
 fn config(message: impl Into<String>) -> ConfigError {
@@ -58,7 +60,11 @@ impl HookVars {
     /// `AUTHORIZER_ROLE` without the `authorize` role; or a timeout or
     /// authorizer role set without `HOOK_ROLES`.
     pub fn parse(var: &impl Fn(&str) -> Option<String>) -> Result<Option<Self>, ConfigError> {
+        let http = HttpVars::parse(var)?;
         let Some(list) = var(ROLES_VAR) else {
+            if http.is_some() {
+                return Err(config("HOOK_URL needs HOOK_ROLES"));
+            }
             if var(TIMEOUT_VAR).is_some() || var(AUTHORIZER_ROLE_VAR).is_some() {
                 return Err(config(format!(
                     "{TIMEOUT_VAR} and {AUTHORIZER_ROLE_VAR} need {ROLES_VAR}"
@@ -114,6 +120,7 @@ impl HookVars {
             roles,
             timeout,
             authorizer_role,
+            http,
         }))
     }
 
@@ -124,6 +131,13 @@ impl HookVars {
     /// # Errors
     /// Either half without the other.
     pub fn check_binding(vars: Option<&Self>, binding_present: bool) -> Result<(), ConfigError> {
+        if vars.is_some_and(|v| v.http.is_some()) {
+            return if binding_present {
+                Err(config("HOOK_URL and ADMISSION_HOOK are mutually exclusive"))
+            } else {
+                Ok(())
+            };
+        }
         match (vars, binding_present) {
             (Some(_), false) => Err(config(format!(
                 "{ROLES_VAR} is set but the {BINDING} service binding is not configured"
@@ -234,5 +248,184 @@ mod tests {
         assert!(err.0.contains(BINDING), "{err}");
         let err = HookVars::check_binding(None, true).unwrap_err();
         assert!(err.0.contains(ROLES_VAR), "{err}");
+    }
+}
+
+/// Validated HTTP channel configuration. Debug redacts the endpoint path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpVars {
+    /// Endpoint, including an optional path prefix.
+    pub endpoint: super::fetch::Endpoint,
+    /// Signed request lifetime, independently bounded from the call timeout.
+    pub validity: Duration,
+}
+
+impl HttpVars {
+    fn parse(var: &impl Fn(&str) -> Option<String>) -> Result<Option<Self>, ConfigError> {
+        let Some(url) = var("HOOK_URL") else {
+            if var("HOOK_SIGNATURE_VALIDITY_MS").is_some() {
+                return Err(config("HOOK_SIGNATURE_VALIDITY_MS needs HOOK_URL"));
+            }
+            return Ok(None);
+        };
+        if !cfg!(feature = "signed-http-hooks") {
+            return Err(config("HOOK_URL requires signed-http-hooks (Stage 2)"));
+        }
+        let validity = var("HOOK_SIGNATURE_VALIDITY_MS").map_or(Ok(60_000), |text| {
+            text.parse::<u64>()
+                .ok()
+                .filter(|ms| (1..=300_000).contains(ms))
+                .ok_or_else(|| config("HOOK_SIGNATURE_VALIDITY_MS must be 1..=300000"))
+        })?;
+        Ok(Some(Self {
+            endpoint: super::fetch::Endpoint::new(&url)?,
+            validity: Duration::from_millis(validity),
+        }))
+    }
+}
+
+/// Parse the native key grammar, wiping the input and decoded seed on drop.
+///
+/// # Errors
+/// A missing or malformed key, or reuse of any accepted ticket secret.
+pub fn http_signer(
+    text: Option<String>,
+    vars: &HttpVars,
+    tickets: Option<&mkit_server::upload::token::TicketKeys>,
+    other_keys: &[[u8; 32]],
+) -> Result<mkit_server::hooks::HookSigner, ConfigError> {
+    use mkit_core::hash::from_hex;
+    use mkit_server::hooks::HookSigner;
+    use zeroize::Zeroizing;
+    let text = Zeroizing::new(text.ok_or_else(|| config("HOOK_URL needs MKIT_HOOK_KEY secret"))?);
+    let bad = || config("MKIT_HOOK_KEY must be one line `<key-id> <64 hex seed>`");
+    let mut lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'));
+    let line = lines.next().ok_or_else(bad)?;
+    if lines.next().is_some() {
+        return Err(bad());
+    }
+    let mut fields = line.split_whitespace();
+    let id = fields.next().ok_or_else(bad)?;
+    let seed = Zeroizing::new(from_hex(fields.next().ok_or_else(bad)?).map_err(|_| bad())?);
+    if fields.next().is_some() {
+        return Err(bad());
+    }
+    if tickets.is_some_and(|keys| keys.contains_secret(&seed)) {
+        return Err(config(
+            "hook key must differ from every accepted ticket secret",
+        ));
+    }
+    let signer = HookSigner::new(id, seed)
+        .and_then(|s| s.with_validity(vars.validity))
+        .map_err(|_| bad())?;
+    if other_keys.contains(&signer.public_key()) {
+        return Err(config(
+            "hook key must differ from other configured role keys",
+        ));
+    }
+    Ok(signer)
+}
+
+#[cfg(test)]
+mod http_tests {
+    use super::*;
+    use mkit_server::hooks::{HookVerifier, VerifierKey};
+    use mkit_server::upload::token::TicketKeys;
+
+    fn vars() -> HttpVars {
+        HttpVars {
+            endpoint: super::super::fetch::Endpoint::new("https://hooks.example/prefix").unwrap(),
+            validity: Duration::from_mins(1),
+        }
+    }
+    fn parse(pairs: &[(&str, &str)]) -> Result<Option<HookVars>, ConfigError> {
+        HookVars::parse(&|name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        })
+    }
+    #[test]
+    fn key_grammar_redaction_and_all_ticket_keys() {
+        let vars = vars();
+        for text in [
+            "",
+            "secret",
+            "id secret",
+            "id 00 extra",
+            "id 00\nid 00",
+            "bad/id 0000000000000000000000000000000000000000000000000000000000000000",
+        ] {
+            let err = http_signer(Some(text.into()), &vars, None, &[]).unwrap_err();
+            assert!(!err.0.contains("secret"));
+        }
+        assert!(http_signer(None, &vars, None, &[]).is_err());
+        let text = format!("# comment\nkey-1 {}\n", "19".repeat(32));
+        let tickets = TicketKeys::new(vec![
+            ("active".into(), [1; 32]),
+            ("retired".into(), [0x19; 32]),
+        ])
+        .unwrap();
+        assert!(http_signer(Some(text.clone()), &vars, Some(&tickets), &[]).is_err());
+        let public = http_signer(Some(text.clone()), &vars, None, &[])
+            .unwrap()
+            .public_key();
+        assert!(http_signer(Some(text), &vars, None, &[public]).is_err());
+    }
+    #[test]
+    fn signed_exact_bytes_verify_for_endpoint_origin() {
+        let vars = vars();
+        let signer =
+            http_signer(Some(format!("key {}", "17".repeat(32))), &vars, None, &[]).unwrap();
+        let verifier = HookVerifier::new(
+            vars.endpoint.origin(),
+            vec![VerifierKey::new("key", signer.public_key())],
+            || 100_000,
+        )
+        .with_replay_protection();
+        let procedure = "/mkit.server.hooks.v1.HooksService/Admit";
+        let body =
+            br#"{ "credentialHeaders": [{"name":"Payment-Authorization","value":"opaque"}] }"#;
+        let headers = signer
+            .headers(vars.endpoint.origin(), procedure, body, 100_000, &[9; 32])
+            .unwrap();
+        let headers = headers
+            .iter()
+            .map(|(n, v)| (*n, v.as_str()))
+            .collect::<Vec<_>>();
+        verifier.verify(procedure, &headers, body).unwrap();
+        assert!(verifier.verify(procedure, &headers, body).is_err());
+        assert!(verifier.verify(procedure, &headers, b"{}").is_err());
+    }
+    #[test]
+    fn http_configuration_is_complete_and_validity_bounded() {
+        assert!(parse(&[("HOOK_SIGNATURE_VALIDITY_MS", "1")]).is_err());
+        assert!(parse(&[("HOOK_URL", "https://hooks.example")]).is_err());
+        for value in ["0", "300001", "-1", ""] {
+            assert!(
+                parse(&[
+                    ("HOOK_URL", "https://hooks.example"),
+                    ("HOOK_ROLES", "admit"),
+                    ("HOOK_SIGNATURE_VALIDITY_MS", value)
+                ])
+                .is_err()
+            );
+        }
+        let parsed = parse(&[
+            ("HOOK_URL", "https://hooks.example"),
+            ("HOOK_ROLES", "admit"),
+        ]);
+        if cfg!(feature = "signed-http-hooks") {
+            assert_eq!(
+                parsed.unwrap().unwrap().http.unwrap().validity,
+                Duration::from_mins(1)
+            );
+        } else {
+            assert!(parsed.is_err());
+        }
     }
 }

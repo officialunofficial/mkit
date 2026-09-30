@@ -22,7 +22,8 @@ use super::{
 /// pairs 4, replay 3, counters 4, outbox sequence/backlog 4, and relay kick
 /// 1, ref-index relay rows 2, and one outcome-delivery kick 1. These figures are D34's. On Single, a grant guard replaces the lease
 /// pair and there is no relay share or relay kick, so seven tickets cost
-/// `8 * 7 + 22 = 78`. The real maximal planner batches are tested
+/// `8 * 7 + 24 = 80`, including durable authority-generation/mode absence guards.
+/// The real maximal planner batches are tested
 /// separately. On D34, seven tickets cost `9 * 7 + 26 = 89` ops before
 /// opportunistic pruning.
 ///

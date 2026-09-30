@@ -101,6 +101,7 @@ hooks=0
 test_faults=0
 sharding=d34
 multi=0
+hooks=0
 indexed=0
 runner_args=()
 # Under D34 a ListRefs page scans 16 buckets and each lag poll re-lists, so the
@@ -112,6 +113,7 @@ while [ $# -gt 0 ]; do
         --hooks) hooks=1 ;;
         --test-faults) test_faults=1 ;;
         --multi) multi=1 ;;
+        --hooks) hooks=1 ;;
         --indexed) indexed=1 ;;
         --sharding)
             if [ $# -lt 2 ] || { [ "$2" != single ] && [ "$2" != d34 ]; }; then
@@ -379,6 +381,10 @@ if [ "${test_faults}" -eq 1 ]; then
     build_args+=(--features test-faults)
 fi
 
+if [ "${hooks}" -eq 1 ]; then
+    build_args=(--release --features test-faults,signed-http-hooks)
+fi
+
 echo ">> building the conformance runner"
 cargo build --manifest-path rust/Cargo.toml -p mkit-server-conformance \
     --bin mkit-server-conformance
@@ -592,3 +598,9 @@ if [ "${indexed}" -eq 1 ]; then
 fi
 if [ "${hooks}" -eq 1 ]; then bash scripts/vcs-worker-hooks.sh; fi
 echo ">> vcs-worker conformance passed"
+
+# The hooks phase includes real workerd timer and HTTP cancellation probes.
+if [ "${hooks}" -eq 1 ]; then
+    stop_server
+    node scripts/vcs-worker-hooks-probe.mjs
+fi

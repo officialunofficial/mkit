@@ -529,10 +529,33 @@ fn indexed_concurrent_lease_has_no_replay_row_and_retry_commits() {
 
 #[test]
 fn indexed_seven_ticket_advance_adds_no_batch_rows() {
-    for (sharding, expected) in [(Sharding::D34, 89), (Sharding::Single, 78)] {
+    for (sharding, expected) in [(Sharding::D34, 89), (Sharding::Single, 80)] {
         let d34 = sharding == Sharding::D34;
         let batch = planned_ticket_advance_mode(7, d34);
         assert_eq!(batch.preconditions.len() + batch.writes.len(), expected);
+        assert!(expected <= crate::store::MAX_BATCH_OPS);
+        if !d34 {
+            assert_eq!(
+                batch
+                    .preconditions
+                    .iter()
+                    .filter(|guard| matches!(guard,
+                        Precondition::Absent(key) if *key == keys::authority_generation()
+                    ))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                batch
+                    .preconditions
+                    .iter()
+                    .filter(|guard| matches!(guard,
+                        Precondition::Absent(key) if *key == keys::lease_recovery()
+                    ))
+                    .count(),
+                1
+            );
+        }
         assert!(batch.writes.iter().all(|write| {
             let (Write::Put(key, _) | Write::Delete(key)) = write;
             !matches!(

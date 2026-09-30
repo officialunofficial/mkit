@@ -195,6 +195,8 @@ mod tests {
 
     fn lease(expires_at_ms: u64) -> codec::LeasedShard {
         codec::LeasedShard {
+            authority_generation: None,
+            acked_authority_generation: None,
             epoch: 3,
             expires_at_ms,
             acked_epoch: 2,

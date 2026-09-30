@@ -2,6 +2,7 @@ use super::*;
 
 fn claims() -> TicketClaims {
     TicketClaims {
+        authority_generation: None,
         ticket_id: [0x11; 32],
         audience: "https://api.example.test".into(),
         repository: "ed25519-test/demo".into(),
@@ -191,4 +192,21 @@ fn configuration_validation_and_redaction() {
     assert!(TicketKeys::new(Vec::new()).is_err());
     assert!(TicketKeys::new(vec![(String::new(), [7; 32])]).is_err());
     assert!(TicketKeys::new(vec![("id".into(), [7; 32]), ("id".into(), [8; 32])]).is_err());
+}
+
+#[test]
+fn authority_generation_is_authenticated_and_unfenced_tokens_stay_v1() {
+    let keys = keys("key-1", 7);
+    let mut claims = claims();
+    assert_eq!(keys.mint(&claims)[0], 1);
+    for generation in [0, 1, u64::MAX] {
+        claims.authority_generation = Some(generation);
+        let token = keys.mint(&claims);
+        assert_eq!(token[0], 2);
+        assert_eq!(keys.verify(&token, 0).unwrap(), claims);
+        let mut changed = token.clone();
+        let at = changed.len() - 33;
+        changed[at] ^= 1;
+        assert!(keys.verify(&changed, 0).is_err());
+    }
 }

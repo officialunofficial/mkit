@@ -177,6 +177,8 @@ pub fn response_header_plan(headers: &http::HeaderMap) -> Vec<(String, String, b
 #[cfg_attr(not(feature = "http-objects"), derive(PartialEq, Eq))]
 #[non_exhaustive]
 pub struct WorkerConfig {
+    /// Optional dedicated deployment-authority keys (`AUTHORITY_FENCE`, `AUTHORITY_KEYS`).
+    pub authority_fence: Option<mkit_server::authority::AuthorityFence>,
     /// `AUTH_AUDIENCE`: the canonical origin writes are signed for.
     pub audience: String,
     /// `AUTH_REPOSITORY`: the repository identity writes are signed for.
@@ -305,6 +307,7 @@ impl WorkerConfig {
         config.single_upload_max_bytes = Some(SINGLE_PUT_MAX_BYTES);
         config.sharding = self.sharding;
         config.ticket_keys.clone_from(&self.ticket_keys);
+        config.authority_fence.clone_from(&self.authority_fence);
         config.indexed = self.indexed;
         #[cfg(feature = "http-objects")]
         if let Some(mount) = &self.http_mount {
@@ -353,6 +356,7 @@ impl WorkerConfig {
     /// malformed `TEST_QUOTA_*` var, or an invalid multi-addressing
     /// combination: `NAMESPACE_POLICY`/`NAMESPACE_ALLOWLIST`/
     /// `UNSAFE_OPEN_NAMESPACES` and `TICKET_KEYS` rules.
+    #[allow(clippy::too_many_lines)] // Resolves the deployment fields together; authority statement grammar is factored separately.
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let indexed_requested = var(INDEXED_MODE_VAR).is_some_and(|value| {
             !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
@@ -428,7 +432,31 @@ impl WorkerConfig {
         )?;
         #[cfg(feature = "http-objects")]
         let url_tokens = crate::http_mount::token_config_for_tickets(&var, ticket_keys.as_ref())?;
+        let hooks = crate::hooks::config::HookVars::parse(&var)?;
+        let authority_fence = resolve_authority_fence(&var, multi, hooks.as_ref())?;
+        if let Some(fence) = &authority_fence {
+            if fence.public_keys().any(|key| {
+                ticket_keys
+                    .as_ref()
+                    .is_some_and(|tickets| tickets.contains_ed25519_public(&key))
+            }) {
+                return Err(ConfigError(
+                    "authority keys must differ from ticket keys".into(),
+                ));
+            }
+            #[cfg(feature = "http-objects")]
+            if fence.public_keys().any(|key| {
+                url_tokens
+                    .as_ref()
+                    .is_some_and(|tokens| tokens.keys().public_keys().any(|public| public == key))
+            }) {
+                return Err(ConfigError(
+                    "authority keys must differ from URL-token keys".into(),
+                ));
+            }
+        }
         Ok(Self {
+            authority_fence,
             indexed,
             sharding,
             placement,
@@ -440,7 +468,7 @@ impl WorkerConfig {
             grants,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             blob_binding: crate::r2::STORAGE_BINDING,
-            hooks: crate::hooks::config::HookVars::parse(&var)?,
+            hooks,
             #[cfg(feature = "http-objects")]
             http_mount: None,
             #[cfg(feature = "http-objects")]
@@ -463,7 +491,9 @@ impl WorkerConfig {
     #[cfg(target_arch = "wasm32")]
     pub fn from_env(env: &worker::Env) -> Result<Self, ConfigError> {
         Self::from_vars(|name| {
-            if name == TICKET_KEYS_VAR || cfg!(feature = "http-objects") && name == "URL_TOKEN_KEYS"
+            if name == "AUTHORITY_KEYS"
+                || name == TICKET_KEYS_VAR
+                || cfg!(feature = "http-objects") && name == "URL_TOKEN_KEYS"
             {
                 env.secret(name)
                     .ok()
@@ -474,6 +504,42 @@ impl WorkerConfig {
             }
         })
     }
+}
+
+fn resolve_authority_fence(
+    var: &impl Fn(&str) -> Option<String>,
+    multi: bool,
+    hooks: Option<&crate::hooks::config::HookVars>,
+) -> Result<Option<mkit_server::authority::AuthorityFence>, ConfigError> {
+    let enabled = match var("AUTHORITY_FENCE").as_deref() {
+        None | Some("false") => false,
+        Some("true") => true,
+        _ => return Err(ConfigError("AUTHORITY_FENCE must be true or false".into())),
+    };
+    let keys = var("AUTHORITY_KEYS");
+    if enabled != keys.is_some() {
+        return Err(ConfigError(
+            "AUTHORITY_FENCE and AUTHORITY_KEYS must be configured together".into(),
+        ));
+    }
+    let authority_fence = keys
+        .map(|keys| {
+            mkit_server::authority::AuthorityFence::parse(&keys)
+                .map_err(|_| ConfigError("AUTHORITY_KEYS is invalid".into()))
+        })
+        .transpose()?;
+    if enabled
+        && (!multi
+            || hooks.is_none_or(|hooks| {
+                !hooks.roles.authorize
+                    || hooks.authorizer_role != mkit_server::policy::AuthorizerRole::Authority
+            }))
+    {
+        return Err(ConfigError(
+            "authority fencing requires Multi and an Authority hook".into(),
+        ));
+    }
+    Ok(authority_fence)
 }
 
 /// The indexed configuration `INDEXED_MODE` asks for: scheduled verification
@@ -2472,6 +2538,44 @@ mod tests {
     }
 
     #[test]
+    fn authority_fence_configuration_is_complete_permissioned_and_default_off() {
+        let ns = "ed25519-0101010101010101010101010101010101010101010101010101010101010101";
+        let public = mkit_core::hash::to_hex(
+            &mkit_core::hash::from_hex(
+                "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+            )
+            .unwrap(),
+        );
+        let key = format!("deployment {public} {ns}");
+        let base = [
+            (AUDIENCE_VAR, "https://vcs.example"),
+            (ADDRESSING_VAR, "multi"),
+            (NAMESPACE_POLICY_VAR, "allowlist"),
+            (NAMESPACE_ALLOWLIST_VAR, ns),
+            (
+                TICKET_KEYS_VAR,
+                "ticket 0909090909090909090909090909090909090909090909090909090909090909",
+            ),
+            ("HOOK_ROLES", "authorize"),
+            ("AUTHORIZER_ROLE", "authority"),
+        ];
+        assert!(
+            WorkerConfig::from_vars(vars(&base))
+                .unwrap()
+                .authority_fence
+                .is_none()
+        );
+        let mut pairs = base.to_vec();
+        pairs.push(("AUTHORITY_FENCE", "true"));
+        assert!(WorkerConfig::from_vars(vars(&pairs)).is_err());
+        pairs.push(("AUTHORITY_KEYS", &key));
+        let cfg = WorkerConfig::from_vars(vars(&pairs)).unwrap();
+        assert!(cfg.pipeline_config().unwrap().authority_fence.is_some());
+        pairs.push(("AUTHORIZER_ROLE", "check"));
+        assert!(WorkerConfig::from_vars(vars(&pairs)).is_err());
+    }
+
+    #[test]
     fn config_requires_audience_and_repository() {
         let cfg = WorkerConfig::from_vars(vars(&[
             (AUDIENCE_VAR, "https://vcs.example"),
@@ -2513,7 +2617,7 @@ mod tests {
             ("AUTHORIZER_ROLE", "authority"),
         ]);
         let cfg = WorkerConfig::from_vars(vars(&pairs)).unwrap();
-        let hooks = cfg.hooks.unwrap();
+        let hooks = cfg.hooks.as_ref().unwrap();
         assert!(hooks.roles.authorize && hooks.roles.admit && !hooks.roles.outcome);
         assert_eq!(
             cfg.pipeline_config().unwrap().authorizer_role,

@@ -40,6 +40,7 @@ pub(super) fn repo(name: &str) -> RepoId {
 
 pub(super) fn ticket(repo: &RepoId, bytes: &[u8], created_at_ms: u64) -> TicketV1 {
     TicketV1 {
+        authority_generation: None,
         repo: repo.name.clone(),
         ref_name: "refs/heads/main".into(),
         signer: [3; 32],

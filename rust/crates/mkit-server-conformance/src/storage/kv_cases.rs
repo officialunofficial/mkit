@@ -22,6 +22,7 @@ use super::{KvHarness, Outcome, commit, need_all_classes, need_atomic, outcome, 
 
 fn spec(rid: &str) -> Result<TicketSpec, String> {
     Ok(TicketSpec {
+        authority_generation: None,
         repo: ok!(RepoName::new("conformance")),
         ref_name: "refs/heads/main".into(),
         signer: [0x11; 32],

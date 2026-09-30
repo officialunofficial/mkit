@@ -16,6 +16,7 @@ const SECRET: [u8; 32] = [7; 32];
 
 fn claims() -> TicketClaims {
     TicketClaims {
+        authority_generation: None,
         ticket_id: [0x11; 32],
         audience: "https://api.example.test".into(),
         repository: format!("ed25519-{}/demo", "22".repeat(32)),
@@ -146,4 +147,24 @@ fn golden_ticket_token_v1() {
             failure["name"]
         );
     }
+}
+
+#[test]
+fn golden_ticket_token_v2_authority() {
+    // Independently computed with the Python BLAKE3 binding.
+    let name = "ticket-token-v2-authority.json";
+    let stored = fs::read(dir().join(name)).unwrap();
+    let fixture: Value = serde_json::from_slice(&stored).unwrap();
+    let keys = TicketKeys::new(vec![(KEY_ID.into(), SECRET)]).unwrap();
+    let mut claims = claims();
+    claims.authority_generation = Some(7);
+    let token = bytes_from_hex(fixture["token_hex"].as_str().unwrap());
+    assert_eq!(keys.mint(&claims), token);
+    assert_eq!(keys.verify(&token, NOW).unwrap(), claims);
+    let manifest = fs::read_to_string(dir().join("MANIFEST.txt")).unwrap();
+    let pins: Vec<_> = manifest
+        .lines()
+        .filter_map(|line| line.strip_prefix(&format!("{name} ")))
+        .collect();
+    assert_eq!(pins, [to_hex(&hash(&stored))]);
 }

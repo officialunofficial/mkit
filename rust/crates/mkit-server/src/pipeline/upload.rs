@@ -4,7 +4,8 @@
 //! commitment and the stateless ticket before reading chunks. It skips the
 //! replay ledger, authorization, admission, quota and `pre_receive`. After
 //! the full pack verifies and commits, it writes a content-addressed upload
-//! marker in a non-pack blob namespace. It touches no metadata shard.
+//! marker in a non-pack blob namespace. It writes no metadata shard; bounded
+//! authoritative mode/generation reads guard staging and completion.
 //!
 //! [`Pipeline::open_upload`] remains for un-ticketed single-repository
 //! uploads below the advertised threshold, and for transport identity
@@ -54,7 +55,8 @@ pub enum UploadMode {
     /// The operation already committed: verify the stream without writing
     /// it, then return OK without an apply.
     Replay,
-    /// A stateless ticket authorizes the stream; no metadata is touched.
+    /// A stateless ticket authorizes the stream; bounded authority-mode reads
+    /// guard physical staging and completion, without metadata writes.
     Ticketed,
 }
 
@@ -81,6 +83,7 @@ pub struct UploadSession<'p, B: BlobStore, N, H> {
     failed: Option<ServerError>,
     outcome: Outcome,
     ticket_id: Option<Hash>,
+    staging: super::staging::StagingBuffer,
 }
 
 impl<B: BlobStore, N, H> fmt::Debug for UploadSession<'_, B, N, H> {
@@ -167,6 +170,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                 failed: None,
                 outcome,
                 ticket_id: o.ticket_id,
+                staging: super::staging::StagingBuffer::default(),
             }),
             Err(err) => {
                 outcome.record(Err(&err));
@@ -234,6 +238,10 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             let charges = allowance.charges;
             if op.auth.is_some() || !charges.is_empty() {
                 let req = WriteRequest {
+                    authority_store: super::plan::AuthorityStore::from_capabilities(
+                        pipe.meta.capabilities(),
+                    ),
+                    authority_generation: op.authz.authority_generation,
                     repo: &op.repo.name,
                     kind: WriteKind::UploadReserve,
                     refs: &[],
@@ -275,7 +283,8 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
         })
     }
 
-    /// Open a replay-exempt ticketed upload without consulting metadata.
+    /// Open a replay-exempt ticketed upload with only authoritative fence-mode
+    /// reads, without reserving or writing business metadata.
     pub(super) async fn begin_ticketed(
         pipe: &'p Pipeline<B, N, H>,
         a: &Authenticated,
@@ -297,7 +306,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             })?;
             let key = validator.key();
             let declared = validator.declared();
-            let op = pipe.identify(
+            let mut op = pipe.identify(
                 a,
                 OpKind::UploadPack {
                     key,
@@ -319,6 +328,9 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                 &a.repo().identity,
                 &auth.signer,
             )?;
+            pipe.check_ticket_generation(&op.repo.namespace, claims.authority_generation)
+                .await?;
+            op.authz.authority_generation = claims.authority_generation;
             if claims.pack_id != key.0 || claims.bytes != declared {
                 return Err(ServerError::new(
                     Code::PermissionDenied,
@@ -331,6 +343,13 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                 .begin(key.into(), declared)
                 .await
                 .map_err(|e| store_error(StorageOp::BlobPut, e))?;
+            if let Err(err) = pipe
+                .check_ticket_generation(&op.repo.namespace, claims.authority_generation)
+                .await
+            {
+                sink.abort().await;
+                return Err(err);
+            }
             Ok(Opened {
                 op,
                 p: pipe.shards.coordinator(&a.repo().repo.namespace),
@@ -354,6 +373,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                 failed: None,
                 outcome,
                 ticket_id: o.ticket_id,
+                staging: super::staging::StagingBuffer::default(),
             }),
             Err(err) => {
                 outcome.record(Err(&err));
@@ -379,29 +399,43 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
         &mut self,
         chunk_pack_id: Option<&[u8]>,
         offset: Option<u64>,
-        data: Bytes,
+        mut data: Bytes,
         last: bool,
     ) -> Result<bool, ServerError> {
         if let Some(err) = &self.failed {
             return Err(err.clone());
         }
+        let span = self.outcome.span.clone();
         let result = async {
             let progress = self
                 .validator
                 .push(chunk_pack_id, offset, data.len(), last)?;
-            match self.target.as_mut() {
-                Some(Target::Sink(sink)) => {
-                    let written = sink.write(data).await;
-                    written.map_err(|e| store_error(StorageOp::BlobPut, e))?;
+            if self.ticket_id.is_some() {
+                while !data.is_empty() {
+                    if let Some(bytes) = self.staging.push(&mut data) {
+                        self.stage(bytes).await?;
+                    }
                 }
-                Some(Target::Verify(hasher)) => {
-                    hasher.update(&data);
+                if progress.complete
+                    && let Some(bytes) = self.staging.finish()
+                {
+                    self.stage(bytes).await?;
                 }
-                None => return Err(internal("upload sink gone")),
+            } else {
+                match self.target.as_mut() {
+                    Some(Target::Sink(sink)) => {
+                        let written = sink.write(data).await;
+                        written.map_err(|e| store_error(StorageOp::BlobPut, e))?;
+                    }
+                    Some(Target::Verify(hasher)) => {
+                        hasher.update(&data);
+                    }
+                    None => return Err(internal("upload sink gone")),
+                }
             }
             Ok(progress.complete)
         }
-        .instrument(self.outcome.span.clone())
+        .instrument(span)
         .await;
         if let Err(err) = &result {
             self.fail(err);
@@ -426,9 +460,31 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
         result
     }
 
+    async fn stage(&mut self, bytes: Bytes) -> Result<(), ServerError> {
+        self.pipe
+            .check_ticket_generation(&self.op.repo.namespace, self.op.authz.authority_generation)
+            .await?;
+        let Some(Target::Sink(sink)) = self.target.as_mut() else {
+            return Err(internal("ticketed upload sink gone"));
+        };
+        sink.write(bytes)
+            .await
+            .map_err(|e| store_error(StorageOp::BlobPut, e))?;
+        self.pipe
+            .check_ticket_generation(&self.op.repo.namespace, self.op.authz.authority_generation)
+            .await
+    }
+
     async fn complete(&mut self) -> Result<(), ServerError> {
         let pipe = self.pipe;
         let done = self.validator.clone().finish()?;
+        if self.ticket_id.is_some() {
+            pipe.check_ticket_generation(
+                &self.op.repo.namespace,
+                self.op.authz.authority_generation,
+            )
+            .await?;
+        }
         match self.target.take() {
             Some(Target::Sink(sink)) => match sink.commit().await {
                 Ok(_) => {}
@@ -444,9 +500,19 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
         }
         super::fault!(pipe, AfterBlobCommit, &self.op, &self.a);
         if let Some(ticket_id) = self.ticket_id {
+            pipe.check_ticket_generation(
+                &self.op.repo.namespace,
+                self.op.authz.authority_generation,
+            )
+            .await?;
             write_upload_marker(&pipe.blobs, &ticket_id, &done.key.0)
                 .await
                 .map_err(|e| store_error(StorageOp::BlobPut, e))?;
+            pipe.check_ticket_generation(
+                &self.op.repo.namespace,
+                self.op.authz.authority_generation,
+            )
+            .await?;
             pipe.metrics.incr(METRIC_UPLOAD_BYTES, &[], done.total);
             return Ok(());
         }
@@ -475,6 +541,10 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             return Self::lapsed(checked);
         }
         let req = WriteRequest {
+            authority_store: super::plan::AuthorityStore::from_capabilities(
+                pipe.meta.capabilities(),
+            ),
+            authority_generation: self.op.authz.authority_generation,
             repo: &self.op.repo.name,
             kind: WriteKind::UploadCommit,
             refs: &[],
