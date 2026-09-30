@@ -162,3 +162,19 @@ expiry, every publication/sidecar/relay crash boundary, delayed delivery beyond
 Then integrate other merged seams, run the full brief's gates, obtain two
 independent reviews through the root, and open the PR. Nothing in this checkpoint
 claims those implementation steps or checks are complete.
+
+### Atomic-creation checkpoint
+
+The first implementation step adds the ordered group DTO to jobs, preserves it
+on source restart, and claims new jobs in a single transaction guarded on ticket,
+job and verification observations plus `NotAfter`. An unfinished existing member
+blocks creation of the rest of an overlapping group. Existing finished members
+are captured with their already-Verified status. This is creation arbitration
+only; selection facts, legacy reconstruction and the extraction protocol remain
+outstanding.
+
+The new A+B/B+C regression first failed on the integrated baseline at the
+assertion that C must remain unclaimed, then passed after the fix. Evidence is
+under `~/.cache/mkit-test-tmp/wp-4-10b/group-{red,green}.log`. This focused result
+does not establish complete native/Scheduled selection parity or production
+readiness.

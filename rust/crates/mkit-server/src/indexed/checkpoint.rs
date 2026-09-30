@@ -103,10 +103,31 @@ pub enum Outcome {
     ExtractionUnavailable,
 }
 
+/// One immutable member of the Advance that claimed an extraction group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtractionGroupMember {
+    /// Immutable source pack identity.
+    pub pack: Hash,
+    /// Ticket identity selected by the Advance.
+    pub ticket: Hash,
+    /// Declared pack length.
+    pub bytes: u64,
+    /// Source age for repository-local resolution failures.
+    pub created_at_ms: u64,
+    /// Native still stages this member's selection facts, but does not extract
+    /// objects whose first owner was already verified.
+    pub already_verified: bool,
+}
+
 /// The persisted state of one job, guarded by `vc` sub-class 0.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VerifyJobV1 {
+    /// Ordered, atomically claimed first-Advance extraction context. Empty
+    /// identifies a legacy job whose facts require bounded reconstruction.
+    #[serde(default)]
+    pub extraction_group: Vec<ExtractionGroupMember>,
     /// The ticket this job serves; the job lives while that ticket does.
     pub ticket_id: Hash,
     /// That ticket's creation time: the start of the membership lag window.
@@ -187,6 +208,7 @@ impl VerifyJobV1 {
         );
         *self = Self {
             restarts: self.restarts.saturating_add(1),
+            extraction_group: self.extraction_group.clone(),
             ..fresh
         };
     }

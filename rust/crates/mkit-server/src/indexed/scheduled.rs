@@ -15,7 +15,8 @@
 use super::{
     IndexedConfig,
     checkpoint::{
-        Kind, Outcome, Phase, VerifyJobV1, WINDOW_BYTES, decode_frame, encode_job, timer_reference,
+        ExtractionGroupMember, Kind, Outcome, Phase, VerifyJobV1, WINDOW_BYTES, decode_frame,
+        encode_job, timer_reference,
     },
     resolve,
     state::VerificationV1,
@@ -140,6 +141,127 @@ pub async fn create_job<N: NamespaceStore>(
 struct Consumed<'a> {
     ticket: &'a TicketV1,
     job: VerifyJobV1,
+}
+
+/// Claim every new member together. Waiting on a foreign unfinished group
+/// creates no partial group: A+B and B+C serialize before either can extract.
+#[allow(clippy::too_many_arguments)]
+async fn claim_extraction_group<N: NamespaceStore>(
+    store: &N,
+    source: &Partition,
+    repo: &RepoId,
+    tickets: &[TicketV1],
+    ticket_ids: &[Hash],
+    rows: &[Option<Value>],
+    clock: &dyn Clock,
+    bound: u64,
+) -> Result<bool, ServerError> {
+    let now = u64::try_from(clock.now_ms()).unwrap_or(0);
+    let jobs = tickets
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            rows[2 * i]
+                .as_ref()
+                .map(super::checkpoint::decode_job)
+                .transpose()
+                .map_err(|_| storage_failed())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let states = tickets
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            rows[2 * i + 1]
+                .as_ref()
+                .map(super::state::decode)
+                .transpose()
+                .map_err(|_| storage_failed())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let new = jobs
+        .iter()
+        .zip(ticket_ids)
+        .map(|(job, id)| job.as_ref().is_none_or(|job| job.ticket_id != *id))
+        .collect::<Vec<_>>();
+    if !new.iter().any(|new| *new) {
+        return Ok(false);
+    }
+    let mut group = Vec::with_capacity(tickets.len());
+    for (i, (ticket, id)) in tickets.iter().zip(ticket_ids).enumerate() {
+        if let Some(VerificationV1::Rejected { code, message }) = &states[i] {
+            return Err(stored_error(code, message));
+        }
+        let already_verified = match &states[i] {
+            Some(VerificationV1::Verified { pack_len, .. }) if *pack_len == ticket.bytes => true,
+            Some(VerificationV1::Verified { .. }) => return Err(storage_failed()),
+            _ => false,
+        };
+        if !new[i]
+            && let Some(job) = &jobs[i]
+            && !(job.usable() && already_verified)
+        {
+            if let Some(outcome) = job.outcome {
+                return Err(outcome_error(outcome, now, ticket, bound));
+            }
+            // A coherent group was committed atomically. Finding an unfinished
+            // existing member alongside an unclaimed one means a foreign group
+            // owns it (or a legacy job is still running).
+            return Err(super::pending(retry_after(Some(job))));
+        }
+        group.push(ExtractionGroupMember {
+            pack: ticket.pack_id,
+            ticket: *id,
+            bytes: ticket.bytes,
+            created_at_ms: ticket.created_at_ms,
+            already_verified,
+        });
+    }
+    let mut batch = Batch::new().require(Precondition::NotAfter(now.saturating_add(10_000)));
+    for (i, (ticket, id)) in tickets.iter().zip(ticket_ids).enumerate() {
+        let job_key = keys::verify_job(&repo.name, &ticket.pack_id);
+        let state_key = keys::verification(&repo.name, &ticket.pack_id);
+        batch = batch.require(Precondition::Equals(
+            keys::ticket(id),
+            crate::store::codec::encode_ticket(ticket),
+        ));
+        for (key, raw) in [
+            (job_key.clone(), rows[2 * i].as_ref()),
+            (state_key, rows[2 * i + 1].as_ref()),
+        ] {
+            batch = batch.require(match raw {
+                Some(raw) => Precondition::Equals(key, raw.clone()),
+                None => Precondition::Absent(key),
+            });
+        }
+        if new[i] {
+            let mut job = VerifyJobV1::new(
+                *id,
+                ticket.created_at_ms,
+                ticket.bytes,
+                super::checkpoint::DEFAULT_ENTRY_CAP,
+            );
+            job.extraction_group.clone_from(&group);
+            batch = batch.put(job_key, encode_job(&job)).put(
+                keys::timer(
+                    now,
+                    kinds::VERIFY.get(),
+                    &timer_reference(&repo.name, &ticket.pack_id),
+                ),
+                Value::default(),
+            );
+        }
+    }
+    match store
+        .apply(source, batch)
+        .await
+        .map_err(|_| storage_failed())?
+    {
+        BatchOutcome::Committed => Ok(true),
+        BatchOutcome::PreconditionFailed { .. } | BatchOutcome::DeadlinePassed { .. } => {
+            Err(super::pending(1_000))
+        }
+    }
 }
 
 /// The history edges the fast-forward check reads (WP-4.17), in the shape the
@@ -280,6 +402,13 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
         .map_err(|_| storage_failed())?;
     if rows.len() != wanted.len() {
         return Err(storage_failed());
+    }
+    if claim_extraction_group(
+        store, source, repo, tickets, ticket_ids, &rows, clock, bound,
+    )
+    .await?
+    {
+        return Err(super::pending(1_000));
     }
     let mut ready = Vec::with_capacity(tickets.len());
     let mut pending: Option<u64> = None;

@@ -944,6 +944,31 @@ fn a_pack_needing_extraction_never_reaches_verified_here() {
 }
 
 #[test]
+fn an_overlapping_advance_does_not_partially_claim_a_new_extraction_group() {
+    let rig = Rig::new();
+    let (pack_a, head_a) = tree_pack(1, 32);
+    let (pack_b, head_b) = tree_pack(1, 33);
+    let (pack_c, _) = tree_pack(1, 34);
+    let (a, aid) = rig.add(&pack_a);
+    let (b, bid) = rig.add(&pack_b);
+    let (c, cid) = rig.add(&pack_c);
+    assert!(rig.check(&[(&a, aid), (&b, bid)], head_a).is_err());
+    assert!(rig.job(&a.pack_id).is_some());
+    assert!(rig.job(&b.pack_id).is_some());
+    assert!(rig.check(&[(&b, bid), (&c, cid)], head_b).is_err());
+    assert!(
+        rig.job(&c.pack_id).is_none(),
+        "B belongs to unfinished A+B: B+C must claim no new member"
+    );
+    rig.drive(|rig| rig.finished(&a.pack_id) && rig.finished(&b.pack_id));
+    assert!(rig.check(&[(&b, bid), (&c, cid)], head_b).is_err());
+    assert!(
+        rig.job(&c.pack_id).is_some(),
+        "finished A+B must not permanently prevent the later B+C group"
+    );
+}
+
+#[test]
 fn a_single_entry_is_bounded_within_the_slice_resident_budget() {
     let (object, bytes) = blob(7, 2 << 20);
     let mut writer = PackWriter::new_raw_only();
