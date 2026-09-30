@@ -79,3 +79,10 @@ pub(super) async fn fire_on_schedule(ctx: Ctx) -> CaseResult {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
+
+/// Tick `name`'s ref shard with the business clock skewed by `skew_ms`, so
+/// every timer due by then fires (through a `ListRefs` of its parent).
+pub(super) async fn tick_shard(ctx: &Ctx, name: &str, skew_ms: i64) -> CaseResult {
+    list_tick(ctx, name, Some(&skew_ms.to_string())).await?;
+    Ok(())
+}

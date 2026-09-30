@@ -8,7 +8,7 @@ use mkit_core::object::ObjectType;
 
 use super::body::EndHook;
 use super::reach::{Reachability, TtlReachability};
-use super::route::{Query, Target};
+use super::route::Query;
 use super::{HttpObjectResponse, HttpObjectsConfig};
 use crate::Procedure;
 use crate::repo::RepoId;
@@ -19,17 +19,41 @@ use crate::{BoxFuture, MaybeSend, MaybeSync, Redacted, ServerError};
 /// repository's visibility is known; a public repository ignores it. The
 /// token is never logged.
 pub trait TokenGate: MaybeSend + MaybeSync {
-    /// Whether the token passed its precheck.
-    fn precheck(&self, target: &Target, token: &Redacted) -> bool;
+    /// Retain a redacted verified statement until visibility is known.
+    fn precheck(
+        &self,
+        token: &Redacted,
+        now_ms: i64,
+    ) -> Result<crate::url_token::Prechecked, crate::url_token::TokenRejected>;
+    /// Configured maximum token lifetime, used by stateless binding checks.
+    fn ttl_ms(&self) -> u64;
 }
 
-/// No tokens are issued yet: every precheck passes and nothing reads it.
+/// No keys are configured; private reads fail with the uniform 404.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoTokens;
-
 impl TokenGate for NoTokens {
-    fn precheck(&self, _: &Target, _: &Redacted) -> bool {
-        true
+    fn precheck(
+        &self,
+        _: &Redacted,
+        _: i64,
+    ) -> Result<crate::url_token::Prechecked, crate::url_token::TokenRejected> {
+        Err(crate::url_token::TokenRejected)
+    }
+    fn ttl_ms(&self) -> u64 {
+        0
+    }
+}
+impl TokenGate for crate::url_token::UrlTokenConfig {
+    fn precheck(
+        &self,
+        token: &Redacted,
+        now_ms: i64,
+    ) -> Result<crate::url_token::Prechecked, crate::url_token::TokenRejected> {
+        self.precheck(token.expose(), now_ms)
+    }
+    fn ttl_ms(&self) -> u64 {
+        self.ttl_ms()
     }
 }
 
@@ -48,6 +72,8 @@ pub struct AdmitRequest<'a> {
     pub ref_path: bool,
     /// The selected GET body length, after ordinary Range selection.
     pub declared_bytes: u64,
+    /// Selected payment credentials; never contains Bearer credentials.
+    pub credential_headers: &'a [crate::pipeline::CredentialHeader],
 }
 
 /// What an admitted read adds to its 200 or 206.
@@ -203,6 +229,8 @@ impl ProofServer for UnsupportedProofs {
 pub struct HttpSeams {
     /// §3 step 5 (WP-4.15).
     pub tokens: Arc<dyn TokenGate>,
+    /// Retains asynchronous read finalization on cancellation. Required for reservations.
+    pub read_runtime: Option<super::HttpReadRuntime>,
     /// §3 step 11 (WP-4.13).
     pub admission: Arc<dyn HttpAdmission>,
     /// §3 steps 7-8 (WP-5.9a).
@@ -219,6 +247,7 @@ impl HttpSeams {
     pub fn new(cfg: &HttpObjectsConfig) -> Self {
         Self {
             tokens: Arc::new(NoTokens),
+            read_runtime: None,
             admission: Arc::new(NoAdmission),
             takedown: Arc::new(NoTakedown),
             proofs: Arc::new(UnsupportedProofs),

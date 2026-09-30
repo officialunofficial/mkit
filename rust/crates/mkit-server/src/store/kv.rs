@@ -511,3 +511,49 @@ pub trait NamespaceStore: MaybeSend + MaybeSync {
     /// A cheap health check.
     fn probe(&self) -> impl Future<Output = Result<(), StoreError>> + MaybeSend;
 }
+
+// Share a store handle across response streams and retained finalizers.
+impl<S: NamespaceStore + ?Sized> NamespaceStore for std::sync::Arc<S> {
+    fn capabilities(&self) -> StoreCapabilities {
+        (**self).capabilities()
+    }
+    async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
+        (**self).get(p, key).await
+    }
+    async fn has(&self, p: &Partition, key: &Key) -> Result<bool, StoreError> {
+        (**self).has(p, key).await
+    }
+    async fn get_many(
+        &self,
+        p: &Partition,
+        keys: &[Key],
+    ) -> Result<Vec<Option<Value>>, StoreError> {
+        (**self).get_many(p, keys).await
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&Cursor>,
+        limit: u32,
+    ) -> Result<ScanPage, StoreError> {
+        (**self).scan(p, start, end, after, limit).await
+    }
+    async fn scan_many(
+        &self,
+        p: &Partition,
+        ranges: &[RangeScan],
+    ) -> Result<Vec<ScanPage>, StoreError> {
+        (**self).scan_many(p, ranges).await
+    }
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        (**self).apply(p, batch).await
+    }
+    async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
+        (**self).stats(p).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        (**self).probe().await
+    }
+}

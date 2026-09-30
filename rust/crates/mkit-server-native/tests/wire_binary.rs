@@ -115,6 +115,9 @@ async fn check(origin: &str, profile: Profile) {
     let report = run(&target, None).await;
     if target.profile.has(Feature::Tickets) {
         for name in [
+            "tickets.begin_upload_per_ref_cap",
+            "tickets.advance_ticket_bindings",
+            "refs.many_refs_one_repository",
             "tickets.begin_upload_new",
             "tickets.begin_upload_idempotent",
             "tickets.begin_upload_caps",
@@ -135,6 +138,20 @@ async fn check(origin: &str, profile: Profile) {
             "multipart.resume_receipts",
             "multipart.root_mismatch_invisible",
         ] {
+            assert!(
+                matches!(report.verdict(name), Some(Verdict::Pass(_))),
+                "{name} did not pass"
+            );
+        }
+    }
+    if target.profile.has(Feature::TestFaults) && target.profile.has(Feature::Tickets) {
+        // Neither may skip: the ticket expiry timer frees the cap, and on D34
+        // a held relay makes the listing lag observable.
+        let mut lagged = vec!["tickets.expiry_timer_frees_cap_slot"];
+        if target.profile.sharding_d34 {
+            lagged.push("lag.list_refs_window");
+        }
+        for name in lagged {
             assert!(
                 matches!(report.verdict(name), Some(Verdict::Pass(_))),
                 "{name} did not pass"

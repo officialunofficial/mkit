@@ -1821,6 +1821,41 @@ the pipeline `private_repository_reads_return_the_missing_repository_error`
 and `a_signed_read_writes_no_replay_rows` tests; the connect_dispatch and
 wire `reads.private_not_found_byte_identical` cases.
 
+## Paid HTTP reads reserve durably and settle once
+
+**Always:** a reservation-bearing HTTP read records Pending(Read) before
+returning a body; transmission stops at the configured creation-based deadline.
+Completion and reconciliation conditionally replace the same pending bytes.
+Partial transmission records ReadServed(actual bytes handed to the stream),
+and a zero-byte failure records Aborted(INTERNAL); HEAD succeeds with zero bytes.
+
+**Because:** charging without a durable obligation loses accounting on a crash,
+and independent terminal writes can charge one reservation twice.
+
+**If violated:** a paid stream can escape accounting or create duplicate outcomes.
+
+**Enforced by:** `pipeline/http_admission.rs`, `http_objects/paid.rs`,
+`timers/reservation_reconcile.rs` and the focused `http_objects/paid_reads` tests.
+Stage 2 only; adapters must retain the injected spawner's tasks (WP-4.16).
+
+## HTTP URL tokens bind before stored epoch access
+
+**Always:** private HTTP reads precheck signatures before repository lookup,
+then bind audience, repository, decoded target, expiry and lifetime before
+reading the stored epoch. Public reads ignore every token result. A valid
+private token still requires the Authorizer, and the caller stays anonymous.
+Private immutable freshness never exceeds the token's remaining lifetime.
+
+**Because:** early epoch access reveals extra state to invalid tokens, and
+cache freshness beyond expiry extends a private authorization capability.
+
+**If violated:** invalid tokens can probe stored state or private content can
+remain fresh after the authorization expires.
+
+**Enforced by:** `pipeline/http_tokens.rs`, `policy/read.rs` and counted-store
+`http_objects/private_tokens` tests. Stage 2 only; shared-cache bypass belongs
+to the adapters in WP-4.16.
+
 ## Published ref snapshots never authorize a read
 
 **Always:** configured snapshots serve only anonymous reads after the authoritative

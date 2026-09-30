@@ -21,6 +21,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - RPC: public `mkit-rpc::hooks` message types with JSON support and runtime-free
   `HookSigner` and `HookVerifier`, enabled by the `hooks` feature. The server
   re-exports its authentication surface (WP-3.7b, Linear MKIT-67).
+
+- Server (Stage 2, inert): URL tokens now authorize private HTTP object
+  and ref-path reads through staged signature, stateless binding and epoch
+  checks, while preserving anonymous published access and Authorizer checks.
+  Private immutable cache lifetimes are bounded by token expiry; private ref
+  paths require revalidation. Active and retained token keys are separated
+  from ticket secrets without exposing seeds (WP-4.15, R-178).
+
+- Server (Stage 2, inert): programmatic `HttpObjectsConfig::admit_reads`
+  enables paid GET and HEAD reads, canonical JSON 402s, private admitted
+  responses, durable pending reads before transmission, deadline enforcement
+  and retained asynchronous byte accounting (WP-4.13, R-177). The shared
+  credential selector now denies comma-joined selected payment headers,
+  correcting #1212; non-Payment Authorization remains excluded. API:
+  `HttpReadRuntime` injects retained tasks and deadlines, and
+  `HttpObjectRequest::header_names` preserves credential name spelling.
 - WP-1.19: add an inert Stage 2 staging template and activation/backup runbook; provisioning, routes and CPU sizing wait until after REL-1.
 
 - **WP-1.21 (Stage 2):** default-off Worker published ref-index snapshots with bounded binary envelopes,
@@ -79,6 +95,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shard, coordinator and root classes; the quota conformance cases run under
   D34 (per-branch) and a Multi + D34 case checks the namespace cap across
   branches after a forced rollup (WP-1.26b).
+- Server: the M1 exit wire conformance suite (WP-1.27): isolation replay, target-ref ticket caps and expiry, the
+  D34 lag windows and D36 hinted reads over a held relay, idle and expired epoch-lease renewal, 64-ref writes, an
+  over-32 MiB native listing and bounded ticket growth; the `test-faults` timer directive also expires tickets and
+  the Worker stats hook is scoped to one ref's shard under D34. The report is
+  `docs/plans/mkit-server/m1-exit-report.md`. `mkit-server-conformance` `Profile` gains `ticket_per_ref` and
+  `merge_paging_refs` (WP-1.27).
 - Server: `mkit-server serve` gains `--grant-schemes`, a repeatable
   `--webauthn-rp <id=origin[,origin...]>` and the development-only
   `--unsafe-allow-loopback-grants`; the Worker gains the `GRANT_SCHEMES` and

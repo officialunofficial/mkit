@@ -12,9 +12,11 @@
 #                  server: (1) the whole suite, with the clock-skew directive
 #                  and the stats hook (`replay.expired_retry_rejected`); (2)
 #                  with a declared per-signer quota (`TEST_QUOTA_*` vars, read
-#                  only by a test-faults build): `growth.replay_and_quota_pruned`
-#                  first, on the still-disposable server (it waits out the
-#                  quota window: about 3 minutes), then the `quota.` cases.
+#                  only by a test-faults build) and a 20 s ticket lifetime
+#                  (`TEST_TICKET_TTL_MS`): the `growth.` cases first, on the
+#                  still-disposable server (they wait out the quota window and
+#                  the ticket lifetime: about 6 minutes), then the `quota.`
+#                  cases.
 #                  It then checks that the adapter never held more than 1 MiB
 #                  of an `UploadPack` or `DownloadPack` body at once. The
 #                  bound covers the streaming RPCs only: a unary response is
@@ -23,23 +25,29 @@
 #                  stays under) until WP-1.27 pages it.
 #   --sharding d34  the default (WP-1.28c; `--sharding single` pins the old
 #                   routing). D34 quota cases spend one branch (quota is per
-#                   (signer, branch) under Single addressing); the growth case
-#                   waits for WP-1.27's partition-scoped stats hook. With
-#                   --test-faults it plants a RefShard relay and verifies
-#                   RepoIndexShard delivery and queue drainage; with --multi
-#                   too, a Multi + D34 quota phase forces a rollup under clock
-#                   skew and checks the namespace cap across branches.
+#                   (signer, branch) under Single addressing); the growth
+#                   cases read the stats hook scoped to one ref's shard
+#                   (`?ref=`, WP-1.27), and the suite declares `epoch-leases`.
+#                   With --test-faults it plants a RefShard relay and verifies
+#                   RepoIndexShard delivery and queue drainage, and the lag
+#                   cases hold the relay (`x-mkit-test-relay-delay-ms`); with
+#                   --multi too, the grant phase adds the lease, lag-window and
+#                   D36 hint cases, and a Multi + D34 quota phase forces a
+#                   rollup under clock skew and checks the namespace cap
+#                   across branches.
 #   --hooks        add M3 admission/CORS/outcome checks with the Rust MPP fixture.
 #   --multi        add the Multi phase (WP-1.30): a fresh server started with
 #                  ADDRESSING=multi and the namespace allowlist the run's
 #                  fixed seed and run id derive, then the Multi wire cases
 #                  (repo., repository., policy., tickets.advance_other_repository,
-#                  info.). The membership cases seed their fixture over the
-#                  wire; only repo.membership_read_your_writes still skips —
-#                  its membership index must stay undelivered. With
+#                  tickets.advance_ticket_bindings, info.). The membership
+#                  cases seed their fixture over the wire; only
+#                  repo.membership_read_your_writes still skips (its membership
+#                  index must stay undelivered against a live relay). With
 #                  --test-faults, a grant phase (WP-1.30b) configures
 #                  GRANT_SCHEMES, WEBAUTHN_RPS and UNSAFE_LOOPBACK_GRANTS and
-#                  runs the grants., ref_scopes. and epochs. cases at M2.
+#                  runs the grants., ref_scopes., epochs., leases., lag. and
+#                  repo. cases at M2.
 #   -- ARGS        passed to every `mkit-server-conformance wire` run (e.g.
 #                  `-- --filter refs.`, `-- --list-refs 1000`).
 #
@@ -77,6 +85,8 @@ MAX_PACK_BYTES=1073741824
 TEST_QUOTA_OPS=300
 TEST_QUOTA_BYTES=2097152
 TEST_QUOTA_WINDOW_MS=60000
+# The ticket lifetime in that phase: the ticket growth case waits it out.
+TEST_TICKET_TTL_MS=20000
 # The adapter's body-buffer bound under test (bytes).
 MAX_BUFFERED_BYTES=1048576
 
@@ -117,6 +127,12 @@ stop_server() {
         kill -- "-${server_pid}" 2>/dev/null || kill "${server_pid}" 2>/dev/null || true
         wait "${server_pid}" 2>/dev/null || true
         server_pid=""
+        # workerd can outlive its parent for a moment: wait for the port, or the
+        # next phase's health probe answers from the dying server.
+        local deadline=$((SECONDS + 30))
+        while (echo >"/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null && [ "${SECONDS}" -lt "${deadline}" ]; do
+            sleep 0.2
+        done
     fi
 }
 
@@ -225,12 +241,32 @@ cold_start() {
     echo ">> [${name}] concurrent cold-start passed: 30/30 HTTP 200 / SERVING"
 }
 
+# capture <command...>: run it with its TAP on stdout kept in ${work}/last.tap
+# as well; the command's exit status lands in ${status}.
+capture() {
+    set +e
+    "$@" | tee "${work}/last.tap"
+    status=${PIPESTATUS[0]}
+    set -e
+}
+
+# require_pass <case...>: each named case passed in the last captured run (a
+# skip or an absent case is a failure): the exit status alone cannot tell.
+require_pass() {
+    local name
+    for name in "$@"; do
+        if ! grep -E "^ok [0-9]+ - ${name}( #|\$)" "${work}/last.tap" | grep -v '# SKIP' | grep -q .; then
+            echo "${name} did not run and pass" >&2
+            exit 1
+        fi
+    done
+}
+
 # run_suite <features> <runner args...>
 run_suite() {
     local features="$1"
     shift
     echo ">> running the wire suite (features: ${features}) $*"
-    local status=0
     # List fixture concurrency: miniflare's proxy drops UpdateRef ("Network
     # connection lost"; the dev server continues) when several slow writes are
     # in flight, so local runs pace to 1. CI keeps 8, the concurrent-UpdateRef
@@ -240,11 +276,11 @@ run_suite() {
     if [ -z "${list_parallel}" ]; then
         if [ -n "${CI:-}" ]; then list_parallel=8; else list_parallel=1; fi
     fi
-    "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
+    capture "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
         --repository "${REPOSITORY}" --random-signer --atomic-advance --fresh-target --milestone M1 \
         --max-pack-bytes "${MAX_PACK_BYTES}" --features "${features}" --sharding "${sharding}" \
         --list-parallel "${list_parallel}" \
-        "$@" ${d34_list_args[@]+"${d34_list_args[@]}"} ${runner_args[@]+"${runner_args[@]}"} || status=$?
+        "$@" ${d34_list_args[@]+"${d34_list_args[@]}"} ${runner_args[@]+"${runner_args[@]}"}
     if [ "${status}" -ne 0 ]; then
         echo "wire suite failed (exit ${status}); wrangler log tail:" >&2
         tail -n 80 "${log}" >&2
@@ -321,6 +357,8 @@ NODE
 # The pipeline serves grpc.health.v1 and rejects an auth v2 signature over
 # gzip-encoded bytes (fails closed, SPEC-WRITE-GRANTS §9.2 is open).
 features="health,strict-gzip-auth,tickets,multipart"
+# D34 runs epoch leases (the bump case needs the test-faults directive).
+if [ "${sharding}" = d34 ]; then features="${features},epoch-leases"; fi
 build_args=(--release)
 vars=(--var "AUTH_AUDIENCE:${ORIGIN}" --var "AUTH_REPOSITORY:${REPOSITORY}" --var "SHARDING:${sharding}")
 if [ "${test_faults}" -eq 1 ]; then
@@ -339,6 +377,12 @@ echo ">> building apps/vcs-worker (worker-build ${build_args[*]})"
 
 start_server suite "${vars[@]}"
 run_suite "${features}"
+if [ "${test_faults}" -eq 1 ] && [ -z "${runner_args[*]:-}" ]; then
+    require_pass tickets.expiry_timer_frees_cap_slot
+    if [ "${sharding}" = d34 ]; then
+        require_pass lag.list_refs_window leases.bump_completes_and_writes_continue
+    fi
+fi
 if [ "${test_faults}" -eq 1 ] && [ "${sharding}" = single ]; then
     snapshot_round_trip
 fi
@@ -353,14 +397,14 @@ if [ "${test_faults}" -eq 1 ]; then
     start_server quota "${vars[@]}" \
         --var "TEST_QUOTA_OPS:${TEST_QUOTA_OPS}" \
         --var "TEST_QUOTA_BYTES:${TEST_QUOTA_BYTES}" \
-        --var "TEST_QUOTA_WINDOW_MS:${TEST_QUOTA_WINDOW_MS}"
-    if [ "${sharding}" = d34 ]; then
-        # The growth case reads the single-partition stats hook; WP-1.27 adds a
-        # partition-scoped one. D34 quota cases spend one branch (per-branch
-        # quota) and run below.
-        echo ">> skipping growth.replay_and_quota_pruned under D34: the stats hook is single-partition until WP-1.27"
-    else
-        run_suite "${features}" "${quota_args[@]}" --filter growth.
+        --var "TEST_QUOTA_WINDOW_MS:${TEST_QUOTA_WINDOW_MS}" \
+        --var "TEST_TICKET_TTL_MS:${TEST_TICKET_TTL_MS}"
+    # The growth cases first, on the still-disposable server: the stats hook
+    # reads the partition of one ref's shard under D34 (`?ref=`), else the
+    # deployment's single partition.
+    run_suite "${features}" "${quota_args[@]}" --filter growth.
+    if [ -z "${runner_args[*]:-}" ]; then
+        require_pass growth.replay_and_quota_pruned growth.tickets_and_outbox_pruned
     fi
     run_suite "${features}" "${quota_args[@]}" --filter quota.
     stop_server
@@ -400,7 +444,8 @@ if [ "${multi}" -eq 1 ]; then
 
     start_server multi "${vars[@]}" \
         --var "ADDRESSING:multi" --var "NAMESPACE_ALLOWLIST:${allowlist}"
-    for filter in repo. repository. policy. tickets.advance_other_repository info.; do
+    for filter in repo. repository. policy. tickets.advance_other_repository \
+        tickets.advance_ticket_bindings info.; do
         echo ">> running the Multi wire suite (features: ${multi_features}) --filter ${filter}"
         status=0
         "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
@@ -428,25 +473,39 @@ if [ "${multi}" -eq 1 ]; then
             --run-id "${multi_run_id}" --grant-owners)"
         grant_allowlist="$(printf '%s' "${grant_allowlist}" | tr '\n' ',')"
         grant_features="${multi_features},grants,test-faults,timers"
+        # Epoch leases exist under D34 only; the lease, lag-window and D36
+        # hint cases also need test-faults (this phase is such a build).
+        if [ "${sharding}" = d34 ]; then grant_features="${grant_features},epoch-leases"; fi
         start_server multi-grants "${vars[@]}" \
             --var "ADDRESSING:multi" --var "NAMESPACE_ALLOWLIST:${grant_allowlist}" \
             --var "GRANT_SCHEMES:ed25519,secp256k1-eip191,webauthn-p256" \
             --var "WEBAUTHN_RPS:example.test=https://example.test" \
             --var "UNSAFE_LOOPBACK_GRANTS:true"
-        for filter in info.shape_and_policy grants. ref_scopes. epochs.; do
+        for filter in info.shape_and_policy grants. ref_scopes. epochs. leases. lag. repo. \
+            tickets.advance_ticket_bindings; do
             echo ">> running the Multi grant wire suite (features: ${grant_features}) --filter ${filter}"
-            status=0
-            "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
+            capture "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
                 --repository "${REPOSITORY}" --signer-seed-hex "${multi_seed}" \
                 --run-id "${multi_run_id}" --atomic-advance --fresh-target --milestone M2 \
                 --max-pack-bytes "${MAX_PACK_BYTES}" --features "${grant_features}" \
                 --sharding "${sharding}" --filter "${filter}" \
                 ${d34_list_args[@]+"${d34_list_args[@]}"} \
-                ${runner_args[@]+"${runner_args[@]}"} || status=$?
+                ${runner_args[@]+"${runner_args[@]}"}
             if [ "${status}" -ne 0 ]; then
                 echo "Multi grant wire suite failed (exit ${status}); wrangler log tail:" >&2
                 tail -n 80 "${log}" >&2
                 exit "${status}"
+            fi
+            if [ -z "${runner_args[*]:-}" ]; then
+                case "${filter}" in
+                    leases.) if [ "${sharding}" = d34 ]; then
+                        require_pass leases.idle_shard_renews_at_new_epoch \
+                            leases.lease_expires_before_revocation_completes
+                    fi ;;
+                    repo.) require_pass repo.isolation_replay
+                        if [ "${sharding}" = d34 ]; then require_pass repo.d36_hint_reads_during_lag; fi ;;
+                    lag.) if [ "${sharding}" = d34 ]; then require_pass lag.membership_window; fi ;;
+                esac
             fi
         done
         stop_server

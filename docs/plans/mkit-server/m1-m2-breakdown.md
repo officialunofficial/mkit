@@ -58,6 +58,12 @@ The M1 exit criteria:
   revocation (revoke during an in-flight write, a paused write reaching its shard after lease expiry, an idle shard
   waking after a revocation, lease expiry racing an ack), many-ref write throughput in one repo,
   `BeginUpload` with a target ref, ticket caps, ListRefs merge pagination under the RPC limit, and bounded growth.
+  **Satisfied locally (WP-1.27, amended R-159, R-160):** each case runs on the lanes the report's matrix names (native lanes and
+  `wrangler dev`; the 75,000-ref listing is native only, and bounded ticket growth runs on `wrangler dev` only).
+  Wire leases cover bump, idle wake and expiry before revocation completes, with no ack in flight;
+  the in-crate races (revoke during a write, R-63, the paused write, expiry racing an ack) are cited per amended R-159.
+  The report retains failed Worker proxy attempts. The results
+  are in [`m1-exit-report.md`](m1-exit-report.md).
 - ~~A real `mkit` push and clone works against staging.~~ **Superseded (R-154, R-159):** Stage 1's exit evidence is
   local runs (`m1-exit-report.md`); staging is ops work after REL-1.
 - ~~Conformance runs against deployed staging (not only `wrangler dev`, whose DO bindings are always local). During the
@@ -487,8 +493,9 @@ Folded into WP-S1 §7.6/§7.8/§7.9 (adopted Q18 default). Every former dependen
   open-ticket caps; lag windows for membership and ListRefs (using the relay-delay fault); **D36 read-your-writes:
   a pusher's `PackExists`/`DownloadPack` with `X-Mkit-Ref` sees its just-advanced packs immediately while the relay
   is delayed, and the header never reveals another repo's packs or a ref of another repo**; epoch-lease revocation
-  (revoke during an in-flight write, the paused-write/failed-push/expired-lease case of R-63, idle shard waking
-  after a revocation, lease expiry racing an ack) via the test bump endpoint; many-ref write throughput in one repo (64 refs written concurrently; ~~on staging assert
+  (**amended R-159:** bump, idle shard waking after revocation, lease expiry before revocation completes over
+  the wire; revoke during an in-flight write, R-63 and lease expiry racing an ack stay in-crate and are cited);
+  many-ref write throughput in one repo (64 refs written concurrently; ~~on staging assert
   aggregate throughput ≥ 8× a single hot ref~~ **superseded (R-154, R-159): no staging bar**; on `wrangler dev` only correctness); bounded growth (replay, quota,
   tickets and outbox key counts shrink back after load + clock skew); ListRefs merge pagination across ref-index
   buckets with a > 32 MiB total listing and every page ≤ 2 MiB.
