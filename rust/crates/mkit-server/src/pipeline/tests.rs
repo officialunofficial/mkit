@@ -77,6 +77,10 @@ fn planned_ticket_advance(count: usize) -> Batch {
 
 #[allow(clippy::too_many_lines)] // A full ticket snapshot and its expected maximal planner shape.
 fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
+    planned_ticket_publication(count, d34, false)
+}
+#[allow(clippy::too_many_lines)] // A complete ticket snapshot pins the maximal apply budget.
+fn planned_ticket_publication(count: usize, d34: bool, retained: bool) -> Batch {
     use crate::store::codec::{ReservationV1, TicketV1};
     let repo = RepoId {
         namespace: NamespaceKey::deployment_default(),
@@ -113,6 +117,22 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
         fingerprint: [2; 32],
         expires_at_ms: T0 + 60_000,
     };
+    let mut record = clearance::immediate(
+        crate::store::publication::Pair {
+            head: Some(C),
+            packmap: Some(B),
+        },
+        [1; 32],
+        vec![],
+    );
+    if retained {
+        record
+            .obligations
+            .push(crate::store::publication::Obligation {
+                id: [8; 32],
+                state: crate::store::publication::Clearance::Cleared,
+            });
+    }
     let req = WriteRequest {
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
@@ -144,6 +164,12 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
         advance: Some(advance.clone()),
         implicit: None,
         rejection: None,
+        publication: Some(clearance::PublicationWrite {
+            repo: &repo,
+            source: &source,
+            shards,
+            prepared: Some(&record),
+        }),
         pending: None,
     };
     let mut snap = snapshot(&req, &[]);
@@ -202,10 +228,24 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
 }
 
 #[test]
+fn seven_ticket_publication_bounds_are_real_batches() {
+    for (d34, retained, expected) in [
+        (true, false, 93),
+        (true, true, 94),
+        (false, false, 84),
+        (false, true, 85),
+    ] {
+        let batch = planned_ticket_publication(7, d34, retained);
+        assert_eq!(batch.preconditions.len() + batch.writes.len(), expected);
+        batch.validate(&StoreCapabilities::full()).unwrap();
+    }
+}
+
+#[test]
 fn seven_ticket_advance_plans_a_valid_real_batch() {
     let batch = planned_ticket_advance(7);
     let ops = batch.preconditions.len() + batch.writes.len();
-    assert_eq!(ops, 89);
+    assert_eq!(ops, 93);
     for key in [
         keys::epoch_lease(),
         keys::layout_version(),
@@ -224,8 +264,10 @@ fn seven_ticket_advance_plans_a_valid_real_batch() {
                 .any(|w| matches!(w, Write::Put(k, _) if *k == key))
         );
     }
+    // This immediate, obligation-free advance omits the retained av row;
+    // the shared maximum also allows a retained completed inspection record.
     assert_eq!(
-        ops,
+        ops + 1,
         crate::store::outbox::MAX_TICKETS_PER_ADVANCE * 9
             + crate::store::outbox::ADVANCE_SHARED_OPS
     );
@@ -288,7 +330,7 @@ fn single_ticket_advance_guards_the_grant_epoch() {
             .count(),
         1
     );
-    assert_eq!(ops, 80);
+    assert_eq!(ops, 84);
     assert!(ops <= crate::store::MAX_BATCH_OPS);
 }
 
@@ -361,6 +403,7 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
         mark_repo_known: true,
         begin: None,
         advance: None,
+        publication: None,
         pending: None,
         implicit: Some(implicit),
         rejection: None,
@@ -1068,7 +1111,10 @@ impl<H: HookSet> Env<H> {
 fn seed(kv: &MemoryKv, refs: &[(&str, Hash)]) {
     let name = RepoName::new(REPO).unwrap();
     for (n, id) in refs {
-        let batch = Batch::new().put(keys::ref_key(&name, n), codec::encode_ref_id(id));
+        let mut batch = Batch::new().put(keys::ref_key(&name, n), codec::encode_ref_id(id));
+        if kv.capabilities().atomic_multi_key {
+            batch = batch.put(keys::published_ref(&name, n), codec::encode_ref_id(id));
+        }
         assert_eq!(
             now(kv.apply(&ns(), batch)).unwrap(),
             BatchOutcome::Committed
@@ -2732,6 +2778,7 @@ fn incapable_authority_planner_request_refuses_generation() {
         let req = WriteRequest {
             authority_store,
             authority_generation: Some(0),
+            publication: None,
             repo: &name,
             kind: WriteKind::UpdateRef,
             refs: &refs,
@@ -2788,6 +2835,7 @@ fn simple_index_batch(
         advance: None,
         implicit: None,
         rejection: None,
+        publication: None,
         pending: None,
     };
     plan_write(&req, &snapshot(&req, values), &clock_at(5, None)).unwrap()
@@ -2943,6 +2991,7 @@ fn plan_cas_any_missing_match_on_snapshot() {
             mark_repo_known: false,
             lease: None,
             rejection: None,
+            publication: None,
             pending: None,
             begin: None,
             advance: None,
@@ -3011,6 +3060,7 @@ fn plan_conflict_writes_only_the_replay_record() {
         mark_repo_known: false,
         lease: None,
         rejection: None,
+        publication: None,
         pending: None,
         begin: None,
         advance: None,
@@ -3087,6 +3137,7 @@ fn plan_quota_exhaustion_yields_no_batch() {
         mark_repo_known: false,
         lease: None,
         rejection: None,
+        publication: None,
         pending: None,
         begin: None,
         advance: None,
@@ -3144,7 +3195,8 @@ proptest! {
             mark_repo_known: false,
                     lease: None,
             rejection: None,
-            pending: None,
+            publication: None,
+        pending: None,
                     begin: None,
             advance: None,
             implicit: None,
@@ -3769,6 +3821,7 @@ fn plan_signed_conflict_still_charges_quota() {
         mark_repo_known: false,
         lease: None,
         rejection: None,
+        publication: None,
         pending: None,
         begin: None,
         advance: None,
@@ -3831,6 +3884,7 @@ fn plan_prune_fits_the_batch_op_cap() {
         mark_repo_known: false,
         lease: None,
         rejection: None,
+        publication: None,
         pending: None,
         begin: None,
         advance: None,
@@ -3886,6 +3940,7 @@ fn prune_sampling_is_deterministic_one_in_eight() {
         mark_repo_known: false,
         lease: None,
         rejection: None,
+        publication: None,
         pending: None,
         begin: None,
         advance: None,
@@ -4083,7 +4138,9 @@ fn lost_prune_race_retries_without_prune_uncounted() {
     env.update(&Req::update(&key(7), n, &u, T0), &u).unwrap();
     let batches = env.batches();
     assert_eq!(batches.len(), usize::try_from(MAX_REPLAN).unwrap() + 2);
-    let deletes = |b: &Batch| b.writes.iter().any(|w| matches!(w, Write::Delete(_)));
+    let deletes = |b: &Batch| {
+        b.writes.iter().any(|w| matches!(w, Write::Delete(k) if matches!(keys::parse(k), Some(keys::ParsedKey::Quota(_) | keys::ParsedKey::QuotaWindow { .. }))))
+    };
     assert!(deletes(&batches[0]), "the first attempt prunes");
     assert!(!batches[1..].iter().any(deletes), "the retries do not");
     let kept = now(env.pipe.meta.inner.get(&ns(), &quota)).unwrap();
@@ -4382,6 +4439,7 @@ fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
             install: false,
         }),
         rejection: None,
+        publication: None,
         pending: None,
         begin: None,
         advance: None,
@@ -4499,6 +4557,7 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
             layout_version: false,
             mark_repo_known: false,
             rejection: None,
+            publication: None,
             pending: None,
             begin: None,
             advance: None,
@@ -5023,3 +5082,131 @@ fn pipeline_refuses_more_extra_credential_headers_than_fit() {
 #[cfg(feature = "published-view")]
 #[path = "tests/published.rs"]
 mod published_view;
+
+#[test]
+fn admin_keys_cannot_authenticate_client_transport_principals() {
+    let admin = key(1);
+    let admin_key = *admin.verifying_key().as_bytes();
+    let mut c = cfg(AuthMode::TransportIdentity);
+    c.admin_keys = vec![admin_key];
+    let clock = clock();
+    let e = build(c, Spy::new(store(&clock)), Hooks::new(), clock);
+    for principal in [
+        Principal::TransportPeer { ed25519: admin_key },
+        Principal::SshForcedCommand {
+            key: Some(admin_key),
+        },
+    ] {
+        let mut req = Req::unsigned(Procedure::UpdateRef);
+        req.principal = Some(principal);
+        assert_eq!(e.auth(&req).unwrap_err().code(), Code::Unauthenticated);
+    }
+    let mut req = Req::unsigned(Procedure::UpdateRef);
+    req.principal = Some(Principal::TransportPeer {
+        ed25519: *key(2).verifying_key().as_bytes(),
+    });
+    assert!(e.auth(&req).is_ok(), "distinct client key remains usable");
+    assert!(e.batches().is_empty());
+}
+
+#[test]
+fn prepared_publication_pair_cannot_survive_a_counterpart_guard_race() {
+    use crate::store::publication::{Pair, Publication};
+    let repo = repo();
+    let source = SinglePartition.ref_shard(&repo, HEAD);
+    let refs = [upd(HEAD, Match(A), B)];
+    let prepared = clearance::immediate(
+        Pair {
+            head: Some(B),
+            packmap: Some(C),
+        },
+        [0; 32],
+        vec![],
+    );
+    let req = WriteRequest {
+        authority_store: AuthorityStore::Guarded,
+        authority_generation: None,
+        repo: &repo.name,
+        kind: WriteKind::UpdateRef,
+        refs: &refs,
+        ref_index: None,
+        replay: None,
+        charges: &[],
+        namespace_charge: None,
+        grant: None,
+        lease: None,
+        layout_version: false,
+        mark_repo_known: false,
+        begin: None,
+        advance: None,
+        implicit: None,
+        rejection: None,
+        pending: None,
+        publication: Some(clearance::PublicationWrite {
+            repo: &repo,
+            source: &source,
+            shards: &SinglePartition,
+            prepared: Some(&prepared),
+        }),
+    };
+    let values = [
+        (keys::ref_key(&repo.name, HEAD), codec::encode_ref_id(&A)),
+        (keys::ref_key(&repo.name, PACKMAP), codec::encode_ref_id(&C)),
+    ];
+    let snapshot_before = snapshot(&req, &values);
+    let Planned::Apply(first) = plan_write(&req, &snapshot_before, &clock_at(0, None)).unwrap()
+    else {
+        panic!("apply")
+    };
+    let kv = store(&Arc::new(ManualClock::new(0)));
+    now(kv.apply(
+        &source,
+        values
+            .iter()
+            .fold(Batch::new(), |b, (k, v)| b.put(k.clone(), v.clone())),
+    ))
+    .unwrap();
+    // A concurrent packmap-only write changes the retained publication state.
+    let current = Publication {
+        sequence: 1,
+        published: 1,
+        value: Pair {
+            head: Some(A),
+            packmap: Some(B),
+        },
+        ..Default::default()
+    };
+    let state_key = keys::publication(&repo.name, HEAD);
+    let raw = current.encode().unwrap();
+    now(kv.apply(
+        &source,
+        Batch::new()
+            .put(keys::ref_key(&repo.name, PACKMAP), codec::encode_ref_id(&B))
+            .put(state_key.clone(), raw.clone()),
+    ))
+    .unwrap();
+    assert!(matches!(
+        now(kv.apply(&source, first.batch)).unwrap(),
+        BatchOutcome::PreconditionFailed { .. }
+    ));
+    let fresh = snapshot(
+        &req,
+        &[
+            (values[0].0.clone(), values[0].1.clone()),
+            (values[1].0.clone(), codec::encode_ref_id(&B)),
+            (state_key, raw),
+        ],
+    );
+    let error = plan_write(&req, &fresh, &clock_at(0, None)).unwrap_err();
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(error.public_message(), "publication pair changed; retry");
+    assert_eq!(
+        now(read::read_ref(&kv, &source, &repo.name, HEAD)).unwrap(),
+        Some(A)
+    );
+    assert!(
+        now(kv.get(&source, &keys::advance(&repo.name, HEAD, 2)))
+            .unwrap()
+            .is_none()
+    );
+}

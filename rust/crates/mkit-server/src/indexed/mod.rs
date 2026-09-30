@@ -9,6 +9,7 @@ pub mod entries;
 mod etag;
 mod extract;
 pub mod job;
+pub mod publication;
 pub mod resolve;
 pub mod scheduled;
 mod selection;

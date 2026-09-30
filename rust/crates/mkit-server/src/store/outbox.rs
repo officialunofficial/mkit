@@ -17,14 +17,15 @@ use super::{
 /// put and one relay-row share. An advance uses one signer and runs no
 /// admission (the quota planner asserts this in `pipeline::plan_namespace`),
 /// so `tu` and `tc` are each guarded/written once. Shared
-/// overhead is at most 26: deadline 1, lease guard/install 2, absent layout
+/// overhead is at most 31: publication guard/state 2, retained value 1,
+/// two published refs 2, deadline 1, lease guard/install 2, absent layout
 /// version guard/install 2, absent repo-known guard/install 2, two ref CAS
 /// pairs 4, replay 3, counters 4, outbox sequence/backlog 4, and relay kick
 /// 1, ref-index relay rows 2, and one outcome-delivery kick 1. These figures are D34's. On Single, a grant guard replaces the lease
 /// pair and there is no relay share or relay kick, so seven tickets cost
-/// `8 * 7 + 24 = 80`, including durable authority-generation/mode absence guards.
-/// The real maximal planner batches are tested
-/// separately. On D34, seven tickets cost `9 * 7 + 26 = 89` ops before
+/// `8 * 7 + 29 = 85`, including durable authority-generation/mode absence guards.
+/// The real maximal planner batches are tested separately. On D34, seven tickets
+/// cost `9 * 7 + 31 = 94` ops before
 /// opportunistic pruning.
 ///
 /// The same constant caps an implicit transport-identity session's pending
@@ -34,7 +35,7 @@ use super::{
 /// (`maximal_implicit_consume_plans_a_valid_batch`).
 pub const MAX_TICKETS_PER_ADVANCE: usize = 7;
 /// The advance batch's ops outside the per-ticket and per-signer ones.
-pub const ADVANCE_SHARED_OPS: usize = 26;
+pub const ADVANCE_SHARED_OPS: usize = 31;
 const _: () = assert!(MAX_TICKETS_PER_ADVANCE * 9 + ADVANCE_SHARED_OPS <= MAX_BATCH_OPS);
 
 /// Maximum operations (puts plus deletes) per relay row; two ops guard/advance rh,

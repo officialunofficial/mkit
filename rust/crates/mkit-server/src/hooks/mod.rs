@@ -63,7 +63,7 @@ pub use mkit_rpc::hooks::{DEFAULT_VALIDITY, DOMAIN, HookSigner, MAX_VALIDITY, Si
 pub use mkit_rpc::hooks::{
     HookVerifier, KeyListError, MAX_CLOCK_LEAD_MS, Verified, VerifierKey, VerifyError,
 };
-pub use roles::{RemoteAdmission, RemoteAuthorizer, RemoteOutcomes};
+pub use roles::{RemoteAdmission, RemoteAuthorizer, RemoteOutcomes, RemotePurge};
 pub use sign::{NonceSource, OsNonces};
 
 #[cfg(test)]

@@ -55,6 +55,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             layout_version: false,
             mark_repo_known: false,
             rejection: Some(&rejection),
+            publication: None,
             pending: None,
             begin: None,
             advance: None,

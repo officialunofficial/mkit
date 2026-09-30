@@ -724,6 +724,7 @@ checks, to a relative object URL preserving the repository prefix.
 Configured admission disables redirects. Traces record method and escaped
 path only; credentials and queries are redacted.
 
+Stores written by earlier unreleased mkit-server builds are unsupported; reset them.
 Enable `--authority-fence` with repeated `--authority-key` values in the grammar
 `<key-id> <64 lowercase hex public key> <namespace[,namespace...]>`. This requires
 Multi addressing, auth v2, transactional metadata and an Authority hook. The
@@ -740,3 +741,19 @@ activation may return `unavailable` with `Retry-After: 1` until its bounded leas
 barrier completes. Repeating the signed target resumes durable progress; it does
 not create a namespace or charge first-write creation. Restore must preserve the
 authority mode and generation, then declare real lease-table recovery.
+
+## Operator audit and automatic purges
+
+The default-off operator listener uses `--admin-keys-file <PATH>` and optional
+`--admin-listen <ADDR>` (default `127.0.0.1:19191`). It requires `SQLite` metadata,
+auth v2 and the canonical server audience. The file follows SPEC-SERVER §16.3's
+role-bearing Ed25519 public-key list; operator keys must differ from hook, token,
+ticket and write keys. The only mounted procedure is `ReadAuditLog`.
+
+`--hook-cache-purge-url` opts into signed global purge delivery over the existing
+hook key settings. `SQLite` timers resume accepted purge and audit relay work after
+restart. The sink must return an empty JSON object. Failed attempts retain the
+same body/id and sign again with a fresh nonce, using the configured hook timeout.
+No shared serving cache exists in the native adapter; process-local reachability
+is invalidated immediately after serving-state changes. Manual purge is deferred
+to WP-5.6a.

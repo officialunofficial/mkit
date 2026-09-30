@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 use super::extract::Kind;
-use crate::store::{StoreError, Value};
+#[cfg(test)]
+use crate::store::StoreError;
+use crate::store::Value;
 
 /// One decoded entry's projection for union selection. Stored in vc sub-4.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

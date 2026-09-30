@@ -1,5 +1,7 @@
 //! Stage 2 published ref snapshots. Nothing is constructed by Stage 1 entrypoints.
 mod codec;
+mod fence;
+pub use fence::fenced_reader;
 #[cfg(target_arch = "wasm32")]
 mod runtime;
 mod timer;
@@ -19,7 +21,7 @@ pub const MAX_ROWS: usize = 64;
 pub const MAX_BYTES: usize = 32 * 1024;
 /// `Cache` residence, independently checked as well as sent to the `Cache` API.
 pub const CACHE_TTL_MS: u64 = 1000;
-/// Finite freshness window; expired data always takes the live path.
+/// Finite freshness window; expiry falls back to the published index.
 pub const VALIDITY_MS: u64 = 60_000;
 /// Quiet public and private buckets are revisited before expiry.
 pub const REFRESH_MS: u64 = 30_000;
@@ -33,7 +35,7 @@ pub const SNAPSHOTS_BINDING: &str = "PUBLISHED_SNAPSHOTS";
 pub struct PublishedViewConfig {
     /// Unique deployment identity; changing deployments must change this value.
     pub deployment: String,
-    /// No inspection source is wired until WP-5.4/5.5. True refuses live fallback.
+    /// Records inspection activation. Snapshots and fallback both use published inputs.
     pub inspection_configured: bool,
     /// Unsigned `ReadRef` opt-in; signed reads always bypass snapshots.
     pub unsigned_read_ref: bool,
@@ -129,6 +131,9 @@ impl<B: SnapshotBucket, C: SnapshotCache> PublishedSource for SnapshotReader<B, 
     fn inspection_configured(&self) -> bool {
         self.config.inspection_configured
     }
+    fn uses_published_values(&self) -> bool {
+        true
+    }
     fn read_ref_enabled(&self) -> bool {
         self.config.unsigned_read_ref
     }
@@ -139,9 +144,6 @@ impl<B: SnapshotBucket, C: SnapshotCache> PublishedSource for SnapshotReader<B, 
         now_ms: u64,
     ) -> BoxFuture<'a, mkit_server::pipeline::published::PublishedBucket> {
         Box::pin(async move {
-            if self.config.inspection_configured {
-                return Err(StoreError::unavailable("published view unavailable"));
-            }
             let key = object_key(partition)?;
             let cache = cache_key(&self.config.deployment, partition)?;
             if let Ok(Some((at, bytes))) = self.cache.get(&cache).await

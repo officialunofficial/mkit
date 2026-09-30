@@ -371,6 +371,13 @@ async fn plant_membership(
                     Value::default(),
                 )],
             };
+            let batch = if matches!(partition, Partition::RepoIndex { .. }) {
+                Batch::new()
+                    .put(keys::membership(&repo.name, &id), Value::default())
+                    .put(keys::published_member(&repo.name, &id), Value::default())
+            } else {
+                batch
+            };
             assert_eq!(
                 meta.apply(&partition, batch).await.unwrap(),
                 BatchOutcome::Committed

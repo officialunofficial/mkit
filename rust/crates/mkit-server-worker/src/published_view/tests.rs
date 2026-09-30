@@ -212,10 +212,10 @@ fn delivery(store: &SqlKvStore<RusqliteConn>, source: u64, seq: u64, delete: boo
         ))
         .put(rh, codec::encode_u64(seq));
     let batch = if delete {
-        batch.delete(keys::ref_index_key(&repo().name, "refs/heads/main"))
+        batch.delete(keys::published_index(&repo().name, "refs/heads/main"))
     } else {
         batch.put(
-            keys::ref_index_key(&repo().name, "refs/heads/main"),
+            keys::published_index(&repo().name, "refs/heads/main"),
             codec::encode_ref_id(&[seq.to_le_bytes()[0]; 32]),
         )
     };
@@ -285,7 +285,7 @@ fn codec_is_deterministic_bounded_and_validates_all_boundaries() {
         assert!(Envelope::decode(&bytes[..end], &partition(), 1000).is_err());
     }
     let mut wrong_version = bytes.clone();
-    wrong_version[3] = 2;
+    wrong_version[3] = 1; // Refuse old envelopes captured from live-index inputs.
     assert!(Envelope::decode(&wrong_version, &partition(), 1000).is_err());
     assert!(Envelope::decode(&bytes, &partition(), 999).is_err());
     assert!(Envelope::decode(&bytes, &partition(), 61000).is_err());
@@ -344,7 +344,7 @@ fn dirty_generation_is_atomic_for_multiple_sources_and_deletes() {
     .unwrap();
     let batch = Batch::new()
         .require(Precondition::Absent(rh))
-        .delete(keys::ref_index_key(&repo().name, "refs/heads/main"));
+        .delete(keys::published_index(&repo().name, "refs/heads/main"));
     assert!(matches!(
         store
             .apply_extended(&p.clone(), batch, move |get, batch, now| extend_relay(
@@ -362,7 +362,7 @@ fn dirty_generation_is_atomic_for_multiple_sources_and_deletes() {
     assert!(
         block_on(store.get(
             &partition(),
-            &keys::ref_index_key(&repo().name, "refs/heads/main")
+            &keys::published_index(&repo().name, "refs/heads/main")
         ))
         .unwrap()
         .is_none()
@@ -519,7 +519,7 @@ fn private_missing_and_oversized_buckets_remove_public_data_without_upload() {
             block_on(store.apply(
                 &partition(),
                 Batch::new().put(
-                    keys::ref_index_key(&repo().name, &name),
+                    keys::published_index(&repo().name, &name),
                     codec::encode_ref_id(&[1; 32]),
                 ),
             ))
@@ -597,8 +597,12 @@ fn cache_expiry_failures_and_malformed_snapshots_use_at_most_two_lookups_before_
     );
     let before = bucket.calls.load(Ordering::SeqCst);
     reader.config.inspection_configured = true;
-    assert!(block_on(reader.bucket(&repo(), &partition(), 2200)).is_err());
-    assert_eq!(bucket.calls.load(Ordering::SeqCst), before);
+    assert!(
+        block_on(reader.bucket(&repo(), &partition(), 2200))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(bucket.calls.load(Ordering::SeqCst), before + 1);
 }
 
 #[test]
@@ -758,7 +762,7 @@ fn configured_pressure_store_propagates_atomic_timer_wakes_and_inert_store_write
         clock.clone(),
         Arc::new(mkit_server::telemetry::NoopMetrics),
     );
-    let key = keys::ref_index_key(&repo().name, "refs/heads/main");
+    let key = keys::published_index(&repo().name, "refs/heads/main");
     block_on(plain.apply(
         &partition(),
         Batch::new().put(key.clone(), codec::encode_ref_id(&[1; 32])),
@@ -792,7 +796,7 @@ fn configured_pressure_store_propagates_atomic_timer_wakes_and_inert_store_write
             &partition(),
             Batch::new()
                 .require(Precondition::Absent(state_key()))
-                .delete(keys::ref_index_key(&repo().name, "refs/heads/main")),
+                .delete(keys::published_index(&repo().name, "refs/heads/main")),
         ),
     )
     .unwrap();
@@ -939,7 +943,7 @@ fn full_reserved_target_batch_and_three_local_writes_commit_atomically() {
         .put(guard, Value::default());
     for _ in 0..95 {
         batch.writes.push(mkit_server::Write::Put(
-            keys::ref_index_key(&repo().name, "refs/heads/main"),
+            keys::published_index(&repo().name, "refs/heads/main"),
             codec::encode_ref_id(&[9; 32]),
         ));
     }
@@ -973,4 +977,144 @@ fn full_reserved_target_batch_and_three_local_writes_commit_atomically() {
         BatchOutcome::PreconditionFailed { .. }
     ));
     assert_eq!(state(&store).generation, 2);
+}
+
+#[test]
+fn purge_during_snapshot_refill_cannot_return_stale_rows() {
+    let clock = Arc::new(ManualClock::new(1000));
+    let bucket = Bucket::new(clock.clone());
+    *bucket.object.lock().unwrap() = Some(SnapshotObject {
+        etag: "old".into(),
+        stored_at_ms: 1000,
+        bytes: envelope(1, 1000).encode().unwrap(),
+    });
+    let store = Arc::new(MemoryKv::default());
+    let changed = store.clone();
+    let cache = Cache::default();
+    *cache.put_hook.lock().unwrap() = Some(Box::new(move || {
+        changed
+            .apply(
+                &D34Shards.coordinator(&repo().namespace),
+                Batch::new().put(
+                    keys::cache_purge_generation("root/sample"),
+                    Value::new(1001u64.to_be_bytes().to_vec()),
+                ),
+            )
+            .now_or_never()
+            .unwrap()
+            .unwrap();
+    }));
+    let reader = SnapshotReader {
+        bucket,
+        cache,
+        config: PublishedViewConfig::new("purge-fence").unwrap(),
+        clock,
+    };
+    let reader = fenced_reader(
+        Arc::new(reader),
+        store.clone(),
+        mkit_server::pipeline::Sharding::D34,
+    );
+    assert!(
+        block_on(reader.bucket(&repo(), &partition(), 1000))
+            .unwrap()
+            .is_none()
+    );
+    // Retained R2/cache bytes stay fenced on a cold retry before global ack.
+    assert!(
+        block_on(reader.bucket(&repo(), &partition(), 1000))
+            .unwrap()
+            .is_none()
+    );
+}
+
+fn check_fenced_published_snapshot(inspection: bool) {
+    let clock = Arc::new(ManualClock::new(1000));
+    let bucket = Bucket::new(clock.clone());
+    let snapshot = envelope(1, 1000);
+    *bucket.object.lock().unwrap() = Some(SnapshotObject {
+        etag: "published".into(),
+        stored_at_ms: 1000,
+        bytes: snapshot.encode().unwrap(),
+    });
+    let store = Arc::new(MemoryKv::default());
+    let mut config = PublishedViewConfig::new("published-purge-fence").unwrap();
+    config.inspection_configured = inspection;
+    config.unsigned_read_ref = true;
+    let reader = fenced_reader(
+        Arc::new(SnapshotReader {
+            bucket,
+            cache: Cache::default(),
+            config,
+            clock,
+        }),
+        store.clone(),
+        mkit_server::pipeline::Sharding::D34,
+    );
+    assert_eq!(
+        block_on(reader.bucket(&repo(), &partition(), 1000)).unwrap(),
+        Some(snapshot.rows)
+    );
+    assert!(reader.uses_published_values());
+    assert!(reader.read_ref_enabled());
+    block_on(store.apply(
+        &D34Shards.coordinator(&repo().namespace),
+        Batch::new().put(
+            keys::cache_purge_generation("root/sample"),
+            Value::new(1001u64.to_be_bytes().to_vec()),
+        ),
+    ))
+    .unwrap();
+    assert!(
+        block_on(reader.bucket(&repo(), &partition(), 1000))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn purge_fence_preserves_published_snapshot_capability() {
+    check_fenced_published_snapshot(false);
+}
+
+#[test]
+fn purge_fence_accepts_published_inspection_snapshots_and_still_invalidates() {
+    check_fenced_published_snapshot(true);
+}
+
+#[test]
+fn live_index_updates_do_not_dirty_published_snapshot_work() {
+    let clock = Arc::new(ManualClock::new(1000));
+    let store = local(&clock);
+    let p = partition();
+    let live = keys::ref_index_key(&repo().name, "refs/heads/main");
+    assert_eq!(
+        store
+            .apply_extended(
+                &p.clone(),
+                Batch::new().put(live.clone(), codec::encode_ref_id(&[9; 32])),
+                move |get, batch, now| extend_relay(&p, get, batch, now).map(|_| ())
+            )
+            .unwrap(),
+        BatchOutcome::Committed
+    );
+    assert!(
+        block_on(store.get(&partition(), &state_key()))
+            .unwrap()
+            .is_none()
+    );
+    delivery(&store, 1, 1, false);
+    assert_eq!(state(&store).generation, 1);
+    assert_eq!(
+        block_on(store.get(&partition(), &live)).unwrap(),
+        Some(codec::encode_ref_id(&[9; 32]))
+    );
+    assert_eq!(
+        block_on(store.get(
+            &partition(),
+            &keys::published_index(&repo().name, "refs/heads/main")
+        ))
+        .unwrap(),
+        Some(codec::encode_ref_id(&[1; 32]))
+    );
 }

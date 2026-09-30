@@ -60,6 +60,8 @@ pub struct ServerLocks {
 /// hooks and write gate.
 #[derive(Debug)]
 pub struct Services {
+    /// Separate default-off operator router.
+    pub admin: Option<axum::Router>,
     /// The router over the configured stores (served only with
     /// [`ServeConfig::listen`]).
     pub router: axum::Router,
@@ -76,6 +78,8 @@ pub struct Services {
 /// A server ready to bind: its services, and the root's locks.
 #[derive(Debug)]
 pub struct Opened {
+    /// Separate default-off operator router.
+    pub admin: Option<axum::Router>,
     /// The router over the configured stores.
     pub router: axum::Router,
     /// The enc listener's service, when configured.
@@ -95,6 +99,7 @@ impl Opened {
     #[must_use = "the locks release when dropped"]
     pub fn into_parts(self) -> (Services, ServerLocks) {
         let services = Services {
+            admin: self.admin,
             router: self.router,
             #[cfg(feature = "enc")]
             enc: self.enc,
@@ -454,11 +459,20 @@ where
             &[settings.public_key()?],
         )?;
     }
+    let mut pipeline_config = cfg.pipeline.clone();
+    if let Some(purge) = pipeline_config.purge.take() {
+        pipeline_config.purge = Some(purge.with_audit(Arc::new(
+            mkit_server::admin::SystemAudit::new(
+                meta.clone(),
+                crate::admin::partition(pipeline_config.sharding),
+            ),
+        )));
+    }
     let pipeline = Pipeline::new(
         blobs,
-        meta,
+        meta.clone(),
         hooks,
-        cfg.pipeline.clone(),
+        pipeline_config.clone(),
         Arc::new(SystemClock),
         Arc::new(MetricsBridge),
     )
@@ -481,6 +495,15 @@ where
                     .map_err(|_| config_error("enc key", "invalid public key"))?;
                 crate::http_mount::check_other_keys(cfg.pipeline.url_tokens.as_ref(), &[public])?;
             }
+            if let Some(admin) = &cfg.admin {
+                use commonware_cryptography::Signer as _;
+                let public = <[u8; 32]>::try_from(key.public_key().as_ref())
+                    .map_err(|e| config_error("enc key", e))?;
+                admin
+                    .config
+                    .check_separation(&[public])
+                    .map_err(|e| config_error("admin key", e))?;
+            }
             // The enc key may be created on first run, so this is the first
             // place its public half is known (SPEC-SERVER §7.1).
             #[cfg(feature = "hooks")]
@@ -497,6 +520,10 @@ where
         None => None,
     };
     Ok(Services {
+        admin: cfg
+            .admin
+            .as_ref()
+            .map(|settings| crate::admin::router(meta, settings, &pipeline_config)),
         router: build_router(Arc::new(pipeline), &cfg.router),
         #[cfg(feature = "enc")]
         enc,
@@ -714,6 +741,7 @@ where
         )?,
     };
     Ok(Opened {
+        admin: services.admin,
         router: services.router,
         #[cfg(feature = "enc")]
         enc: services.enc,
@@ -780,7 +808,20 @@ where
             .with_sink_timeout(options.timeout)
             .with_max_rows(options.max_rows)
             .with_clock(Arc::new(SystemClock));
-            let registry = sqlite_timer_registry_with(blobs.clone(), meta.clone(), outcomes);
+            let registry = sqlite_timer_registry_with_audit(
+                blobs.clone(),
+                meta.clone(),
+                outcomes,
+                crate::admin::partition(cfg.pipeline.sharding),
+            );
+            #[cfg(feature = "hooks")]
+            let registry = if let Some(sink) =
+                crate::purge::build(cfg.hooks.as_ref(), &outcome_audience(cfg))?
+            {
+                registry.register(crate::purge::NativeDelivery::new(sink))
+            } else {
+                registry
+            };
             let driver = TimerDriver::new(meta.clone(), registry, Arc::new(SystemClock));
             let mut services = build_services(blobs, meta, cfg, hooks)?;
             services.timers = Some(driver);
@@ -826,6 +867,24 @@ where
     B: MultipartBlobStore + Clone + 'static,
     O: OutcomeSink + 'static,
 {
+    sqlite_timer_registry_with_audit(
+        blobs,
+        meta,
+        delivery,
+        crate::admin::partition(Sharding::Single),
+    )
+}
+
+fn sqlite_timer_registry_with_audit<B, O>(
+    blobs: B,
+    meta: TimerStore,
+    delivery: OutcomeDelivery<O>,
+    root: mkit_server::Partition,
+) -> mkit_server::timers::TimerRegistry<'static, TimerStore>
+where
+    B: MultipartBlobStore + Clone + 'static,
+    O: OutcomeSink + 'static,
+{
     let registry = mkit_server::timers::TimerRegistry::new()
         .register(mkit_server::timers::ticket_expiry::TicketExpiry { blobs })
         .register(
@@ -834,11 +893,16 @@ where
         )
         .register(mkit_server::relay::RelayHandler {
             target: meta.clone(),
-            hook: mkit_server::relay::NoHook,
+            hook: mkit_server::admin::AuditRelayHook::new(meta.clone(), root),
             budget: mkit_server::relay::RelayBudget::default(),
         })
         .register(delivery)
         .register(mkit_server::timers::reservation_reconcile::ReservationReconcile)
+        .register(
+            mkit_server::timers::publication_recheck::PublicationRecheck {
+                target: meta.clone(),
+            },
+        )
         .register(mkit_server::timers::quota_rollup::QuotaRollup {
             coordinator: meta,
             metrics: MetricsBridge,
@@ -909,6 +973,12 @@ pub async fn serve_services(
         Some(addr) => Some(bind(addr, "--listen").await?),
         None => None,
     };
+    let admin = match (&cfg.admin, services.admin) {
+        (Some(settings), Some(router)) => {
+            Some((bind(settings.listen, "--admin-listen").await?, router))
+        }
+        _ => None,
+    };
     #[cfg(feature = "enc")]
     let enc = match (&cfg.enc, services.enc) {
         (Some(opts), Some(service)) => Some((bind(opts.listen, "--listen-enc").await?, service)),
@@ -948,6 +1018,14 @@ pub async fn serve_services(
             .await
             .map_err(|e| ConfigError::new(exit::UNAVAILABLE, format!("mkit-server serve: {e}")))
     };
+    let admin_run = async {
+        let Some((listener, router)) = admin else {
+            return Ok(());
+        };
+        serve(listener, router, shutdown.clone(), &cfg.serve)
+            .await
+            .map_err(|e| config_error("admin listener", e))
+    };
     #[cfg(feature = "enc")]
     let enc_run = async {
         let (Some(opts), Some((listener, service))) = (&cfg.enc, enc) else {
@@ -968,9 +1046,11 @@ pub async fn serve_services(
     };
     #[cfg(not(feature = "enc"))]
     let enc_run = async { Ok(()) };
-    let (http_result, enc_result) = tokio::join!(async { stop_on_error(http_run.await) }, async {
-        stop_on_error(enc_run.await)
-    },);
+    let (http_result, enc_result, admin_result) = tokio::join!(
+        async { stop_on_error(http_run.await) },
+        async { stop_on_error(enc_run.await) },
+        async { stop_on_error(admin_run.await) }
+    );
     shutdown.trigger();
     timer_stop.trigger();
     if let Some(task) = timer_task {
@@ -981,7 +1061,7 @@ pub async fn serve_services(
             .map_err(|e| config_error("storage pressure monitor", e))?;
     }
     tracing::info!("stopped");
-    http_result.and(enc_result)
+    http_result.and(enc_result).and(admin_result)
 }
 
 /// [`open`], then [`serve_services`]; the locks are released on return.

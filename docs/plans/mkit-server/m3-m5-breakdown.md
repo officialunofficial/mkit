@@ -790,7 +790,7 @@ Entry condition:
   - Storage and wire tests for each transition.
   - Renewal in grace restores active.
   - A read is blocked in suspended.
-  - An event is emitted exactly once per transition (idempotent delivery).
+  - One logical event is durably recorded per transition, with at-least-once delivery and receiver deduplication.
 - **Size:** L (~1200).
 
 ### WP-5.3a: GC mark: roots, pins, grace, GC-pending, apply precondition
@@ -846,8 +846,8 @@ Entry condition:
 
 ### WP-5.4: Published view: (head, packmap) pointer, caller view on every read path
 - **Depends on:**
-  - WP-5.2 (which carries WP-5.1a and the M2 exit: signed reads for writer detection)
-  - the published pointer storage is added here (§H-A13, R-24), not in M1
+  - Explicit dependencies in `registry.json` (R-182): signed reads, indexed verification, timers, relays and snapshots.
+  - The published pointer storage is added here (§H-A13, R-24), not in M1
 - **Goal:**
   - Add the **published pointer storage** in the ref shard (moved here from M0/M1, R-24): a per-branch advance
     sequence, clearance state and the (head, packmap) pointer; until M5 it equals the live ref.
@@ -855,7 +855,7 @@ Entry condition:
   - The published pointer = the (head, packmap) of the last advance *k* such that every advance ≤ *k* has cleared.
   - ListRefs, ReadRef, PackExists, DownloadPack and HTTP serving answer from the **caller's view**: writers (owner or write grant, via signed read) see the real refs; the public and read-only grantees see the published view.
   - **The D36 `X-Mkit-Ref` path too (R-75, R-77):** for a non-writer, the header resolves only against membership
-    added by advances ≤ the published pointer (cleared advances); membership added by a pending (quarantined) advance
+    added by cleared or resolved advances, independently of the ref pointer; membership added by a pending advance
     is invisible through it, exactly as through the index.
   - Pending packs and blobs are never served to non-writers.
   - Without any inspector configured, published == real (no behaviour change).
@@ -976,28 +976,19 @@ Entry condition:
 - **Size:** M (~700).
 
 ### WP-5.10: `CachePurger` hook and purge triggers
-- **Depends on:** WP-5.2. (R-82: was also WP-5.6, but 5.6 invokes the purger; the order is now 5.10 → 5.6.)
-- **Goal:**
-  - A `CachePurger` trait. The implementer provides it (e.g. the Cloudflare purge API); mkit ships a no-op and a logging impl.
-  - It's invoked on suspension, lease deletion and visibility change (this WP), and on takedown (wired by WP-5.6),
-    with the affected URL set (object URLs plus ref paths, including the per-bucket snapshot keys of WP-1.21).
-  - Delivery goes through the outbox (retry until acked).
-- **Files:** `mkit-server/src/purge.rs`.
-- **Size:** S (~350).
+- **Depends on:** WP-5.4, WP-5.1b-2 and WP-3.9c. WP-5.2 is needed only for post-launch lease-deletion triggers (R-188, R-198).
+- **Goal:** durable timer-11 local and signed remote `CachePurge` delivery, snapshot invalidation and serving-stop/hit/visibility automatic intents in the triggering state apply. Retry an unchanged body/id with fresh signing nonces until an empty acknowledgement. Keep gated Workers entrypoint caching disabled; Paid-only activation shares one enumeration/delivery budget.
+- **Scope:** 5.5a/5.6a call automatic seams. Manual `PurgeCache` moves to 5.6a (R-190), accepted asynchronously with completion in audit. No no-op acknowledgement for shared caches.
+- **Files:** `mkit-server/src/purge/`, automatic pipeline seams and native/Worker adapters.
+- **Size:** bundle cap 3,000 non-test lines with WP-5.11a; user authorized a modest excess for the completed invalidation/fence work.
 
 ### WP-5.11a: Admin API framework: signed envelope, replay protection, audit log
-- **Depends on:** WP-5.1b.
-- **Goal:**
-  - An `mkit.server.admin.v1` Connect service.
-  - Requests are signed with the deployment admin Ed25519 key (a dedicated role key; single key with key-list rotation,
-    threshold deferred) using a **distinct domain** (so a write envelope can't be replayed as an admin one).
-  - A replay ledger with an admin scope.
-  - An append-only **audit log**: who, what, when, request digest, result. It's stored in a deployment-global admin store: native SQLite; on Workers a dedicated admin DO.
-  - Admin endpoints are off unless an admin key is configured.
-- **Files:** `mkit-server/src/admin/{mod.rs, auth.rs, audit.rs}`, `mkit-server/generated/**`, adapter mounts.
-- **Tests:** A replay is rejected. A write-domain envelope is rejected. Every call is audited, including failures.
-- **Size:** L (~1000).
-- **Decided:** PRD Q4 by planner default (single admin key per deployment, key-list rotation; reviewable).
+- **Depends on:** WP-5.1b-2, WP-2.9 (signed reads/visibility), WP-1.10 (metadata), WP-3.7b/WP-3.9c (hook authentication) and WP-5.10. Aggregate activation WP-4.18 follows these foundations (R-189, R-198).
+- **Goal:** default-off `mkit.server.admin.v1` signed requests, dedicated role keys, durable nonce/result and persistent operation-id replay, gapless deployment audit and `ReadAuditLog`. Durable action acceptance and audit precede effects/success; Workers effects must be resumable.
+- **Scope:** manual purge, inspection review and takedown operations land in later lanes. The approved existing outbox relay carries automatic audit events: source state, purge intent, timer and event commit together; the root receipt, gapless append and watermark commit together in arrival order.
+- **Files:** `mkit-server/src/admin/` and adapter configuration/mounts.
+- **Tests:** exact signature/body/path/origin binding, mixed credentials and roles, same-nonce stored results, operation-id deduplication, audit continuity/export and default-off adapters.
+- **Size:** bundle cap 3,000 non-test lines with WP-5.10; user authorized a modest excess for the completed invalidation/fence work.
 
 ### WP-5.11b: Admin operations and the `mkit-server admin` CLI
 - **Depends on:**

@@ -80,3 +80,23 @@ have their own default-off forwarding feature and explicit mount opt-in;
 Stage 1 defaults, app features and release builds mount no HTTP object or
 URL-token key routes. See the native and Worker adapter READMEs for CORS,
 streaming, retained paid-read settlement and dedicated token keys.
+
+## Launch purge and operator foundations
+
+`purge::PurgeConfig` enables durable automatic repository purges. Call
+`Pipeline::plan_repository_purge` before a serving-state mutation and merge its
+batch into that mutation's apply. The batch contains the immutable purge body,
+kind-11 timer, refill fence and root audit relay event. When a caller already
+allocates outbox rows, coallocate the audit event through the existing outbox
+planner. Invalidate process-local reachability immediately after commit.
+
+The global sink receives signed `hooks.v1.CachePurge` requests with a stable id
+and fresh nonce on each retry. Only an empty acknowledgement completes work;
+failed delivery leaves authoritative serving stops in force. The root relay
+appends automatic audit events and delivery receipts with its watermark, in
+arrival order, retaining source time. Purge delivery runs independently.
+
+`admin::Engine` verifies the separate `mkit-admin:v1` envelope and exports a
+gapless chain through `ReadAuditLog`. No keys means no operator routes. The
+framework includes persistent operation-id planning for later consumers; manual
+`PurgeCache` is not exposed and belongs to WP-5.6a.

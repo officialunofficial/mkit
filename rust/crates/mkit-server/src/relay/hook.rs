@@ -31,6 +31,12 @@ pub trait RelayHook: MaybeSend + MaybeSync {
         self.before_apply(target, rows, pre, writes)
     }
 
+    /// Target-local extensions may reserve operations before a remote apply.
+    /// The relay shrinks groups until their base effects and this reserve fit.
+    fn reserved_ops(&self, _target: &Partition, _rows: &[(u64, RelayV1)]) -> usize {
+        0
+    }
+
     /// Extend the atomic target batch, or fail delivery for this target.
     fn before_apply<'a>(
         &'a self,

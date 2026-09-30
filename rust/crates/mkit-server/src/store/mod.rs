@@ -22,9 +22,11 @@ mod kv;
 mod maintenance;
 pub mod outbox;
 mod partition;
+pub mod publication;
 pub mod read;
 pub mod restore;
 pub mod tickets;
+pub mod view;
 pub mod watermark;
 
 pub use blob::{

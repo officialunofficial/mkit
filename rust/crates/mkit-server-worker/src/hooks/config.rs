@@ -24,6 +24,8 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const MAX_TIMEOUT_MS: u64 = 30_000;
 
 /// Which stages call the hook Worker.
+// Protocol roles are independently selectable, including purge-only sinks.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HookRoles {
     /// Stage 2 over `Authorize`.
@@ -32,6 +34,8 @@ pub struct HookRoles {
     pub admit: bool,
     /// Stage 8 over `Outcome` (kind-8 delivery).
     pub outcome: bool,
+    /// Signed global cache invalidation (Paid-only).
+    pub cache_purge: bool,
 }
 
 /// The parsed hook vars.
@@ -76,15 +80,17 @@ impl HookVars {
             authorize: false,
             admit: false,
             outcome: false,
+            cache_purge: false,
         };
         for name in list.split(',').map(str::trim) {
             let slot = match name {
                 "authorize" => &mut roles.authorize,
                 "admit" => &mut roles.admit,
                 "outcome" => &mut roles.outcome,
+                "cache-purge" => &mut roles.cache_purge,
                 _ => {
                     return Err(config(format!(
-                        "{ROLES_VAR} must list authorize, admit and outcome, comma separated"
+                        "{ROLES_VAR} must list authorize, admit, outcome and cache-purge, comma separated"
                     )));
                 }
             };
@@ -92,6 +98,9 @@ impl HookVars {
                 return Err(config(format!("{ROLES_VAR} repeats {name}")));
             }
             *slot = true;
+        }
+        if roles.cache_purge && http.is_none() {
+            return Err(config("cache-purge requires signed HTTPS HOOK_URL"));
         }
         let timeout = match var(TIMEOUT_VAR) {
             None => DEFAULT_TIMEOUT,
@@ -176,7 +185,8 @@ mod tests {
             HookRoles {
                 authorize: false,
                 admit: true,
-                outcome: true
+                outcome: true,
+                cache_purge: false
             }
         );
         assert_eq!(vars.timeout, DEFAULT_TIMEOUT);
@@ -427,5 +437,29 @@ mod http_tests {
         } else {
             assert!(parsed.is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod purge_tests {
+    use super::*;
+    #[test]
+    fn purge_only_is_signed_and_never_activates_other_roles() {
+        let var = |name: &str| match name {
+            "HOOK_ROLES" => Some("cache-purge".into()),
+            "HOOK_URL" => Some("https://hooks.example/prefix".into()),
+            _ => None,
+        };
+        let parsed = HookVars::parse(&var);
+        if cfg!(feature = "signed-http-hooks") {
+            let roles = parsed.unwrap().unwrap().roles;
+            assert!(roles.cache_purge);
+            assert!(!roles.authorize && !roles.admit && !roles.outcome);
+        } else {
+            assert!(parsed.is_err());
+        }
+        assert!(
+            HookVars::parse(&|name| (name == "HOOK_ROLES").then(|| "cache-purge".into())).is_err()
+        );
     }
 }

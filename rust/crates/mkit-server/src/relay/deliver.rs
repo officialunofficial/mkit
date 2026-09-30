@@ -467,6 +467,9 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
             if !matches!(target, Partition::RefIndex { .. }) {
                 caps.reserved_batch_ops = 0;
             }
+            caps.reserved_batch_ops = caps
+                .reserved_batch_ops
+                .saturating_add(self.hook.reserved_ops(target, &rows[start..end]));
             if let Err(error) = batch.validate(&caps) {
                 if matches!(error, StoreError::Invalid(_)) && end > start + 1 {
                     end = start + (end - start) / 2;

@@ -255,16 +255,26 @@ impl<C: SqlConn> NamespaceStore for PressureStore<C> {
 
     async fn apply(&self, partition: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
         let has_put = batch.has_put();
-        #[cfg(feature = "published-view")]
-        let outcome = if self.published_view && matches!(partition, Partition::RefIndex { .. }) {
+        let outcome = {
             let p = partition.clone();
+            #[cfg(feature = "published-view")]
+            let snapshots = self.published_view;
             let wake = Arc::new(Mutex::new(None));
             let staged = wake.clone();
             let outcome = self
                 .inner
                 .apply_extended(partition, batch, move |get, batch, now| {
-                    let due = crate::published_view::extend_relay(&p, get, batch, now)?;
-                    *staged.lock().unwrap_or_else(PoisonError::into_inner) = due;
+                    mkit_server::admin::extend_audit_batch(&p, batch, |key| {
+                        get(key).map_err(StoreError::from)
+                    })
+                    .map_err(|_| SqlError::Corrupt("automatic audit extension"))?;
+                    #[cfg(feature = "published-view")]
+                    if snapshots && matches!(p, Partition::RefIndex { .. }) {
+                        let due = crate::published_view::extend_relay(&p, get, batch, now)?;
+                        *staged.lock().unwrap_or_else(PoisonError::into_inner) = due;
+                    }
+                    #[cfg(not(feature = "published-view"))]
+                    let _ = (staged, now);
                     Ok(())
                 })?;
             if outcome == BatchOutcome::Committed
@@ -277,11 +287,7 @@ impl<C: SqlConn> NamespaceStore for PressureStore<C> {
                 *pending = Some(pending.map_or(due, |old| old.min(due)));
             }
             outcome
-        } else {
-            self.inner.apply(partition, batch).await?
         };
-        #[cfg(not(feature = "published-view"))]
-        let outcome = self.inner.apply(partition, batch).await?;
         if has_put && outcome == BatchOutcome::Committed {
             self.observe_pressure(partition);
             self.seed_backup_if_needed(partition).await;
@@ -618,6 +624,7 @@ mod object {
         alarm_dirty: Cell<bool>,
         #[cfg(feature = "published-view")]
         snapshot_alarm: Option<crate::published_view::SnapshotAlarm>,
+        alarm_budget: Option<mkit_server::purge::SliceBudget>,
     }
 
     impl core::fmt::Debug for NsObject {
@@ -653,6 +660,7 @@ mod object {
                 alarm_dirty: Cell::new(false),
                 #[cfg(feature = "published-view")]
                 snapshot_alarm: None,
+                alarm_budget: None,
             };
             (object, state)
         }
@@ -670,6 +678,16 @@ mod object {
         #[must_use]
         pub fn with_capacity(mut self, capacity: Capacity) -> Self {
             self.capacity = capacity;
+            self
+        }
+
+        /// One external-operation allowance shared by every partition head.
+        #[must_use]
+        pub fn with_alarm_budget(
+            mut self,
+            budget: Option<mkit_server::purge::SliceBudget>,
+        ) -> Self {
+            self.alarm_budget = budget;
             self
         }
 
@@ -786,6 +804,9 @@ mod object {
         /// Fire due timers and multiplex all partition heads onto one alarm.
         pub async fn alarm(&self) -> worker::Result<Response> {
             self.alarm_dirty.set(false);
+            if let Some(budget) = &self.alarm_budget {
+                budget.reset();
+            }
             #[cfg(feature = "published-view")]
             if let Some(alarm) = &self.snapshot_alarm {
                 alarm.reset();

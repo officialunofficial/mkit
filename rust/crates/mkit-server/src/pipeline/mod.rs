@@ -24,6 +24,7 @@ mod advance;
 mod auth;
 mod authority;
 mod begin;
+pub mod clearance;
 mod coordinator;
 mod download;
 mod durable_outcome;
@@ -47,6 +48,7 @@ mod parts;
 mod plan;
 #[cfg(feature = "published-view")]
 pub mod published;
+mod purge;
 mod ref_policy;
 mod reservation;
 mod revocation;
@@ -264,6 +266,10 @@ pub struct PipelineConfig {
     /// URL-token key set and lifetime for `IssueObjectUrl`
     /// (SPEC-WRITE-GRANTS §9.4); `None` answers `unimplemented`.
     pub url_tokens: Option<crate::url_token::UrlTokenConfig>,
+    /// Dedicated operator keys, forbidden for client and owner authorization.
+    pub admin_keys: Vec<[u8; 32]>,
+    /// Durable invalidation; absent keeps launch purge machinery inert.
+    pub purge: Option<crate::purge::PurgeConfig>,
     /// Ticket lifetime, positive and strictly below seven days.
     pub ticket_ttl_ms: u64,
     /// Open-ticket bounds in each ref shard.
@@ -344,6 +350,8 @@ impl PipelineConfig {
             begin_upload_threshold_bytes: u64::MAX,
             ticket_keys: None,
             url_tokens: None,
+            admin_keys: Vec::new(),
+            purge: None,
             ticket_ttl_ms: 86_400_000,
             ticket_caps: TicketCaps {
                 per_ref: 1024,
@@ -442,6 +450,7 @@ impl core::fmt::Debug for VisibilityRequest {
 
 /// The request pipeline over blobs `B`, metadata `N` and hooks `H`.
 pub struct Pipeline<B, N, H = Hooks> {
+    publication_policy: Option<Arc<dyn clearance::PublicationPolicy>>,
     #[cfg(feature = "published-view")]
     published: Option<Arc<dyn published::PublishedSource>>,
     blobs: B,
@@ -577,6 +586,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         clock: Arc<dyn Clock>,
         metrics: Arc<dyn Metrics>,
     ) -> Result<Self, ServerError> {
+        if let Some(purge) = &cfg.purge {
+            purge.validate().map_err(meta_error)?;
+        }
         if cfg.authority_fence.is_some()
             && (cfg.authorizer_role != AuthorizerRole::Authority
                 || hooks.authorizer().is_open()
@@ -803,6 +815,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         Ok(Self {
             #[cfg(feature = "published-view")]
             published: None,
+            publication_policy: None,
             blobs,
             meta,
             hooks,
@@ -946,6 +959,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let skew = 0;
         let now = self.clock.now_ms().saturating_add(skew);
         let mut a = auth::authenticate(&self.cfg.auth, meta, now, repo, &expected_repository)?;
+        if a.principal
+            .ed25519()
+            .is_some_and(|key| self.cfg.admin_keys.contains(key))
+        {
+            return Err(ServerError::unauthenticated(
+                "admin key cannot authenticate client calls",
+            ));
+        }
         // Credentials are captured for admission, which only signed writes
         // reach: signed reads and `SetRepoVisibility` never run it (§9.1).
         if matches!(self.cfg.auth, AuthMode::AuthV2(_))
@@ -1017,8 +1038,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
             let op = self.identify(a, kind)?;
             let authorized = self.authorize_read(&op).await?;
-            #[cfg(not(feature = "published-view"))]
-            let _ = authorized;
             let scan = refs::list_scan_prefix(prefix);
             let last = token
                 .map(|bytes| {
@@ -1054,23 +1073,34 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             };
             let partitions = self.shards.ref_index_partitions(&op.repo);
             #[cfg(feature = "published-view")]
+            if authorized.facts.caller_view != CallerView::Writer
+                && self
+                    .published
+                    .as_ref()
+                    .is_some_and(|s| s.inspection_configured() && !s.uses_published_values())
+            {
+                return Err(ServerError::unavailable("published view unavailable"));
+            }
+            #[cfg(feature = "published-view")]
             let source = self.published.as_deref().filter(|_| {
                 self.visibility_gates_reads()
                     && op.auth.is_none()
                     && matches!(op.principal, Principal::Anonymous)
+                    && (self.publication_policy.is_none()
+                        || self
+                            .published
+                            .as_ref()
+                            .is_some_and(|s| s.uses_published_values()))
             });
-            #[cfg(feature = "published-view")]
-            if self
-                .published
-                .as_ref()
-                .is_some_and(|s| s.inspection_configured())
-                && authorized.facts.caller_view != CallerView::Writer
-            {
-                return Err(ServerError::unavailable("published view unavailable"));
-            }
+            let view = crate::store::view::ViewStore {
+                store: &self.meta,
+                repo: &op.repo,
+                writer: authorized.facts.caller_view == CallerView::Writer,
+                policy: self.publication_policy.as_deref(),
+            };
             let result = if partitions.len() == 1 {
                 let bucket = list::RefBucket {
-                    store: &self.meta,
+                    store: &view,
                     partition: &partitions[0],
                 };
                 list::page(
@@ -1087,7 +1117,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 let buckets = partitions
                     .iter()
                     .map(|partition| published::ReaderBucket {
-                        store: &self.meta,
+                        store: &view,
                         partition,
                         source,
                         now_ms: ms(self.clock.now_ms()),
@@ -1097,7 +1127,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 let buckets = partitions
                     .iter()
                     .map(|partition| list::IndexBucket {
-                        store: &self.meta,
+                        store: &view,
                         partition,
                     })
                     .collect::<Vec<_>>();
@@ -1133,6 +1163,21 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         self
     }
 
+    /// Install the inspection preparation and immediate hold gate (post-launch WP-5.5c).
+    /// Inspection requires indexed mode and an owner/authority write policy.
+    pub fn with_publication_policy(
+        mut self,
+        policy: Arc<dyn clearance::PublicationPolicy>,
+    ) -> Result<Self, ServerError> {
+        if self.cfg.indexed.is_none() || self.cfg.write_policy == WritePolicy::Open {
+            return Err(ServerError::invalid_argument(
+                "inspection requires indexed mode and restricted writes",
+            ));
+        }
+        self.publication_policy = Some(policy);
+        Ok(self)
+    }
+
     /// One ref's id, if it exists.
     ///
     /// # Errors
@@ -1151,11 +1196,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             check_ref_name(name)?;
             let op = self.identify(a, kind)?;
             let authorized = self.authorize_read(&op).await?;
-            #[cfg(not(feature = "published-view"))]
-            let _ = authorized;
             #[cfg(feature = "published-view")]
             if let Some(source) = &self.published {
                 if source.inspection_configured()
+                    && !source.uses_published_values()
                     && authorized.facts.caller_view != CallerView::Writer
                 {
                     return Err(ServerError::unavailable("published view unavailable"));
@@ -1164,6 +1208,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     && op.auth.is_none()
                     && matches!(op.principal, Principal::Anonymous)
                     && source.read_ref_enabled()
+                    && (self.publication_policy.is_none() || source.uses_published_values())
                 {
                     let partition = self.shards.ref_index(&op.repo, name);
                     if let Some(rows) = source
@@ -1171,12 +1216,23 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         .await
                         .map_err(meta_error)?
                     {
+                        if self.meta.capabilities().atomic_multi_key
+                            && !source.uses_published_values()
+                        {
+                            return Err(ServerError::unavailable("published view unavailable"));
+                        }
                         return Ok(rows.into_iter().find(|(n, _)| n == name).map(|(_, id)| id));
                     }
                 }
             }
             let p = self.shards.ref_shard(&op.repo, name);
-            read::read_ref(&self.meta, &p, &op.repo.name, name)
+            let view = crate::store::view::ViewStore {
+                store: &self.meta,
+                repo: &op.repo,
+                writer: authorized.facts.caller_view == CallerView::Writer,
+                policy: self.publication_policy.as_deref(),
+            };
+            read::read_ref(&view, &p, &op.repo.name, name)
                 .await
                 .map_err(meta_error)
         })
@@ -1353,8 +1409,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     pub async fn pack_exists(&self, a: &Authenticated, key: PackKey) -> Result<bool, ServerError> {
         self.observe(a, async {
             let op = self.identify(a, OpKind::PackExists { key })?;
-            self.authorize_read(&op).await?;
-            if !self.pack_is_member(a, &key).await? {
+            let authorized = self.authorize_read(&op).await?;
+            if !self
+                .pack_is_member(a, &key, authorized.facts.caller_view)
+                .await?
+            {
                 return Ok(false);
             }
             let head = self.blobs.head(&key.into()).await;
@@ -1584,7 +1643,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ));
             }
             match self.meta.apply(p, batch).await {
-                Ok(BatchOutcome::Committed) => return Ok(()),
+                Ok(BatchOutcome::Committed) => {
+                    self.invalidate_local_cache(repo).await;
+                    return Ok(());
+                }
                 Ok(BatchOutcome::DeadlinePassed { .. }) => {
                     return Err(ServerError::unavailable("commit deadline passed; retry"));
                 }
@@ -1721,6 +1783,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let expired = read::expired_replay_keys(&self.meta, p, now, 32)
             .await
             .map_err(meta_error)?;
+        let purge = self
+            .plan_repository_purge(
+                p,
+                repo,
+                crate::purge::Trigger::VisibilityChange,
+                &mkit_core::hash::to_hex(&auth.replay_scope),
+                now,
+            )
+            .await?;
+        batch.preconditions.extend(purge.preconditions);
+        batch.writes.extend(purge.writes);
         let mut prune = Batch::new().require(Precondition::NotAfter(deadline));
         for (index, target) in &expired {
             if batch.preconditions.len() + batch.writes.len() + 2 > MAX_BATCH_OPS {
@@ -1760,6 +1833,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let verified =
             verify_visibility_statement(grants.verifier(), statement, &identity, a.business_now_ms)
                 .map_err(rejected)?;
+        if let Some(namespace) = identity.namespace() {
+            self.require_client_owner_key(namespace)?;
+        }
         let created = u64::try_from(verified.statement().created_ms)
             .map_err(|_| rejected(mkit_attest::grant::GrantError::DecimalOutOfRange))?;
         let id = to_hex(verified.id());
@@ -1794,7 +1870,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 Some(value) => Precondition::Equals(rv_key.clone(), value.clone()),
                 None => Precondition::Absent(rv_key.clone()),
             };
-            let batch = Batch::new()
+            let mut batch = Batch::new()
                 .require(Precondition::NotAfter(deadline))
                 .require(rv_guard)
                 .put(
@@ -1805,8 +1881,22 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         last_statement_id: Some(id.clone()),
                     }),
                 );
+            let purge = self
+                .plan_repository_purge(
+                    p,
+                    repo,
+                    crate::purge::Trigger::VisibilityChange,
+                    &id,
+                    ms(self.clock.now_ms()),
+                )
+                .await?;
+            batch.preconditions.extend(purge.preconditions);
+            batch.writes.extend(purge.writes);
             match self.meta.apply(p, batch).await {
-                Ok(BatchOutcome::Committed) => return Ok(()),
+                Ok(BatchOutcome::Committed) => {
+                    self.invalidate_local_cache(repo).await;
+                    return Ok(());
+                }
                 Ok(BatchOutcome::DeadlinePassed { .. }) => {
                     return Err(ServerError::unavailable("commit deadline passed; retry"));
                 }
@@ -1874,8 +1964,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let mut outcome = self.outcome(a);
         let opened = async {
             let op = self.identify(a, OpKind::DownloadPack { key })?;
-            self.authorize_read(&op).await?;
-            if !self.pack_is_member(a, &key).await? {
+            let authorized = self.authorize_read(&op).await?;
+            if !self
+                .pack_is_member(a, &key, authorized.facts.caller_view)
+                .await?
+            {
                 return Err(ServerError::not_found("pack not found"));
             }
             let body = self.blobs.get(&key.into(), None).await;
@@ -2256,7 +2349,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     write,
                     ahead,
                     (lease, begin.as_ref()),
-                    (pending.as_ref(), implicit),
+                    (pending.as_ref(), implicit, &staged.external_bases),
                 )
                 .await
             }
@@ -2423,12 +2516,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         // §7 steps 1–10 are stateless: run them before the coordinator
         // read, even when the repository turns out to be missing.
-        let check = op.write_grant.as_ref().and_then(|header| {
-            self.cfg
-                .grants
-                .as_ref()
-                .and_then(|g| read_policy::check_grant(g, header.expose(), op))
-        });
+        let admin_owner = Namespace::parse(op.repo.namespace.as_str())
+            .is_ok_and(|namespace| self.owner_key_is_admin(&namespace));
+        let check = op
+            .write_grant
+            .as_ref()
+            .filter(|_| !admin_owner)
+            .and_then(|header| {
+                self.cfg
+                    .grants
+                    .as_ref()
+                    .and_then(|g| read_policy::check_grant(g, header.expose(), op))
+            });
         let signed = op.auth.is_some();
         let owner = op.write_grant.is_none()
             && matches!(Namespace::parse(op.repo.namespace.as_str()),
@@ -2644,12 +2743,23 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         })
     }
 
-    async fn pack_is_member(&self, a: &Authenticated, key: &PackKey) -> Result<bool, ServerError> {
+    async fn pack_is_member(
+        &self,
+        a: &Authenticated,
+        key: &PackKey,
+        caller: CallerView,
+    ) -> Result<bool, ServerError> {
         if matches!(self.cfg.addressing, Addressing::Single { .. }) {
             return Ok(true);
         }
+        let view = crate::store::view::ViewStore {
+            store: &self.meta,
+            repo: &a.repo().repo,
+            writer: caller == CallerView::Writer,
+            policy: self.publication_policy.as_deref(),
+        };
         read::is_member(
-            &self.meta,
+            &view,
             self.shards.as_ref(),
             &a.repo().repo,
             &key.0,
@@ -2720,6 +2830,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .iter()
             .map(|r| keys::ref_key(&op.repo.name, &r.name))
             .collect();
+        if let Some(update) = refs.first() {
+            let name = crate::store::publication::sequence_ref(&update.name);
+            wanted.push(keys::publication(&op.repo.name, &name));
+            wanted.push(keys::ref_key(&op.repo.name, &name));
+            if let Some(packmap) = mkit_attest::grant::head_packmap(&name) {
+                wanted.push(keys::ref_key(&op.repo.name, &packmap));
+            }
+            wanted.push(keys::outbox_sequence());
+        }
         if self.cfg.sharding == Sharding::Single && caps.key_classes == KeyClasses::All {
             wanted.extend([keys::authority_generation(), keys::lease_recovery()]);
         }
@@ -2968,6 +3087,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
     }
 
+    fn owner_key_is_admin(&self, namespace: &Namespace) -> bool {
+        matches!(namespace, Namespace::Ed25519(key) if self.cfg.admin_keys.contains(key))
+    }
+
+    fn require_client_owner_key(&self, namespace: &Namespace) -> Result<(), ServerError> {
+        if self.owner_key_is_admin(namespace) {
+            return Err(ServerError::permission_denied(
+                "admin key cannot authorize client calls",
+            ));
+        }
+        Ok(())
+    }
+
     /// SPEC-TRANSPORT-CONNECT §7.5 rule 1: an allowlisted namespace whose
     /// principal owns it (`ed25519-<key>` ↔ the Ed25519 principal), and the
     /// M2 write grants that qualify it. `policy` is the deployment's
@@ -2982,6 +3114,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     ) -> Result<(AuthzFacts, Option<FastForward>), ServerError> {
         let namespace = Namespace::parse(op.repo.namespace.as_str())
             .map_err(|_| internal("invalid resolved owner-policy namespace"))?;
+        if op.write_grant.is_some() {
+            self.require_client_owner_key(&namespace)?;
+        }
         if let Some(NamespacePolicy::Allowlist(allowed)) = policy
             && !allowed.contains(&namespace)
         {
@@ -3067,7 +3202,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         (kind, refs, charges): (WriteKind, &[RefUpdate], &[QuotaCharge]),
         ahead: Option<Snapshot>,
         (lease, begin): (Option<lease::LeaseWrite>, Option<&BeginWrite>),
-        (pending, implicit): (Option<&reservation::PendingGuard>, Option<&[PendingPack]>),
+        (pending, implicit, external_bases): (
+            Option<&reservation::PendingGuard>,
+            Option<&[PendingPack]>,
+            &std::collections::BTreeSet<Hash>,
+        ),
     ) -> Result<StoredResult, ServerError> {
         let caps = self.meta.capabilities();
         let replay = upload::replay_guard(op);
@@ -3079,26 +3218,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 !pending.is_empty() && matches!(self.cfg.addressing, Addressing::Multi(_))
             })
             .map(implicit::implicit_packs);
-        let advance = match &op.kind {
-            OpKind::AdvanceRefs { head, tickets, .. } if !tickets.is_empty() => {
-                Some(advance::AdvanceWrite {
-                    ids: tickets,
-                    signer: op
-                        .auth
-                        .as_ref()
-                        .ok_or_else(|| {
-                            ServerError::failed_precondition("invalid or expired upload ticket")
-                        })?
-                        .signer,
-                    head_ref: &head.name,
-                    repo_id: &op.repo,
-                    repository: &a.repo().identity,
-                    source: p,
-                    shards: self.shards.as_ref(),
-                })
-            }
-            _ => None,
-        };
+        let advance = self.publication_ticket_write(op, a, p)?;
         let mut req = WriteRequest {
             authority_store: plan::AuthorityStore::from_capabilities(self.meta.capabilities()),
             authority_generation: op.authz.authority_generation,
@@ -3125,6 +3245,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     .as_ref()
                     .is_none_or(|snap| snap.get(&keys::repo_known(&op.repo.name)).is_none()),
             rejection: None,
+            publication: (caps.atomic_multi_key && !refs.is_empty()).then_some(
+                clearance::PublicationWrite {
+                    repo: &op.repo,
+                    source: p,
+                    shards: self.shards.as_ref(),
+                    prepared: None,
+                },
+            ),
             pending,
             begin,
             advance,
@@ -3135,6 +3263,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 shards: self.shards.as_ref(),
             }),
         };
+        let mut ahead = ahead;
+        let prepared = self
+            .prepare_publication(
+                op,
+                p,
+                &req,
+                &mut ahead,
+                implicit_ids.as_deref(),
+                external_bases,
+            )
+            .await?;
+        if let Some(publication) = &mut req.publication {
+            publication.prepared = prepared.as_ref();
+        }
         if caps.atomic_multi_key || replay.is_some() || !charges.is_empty() {
             return self.apply_atomic(op, a, p, &req, ahead).await;
         }
@@ -3158,6 +3300,133 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             WriteKind::UpdateRef => StoredResult::UpdateRef(UpdateRefResult::Committed),
             _ => StoredResult::AdvanceRefs(AdvanceOutcome::Committed),
         })
+    }
+
+    fn publication_ticket_write<'a>(
+        &'a self,
+        op: &'a Operation,
+        a: &'a Authenticated,
+        p: &'a Partition,
+    ) -> Result<Option<advance::AdvanceWrite<'a>>, ServerError> {
+        Ok(match &op.kind {
+            OpKind::AdvanceRefs { head, tickets, .. } if !tickets.is_empty() => {
+                Some(advance::AdvanceWrite {
+                    ids: tickets,
+                    signer: op
+                        .auth
+                        .as_ref()
+                        .ok_or_else(|| {
+                            ServerError::failed_precondition("invalid or expired upload ticket")
+                        })?
+                        .signer,
+                    head_ref: &head.name,
+                    repo_id: &op.repo,
+                    repository: &a.repo().identity,
+                    source: p,
+                    shards: self.shards.as_ref(),
+                })
+            }
+            _ => None,
+        })
+    }
+
+    /// Prepare inspection against the complete resulting pair before any write.
+    async fn prepare_publication(
+        &self,
+        op: &Operation,
+        p: &Partition,
+        req: &WriteRequest<'_>,
+        ahead: &mut Option<Snapshot>,
+        implicit_ids: Option<&[Hash]>,
+        external_bases: &std::collections::BTreeSet<Hash>,
+    ) -> Result<Option<crate::store::publication::Advance>, ServerError> {
+        // Deletions establish an immediate boundary without consulting inspection
+        // or verifying the surviving pair; older membership obligations remain retained.
+        if let Some(policy) = &self.publication_policy
+            && !req.refs.is_empty()
+            && req.refs.iter().all(|update| update.new.is_some())
+        {
+            let snapshot = ahead.get_or_insert_with(Snapshot::default);
+            self.fill(p, snapshot, req.read_keys()).await?;
+            let pair = clearance::resulting_pair(&op.repo.name, req.refs, snapshot)?;
+            let mut prepared = policy.prepare(op, &pair).await?;
+            if prepared.value != pair {
+                return Err(internal("publication policy changed the resulting pair"));
+            }
+            // Membership dependencies belong to the server, not to an
+            // inspector's verdict. An Inspect Pass alone cannot publish.
+            prepared.generation =
+                crate::store::publication::Publication::decode(snapshot.get(&keys::publication(
+                    &op.repo.name,
+                    &crate::store::publication::sequence_ref(&req.refs[0].name),
+                )))
+                .map_err(meta_error)?
+                .generation;
+            prepared.additions = if let Some(advance) = &req.advance {
+                advance
+                    .ids
+                    .iter()
+                    .map(|id| {
+                        snapshot
+                            .get(&keys::ticket(id))
+                            .ok_or_else(|| internal("publication ticket missing"))
+                            .and_then(|raw| {
+                                codec::decode_ticket(raw)
+                                    .map(|t| t.pack_id)
+                                    .map_err(meta_error)
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                implicit_ids.map(<[Hash]>::to_vec).unwrap_or_default()
+            };
+            crate::indexed::publication::verify(
+                &self.blobs,
+                &self.meta,
+                self.shards.as_ref(),
+                &op.repo,
+                &pair,
+                mkit_attest::grant::head_packmap(&crate::store::publication::sequence_ref(
+                    &req.refs[0].name,
+                ))
+                .is_some(),
+                &mut prepared,
+                policy.as_ref(),
+                self.cfg
+                    .indexed
+                    .ok_or_else(|| internal("publication requires indexed mode"))?,
+                self.metrics.as_ref(),
+            )
+            .await?;
+            prepared.external_bases = prepared
+                .external_bases
+                .iter()
+                .copied()
+                .chain(external_bases.iter().copied())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            if prepared.external_bases.len() > crate::store::publication::MAX_ADVANCE_ITEMS {
+                return Err(ServerError::invalid_argument("object index limit exceeded"));
+            }
+            if prepared.state.publishable()
+                && !crate::timers::publication_recheck::dependencies(
+                    &self.meta,
+                    &self.meta,
+                    p,
+                    self.shards.as_ref(),
+                    &op.repo,
+                    &prepared,
+                )
+                .await
+                .map_err(meta_error)?
+            {
+                prepared.state = crate::store::publication::Clearance::Pending;
+            }
+            Ok(Some(prepared))
+        } else {
+            Ok(None)
+        }
     }
 
     /// [`Self::apply_loop`] on a store with atomic multi-key batches, which
