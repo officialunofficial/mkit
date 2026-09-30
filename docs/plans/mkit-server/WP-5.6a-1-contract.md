@@ -10,8 +10,15 @@ The security gate reports yanked `yoke-derive 0.8.3` in the unchanged interop
 lockfile, reproduced on the byte-identical parent. These exceptions follow the
 executor-common parent-failure procedure and remain recorded in the PR.
 The [brief](briefs/WP-5.6a-1.md) remains the required contract; this layout is not
-launch-readiness evidence. Production Rust additions are 2,786 against base
+launch-readiness evidence. Production Rust additions are at most 2,794, including
+eight review-added relay lines beyond the original 2,786 against base
 `8bc30385`, below the 2,800 cap; tests/docs/proto/generated code are excluded.
+
+Review fixed late-holder delivery's missing V2 observation: the guarded relay
+snapshot now includes V1 and V2 denial and retains the real ct/timer-13 handoff.
+The nine-key snapshot caps raw corrupt values at 4.5 MiB; backend calls are unchanged,
+and ordinary batch validation/shrinking retains the 100-operation apply limit.
+The V2 regression failed before the fix; the shared V1/V2 fixture passes afterward.
 
 The staged core implements denial and audited intent; production takedown activation
 awaits WP-5.6a-2 preservation and launch gates. Acceptance returns the existing

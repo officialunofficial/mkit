@@ -22,9 +22,9 @@ use crate::timers::{
 // remains an upper bound; leftover rows schedule another tick.
 const MAX_FIRE_BYTES: usize = 4 * 1024 * 1024;
 const SCAN_PAGE_ROWS: u32 = 64;
-// At most 4 MiB raw snapshot values even for corrupt maximum-sized rows.
+// At most 4.5 MiB raw snapshot values even for corrupt maximum-sized rows.
 // Together with source pages and JSON/JS copies this leaves hook headroom.
-const MAX_HOOK_READ_KEYS: usize = 8;
+const MAX_HOOK_READ_KEYS: usize = 9;
 
 type QueuedRow = (u64, RelayV1, Key, Value);
 type TargetRows = (Partition, Vec<QueuedRow>);
