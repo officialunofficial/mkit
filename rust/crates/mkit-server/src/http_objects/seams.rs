@@ -68,7 +68,7 @@ pub struct AdmitRequest<'a> {
     pub head: bool,
     /// A ref path rather than an object id.
     pub ref_path: bool,
-    /// The selected GET body length, after ordinary Range selection.
+    /// The selected GET body length, after ordinary Range or proof selection.
     pub declared_bytes: u64,
     /// Selected payment credentials; never contains Bearer credentials.
     pub credential_headers: &'a [crate::pipeline::CredentialHeader],

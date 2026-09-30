@@ -850,3 +850,48 @@ fn proof_drop_before_or_after_first_byte_settles_once() {
         }
     }
 }
+
+struct PendingProof(Arc<AtomicBool>);
+impl crate::http_objects::ProofServer for PendingProof {
+    fn build<'a>(
+        &'a self,
+        _: &'a crate::http_objects::PreparedProof,
+        _: &'a mut dyn crate::http_objects::ProofSource,
+    ) -> BoxFuture<'a, Result<Vec<u8>, ServerError>> {
+        Box::pin(async move {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            core::future::pending().await
+        })
+    }
+}
+
+#[test]
+fn proof_cancellation_during_build_aborts_reserved_read() {
+    let (fx, d, admission, tasks) = setup();
+    let started = Arc::new(AtomicBool::new(false));
+    let fx = with_seams(fx, |s| s.proofs = Arc::new(PendingProof(started.clone())));
+    let query = format!("proof=1&commit={}&path=small.txt", to_hex(&d.head()));
+    let path = fx.object_url("room", &id(&d.small));
+    let headers = |_: &str| Vec::new();
+    let request = HttpObjectRequest {
+        method: "GET",
+        raw_path: &path,
+        raw_query: Some(crate::http_objects::RedactedQuery::new(&query)),
+        headers: &headers,
+        header_names: &[],
+    };
+    let mut response = Box::pin(fx.pipe.serve_http_object(&request));
+    block_on(async { assert!(futures::poll!(&mut response).is_pending()) });
+    assert!(started.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(matches!(reservation(&fx, 0), ReservationV1::Pending { .. }));
+    drop(response);
+    tasks.join();
+    assert!(matches!(
+        reservation(&fx, 0),
+        ReservationV1::Aborted {
+            reason: AbortReason::Internal,
+            ..
+        }
+    ));
+    assert_eq!(admission.calls.lock().unwrap().len(), 1);
+}
