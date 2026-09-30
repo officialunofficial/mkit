@@ -16,6 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   serving stops. Specify indexed permanent-retention launch without storage leases
   or GC, and publication Events: Committed means Sent; Delivered requires the
   contiguous published prefix.
+- Add optional namespace authority-generation fencing with dedicated deployment-authority statements, native/Worker configuration, independent D34 lease barriers and generation-bound upload tickets (WP-2.16).
+  Ticket streams coalesce legal client frames into bounded 256 KiB storage
+  checkpoints, preserving revocation checks within Worker request budgets.
+
+- WP-3.9c: default-off signed HTTPS Worker hooks with canonical origin signing,
+  manual redirects, streamed response limits and aborting call timeouts.
+- Worker (inert): extracted-object storage can use root-pinned backend R2
+  multipart sessions with verified streamed parts and bounded finalization.
+  Internal object receipts preserve opaque backend ETags without changing pack
+  wire receipts; extraction and production activation remain separate work
+  (WP-4.10b-multipart, R-192).
 
 - Server: kind-8 completion uses the guarded fresh backlog, preserving delivery
   after a concurrent outcome append (WP-3.13; correction to #1219).

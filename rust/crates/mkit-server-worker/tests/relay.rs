@@ -35,6 +35,8 @@ fn free_plan_caps_lease_sweep_source_subrequests_at_sixteen() {
         for n in 0..20 {
             let shard_ref = format!("refs/heads/b{n}");
             let row = codec::LeasedShard {
+                authority_generation: None,
+                acked_authority_generation: None,
                 epoch: 1,
                 expires_at_ms: 100,
                 acked_epoch: 1,

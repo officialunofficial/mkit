@@ -42,4 +42,5 @@ lto = true
 # Local-only fault injection and test hooks (the pipeline's
 # `x-mkit-test-fault`/clock-skew directives, the store faults,
 # `GET /__mkit_test/stats`, `TEST_QUOTA_*`); omitted from production builds.
+signed-http-hooks = ["mkit-server-worker/signed-http-hooks"]
 test-faults = ["mkit-server-worker/test-faults"]

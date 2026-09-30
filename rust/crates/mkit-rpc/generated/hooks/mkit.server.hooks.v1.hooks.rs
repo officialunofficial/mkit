@@ -4348,13 +4348,26 @@ pub struct AuthorizeAllow {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub writer_view: ::core::option::Option<bool>,
+    /// Mandatory on fenced Authority write allowances; SPEC-SERVER §6.2.1.
+    ///
+    /// Field 2: `authority_generation`
+    #[serde(
+        rename = "authorityGeneration",
+        alias = "authority_generation",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub authority_generation: ::core::option::Option<u64>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
 impl ::core::fmt::Debug for AuthorizeAllow {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("AuthorizeAllow").field("writer_view", &self.writer_view).finish()
+        f.debug_struct("AuthorizeAllow")
+            .field("writer_view", &self.writer_view)
+            .field("authority_generation", &self.authority_generation)
+            .finish()
     }
 }
 impl AuthorizeAllow {
@@ -4370,6 +4383,13 @@ impl AuthorizeAllow {
     ///Sets [`Self::writer_view`] to `Some(value)`, consuming and returning `self`.
     pub fn with_writer_view(mut self, value: bool) -> Self {
         self.writer_view = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::authority_generation`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_authority_generation(mut self, value: u64) -> Self {
+        self.authority_generation = Some(value);
         self
     }
 }
@@ -4396,6 +4416,9 @@ impl ::buffa::Message for AuthorizeAllow {
         if self.writer_view.is_some() {
             size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
         }
+        if let Some(v) = self.authority_generation {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -4408,6 +4431,9 @@ impl ::buffa::Message for AuthorizeAllow {
         use ::buffa::Enumeration as _;
         if let Some(v) = self.writer_view {
             ::buffa::types::put_bool_field(1u32, v, buf);
+        }
+        if let Some(v) = self.authority_generation {
+            ::buffa::types::put_uint64_field(2u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -4431,6 +4457,15 @@ impl ::buffa::Message for AuthorizeAllow {
                     ::buffa::types::decode_bool(buf)?,
                 );
             }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.authority_generation = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -4440,6 +4475,7 @@ impl ::buffa::Message for AuthorizeAllow {
     }
     fn clear(&mut self) {
         self.writer_view = ::core::option::Option::None;
+        self.authority_generation = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }

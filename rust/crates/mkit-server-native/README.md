@@ -725,3 +725,19 @@ Configured admission disables redirects. Traces record method and escaped
 path only; credentials and queries are redacted.
 
 Stores written by earlier unreleased mkit-server builds are unsupported; reset them.
+Enable `--authority-fence` with repeated `--authority-key` values in the grammar
+`<key-id> <64 lowercase hex public key> <namespace[,namespace...]>`. This requires
+Multi addressing, auth v2, transactional metadata and an Authority hook. The
+keys are dedicated deployment-authority verification keys, separate from owner,
+hook, ticket and URL-token keys. `GetAuthorityGeneration` and
+`SetAuthorityGeneration` use SPEC-SERVER §6.2.1 outside auth-v2; pending completion
+returns `unavailable` and `Retry-After: 1`. Fencing is off by default.
+`--listen-enc` is incompatible: every write listener must use auth v2 when the
+authority fence is enabled.
+
+Once a namespace has persisted authority fencing, disabling the executor setting
+refuses new writes for that namespace, including generation zero. Initial
+activation may return `unavailable` with `Retry-After: 1` until its bounded lease
+barrier completes. Repeating the signed target resumes durable progress; it does
+not create a namespace or charge first-write creation. Restore must preserve the
+authority mode and generation, then declare real lease-table recovery.

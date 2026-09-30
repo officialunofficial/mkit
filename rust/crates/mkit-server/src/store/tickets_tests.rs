@@ -12,6 +12,7 @@ use crate::store::{Batch, BatchOutcome, BlobKey, NamespaceStore, StoreCapabiliti
 
 fn spec() -> TicketSpec {
     TicketSpec {
+        authority_generation: None,
         repo: RepoName::new("repo").unwrap(),
         ref_name: "refs/heads/main".into(),
         signer: [1; 32],

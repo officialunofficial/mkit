@@ -565,6 +565,24 @@ impl generated::TransportService for TestService {
         Ok(Response::new(generated::CompleteUploadResponse::default()))
     }
 
+    async fn get_authority_generation(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::GetAuthorityGenerationRequest>,
+    ) -> ServiceResult<generated::GetAuthorityGenerationResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
+    async fn set_authority_generation(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::SetAuthorityGenerationRequest>,
+    ) -> ServiceResult<generated::SetAuthorityGenerationResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
     async fn get_grant_epoch(
         &self,
         _ctx: RequestContext,

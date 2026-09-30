@@ -22,6 +22,7 @@
 mod admission;
 mod advance;
 mod auth;
+mod authority;
 mod begin;
 pub mod clearance;
 mod coordinator;
@@ -51,6 +52,7 @@ mod ref_policy;
 mod reservation;
 mod revocation;
 mod shard;
+mod staging;
 #[cfg(test)]
 mod tests;
 mod upload;
@@ -238,6 +240,8 @@ pub struct PipelineConfig {
     pub auth: AuthMode,
     /// Owner-signed write grant verifier for Multi/Owner deployments.
     pub grants: Option<GrantConfig>,
+    /// Independent deployment-authority fence, optional and default-off.
+    pub authority_fence: Option<crate::authority::AuthorityFence>,
     /// Write authorization policy; Open for Single, Owner for Multi.
     pub write_policy: WritePolicy,
     /// Role of the authorizer hook, defaulting to an additional check.
@@ -332,6 +336,7 @@ impl PipelineConfig {
             sharding: Sharding::Single,
             auth,
             grants: None,
+            authority_fence: None,
             upload_limits,
             single_upload_max_bytes: None,
             part_size: mkit_core::upload_parts::MIN_PART_SIZE,
@@ -451,7 +456,6 @@ pub struct Pipeline<B, N, H = Hooks> {
     #[cfg(feature = "test-faults")]
     faults: Option<Arc<dyn faults::DynFaultHooks>>,
     gate: Option<Arc<gate::WriteGate>>,
-    revocation_cursors: Arc<revocation::RevokeCursors>,
     #[cfg(feature = "http-objects")]
     http_seams: Option<crate::http_objects::HttpSeams>,
 }
@@ -575,6 +579,38 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         clock: Arc<dyn Clock>,
         metrics: Arc<dyn Metrics>,
     ) -> Result<Self, ServerError> {
+        if cfg.authority_fence.is_some()
+            && (cfg.authorizer_role != AuthorizerRole::Authority
+                || hooks.authorizer().is_open()
+                || !meta.capabilities().atomic_multi_key
+                || !matches!(cfg.auth, AuthMode::AuthV2(_))
+                || !matches!(cfg.addressing, Addressing::Multi(_)))
+        {
+            return Err(ServerError::invalid_argument(
+                "authority fencing requires Multi, auth v2, an Authority hook and transactional storage",
+            ));
+        }
+        if let Some(fence) = &cfg.authority_fence {
+            if fence.public_keys().any(|key| {
+                cfg.ticket_keys
+                    .as_ref()
+                    .is_some_and(|tickets| tickets.contains_ed25519_public(&key))
+            }) {
+                return Err(ServerError::invalid_argument(
+                    "authority keys must differ from ticket keys",
+                ));
+            }
+            #[cfg(feature = "http-objects")]
+            if fence.public_keys().any(|key| {
+                cfg.url_tokens
+                    .as_ref()
+                    .is_some_and(|tokens| tokens.keys().public_keys().any(|public| public == key))
+            }) {
+                return Err(ServerError::invalid_argument(
+                    "authority keys must differ from URL-token keys",
+                ));
+            }
+        }
         if let Some(indexed) = &cfg.indexed {
             if !matches!(cfg.auth, AuthMode::AuthV2(_))
                 || cfg.ticket_keys.is_none()
@@ -780,7 +816,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             #[cfg(feature = "test-faults")]
             faults: None,
             gate: None,
-            revocation_cursors: Arc::default(),
             #[cfg(feature = "http-objects")]
             http_seams,
         })
@@ -858,7 +893,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         )?;
         sibling.shards = Arc::clone(&self.shards);
         sibling.gate.clone_from(&self.gate);
-        sibling.revocation_cursors = Arc::clone(&self.revocation_cursors);
         #[cfg(feature = "test-faults")]
         sibling.faults.clone_from(&self.faults);
         #[cfg(feature = "http-objects")]
@@ -1488,6 +1522,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Envelope mode: the stage-0 replay lookup, owner-or-hook
     /// authorization mirroring the write branch (never a grant), then the
     /// guarded `rv` write with its replay record.
+    #[allow(clippy::too_many_lines)] // Replay, authorization and both guarded visibility retries share one lifecycle.
     async fn visibility_envelope(
         &self,
         a: &Authenticated,
@@ -1508,7 +1543,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let rv_key = keys::repo_visibility(&repo.name);
         let rows = self
             .meta
-            .get_many(p, &[replay_key.clone(), rv_key.clone()])
+            .get_many(
+                p,
+                &[
+                    replay_key.clone(),
+                    rv_key.clone(),
+                    keys::authority_generation(),
+                    keys::lease_recovery(),
+                ],
+            )
             .await
             .map_err(meta_error)?;
         let mut rows = rows.into_iter();
@@ -1534,12 +1577,53 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ));
             }
         }
-        self.authorize_visibility_envelope(&op).await?;
+        Box::pin(self.ensure_authority_activation(&repo.namespace)).await?;
+        let facts = self.authorize_visibility_envelope(&op).await?;
         let mut replans = 0;
         loop {
-            let (batch, prune) = self
+            let (mut batch, prune) = self
                 .plan_visibility(p, auth, repo, visibility, stored.as_ref())
                 .await?;
+            let fence_rows = self
+                .meta
+                .get_many(p, &[keys::authority_generation(), keys::lease_recovery()])
+                .await
+                .map_err(meta_error)?;
+            let [generation_value, mode_value] = fence_rows.as_slice() else {
+                return Err(internal("visibility fence row count"));
+            };
+            let mode = mode_value
+                .as_ref()
+                .map(codec::decode_lease_recovery)
+                .transpose()
+                .map_err(meta_error)?;
+            if facts.authority_generation.is_none()
+                && (generation_value.is_some()
+                    || mode.is_some_and(|m| m.authority_fence == Some(true)))
+            {
+                return Err(ServerError::unavailable(
+                    "persisted authority fence requires enabled executor",
+                ));
+            }
+            batch = batch.require(lease::observed_guard(
+                keys::lease_recovery(),
+                mode_value.as_ref(),
+            ));
+            if let Some(generation) = facts.authority_generation {
+                let current = generation_value
+                    .as_ref()
+                    .map(codec::decode_u64)
+                    .transpose()
+                    .map_err(meta_error)?
+                    .unwrap_or(0);
+                if current != generation {
+                    return Err(crate::authority::moved());
+                }
+                batch = batch.require(lease::observed_guard(
+                    keys::authority_generation(),
+                    generation_value.as_ref(),
+                ));
+            }
             match self.meta.apply(p, batch).await {
                 Ok(BatchOutcome::Committed) => return Ok(()),
                 Ok(BatchOutcome::DeadlinePassed { .. }) => {
@@ -1585,7 +1669,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Envelope-mode authorization: the owner, or (`authority` role) the
     /// hook, which is shown a reader until it decides. Hook errors are
     /// stripped of any admission shape.
-    async fn authorize_visibility_envelope(&self, op: &Operation) -> Result<(), ServerError> {
+    async fn authorize_visibility_envelope(
+        &self,
+        op: &Operation,
+    ) -> Result<AuthzFacts, ServerError> {
         let owner = matches!(
             Namespace::parse(op.repo.namespace.as_str()),
             Ok(Namespace::Ed25519(key)) if op.principal.ed25519() == Some(&key)
@@ -1597,6 +1684,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         let mut authorized = op.clone();
         authorized.authz = AuthzFacts {
+            authority_generation: None,
             grant: None,
             owner,
             // The hook decides whether a non-owner may write; until it
@@ -1607,12 +1695,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 CallerView::Reader
             },
         };
-        self.hooks
+        let returned = self
+            .hooks
             .authorizer()
             .authorize(&authorized)
             .await
             .map_err(ServerError::strip_admission_shape)?;
-        Ok(())
+        self.merge_authority_facts(&mut authorized.authz, &returned)?;
+        Ok(authorized.authz)
     }
 
     /// One envelope attempt: deadline, replay `Absent`, the `rv` guard and
@@ -2392,6 +2482,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             // would, and discards it, so latency does not tell them apart.
             if signed && op.write_grant.is_none() {
                 let provisional = AuthzFacts {
+                    authority_generation: None,
                     grant: None,
                     owner,
                     caller_view: if owner {
@@ -2417,6 +2508,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             return Err(ServerError::repository_not_found());
         }
         let provisional = AuthzFacts {
+            authority_generation: None,
             grant: grant_ref.clone(),
             owner,
             caller_view: if owner || grant.is_some_and(|g| g.write) {
@@ -2442,6 +2534,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             read_policy::ReadDecision::NotFound => Err(ServerError::repository_not_found()),
             read_policy::ReadDecision::Allow(caller_view) => Ok(ReadAuth {
                 facts: AuthzFacts {
+                    authority_generation: None,
                     grant: grant_ref,
                     owner,
                     caller_view,
@@ -2691,6 +2784,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
             wanted.push(keys::outbox_sequence());
         }
+        if self.cfg.sharding == Sharding::Single && caps.key_classes == KeyClasses::All {
+            wanted.extend([keys::authority_generation(), keys::lease_recovery()]);
+        }
         if caps.implicit_layout_version.is_none() {
             wanted.push(keys::layout_version());
         }
@@ -2886,6 +2982,22 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         replay_answer(classify(record.as_ref(), &auth.fingerprint))
     }
 
+    fn merge_authority_facts(
+        &self,
+        built_in: &mut AuthzFacts,
+        returned: &AuthzFacts,
+    ) -> Result<(), ServerError> {
+        if self.cfg.authorizer_role == AuthorizerRole::Authority
+            && self.cfg.authority_fence.is_some()
+        {
+            built_in.authority_generation =
+                Some(returned.authority_generation.ok_or_else(|| {
+                    ServerError::unavailable("Authority allowance missing generation")
+                })?);
+        }
+        Ok(())
+    }
+
     /// Stage 2: the facts it returns become `op.authz` before admission.
     async fn authorize(
         &self,
@@ -2894,6 +3006,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         tracing::debug!(stage = "authorize");
         if !op.procedure().is_write() {
             return Ok((self.authorize_read(op).await?.facts, None));
+        }
+        if self.cfg.authority_fence.is_some() && self.cfg.sharding == Sharding::Single {
+            Box::pin(self.ensure_authority_activation(&op.repo.namespace)).await?;
         }
         match &self.cfg.addressing {
             Addressing::Multi(multi) => self.owner_rule(op, Some(&multi.namespace_policy)).await,
@@ -2907,7 +3022,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .authorizer()
                 .authorize(op)
                 .await
-                .map(|facts| (facts, None))
+                .map(|mut facts| {
+                    // The authority fence is valid only for Multi addressing.
+                    // A hook cannot activate it on an unfenced Single deployment.
+                    facts.authority_generation = None;
+                    (facts, None)
+                })
                 .map_err(ServerError::strip_admission_shape),
         }
     }
@@ -2972,7 +3092,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if self.cfg.authorizer_role == AuthorizerRole::Check && !owner && grant.is_none() {
             return Err(ServerError::permission_denied("write not permitted"));
         }
-        let facts = AuthzFacts {
+        let mut facts = AuthzFacts {
+            authority_generation: None,
             grant,
             owner,
             caller_view: CallerView::Writer,
@@ -2980,11 +3101,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         // Both Authorize and Admit see the established owner/grant facts (§6.2).
         let mut authorized = op.clone();
         authorized.authz = facts.clone();
-        self.hooks
+        let returned = self
+            .hooks
             .authorizer()
             .authorize(&authorized)
             .await
             .map_err(ServerError::strip_admission_shape)?;
+        self.merge_authority_facts(&mut facts, &returned)?;
         Ok((facts, fast_forward))
     }
 
@@ -3026,6 +3149,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .map(implicit::implicit_packs);
         let advance = self.publication_ticket_write(op, a, p)?;
         let mut req = WriteRequest {
+            authority_store: plan::AuthorityStore::from_capabilities(self.meta.capabilities()),
+            authority_generation: op.authz.authority_generation,
             repo: &op.repo.name,
             kind,
             refs,
@@ -3260,7 +3385,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         req: &WriteRequest<'_>,
         mut ahead: Option<Snapshot>,
     ) -> Result<StoredResult, ServerError> {
-        let mut req = req.clone();
+        let mut req = req.for_store(self.meta.capabilities());
         // Held until the loop ends (see `with_write_gate`).
         let _gate = match &self.gate {
             Some(gate) => Some(gate.enter(p).await),

@@ -1261,7 +1261,7 @@ async fn indexed_sqlite_verified_pack_reuse_rechecks_current_closure() {
         else {
             panic!("expected ticket");
         };
-        upload_ticket(&pipe, mode, pack, &token).await;
+        Box::pin(upload_ticket(&pipe, mode, pack, &token)).await;
         tickets.push(id);
     }
     let advance = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
@@ -1437,7 +1437,7 @@ async fn indexed_push_extracts_a_large_file_to_the_object_store() {
     else {
         panic!("expected ticket");
     };
-    upload_ticket(&pipe, mode, &pack, &token).await;
+    Box::pin(upload_ticket(&pipe, mode, &pack, &token)).await;
     let object_path = dir.path().join("objects").join(to_hex(&blob_id));
     assert!(
         !object_path.exists(),
@@ -1560,7 +1560,7 @@ async fn advance_flow<N: NamespaceStore + 'static>(
         let BeginUploadResult::Ticket { token, .. } = result else {
             panic!("expected ticket")
         };
-        upload_ticket(&pipe, mode, pack, &token).await;
+        Box::pin(upload_ticket(&pipe, mode, pack, &token)).await;
         ids.push(id);
     }
     spy.reservation.store(0, Ordering::SeqCst);
@@ -1815,7 +1815,7 @@ async fn missing_pack_aborts<N: NamespaceStore>(backend: N, clock: Arc<ManualClo
     let BeginUploadResult::Ticket { token, .. } = result else {
         panic!("expected ticket")
     };
-    upload_ticket(&pipe, mode, PACK, &token).await;
+    Box::pin(upload_ticket(&pipe, mode, PACK, &token)).await;
     assert!(
         blobs
             .delete(&mkit_server::store::BlobKey::pack(hash(PACK)))
@@ -1910,7 +1910,7 @@ async fn mixed_incomplete<N: NamespaceStore>(backend: N, clock: Arc<ManualClock>
     let BeginUploadResult::Ticket { token, .. } = lost else {
         panic!("expected ticket")
     };
-    upload_ticket(&pipe, mode, LOST, &token).await;
+    Box::pin(upload_ticket(&pipe, mode, LOST, &token)).await;
     blobs
         .delete(&mkit_server::store::BlobKey::pack(hash(LOST)))
         .await
@@ -2100,7 +2100,7 @@ async fn lost_pack_precedes_bad_row<N: NamespaceStore>(
     let BeginUploadResult::Ticket { token, .. } = lost else {
         unreachable!()
     };
-    upload_ticket(&pipe, mode, DATA, &token).await;
+    Box::pin(upload_ticket(&pipe, mode, DATA, &token)).await;
     blobs.delete(&BlobKey::pack(hash(DATA))).await.unwrap();
     let second_begin = auth(&pipe, mode, 1, Procedure::BeginUpload);
     let bad = pipe
@@ -2207,7 +2207,7 @@ async fn abort_deadline_is_unavailable<N: NamespaceStore>(
     let BeginUploadResult::Ticket { token, .. } = opened else {
         unreachable!()
     };
-    upload_ticket(&pipe, mode, DATA, &token).await;
+    Box::pin(upload_ticket(&pipe, mode, DATA, &token)).await;
     blobs.delete(&BlobKey::pack(hash(DATA))).await.unwrap();
     store.controls.abort_deadline.store(true, Ordering::SeqCst);
     let advance = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
@@ -2486,7 +2486,7 @@ async fn consume_race<N: NamespaceStore + 'static>(
     let BeginUploadResult::Ticket { token, .. } = ticket else {
         unreachable!()
     };
-    upload_ticket(&pipe, mode, DATA, &token).await;
+    Box::pin(upload_ticket(&pipe, mode, DATA, &token)).await;
     let first_auth = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
     let second_auth = if same_nonce {
         first_auth.clone()
@@ -2610,7 +2610,7 @@ async fn live_begin_races_consume<N: NamespaceStore + 'static>(
     tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
         .await
         .unwrap();
-    upload_ticket(&pipe, mode, DATA, &token).await;
+    Box::pin(upload_ticket(&pipe, mode, DATA, &token)).await;
     let advance = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
     assert_eq!(
         pipe.advance_refs_with_tickets(
@@ -2682,7 +2682,7 @@ async fn existing_begin_races_consume<N: NamespaceStore + 'static>(
     tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
         .await
         .unwrap();
-    upload_ticket(&pipe, mode, DATA, &token).await;
+    Box::pin(upload_ticket(&pipe, mode, DATA, &token)).await;
     let advance = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
     assert_eq!(
         pipe.advance_refs_with_tickets(
@@ -2744,7 +2744,7 @@ async fn abort_races_consume<N: NamespaceStore + 'static>(
     let BeginUploadResult::Ticket { token, .. } = ticket else {
         unreachable!()
     };
-    upload_ticket(&pipe, mode, DATA, &token).await;
+    Box::pin(upload_ticket(&pipe, mode, DATA, &token)).await;
     blobs
         .delete(&mkit_server::store::BlobKey::pack(hash(DATA)))
         .await
@@ -2770,7 +2770,7 @@ async fn abort_races_consume<N: NamespaceStore + 'static>(
     tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
         .await
         .unwrap();
-    upload_ticket(&pipe, mode, DATA, &token).await;
+    Box::pin(upload_ticket(&pipe, mode, DATA, &token)).await;
     let consume = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
     assert_eq!(
         pipe.advance_refs_with_tickets(
@@ -2839,7 +2839,7 @@ async fn abort_race_replans_into_commit<N: NamespaceStore + 'static>(
     let BeginUploadResult::Ticket { token, .. } = opened else {
         unreachable!()
     };
-    upload_ticket(&pipe, mode, DATA, &token).await;
+    Box::pin(upload_ticket(&pipe, mode, DATA, &token)).await;
     blobs.delete(&BlobKey::pack(hash(DATA))).await.unwrap();
     store.arm_abort(pause.clone());
     let advance = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
@@ -2871,7 +2871,7 @@ async fn abort_race_replans_into_commit<N: NamespaceStore + 'static>(
         .apply(&p, Batch::new().put(key, codec::encode_ticket(&row)))
         .await
         .unwrap();
-    upload_ticket(&pipe, mode, DATA, &token).await;
+    Box::pin(upload_ticket(&pipe, mode, DATA, &token)).await;
     pause.release.notify_one();
     assert_eq!(
         blocked.await.unwrap().unwrap(),
@@ -2925,7 +2925,7 @@ async fn expired_close_races_consume<N: NamespaceStore + 'static>(
     let BeginUploadResult::Ticket { token, .. } = ticket else {
         unreachable!()
     };
-    upload_ticket(&pipe, mode, DATA, &token).await;
+    Box::pin(upload_ticket(&pipe, mode, DATA, &token)).await;
     let advance = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
     let p = mode.partition(&advance, REF);
     let ticket_key = keys::ticket(&id);
@@ -3064,7 +3064,7 @@ async fn seven_tickets_commit<N: NamespaceStore>(backend: N, clock: Arc<ManualCl
         let BeginUploadResult::Ticket { token, .. } = ticket else {
             unreachable!()
         };
-        upload_ticket(&pipe, mode, &data, &token).await;
+        Box::pin(upload_ticket(&pipe, mode, &data, &token)).await;
     }
     store.take();
     let advance = auth(&pipe, mode, 1, Procedure::AdvanceRefs);

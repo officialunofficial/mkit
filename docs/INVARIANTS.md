@@ -77,20 +77,21 @@ format, subject and key-window checks. Runtime issuance, replay and field
 exclusion are specified in SPEC-SERVER §15 and await WP-5.8 implementation
 and conformance coverage.
 
-## Ticketed UploadPack touches no metadata and always leaves a marker
+## Ticketed UploadPack writes no business metadata and requires a marker
 
 **Always:** a ticketed UploadPack verifies the signed pack commitment and
 ticket before reading bytes, streams the complete pack through a verifying
 blob sink, and writes a content-addressed marker in the upload-marker
-namespace after the pack commit. It makes no `NamespaceStore` call, quota
-charge, replay row, authorization, admission or `pre_receive` call.
+namespace after the pack commit. Only bounded authoritative generation/mode
+reads are permitted; it writes no metadata row and makes no quota charge,
+replay reservation, authorization, admission or `pre_receive` call.
 
 **Because:** the marker proves that a holder of this ticket supplied and
 verified these pack bytes. WP-1.10 requires it with the pack blob before
 consuming the ticket, even when another repository already stored the pack.
 
 **If violated:** an advance could attach a globally present pack without an
-upload, or a ticketed stream could depend on another shard's metadata.
+upload, or a ticketed stream could create business metadata or bypass revocation.
 
 **Enforced by:** `mkit-server` pipeline tests `ticketed_upload_no_metadata_and_marker`,
 `ticketed_upload_failures_leave_no_marker`, and `upload::marker::tests::golden_upload_marker_v1`;
@@ -1945,3 +1946,58 @@ coherent PublicationPolicy serving-stop seam; HTTP and tokens remain anonymous.
 RPC identity/pending/held tests, private token/proof tests and existing authorization
 matrix cover the paths. The actual inspector/flag scheduler and cache purge remain
 WP-5.5a/5.6a responsibilities; this change does not claim their activation.
+## External authority revocation fences final acceptance
+
+**Always:** with authority fencing enabled, a completed namespace generation
+barrier prevents every older Authority allowance from accepting a new write.
+Facts survive retries, visibility writes compare the coordinator generation,
+and D34 writes guard generation-bearing leases and backend deadlines. Ticket
+staging coalesces client frames in at most 256 KiB of private buffering and
+checks the ticket's generation before and after every actual backend write,
+plus receipt, completion and marker boundaries. Metadata work depends on
+declared bytes, never the number of client frames. Durable
+mode at generation zero prevents a disabled executor from accepting through a
+fenced lease, fresh shard, visibility operation or ticket. Initial activation
+finishes its barrier before granting ready leases and creates no accounting
+namespace. Grant epochs remain independent. Generation/recovery-bound durable
+cursors keep bounded completion progressing across cold executor instances;
+recovery invalidates them while preserving the fence.
+All-key stores inspect durable fence evidence even on disabled Single
+executors; atomic all-key stores also guard the observed generation and mode
+at acceptance. Single batches these reads into its existing read-ahead call.
+Ref-only stores omit unsupported metadata reads and retain sequential ref
+batches. Their capabilities cannot enable fencing; generation-bearing plans
+on any incapable store refuse rather than dropping their protection.
+
+**Because:** stopping future hook allowances cannot revoke an allowance already
+paused between authorization and durable acceptance.
+
+**If violated:** a revoked delegate can commit after revocation was acknowledged.
+
+**Enforced by:** the atomic plan, visibility and ticket guards and shared lease
+renewal/completion; memory/SQLite authority tests in
+`rust/crates/mkit-server-native/tests/epoch_leases.rs`. Deployment activation is
+optional and requires an Authority hook with explicit generation facts.
+
+## Worker extracted-object backend completion verifies before visibility
+
+**Always:** server-internal object multipart sessions pin a trusted raw-root/CV
+plan, geometry and operation identity before staging. Actual streamed parts
+verify length/CV before receiving opaque backend receipts. Completion checks the
+ordered receipt/session binding, geometry and merged root before R2 completion;
+it never rereads part payloads. All R2 object writer paths share an immutable
+root/length pin. Public pack receipt limits and upload semantics are unchanged.
+
+**Because:** R2 completion immediately publishes and has no conditional object
+write option. An ETag selects a backend part and does not prove integrity.
+Safety across pre-upgrade objects additionally depends on the canonical
+verifier binding object identity to one correct raw root; AlreadyPresent is
+advisory and cannot replace repository-local source verification or charging.
+
+**If violated:** a replacement, forged receipt or competing writer could expose
+unverified bytes or falsely authorize reuse in another repository.
+
+**Enforced by:** `r2/object_multipart.rs`, legacy R2 object sink/completion root
+pins, bounded-object multipart model tests, and the local R2 runtime probe.
+The parent WP-4.10b must establish canonical identity plus immutable verified
+source evidence in its first bounded source pass; that integration is pending.

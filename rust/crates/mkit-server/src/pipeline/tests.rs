@@ -133,6 +133,8 @@ fn planned_ticket_publication(count: usize, d34: bool, retained: bool) -> Batch 
             });
     }
     let req = WriteRequest {
+        authority_store: AuthorityStore::Guarded,
+        authority_generation: None,
         repo: &repo.name,
         kind: WriteKind::AdvanceRefs,
         refs: &refs,
@@ -147,6 +149,8 @@ fn planned_ticket_publication(count: usize, d34: bool, retained: bool) -> Batch 
         }),
         lease: d34.then_some(lease::LeaseWrite {
             value: codec::EpochLease {
+                authority_ready: None,
+                authority_generation: None,
                 epoch: 1,
                 expires_at_ms: ms(T0) + 30_000,
                 config_version: 1,
@@ -175,6 +179,7 @@ fn planned_ticket_publication(count: usize, d34: bool, retained: bool) -> Batch 
             let mut pack_id = [0; 32];
             pack_id[0] = u8::try_from(i).unwrap() << 4;
             TicketV1 {
+                authority_generation: None,
                 repo: repo.name.clone(),
                 ref_name: HEAD.into(),
                 signer,
@@ -226,8 +231,8 @@ fn seven_ticket_publication_bounds_are_real_batches() {
     for (d34, retained, expected) in [
         (true, false, 93),
         (true, true, 94),
-        (false, false, 82),
-        (false, true, 83),
+        (false, false, 84),
+        (false, true, 85),
     ] {
         let batch = planned_ticket_publication(7, d34, retained);
         assert_eq!(batch.preconditions.len() + batch.writes.len(), expected);
@@ -303,7 +308,29 @@ fn single_ticket_advance_guards_the_grant_epoch() {
     assert!(batch.preconditions.iter().any(|guard| matches!(guard,
         Precondition::Absent(key) if *key == keys::grant_epoch()
     )));
-    assert_eq!(batch.preconditions.len() + batch.writes.len(), 86);
+    assert_eq!(
+        batch
+            .preconditions
+            .iter()
+            .filter(|guard| matches!(guard,
+                Precondition::Absent(key) if *key == keys::lease_recovery()
+            ))
+            .count(),
+        1
+    );
+    let ops = batch.preconditions.len() + batch.writes.len();
+    assert_eq!(
+        batch
+            .preconditions
+            .iter()
+            .filter(|guard| matches!(guard,
+                Precondition::Absent(key) if *key == keys::authority_generation()
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(ops, 84);
+    assert!(ops <= crate::store::MAX_BATCH_OPS);
 }
 
 /// WP-1.15 B9's largest implicit batch: a packmap write consuming
@@ -350,6 +377,8 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
         shards: &shards,
     };
     let req = WriteRequest {
+        authority_store: AuthorityStore::Guarded,
+        authority_generation: None,
         repo: &repo.name,
         kind: WriteKind::UpdateRef,
         refs: &refs,
@@ -361,6 +390,8 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
         grant: None,
         lease: Some(lease::LeaseWrite {
             value: codec::EpochLease {
+                authority_ready: None,
+                authority_generation: None,
                 epoch: 1,
                 expires_at_ms: ms(T0) + 30_000,
                 config_version: 1,
@@ -454,6 +485,7 @@ fn ticket_reservation_id_mismatch_is_corruption() {
     snap.insert(
         keys::ticket(&id),
         Some(codec::encode_ticket(&codec::TicketV1 {
+            authority_generation: None,
             repo: repo.name.clone(),
             ref_name: HEAD.into(),
             signer: [7; 32],
@@ -768,6 +800,9 @@ fn single_sharding_watermark_reads_namespace_outbox() {
         Batch::new().put(
             keys::lease_recovery(),
             codec::encode_lease_recovery(&codec::LeaseRecovery {
+                authority_fence: None,
+                authority_ready: None,
+                activation_only: None,
                 resumed_at_ms: u64::try_from(T0).unwrap(),
             }),
         ),
@@ -1839,6 +1874,73 @@ fn advance_refs_nonatomic_store_matches_trait_default_order() {
     }
 }
 
+#[test]
+fn nonatomic_single_all_keys_preserves_refs_and_refuses_persisted_fence() {
+    for auth in [
+        AuthMode::Open,
+        AuthMode::Bearer {
+            token: crate::error::Redacted::new("secret"),
+        },
+    ] {
+        for evidence in [
+            None,
+            Some(keys::authority_generation()),
+            Some(keys::lease_recovery()),
+        ] {
+            let clock = clock();
+            let kv = store(&clock);
+            seed(&kv, &[(HEAD, A), (PACKMAP, A)]);
+            if let Some(key) = evidence.as_ref() {
+                let value = if *key == keys::authority_generation() {
+                    codec::encode_u64(0)
+                } else {
+                    codec::encode_lease_recovery(&codec::LeaseRecovery {
+                        resumed_at_ms: 0,
+                        authority_fence: Some(true),
+                        authority_ready: Some(true),
+                        activation_only: Some(true),
+                    })
+                };
+                assert_eq!(
+                    now(kv.apply(&ns(), Batch::new().put(key.clone(), value))).unwrap(),
+                    BatchOutcome::Committed
+                );
+            }
+            let mut caps = StoreCapabilities::full();
+            caps.atomic_multi_key = false;
+            caps.implicit_layout_version = Some(LAYOUT_VERSION);
+            let env = build(
+                cfg(auth.clone()),
+                Spy::new(kv.with_capabilities(caps)),
+                Hooks::new(),
+                clock,
+            );
+            let request =
+                |procedure| Req::unsigned(procedure).header("authorization", "Bearer secret");
+            let read = |name| {
+                let a = env.auth(&request(Procedure::ReadRef)).unwrap();
+                now(env.pipe.read_ref(&a, name)).unwrap()
+            };
+            let update = env.update(&request(Procedure::UpdateRef), &upd(HEAD, Match(A), B));
+            let advance = env.advance(
+                &request(Procedure::AdvanceRefs),
+                &upd(HEAD, Match(B), C),
+                &upd(PACKMAP, Match(A), C),
+            );
+            if evidence.is_some() {
+                assert_eq!(update.unwrap_err().code(), Code::Unavailable);
+                assert_eq!(advance.unwrap_err().code(), Code::Unavailable);
+                assert_eq!((read(HEAD), read(PACKMAP)), (Some(A), Some(A)));
+                assert!(env.batches().is_empty());
+            } else {
+                assert_eq!(update.unwrap(), UpdateRefResult::Committed);
+                assert_eq!(advance.unwrap(), AdvanceOutcome::Committed);
+                assert_eq!((read(HEAD), read(PACKMAP)), (Some(C), Some(C)));
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------- other modes
 
 #[test]
@@ -2455,6 +2557,7 @@ struct GrantEpochZero;
 impl Authorizer for GrantEpochZero {
     async fn authorize(&self, _: &Operation) -> Result<AuthzFacts, ServerError> {
         Ok(AuthzFacts {
+            authority_generation: None,
             grant: Some(crate::op::GrantRef {
                 id: [9; 32],
                 epoch: 0,
@@ -2556,6 +2659,66 @@ fn pipeline_new_rejects_authv2_over_refs_only_store() {
 }
 
 #[test]
+fn authority_fence_requires_capable_store_at_startup() {
+    use crate::repo::MultiAddressing;
+    let mut config = cfg(authv2());
+    config.addressing = Addressing::Multi(MultiAddressing::new());
+    config.write_policy = WritePolicy::Owner;
+    config.authorizer_role = AuthorizerRole::Authority;
+    config.authority_fence = Some(
+        crate::authority::AuthorityFence::parse(&format!(
+            "deployment {} ed25519-{}",
+            to_hex(&key(8).verifying_key().to_bytes()),
+            to_hex(&key(7).verifying_key().to_bytes()),
+        ))
+        .unwrap(),
+    );
+    config.ticket_keys =
+        Some(crate::upload::token::TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap());
+    for (caps, capable) in [
+        (StoreCapabilities::full(), true),
+        (
+            StoreCapabilities {
+                atomic_multi_key: false,
+                implicit_layout_version: Some(LAYOUT_VERSION),
+                ..StoreCapabilities::full()
+            },
+            false,
+        ),
+        (StoreCapabilities::refs_only(), false),
+        (
+            StoreCapabilities {
+                atomic_multi_key: true,
+                ..StoreCapabilities::refs_only()
+            },
+            false,
+        ),
+    ] {
+        let clock = clock();
+        let hooks = Hooks {
+            authorizer: Granting,
+            admission: DefaultAdmission,
+            pre_receive: NoPreReceive,
+            receipts: NoReceipts,
+            outcomes: NoOutcomes,
+        };
+        let result = Pipeline::new(
+            MemoryBlobStore::default(),
+            store(&clock).with_capabilities(caps),
+            hooks,
+            config.clone(),
+            clock,
+            Arc::new(crate::NoopMetrics),
+        );
+        if capable {
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            assert_eq!(result.unwrap_err().code(), Code::InvalidArgument);
+        }
+    }
+}
+
+#[test]
 fn refs_only_store_never_sees_layout_version_key() {
     for auth in [AuthMode::Open, AuthMode::TransportIdentity] {
         let clock = clock();
@@ -2606,6 +2769,40 @@ fn snapshot(req: &WriteRequest<'_>, values: &[(Key, Value)]) -> Snapshot {
     snap
 }
 
+#[test]
+fn incapable_authority_planner_request_refuses_generation() {
+    let name = repo_name();
+    let refs = [upd(HEAD, Missing, A)];
+    for authority_store in [AuthorityStore::RefsOnly, AuthorityStore::Inspected] {
+        let req = WriteRequest {
+            authority_store,
+            authority_generation: Some(0),
+            repo: &name,
+            kind: WriteKind::UpdateRef,
+            refs: &refs,
+            ref_index: None,
+            replay: None,
+            charges: &[],
+            namespace_charge: None,
+            grant: None,
+            lease: None,
+            layout_version: false,
+            mark_repo_known: false,
+            begin: None,
+            advance: None,
+            implicit: None,
+            rejection: None,
+            pending: None,
+        };
+        assert_eq!(
+            plan_write(&req, &snapshot(&req, &[]), &clock_at(5, None))
+                .unwrap_err()
+                .code(),
+            Code::Unavailable
+        );
+    }
+}
+
 fn simple_index_batch(
     repo: &RepoId,
     source: &Partition,
@@ -2615,6 +2812,8 @@ fn simple_index_batch(
     index: bool,
 ) -> Planned {
     let req = WriteRequest {
+        authority_store: AuthorityStore::Guarded,
+        authority_generation: None,
         repo: &repo.name,
         kind: if refs.len() == 1 {
             WriteKind::UpdateRef
@@ -2776,6 +2975,8 @@ fn plan_cas_any_missing_match_on_snapshot() {
     for (condition, current, commits) in cases {
         let refs = [upd(HEAD, condition, C)];
         let req = WriteRequest {
+            authority_store: AuthorityStore::Guarded,
+            authority_generation: None,
             repo: &name,
             kind: WriteKind::UpdateRef,
             refs: &refs,
@@ -2807,8 +3008,17 @@ fn plan_cas_any_missing_match_on_snapshot() {
                     plan.batch.writes,
                     vec![Write::Put(ref_value(HEAD, C).0, ref_value(HEAD, C).1)]
                 );
-                let guarded = plan.batch.preconditions.len() == 2;
+                let guarded = plan.batch.preconditions.iter().any(|guard| matches!(guard,
+                    Precondition::Absent(key) | Precondition::Equals(key, _) if *key == keys::ref_key(&name, HEAD)
+                ));
                 assert_eq!(guarded, condition != Any, "Any is never guarded");
+                for key in [keys::authority_generation(), keys::lease_recovery()] {
+                    assert!(
+                        plan.batch
+                            .preconditions
+                            .contains(&Precondition::Absent(key))
+                    );
+                }
             }
             Planned::Done(result) => {
                 assert!(!commits, "{condition:?} {current:?}");
@@ -2834,6 +3044,8 @@ fn plan_conflict_writes_only_the_replay_record() {
     let name = repo_name();
     let refs = [upd(PACKMAP, Match(A), C), upd(HEAD, Match(A), C)];
     let req = WriteRequest {
+        authority_store: AuthorityStore::Guarded,
+        authority_generation: None,
         repo: &name,
         kind: WriteKind::AdvanceRefs,
         refs: &refs,
@@ -2881,12 +3093,14 @@ fn plan_conflict_writes_only_the_replay_record() {
     assert_eq!(
         plan.batch.preconditions[1..],
         [
+            Precondition::Absent(keys::lease_recovery()),
+            Precondition::Absent(keys::authority_generation()),
             Precondition::Equals(values[0].0.clone(), values[0].1.clone()),
             Precondition::Equals(values[1].0.clone(), values[1].1.clone()),
             Precondition::Absent(keys::replay(&[1; 32])),
         ]
     );
-    assert_eq!(plan.replay_index, Some(3));
+    assert_eq!(plan.replay_index, Some(5));
 }
 
 fn charge(max_ops: u32) -> QuotaCharge {
@@ -2907,6 +3121,8 @@ fn plan_quota_exhaustion_yields_no_batch() {
     let refs = [upd(HEAD, Any, C)];
     let charges = [charge(1)];
     let req = WriteRequest {
+        authority_store: AuthorityStore::Guarded,
+        authority_generation: None,
         repo: &name,
         kind: WriteKind::UpdateRef,
         refs: &refs,
@@ -2963,6 +3179,8 @@ proptest! {
         let refs = if advance { &refs[..] } else { &refs[1..] };
         let charges: Vec<_> = quota.map(|_| charge(2)).into_iter().collect();
         let req = WriteRequest {
+            authority_store: AuthorityStore::Guarded,
+            authority_generation: None,
             repo: &name,
             kind: if advance { WriteKind::AdvanceRefs } else { WriteKind::UpdateRef },
             refs,
@@ -3587,6 +3805,8 @@ fn plan_signed_conflict_still_charges_quota() {
     let refs = [upd(HEAD, Missing, C)];
     let charges = [charge(5)];
     let req = WriteRequest {
+        authority_store: AuthorityStore::Guarded,
+        authority_generation: None,
         repo: &name,
         kind: WriteKind::UpdateRef,
         refs: &refs,
@@ -3648,6 +3868,8 @@ fn plan_prune_fits_the_batch_op_cap() {
         })
         .collect();
     let req = WriteRequest {
+        authority_store: AuthorityStore::Guarded,
+        authority_generation: None,
         repo: &name,
         kind: WriteKind::AdvanceRefs,
         refs: &refs,
@@ -3702,6 +3924,8 @@ fn prune_sampling_is_deterministic_one_in_eight() {
     let name = repo_name();
     let refs = [upd(HEAD, Any, C)];
     let request = |replay: Option<ReplayGuard>| WriteRequest {
+        authority_store: AuthorityStore::Guarded,
+        authority_generation: None,
         repo: &name,
         kind: WriteKind::UpdateRef,
         refs: &refs,
@@ -3835,6 +4059,7 @@ struct Granting;
 impl Authorizer for Granting {
     async fn authorize(&self, _: &Operation) -> Result<AuthzFacts, ServerError> {
         Ok(AuthzFacts {
+            authority_generation: None,
             owner: true,
             grant: Some(crate::op::GrantRef {
                 id: [9; 32],
@@ -4142,9 +4367,12 @@ fn prune_race_then_push(kv: MemoryKv, pushed: codec::EpochLease) -> Spy {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // The race fixture verifies both attempts, deadline and refreshed lease state.
 fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
     let clock = clock();
     let pushed = codec::EpochLease {
+        authority_ready: None,
+        authority_generation: None,
         epoch: 1,
         expires_at_ms: ms(T0) + 30_000,
         config_version: 1,
@@ -4160,7 +4388,12 @@ fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
     config.sharding = Sharding::D34;
     let env = build(config, meta, Hooks::new(), clock);
     let p = D34Shards.ref_shard(&repo(), HEAD);
-    let old = codec::EpochLease { epoch: 0, ..pushed };
+    let old = codec::EpochLease {
+        authority_ready: None,
+        authority_generation: None,
+        epoch: 0,
+        ..pushed
+    };
     assert_eq!(
         now(env.pipe.meta.inner.apply(
             &p,
@@ -4179,6 +4412,8 @@ fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
         limits: DEFAULT_WRITE_QUOTA,
     }];
     let req = WriteRequest {
+        authority_store: AuthorityStore::Guarded,
+        authority_generation: None,
         repo: &repo_name(),
         kind: WriteKind::UpdateRef,
         refs: &refs,
@@ -4289,6 +4524,8 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
     let name = repo_name();
     let refs = [upd(HEAD, Any, A)];
     let stored = codec::EpochLease {
+        authority_ready: None,
+        authority_generation: None,
         epoch: 6,
         expires_at_ms: ms(T0) + 30_000,
         config_version: 1,
@@ -4298,6 +4535,8 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
         (ms(T0) + 7_000, ms(T0) + 2_000),
     ] {
         let req = WriteRequest {
+            authority_store: AuthorityStore::Guarded,
+            authority_generation: None,
             repo: &name,
             kind: WriteKind::UpdateRef,
             refs: &refs,
@@ -4323,6 +4562,8 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
             implicit: None,
             lease: Some(lease::LeaseWrite {
                 value: codec::EpochLease {
+                    authority_ready: None,
+                    authority_generation: None,
                     epoch: 7,
                     expires_at_ms,
                     ..stored

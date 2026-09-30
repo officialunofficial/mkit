@@ -43,3 +43,18 @@ prefix in a relative object URL; configured admission disables redirects.
 
 The [local workerd probe](tests/http-mount-probe/README.md) exercises the real
 streaming bridge and outer response policy without deployment or cloud bindings.
+
+Set `AUTHORITY_FENCE=true` and `AUTHORITY_KEYS` (secret) to enable namespace
+fencing under Multi addressing and an Authority hook. Each key line is
+`<key-id> <64 lowercase hex public key> <namespace[,namespace...]>`; keys must be
+dedicated and differ from owner, hook, ticket and active/retired URL-token keys.
+Every write allowance must include `authority_generation`. Fencing is off by
+default; launch activation belongs to WP-4.18. The getter/setter and canonical
+signed statement contract are SPEC-SERVER §6.2.1.
+
+Once a namespace has persisted authority fencing, disabling the executor setting
+refuses new writes for that namespace, including generation zero. Initial
+activation may return `unavailable` with `Retry-After: 1` until its bounded lease
+barrier completes. Repeating the signed target resumes durable progress; it does
+not create a namespace or charge first-write creation. Restore must preserve the
+authority mode and generation, then declare real lease-table recovery.

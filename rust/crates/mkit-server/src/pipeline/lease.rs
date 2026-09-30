@@ -32,17 +32,20 @@ pub(super) struct LeaseWrite {
 
 pub(super) enum LeaseObservation {
     Usable(codec::EpochLease),
-    Renew(CoordinatorLease),
+    Renew(Box<CoordinatorLease>),
 }
 
 pub(super) struct CoordinatorLease {
     namespace: Option<Value>,
     repo: Option<Value>,
     epoch: Option<Value>,
+    authority: Option<Value>,
+    authority_generation: Option<u64>,
     leased_epoch: u64,
     shard: Option<Value>,
     observed_el: Option<codec::EpochLease>,
     recovery: Option<codec::LeaseRecovery>,
+    recovery_value: Option<Value>,
     relay_watermark_ms: u64,
     quota_seed: Option<(u64, NamespaceUsage)>,
 }
@@ -113,6 +116,8 @@ const LEASE_GRANT_ATTEMPTS: usize = 8;
 /// pipeline. Defaults equal [`super::PipelineConfig::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeaseParams {
+    /// Require the independent authority generation in the shared lease lifecycle.
+    pub authority_fence: bool,
     /// Coordinator epoch lease duration, in milliseconds.
     pub epoch_lease_ms: u64,
     /// Clock-skew safety margin, in milliseconds.
@@ -124,6 +129,7 @@ pub struct LeaseParams {
 impl Default for LeaseParams {
     fn default() -> Self {
         Self {
+            authority_fence: false,
             epoch_lease_ms: 30_000,
             lease_margin_ms: 5_000,
             min_lease_budget_ms: 1_000,
@@ -134,6 +140,7 @@ impl Default for LeaseParams {
 impl From<&super::PipelineConfig> for LeaseParams {
     fn from(cfg: &super::PipelineConfig) -> Self {
         Self {
+            authority_fence: cfg.authority_fence.is_some(),
             epoch_lease_ms: cfg.epoch_lease_ms,
             lease_margin_ms: cfg.lease_margin_ms,
             min_lease_budget_ms: cfg.min_lease_budget_ms,
@@ -141,6 +148,7 @@ impl From<&super::PipelineConfig> for LeaseParams {
     }
 }
 
+#[allow(clippy::too_many_lines)] // One shared atomic grant guards both barriers and updates creation, lease and sweep rows.
 fn grant_batch(
     read: &CoordinatorLease,
     repo: &RepoName,
@@ -161,12 +169,14 @@ fn grant_batch(
         .map_err(meta_error)?;
     // A declared recovery can leave a surviving el without its lease-table row.
     // Completion remains fenced by the same hold-off in revoke_step.
-    let recovering = read.recovery.is_some_and(|lr| {
-        now < lr
-            .resumed_at_ms
-            .saturating_add(cfg.epoch_lease_ms)
-            .saturating_add(cfg.lease_margin_ms)
-    });
+    let recovering = read
+        .recovery
+        .and_then(codec::LeaseRecovery::recovery_time)
+        .is_some_and(|resumed| {
+            now < resumed
+                .saturating_add(cfg.epoch_lease_ms)
+                .saturating_add(cfg.lease_margin_ms)
+        });
     if !recovering && old.is_none_or(|lease| lease.expires_at_ms <= now) {
         let observed_ls_expires = old.map_or(0, |lease| lease.expires_at_ms);
         // Safety relies on lease_margin_ms exceeding every clock skew
@@ -184,6 +194,12 @@ fn grant_batch(
         expires_at_ms: old
             .map_or(0, |l| l.expires_at_ms)
             .max(now.saturating_add(cfg.epoch_lease_ms)),
+        authority_generation: read.authority_generation,
+        acked_authority_generation: if old.is_some_and(|l| l.expires_at_ms > now) {
+            old.and_then(|l| l.acked_authority_generation)
+        } else {
+            read.authority_generation
+        },
         acked_epoch: old
             .filter(|l| l.expires_at_ms > now)
             .map_or(epoch, |l| l.acked_epoch),
@@ -216,7 +232,27 @@ fn grant_batch(
             Precondition::Present(rr_key.clone())
         })
         .require(observed_guard(keys::grant_epoch(), read.epoch.as_ref()))
-        .require(observed_guard(ls_key.clone(), read.shard.as_ref()));
+        .require(observed_guard(ls_key.clone(), read.shard.as_ref()))
+        .require(observed_guard(
+            keys::lease_recovery(),
+            read.recovery_value.as_ref(),
+        ));
+    if cfg.authority_fence
+        && read.recovery.is_none_or(|mode| {
+            mode.authority_fence != Some(true) || mode.authority_ready != Some(true)
+        })
+    {
+        return Err(
+            ServerError::unavailable("authority activation pending; retry")
+                .with_header("Retry-After", "1"),
+        );
+    }
+    if read.authority_generation.is_some() {
+        batch = batch.require(observed_guard(
+            keys::authority_generation(),
+            read.authority.as_ref(),
+        ));
+    }
     if creation.namespace {
         batch = batch.put(nr_key, codec::encode_namespace_record(&namespace));
     }
@@ -240,7 +276,9 @@ fn grant_batch(
             Value::default(),
         );
     let value = codec::EpochLease {
+        authority_ready: cfg.authority_fence.then_some(true),
         epoch,
+        authority_generation: read.authority_generation,
         expires_at_ms: shard.expires_at_ms,
         config_version: namespace.config_version,
     };
@@ -254,7 +292,7 @@ fn grant_batch(
 /// Read the coordinator rows a grant plans from and the shard's relay
 /// watermark. `source` serves the ref shard `p`; `coordinator_store` the
 /// namespace coordinator (the same store, except on a Worker's timer).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One bounded snapshot validates mode, accounting and both independent generations together.
 async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
     source: &L,
     coordinator_store: &M,
@@ -264,7 +302,13 @@ async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
     p: &Partition,
     observed_el: Option<codec::EpochLease>,
     seed_window: Option<u64>,
+    authority_fence: bool,
 ) -> Result<CoordinatorLease, ServerError> {
+    if !authority_fence && observed_el.is_some_and(|el| el.authority_generation.is_some()) {
+        return Err(ServerError::unavailable(
+            "persisted authority lease requires enabled executor",
+        ));
+    }
     let mut wanted = vec![
         keys::namespace_record(),
         keys::repo_record(&repo_id.name),
@@ -272,6 +316,9 @@ async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
         keys::leased_shard(&repo_id.name, shard_ref(p)?),
         keys::lease_recovery(),
     ];
+    if authority_fence {
+        wanted.push(keys::authority_generation());
+    }
     if let Some(window) = seed_window {
         wanted.push(keys::quota_total(window));
     }
@@ -293,9 +340,40 @@ async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
     let [namespace, repo, epoch, shard, recovery] = &rows[..5] else {
         return Err(internal("lease get_many returned the wrong row count"));
     };
+    let mode = recovery
+        .as_ref()
+        .map(codec::decode_lease_recovery)
+        .transpose()
+        .map_err(meta_error)?;
+    if !authority_fence
+        && (mode.is_some_and(|m| m.authority_fence == Some(true))
+            || shard
+                .as_ref()
+                .map(codec::decode_leased_shard)
+                .transpose()
+                .map_err(meta_error)?
+                .is_some_and(|row| row.authority_generation.is_some()))
+    {
+        return Err(ServerError::unavailable(
+            "persisted authority fence requires enabled executor",
+        ));
+    }
+    let authority = if authority_fence {
+        rows[5].clone()
+    } else {
+        None
+    };
+    if authority_fence
+        && mode.is_some_and(|m| m.authority_fence == Some(true))
+        && authority.is_none()
+    {
+        return Err(ServerError::unavailable(
+            "authority generation missing from fenced namespace",
+        ));
+    }
     let quota_seed = seed_window
         .map(|window| {
-            rows[5]
+            rows[5 + usize::from(authority_fence)]
                 .as_ref()
                 .map(codec::decode_namespace_usage)
                 .transpose()
@@ -319,6 +397,19 @@ async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
         namespace: namespace.clone(),
         repo: repo.clone(),
         epoch: epoch.clone(),
+        authority: authority.clone(),
+        authority_generation: if authority_fence {
+            Some(
+                authority
+                    .as_ref()
+                    .map(codec::decode_u64)
+                    .transpose()
+                    .map_err(meta_error)?
+                    .unwrap_or(0),
+            )
+        } else {
+            None
+        },
         leased_epoch: epoch
             .as_ref()
             .map(codec::decode_u64)
@@ -327,6 +418,7 @@ async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
             .unwrap_or(0),
         shard: shard.clone(),
         observed_el,
+        recovery_value: recovery.clone(),
         recovery: recovery
             .as_ref()
             .map(codec::decode_lease_recovery)
@@ -375,8 +467,15 @@ pub async fn renew_for_relay<L: NamespaceStore, M: NamespaceStore>(
             .map(codec::decode_epoch_lease)
             .transpose()
             .map_err(meta_error)?;
+        if !params.authority_fence && observed.is_some_and(|el| el.authority_generation.is_some()) {
+            return Err(ServerError::unavailable(
+                "persisted authority lease requires enabled executor",
+            ));
+        }
         let now = ms(clock.now_ms());
         if let (Some(raw), Some(lease)) = (&raw, observed)
+            && (!params.authority_fence
+                || (lease.authority_generation.is_some() && lease.authority_ready == Some(true)))
             && lease
                 .expires_at_ms
                 .checked_sub(params.lease_margin_ms)
@@ -385,7 +484,18 @@ pub async fn renew_for_relay<L: NamespaceStore, M: NamespaceStore>(
         {
             return Ok(raw.clone());
         }
-        let read = read_lease_rows(local, meta, shards, clock, repo, p, observed, None).await?;
+        let read = read_lease_rows(
+            local,
+            meta,
+            shards,
+            clock,
+            repo,
+            p,
+            observed,
+            None,
+            params.authority_fence,
+        )
+        .await?;
         let grant = grant_batch(&read, &repo.name, p, now, now, params)?;
         match meta
             .apply(&shards.coordinator(&repo.namespace), grant.batch)
@@ -432,7 +542,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .map(codec::decode_epoch_lease)
             .transpose()
             .map_err(meta_error)?;
-        if let Some(lease) = observed_el {
+        if self.cfg.authority_fence.is_none()
+            && observed_el.is_some_and(|el| el.authority_generation.is_some())
+        {
+            return Err(ServerError::unavailable(
+                "persisted authority lease requires enabled executor",
+            ));
+        }
+        if let Some(lease) = observed_el.filter(|lease| {
+            self.cfg.authority_fence.is_none()
+                || (lease.authority_generation.is_some() && lease.authority_ready == Some(true))
+        }) {
             let now = ms(self.clock.now_ms());
             let usable_until = lease.expires_at_ms.checked_sub(self.cfg.lease_margin_ms);
             if usable_until
@@ -442,9 +562,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 return Ok(LeaseObservation::Usable(lease));
             }
         }
-        Ok(LeaseObservation::Renew(
+        Ok(LeaseObservation::Renew(Box::new(
             self.read_lease(op, p, observed_el, seed_window).await?,
-        ))
+        )))
     }
 
     async fn read_lease(
@@ -454,7 +574,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         observed_el: Option<codec::EpochLease>,
         seed_window: Option<u64>,
     ) -> Result<CoordinatorLease, ServerError> {
-        read_lease_rows(
+        let read = read_lease_rows(
             &self.meta,
             &self.meta,
             self.shards.as_ref(),
@@ -463,8 +583,29 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             p,
             observed_el,
             seed_window,
+            self.cfg.authority_fence.is_some(),
         )
-        .await
+        .await?;
+        if self.cfg.authority_fence.is_some()
+            && read.recovery.is_none_or(|mode| {
+                mode.authority_fence != Some(true) || mode.authority_ready != Some(true)
+            })
+        {
+            Box::pin(self.ensure_authority_activation(&op.repo.namespace)).await?;
+            return read_lease_rows(
+                &self.meta,
+                &self.meta,
+                self.shards.as_ref(),
+                self.clock.as_ref(),
+                &op.repo,
+                p,
+                observed_el,
+                seed_window,
+                true,
+            )
+            .await;
+        }
+        Ok(read)
     }
 
     pub(super) async fn admit_lease(
@@ -474,7 +615,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         observed: LeaseObservation,
         skew_ms: i64,
     ) -> Result<(Creation, LeaseWrite), ServerError> {
-        let LeaseObservation::Renew(mut read) = observed else {
+        let LeaseObservation::Renew(read) = observed else {
             let LeaseObservation::Usable(value) = observed else {
                 unreachable!()
             };
@@ -486,6 +627,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 },
             ));
         };
+        let mut read = *read;
         let coordinator = self.shards.coordinator(&op.repo.namespace);
         for _ in 0..LEASE_GRANT_ATTEMPTS {
             if op
@@ -495,6 +637,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .is_some_and(|grant| grant.epoch != read.leased_epoch)
             {
                 return Err(super::plan::epoch_moved());
+            }
+            if let Some(generation) = op.authz.authority_generation
+                && Some(generation) != read.authority_generation
+            {
+                return Err(crate::authority::moved());
             }
             let now = ms(self.clock.now_ms());
             let created_at_ms = ms(self.clock.now_ms().saturating_add(skew_ms));

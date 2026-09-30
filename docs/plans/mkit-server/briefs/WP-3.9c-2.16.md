@@ -1,0 +1,106 @@
+## Purpose
+
+Uno's storage Worker (built on `vcs-worker`) can call uno-api's hooks on GKE over **signed HTTPS**. And when uno-api
+revokes a delegate, **no write that uno-api's Authority hook allowed earlier can commit afterwards**, across D34 leased
+shards, with the same completion guarantees as grant epochs.
+
+## A. Fixed (do not change)
+
+1. **SPEC-SERVER:**
+   - §6: the stages and the Authority role;
+   - §6.1: https only;
+   - §7.1: signing;
+   - §8: fail closed.
+2. **SPEC-WRITE-GRANTS §5.4–§5.6:** fencing and completion. **R-63 and R-151:** the paused-write counterexample and
+   the completion semantics. Grant epochs keep their current scope and are **not** reused.
+3. **R-162 and R-166–R-168:** the channel contract; binding behaviour unchanged; Free outcomes 1×8; the alarm split
+   `32 relay + 1 backup + 8 outcome + ≤ 8 rollup = 49`.
+4. **The existing `HookChannel`/`HookClient` contract** (3.7) and 3.7b's `mkit-rpc` signer and verifier.
+
+## B. Decided (do not change)
+
+### Part 1: WP-3.9c
+
+- **B1.** A wasm-only `FetchChannel`, per fact sheet §2:
+  - https only; refuse userinfo, a query or a fragment; a base-path prefix is allowed;
+  - the audience is the endpoint's canonical origin;
+  - send the exact signed Connect-JSON bytes;
+  - manual redirects, never followed;
+  - no internal retries;
+  - a streamed cap of `max + 1` that keeps the status;
+  - a `WorkerSleep` timeout that also aborts the fetch.
+- **B2. Configuration:**
+  - `HOOK_URL`, plus the existing `HOOK_ROLES`, `HOOK_TIMEOUT_MS` and `AUTHORIZER_ROLE`;
+  - the **`MKIT_HOOK_KEY` secret**, in the native key grammar `<key-id> <64 hex seed>`;
+  - `HOOK_SIGNATURE_VALIDITY_MS`, default 60,000, range 1–300,000.
+  - Refuse an incomplete configuration, and refuse HTTP together with `ADMISSION_HOOK`.
+  - Custom entry points are preserved.
+  - Key separation covers every accepted ticket secret, and the active and retired URL-token keys, when configured.
+- **B3.** The Queue sink (3.9b) stays optional, and it isn't part of this bundle.
+
+### Part 2: WP-2.16, the authority fence
+
+- **B4. Option 1** from the fact sheet: an **independent, per-namespace authority generation**, reusing the lease
+  algorithm. It's optional and default-off, and requires the Authority role plus transactional storage. There is no
+  per-principal generation.
+- **B5. Spec:** add **SPEC-SERVER §6.2.1** with the fact sheet's normative text, plus a version-history row, and
+  register the statement domain in SPEC-CONVENTIONS. **Fail closed** on missing or invalid facts.
+- **B6.** Add the generation to `AuthorizeAllow` (hooks, with the proto field added additively), to `AuthzFacts`, and
+  to write planning.
+  - It's preserved through admission, planning and retries.
+  - Apply compares atomically against the authoritative row or the guarded shard lease.
+  - A mismatch is `permission_denied`, with nothing accepted and the reservation `Aborted`.
+  - **Fix both traps:** ordinary write authorization and visibility authorization currently discard the returned hook
+    facts. Merge trusted Authority facts, keeping the built-in owner and grant facts.
+- **B7. RPCs:** `GetAuthorityGeneration` and `SetAuthorityGeneration`, outside auth-v2 envelopes.
+  - The setter carries a bounded, canonical statement signed by a **configured deployment-authority key with
+    namespace permission**, never just a namespace-owner key.
+  - Bind the domain, key id, namespace, generation, audience, timestamps and nonce.
+  - Strict Ed25519; bounded increments; reject overflow and rollback; idempotent completion retries.
+  - Reuse R-151's bounded completion scans, and pending `unavailable` with `Retry-After`.
+  - Amend the transport proto and STC additively.
+- **B8. D34:**
+  - a separate coordinator generation row;
+  - durable leases extended with the authority generation and its acknowledgement;
+  - renewals guard both;
+  - separate completion checkpoints;
+  - codec compatibility;
+  - no extra steady-state DO calls.
+- **B9. Coverage:** advances and deletes, ticketless uploads, reserved `BeginUpload`, and authority visibility
+  writes.
+  - **Ticket-only part paths** bypass Authorize, so add ticket-generation checks so revoked writers can't keep
+    staging bytes.
+  - Record that re-enrolling the same key needs fresh keys or incarnation binding; that's Uno's job, noted in R-181.
+- **B10. Exposure:**
+  - native: flags for the deployment-authority key and fence enablement;
+  - Worker: vars and secrets;
+  - both default-off.
+
+  Activation for the launch is decided in 4.18/launch.
+
+### Both parts
+
+- **B11. Docs:** R-180 and R-181, a CHANGELOG line per WP, and the native and Worker READMEs. R-181 also records the
+  owner-bridge scope from fact sheet §4 as a post-launch item.
+
+## C. Your decisions
+
+Module layout, config struct shapes, the statement codec field order (documented), and the metric names.
+
+## D. Escalate (stop and report) if
+
+- The fence can't reuse the lease lifecycle without changing grant-epoch semantics.
+- A trap path can't carry facts without a `HookSet` change.
+- Production code passes 3,000 lines. Apply the fact sheet §7 split.
+
+## Tests (required)
+
+Fact sheet §9, both lists in full, including R-63's paused write and R-151's completion. Extend the memory/SQLite
+`epoch_leases` fixtures and the Worker D34 wire coverage.
+
+## Gates
+
+- The common gate set, plus `just ci-server`, `ci-scripts` and `ci-security`.
+- `cargo nextest run --locked -p mkit-server -p mkit-server-native -p mkit-server-worker -p mkit-server-conformance -p mkit-rpc --all-features`.
+- wasm32 clippy and the worker build.
+- `scripts/vcs-worker-conformance.sh` default phase plus the hooks phase, with a free `VCS_CONFORMANCE_PORT`.

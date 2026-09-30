@@ -47,6 +47,8 @@ struct Model {
 impl Model {
     fn lease(epoch: u64, expires_at_ms: u64) -> EpochLease {
         EpochLease {
+            authority_ready: None,
+            authority_generation: None,
             epoch,
             expires_at_ms,
             config_version: 1,
@@ -96,6 +98,8 @@ impl Model {
             self.epoch
         };
         let row = LeasedShard {
+            authority_generation: None,
+            acked_authority_generation: None,
             epoch: self.epoch,
             expires_at_ms,
             acked_epoch,
@@ -172,6 +176,8 @@ impl Model {
             && push.row.acked_epoch < push.target
         {
             self.rows[push.shard] = Some(LeasedShard {
+                authority_generation: None,
+                acked_authority_generation: None,
                 acked_epoch: push.target,
                 ..push.row
             });
@@ -365,6 +371,9 @@ fn declared_recovery_waits_from_resume_instead_of_namespace_creation() {
         "empty table without recovery implies no lost leases"
     );
     model.recovery = Some(LeaseRecovery {
+        authority_fence: None,
+        authority_ready: None,
+        activation_only: None,
         resumed_at_ms: model.now,
     });
     assert!(
