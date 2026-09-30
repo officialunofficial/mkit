@@ -78,3 +78,87 @@ The fact sheet's §8 extraction list, in full.
 - `cargo nextest run --locked -p mkit-server -p mkit-server-worker -p mkit-server-conformance --all-features`.
 - wasm32 clippy and the worker build.
 - `scripts/vcs-worker-conformance.sh` (the indexed/test-faults phase), with a free `VCS_CONFORMANCE_PORT`.
+
+## Executor checkpoint: design, not implementation (2026-09-30)
+
+The root ruling is `~/.cache/mkit-orch/scratchpad/prompts/RULING-4.10b-group-protection-codex.md`.
+It reserves content pending-protection tag `gp` and optional timer kind 13
+`CONTENT_TAKEDOWN_REQUEST`; R-186 remains this package's row. These reservations
+do not describe implemented behavior.
+
+### Consumed-set arbitration
+
+Native `indexed/verify.rs` decodes already-Verified packs too. Its union therefore
+includes their manifest/tree facts when selecting newly introduced objects.
+`staged_owner` uses the first occurrence in ticket order; extraction only runs for
+an owner whose `needs_index` is true. Both rules must survive Scheduled execution.
+Recording only fresh packs or selecting each pack independently would be wrong.
+
+The planned Scheduled creation transaction captures an ordered group of
+pack/ticket/length/creation identities and each member's already-Verified status.
+It guards every observed job and verification row, then claims all new jobs in
+one batch. An unfinished member owned by a different group prevents *all* new
+claims. After that group finishes, a later group may reuse its immutable facts.
+This gives A+B versus B+C the same serialization boundary as native's Pending
+verification lease, rather than creating A and C with mutually incompatible B.
+Only creation of the group is atomic; subsequent work remains bounded per job.
+
+Every group member contributes versioned vc sub-4 selection facts. Extract waits
+for complete, validated facts from the whole group. The group must include reused
+Verified members and preserve first-owner selection. Missing legacy facts need a
+bounded reconstruction path; assuming they exist is unsafe. Replaced/expired
+identities invalidate unfinished work before extraction can switch groups.
+Group aggregate extraction limits and duplicate ownership must use the union,
+while every existing vc sub-6 source dependency remains available to publication.
+
+### Protection and relay
+
+TTL renewal alone cannot cover arbitrary queued delay: current holds expire within
+24 hours and ticket cleanup can remove the job. Before an action can outlive TTL
+protection, extraction will create a versioned `gp 00 object hold_id` marker in the
+content shard, identifying the repository, source job and intent. Marker mutations
+bump and guard `c`; any marker conservatively prevents collection. An initial
+bounded existence scan suffices for GC, and malformed state fails closed.
+
+The source checkpoint and holder relay enqueue must commit together. The target
+hook will atomically write HolderV1, update conservative accounting, release the
+TTL hold, remove the matching marker, and advance the watermark. It must still
+apply valid queued work after ticket expiry, check the fresh blocklist, and record
+a real durable takedown request for a late blocked holder. Watermark redelivery
+does not re-bump; a distinct intent does. A crash before source intent creation
+may leave conservative protection; cancellation cannot remove it on age alone.
+Recovery must prove no surviving relay can still apply before releasing it.
+
+### Multipart and budgets
+
+Cloudflare's Workers API exposes create/resume/uploadPart/complete/abort. Complete
+has no conditional-write options and makes the final object globally readable;
+verification must finish before that call. Parts are selected by upload ID, part
+number and returned ETag. ETags identify selected parts, not BLAKE3 integrity.
+The backend path must keep private sessions bound to frozen object/group identity,
+verify deterministic source bytes before each upload, persist CV/length/ETag
+together, and validate exact geometry and merged root before completion. Duplicate
+writers must not replace a selected slot with unverified or different bytes.
+The existing R2 implementation instead rereads every staged part into a final PUT
+and cannot supply bounded finalization for an arbitrarily large object.
+Backend evidence: [Workers API](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/),
+[multipart limits and ETags](https://developers.cloudflare.com/r2/objects/upload-objects/),
+and installed workers-rs 0.8.5 `src/r2/mod.rs`.
+
+All backend calls, hook reads, group retries and failed planning attempts count.
+Verification retains one Paid-only fire, 256 calls and 48 MiB resident allowance.
+Relay target limits must include hook work and shrink/retry reads before the
+whole-alarm bound is recorded. Actual tests and measured bounds are outstanding.
+Exposure remains off. No staging or deployment checks have run for this package.
+
+### Remaining execution
+
+Implement group arbitration/facts; source resolution and replay-safe charges;
+bounded multipart; pending protection and target hook; expiry/crash recovery;
+real Worker registration and budgets. Required regression coverage includes
+native parity with reused packs, overlapping/partial groups, replacement and
+expiry, every publication/sidecar/relay crash boundary, delayed delivery beyond
+24 hours, stale GC/removal races, late block requests, and actual memory/call caps.
+Then integrate other merged seams, run the full brief's gates, obtain two
+independent reviews through the root, and open the PR. Nothing in this checkpoint
+claims those implementation steps or checks are complete.
