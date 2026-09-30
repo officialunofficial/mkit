@@ -7,10 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: kind-8 completion uses the guarded fresh backlog, preserving delivery
+  after a concurrent outcome append (WP-3.13; correction to #1219).
+
 - Server conformance: M3 cases cover admission, CORS, CAS-loss and ticket expiry; the
   orchestrator rulings preserve pipeline ordering and accept ordered combined
-  WWW-Authenticate lists on Workers. A shared outcome append/acknowledgment
-  race triggers a new Section D skip (WP-3.13, incomplete).
+  WWW-Authenticate lists on Workers (WP-3.13).
 
 - Server conformance: MPP stub, loopback controls, real native binary/exec-helper
   push tests and a shared admission commit case; isolated Worker forwarder

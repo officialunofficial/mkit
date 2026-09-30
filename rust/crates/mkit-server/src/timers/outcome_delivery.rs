@@ -306,10 +306,18 @@ impl<O: OutcomeSink> OutcomeDelivery<O> {
             }
         }
         let fresh_oc = if acked.is_empty() {
-            None
+            oc.clone()
         } else {
             ctx.store.get(ctx.partition, &oc_key).await?
         };
+        let fresh_backlog = fresh_oc
+            .as_ref()
+            .map(codec::decode_backlog)
+            .transpose()?
+            .unwrap_or_default();
+        // Completion and acknowledgments must share a snapshot. A later append
+        // fails this guard, retaining the timer for the next fire to re-plan.
+        batch.preconditions.push(guard(oc_key, fresh_oc.as_ref()));
         for (rid, value, seq) in &acked {
             match plan_ack(
                 rid,
@@ -325,7 +333,7 @@ impl<O: OutcomeSink> OutcomeDelivery<O> {
                 }
             }
         }
-        if delivered == backlog.rows {
+        if delivered == fresh_backlog.rows {
             return Ok(Fired::Done(batch));
         }
         // The next fire resumes just after the failed row. Resuming after the
@@ -388,7 +396,7 @@ mod tests {
     use crate::rt::{ManualClock, ManualSleep};
     use crate::store::codec::{Backlog, ReservationV1};
     use crate::store::outbox::{OutboxBuilder, Terminal};
-    use crate::store::{BatchOutcome, Partition, Write};
+    use crate::store::{BatchOutcome, Key, Partition, Precondition, Write};
     use crate::telemetry::NoopMetrics;
     use crate::timers::{TickBudget, TimerRegistry, run_due};
     use std::sync::Mutex;
@@ -477,8 +485,7 @@ mod tests {
         .unwrap()
     }
 
-    // Section D diagnostic: a second terminal outcome arrives inside the first
-    // sink await. Exercise the unchanged production handler deterministically.
+    // A second terminal outcome arrives inside the first sink await.
     struct AppendDuringAck(Arc<MemoryKv>);
     impl OutcomeSink for AppendDuringAck {
         async fn deliver(&self, outcome: &Outcome) -> Result<(), DeliveryError> {
@@ -519,8 +526,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Section D: concurrent append during acknowledgment strands an outcome"]
-    async fn diagnostic_append_during_ack_strands_an_outcome() {
+    async fn append_during_ack_keeps_a_timer_and_delivers_on_the_next_fire() {
         let clock = Arc::new(ManualClock::new(100));
         let store = Arc::new(MemoryKv::with_clock(clock.clone()));
         seed(&store, &["first"]).await;
@@ -538,16 +544,174 @@ mod tests {
             .scan(&partition(), &start, &end, None, 10)
             .await
             .unwrap();
-        assert!(timers.entries.is_empty(), "delivery timer disappeared");
+        assert_eq!(timers.entries.len(), 1, "one delivery timer remains");
         let (start, end) = keys::class_range(keys::TAG_OUTCOME_PENDING);
         let pending = store
             .scan(&partition(), &start, &end, None, 10)
             .await
             .unwrap();
         assert_eq!(pending.entries.len(), 1);
-        let report = fire(&store, &clock, Arc::new(Capture::default()), 1_000_000).await;
-        assert_eq!(report.fired, 0, "no wake even after advancing time");
-        assert_eq!(backlog_rows(&store).await, 1);
+        let due = timer_due(&store).await;
+        assert!(due <= 101, "remaining outcome is due now");
+        clock.set(i64::try_from(due).unwrap());
+        let sink = Arc::new(Capture::default());
+        assert_eq!(fire(&store, &clock, sink.clone(), due).await.fired, 1);
+        assert_eq!(sink.seen.lock().unwrap()[0].reservation_id, "second");
+        assert!(matches!(
+            sink.seen.lock().unwrap()[0].kind,
+            OutcomeKind::Aborted { .. }
+        ));
+        assert_eq!(backlog_rows(&store).await, 0);
+        assert!(
+            store
+                .scan(&partition(), &start, &end, None, 10)
+                .await
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+    }
+
+    async fn planned_delivery(store: &MemoryKv, sink: Arc<Capture>) -> (Key, Value, Fired) {
+        let (start, end) = keys::class_range(keys::TAG_TIMER);
+        let (key, value) = store
+            .scan(&partition(), &start, &end, None, 10)
+            .await
+            .unwrap()
+            .entries[0]
+            .clone();
+        let Some(keys::ParsedKey::Timer {
+            due_at_ms,
+            kind,
+            reference,
+        }) = keys::parse(&key)
+        else {
+            panic!("delivery timer");
+        };
+        let timer = DueTimer {
+            due_at_ms,
+            kind: crate::timers::TimerKind::new(kind),
+            reference,
+            value: value.clone(),
+        };
+        let delivery = OutcomeDelivery::new(
+            sink,
+            "https://example.test".into(),
+            Arc::new(NoopMetrics),
+            Arc::new(ManualSleep::new()),
+        );
+        let fired = delivery
+            .fire(
+                &TimerCtx {
+                    store,
+                    partition: &partition(),
+                    now_ms: 100,
+                },
+                &timer,
+            )
+            .await
+            .unwrap();
+        (key, value, fired)
+    }
+
+    #[tokio::test]
+    async fn append_after_fresh_read_fails_the_guard_and_replans_delivery() {
+        let clock = Arc::new(ManualClock::new(100));
+        let store = Arc::new(MemoryKv::with_clock(clock.clone()));
+        seed(&store, &["first"]).await;
+        let sink = Arc::new(Capture::default());
+        let prior_oc = store
+            .get(&partition(), &keys::outcome_backlog())
+            .await
+            .unwrap()
+            .unwrap();
+        let (key, value, fired) = planned_delivery(&store, sink.clone()).await;
+        let Fired::Done(batch) = fired else {
+            panic!("original row acknowledged");
+        };
+        assert!(
+            batch
+                .preconditions
+                .contains(&Precondition::Equals(keys::outcome_backlog(), prior_oc))
+        );
+        // Append after the handler's fresh read and before applying its Done.
+        let first = sink.seen.lock().unwrap()[0].clone();
+        AppendDuringAck(store.clone())
+            .deliver(&first)
+            .await
+            .unwrap();
+        let batch = batch
+            .require(Precondition::Equals(key.clone(), value))
+            .delete(key.clone());
+        assert!(matches!(
+            store.apply(&partition(), batch).await.unwrap(),
+            BatchOutcome::PreconditionFailed { .. }
+        ));
+        assert_eq!(backlog_rows(&store).await, 2);
+        assert!(store.get(&partition(), &key).await.unwrap().is_some());
+        assert_eq!(fire(&store, &clock, sink.clone(), 100).await.fired, 1);
+        assert_eq!(backlog_rows(&store).await, 0);
+        assert!(store.get(&partition(), &key).await.unwrap().is_none());
+        let seen = sink.seen.lock().unwrap();
+        assert_eq!(
+            seen.iter().filter(|o| o.reservation_id == "first").count(),
+            2
+        );
+        assert_eq!(
+            seen.iter().filter(|o| o.reservation_id == "second").count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn no_acknowledgments_guard_the_initial_backlog() {
+        let store = MemoryKv::with_clock(Arc::new(ManualClock::new(100)));
+        seed(&store, &["first"]).await;
+        let prior = store
+            .get(&partition(), &keys::outcome_backlog())
+            .await
+            .unwrap()
+            .unwrap();
+        let sink = Arc::new(Capture {
+            fail: true,
+            ..Capture::default()
+        });
+        let (_, _, fired) = planned_delivery(&store, sink).await;
+        let Fired::Reschedule { batch, .. } = fired else {
+            panic!("failed sink retries");
+        };
+        assert!(
+            batch
+                .preconditions
+                .contains(&Precondition::Equals(keys::outcome_backlog(), prior))
+        );
+        assert!(batch.writes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn all_acknowledgments_return_done_with_an_empty_backlog() {
+        let store = MemoryKv::with_clock(Arc::new(ManualClock::new(100)));
+        seed(&store, &["first", "second"]).await;
+        let sink = Arc::new(Capture::default());
+        let (key, value, fired) = planned_delivery(&store, sink.clone()).await;
+        let Fired::Done(batch) = fired else {
+            panic!("all rows acknowledged");
+        };
+        assert_eq!(
+            store
+                .apply(
+                    &partition(),
+                    batch
+                        .require(Precondition::Equals(key.clone(), value))
+                        .delete(key.clone())
+                )
+                .await
+                .unwrap(),
+            BatchOutcome::Committed
+        );
+        assert_eq!(sink.seen.lock().unwrap().len(), 2);
+        assert_eq!(backlog_rows(&store).await, 0);
+        assert!(store.get(&partition(), &key).await.unwrap().is_none());
     }
 
     #[tokio::test]

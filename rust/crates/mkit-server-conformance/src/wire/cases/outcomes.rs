@@ -12,11 +12,7 @@ async fn release(ctx: &Ctx) -> CaseResult {
         .await?;
     mode(ctx, "normal", "normal").await
 }
-#[allow(unreachable_code, unused_variables)] // Section D: retain the full case for the shared-handler fix.
 pub(super) async fn aborted_on_cas_loss(ctx: Ctx) -> CaseResult {
-    return Err(super::Failure::Skip(
-        "Section D: shared outcome delivery can delete its timer after a concurrent append; see m3-exit-report.md".into(),
-    ));
     mode(&ctx, "hold", "normal").await?;
     let before = snapshot(&ctx).await?;
     let initial = calls(&ctx).await?;
