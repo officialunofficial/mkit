@@ -1,4 +1,4 @@
-//! Trusted inspection preparation and immediate serving-stop seam for WP-5.5a.
+//! Trusted inspection preparation and immediate serving-stop seam for post-launch WP-5.5c.
 use crate::ServerError;
 use crate::op::Operation;
 use crate::repo::RepoId;

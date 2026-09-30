@@ -1145,7 +1145,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         self
     }
 
-    /// Install the inspection preparation and immediate hold gate (WP-5.5a).
+    /// Install the inspection preparation and immediate hold gate (post-launch WP-5.5c).
     /// Inspection requires indexed mode and an owner/authority write policy.
     pub fn with_publication_policy(
         mut self,
