@@ -407,7 +407,11 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                 tracing::warn!(?target, %error, "relay hook failed");
                 return None;
             }
-            if let Err(error) = batch.validate(&self.target.capabilities()) {
+            let mut caps = self.target.capabilities();
+            if !matches!(target, Partition::RefIndex { .. }) {
+                caps.reserved_batch_ops = 0;
+            }
+            if let Err(error) = batch.validate(&caps) {
                 if matches!(error, StoreError::Invalid(_)) && end > start + 1 {
                     end = start + (end - start) / 2;
                     continue;

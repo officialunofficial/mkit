@@ -158,7 +158,9 @@ impl Batch {
     /// `atomic_multi_key`, more than one write or a key precondition on
     /// another key than the write.
     pub fn validate(&self, caps: &StoreCapabilities) -> Result<(), StoreError> {
-        if self.preconditions.len() + self.writes.len() > MAX_BATCH_OPS {
+        if self.preconditions.len() + self.writes.len()
+            > MAX_BATCH_OPS.saturating_sub(caps.reserved_batch_ops)
+        {
             return Err(StoreError::Invalid("batch exceeds MAX_BATCH_OPS".into()));
         }
         let mut keys = Vec::new();
@@ -304,6 +306,8 @@ pub struct StoreCapabilities {
     /// precondition, on that same key (plus any `NotAfter`). The pipeline
     /// then issues sequential batches.
     pub atomic_multi_key: bool,
+    /// Operations reserved for a `RefIndex` target-local atomic apply extension.
+    pub reserved_batch_ops: usize,
     /// Which key classes the store accepts.
     pub key_classes: KeyClasses,
     /// How membership is decided.
@@ -320,6 +324,7 @@ impl StoreCapabilities {
     pub const fn full() -> Self {
         Self {
             atomic_multi_key: true,
+            reserved_batch_ops: 0,
             key_classes: KeyClasses::All,
             membership: MembershipMode::StorePresence,
             implicit_layout_version: None,
@@ -331,6 +336,7 @@ impl StoreCapabilities {
     pub const fn refs_only() -> Self {
         Self {
             atomic_multi_key: false,
+            reserved_batch_ops: 0,
             key_classes: KeyClasses::RefsOnly,
             membership: MembershipMode::StorePresence,
             implicit_layout_version: Some(keys::LAYOUT_VERSION),

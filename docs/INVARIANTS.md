@@ -1849,3 +1849,20 @@ remain fresh after the authorization expires.
 **Enforced by:** `pipeline/http_tokens.rs`, `policy/read.rs` and counted-store
 `http_objects/private_tokens` tests. Stage 2 only; shared-cache bypass belongs
 to the adapters in WP-4.16.
+
+## Published ref snapshots never authorize a read
+
+**Always:** configured snapshots serve only anonymous reads after the authoritative
+coordinator authorization. Signed reads bypass them, private publication is skipped,
+and inspection configuration refuses live fallback. Snapshot misses or expiry use the
+same bounded live merge and repository-bound token contract. Dirty generation and timer
+seeding commit with index changes; upload completion cannot clear a newer generation.
+
+**Because:** a ref-data cache must not become a visibility cache, an inspection bypass,
+or a source of lost index updates after an upload race.
+
+**If violated:** private or pending values leak, or anonymous listings remain stale
+without a future alarm wake.
+
+**Enforced by:** core `pipeline/tests/published.rs` and Worker
+`published_view/tests.rs`; runtime feature/configuration are off by default (Stage 2).

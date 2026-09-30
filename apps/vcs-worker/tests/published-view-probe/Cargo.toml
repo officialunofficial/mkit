@@ -1,0 +1,37 @@
+[package]
+name = "mkit-published-view-probe"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95.0"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The `#[event(fetch)]` and `#[durable_object]` macros. Same pin and
+# features as mkit-server-worker and apps/mkit-worker-common.
+worker = { version = "0.8", features = ["http"] }
+# The adapter: its default features keep `mkit-core`'s `pack-zstd`
+# (zstd-sys, C) out of this wasm32 graph.
+mkit-server-worker = { path = "../../../../rust/crates/mkit-server-worker", features = ["published-view"] }
+mkit-server = { path = "../../../../rust/crates/mkit-server" }
+mkit-core = { path = "../../../../rust/crates/mkit-core", default-features = false }
+serde_json = "1"
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+
+[features]
+# Local-only fault injection and test hooks (the pipeline's
+# `x-mkit-test-fault`/clock-skew directives, the store faults,
+# `GET /__mkit_test/stats`, `TEST_QUOTA_*`); omitted from production builds.
+test-faults = ["mkit-server-worker/test-faults"]
+
+[workspace]
