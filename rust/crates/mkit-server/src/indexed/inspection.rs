@@ -227,8 +227,8 @@ pub(super) async fn preflight_native<B: BlobStore>(
     Ok(count)
 }
 
-fn metadata_error(error: crate::StoreError) -> ServerError {
-    if super::budget::is_exhausted(&error) {
+fn metadata_error(error: &crate::StoreError) -> ServerError {
+    if super::budget::is_exhausted(error) {
         limit_error()
     } else {
         ServerError::unavailable("object storage request failed")
@@ -256,7 +256,7 @@ async fn guard_jobs<S: crate::NamespaceStore>(
     let current = store
         .get_many(source, &keys)
         .await
-        .map_err(metadata_error)?;
+        .map_err(|error| metadata_error(&error))?;
     if current.len() != keys.len() {
         return Err(ServerError::unavailable("object storage request failed"));
     }
@@ -292,7 +292,7 @@ pub(super) async fn scheduled_entries<S: crate::NamespaceStore>(
             let page = store
                 .scan(source, &start, &end, after.as_ref(), 1000)
                 .await
-                .map_err(metadata_error)?;
+                .map_err(|error| metadata_error(&error))?;
             if page.entries.len() > 1000 {
                 return Err(failed());
             }
@@ -387,7 +387,7 @@ mod tests {
                     ),
             ),
         )
-        .unwrap();
+        .expect("seed deterministic verified-pack metadata");
         snapshot
     }
 
