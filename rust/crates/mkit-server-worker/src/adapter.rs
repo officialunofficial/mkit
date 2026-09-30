@@ -2343,7 +2343,7 @@ mod tests {
             ("AUTHORIZER_ROLE", "authority"),
         ]);
         let cfg = WorkerConfig::from_vars(vars(&pairs)).unwrap();
-        let hooks = cfg.hooks.unwrap();
+        let hooks = cfg.hooks.as_ref().unwrap();
         assert!(hooks.roles.authorize && hooks.roles.admit && !hooks.roles.outcome);
         assert_eq!(
             cfg.pipeline_config().unwrap().authorizer_role,

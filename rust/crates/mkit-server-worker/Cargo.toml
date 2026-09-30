@@ -35,6 +35,7 @@ workspace = true
 # batch that fails once after its writes), plus the pipeline seam of
 # `mkit-server/test-faults`. Never enabled by a release build.
 test-faults = ["mkit-server/test-faults"]
+signed-http-hooks = []
 published-view = ["mkit-server/published-view"]
 
 [dependencies]
@@ -44,6 +45,8 @@ published-view = ["mkit-server/published-view"]
 mkit-server = { version = "0.4", path = "../mkit-server", features = ["connect", "sql", "remote-hooks"] }
 # default-features = false keeps `pack-zstd` (zstd-sys, C) out of wasm32.
 mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
+url = "2"
+zeroize = "1"
 bytes = "1"
 # mpsc/oneshot channels between a sink and its spawned R2 put.
 futures = { version = "0.3", default-features = false, features = ["std"] }
@@ -64,6 +67,7 @@ tower = { version = "0.5", default-features = false, features = ["util"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Same pin and features as apps/vcs-worker and apps/mkit-worker-common.
+web-sys = { version = "0.3", features = ["AbortController", "AbortSignal"] }
 worker = { version = "0.8", features = ["http"] }
 mkit-worker-common = { path = "../../../apps/mkit-worker-common" }
 

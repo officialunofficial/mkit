@@ -353,3 +353,20 @@ Stage 2 staging has an [inert template and activation runbook](staging/README.md
 4. **Pin a route** in `wrangler.jsonc` once a hostname is chosen.
 
 [workers-rs]: https://github.com/cloudflare/workers-rs
+
+## Signed HTTP hooks (WP-3.9c)
+
+Build with `signed-http-hooks` to opt into the Stage 2 HTTP channel. Set
+`HOOK_URL` to an HTTPS origin with an optional base path, `HOOK_ROLES` to
+`authorize,admit,outcome` (or a subset), and the `MKIT_HOOK_KEY` secret to
+`<key-id> <64 hex seed>`, matching the native grammar. `HOOK_TIMEOUT_MS`
+defaults to 5000 (1–30000); `HOOK_SIGNATURE_VALIDITY_MS` defaults to 60000
+(1–300000). `AUTHORIZER_ROLE=authority` requires the authorize role.
+
+HTTP and `ADMISSION_HOOK` are mutually exclusive. Userinfo, query strings
+and fragments are refused. Calls sign the exact Connect JSON bytes for the
+endpoint origin, never follow redirects or retry internally, and abort on
+timeout/cancellation. Decisions fail closed; durable outcomes retain their
+existing retry/acknowledgement and Free 1×8 alarm budget. The secret must
+differ from every accepted ticket secret and configured role key. Custom
+`fetch_with`/`serve_with` entry points retain their injected hooks.

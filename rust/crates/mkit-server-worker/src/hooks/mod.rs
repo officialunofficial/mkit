@@ -13,3 +13,6 @@
 pub mod binding;
 pub mod build;
 pub mod config;
+
+/// Signed HTTPS hook transport (WP-3.9c).
+pub mod fetch;

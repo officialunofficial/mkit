@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- WP-3.9c: default-off signed HTTPS Worker hooks with canonical origin signing,
+  manual redirects, streamed response limits and aborting call timeouts.
+
 - Server (Stage 2, inert): URL tokens now authorize private HTTP object
   and ref-path reads through staged signature, stateless binding and epoch
   checks, while preserving anonymous published access and Authorizer checks.
