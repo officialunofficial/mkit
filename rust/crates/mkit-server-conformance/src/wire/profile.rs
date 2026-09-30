@@ -141,6 +141,14 @@ pub enum Feature {
     SignedReads,
     /// Admission challenges (M3).
     Admission,
+    /// Loopback MPP fixture control plane.
+    HookStub,
+    /// Test-only short ticket lifetime.
+    ShortTickets,
+    /// Platform may combine repeated challenge fields per RFC 9110.
+    CombinedChallengeFields,
+    /// Tiny configured backlog cap.
+    BacklogCap,
     /// Indexed mode (M4).
     IndexedMode,
     /// Indexed mode whose packs verify asynchronously in scheduled slices,
@@ -158,7 +166,7 @@ pub enum Feature {
     Admin,
 }
 
-const FEATURE_NAMES: [(Feature, &str); 24] = [
+const FEATURE_NAMES: [(Feature, &str); 28] = [
     (Feature::Bearer, "bearer"),
     (Feature::AuthV2, "auth-v2"),
     (Feature::AtomicAdvance, "atomic-advance"),
@@ -176,6 +184,13 @@ const FEATURE_NAMES: [(Feature, &str); 24] = [
     (Feature::Grants, "grants"),
     (Feature::SignedReads, "signed-reads"),
     (Feature::Admission, "admission"),
+    (Feature::HookStub, "hook-stub"),
+    (Feature::ShortTickets, "short-tickets"),
+    (Feature::BacklogCap, "backlog-cap"),
+    (
+        Feature::CombinedChallengeFields,
+        "combined-challenge-fields",
+    ),
     (Feature::IndexedMode, "indexed-mode"),
     (Feature::IndexedAsync, "indexed-async"),
     (Feature::HttpObjects, "http-objects"),
@@ -222,6 +237,10 @@ pub const DEFAULT_DUPLICATE_RETRY_MS: u64 = 10_000;
 #[derive(Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)] // Independent server capabilities and runner settings.
 pub struct Profile {
+    /// Loopback-only MPP control plane origin.
+    pub hook_stub: Option<url::Url>,
+    /// Configured test backlog row cap, when declared.
+    pub backlog_cap: Option<u64>,
     /// How transport RPCs authenticate.
     pub auth: WireAuth,
     /// `true`: head/packmap conflicts leave both refs untouched.
@@ -291,6 +310,8 @@ impl Profile {
     pub fn new(auth: WireAuth) -> Self {
         let mut profile = Self {
             auth,
+            hook_stub: None,
+            backlog_cap: None,
             atomic_advance: false,
             sharding_d34: false,
             max_pack_bytes: mkit_core::protocol::PACK_BODY_LIMIT,
@@ -381,6 +402,10 @@ pub(crate) fn random_bytes<const N: usize>() -> [u8; N] {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileSpec {
+    /// Loopback-only MPP control plane origin.
+    pub hook_stub: Option<url::Url>,
+    /// Configured test backlog row cap.
+    pub backlog_cap: Option<u64>,
     /// `none`, `bearer` or `auth-v2`.
     pub auth: Option<String>,
     /// The environment variable holding the bearer token (never the token
@@ -459,6 +484,8 @@ impl ProfileSpec {
             )
         };
         Self {
+            hook_stub: over.hook_stub.or(self.hook_stub),
+            backlog_cap: over.backlog_cap.or(self.backlog_cap),
             auth: over.auth.or(self.auth),
             bearer_token_env: over.bearer_token_env.or(self.bearer_token_env),
             audience: over.audience.or(self.audience),
@@ -578,6 +605,7 @@ impl ProfileSpec {
         }
         profile.sign_reads = self.sign_reads.unwrap_or(false);
         profile.fresh_target = self.fresh_target.unwrap_or(false);
+        configure_hooks(&mut profile, self.hook_stub, self.backlog_cap)?;
         profile.derive_features();
         // `name` adds a feature to the derived set, `-name` removes one.
         for entry in self.features.unwrap_or_default() {
@@ -588,6 +616,38 @@ impl ProfileSpec {
         }
         Ok(profile)
     }
+}
+
+fn configure_hooks(
+    profile: &mut Profile,
+    hook_stub: Option<url::Url>,
+    backlog_cap: Option<u64>,
+) -> Result<(), String> {
+    if let Some(url) = hook_stub {
+        let ip = url
+            .host_str()
+            .and_then(|s| s.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok());
+        if url.scheme() != "http"
+            || !ip.is_some_and(|ip| ip.is_loopback())
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.path() != "/"
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err("--hook-stub must be a loopback HTTP origin".into());
+        }
+        profile.hook_stub = Some(url);
+        profile.features.insert(Feature::HookStub);
+    }
+    if let Some(cap) = backlog_cap {
+        if cap == 0 || cap > 16 {
+            return Err("--backlog-cap must be 1..16".into());
+        }
+        profile.backlog_cap = Some(cap);
+        profile.features.insert(Feature::BacklogCap);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -30,7 +30,7 @@ const DIVERGENCES: &[(&str, &str)] = &[];
 
 fn profile(auth: WireAuth) -> Profile {
     let mut p = Profile::new(auth);
-    p.milestone = mkit_server_conformance::wire::Milestone::M1;
+    p.milestone = mkit_server_conformance::wire::Milestone::M3;
     p.list_refs = 200;
     // A server started empty for this test: whole-server listings are bounded.
     p.fresh_target = true;
@@ -47,6 +47,8 @@ async fn fs_layout_bearer_passes_the_wire_suite() {
         &[
             "--listen",
             "127.0.0.1:0",
+            "--cors-allow-origin",
+            "*",
             "--repo-root",
             common::s(root.path()),
         ],
@@ -65,6 +67,16 @@ async fn fs_layout_bearer_passes_the_wire_suite() {
     };
     let native = run(&target, None).await;
     common::judge(&native, DIVERGENCES);
+
+    // R-165: fs-layout cannot carry a durable real outcome sink. Hook-only M3
+    // cases must be visible skips, while the independent CORS case still runs.
+    let skipped = native.skips();
+    for &case in common::M3_CASES {
+        if case != "cors.expose_admission_headers" {
+            assert!(skipped.contains(&case), "fs-layout unexpectedly ran {case}");
+        }
+    }
+    assert!(native.passes().contains(&"cors.expose_admission_headers"));
 
     // The bearer cases, and the case the legacy server failed, ran and
     // passed.

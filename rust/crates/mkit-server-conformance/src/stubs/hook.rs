@@ -30,7 +30,7 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, Request, Response, StatusCode};
 use bytes::Bytes;
-use mkit_server::hooks::{HookVerifier, VerifierKey};
+use mkit_rpc::hooks::{HookVerifier, VerifierKey};
 
 /// The Connect path of every hook procedure.
 pub const SERVICE: &str = "/mkit.server.hooks.v1.HooksService";
@@ -42,13 +42,23 @@ const MAX_BODY: usize = 1 << 20;
 pub type HookKey = VerifierKey;
 
 /// A scripted answer.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Reply {
-    status: u16,
+    pub(super) status: u16,
     headers: Vec<(String, String)>,
-    body: Bytes,
+    pub(super) body: Bytes,
     delay: Duration,
     stall: bool,
+    gate: Option<Arc<tokio::sync::Semaphore>>,
+}
+
+impl fmt::Debug for Reply {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Reply")
+            .field("status", &self.status)
+            .field("body_len", &self.body.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Reply {
@@ -67,6 +77,7 @@ impl Reply {
             body: Bytes::from(body),
             delay: Duration::ZERO,
             stall: false,
+            gate: None,
         }
     }
 
@@ -79,6 +90,7 @@ impl Reply {
             body: Bytes::new(),
             delay: Duration::ZERO,
             stall: false,
+            gate: None,
         }
     }
 
@@ -99,6 +111,13 @@ impl Reply {
             stall: true,
             ..Self::status(200)
         }
+    }
+
+    /// Hold this response until the supplied gate opens.
+    #[must_use]
+    pub fn held(mut self, gate: Arc<tokio::sync::Semaphore>) -> Self {
+        self.gate = Some(gate);
+        self
     }
 
     /// Answer after `delay`.
@@ -158,6 +177,14 @@ impl fmt::Debug for RecordedCall {
     }
 }
 
+/// Additive scripted behavior for a payment fixture. Only the authenticated
+/// hook path, or a loopback-only `/__stub/` control path, reaches this callback.
+/// Implementations must never log raw bodies or credential values.
+pub trait HookBehavior: Send + Sync {
+    /// Return a custom reply, or None to use the existing script/default.
+    fn reply(&self, path: &str, body: &[u8]) -> Option<Reply>;
+}
+
 #[derive(Default)]
 struct Inner {
     scripts: HashMap<String, VecDeque<Reply>>,
@@ -170,6 +197,8 @@ struct Shared {
     state: Mutex<Inner>,
     down: AtomicBool,
     reservations: AtomicU64,
+    behavior: Option<Arc<dyn HookBehavior>>,
+    unsigned: bool,
 }
 
 impl Shared {
@@ -212,6 +241,23 @@ impl FakeHook {
     /// If the listener or the server thread cannot start.
     #[must_use]
     pub fn start_on(bind: &str, keys: Vec<HookKey>) -> Self {
+        Self::start_with(bind, keys, false, None)
+    }
+
+    /// Start with optional custom behavior and explicitly isolated unsigned
+    /// requests (service-binding test lanes only). The listener is loopback-only.
+    ///
+    /// # Panics
+    /// If bind is not a loopback IP address or the listener cannot start.
+    #[must_use]
+    pub fn start_with(
+        bind: &str,
+        keys: Vec<HookKey>,
+        unsigned: bool,
+        behavior: Option<Arc<dyn HookBehavior>>,
+    ) -> Self {
+        let parsed: SocketAddr = bind.parse().expect("an IP socket address");
+        assert!(parsed.ip().is_loopback(), "stub listeners must be loopback");
         let listener = std::net::TcpListener::bind(bind).expect("bind the fake hook");
         listener
             .set_nonblocking(true)
@@ -224,6 +270,8 @@ impl FakeHook {
             state: Mutex::new(Inner::default()),
             down: AtomicBool::new(false),
             reservations: AtomicU64::new(0),
+            behavior,
+            unsigned,
         });
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let state = Arc::clone(&shared);
@@ -350,7 +398,11 @@ fn default_reply(shared: &Shared, procedure: &str) -> Reply {
     }
 }
 
-fn validate_metadata(parts: &axum::http::request::Parts, procedure: &str) -> Result<(), String> {
+fn validate_metadata(
+    parts: &axum::http::request::Parts,
+    procedure: &str,
+    unsigned: bool,
+) -> Result<(), String> {
     if parts.method != axum::http::Method::POST
         || !matches!(procedure, "Authorize" | "Admit" | "Outcome")
     {
@@ -361,6 +413,9 @@ fn validate_metadata(parts: &axum::http::request::Parts, procedure: &str) -> Res
         .is_none_or(|value| value.trim() != "application/json")
     {
         return Err("not a Connect JSON request".to_owned());
+    }
+    if unsigned {
+        return Ok(());
     }
     for name in [
         "x-mkit-hook-version",
@@ -383,6 +438,29 @@ fn validate_metadata(parts: &axum::http::request::Parts, procedure: &str) -> Res
     Ok(())
 }
 
+async fn control_reply(
+    shared: &Shared,
+    method: axum::http::Method,
+    path: &str,
+    body: Body,
+) -> Response<Body> {
+    if !matches!(method, axum::http::Method::GET | axum::http::Method::POST) {
+        return respond(&Reply::status(405));
+    }
+    let Ok(Ok(body)) =
+        tokio::time::timeout(Duration::from_secs(5), axum::body::to_bytes(body, MAX_BODY)).await
+    else {
+        return respond(&Reply::status(413));
+    };
+    respond(
+        &shared
+            .behavior
+            .as_ref()
+            .and_then(|b| b.reply(path, &body))
+            .unwrap_or_else(|| Reply::status(404)),
+    )
+}
+
 async fn handle(State(shared): State<Arc<Shared>>, request: Request<Body>) -> Response<Body> {
     let (parts, body) = request.into_parts();
     let path = parts.uri.path().to_owned();
@@ -391,7 +469,10 @@ async fn handle(State(shared): State<Arc<Shared>>, request: Request<Body>) -> Re
         .unwrap_or_default()
         .to_owned();
     // SPEC-SERVER §7.1 requires these checks before polling an untrusted body.
-    let metadata = validate_metadata(&parts, &procedure);
+    if path.starts_with("/__stub/") {
+        return control_reply(&shared, parts.method, &path, body).await;
+    }
+    let metadata = validate_metadata(&parts, &procedure, shared.unsigned);
     let mut received = Vec::new();
     let verdict = match metadata {
         Err(reason) => Err(reason),
@@ -404,11 +485,15 @@ async fn handle(State(shared): State<Arc<Shared>>, request: Request<Body>) -> Re
                     .iter()
                     .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?)))
                     .collect();
-                shared
-                    .verifier
-                    .verify(&path, &pairs, &received)
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
+                if shared.unsigned {
+                    Ok(())
+                } else {
+                    shared
+                        .verifier
+                        .verify(&path, &pairs, &received)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                }
             }
         },
     };
@@ -421,7 +506,14 @@ async fn handle(State(shared): State<Arc<Shared>>, request: Request<Body>) -> Re
                 .scripts
                 .get_mut(&procedure)
                 .and_then(VecDeque::pop_front);
-            scripted.unwrap_or_else(|| default_reply(&shared, &procedure))
+            scripted
+                .or_else(|| {
+                    shared
+                        .behavior
+                        .as_ref()
+                        .and_then(|b| b.reply(&path, &received))
+                })
+                .unwrap_or_else(|| default_reply(&shared, &procedure))
         }
     };
     let reply = if verdict.is_err() {
@@ -448,6 +540,11 @@ async fn handle(State(shared): State<Arc<Shared>>, request: Request<Body>) -> Re
         body: received,
         status: reply.status,
     });
+    if let Some(gate) = &reply.gate
+        && let Ok(permit) = gate.acquire().await
+    {
+        permit.forget();
+    }
     if reply.stall {
         std::future::pending::<()>().await;
     }

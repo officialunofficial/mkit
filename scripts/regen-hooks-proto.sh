@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #
 # Regenerate the vendored buffa codegen for the canonical
-# proto/mkit/server/hooks/v1/hooks.proto, consumed by mkit-server's
-# `remote-hooks` feature (rust/crates/mkit-server/generated/hooks/).
+# proto/mkit/server/hooks/v1/hooks.proto, consumed by mkit-rpc's
+# `hooks` feature (rust/crates/mkit-rpc/generated/hooks/).
 #
 # Messages and the JSON codec only: no ConnectRPC stubs, so the feature stays
-# wasm-clean and pulls no client. mkit-server builds from the committed
+# wasm-clean and pulls no client. mkit-rpc builds from the committed
 # sources, so consumers (Cloudflare Workers Builds, CI, docs.rs) never need
 # protoc (their images lack one new enough for `edition = "2023"`). After
 # editing hooks.proto, run this from the repo root and commit generated/hooks/.
@@ -18,20 +18,20 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-gen_dir="rust/crates/mkit-server/generated/hooks"
-marker=".mkit-server-hooks-codegen"
+gen_dir="rust/crates/mkit-rpc/generated/hooks"
+marker=".mkit-rpc-hooks-codegen"
 
-echo ">> mkit-server remote-hooks (wasm32 target, matching regen-transport-proto.sh)"
-MKIT_HOOKS_CODEGEN=1 cargo build --manifest-path rust/Cargo.toml -p mkit-server \
-    --no-default-features --features remote-hooks --target wasm32-unknown-unknown
+echo ">> mkit-rpc hooks (wasm32 target, matching regen-transport-proto.sh)"
+MKIT_HOOKS_CODEGEN=1 cargo build --manifest-path rust/Cargo.toml -p mkit-rpc \
+    --features hooks --target wasm32-unknown-unknown
 
 # Pick the OUT_DIR whose marker is freshest: staging-mode runs fill OUT_DIR
 # with the same file set, so the marker is what marks a true codegen run.
-build_glob="rust/target/wasm32-unknown-unknown/debug/build/mkit-server-*/out/hooks"
+build_glob="rust/target/wasm32-unknown-unknown/debug/build/mkit-rpc-*/out/hooks"
 # shellcheck disable=SC2086
 out=$(ls -t $build_glob/$marker 2>/dev/null | head -n 1)
 if [ -z "${out}" ]; then
-    echo "error: no codegen output found for mkit-server hooks under: $build_glob" >&2
+    echo "error: no codegen output found for mkit-rpc hooks under: $build_glob" >&2
     exit 1
 fi
 out="${out%/$marker}"

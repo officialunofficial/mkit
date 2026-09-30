@@ -1676,7 +1676,8 @@
     "depends_on": [
       "3.8",
       "3.9",
-      "3.11"
+      "3.11",
+      "3.7b"
     ],
     "size": "L",
     "summary": "Adds a test-only stub MPP hook and helper and end-to-end tests: challenge to commit with exactly one Committed, Aborted settles nothing, Expired, retry after lost response, old-client fail-fast, reserved-header refusal.",
@@ -1689,7 +1690,7 @@
   },
   {
     "id": "3.13",
-    "title": "Wire conformance: admission, outcomes and backpressure on both adapters and staging",
+    "title": "Wire conformance: admission, outcomes and backpressure on both adapters (M3 exit)",
     "milestone": "M3",
     "track": "conformance",
     "depends_on": [
@@ -1698,14 +1699,12 @@
       "3.12"
     ],
     "size": "M",
-    "summary": "Adds black-box admission cases (402 shape, no state on challenge, preflight, receipts, replay ordering) plus outbox backpressure while the hook is down, run natively, on wrangler dev and on staging. The human deploys the stub hook Worker.",
-    "human_action": true,
+    "summary": "Adds black-box admission and outcome cases on native and local wrangler dev lanes, with test-only backlog and ticket TTL controls. No staging (R-154). Section D escalation: held-admission duplicates call Admit twice and return 403; M3 exit remains blocked. See m3-exit-report.md.",
+    "human_action": false,
     "area_gates": [
       "rust",
       "conf-native",
-      "conf-wrangler",
-      "staging",
-      "ci-yaml"
+      "conf-wrangler"
     ]
   },
   {

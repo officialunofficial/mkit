@@ -514,7 +514,11 @@ headers defined in §6.6. The server handles the client response,
 caching, CORS, and redaction as STC §5.1 requires.
 
 `Header.name` is an HTTP header name and `Header.value` is its value.
-Repeated `Header` entries preserve repeated `WWW-Authenticate` fields.
+Repeated `Header` entries preserve `WWW-Authenticate` challenge order.
+Servers SHOULD emit separate field lines; order-preserving combination
+into a comma-separated challenge list on platforms that fold fields is
+conforming under STC §5.1 and RFC 9110 §5.3. Clients and admission helpers
+MUST parse these values as challenge lists (RFC 9110 §11.6.1).
 Their names are compared case-insensitively for the allowlists.
 
 An Admit `deny` is a deliberate admission denial using the `Deny`
@@ -3380,6 +3384,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| `1` (WP-3.13) | draft | §6.3 preserves repeated challenge order while allowing RFC 9110 combination on platforms that fold fields; mirrors STC §5.1. |
 | 1 | draft | §9.7 clarifications: rules intersect, a packmap is covered through its head, a missing auth v2 signer denies, ancestry semantics and bounds, and the allowed-signer set MAY be checked before verification and at `BeginUpload`; §9.3 requires a ticketless indexed head to be a member commit, remix or tag (WP-4.17). |
 | 1 | draft | Indexed ingestion verifies every consumed object, including unreachable entries; closure and packlist index caps have the `object index limit exceeded` error (§9.3; WP-4.7). Indexed pack-size and decode-budget errors are pinned in §9.8. |
 | 1 | draft | §18 conformance scope: a core profile (§2–§8; no inspectors, storage leases, GC, indexed mode, takedown, receipts or admin service) and a full profile; §1 defers the §§9–16 obligations to the profile. |

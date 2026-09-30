@@ -97,3 +97,7 @@ mod tests {
         assert!(!dbg.contains("123456"), "PIN leaked into Debug: {dbg}");
     }
 }
+
+/// Public server-hook wire types and authentication (feature `hooks`).
+#[cfg(feature = "hooks")]
+pub mod hooks;
