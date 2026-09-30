@@ -1310,6 +1310,9 @@ durable until acknowledgement, which deletes their delivery index and subtracts
 the exact stored key/value byte count. Shared counters and sequence/backlog
 values are guarded once per batch. A zero-to-positive backlog transition adds
 one kind-8 delivery kick; delivery may repeat but never drops an unacked row.
+A positive backlog keeps exactly one kind-8 row. Delivery decides completion
+from the same backlog snapshot its acknowledgment batch guards; concurrent
+appends either retain a rescheduled timer or fail that guard for re-planning.
 
 **Because:** consumption and expiry race; delivery may repeat or crash. An
 unguarded replacement could record two outcomes, erase a replacement ticket's
@@ -1325,6 +1328,9 @@ and SQLite. WP-1.10 exercises consumption and the defensive abort over native
 memory/SQLite and wire cases; the kind-2 expiry handler closes tickets with
 one guarded `Expired` row and best-effort session abort. WP-3.3 enforces guarded
 Pending reservations, ReadServed, reconciliation and backlog limits.
+WP-3.13 corrects the kind-8 acknowledgment/completion window from #1219;
+regular `timers/outcome_delivery.rs` regressions cover appends before and
+after the guarded fresh read and complete empty-backlog acknowledgment.
 ## Relay delivery advances durable per-source watermarks before source cleanup
 
 **Always:** relay rows for a source/target pair apply in sequence order. Each
@@ -1815,6 +1821,26 @@ the pipeline `private_repository_reads_return_the_missing_repository_error`
 and `a_signed_read_writes_no_replay_rows` tests; the connect_dispatch and
 wire `reads.private_not_found_byte_identical` cases.
 
+
+## Scheduled verification checkpoints retain closure authority
+
+**Always:** a scheduled job's guarded checkpoint and the deletion of a child
+satisfied by a member pack commit together. The checkpoint retains that pack
+for the consuming advance's membership recheck. Only a completed decode may
+emit index rows, and Verified follows delivery and extraction. Rebuilding job
+rows cannot downgrade an already Verified pack.
+
+**Because:** a crash between deleting a child and recording its member would
+lose the evidence needed to catch GC or generation changes. Async verification
+must retain the same repository authority as inline verification.
+
+**If violated:** an advance can accept an open closure, or storage damage can
+turn a monotone verification result into a contradictory persisted rejection.
+
+**Enforced by:** `mkit-server/src/indexed/job.rs` atomic closure checkpoints and
+state guards; the job-driver crash sweeps, satisfying-member removal test,
+Verified rebuild test, and Scheduled pipeline pending/delivery tests.
+
 ## Paid HTTP reads reserve durably and settle once
 
 **Always:** a reservation-bearing HTTP read records Pending(Read) before
@@ -1885,3 +1911,27 @@ content or tokens, or serves a different object from the requested URL.
 
 **Enforced by:** native `tests/http_mount.rs`, Worker `http_mount` tests,
  default feature/startup configuration, and the release feature gate.
+
+
+## Worker extracted-object backend completion verifies before visibility
+
+**Always:** server-internal object multipart sessions pin a trusted raw-root/CV
+plan, geometry and operation identity before staging. Actual streamed parts
+verify length/CV before receiving opaque backend receipts. Completion checks the
+ordered receipt/session binding, geometry and merged root before R2 completion;
+it never rereads part payloads. All R2 object writer paths share an immutable
+root/length pin. Public pack receipt limits and upload semantics are unchanged.
+
+**Because:** R2 completion immediately publishes and has no conditional object
+write option. An ETag selects a backend part and does not prove integrity.
+Safety across pre-upgrade objects additionally depends on the canonical
+verifier binding object identity to one correct raw root; AlreadyPresent is
+advisory and cannot replace repository-local source verification or charging.
+
+**If violated:** a replacement, forged receipt or competing writer could expose
+unverified bytes or falsely authorize reuse in another repository.
+
+**Enforced by:** `r2/object_multipart.rs`, legacy R2 object sink/completion root
+pins, bounded-object multipart model tests, and the local R2 runtime probe.
+The parent WP-4.10b must establish canonical identity plus immutable verified
+source evidence in its first bounded source pass; that integration is pending.

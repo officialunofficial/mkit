@@ -79,7 +79,9 @@ pub const PACKS_KEYSPACE: &str = "packs";
 pub const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 mod multipart;
+mod object_multipart;
 pub use multipart::R2PartSink;
+pub use object_multipart::{VerifiedObjectPart, VerifiedObjectPartRef};
 
 /// Sent into a put body to fail it before its declared length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +102,22 @@ pub type ObjectStream = BoxStream<'static, Result<Bytes, String>>;
 pub struct ObjectPage {
     pub keys: Vec<String>,
     pub cursor: Option<String>,
+}
+
+/// The answer of [`ObjectBucket::get_range_etag`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum RangeRead {
+    /// No such object.
+    Absent,
+    /// The object no longer has the etag the caller required.
+    EtagChanged,
+    /// The requested range, and the etag of the object it came from.
+    Bytes {
+        /// Exactly the requested range.
+        bytes: Vec<u8>,
+        /// The object's etag.
+        etag: String,
+    },
 }
 
 /// The object-store operations [`R2BlobStore`] needs: R2 on Workers
@@ -123,6 +141,19 @@ pub trait ObjectBucket: MaybeSend + MaybeSync + Clone + 'static {
         range: Option<Range<u64>>,
     ) -> impl Future<Output = Result<Option<(u64, ObjectStream)>, String>> + MaybeSend;
 
+    /// `range` of the object, only while it still has `etag` (when given),
+    /// and the etag it has. Scheduled verification reads a pack in windows
+    /// across alarms and binds every read to the etag of the first
+    /// (SPEC-PACKFILE §11); a backend without conditional reads fails.
+    fn get_range_etag(
+        &self,
+        _key: &str,
+        _range: Range<u64>,
+        _etag: Option<&str>,
+    ) -> impl Future<Output = Result<RangeRead, String>> + MaybeSend {
+        async { Err("conditional range reads are not supported".to_owned()) }
+    }
+
     /// Remove the object; absent is not an error.
     fn delete(&self, key: &str) -> impl Future<Output = Result<(), String>> + MaybeSend;
 
@@ -138,6 +169,50 @@ pub trait ObjectBucket: MaybeSend + MaybeSync + Clone + 'static {
         &self,
         keys: Vec<String>,
     ) -> impl Future<Output = Result<(), String>> + MaybeSend;
+
+    /// Create a private backend multipart session for `key`. Unsupported by
+    /// default; only the verified object protocol may use this primitive.
+    fn create_object_upload(
+        &self,
+        _key: &str,
+    ) -> impl Future<Output = Result<String, String>> + MaybeSend {
+        async { Err("backend multipart unsupported".into()) }
+    }
+
+    /// Spawn one fixed-length private part body. Success returns its opaque
+    /// backend `ETag`; it is NOT a content-integrity proof.
+    fn spawn_object_part(
+        &self,
+        _key: String,
+        _upload: String,
+        _number: u16,
+        _len: u64,
+        _body: PutBody,
+    ) -> oneshot::Receiver<Result<String, String>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(Err("backend multipart unsupported".into()));
+        rx
+    }
+
+    /// Publish exactly the listed backend parts. No conditional publication
+    /// is available; callers must establish deterministic verified bytes.
+    fn complete_object_upload(
+        &self,
+        _key: &str,
+        _upload: &str,
+        _parts: Vec<(u16, String)>,
+    ) -> impl Future<Output = Result<(), String>> + MaybeSend {
+        async { Err("backend multipart unsupported".into()) }
+    }
+
+    /// Abort the private backend session. A gone session is harmless.
+    fn abort_object_upload(
+        &self,
+        _key: &str,
+        _upload: &str,
+    ) -> impl Future<Output = Result<(), String>> + MaybeSend {
+        async { Err("backend multipart unsupported".into()) }
+    }
 
     /// A cheap reachability check.
     fn probe(&self) -> impl Future<Output = Result<(), String>> + MaybeSend;
@@ -296,14 +371,14 @@ impl Withheld {
 
 /// The spawned put behind a sink, and its answer once it has one.
 #[derive(Debug)]
-struct Running {
+struct Running<T = bool> {
     tx: Option<mpsc::Sender<Result<Bytes, BodyAborted>>>,
     /// `None` once the answer is in.
-    done: Option<oneshot::Receiver<PutResult>>,
-    answer: Option<PutResult>,
+    done: Option<oneshot::Receiver<Result<T, String>>>,
+    answer: Option<Result<T, String>>,
 }
 
-impl Running {
+impl Running<bool> {
     fn spawn<B: ObjectBucket>(bucket: &B, object: String, len: u64) -> Self {
         // Buffer 0 plus one slot per sender: depth 1.
         let (tx, rx) = mpsc::channel(0);
@@ -313,9 +388,11 @@ impl Running {
             answer: None,
         }
     }
+}
 
+impl<T> Running<T> {
     /// Keep the put's answer; stop feeding its body.
-    fn record(&mut self, answer: Result<PutResult, oneshot::Canceled>) {
+    fn record(&mut self, answer: Result<Result<T, String>, oneshot::Canceled>) {
         self.answer = Some(answer.unwrap_or_else(|_| Err("put task dropped".into())));
         self.done = None;
         self.tx = None;
@@ -349,7 +426,7 @@ impl Running {
     }
 
     /// Close the body (every declared byte is in it) and return the answer.
-    async fn finish(&mut self) -> PutResult {
+    async fn finish(&mut self) -> Result<T, String> {
         self.tx = None;
         self.settle().await;
         self.answer
@@ -372,6 +449,7 @@ impl Running {
 #[derive(Debug)]
 pub struct R2PackSink<B> {
     bucket: B,
+    store: R2BlobStore<B>,
     object: String,
     core: Withheld,
     /// `None` for an empty blob, whose put starts only at commit.
@@ -471,6 +549,7 @@ impl<B: ObjectBucket> R2BlobStore<B> {
         let put = (core.len > 0).then(|| Running::spawn(&self.bucket, object.clone(), core.len));
         R2PackSink {
             bucket: self.bucket.clone(),
+            store: self.clone(),
             object,
             core,
             put,
@@ -534,6 +613,15 @@ impl<B: ObjectBucket> R2PackSink<B> {
                 return Err(e);
             }
         };
+        if let Some(root) = root
+            && let Err(error) = self
+                .store
+                .pin_object_root(&self.object, root, self.core.len)
+                .await
+        {
+            self.fail().await;
+            return Err(error);
+        }
         #[cfg(feature = "test-faults")]
         if self.fail_final.swap(false, Ordering::SeqCst) {
             self.fail().await;
@@ -726,6 +814,36 @@ impl ObjectBucket for EnvBucket {
         Ok(Some((object.size(), Box::pin(stream))))
     }
 
+    async fn get_range_etag(
+        &self,
+        key: &str,
+        range: Range<u64>,
+        etag: Option<&str>,
+    ) -> Result<RangeRead, String> {
+        let bucket = self.bucket()?;
+        let mut get = bucket.get(key).range(worker::Range::OffsetWithLength {
+            offset: range.start,
+            length: range.end - range.start,
+        });
+        if let Some(etag) = etag {
+            get = get.only_if(worker::Conditional {
+                etag_matches: Some(etag.to_owned()),
+                ..Default::default()
+            });
+        }
+        let Some(object) = get.execute().await.map_err(|e| e.to_string())? else {
+            return Ok(RangeRead::Absent);
+        };
+        // A failed condition answers the object's metadata without a body.
+        let Some(body) = object.body() else {
+            return Ok(RangeRead::EtagChanged);
+        };
+        Ok(RangeRead::Bytes {
+            bytes: body.bytes().await.map_err(|e| e.to_string())?,
+            etag: object.etag(),
+        })
+    }
+
     async fn delete(&self, key: &str) -> Result<(), String> {
         self.bucket()?.delete(key).await.map_err(|e| e.to_string())
     }
@@ -746,6 +864,75 @@ impl ObjectBucket for EnvBucket {
     async fn delete_many(&self, keys: Vec<String>) -> Result<(), String> {
         self.bucket()?
             .delete_multiple(keys)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn create_object_upload(&self, key: &str) -> Result<String, String> {
+        let upload = self
+            .bucket()?
+            .create_multipart_upload(key)
+            .execute()
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(upload.upload_id().await)
+    }
+
+    fn spawn_object_part(
+        &self,
+        key: String,
+        upload: String,
+        number: u16,
+        len: u64,
+        body: PutBody,
+    ) -> oneshot::Receiver<Result<String, String>> {
+        let (tx, rx) = oneshot::channel();
+        let bucket = self.bucket();
+        worker::wasm_bindgen_futures::spawn_local(async move {
+            let result = async move {
+                let body = body.map(|item| {
+                    item.map(Vec::from)
+                        .map_err(|_| worker::Error::RustError("upload aborted".into()))
+                });
+                let upload = bucket?
+                    .resume_multipart_upload(key, upload)
+                    .map_err(|e| e.to_string())?;
+                let part = upload
+                    .upload_part(number, worker::FixedLengthStream::wrap(body, len))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(part.etag())
+            }
+            .await;
+            let _ = tx.send(result);
+        });
+        rx
+    }
+
+    async fn complete_object_upload(
+        &self,
+        key: &str,
+        upload: &str,
+        parts: Vec<(u16, String)>,
+    ) -> Result<(), String> {
+        self.bucket()?
+            .resume_multipart_upload(key, upload)
+            .map_err(|e| e.to_string())?
+            .complete(
+                parts
+                    .into_iter()
+                    .map(|(number, etag)| worker::UploadedPart::new(number, etag)),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    async fn abort_object_upload(&self, key: &str, upload: &str) -> Result<(), String> {
+        self.bucket()?
+            .resume_multipart_upload(key, upload)
+            .map_err(|e| e.to_string())?
+            .abort()
             .await
             .map_err(|e| e.to_string())
     }

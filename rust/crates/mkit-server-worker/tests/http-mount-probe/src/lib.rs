@@ -1,10 +1,11 @@
 //! Synthetic responses through the production bridge and final response policy.
-//! This fixture has no deployment bindings and is run only by the local probe.
+//! This fixture uses an isolated local R2 binding and is run only by the local probe.
 use bytes::Bytes;
 use futures::StreamExt as _;
 use mkit_server::http_objects::mount::{HttpMountOptions, key_document};
 use mkit_server::http_objects::{HttpBody, HttpObjectResponse};
 use mkit_server_worker::http_mount::{raw_path_query, response_to_worker, token_config};
+use mkit_server_worker::r2::VerifiedObjectPartRef;
 use worker::{Context, Env, Error, Fetch, Method, Request, Response, Result, Url, event};
 
 #[event(fetch)]
@@ -12,6 +13,9 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let url = req.inner().url();
     let (path, query) =
         raw_path_query(&url).map_err(|_| Error::RustError("invalid test request URL".into()))?;
+    if path == "/multipart" {
+        return multipart_probe(env).await;
+    }
     if path.starts_with("/raw") {
         return Response::from_json(&serde_json::json!({ "path": path, "query": query }));
     }
@@ -122,4 +126,87 @@ async fn synthetic_response(req: &Request, env: &Env, path: &str) -> Result<Http
         };
     }
     Ok(response)
+}
+
+// Local R2 binding only; exercises the actual workers-rs upload/complete API.
+async fn multipart_probe(env: Env) -> Result<Response> {
+    use mkit_core::hash::hash;
+    use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan, part_subtree_cv};
+    use mkit_server::{BlobKey, BlobStore, PartSink};
+    use mkit_server_worker::r2::{EnvBucket, R2BlobStore};
+    let failure = |e: mkit_server::StoreError| Error::RustError(e.to_string());
+    let store = R2BlobStore::new(EnvBucket::new(env, "MULTIPART_PROBE"), "packs");
+    let bytes = vec![23; MIN_PART_SIZE as usize + 7];
+    let plan = PartPlan::new(bytes.len() as u64, MIN_PART_SIZE, 10_000)
+        .map_err(|e| Error::RustError(e.to_string()))?;
+    let cvs: Vec<_> = (0..plan.count())
+        .map(|i| {
+            let start = plan.offset(i).unwrap() as usize;
+            part_subtree_cv(
+                &plan,
+                i,
+                &bytes[start..start + plan.expected_len(i).unwrap() as usize],
+            )
+            .unwrap()
+        })
+        .collect();
+    let key = BlobKey::object([23; 32]);
+    let token = store
+        .begin_verified_object(key, &plan, hash(&bytes), &cvs, [24; 32])
+        .await
+        .map_err(|e| Error::RustError(format!("begin: {e}")))?;
+    let mut parts = Vec::new();
+    for i in 0..plan.count() {
+        let mut sink = store
+            .begin_verified_object_part(key, &token, &plan, i, cvs[i as usize])
+            .await
+            .map_err(failure)?;
+        let start = plan.offset(i).unwrap() as usize;
+        let len = plan.expected_len(i).unwrap();
+        for piece in bytes[start..start + len as usize].chunks(256 * 1024) {
+            sink.write(Bytes::copy_from_slice(piece))
+                .await
+                .map_err(failure)?;
+        }
+        parts.push(VerifiedObjectPartRef {
+            index: i,
+            len,
+            tag: sink
+                .commit()
+                .await
+                .map_err(|e| Error::RustError(format!("part commit: {e}")))?,
+        });
+    }
+    if store.head(&key).await.map_err(failure)?.is_some() {
+        return Err(Error::RustError("object visible before completion".into()));
+    }
+    if store
+        .complete_verified_object(key, &token, &plan, &parts, [0; 32])
+        .await
+        .is_ok()
+    {
+        return Err(Error::RustError("wrong root accepted".into()));
+    }
+    store
+        .complete_verified_object(key, &token, &plan, &parts, hash(&bytes))
+        .await
+        .map_err(failure)?;
+    let actual = store
+        .get(&key, None)
+        .await
+        .map_err(failure)?
+        .ok_or_else(|| Error::RustError("missing completed object".into()))?;
+    let mut received = Vec::new();
+    match actual {
+        mkit_server::BlobBody::Bytes(bytes) => received.extend_from_slice(&bytes),
+        mkit_server::BlobBody::Stream { mut stream, .. } => {
+            while let Some(piece) = stream.next().await {
+                received.extend_from_slice(&piece.map_err(failure)?);
+            }
+        }
+    }
+    if received != bytes {
+        return Err(Error::RustError("completed bytes mismatch".into()));
+    }
+    Response::from_json(&serde_json::json!({"verified": true, "parts": parts.len()}))
 }

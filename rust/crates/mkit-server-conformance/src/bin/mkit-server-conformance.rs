@@ -29,6 +29,19 @@ struct Cli {
 enum Command {
     /// Run the black-box wire suite against a `mkit.transport.v1` server.
     Wire(WireArgs),
+    /// Run the loopback MPP hook fixture (never a release feature).
+    #[cfg(feature = "stubs")]
+    StubHook {
+        /// Loopback IP socket address.
+        #[arg(long, default_value = "127.0.0.1:0")]
+        listen: std::net::SocketAddr,
+        /// Isolated service-binding test channel, without signatures.
+        #[arg(long, conflicts_with = "key_list")]
+        unsigned: bool,
+        /// Trusted public hook key list (SPEC-SERVER §7.2).
+        #[arg(long, required_unless_present = "unsigned")]
+        key_list: Option<std::path::PathBuf>,
+    },
     /// Print the namespace allowlist a multi deployment needs for this
     /// suite's derived signers (one canonical namespace per line): pass
     /// the same auth-v2 profile flags `wire` runs with (`--audience`,
@@ -39,6 +52,12 @@ enum Command {
 #[derive(Debug, Args)]
 #[allow(clippy::struct_excessive_bools)] // clap flags
 struct WireArgs {
+    /// Loopback-only MPP fixture control plane origin.
+    #[arg(long)]
+    hook_stub: Option<url::Url>,
+    /// Declared test backlog row cap (1..16).
+    #[arg(long)]
+    backlog_cap: Option<u64>,
     /// `allowlist` only: also list the grant cases' fixed owner namespaces.
     /// Their keys are public test seeds: local conformance runs only.
     #[arg(long)]
@@ -140,6 +159,8 @@ struct WireArgs {
 impl WireArgs {
     fn spec(&self) -> ProfileSpec {
         ProfileSpec {
+            hook_stub: self.hook_stub.clone(),
+            backlog_cap: self.backlog_cap,
             auth: self.auth.clone(),
             bearer_token_env: self.bearer_token_env.clone(),
             audience: self.audience.clone(),
@@ -213,6 +234,41 @@ fn wire(args: &WireArgs) -> Result<bool, String> {
 
 fn main() -> ExitCode {
     match Cli::parse().command {
+        #[cfg(feature = "stubs")]
+        Command::StubHook {
+            listen,
+            unsigned,
+            key_list,
+        } => {
+            if !listen.ip().is_loopback() {
+                eprintln!("stub-hook: loopback required");
+                return ExitCode::from(2);
+            }
+            let keys = match key_list
+                .map(std::fs::read_to_string)
+                .transpose()
+                .map_err(|_| "key list could not be read")
+                .and_then(|s| {
+                    mkit_rpc::hooks::VerifierKey::parse_list(
+                        s.as_deref().unwrap_or("{\"version\":1,\"keys\":[]}"),
+                    )
+                    .map_err(|_| "invalid key list")
+                }) {
+                Ok(keys) => keys,
+                Err(reason) => {
+                    eprintln!("stub-hook: {reason}");
+                    return ExitCode::from(2);
+                }
+            };
+            let stub = mkit_server_conformance::stubs::mpp::MppStub::start_on(
+                &listen.to_string(),
+                keys,
+                unsigned,
+            );
+            println!("{}", stub.origin());
+            std::thread::park();
+            ExitCode::SUCCESS
+        }
         Command::Wire(args) => match wire(&args) {
             Ok(true) => ExitCode::SUCCESS,
             Ok(false) => ExitCode::FAILURE,

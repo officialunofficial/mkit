@@ -38,9 +38,11 @@ fake-s3 = ["dep:axum", "dep:hmac", "tokio/net"]
 # SPEC-SERVER §7.1 signed request (with mkit-server's `HookVerifier`), answers from a script and records calls
 # (WP-3.8; WP-3.12 builds its payment stub on it). A test utility: never in a
 # release binary.
-stubs = ["dep:axum", "tokio/net", "mkit-server/remote-hooks"]
+stubs = ["dep:axum", "dep:hmac", "tokio/net", "mkit-server/remote-hooks", "mkit-rpc/hooks"]
 
 [dependencies]
+mkit-rpc = { version = "0.4", path = "../mkit-rpc" }
+base64 = "0.22"
 mkit-server = { version = "0.4", path = "../mkit-server", features = ["memory"] }
 mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
 mkit-attest = { version = "0.4", path = "../mkit-attest", default-features = false, features = ["grants"] }
@@ -64,7 +66,7 @@ webpki-roots = "1"
 flate2 = "1"
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
 getrandom = "0.4"
-url = "2"
+url = { version = "2", features = ["serde"] }
 clap = { version = "4", default-features = false, features = ["std", "help", "error-context", "usage", "derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

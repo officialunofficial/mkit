@@ -274,7 +274,8 @@ impl<B: ObjectBucket> R2BlobStore<B> {
         root: Option<Hash>,
     ) -> Result<CommitOutcome, StoreError> {
         let expected = key.expected_root(root)?;
-        if self.head(&key).await?.is_some() {
+        // Preserve the public pack protocol's already-completed recovery.
+        if root.is_none() && self.head(&key).await?.is_some() {
             return Ok(CommitOutcome::AlreadyPresent);
         }
         let prefix = session_prefix(self, session)?;
@@ -307,6 +308,17 @@ impl<B: ObjectBucket> R2BlobStore<B> {
             != expected
         {
             return Err(StoreError::Invalid("merged part root mismatch".into()));
+        }
+        if let Some(root) = root {
+            self.pin_object_root(&self.object_key(&key)?, root, plan.total())
+                .await?;
+        }
+        if let Some(meta) = self.head(&key).await? {
+            return if meta.len == plan.total() {
+                Ok(CommitOutcome::AlreadyPresent)
+            } else {
+                Err(StoreError::Invalid("stored object length mismatch".into()))
+            };
         }
         // Bypass the single-part UploadPack cap; Withheld verifies the whole
         // stream before the conditional final PUT can become visible.

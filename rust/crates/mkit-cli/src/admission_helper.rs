@@ -305,7 +305,7 @@ mod tests {
                 value: "opaque".into(),
             }],
             "untrusted".into(),
-            vec!["Payment x".into()],
+            vec!["Payment id=\"a,b\", request=\"x,y\", Basic realm=\"other\"".into()],
             vec!["invoice".into()],
         );
         let result = helper.respond(&context(&required)).unwrap();
@@ -320,7 +320,7 @@ mod tests {
                 "procedure": "/mkit.transport.v1.TransportService/UpdateRef",
                 "description": "untrusted",
                 "challenges": [{"scheme": "pay", "value": "opaque"}],
-                "headers": {"www-authenticate": ["Payment x"], "payment-required": ["invoice"]}
+                "headers": {"www-authenticate": ["Payment id=\"a,b\", request=\"x,y\", Basic realm=\"other\""], "payment-required": ["invoice"]}
             })
         );
     }

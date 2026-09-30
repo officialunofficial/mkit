@@ -32,7 +32,7 @@ impl TimerKind {
 /// | 4 | BACKUP (Worker only, WP-1.29b) |
 /// | 5 | QUOTA_ROLLUP (WP-1.26a) |
 /// | 6 | Reserved |
-/// | 7 | Reserved for WP-4.8 |
+/// | 7 | VERIFY (scheduled indexed verification, WP-4.8) |
 /// | 8 | OUTCOME_DELIVERY (WP-3.3) |
 /// | 9 | RESERVATION_RECONCILE (WP-3.3) |
 /// | 10 | PUBLISHED_VIEW (Worker only, WP-1.21) |
@@ -51,6 +51,8 @@ pub mod kinds {
     pub const BACKUP: super::TimerKind = super::TimerKind::new(4);
     /// Ref-shard namespace quota reconciliation.
     pub const QUOTA_ROLLUP: super::TimerKind = super::TimerKind::new(5);
+    /// Checkpointed slices of a ticketed pack's scheduled verification.
+    pub const VERIFY: super::TimerKind = super::TimerKind::new(7);
     /// Deliver durable terminal outcomes.
     pub const OUTCOME_DELIVERY: super::TimerKind = super::TimerKind::new(8);
     /// Settle abandoned pending reservations.
