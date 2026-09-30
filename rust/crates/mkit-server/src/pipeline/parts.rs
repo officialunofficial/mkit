@@ -154,6 +154,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
             }
             other => multipart_error(StorageOp::MultipartPart, other),
         })?;
+        self.pipe
+            .check_ticket_generation(&self.namespace, self.generation)
+            .await?;
         let keys = self.pipe.cfg.ticket_keys.as_ref().ok_or_else(|| {
             ServerError::internal("upload tickets are not configured", "ticket keys vanished")
         })?;
@@ -368,7 +371,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     "merged part root does not match the ticket",
                 ));
             }
-            self.publish_verified_upload(&claims, &plan, &parts).await
+            self.publish_verified_upload(&a.repo().repo.namespace, &claims, &plan, &parts)
+                .await
         })
         .await
     }
@@ -377,6 +381,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// have been checked without accessing storage.
     async fn publish_verified_upload(
         &self,
+        namespace: &crate::repo::NamespaceKey,
         claims: &TicketClaims,
         plan: &PartPlan,
         parts: &[PartRef],
@@ -425,9 +430,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 Err(e) => return Err(multipart_error(StorageOp::MultipartSession, e)),
             }
         }
+        self.check_ticket_generation(namespace, claims.authority_generation)
+            .await?;
         write_upload_marker(&self.blobs, &claims.ticket_id, &claims.pack_id)
             .await
             .map_err(|e| store_error(StorageOp::BlobPut, e))?;
+        // The marker is a shared proof, not repository membership. A revoked
+        // ticket cannot consume it, and this call must not report acceptance.
+        self.check_ticket_generation(namespace, claims.authority_generation)
+            .await?;
         Ok(())
     }
 }

@@ -1006,3 +1006,228 @@ fn unrelated_store_invalid_error_has_fixed_public_message() {
     assert_eq!(err.code(), Code::InvalidArgument);
     assert_eq!(err.public_message(), "invalid multipart upload state");
 }
+
+// Advance the authority row while a backend future is suspended. This models
+// a completed setter with no active write leases; shared pack bytes stay intact.
+struct CompletionGeneration(Arc<std::sync::atomic::AtomicU64>);
+impl NamespaceStore for CompletionGeneration {
+    fn capabilities(&self) -> StoreCapabilities {
+        StoreCapabilities::full()
+    }
+    async fn get(&self, _: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
+        assert_eq!(key, &crate::store::keys::authority_generation());
+        Ok(Some(crate::store::codec::encode_u64(
+            self.0.load(std::sync::atomic::Ordering::SeqCst),
+        )))
+    }
+    async fn scan(
+        &self,
+        _: &Partition,
+        _: &Key,
+        _: &Key,
+        _: Option<&Cursor>,
+        _: u32,
+    ) -> Result<ScanPage, StoreError> {
+        panic!("unexpected scan")
+    }
+    async fn apply(&self, _: &Partition, _: Batch) -> Result<BatchOutcome, StoreError> {
+        panic!("unexpected apply")
+    }
+    async fn stats(&self, _: &Partition) -> Result<PartitionStats, StoreError> {
+        panic!("unexpected stats")
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
+}
+struct PausedCompletion {
+    inner: MemoryBlobStore,
+    phase: &'static str,
+    gate: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
+    heads: std::sync::atomic::AtomicUsize,
+}
+impl PausedCompletion {
+    async fn pause(&self, phase: &str) {
+        if self.phase == phase {
+            let gate = self.gate.lock().unwrap().take();
+            if let Some(gate) = gate {
+                gate.await.unwrap();
+            }
+        }
+    }
+}
+impl BlobStore for PausedCompletion {
+    type Sink = crate::memory::MemoryPackSink;
+    async fn begin(&self, key: BlobKey, len: u64) -> Result<Self::Sink, StoreError> {
+        self.pause("marker").await;
+        self.inner.begin(key, len).await
+    }
+    async fn get(
+        &self,
+        key: &BlobKey,
+        range: Option<ByteRange>,
+    ) -> Result<Option<BlobBody>, StoreError> {
+        self.inner.get(key, range).await
+    }
+    async fn head(&self, key: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
+        if self.heads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+            self.pause("recovery").await;
+        }
+        self.inner.head(key).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
+    async fn delete(&self, key: &BlobKey) -> Result<bool, StoreError> {
+        self.inner.delete(key).await
+    }
+}
+impl MultipartBlobStore for PausedCompletion {
+    type PartSink = crate::memory::MemoryPartSink;
+    const MAX_PARTS: u32 = 10_000;
+    fn supports_multipart(&self) -> bool {
+        true
+    }
+    async fn begin_multipart(
+        &self,
+        key: BlobKey,
+        len: u64,
+        size: u64,
+    ) -> Result<Vec<u8>, StoreError> {
+        self.inner.begin_multipart(key, len, size).await
+    }
+    async fn begin_part(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        index: u32,
+        cv: [u8; 32],
+    ) -> Result<Self::PartSink, StoreError> {
+        self.inner.begin_part(key, session, plan, index, cv).await
+    }
+    async fn complete(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        parts: &[PartRef],
+    ) -> Result<CommitOutcome, StoreError> {
+        self.pause("complete").await;
+        let result = self.inner.complete(key, session, plan, parts).await?;
+        if self.phase == "recovery" {
+            Err(StoreError::SessionGone)
+        } else {
+            Ok(result)
+        }
+    }
+    async fn abort(&self, key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
+        self.pause("abort").await;
+        self.inner.abort(key, session).await
+    }
+}
+#[test]
+#[allow(clippy::too_many_lines)] // Each backend suspension must preserve the same ticket and shared bytes.
+fn authority_completion_rechecks_after_backend_and_marker_awaits() {
+    use std::{
+        future::Future,
+        sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+        task::{Context, Poll},
+    };
+    for phase in ["complete", "abort", "recovery", "marker"] {
+        let blobs = MemoryBlobStore::default();
+        let data = data(2, 5);
+        let mut claims = claims(&blobs, &data, &signer());
+        claims.authority_generation = Some(0);
+        let plan = PartPlan::new(claims.bytes, claims.part_size, 10_000).unwrap();
+        let mut parts = Vec::new();
+        for index in 0..plan.count() {
+            let bytes = part(&plan, &data, index);
+            let cv = part_subtree_cv(&plan, index, bytes).unwrap();
+            let tag = block_on(async {
+                let mut sink = blobs
+                    .begin_part(
+                        BlobKey::pack(claims.pack_id),
+                        &claims.upload_session,
+                        &plan,
+                        index,
+                        cv,
+                    )
+                    .await
+                    .unwrap();
+                sink.write(Bytes::copy_from_slice(bytes)).await.unwrap();
+                sink.commit().await.unwrap()
+            });
+            parts.push(PartRef {
+                index,
+                len: bytes.len() as u64,
+                tag,
+            });
+        }
+        if phase == "abort" {
+            block_on(async {
+                let mut sink = blobs
+                    .begin(BlobKey::pack(claims.pack_id), claims.bytes)
+                    .await
+                    .unwrap();
+                sink.write(Bytes::copy_from_slice(&data)).await.unwrap();
+                sink.commit().await.unwrap();
+            });
+        }
+        let cfg = pipe(blobs.clone(), keys(), Arc::new(ManualClock::new(T0))).cfg;
+        let generation = Arc::new(AtomicU64::new(0));
+        let (resume, gate) = futures::channel::oneshot::channel();
+        let paused = PausedCompletion {
+            inner: blobs.clone(),
+            phase,
+            gate: Mutex::new(Some(gate)),
+            heads: AtomicUsize::new(0),
+        };
+        let mut pipe = Pipeline::new(
+            paused,
+            CompletionGeneration(generation.clone()),
+            Hooks::new(),
+            cfg,
+            Arc::new(ManualClock::new(T0)),
+            Arc::new(NoopMetrics),
+        )
+        .unwrap();
+        // This focused private helper test does not exercise startup. Production
+        // requires Multi+Authority; the fixture isolates the acceptance window.
+        pipe.cfg.authority_fence = Some(
+            crate::authority::AuthorityFence::parse(&format!(
+                "deployment {} ed25519-{}",
+                to_hex(SigningKey::from_bytes(&[8; 32]).verifying_key().as_bytes()),
+                "04".repeat(32)
+            ))
+            .unwrap(),
+        );
+        let namespace = NamespaceKey::deployment_default();
+        let mut completion =
+            Box::pin(pipe.publish_verified_upload(&namespace, &claims, &plan, &parts));
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(
+            matches!(completion.as_mut().poll(&mut cx), Poll::Pending),
+            "{phase}"
+        );
+        generation.store(1, Ordering::SeqCst);
+        resume.send(()).unwrap();
+        let result = block_on(completion);
+        assert_eq!(
+            result.unwrap_err().code(),
+            Code::PermissionDenied,
+            "{phase}"
+        );
+        assert!(
+            block_on(blobs.head(&BlobKey::pack(claims.pack_id)))
+                .unwrap()
+                .is_some(),
+            "shared pack must remain: {phase}"
+        );
+        let (marker, _) = upload_marker(&claims.ticket_id, &claims.pack_id);
+        if phase != "marker" {
+            assert!(block_on(blobs.head(&marker)).unwrap().is_none(), "{phase}");
+        }
+    }
+}
