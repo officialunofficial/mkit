@@ -92,7 +92,7 @@ pub struct Request {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub namespace: String,
 }
-fn invalid(message: &str) -> StoreError { StoreError::Invalid(message.into()) }
+fn invalid(message: &'static str) -> StoreError { StoreError::Invalid(message.into()) }
 impl Request {
     /// Validate bounded protocol selectors before acceptance or side effects.
     pub fn validate(&self) -> Result<(), StoreError> {

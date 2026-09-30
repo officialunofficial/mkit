@@ -30,7 +30,7 @@ fn decode<T:serde::de::DeserializeOwned>(value:&Value) -> Result<T,ServerError> 
     serde_json::from_slice(value.as_bytes()).map_err(|_| ServerError::new(Code::DataLoss,"corrupt admin ledger"))
 }
 fn guarded(batch:Batch,key:Key,old:Option<Value>) -> Batch {
-    batch.require(old.map_or_else(|| Precondition::Absent(key.clone()),|v| Precondition::Equals(key,v)))
+    batch.require(match old { Some(value) => Precondition::Equals(key, value), None => Precondition::Absent(key) })
 }
 fn previous(head:&Head) -> String { if head.seq == 0 { "00".repeat(32) } else { head.hash.clone() } }
 fn decode_head(value:Option<&Value>) -> Result<Head,ServerError> {
@@ -111,7 +111,7 @@ impl<S:NamespaceStore> purge::AutomaticAudit for SystemAudit<S> {
                     purge::Trigger::LeaseDeletion => "system:timer",
                     _ => "system:relay",
                 };
-                let mut batch = plan_system(&self.store,&self.root,actor,&format!("{actor}/cache-purge"),&[request.scope()],now_ms).await?;
+                let mut batch = plan_system(&self.store,&self.root,actor,&format!("{actor}/cache-purge"),&[request.scope().to_owned()],now_ms).await?;
                 batch = batch.require(Precondition::Absent(intent_key.clone())).put(intent_key.clone(),intent.clone());
                 if self.store.apply(&self.root,batch).await? == BatchOutcome::Committed { return Ok(Batch::new()); }
             }
@@ -218,7 +218,7 @@ impl<S:NamespaceStore> Engine<S> {
                         let first:Operation = decode(&value)?;
                         if first.digest!=verified.digest || first.path!=verified.path {
                             let response = Response::error(&auth::invalid("operation id reused with a different request"));
-                            (response,operation.as_str(),label.as_str(),vec![request.scope()])
+                            (response,operation.as_str(),label.as_str(),vec![request.scope().to_owned()])
                         } else {
                             // Cross-nonce operation retries preserve the first accepted
                             // identity/result without creating another action or audit.
@@ -234,7 +234,7 @@ impl<S:NamespaceStore> Engine<S> {
                         batch.preconditions.extend(planned.preconditions); batch.writes.extend(planned.writes);
                         let response = Response::json(&json!({"purgeId":request.purge_id}));
                         batch = batch.require(Precondition::Absent(operation_key.clone())).put(operation_key,encode(&Operation { digest:verified.digest.clone(),path:verified.path.clone(),result:response.clone() })?);
-                        (response,operation.as_str(),label.as_str(),vec![request.scope()])
+                        (response,operation.as_str(),label.as_str(),vec![request.scope().to_owned()])
                     }
                 }
             };
