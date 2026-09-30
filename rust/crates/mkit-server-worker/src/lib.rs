@@ -67,6 +67,7 @@ pub mod ns_object;
 pub mod published_view;
 pub mod purge;
 pub mod r2;
+pub mod scanner_retrieval;
 pub mod sharding_guard;
 pub mod sleep;
 pub mod telemetry;

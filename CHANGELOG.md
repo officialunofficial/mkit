@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resumable delta reconstruction and root-checked multipart uploads. Hold renewal
   and durable holder delivery precede Verified; release activation waits for 4.18.
 
+- Server (R-193): default-off private raw-pack retrieval for synchronous
+  scanners, with separate capability MAC and scanner signing keys, bounded
+  ranges, current-ticket lifetime checks, uniform `not_found` and global
+  block enforcement on native and Worker. Inspect remains metadata-only;
+  retries keep their inspection id and mint fresh short-lived capabilities.
+  Production activation remains gated by WP-4.18.
 
 - Server (WP-5.6a-1, R-190): independent V2 denial actions, verified pack inventory
   and signed, audited pending takedown intents; manual PurgeCache returns a purge

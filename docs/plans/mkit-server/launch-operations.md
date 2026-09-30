@@ -87,7 +87,7 @@ Record ids/fingerprints and rollout times; never log private seeds or tokens.
 |---|---|
 | Ticket MAC | New unique id first, old entries retained on every instance for at least seven days after rotation; verify new tickets/part receipts and existing-session completion. Follow [upload-key-rotation.md](upload-key-rotation.md) |
 | Hook / purge delivery | Publish overlapping public trust list at each receiver, switch outgoing signer, retire old key after longest request validity and trust-cache propagation. Retry durable deliveries with fresh nonces; preserve reservation/event/purge deduplication |
-| Scanner / capability | R-193 finalizes overlap, assignment lifetime, expiry and bounded-segment revocation. Prove new assigned reads, stale/foreign/expired denial and no write/admin/ReadPreserved access before retiring old keys |
+| Scanner / capability | Install a unique new `active <id> <64-hex secret>` in `SCANNER_RETRIEVAL_KEYS` on every instance; move the old key to `retained <id> <64-hex secret> <retired_at_ms>`. Retained verification ends 301,000 ms after retirement, covering the maximum capability lifetime. Overlap scanner public keys in `SCANNER_KEYS`, switch the scanner's separate signer, then remove the old public key to revoke it. Each Inspect retry uses a fresh capability with the same inspection id; capability expiry and fresh open-ticket checks remain mandatory. Prove bounded assigned reads, foreign/expired/consumed/closed-ticket/global-block denial and configured role-collision refusal; scanner access grants no write/admin/ReadPreserved permission. Activation remains default-off, Paid-only and gated by 4.18 |
 | Admin | Add bounded-validity role-bearing public key, switch offline signer, retire old key after outstanding envelope validity and replay records expire (§16.3). Retiring keys never erases audit history |
 | Authority fence | Keep separate namespace permissions. Stop authorization and persist/complete the signed target barrier before acknowledging revocation; a key-list change alone does not complete that barrier. Follow final 2.16 / 4.18 contract |
 | URL token | Follow active/retained key grammar and public-list refresh; retain verification for outstanding tokens per final limits. Prove unknown/retired token denial and role collision refusal |
@@ -107,7 +107,26 @@ reconciliation; store links in the readiness record. No drill below has passed.
 |---|---|---|---|
 | Hooks down | Authorize/Admit timeout, connection failure, non-2xx, invalid or oversize response; redirect and cancellation | Decisions fail closed with retryable unavailable and no state write; preserve §8's otherwise-authorized public-read classification exception. Outcome delivery stays durable until acknowledgement; restore receiver and reconcile by reservation id | Existing 3.9c; Event durable/reordered replay 5.15; integrated 4.18 |
 | Scanner down | Unreachable Inspect endpoint; invalid verdict; private retrieval expiry/revocation mid-read | Sync fail-closed inspection returns unavailable and nothing commits. Restore the scanner; prove no public/private oracle and global-block denial | 5.5a / R-193 / 4.18 |
+| Scanner timing | Cold and warm global-denial proof plus every bounded range needed for pack decoding | Measure against actual Inspect timeout before activation. Worker HOOK_TIMEOUT_MS stays default 5,000 ms / maximum 30,000 ms; native/core retrieval supports up to 300,000 ms. Fail-closed retries keep tickets open and mint fresh capabilities, but timing must be proved for the deployed profile | 4.18 |
 | Purge sink down | Timeout/non-2xx or lost acknowledgement during overlapping block/visibility intents | Retain intents, retry with backoff, reconcile duplicates; local invalidation and authoritative hold/block checks remain effective while sink is down. Manual acceptance returns purge id, not completion; later audit proves completion | 5.10 / 5.6a / 4.18 |
+
+R-193 scanner retrieval prefetches up to eight first descriptor pages
+concurrently, with at most 4 MiB of raw descriptor values plus bounded
+key, cursor and collection overhead. Continuations and nested
+inventory, chunk and action proofs remain sequential under existing bounds,
+preserving fresh checks and the shared call budget. Host tests cover
+production Worker DO/R2 adapters, two-pack independent decoding and ranges.
+
+Local mounted diagnostics returned one cold HTTP 206 after 18.459 s and
+another read's uniform expiry HTTP 404 after 35.454 s. A subsequent request
+returned runtime HTTP 500 before the fixture ran. Local workerd restarted
+while exercising the 4,096 SQLite DOs; sampled RSS was 1.36 GiB. The cause
+was not established. Mounted scanner conformance and production timing
+remain unproven; the optional mounted scanner harness is not retained.
+At 4.18, measure latency and resource use for the actual profile and retain
+cold and warm end-to-end evidence for all pack ranges and the scanner's independent
+external-base resolver/cache before activation; capability scope stays limited
+to raw added packs. No timeout or activation gate is relaxed by these probes.
 
 Also capture Outcome duplicates, disconnect settlement,
 multicolo block denial and cache convergence, key rotation and incompatible

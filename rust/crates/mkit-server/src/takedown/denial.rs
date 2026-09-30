@@ -398,97 +398,145 @@ async fn prove<S: NamespaceStore>(
     let mut end = INDEX_PREFIX.to_vec();
     *end.last_mut().ok_or_else(unavailable)? = 1;
     let end = Key::new(end);
-    for prefix in 0..crate::store::INDEX_FANOUT {
-        let mut after = None;
-        loop {
-            let scan = store
+    prove_shards(store, shards, repo, target, &start, &end, 1).await?;
+    for id in target.ids {
+        require_clear(store, id).await?;
+    }
+    Ok(())
+}
+/// Only first descriptor pages are prefetched. Each shard's continuations and
+/// nested inventory/chunk proofs retain the existing serial working set.
+const SCANNER_PROOF_CONCURRENCY: usize = 8;
+// At most 4 MiB of raw descriptor values, plus bounded key/cursor overhead;
+// nested proof allocations remain serial.
+const _: () = assert!(SCANNER_PROOF_CONCURRENCY * crate::store::MAX_VALUE_BYTES <= 4 * 1024 * 1024);
+
+async fn prove_shards<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    target: &Target<'_>,
+    start: &Key,
+    end: &Key,
+    concurrency: usize,
+) -> Result<(), ServerError> {
+    use futures::StreamExt as _;
+    // Ordered completion retains the serial descriptor processing order.
+    // Dropping on error cancels pending reads and dispatches no more shards.
+    let mut pages = futures::stream::iter(0..crate::store::INDEX_FANOUT)
+        .map(|prefix| async move {
+            let page = store
+                .scan(&Partition::ContentShard(prefix), start, end, None, 1)
+                .await
+                .map_err(|_| unavailable())?;
+            Ok::<_, ServerError>((prefix, page))
+        })
+        .buffered(concurrency);
+    while let Some(page) = pages.next().await {
+        prove_shard(store, shards, repo, target, page?, start, end).await?;
+    }
+    Ok(())
+}
+
+async fn prove_shard<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    target: &Target<'_>,
+    first: (u16, crate::store::ScanPage),
+    start: &Key,
+    end: &Key,
+) -> Result<(), ServerError> {
+    let (prefix, page) = first;
+    let mut first = Some(page);
+    let mut after = None;
+    loop {
+        let scan = match first.take() {
+            Some(page) => page,
+            None => store
                 .scan(
                     &Partition::ContentShard(prefix),
-                    &start,
-                    &end,
+                    start,
+                    end,
                     after.as_ref(),
                     1,
                 )
                 .await
-                .map_err(|_| unavailable())?;
-            for (key, raw) in scan.entries {
-                let body = key
-                    .as_bytes()
-                    .strip_prefix(INDEX_PREFIX)
-                    .ok_or_else(unavailable)?;
-                if body.len() != 32 && !(body.len() == 33 && body[32] == 0) {
-                    return Err(unavailable());
-                }
-                let object: Hash = body[..32].try_into().map_err(|_| unavailable())?;
-                if target.intersects(store, &[object]).await? {
-                    return Err(blocked());
-                }
-                if body.len() == 33 {
-                    crate::store::codec::decode_block_entry(&raw).map_err(|_| unavailable())?;
-                    if held(store, shards, repo, &object).await? {
-                        let (_, row) = super::inventory::member(store, shards, repo, &object)
-                            .await
-                            .map_err(|_| unavailable())?;
-                        if row.kind == 5 && target.chunks(store, &row.references).await? {
-                            return Err(blocked());
-                        }
-                    }
-                    continue;
-                }
-                for action in decode_actions(Some(&raw)).map_err(|_| unavailable())? {
-                    if let Some(pack) = action.pack_scope {
-                        if super::inventory::seal(store, &pack)
-                            .await
-                            .map_err(|_| unavailable())?
-                            != action.pack_digest.ok_or_else(unavailable)?
-                        {
-                            return Err(unavailable());
-                        }
-                        let hit =
-                            super::inventory::visit(store, &pack, false, |id, row| async move {
-                                if target
-                                    .intersects(store, &[id])
-                                    .await
-                                    .map_err(|_| corrupt())?
-                                    && super::inventory::is_file(store, &pack, &id).await?
-                                {
-                                    return Ok(true);
-                                }
-                                if row.kind == 5
-                                    && held(store, shards, repo, &id)
-                                        .await
-                                        .map_err(|_| corrupt())?
-                                    && target
-                                        .chunks(store, &row.references)
-                                        .await
-                                        .map_err(|_| corrupt())?
-                                {
-                                    return Ok(true);
-                                }
-                                Ok(false)
-                            })
-                            .await
-                            .map_err(|_| unavailable())?;
-                        if hit {
-                            return Err(blocked());
-                        }
-                    } else if action.chunk_count > 0
-                        && held(store, shards, repo, &object).await?
-                        && target.chunks(store, &action).await?
-                    {
+                .map_err(|_| unavailable())?,
+        };
+        for (key, raw) in scan.entries {
+            let body = key
+                .as_bytes()
+                .strip_prefix(INDEX_PREFIX)
+                .ok_or_else(unavailable)?;
+            if body.len() != 32 && !(body.len() == 33 && body[32] == 0) {
+                return Err(unavailable());
+            }
+            let object: Hash = body[..32].try_into().map_err(|_| unavailable())?;
+            if target.intersects(store, &[object]).await? {
+                return Err(blocked());
+            }
+            if body.len() == 33 {
+                crate::store::codec::decode_block_entry(&raw).map_err(|_| unavailable())?;
+                if held(store, shards, repo, &object).await? {
+                    let (_, row) = super::inventory::member(store, shards, repo, &object)
+                        .await
+                        .map_err(|_| unavailable())?;
+                    if row.kind == 5 && target.chunks(store, &row.references).await? {
                         return Err(blocked());
                     }
                 }
+                continue;
             }
-            match scan.next {
-                Some(next) if after.as_ref() != Some(&next) => after = Some(next),
-                Some(_) => return Err(unavailable()),
-                None => break,
+            for action in decode_actions(Some(&raw)).map_err(|_| unavailable())? {
+                if let Some(pack) = action.pack_scope {
+                    if super::inventory::seal(store, &pack)
+                        .await
+                        .map_err(|_| unavailable())?
+                        != action.pack_digest.ok_or_else(unavailable)?
+                    {
+                        return Err(unavailable());
+                    }
+                    let hit = super::inventory::visit(store, &pack, false, |id, row| async move {
+                        if target
+                            .intersects(store, &[id])
+                            .await
+                            .map_err(|_| corrupt())?
+                            && super::inventory::is_file(store, &pack, &id).await?
+                        {
+                            return Ok(true);
+                        }
+                        if row.kind == 5
+                            && held(store, shards, repo, &id)
+                                .await
+                                .map_err(|_| corrupt())?
+                            && target
+                                .chunks(store, &row.references)
+                                .await
+                                .map_err(|_| corrupt())?
+                        {
+                            return Ok(true);
+                        }
+                        Ok(false)
+                    })
+                    .await
+                    .map_err(|_| unavailable())?;
+                    if hit {
+                        return Err(blocked());
+                    }
+                } else if action.chunk_count > 0
+                    && held(store, shards, repo, &object).await?
+                    && target.chunks(store, &action).await?
+                {
+                    return Err(blocked());
+                }
             }
         }
-    }
-    for id in target.ids {
-        require_clear(store, id).await?;
+        match scan.next {
+            Some(next) if after.as_ref() != Some(&next) => after = Some(next),
+            Some(_) => return Err(unavailable()),
+            None => break,
+        }
     }
     Ok(())
 }
@@ -596,29 +644,57 @@ pub async fn require_pack_clear<S: NamespaceStore>(
     repo: &RepoId,
     pack: &Hash,
 ) -> Result<(), ServerError> {
+    require_pack_clear_with_concurrency(store, shards, repo, pack, 1).await
+}
+
+/// The scanner's strong global proof, with at most eight first-page reads.
+/// Every shard and page is still checked under the same shared call budget.
+///
+/// # Errors
+/// A block or any failed, corrupt, or budget-exhausted proof fails closed.
+pub async fn require_pack_clear_for_scanner<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    pack: &Hash,
+) -> Result<(), ServerError> {
+    require_pack_clear_with_concurrency(store, shards, repo, pack, SCANNER_PROOF_CONCURRENCY).await
+}
+
+async fn require_pack_clear_with_concurrency<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    pack: &Hash,
+    concurrency: usize,
+) -> Result<(), ServerError> {
     let budget = SliceBudget::new(9000);
     let remote = Budgeted::new(store, &budget);
     require_clear(&remote, pack).await?;
     super::inventory::visit(&remote, pack, false, |_, _| async { Ok(false) })
         .await
         .map_err(|_| unavailable())?;
-    prove(
-        &remote,
-        shards,
-        repo,
-        &Target {
-            ids: &BTreeSet::from([*pack]),
-            manifests: Vec::new(),
-            packs: vec![*pack],
-        },
-    )
-    .await
+    let start = Key::new(INDEX_PREFIX.to_vec());
+    let mut end = INDEX_PREFIX.to_vec();
+    *end.last_mut().ok_or_else(unavailable)? = 1;
+    let end = Key::new(end);
+    let target = Target {
+        ids: &BTreeSet::from([*pack]),
+        manifests: Vec::new(),
+        packs: vec![*pack],
+    };
+    prove_shards(&remote, shards, repo, &target, &start, &end, concurrency).await?;
+    for id in target.ids {
+        require_clear(&remote, id).await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pipeline::D34Shards;
+    use crate::store::{BatchOutcome, Cursor, PartitionStats, ScanPage, StoreCapabilities};
     use crate::store::{
         content_shard,
         index::{IndexEntry, IndexValue},
@@ -626,6 +702,243 @@ mod tests {
     use crate::{Batch, ManualClock, MemoryKv, NamespaceKey, RepoName};
     use futures_executor::block_on;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct ScanProbe {
+        inner: MemoryKv,
+        active: AtomicUsize,
+        peak: AtomicUsize,
+        scans: AtomicUsize,
+        fail_prefix: Option<u16>,
+        stall: bool,
+    }
+    impl ScanProbe {
+        fn new(fail_prefix: Option<u16>, stall: bool) -> Self {
+            Self {
+                inner: store(),
+                active: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+                scans: AtomicUsize::new(0),
+                fail_prefix,
+                stall,
+            }
+        }
+    }
+    struct ActiveScan<'a>(&'a AtomicUsize);
+    impl Drop for ActiveScan<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    impl NamespaceStore for ScanProbe {
+        fn capabilities(&self) -> StoreCapabilities {
+            self.inner.capabilities()
+        }
+        async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
+            self.inner.get(p, key).await
+        }
+        async fn scan(
+            &self,
+            p: &Partition,
+            start: &Key,
+            end: &Key,
+            after: Option<&Cursor>,
+            limit: u32,
+        ) -> Result<ScanPage, StoreError> {
+            assert_eq!(start.as_bytes(), INDEX_PREFIX);
+            assert_eq!(limit, 1);
+            self.scans.fetch_add(1, Ordering::SeqCst);
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(active, Ordering::SeqCst);
+            let _guard = ActiveScan(&self.active);
+            let mut yielded = false;
+            futures::future::poll_fn(|cx| {
+                if self.stall {
+                    return std::task::Poll::Pending;
+                }
+                if yielded {
+                    std::task::Poll::Ready(())
+                } else {
+                    yielded = true;
+                    cx.waker().wake_by_ref();
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
+            if matches!(p, Partition::ContentShard(prefix) if Some(*prefix) == self.fail_prefix) {
+                return Err(StoreError::unavailable("probe shard failure"));
+            }
+            self.inner.scan(p, start, end, after, limit).await
+        }
+        async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+            self.inner.apply(p, batch).await
+        }
+        async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
+            self.inner.stats(p).await
+        }
+        async fn probe(&self) -> Result<(), StoreError> {
+            self.inner.probe().await
+        }
+    }
+    async fn probe_proof(
+        store: &ScanProbe,
+        budget: &SliceBudget,
+        ids: &BTreeSet<Hash>,
+        concurrency: usize,
+    ) -> Result<(), ServerError> {
+        let mut end = INDEX_PREFIX.to_vec();
+        *end.last_mut().unwrap() = 1;
+        prove_shards(
+            &Budgeted::new(store, budget),
+            &D34Shards,
+            &repo("probe"),
+            &Target {
+                ids,
+                manifests: Vec::new(),
+                packs: Vec::new(),
+            },
+            &Key::new(INDEX_PREFIX.to_vec()),
+            &Key::new(end),
+            concurrency,
+        )
+        .await
+    }
+
+    #[test]
+    fn scanner_proof_checks_all_shards_with_measured_concurrency_and_shared_budget() {
+        block_on(async {
+            for concurrency in [1, SCANNER_PROOF_CONCURRENCY] {
+                let store = ScanProbe::new(None, false);
+                let budget = SliceBudget::new(9000);
+                probe_proof(&store, &budget, &BTreeSet::new(), concurrency)
+                    .await
+                    .unwrap();
+                assert_eq!(store.peak.load(Ordering::SeqCst), concurrency);
+                assert_eq!(store.scans.load(Ordering::SeqCst), 4096);
+                assert_eq!(budget.used(), 4096);
+                assert_eq!(store.active.load(Ordering::SeqCst), 0);
+            }
+        });
+    }
+
+    #[test]
+    fn scanner_proof_preserves_late_block_failure_and_continuations() {
+        block_on(async {
+            for concurrency in [1, SCANNER_PROOF_CONCURRENCY] {
+                let store = ScanProbe::new(None, false);
+                let blocked_id = [255; 32];
+                ContentIndex::new(BorrowedStore(&store.inner))
+                    .install_block_action(&blocked_id, &action(1, vec![]), 1)
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    probe_proof(
+                        &store,
+                        &SliceBudget::new(9000),
+                        &BTreeSet::from([blocked_id]),
+                        concurrency
+                    )
+                    .await,
+                    Err(error) if error.code() == crate::Code::PermissionDenied
+                ));
+                assert_eq!(store.scans.load(Ordering::SeqCst), 4096);
+                assert_eq!(store.active.load(Ordering::SeqCst), 0);
+
+                // Distinct descriptors in the final shard require continuation.
+                let mut second_id = blocked_id;
+                second_id[31] = 254;
+                ContentIndex::new(BorrowedStore(&store.inner))
+                    .install_block_action(&second_id, &action(2, vec![]), 1)
+                    .await
+                    .unwrap();
+                store.scans.store(0, Ordering::SeqCst);
+                probe_proof(
+                    &store,
+                    &SliceBudget::new(9000),
+                    &BTreeSet::new(),
+                    concurrency,
+                )
+                .await
+                .unwrap();
+                assert_eq!(store.scans.load(Ordering::SeqCst), 4097);
+
+                store
+                    .inner
+                    .apply(
+                        &content_shard(&second_id),
+                        Batch::new()
+                            .put(descriptor_key(&second_id), Value::new(b"corrupt".to_vec())),
+                    )
+                    .await
+                    .unwrap();
+                store.scans.store(0, Ordering::SeqCst);
+                assert!(matches!(
+                    probe_proof(&store, &SliceBudget::new(9000), &BTreeSet::new(), concurrency).await,
+                    Err(error) if error.code() == crate::Code::Unavailable
+                ));
+                assert_eq!(store.scans.load(Ordering::SeqCst), 4096);
+                assert_eq!(store.active.load(Ordering::SeqCst), 0);
+
+                let failed = ScanProbe::new(Some(crate::store::INDEX_FANOUT - 1), false);
+                assert!(matches!(
+                    probe_proof(
+                        &failed,
+                        &SliceBudget::new(9000),
+                        &BTreeSet::new(),
+                        concurrency
+                    )
+                    .await,
+                    Err(error) if error.code() == crate::Code::Unavailable
+                ));
+                assert_eq!(failed.scans.load(Ordering::SeqCst), 4096);
+                assert_eq!(failed.active.load(Ordering::SeqCst), 0);
+            }
+        });
+    }
+
+    #[test]
+    fn scanner_proof_budget_failure_and_cancellation_drop_outstanding_scans() {
+        block_on(async {
+            let store = ScanProbe::new(None, false);
+            let budget = SliceBudget::new(19);
+            assert!(matches!(
+                probe_proof(&store, &budget, &BTreeSet::new(), SCANNER_PROOF_CONCURRENCY).await,
+                Err(error) if error.code() == crate::Code::Unavailable
+            ));
+            assert_eq!(budget.used(), 19);
+            assert_eq!(store.scans.load(Ordering::SeqCst), 19);
+            assert_eq!(store.active.load(Ordering::SeqCst), 0);
+
+            let stalled = ScanProbe::new(None, true);
+            let budget = SliceBudget::new(9000);
+            let ids = BTreeSet::new();
+            let mut proof = Box::pin(probe_proof(
+                &stalled,
+                &budget,
+                &ids,
+                SCANNER_PROOF_CONCURRENCY,
+            ));
+            futures::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(proof.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            assert_eq!(
+                stalled.active.load(Ordering::SeqCst),
+                SCANNER_PROOF_CONCURRENCY
+            );
+            drop(proof);
+            assert_eq!(stalled.active.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                stalled.scans.load(Ordering::SeqCst),
+                SCANNER_PROOF_CONCURRENCY
+            );
+            assert_eq!(
+                budget.used(),
+                u32::try_from(SCANNER_PROOF_CONCURRENCY).unwrap()
+            );
+        });
+    }
 
     fn store() -> MemoryKv {
         MemoryKv::with_clock(Arc::new(ManualClock::new(0)))

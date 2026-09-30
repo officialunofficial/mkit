@@ -4,7 +4,7 @@ use crate::ServerError;
 use crate::hooks::InspectVerdict;
 use crate::op::Operation;
 use crate::rt::{BoxFuture, MaybeSend, MaybeSync};
-use mkit_rpc::hooks::InspectObject;
+use mkit_rpc::hooks::{InspectObject, InspectRetrieval};
 
 /// The launch ceiling and default inspected-set bound.
 pub const MAX_OBJECTS: usize = 10_000;
@@ -44,6 +44,22 @@ pub trait ContentInspector: MaybeSend + MaybeSync {
     fn on_unavailable(&self) -> OnUnavailable {
         OnUnavailable::FailClosed
     }
+    /// Bound capability validity to this inspector's actual hook timeout.
+    fn retrieval_timeout(&self) -> core::time::Duration {
+        crate::hooks::DEFAULT_TIMEOUT
+    }
+    /// Inspect with optional private retrieval metadata. In-process inspectors
+    /// can use this seam without sending object bytes in the metadata request.
+    fn inspect_with_retrieval<'a>(
+        &'a self,
+        op: &'a Operation,
+        id: &'a str,
+        objects: &'a [InspectObject],
+        retrieval: Option<InspectRetrieval>,
+    ) -> BoxFuture<'a, Result<InspectVerdict, ServerError>> {
+        let _ = retrieval;
+        self.inspect(op, id, objects)
+    }
     /// Inspect exactly this assigned batch; the logical id survives retries.
     fn inspect<'a>(
         &'a self,
@@ -81,6 +97,7 @@ impl<B: crate::store::MultipartBlobStore, N: crate::NamespaceStore, H: super::Ho
         op: &Operation,
         pair: &crate::store::publication::Pair,
         objects: Vec<crate::indexed::inspection::InspectObject>,
+        assignment: Option<&crate::scanner_retrieval::Assignment>,
     ) -> Result<(), ServerError> {
         use mkit_rpc::hooks::InspectObjectKind as K;
         let objects: Vec<_> = objects
@@ -117,7 +134,32 @@ impl<B: crate::store::MultipartBlobStore, N: crate::NamespaceStore, H: super::Ho
             ))
             .map_err(|_| ServerError::unavailable("inspection metadata unavailable"))?;
             let id = mkit_core::hash::to_hex(&mkit_core::hash::hash(&bytes));
-            let verdict = inspector.inspect(op, &id, &objects).await;
+            let retrieval = match (&self.cfg.scanner_retrieval, assignment) {
+                (Some(config), Some(assignment)) => {
+                    let super::AuthMode::AuthV2(auth) = &self.cfg.auth else {
+                        return Err(ServerError::unavailable("retrieval unavailable"));
+                    };
+                    config
+                        .mint(
+                            auth.audience(),
+                            &id,
+                            assignment,
+                            inspector.retrieval_timeout(),
+                            u64::try_from(self.clock.now_ms()).unwrap_or(0),
+                        )
+                        .map(Some)
+                }
+                (Some(_), None) => Err(ServerError::unavailable("retrieval unavailable")),
+                (None, _) => Ok(None),
+            };
+            let verdict = match retrieval {
+                Ok(retrieval) => {
+                    inspector
+                        .inspect_with_retrieval(op, &id, &objects, retrieval)
+                        .await
+                }
+                Err(error) => Err(error),
+            };
             let result = match &verdict {
                 Ok(InspectVerdict::Pass) => "pass",
                 Ok(InspectVerdict::Reject(_)) => "reject",
