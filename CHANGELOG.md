@@ -13,6 +13,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proofs. Add wasm-clean `store::MemorySource` for synchronous disclosures
   and diffs, with native and Worker embedding entry points. No wire change.
 
+- Server/Worker: bound raw timer-alarm enumeration and share tick limits across
+  logical heads. Persist capped exponential backoff in the existing timer row
+  for cold fairness, preserving payloads and original handler due times. The
+  unshipped timer key codec gains retry metadata; timer payloads reserve enough
+  headroom for a guarded move within the existing batch limit.
+- Server/Worker: keep immediate alarm continuations strictly after the current
+  clock so bounded ticket, outcome and relay cleanup cannot strand an alarm
+  chain. Native test timer directives share tick exclusion with the autonomous
+  driver, making due-timer and redelivery conformance deterministic.
+
+- Server/Worker (WP-4.16b, R-201): ordinary ref-path file responses now select
+  Content-Type from a fixed extension allowlist and include inline/attachment
+  filenames with RFC 5987 encoding and a sanitized ASCII fallback. HEAD and
+  ranges share the headers; SVG/HTML remain binary attachments. Security,
+  object-id routes, proofs, caching and private-token rules are unchanged.
+
+- Server: publication timer 12 resumes bounded dependency checks across alarms
+  and restarts after guarded obligation, dependency or generation changes.
+  Valid large D34 packmaps no longer stall at the whole-alarm call limit.
+  Its internal timer-value codec changes; reset unsupported pre-launch stores.
+
 - Server/Worker (default-off, WP-4.10b-2, R-186): complete consumed-group extraction
   with closure before effects, native union counts, bounded job header/body guards,
   resumable delta reconstruction and root-checked multipart uploads. Hold renewal

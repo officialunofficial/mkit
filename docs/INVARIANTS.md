@@ -1220,6 +1220,26 @@ cancellation must not hide a durable timer from the native driver.
 **Enforced by:** `mkit-server/src/timers/tests.rs` race and atomicity tests,
 `mkit-server-native/tests/timers.rs`, and the worker's pure alarm tests.
 
+## Physical timer alarms share bounds and retain cold fairness
+
+**Always:** Worker raw timer enumeration and every logical head share one
+512-row, 128-commit, 32-attempt-per-kind and 10-second injected-clock allowance.
+Enumeration uses bounded indexed raw windows. A volatile cursor rotates warm
+work; guarded failed/unknown-row moves persist capped exponential backoff for
+cold fairness. Retry moves preserve opaque payloads and original handler due
+times, never waive work, and require an absent destination.
+
+**Because:** a frozen Worker clock and repeated isolate restarts cannot bound
+unlimited head enumeration or prevent retained failures from pinning a window.
+
+**If violated:** one physical alarm can exceed its limits, or later durable work
+can remain permanently hidden behind failing or unknown rows.
+
+**Enforced by:** `timers::TickState`, `timers::run_due_with_state`,
+`mkit-server-worker::alarm::run_physical_alarm`, SQL indexed window/VM-step tests,
+and timer/alarm regressions for aggregate bounds, cold restarts and retained rows.
+See [the implementation contract](plans/mkit-server/timer-alarm-bounds.md).
+
 ## Worker shard classes reject foreign partition kinds
 
 **Always:** each Durable Object class accepts only its assigned partition kinds
@@ -1238,11 +1258,16 @@ class/partition cross-product in `mkit-server-worker/tests/stores.rs`.
 **Always:** after running due timers, the alarm handler re-reads the current
 alarm and retains the earlier of it and the tick's next wake. With default
 storage options and no intervening I/O, Cloudflare input gates protect this
-final read/write sequence from request delivery.
+final read/write sequence from request delivery. Every successor alarm is
+clamped strictly after a fresh reading of the object's clock, including a
+retained alarm or a dirty tick's immediate wake. Stored timer due times and
+tick budgets stay independent of this runtime wake scheduling.
 
 **Because:** `getAlarm` returns null during an alarm handler unless `setAlarm`
 has been called since it started. A timer Apply interleaved while a handler
 awaits non-storage I/O may install a new alarm.
+Rearming at the active alarm's timestamp can preserve its metadata without
+scheduling another callback when the runtime clock is frozen.
 
 **If violated:** the final tick reschedule or delete can overwrite that alarm,
 delaying or stranding a newly inserted timer.
@@ -1251,6 +1276,13 @@ delaying or stranding a newly inserted timer.
 regression tests. Gate semantics follow [Cloudflare's glossary](https://developers.cloudflare.com/durable-objects/reference/glossary/)
 and [storage transaction documentation](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#transaction);
 the null behavior is documented in [the alarms API](https://developers.cloudflare.com/durable-objects/api/alarms/#getalarm).
+`continuation_advances_a_frozen_alarm_clock` pins equal-clock scheduling;
+`scripts/vcs-worker-alarm-probe.mjs` exercises the real Rust driver across
+multiple bounded ticks using the pinned workerd runtime's clock, awaiting one
+explicit completion response after all fixture timers drain and their handlers
+finish;
+[workerd issue #6866](https://github.com/cloudflare/workerd/issues/6866) describes
+the equal-timestamp scheduling failure.
 
 ## Worker deployment sharding is bound before serving RPCs
 
@@ -2200,3 +2232,41 @@ set removes the role-reconstruction cost recorded in
 [the historical WP-5.5a escalation](plans/mkit-server/wp-5-5a-escalation.md#resolved-by-the-revised-r-200-added-pack-ruling).
 Full classification, async holds and unrestricted multi-batch inspection remain
 deferred to WP-5.5c; the durable marker belongs to WP-5.5a-0.
+
+## HTTP file headers never interpolate raw filenames
+
+**Always:** ordinary successful ref-path Blob/ChunkedBlob responses select media
+and disposition only from the fixed extension allowlist. Extended filenames
+are derived and fully percent-encoded outside RFC 5987 attr-char; the ASCII
+fallback retains only alphanumerics and `._-` and is capped at 255 bytes.
+
+**Because:** repository entry names may contain quotes, delimiters, control or
+non-UTF-8 bytes. Their bytes must never become header syntax or active media.
+
+**If violated:** a filename could inject response headers or enable active
+content under the serving origin.
+
+**Enforced by:** `http_objects/content_headers.rs`, success-only selection in
+`pipeline/http.rs`, common pipeline tests, and shared `content-headers.json`
+wire vectors on the native mount and local workerd probe (WP-4.16b, R-201).
+
+## Publication rechecks retain bounded progress
+
+**Always:** timer 12 persists its next unchecked or unsatisfied routed witness position in
+its existing row, bound to the full retained advance plus publication generation
+and deletion boundary. Each fire makes at most 128 routed witness calls and
+stops before the shared Worker alarm budget is exhausted. Checkpoints and
+completion guard the advance, publication state and original timer row together.
+Local mutable witnesses are re-read each fire. Missing witnesses, outstanding
+obligations, holds and hits never authorize completion.
+
+**Because:** a valid D34 packmap may require more routed witness reads than one
+alarm permits, and restarting every check can leave it permanently pending.
+
+**If violated:** publication stalls, or stale progress skips a dependency after
+an obligation or generation change.
+
+**Enforced by:** `timers/publication_recheck.rs`, Worker shared alarm registration,
+and the publication recheck regressions. No tag, timer kind, public protocol,
+packmap limit or whole-alarm budget changes. Pre-launch timer codecs are reset,
+not migrated (R-198 B1).

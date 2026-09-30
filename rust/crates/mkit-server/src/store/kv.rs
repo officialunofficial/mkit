@@ -25,6 +25,9 @@ pub const MAX_BATCH_OPS: usize = 100;
 /// Most key and value bytes, summed over a [`Batch`]'s preconditions and
 /// writes.
 pub const MAX_BATCH_BYTES: usize = 1024 * 1024;
+/// A timer value must fit Equals+Put while a guarded retry relocates two keys.
+/// Four maximum keys (Equals, Absent, Delete, Put) share the existing batch cap.
+pub(crate) const MAX_TIMER_VALUE_BYTES: usize = (MAX_BATCH_BYTES - 4 * MAX_KEY_BYTES) / 2;
 
 macro_rules! bytes_newtype {
     ($(#[$doc:meta])* $name:ident) => {
@@ -152,7 +155,8 @@ impl Batch {
     ///
     /// # Errors
     /// [`StoreError::Invalid`] for a key over [`MAX_KEY_BYTES`], a value
-    /// over [`MAX_VALUE_BYTES`], more than [`MAX_BATCH_OPS`] operations or
+    /// over [`MAX_VALUE_BYTES`] (510 KiB for timer payloads), more than
+    /// [`MAX_BATCH_OPS`] operations or
     /// more than [`MAX_BATCH_BYTES`] in total; [`StoreError::Unsupported`]
     /// for a key outside `caps.key_classes`, or, without
     /// `atomic_multi_key`, more than one write or a key precondition on
@@ -191,6 +195,14 @@ impl Batch {
             }
             if value.is_some_and(|v| v.as_bytes().len() > MAX_VALUE_BYTES) {
                 return Err(StoreError::Invalid("value exceeds MAX_VALUE_BYTES".into()));
+            }
+            if value.is_some_and(|v| v.as_bytes().len() > MAX_TIMER_VALUE_BYTES)
+                && key.as_bytes().starts_with(b"w\0")
+                && matches!(keys::parse(key), Some(keys::ParsedKey::Timer { .. }))
+            {
+                return Err(StoreError::Invalid(
+                    "timer value exceeds retry batch allowance".into(),
+                ));
             }
             if caps.key_classes == KeyClasses::RefsOnly && !keys::is_ref_key(key) {
                 return Err(StoreError::Unsupported(

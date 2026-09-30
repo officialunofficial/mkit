@@ -479,6 +479,8 @@ pub struct Pipeline<B, N, H = Hooks> {
     metrics: Arc<dyn Metrics>,
     #[cfg(feature = "test-faults")]
     faults: Option<Arc<dyn faults::DynFaultHooks>>,
+    #[cfg(feature = "test-faults")]
+    test_timer_gate: Option<Arc<tokio::sync::Mutex<()>>>,
     gate: Option<Arc<gate::WriteGate>>,
     #[cfg(feature = "http-objects")]
     http_seams: Option<crate::http_objects::HttpSeams>,
@@ -863,6 +865,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             metrics,
             #[cfg(feature = "test-faults")]
             faults: None,
+            #[cfg(feature = "test-faults")]
+            test_timer_gate: None,
             gate: None,
             #[cfg(feature = "http-objects")]
             http_seams,
@@ -927,6 +931,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     #[must_use]
     pub fn with_faults(mut self, hooks: impl FaultHooks + 'static) -> Self {
         self.faults = Some(Arc::new(hooks));
+        self
+    }
+
+    /// Exclude an adapter's autonomous timer tick while a test directive drains.
+    /// The adapter must use this same gate around its own ticks.
+    #[cfg(feature = "test-faults")]
+    #[must_use]
+    pub fn with_test_timer_gate(mut self, gate: Arc<tokio::sync::Mutex<()>>) -> Self {
+        self.test_timer_gate = Some(gate);
         self
     }
 
@@ -1000,7 +1013,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             sibling.inspect_limit = self.inspect_limit;
         }
         #[cfg(feature = "test-faults")]
-        sibling.faults.clone_from(&self.faults);
+        {
+            sibling.faults.clone_from(&self.faults);
+            sibling.test_timer_gate.clone_from(&self.test_timer_gate);
+        }
         #[cfg(feature = "http-objects")]
         sibling.http_seams.clone_from(&self.http_seams);
         #[cfg(feature = "published-view")]
@@ -1169,6 +1185,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 &op.repo,
                 self.clock.as_ref(),
                 ms(self.clock.now_ms().saturating_add(a.business_skew_ms)),
+                self.test_timer_gate.as_deref(),
             )
             .await?;
             let requested = page_size.unwrap_or(0);

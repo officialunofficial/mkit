@@ -2482,6 +2482,7 @@ fn a_configured_admission_makes_the_200_and_its_304_private_alike() {
     }
 }
 
+mod content_headers;
 mod paid_reads;
 mod private_tokens;
 mod publication_proofs;

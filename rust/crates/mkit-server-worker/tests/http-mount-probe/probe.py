@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and probe the HTTP response bridge using owned local workerd servers."""
+"""Probe the HTTP bridge and indexed ref-file headers using local workerd."""
 import http.client
 import json
 import os
@@ -30,6 +30,31 @@ def request(path, method="GET", headers=None):
 
 def verify():
     passed = []
+    vectors = json.loads((WORKTREE / "rust/tests/golden/http-objects/content-headers.json").read_text())
+    for case in vectors["cases"]:
+        path = "/content-headers/files/" + case["path"]
+        for method in ["GET", "HEAD"]:
+            for ranged in [False, True]:
+                status, headers, body = request(path, method, {"Range": "bytes=1-2"} if ranged else {})
+                assert status == (206 if ranged else 200), (path, status, body)
+                assert headers["content-type"] == case["media"], path
+                assert headers["content-disposition"] == case["disposition"], path
+                assert headers["x-content-type-options"] == "nosniff"
+                assert headers["content-security-policy"] == "sandbox; default-src 'none'"
+                assert headers["referrer-policy"] == "no-referrer"
+                expected = b"" if method == "HEAD" else (b"ht" if ranged else b"<html>no sniffing</html>")
+                assert body == expected, (path, body)
+        status, headers, body = request(path, headers={"If-None-Match": headers["etag"]})
+        assert status == 304 and "content-disposition" not in headers and "content-type" not in headers
+    passed.append(f"{len(vectors['cases'])} real indexed ref-file vectors: GET/HEAD/206/304 and security")
+    status, headers, body = request("/content-headers/chunked.PDF")
+    assert status == 200 and body == b"<html>no sniffing</html>"
+    assert headers["content-type"] == "application/pdf"
+    assert headers["content-disposition"] == 'inline; filename="chunked.PDF"; filename*=UTF-8\'\'chunked.PDF'
+    for path in ["object", "", "files"]:
+        status, headers, body = request("/content-headers/" + path)
+        assert status == 200 and "content-disposition" not in headers, (path, status, body)
+    passed.append("real indexed ChunkedBlob headers; object-id and tree headers unchanged")
     status, _, body = request("/multipart")
     assert status == 200 and json.loads(body) == {"verified": True, "parts": 2}, (status, body)
     passed.append("local R2 multipart verifies before visibility and preserves exact bytes")
