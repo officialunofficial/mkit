@@ -349,6 +349,8 @@ pub use closure::{
 };
 mod push;
 pub use push::{PushReport, verify_push};
+/// Exact proof wire-size planning from canonical object metadata.
+pub mod proof_size;
 pub mod span;
 
 // ---------------------------------------------------------------------------
@@ -1414,6 +1416,24 @@ pub fn build_disclosure_from<S: crate::store::ObjectSource + ?Sized>(
     path: &[&[u8]],
     selector: Selector,
 ) -> Result<Vec<u8>, VerifyError> {
+    let (commit_bytes, steps, leaf_id) = build_prefix(source, commit_id, path)?;
+    let payload = build_payload(source, &leaf_id, selector)?;
+    Ok(encode_disclosure(
+        commit_id,
+        &commit_bytes,
+        &steps,
+        &payload,
+    ))
+}
+
+fn build_prefix<S: crate::store::ObjectSource + ?Sized>(
+    source: &S,
+    commit_id: &Hash,
+    path: &[&[u8]],
+) -> Result<(Vec<u8>, Vec<Step>, Hash), VerifyError> {
+    if path.len() > MAX_TREE_DEPTH {
+        return Err(VerifyError::TooManySteps(path.len()));
+    }
     let commit_bytes = source.read(commit_id)?;
     let commit_obj = crate::serialize::deserialize(&commit_bytes)?;
     let tree_hash = match &commit_obj {
@@ -1450,13 +1470,7 @@ pub fn build_disclosure_from<S: crate::store::ObjectSource + ?Sized>(
         }
     }
 
-    let payload = build_payload(source, &leaf_id, selector)?;
-    Ok(encode_disclosure(
-        commit_id,
-        &commit_bytes,
-        &steps,
-        &payload,
-    ))
+    Ok((commit_bytes, steps, leaf_id))
 }
 
 fn build_payload<S: crate::store::ObjectSource + ?Sized>(

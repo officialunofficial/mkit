@@ -57,3 +57,8 @@ pub use shutdown::{Shutdown, shutdown_signal};
 pub use spawn::TokioSpawner;
 #[cfg(feature = "sqlite")]
 pub use sqlite::{RusqliteConn, SqliteKvStore};
+
+#[cfg(feature = "http-objects")]
+mod http_proofs;
+#[cfg(feature = "http-objects")]
+pub use http_proofs::NativeProofs;
