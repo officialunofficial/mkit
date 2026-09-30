@@ -2178,3 +2178,20 @@ set removes the role-reconstruction cost recorded in
 [the historical WP-5.5a escalation](plans/mkit-server/wp-5-5a-escalation.md#resolved-by-the-revised-r-200-added-pack-ruling).
 Full classification, async holds and unrestricted multi-batch inspection remain
 deferred to WP-5.5c; the durable marker belongs to WP-5.5a-0.
+
+## HTTP file headers never interpolate raw filenames
+
+**Always:** ordinary successful ref-path Blob/ChunkedBlob responses select media
+and disposition only from the fixed extension allowlist. Extended filenames
+are derived and fully percent-encoded outside RFC 5987 attr-char; the ASCII
+fallback retains only alphanumerics and `._-` and is capped at 255 bytes.
+
+**Because:** repository entry names may contain quotes, delimiters, control or
+non-UTF-8 bytes. Their bytes must never become header syntax or active media.
+
+**If violated:** a filename could inject response headers or enable active
+content under the serving origin.
+
+**Enforced by:** `http_objects/content_headers.rs`, success-only selection in
+`pipeline/http.rs`, common pipeline tests, and shared `content-headers.json`
+wire vectors on the native mount and local workerd probe (WP-4.16b, R-201).

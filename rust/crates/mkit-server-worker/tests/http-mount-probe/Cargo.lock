@@ -1044,7 +1044,10 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "web-sys",
  "worker",
+ "zeroize",
 ]
 
 [[package]]
@@ -1052,6 +1055,7 @@ name = "mkit-server-worker-http-mount-probe"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "ed25519-dalek",
  "futures",
  "getrandom 0.2.17",
  "getrandom 0.4.3",

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server/Worker (WP-4.16b, R-201): ordinary ref-path file responses now select
+  Content-Type from a fixed extension allowlist and include inline/attachment
+  filenames with RFC 5987 encoding and a sanitized ASCII fallback. HEAD and
+  ranges share the headers; SVG/HTML remain binary attachments. Security,
+  object-id routes, proofs, caching and private-token rules are unchanged.
+
 - Server/Worker (default-off, WP-4.10b-2, R-186): complete consumed-group extraction
   with closure before effects, native union counts, bounded job header/body guards,
   resumable delta reconstruction and root-checked multipart uploads. Hold renewal

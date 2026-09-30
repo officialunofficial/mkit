@@ -1,5 +1,7 @@
 //! Synthetic responses through the production bridge and final response policy.
 //! This fixture uses an isolated local R2 binding and is run only by the local probe.
+#[path = "../../../../../tests/fixtures/http_content_headers.rs"]
+mod content_headers_fixture;
 use bytes::Bytes;
 use futures::StreamExt as _;
 use mkit_server::http_objects::mount::{HttpMountOptions, key_document};
@@ -13,6 +15,31 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let url = req.inner().url();
     let (path, query) =
         raw_path_query(&url).map_err(|_| Error::RustError("invalid test request URL".into()))?;
+    if path.starts_with("/content-headers/") {
+        let (pipe, prefix, object) = content_headers_fixture::fixture().await;
+        let selected = path.strip_prefix("/content-headers/").unwrap();
+        let target = if selected == "object" {
+            object
+        } else {
+            format!("{prefix}{selected}")
+        };
+        let headers = |name: &str| req.headers().get(name).ok().flatten().into_iter().collect();
+        let response = pipe
+            .serve_http_object(&mkit_server::http_objects::HttpObjectRequest {
+                method: req.method().as_ref(),
+                raw_path: &target,
+                raw_query: query.map(mkit_server::http_objects::RedactedQuery::new),
+                headers: &headers,
+                header_names: &[],
+            })
+            .await;
+        return response_to_worker(
+            response,
+            req.method().as_ref(),
+            None,
+            &HttpMountOptions::default(),
+        );
+    }
     if path == "/multipart" {
         return multipart_probe(env).await;
     }
