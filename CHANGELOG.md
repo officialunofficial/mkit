@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - WP-3.9c: default-off signed HTTPS Worker hooks with canonical origin signing,
   manual redirects, streamed response limits and aborting call timeouts.
+- Worker (inert): extracted-object storage can use root-pinned backend R2
+  multipart sessions with verified streamed parts and bounded finalization.
+  Internal object receipts preserve opaque backend ETags without changing pack
+  wire receipts; extraction and production activation remain separate work
+  (WP-4.10b-multipart, R-192).
+
 - Server: kind-8 completion uses the guarded fresh backlog, preserving delivery
   after a concurrent outcome append (WP-3.13; correction to #1219).
 

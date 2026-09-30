@@ -1945,3 +1945,26 @@ paused between authorization and durable acceptance.
 renewal/completion; memory/SQLite authority tests in
 `rust/crates/mkit-server-native/tests/epoch_leases.rs`. Deployment activation is
 optional and requires an Authority hook with explicit generation facts.
+
+## Worker extracted-object backend completion verifies before visibility
+
+**Always:** server-internal object multipart sessions pin a trusted raw-root/CV
+plan, geometry and operation identity before staging. Actual streamed parts
+verify length/CV before receiving opaque backend receipts. Completion checks the
+ordered receipt/session binding, geometry and merged root before R2 completion;
+it never rereads part payloads. All R2 object writer paths share an immutable
+root/length pin. Public pack receipt limits and upload semantics are unchanged.
+
+**Because:** R2 completion immediately publishes and has no conditional object
+write option. An ETag selects a backend part and does not prove integrity.
+Safety across pre-upgrade objects additionally depends on the canonical
+verifier binding object identity to one correct raw root; AlreadyPresent is
+advisory and cannot replace repository-local source verification or charging.
+
+**If violated:** a replacement, forged receipt or competing writer could expose
+unverified bytes or falsely authorize reuse in another repository.
+
+**Enforced by:** `r2/object_multipart.rs`, legacy R2 object sink/completion root
+pins, bounded-object multipart model tests, and the local R2 runtime probe.
+The parent WP-4.10b must establish canonical identity plus immutable verified
+source evidence in its first bounded source pass; that integration is pending.
