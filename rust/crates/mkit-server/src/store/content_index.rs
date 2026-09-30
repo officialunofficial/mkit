@@ -425,6 +425,9 @@ impl<S: NamespaceStore> ContentIndex<S> {
         identity: &super::PendingHolderV1,
         now_ms: u64,
     ) -> Result<HoldOutcome, StoreError> {
+        if identity.object != *object || identity.hold_id != *hold_id {
+            return Err(StoreError::Corrupt("pending holder key mismatch".into()));
+        }
         let identity = identity.encode()?;
         let key = keys::pending_holder(object, hold_id);
         self.mutate(object, now_ms, Some(&key), None, true, |seen, state| {
@@ -905,12 +908,15 @@ mod tests {
         let prior = block_on(idx.collectable(&object, GRACE, GRACE))
             .unwrap()
             .unwrap();
-        let owner = super::super::PendingHolderV1 {
-            holder: holder("repo"),
-            source: Partition::Namespace(NamespaceKey::deployment_default()),
-            ticket: OP,
-            intent: [0x55; 32],
-        };
+        let owner = super::super::PendingHolderV1::new(
+            holder("repo"),
+            Partition::Namespace(NamespaceKey::deployment_default()),
+            OP,
+            object,
+            hold,
+            [0x55; 32],
+        )
+        .unwrap();
         held(block_on(
             idx.protect_pending_holder(&object, &hold, &owner, GRACE),
         ));

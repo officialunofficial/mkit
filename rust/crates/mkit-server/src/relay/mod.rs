@@ -23,9 +23,11 @@
 //! `RELAY_LAG_BOUND_MS` in time; WP-1.23c's `namespace_relay_watermark`
 //! must tolerate that lag.
 
+mod content;
 mod deliver;
 mod enqueue;
 mod hook;
+pub use content::{ContentTakedownV1, HolderRelayHook, TakedownRequestTimer};
 
 pub use deliver::RelayHandler;
 pub use enqueue::{

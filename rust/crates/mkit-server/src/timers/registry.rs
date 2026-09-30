@@ -36,7 +36,12 @@ impl TimerKind {
 /// | 8 | OUTCOME_DELIVERY (WP-3.3) |
 /// | 9 | RESERVATION_RECONCILE (WP-3.3) |
 /// | 10 | PUBLISHED_VIEW (Worker only, WP-1.21) |
-/// | 11..=0xEF | Production, unallocated |
+/// | 11 | CACHE_PURGE (reserved) |
+/// | 12 | PUBLICATION_RECHECK (reserved) |
+/// | 13 | CONTENT_TAKEDOWN_REQUEST (WP-4.10b) |
+/// | 14 | INSPECTION (reserved) |
+/// | 15 | PUBLICATION_MIGRATION (reserved) |
+/// | 16..=0xEF | Production, unallocated |
 /// | 0xF0..=0xFE | Reserved for tests |
 /// | 0xFF | TEST (`test-faults` only) |
 pub mod kinds {
@@ -58,6 +63,8 @@ pub mod kinds {
     pub const RESERVATION_RECONCILE: super::TimerKind = super::TimerKind::new(9);
     /// Published ref-index snapshots (Stage 2 Worker opt-in only).
     pub const PUBLISHED_VIEW: super::TimerKind = super::TimerKind::new(10);
+    /// Materialize a durable late-holder takedown handoff; not takedown completion.
+    pub const CONTENT_TAKEDOWN_REQUEST: super::TimerKind = super::TimerKind::new(13);
     /// Ref deletion used only by test drivers and directives.
     #[cfg(feature = "test-faults")]
     pub const TEST: super::TimerKind = super::TimerKind::new(0xFF);

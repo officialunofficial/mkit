@@ -1,7 +1,7 @@
 //! Durable queued-holder identity. It never expires by age: only the
 //! matching atomic holder delivery or proven intent reconciliation releases it.
 use super::{Holder, Key, Partition, StoreError, Value, keys};
-use mkit_core::hash::Hash;
+use mkit_core::hash::{Hash, Hasher};
 
 /// Identity of a pending extraction holder intent, stored under `gp`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,18 +12,63 @@ pub struct PendingHolderV1 {
     pub source: Partition,
     /// Verification job's consuming ticket.
     pub ticket: Hash,
-    /// Stable relay intent identity, distinct from transport redelivery.
+    /// Protected object; checked against the gp/request key.
+    pub object: Hash,
+    /// Matching ordinary extraction hold.
+    pub hold_id: Hash,
+    /// Stable source operation, unchanged by transport retries.
+    pub operation: Hash,
+    /// Domain-bound relay intent identity, distinct from transport redelivery.
     pub intent: Hash,
 }
 
 impl PendingHolderV1 {
+    /// Construct one stable intent from its complete provenance.
+    pub fn new(
+        holder: Holder,
+        source: Partition,
+        ticket: Hash,
+        object: Hash,
+        hold_id: Hash,
+        operation: Hash,
+    ) -> Result<Self, StoreError> {
+        let mut record = Self {
+            holder,
+            source,
+            ticket,
+            object,
+            hold_id,
+            operation,
+            intent: [0; 32],
+        };
+        record.intent = record.intent_id()?;
+        record.validate()?;
+        Ok(record)
+    }
+
+    fn intent_id(&self) -> Result<Hash, StoreError> {
+        let mut hasher = Hasher::new();
+        hasher.update(b"mkit-content-holder-intent:v1");
+        for bytes in [
+            self.source.encode()?.as_ref(),
+            keys::holder(&self.object, &self.holder.ns, &self.holder.repo)?.as_bytes(),
+            &self.ticket,
+            &self.hold_id,
+            &self.operation,
+        ] {
+            hasher.update(&(bytes.len() as u64).to_be_bytes());
+            hasher.update(bytes);
+        }
+        Ok(hasher.finalize())
+    }
+
     fn validate(&self) -> Result<(), StoreError> {
         let bound = match &self.source {
             Partition::Namespace(ns) => ns == &self.holder.ns,
             Partition::Ref { ns, repo, .. } => ns == &self.holder.ns && repo == &self.holder.repo,
             _ => false,
         };
-        if !bound {
+        if !bound || self.intent != self.intent_id()? {
             return Err(StoreError::Corrupt("pending holder source mismatch".into()));
         }
         Ok(())
@@ -41,8 +86,15 @@ impl PendingHolderV1 {
             bytes.extend_from_slice(&len.to_be_bytes());
             bytes.extend_from_slice(field);
         }
-        bytes.extend_from_slice(&self.ticket);
-        bytes.extend_from_slice(&self.intent);
+        for hash in [
+            &self.ticket,
+            &self.object,
+            &self.hold_id,
+            &self.operation,
+            &self.intent,
+        ] {
+            bytes.extend_from_slice(hash);
+        }
         if bytes.len() > 4096 {
             return Err(StoreError::Invalid(
                 "pending holder identity too large".into(),
@@ -81,15 +133,16 @@ impl PendingHolderV1 {
         if object != [0; 32] {
             return Err(corrupt());
         }
-        let Some((ticket, intent)) = rest.split_first_chunk::<32>() else {
-            return Err(corrupt());
-        };
-        let intent: Hash = intent.try_into().map_err(|_| corrupt())?;
+        let hashes: &[u8; 160] = rest.try_into().map_err(|_| corrupt())?;
+        let at = |i| hashes[i..i + 32].try_into().map_err(|_| corrupt());
         let record = Self {
             holder: Holder::new(ns, repo),
             source,
-            ticket: *ticket,
-            intent,
+            ticket: at(0)?,
+            object: at(32)?,
+            hold_id: at(64)?,
+            operation: at(96)?,
+            intent: at(128)?,
         };
         record.validate()?;
         if record.encode()? != *value {

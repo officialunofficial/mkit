@@ -2452,3 +2452,358 @@ proptest::proptest! {
         });
     }
 }
+
+struct DeclaredSnapshotHook;
+impl RelayHook for DeclaredSnapshotHook {
+    fn read_keys(&self, _: &Partition, _: &[(u64, RelayV1)]) -> Result<Vec<Key>, StoreError> {
+        Ok(vec![Key::new(b"hook-state".to_vec())])
+    }
+    fn before_apply<'a>(
+        &'a self,
+        _: &'a Partition,
+        _: &'a [(u64, RelayV1)],
+        _: &'a mut Vec<Precondition>,
+        _: &'a mut Vec<Write>,
+    ) -> BoxFuture<'a, Result<(), StoreError>> {
+        Box::pin(async { panic!("declared hook must receive its snapshot") })
+    }
+    fn before_apply_observed<'a>(
+        &'a self,
+        _: &'a Partition,
+        _: &'a [(u64, RelayV1)],
+        observed: &'a [(Key, Option<Value>)],
+        pre: &'a mut Vec<Precondition>,
+        writes: &'a mut Vec<Write>,
+    ) -> BoxFuture<'a, Result<(), StoreError>> {
+        Box::pin(async move {
+            let key = Key::new(b"hook-state".to_vec());
+            let raw = observed.iter().find(|(k, _)| k == &key).unwrap().1.as_ref();
+            pre.push(match raw {
+                Some(raw) => Precondition::Equals(key.clone(), raw.clone()),
+                None => Precondition::Absent(key.clone()),
+            });
+            writes.push(Write::Put(key, codec::encode_u64(1)));
+            Ok(())
+        })
+    }
+}
+struct RoutedMethods {
+    inner: MemoryKv,
+    calls: AtomicUsize,
+    lost_reply: AtomicBool,
+}
+impl NamespaceStore for RoutedMethods {
+    fn capabilities(&self) -> StoreCapabilities {
+        self.inner.capabilities()
+    }
+    async fn get(&self, p: &Partition, k: &Key) -> Result<Option<Value>, StoreError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.get(p, k).await
+    }
+    async fn get_many(&self, p: &Partition, k: &[Key]) -> Result<Vec<Option<Value>>, StoreError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.get_many(p, k).await
+    }
+    async fn scan(
+        &self,
+        _: &Partition,
+        _: &Key,
+        _: &Key,
+        _: Option<&Cursor>,
+        _: u32,
+    ) -> Result<ScanPage, StoreError> {
+        panic!("no target scan")
+    }
+    async fn apply(&self, p: &Partition, b: Batch) -> Result<BatchOutcome, StoreError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let result = self.inner.apply(p, b).await?;
+        if result == BatchOutcome::Committed && self.lost_reply.swap(false, Ordering::SeqCst) {
+            return Err(StoreError::Unavailable("lost target reply".into()));
+        }
+        Ok(result)
+    }
+    async fn stats(&self, _: &Partition) -> Result<PartitionStats, StoreError> {
+        panic!("no target stats")
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn declared_hook_snapshot_and_watermark_use_two_routed_methods() {
+    let local = memory();
+    let remote = RoutedMethods {
+        inner: memory(),
+        calls: AtomicUsize::new(0),
+        lost_reply: AtomicBool::new(false),
+    };
+    let p = target(0);
+    append(
+        &local,
+        &p,
+        vec![(key(), Value::new(b"payload".as_slice()))],
+        50,
+    )
+    .await;
+    let h = RelayHandler {
+        target: remote,
+        hook: DeclaredSnapshotHook,
+        budget: RelayBudget {
+            max_target_calls: Some(2),
+            ..RelayBudget::default()
+        },
+    };
+    fire(&h, &local).await.unwrap();
+    assert_eq!(h.target.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        h.target
+            .inner
+            .get(&p, &Key::new(b"hook-state".to_vec()))
+            .await
+            .unwrap(),
+        Some(codec::encode_u64(1))
+    );
+    assert_eq!(
+        h.target
+            .inner
+            .get(&p, &keys::relay_high_water(&source()).unwrap())
+            .await
+            .unwrap(),
+        Some(codec::encode_u64(1))
+    );
+    assert!(queued(&local).await.is_empty());
+}
+
+#[tokio::test]
+async fn holder_delivery_lost_reply_is_atomic_and_never_double_bumps() {
+    let local = memory();
+    let object = [0x42; 32];
+    let hold = [0x43; 32];
+    let p = crate::store::content_shard(&object);
+    let remote = RoutedMethods {
+        inner: memory(),
+        calls: AtomicUsize::new(0),
+        lost_reply: AtomicBool::new(true),
+    };
+    let idx = crate::store::ContentIndex::new(crate::store::BorrowedStore(&remote.inner));
+    let identity = crate::store::PendingHolderV1::new(
+        crate::store::Holder::new(
+            NamespaceKey::deployment_default(),
+            RepoName::new("a").unwrap(),
+        ),
+        source(),
+        [0x44; 32],
+        object,
+        hold,
+        [0x45; 32],
+    )
+    .unwrap();
+    idx.add_hold(&object, &hold, 10_000, 100).await.unwrap();
+    idx.protect_pending_holder(&object, &hold, &identity, 100)
+        .await
+        .unwrap();
+    append(
+        &local,
+        &p,
+        vec![(
+            keys::pending_holder(&object, &hold),
+            identity.encode().unwrap(),
+        )],
+        50,
+    )
+    .await;
+    let h = RelayHandler {
+        target: remote,
+        hook: HolderRelayHook {
+            clock: Arc::new(ManualClock::new(100)),
+        },
+        budget: RelayBudget {
+            max_target_calls: Some(2),
+            ..RelayBudget::default()
+        },
+    };
+    fire(&h, &local).await.unwrap();
+    assert_eq!(h.target.calls.load(Ordering::SeqCst), 2);
+    assert!(
+        !queued(&local).await.is_empty(),
+        "lost reply keeps source intent queued"
+    );
+    let state = h
+        .target
+        .inner
+        .get(&p, &keys::object_state(&object))
+        .await
+        .unwrap()
+        .unwrap();
+    let value = codec::decode_object_state(&state).unwrap();
+    assert_eq!(value.holders, 1);
+    assert!(
+        h.target
+            .inner
+            .get(&p, &keys::pending_holder(&object, &hold))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        h.target
+            .inner
+            .get(&p, &keys::hold(&object, &hold))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        h.target
+            .inner
+            .get(&p, &keys::relay_high_water(&source()).unwrap())
+            .await
+            .unwrap(),
+        Some(codec::encode_u64(1))
+    );
+    fire(&h, &local).await.unwrap();
+    assert!(queued(&local).await.is_empty());
+    assert_eq!(
+        h.target.calls.load(Ordering::SeqCst),
+        3,
+        "duplicate watermark needs only one routed snapshot"
+    );
+    assert_eq!(
+        h.target
+            .inner
+            .get(&p, &keys::object_state(&object))
+            .await
+            .unwrap(),
+        Some(state)
+    );
+}
+
+#[tokio::test]
+async fn late_blocked_holder_after_ttl_retains_real_takedown_handoff() {
+    let local = memory();
+    let object = [0x46; 32];
+    let hold = [0x47; 32];
+    let p = crate::store::content_shard(&object);
+    let remote = RoutedMethods {
+        inner: memory(),
+        calls: AtomicUsize::new(0),
+        lost_reply: AtomicBool::new(false),
+    };
+    let idx = crate::store::ContentIndex::new(crate::store::BorrowedStore(&remote.inner));
+    let identity = crate::store::PendingHolderV1::new(
+        crate::store::Holder::new(
+            NamespaceKey::deployment_default(),
+            RepoName::new("a").unwrap(),
+        ),
+        source(),
+        [0x48; 32],
+        object,
+        hold,
+        [0x49; 32],
+    )
+    .unwrap();
+    idx.add_hold(&object, &hold, 10_000, 100).await.unwrap();
+    idx.protect_pending_holder(&object, &hold, &identity, 100)
+        .await
+        .unwrap();
+    let blocked = crate::store::BlockEntry::new("late", 101);
+    idx.block(&object, &blocked, 101).await.unwrap();
+    append(
+        &local,
+        &p,
+        vec![(
+            keys::pending_holder(&object, &hold),
+            identity.encode().unwrap(),
+        )],
+        50,
+    )
+    .await;
+    let now = crate::store::MAX_HOLD_TTL_MS + 1_000;
+    assert!(idx.collectable(&object, now, 0).await.unwrap().is_none());
+    let h = RelayHandler {
+        target: remote,
+        hook: HolderRelayHook {
+            clock: Arc::new(ManualClock::new(now as i64)),
+        },
+        budget: RelayBudget {
+            max_target_calls: Some(2),
+            ..RelayBudget::default()
+        },
+    };
+    fire(&h, &local).await.unwrap();
+    assert_eq!(h.target.calls.load(Ordering::SeqCst), 2);
+    assert!(queued(&local).await.is_empty());
+    let key = keys::content_takedown(&object, &identity.intent);
+    let raw = h.target.inner.get(&p, &key).await.unwrap().unwrap();
+    let request = ContentTakedownV1::decode(&raw).unwrap();
+    assert_eq!(request.identity, identity);
+    assert_eq!(request.blocked, blocked);
+    assert!(request.ready_at_ms.is_none());
+    assert_eq!(
+        keys::parse(&key),
+        Some(keys::ParsedKey::ContentTakedown {
+            object,
+            intent: identity.intent
+        })
+    );
+    let reference = bytes::Bytes::from([object.as_slice(), identity.intent.as_slice()].concat());
+    let fired = TakedownRequestTimer
+        .fire(
+            &TimerCtx {
+                store: &h.target.inner,
+                partition: &p,
+                now_ms: now,
+            },
+            &DueTimer {
+                due_at_ms: now,
+                kind: kinds::CONTENT_TAKEDOWN_REQUEST,
+                reference,
+                value: Value::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let Fired::Reschedule { batch, .. } = fired else {
+        panic!("handoff must stay durably pending for5.6a")
+    };
+    assert_eq!(
+        h.target.inner.apply(&p, batch).await.unwrap(),
+        BatchOutcome::Committed
+    );
+    let ready =
+        ContentTakedownV1::decode(&h.target.inner.get(&p, &key).await.unwrap().unwrap()).unwrap();
+    assert_eq!(ready.ready_at_ms, Some(now));
+    assert_eq!(ready.blocked, blocked);
+    assert!(
+        h.target
+            .inner
+            .get(&p, &keys::pending_holder(&object, &hold))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        h.target
+            .inner
+            .get(&p, &keys::hold(&object, &hold))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        codec::decode_object_state(
+            &h.target
+                .inner
+                .get(&p, &keys::object_state(&object))
+                .await
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap()
+        .holders,
+        1
+    );
+    let mut bad = ready.encode().unwrap().as_bytes().to_vec();
+    bad.push(0);
+    assert!(ContentTakedownV1::decode(&Value::new(bad)).is_err());
+}

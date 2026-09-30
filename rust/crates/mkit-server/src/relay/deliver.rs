@@ -22,6 +22,9 @@ use crate::timers::{
 // remains an upper bound; leftover rows schedule another tick.
 const MAX_FIRE_BYTES: usize = 4 * 1024 * 1024;
 const SCAN_PAGE_ROWS: u32 = 64;
+// At most 4 MiB raw snapshot values even for corrupt maximum-sized rows.
+// Together with source pages and JSON/JS copies this leaves hook headroom.
+const MAX_HOOK_READ_KEYS: usize = 8;
 
 type QueuedRow = (u64, RelayV1, Key, Value);
 type TargetRows = (Partition, Vec<QueuedRow>);
@@ -309,18 +312,60 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                 if call_limit.is_some_and(|cap| result.calls >= cap) {
                     return result;
                 }
+                let mut prefix_end = result.completed
+                    + fitting_prefix(
+                        &Batch::new().require(Precondition::Absent(rh.clone())),
+                        rh,
+                        &rows[result.completed..],
+                    );
+                if prefix_end == result.completed {
+                    result.failed = true;
+                    return result;
+                }
+                let declared = loop {
+                    let keys = match self
+                        .hook
+                        .read_keys(target, &rows[result.completed..prefix_end])
+                    {
+                        Ok(keys) => keys.into_iter().collect::<BTreeSet<_>>(),
+                        Err(_) => {
+                            result.failed = true;
+                            return result;
+                        }
+                    };
+                    if keys.len() + usize::from(!keys.contains(rh)) <= MAX_HOOK_READ_KEYS {
+                        break keys;
+                    }
+                    if prefix_end == result.completed + 1 {
+                        result.failed = true;
+                        return result;
+                    }
+                    prefix_end = result.completed + (prefix_end - result.completed) / 2;
+                };
                 result.calls = result.calls.saturating_add(1);
                 let snapshot = async {
-                    let observed = self.target.get(target, rh).await?;
+                    let mut observations = Vec::new();
+                    let observed = if declared.is_empty() {
+                        self.target.get(target, rh).await?
+                    } else {
+                        let mut keys = vec![rh.clone()];
+                        keys.extend(declared.into_iter().filter(|key| key != rh));
+                        let values = self.target.get_many(target, &keys).await?;
+                        if values.len() != keys.len() {
+                            return Err(StoreError::Corrupt("short relay snapshot".into()));
+                        }
+                        observations = keys.into_iter().zip(values).collect();
+                        observations[0].1.clone()
+                    };
                     let hw = observed
                         .as_ref()
                         .map(codec::decode_u64)
                         .transpose()?
                         .unwrap_or(0);
-                    Ok::<_, StoreError>((observed, hw))
+                    Ok::<_, StoreError>((observed, hw, observations))
                 }
                 .await;
-                let (observed, hw) = match snapshot {
+                let (observed, hw, observations) = match snapshot {
                     Ok(snapshot) => snapshot,
                     Err(error) => {
                         tracing::warn!(?target, %error, "relay watermark read failed");
@@ -335,9 +380,19 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                 if result.completed == rows.len() || !allow_apply {
                     return result;
                 }
+                if result.completed >= prefix_end {
+                    continue;
+                }
                 result.selected = true;
                 let Some((batch, end)) = self
-                    .prepare_target_batch(target, rh, rows, observed.as_ref(), result.completed)
+                    .prepare_target_batch(
+                        target,
+                        rh,
+                        &rows[..prefix_end],
+                        observed.as_ref(),
+                        result.completed,
+                        &observations,
+                    )
                     .await
                 else {
                     result.failed = true;
@@ -377,6 +432,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         rows: &[(u64, RelayV1)],
         observed: Option<&Value>,
         start: usize,
+        observations: &[(Key, Option<Value>)],
     ) -> Option<(Batch, usize)> {
         let base = Batch::new().require(match observed {
             Some(value) => Precondition::Equals(rh.clone(), value.clone()),
@@ -396,9 +452,10 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
             let mut batch = target_batch(rh, observed, &rows[start..end]);
             if let Err(error) = self
                 .hook
-                .before_apply(
+                .before_apply_observed(
                     target,
                     &rows[start..end],
+                    observations,
                     &mut batch.preconditions,
                     &mut batch.writes,
                 )

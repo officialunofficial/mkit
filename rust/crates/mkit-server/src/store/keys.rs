@@ -136,6 +136,8 @@ pub const TAG_HOLDER: &str = "h";
 pub const TAG_HOLD: &str = "g";
 /// Durable queued-holder protection; no age expiry.
 pub const TAG_PENDING_HOLDER: &str = "gp";
+/// Durable late-holder takedown request for WP-5.6a.
+pub const TAG_CONTENT_TAKEDOWN: &str = "ct";
 /// `ContentIndex` blocklist tag.
 pub const TAG_BLOCK: &str = "b";
 /// `ContentIndex` object state (last change and holder count) tag.
@@ -390,6 +392,13 @@ pub enum ParsedKey {
         object: Hash,
         /// Matching extraction hold id.
         hold_id: Hash,
+    },
+    /// `ct 00 <object> <intent>`: durable late-holder takedown request.
+    ContentTakedown {
+        /// Blocked object.
+        object: Hash,
+        /// Domain-bound holder intent identity.
+        intent: Hash,
     },
     /// `b 00 <object>`.
     Block(Hash),
@@ -878,6 +887,20 @@ pub fn pending_holders_of(object: &Hash) -> (Key, Key) {
     (start, end)
 }
 
+/// Real late-holder request, retained for the takedown owner.
+#[must_use]
+pub fn content_takedown(object: &Hash, intent: &Hash) -> Key {
+    key(TAG_CONTENT_TAKEDOWN, &[object, intent])
+}
+
+/// Bounded request scan for an object.
+#[must_use]
+pub fn content_takedowns_of(object: &Hash) -> (Key, Key) {
+    let start = key(TAG_CONTENT_TAKEDOWN, &[object]);
+    let end = successor(&start);
+    (start, end)
+}
+
 /// `b 00 <object>`.
 #[must_use]
 pub fn block(object: &Hash) -> Key {
@@ -1117,6 +1140,13 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
             ParsedKey::PendingHolder {
                 object: *object,
                 hold_id: hash(hold_id)?,
+            }
+        }
+        b"ct" => {
+            let (object, intent) = body.split_first_chunk::<32>()?;
+            ParsedKey::ContentTakedown {
+                object: *object,
+                intent: hash(intent)?,
             }
         }
         b"b" => ParsedKey::Block(hash(body)?),
