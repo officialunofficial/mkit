@@ -768,8 +768,9 @@ impl From<ServerInfo> for GetServerInfoResponse {
             index_fanout: Some(info.index_fanout),
             max_delta_chain_depth: Some(info.max_delta_chain_depth),
             leases: None, // Storage-lease enforcement lands in WP-5.2.
-            // Inspection is specified but not implemented yet (WP-5.1a-2).
+            // Launch inspection is synchronous only (SPEC-SERVER §18).
             async_inspection: Some(false),
+            inspection_max_objects: info.inspection_max_objects,
             __buffa_unknown_fields: buffa::UnknownFields::default(),
         }
     }
@@ -844,8 +845,29 @@ mod proto_roundtrip {
             grant_schemes: vec!["ed25519".into(), "secp256k1-eip191".into()],
             namespace_policy: Some("allowlist".into()),
             index_fanout: Some(4096),
+            inspection_max_objects: Some(10_000),
             ..Default::default()
         });
+    }
+
+    #[test]
+    fn inspection_limit_roundtrips_and_is_absent_without_inspection() {
+        for limit in [None, Some(10_000)] {
+            let response = GetServerInfoResponse {
+                inspection_max_objects: limit,
+                ..Default::default()
+            };
+            roundtrip(&response);
+            let json = serde_json::to_value(&response).unwrap();
+            assert_eq!(
+                json.get("inspectionMaxObjects"),
+                limit.map(serde_json::Value::from).as_ref()
+            );
+            assert_eq!(
+                serde_json::from_value::<GetServerInfoResponse>(json).unwrap(),
+                response
+            );
+        }
     }
 
     #[test]

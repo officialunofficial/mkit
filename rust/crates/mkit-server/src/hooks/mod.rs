@@ -18,12 +18,15 @@
 //! - [`RemoteAuthorizer`], [`RemoteAdmission`] and [`RemoteOutcomes`] share
 //!   one [`HookClient`] and implement the stage traits, so any subset plugs
 //!   into [`Hooks`](crate::pipeline::Hooks).
+//! - [`RemoteInspector`] implements synchronous inspection at stage 5. The
+//!   pipeline owns complete inspected-set enumeration, batching and stable
+//!   inspection ids.
 //!
 //! # Failure semantics
 //!
-//! Authorize and Admit fail closed (§8): a transport error, timeout, non-2xx
+//! Authorize, Admit and Inspect fail closed (§8): a transport error, timeout, non-2xx
 //! status, Connect error body, non-JSON content type, body over 64 KiB,
-//! malformed JSON, absent decision or a failed §6.6 check all answer
+//! malformed JSON, absent decision/verdict or a failed §6.6 check all answer
 //! retryable `unavailable` and write nothing. There is no retry inside a call.
 //! A deliberate `deny` in a 2xx answer is a decision, sanitised per §6.2. An
 //! Outcome is acknowledged by any 2xx; every other result is a
@@ -40,8 +43,8 @@
 //!
 //! # Not here
 //!
-//! Inspect, Event and `CachePurge` belong to later work (5.5, 5.2, 5.10), and a
-//! core-profile server must not accept inspector configuration (§18).
+//! The launch profile accepts synchronous fail-closed inspection only (§18).
+//! Async inspection belongs to WP-5.5c. Event belongs to WP-5.2.
 //! `AuthorizeAllow.writer_view` becomes `AuthzFacts::caller_view`, which the
 //! pipeline honours only under the `authority` role (§10.1). Reservation-id
 //! uniqueness is enforced per partition by the pipeline, while §6.6 asks for
@@ -49,6 +52,7 @@
 
 mod channel;
 mod client;
+mod inspection;
 mod map;
 mod roles;
 mod sign;
@@ -59,6 +63,7 @@ mod proto {
 
 pub use channel::{ChannelError, HookChannel, HookRequest, HookResponse};
 pub use client::{DEFAULT_TIMEOUT, HookClient, HookConfigError, MAX_RESPONSE_BYTES};
+pub use inspection::{InspectVerdict, RemoteInspector};
 pub use mkit_rpc::hooks::{DEFAULT_VALIDITY, DOMAIN, HookSigner, MAX_VALIDITY, SignerError};
 pub use mkit_rpc::hooks::{
     HookVerifier, KeyListError, MAX_CLOCK_LEAD_MS, Verified, VerifierKey, VerifyError,
