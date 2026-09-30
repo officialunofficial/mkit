@@ -168,6 +168,16 @@ impl HookSettings {
         Ok(self.signer()?.public_key())
     }
 
+    /// Refuse scanner role reuse without exposing the hook seed.
+    pub(crate) fn check_scanner_keys(
+        &self,
+        config: &mkit_server::scanner_retrieval::RetrievalConfig,
+    ) -> Result<(), ConfigError> {
+        config
+            .check_role_keys(&[self.public_key()?], &[*self.seed])
+            .map_err(|e| ConfigError::new(exit::CONFIG_ERROR, e.to_string()))
+    }
+
     /// Whether any role is remote.
     #[must_use]
     pub fn any(&self) -> bool {

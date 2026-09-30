@@ -151,18 +151,21 @@ where
         })
         .fallback_service(unary);
     let cap = crate::guard::CapLayer::new(opts.max_concurrency, opts.queue_timeout);
+    let scanner_cap = cap.clone();
     #[cfg(feature = "http-objects")]
     if let Some(mount) = &opts.http_objects
         && pipeline.http_objects_enabled()
     {
         let router = layers::apply(router, opts, bearer.as_deref(), None);
-        return crate::http_mount::mount(
+        let router = crate::http_mount::mount(
             router,
-            pipeline,
+            pipeline.clone(),
             mount.clone(),
             opts.redactor.clone(),
             cap,
         );
+        return crate::scanner_retrieval::mount(router, pipeline, opts, &scanner_cap);
     }
-    layers::apply(router, opts, bearer.as_deref(), Some(cap))
+    let router = layers::apply(router, opts, bearer.as_deref(), Some(cap));
+    crate::scanner_retrieval::mount(router, pipeline, opts, &scanner_cap)
 }

@@ -227,6 +227,28 @@ message InspectRequest {
   InspectPhase phase = 3;
   // Stable logical inspection id across retries, distinct from hook nonces; SPEC-SERVER §11.3.
   string inspection_id = 4;
+  // Optional private added-pack retrieval metadata; never inline bytes; SPEC-SERVER §11.4.
+  InspectRetrieval scanner_retrieval = 5;
+}
+
+// Capability and ordered raw added packs for a single call; SPEC-SERVER §11.4.
+message InspectRetrieval {
+  // Origin-relative private endpoint path, without a query; SPEC-SERVER §11.4.
+  string endpoint_path = 1;
+  // Short-lived opaque retrieval capability; never log it; SPEC-SERVER §11.4.
+  string capability = 2;
+  // Exclusive expiry, as Unix epoch milliseconds; SPEC-SERVER §11.4.
+  uint64 expires_at_ms = 3;
+  // Exact added-pack order with lengths of raw stored packs; SPEC-SERVER §11.4.
+  repeated InspectPack packs = 4;
+}
+
+// Raw added-pack identity and byte length; SPEC-SERVER §11.4.
+message InspectPack {
+  // Raw 32-byte pack id; SPEC-SERVER §11.4.
+  bytes id = 1;
+  // Length of the raw staged pack in bytes; SPEC-SERVER §11.4.
+  uint64 length = 2;
 }
 
 // Pipeline phase of the inspection; SPEC-SERVER §11.1.

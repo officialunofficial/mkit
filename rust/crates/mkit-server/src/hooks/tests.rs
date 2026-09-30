@@ -327,7 +327,7 @@ fn signer_refuses_a_bad_key_id_validity_and_clock() {
 }
 
 /// An independent §7.1 verifier over what the channel received.
-fn verify(seen: &Seen) {
+pub(super) fn verify(seen: &Seen) {
     let header = |name: &str| {
         let mut all = seen.headers.iter().filter(|(n, _)| *n == name);
         let value = all

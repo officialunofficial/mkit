@@ -1,7 +1,15 @@
 # R-193: lifetime authority escalation
 
-Status: stopped under [brief](briefs/R-193.md) B3 / D, before retrieval implementation.
+Status: historical escalation, superseded by the user lifetime ruling in
+the [brief](briefs/R-193.md#user-lifetime-ruling-2026-09-30-supersedes-b3-and-retry-test-wording).
 Base: `bc114103` (`origin/feat/mkit-server`, including #1240 and #1242).
+
+The user authorized existing ticket state as the lifetime authority: abort
+means terminal ticket close or expiry; fail-closed attempts leave retrieval
+valid until capability expiry. Retries keep `inspection_id` and mint a fresh
+capability. Implementation resumed without a new durable record or key tag.
+The evidence below and its lifecycle regression are retained as history;
+the former stop and deferred-gate statements describe the escalation commit.
 
 ## The blocker
 
