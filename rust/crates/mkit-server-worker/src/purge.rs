@@ -1,4 +1,6 @@
 //! Paid alarm accounting and colo-local cache invalidation.
+// Namespace delivery is mounted by wasm glue and exercised by host unit tests.
+#![cfg_attr(not(any(test, target_arch = "wasm32")), allow(dead_code))]
 use mkit_server::purge::{LocalInvalidation, Request, SliceBudget};
 use mkit_server::timers::{DueTimer, Fired, TimerCtx, TimerHandler, TimerKind};
 use mkit_server::{BoxFuture, MaybeSend, MaybeSync, NamespaceStore, StoreError};
@@ -102,6 +104,202 @@ impl<C: CacheDelete> LocalInvalidation for LocalCache<C> {
                 self.cache.delete(key).await?;
             }
             Ok(None)
+        })
+    }
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NamespacePosition {
+    paths: bool,
+    done: bool,
+    after: Option<Vec<u8>>,
+    repository: Option<String>,
+    cursor: u32,
+}
+fn bad_position() -> StoreError {
+    StoreError::Corrupt("invalid namespace purge checkpoint".into())
+}
+struct NamespaceCache<'a, S, T, C> {
+    local: &'a LocalCache<C>,
+    source: &'a S,
+    remote: &'a T,
+    partition: &'a mkit_server::Partition,
+    sharding: mkit_server::pipeline::Sharding,
+    single: Option<&'a mkit_server::RepoId>,
+}
+impl<S: NamespaceStore, T: NamespaceStore, C: CacheDelete> LocalInvalidation
+    for NamespaceCache<'_, S, T, C>
+{
+    fn invalidate<'a>(
+        &'a self,
+        request: &'a Request,
+        cursor: u32,
+        budget: &'a SliceBudget,
+    ) -> BoxFuture<'a, Result<Option<u32>, StoreError>> {
+        self.local.invalidate(request, cursor, budget)
+    }
+    #[allow(clippy::too_many_lines)] // One checkpoint machine owns catalog traversal and cache deletion.
+    fn invalidate_checkpoint<'a>(
+        &'a self,
+        request: &'a Request,
+        checkpoint: &'a [u8],
+        budget: &'a SliceBudget,
+    ) -> BoxFuture<'a, Result<Option<Vec<u8>>, StoreError>> {
+        Box::pin(async move {
+            if !request.repository.is_empty() {
+                return self
+                    .local
+                    .invalidate_checkpoint(request, checkpoint, budget)
+                    .await;
+            }
+            request.validate()?;
+            let namespace = if request.namespace == "root" {
+                mkit_server::NamespaceKey::deployment_default()
+            } else {
+                mkit_server::NamespaceKey::from_namespace(
+                    &mkit_core::repo_identity::Namespace::parse(&request.namespace)
+                        .map_err(|_| bad_position())?,
+                )
+            };
+            let target = match self.sharding {
+                mkit_server::pipeline::Sharding::Single => {
+                    mkit_server::Partition::Namespace(namespace.clone())
+                }
+                _ => mkit_server::Partition::Coordinator(namespace.clone()),
+            };
+            let mut pos: NamespacePosition = if checkpoint.is_empty() {
+                NamespacePosition::default()
+            } else {
+                serde_json::from_slice(checkpoint).map_err(|_| bad_position())?
+            };
+            if checkpoint.len() > 4096
+                || pos.after.as_ref().is_some_and(Vec::is_empty)
+                || (pos.done && pos.after.is_some())
+                || (pos.done && pos.repository.is_none())
+                || (pos.paths && pos.repository.is_none() && pos.cursor != 0)
+                || pos
+                    .repository
+                    .as_ref()
+                    .is_some_and(|name| mkit_server::RepoName::new(name).is_err())
+                || pos.cursor as usize
+                    > if pos.paths {
+                        16
+                    } else {
+                        request.url_paths.len()
+                    }
+            {
+                return Err(bad_position());
+            }
+            loop {
+                if !pos.paths {
+                    while let Some(path) = request.url_paths.get(pos.cursor as usize) {
+                        if !budget.charge(2) {
+                            break;
+                        }
+                        self.local
+                            .cache
+                            .delete(&format!("{}{path}", request.audience))
+                            .await?;
+                        pos.cursor += 1;
+                    }
+                    if pos.cursor as usize != request.url_paths.len() {
+                        break;
+                    }
+                    pos.paths = true;
+                    pos.cursor = 0;
+                }
+                if let Some(repository) = &pos.repository {
+                    let mut child = request.clone();
+                    child.namespace.clear();
+                    child.repository = format!("{}/{}", request.namespace, repository);
+                    child.url_paths.clear();
+                    if let Some(cursor) = self.local.invalidate(&child, pos.cursor, budget).await? {
+                        pos.cursor = cursor;
+                        break;
+                    }
+                    pos.repository = None;
+                    pos.cursor = 0;
+                }
+                if pos.done {
+                    return Ok(None);
+                }
+                if let Some(single) = self.single {
+                    pos.done = true;
+                    if single.namespace == namespace {
+                        pos.repository = Some(single.name.as_str().to_owned());
+                    }
+                    continue;
+                }
+                if !budget.charge(1) {
+                    break;
+                }
+                let after = pos
+                    .after
+                    .as_ref()
+                    .map(|c| mkit_server::Cursor::new(c.clone()));
+                let start = mkit_server::Key::new(b"rr\0".to_vec());
+                let end = mkit_server::Key::new(b"rr\x01".to_vec());
+                let page = if target == *self.partition {
+                    self.source
+                        .scan(&target, &start, &end, after.as_ref(), 1)
+                        .await?
+                } else {
+                    self.remote
+                        .scan(&target, &start, &end, after.as_ref(), 1)
+                        .await?
+                };
+                if page.entries.len() > 1 || (page.entries.is_empty() && page.next.is_some()) {
+                    return Err(bad_position());
+                }
+                pos.done = page.next.is_none();
+                pos.after = page.next.map(|c| c.as_bytes().to_vec());
+                if let Some((key, value)) = page.entries.first() {
+                    let Some(mkit_server::store::keys::ParsedKey::RepoRecord(repo)) =
+                        mkit_server::store::keys::parse(key)
+                    else {
+                        return Err(bad_position());
+                    };
+                    mkit_server::store::codec::decode_repo_record(value)?;
+                    pos.repository = Some(repo.as_str().to_owned());
+                }
+            }
+            Ok(Some(serde_json::to_vec(&pos).map_err(|_| bad_position())?))
+        })
+    }
+}
+/// Kind-11 delivery with durable catalog traversal and context-local reads.
+pub(crate) struct NamespaceDelivery<T, C> {
+    pub delivery: mkit_server::purge::PurgeDelivery,
+    pub local: LocalCache<C>,
+    pub remote: T,
+    pub sharding: mkit_server::pipeline::Sharding,
+    pub single: Option<mkit_server::RepoId>,
+}
+impl<S: NamespaceStore, T: NamespaceStore, C: CacheDelete> TimerHandler<S>
+    for NamespaceDelivery<T, C>
+{
+    fn kind(&self) -> TimerKind {
+        mkit_server::timers::registry::kinds::CACHE_PURGE
+    }
+    fn max_per_tick(&self) -> Option<u32> {
+        Some(1)
+    }
+    fn fire<'a>(
+        &'a self,
+        ctx: &'a TimerCtx<'a, S>,
+        timer: &'a DueTimer,
+    ) -> BoxFuture<'a, Result<Fired, StoreError>> {
+        Box::pin(async move {
+            let local = NamespaceCache {
+                local: &self.local,
+                source: ctx.store,
+                remote: &self.remote,
+                partition: ctx.partition,
+                sharding: self.sharding,
+                single: self.single.as_ref(),
+            };
+            self.delivery.fire_with_local(&local, ctx, timer).await
         })
     }
 }
@@ -376,6 +574,327 @@ mod tests {
         kind: u8,
         calls: u32,
         recorded: Arc<AtomicU32>,
+    }
+
+    #[derive(Clone)]
+    struct NamespaceSink(Arc<Mutex<Vec<Request>>>);
+    impl PurgeSink for NamespaceSink {
+        fn deliver<'a>(&'a self, request: &'a Request) -> BoxFuture<'a, Result<(), StoreError>> {
+            Box::pin(async move {
+                self.0.lock().unwrap().push(request.clone());
+                Ok(())
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct CatalogCounts {
+        inner: Arc<MemoryKv>,
+        reads: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
+    }
+    impl NamespaceStore for CatalogCounts {
+        fn capabilities(&self) -> mkit_server::StoreCapabilities {
+            self.inner.capabilities()
+        }
+        async fn get(
+            &self,
+            p: &Partition,
+            key: &mkit_server::Key,
+        ) -> Result<Option<mkit_server::Value>, StoreError> {
+            self.inner.get(p, key).await
+        }
+        async fn scan(
+            &self,
+            p: &Partition,
+            start: &mkit_server::Key,
+            end: &mkit_server::Key,
+            after: Option<&mkit_server::Cursor>,
+            limit: u32,
+        ) -> Result<mkit_server::ScanPage, StoreError> {
+            if start.as_bytes() == b"rr\0" {
+                self.reads
+                    .lock()
+                    .unwrap()
+                    .push(after.map(|c| c.as_bytes().to_vec()));
+            }
+            self.inner.scan(p, start, end, after, limit).await
+        }
+        async fn apply(
+            &self,
+            p: &Partition,
+            batch: Batch,
+        ) -> Result<mkit_server::BatchOutcome, StoreError> {
+            self.inner.apply(p, batch).await
+        }
+        async fn stats(&self, p: &Partition) -> Result<mkit_server::PartitionStats, StoreError> {
+            self.inner.stats(p).await
+        }
+        async fn probe(&self) -> Result<(), StoreError> {
+            self.inner.probe().await
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "published-view")]
+    async fn namespace_catalog_cursor_is_durable_and_never_restarts_prior_pages() {
+        use mkit_server::store::{codec, keys};
+        let inner = Arc::new(MemoryKv::default());
+        let partition = Partition::Coordinator(NamespaceKey::deployment_default());
+        for index in 0..20 {
+            inner
+                .apply(
+                    &partition,
+                    Batch::new().put(
+                        keys::repo_record(&RepoName::new(format!("repo-{index:02}")).unwrap()),
+                        codec::encode_repo_record(&codec::RepoRecord { created_at_ms: 1 }),
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let source = CatalogCounts {
+            inner: inner.clone(),
+            reads: reads.clone(),
+        };
+        let remote_reads = Arc::new(Mutex::new(Vec::new()));
+        let remote = CatalogCounts {
+            inner: Arc::new(MemoryKv::default()),
+            reads: remote_reads.clone(),
+        };
+        let mut work = request("durable-namespace");
+        work.repository.clear();
+        work.namespace = "root".into();
+        work.url_paths.clear();
+        let cache = Cache::default();
+        let local = LocalCache {
+            cache: cache.clone(),
+            snapshot_deployment: Some("fixture-deployment".into()),
+        };
+        let mut checkpoint = Vec::new();
+        let mut charges = 0;
+        for _ in 0..200 {
+            let budget = SliceBudget::new(6);
+            let invalidator = NamespaceCache {
+                local: &local,
+                source: &source,
+                remote: &remote,
+                partition: &partition,
+                sharding: mkit_server::pipeline::Sharding::D34,
+                single: None,
+            };
+            let next = invalidator
+                .invalidate_checkpoint(&work, &checkpoint, &budget)
+                .await
+                .unwrap();
+            charges += budget.used();
+            assert!(budget.used() <= 6);
+            let Some(next) = next else {
+                break;
+            };
+            checkpoint =
+                serde_json::from_slice::<Vec<u8>>(&serde_json::to_vec(&next).unwrap()).unwrap();
+        }
+        let scans = reads.lock().unwrap();
+        assert_eq!(scans.len(), 20);
+        assert_eq!(
+            scans.iter().filter(|cursor| cursor.is_none()).count(),
+            1,
+            "cold slices must resume the opaque position"
+        );
+        assert_eq!(cache.0.lock().unwrap().len(), 20 * 16);
+        assert_eq!(
+            charges,
+            20 + 2 * 20 * 16,
+            "every catalog read and delete is reserved"
+        );
+        assert!(
+            remote_reads.lock().unwrap().is_empty(),
+            "catalog in this DO must use TimerCtx's local store"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "published-view")]
+    async fn namespace_checkpoint_exhaustion_corruption_and_single_repo_are_fail_closed() {
+        use mkit_server::store::keys;
+        let source = CatalogCounts {
+            inner: Arc::new(MemoryKv::default()),
+            reads: Arc::new(Mutex::new(Vec::new())),
+        };
+        let remote = source.clone();
+        let partition = Partition::Coordinator(NamespaceKey::deployment_default());
+        let cache = Cache::default();
+        let local = LocalCache {
+            cache: cache.clone(),
+            snapshot_deployment: Some("fixture-deployment".into()),
+        };
+        let mut work = request("single-namespace");
+        work.repository.clear();
+        work.namespace = "root".into();
+        work.url_paths.clear();
+        let invalidator = NamespaceCache {
+            local: &local,
+            source: &source,
+            remote: &remote,
+            partition: &partition,
+            sharding: mkit_server::pipeline::Sharding::D34,
+            single: None,
+        };
+        let checkpoint = invalidator
+            .invalidate_checkpoint(&work, &[], &SliceBudget::new(0))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(source.reads.lock().unwrap().is_empty());
+        assert!(cache.0.lock().unwrap().is_empty());
+        for corrupt in [b"invalid".to_vec(), serde_json::json!({"paths":true,"done":true,"after":null,"repository":null,"cursor":0}).to_string().into_bytes(), serde_json::json!({"paths":true,"done":false,"after":null,"repository":"repo","cursor":17}).to_string().into_bytes()] {
+            assert!(invalidator.invalidate_checkpoint(&work, &corrupt, &SliceBudget::new(100)).await.is_err());
+        }
+        source
+            .inner
+            .apply(
+                &partition,
+                Batch::new().put(
+                    keys::repo_record(&RepoName::new("broken").unwrap()),
+                    mkit_server::Value::new(b"invalid".to_vec()),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(
+            invalidator
+                .invalidate_checkpoint(&work, &checkpoint, &SliceBudget::new(100))
+                .await
+                .is_err()
+        );
+        assert!(cache.0.lock().unwrap().is_empty());
+        let single = mkit_server::RepoId {
+            namespace: NamespaceKey::deployment_default(),
+            name: RepoName::new("configured").unwrap(),
+        };
+        let single_local = NamespaceCache {
+            single: Some(&single),
+            ..invalidator
+        };
+        let prior = source.reads.lock().unwrap().len();
+        assert!(
+            single_local
+                .invalidate_checkpoint(&work, &[], &SliceBudget::new(32))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            source.reads.lock().unwrap().len(),
+            prior,
+            "Single uses its configured repo, not an absent registry"
+        );
+        assert_eq!(cache.0.lock().unwrap().len(), 16);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "published-view")]
+    async fn manual_namespace_purge_enumerates_registered_repositories_across_cold_slices() {
+        use mkit_server::store::{codec, keys};
+        use std::collections::BTreeSet;
+        let store = Arc::new(MemoryKv::default());
+        let partition = Partition::Coordinator(NamespaceKey::deployment_default());
+        for name in ["repo", "other"] {
+            store
+                .apply(
+                    &partition,
+                    Batch::new().put(
+                        keys::repo_record(&RepoName::new(name).unwrap()),
+                        codec::encode_repo_record(&codec::RepoRecord { created_at_ms: 1 }),
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        let mut work = request("manual-namespace");
+        work.repository.clear();
+        work.namespace = "root".into();
+        work.trigger = Trigger::Manual;
+        work.url_paths = vec!["/object".into(), "/proof".into()];
+        store
+            .apply(&partition, plan_enqueue(&work, 10, None, None).unwrap())
+            .await
+            .unwrap();
+        let cache = Cache::default();
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let clock = ManualClock::new(10);
+        for tick in 0..80 {
+            let now = 10 + tick * 1_000_000;
+            clock.set(i64::try_from(now).unwrap());
+            let budget = SliceBudget::new(6);
+            let registry = TimerRegistry::new().register(NamespaceDelivery {
+                delivery: PurgeDelivery::new(
+                    Arc::new(mkit_server::purge::NoLocalCache),
+                    Some(Arc::new(NamespaceSink(delivered.clone()))),
+                    budget.clone(),
+                ),
+                local: LocalCache {
+                    cache: cache.clone(),
+                    snapshot_deployment: Some("fixture-deployment".into()),
+                },
+                remote: store.clone(),
+                sharding: mkit_server::pipeline::Sharding::D34,
+                single: None,
+            });
+            run_due(
+                &store,
+                &partition,
+                &registry,
+                &clock,
+                now,
+                &TickBudget::new(1, 1, 16, 1000),
+            )
+            .await
+            .unwrap();
+            assert!(
+                budget.used() <= 6,
+                "catalog reads and cache deletes share the slice allowance"
+            );
+            if read_request(&store, &partition, &work.purge_id)
+                .await
+                .unwrap()
+                .is_none()
+            {
+                break;
+            }
+        }
+        assert!(
+            read_request(&store, &partition, &work.purge_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "a finite namespace catalog must complete after bounded cold slices"
+        );
+        let mut expected = remote_snapshot_keys(&work);
+        expected.extend(
+            work.url_paths
+                .iter()
+                .map(|path| format!("{}{path}", work.audience)),
+        );
+        assert_eq!(
+            cache
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+        assert_eq!(*delivered.lock().unwrap(), [work]);
+        assert!(
+            store
+                .get(&partition, &keys::outcome_backlog())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
     impl<S: NamespaceStore> TimerHandler<S> for HandlerCalls {
         fn kind(&self) -> TimerKind {

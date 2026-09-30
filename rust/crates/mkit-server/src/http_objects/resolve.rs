@@ -148,6 +148,9 @@ pub(crate) async fn load<B: BlobStore, N: NamespaceStore>(
         Err(ResolveFailure::Other(error)) if error.public_message() == DECODE_BUDGET_MESSAGE => {
             Err(Miss::Capped)
         }
+        Err(ResolveFailure::Other(error)) if error.public_message() == "object blocked" => {
+            Err(Miss::NotFound)
+        }
         Err(_) => {
             tracing::warn!("member object could not be reconstructed");
             Err(Miss::Unavailable)

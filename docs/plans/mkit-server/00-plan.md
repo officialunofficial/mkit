@@ -212,6 +212,7 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 | 4.9 | Client: PendingVerification polling | M4 | client | 4.4, 1.16 | M | rust,cli | no |
 | 4.10a | ~~ContentIndex shards on Workers and holder sub-sharding~~ Deferred (R-131) | M4 | storage | 4.4, 1.8 | M | rust,wasm,workers,conf-wrangler | no |
 | 4.10 | Server: D32 extraction into the global object CAS, holds and holders (R-163; native) | M4 | core | 4.7 | L | rust,conf-native | no |
+| 4.10b-1 | Worker: protection and bounded upload prerequisites (merged, R-186) | M4 | worker | 4.8, 4.10, 4.10b-multipart | L | rust,wasm,workers,conf-wrangler | no |
 | 4.10b | Worker: extraction slices and content relay hook (R-163; Stage 2) | M4 | worker | 4.8, 4.10 | L | rust,wasm,workers,conf-wrangler | no |
 | 4.11 | Spec: HTTP serving and proofs (#1088) | M4 | spec | 4.4 | M | docs,golden | yes |
 | 4.12 | Server core: HTTP object serving (http-objects feature) (R-169; Stage 2, inert) | M4 | core | 4.11, 4.7, 4.10 | L | rust,wasm | no |
@@ -223,7 +224,7 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 | 4.15 | Private serving via M2 signed URLs and read auth | M4 | core | 4.12, 2.9, 2.11 | M | rust,conf-native | no |
 | 4.16 | Adapters: HTTP serving, Range, GET/HEAD CORS and query-string redaction (R-109) | M4 | native | 4.12 | M | rust,wasm,workers | no |
 | 4.17 | Pre-receive policy hooks: allowed signers per ref, fast-forward-only grants | M4 | core | 4.7, 4.4, 2.7 | M | rust,conf-native | no |
-| 4.18 | Conformance: indexed mode and serving wire suite (M4 exit) | M4 | conformance | 4.8, 4.9, 4.10, 4.10b, 4.14b-1, 4.15, 4.16, 4.17, 5.10, 5.11a | L | rust,conf-native,conf-wrangler,staging | yes |
+| 4.18 | Conformance: indexed mode and serving wire suite (M4 exit) | M4 | conformance | 4.8, 4.9, 4.10, 4.10b, 4.14b-1, 4.15, 4.16, 4.17, 5.10, 5.11a, 5.6a-2 | L | rust,conf-native,conf-wrangler,staging | yes |
 | 5.1a | Spec: leases, lifecycle events, server GC, published view and quarantine (#1091 part 1) | M5 | spec | 3.6, 4.4 | M | docs,proto,golden | yes |
 | 5.1b-1 | Spec: takedown, tombstones, preservation and signed notices (#1091 part 2a) | M5 | spec | 5.1a-2, 5.1c | M | docs,proto,golden | no |
 | 5.1b-2 | Spec: admin API, audit log and remote CachePurge (#1091 part 2b) | M5 | spec | 5.1b-1 | M | docs,proto,golden | no |
@@ -237,7 +238,9 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 | 5.5a-0 | Durable inspection-mode marker (post-launch, R-199/R-200) | M5 | core | REL-1, 5.4 | S | rust,wasm | no |
 | 5.5c | Full classification, async inspection, holds and review (post-launch, R-200) | M5 | core | 5.5a, 5.5a-0, 5.11a | L | rust,wasm,workers,conf-native,conf-wrangler | no |
 | 5.5b | Inspector takedown completion | M5 | core | 5.5c, 5.6 | L | rust,conf-native,conf-wrangler | no |
-| 5.6 | Takedown core: tombstones, blocklist (checked by the relay), preservation store, per-repo views, suspension | M5 | core | 5.1b-1, 4.10, 5.10 | L | rust,conf-native,conf-wrangler | yes |
+| 5.6 | Takedown aggregate: lean denial and preservation; full completion follows | M5 | core | 5.6a-2 | L | rust,conf-native,conf-wrangler | yes |
+| 5.6a-1 | Lean global denial and pending audited takedown intent | M5 | core | 5.4, 4.10, 5.10, 5.11a | L | rust,wasm,proto,conf-native,conf-wrangler | no |
+| 5.6a-2 | Verified takedown preservation and restricted administration | M5 | core | 5.6a-1, 4.10b-1 | L | rust,wasm,proto,conf-native,conf-wrangler | yes |
 | 5.7a | mkit-core: delta-safe pack rewrite primitive | M5 | core | 4.2 | M | rust,wasm | no |
 | 5.7b | Server: rewrite orchestration, packlist chain rebuild, packmap CAS | M5 | core | 5.7a, 5.6 | L | rust,conf-native | no |
 | 5.8 | Storage receipts: ReceiptSigner, receipt key, key list, AdvanceRefs field | M5 | core | 5.1c, 5.2 | L | rust,conf-native,golden | yes |
@@ -290,9 +293,10 @@ this order schedules the launch bundles, and includes already merged implementat
    async/hold/review semantics move to 5.5c; publication Events move to post-launch 5.15 (R-200).
 4. **Worker serving: 4.8 → 4.10b → 4.16 → 4.18**, including production opt-in and activation, plus the
    native/core proof prerequisites (4.14b-1); Worker proofs (4.14b-2) are post-launch (R-200).
-5. **Launch takedown and admin:** lean 5.6a, including manual PurgeCache, with the signed/audited
-   framework in 5.11a and lease-independent purge foundations in 5.10. Inspection review operations
-   move to 5.5c; full admin/CLI operations in 5.11b and inspector takedown completion in 5.5b follow launch.
+5. **Launch takedown and admin, before 4.18 activation:** 5.6a-1 global denial,
+   pending audited intent and manual purge; then 5.6a-2 verified preservation and
+   restricted administration. Both use R-190. No holds, reinstatement, notices or
+   rewrite at launch. Full admin/CLI and completion remain post-launch work.
 6. **Real Cloudflare staging, 1.19/1.20, before launch:** activate the launch profile, run conformance/e2e and
    measure CPU, subrequests and cost. Local wrangler measurements do not establish production sizing.
    Run from the orchestrator's machine; staging workflows remain main-only, with no feature-branch dispatch.
@@ -300,14 +304,15 @@ this order schedules the launch bundles, and includes already merged implementat
    merge commit. Before launch, the user runs an external full-code-and-spec review of the entire launch scope;
    the orchestrator validates findings against the code, and validated fixes receive an adversarial review.
 
-**Launch profile, recorded here; spec text lands with 5.4.** Indexed mode, serving and inspection without
-storage leases; permanent retention and GC disabled. 5.4 must amend SPEC-SERVER §12.1/§18 and explicitly
-define sync-only added-pack inspection under R-200. This plan does not itself amend normative text
-or claim conformance to the existing full profile. Leases, GC and receipts (5.2, 5.3a/b, 5.8) follow launch.
+**Launch profile (R-198/R-200).** Indexed serving and sync-only inspection without
+storage leases; permanent serving retention and GC disabled. Admin takedowns remain
+unresolved until applicable completion; preservation retention is separate. This
+plan does not itself amend normative text or claim full-profile conformance.
+Leases, GC and storage receipts (5.2, 5.3a/b, 5.8) follow launch.
 Storage leases are distinct from the existing D34 epoch leases and the 2.16 authority fence.
 
-**Post-launch order (R-200).** First 5.5a-0, then 5.5c, 5.15 and 4.14b-2. Continue remaining
-WPs in plan/dependency order: 5.5b completes inspector takedown;
+**Post-launch order (R-200).** 5.5a-0 → 5.5c → 5.15 → 4.14b-2; then remaining
+WPs in plan/dependency order, including inspector takedown completion in 5.5b;
 5.2 → 5.3a → 5.3b and 5.8 add leases, GC and receipts; full admin, native-only extras and other remaining work
 follow their registry prerequisites. REL-2 is a follow-up tracking aggregate, with no mandated second launch
 or next-minor version bump. The registry remains the dependency DAG; former static wave/weighted-release
@@ -607,6 +612,7 @@ ContentIndex/export/hooks → M0-02b, unary pipeline → M0-05a, streaming/fault
 | R-187 | HTTP proofs split: native/core and Workers (WP-4.14b-1/2) | Native/core preparation validates a published-reachable commit and exact path/leaf before validators/payment, then selects canonical Object, MKDP plain/single-chunk ranges or MKDS cross-chunk ranges. Exact structural wire lengths use indexed canonical sizes, tree positions/counts and chunk lengths only through the span, constructing no Merkle/Bao proofs. Common weak ETag validation precedes content/bundle caps and common anonymous GET/HEAD admission; build starts after allowance and any build/length failure aborts the reservation before bytes. Proofs ignore HTTP Range/If-Range, always use 200 with Accept-Ranges none, proof ETag and metadata; cache privacy composes with tokens/admission/receipts. Native uses a blocking-pool builder and one verified repository-local canonical read at a time; extracted concatenated file bytes and MKOF hints are unnecessary. The shared core prefix removes duplicated traversal. Syntax is 400; bounds, unsupported selectors, inclusive-length overflow and content/encoded caps are 416. Merged 4.13 is explicit; Workers 4.14b-2 depends on 4.10b and adds bounded canonical prefetch plus actual subrequest/peak-memory/staging CPU evidence before activation. Uno MKDP/MKDS verification uses mkit-core/mkit-wasm; mkit-attest handles DSSE. A manifest proof alone does not verify separately fetched file bytes. | 4.14b-1, 4.14b-2, 4.13, 4.10b, 4.18 |
 | R-188 | WP-5.10 launch purge (R-198) | Kind 11 CACHE_PURGE owns durable retry work, stable purge ids and fresh signed sink nonces. Local and snapshot invalidation must precede acknowledgement; serving fences remain authoritative and Workers Caching stays disabled on gated entrypoints. Workers activation is Paid-only. Every alarm shares a 1,000 external-operation cap across all heads: actual DO calls, 16 per outcome, 256 per verify slice, 3 per snapshot, 1 per backup/ticket abort, 2 per local cache key (enumeration/delete), and 1 per signed sink attempt. Root audit SQL adds no external calls; exhaustion leaves durable checkpoints. Automatic intents commit with their triggering state apply. Manual PurgeCache belongs to 5.6a (R-190); lease-deletion triggers depend on post-launch 5.2. This row allocates the contract; activation awaits complete implementation and gates. | 5.10, 5.5a, 5.6a, 5.2 |
 | R-189 | WP-5.11a admin foundations (R-198) | Dedicated signed admin envelope, role-separated keys, durable nonce/result and operation-id replay, gapless audit and ReadAuditLog; default-off. Implementation prerequisites are signed reads/visibility (2.9), metadata (1.10), hook authentication (3.7b/3.9c) and purge (5.10), not aggregate activation 4.18. Activation follows these foundations. Manual PurgeCache and review/takedown operations are later-lane consumers. User ruling: automatic audit events use the existing source outbox and root target hook; the source intent/timer/event commit together, and audit append/dedup/watermark commit together in arrival order. | 5.11a, 5.10, 4.18, 5.5a, 5.6a |
+| R-190 | WP-5.6a launch split (user, R-198/R-200) | Part 5.6a-1: independent global denial, verified pack inventory, signed pending Takedown intent and asynchronous manual purge; user-ruling cap 2,800 production Rust lines, excluding tests/docs/proto/generated code. Part 5.6a-2: verified preservation, discovery, retention/legal holds, restricted reads and adapters; cap 2,600 including docs. Kind 15 TAKEDOWN_WORK covers checkpointed acquisition, discovery retries and audited retention purge; per-action copy ownership is mandatory. Metadata uses disjoint existing b subkeys, preserving exact V1 b 00 object:32 producers; no new tag or older-build migration. Production takedown activation waits for both parts. 4.10b-1 is merged; PR2 must consume the actual ct/timer-13 handoff, without an unmerged carry-forward. | 5.6a-1, 5.6a-2, 5.6, 4.18 |
 | R-192 | Bounded Worker object multipart prerequisite (orchestrator, 2026-09-30) | WP-4.10b-multipart supplies immutable trusted root/CV plans, verified streamed part receipts and backend R2 completion before visibility, preserving public PACK wire limits. Canonical object identity/root validation and source charging remain parent WP-4.10b duties. Internal opaque receipts are bounded separately following actual local R2 ETag evidence. No extraction/holder or production activation is enabled by this prerequisite. | 4.10b-multipart, 4.10b |
 | R-195 | WP-1.20 readiness (early docs skeleton) | [D35 Uno environment](staging-uno.md), [operator runbook](launch-operations.md), [REL-1 dependency/evidence checklist](launch-readiness.md) and [DRAFT user-only release prompt](briefs/REL-1-draft.md). No runtime/config/script/workflow change or staging/measurement/sign-off claim. Final 1.20 waits for 4.18; 5.5a/R-193/5.15/5.6a/4.18 contracts remain pending. R-198 governs: reset unsupported pre-launch stores, no migration; storage leases off, permanent retention, serving GC off/refused in indexed mode, lean takedown. Historical registry aggregates/edges are recorded for owning lanes to reconcile; this subset does not complete 1.20 or REL-1. | 1.20, REL-1 |
 | R-198 | Launch restart ruling (Decisions B1–B6) | Pre-launch persisted formats are unsupported: reset, with no migration/backfill or era discriminator. WP-5.4 is published view plus hold seam only; Post-launch WP-5.5c owns lean durable inspection mode, per-content/advance holds, RepoIndex flags and strong serving checks in inspection mode, with read-then-commit flag linearization and timer-12 rechecks. Freeze 4.10b gp/ct/timer-13 and finish the extraction driver; indexed GC remains refused. 5.10/5.11a ships purge delivery and the audited admin framework; manual asynchronous `PurgeCache` moves to 5.6a. R-196/R-197 are withdrawn and retired; timer 15 and key tag `pv` are freed. Rows R-182–R-195 and timers 11–14 retain their owners; R-199 is assigned to WP-5.5a-0; R-200 follow-up context is recorded by WP-5.5a-sync. | 5.4, 5.5c, 4.10b, 5.10, 5.11a, 5.6a |

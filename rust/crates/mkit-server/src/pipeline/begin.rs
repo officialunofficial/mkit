@@ -235,6 +235,26 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .map_err(|e| store_error(StorageOp::BlobHead, e))?
                 .is_some()
         };
+        let present = if present && self.cfg.indexed.is_some() {
+            let clear = if self.cfg.takedown_denial {
+                crate::takedown::denial::require_pack_clear(
+                    &self.meta,
+                    self.shards.as_ref(),
+                    &op.repo,
+                    &key.0,
+                )
+                .await
+            } else {
+                crate::takedown::denial::require_clear(&self.meta, &key.0).await
+            };
+            match clear {
+                Ok(()) => true,
+                Err(e) if e.public_message() == "object blocked" => false,
+                Err(e) => return Err(e),
+            }
+        } else {
+            present
+        };
         if present {
             return Ok(Some(BeginUploadResult::AlreadyPresent));
         }

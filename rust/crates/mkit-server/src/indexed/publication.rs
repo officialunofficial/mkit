@@ -267,7 +267,10 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
             metrics,
         )
         .await
-        .map_err(|_| closed())?;
+        .map_err(|e| match e {
+            resolve::ResolveFailure::Other(e) if e.public_message() == "object blocked" => e,
+            _ => closed(),
+        })?;
         remaining = remaining
             .checked_sub(memo.retained_bytes())
             .ok_or_else(capped)?;

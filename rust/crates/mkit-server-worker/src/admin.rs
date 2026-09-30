@@ -33,7 +33,13 @@ pub fn parse(
 }
 #[cfg(any(target_arch = "wasm32", test))]
 fn supported_path(path: &str) -> bool {
-    path == mkit_server::admin::AUDIT_PATH
+    path == mkit_server::admin::AUDIT_PATH || path == mkit_server::admin::PURGE_PATH
+}
+#[cfg(any(target_arch = "wasm32", test))]
+fn purge_enabled(cfg: &crate::adapter::WorkerConfig) -> bool {
+    cfg.hooks
+        .as_ref()
+        .is_some_and(|hooks| hooks.roles.cache_purge && hooks.http.is_some())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -72,7 +78,8 @@ pub(crate) async fn serve(
             crate::ns_client::StubTransport::new(env.clone(), cfg.placement.clone()),
             cfg.probe_partition(),
         );
-        let engine = Engine::new(store, cfg.probe_partition(), config.clone());
+        let engine = Engine::new(store, cfg.probe_partition(), config.clone())
+            .with_purge(purge_enabled(cfg));
         engine
             .handle(
                 &path,
@@ -97,12 +104,50 @@ pub(crate) async fn serve(
 mod tests {
     use super::*;
     #[test]
-    fn only_audit_export_is_exposed() {
+    fn manual_purge_is_exposed_and_takedown_stays_unexposed() {
         assert!(supported_path(mkit_server::admin::AUDIT_PATH));
-        assert!(!supported_path(mkit_server::admin::PURGE_PATH));
+        assert!(supported_path(mkit_server::admin::PURGE_PATH));
         assert!(!supported_path(
             "/mkit.server.admin.v1.AdminService/Takedown"
         ));
+    }
+
+    #[test]
+    fn purge_activation_requires_the_signed_purge_role() {
+        let mut cfg = crate::adapter::WorkerConfig::from_vars(|name| match name {
+            "AUTH_AUDIENCE" => Some("https://server.example".into()),
+            "AUTH_REPOSITORY" => Some("repo".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert!(!purge_enabled(&cfg));
+        let mut hooks = crate::hooks::config::HookVars {
+            roles: crate::hooks::config::HookRoles {
+                authorize: false,
+                admit: false,
+                outcome: true,
+                cache_purge: false,
+                inspect: false,
+            },
+            timeout: std::time::Duration::from_secs(5),
+            authorizer_role: mkit_server::policy::AuthorizerRole::Check,
+            http: None,
+            inspect_batch_max_objects: 10_000,
+        };
+        cfg.hooks = Some(hooks.clone());
+        assert!(!purge_enabled(&cfg));
+        hooks.roles.cache_purge = true;
+        cfg.hooks = Some(hooks.clone());
+        assert!(
+            !purge_enabled(&cfg),
+            "service binding alone cannot sign global purge"
+        );
+        hooks.http = Some(crate::hooks::config::HttpVars {
+            endpoint: crate::hooks::fetch::Endpoint::new("https://hooks.example").unwrap(),
+            validity: std::time::Duration::from_mins(1),
+        });
+        cfg.hooks = Some(hooks);
+        assert!(purge_enabled(&cfg));
     }
 
     #[test]

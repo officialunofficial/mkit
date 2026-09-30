@@ -649,7 +649,54 @@ impl<S: NamespaceStore> ContentIndex<S> {
         let (key, value) = (keys::block(object), codec::encode_block_entry(entry));
         self.mutate(object, now_ms, None, None, false, |_, _| {
             Ok(Step::Commit(
-                vec![Write::Put(key.clone(), value.clone())],
+                vec![
+                    Write::Put(key.clone(), value.clone()),
+                    Write::Put(
+                        crate::takedown::denial::legacy_descriptor_key(object),
+                        value.clone(),
+                    ),
+                ],
+                (),
+            ))
+        })
+        .await
+    }
+
+    /// Install an independent V2 action without replacing any current V1 denial.
+    pub async fn install_block_action(
+        &self,
+        object: &Hash,
+        action: &crate::takedown::denial::BlockAction,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let staged =
+            crate::takedown::denial::stage_action(&self.store, object, action, now_ms).await?;
+        self.install_stored_block_action(object, &staged, now_ms)
+            .await
+    }
+
+    /// Activate already verified immutable metadata without reading source bytes.
+    pub async fn install_stored_block_action(
+        &self,
+        object: &Hash,
+        staged: &crate::takedown::denial::StoredAction,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        use crate::takedown::denial::{action_key, decode_actions, encode_actions};
+        let key = action_key(object);
+        self.mutate(object, now_ms, Some(&key), None, false, |seen, _| {
+            let mut actions = decode_actions(seen.probe.as_ref())?;
+            match actions.binary_search_by_key(&staged.action.id, |a| a.action.id) {
+                Ok(i) if actions[i] == *staged => return Ok(Step::Stop(())),
+                Ok(_) => return Err(StoreError::Invalid("denial action identity reused".into())),
+                Err(i) => actions.insert(i, staged.clone()),
+            }
+            let value = encode_actions(actions)?;
+            Ok(Step::Commit(
+                vec![
+                    Write::Put(key.clone(), value.clone()),
+                    Write::Put(crate::takedown::denial::descriptor_key(object), value),
+                ],
                 (),
             ))
         })
@@ -660,18 +707,38 @@ impl<S: NamespaceStore> ContentIndex<S> {
     pub async fn unblock(&self, object: &Hash, now_ms: u64) -> Result<(), StoreError> {
         let key = keys::block(object);
         self.mutate(object, now_ms, None, None, false, |_, _| {
-            Ok(Step::Commit(vec![Write::Delete(key.clone())], ()))
+            Ok(Step::Commit(
+                vec![
+                    Write::Delete(key.clone()),
+                    Write::Delete(crate::takedown::denial::legacy_descriptor_key(object)),
+                ],
+                (),
+            ))
         })
         .await
     }
 
     /// The blocklist entry of `object`, if blocked.
     pub async fn blocked(&self, object: &Hash) -> Result<Option<BlockEntry>, StoreError> {
-        let value = self
+        let rows = self
             .store
-            .get(&content_shard(object), &keys::block(object))
+            .get_many(
+                &content_shard(object),
+                &[
+                    keys::block(object),
+                    crate::takedown::denial::action_key(object),
+                ],
+            )
             .await?;
-        value.as_ref().map(codec::decode_block_entry).transpose()
+        if rows.len() != 2 {
+            return Err(StoreError::Corrupt("short denial read".into()));
+        }
+        let legacy = rows[0]
+            .as_ref()
+            .map(codec::decode_block_entry)
+            .transpose()?;
+        let independent = crate::takedown::denial::representative(rows[1].as_ref())?;
+        Ok(legacy.or(independent))
     }
 
     /// The state row of `object`, if it was ever indexed.
@@ -801,14 +868,21 @@ impl<S: NamespaceStore> ContentIndex<S> {
             keys::layout_version(),
             state_key.clone(),
             keys::block(object),
+            crate::takedown::denial::action_key(object),
         ];
         read.extend(probe.cloned());
         read.extend(aux.cloned());
         let (hold_start, hold_end) = keys::holds_of(object);
         for _ in 0..MAX_ATTEMPTS {
-            let mut values = self.store.get_many(&p, &read).await?.into_iter();
+            let values = self.store.get_many(&p, &read).await?;
+            if values.len() != read.len() {
+                return Err(StoreError::Corrupt("short content read".into()));
+            }
+            let mut values = values.into_iter();
             let (v, old, blocked) = (values.next(), values.next(), values.next());
             let (v, old, blocked) = (v.flatten(), old.flatten(), blocked.flatten());
+            let independent =
+                crate::takedown::denial::representative(values.next().flatten().as_ref())?;
             // The optional rows follow the fixed ones, in this order.
             let probed = probe.and_then(|_| values.next().flatten());
             let auxiliary = aux.and_then(|_| values.next().flatten());
@@ -818,7 +892,8 @@ impl<S: NamespaceStore> ContentIndex<S> {
                 blocked: blocked
                     .as_ref()
                     .map(codec::decode_block_entry)
-                    .transpose()?,
+                    .transpose()?
+                    .or(independent),
             };
             let holds = self
                 .store

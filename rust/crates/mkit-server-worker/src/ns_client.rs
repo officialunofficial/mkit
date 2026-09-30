@@ -12,6 +12,7 @@
 //! [`NsReply::Err`] keeps its kind (`Full` stays `Full`).
 
 use core::future::Future;
+use mkit_server::indexed::budget::SliceBudget;
 
 use mkit_server::storage_error::StorageOp;
 use mkit_server::store::ExportPage;
@@ -38,12 +39,21 @@ pub trait NsTransport: MaybeSend + MaybeSync {
     ) -> impl Future<Output = Result<String, StoreError>> + MaybeSend;
 }
 
+/// Charge before dispatch; clients and spawned work retain the same counter.
+///
+/// # Errors
+/// Returns unavailable once the invocation's backend allowance is spent.
+pub fn charge_request(budget: Option<&SliceBudget>) -> Result<(), StoreError> {
+    budget.map_or(Ok(()), SliceBudget::charge)
+}
+
 /// The key-level store over per-partition Durable Objects.
 #[derive(Debug, Clone)]
 pub struct DoNamespaceStore<T> {
     transport: T,
     probe_partition: Partition,
     reserved_batch_ops: usize,
+    request_budget: Option<SliceBudget>,
 }
 
 fn op(call: &NsCall) -> &'static str {
@@ -82,7 +92,15 @@ impl<T: NsTransport> DoNamespaceStore<T> {
             transport,
             probe_partition,
             reserved_batch_ops: 0,
+            request_budget: None,
         }
+    }
+
+    /// Share an invocation's backend allowance with its other clients.
+    #[must_use]
+    pub fn with_budget(mut self, budget: SliceBudget) -> Self {
+        self.request_budget = Some(budget);
+        self
     }
 
     /// Reserve operations for an explicitly configured target-local apply seam.
@@ -103,6 +121,7 @@ impl<T: NsTransport> DoNamespaceStore<T> {
         let op = op(&call);
         let body = serde_json::to_string(&NsRequest::new(p, call)?)
             .map_err(|e| backend_error(StorageOp::RequestSerialize, e))?;
+        charge_request(self.request_budget.as_ref())?;
         let reply = self.transport.call(&target, op, body).await?;
         match serde_json::from_str::<NsReply>(&reply) {
             Ok(NsReply::Err { kind, message }) => Err(kind.into_error(message)),

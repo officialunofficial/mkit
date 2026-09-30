@@ -1033,8 +1033,27 @@ where
                     Stop::Reject("object hash mismatch")
                 }
             })?;
+        crate::takedown::denial::require_clear(self.remote, &id)
+            .await
+            .map_err(|error| {
+                if error.code() == crate::Code::PermissionDenied {
+                    Stop::Outcome(Outcome::Blocked)
+                } else {
+                    unavailable("decoded object unavailable")
+                }
+            })?;
         let object = mkit_core::serialize::deserialize(&bytes)
             .map_err(|_| Stop::Reject("object hash mismatch"))?;
+        crate::takedown::inventory::stage(
+            self.remote,
+            &self.pack,
+            job.pack_len,
+            &id,
+            &object,
+            base,
+            self.now,
+        )
+        .await?;
         let size = bytes.len() as u64;
         let existing = self.frame_row(st, &id).await?;
         // A replayed entry meets its own row; a real duplicate meets an
@@ -1223,6 +1242,7 @@ where
             ResolveFailure::Other(error) => match error.public_message() {
                 "pack exceeds indexed decode budget" => Stop::Outcome(Outcome::DecodeBudget),
                 "delta chain too deep" => Stop::Outcome(Outcome::ExternalTooDeep),
+                "object blocked" => Stop::Outcome(Outcome::Blocked),
                 _ => unavailable("member content unavailable"),
             },
         })?;
@@ -1241,6 +1261,14 @@ where
             .map(|(location, (bytes, depth))| (*location, bytes.len() as u64, *depth))
             .collect();
         for ((id, pack, offset), size, depth) in fresh {
+            crate::takedown::inventory::dependency(
+                self.remote,
+                &self.pack,
+                job.pack_len,
+                &id,
+                self.now,
+            )
+            .await?;
             st.writes.push(Write::Put(
                 self.row(keys::VC_DEPENDENCY, &pack),
                 Value::default(),
@@ -1414,6 +1442,17 @@ where
         for direct in plan.direct {
             let mut batch = Batch::new().require(Precondition::NotAfter(self.deadline()));
             for (key, value) in direct.puts {
+                if let Some(keys::ParsedKey::ObjectIndex { object, .. }) = keys::parse(&key) {
+                    crate::takedown::denial::require_clear(self.remote, &object)
+                        .await
+                        .map_err(|error| {
+                            if error.code() == crate::Code::PermissionDenied {
+                                Stop::Outcome(Outcome::Blocked)
+                            } else {
+                                unavailable("index object unavailable")
+                            }
+                        })?;
+                }
                 batch = batch.put(key, value);
             }
             if !matches!(
@@ -1488,6 +1527,37 @@ where
         held: &mut Option<Value>,
     ) -> Result<u64, Stop> {
         let now = now_ms(self.h.clock.as_ref());
+        if job.kind == Kind::Packlist {
+            // Verify owns scan after decoding; checkpoint its inventory position.
+            let mut offset = if job.scan.is_empty() {
+                0
+            } else {
+                codec::decode_u64(&Value::new(job.scan.clone()))?
+            };
+            let start =
+                usize::try_from(offset).map_err(|_| unavailable("invalid inventory cursor"))?;
+            let children = job
+                .packlist
+                .get(start..)
+                .ok_or_else(|| unavailable("invalid inventory cursor"))?;
+            for child in children {
+                if self.budget.remaining() < ENTRY_RESERVE {
+                    return Ok(1);
+                }
+                crate::takedown::inventory::dependency(
+                    self.remote,
+                    &self.pack,
+                    job.pack_len,
+                    child,
+                    now,
+                )
+                .await?;
+                offset += 1;
+                job.scan = offset.to_be_bytes().to_vec();
+            }
+        }
+        crate::takedown::inventory::complete(self.remote, &self.pack, job.pack_len, now).await?;
+        job.scan.clear();
         match state {
             Some((VerificationV1::Rejected { .. }, _)) => {
                 job.phase = Phase::Watch;

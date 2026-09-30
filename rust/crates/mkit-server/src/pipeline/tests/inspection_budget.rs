@@ -102,6 +102,8 @@ fn inspection_pair_budget_includes_dependency_visibility_before_hooks() {
         let source = D34Shards.ref_shard(&repo, HEAD);
         let refs = [upd(PACKMAP, Missing, node_id)];
         let write = WriteRequest {
+            denial_ids: None,
+            denial_packs: &[],
             authority_store: AuthorityStore::Guarded,
             authority_generation: None,
             repo: &repo.name,

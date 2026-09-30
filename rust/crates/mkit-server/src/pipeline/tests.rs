@@ -134,6 +134,8 @@ fn planned_ticket_publication(count: usize, d34: bool, retained: bool) -> Batch 
             });
     }
     let req = WriteRequest {
+        denial_ids: None,
+        denial_packs: &[],
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &repo.name,
@@ -343,6 +345,7 @@ fn single_ticket_advance_guards_the_grant_epoch() {
 /// the packmap ref, 7 membership puts, 8 relay rows, the relay timer and
 /// the sequence put).
 #[test]
+#[allow(clippy::too_many_lines)] // One maximal batch fixture checks every reserved relay and membership effect.
 fn maximal_implicit_consume_plans_a_valid_batch() {
     use crate::store::outbox::MAX_TICKETS_PER_ADVANCE;
     let repo = RepoId {
@@ -378,6 +381,8 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
         shards: &shards,
     };
     let req = WriteRequest {
+        denial_ids: None,
+        denial_packs: &[],
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &repo.name,
@@ -2776,6 +2781,8 @@ fn incapable_authority_planner_request_refuses_generation() {
     let refs = [upd(HEAD, Missing, A)];
     for authority_store in [AuthorityStore::RefsOnly, AuthorityStore::Inspected] {
         let req = WriteRequest {
+            denial_ids: None,
+            denial_packs: &[],
             authority_store,
             authority_generation: Some(0),
             publication: None,
@@ -2814,6 +2821,8 @@ fn simple_index_batch(
     index: bool,
 ) -> Planned {
     let req = WriteRequest {
+        denial_ids: None,
+        denial_packs: &[],
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &repo.name,
@@ -2977,6 +2986,8 @@ fn plan_cas_any_missing_match_on_snapshot() {
     for (condition, current, commits) in cases {
         let refs = [upd(HEAD, condition, C)];
         let req = WriteRequest {
+            denial_ids: None,
+            denial_packs: &[],
             authority_store: AuthorityStore::Guarded,
             authority_generation: None,
             repo: &name,
@@ -3046,6 +3057,8 @@ fn plan_conflict_writes_only_the_replay_record() {
     let name = repo_name();
     let refs = [upd(PACKMAP, Match(A), C), upd(HEAD, Match(A), C)];
     let req = WriteRequest {
+        denial_ids: None,
+        denial_packs: &[],
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &name,
@@ -3123,6 +3136,8 @@ fn plan_quota_exhaustion_yields_no_batch() {
     let refs = [upd(HEAD, Any, C)];
     let charges = [charge(1)];
     let req = WriteRequest {
+        denial_ids: None,
+        denial_packs: &[],
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &name,
@@ -3181,6 +3196,8 @@ proptest! {
         let refs = if advance { &refs[..] } else { &refs[1..] };
         let charges: Vec<_> = quota.map(|_| charge(2)).into_iter().collect();
         let req = WriteRequest {
+            denial_ids: None,
+                    denial_packs: &[],
             authority_store: AuthorityStore::Guarded,
             authority_generation: None,
             repo: &name,
@@ -3807,6 +3824,8 @@ fn plan_signed_conflict_still_charges_quota() {
     let refs = [upd(HEAD, Missing, C)];
     let charges = [charge(5)];
     let req = WriteRequest {
+        denial_ids: None,
+        denial_packs: &[],
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &name,
@@ -3870,6 +3889,8 @@ fn plan_prune_fits_the_batch_op_cap() {
         })
         .collect();
     let req = WriteRequest {
+        denial_ids: None,
+        denial_packs: &[],
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &name,
@@ -3926,6 +3947,8 @@ fn prune_sampling_is_deterministic_one_in_eight() {
     let name = repo_name();
     let refs = [upd(HEAD, Any, C)];
     let request = |replay: Option<ReplayGuard>| WriteRequest {
+        denial_ids: None,
+        denial_packs: &[],
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &name,
@@ -4414,6 +4437,8 @@ fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
         limits: DEFAULT_WRITE_QUOTA,
     }];
     let req = WriteRequest {
+        denial_ids: None,
+        denial_packs: &[],
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &repo_name(),
@@ -4537,6 +4562,8 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
         (ms(T0) + 7_000, ms(T0) + 2_000),
     ] {
         let req = WriteRequest {
+            denial_ids: None,
+            denial_packs: &[],
             authority_store: AuthorityStore::Guarded,
             authority_generation: None,
             repo: &name,
@@ -5124,6 +5151,8 @@ fn prepared_publication_pair_cannot_survive_a_counterpart_guard_race() {
         vec![],
     );
     let req = WriteRequest {
+        denial_ids: None,
+        denial_packs: &[],
         authority_store: AuthorityStore::Guarded,
         authority_generation: None,
         repo: &repo.name,

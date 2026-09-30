@@ -103,11 +103,10 @@ pub fn router<S: NamespaceStore + Clone + 'static>(
     settings: &Settings,
     pipeline: &PipelineConfig,
 ) -> Router {
-    let engine = Arc::new(Engine::new(
-        store,
-        partition(pipeline.sharding),
-        settings.config.clone(),
-    ));
+    let engine = Arc::new(
+        Engine::new(store, partition(pipeline.sharding), settings.config.clone())
+            .with_purge(pipeline.purge.is_some()),
+    );
     let dispatch = move |req: Request| {
         let engine = Arc::clone(&engine);
         async move {
@@ -139,10 +138,15 @@ pub fn router<S: NamespaceStore + Clone + 'static>(
             response(engine.handle(&path, &headers, &capture, now).await)
         }
     };
-    Router::new().route(
-        mkit_server::admin::AUDIT_PATH,
-        axum::routing::post(dispatch),
-    )
+    Router::new()
+        .route(
+            mkit_server::admin::AUDIT_PATH,
+            axum::routing::post(dispatch.clone()),
+        )
+        .route(
+            mkit_server::admin::PURGE_PATH,
+            axum::routing::post(dispatch),
+        )
 }
 fn response(reply: mkit_server::admin::Response) -> Response {
     Response::builder()
@@ -160,7 +164,7 @@ mod tests {
     use tower::ServiceExt;
 
     #[tokio::test]
-    async fn manual_purge_has_no_native_route() {
+    async fn manual_purge_is_routed_and_takedown_stays_unexposed() {
         let mut public = [0x66; 32];
         public[0] = 0x58;
         let config = Config::parse("https://server.example", &serde_json::json!({"version":1,"keys":[{"keyId":"operator","alg":"ed25519","publicKey":mkit_core::hash::to_hex(&public),"roles":["all"]}]}).to_string()).unwrap();
@@ -181,20 +185,143 @@ mod tests {
                 max_chunks: 1,
             },
         );
-        let response = router(
+        let routes = router(
             std::sync::Arc::new(MemoryKv::default()),
             &settings,
             &pipeline,
-        )
-        .oneshot(
-            Request::builder()
+        );
+        let takedown = routes
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(mkit_server::admin::TAKEDOWN_PATH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(takedown.status(), 404);
+        let response = routes
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(mkit_server::admin::PURGE_PATH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(response.status(), 404);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Exercise signed acceptance, replay and disabled configuration together.
+    async fn signed_native_purge_requires_configured_delivery_and_audits_disabled_result() {
+        use ed25519_dalek::{Signer as _, SigningKey};
+        let signer = SigningKey::from_bytes(&[71; 32]);
+        let config = Config::parse("https://server.example", &serde_json::json!({"version":1,"keys":[{"keyId":"operator","alg":"ed25519","publicKey":mkit_core::hash::to_hex(signer.verifying_key().as_bytes()),"roles":["moderation"]}]}).to_string()).unwrap();
+        let settings = Settings {
+            listen: SocketAddr::from(([127, 0, 0, 1], 19191)),
+            config,
+        };
+        for enabled in [false, true] {
+            let mut pipeline = PipelineConfig::new(
+                mkit_server::Addressing::Single {
+                    repo: mkit_server::RepoId {
+                        namespace: NamespaceKey::deployment_default(),
+                        name: mkit_server::RepoName::new("repo").unwrap(),
+                    },
+                },
+                AuthMode::TransportIdentity,
+                mkit_server::upload::UploadLimits {
+                    max_total_bytes: 1024,
+                    max_chunks: 1,
+                },
+            );
+            if enabled {
+                pipeline.purge = Some(mkit_server::purge::PurgeConfig::new(
+                    "https://server.example".into(),
+                    true,
+                    true,
+                ));
+            }
+            let store = Arc::new(MemoryKv::default());
+            let bytes = serde_json::json!({"repository":"root/repo","operationId":"native-operation","reason":"manual"}).to_string().into_bytes();
+            let mut capture = BodyCapture::default();
+            capture.push(&bytes);
+            let now = mkit_server::Clock::now_ms(&mkit_server::SystemClock);
+            let expiry = now + 60_000;
+            let nonce = mkit_core::hash::to_hex(&[91; 32]);
+            let digest = capture.digest();
+            let canonical = format!(
+                "mkit-admin:v1\noperator\nhttps://server.example\n{}\n{digest}\n{now}\n{expiry}\n{nonce}",
+                mkit_server::admin::PURGE_PATH
+            );
+            let signature = mkit_core::hash::to_hex_bytes(
+                &signer
+                    .sign(&mkit_core::hash::hash(canonical.as_bytes()))
+                    .to_bytes(),
+            );
+            let request = Request::builder()
                 .method("POST")
                 .uri(mkit_server::admin::PURGE_PATH)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(response.status(), 404);
+                .header("x-mkit-admin-version", "1")
+                .header("x-mkit-admin-key-id", "operator")
+                .header("x-mkit-admin-audience", "https://server.example")
+                .header("x-mkit-admin-created-at", now.to_string())
+                .header("x-mkit-admin-expires-at", expiry.to_string())
+                .header("x-mkit-admin-nonce", nonce)
+                .header("x-mkit-admin-digest", digest)
+                .header("x-mkit-admin-signature", signature)
+                .body(Body::from(bytes))
+                .unwrap();
+            let response = router(store.clone(), &settings, &pipeline)
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), if enabled { 200 } else { 400 });
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            if enabled {
+                assert!(crate::admin::partition(pipeline.sharding) == partition(Sharding::Single));
+                assert!(
+                    mkit_server::purge::read_request(
+                        &store,
+                        &partition(pipeline.sharding),
+                        result["purgeId"].as_str().unwrap()
+                    )
+                    .await
+                    .unwrap()
+                    .is_some()
+                );
+            } else {
+                assert_eq!(result["code"], "failed_precondition");
+                assert!(
+                    store
+                        .get(
+                            &partition(pipeline.sharding),
+                            &mkit_server::store::keys::outcome_backlog()
+                        )
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            let head = store
+                .get(
+                    &partition(pipeline.sharding),
+                    &mkit_server::Key::new(b"ah\0".to_vec()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(head.as_bytes()).unwrap()["seq"],
+                1
+            );
+        }
     }
 }

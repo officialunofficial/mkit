@@ -840,6 +840,7 @@ fn extractor<'a, B: MultipartBlobStore, S: NamespaceStore>(
         metrics: &NoopMetrics,
         staged,
         staged_bytes: 0,
+        denial_pack: std::sync::Mutex::new(None),
         resolved: AtomicU64::new(0),
     }
 }

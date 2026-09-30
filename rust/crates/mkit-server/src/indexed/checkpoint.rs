@@ -91,6 +91,8 @@ pub enum Kind {
 pub enum Outcome {
     /// An external base was not a member after the lag window.
     BaseMissing,
+    /// A fresh global denial: permission failure, distinct from unavailable storage.
+    Blocked,
     /// An external base lookup hit an index cap.
     BaseCapped,
     /// A closure lookup hit an index cap.

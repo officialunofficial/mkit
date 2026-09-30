@@ -1978,6 +1978,21 @@ RPC identity/pending/held tests, private token/proof tests and existing authoriz
 matrix cover the paths. The actual inspector/flag scheduler and cache purge remain
 WP-5.5c/5.6a responsibilities; this change does not claim their activation.
 
+## Independent global denial and pending takedown intent (WP-5.6a-1)
+
+**Always:** current V1 rows and every active V2 action keep denying independently;
+accepted intents bind immutable verified descriptors and return success only after
+all denial actions activate. Manifest chunks stop only in repositories holding the
+blocked manifest. Acceptance remains incomplete with preservation pending.
+**Because:** source loss, overlapping actions and stale caches must not undo denial
+or turn acceptance into completion. **If violated:** blocked bytes become reusable
+or a request loses preservation responsibility. **Enforcement work:** ContentIndex V2
+guards, immutable action/inventory pages, fresh pipeline denial checks and audited
+intent activation, including contextual HTTP manifest checks, ticketless closure
+and bounded namespace purge, with source tests and independent reviews. Gate
+exceptions are recorded in the implementation contract; production takedown
+activation remains gated on WP-5.6a-2 and launch gates.
+
 ## External authority revocation fences final acceptance
 
 **Always:** with authority fencing enabled, a completed namespace generation

@@ -12,6 +12,18 @@ fn memory() -> MemoryKv {
     MemoryKv::with_clock(Arc::new(ManualClock::new(100)))
 }
 
+#[test]
+fn takedown_work_timer_key_golden() {
+    // R-190: the new allocation retains the existing generic timer wire shape.
+    let kind = registry::kinds::TAKEDOWN_WORK.get();
+    assert_eq!(kind, 15);
+    let key = keys::timer(100, kind, b"action-1");
+    assert_eq!(key.as_bytes(), b"w\0\0\0\0\0\0\0\0\x64\x0faction-1");
+    assert!(matches!(keys::parse(&key), Some(keys::ParsedKey::Timer {
+        due_at_ms: 100, kind: 15, reference
+    }) if reference.as_ref() == b"action-1"));
+}
+
 #[cfg(feature = "test-faults")]
 #[tokio::test]
 async fn test_timer_d34_deletes_ref_and_enqueues_index_delete_without_lease() {
