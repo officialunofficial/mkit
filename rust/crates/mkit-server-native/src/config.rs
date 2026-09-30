@@ -363,6 +363,13 @@ pub struct ServeArgs {
     #[cfg(feature = "test-faults")]
     #[arg(long, value_name = "MS")]
     pub indexed_relay_lag_bound_ms: Option<u64>,
+    /// Enable namespace authority-generation fencing (Multi + auth v2 + Authority hook).
+    #[arg(long)]
+    pub authority_fence: bool,
+    /// Dedicated deployment-authority verification key and namespace permissions.
+    /// Repeat `<key-id> <64 lowercase hex public key> <namespace[,namespace...]>`.
+    #[arg(long, value_name = "KEY")]
+    pub authority_key: Vec<String>,
     /// Remote hooks (`--hook-*-url`, `--hook-key-file`, ...).
     #[cfg(feature = "hooks")]
     #[command(flatten)]
@@ -1501,6 +1508,38 @@ pub fn resolve(
         Duration::from_secs(args.unary_timeout_secs),
         env,
     )?;
+    if args.authority_fence == args.authority_key.is_empty() {
+        return Err(usage(
+            "--authority-fence and --authority-key must be configured together",
+        ));
+    }
+    if args.authority_fence {
+        if !multi
+            || pipeline.authorizer_role != mkit_server::policy::AuthorizerRole::Authority
+            || !matches!(pipeline.auth, AuthMode::AuthV2(_))
+            || matches!(meta, MetaChoice::FsLayout)
+        {
+            return Err(usage(
+                "authority fencing requires Multi, auth v2, an Authority hook and transactional metadata",
+            ));
+        }
+        #[cfg(feature = "enc")]
+        if enc.is_some() {
+            return Err(usage(
+                "authority fencing requires auth-v2 on every write listener; --listen-enc is incompatible",
+            ));
+        }
+        let fence = mkit_server::authority::AuthorityFence::parse(&args.authority_key.join("\n"))
+            .map_err(|_| usage("--authority-key is invalid"))?;
+        #[cfg(feature = "hooks")]
+        if let Some(hooks) = &hooks {
+            let public = hooks.public_key()?;
+            if fence.public_keys().any(|key| key == public) {
+                return Err(usage("authority keys must differ from the hook key"));
+            }
+        }
+        pipeline.authority_fence = Some(fence);
+    }
     let (redactor, cors_extra_allow_headers) = credential_router_parts(&pipeline)?;
     let router = RouterOptions {
         unary_timeout: Duration::from_secs(args.unary_timeout_secs),

@@ -16,6 +16,15 @@ use worker::{
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+    #[cfg(feature = "test-faults")]
+    if req.path() == "/__mkit_test/worker-sleep" {
+        return mkit_server_worker::sleep::runtime_probe().await;
+    }
+    #[cfg(feature = "test-faults")]
+    if req.path() == "/__mkit_test/hook-fetch" {
+        let mode = req.url()?.query_pairs().find(|(key,_)| key == "mode").map(|(_,v)| v.into_owned()).unwrap_or_default();
+        return mkit_server_worker::hooks::fetch_probe::run(&mode).await;
+    }
     adapter::fetch(req, env).await
 }
 

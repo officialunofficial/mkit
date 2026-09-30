@@ -25,6 +25,7 @@
 //! `Pipeline::serve_http_object` (Stage 2, inert in Stage 1).
 
 pub mod auth_v2;
+pub mod authority;
 #[cfg(feature = "connect")]
 pub mod connect;
 pub mod download;

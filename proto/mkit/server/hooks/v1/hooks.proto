@@ -144,6 +144,8 @@ message AuthorizeAllow {
   // Authority-source allowance grants this signed caller the repository's writer view;
   // ignored for a check hook and does not bypass read authorization; SPEC-SERVER §10.1.
   bool writer_view = 1;
+  // Mandatory on fenced Authority write allowances; SPEC-SERVER §6.2.1.
+  uint64 authority_generation = 2;
 }
 
 // Deliberate refusal, distinct from hook execution failure; SPEC-SERVER §§6.2, 8.
