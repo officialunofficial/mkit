@@ -5,9 +5,12 @@
 This is the user-approved follow-up to [PR1](WP-4.10b-1.md), sharing R-186.
 Create its branch from PR1 and preserve the saved extraction checkpoint/tests;
 open it into `feat/mkit-server` only after PR1 merges. Do not merge it. The
-production cap is **2,300 non-test Rust production lines**, measured and reported against the
-final base. The user raised it solely for incremental delta-base lookup and
-reconstruction checkpointed in existing vc4, plus review and clippy fixes.
+production cap is **2,350 non-test Rust production lines**, measured and reported against the
+final base. The 2,300-line amendment covers incremental delta-base lookup and
+reconstruction checkpointed in existing vc4, plus review and clippy fixes. The
+final 2,350-line amendment covers only isolated/parent investigation and necessary
+fixes of the Worker growth-pruning and two native timer failures; it authorizes
+no new scope and explicitly forbids trimming code to fit.
 Escalate before exceeding it or requiring another protocol surface.
 
 A native-valid 50-deep delta source must progress on each alarm and finish with

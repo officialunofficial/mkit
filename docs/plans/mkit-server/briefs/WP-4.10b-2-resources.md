@@ -7,7 +7,7 @@ until WP-4.18. Both parts share R-186.
 
 ## Incremental reconstruction acceptance
 
-The user approved a **2,300 changed physical non-test Rust line** cap solely for
+The user approved a **2,300 changed physical non-test Rust line** amendment solely for
 incremental source lookup/reconstruction in existing vc4 and review/clippy fixes.
 The original native-valid member source stalled synchronous reconstruction at
 chunk 0; the new cursor preserves lookup, descent and ascent across alarms.
@@ -21,8 +21,22 @@ comprising 2,221 added and 80 removed. The earlier 2,297 count omitted four
 removed `cfg(test)` gates that enable production use of existing projection
 helpers. Those deletions count; the unchanged 114 helper/import lines are
 reported as reused existing code rather than newly added diff lines. This is
-one line above the approved cap, so execution stopped without pushing or opening
-the PR. No production limit or protocol surface was raised to accommodate it.
+one line above the then-approved cap, so execution stopped without pushing or
+opening the PR. The user subsequently approved **2,350 lines**, without code
+trimming or new scope: additional headroom covers only isolated/parent checks
+and necessary fixes of the Worker growth-pruning and two native timer failures.
+No runtime resource limit or protocol surface was raised to accommodate it.
+
+The remaining failure checks reproduced both native timer failures on clean
+feature parent `bc114103`: filesystem paired runs were PASS/FAIL/PASS versus
+parent PASS/PASS/FAIL; S3's earlier parent failure and subsequent passing reruns
+show the same intermittent timer path. Worker ticket/outbox pruning also failed
+on that clean parent's full growth phase (1,101 keys, bound 609), despite three
+passing isolated parent runs. No production fix or trimming was made for these
+pre-existing failures. The final complete Worker test-faults/indexed script
+passed main 93, growth 2, quota 4 and indexed recovery 1; streamed buffering
+peaked at 864,051 bytes, below 1 MiB. Native aggregate gate exceptions, exact
+controls and other gate results are recorded in the PR body.
 
 The 50-hop test uses actual producer-generated index rows and native as its oracle.
 With 2 KiB source nodes it makes **101 durable reconstruction steps**, consuming

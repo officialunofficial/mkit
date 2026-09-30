@@ -3,8 +3,10 @@
 The user approved [WP-4.10b-1](WP-4.10b-1.md), protection and bounded upload
 prerequisites with Extract still fail-closed, followed by
 [WP-4.10b-2](WP-4.10b-2.md), the extraction driver. Both share R-186. PR1's
-production cap is 3,000 lines; PR2's approved amended cap is 2,300, solely for
-incremental delta lookup/reconstruction and review/clippy fixes. PR2 is based on PR1 and opens into
+production cap is 3,000 lines. PR2's 2,300-line amendment covers incremental
+delta lookup/reconstruction and review/clippy fixes; the final 2,350-line cap
+adds only isolated/parent checks and necessary fixes for Worker growth pruning
+and the two native timer failures, with no new scope or code trimming. PR2 is based on PR1 and opens into
 `feat/mkit-server` after PR1 merges. Neither PR is merged by the executor.
 
 The original purpose and A/B requirements below define the complete package;
