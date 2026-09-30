@@ -166,7 +166,7 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 | 3.10 | G18 | Client: 402 detection -> AdmissionRequired, receipt passthrough | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 3.11 | G18 | Client: admission_helper, header allowlist and hard-reserved set (D30) | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 3.12 | G18 | Stub MPP hook server and helper; end-to-end tests (M3 exit) | [exit evidence](m3-exit-report.md) | | native helper and Worker M3 lane pass; full gates incomplete |
-| 3.13 | G18 | Wire conformance: admission, outcomes and backpressure on both adapters | [exit evidence](m3-exit-report.md) | | blocked: shared outcome append/ack race; see exit report |
+| 3.13 | G18 | Wire conformance: admission, outcomes and backpressure on both adapters | [exit evidence](m3-exit-report.md) | | implemented; core race corrected; final gates and publication pending |
 | 3.14 | G17 | Docs: TypeScript mppx reference Worker (documentation only) | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 4.1 | G19 | mkit-core: pack-ruzstd decode feature and dep-graph check | [brief](briefs/WP-4.1.md) | [#1116](https://github.com/officialunofficial/mkit/pull/1116) | merged |
 | 4.2 | G19 | mkit-core: repo-isolated delta-base seam and incremental push verification | [brief](briefs/WP-4.2.md) | [#1123](https://github.com/officialunofficial/mkit/pull/1123) | merged |

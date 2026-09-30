@@ -10,6 +10,25 @@ use mkit_server_conformance::wire::{CASES, Report, Verdict};
 use mkit_server_native::config::{ConfigError, ServeArgs, ServeConfig, resolve};
 use mkit_server_native::{ServeOptions, Shutdown, serve};
 
+/// M3-only cases unavailable on baseline M1 lanes without the hook fixture.
+pub(crate) const M3_CASES: &[&str] = &[
+    "admission.challenge_402_typed_detail",
+    "admission.deny_403_no_detail",
+    "admission.no_state_on_challenge",
+    "admission.replay_skips_admission",
+    "admission.challenge_exhausted",
+    "admission.hook_down_unavailable",
+    "admission.ticketless_upload_refused",
+    "admission.concurrent_duplicate_during_admit",
+    "admission.helper_flow_commit",
+    "cors.preflight_payment_headers",
+    "cors.expose_admission_headers",
+    "outcomes.aborted_on_cas_loss",
+    "outcomes.expired_ticket",
+    "outcomes.backpressure_hook_down",
+    "outcomes.eventual_completeness",
+];
+
 /// `mkit-server serve`'s flags, parsed as the binary parses them.
 #[derive(Debug, Parser)]
 struct Serve {

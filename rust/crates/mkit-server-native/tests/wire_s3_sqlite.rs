@@ -133,9 +133,7 @@ async fn wire_suite_s3_sqlite_auth_v2() {
     for skipped in report.skips() {
         assert!(
             skipped == "advance.nonatomic_packmap_first"
-                || skipped.starts_with("admission.")
-                || skipped.starts_with("outcomes.")
-                || skipped.starts_with("cors.")
+                || common::M3_CASES.contains(&skipped)
                 || matches!(
                     skipped,
                     "leases.bump_completes_and_writes_continue"

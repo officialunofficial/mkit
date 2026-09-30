@@ -71,15 +71,10 @@ async fn fs_layout_bearer_passes_the_wire_suite() {
     // R-165: fs-layout cannot carry a durable real outcome sink. Hook-only M3
     // cases must be visible skips, while the independent CORS case still runs.
     let skipped = native.skips();
-    for case in [
-        "admission.helper_flow_commit",
-        "admission.concurrent_duplicate_during_admit",
-        "outcomes.aborted_on_cas_loss",
-        "outcomes.expired_ticket",
-        "outcomes.backpressure_hook_down",
-        "outcomes.eventual_completeness",
-    ] {
-        assert!(skipped.contains(&case), "fs-layout unexpectedly ran {case}");
+    for &case in common::M3_CASES {
+        if case != "cors.expose_admission_headers" {
+            assert!(skipped.contains(&case), "fs-layout unexpectedly ran {case}");
+        }
     }
     assert!(native.passes().contains(&"cors.expose_admission_headers"));
 

@@ -496,7 +496,12 @@ async fn binary_s3_sqlite_auth_v2() {
 async fn wire_m3_binary() {
     common::mpp::suite_with(
         &[],
-        &["admission.", "cors.", "outcomes.aborted_on_cas_loss"],
+        &[
+            "admission.",
+            "cors.",
+            "outcomes.aborted_on_cas_loss",
+            "outcomes.eventual_completeness",
+        ],
         &[],
         true,
     )
