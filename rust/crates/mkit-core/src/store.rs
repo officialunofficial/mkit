@@ -51,7 +51,9 @@ use crate::layout::RepoLayout;
 use crate::object::{MkitError, Object, object_id_from_bytes, verified_id_and_object};
 use crate::serialize;
 
+mod memory;
 mod source;
+pub use memory::MemorySource;
 pub use source::{DisplaySource, EphemeralSink, ObjectSource};
 
 /// Top-level repository directory name.
