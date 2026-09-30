@@ -184,7 +184,7 @@ impl TakedownGate for NoTakedown {
 /// membership and integrity and share one bounded decode allowance.
 pub trait ProofSource: MaybeSend {
     /// Read one canonical object; never concatenated extracted file bytes.
-    fn read<'a>(&'a mut self, id: Hash) -> BoxFuture<'a, Result<Vec<u8>, ServerError>>;
+    fn read(&mut self, id: Hash) -> BoxFuture<'_, Result<Vec<u8>, ServerError>>;
 }
 
 /// Selected proof. Preparation constructs no Merkle or Bao proofs.

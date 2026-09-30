@@ -784,7 +784,7 @@ impl ProofServer for FailedProof {
     ) -> BoxFuture<'a, Result<Vec<u8>, ServerError>> {
         Box::pin(async move {
             if self.0 {
-                Ok(vec![0; request.encoded_len as usize - 1])
+                Ok(vec![0; usize::try_from(request.encoded_len).unwrap() - 1])
             } else {
                 Err(ServerError::unavailable("build failed"))
             }

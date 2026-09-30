@@ -202,7 +202,7 @@ pub(crate) struct RepositorySource<'a, B, N> {
     pub gate: &'a dyn TakedownGate,
 }
 impl<B: BlobStore, N: NamespaceStore> ProofSource for RepositorySource<'_, B, N> {
-    fn read<'a>(&'a mut self, id: Hash) -> BoxFuture<'a, Result<Vec<u8>, ServerError>> {
+    fn read(&mut self, id: Hash) -> BoxFuture<'_, Result<Vec<u8>, ServerError>> {
         Box::pin(async move {
             clear(self.gate, &self.env, id)
                 .await

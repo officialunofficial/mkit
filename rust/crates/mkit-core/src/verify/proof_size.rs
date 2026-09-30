@@ -99,7 +99,7 @@ fn bao_parents(base: u64, leaves: u64, first: u64, last: u64) -> u64 {
     if leaves == 1 || last < base || first >= base + leaves {
         return 0;
     }
-    let left = 1u64 << (63 - (leaves - 1).leading_zeros());
+    let left = 1u64 << (leaves - 1).ilog2();
     1 + bao_parents(base, left, first, last) + bao_parents(base + left, leaves - left, first, last)
 }
 
@@ -277,22 +277,22 @@ mod tests {
 
     #[test]
     fn merkle_sizes_match_odd_even_and_power_of_two_shapes() {
-        for chunks in 1..=70 {
+        for chunks in 1u32..=70 {
             let manifest = ChunkedBlob {
-                total_size: chunks as u64,
+                total_size: u64::from(chunks),
                 chunk_size: 0,
                 chunks: (0..chunks).map(|n| [n as u8; 32]).collect(),
             };
             for index in 0..chunks {
-                let position = index as u32 + 1;
+                let position = index + 1;
                 assert_eq!(
-                    proof_size(chunks as u32 + 1, &[position]).unwrap(),
+                    proof_size(chunks + 1, &[position]).unwrap(),
                     merkle::build_chunk_proof(&manifest, position)
                         .unwrap()
                         .encode_size() as u128
                 );
                 assert_eq!(
-                    proof_size(chunks as u32 + 1, &[0, position]).unwrap(),
+                    proof_size(chunks + 1, &[0, position]).unwrap(),
                     merkle::build_chunks_multi_proof(&manifest, [0, position])
                         .unwrap()
                         .encode_size() as u128
@@ -398,10 +398,7 @@ mod tests {
             chunked_range_proof_size(200, &[], 1, &[1], u64::MAX, 1),
             Err(RangeProofError::OffsetOverflow)
         ));
-        assert!(matches!(
-            chunked_range_proof_size(200, &[], 1, &[MAX_BUNDLE_BYTES as u64], 0, 1),
-            Ok(_)
-        ));
+        assert!(chunked_range_proof_size(200, &[], 1, &[MAX_BUNDLE_BYTES as u64], 0, 1).is_ok());
         assert!(matches!(
             chunked_range_proof_size(
                 200,

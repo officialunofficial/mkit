@@ -1715,7 +1715,7 @@ impl ProofServer for Proofs {
             .lock()
             .unwrap()
             .push((request.leaf, request.commit, request.range));
-        Box::pin(async move { Ok(vec![0; request.encoded_len as usize]) })
+        Box::pin(async move { Ok(vec![0; usize::try_from(request.encoded_len).unwrap()]) })
     }
 }
 
