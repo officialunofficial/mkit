@@ -1,19 +1,20 @@
 # M1 exit report (WP-1.27)
 
 Local Stage 1 evidence for [MKIT-29](https://linear.app/officialunofficial/issue/MKIT-29),
-SPEC-SERVER §18 and PRD §8, on 2026-09-29, against `feat/mkit-server` at `85c4adf3`
-plus WP-1.27. This work finishes an interrupted executor's snapshot (`525a4dba`).
+SPEC-SERVER §18 and PRD §8, on 2026-09-29. Initial evidence used `feat/mkit-server` at `85c4adf3`
+plus WP-1.27; the final integration rerun includes `b0bbbba2` (#1225).
+This work finishes an interrupted executor's snapshot (`525a4dba`).
 Runs used macOS, Rust 1.95.0, cargo-nextest 0.9.133 and wrangler 4.134.0 on a shared
 machine; these are correctness results, not throughput measurements.
 All builds used `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0`, the worktree's
 own `rust/target`, and non-symlinked `TMPDIR=$HOME/.cache/mkit-test-tmp/1.27`.
 Worker phases used `VCS_CONFORMANCE_PORT=8911` and stopped only their own processes.
 
-**Verdict:** native and Single Worker gates pass. The full ordinary Multi and
-D34+faults Worker gates remain failing after their one permitted retry, with
-Miniflare proxy errors. Every Worker phase was exercised; unreached phases were
-continued separately. Isolation, policy, tickets, D34 lag/hinted reads, lease
-renewal, 64-ref correctness, paging and bounded-growth evidence follows.
+**Verdict:** native and every complete local Worker gate pass on the final
+integration tree. Default Worker D34 needed its one permitted network-flake
+retry; failed earlier attempts and their separate continuations remain below.
+Isolation, policy, tickets, D34 lag/hinted reads, lease renewal, 64-ref
+correctness, paging and bounded-growth evidence follows.
 Exact expiry during an acknowledgement remains an in-crate race, an explicit
 deviation from A2/B1(g): request clock skew changes business time, while lease
 observation, revocation and acknowledgement use real time. No new pause or clock
@@ -23,12 +24,12 @@ transition was added. Staging remains deferred per R-154.
 
 | Gate | Final result |
 |---|---|
-| `just ci-server` / four-crate all-features nextest | 2,185 passed, 0 failed, 8 skipped; 322.622 s |
-| `mkit-server` | 1,020 passed |
+| `just ci-server` / four-crate all-features nextest | 2,204 passed, 0 failed, 8 skipped; 281.733 s |
+| `mkit-server` | 1,023 passed |
 | `mkit-server-conformance` | 523 passed |
 | `mkit-server-native` | 389 passed |
-| `mkit-server-worker` | 253 passed |
-| CLI reverse dependency | 1,534 passed, 0 failed, 9 skipped; 959.926 s |
+| `mkit-server-worker` | 269 passed |
+| CLI reverse dependency (before #1225) | 1,534 passed, 0 failed, 9 skipped; 959.926 s |
 | Default-feature native test build | passed, every binary builds |
 | fmt; workspace/all-targets/all-features clippy | passed, warnings denied |
 | Docs; doctests; wasm32 core/Worker clippy | passed |
@@ -43,6 +44,13 @@ suite covers the reverse dependency. Default-feature `cargo test --locked
 made the `FsBlobStore` import unconditional, so no test was hidden behind a new
 feature gate for B4b.
 
+The first post-merge server run timed out in the unchanged memory namespace-quota
+test; it passed alone in 0.088 s, in the full rerun in 0.079 s, and on unchanged
+parent `b0bbbba2` in 0.120 s.
+The initial native timeout diagnostics passed alone: CLI stateful export in
+21.290 s and relay schedule property in 21.443 s. Both passed in the final full
+suites and on unchanged parent `85c4adf3` (12.251 s and 10.055 s respectively).
+
 ## 2. Native wire lanes
 
 ```bash
@@ -51,8 +59,9 @@ cargo nextest run --locked -p mkit-server-native -p mkit-server-conformance \
   --all-features -E 'binary(/wire_/) or binary(=baseline_pipeline_memory)' --no-capture
 ```
 
-The final selection passed **36/36** nextest tests in 639.629 s; one ignored
-large-listing test is excluded here and runs separately below. Counts are TAP
+The dedicated selection before #1225 passed **36/36** nextest tests in 639.629 s; one ignored
+large-listing test is excluded here and runs separately below. The post-merge
+server gate reran these non-ignored wire tests successfully. Counts are TAP
 case results, with filtered runs aggregated per lane; every row has zero failures.
 
 | Native lane | Sharding / addressing | Pass | Skip |
@@ -133,6 +142,37 @@ test-faults-only observation supplies the B1(k) physical-abort evidence.
 
 ## 4. Worker phases (`wrangler dev`)
 
+All five complete script invocations passed after merging #1225. A permission
+profile change temporarily blocked Git/scratch writes and GitHub access; the
+original Worker process continued and its exit files were collected after access
+was restored. No duplicate server was started.
+
+| Final post-#1225 Worker phase | Pass | Fail | Skip |
+|---|---:|---:|---:|
+| Default D34, full-suite retry | 84 | 0 | 115 |
+| Single, full suite | 84 | 0 | 115 |
+| Single plus faults, main suite | 91 | 0 | 108 |
+| Single plus faults, growth | 2 | 0 | 0 |
+| Single plus faults, quota | 4 | 0 | 1 |
+| Ordinary `--multi`, initial D34 suite | 84 | 0 | 115 |
+| Ordinary Multi | 17 | 0 | 5 |
+| D34 plus faults, main suite | 93 | 0 | 106 |
+| D34 plus faults, growth | 2 | 0 | 0 |
+| D34 plus faults, quota | 4 | 0 | 1 |
+| Multi phase in fault build | 17 | 0 | 5 |
+| D34 Multi grants/epochs/leases/lag/repo/ticket | 66 | 0 | 6 |
+| Multi+D34 namespace quota after rollup | 1 | 0 | 0 |
+
+Final Single growth: replay/quota keys **26 → 284 → 76** (bound 76, 24 triggers),
+ticket/outbox keys **159 → 355 → 212** (bound 215, 27 triggers).
+Final D34 growth: replay/quota keys **29 → 279 → 67** (bound 76, 21 triggers),
+ticket/outbox keys **27 → 223 → 107** (bound 119, 48 triggers).
+Streaming-buffer peaks passed: **864,189 bytes** (Single) and **864,141 bytes**
+(D34), each below 1 MiB. Snapshot round trip and planted relay delivery passed.
+The initial default D34 attempt had two proxy failures (multipart resume and
+64-ref correctness); its one retry passed. The other four final invocations
+passed on their first attempts. Their logs are `worker-merged-*.log`.
+
 ```bash
 export VCS_CONFORMANCE_PORT=8911
 bash scripts/vcs-worker-conformance.sh
@@ -142,7 +182,7 @@ bash scripts/vcs-worker-conformance.sh --multi
 bash scripts/vcs-worker-conformance.sh --test-faults --multi
 ```
 
-| Worker phase / final attempt | Pass | Fail | Skip |
+| Earlier pre-#1225 phase / final attempt | Pass | Fail | Skip |
 |---|---:|---:|---:|
 | Default D34, full suite | 84 | 0 | 115 |
 | Single, full suite | 84 | 0 | 115 |
@@ -165,10 +205,10 @@ ticket/outbox keys **159 → 355 → 212** (bound 215, 27 triggers).
 D34 growth: replay/quota keys **32 → 307 → 113** (bound 139, 42 triggers),
 ticket/outbox keys **31 → 223 → 81** (bound 95, 26 triggers).
 Single's streaming-buffer check passed at **863,996 bytes**, below 1 MiB.
-The final failed D34 main log and resumed logs also supplied the streaming bound
-check; its value is recorded in the saved phase output.
+The final failed D34 main log and resumed logs also passed the streaming bound
+check at **864,166 bytes**.
 
-The ordinary Multi retry failed in concurrent ref/advance cases. The D34 retry
+Before #1225, the ordinary Multi retry failed in concurrent ref/advance cases. The D34 retry
 failed in multipart, per-ref cap, concurrent refs/advance and replay cases; each
 failure is `Network connection lost`. Isolated D34 expiry failed after its timer
 call with the same proxy error. The resumed grant phase's `repo.isolation_refs`
@@ -180,7 +220,11 @@ To finish unreached coverage without a third full-suite retry, scratch harnesses
 retained the committed script's build, fresh-server, phase and own-process cleanup
 blocks, while selecting the remaining phases. Their success messages explicitly
 label continuation results; they do not turn a failed full gate into a pass.
-The final report retains all failed gate results. Source and logs are under the
+The report retains these failed attempts, superseded by the complete post-#1225
+passes above. Isolated checks of the unchanged
+`refs.concurrent_missing_one_winner` and `repo.isolation_refs` cases failed with
+the proxy error on this branch, then passed on unchanged parent `85c4adf3`. This
+comparison does not establish that the failures pre-existed this work. Source and logs are under the
 WP's scratch directory. No repository script was weakened to ignore failures.
 
 Worker D34 keeps 1,000 refs (R-134); Single keeps its 10,000-ref fixture. Growth
@@ -189,18 +233,18 @@ uses disposable stores, a real short ticket lifetime and partition-scoped
 test-faults. Grant phases run `leases.`, `lag.` and `repo.` alongside grant/epoch
 cases; D34 enables epoch-leases.
 
-The first Single+faults attempt hit Miniflare `Network connection lost`; it was
+The first pre-#1225 Single+faults attempt hit Miniflare `Network connection lost`; it was
 rerun once, as required. The initial attempt also exposed a fixture quota error:
 opening 64 large multipart tickets exceeded the default quota. The final case
 opens one multipart session, sufficient to prove abort, and small remaining
-tickets. The tables distinguish successful phases from the final failed full-suite retry.
+tickets. The tables distinguish successful phases from the earlier failed full-suite retries.
 
 ## 5. Epoch-lease evidence and wire deviation
 
 All **48** native `epoch_leases` integration tests passed in the final server run.
-`expiry_races_ack_memory` passed in 0.054 s and `expiry_races_ack_sqlite` in
-0.150 s. `failed_push_then_expired_lease_{memory,sqlite}` (R-63) passed in
-0.056/0.161 s; `revoke_during_authorize_{memory,sqlite}` passed in 0.055/0.250 s.
+`expiry_races_ack_memory` passed in 0.064 s and `expiry_races_ack_sqlite` in
+0.125 s. `failed_push_then_expired_lease_{memory,sqlite}` (R-63) passed in
+0.063/0.103 s; `revoke_during_authorize_{memory,sqlite}` passed in 0.055/0.085 s.
 
 Both backends also cover revoke-during-authorize, the failed revocation push with
 an expired lease (R-63), paused and cancelled renewals, and renewal between push
