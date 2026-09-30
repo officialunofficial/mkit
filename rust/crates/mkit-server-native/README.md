@@ -724,6 +724,7 @@ checks, to a relative object URL preserving the repository prefix.
 Configured admission disables redirects. Traces record method and escaped
 path only; credentials and queries are redacted.
 
+Stores written by earlier unreleased mkit-server builds are unsupported; reset them.
 Enable `--authority-fence` with repeated `--authority-key` values in the grammar
 `<key-id> <64 lowercase hex public key> <namespace[,namespace...]>`. This requires
 Multi addressing, auth v2, transactional metadata and an Authority hook. The

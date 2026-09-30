@@ -4,7 +4,7 @@ use mkit_server::pipeline::{D34Shards, ShardMap};
 use mkit_server::{Partition, RepoId, StoreError};
 use std::fmt::Write as _;
 
-/// Deterministic v1 envelope: magic, identity length+partition, three `BE` u64s,
+/// Deterministic v2 envelope: magic, identity length+partition, three `BE` u64s,
 /// `BE` u16 row count, then `BE` u16 name length, `UTF-8` full name, raw 32-byte id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Envelope {
@@ -75,7 +75,7 @@ impl Envelope {
             return Err(bad());
         }
         let mut bytes = Vec::with_capacity(length);
-        bytes.extend_from_slice(b"MKP\x01");
+        bytes.extend_from_slice(b"MKP\x02");
         bytes.extend_from_slice(
             &u16::try_from(partition.len())
                 .map_err(|_| bad())?
@@ -103,7 +103,7 @@ impl Envelope {
             return Err(bad());
         }
         let mut read = Reader(bytes);
-        if read.take(4)? != b"MKP\x01" {
+        if read.take(4)? != b"MKP\x02" {
             return Err(bad());
         }
         let n = usize::from(read.u16()?);

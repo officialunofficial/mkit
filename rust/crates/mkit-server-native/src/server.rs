@@ -898,6 +898,11 @@ where
         })
         .register(delivery)
         .register(mkit_server::timers::reservation_reconcile::ReservationReconcile)
+        .register(
+            mkit_server::timers::publication_recheck::PublicationRecheck {
+                target: meta.clone(),
+            },
+        )
         .register(mkit_server::timers::quota_rollup::QuotaRollup {
             coordinator: meta,
             metrics: MetricsBridge,

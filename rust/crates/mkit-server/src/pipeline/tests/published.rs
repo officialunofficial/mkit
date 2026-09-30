@@ -13,6 +13,10 @@ impl PublishedSource for Source {
     fn inspection_configured(&self) -> bool {
         self.inspection.load(Ordering::SeqCst)
     }
+    fn uses_published_values(&self) -> bool {
+        // Switching inspection on simulates a source that still supplies live inputs.
+        !self.inspection.load(Ordering::SeqCst)
+    }
     fn read_ref_enabled(&self) -> bool {
         self.read_ref.load(Ordering::SeqCst)
     }
@@ -44,15 +48,25 @@ fn anonymous_only_after_authorization_signed_bypass_and_private_transition() {
     put_repo(&e, &repo, None);
     now(e.pipe.meta.inner.apply(
         &D34Shards.ref_index(&repo, HEAD),
-        Batch::new().put(
-            keys::ref_index_key(&repo.name, HEAD),
-            codec::encode_ref_id(&A),
-        ),
+        Batch::new()
+            .put(
+                keys::published_index(&repo.name, HEAD),
+                codec::encode_ref_id(&A),
+            )
+            .put(
+                keys::ref_index_key(&repo.name, HEAD),
+                codec::encode_ref_id(&A),
+            ),
     ))
     .unwrap();
     now(e.pipe.meta.inner.apply(
         &D34Shards.ref_shard(&repo, HEAD),
-        Batch::new().put(keys::ref_key(&repo.name, HEAD), codec::encode_ref_id(&A)),
+        Batch::new()
+            .put(keys::ref_key(&repo.name, HEAD), codec::encode_ref_id(&A))
+            .put(
+                keys::published_ref(&repo.name, HEAD),
+                codec::encode_ref_id(&A),
+            ),
     ))
     .unwrap();
     let source = Arc::new(Source::default());
@@ -140,6 +154,9 @@ struct MixedSource {
     rows: Vec<(String, Hash)>,
 }
 impl PublishedSource for MixedSource {
+    fn uses_published_values(&self) -> bool {
+        true
+    }
     fn inspection_configured(&self) -> bool {
         false
     }
@@ -179,7 +196,7 @@ fn mixed_snapshot_live_pages_make_strict_progress_and_reject_foreign_tokens() {
         now(e.pipe.meta.inner.apply(
             &D34Shards.ref_index(&repo, name),
             Batch::new().put(
-                keys::ref_index_key(&repo.name, name),
+                keys::published_index(&repo.name, name),
                 codec::encode_ref_id(&A),
             ),
         ))

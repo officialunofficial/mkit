@@ -892,9 +892,9 @@ fn excluded_packmap_refs_exhaust_the_ref_scan_budget() {
         let repo = fx.repo_id("room");
         // Move the published tip after the excluded namespace in listing order.
         let partition = fx.pipe.shards.ref_shard(&repo, HEAD);
-        let mut batch = Batch::new().delete(keys::ref_key(&repo.name, HEAD));
+        let mut batch = Batch::new().delete(keys::published_ref(&repo.name, HEAD));
         batch = batch.put(
-            keys::ref_key(&repo.name, "refs/tags/z"),
+            keys::published_ref(&repo.name, "refs/tags/z"),
             codec::encode_ref_id(&d.head()),
         );
         assert_eq!(
@@ -903,7 +903,7 @@ fn excluded_packmap_refs_exhaust_the_ref_scan_budget() {
         );
         for index in 0..100 {
             let batch = Batch::new().put(
-                keys::ref_key(&repo.name, &format!("refs/mkit/packmap/p{index:03}")),
+                keys::published_ref(&repo.name, &format!("refs/mkit/packmap/p{index:03}")),
                 codec::encode_ref_id(&[0x55; 32]),
             );
             assert_eq!(
@@ -2473,3 +2473,58 @@ fn a_configured_admission_makes_the_200_and_its_304_private_alike() {
 
 mod paid_reads;
 mod private_tokens;
+
+struct ServingStop(Arc<AtomicBool>);
+impl clearance::PublicationPolicy for ServingStop {
+    fn prepare<'a>(
+        &'a self,
+        _: &'a Operation,
+        value: &'a crate::store::publication::Pair,
+    ) -> crate::BoxFuture<'a, Result<crate::store::publication::Advance, ServerError>> {
+        Box::pin(async move { Ok(clearance::immediate(value.clone(), [0; 32], vec![])) })
+    }
+    fn pack_available(&self, _: &RepoId, _: &Hash) -> bool {
+        !self.0.load(Ordering::SeqCst)
+    }
+}
+
+#[test]
+fn held_serving_stop_overrides_warm_reachability_extracted_bytes_and_proofs() {
+    let (mut fx, d) = published();
+    let stopped = Arc::new(AtomicBool::new(false));
+    fx.pipe = fx
+        .pipe
+        .with_publication_policy(Arc::new(ServingStop(stopped.clone())))
+        .unwrap();
+    let proofs = Arc::new(Proofs(Mutex::new(Vec::new())));
+    let fx = with_seams(fx, |s| s.proofs = proofs.clone());
+    for object in [&d.small, &d.big, &d.manifest] {
+        assert_eq!(fx.get(&fx.object_url("room", &id(object))).status, 200);
+    }
+    assert_eq!(fx.get(&fx.ref_url("room", "main", "small.txt")).status, 200);
+    stopped.store(true, Ordering::SeqCst);
+    for path in [
+        fx.object_url("room", &id(&d.small)),
+        fx.object_url("room", &id(&d.big)),
+        fx.object_url("room", &id(&d.manifest)),
+        fx.ref_url("room", "main", "small.txt"),
+    ] {
+        for method in ["GET", "HEAD"] {
+            let got = read(fx.request(method, &path, None, &[("if-none-match", "*")]));
+            assert_eq!(got.status, 404);
+            assert_eq!(got.header("Cache-Control"), Some("no-store"));
+            assert_eq!(got.header("ETag"), None);
+        }
+    }
+    assert_eq!(
+        read(fx.request(
+            "GET",
+            &fx.ref_url("room", "main", "small.txt"),
+            Some("proof=1"),
+            &[]
+        ))
+        .status,
+        404
+    );
+    assert!(proofs.0.lock().unwrap().is_empty());
+}
