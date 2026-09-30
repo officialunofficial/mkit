@@ -113,8 +113,8 @@ fn relay_uses_one_watermark_read_and_one_atomic_apply_per_target() {
             &mut builder,
             &mut batch.writes,
         );
-        // Fill the first target's relay row to its legal 96-operation cap.
-        let extra = (0..MAX_RELAY_PUTS - 1)
+        // Live and published membership use two puts; fill the row to its 96-put cap.
+        let extra = (0..MAX_RELAY_PUTS - 2)
             .map(|i| {
                 let mut pack = packs[0];
                 pack[2] = u8::try_from(i + 32).unwrap();

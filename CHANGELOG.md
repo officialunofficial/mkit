@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Server (WP-5.4, R-198): remove compatibility with unreleased publication stores;
-  reset existing stores. Hold authority remains WP-5.5a; timer 15 and `pv` are freed.
+  reset existing stores. Hold authority belongs to post-launch WP-5.5c; timer 15 and `pv` are freed.
 
 - **WP-5.4:** add persistent paired published refs, versioned membership and durable
   cross-ref dependency rechecks; route reader RPCs, snapshots, tokens and HTTP

@@ -1,7 +1,7 @@
 ## Purpose
 
 mkit tracks, per ref, the **published** (head, packmap) pair: the contiguous prefix of advances whose content has
-cleared. Readers see only published values, and writers see live ones. This is the foundation for inspection (5.5a)
+cleared. Readers see only published values, and writers see live ones. This is the foundation for inspection (5.5c)
 and for Uno's Sent → Delivered states.
 
 ## A. Fixed (do not change)
@@ -27,7 +27,7 @@ and for Uno's Sent → Delivered states.
 - **B2. Storage, in the RefShard:**
   - persistent advance sequences that never reset;
   - retained values;
-  - obligations (the hook for 5.5a);
+  - obligations (the hook for 5.5c);
   - deletion boundaries;
   - the paired published (head, packmap);
   - coverage of head-only and packmap-only `UpdateRef`, other refs, and pair-closure verification.
@@ -38,7 +38,7 @@ and for Uno's Sent → Delivered states.
   byte-identical to today, and a test asserts it.
 - **B5. Caller views and reads:**
   - writers see live refs and membership; readers see published values;
-  - pending content is writer-visible; **held content is unavailable to everyone** (holds come with 5.5a; add the
+  - pending content is writer-visible; **held content is unavailable to everyone** (holds come with 5.5c; add the
     seam now);
   - switch every read surface to the view:
     - ListRefs, ReadRef, PackExists and DownloadPack;

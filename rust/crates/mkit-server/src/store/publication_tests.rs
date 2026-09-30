@@ -274,7 +274,7 @@ fn witness_codec_golden_and_fail_closed() {
 }
 
 #[test]
-#[ignore = "WP-5.5a (R-183): hold authority, see R-198"]
+#[ignore = "WP-5.5c (post-launch): hold authority, see R-198/R-200"]
 fn releasing_one_advance_must_preserve_another_hold_on_the_same_pack() {
     block_on(async {
         let kv = MemoryKv::default();
