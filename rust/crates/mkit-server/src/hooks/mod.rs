@@ -18,6 +18,9 @@
 //! - [`RemoteAuthorizer`], [`RemoteAdmission`] and [`RemoteOutcomes`] share
 //!   one [`HookClient`] and implement the stage traits, so any subset plugs
 //!   into [`Hooks`](crate::pipeline::Hooks).
+//! - [`RemoteInspector`] is a transport adapter only. Its caller owns complete
+//!   inspected-set enumeration, batching and stable inspection ids. Stage 5
+//!   integration is blocked by WP-5.5a's Section D budget escalation.
 //!
 //! # Failure semantics
 //!
@@ -40,8 +43,9 @@
 //!
 //! # Not here
 //!
-//! Inspect, Event and `CachePurge` belong to later work (5.5, 5.2, 5.10), and a
-//! core-profile server must not accept inspector configuration (§18).
+//! Inspection deployment and pipeline integration are not implemented; a
+//! core-profile server must still refuse inspector configuration (§18).
+//! Async inspection belongs to WP-5.5c. Event belongs to WP-5.2.
 //! `AuthorizeAllow.writer_view` becomes `AuthzFacts::caller_view`, which the
 //! pipeline honours only under the `authority` role (§10.1). Reservation-id
 //! uniqueness is enforced per partition by the pipeline, while §6.6 asks for
@@ -49,6 +53,7 @@
 
 mod channel;
 mod client;
+mod inspection;
 mod map;
 mod roles;
 mod sign;
@@ -59,6 +64,7 @@ mod proto {
 
 pub use channel::{ChannelError, HookChannel, HookRequest, HookResponse};
 pub use client::{DEFAULT_TIMEOUT, HookClient, HookConfigError, MAX_RESPONSE_BYTES};
+pub use inspection::{InspectVerdict, RemoteInspector};
 pub use mkit_rpc::hooks::{DEFAULT_VALIDITY, DOMAIN, HookSigner, MAX_VALIDITY, SignerError};
 pub use mkit_rpc::hooks::{
     HookVerifier, KeyListError, MAX_CLOCK_LEAD_MS, Verified, VerifierKey, VerifyError,
