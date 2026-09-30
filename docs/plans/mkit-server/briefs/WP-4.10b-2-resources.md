@@ -16,6 +16,14 @@ Descriptors and opaque lookup continuation live in vc4; only a bounded cursor,
 level and cumulative byte charge enter the guarded header. No protocol surface
 has changed.
 
+Final cap audit at `406e0c39`: **2,301 changed physical production lines**,
+comprising 2,221 added and 80 removed. The earlier 2,297 count omitted four
+removed `cfg(test)` gates that enable production use of existing projection
+helpers. Those deletions count; the unchanged 114 helper/import lines are
+reported as reused existing code rather than newly added diff lines. This is
+one line above the approved cap, so execution stopped without pushing or opening
+the PR. No production limit or protocol surface was raised to accommodate it.
+
 The 50-hop test uses actual producer-generated index rows and native as its oracle.
 With 2 KiB source nodes it makes **101 durable reconstruction steps**, consuming
 **2,306 observed / 2,318 charged calls** across extraction and final verification. The 250 KiB-node
