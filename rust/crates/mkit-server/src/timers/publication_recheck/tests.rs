@@ -539,10 +539,43 @@ fn completion_cas_cannot_publish_after_a_concurrent_obligation_change() {
 #[test]
 fn valid_d34_packmap_over_whole_alarm_allowance_completes_across_fires() {
     block_on(async {
-        let fixture = Fixture::new(1_101).await;
+        let fixture = Fixture::new(4_096).await;
         fixture.populate(0).await;
+        // Exercise all 4,096 prefixes plus 2,048 external bases: 256 prefixes
+        // need two pages each. The audit's 8,192-ID structural maximum
+        // exceeds the existing 512 KiB advance codec limit.
+        let mut advance = fixture.advance().await;
+        for prefix in 0..256 {
+            let mut batch = Batch::new();
+            for suffix in 2..=9 {
+                let mut pack = fixture.dependencies[prefix];
+                pack[31] = suffix;
+                advance.external_bases.push(pack);
+                batch = batch.put(
+                    keys::published_member(&fixture.repo.name, &pack),
+                    Witness {
+                        generation: 0,
+                        sequence: 1,
+                        published: true,
+                        held: false,
+                    }
+                    .encode(),
+                );
+            }
+            let partition =
+                D34Shards.membership(&fixture.repo, &BlobKey::pack(fixture.dependencies[prefix]));
+            fixture.kv.apply(&partition, batch).await.unwrap();
+        }
+        fixture
+            .kv
+            .apply(
+                &fixture.source,
+                Batch::new().put(fixture.advance_key(), advance.encode().unwrap()),
+            )
+            .await
+            .unwrap();
         let mut total_calls = 0;
-        for fire in 0..20 {
+        for fire in 0..40 {
             let report = fixture.fire(fire * publication::RECHECK_MS).await;
             assert_eq!(
                 report.failed, 0,
@@ -554,7 +587,8 @@ fn valid_d34_packmap_over_whole_alarm_allowance_completes_across_fires() {
             total_calls += fixture.target.calls();
             if fixture.published().await == 1 {
                 assert!(fire > 0, "more than one alarm's routed allowance is needed");
-                assert_eq!(total_calls, 1_101, "already-checked witnesses were reread");
+                assert_eq!(fire, 33, "4,352 calls need exactly 34 bounded fires");
+                assert_eq!(total_calls, 4_352, "already-checked witnesses were reread");
                 return;
             }
         }
