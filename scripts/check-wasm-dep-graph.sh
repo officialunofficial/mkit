@@ -108,10 +108,14 @@ check_tree "apps/vcs-worker" "apps/vcs-worker" "" "" blst zstd-sys commonware-ru
 check_tree "mkit-core (pack-ruzstd)" "rust/crates/mkit-core" "--no-default-features --features pack-ruzstd" "ruzstd" \
   blst zstd-sys commonware-runtime commonware-storage
 
+check_tree "mkit-rpc (hooks)" "rust/crates/mkit-rpc" "--features hooks" "buffa ed25519-dalek" \
+    blst zstd-sys commonware-runtime commonware-storage
+
 if [ "$fail" -ne 0 ]; then
   echo
   echo "See docs/INVARIANTS.md (\"wasm32 dependency graphs contain no C-toolchain crates\")."
   exit 1
 fi
+
 
 echo "ok: mkit-wasm, apps/repo-worker, mkit-server (also with remote-hooks), mkit-server-worker, apps/vcs-worker and mkit-core (pack-ruzstd) wasm32 dependency graphs contain no C-toolchain crates"

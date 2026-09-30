@@ -4686,6 +4686,7 @@ pub const __DENY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
+///WARNING: Contains payment credentials. Never log or Debug-print this message or its credential_headers. Build with ..Default::default() for additive evolution.
 pub struct AdmitRequest {
     /// Operation including established owner and grant facts; SPEC-SERVER §6.3.
     ///

@@ -52,30 +52,19 @@ mod client;
 mod map;
 mod roles;
 mod sign;
-mod verify;
 
-#[allow(
-    missing_docs,
-    missing_debug_implementations,
-    unreachable_pub,
-    clippy::all,
-    clippy::pedantic,
-    clippy::cargo
-)]
 mod proto {
-    include!(concat!(env!("OUT_DIR"), "/hooks/_hooks.rs"));
-    pub(super) use mkit::server::hooks::v1;
+    pub(super) use mkit_rpc::hooks as v1;
 }
 
 pub use channel::{ChannelError, HookChannel, HookRequest, HookResponse};
 pub use client::{DEFAULT_TIMEOUT, HookClient, HookConfigError, MAX_RESPONSE_BYTES};
-pub use roles::{RemoteAdmission, RemoteAuthorizer, RemoteOutcomes};
-pub use sign::{
-    DEFAULT_VALIDITY, DOMAIN, HookSigner, MAX_VALIDITY, NonceSource, OsNonces, SignerError,
-};
-pub use verify::{
+pub use mkit_rpc::hooks::{DEFAULT_VALIDITY, DOMAIN, HookSigner, MAX_VALIDITY, SignerError};
+pub use mkit_rpc::hooks::{
     HookVerifier, KeyListError, MAX_CLOCK_LEAD_MS, Verified, VerifierKey, VerifyError,
 };
+pub use roles::{RemoteAdmission, RemoteAuthorizer, RemoteOutcomes};
+pub use sign::{NonceSource, OsNonces};
 
 #[cfg(test)]
 pub(crate) mod tests;

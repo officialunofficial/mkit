@@ -5,7 +5,7 @@
 # apps/vcs-worker under a local `wrangler dev`: the M0 "nothing changes on
 # the wire" exit check for the vcs-worker port (WP-M0-17).
 #
-#   scripts/vcs-worker-conformance.sh [--test-faults] [--sharding single|d34] [--multi] [--hooks] [--indexed] [-- <extra runner args>]
+#   scripts/vcs-worker-conformance.sh [--test-faults] [--hooks] [--sharding single|d34] [--multi] [--indexed] [-- <extra runner args>]
 #
 #   (default)      a release-optimized build; the whole suite once.
 #   --test-faults  a `test-faults` build, in two phases, each on a fresh
@@ -35,6 +35,7 @@
 #                   D36 hint cases, and a Multi + D34 quota phase forces a
 #                   rollup under clock skew and checks the namespace cap
 #                   across branches.
+#   --hooks        add M3 admission/CORS/outcome checks with the Rust MPP fixture.
 #   --multi        add the Multi phase (WP-1.30): a fresh server started with
 #                  ADDRESSING=multi and the namespace allowlist the run's
 #                  fixed seed and run id derive, then the Multi wire cases
@@ -96,6 +97,7 @@ TEST_TICKET_TTL_MS=20000
 # The adapter's body-buffer bound under test (bytes).
 MAX_BUFFERED_BYTES=1048576
 
+hooks=0
 test_faults=0
 sharding=d34
 multi=0
@@ -108,6 +110,7 @@ runner_args=()
 d34_list_args=(--list-refs 1000)
 while [ $# -gt 0 ]; do
     case "$1" in
+        --hooks) hooks=1 ;;
         --test-faults) test_faults=1 ;;
         --multi) multi=1 ;;
         --hooks) hooks=1 ;;
@@ -120,7 +123,7 @@ while [ $# -gt 0 ]; do
             d34_list_args=()
             if [ "${sharding}" = d34 ]; then d34_list_args=(--list-refs 1000); fi ;;
         --) shift; runner_args=("$@"); break ;;
-        *) echo "usage: $0 [--test-faults] [--sharding single|d34] [--multi] [--hooks] [--indexed] [-- <runner args>]" >&2; exit 2 ;;
+        *) echo "usage: $0 [--test-faults] [--hooks] [--sharding single|d34] [--multi] [--indexed] [-- <runner args>]" >&2; exit 2 ;;
     esac
     shift
 done
@@ -593,6 +596,7 @@ if [ "${indexed}" -eq 1 ]; then
     echo ">> indexed phase passed: pending until verified, the failed slice resumed, then committed"
     stop_server
 fi
+if [ "${hooks}" -eq 1 ]; then bash scripts/vcs-worker-hooks.sh; fi
 echo ">> vcs-worker conformance passed"
 
 # The hooks phase includes real workerd timer and HTTP cancellation probes.

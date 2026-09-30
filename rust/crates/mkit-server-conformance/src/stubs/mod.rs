@@ -2,3 +2,5 @@
 //! `stubs`; test utilities, never in a release binary).
 
 pub mod hook;
+
+pub mod mpp;

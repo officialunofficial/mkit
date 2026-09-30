@@ -1739,6 +1739,16 @@ when the target build enables the corresponding backend feature. Security-
 sensitive selector keys are ignored from repo-local config; set them in
 `$XDG_CONFIG_HOME/mkit/config` or with explicit command flags.
 
+### Admission helper
+
+The admission helper's stdin carries raw `headers["www-authenticate"]`
+field values. One value can contain several challenges when the server's
+platform combines repeated fields. Helpers MUST parse each value as an
+RFC 9110 §11.6.1 challenge list, preserve challenge order, and distinguish
+list separators from commas within auth-params and quoted strings.
+The separate typed `challenges` array remains available. mkit forwards
+the raw fields without splitting them.
+
 ### `user.identity`
 
 The commit author Identity, encoded as `[kind:u8][len:u16 LE][bytes]`

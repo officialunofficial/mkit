@@ -161,8 +161,9 @@ if not features:
     err("no compiler-artifact messages: was the build run with --message-format=json*?")
 
 for name, feats in sorted(features.items()):
-    if "test-faults" in feats:
-        err(f"{name} was compiled with the `test-faults` test seam")
+    for seam in ("test-faults", "stubs"):
+        if seam in feats:
+            err(f"{name} was compiled with the `{seam}` test seam")
 
 # The binary being scanned must be the one this log built.
 bin_name = "mkit" if mode == "cli" else "mkit-server"
@@ -240,6 +241,9 @@ if [ "$mode" = cli ]; then
   scan 'sqlite3_' 'SQLite linked into mkit'
 fi
 scan 'x-mkit-test-' 'test-faults seam compiled in'
+scan '/__stub/' 'MPP stub control plane compiled in'
+scan 'TEST_OUTBOX_BACKLOG_ROWS' 'test-only Worker backlog var compiled in'
+scan 'TEST_TICKET_TTL_MS' 'test-only Worker ticket var compiled in'
 
 if [ "$fail" -ne 0 ]; then
   echo "check-release-artifact-features: FAILED ($mode): $(basename "$binary")" >&2

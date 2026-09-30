@@ -991,8 +991,12 @@ version = "0.4.2"
 dependencies = [
  "buffa",
  "buffa-build",
+ "ed25519-dalek",
  "mkit-core",
+ "serde",
+ "serde_json",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]
@@ -1002,7 +1006,6 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "buffa",
- "buffa-build",
  "bytes",
  "connectrpc",
  "connectrpc-build",
@@ -1013,6 +1016,7 @@ dependencies = [
  "http",
  "mkit-attest",
  "mkit-core",
+ "mkit-rpc",
  "send_wrapper",
  "serde",
  "serde_json",

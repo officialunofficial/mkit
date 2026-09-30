@@ -11,6 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - WP-3.9c: default-off signed HTTPS Worker hooks with canonical origin signing,
   manual redirects, streamed response limits and aborting call timeouts.
+- Server: kind-8 completion uses the guarded fresh backlog, preserving delivery
+  after a concurrent outcome append (WP-3.13; correction to #1219).
+
+- Server conformance: M3 cases cover admission, CORS, CAS-loss and ticket expiry; the
+  orchestrator rulings preserve pipeline ordering and accept ordered combined
+  WWW-Authenticate lists on Workers (WP-3.13).
+
+- Server conformance: MPP stub, loopback controls, real native binary/exec-helper
+  push tests and a shared admission commit case; isolated Worker forwarder
+  calls the same Rust fixture (WP-3.12). Release guards reject `stubs`.
+
+- RPC: public `mkit-rpc::hooks` message types with JSON support and runtime-free
+  `HookSigner` and `HookVerifier`, enabled by the `hooks` feature. The server
+  re-exports its authentication surface (WP-3.7b, Linear MKIT-67).
+
 - Server (Stage 2, inert): default-off `http-objects` adapter features mount
   raw escaped HTTP object routes with streaming Range/HEAD, read CORS on
   every response, query-free diagnostics, and public URL-token key documents.
