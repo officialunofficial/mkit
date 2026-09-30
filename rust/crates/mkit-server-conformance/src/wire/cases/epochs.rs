@@ -68,6 +68,27 @@ async fn set(
         .await
 }
 
+/// `SetGrantEpoch(new_epoch)` for `owner`, retried while the server answers
+/// `unavailable` (the revocation is still waiting on a shard's ack: STC §7.9
+/// tells the caller to retry).
+pub(super) async fn set_epoch(
+    ctx: &Ctx,
+    owner: &Owner,
+    new_epoch: u64,
+) -> Result<SetGrantEpochResponse, Failure> {
+    let statement = signed(owner, &statement(ctx, owner, new_epoch));
+    let mut attempt = 0;
+    loop {
+        match set(ctx, &statement).await? {
+            Err(error) if error.code == "unavailable" && attempt < 5 => {
+                attempt += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            result => return want_ok(result, "SetGrantEpoch"),
+        }
+    }
+}
+
 /// The owner's stored grant epoch. The fixed `0x` owners are shared by every
 /// case and every run against a deployment, so their epoch is not known to
 /// be zero.

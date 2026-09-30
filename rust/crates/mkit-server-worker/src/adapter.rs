@@ -40,7 +40,9 @@
 //!
 //! **Test faults** (`test-faults` only): the pipeline gets
 //! `WorkerFaults`, `GET /__mkit_test/stats` answers the default
-//! partition's size, `TEST_QUOTA_*` vars replace the write quota, and each
+//! partition's size (under D34, that of the ref shard `?ref=<name>` names),
+//! `TEST_QUOTA_*` vars replace the write quota, `TEST_TICKET_TTL_MS`
+//! shortens the ticket lifetime, and each
 //! request logs the most body bytes the adapter held at once, with its
 //! path (`mkit-adapter peak-buffered-bytes <n> … path <path>`).
 //! Under D34, `POST /__mkit_test/relay/<pack>` plants a membership relay;
@@ -222,6 +224,11 @@ pub struct WorkerConfig {
     /// cases).
     #[cfg(feature = "test-faults")]
     pub test_quota: Option<QuotaLimits>,
+    /// `TEST_TICKET_TTL_MS`: the upload ticket lifetime instead of the
+    /// default 24 hours (`test-faults` builds only, so the growth case can
+    /// wait out real ticket expiry).
+    #[cfg(feature = "test-faults")]
+    pub test_ticket_ttl_ms: Option<u64>,
 }
 
 /// A missing or malformed var. The adapter answers every RPC
@@ -302,6 +309,10 @@ impl WorkerConfig {
         #[cfg(feature = "test-faults")]
         if let Some(quota) = self.test_quota {
             config.write_quota = Some(quota);
+        }
+        #[cfg(feature = "test-faults")]
+        if let Some(ttl) = self.test_ticket_ttl_ms {
+            config.ticket_ttl_ms = ttl;
         }
         Ok(config)
     }
@@ -405,6 +416,8 @@ impl WorkerConfig {
             published_view: None,
             #[cfg(feature = "test-faults")]
             test_quota: test_quota(&var)?,
+            #[cfg(feature = "test-faults")]
+            test_ticket_ttl_ms: test_ticket_ttl(&var)?,
         })
     }
 
@@ -624,6 +637,20 @@ fn test_quota(var: &impl Fn(&str) -> Option<String>) -> Result<Option<QuotaLimit
         max_bytes: parse(names[1], bytes.as_deref())?,
         window_ms: parse(names[2], window.as_deref())?,
     }))
+}
+
+/// `TEST_TICKET_TTL_MS`: a positive lifetime in milliseconds, or unset.
+#[cfg(feature = "test-faults")]
+fn test_ticket_ttl(var: &impl Fn(&str) -> Option<String>) -> Result<Option<u64>, ConfigError> {
+    var("TEST_TICKET_TTL_MS")
+        .map(|v| {
+            v.trim()
+                .parse::<u64>()
+                .ok()
+                .filter(|ttl| *ttl > 0)
+                .ok_or_else(|| ConfigError("TEST_TICKET_TTL_MS is not a positive number".into()))
+        })
+        .transpose()
 }
 
 /// The Durable Object storage cap for the `WORKERS_PLAN` var: `paid` is
@@ -1802,7 +1829,11 @@ mod glue {
         }
         #[cfg(feature = "test-faults")]
         if req.method() == worker::Method::Get && req.path() == test::STATS_PATH {
-            return Ok(cors(test::stats(&env, cfg).await?));
+            let scope = req
+                .url()?
+                .query_pairs()
+                .find_map(|(k, v)| (k == "ref").then(|| v.into_owned()));
+            return Ok(cors(test::stats(&env, cfg, scope.as_deref()).await?));
         }
         #[cfg(feature = "test-faults")]
         {
@@ -2202,20 +2233,33 @@ mod glue {
             FAULTS.with(Arc::clone)
         }
 
-        /// `{bytes, keys}` of the deployment-default partition, which holds
-        /// the replay records and quota windows.
+        /// `{bytes, keys}` of the partition that holds the replay records and
+        /// quota windows of writes to `scope` (a full ref name): the
+        /// deployment-default partition under Single sharding, where `scope`
+        /// is ignored, and that ref's shard under D34, where it is required.
         pub(super) async fn stats(
             env: &Env,
             cfg: &super::WorkerConfig,
+            scope: Option<&str>,
         ) -> worker::Result<Response> {
-            if cfg.sharding == mkit_server::pipeline::Sharding::D34 {
-                return Response::error("stats hook is single-sharding only", 409);
-            }
+            let p = if cfg.sharding == Sharding::D34 {
+                let Some(reference) = scope.filter(|r| mkit_server::refs::validate_ref_name(r))
+                else {
+                    return Response::error("D34 stats need ?ref=<valid ref name>", 400);
+                };
+                let repo = RepoId {
+                    namespace: NamespaceKey::deployment_default(),
+                    name: RepoName::new(cfg.repository.as_deref().unwrap_or("default"))
+                        .map_err(|e| worker::Error::RustError(e.to_string()))?,
+                };
+                D34Shards.ref_shard(&repo, reference)
+            } else {
+                Partition::Namespace(NamespaceKey::deployment_default())
+            };
             let store = WorkerNamespaceStore::new(
                 StubTransport::new(env.clone(), cfg.placement.clone()),
                 cfg.probe_partition(),
             );
-            let p = Partition::Namespace(NamespaceKey::deployment_default());
             match store.stats(&p).await {
                 Ok(s) => {
                     Response::from_json(&serde_json::json!({ "bytes": s.bytes, "keys": s.keys }))
@@ -2927,6 +2971,24 @@ mod tests {
         let mut partial = base.to_vec();
         partial.push(("TEST_QUOTA_OPS", "7"));
         assert!(WorkerConfig::from_vars(vars(&partial)).is_err());
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[test]
+    fn test_ticket_ttl_is_positive_or_unset() {
+        let base = [(AUDIENCE_VAR, "https://x.example"), (REPOSITORY_VAR, "r")];
+        let cfg = WorkerConfig::from_vars(vars(&base)).unwrap();
+        assert_eq!(cfg.test_ticket_ttl_ms, None);
+        let mut short = base.to_vec();
+        short.push(("TEST_TICKET_TTL_MS", "20000"));
+        let cfg = WorkerConfig::from_vars(vars(&short)).unwrap();
+        assert_eq!(cfg.test_ticket_ttl_ms, Some(20_000));
+        assert_eq!(cfg.pipeline_config().unwrap().ticket_ttl_ms, 20_000);
+        for bad in ["0", "-1", "soon"] {
+            let mut vars_bad = base.to_vec();
+            vars_bad.push(("TEST_TICKET_TTL_MS", bad));
+            assert!(WorkerConfig::from_vars(vars(&vars_bad)).is_err(), "{bad}");
+        }
     }
 
     /// `final-chunk` arms the blob store once per operation; `after-reserve`

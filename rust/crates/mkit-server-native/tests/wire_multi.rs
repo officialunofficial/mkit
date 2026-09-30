@@ -1,6 +1,6 @@
 //! The Multi exit gate (WP-1.30): the `repo.*`, `repository.*`, `policy.*`,
-//! `tickets.advance_other_repository` and `info.*` wire cases against the
-//! `mkit-server serve` wiring (`config::resolve`, then `server::open`)
+//! `tickets.advance_other_repository`, `tickets.advance_ticket_bindings`,
+//! `lag.*` and `info.*` wire cases against the `mkit-server serve` wiring (`config::resolve`, then `server::open`)
 //! started with `--addressing multi`: FS blobs under the root, `SQLite`
 //! metadata, auth v2, and the namespace allowlist this profile derives.
 //! The membership cases seed their fixture through a real ticketed push;
@@ -23,6 +23,20 @@ const DIVERGENCES: &[(&str, &str)] = &[];
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wire_suite_multi_sqlite_auth_v2() {
+    multi_suite("single").await;
+}
+
+/// Multi under D34 with `test-faults`: ref listings and pack membership lag
+/// their writes, so the lag-window and D36 hint cases run over a real
+/// ticketed push against the relay.
+#[cfg(feature = "test-faults")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wire_suite_multi_sqlite_auth_v2_d34() {
+    multi_suite("d34").await;
+}
+
+#[allow(clippy::too_many_lines)] // Setup, flags and the case groups.
+async fn multi_suite(sharding: &str) {
     let root = common::repo_root();
     let ticket_file = root.path().join("ticket.keys");
     common::secret_file(
@@ -37,10 +51,11 @@ async fn wire_suite_multi_sqlite_auth_v2() {
         repository: "ignored-in-multi-mode".to_owned(),
         seed: [0x5e; 32],
     });
-    profile.run_id = "wire-multi".to_owned();
+    "wire-multi".clone_into(&mut profile.run_id);
     profile.milestone = Milestone::M1;
     profile.atomic_advance = true;
     profile.max_pack_bytes = MAX_PACK;
+    profile.sharding_d34 = sharding == "d34";
     profile.list_refs = 200;
     // A server started empty for this test: whole-server listings are bounded.
     profile.fresh_target = true;
@@ -48,6 +63,11 @@ async fn wire_suite_multi_sqlite_auth_v2() {
     profile.features.insert(Feature::MultiRepo);
     profile.features.insert(Feature::NamespacePolicy);
     profile.features.insert(Feature::Tickets);
+    #[cfg(feature = "test-faults")]
+    if profile.sharding_d34 {
+        profile.features.insert(Feature::TestFaults);
+        profile.features.insert(Feature::Timers);
+    }
     profile.ticket_per_signer = 4;
     // The allowlist the deployment starts with, one namespace per line.
     let allowlist = root.path().join("namespaces");
@@ -67,7 +87,7 @@ async fn wire_suite_multi_sqlite_auth_v2() {
             "--meta",
             &meta,
             "--sharding",
-            "single",
+            sharding,
             "--ticket-key-file",
             common::s(&ticket_file),
             "--auth",
@@ -81,8 +101,13 @@ async fn wire_suite_multi_sqlite_auth_v2() {
     )
     .unwrap();
     cfg.pipeline.ticket_caps.per_signer = 4;
-    let opened = server::open(&cfg).unwrap();
+    let mut opened = server::open(&cfg).unwrap();
     let shutdown = Shutdown::new();
+    // The relay driver delivers D34's ref-name and membership indexes.
+    let timers = opened
+        .timers
+        .take()
+        .map(|driver| tokio::spawn(driver.start(shutdown.clone())));
     let served = common::spawn_serve(listener, opened.router.clone(), &shutdown);
 
     let target = WireTarget {
@@ -96,20 +121,29 @@ async fn wire_suite_multi_sqlite_auth_v2() {
         "repository.",
         "policy.",
         "tickets.advance_other_repository",
+        "tickets.advance_ticket_bindings",
+        "lag.",
         "info.",
     ] {
         let report = run(&target, Some(filter)).await;
         common::judge(&report, DIVERGENCES);
         for case in mkit_server_conformance::wire::CASES.iter().filter(|case| {
-            case.name.contains(filter) && case.requires.contains(&Feature::MultiRepo)
+            case.name.contains(filter)
+                && case.requires.contains(&Feature::MultiRepo)
+                && case.skip_reason(&target.profile).is_none()
         }) {
             match case.name {
-                // The read-your-writes case keeps its D34 skip; the other
-                // membership cases seed over the wire and run.
+                // The read-your-writes case keeps its D34 skip on Single; on
+                // D34 the index cannot be held undelivered against a live
+                // relay. The other membership cases seed over the wire.
                 "repo.membership_read_your_writes" => assert!(
                     matches!(report.verdict(case.name), Some(Verdict::Skip(reason))
-                        if reason == "requires separate membership and ref shards (D34)"),
-                    "{} did not skip with its D34 reason",
+                    if reason.starts_with(if sharding == "d34" {
+                        "needs the membership index held undelivered"
+                    } else {
+                        "requires separate membership and ref shards (D34)"
+                    })),
+                    "{} did not skip with its reason",
                     case.name
                 ),
                 _ => assert!(
@@ -119,10 +153,20 @@ async fn wire_suite_multi_sqlite_auth_v2() {
                 ),
             }
         }
+        if filter == "tickets.advance_ticket_bindings" {
+            let case = "tickets.advance_ticket_bindings";
+            assert!(
+                report.passes().contains(&case),
+                "{case} did not run and pass"
+            );
+        }
     }
 
     shutdown.trigger();
     served.await.unwrap().unwrap();
+    if let Some(timers) = timers {
+        timers.await.unwrap().unwrap().await.unwrap();
+    }
     assert!(db.exists());
     drop(opened);
 }
@@ -161,7 +205,12 @@ async fn grants_and_epochs(sharding: &str) {
     profile.features.insert(Feature::Tickets);
     profile.features.insert(Feature::Grants);
     #[cfg(feature = "test-faults")]
-    profile.features.insert(Feature::TestFaults);
+    {
+        profile.features.insert(Feature::TestFaults);
+        if profile.sharding_d34 {
+            profile.features.insert(Feature::EpochLeases);
+        }
+    }
     profile.ticket_per_signer = 4;
     let allowlist_text = format!(
         "{}{}",
@@ -237,7 +286,13 @@ async fn grants_and_epochs(sharding: &str) {
         profile,
     };
     let mut ran = 0;
-    for filter in ["info.shape_and_policy", "grants.", "ref_scopes.", "epochs."] {
+    for filter in [
+        "info.shape_and_policy",
+        "grants.",
+        "ref_scopes.",
+        "epochs.",
+        "leases.",
+    ] {
         let report = run(&target, Some(filter)).await;
         common::judge(&report, DIVERGENCES);
         for case in mkit_server_conformance::wire::CASES.iter().filter(|case| {

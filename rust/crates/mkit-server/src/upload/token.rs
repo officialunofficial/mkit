@@ -207,6 +207,18 @@ impl TicketKeys {
             .any(|key| bool::from(key.secret.ct_eq(secret)))
     }
 
+    /// Whether any ticket secret is the seed of this Ed25519 public key.
+    /// Used to keep every active or retained URL-token key dedicated.
+    #[must_use]
+    pub fn contains_ed25519_public(&self, public: &[u8; 32]) -> bool {
+        self.keys.iter().any(|key| {
+            ed25519_dalek::SigningKey::from_bytes(&key.secret)
+                .verifying_key()
+                .as_bytes()
+                == public
+        })
+    }
+
     /// Mint a token from trusted claims.
     ///
     /// # Panics

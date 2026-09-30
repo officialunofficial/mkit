@@ -16,6 +16,7 @@ use super::{
     A, B, C, CaseResult, Commit, Ctx, Exp, Failure, Signed, advance_req, ensure, eventually_listed,
     sign_unary, update_req, upload_msgs, want_code, want_ok, want_outcome,
 };
+use crate::wire::RELAY_DELAY_MS_HEADER;
 use crate::wire::client::{Rpc, frame};
 use crate::wire::sign::pack_commitment;
 
@@ -500,6 +501,19 @@ async fn seed_membership(ctx: &Ctx, repository: &str) -> CaseResult {
     if ctx.profile().planted_membership {
         return Ok(());
     }
+    seed_membership_delayed(ctx, repository, None).await?;
+    Ok(())
+}
+
+/// [`seed_membership`] whose final `AdvanceRefs` asks the server to hold the
+/// ref shard's relay for `relay_delay_ms` (`test-faults`, D34). Returns when
+/// that `AdvanceRefs` was sent, which starts the hold: the server's clock
+/// starts at its commit, later than this.
+async fn seed_membership_delayed(
+    ctx: &Ctx,
+    repository: &str,
+    relay_delay_ms: Option<u64>,
+) -> Result<std::time::Instant, Failure> {
     let pack = ctx.ns().into_bytes();
     let id = hash(&pack);
     let signer = ctx.v2_signer("repository-a")?;
@@ -542,15 +556,19 @@ async fn seed_membership(ctx: &Ctx, repository: &str) -> CaseResult {
         ("refs/mkit/packmap/main", Exp::Missing, &B),
     );
     advance.ticket_ids = vec![ticket.id.unwrap_or_default()];
-    let response: Result<AdvanceRefsResponse, _> = ctx
-        .send(&sign_unary(&signer, Rpc::AdvanceRefs, &advance, |env| {
-            env.repository = repository.to_string();
-        }))
-        .await?;
+    let mut commit = sign_unary(&signer, Rpc::AdvanceRefs, &advance, |env| {
+        env.repository = repository.to_string();
+    });
+    if let Some(delay) = relay_delay_ms {
+        commit = commit.with_header(RELAY_DELAY_MS_HEADER, delay.to_string());
+    }
+    let sent = std::time::Instant::now();
+    let response: Result<AdvanceRefsResponse, _> = ctx.send(&commit).await?;
     want_outcome(
         response.map(|r| r.outcome.map_or(0, |o| o.to_i32())),
         AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
-    )
+    )?;
+    Ok(sent)
 }
 
 pub(super) async fn isolation_packs(ctx: Ctx) -> CaseResult {
@@ -613,4 +631,146 @@ pub(super) async fn malformed_membership_hint(ctx: Ctx) -> CaseResult {
     }
     let oversized = format!("refs/heads/{}", "a".repeat(513));
     pack_read(&ctx, &repo_b, Some(&oversized), false).await
+}
+
+/// How long the lag cases hold the relay. The unhinted read must land inside
+/// this window; a slower server skips instead of failing.
+const LAG_MS: u64 = 8_000;
+
+/// A D34 served deployment with `test-faults`: the lag cases seed over the
+/// wire and rely on a running relay.
+fn need_lag_window(ctx: &Ctx) -> CaseResult {
+    if !ctx.profile().sharding_d34 {
+        return Err(Failure::Skip(
+            "requires separate membership and ref shards (D34)".into(),
+        ));
+    }
+    if ctx.profile().planted_membership {
+        return Err(Failure::Skip(
+            "seeds over the wire and needs a relay; the in-process baseline runs none".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) async fn membership_lag_window(ctx: Ctx) -> CaseResult {
+    need_lag_window(&ctx)?;
+    let (repository, _) = identities(&ctx, "lag", "unused")?;
+    let started = seed_membership_delayed(&ctx, &repository, Some(LAG_MS)).await?;
+    let pack = ctx.ns().into_bytes();
+    // The relay is held: the committed pack is not yet a member without
+    // its ref hint (a stale membership index answers false).
+    let early = pack_exists(&ctx, &repository, hash(&pack), None).await?;
+    if started.elapsed().as_millis() >= u128::from(LAG_MS) {
+        return Err(Failure::Skip(
+            "the lag window closed before the read".into(),
+        ));
+    }
+    ensure!(!early, "membership was visible while its relay was held");
+    // Then the relay delivers, within the bound (STC §7.9).
+    pack_read(&ctx, &repository, None, true).await
+}
+
+pub(super) async fn d36_hint_reads_during_lag(ctx: Ctx) -> CaseResult {
+    need_lag_window(&ctx)?;
+    let (repo_a, repo_b) = identities(&ctx, "lag", "lag")?;
+    let namespace = repo_a
+        .split_once('/')
+        .ok_or("repository has no namespace")?
+        .0;
+    let repo_c = format!("{namespace}/lag-two");
+    // The same ref name in two other repositories: the hint must resolve
+    // in the repository being read, never across repositories. They exist
+    // before the timed push, so the window holds only reads.
+    for (repository, label) in [(&repo_b, "repository-b"), (&repo_c, "repository-a")] {
+        let signed = sign_unary(
+            &ctx.v2_signer(label)?,
+            Rpc::UpdateRef,
+            &update_req("refs/heads/main", Exp::Any, &A),
+            |env| repository.clone_into(&mut env.repository),
+        );
+        want_ok(ctx.send::<UpdateRefResponse>(&signed).await?, "UpdateRef")?;
+    }
+    let started = seed_membership_delayed(&ctx, &repo_a, Some(LAG_MS)).await?;
+    // Inside the window the index has not seen the push: only a hinted read,
+    // which checks the ref shard that holds the membership from its commit,
+    // finds the pack.
+    let id = hash(&ctx.ns().into_bytes());
+    let (plain, hinted) = (
+        pack_exists(&ctx, &repo_a, id, None).await?,
+        pack_exists(&ctx, &repo_a, id, Some("refs/heads/main")).await?,
+    );
+    let in_window = |started: std::time::Instant| {
+        if started.elapsed().as_millis() >= u128::from(LAG_MS) {
+            Err(Failure::Skip(
+                "the lag window closed before the reads".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    in_window(started)?;
+    ensure!(!plain, "membership was visible while its relay was held");
+    ensure!(hinted, "the ref hint did not find the committed pack");
+    // The hinted `DownloadPack` must land in the window too, or it would
+    // prove nothing about the index it bypasses.
+    pack_read(&ctx, &repo_a, Some("refs/heads/main"), true).await?;
+    in_window(started)?;
+    for repository in [&repo_b, &repo_c] {
+        pack_read(&ctx, repository, Some("refs/heads/main"), false).await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn isolation_replay(ctx: Ctx) -> CaseResult {
+    let (repo_a, repo_b) = identities(&ctx, "replay", "replay")?;
+    let namespace = repo_a
+        .split_once('/')
+        .ok_or("repository has no namespace")?
+        .0;
+    let repo_a_two = format!("{namespace}/replay-two");
+    let req = update_req(&ctx.head("main"), Exp::Any, &A);
+    let signed = |label: &str, repository: &str, nonce: Option<&str>| {
+        Ok::<_, Failure>(sign_unary(
+            &ctx.v2_signer(label)?,
+            Rpc::UpdateRef,
+            &req,
+            |env| {
+                repository.clone_into(&mut env.repository);
+                if let Some(nonce) = nonce {
+                    nonce.clone_into(&mut env.nonce);
+                }
+            },
+        ))
+    };
+    let first = signed("repository-a", &repo_a, None)?;
+    want_ok(ctx.send::<UpdateRefResponse>(&first).await?, "first write")?;
+    // The very same nonce and body, validly signed for other repositories:
+    // one of the same owner, one of another namespace. A replay ledger that
+    // leaked across repositories would answer with the first write's saved
+    // result and commit nothing.
+    for (label, repository) in [("repository-a", &repo_a_two), ("repository-b", &repo_b)] {
+        let again = signed(label, repository, Some(&first.nonce))?;
+        want_ok(
+            ctx.send::<UpdateRefResponse>(&again).await?,
+            "same nonce elsewhere",
+        )?;
+        let value = want_ok(read(&ctx, repository, "main").await?, "ReadRef")?;
+        ensure!(
+            value.object_id.as_deref() == Some(&A),
+            "a replay record in one repository answered a request to {repository}"
+        );
+    }
+    // A true replay in repository A is answered from its saved result.
+    set(&ctx, &repo_a, "main", &B).await?;
+    want_ok(
+        ctx.send::<UpdateRefResponse>(&first).await?,
+        "replay in place",
+    )?;
+    let value = want_ok(read(&ctx, &repo_a, "main").await?, "ReadRef")?;
+    ensure!(
+        value.object_id.as_deref() == Some(&B),
+        "a replay re-executed instead of returning its saved result"
+    );
+    Ok(())
 }

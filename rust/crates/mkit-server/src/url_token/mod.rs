@@ -228,10 +228,11 @@ impl UrlTokenKeys {
         key_id(&self.active.verifying_key().to_bytes())
     }
 
-    /// The active seed, for the `Pipeline::new` distinctness check against
-    /// the upload-ticket secrets. Callers must not log it.
-    pub(crate) fn active_seed(&self) -> Zeroizing<[u8; 32]> {
-        Zeroizing::new(self.active.to_bytes())
+    /// Active and retained public keys for deployment role-separation checks.
+    /// This never exposes seeds; adapters compare hook/enc/receipt/admin keys.
+    pub fn public_keys(&self) -> impl Iterator<Item = [u8; 32]> + '_ {
+        core::iter::once(self.active.verifying_key().to_bytes())
+            .chain(self.retired.iter().map(|key| key.public))
     }
 
     /// The verification key for a statement's key id: the active key, or a
@@ -488,12 +489,24 @@ pub struct Binding<'a> {
 
 /// A token bound to the request; the epoch comparison is all that is
 /// left (§9.4).
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct BoundToken {
     epoch: u64,
+    expiry_ms: i64,
 }
 
+impl fmt::Debug for BoundToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BoundToken").finish_non_exhaustive()
+    }
+}
 impl BoundToken {
+    /// Expiry retained for HTTP cache lifetime bounds.
+    #[must_use]
+    pub fn expiry_ms(&self) -> i64 {
+        self.expiry_ms
+    }
+
     /// The epoch the token was minted at.
     #[must_use]
     pub fn epoch(&self) -> u64 {
@@ -545,6 +558,7 @@ impl Prechecked {
         }
         Ok(BoundToken {
             epoch: statement.epoch(),
+            expiry_ms: statement.expiry_ms(),
         })
     }
 }

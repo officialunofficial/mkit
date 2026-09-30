@@ -22,23 +22,22 @@ pub(crate) struct PendingGuard {
     pub(crate) repository: String,
 }
 
-/// Default read grace from SPEC-SERVER §5. HTTP read admission lands in 4.13.
-#[cfg(test)]
-pub(crate) const READ_RECONCILE_GRACE_MS: u64 = 60_000;
 /// Margin beyond the maximum permitted backend clock lead.
 const RECONCILE_MARGIN_MS: u64 = 1_000;
 
-/// Pure paid-read planner; HTTP integration follows in WP-4.13.
-#[cfg(test)]
+/// Paid-read planner with the deployment's SPEC-SERVER §5 grace.
+#[cfg(any(test, feature = "http-objects"))]
 pub(crate) fn read_pending(
     repository: String,
     created_at_ms: u64,
     deadline_ms: u64,
+    read_reconcile_grace: core::time::Duration,
 ) -> ReservationV1 {
     ReservationV1::Pending {
         repository,
         created_at_ms,
-        reconcile_at_ms: deadline_ms.saturating_add(READ_RECONCILE_GRACE_MS),
+        reconcile_at_ms: deadline_ms
+            .saturating_add(u64::try_from(read_reconcile_grace.as_millis()).unwrap_or(u64::MAX)),
         op: PendingOp::Read,
     }
 }
@@ -268,7 +267,7 @@ mod tests {
 
     #[test]
     fn read_planner_uses_sixty_second_reconcile_grace() {
-        let pending = read_pending("repo".into(), 1, 10_000);
+        let pending = read_pending("repo".into(), 1, 10_000, core::time::Duration::from_mins(1));
         assert_eq!(
             pending,
             ReservationV1::Pending {

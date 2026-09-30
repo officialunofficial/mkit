@@ -4,7 +4,9 @@ Finished from the interrupted executor's worktree at `3fda91f5`, on
 `mkit-server/wp-4-8-worker-async-verify`. A fresh fetch and merge of
 `origin/feat/mkit-server` found WP-4.12 and WP-4.17 already present. Both
 inherited base merges remain in the branch. The final base merge includes
-WP-1.21/WP-1.19 (#1225), retaining both adjacent invariant additions. The contract is [the brief](briefs/WP-4.8.md).
+WP-1.21/WP-1.19 (#1225), WP-1.27 (#1227) and WP-4.13/WP-4.15 (#1226),
+retaining the adjacent invariant additions, all conformance cases and both
+wrangler script phases. R-171 stays in numeric order within the table. The contract is [the brief](briefs/WP-4.8.md).
 
 ## Brief coverage
 
