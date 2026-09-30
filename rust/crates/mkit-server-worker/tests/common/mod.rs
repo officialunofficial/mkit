@@ -48,11 +48,14 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+type BackendParts = BTreeMap<u16, (String, Bytes)>;
+type BackendUploads = BTreeMap<String, (String, BackendParts)>;
+
 /// Simulated R2 (see the module docs).
 #[derive(Debug, Clone, Default)]
 pub struct SimBucket {
     objects: Arc<Mutex<BTreeMap<String, Bytes>>>,
-    uploads: Arc<Mutex<BTreeMap<String, (String, BTreeMap<u16, (String, Bytes)>)>>>,
+    uploads: Arc<Mutex<BackendUploads>>,
     next_upload: Arc<AtomicUsize>,
     pub metadata_reads: Arc<AtomicUsize>,
     pub backend_completions: Arc<AtomicUsize>,
@@ -158,6 +161,7 @@ impl ObjectBucket for SimBucket {
         len: u64,
         mut body: PutBody,
     ) -> oneshot::Receiver<Result<String, String>> {
+        self.operations.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         let this = self.clone();
         std::thread::spawn(move || {
@@ -219,7 +223,7 @@ impl ObjectBucket for SimBucket {
                     }
                     result.extend_from_slice(bytes);
                 }
-                lock(&this.objects).insert(key.to_owned(), Bytes::from(result));
+                lock(&this.objects).insert(key.clone(), Bytes::from(result));
                 uploads.remove(&upload);
                 if this.lose_completion_reply.swap(false, Ordering::SeqCst) {
                     return Err("lost completion reply".into());

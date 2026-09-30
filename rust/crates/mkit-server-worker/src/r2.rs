@@ -81,7 +81,7 @@ pub const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 mod multipart;
 mod object_multipart;
 pub use multipart::R2PartSink;
-pub use object_multipart::VerifiedObjectPart;
+pub use object_multipart::{VerifiedObjectPart, VerifiedObjectPartRef};
 
 /// Sent into a put body to fail it before its declared length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,7 +180,7 @@ pub trait ObjectBucket: MaybeSend + MaybeSync + Clone + 'static {
     }
 
     /// Spawn one fixed-length private part body. Success returns its opaque
-    /// backend ETag; it is NOT a content-integrity proof.
+    /// backend `ETag`; it is NOT a content-integrity proof.
     fn spawn_object_part(
         &self,
         _key: String,
@@ -613,15 +613,14 @@ impl<B: ObjectBucket> R2PackSink<B> {
                 return Err(e);
             }
         };
-        if let Some(root) = root {
-            if let Err(error) = self
+        if let Some(root) = root
+            && let Err(error) = self
                 .store
                 .pin_object_root(&self.object, root, self.core.len)
                 .await
-            {
-                self.fail().await;
-                return Err(error);
-            }
+        {
+            self.fail().await;
+            return Err(error);
         }
         #[cfg(feature = "test-faults")]
         if self.fail_final.swap(false, Ordering::SeqCst) {

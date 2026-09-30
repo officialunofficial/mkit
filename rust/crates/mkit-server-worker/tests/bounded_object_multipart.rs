@@ -1,24 +1,31 @@
 #![allow(clippy::unwrap_used)]
 mod common;
+use mkit_server_worker::r2::VerifiedObjectPartRef;
+
+// The heap probe is process-wide: exclude unrelated concurrent test payloads.
+static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 use bytes::Bytes;
 use futures::executor::block_on;
 use mkit_core::hash::hash;
 use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan, part_subtree_cv};
-use mkit_server::{BlobKey, BlobStore, PartRef, PartSink};
-use mkit_server_worker::r2::R2BlobStore;
+use mkit_server::{BlobKey, BlobStore, PackSink, PartSink};
+use mkit_server_worker::r2::{ObjectBucket, R2BlobStore};
 
 #[test]
 fn object_backend_completion_uses_pinned_verified_parts_without_rereads() {
+    let _isolation = TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     block_on(async {
         let bucket = common::SimBucket::default();
         let store = R2BlobStore::new(bucket.clone(), "packs");
-        let bytes = vec![7; MIN_PART_SIZE as usize + 10];
+        let bytes = vec![7; usize::try_from(MIN_PART_SIZE).unwrap() + 10];
         let plan = PartPlan::new(bytes.len() as u64, MIN_PART_SIZE, 10_000).unwrap();
         let cvs: Vec<_> = (0..plan.count())
             .map(|index| {
-                let start = plan.offset(index).unwrap() as usize;
-                let end = start + plan.expected_len(index).unwrap() as usize;
+                let start = usize::try_from(plan.offset(index).unwrap()).unwrap();
+                let end = start + usize::try_from(plan.expected_len(index).unwrap()).unwrap();
                 part_subtree_cv(&plan, index, &bytes[start..end]).unwrap()
             })
             .collect();
@@ -33,12 +40,12 @@ fn object_backend_completion_uses_pinned_verified_parts_without_rereads() {
                 .begin_verified_object_part(key, &session, &plan, index, cvs[index as usize])
                 .await
                 .unwrap();
-            let start = plan.offset(index).unwrap() as usize;
+            let start = usize::try_from(plan.offset(index).unwrap()).unwrap();
             let len = plan.expected_len(index).unwrap();
-            for piece in bytes[start..start + len as usize].chunks(256 * 1024) {
+            for piece in bytes[start..start + usize::try_from(len).unwrap()].chunks(256 * 1024) {
                 sink.write(Bytes::copy_from_slice(piece)).await.unwrap();
             }
-            receipts.push(PartRef {
+            receipts.push(VerifiedObjectPartRef {
                 index,
                 len,
                 tag: sink.commit().await.unwrap(),
@@ -74,19 +81,21 @@ fn object_backend_completion_uses_pinned_verified_parts_without_rereads() {
 
 #[test]
 fn root_binding_covers_legacy_single_put_and_forged_plans() {
-    use mkit_server::PackSink;
+    let _isolation = TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     block_on(async {
         let store = R2BlobStore::new(common::SimBucket::default(), "tenant/packs");
         let key = BlobKey::object([11; 32]);
-        let bytes = vec![5; MIN_PART_SIZE as usize + 1];
+        let bytes = vec![5; usize::try_from(MIN_PART_SIZE).unwrap() + 1];
         let plan = PartPlan::new(bytes.len() as u64, MIN_PART_SIZE, 10_000).unwrap();
         let cvs: Vec<_> = (0..plan.count())
             .map(|i| {
-                let start = plan.offset(i).unwrap() as usize;
+                let start = usize::try_from(plan.offset(i).unwrap()).unwrap();
                 part_subtree_cv(
                     &plan,
                     i,
-                    &bytes[start..start + plan.expected_len(i).unwrap() as usize],
+                    &bytes[start..start + usize::try_from(plan.expected_len(i).unwrap()).unwrap()],
                 )
                 .unwrap()
             })
@@ -136,21 +145,21 @@ async fn prepared() -> (
     BlobKey,
     PartPlan,
     Vec<u8>,
-    Vec<PartRef>,
+    Vec<VerifiedObjectPartRef>,
     Vec<u8>,
     Vec<[u8; 32]>,
 ) {
     let bucket = common::SimBucket::default();
     let store = R2BlobStore::new(bucket.clone(), "packs");
-    let bytes = vec![13; MIN_PART_SIZE as usize + 10];
+    let bytes = vec![13; usize::try_from(MIN_PART_SIZE).unwrap() + 10];
     let plan = PartPlan::new(bytes.len() as u64, MIN_PART_SIZE, 10_000).unwrap();
     let cvs: Vec<_> = (0..plan.count())
         .map(|i| {
-            let start = plan.offset(i).unwrap() as usize;
+            let start = usize::try_from(plan.offset(i).unwrap()).unwrap();
             part_subtree_cv(
                 &plan,
                 i,
-                &bytes[start..start + plan.expected_len(i).unwrap() as usize],
+                &bytes[start..start + usize::try_from(plan.expected_len(i).unwrap()).unwrap()],
             )
             .unwrap()
         })
@@ -166,12 +175,12 @@ async fn prepared() -> (
             .begin_verified_object_part(key, &session, &plan, i, cvs[i as usize])
             .await
             .unwrap();
-        let start = plan.offset(i).unwrap() as usize;
+        let start = usize::try_from(plan.offset(i).unwrap()).unwrap();
         let len = plan.expected_len(i).unwrap();
-        for piece in bytes[start..start + len as usize].chunks(256 * 1024) {
+        for piece in bytes[start..start + usize::try_from(len).unwrap()].chunks(256 * 1024) {
             sink.write(Bytes::copy_from_slice(piece)).await.unwrap();
         }
-        parts.push(PartRef {
+        parts.push(VerifiedObjectPartRef {
             index: i,
             len,
             tag: sink.commit().await.unwrap(),
@@ -182,20 +191,23 @@ async fn prepared() -> (
 
 #[test]
 fn forged_receipts_geometry_context_and_root_cannot_publish() {
+    let _isolation = TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     block_on(async {
         let (store, bucket, key, plan, session, parts, bytes, cvs) = prepared().await;
         let root = hash(&bytes);
         let clone_parts = || {
             parts
                 .iter()
-                .map(|p| PartRef {
+                .map(|p| VerifiedObjectPartRef {
                     index: p.index,
                     len: p.len,
                     tag: p.tag.clone(),
                 })
                 .collect::<Vec<_>>()
         };
-        for mutation in 0..6 {
+        for mutation in 0..9 {
             let mut forged = clone_parts();
             match mutation {
                 0 => forged[0].tag[1] ^= 1,
@@ -203,9 +215,12 @@ fn forged_receipts_geometry_context_and_root_cannot_publish() {
                 2 => forged[0].len += 1,
                 3 => forged.swap(0, 1),
                 4 => forged[1].index = 0,
-                _ => {
+                5 => {
                     forged.pop();
                 }
+                6 => forged[0].tag[0] = 2,
+                7 => forged[0].tag.resize(1090, b'x'),
+                _ => forged[0].tag[65] = 255,
             }
             assert!(
                 store
@@ -246,7 +261,9 @@ fn forged_receipts_geometry_context_and_root_cannot_publish() {
             .await
             .unwrap();
         replacement
-            .write(Bytes::copy_from_slice(&bytes[MIN_PART_SIZE as usize..]))
+            .write(Bytes::copy_from_slice(
+                &bytes[usize::try_from(MIN_PART_SIZE).unwrap()..],
+            ))
             .await
             .unwrap();
         let new_tag = replacement.commit().await.unwrap();
@@ -281,6 +298,9 @@ fn forged_receipts_geometry_context_and_root_cannot_publish() {
 
 #[test]
 fn wrong_actual_part_bytes_never_create_a_trusted_receipt() {
+    let _isolation = TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     block_on(async {
         let (store, _, key, plan, session, _, _, cvs) = prepared().await;
         let mut sink = store
@@ -295,6 +315,9 @@ fn wrong_actual_part_bytes_never_create_a_trusted_receipt() {
 
 #[test]
 fn completion_after_a_lost_backend_reply_recovers_only_verified_identity() {
+    let _isolation = TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     block_on(async {
         let (store, bucket, key, plan, session, parts, bytes, _) = prepared().await;
         bucket
@@ -316,19 +339,23 @@ fn completion_after_a_lost_backend_reply_recovers_only_verified_identity() {
 
 #[test]
 fn bounded_object_finalization_calls_and_heap_do_not_scale_with_payload() {
+    let _isolation = TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     block_on(async {
         for count in [2, 5] {
             let bucket = common::SimBucket::default();
             let store = R2BlobStore::new(bucket.clone(), "packs");
-            let bytes = vec![17; MIN_PART_SIZE as usize * (count - 1) + 1];
+            let bytes = vec![17; usize::try_from(MIN_PART_SIZE).unwrap() * (count - 1) + 1];
             let plan = PartPlan::new(bytes.len() as u64, MIN_PART_SIZE, 10_000).unwrap();
             let cvs: Vec<_> = (0..plan.count())
                 .map(|i| {
-                    let start = plan.offset(i).unwrap() as usize;
+                    let start = usize::try_from(plan.offset(i).unwrap()).unwrap();
                     part_subtree_cv(
                         &plan,
                         i,
-                        &bytes[start..start + plan.expected_len(i).unwrap() as usize],
+                        &bytes[start
+                            ..start + usize::try_from(plan.expected_len(i).unwrap()).unwrap()],
                     )
                     .unwrap()
                 })
@@ -344,12 +371,13 @@ fn bounded_object_finalization_calls_and_heap_do_not_scale_with_payload() {
                     .begin_verified_object_part(key, &session, &plan, i, cvs[i as usize])
                     .await
                     .unwrap();
-                let start = plan.offset(i).unwrap() as usize;
+                let start = usize::try_from(plan.offset(i).unwrap()).unwrap();
                 let len = plan.expected_len(i).unwrap();
-                for chunk in bytes[start..start + len as usize].chunks(256 * 1024) {
+                for chunk in bytes[start..start + usize::try_from(len).unwrap()].chunks(256 * 1024)
+                {
                     sink.write(Bytes::copy_from_slice(chunk)).await.unwrap();
                 }
-                parts.push(PartRef {
+                parts.push(VerifiedObjectPartRef {
                     index: i,
                     len,
                     tag: sink.commit().await.unwrap(),
@@ -365,9 +393,147 @@ fn bounded_object_finalization_calls_and_heap_do_not_scale_with_payload() {
             result.unwrap();
             assert_eq!(
                 bucket.operations.load(std::sync::atomic::Ordering::SeqCst) - before,
-                5
+                4
             );
             assert!(peak < 1 << 20, "finalization peak {peak} for {count} parts");
         }
+    });
+}
+
+#[test]
+fn concurrent_session_and_completion_races_preserve_root_binding() {
+    let _isolation = TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    block_on(async {
+        let (store, _, key, plan, session, parts, bytes, cvs) = prepared().await;
+        let root = hash(&bytes);
+        let (left, right) = futures::join!(
+            store.begin_verified_object(key, &plan, root, &cvs, [77; 32]),
+            store.begin_verified_object(key, &plan, root, &cvs, [77; 32])
+        );
+        assert_eq!(left.unwrap(), right.unwrap());
+        let wrong = vec![14; bytes.len()];
+        let wrong_cvs: Vec<_> = (0..plan.count())
+            .map(|i| {
+                let start = usize::try_from(plan.offset(i).unwrap()).unwrap();
+                part_subtree_cv(
+                    &plan,
+                    i,
+                    &wrong[start..start + usize::try_from(plan.expected_len(i).unwrap()).unwrap()],
+                )
+                .unwrap()
+            })
+            .collect();
+        assert!(
+            store
+                .begin_verified_object(key, &plan, hash(&wrong), &wrong_cvs, [78; 32])
+                .await
+                .is_err()
+        );
+        assert!(store.head(&key).await.unwrap().is_none());
+        let (left, right) = futures::join!(
+            store.complete_verified_object(key, &session, &plan, &parts, root),
+            store.complete_verified_object(key, &session, &plan, &parts, root)
+        );
+        left.unwrap();
+        right.unwrap();
+    });
+}
+
+#[test]
+fn short_and_cancelled_private_parts_cannot_publish() {
+    let _isolation = TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    block_on(async {
+        let (store, bucket, key, plan, session, _, _, cvs) = prepared().await;
+        let mut short = store
+            .begin_verified_object_part(key, &session, &plan, 0, cvs[0])
+            .await
+            .unwrap();
+        short.write(Bytes::from_static(b"short")).await.unwrap();
+        assert!(short.commit().await.is_err());
+        let mut cancelled = store
+            .begin_verified_object_part(key, &session, &plan, 0, cvs[0])
+            .await
+            .unwrap();
+        cancelled.write(Bytes::from_static(b"short")).await.unwrap();
+        cancelled.abort().await;
+        assert!(store.head(&key).await.unwrap().is_none());
+        assert_eq!(
+            bucket
+                .backend_completions
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    });
+}
+
+#[test]
+fn preupgrade_canonical_object_without_root_pin_recovers_advisory_presence() {
+    let _isolation = TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    block_on(async {
+        let (store, bucket, key, plan, session, parts, bytes, _) = prepared().await;
+        let object = store.object_key(&key).unwrap();
+        let root_key = format!(
+            "server-object-roots/{}",
+            mkit_core::hash::to_hex_bytes(&hash(object.as_bytes()))
+        );
+        bucket.delete(&root_key).await.unwrap();
+        // Pre-upgrade production writers relied on the canonical verifier's
+        // object-id/raw-root relation, rather than persistent root-pin metadata.
+        bucket.replace_object(&object, Bytes::copy_from_slice(&bytes));
+        assert_eq!(
+            store
+                .complete_verified_object(key, &session, &plan, &parts, hash(&bytes))
+                .await
+                .unwrap(),
+            mkit_server::CommitOutcome::AlreadyPresent
+        );
+        assert_eq!(
+            bucket
+                .backend_completions
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    });
+}
+
+#[test]
+fn competing_first_roots_select_one_immutable_identity() {
+    let _isolation = TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    block_on(async {
+        let store = R2BlobStore::new(common::SimBucket::default(), "packs");
+        let key = BlobKey::object([90; 32]);
+        let a_bytes = vec![1; usize::try_from(MIN_PART_SIZE).unwrap() + 1];
+        let b_bytes = vec![2; a_bytes.len()];
+        let plan = PartPlan::new(a_bytes.len() as u64, MIN_PART_SIZE, 10_000).unwrap();
+        let cvs = |bytes: &[u8]| {
+            (0..plan.count())
+                .map(|i| {
+                    let start = usize::try_from(plan.offset(i).unwrap()).unwrap();
+                    part_subtree_cv(
+                        &plan,
+                        i,
+                        &bytes[start
+                            ..start + usize::try_from(plan.expected_len(i).unwrap()).unwrap()],
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        let a = cvs(&a_bytes);
+        let b = cvs(&b_bytes);
+        let (left, right) = futures::join!(
+            store.begin_verified_object(key, &plan, hash(&a_bytes), &a, [91; 32]),
+            store.begin_verified_object(key, &plan, hash(&b_bytes), &b, [92; 32])
+        );
+        assert_ne!(left.is_ok(), right.is_ok());
+        assert!(store.head(&key).await.unwrap().is_none());
     });
 }

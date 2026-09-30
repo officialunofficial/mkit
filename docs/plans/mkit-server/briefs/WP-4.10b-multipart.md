@@ -78,3 +78,91 @@ its first bounded source pass must compute root/CVplan, charge every repository
 source on miss/dedup/replay and count all physicalreads/CPU plus metadata/backend
 operations. Parent caps256calls/slice and48MiB stay fixed; fullselection and
 protection/relay scope remain unfinished.
+
+
+## Runtime and resource refinement
+
+Actual local workerd/Miniflare returned a171-byte uploaded-part ETag, disproving
+an initial63-byte assumption. Object completion now uses a separate bounded
+VerifiedObjectPartRef (opaque ETag up to1024bytes, tag up to1089); public PACK
+PartRef128 remains unchanged. Larger unsupported backend tags fail closed.
+Local isolated R2 probe passed17checks, including absent-before-completion,
+wrongroot refusal and exact completed2part bytes; evidence directory
+~/.cache/mkit-test-tmp/wp-4-10b-multipart/http-mount-probe-2631. No cloud run.
+
+At maximum10000slots, worst-case tags total10,890,000bytes and selected backend
+strings10,240,000bytes. Two maximum metadata buffers add4,194,304bytes; CV arrays,
+Vec headers and bookkeeping add under2MiB. Rust-side resident bookkeeping is
+therefore below28MiB, excluding caller/source payload and runtime JS copies.
+The boundsgolden tests maximum JSON encoding (all255CVbytes) under2MiB.
+No maximum-geometry runtime JS peak is claimed; parent must account runtime
+copies and source buffers in its48MiB whole-slice budget at actual geometry.
+Metadata work does not grow in number of calls with parts: finalization has
+sessionGET, existingrootpinGET, finalHEAD, backendcomplete=4operations;
+failed/lostreply adds oneHEAD (5). ExistingAlreadyPresent returns after
+HEAD (3). An absent rootpin adds conditionalPUT+confirmationGET: pre-upgrade
+existingAlreadyPresent uses5; absentobjectCreated uses6, lostreply7. Exact
+existingrootpins avoid metadataPUT/429 during retry; concurrent absentpin
+publication recovers only when the observed immutable bytes match. Root merge/receipt validation is O(parts)CPU,
+not O(payload), and receipt+plan storage is O(parts).
+
+Legacypre-upgrade objects need not have rootpin metadata. Their head-only reuse
+is safe under the trusted canonical verifier objectID→onecorrectrawroot invariant
+across all writers, NOT because creating a new pin authenticates old bytes.
+Rootpins coordinate new claims; the parent first source pass must validate that
+canonical relation and immutable source evidence even on dedup/replay. Storage
+presence alone never confers repository membership or skips source charging.
+
+
+## Executor review checklist (before independent peer review)
+
+A/B1: root verification precedes visibility; backendcomplete has no conditional
+options, selected ETags are receipts, pinned actual CVs make every permitted
+same-slot replacement byte-identical. Real local R2 probe exercises workers-rs
+0.8.6; model tests additionally cover stale/replaced receipts and concurrent
+completion. Public PACK paths and receipt128 contract remain separate.
+B2: immutable operation metadata binds exact objectpath/root/length/partgeometry/
+CVplan; versioned receipts bind raw metadata hash and slotCV. Actual streamed
+bytes verify before the finalbyte is released. Corrupt version/UTF8/oversize/
+key/root/context/geometry/order/count fail closed. Server-owned source identity
+validation is a documented parent prerequisite, not a claim this storage seam
+independently derives canonical objectIDs.
+B3: finalization has constant backendcall count and O(parts), not O(payload),
+CPU/metadata memory; payload never reread. Max10000slot JSON and receipt limits
+have explicit encoding/allocation bounds; measured2/5part finalization adds
+under1MiB hostheap. This measurement excludes backendstorageallocations and
+unrelated parallel tests by provenance/isolation. Parent runtimeJS/source
+budget proof remains mandatory and is not replaced by the Rust bound.
+B4: every legacyR2 objectwriter pins after verification and before finalvisibility;
+competingfirstroots select one claim, sameoperation creators select one session,
+loser aborts only its own private backendsession. Existingcanonicalobjects
+without pins recover advisorypresence, never repository authorization.
+B5: registry explicitly adds4.10b-multipart→4.10b, R192row, invariant andchangelog.
+No extraction/gp/holder/relay/activation implementation is claimed here.
+
+Self-review fixed the actual opaqueETag size mismatch and existingrootpin429
+retry regression. The global heapmeter tests now isolate unrelated testpayloads
+while protocolrace tests retain real concurrent futures/backendthreads. Source
+and productionbehavior review are complete locally; independentroot-scheduled
+peer reviews remain required before openingPR. Gates are recorded below only
+once terminal; staging/deployment/remoteR2 and optionalMinIO are not claimed.
+
+## Terminal executor gate evidence
+
+- just ci-server:2351/2351passed,8optional skips; wasm builds/checks and CLIbaseline green.
+- Final Worker nextest --all-features:294/294passed,0skips after test instrumentation/lint refinements.
+- Workspace all-target/all-feature lockedClippy -Dwarnings and lockedwasm Clippy --no-deps:green.
+- ci-scripts, ci-security, spec-status, fmt workspace+standalonefixture and diffcheck:green.
+- RUSTDOCFLAGS=-Dwarnings Worker rustdoc:green; allfeature Worker doctests:0tests/pass.
+- Local release vcs-worker conformance:84pass,0fail,131profile skips; concurrent coldstart30/30SERVING.
+  Evidence: ~/.cache/mkit-test-tmp/wp-4-10b-multipart/vcs-worker-conformance.SmmZKY.
+- Local R2+HTTP bridge probe:17checks passed, including actual verified2part completion.
+  Evidence: ~/.cache/mkit-test-tmp/wp-4-10b-multipart/http-mount-probe-7242.
+
+The older unisolated cargo-test run failed the process-wide heapmeter because
+parallel fixtures allocated source payloads; nextest process isolation and the
+explicit fixture mutex preserve meaningful heap bounds. No assertion was relaxed.
+An earlier in-flight server compile overlapped the rootpin correction and used
+mixed snapshots; the subsequent frozen-source server gate and finalWorker gate
+supersede that run. No deployment, remoteR2, staging or optionalMinIO run is claimed.
+All executor-owned gate processes are terminal. Independent peer review is pending.

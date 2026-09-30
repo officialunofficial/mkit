@@ -1,20 +1,34 @@
 //! Root-pinned backend multipart for extracted objects. Unlike ticketed pack
 //! staging, completion never reads the part payloads. A pinned CV per slot makes
-//! concurrent replacements byte-identical after verification; ETags only select
+//! concurrent replacements byte-identical after verification; `ETags` only select
 //! backend receipts. All access is server-internal, never client authority.
 
 use bytes::Bytes;
 use futures::{StreamExt as _, channel::mpsc};
 use mkit_core::hash::{Hash, hash, to_hex_bytes};
 use mkit_core::upload_parts::{PartPlan, merge_to_root};
-use mkit_server::{BlobKey, BlobStore, CommitOutcome, PartRef, PartSink, StoreError};
+use mkit_server::{BlobKey, BlobStore, CommitOutcome, PartSink, StoreError};
 use serde::{Deserialize, Serialize};
 
 use super::{ObjectBucket, R2BlobStore, Running, Withheld};
 
 const MAX_META: usize = 2 << 20;
 const MAX_ID: usize = 1024;
-const MAX_ETAG: usize = 63;
+const MAX_ETAG: usize = 1024;
+const MAX_RECEIPT: usize = 65 + MAX_ETAG;
+
+/// Server-internal object receipt; distinct from the capped public pack receipt.
+/// Backend `ETags` are opaque and can exceed the pack wire tag limit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifiedObjectPartRef {
+    /// Zero-based deterministic part slot.
+    pub index: u32,
+    /// Exact verified part length.
+    pub len: u64,
+    /// Versioned CV/session binding followed by the bounded opaque backend tag.
+    pub tag: Vec<u8>,
+}
 
 fn invalid() -> StoreError {
     StoreError::Invalid("invalid verified object session".into())
@@ -78,7 +92,7 @@ impl<B: ObjectBucket> R2BlobStore<B> {
         if len > MAX_META as u64 {
             return Err(invalid());
         }
-        let mut bytes = Vec::with_capacity(len as usize);
+        let mut bytes = Vec::with_capacity(usize::try_from(len).map_err(|_| invalid())?);
         while let Some(piece) = stream.next().await {
             let piece = piece.map_err(failed)?;
             if piece.len() > MAX_META - bytes.len() {
@@ -115,12 +129,21 @@ impl<B: ObjectBucket> R2BlobStore<B> {
         let mut expected = vec![1];
         expected.extend_from_slice(&root);
         expected.extend_from_slice(&len.to_be_bytes());
-        self.put_object_metadata(key.clone(), Bytes::from(expected.clone()))
-            .await?;
-        if self.read_object_metadata(&key).await?.as_deref() != Some(expected.as_slice()) {
-            return Err(invalid());
+        if let Some(observed) = self.read_object_metadata(&key).await? {
+            return if observed == expected {
+                Ok(())
+            } else {
+                Err(invalid())
+            };
         }
-        Ok(())
+        let published = self
+            .put_object_metadata(key.clone(), Bytes::from(expected.clone()))
+            .await;
+        if self.read_object_metadata(&key).await?.as_deref() == Some(expected.as_slice()) {
+            return Ok(());
+        }
+        published?;
+        Err(invalid())
     }
 
     /// Start or resume a server-owned root-pinned extraction upload. `cvs` must
@@ -177,29 +200,26 @@ impl<B: ObjectBucket> R2BlobStore<B> {
             .put_object_metadata(meta_key.clone(), Bytes::from(bytes))
             .await;
         let observed = self.read_object_metadata(&meta_key).await;
-        match observed {
-            Ok(Some(bytes)) => {
-                let winner: Session = decode(&bytes)?;
-                if winner.upload != candidate.upload {
-                    let _ = self
-                        .bucket
-                        .abort_object_upload(&candidate.definition.object, &candidate.upload)
-                        .await;
-                }
-                if winner.definition != candidate.definition {
-                    return Err(invalid());
-                }
-                result?;
-                Ok(operation.to_vec())
+        if let Ok(Some(bytes)) = observed {
+            let winner: Session = decode(&bytes)?;
+            if winner.upload != candidate.upload {
+                let _ = self
+                    .bucket
+                    .abort_object_upload(&candidate.definition.object, &candidate.upload)
+                    .await;
             }
-            _ => {
-                // An uncertain write may have committed. Leave the upload
-                // conservatively; lifecycle abort reclaims orphaned sessions.
-                result?;
-                Err(StoreError::unavailable(
-                    "object session publication unavailable",
-                ))
+            if winner.definition != candidate.definition {
+                return Err(invalid());
             }
+            result?;
+            Ok(operation.to_vec())
+        } else {
+            // An uncertain write may have committed. Leave the upload
+            // conservatively; lifecycle abort reclaims orphaned sessions.
+            result?;
+            Err(StoreError::unavailable(
+                "object session publication unavailable",
+            ))
         }
     }
 
@@ -209,6 +229,9 @@ impl<B: ObjectBucket> R2BlobStore<B> {
         token: &[u8],
         plan: &PartPlan,
     ) -> Result<(Session, Hash), StoreError> {
+        if plan.count() > 10_000 {
+            return Err(invalid());
+        }
         let operation: Hash = token.try_into().map_err(|_| invalid())?;
         let bytes = self
             .read_object_metadata(&self.object_session_key(&operation))
@@ -232,7 +255,7 @@ impl<B: ObjectBucket> R2BlobStore<B> {
     }
 
     /// Open one fixed-CV private part. Competing same-slot writers are required
-    /// to verify identical bytes, even if backend ETags are not unique hashes.
+    /// to verify identical bytes, even if backend `ETags` are not unique hashes.
     pub async fn begin_verified_object_part(
         &self,
         key: BlobKey,
@@ -279,7 +302,7 @@ impl<B: ObjectBucket> R2BlobStore<B> {
         key: BlobKey,
         token: &[u8],
         plan: &PartPlan,
-        parts: &[PartRef],
+        parts: &[VerifiedObjectPartRef],
         root: Hash,
     ) -> Result<CommitOutcome, StoreError> {
         let (session, binding) = self.checked_object_session(key, token, plan).await?;
@@ -292,7 +315,7 @@ impl<B: ObjectBucket> R2BlobStore<B> {
             if part.index as usize != index
                 || part.len != plan.expected_len(part.index).map_err(|_| invalid())?
                 || part.tag.len() < 66
-                || part.tag.len() > 128
+                || part.tag.len() > MAX_RECEIPT
                 || part.tag[0] != 1
                 || &part.tag[1..33] != cv
                 || part.tag[33..65] != binding
@@ -419,5 +442,34 @@ impl<B: ObjectBucket> PartSink for VerifiedObjectPart<B> {
     }
     async fn abort(self) {
         self.put.fail().await;
+    }
+}
+
+#[cfg(test)]
+mod bounds_tests {
+    use super::*;
+
+    #[test]
+    fn maximum_geometry_metadata_and_receipts_have_explicit_bounds() {
+        let definition = Definition {
+            object: "x".repeat(MAX_ID),
+            root: [255; 32],
+            len: u64::MAX,
+            part_size: u64::MAX,
+            cvs: vec![[255; 32]; 10_000],
+            operation: [255; 32],
+        };
+        let session = Session {
+            definition,
+            upload: "x".repeat(MAX_ID),
+        };
+        let bytes = encode(&session).unwrap();
+        assert!(bytes.len() < MAX_META);
+        let decoded: Session = decode(&bytes).unwrap();
+        assert_eq!(decoded.definition.cvs.len(), 10_000);
+        assert_eq!(MAX_RECEIPT * 10_000, 10_890_000);
+        // Full receipt tags plus selected opaque backend strings dominate
+        // Rust-side finalization storage; no part payload is retained.
+        const { assert!(MAX_RECEIPT * 10_000 + MAX_ETAG * 10_000 + 2 * MAX_META < 26 << 20) };
     }
 }
