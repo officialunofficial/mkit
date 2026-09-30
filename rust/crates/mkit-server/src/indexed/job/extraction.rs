@@ -525,7 +525,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
             let (object, bytes) = self
                 .incremental_member(st, x, head)
                 .await?
-                .ok_or(Stop::Yield(1_000))?;
+                .ok_or(Stop::Yield(0))?;
             if x.staged_bytes.saturating_add(bytes) > self.h.cfg.decode_budget {
                 return Err(Stop::Outcome(Outcome::DecodeBudget));
             }
@@ -851,7 +851,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         let (chunk, charged) = self
             .incremental_member(st, x, chunk_id)
             .await?
-            .ok_or(Stop::Yield(1_000))?;
+            .ok_or(Stop::Yield(0))?;
         let Object::Blob(blob) = chunk else {
             return Err(Stop::Reject("object hash mismatch"));
         };
@@ -1081,7 +1081,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
     ) -> Result<(), Stop> {
         if !relay_delivered_through(self.local, self.source, x.relay.ok_or_else(corrupt)?).await? {
             self.protect(job, x).await?;
-            return Ok(());
+            return Err(Stop::Wait(1_000));
         }
         let id = x.object.ok_or_else(corrupt)?;
         self.auxiliary(
@@ -1129,6 +1129,6 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         };
         job.extraction = Some(x);
         result?;
-        Ok(1_000)
+        Ok(0)
     }
 }

@@ -649,6 +649,35 @@ fn persisted_member_cursor(rig: &Rig, pack: Hash) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
+fn counted_fire_due(rig: &Rig, handler: &CountedExtraction, pack: Hash) -> Result<u64, StoreError> {
+    use crate::timers::{DueTimer, Fired, TimerCtx, TimerHandler};
+    let now = u64::try_from(rig.clock.now_ms()).unwrap();
+    let fired = block_on(handler.fire(
+        &TimerCtx {
+            store: rig.store.as_ref(),
+            partition: &rig.source(),
+            now_ms: now,
+        },
+        &DueTimer {
+            due_at_ms: now - 1,
+            kind: crate::timers::registry::kinds::VERIFY,
+            reference: Bytes::from(checkpoint::timer_reference(&rig.repo.name, &pack)),
+            value: Value::default(),
+        },
+    ))?;
+    let Fired::Reschedule {
+        due_at_ms, batch, ..
+    } = fired
+    else {
+        panic!("live verification must retain its timer")
+    };
+    assert_eq!(
+        block_on(rig.store.apply(&rig.source(), batch))?,
+        BatchOutcome::Committed
+    );
+    Ok(due_at_ms)
+}
+
 #[allow(clippy::too_many_lines)] // Native oracle, durable progress, restart and resource bounds share one valid fixture.
 fn fifty_deep_member_chunk(payload_bytes: usize, window_bytes: u64, quota_shortfall: bool) {
     use crate::timers::{DueTimer, Fired, TimerCtx, TimerHandler};
@@ -773,6 +802,10 @@ fn fifty_deep_member_chunk(payload_bytes: usize, window_bytes: u64, quota_shortf
             },
         ));
         let succeeded = fired.is_ok();
+        let due = match &fired {
+            Ok(Fired::Reschedule { due_at_ms, .. }) => Some(*due_at_ms),
+            _ => None,
+        };
         match fired {
             Ok(Fired::Done(batch) | Fired::Reschedule { batch, .. }) => {
                 assert_eq!(
@@ -819,6 +852,11 @@ fn fifty_deep_member_chunk(payload_bytes: usize, window_bytes: u64, quota_shortf
                 .as_ref()
                 .is_some_and(|x| x.stage == 3 && x.chunk == 0 && x.written == 0)
         {
+            assert_eq!(
+                due,
+                Some(now + 1),
+                "durable source work must remain promptly due"
+            );
             assert!(
                 cursor_after != cursor_before
                     || rig.rows(&ticket.pack_id, keys::VC_CANDIDATE) != rows_before,
@@ -1078,6 +1116,200 @@ fn a_thin_member_blob_with_a_tree_base_matches_native_identity_and_offsets() {
         );
     }
     assert_holder(&scheduled, object);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Bounded emit and immediate full-scan progress share native success/error oracles.
+fn a_large_single_pack_emits_within_budget_and_reschedules_metadata_progress_immediately() {
+    let mut objects = (0..720_u16)
+        .map(|i| {
+            Object::Blob(Blob {
+                data: i.to_be_bytes().to_vec(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let ids = objects
+        .iter()
+        .map(|object| object.id().unwrap())
+        .collect::<Vec<_>>();
+    let tree = Object::Tree(Tree {
+        entries: ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| TreeEntry {
+                name: format!("f{i:03}").into_bytes(),
+                mode: EntryMode::Blob,
+                object_hash: *id,
+            })
+            .collect(),
+    });
+    let (commit, head) = signed_commit(tree.id().unwrap(), Vec::new(), 7, b"no extraction");
+    objects.extend([tree, commit]);
+    let bytes = pack(&objects);
+    let rig = Rig::new();
+    let oracle = Rig::new();
+    let ticket = rig.add(&bytes);
+    let oracle_ticket = oracle.add(&bytes);
+    let expected = native(&oracle, std::slice::from_ref(&oracle_ticket), head);
+    assert_eq!(expected.objects, 722);
+    assert!(rig.check(&[(&ticket.0, ticket.1)], head).is_err());
+    let extension = TestExtraction::new(&rig);
+    let calls = Arc::new(AtomicU32::new(0));
+    let handler = counted_extraction(&rig, calls.clone(), ticket.0.pack_id);
+    let mut emitted = 0;
+    for _ in 0..1_000 {
+        if rig.job(&ticket.0.pack_id).unwrap().phase == Phase::Extract {
+            break;
+        }
+        let phase = rig.job(&ticket.0.pack_id).unwrap().phase;
+        calls.store(0, Ordering::SeqCst);
+        counted_fire_due(&rig, &handler, ticket.0.pack_id).unwrap_or_else(|error| {
+            panic!(
+                "{phase:?}: {error}; {} actual calls",
+                calls.load(Ordering::SeqCst)
+            )
+        });
+        assert!(calls.load(Ordering::SeqCst) <= 256);
+        if phase == Phase::EmitIndex {
+            emitted += 1;
+        }
+        relay_only(&rig);
+        rig.clock.advance(1);
+    }
+    assert!(
+        emitted >= 6,
+        "722 actual index rows must emit across bounded pages"
+    );
+    let before = rig.job(&ticket.0.pack_id).unwrap();
+    assert_eq!(before.phase, Phase::Extract);
+    assert!(!before.extract_needed);
+    assert_eq!(before.extraction_group.len(), 1);
+    assert!(before.extraction.is_none());
+    let now = u64::try_from(rig.clock.now_ms()).unwrap();
+    assert_eq!(
+        counted_fire_due(&rig, &handler, ticket.0.pack_id).unwrap(),
+        now
+    );
+    let after = rig.job(&ticket.0.pack_id).unwrap();
+    assert_eq!(after.phase, Phase::Extract);
+    assert!(after.extraction.is_some());
+    // Full scan, closure and selection each visit every producer object once.
+    let progress_bound = 3 * objects.len() + 128;
+    for _ in 0..progress_bound {
+        let before = rig.job(&ticket.0.pack_id).unwrap();
+        if before.phase != Phase::Extract {
+            break;
+        }
+        let now = u64::try_from(rig.clock.now_ms()).unwrap();
+        calls.store(0, Ordering::SeqCst);
+        assert_eq!(
+            counted_fire_due(&rig, &handler, ticket.0.pack_id).unwrap(),
+            now
+        );
+        assert!(calls.load(Ordering::SeqCst) <= 256);
+        let after = rig.job(&ticket.0.pack_id).unwrap();
+        assert!(after.extraction != before.extraction || after.phase != before.phase);
+        rig.clock.advance(1);
+    }
+    assert!(matches!(
+        rig.job(&ticket.0.pack_id).unwrap().phase,
+        Phase::Verify | Phase::Recheck | Phase::Watch
+    ));
+    assert_eq!(rig.job(&ticket.0.pack_id).unwrap().outcome, None);
+    for id in &ids {
+        assert_no_extraction_effects(&rig, &extension, *id);
+        assert!(read_blob(&rig.blobs, &BlobKey::object_offsets(*id)).is_none());
+    }
+    drive(&rig, &extension, &[ticket.0.pack_id]);
+    assert_eq!(rig.check(&[(&ticket.0, ticket.1)], head).unwrap(), expected);
+    let bad_head = [233; 32];
+    let within_lag = rig.check(&[(&ticket.0, ticket.1)], bad_head).unwrap_err();
+    assert_eq!(within_lag.code(), crate::Code::Unavailable);
+    // Prompt metadata work must retain the existing repository-membership lag.
+    rig.clock
+        .advance(i64::try_from(rig.cfg.relay_lag_bound_ms).unwrap() + 1);
+    let scheduled_error = rig.check(&[(&ticket.0, ticket.1)], bad_head).unwrap_err();
+    oracle
+        .clock
+        .advance(rig.clock.now_ms() - oracle.clock.now_ms());
+    let native_error = block_on(crate::indexed::verify::verify_ticketed(
+        oracle.blobs.as_ref(),
+        oracle.store.as_ref(),
+        oracle.shards.as_ref(),
+        &oracle.repo,
+        &oracle.source(),
+        std::slice::from_ref(&oracle_ticket.0),
+        &[oracle_ticket.1],
+        bad_head,
+        oracle.cfg,
+        oracle.clock.as_ref(),
+        oracle.recorder.as_ref(),
+    ))
+    .unwrap_err();
+    assert_eq!(scheduled_error.code(), native_error.code());
+    assert_eq!(scheduled_error.code(), crate::Code::InvalidArgument);
+}
+
+#[test]
+fn queued_holder_delivery_waits_while_successful_metadata_work_is_immediate() {
+    let rig = Rig::new();
+    let (bytes, head) = tree_pack(1, 70_000);
+    let (ticket, ticket_id) = rig.add(&bytes);
+    assert!(rig.check(&[(&ticket, ticket_id)], head).is_err());
+    let extension = TestExtraction::new(&rig);
+    for _ in 0..300 {
+        fire_pack(&rig, &extension, ticket.pack_id);
+        if rig
+            .job(&ticket.pack_id)
+            .unwrap()
+            .extraction
+            .is_some_and(|x| x.stage == 9)
+        {
+            break;
+        }
+        relay_only(&rig);
+        rig.clock.advance(1);
+    }
+    let before = rig.job(&ticket.pack_id).unwrap().extraction.unwrap();
+    assert_eq!(before.stage, 9);
+    assert!(before.relay.is_some());
+    let object = before.object.unwrap();
+    assert!(
+        block_on(rig.store.get(
+            &content_shard(&object),
+            &keys::holder(&object, &rig.repo.namespace, &rig.repo.name).unwrap(),
+        ))
+        .unwrap()
+        .is_none()
+    );
+    let calls = Arc::new(AtomicU32::new(0));
+    let handler = counted_extraction(&rig, calls.clone(), ticket.pack_id);
+    let now = u64::try_from(rig.clock.now_ms()).unwrap();
+    assert_eq!(
+        counted_fire_due(&rig, &handler, ticket.pack_id).unwrap(),
+        now + 1_000
+    );
+    assert_eq!(rig.job(&ticket.pack_id).unwrap().extraction, Some(before));
+    assert!(calls.load(Ordering::SeqCst) <= 256);
+    let content = ContentIndex::new(crate::store::BorrowedStore(rig.store.as_ref()));
+    assert!(
+        block_on(content.collectable(&object, now, 0))
+            .unwrap()
+            .is_none()
+    );
+    relay_only(&rig);
+    assert_holder(&rig, object);
+    rig.clock.advance(1_000);
+    let now = u64::try_from(rig.clock.now_ms()).unwrap();
+    assert_eq!(
+        counted_fire_due(&rig, &handler, ticket.pack_id).unwrap(),
+        now
+    );
+    let after = rig.job(&ticket.pack_id).unwrap().extraction.unwrap();
+    assert_eq!(after.stage, 2);
+    assert!(after.object.is_none());
+    drive(&rig, &extension, &[ticket.pack_id]);
+    rig.check(&[(&ticket, ticket_id)], head).unwrap();
 }
 
 #[test]

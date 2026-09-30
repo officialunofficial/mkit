@@ -94,7 +94,7 @@ const ENTRY_RESERVE: u32 = 64;
 /// Each closure lookup has its own durable id boundary.
 const CLOSURE_CHUNK: u32 = 1;
 /// Frame rows per index emission slice.
-const EMIT_PAGE: u32 = 256;
+const EMIT_PAGE: u32 = 64;
 /// Rows per cleanup batch.
 const CLEANUP_PAGE: u32 = 90;
 /// Cleanup pages per fire.

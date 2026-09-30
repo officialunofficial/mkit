@@ -56,6 +56,15 @@ counter before doing IO. Exhaustion fails the current slice; its durable cursor
 replays. The next alarm starts a new counter. Source lookup, lease renewal,
 block/hold/protection reads and retries use the same slice counter.
 
+Successful bounded work requests the next alarm without an artificial delay,
+including incremental member lookup and reconstruction. The existing scheduler
+still advances the timer key by at least one millisecond and permits only one
+verification fire per alarm. Missing sources and undelivered holder intents keep
+their backoff; pending delivery renews protection before waiting. Index emission
+uses 64-row pages, leaving room for the merged per-object denial reads and keeping
+even invalid 512 KiB raw values within the 48 MiB resident allowance. The full
+group scan, closure barrier and union totals remain mandatory for small objects.
+
 The frozen component ledger remains Paid **889** and Free **49**, including
 24 paid expiry calls. This is not the merged alarm total: purge,
 snapshot/admin and other merged consumers also reserve from the shared
