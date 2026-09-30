@@ -5,6 +5,34 @@ single crate or spec. Each entry states the invariant, why it matters, and
 what breaks when it is violated. A regression test enforces each one; find
 it by the file path listed under "Enforced by".
 
+## Private scanner retrieval requires current ticket and global-denial checks
+
+**Always:** scanner byte reads require both a dedicated short-lived capability
+and an allowlisted scanner auth-v2 signature over the exact private request.
+Every ticket bound to the requested raw pack must still be open and unexpired
+at request time, and global denial must permit the bytes. Apply consumption,
+terminal close, ticket expiry or capability expiry yields the same `not_found`
+as a missing pack. Fail-closed inspection leaves tickets open, so retrieval
+intentionally survives that attempt only until capability expiry. Retries keep
+the inspection id and mint a fresh capability.
+
+**Because:** staged bytes are absent from the public serving view, and private
+inspection authority must remain bounded without weakening global blocks or
+introducing an existence oracle.
+
+**If violated:** a scanner can read foreign, expired or blocked staged content,
+or reveal whether a pack exists through error differences.
+
+**Enforced by:** `rust/crates/mkit-server/src/scanner_retrieval/` capability,
+current-ticket and denial checks with shared call/response bounds;
+`rust/crates/mkit-server/src/takedown/denial.rs` prefetches at most eight
+first descriptor pages with at most 4 MiB of raw descriptor values plus
+bounded key, cursor and collection overhead; continuations and
+nested inventory/chunk/action proofs remain sequential with their existing
+bounds, and existing callers remain serial; core,
+native and Worker scanner retrieval regression suites. The native and Worker
+mounts are default-off; Worker release activation awaits WP-4.18.
+
 ## Ticketed pushes bind uploaded bytes to one paired advance
 
 **Always:** a Connect push opens a signed ticket for each pack that needs one,

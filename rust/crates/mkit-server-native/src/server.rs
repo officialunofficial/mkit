@@ -459,6 +459,10 @@ where
             &[settings.public_key()?],
         )?;
     }
+    #[cfg(feature = "hooks")]
+    if let (Some(retrieval), Some(settings)) = (&cfg.pipeline.scanner_retrieval, &cfg.hooks) {
+        settings.check_scanner_keys(retrieval)?;
+    }
     let mut pipeline_config = cfg.pipeline.clone();
     if let Some(purge) = pipeline_config.purge.take() {
         pipeline_config.purge = Some(purge.with_audit(Arc::new(
@@ -504,6 +508,9 @@ where
                 .with_auth(mkit_server::pipeline::AuthMode::TransportIdentity)
                 .map_err(|e| config_error("pipeline", e))?;
             let key = crate::enc::load_server_key(&opts.server_key)?;
+            if let Some(retrieval) = &cfg.pipeline.scanner_retrieval {
+                crate::scanner_retrieval::check_enc_key(retrieval, &key)?;
+            }
             #[cfg(feature = "http-objects")]
             {
                 use commonware_cryptography::Signer as _;

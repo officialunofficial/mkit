@@ -181,6 +181,8 @@ pub struct WorkerConfig {
     pub admin: Option<mkit_server::admin::Config>,
     /// Default-off restricted preservation configuration.
     pub takedown: Option<crate::admin::TakedownSettings>,
+    /// Default-off private scanner retrieval, available only to Paid inspection.
+    pub scanner_retrieval: Option<Arc<mkit_server::scanner_retrieval::RetrievalConfig>>,
     /// Optional dedicated deployment-authority keys (`AUTHORITY_FENCE`, `AUTHORITY_KEYS`).
     pub authority_fence: Option<mkit_server::authority::AuthorityFence>,
     /// `AUTH_AUDIENCE`: the canonical origin writes are signed for.
@@ -273,7 +275,6 @@ impl WorkerConfig {
     }
 
     /// Build the deployment pipeline configuration without store access.
-    #[cfg(any(target_arch = "wasm32", test))]
     pub(crate) fn pipeline_config(
         &self,
     ) -> Result<mkit_server::pipeline::PipelineConfig, ConfigError> {
@@ -312,6 +313,7 @@ impl WorkerConfig {
         config.sharding = self.sharding;
         config.ticket_keys.clone_from(&self.ticket_keys);
         config.authority_fence.clone_from(&self.authority_fence);
+        config.scanner_retrieval.clone_from(&self.scanner_retrieval);
         config.admin_keys = self
             .admin
             .as_ref()
@@ -374,6 +376,7 @@ impl WorkerConfig {
                 config.ticket_ttl_ms = ttl;
             }
         }
+        mkit_server::scanner_retrieval::validate_config(&config).map_err(|error| bad(&error))?;
         Ok(config)
     }
 
@@ -488,6 +491,11 @@ impl WorkerConfig {
                     .into(),
             ));
         }
+        let scanner_retrieval = crate::scanner_retrieval::parse(
+            &var,
+            indexed.is_some(),
+            hooks.as_ref().is_some_and(|h| h.roles.inspect),
+        )?;
         let authority_fence = resolve_authority_fence(&var, multi, hooks.as_ref())?;
         if let Some(fence) = &authority_fence
             && fence.public_keys().any(|key| {
@@ -542,9 +550,10 @@ impl WorkerConfig {
                 return Err(ConfigError("receipt key repeats URL-token key".into()));
             }
         }
-        Ok(Self {
+        let config = Self {
             takedown,
             admin,
+            scanner_retrieval,
             authority_fence,
             indexed,
             sharding,
@@ -570,7 +579,11 @@ impl WorkerConfig {
             test_outbox_rows: test_number(&var, "TEST_OUTBOX_BACKLOG_ROWS", 16)?,
             #[cfg(feature = "test-faults")]
             test_ticket_ttl_ms: test_ticket_ttl(&var)?,
-        })
+        };
+        if config.scanner_retrieval.is_some() {
+            config.pipeline_config()?;
+        }
+        Ok(config)
     }
 
     /// The settings from `env`'s vars.
@@ -586,6 +599,7 @@ impl WorkerConfig {
             if name == crate::admin::KEYS_SECRET
                 || name == "AUTHORITY_KEYS"
                 || name == TICKET_KEYS_VAR
+                || name == crate::scanner_retrieval::KEYS_SECRET
                 || cfg!(feature = "http-objects") && name == "URL_TOKEN_KEYS"
             {
                 env.secret(name)
@@ -2269,7 +2283,8 @@ mod glue {
         if let Some(response) = receipt_keys(&req, cfg)? {
             return Ok(response);
         }
-        if is_options_preflight(&req) {
+        let scanner_request = crate::scanner_retrieval::mounted(&req.path(), cfg);
+        if !scanner_request && is_options_preflight(&req) {
             return cors_preflight_response(&cors_allow_headers(), CORS_ALLOW_METHODS);
         }
         // One invocation owns all backend phases and lazy upload/proof clones.
@@ -2298,6 +2313,9 @@ mod glue {
                 .with(|cache| Settled::finish(cache, cfg.sharding, multi, jurisdiction, result))
         };
         if let Err(error) = checked {
+            if scanner_request {
+                return crate::scanner_retrieval::not_found();
+            }
             return Ok(cors(json_response(
                 unavailable_json(error.public_message()),
                 503,
@@ -2335,12 +2353,7 @@ mod glue {
                 return Ok(cors(test::relay(req.method(), pack, &env, cfg).await?));
             }
         }
-        let length = req.headers().get("content-length").ok().flatten();
-        #[cfg(feature = "http-objects")]
-        let check_body_cap = !crate::http_mount::glue::mounted_request(&req, cfg);
-        #[cfg(not(feature = "http-objects"))]
-        let check_body_cap = true;
-        if check_body_cap && content_length_exceeds(length.as_deref(), cfg.max_body_bytes) {
+        if !scanner_request && exceeds_body_cap(&req, cfg) {
             let body = body_too_large_json(cfg.max_body_bytes);
             return Ok(cors(json_response(body, 400)?));
         }
@@ -2357,13 +2370,26 @@ mod glue {
             )
         }) {
             Ok(pipe) => pipe,
+            Err(_) if scanner_request => return crate::scanner_retrieval::not_found(),
             Err(e) => return Ok(cors(json_response(unavailable_json(&e.0), 503)?)),
         };
         #[cfg(feature = "http-objects")]
         if crate::http_mount::glue::mounted_request(&req, cfg) {
             return crate::http_mount::glue::serve(&pipe, &req).await;
         }
+        if scanner_request {
+            return crate::scanner_retrieval::serve(&pipe, req).await;
+        }
         serve_connect(&req, cfg, pipe).await
+    }
+
+    fn exceeds_body_cap(req: &Request, cfg: &WorkerConfig) -> bool {
+        #[cfg(feature = "http-objects")]
+        if crate::http_mount::glue::mounted_request(req, cfg) {
+            return false;
+        }
+        let length = req.headers().get("content-length").ok().flatten();
+        content_length_exceeds(length.as_deref(), cfg.max_body_bytes)
     }
 
     /// Dispatch Connect and bridge its streaming response with request-cap accounting.
