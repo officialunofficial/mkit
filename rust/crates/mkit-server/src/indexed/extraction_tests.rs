@@ -204,7 +204,10 @@ fn tick<S: NamespaceStore>(rig: &Rig, extension: &TestExtraction, local: &S, rel
 
 fn drive(rig: &Rig, extension: &TestExtraction, packs: &[Hash]) {
     for _ in 0..3_000 {
-        if packs.iter().all(|id| rig.finished(id)) {
+        if packs
+            .iter()
+            .all(|id| rig.finished(id) && !rig.job(id).unwrap().closure_retry())
+        {
             for pack in packs {
                 assert_eq!(rig.job(pack).unwrap().outcome, None);
             }
@@ -535,6 +538,101 @@ fn missing_member_source_can_arrive_before_lag_and_then_extract() {
     seed_member(&rig, chunk_id, &serialize(&chunk).unwrap());
     drive(&rig, &extension, &[ticket.pack_id]);
     rig.check(&[(&ticket, ticket_id)], head).unwrap();
+    assert_holder(&rig, id);
+}
+
+#[test]
+fn a_peer_stale_closure_error_does_not_block_a_revalidated_group_owner() {
+    let rig = Rig::new();
+    let native_rig = Rig::new();
+    let chunk = Object::Blob(Blob {
+        data: vec![76; 70_000],
+    });
+    let chunk_id = chunk.id().unwrap();
+    let manifest = Object::ChunkedBlob(ChunkedBlob {
+        total_size: 70_000,
+        chunk_size: 0,
+        chunks: vec![chunk_id],
+    });
+    let id = manifest.id().unwrap();
+    let (tree, commit, head) = tree_head(&[id]);
+    let packs = [pack(&[manifest]), pack(&[tree, commit])];
+    let tickets = packs.iter().map(|pack| rig.add(pack)).collect::<Vec<_>>();
+    let native_tickets = packs
+        .iter()
+        .map(|pack| native_rig.add(pack))
+        .collect::<Vec<_>>();
+    let items = tickets
+        .iter()
+        .map(|(ticket, id)| (ticket, *id))
+        .collect::<Vec<_>>();
+    assert!(rig.check(&items, head).is_err());
+    let extension = TestExtraction::new(&rig);
+    rig.clock
+        .advance(i64::try_from(rig.cfg.relay_lag_bound_ms).unwrap() + 1);
+    for _ in 0..100 {
+        for (ticket, _) in &tickets {
+            fire_pack(&rig, &extension, ticket.pack_id);
+        }
+        if tickets.iter().all(|(ticket, _)| {
+            rig.job(&ticket.pack_id).unwrap().outcome == Some(checkpoint::Outcome::ClosureMissing)
+        }) {
+            break;
+        }
+    }
+    for (ticket, _) in &tickets {
+        assert_eq!(
+            rig.job(&ticket.pack_id).unwrap().outcome,
+            Some(checkpoint::Outcome::ClosureMissing)
+        );
+    }
+    assert_no_extraction_effects(&rig, &extension, id);
+    seed_member(&rig, chunk_id, &serialize(&chunk).unwrap());
+    // Only the first owner runs. The peer's durable error remains stale while
+    // this owner validates the complete current group and starts its object.
+    for _ in 0..100 {
+        fire_pack(&rig, &extension, tickets[0].0.pack_id);
+        let job = rig.job(&tickets[0].0.pack_id).unwrap();
+        if job
+            .extraction
+            .as_ref()
+            .is_some_and(|x| x.object == Some(id) && x.stage == 4)
+        {
+            assert_eq!(job.outcome, None);
+            break;
+        }
+    }
+    let first = rig.job(&tickets[0].0.pack_id).unwrap();
+    assert_eq!(first.outcome, None);
+    assert_eq!(first.extraction.as_ref().unwrap().stage, 4);
+    assert_eq!(
+        rig.job(&tickets[1].0.pack_id).unwrap().outcome,
+        Some(checkpoint::Outcome::ClosureMissing)
+    );
+    fire_pack(&rig, &extension, tickets[0].0.pack_id);
+    assert_eq!(rig.job(&tickets[0].0.pack_id).unwrap().outcome, None);
+    assert!(
+        rig.job(&tickets[0].0.pack_id)
+            .unwrap()
+            .extraction
+            .as_ref()
+            .unwrap()
+            .stage
+            > 4
+    );
+    drive(
+        &rig,
+        &extension,
+        &tickets
+            .iter()
+            .map(|(ticket, _)| ticket.pack_id)
+            .collect::<Vec<_>>(),
+    );
+    seed_member(&native_rig, chunk_id, &serialize(&chunk).unwrap());
+    assert_eq!(
+        rig.check(&items, head).unwrap(),
+        native(&native_rig, &native_tickets, head)
+    );
     assert_holder(&rig, id);
 }
 

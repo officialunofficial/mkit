@@ -18,6 +18,56 @@ member reconstruction is still required; raising the 256-call allowance or
 rejecting this otherwise valid push is not a solution. Full gates and PR2
 completion remain pending.
 
+## Feature integration checkpoint (2026-09-30)
+
+Feature tip `8bc30385` (merged PR1 #1238, including duplicate-holder intent
+cleanup, plus HTTP proofs) was merged into the driver in `b2285099`. The reviewed
+relay implementation and regressions are retained verbatim. Formatting and
+native server/Worker compilation passed; 76 relay/header/count/cleanup regressions
+and 181 indexed tests passed in focused nextest runs. The latter deliberately
+excluded the failing native-valid depth-50 case and the six-group fixture that
+previously exceeded the default timeout; these exclusions are not gate waivers.
+The two-peer stale closure error and stable error until late source arrival now
+pass, with native count parity checked after recovery.
+
+Against that feature tip, production Rust changes measure **1,928 added + 72
+removed = 2,000 physical non-test lines**, including blanks and comments. Test
+files and inline test modules are excluded. This exhausts the approved PR2 cap.
+Bounded source reconstruction needs an explicit scope decision before adding
+production lines. Full gates, wasm checks, Worker conformance and PR opening
+remain outstanding; this checkpoint is not a finished extraction implementation.
+
+## Proposed bounded reconstruction amendment (approval pending)
+
+The merged depth-50 regression reproduces the same stall. The proposed fix replaces
+synchronous recursive source reconstruction with resumable lookup, descent and
+ascent using only existing vc4 rows. Each alarm checks at most one bounded lookup
+page or reconstructs one bounded frame. Existing index/frame codecs and checkpoint
+JSON/hex encoders are reused. Opaque lookup continuation and ancestry descriptors
+stay outside the header; the header adds only a small group-bound cursor and
+counters. No new trait, tag, timer, wire/relay codec or cross-partition seam is
+needed.
+
+One canonical accumulator lives in 128 KiB vc4 fragments; descent records visited
+locations and ascent verifies each decoded hash and actual depth. Every consumed
+location rechecks repository membership. Total canonical source bytes accumulate
+without retaining the whole chain. Charge and completed chunk cursor advance in
+one guarded commit, preserving replay and native's per-chunk charging; the upload
+pass does not charge again. The proposal retains 256 calls, 48 MiB, 100 ops and
+1 MiB per apply. Tests must cover the native-valid depth-50 case, lookup pagination,
+restart on each descent/ascent boundary, source changes, hash/depth failures and
+charge replay.
+
+Independent implementation review estimates **220–270 net production lines**.
+Request a **2,300-line PR2 cap**, under the same R-186 and two-PR split, solely for
+this bounded reconstruction and review fixes. This is a proposal, not permission
+or implemented behavior. The current source has not exceeded 2,000 lines.
+
+Remaining gate work also includes a cleanup-function lint (109 lines), test lint
+fixes and reducing the six-group fixture's redundant setup cost without reducing
+its six groups, 42 real jobs, 256 members or actual claim/race assertions. Targeted
+clippy failed on those lints; no full-gate success is claimed.
+
 ## Whole alarm and verification calls
 
 The real RefShard registration uses `R2Extraction` only for Paid Scheduled
