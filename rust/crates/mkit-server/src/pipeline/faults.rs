@@ -291,6 +291,7 @@ pub(crate) async fn schedule_timer<S: crate::NamespaceStore>(
     }
 }
 /// Tick the requested ref shard before the ordinary listing.
+#[allow(clippy::too_many_arguments)] // Explicit test dependencies, including adapter tick exclusion.
 pub(crate) async fn run_timers<S: crate::NamespaceStore>(
     directives: &TestDirectives,
     store: &S,
@@ -299,10 +300,18 @@ pub(crate) async fn run_timers<S: crate::NamespaceStore>(
     repo: &crate::RepoId,
     clock: &dyn crate::Clock,
     business_now: u64,
+    gate: Option<&tokio::sync::Mutex<()>>,
 ) -> Result<(), ServerError> {
     use crate::relay::{NoHook, RelayBudget, RelayHandler};
     use crate::timers::{TickBudget, TimerRegistry, run_due, test_kind::TestTimer};
     if let Some(name) = &directives.run_timers {
+        // A native autonomous tick can checkpoint the same relay rows. Hold
+        // exclusion throughout the drain so its CAS loss cannot turn an
+        // otherwise successful directive into a handler failure.
+        let _tick_guard = match gate {
+            Some(gate) => Some(gate.lock().await),
+            None => None,
+        };
         let partition = shards.ref_shard(repo, name);
         let registry = TimerRegistry::new()
             .register(TestTimer)

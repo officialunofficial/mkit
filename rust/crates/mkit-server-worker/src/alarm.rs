@@ -22,11 +22,12 @@ pub enum AlarmAction {
     Delete,
 }
 
-/// Set the next wake, clamping to now, or delete an empty schedule.
+/// Set the next wake strictly after now, or delete an empty schedule.
+/// Reusing the active alarm timestamp can strand a workerd alarm chain.
 #[must_use]
 pub fn alarm_after_tick(next_wake: Option<u64>, now_ms: u64) -> AlarmAction {
     match next_wake {
-        Some(next) => AlarmAction::Set(alarm_time(next.max(now_ms))),
+        Some(next) => AlarmAction::Set(alarm_time(next.max(now_ms.saturating_add(1)))),
         None => AlarmAction::Delete,
     }
 }
@@ -38,9 +39,12 @@ pub fn alarm_after_tick_with_current(
     next_wake: Option<u64>,
     now_ms: u64,
 ) -> AlarmAction {
+    let earliest = alarm_time(now_ms.saturating_add(1));
     match (current, alarm_after_tick(next_wake, now_ms)) {
-        (Some(current), AlarmAction::Set(next)) => AlarmAction::Set(current.min(next)),
-        (Some(current), AlarmAction::Delete) => AlarmAction::Set(current),
+        (Some(current), AlarmAction::Set(next)) => {
+            AlarmAction::Set(current.min(next).max(earliest))
+        }
+        (Some(current), AlarmAction::Delete) => AlarmAction::Set(current.max(earliest)),
         (None, action) => action,
     }
 }
@@ -55,7 +59,7 @@ pub fn alarm_after_tick_with_dirty(
     dirty: bool,
 ) -> AlarmAction {
     if dirty {
-        AlarmAction::Set(alarm_time(now_ms))
+        alarm_after_tick(Some(now_ms), now_ms)
     } else {
         alarm_after_tick_with_current(current, next_wake, now_ms)
     }
@@ -75,6 +79,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn continuation_advances_a_frozen_alarm_clock() {
+        // workerd can retain a rearmed timestamp equal to the active alarm
+        // without scheduling a successor (cloudflare/workerd#6866).
+        for current in [None, Some(99), Some(100)] {
+            for dirty in [false, true] {
+                assert_eq!(
+                    alarm_after_tick_with_dirty(current, Some(100), 100, dirty),
+                    AlarmAction::Set(101),
+                );
+            }
+        }
+        assert_eq!(alarm_after_tick(Some(90), 100), AlarmAction::Set(101));
+        assert_eq!(
+            alarm_after_tick_with_current(Some(90), None, 100),
+            AlarmAction::Set(101),
+        );
+        assert_eq!(
+            alarm_after_tick_with_current(Some(200), Some(300), 100),
+            AlarmAction::Set(200),
+        );
+    }
+
+    #[test]
     fn tick_preserves_alarms_installed_by_interleaved_applies() {
         let schedules = [None, Some(10), Some(200), Some(u64::MAX)];
         let cases = [
@@ -82,18 +109,18 @@ mod tests {
                 None,
                 [
                     AlarmAction::Delete,
-                    AlarmAction::Set(100),
+                    AlarmAction::Set(101),
                     AlarmAction::Set(200),
                     AlarmAction::Set(MAX_DATE_MS),
                 ],
             ),
-            (Some(50), [AlarmAction::Set(50); 4]),
-            (Some(100), [AlarmAction::Set(100); 4]),
+            (Some(50), [AlarmAction::Set(101); 4]),
+            (Some(100), [AlarmAction::Set(101); 4]),
             (
                 Some(150),
                 [
                     AlarmAction::Set(150),
-                    AlarmAction::Set(100),
+                    AlarmAction::Set(101),
                     AlarmAction::Set(150),
                     AlarmAction::Set(150),
                 ],
@@ -102,7 +129,7 @@ mod tests {
                 Some(300),
                 [
                     AlarmAction::Set(300),
-                    AlarmAction::Set(100),
+                    AlarmAction::Set(101),
                     AlarmAction::Set(200),
                     AlarmAction::Set(300),
                 ],
@@ -119,7 +146,7 @@ mod tests {
     fn dirty_tick_wakes_now_and_clean_empty_tick_deletes() {
         assert_eq!(
             alarm_after_tick_with_dirty(Some(500), None, 100, true),
-            AlarmAction::Set(100)
+            AlarmAction::Set(101)
         );
         assert_eq!(
             alarm_after_tick_with_dirty(None, None, 100, false),
@@ -144,7 +171,7 @@ mod tests {
     #[test]
     fn past_timers_are_set_at_now_and_empty_ticks_delete() {
         assert_eq!(alarm_after_put(None, 10, 100), Some(100));
-        assert_eq!(alarm_after_tick(Some(10), 100), AlarmAction::Set(100));
+        assert_eq!(alarm_after_tick(Some(10), 100), AlarmAction::Set(101));
         assert_eq!(alarm_after_tick(Some(200), 100), AlarmAction::Set(200));
         assert_eq!(alarm_after_tick(None, 100), AlarmAction::Delete);
         assert_eq!(
