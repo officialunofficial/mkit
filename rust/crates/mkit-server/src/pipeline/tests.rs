@@ -4778,3 +4778,7 @@ fn pipeline_refuses_more_extra_credential_headers_than_fit() {
         .is_ok()
     );
 }
+
+#[cfg(feature = "published-view")]
+#[path = "tests/published.rs"]
+mod published_view;

@@ -32,6 +32,7 @@
 //! | epoch lease (ref shard) | `el 00` | codec `EpochLease` |
 //! | leased shard (`Coordinator`) | `ls 00 <repo> 00 <shard_ref>` | codec `LeasedShard` |
 //! | lease recovery (`Coordinator`) | `lr 00` | codec `LeaseRecovery` |
+//! | published snapshot state (configured Worker `RefIndex` only) | `ps 00` | v1: version:u8, dirty:u8, generation/due/last-success:be64 |
 //! | backup state (Worker only; never pruned) | `bk 00` | codec `BackupStateV1` |
 //! | ticket | `t 00 <ticket_id:32>` | codec `TicketV1` |
 //! | ticket idempotency | `ti 00 <repo> 00 <ref> 00 <pack:32> <signer:32>` | raw ticket id |

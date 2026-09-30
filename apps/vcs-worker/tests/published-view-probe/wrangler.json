@@ -1,0 +1,67 @@
+{
+  "name": "mkit-published-view-probe",
+  "main": "build/worker/shim.mjs",
+  "compatibility_date": "2026-09-09",
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {
+    "AUTH_AUDIENCE": "https://local.example.test",
+    "ADDRESSING": "multi",
+    "SHARDING": "d34",
+    "WORKERS_PLAN": "free",
+    "NAMESPACE_POLICY": "allowlist",
+    "NAMESPACE_ALLOWLIST": "ed25519-1111111111111111111111111111111111111111111111111111111111111111",
+    "TICKET_KEYS": "probe abababababababababababababababababababababababababababababababab"
+  },
+  "r2_buckets": [
+    {
+      "binding": "STORAGE",
+      "bucket_name": "local-probe-packs"
+    },
+    {
+      "binding": "PUBLISHED_SNAPSHOTS",
+      "bucket_name": "local-probe-snapshots"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "REFSTORE",
+        "class_name": "RefStore"
+      },
+      {
+        "name": "NS_COORD",
+        "class_name": "NsCoordinator"
+      },
+      {
+        "name": "REF_SHARD",
+        "class_name": "RefShard"
+      },
+      {
+        "name": "REPO_INDEX",
+        "class_name": "RepoIndexShard"
+      },
+      {
+        "name": "CONTENT_INDEX",
+        "class_name": "ContentIndexShard"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "RefStore"
+      ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "NsCoordinator",
+        "RefShard",
+        "RepoIndexShard",
+        "ContentIndexShard"
+      ]
+    }
+  ]
+}
