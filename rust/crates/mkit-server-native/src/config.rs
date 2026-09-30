@@ -1523,6 +1523,7 @@ pub fn resolve(
                     audience: match &pipeline.auth { AuthMode::AuthV2(auth) => auth.audience().to_owned(), _ => String::new() },
                     shared_caches: true,
                     remote_sink: true,
+                    audit: None,
                 });
             }
         }

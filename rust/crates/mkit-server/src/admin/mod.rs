@@ -133,8 +133,8 @@ fn payload<'a>(path:&str,bytes:&'a [u8]) -> Result<&'a [u8],ServerError> {
 
 mod encoded_bytes {
     use super::*;
-    pub fn serialize<S:serde::Serializer>(bytes:&[u8],serializer:S) -> Result<S::Ok,S::Error> { serializer.serialize_str(&STANDARD.encode(bytes)) }
-    pub fn deserialize<'de,D:serde::Deserializer<'de>>(deserializer:D) -> Result<Vec<u8>,D::Error> {
+    pub(super) fn serialize<S:serde::Serializer>(bytes:&[u8],serializer:S) -> Result<S::Ok,S::Error> { serializer.serialize_str(&STANDARD.encode(bytes)) }
+    pub(super) fn deserialize<'de,D:serde::Deserializer<'de>>(deserializer:D) -> Result<Vec<u8>,D::Error> {
         STANDARD.decode(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
 }

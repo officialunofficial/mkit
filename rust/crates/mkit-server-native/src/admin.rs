@@ -36,6 +36,7 @@ pub fn resolve(args: &AdminArgs, pipeline: &mut PipelineConfig, meta: &MetaChoic
         if args.admin_listen.is_some() { return Err(invalid("--admin-listen requires --admin-keys-file")); }
         return Ok(None);
     };
+    if !matches!(pipeline.sharding, Sharding::Single | Sharding::D34) { return Err(invalid("unsupported admin sharding")); }
     if !matches!(meta, MetaChoice::Sqlite { .. }) { return Err(invalid("admin requires --meta sqlite:<PATH>")); }
     let AuthMode::AuthV2(auth) = &pipeline.auth else { return Err(invalid("admin requires --auth auth-v2 and --audience")); };
     let json = read_secret_file(path, "--admin-keys-file", "admin public key list")?;
@@ -45,7 +46,7 @@ pub fn resolve(args: &AdminArgs, pipeline: &mut PipelineConfig, meta: &MetaChoic
     }
     #[cfg(feature = "http-objects")]
     if let Some(tokens) = &pipeline.url_tokens {
-        config.check_separation(&tokens.keys().public_keys()).map_err(invalid)?;
+        config.check_separation(&tokens.keys().public_keys().collect::<Vec<_>>()).map_err(invalid)?;
     }
     pipeline.admin_keys = config.public_keys();
     Ok(Some(Settings { listen: args.admin_listen.unwrap_or_else(|| SocketAddr::from(([127,0,0,1],19191))), config }))
@@ -53,12 +54,12 @@ pub fn resolve(args: &AdminArgs, pipeline: &mut PipelineConfig, meta: &MetaChoic
 /// Stable deployment-wide audit/replay partition, inaccessible as a client namespace.
 #[must_use]
 pub fn partition(sharding: Sharding) -> Partition {
-    match sharding { Sharding::Single => Partition::Namespace(NamespaceKey::deployment_default()), Sharding::D34 => Partition::Coordinator(NamespaceKey::deployment_default()) }
+    match sharding { Sharding::Single => Partition::Namespace(NamespaceKey::deployment_default()), _ => Partition::Coordinator(NamespaceKey::deployment_default()) }
 }
 /// Build only the two supported operator procedures on the separate router.
 #[must_use]
 pub fn router<S: NamespaceStore + Clone + 'static>(store:S, settings:&Settings, pipeline:&PipelineConfig) -> Router {
-    let engine = Arc::new(Engine::new(store, partition(pipeline.sharding), settings.config.clone(), pipeline.purge.clone()));
+    let engine = Arc::new(Engine::new(store, partition(pipeline.sharding), settings.config.clone(), pipeline.purge.is_some()));
     let dispatch = move |req:Request| {
         let engine = Arc::clone(&engine);
         async move {
@@ -72,7 +73,7 @@ pub fn router<S: NamespaceStore + Clone + 'static>(store:S, settings:&Settings, 
                 capture.push(&chunk);
             }
             let now = mkit_server::Clock::now_ms(&mkit_server::SystemClock);
-            response(engine.handle(&path, &headers, capture, u64::try_from(now).unwrap_or(0)).await)
+            response(engine.handle(&path, &headers, &capture, now).await)
         }
     };
     Router::new().route("/mkit.server.admin.v1.AdminService/PurgeCache", axum::routing::post(dispatch.clone())).route("/mkit.server.admin.v1.AdminService/ReadAuditLog", axum::routing::post(dispatch))
