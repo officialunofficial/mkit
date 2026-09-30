@@ -1310,6 +1310,9 @@ durable until acknowledgement, which deletes their delivery index and subtracts
 the exact stored key/value byte count. Shared counters and sequence/backlog
 values are guarded once per batch. A zero-to-positive backlog transition adds
 one kind-8 delivery kick; delivery may repeat but never drops an unacked row.
+A positive backlog keeps exactly one kind-8 row. Delivery decides completion
+from the same backlog snapshot its acknowledgment batch guards; concurrent
+appends either retain a rescheduled timer or fail that guard for re-planning.
 
 **Because:** consumption and expiry race; delivery may repeat or crash. An
 unguarded replacement could record two outcomes, erase a replacement ticket's
@@ -1325,6 +1328,9 @@ and SQLite. WP-1.10 exercises consumption and the defensive abort over native
 memory/SQLite and wire cases; the kind-2 expiry handler closes tickets with
 one guarded `Expired` row and best-effort session abort. WP-3.3 enforces guarded
 Pending reservations, ReadServed, reconciliation and backlog limits.
+WP-3.13 corrects the kind-8 acknowledgment/completion window from #1219;
+regular `timers/outcome_delivery.rs` regressions cover appends before and
+after the guarded fresh read and complete empty-backlog acknowledgment.
 ## Relay delivery advances durable per-source watermarks before source cleanup
 
 **Always:** relay rows for a source/target pair apply in sequence order. Each

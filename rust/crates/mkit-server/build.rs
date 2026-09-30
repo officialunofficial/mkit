@@ -20,72 +20,12 @@
 // (tokio/net, hyper-util server, libc), which does not build for
 // wasm32-unknown-unknown.
 //
-// The `remote-hooks` feature does the same for the `mkit.server.hooks.v1`
-// messages, with buffa alone (no ConnectRPC stubs: nothing here serves or
-// calls a generated client). Sources live under generated/hooks/ and stage
-// into $OUT_DIR/hooks/. Regenerate with MKIT_HOOKS_CODEGEN=1 (protoc >= 27),
-// i.e. scripts/regen-hooks-proto.sh from the repo root.
+// Hook messages are staged by mkit-rpc (feature hooks).
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     #[cfg(feature = "connect")]
     connect::stage();
-    #[cfg(feature = "remote-hooks")]
-    hooks::stage();
-}
-
-#[cfg(feature = "remote-hooks")]
-mod hooks {
-    use std::path::{Path, PathBuf};
-
-    /// Written next to real codegen output so the regen script can tell it
-    /// from a staged copy of `generated/hooks/`.
-    const MARKER: &str = ".mkit-server-hooks-codegen";
-
-    pub(crate) fn stage() {
-        let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR")).join("hooks");
-        std::fs::create_dir_all(&out_dir).expect("create hooks OUT_DIR");
-        println!("cargo:rerun-if-changed=generated/hooks");
-        println!("cargo:rerun-if-env-changed=PROTOC");
-        println!("cargo:rerun-if-env-changed=MKIT_HOOKS_CODEGEN");
-        let marker = out_dir.join(MARKER);
-
-        if std::env::var_os("MKIT_HOOKS_CODEGEN").is_some() {
-            let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../proto")
-                .canonicalize()
-                .expect("canonical proto root not found: expected proto/ at repo root");
-            let hooks = root.join("mkit/server/hooks/v1/hooks.proto");
-            println!("cargo:rerun-if-changed={}", hooks.display());
-            buffa_build::Config::new()
-                .files(&[hooks.to_str().expect("proto path is valid UTF-8")])
-                .includes(&[root.to_str().expect("proto root is valid UTF-8")])
-                .out_dir(&out_dir)
-                .generate_views(false)
-                .generate_json(true)
-                .include_file("_hooks.rs")
-                .compile()
-                .expect("buffa codegen failed for the canonical hooks proto");
-            std::fs::write(&marker, b"").expect("write codegen marker");
-            return;
-        }
-
-        let _ = std::fs::remove_file(&marker);
-        let mut staged = 0usize;
-        for entry in std::fs::read_dir(Path::new("generated/hooks")).expect("read generated/hooks/")
-        {
-            let path = entry.expect("read generated/hooks/ entry").path();
-            if path.extension().is_some_and(|e| e == "rs") {
-                let name = path.file_name().expect("file name");
-                std::fs::copy(&path, out_dir.join(name)).expect("stage generated module");
-                staged += 1;
-            }
-        }
-        assert!(
-            staged > 0,
-            "generated/hooks/ contains no .rs modules: run scripts/regen-hooks-proto.sh"
-        );
-    }
 }
 
 #[cfg(feature = "connect")]
