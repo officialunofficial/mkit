@@ -52,6 +52,12 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[derive(Debug, Clone, Default)]
 pub struct SimBucket {
     objects: Arc<Mutex<BTreeMap<String, Bytes>>>,
+    uploads: Arc<Mutex<BTreeMap<String, (String, BTreeMap<u16, (String, Bytes)>)>>>,
+    next_upload: Arc<AtomicUsize>,
+    pub metadata_reads: Arc<AtomicUsize>,
+    pub backend_completions: Arc<AtomicUsize>,
+    pub operations: Arc<AtomicUsize>,
+    pub lose_completion_reply: Arc<AtomicBool>,
     /// Fail this many next puts after their body arrived, as R2 does for a
     /// second write of one key within a second (HTTP 429).
     fail_puts: Arc<AtomicUsize>,
@@ -99,6 +105,7 @@ impl SimBucket {
 
 impl ObjectBucket for SimBucket {
     fn spawn_put(&self, key: String, len: u64, mut body: PutBody) -> oneshot::Receiver<PutResult> {
+        self.operations.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         let this = self.clone();
         std::thread::spawn(move || {
@@ -136,7 +143,106 @@ impl ObjectBucket for SimBucket {
         rx
     }
 
+    async fn create_object_upload(&self, key: &str) -> Result<String, String> {
+        self.operations.fetch_add(1, Ordering::SeqCst);
+        let id = self.next_upload.fetch_add(1, Ordering::SeqCst).to_string();
+        lock(&self.uploads).insert(id.clone(), (key.to_owned(), BTreeMap::new()));
+        Ok(id)
+    }
+
+    fn spawn_object_part(
+        &self,
+        key: String,
+        upload: String,
+        number: u16,
+        len: u64,
+        mut body: PutBody,
+    ) -> oneshot::Receiver<Result<String, String>> {
+        let (tx, rx) = oneshot::channel();
+        let this = self.clone();
+        std::thread::spawn(move || {
+            multipart_allocator::exclude_current_thread();
+            let result = block_on(async {
+                let mut bytes = Vec::new();
+                while let Some(piece) = body.next().await {
+                    bytes.extend_from_slice(&piece.map_err(|_| "body aborted".to_owned())?);
+                    if bytes.len() as u64 > len {
+                        return Err("overrun".into());
+                    }
+                }
+                if bytes.len() as u64 != len {
+                    return Err("underrun".into());
+                }
+                let mut uploads = lock(&this.uploads);
+                let (object, parts) = uploads.get_mut(&upload).ok_or("SessionGone")?;
+                if *object != key {
+                    return Err("wrong key".into());
+                }
+                let etag = format!(
+                    "part-{number}-{}",
+                    this.next_upload.fetch_add(1, Ordering::SeqCst)
+                );
+                parts.insert(number, (etag.clone(), Bytes::from(bytes)));
+                Ok(etag)
+            });
+            let _ = tx.send(result);
+        });
+        rx
+    }
+
+    async fn complete_object_upload(
+        &self,
+        key: &str,
+        upload: &str,
+        selected: Vec<(u16, String)>,
+    ) -> Result<(), String> {
+        self.backend_completions.fetch_add(1, Ordering::SeqCst);
+        self.operations.fetch_add(1, Ordering::SeqCst);
+        let this = self.clone();
+        let key = key.to_owned();
+        let upload = upload.to_owned();
+        let (tx, rx) = oneshot::channel();
+        std::thread::spawn(move || {
+            // Remote backend storage is outside the Worker's resident heap.
+            multipart_allocator::exclude_current_thread();
+            let result = (|| {
+                let mut uploads = lock(&this.uploads);
+                let (object, parts) = uploads.get(&upload).ok_or("SessionGone")?;
+                if object != &key {
+                    return Err("wrong key".into());
+                }
+                let mut result = Vec::new();
+                for (number, etag) in selected {
+                    let (actual, bytes) = parts.get(&number).ok_or("missing part")?;
+                    if *actual != etag {
+                        return Err("part replaced".into());
+                    }
+                    result.extend_from_slice(bytes);
+                }
+                lock(&this.objects).insert(key.to_owned(), Bytes::from(result));
+                uploads.remove(&upload);
+                if this.lose_completion_reply.swap(false, Ordering::SeqCst) {
+                    return Err("lost completion reply".into());
+                }
+                Ok(())
+            })();
+            let _ = tx.send(result);
+        });
+        rx.await.map_err(|_| "backend task dropped".to_owned())?
+    }
+
+    async fn abort_object_upload(&self, key: &str, upload: &str) -> Result<(), String> {
+        self.operations.fetch_add(1, Ordering::SeqCst);
+        let mut uploads = lock(&self.uploads);
+        if uploads.get(upload).is_some_and(|(object, _)| object != key) {
+            return Err("wrong key".into());
+        }
+        uploads.remove(upload);
+        Ok(())
+    }
+
     async fn head(&self, key: &str) -> Result<Option<u64>, String> {
+        self.operations.fetch_add(1, Ordering::SeqCst);
         Ok(lock(&self.objects).get(key).map(|b| b.len() as u64))
     }
 
@@ -145,6 +251,8 @@ impl ObjectBucket for SimBucket {
         key: &str,
         range: Option<Range<u64>>,
     ) -> Result<Option<(u64, ObjectStream)>, String> {
+        self.metadata_reads.fetch_add(1, Ordering::SeqCst);
+        self.operations.fetch_add(1, Ordering::SeqCst);
         let Some(object) = lock(&self.objects).get(key).cloned() else {
             return Ok(None);
         };
