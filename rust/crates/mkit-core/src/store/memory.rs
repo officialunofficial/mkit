@@ -2,8 +2,7 @@ use super::{MAX_RAW_OBJECT_SIZE, ObjectSource, StoreError, StoreResult, check_ha
 use crate::hash::{Hash, to_hex};
 use crate::object::object_id_from_bytes;
 use std::collections::BTreeMap;
-/// Canonical object bytes prefetched into memory by an embedding application.
-/// Fetch asynchronously, insert canonical bytes, then use
+/// Prefetched canonical bytes for synchronous builders such as
 /// [`crate::verify::build_disclosure_from`] or [`crate::ops::diff::diff_trees`].
 /// The host owns authorization and aggregate memory limits.
 #[derive(Debug, Default)]
@@ -11,8 +10,7 @@ pub struct MemorySource {
     objects: BTreeMap<Hash, Vec<u8>>,
 }
 impl MemorySource {
-    /// Insert prefetched canonical bytes under their expected object ID.
-    /// An invalid insertion leaves the previous value intact.
+    /// Insert verified canonical bytes; failed inserts preserve the previous value.
     ///
     /// # Errors
     /// [`StoreError::ObjectTooLarge`] or [`StoreError::HashMismatch`].
