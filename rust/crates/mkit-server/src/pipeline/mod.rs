@@ -2925,7 +2925,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .authorizer()
                 .authorize(op)
                 .await
-                .map(|facts| (facts, None))
+                .map(|mut facts| {
+                    // The authority fence is valid only for Multi addressing.
+                    // A hook cannot activate it on an unfenced Single deployment.
+                    facts.authority_generation = None;
+                    (facts, None)
+                })
                 .map_err(ServerError::strip_admission_shape),
         }
     }
