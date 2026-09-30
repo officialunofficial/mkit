@@ -4,8 +4,10 @@ This standalone test fixture sends synthetic responses through the production
 Workers streaming bridge and final response policy. It checks raw escaped paths,
 trailing empty queries, streamed GET and Range lengths, HEAD across status codes,
 repeated challenges, CORS, key documents, private caching and adapter-error policy.
+Shared `content-headers.json` vectors also drive real indexed memory-store
+ingestion and ref-path GET/HEAD/206/304 responses (WP-4.16b).
 A delayed local subrequest proves that the first body chunk arrives before EOF.
-It also checks verified multipart upload and completion against an isolated local R2 binding, including absence before completion, wrong-root refusal and exact completed bytes. It does not use cloud R2, Durable Objects or the full object pipeline.
+It also checks verified multipart upload and completion against an isolated local R2 binding, including absence before completion, wrong-root refusal and exact completed bytes. It does not use cloud R2 or Durable Objects.
 
 Run from the worktree root with `worker-build`, Node/npm and Python 3 available:
 

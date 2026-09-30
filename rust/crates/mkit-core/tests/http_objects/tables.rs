@@ -559,7 +559,7 @@ pub(super) fn responses() -> Value {
             json!({"method":"GET","route":"ref","public":true}),
             200,
             "public, no-cache",
-            "application/octet-stream",
+            "text/plain; charset=utf-8",
             100,
             None,
         ),
@@ -577,7 +577,7 @@ pub(super) fn responses() -> Value {
             json!({"method":"GET","route":"ref","public":false}),
             200,
             "private, no-cache",
-            "application/octet-stream",
+            "text/plain; charset=utf-8",
             100,
             None,
         ),
@@ -595,7 +595,7 @@ pub(super) fn responses() -> Value {
             json!({"method":"GET","route":"ref","admission":"allow","public":true}),
             200,
             "private, no-cache",
-            "application/octet-stream",
+            "text/plain; charset=utf-8",
             100,
             None,
         ),
@@ -666,6 +666,8 @@ pub(super) fn responses() -> Value {
         let mut headers = json!({"ETag":etag,"Accept-Ranges":"bytes","Cache-Control":cache,"Content-Type":media,"Content-Length":length.to_string(),"X-Mkit-Object":h,"X-Mkit-Object-Type":request["type"].as_str().unwrap_or("blob")});
         if request["route"] == "ref" {
             headers["X-Mkit-Commit"] = json!(commit);
+            headers["Content-Disposition"] =
+                json!("inline; filename=\"small.txt\"; filename*=UTF-8''small.txt");
         }
         if let Some(r) = range {
             headers["Content-Range"] = json!(r);
@@ -942,4 +944,90 @@ pub(super) fn check(dir: &std::path::Path) {
             .as_str()
             .is_some()
     );
+}
+
+/// Shared native/workerd wire vectors; independent of the server.
+pub(super) fn content_headers() -> Value {
+    let mut cases = Vec::new();
+    for (ext, media, kind) in [
+        ("png", "image/png", "inline"),
+        ("jpg", "image/jpeg", "inline"),
+        ("jpeg", "image/jpeg", "inline"),
+        ("gif", "image/gif", "inline"),
+        ("webp", "image/webp", "inline"),
+        ("avif", "image/avif", "inline"),
+        ("txt", "text/plain; charset=utf-8", "inline"),
+        ("json", "application/json", "attachment"),
+        ("pdf", "application/pdf", "inline"),
+        ("svg", "application/octet-stream", "attachment"),
+        ("html", "application/octet-stream", "attachment"),
+        ("js", "application/octet-stream", "attachment"),
+        ("htm", "application/octet-stream", "attachment"),
+        ("xhtml", "application/octet-stream", "attachment"),
+        ("xml", "application/octet-stream", "attachment"),
+        ("mjs", "application/octet-stream", "attachment"),
+        ("css", "application/octet-stream", "attachment"),
+    ] {
+        for name in [
+            format!("file.{ext}"),
+            format!("many.dots.{}", ext.to_ascii_uppercase()),
+        ] {
+            cases.push(json!({"name": name, "path": name, "media": media,
+                "disposition": format!("{kind}; filename=\"{name}\"; filename*=UTF-8''{name}")}));
+        }
+    }
+    for (name, path, fallback, encoded, media, kind) in [
+        (
+            "café.txt",
+            "caf%C3%A9.txt",
+            "caf__.txt",
+            "caf%C3%A9.txt",
+            "text/plain; charset=utf-8",
+            "inline",
+        ),
+        (
+            "a\";\r\nb.txt",
+            "a%22%3B%0D%0Ab.txt",
+            "a____b.txt",
+            "a%22%3B%0D%0Ab.txt",
+            "text/plain; charset=utf-8",
+            "inline",
+        ),
+        (
+            "no-extension",
+            "no-extension",
+            "no-extension",
+            "no-extension",
+            "application/octet-stream",
+            "attachment",
+        ),
+        (
+            "image.png.exe",
+            "image.png.exe",
+            "image.png.exe",
+            "image.png.exe",
+            "application/octet-stream",
+            "attachment",
+        ),
+        (
+            "png",
+            "png",
+            "png",
+            "png",
+            "application/octet-stream",
+            "attachment",
+        ),
+        (
+            "a'%*.txt",
+            "a%27%25%2A.txt",
+            "a___.txt",
+            "a%27%25%2A.txt",
+            "text/plain; charset=utf-8",
+            "inline",
+        ),
+    ] {
+        cases.push(json!({"name": name, "path": path, "media": media,
+            "disposition": format!("{kind}; filename=\"{fallback}\"; filename*=UTF-8''{encoded}")}));
+    }
+    json!({"schema_version": 1, "cases": cases})
 }

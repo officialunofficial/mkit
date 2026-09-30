@@ -2166,6 +2166,24 @@
     ]
   },
   {
+    "id": "4.16b",
+    "title": "Ref-path file Content-Type allowlist and filename (UNO-420, R-201)",
+    "milestone": "M4",
+    "track": "core",
+    "depends_on": [
+      "4.16"
+    ],
+    "size": "S",
+    "summary": "Launch headers for ordinary ref-path Blob/ChunkedBlob 200/206 and HEAD: extension-only media allowlist and RFC 5987 filename plus sanitized ASCII fallback; shared native/Worker implementation, unchanged security, caches, tokens, proofs and 304.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
     "id": "4.17",
     "title": "Pre-receive policy hooks: allowed signers per ref, fast-forward-only grants",
     "milestone": "M4",

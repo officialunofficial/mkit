@@ -757,6 +757,7 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
     for (name, table) in [
         ("url-parse.json", tables::urls()),
         ("response-cases.json", tables::responses()),
+        ("content-headers.json", tables::content_headers()),
     ] {
         files.insert(name.into(), serde_json::to_vec_pretty(&table).unwrap());
     }
@@ -815,7 +816,7 @@ fn committed_http_object_goldens_verify() {
             continue;
         }
         let name = path.file_stem().unwrap().to_str().unwrap();
-        if ["url-parse", "response-cases"].contains(&name) {
+        if ["url-parse", "response-cases", "content-headers"].contains(&name) {
             continue;
         }
         let sidecar: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
