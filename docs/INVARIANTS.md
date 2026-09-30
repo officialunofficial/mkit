@@ -2059,8 +2059,10 @@ and extraction-driver integration remain WP-4.10b-2 work.
 with one complete, deduplicated metadata batch per inspector. The set contains
 every Blob and ChunkedBlob entry of the added packs, surplus included, reported
 as BLOB and CHUNKED_FILE; chunk-only blobs remain BLOB and CHUNK is unused.
-Inspection starts from an empty store; earlier membership was already inspected
-because sync advances clear at apply. Added-pack entry counts preflight the positive
+Inspection starts from an empty store; every consumed pack ticket's file entries
+pass inspection before membership apply. Earlier membership remains covered even
+when D34 relay lag delays publication or refs are deleted and recreated; upload
+completion and verification alone add no membership. Added-pack entry counts preflight the positive
 whole-advance bound (at most 10,000) before enumeration; oversize uses the
 ordinary index-limit refusal before hooks/apply. Reject/quarantine dominates;
 unavailable cannot commit or enter replay. With inspection disabled, existing

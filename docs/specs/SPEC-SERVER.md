@@ -1667,9 +1667,13 @@ reported once. It MUST report `Blob` as `BLOB` and `ChunkedBlob` as
 membership by decoding manifests through the private byte-retrieval
 channel (R-193), rather than through server-side role classification.
 
-This set is complete for the launch profile because synchronous inspection
-clears at apply: earlier membership was already inspected, so newly reachable
-objects outside published membership come from the advance's added packs.
+This set is complete for the launch profile because every membership addition
+passes synchronous inspection before apply, including all file entries of every
+consumed pack ticket. Existing membership was therefore already inspected,
+even when D34 relay lag leaves its publication pending. Newly reachable files
+in such pending packs need not belong to the current advance's added packs;
+they are covered by the earlier inspection. Upload completion or verification
+alone establishes no membership, and ref deletion does not erase that coverage.
 Enabling inspection over existing, unscanned content is unsupported in this
 profile; an inspection deployment MUST start from an empty store. No durable
 inspection-mode marker is introduced at launch; the marker and full-profile
@@ -3602,7 +3606,8 @@ whole-advance input bound of `inspect_batch_max_objects` (positive and at most
 The inspected set is every `Blob` and `ChunkedBlob` entry of the added packs,
 surplus included and ids deduplicated, using `BLOB` and `CHUNKED_FILE` respectively;
 chunk-only blobs MAY be `BLOB` and `CHUNK` is unused (§11.1). Earlier membership
-was already inspected because sync advances clear at apply. Enabling inspection
+was already inspected before its membership apply, including membership whose
+publication is pending on D34 relay (§11.1). Enabling inspection
 over existing, unscanned content is unsupported: inspection deployments MUST
 start from an empty store. Enumeration reads frame/checkpoint pages of at most
 1,000 rows, without an inspection tree walk, reference pages or object-store reads.
