@@ -2199,7 +2199,7 @@ async fn m1_list_refs_wire_pages_stop_at_two_mib() {
         let mut batch = Batch::new();
         for i in base..base + 100 {
             let name = format!("refs/heads/{i:05}{}", "a".repeat(490));
-            batch = batch.put(keys::ref_key(&repo, &name), codec::encode_ref_id(&A));
+            batch = batch.put(keys::published_ref(&repo, &name), codec::encode_ref_id(&A));
         }
         meta.apply(&partition, batch).await.unwrap();
     }

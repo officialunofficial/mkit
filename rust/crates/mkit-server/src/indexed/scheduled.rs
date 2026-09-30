@@ -204,6 +204,7 @@ async fn staged_commits<N: NamespaceStore>(
             .iter()
             .map(|c| usize::try_from(c.job.entries).unwrap_or(usize::MAX))
             .fold(0, usize::saturating_add),
+        external_bases: BTreeSet::new(),
         bytes: ready
             .iter()
             .map(|c| c.job.in_pack_bytes)
@@ -558,5 +559,12 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
             return Err(packlist_error(now, list.ticket.created_at_ms, bound));
         }
     }
-    staged_commits(store, source, repo, &ready, head, cfg).await
+    let mut staged = staged_commits(store, source, repo, &ready, head, cfg).await?;
+    // vc6 includes every intermediate external source, even for surplus entries
+    // and sources co-consumed by this advance; publication must not waive them.
+    staged.external_bases = dependencies
+        .into_iter()
+        .filter_map(|(pack, age)| age.map(|_| pack))
+        .collect();
+    Ok(staged)
 }

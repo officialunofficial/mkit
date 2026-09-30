@@ -14,6 +14,11 @@
 //! | deployment sharding marker (root `Namespace` only) | `sm 00` | UTF-8 `single` or `d34` |
 //! | deployment addressing marker (root `Namespace` only) | `am 00` | UTF-8 `single` or `multi` |
 //! | layout version | `v 00` | be32 [`LAYOUT_VERSION`]; never on `RefsOnly` stores |
+//! | publication sequence and boundary | `pp 00 <repo> 00 <canonical ref>` | v1 `Publication` |
+//! | retained advance | `av 00 <repo> 00 <canonical ref> 00 <seq:be64>` | v1 `Advance` |
+//! | published ref | `pr 00 <repo> 00 <ref>` | 32-byte published id |
+//! | published ref index | `py 00 <repo> 00 <ref>` | 32-byte published id |
+//! | published membership index | `pm 00 <repo> 00 <pack:32>` | v1 clearance witness |
 //! | ref | `r 00 <repo> 00 <refname>` | 32-byte id |
 //! | ref-name index (`RefIndex`) | `x 00 <repo> 00 <refname>` | 32-byte id |
 //! | replay record | `p 00 <scope:32>` | codec `ReplayRecord` |
@@ -40,7 +45,7 @@
 //! | open tickets per ref | `tc 00 <repo> 00 <ref>` | be64; absent means 0, deleted at 0 |
 //! | open tickets per signer | `tu 00 <repo> 00 <ref> 00 <signer:32>` | be64; same rules |
 //! | ticket expiry timer | `w 00 <expires_at:be64> 02 <ticket_id:32>` | empty |
-//! | local membership | `m 00 <repo> 00 <pack:32>` | empty |
+//! | local membership | `m 00 <repo> 00 <pack:32>` | empty (immediate upload) or v1 clearance witness |
 //! | indexed verification state | `vs 00 <repo> 00 <pack:32>` | `VerificationV1` |
 //! | scheduled-verification job (ref shard) | `vc 00 <repo> 00 <pack:32> <sub:u8> [<id:32>]` | sub 0 job `VerifyJobV1`; 1 frame; 2 closure child; 3 charged external base; 4 extraction candidate (WP-4.10b); 5 history edges (parents); 6 external source pack dependency |
 //! | repository object index | `i 00 <repo> 00 <object:32> <pack:32>` | binary `IndexValue` |
@@ -58,7 +63,7 @@
 //! | object state (`ContentShard`) | `c 00 <object:32>` | codec `ObjectState` |
 //!
 //! Reserved tags ([`RESERVED_TAGS`]), each laid out by the work package
-//! that adds it: leases `l`, published pointers `pp`, tombstones `tb`, and the
+//! that adds it: leases `l`, tombstones `tb`, and the
 //! deployment's namespace list
 //! [`TAG_NAMESPACE_LIST`] (WP-1.5; see `Partition` for enumeration). A
 //! new row adds its layout here, with a golden test.
@@ -191,8 +196,19 @@ pub const TAG_OUTBOX_SEQUENCE: &str = "os";
 /// Terminal outcome backlog tag.
 pub const TAG_OUTCOME_BACKLOG: &str = "oc";
 
+/// Persistent paired sequence, pointer and deletion boundary.
+pub const TAG_PUBLICATION: &str = "pp";
+/// Retained advance values and obligations.
+pub const TAG_ADVANCE: &str = "av";
+/// Authoritative published ref value.
+pub const TAG_PUBLISHED_REF: &str = "pr";
+/// Published `RefIndex` projection.
+pub const TAG_PUBLISHED_INDEX: &str = "py";
+/// Published `RepoIndex` membership projection.
+pub const TAG_PUBLISHED_MEMBER: &str = "pm";
+
 /// Tags whose layouts later work packages add. No M0 key uses them.
-pub const RESERVED_TAGS: &[&str] = &["tb", "l", "pp", TAG_NAMESPACE_LIST];
+pub const RESERVED_TAGS: &[&str] = &["tb", "l", TAG_NAMESPACE_LIST];
 
 /// [`TAG_VERIFY_CURSOR`] sub-classes: the job row.
 pub const VC_JOB: u8 = 0;
@@ -246,6 +262,20 @@ pub enum ParsedKey {
         /// Full ref name.
         name: String,
     },
+    /// Publication key with a validated full sequence/ref name.
+    Publication { repo: RepoName, name: String },
+    /// Retained advance, with nonzero sequence.
+    Advance {
+        repo: RepoName,
+        name: String,
+        sequence: u64,
+    },
+    /// Authoritative published value.
+    PublishedRef { repo: RepoName, name: String },
+    /// Published ref projection.
+    PublishedIndex { repo: RepoName, name: String },
+    /// Versioned published membership witness.
+    PublishedMember { repo: RepoName, pack_id: Hash },
     /// `p 00 <scope>`.
     Replay(Hash),
     /// `px 00 <expires_at> <scope>`.
@@ -503,6 +533,64 @@ pub fn ref_index_key(repo: &RepoName, name: &str) -> Key {
 #[must_use]
 pub fn ref_index_prefix_range(repo: &RepoName, prefix: &str) -> (Key, Key) {
     let start = ref_index_key(repo, prefix);
+    let end = successor(&start);
+    (start, end)
+}
+
+/// Publication key for the canonical sequence name (head for a branch pair).
+#[must_use]
+pub fn publication(repo: &RepoName, name: &str) -> Key {
+    key(
+        TAG_PUBLICATION,
+        &[repo.as_str().as_bytes(), b"\0", name.as_bytes()],
+    )
+}
+/// Retained value, ordered numerically within one ref sequence.
+#[must_use]
+pub fn advance(repo: &RepoName, name: &str, sequence: u64) -> Key {
+    key(
+        TAG_ADVANCE,
+        &[
+            repo.as_str().as_bytes(),
+            b"\0",
+            name.as_bytes(),
+            b"\0",
+            &sequence.to_be_bytes(),
+        ],
+    )
+}
+/// Authoritative published ref value.
+#[must_use]
+pub fn published_ref(repo: &RepoName, name: &str) -> Key {
+    key(
+        TAG_PUBLISHED_REF,
+        &[repo.as_str().as_bytes(), b"\0", name.as_bytes()],
+    )
+}
+/// Published ref projection in the same bucket as the live index.
+#[must_use]
+pub fn published_index(repo: &RepoName, name: &str) -> Key {
+    key(
+        TAG_PUBLISHED_INDEX,
+        &[repo.as_str().as_bytes(), b"\0", name.as_bytes()],
+    )
+}
+/// Published membership in the pack's repository index partition.
+#[must_use]
+pub fn published_member(repo: &RepoName, pack: &Hash) -> Key {
+    key(
+        TAG_PUBLISHED_MEMBER,
+        &[repo.as_str().as_bytes(), b"\0", pack],
+    )
+}
+/// A validated published-ref or published-index prefix range.
+#[must_use]
+pub fn published_range(repo: &RepoName, prefix: &str, index: bool) -> (Key, Key) {
+    let start = if index {
+        published_index(repo, prefix)
+    } else {
+        published_ref(repo, prefix)
+    };
     let end = successor(&start);
     (start, end)
 }
@@ -1026,6 +1114,39 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
             let (repo, name) = parse_named_ref(body)?;
             ParsedKey::RefIndexEntry { repo, name }
         }
+        b"pp" | b"pr" | b"py" => {
+            let (repo, name) = parse_named_ref(body)?;
+            check_ticket_ref(&name).ok()?;
+            match tag {
+                b"pp" => ParsedKey::Publication { repo, name },
+                b"pr" => ParsedKey::PublishedRef { repo, name },
+                _ => ParsedKey::PublishedIndex { repo, name },
+            }
+        }
+        b"av" => {
+            let cut = body.len().checked_sub(9)?;
+            if body[cut] != 0 {
+                return None;
+            }
+            let (repo, name) = parse_named_ref(&body[..cut])?;
+            check_ticket_ref(&name).ok()?;
+            let (sequence, rest) = be64(&body[cut + 1..])?;
+            if sequence == 0 || !rest.is_empty() {
+                return None;
+            }
+            ParsedKey::Advance {
+                repo,
+                name,
+                sequence,
+            }
+        }
+        b"pm" => {
+            let sep = body.iter().position(|b| *b == 0)?;
+            ParsedKey::PublishedMember {
+                repo: RepoName::new(text(&body[..sep])?).ok()?,
+                pack_id: hash(&body[sep + 1..])?,
+            }
+        }
         b"t" => ParsedKey::Ticket(hash(body)?),
         b"ti" | b"tc" | b"tu" => parse_ticket_binding(tag, body)?,
         b"m" => {
@@ -1184,9 +1305,81 @@ mod tests {
             TAG_RELAY,
             TAG_OUTBOX_SEQUENCE,
             TAG_OUTCOME_BACKLOG,
+            TAG_PUBLICATION,
+            TAG_ADVANCE,
+            TAG_PUBLISHED_REF,
+            TAG_PUBLISHED_INDEX,
+            TAG_PUBLISHED_MEMBER,
         ];
         tags.extend_from_slice(RESERVED_TAGS);
         tags
+    }
+
+    #[test]
+    fn publication_key_goldens_and_strict_parsing() {
+        let repository = repo("a");
+        let name = "refs/heads/main";
+        let cases = [
+            (
+                publication(&repository, name),
+                b"pp\0a\0refs/heads/main".to_vec(),
+                ParsedKey::Publication {
+                    repo: repository.clone(),
+                    name: name.into(),
+                },
+            ),
+            (
+                advance(&repository, name, 0x0102_0304_0506_0708),
+                [
+                    b"av\0a\0refs/heads/main\0".as_slice(),
+                    &[1, 2, 3, 4, 5, 6, 7, 8],
+                ]
+                .concat(),
+                ParsedKey::Advance {
+                    repo: repository.clone(),
+                    name: name.into(),
+                    sequence: 0x0102_0304_0506_0708,
+                },
+            ),
+            (
+                published_ref(&repository, name),
+                b"pr\0a\0refs/heads/main".to_vec(),
+                ParsedKey::PublishedRef {
+                    repo: repository.clone(),
+                    name: name.into(),
+                },
+            ),
+            (
+                published_index(&repository, name),
+                b"py\0a\0refs/heads/main".to_vec(),
+                ParsedKey::PublishedIndex {
+                    repo: repository.clone(),
+                    name: name.into(),
+                },
+            ),
+            (
+                published_member(&repository, &[0x11; 32]),
+                [b"pm\0a\0".as_slice(), &[0x11; 32]].concat(),
+                ParsedKey::PublishedMember {
+                    repo: repository.clone(),
+                    pack_id: [0x11; 32],
+                },
+            ),
+        ];
+        for (key, golden, parsed) in cases {
+            assert_eq!(key.as_bytes(), golden);
+            assert_eq!(parse(&key), Some(parsed));
+        }
+        for bad in [
+            advance(&repository, name, 0).into_bytes().to_vec(),
+            [b"av\0a\0refs/heads/main\0".as_slice(), &[1; 7]].concat(),
+            [b"av\0a\0refs/heads/main\0".as_slice(), &[1; 9]].concat(),
+            b"pr\0a\0not-a-ref".to_vec(),
+            [b"pm\0a\0".as_slice(), &[1; 31]].concat(),
+            [b"pm\0a\0".as_slice(), &[1; 33]].concat(),
+        ] {
+            assert_eq!(parse(&Key::new(bad)), None);
+        }
     }
 
     #[test]

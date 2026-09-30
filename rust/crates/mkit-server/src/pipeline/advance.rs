@@ -124,6 +124,7 @@ fn reservation<'a>(snap: &'a Snapshot, id: &Hash, t: &TicketV1) -> Result<&'a Va
 }
 
 /// Append ticket closure, terminal outcomes and membership to the same ref batch.
+#[allow(clippy::too_many_arguments)] // One atomic fragment has explicit input and output slices.
 pub(super) fn plan_consumption(
     snap: &Snapshot,
     advance: &AdvanceWrite<'_>,
@@ -133,6 +134,7 @@ pub(super) fn plan_consumption(
     pre: &mut Vec<Precondition>,
     writes: &mut Vec<Write>,
     outbox: &mut OutboxBuilder,
+    membership: bool,
 ) -> Result<(), ServerError> {
     let outcome_refs: Vec<_> = refs
         .iter()
@@ -180,15 +182,17 @@ pub(super) fn plan_consumption(
             })
             .map_err(meta_error)?,
         );
-        tickets::plan_membership(
-            &t.repo,
-            &[t.pack_id],
-            advance.source,
-            advance.shards,
-            advance.repo_id,
-            outbox,
-            writes,
-        );
+        if membership {
+            tickets::plan_membership(
+                &t.repo,
+                &[t.pack_id],
+                advance.source,
+                advance.shards,
+                advance.repo_id,
+                outbox,
+                writes,
+            );
+        }
     }
     Ok(())
 }

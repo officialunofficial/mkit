@@ -75,6 +75,8 @@ pub struct StagedCommits {
     pub objects: usize,
     /// Total decoded bytes of the staged objects.
     pub bytes: u64,
+    /// Every external source pack used by any consumed entry, including surplus objects.
+    pub external_bases: BTreeSet<Hash>,
 }
 
 /// The `parents` of a history object; `None` for a blob, tree or manifest.
@@ -418,6 +420,7 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
     let consumed: BTreeSet<_> = tickets.iter().map(|ticket| ticket.pack_id).collect();
     let mut staged: BTreeMap<Hash, (Vec<u8>, Object, u64)> = BTreeMap::new();
     let mut staged_bytes = 0u64;
+    let mut external_bases = BTreeSet::new();
     let mut staged_owner = BTreeMap::new();
     let mut work = Vec::with_capacity(tickets.len());
     let mut packlists = Vec::new();
@@ -796,6 +799,7 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
                     }
                     return Err(decode_failure(mapped, already_verified, &ticket.pack_id));
                 }
+                external_bases.extend(memo.rows().map(|((_, pack, _), _)| *pack));
                 let Ok(entries) = index_entries(&frames, cfg.max_delta_chain_depth) else {
                     return Err(reject_content(
                         store,
@@ -1061,5 +1065,6 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
         parents,
         objects: staged.len(),
         bytes: staged_bytes,
+        external_bases,
     })
 }

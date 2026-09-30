@@ -197,9 +197,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             .authorize_http_read(&op, &parsed.target, seams, token)
             .await?;
 
+        let view = crate::store::view::ViewStore {
+            store: &self.meta,
+            repo,
+            writer: false,
+            policy: self.publication_policy.as_deref(),
+        };
         let env = Env {
             blobs: &self.blobs,
-            meta: &self.meta,
+            meta: &view,
             shards: self.shards.as_ref(),
             repo,
             indexed,
@@ -213,7 +219,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         let (leaf_id, commit, located) = match &parsed.target {
             Target::Ref { name, path } => {
                 let shard = self.shards.ref_shard(repo, name);
-                let tip = read::read_ref(&self.meta, &shard, &repo.name, name)
+                let tip = read::read_ref(&view, &shard, &repo.name, name)
                     .await
                     .map_err(|error| {
                         tracing::warn!(detail = %error, "ref read failed");
@@ -539,7 +545,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
     /// Prove `id` reachable from a published ref, or fail the request.
     async fn prove_reachable(
         &self,
-        env: &Env<'_, B, N>,
+        env: &Env<'_, B, impl NamespaceStore>,
         seams: &HttpSeams,
         id: &Hash,
         budget: &mut Budget,
@@ -568,6 +574,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
     /// Refs are read from their shards: pending content never
     /// reaches a ref value (indexed advances publish verified packs only).
     async fn published_tips(&self, repo: &RepoId, cap: usize) -> Result<(Vec<Hash>, bool), Fail> {
+        let view = crate::store::view::ViewStore {
+            store: &self.meta,
+            repo,
+            writer: false,
+            policy: self.publication_policy.as_deref(),
+        };
         let scan = crate::refs::list_scan_prefix("refs/");
         let partitions = self.shards.ref_index_partitions(repo);
         let (mut tips, mut last) = (Vec::new(), None::<String>);
@@ -588,7 +600,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             pages_left -= 1;
             let page = if partitions.len() == 1 {
                 let bucket = super::list::RefBucket {
-                    store: &self.meta,
+                    store: &view,
                     partition: &partitions[0],
                 };
                 super::list::page(
@@ -604,7 +616,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
                 let buckets: Vec<_> = partitions
                     .iter()
                     .map(|partition| super::list::IndexBucket {
-                        store: &self.meta,
+                        store: &view,
                         partition,
                     })
                     .collect();

@@ -14,6 +14,10 @@ The implementation plan for the production mkit server epic. The canonical PRD i
 | [`linear-groups.json`](linear-groups.json) | The 26 Linear work groups (G01–G26) and the WPs each one contains. |
 | [`m0-overview.md`](m0-overview.md) | M0 (foundation) overview. |
 | [`m1-m2-breakdown.md`](m1-m2-breakdown.md), [`m3-m5-breakdown.md`](m3-m5-breakdown.md) | Coarse breakdowns for the later milestones (rolling wave: detailed briefs are written at each milestone boundary). |
+| [`staging-uno.md`](staging-uno.md) | Early D35 Uno launch environment and key-role inventory; final contracts pending. |
+| [`launch-operations.md`](launch-operations.md) | User-operated deploy/rollback/reset/rotation and failure-drill skeleton; unexecuted. |
+| [`launch-readiness.md`](launch-readiness.md) | REL-1 dependency mapping and empty user-owned launch evidence/sign-off slots. |
+| [`briefs/REL-1-draft.md`](briefs/REL-1-draft.md) | DRAFT user-only main merge, tags, publishing and deploy prompt; no execution authority. |
 | [`briefs/`](briefs/) | Executor briefs, one per WP (`WP-<id>.md`). Currently Prep, Specs and M0. |
 
 ## Branch and PR conventions

@@ -800,7 +800,7 @@ Entry condition:
   - Storage and wire tests for each transition.
   - Renewal in grace restores active.
   - A read is blocked in suspended.
-  - An event is emitted exactly once per transition (idempotent delivery).
+  - One logical event is durably recorded per transition, with at-least-once delivery and receiver deduplication.
 - **Size:** L (~1200).
 
 ### WP-5.3a: GC mark: roots, pins, grace, GC-pending, apply precondition
@@ -856,8 +856,8 @@ Entry condition:
 
 ### WP-5.4: Published view: (head, packmap) pointer, caller view on every read path
 - **Depends on:**
-  - WP-5.2 (which carries WP-5.1a and the M2 exit: signed reads for writer detection)
-  - the published pointer storage is added here (§H-A13, R-24), not in M1
+  - Explicit dependencies in `registry.json` (R-182): signed reads, indexed verification, timers, relays and snapshots.
+  - The published pointer storage is added here (§H-A13, R-24), not in M1
 - **Goal:**
   - Add the **published pointer storage** in the ref shard (moved here from M0/M1, R-24): a per-branch advance
     sequence, clearance state and the (head, packmap) pointer; until M5 it equals the live ref.
@@ -865,7 +865,7 @@ Entry condition:
   - The published pointer = the (head, packmap) of the last advance *k* such that every advance ≤ *k* has cleared.
   - ListRefs, ReadRef, PackExists, DownloadPack and HTTP serving answer from the **caller's view**: writers (owner or write grant, via signed read) see the real refs; the public and read-only grantees see the published view.
   - **The D36 `X-Mkit-Ref` path too (R-75, R-77):** for a non-writer, the header resolves only against membership
-    added by advances ≤ the published pointer (cleared advances); membership added by a pending (quarantined) advance
+    added by cleared or resolved advances, independently of the ref pointer; membership added by a pending advance
     is invisible through it, exactly as through the index.
   - Pending packs and blobs are never served to non-writers.
   - Without any inspector configured, published == real (no behaviour change).

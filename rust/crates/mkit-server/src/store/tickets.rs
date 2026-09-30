@@ -406,7 +406,7 @@ pub fn plan_ticket_close(
     Ok(())
 }
 
-/// Add local memberships and queue identical upserts for every distinct
+/// Add immediate local memberships and queue live/published upserts for every distinct
 /// remote target. `SinglePartition` needs no relay row or sequence update.
 pub fn plan_membership(
     repo: &RepoName,
@@ -426,7 +426,13 @@ pub fn plan_membership(
         }
         let target = shards.membership(repo_id, &BlobKey::pack(*pack));
         if target != *source {
-            outbox.relay(&target, vec![(key, Value::default())]);
+            outbox.relay(
+                &target,
+                vec![
+                    (key, Value::default()),
+                    (layout::published_member(repo, pack), Value::default()),
+                ],
+            );
         }
     }
 }
