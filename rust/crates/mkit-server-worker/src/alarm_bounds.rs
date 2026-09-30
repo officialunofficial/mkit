@@ -348,3 +348,77 @@ fn retry_destination_collision_retains_payloads_and_uses_partition_backoff() {
         );
     }
 }
+
+struct InsertEarlierThenRetry;
+
+impl TimerHandler<Store> for InsertEarlierThenRetry {
+    fn kind(&self) -> TimerKind {
+        TimerKind::new(240)
+    }
+
+    fn fire<'a>(
+        &'a self,
+        ctx: &'a TimerCtx<'a, Store>,
+        _timer: &'a DueTimer,
+    ) -> BoxFuture<'a, Result<Fired, StoreError>> {
+        Box::pin(async move {
+            ctx.store
+                .apply(
+                    ctx.partition,
+                    Batch::new().put(
+                        keys::timer(0, 240, &2_u32.to_be_bytes()),
+                        Value::new(b"new earlier payload".to_vec()),
+                    ),
+                )
+                .await?;
+            Ok(Fired::Retry)
+        })
+    }
+}
+
+#[test]
+fn newly_inserted_earlier_head_keeps_an_immediate_wake_after_retry_collision() {
+    let clock = Arc::new(ManualClock::new(100));
+    let store = store(&clock);
+    let original = keys::timer(1, 240, &1_u32.to_be_bytes());
+    let destination = keys::timer_retry(5100, 240, &1_u32.to_be_bytes(), 1, 1);
+    let inserted = keys::timer(0, 240, &2_u32.to_be_bytes());
+    block_on(
+        store.apply(
+            &partition(1),
+            Batch::new()
+                .put(original.clone(), Value::new(b"original payload".to_vec()))
+                .put(
+                    destination.clone(),
+                    Value::new(b"different payload".to_vec()),
+                ),
+        ),
+    )
+    .unwrap();
+    let registry = TimerRegistry::new().register(InsertEarlierThenRetry);
+    let report = block_on(run_physical_alarm(
+        &store,
+        &registry,
+        clock.as_ref(),
+        100,
+        TickBudget::default(),
+        &mut None,
+    ))
+    .unwrap();
+    assert_eq!((report.attempted, report.committed), (1, 0));
+    assert_eq!(report.next_wake_ms, Some(100));
+    assert_eq!(
+        store.timer_window(None, TIMER_WINDOW_ROWS).unwrap().len(),
+        3
+    );
+    for (key, payload) in [
+        (original, b"original payload".as_slice()),
+        (destination, b"different payload".as_slice()),
+        (inserted, b"new earlier payload".as_slice()),
+    ] {
+        assert_eq!(
+            block_on(store.get(&partition(1), &key)).unwrap(),
+            Some(Value::new(payload.to_vec()))
+        );
+    }
+}

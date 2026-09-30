@@ -728,7 +728,7 @@ fn all_partition_heads_share_one_snapshot_fire_and_eight_calls_including_backup(
     }
     clock.set(2000);
     alarm.reset();
-    block_on(crate::alarm::run_physical_alarm(
+    let report = block_on(crate::alarm::run_physical_alarm(
         &store,
         &registry,
         clock.as_ref(),
@@ -746,12 +746,33 @@ fn all_partition_heads_share_one_snapshot_fire_and_eight_calls_including_backup(
         8
     );
     assert_eq!(backups.0.load(Ordering::SeqCst), 5);
-    assert!(
-        store
-            .timer_window(None, 64)
-            .unwrap()
+    assert_eq!(
+        report.attempted_for(mkit_server::timers::TimerKind::new(10)),
+        1
+    );
+    assert_eq!(report.next_wake_ms, Some(2000));
+    let timers = store.timer_window(None, 64).unwrap();
+    assert_eq!(timers.len(), 32);
+    assert_eq!(
+        timers
             .iter()
-            .all(|row| matches!(keys::parse(&row.key), Some(keys::ParsedKey::Timer { due_at_ms, .. }) if due_at_ms > 2000))
+            .filter(|row| matches!(
+                keys::parse(&row.key),
+                Some(keys::ParsedKey::Timer {
+                    due_at_ms: 2000,
+                    kind: 10,
+                    ..
+                })
+            ))
+            .count(),
+        15
+    );
+    assert_eq!(
+        timers
+            .iter()
+            .filter(|row| matches!(keys::parse(&row.key), Some(keys::ParsedKey::Timer { due_at_ms, kind: 10, .. }) if due_at_ms > 2000))
+            .count(),
+        1
     );
 }
 

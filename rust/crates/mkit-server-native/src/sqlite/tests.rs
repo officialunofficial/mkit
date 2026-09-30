@@ -18,9 +18,13 @@ use mkit_server::store::{
     EXPORT_END, ExportReader, ImportMode, codec, encode_export_header, encode_export_record,
     export_partition, import_stream, keys,
 };
+use mkit_server::timers::{
+    DueTimer, Fired, RETRY_BACKOFF_MS, TickBudget, TimerCtx, TimerHandler, TimerKind,
+    TimerRegistry, registry::kinds, run_due,
+};
 use mkit_server::{
-    Batch, BatchOutcome, Key, MAX_BATCH_OPS, MAX_KEY_BYTES, NamespaceStore, Partition,
-    Precondition, Redacted, StoreError, StoreMaintenance, Value,
+    Batch, BatchOutcome, BoxFuture, Key, MAX_BATCH_OPS, MAX_KEY_BYTES, ManualClock, NamespaceStore,
+    Partition, Precondition, Redacted, StoreError, StoreMaintenance, Value,
 };
 
 use super::RusqliteConn;
@@ -688,6 +692,153 @@ fn soft_limit_refuses_puts_below_the_hard_cap() {
     assert_eq!(all(&s, &p).len(), n - n / 2);
     // Freed pages bring the store back under the soft limit.
     apply(&s, &p, Batch::new().put(k("x"), v("1"))).unwrap();
+}
+
+fn timer_at_soft_limit(kind: u8, payload: Value) -> (SqlKvStore<RusqliteConn>, Partition, Key) {
+    let conn = RusqliteConn::open_in_memory().unwrap();
+    let seed = SqlKvStore::open(conn.clone()).unwrap();
+    let partition = ns("timer-soft-limit");
+    let key = keys::timer(0, kind, b"retained");
+    assert_eq!(
+        apply(&seed, &partition, Batch::new().put(key.clone(), payload)).unwrap(),
+        BatchOutcome::Committed
+    );
+    let used = conn.size_bytes().unwrap();
+    let reserve = reserve_floor(DEFAULT_PAGE_SIZE);
+    let capacity = Capacity::new(used + reserve).with_reserve(reserve);
+    let store = SqlKvStore::open_with_capacity(conn.clone(), capacity).unwrap();
+    assert_eq!(conn.size_bytes().unwrap(), capacity.soft_limit());
+    assert!(matches!(
+        apply(
+            &store,
+            &partition,
+            Batch::new().put(k("new-data"), v("ref"))
+        ),
+        Err(StoreError::Full)
+    ));
+    (store, partition, key)
+}
+
+#[test]
+fn timer_relay_reschedule_remains_immediate_at_sqlite_soft_limit() {
+    struct Reschedule;
+    impl<S: NamespaceStore> TimerHandler<S> for Reschedule {
+        fn kind(&self) -> TimerKind {
+            kinds::RELAY
+        }
+        fn fire<'a>(
+            &'a self,
+            ctx: &'a TimerCtx<'a, S>,
+            _timer: &'a DueTimer,
+        ) -> BoxFuture<'a, Result<Fired, StoreError>> {
+            Box::pin(async move {
+                Ok(Fired::Reschedule {
+                    due_at_ms: ctx.now_ms + 1,
+                    value: Value::default(),
+                    batch: Batch::new(),
+                })
+            })
+        }
+    }
+
+    let (store, partition, old) = timer_at_soft_limit(kinds::RELAY.get(), Value::default());
+    let registry = TimerRegistry::new().register(Reschedule);
+    let report = block_on(run_due(
+        &store,
+        &partition,
+        &registry,
+        &ManualClock::new(0),
+        0,
+        &TickBudget::default(),
+    ))
+    .unwrap();
+    assert_eq!((report.fired, report.failed, report.raced), (1, 0, 0));
+    assert_eq!(report.next_wake_ms, Some(1));
+    assert!(block_on(store.get(&partition, &old)).unwrap().is_none());
+    let next = keys::timer(1, kinds::RELAY.get(), b"retained");
+    assert_eq!(
+        block_on(store.get(&partition, &next)).unwrap(),
+        Some(Value::default())
+    );
+    assert_eq!(
+        store.timer_window(None, 2).unwrap(),
+        vec![TimerCursor {
+            key: next,
+            partition: partition.clone()
+        }]
+    );
+    assert!(matches!(
+        apply(
+            &store,
+            &partition,
+            Batch::new().put(k("new-data"), v("ref"))
+        ),
+        Err(StoreError::Full)
+    ));
+}
+
+#[test]
+fn timer_unknown_and_failed_handlers_back_off_at_sqlite_soft_limit() {
+    struct Fails;
+    impl<S: NamespaceStore> TimerHandler<S> for Fails {
+        fn kind(&self) -> TimerKind {
+            TimerKind::new(0xfd)
+        }
+        fn fire<'a>(
+            &'a self,
+            _ctx: &'a TimerCtx<'a, S>,
+            _timer: &'a DueTimer,
+        ) -> BoxFuture<'a, Result<Fired, StoreError>> {
+            Box::pin(async { Err(StoreError::unavailable("injected handler failure")) })
+        }
+    }
+
+    for registered in [false, true] {
+        let kind = if registered { 0xfd } else { 0xfe };
+        let payload = Value::new(b"opaque work survives the retry".to_vec());
+        let (store, partition, old) = timer_at_soft_limit(kind, payload.clone());
+        let registry = if registered {
+            TimerRegistry::new().register(Fails)
+        } else {
+            TimerRegistry::new()
+        };
+        let report = block_on(run_due(
+            &store,
+            &partition,
+            &registry,
+            &ManualClock::new(0),
+            0,
+            &TickBudget::default(),
+        ))
+        .unwrap();
+        assert_eq!(report.fired, 0);
+        assert_eq!(report.raced, 0);
+        assert_eq!(report.failed, u32::from(registered));
+        assert_eq!(report.unknown, u32::from(!registered));
+        assert_eq!(report.next_wake_ms, Some(RETRY_BACKOFF_MS));
+        assert!(block_on(store.get(&partition, &old)).unwrap().is_none());
+        let next = keys::timer_retry(RETRY_BACKOFF_MS, kind, b"retained", 0, 1);
+        assert_eq!(
+            block_on(store.get(&partition, &next)).unwrap(),
+            Some(payload)
+        );
+        assert_eq!(keys::timer_retry_state(&next), Some((0, 1)));
+        assert_eq!(
+            store.timer_window(None, 2).unwrap(),
+            vec![TimerCursor {
+                key: next,
+                partition: partition.clone()
+            }]
+        );
+        assert!(matches!(
+            apply(
+                &store,
+                &partition,
+                Batch::new().put(k("new-data"), v("ref"))
+            ),
+            Err(StoreError::Full)
+        ));
+    }
 }
 
 #[test]

@@ -29,7 +29,9 @@ and caps at ten minutes. Because the new due time and attempt survive a restart,
 retained failures move behind later due work even when every alarm is cold.
 Timers are never skipped because they were fired, nor deleted to gain fairness.
 An unavailable store, a guard race or a corrupt key leaves the original row for
-retry or repair.
+retry or repair. A complete traversal with no progress preserves the core's
+conservative retry wake only for the exact already visited physical head;
+new earlier work and unfinished traversals wake immediately.
 
 The current internal timer key codec is:
 

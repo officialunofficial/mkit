@@ -656,7 +656,16 @@ fn malformed_cursor_is_retained_without_routed_reads_or_publication() {
         let report = fixture.fire(0).await;
         assert_eq!((report.failed, report.fired), (1, 0));
         assert_eq!(fixture.target.calls(), 0);
-        assert_eq!(fixture.timer().await, (key, invalid));
+        let (retained, payload) = fixture.timer().await;
+        assert_eq!(payload, invalid);
+        assert_ne!(retained, key);
+        assert_eq!(keys::timer_retry_state(&retained), Some((0, 1)));
+        assert_eq!(report.next_wake_ms, Some(crate::timers::RETRY_BACKOFF_MS));
+        assert!(
+            matches!(keys::parse(&retained), Some(keys::ParsedKey::Timer {
+            due_at_ms, kind: 12, ..
+        }) if due_at_ms == crate::timers::RETRY_BACKOFF_MS)
+        );
         assert_eq!(fixture.published().await, 0);
     });
 }
@@ -725,7 +734,20 @@ fn matching_binding_cannot_skip_beyond_the_actual_dependency_set() {
         let report = fixture.fire(publication::RECHECK_MS).await;
         assert_eq!((report.failed, report.fired), (1, 0));
         assert_eq!(fixture.target.calls(), 0);
-        assert_eq!(fixture.timer().await, (key, invalid));
+        let (retained, payload) = fixture.timer().await;
+        assert_eq!(payload, invalid);
+        assert_ne!(retained, key);
+        assert_eq!(
+            keys::timer_retry_state(&retained),
+            Some((publication::RECHECK_MS, 1))
+        );
+        let next = publication::RECHECK_MS + crate::timers::RETRY_BACKOFF_MS;
+        assert_eq!(report.next_wake_ms, Some(next));
+        assert!(
+            matches!(keys::parse(&retained), Some(keys::ParsedKey::Timer {
+            due_at_ms, kind: 12, ..
+        }) if due_at_ms == next)
+        );
         assert_eq!(fixture.published().await, 0);
     });
 }

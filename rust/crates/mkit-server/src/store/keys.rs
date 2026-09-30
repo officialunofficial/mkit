@@ -1817,13 +1817,7 @@ mod tests {
             ),
             (
                 timer(seq, 2, &pack),
-                [
-                    &b"w\0"[..],
-                    &[1, 2, 3, 4, 5, 6, 7, 8, 2, 0],
-                    &[1, 2, 3, 4, 5, 6, 7, 8],
-                    &pack,
-                ]
-                .concat(),
+                [&b"w\0\x01\x02\x03\x04\x05\x06\x07\x08\x02\0\x01\x02\x03\x04\x05\x06\x07\x08"[..], &pack].concat(),
                 ParsedKey::Timer {
                     due_at_ms: seq,
                     kind: 2,

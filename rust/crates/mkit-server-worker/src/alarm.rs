@@ -6,7 +6,7 @@ use mkit_server::sql::{SqlConn, TimerCursor};
 use mkit_server::store::keys;
 use mkit_server::timers::{TickBudget, TickState, TimerKind, TimerRegistry, run_due_with_state};
 use mkit_server::{Clock, StoreError};
-use std::collections::HashSet;
+use std::collections::{HashMap, hash_map::Entry};
 
 use crate::ns_object::PressureStore;
 
@@ -64,7 +64,7 @@ pub async fn run_physical_alarm<C: SqlConn>(
             "physical alarm requires a positive scan allowance".into(),
         ));
     }
-    let mut partitions = HashSet::new();
+    let mut partitions = HashMap::new();
     let from_beginning = cursor.is_none();
     let mut traversal_complete = false;
     let mut partition_stopped = false;
@@ -97,10 +97,11 @@ pub async fn run_physical_alarm<C: SqlConn>(
                 }
                 _ => true,
             };
-            if due && partitions.insert(row.partition.clone()) {
+            if due && let Entry::Vacant(head) = partitions.entry(row.partition.clone()) {
                 if state.exhausted(clock) {
                     break 'windows;
                 }
+                head.insert(row.key.clone());
                 let report =
                     run_due_with_state(store, &row.partition, registry, clock, now_ms, &mut state)
                         .await?;
@@ -126,7 +127,7 @@ pub async fn run_physical_alarm<C: SqlConn>(
                     && state.committed == 0
                     && !partition_stopped
                     && !state.exhausted(clock)
-                    && partitions.contains(&row.partition)
+                    && partitions.get(&row.partition) == Some(&row.key)
                     && fallback_wake.is_some_and(|wake| wake > now_ms)
                 {
                     fallback_wake.unwrap_or(now_ms)

@@ -82,7 +82,7 @@ pub mod kinds {
 /// `fire` may run more than once for the same timer. Every effect outside
 /// the returned batch MUST be idempotent. Effects inside the batch are
 /// applied at most once per timer row (guarded by the row's original value).
-/// Allow room for the core's Equals/Delete and a reschedule Absent/Put,
+/// Allow room for the core's Equals/Delete and a reschedule Absent/Put
 /// within the store's batch limits. Cross-partition effects require an outbox.
 pub trait TimerHandler<S: NamespaceStore>: MaybeSend + MaybeSync {
     /// The kind this handler decodes.

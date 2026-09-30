@@ -189,10 +189,12 @@ fn timer_window_predicate_matches_partial_index() {
     }
 }
 
+type QueryCalls = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<SqlValue>)>>>;
+
 #[derive(Clone, Default)]
 struct TimerProbe {
     rows: std::sync::Arc<std::sync::Mutex<Vec<Row>>>,
-    calls: std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<SqlValue>)>>>,
+    calls: QueryCalls,
 }
 impl SqlConn for TimerProbe {
     fn exec(&self, _: &str, _: &[SqlValue]) -> Result<u64, SqlError> {
