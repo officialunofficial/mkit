@@ -23,17 +23,18 @@ bounded timeout, manual redirects, and abort on cancellation. Phase 2 must
 measure actual dispatcher totals, including hooks and settlement, rather than
 reporting only the backend counter.
 
-A Paid physical Durable Object alarm currently shares one 1,000-operation
-`purge::SliceBudget` between every logical partition head. The alarm resets it
+A Paid launch physical Durable Object alarm shares one 960-operation
+`purge::SliceBudget` between every logical partition head, reserving 40 of the
+unchanged 1,000-operation project envelope for dispatch and settlement.
+Other Paid configurations retain the existing 1,000-operation allowance. The alarm resets it
 once at entry, never per head (`worker/src/ns_object.rs::alarm`). Local physical
 DO SQLite reads, scans, and applies are not outgoing operations; routed DO
 requests, R2 requests, cache operations, and remote hooks are outgoing work.
 `SharedStore` charges before routed relay, rollup, and publication dependency
 operations. Other handlers reserve their conservative external-call allowance
 before firing. Rejected reservations retain the timer with Retry; purge work
-retains its existing durable checkpoint. This is shared enforcement, but it
-currently consumes the entire project alarm allowance without an explicit
-headroom reserve and has progress risks described below.
+retains its existing durable checkpoint. Headroom does not replace measured
+whole-dispatch evidence or resolve the progress risks described below.
 
 ## Current fixed units
 
@@ -48,7 +49,7 @@ headroom reserve and has progress risks described below.
 | Snapshot kind 10 | One snapshot claim per physical alarm; reserve 3 external calls (coordinator read, R2 get, R2 put; removal uses fewer) | Sixteen heads, private/ineligible snapshot deletion, response/backup overlap |
 | Backup kind 4 | Reserve 1 R2 put; snapshot alarm coordinator also limits overlap | All relevant head combinations and cold backup size |
 | Publication dependency recheck kind 12 | One fire per logical partition tick; every routed witness page shares alarm counter | Must resolve starvation finding below before activation |
-| Cache purge kind 14 | Enumeration, cache deletion, and signed sink delivery share allowance and existing checkpoints | Namespace catalog cold slices, repeated cursors, hooks failure, exact audit/preservation boundaries |
+| Cache purge kind 11 | Enumeration, cache deletion, and signed sink delivery share allowance and existing checkpoints | Namespace catalog cold slices, repeated cursors, hooks failure, exact audit/preservation boundaries |
 | Sync inspection request | Up to 4 inspectors; sequential calls; verification 300, ancestry 256, pair/enumeration/dependencies 256, hooks 4, other stages 144 = 960 declared units | Entire request including retries, physical transports, cancellation, R-193 retrieval |
 | Atomic write | 100 preconditions+writes maximum; seven tickets; current D34 retained-publication batch 94 operations, ordinary publication 93 | Snapshot target-local additions reserve 3, pruning remains within cap, takedown/inspection guards together |
 
@@ -63,14 +64,19 @@ Ticket proof HEADs previously ran all seven ticket futures through `join_all`,
 so seven outgoing responses could be active. `pipeline/advance.rs` now admits
 at most six ticket proof futures; each marker HEAD completes before that
 pack's HEAD begins. Its pending-response regression checks first-poll occupancy,
-peak occupancy, every ticket result, and marker-before-pack ordering. The
-unchanged implicit membership path uses a 16-future chunk limit in
-`pipeline/implicit.rs`; it requires a six-slot bound before claiming the whole
-writer/reuse matrix satisfies the outgoing limit. Sync inspectors and alarm
+peak occupancy, every ticket result, and marker-before-pack ordering. The implicit membership path also uses six-future chunks in
+`pipeline/implicit.rs`; its regression drives the production packmap check
+with seventeen pending membership responses and measures occupancy and completion. Sync inspectors and alarm
 handlers are sequential, but phase 2 must also count R2 response body lifetimes
 and spawned completion/settlement work.
 
 ## Unresolved deterministic findings
+
+The user has assigned the publication dependency issue to a separate fix,
+PR #1245 at `3038c158`: a 128-call bounded recheck sharing the existing
+1,000-call alarm budget. This PR is a phase 2 prerequisite and has not merged
+into the audited base. The original failure and its trigger remain below so
+phase 2 can verify the fix against the integrated physical alarm.
 
 1. **Publication recheck can exhaust forever.** `indexed/publication.rs::verify_inner`
    reads a packmap node, inserts every `node.packs` into the dependency set,
@@ -107,16 +113,36 @@ and spawned completion/settlement work.
    but a frozen clock and many logical heads do not bound the physical alarm's
    aggregate local rows or resident head vector. The shared outgoing allowance
    prevents excess external calls, but does not establish bounded cold local
-   scans or fairness. Physical head enumeration and aggregate tick work need
-   explicit bounded measurement/enforcement before final activation evidence.
+   scans or fairness. The existing physical v2 partial index is already `(key, part)`
+   (`sql/schema.rs:58`). An indexed raw timer window with LIMIT can bound
+   engine rows; adding GROUP BY/MIN/ORDER BY/LIMIT only bounds returned heads
+   while aggregating all timer rows. Unknown kinds remain unchanged at
+   `timers/mod.rs:281`; `next_wake` at lines 339–356 backs off five seconds
+   without updating that row. A volatile rotating cursor can provide warm
+   fairness, but restart resumes at the same retained earliest rows. With
+   more retained unknown rows than the window, unconditional cold restart
+   fairness needs a durable cursor or a change to retention semantics. The
+   user ruling on this tradeoff is pending; dependent implementation is paused.
+   Physical head enumeration and aggregate tick work need explicit bounded
+   measurement/enforcement before final activation evidence.
 
 3. **Release extraction/retrieval/preservation accounting awaits dependencies.**
-   Kind 7 still uses `FailClosedExtraction` in the current release handler.
-   `R2Extraction` reserves 8 begin, 3 part, 7 completion and 2 abort calls from
-   the same per-slice counter, but its real release driver is phase 2 work.
-   R-193 scanner retrieval and 5.6a-2 preservation are unavailable. Their
-   requests and R2/body lifetimes must be added to the same dispatcher ledger
-   after merge; no phase 1 PASS slot is implied.
+   WP-4.10b-2 (#1244) now supplies the real environment handler's
+   `R2Extraction` driver (`worker/src/verify.rs::register_from_env_budgeted`).
+   It reserves 8 begin, 3 part, 7 completion and 2 abort calls from the same
+   256-call slice counter. The extraction state machine charges namespace
+   and source reads against that counter; its 48 MiB resident limit stays
+   unchanged. R-193 (#1243) now supplies scanner retrieval, whose global
+   proof reads 4,096 descriptor shards and has one 8,500-call core
+   allowance for denial/tickets/blob operations, nested under the Worker's
+   9,000-call physical backend allowance. Each returned range is at most
+   1 MiB; the ticket assignment is rechecked after reading bytes. Its first-page prefetch
+   was eight simultaneous metadata calls (`takedown/denial.rs`); WP-4.18
+   reduces this to six and retains measured cancellation/late-block/budget
+   regressions. Nested descriptor proofs are serial while other prefetched
+   responses remain pending. Release retrieval config and mount still require
+   WP-4.18's profile activation. 5.6a-2 preservation remains unavailable.
+   Full R2/body-lifetime dispatcher evidence remains phase 2 work.
 
 ## Required retained regressions and integrated runs
 

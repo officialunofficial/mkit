@@ -11,7 +11,7 @@ pub const KEYS_SECRET: &str = "SCANNER_RETRIEVAL_KEYS";
 
 /// Parse the opt-in and its complete configuration.
 /// # Errors
-/// Missing keys, conflicting settings, or activation ahead of WP-4.18.
+/// Missing keys, conflicting settings, or retrieval outside the launch profile.
 pub fn parse(
     var: &impl Fn(&str) -> Option<String>,
     indexed: bool,
@@ -36,9 +36,9 @@ pub fn parse(
         }
         return Ok(None);
     }
-    if !cfg!(feature = "test-faults") {
+    if !cfg!(feature = "test-faults") && var("LAUNCH_PROFILE").as_deref() != Some("uno") {
         return Err(ConfigError(
-            "scanner retrieval activation requires WP-4.18".into(),
+            "scanner retrieval requires LAUNCH_PROFILE=uno".into(),
         ));
     }
     if !indexed
@@ -63,10 +63,9 @@ pub fn parse(
 /// Exact path matching keeps retrieval off the Connect and HTTP object mounts.
 #[must_use]
 pub fn mounted(path: &str, cfg: &WorkerConfig) -> bool {
-    cfg!(feature = "test-faults") && cfg.scanner_retrieval.is_some() && path == PATH
+    cfg.scanner_retrieval.is_some() && path == PATH
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn check_hook_seed(
     config: &RetrievalConfig,
     key: Option<&str>,

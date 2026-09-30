@@ -32,8 +32,20 @@ pub fn parse(
     Ok(Some(config))
 }
 #[cfg(any(target_arch = "wasm32", test))]
-fn supported_path(path: &str) -> bool {
-    path == mkit_server::admin::AUDIT_PATH || path == mkit_server::admin::PURGE_PATH
+fn supported_path(path: &str, cfg: &crate::adapter::WorkerConfig) -> bool {
+    if path == mkit_server::admin::AUDIT_PATH || path == mkit_server::admin::PURGE_PATH {
+        return true;
+    }
+    cfg.admin.is_some()
+        && cfg.launch.as_ref().is_some_and(|launch| launch.takedown)
+        && path
+            .strip_prefix(mkit_server::admin::PREFIX)
+            .is_some_and(|operation| {
+                matches!(
+                    operation,
+                    "Takedown" | "GetTakedown" | "ListTakedowns" | "ReadPreserved" | "SetLegalHold"
+                )
+            })
 }
 #[cfg(any(target_arch = "wasm32", test))]
 fn purge_enabled(cfg: &crate::adapter::WorkerConfig) -> bool {
@@ -53,7 +65,7 @@ pub(crate) async fn serve(
     let Some(config) = &cfg.admin else {
         return worker::Response::error("admin disabled", 404);
     };
-    if !supported_path(&req.path()) {
+    if !supported_path(&req.path(), cfg) {
         return worker::Response::error("admin operation unavailable", 404);
     }
     if req.method() != worker::Method::Post {
@@ -104,12 +116,51 @@ pub(crate) async fn serve(
 mod tests {
     use super::*;
     #[test]
-    fn manual_purge_is_exposed_and_takedown_stays_unexposed() {
-        assert!(supported_path(mkit_server::admin::AUDIT_PATH));
-        assert!(supported_path(mkit_server::admin::PURGE_PATH));
-        assert!(!supported_path(
-            "/mkit.server.admin.v1.AdminService/Takedown"
-        ));
+    fn lean_catalog_requires_admin_and_takedown_and_never_exposes_hold_ops() {
+        let mut cfg = crate::adapter::WorkerConfig::from_vars(|name| match name {
+            "AUTH_AUDIENCE" => Some("https://server.example".into()),
+            "AUTH_REPOSITORY" => Some("repo".into()),
+            "ADMIN_KEYS" => Some(
+                serde_json::json!({"version":1,"keys":[{
+                    "keyId":"operator", "alg":"ed25519", "publicKey":"11".repeat(32),
+                    "roles":["audit","moderation"]
+                }]})
+                .to_string(),
+            ),
+            _ => None,
+        })
+        .unwrap();
+        for op in [
+            "Takedown",
+            "GetTakedown",
+            "ListTakedowns",
+            "ReadPreserved",
+            "SetLegalHold",
+        ] {
+            let path = format!("{}{op}", mkit_server::admin::PREFIX);
+            assert!(!supported_path(&path, &cfg), "unconfigured {op}");
+            cfg.launch = Some(crate::launch::LaunchConfig { takedown: true });
+            assert!(supported_path(&path, &cfg), "configured {op}");
+            let admin = cfg.admin.take();
+            assert!(!supported_path(&path, &cfg), "no admin {op}");
+            cfg.admin = admin;
+            cfg.launch = None;
+        }
+        assert!(supported_path(mkit_server::admin::AUDIT_PATH, &cfg));
+        assert!(supported_path(mkit_server::admin::PURGE_PATH, &cfg));
+        cfg.launch = Some(crate::launch::LaunchConfig { takedown: true });
+        for op in [
+            "Reinstate",
+            "GetHold",
+            "ListHolds",
+            "ReleaseHold",
+            "RejectHold",
+        ] {
+            assert!(!supported_path(
+                &format!("{}{op}", mkit_server::admin::PREFIX),
+                &cfg
+            ));
+        }
     }
 
     #[test]

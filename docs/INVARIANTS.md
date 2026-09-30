@@ -2178,3 +2178,52 @@ set removes the role-reconstruction cost recorded in
 [the historical WP-5.5a escalation](plans/mkit-server/wp-5-5a-escalation.md#resolved-by-the-revised-r-200-added-pack-ruling).
 Full classification, async holds and unrestricted multi-batch inspection remain
 deferred to WP-5.5c; the durable marker belongs to WP-5.5a-0.
+
+## Paid launch opt-ins validate before accepting work (WP-4.18 / R-194)
+
+**Always:** the Worker Uno launch explicitly selects Paid indexed Multi/D34,
+uses upload tickets at threshold zero, and retains content permanently with
+leases and GC off. Each HTTP/token, hook, and inspection/retrieval opt-in
+validates its complete configuration and distinct key roles before requests.
+Inspection is synchronous and fail-closed; native accepts at most four
+inspectors. No inspector means no advertised inspection bound. Discovery
+reports false leases/async inspection and empty storage-receipt keys. Worker
+proof serving remains unsupported. Takedown still refuses activation until
+verified preservation and its complete configured purge interface are wired.
+
+**Because:** an artifact feature or parsed secret does not establish an active,
+complete capability. Partial opt-ins must never silently authorize writes or
+expose a broader administration/scanner scope.
+
+**If violated:** deployment discovery overstates safety, or missing hooks,
+scanner isolation, preservation or key separation accepts protected work.
+
+**Enforced by:** Worker `launch.rs` and adapter startup/pipeline validation,
+native launch/scanner startup validation, and focused launch, discovery and
+real native scanner HTTP tests. Full release Worker conformance, preservation
+and embedding addenda remain phase-2 gates recorded in `launch-evidence.md`.
+
+## Launch backend work shares limits and response lifetimes
+
+**Always:** ticket proofs and implicit packmap checks retain at most six
+concurrent backend responses, and scanner first-page proof reads retain at most
+six. All launch alarm handlers share one 960-operation allowance under the
+existing 1,000-operation project envelope; the remaining 40 operations are
+reserved for dispatch and settlement. Request backends share their existing
+9,000-call allowance and reserve the existing 1,000-call hook/settlement
+headroom. The Worker HTTP mount attaches paid-read settlement to the fetch
+context's `wait_until` lifetime, including cancellation.
+
+**Because:** independent allowances and dropped response settlement can exceed
+physical invocation limits or lose the durable paid-read outcome.
+
+**If violated:** calls stall, timers stop progressing, or admitted reads lose
+accounting when the response is cancelled.
+
+**Enforced by:** chunked ticket/implicit checks and pending-response occupancy
+regressions, measured scanner concurrency, Worker shared-budget clients and
+sixteen-head budget regression, and the request-context HTTP mount. Complete
+runtime lifetime evidence is pending phase 2. Cold SQL timer-head enumeration
+and repeated-restart fairness remain an explicitly escalated audit finding;
+this invariant does not claim that unresolved work is bounded. The separate
+resumable publication recheck repair (#1245) is required before phase 2.

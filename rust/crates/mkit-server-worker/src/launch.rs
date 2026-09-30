@@ -61,18 +61,16 @@ impl LaunchConfig {
         Ok(Some(Self { takedown }))
     }
 
-    /// Refuse activation until the owning implementations have merged.
+    /// Refuse takedown activation until verified preservation has merged.
     /// # Errors
-    /// Phase 1 has no extraction driver, preservation or private retrieval.
+    /// Verified preservation is the remaining unavailable launch prerequisite.
     pub fn check_prerequisites(&self) -> Result<(), ConfigError> {
         if self.takedown {
             return Err(error(
                 "launch takedown requires WP-5.6a-2 verified preservation",
             ));
         }
-        Err(error(
-            "Paid indexed launch requires WP-4.10b-2 extraction driver; Verified must imply extracted",
-        ))
+        Ok(())
     }
 }
 
@@ -108,7 +106,7 @@ pub(crate) fn validate(
     let key = zeroize::Zeroizing::new(var("MKIT_HOOK_KEY"));
     if let Some(http) = cfg.hooks.as_ref().and_then(|v| v.http.as_ref()) {
         let signer = crate::hooks::config::http_signer(
-            key.as_ref().clone(),
+            key.as_ref().cloned(),
             http,
             cfg.ticket_keys.as_ref(),
             &public,
@@ -126,12 +124,15 @@ pub(crate) fn validate(
             "URL_TOKEN_KEYS requires the http-objects build feature",
         ));
     }
+    if let Some(config) = &cfg.scanner_retrieval {
+        config.check_role_keys(&public, &[]).map_err(|_| {
+            error("scanner retrieval keys must differ from every configured key role")
+        })?;
+        crate::scanner_retrieval::check_hook_seed(config, key.as_ref().map(String::as_str))?;
+    }
     if cfg.launch.is_none() {
         // Missing foundations must never silently turn these options off.
         if [
-            "SCANNER_RETRIEVAL",
-            "SCANNER_RETRIEVAL_KEYS",
-            "SCANNER_KEYS",
             "PRESERVATION_BUCKET",
             "PRESERVATION_RETENTION_SECS",
             "PRESERVATION_KEY",
@@ -139,9 +140,7 @@ pub(crate) fn validate(
         .iter()
         .any(|name| var(name).is_some())
         {
-            return Err(error(
-                "scanner retrieval and preservation require LAUNCH_PROFILE=uno",
-            ));
+            return Err(error("preservation requires LAUNCH_PROFILE=uno"));
         }
         return Ok(());
     }
@@ -157,6 +156,26 @@ pub(crate) fn validate(
     if !cfg.audience.starts_with("https://") {
         return Err(error("launch AUTH_AUDIENCE must use HTTPS"));
     }
+    validate_http(cfg, var)?;
+    let inspecting = cfg.hooks.as_ref().is_some_and(|v| v.roles.inspect);
+    let retrieval = boolean(var, "SCANNER_RETRIEVAL")?;
+    if inspecting && !retrieval {
+        return Err(error(
+            "launch inspection requires SCANNER_RETRIEVAL=true and dedicated scanner keys (R-193)",
+        ));
+    }
+    if retrieval != cfg.scanner_retrieval.is_some() || retrieval && !inspecting {
+        return Err(error(
+            "scanner retrieval requires its complete configuration and the inspect role",
+        ));
+    }
+    validate_preservation(cfg, var)
+}
+
+fn validate_http(
+    cfg: &mut WorkerConfig,
+    var: &impl Fn(&str) -> Option<String>,
+) -> Result<(), ConfigError> {
     let http = boolean(var, "HTTP_OBJECTS")?;
     let reads = boolean(var, "HTTP_ADMIT_READS")?;
     if reads && (!http || cfg.hooks.as_ref().is_none_or(|v| !v.roles.admit)) {
@@ -187,30 +206,13 @@ pub(crate) fn validate(
             read_runtime: None, // The fetch event attaches its wait_until lifetime.
         });
     }
-    let inspecting = cfg.hooks.as_ref().is_some_and(|v| v.roles.inspect);
-    let retrieval = boolean(var, "SCANNER_RETRIEVAL")?;
-    if inspecting && !retrieval {
-        return Err(error(
-            "launch inspection requires SCANNER_RETRIEVAL=true and dedicated scanner keys (R-193)",
-        ));
-    }
-    if retrieval || var("SCANNER_KEYS").is_some() || var("SCANNER_RETRIEVAL_KEYS").is_some() {
-        if !retrieval || !inspecting {
-            return Err(error(
-                "scanner keys require SCANNER_RETRIEVAL=true and the inspect role",
-            ));
-        }
-        for name in ["SCANNER_KEYS", "SCANNER_RETRIEVAL_KEYS"] {
-            if var(name).is_none_or(|s| s.trim().is_empty()) {
-                return Err(error(format!("{name} is required for launch inspection")));
-            }
-        }
-        // R-193 owns the exact key codec/separation and route. Until merged,
-        // refuse even test-faults launch selection rather than parse a rival codec.
-        return Err(error(
-            "launch scanner retrieval requires R-193 private pack retrieval",
-        ));
-    }
+    Ok(())
+}
+
+fn validate_preservation(
+    cfg: &WorkerConfig,
+    var: &impl Fn(&str) -> Option<String>,
+) -> Result<(), ConfigError> {
     let preservation = [
         "PRESERVATION_BUCKET",
         "PRESERVATION_RETENTION_SECS",

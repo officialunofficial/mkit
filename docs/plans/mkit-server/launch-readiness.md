@@ -8,8 +8,8 @@ by a skeleton or by a successful phase 1 refusal.
 Final WP-1.20 waits for 4.18. See the [archived full brief](briefs/WP-1.20-readiness.md),
 [D35 definition](staging-uno.md) and [operator runbook](launch-operations.md).
 
-Source baseline for this skeleton: `origin/feat/mkit-server` at
-`4d1c8fd435b4552c8716a60b606280cf63434ace`, fetched 2026-09-30. This is a
+Current merged-input checkpoint: `cb2159c5551c2f82d2d861347da264297568982d`,
+including extraction #1244 and retrieval #1243. This is a
 documentation reference, **not the final launch candidate**. Empty cells are
 intentional; no checkbox is satisfied by this document or by local wrangler.
 
@@ -18,7 +18,10 @@ intentional; no checkbox is satisfied by this document or by local wrangler.
 Reconcile this list with the final [registry](registry.json) at phase 2. Each
 row requires a full merged SHA, PR and independent review outcome in
 [launch-evidence.md](launch-evidence.md). A registry status is no passing gate.
-The current activation checkpoint waits for 4.10b-2, 5.6a-2 and R-193.
+Extraction 4.10b-2 and retrieval R-193 have merged (#1244 / #1243).
+The checkpoint waits for 5.6a-2 preservation and user phase 2 resumption;
+#1245 publication recheck timer 12 progress repair must merge before complete
+local evidence; native timer flakes still need independent base reproduction.
 
 | Prerequisite | Launch obligation / governing contract | Evidence link / result |
 |---|---|---|
@@ -29,7 +32,7 @@ The current activation checkpoint waits for 4.10b-2, 5.6a-2 and R-193.
 | 5.5a-sync | Optional zero to four sync fail_closed inspectors, complete one-batch added-pack file set and whole-advance bound; R-183 / R-200 | UNRUN |
 | 4.10b-1 / 4.10b-2 / multipart | Extraction grouping/driver, canonical source and whole-phase bounds; R-186 / R-192 | UNRUN |
 | 4.14b-1 | Native/core proofs, advertised and served only natively; R-187 | UNRUN |
-| R-193 | Optional private scanner canonical retrieval, dedicated allowlist/key and no-oracle contract | UNRUN |
+| R-193 | Optional private assigned added-pack raw retrieval, dedicated allowlist/key and no-oracle contract | UNRUN |
 | 5.10 / 5.11a | Automatic purge delivery, signed admin framework and audit, without reverse activation dependency; R-188 / R-189 | UNRUN |
 | 5.6a-1 / 5.6a-2 | Lean takedown, verified preservation/retention/legal holds, incomplete discovery under any, manual asynchronous PurgeCache; R-190 | UNRUN |
 | 4.18 | Paid profile, startup opt-ins, capability honesty and complete local launch matrix; R-194 | UNRUN |

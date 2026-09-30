@@ -782,6 +782,7 @@ mod proto_roundtrip {
         begin_upload_response::Result as BeginResult, upload_part_request::Msg as PartMsg,
     };
     use super::super::proto::mkit::transport::v1::*;
+    use super::ServerInfo;
     use buffa::Message;
 
     fn roundtrip<M: Message + PartialEq + core::fmt::Debug>(message: &M) {

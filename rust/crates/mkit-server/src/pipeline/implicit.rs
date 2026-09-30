@@ -65,7 +65,8 @@ pub(crate) const MAX_IMPLICIT_PACKLIST_BYTES: u64 = 1024 * 1024;
 pub(crate) const MAX_IMPLICIT_LISTED_PACKS: usize = 1024;
 
 /// Bounded membership-read concurrency inside the B10 check.
-const IMPLICIT_CHECK_CONCURRENCY: usize = 16;
+// Every lookup awaits at most one routed metadata or R2 response at a time.
+const IMPLICIT_CHECK_CONCURRENCY: usize = 6;
 
 fn refuse() -> ServerError {
     ServerError::failed_precondition(IMPLICIT_PACKMAP_UNKNOWN)
@@ -323,4 +324,122 @@ pub(crate) fn implicit_packs(pending: &[PendingPack]) -> Vec<Hash> {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+#[cfg(test)]
+mod concurrency_tests {
+    use super::*;
+    use crate::{
+        BlobMeta, BlobStore, ByteRange, ManualClock, MemoryBlobStore, MemoryKv, NamespaceKey,
+        NoopMetrics, Principal, RepoId, RepoName, StoreError,
+    };
+    use futures::{FutureExt, executor::block_on};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    struct PendingMembership {
+        node: Vec<u8>,
+        release: AtomicBool,
+        active: AtomicUsize,
+        peak: AtomicUsize,
+        reads: AtomicUsize,
+    }
+    impl BlobStore for PendingMembership {
+        type Sink = <MemoryBlobStore as BlobStore>::Sink;
+        async fn begin(&self, _: BlobKey, _: u64) -> Result<Self::Sink, StoreError> {
+            unreachable!()
+        }
+        async fn get(
+            &self,
+            _: &BlobKey,
+            _: Option<ByteRange>,
+        ) -> Result<Option<BlobBody>, StoreError> {
+            Ok(Some(BlobBody::Bytes(self.node.clone().into())))
+        }
+        async fn head(&self, _: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(active, Ordering::SeqCst);
+            futures::future::poll_fn(|cx| {
+                if self.release.load(Ordering::SeqCst) {
+                    std::task::Poll::Ready(())
+                } else {
+                    cx.waker().wake_by_ref();
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(Some(BlobMeta { len: 32 }))
+        }
+        async fn probe(&self) -> Result<(), StoreError> {
+            unreachable!()
+        }
+        async fn delete(&self, _: &BlobKey) -> Result<bool, StoreError> {
+            unreachable!()
+        }
+    }
+    impl MultipartBlobStore for PendingMembership {
+        type PartSink = crate::store::UnsupportedPartSink;
+        const MAX_PARTS: u32 = 10_000;
+    }
+
+    #[test]
+    fn implicit_packmap_checks_keep_at_most_six_backend_requests_active() {
+        let packs: Vec<_> = (0..17u8).map(|i| [i; 32]).collect();
+        let node = [99; 32];
+        let repo = RepoId {
+            namespace: NamespaceKey::deployment_default(),
+            name: RepoName::new("repo").unwrap(),
+        };
+        let pipe = Pipeline::new(
+            PendingMembership {
+                node: mkit_core::transfer::encode_packlist(None, &packs).unwrap(),
+                release: AtomicBool::new(false),
+                active: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+                reads: AtomicUsize::new(0),
+            },
+            MemoryKv::default(),
+            super::super::Hooks::new(),
+            super::super::PipelineConfig::new(
+                Addressing::Single { repo: repo.clone() },
+                super::super::AuthMode::Open,
+                crate::upload::UploadLimits {
+                    max_total_bytes: 1024,
+                    max_chunks: 16,
+                },
+            ),
+            Arc::new(ManualClock::new(0)),
+            Arc::new(NoopMetrics),
+        )
+        .unwrap();
+        let mut upd = RefUpdate {
+            name: "refs/mkit/packmap/main".into(),
+            condition: RefWriteCondition::Missing,
+            new: Some(node),
+        };
+        let op = Operation::new(
+            repo,
+            Principal::Anonymous,
+            None,
+            OpKind::UpdateRef(upd.clone()),
+        );
+        let pending = [PendingPack {
+            pack: node,
+            bytes: 32,
+            packlist: true,
+        }];
+        let mut check = Box::pin(pipe.check_implicit_packmap(&op, &pending, None, &mut upd));
+        assert!((&mut check).now_or_never().is_none());
+        assert_eq!(pipe.blobs.active.load(Ordering::SeqCst), 6);
+        pipe.blobs.release.store(true, Ordering::SeqCst);
+        block_on(check).unwrap();
+        assert_eq!(pipe.blobs.reads.load(Ordering::SeqCst), packs.len());
+        assert_eq!(pipe.blobs.active.load(Ordering::SeqCst), 0);
+        assert!(pipe.blobs.peak.load(Ordering::SeqCst) <= 6);
+        assert_eq!(upd.new, Some(node));
+    }
 }

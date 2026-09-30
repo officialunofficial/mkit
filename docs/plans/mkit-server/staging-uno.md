@@ -27,13 +27,13 @@ Staging data has no retention promise and may be reset by the user.
 | Addressing / sharding | `ADDRESSING=multi`, `SHARDING=d34` | Existing deployment markers; never change them over existing state |
 | Namespace admission | `allowlist` with a nonempty `NAMESPACE_ALLOWLIST`, or `any` with `UNSAFE_OPEN_NAMESPACES=true`; Uno Kit demo selects `any` | Under `any`, takedown works but holder discovery is incomplete; report that limitation (5.6a-2) |
 | Account plan | `WORKERS_PLAN=paid`, actual Workers Paid account | Paid-only launch; 4.18 validates profile. CPU allowance remains user-owned and unfilled |
-| Indexed serving | Scheduled verification and extraction; optional HTTP objects; native/core proofs (Worker proofs 4.14b-2 are a post-launch follow-up, R-200) | 4.10b-2 and 4.14b-1; `LAUNCH_PROFILE=uno`, `INDEXED_MODE=true`. Phase 1 release activation fails closed until the extraction driver lands; test builds are separate evidence |
+| Indexed serving | Scheduled verification and extraction; optional HTTP objects; native/core proofs (Worker proofs 4.14b-2 are a post-launch follow-up, R-200) | 4.10b-2 and 4.14b-1; `LAUNCH_PROFILE=uno`, `INDEXED_MODE=true`. Extraction #1244 is merged and 4.18 wires its actual release driver; test builds are separate evidence |
 | Storage leases | Off | 5.4 launch spec amendment; 4.18 config and discovery. Existing epoch leases and authority fencing remain separate |
 | Serving retention | Permanent | 5.4 / 4.18; no lifecycle deletion of packs or extracted `objects/` |
 | Serving-store GC | Off; enabling GC in indexed mode refused | R-198 B4; 4.18 validates. No post-launch GC machinery in this skeleton |
 | Inspection | Optional, zero to four inspectors. Synchronous PRE_RECEIVE only (R-200): `pass`, `reject` (a `quarantine` is rejected), fail-closed when unavailable; async inspectors, publish-on-unavailable and clear deadlines are refused | 5.5a (sync scope). R-193 owns scanner byte retrieval; 4.18 activates. Async inspection, holds and review ops are follow-up 5.5c |
-| Publication Events | Not at launch (R-200): with sync-only inspection every advance publishes at apply, so `Committed` means delivered | 5.15 is a post-launch follow-up |
-| Lean takedown | Optional with admin plus complete preservation and signed HTTPS cache-purge. Immediate global denial, verified restricted preservation, retention/legal holds, audited review; requests can remain unresolved | 5.6a owns concrete operations and normative exception; 4.18 activates. No rewrite, 451 notices or reinstatement claim |
+| Publication Events | Not at launch (R-200). Inspection completes synchronously, but D34 dependency projections can leave publication pending. `Committed` means Sent and does not prove publication or Delivered | 5.15 is a post-launch follow-up |
+| Lean takedown | Optional with admin plus complete preservation and signed HTTPS cache-purge. Immediate global denial, verified restricted preservation, retention/legal holds, audited administration; requests can remain unresolved | 5.6a owns concrete operations and normative exception; 4.18 activates. No rewrite, 451 notices or reinstatement claim |
 | Uploads | Ticketed uploads with threshold zero; measured pack/decode/concurrency limits | `MAX_PACK_BYTES` defaults to 1 GiB, ceiling 4.995 GiB; 65 MiB request cap and 8 MiB non-final multipart minimum. User fills sizing evidence |
 
 Sync-only inspection leaves no durable obligations or holds, so the launch has
@@ -89,7 +89,7 @@ token does not replace mkit message authentication.
 | Incoming scanner | `SCANNER_KEYS`: newline-separated 64-hex Ed25519 public keys; private keys stay with scanner. `SCANNER_RETRIEVAL_KEYS` secret: one `active <key-id> <64-hex secret>` plus optional `retained <key-id> <64-hex secret> <retired_at_ms>` lines | R-193: `POST /_mkit/scanner/pack` requires a dedicated retrieval MAC capability and scanner auth-v2 signature with server-origin audience and exact body/path/repository binding. Only raw added packs in the capability; global blocks always deny. Default-off native `--scanner-retrieval` / Worker `SCANNER_RETRIEVAL=true`, Paid-only and integrated by 4.18. Missing/conflicting keys and configured role reuse refuse startup; no Workers Caching or cache headers |
 | Admin | Dedicated public admin key list, §16.3 JSON with roles; private signing keys offline / HSM | `ADMIN_KEYS`; `audit` for ReadAuditLog, appropriate dedicated moderation/preservation roles for takedown/ReadPreserved. Never client bearer/write/hook authentication. No hold review or Reinstate mount |
 | Purge sink | CachePurge is signed with a deployment **hook** key under §7, to the sink's canonical audience; sink trusts its configured public key list | Signed HTTPS `cache-purge` hook required when takedown is enabled. Isolated binding alone cannot satisfy that opt-in. No new purge-signature domain or admin key reuse. Manual PurgeCache is **5.6a**, asynchronous with purge id and audited completion |
-| URL tokens | Dedicated `URL_TOKEN_KEYS` secret and optional `URL_TOKEN_TTL`; existing HTTP feature grammar | Separate active/retained keys; requires `HTTP_OBJECTS=true` and an `http-objects` build. 4.18 activates |
+| URL tokens | Dedicated `URL_TOKEN_KEYS` secret and optional `URL_TOKEN_TTL`; existing HTTP feature grammar | Separate active/retained keys; HTTP serving requires `HTTP_OBJECTS=true` and an `http-objects` build. Keys alone leave routes off. 4.18 activates |
 | Preservation signing | Explicit preservation retention, dedicated §15 receipt-and-notice signing key and published §15.5 key list | Required by §14.7 even for lean takedown; exact bindings/config **pending 5.6a-2 / 4.18**. This requirement does not enable storage receipts or notices |
 
 Use [SPEC-SERVER §§7, 14.7 and 16](../../specs/SPEC-SERVER.md) and the final
@@ -116,8 +116,9 @@ The route bounds its complete shared denial/ticket/blob call budget at
 9,000-call invocation ceiling. Request bodies are capped at 16 KiB and
 pack response bodies at 1 MiB. Inventory proof paging uses the existing
 verified metadata; the route does not decode or classify pack entries.
-Scanner global-denial checks prefetch up to eight shards' first descriptor
-pages concurrently, retaining at most 4 MiB of raw descriptor values,
+Scanner global-denial checks prefetch up to six shards' first descriptor
+pages concurrently, retaining at most 3 MiB of raw descriptor values
+(within the 4 MiB contract ceiling),
 plus bounded key, cursor and collection overhead.
 Continuations and nested inventory, chunk and action proofs remain sequential
 with their existing limits. All checks are fresh; existing serving callers
@@ -152,8 +153,9 @@ complete configurations at startup. URL-token, scanner retrieval, admin,
 authority, ticket, hook and preservation keys have distinct roles and cannot
 be substituted. See the [app grammar](../../../apps/vcs-worker/README.md#paid-uno-launch-profile-wp-418--r-194).
 
-Phase 1 refuses unavailable extraction (4.10b-2), opted-in preservation
-(5.6a-2) and retrieval (R-193) with prerequisite-specific diagnostics.
+Extraction (4.10b-2 / #1244) and retrieval (R-193 / #1243) are merged
+and receive release wiring in 4.18. Phase 1 still refuses opted-in takedown
+until verified preservation (5.6a-2), with a prerequisite-specific diagnostic.
 The [local launch harness](../../../scripts/vcs-worker-launch.sh) records exact
 SHAs and isolated runtime logs. Phase 2 is required before activation evidence
 can pass. [Evidence slots](launch-evidence.md) remain unrun until executed;

@@ -188,7 +188,7 @@ pub enum LaunchProfileArg {
 #[derive(Debug, Clone, Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ServeArgs {
-    /// Select the indexed launch profile; requires multi auth-v2, SQLite and tickets.
+    /// Select the indexed launch profile; requires multi auth-v2, `SQLite` and tickets.
     #[arg(long, value_enum)]
     pub launch_profile: Option<LaunchProfileArg>,
     /// Mount HTTP objects and native proofs inside the launch profile.
@@ -1594,10 +1594,10 @@ pub fn resolve(
         && hooks
             .as_ref()
             .is_some_and(|settings| !settings.inspect.is_empty())
+        && !args.scanner_retrieval
     {
-        return Err(ConfigError::new(
-            exit::UNAVAILABLE,
-            "launch inspection requires R-193 scanner retrieval; the retrieval contract is not available",
+        return Err(usage(
+            "launch inspection requires --scanner-retrieval, SCANNER_KEYS and dedicated SCANNER_RETRIEVAL_KEYS",
         ));
     }
     if args.authority_fence == args.authority_key.is_empty() {
@@ -1664,6 +1664,8 @@ pub fn resolve(
         }
     }
     crate::scanner_retrieval::resolve(args, &mut pipeline, env)?;
+    mkit_server::scanner_retrieval::validate_config(&pipeline)
+        .map_err(|e| ConfigError::new(exit::CONFIG_ERROR, e.public_message()))?;
     let router = RouterOptions {
         unary_timeout: Duration::from_secs(args.unary_timeout_secs),
         stream_timeout: Duration::from_secs(args.stream_timeout_secs),

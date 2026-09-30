@@ -95,8 +95,7 @@ pub const WEBAUTHN_RPS_VAR: &str = "WEBAUTHN_RPS";
 /// write grants. Honoured only in `test-faults` builds; a release build that
 /// sees it set refuses to start.
 pub const UNSAFE_LOOPBACK_GRANTS_VAR: &str = "UNSAFE_LOOPBACK_GRANTS";
-/// The Worker var that turns indexed mode on (`test-faults` builds only;
-/// every other build refuses it until WP-4.10b).
+/// The Worker var that turns indexed mode on in the Paid launch profile.
 pub const INDEXED_MODE_VAR: &str = "INDEXED_MODE";
 /// Maximum ticketed pack size (bytes), bounded by R2's single-object limit.
 pub const MAX_PACK_BYTES_VAR: &str = "MAX_PACK_BYTES";
@@ -216,15 +215,14 @@ pub struct WorkerConfig {
     /// The R2 bucket binding ([`crate::r2::STORAGE_BINDING`]). Durable
     /// Object bindings come from [`crate::naming`].
     pub blob_binding: &'static str,
-    /// Indexed mode with scheduled verification (WP-4.8): `Some` only in a
-    /// `test-faults` build with `INDEXED_MODE` set on a Paid plan; every
-    /// release build refuses the var (Stage 1, R-171).
+    /// Indexed mode with scheduled verification and extraction, selected by
+    /// the explicit Paid launch profile (or a local test-faults configuration).
     pub indexed: Option<mkit_server::indexed::IndexedConfig>,
     /// `HOOK_ROLES`, `HOOK_TIMEOUT_MS` and `AUTHORIZER_ROLE`: which stages
     /// call the hook Worker over the `ADMISSION_HOOK` service binding. `None`
     /// runs the built-in hooks (WP-3.9).
     pub hooks: Option<crate::hooks::config::HookVars>,
-    /// Explicit Stage 2 indexed + HTTP configuration and route opt-in.
+    /// Explicit indexed HTTP configuration and route opt-in.
     #[cfg(feature = "http-objects")]
     pub http_mount: Option<crate::http_mount::WorkerHttpMountConfig>,
     /// Feature-gated `URL_TOKEN_KEYS`/`URL_TOKEN_TTL`; no mount is enabled by these vars.
@@ -320,6 +318,9 @@ impl WorkerConfig {
             .as_ref()
             .map_or_else(Vec::new, mkit_server::admin::Config::public_keys);
         config.indexed = self.indexed;
+        if self.launch.is_some() {
+            config.begin_upload_threshold_bytes = 0;
+        }
         #[cfg(feature = "http-objects")]
         if let Some(mount) = &self.http_mount {
             config.indexed = Some(mount.indexed);
@@ -409,7 +410,7 @@ impl WorkerConfig {
         #[cfg(not(feature = "test-faults"))]
         if indexed_requested && launch.is_none() {
             return Err(ConfigError(
-                "INDEXED_MODE requires LAUNCH_PROFILE=uno; extraction requires WP-4.10b-2".into(),
+                "INDEXED_MODE requires LAUNCH_PROFILE=uno".into(),
             ));
         }
         let required =
@@ -647,9 +648,8 @@ fn resolve_authority_fence(
 /// The indexed configuration `INDEXED_MODE` asks for: scheduled verification
 /// (WP-4.8), which needs a Paid plan (a slice spends about 256 of an alarm's
 /// 1,000 subrequests; Free's 50 are all assigned, R-147), D34 (the slices run
-/// on ref shards), Multi addressing and upload tickets. Release builds never
-/// get here with `requested` (see `from_vars`).
-#[allow(clippy::unnecessary_wraps)] // `Ok(None)` outside `test-faults`.
+/// on ref shards), Multi addressing and upload tickets. Release activation
+/// additionally requires the explicit Uno launch selection in `from_vars`.
 fn resolve_indexed(
     requested: bool,
     plan: Option<&str>,
@@ -1923,6 +1923,8 @@ mod faults {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "http-objects"))]
+pub use glue::fetch_with_context;
 #[cfg(target_arch = "wasm32")]
 pub use glue::{fetch, fetch_with, ns_object, ns_object_with, serve, serve_with};
 #[cfg(all(target_arch = "wasm32", feature = "published-view"))]
@@ -2133,6 +2135,31 @@ mod glue {
     /// Only when the runtime fails to build a response.
     pub async fn fetch(req: Request, env: Env) -> worker::Result<Response> {
         fetch_with(req, env, hooks_from_env).await
+    }
+
+    /// Serve the optional launch HTTP mount with settlement retained by the fetch event.
+    ///
+    /// # Errors
+    /// Only when the runtime fails to build a response.
+    #[cfg(feature = "http-objects")]
+    pub async fn fetch_with_context(
+        req: Request,
+        env: Env,
+        context: worker::Context,
+    ) -> worker::Result<Response> {
+        match WorkerConfig::from_env(&env) {
+            Ok(mut cfg) => {
+                cfg.http_mount = cfg
+                    .http_mount
+                    .take()
+                    .map(|mount| mount.with_context(context));
+                serve_with(req, env, &cfg, hooks_from_env).await
+            }
+            Err(_) if is_options_preflight(&req) => {
+                cors_preflight_response(&cors_allow_headers(), CORS_ALLOW_METHODS)
+            }
+            Err(error) => Ok(cors(json_response(unavailable_json(&error.0), 503)?)),
+        }
     }
 
     /// Explicit Stage 2 fetch entry point. No environment variable enables snapshots.
@@ -2511,7 +2538,14 @@ mod glue {
         let alarm_budget = plan
             .as_deref()
             .filter(|plan| plan.trim().eq_ignore_ascii_case("paid"))
-            .map(|_| mkit_server::purge::SliceBudget::new(crate::purge::ALARM_OPERATIONS));
+            .map(|_| {
+                let allowance = if cfg.as_ref().is_ok_and(|cfg| cfg.launch.is_some()) {
+                    crate::purge::LAUNCH_ALARM_OPERATIONS
+                } else {
+                    crate::purge::ALARM_OPERATIONS
+                };
+                mkit_server::purge::SliceBudget::new(allowance)
+            });
         let registry =
             super::timer_registry_budgeted(class, target, plan.as_deref(), alarm_budget.as_ref());
         let registry = if matches!(
@@ -2546,8 +2580,8 @@ mod glue {
             Arc::new(WorkerClock),
             alarm_budget.clone(),
         );
-        // Kind 7 (WP-4.8): registered only for an indexed Paid deployment,
-        // which no release build can be.
+        // Kind 7: registered for an indexed Paid deployment, with the merged
+        // extraction driver required before Verified becomes visible.
         let registry = crate::verify::register_from_env_budgeted(
             registry,
             env,
@@ -3035,6 +3069,16 @@ mod tests {
         ]);
         assert!(WorkerConfig::from_vars(vars(&pairs)).is_err());
         pairs.push((PLAN_VAR, "paid"));
+        assert!(
+            WorkerConfig::from_vars(vars(&pairs))
+                .unwrap_err()
+                .0
+                .contains("MKIT_HOOK_KEY")
+        );
+        pairs.push((
+            "MKIT_HOOK_KEY",
+            "purge 3333333333333333333333333333333333333333333333333333333333333333",
+        ));
         let config = WorkerConfig::from_vars(vars(&pairs)).unwrap();
         let purge = config.pipeline_config().unwrap().purge.unwrap();
         assert!(purge.shared_caches && purge.remote_sink);
@@ -4077,11 +4121,10 @@ mod tests {
         assert_eq!(v["message"], "a \"b\"");
     }
 
-    /// Stage 1 inertness (R-171): a release build refuses `INDEXED_MODE`,
-    /// so no Worker builds an indexed pipeline or registers kind 7.
+    /// A release build requires the explicit launch profile for indexed mode.
     #[cfg(not(feature = "test-faults"))]
     #[test]
-    fn a_release_worker_refuses_indexed_mode_until_extraction_lands() {
+    fn a_release_worker_requires_launch_selection_for_indexed_mode() {
         for value in ["true", "1", "yes", "on"] {
             let err =
                 WorkerConfig::from_vars(|name| (name == "INDEXED_MODE").then(|| value.to_owned()))

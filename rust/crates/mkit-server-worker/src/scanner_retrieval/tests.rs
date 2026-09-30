@@ -11,7 +11,7 @@ fn config() -> RetrievalConfig {
 }
 
 #[test]
-fn activation_requires_all_inputs_and_remains_unreleased() {
+fn activation_requires_all_inputs_and_the_release_launch_profile() {
     assert!(parse(&|_| None, false, false).unwrap().is_none());
     for key in [KEYS_SECRET, "SCANNER_KEYS"] {
         assert!(parse(&|name| (name == key).then(|| "key".into()), false, false).is_err());
@@ -29,6 +29,7 @@ fn activation_requires_all_inputs_and_remains_unreleased() {
     let valid = |name: &str| match name {
         "SCANNER_RETRIEVAL" => Some("true".into()),
         "WORKERS_PLAN" => Some("paid".into()),
+        "LAUNCH_PROFILE" => Some("uno".into()),
         KEYS_SECRET => Some(format!("active scan {}", "18".repeat(32))),
         "SCANNER_KEYS" => Some(mkit_core::hash::to_hex(
             &mkit_server::hooks::HookSigner::new("scanner", zeroize::Zeroizing::new([12; 32]))
@@ -51,8 +52,18 @@ fn activation_requires_all_inputs_and_remains_unreleased() {
         )
         .is_err()
     );
+    assert!(parse(&valid, true, true).is_ok());
     assert_eq!(
-        parse(&valid, true, true).is_ok(),
+        parse(
+            &|name| if name == "LAUNCH_PROFILE" {
+                None
+            } else {
+                valid(name)
+            },
+            true,
+            true
+        )
+        .is_ok(),
         cfg!(feature = "test-faults")
     );
 }
@@ -67,7 +78,7 @@ fn mount_defaults_off_and_is_exact() {
     .unwrap();
     assert!(!mounted(PATH, &cfg));
     cfg.scanner_retrieval = Some(Arc::new(config()));
-    assert_eq!(mounted(PATH, &cfg), cfg!(feature = "test-faults"));
+    assert!(mounted(PATH, &cfg));
     for path in [
         "/_mkit/scanner/pack/",
         "/_mkit/scanner",

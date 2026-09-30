@@ -14,10 +14,9 @@
 //! registered there. Raise `limits.cpu_ms` on a Paid deployment that verifies
 //! large packs; a slice the runtime kills is counted and shrinks its own work.
 //!
-//! **Stage 1.** No release build reads `INDEXED_MODE` as anything but a
-//! refusal (`WorkerConfig::from_vars`), so `WorkerConfig::indexed` is `None`
-//! and this registration never happens: kind 7 stays unregistered and no `vc`
-//! row or kind-7 timer is ever written.
+//! **Launch.** The explicit Paid indexed Uno profile selects this handler
+//! with the real R2 extraction driver. Without the opt-in, indexed mode stays
+//! off and no verification job or kind-7 timer is created.
 
 use crate::classes::ShardClass;
 use crate::log_failure;

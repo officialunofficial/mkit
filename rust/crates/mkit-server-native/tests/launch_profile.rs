@@ -54,6 +54,17 @@ fn launch_implies_indexed_and_keeps_http_opt_in() {
         config.pipeline.upload_limits.max_total_bytes
     );
     assert_eq!(config.pipeline.begin_upload_threshold_bytes, 0);
+    let pipeline = mkit_server::pipeline::Pipeline::new(
+        mkit_server::MemoryBlobStore::default(),
+        mkit_server::MemoryKv::default(),
+        mkit_server::pipeline::Hooks::new(),
+        config.pipeline.clone(),
+        std::sync::Arc::new(mkit_server::SystemClock),
+        std::sync::Arc::new(mkit_server::NoopMetrics),
+    )
+    .unwrap();
+    assert_eq!(pipeline.server_info().begin_upload_threshold_bytes, 0);
+    assert!(config.pipeline.scanner_retrieval.is_none());
     #[cfg(feature = "http-objects")]
     assert!(config.pipeline.http_objects.is_none() && config.router.http_objects.is_none());
 }
@@ -95,6 +106,14 @@ fn release_indexed_requires_explicit_launch_profile() {
     let mut core = flags(root.path());
     core.truncate(core.len() - 2);
     core.push("--indexed".into());
+    assert!(
+        resolve(&core)
+            .unwrap_err()
+            .message
+            .contains("--launch-profile uno")
+    );
+    core.pop();
+    core.push("--scanner-retrieval".into());
     assert!(
         resolve(&core)
             .unwrap_err()
@@ -158,7 +177,7 @@ fn http_launch_requires_dedicated_tokens_and_mounts_native_proofs() {
 
 #[cfg(feature = "hooks")]
 #[test]
-fn launch_inspection_validates_then_refuses_missing_retrieval() {
+fn launch_inspection_requires_complete_separate_retrieval_and_sync_inspectors() {
     let root = common::repo_root();
     let hook_key = root.path().join("hook.key");
     common::secret_file(&hook_key, format!("hook {}\n", "33".repeat(32)).as_bytes());
@@ -170,13 +189,66 @@ fn launch_inspection_validates_then_refuses_missing_retrieval() {
         common::s(&hook_key).into(),
     ]);
     let error = resolve(&launch).unwrap_err();
-    assert_eq!(error.code, mkit_server_native::exit::UNAVAILABLE);
-    assert!(error.message.contains("R-193 scanner retrieval"));
-    launch.extend(["--inspect-mode".into(), "async".into()]);
+    assert!(error.message.contains("--scanner-retrieval"));
+    launch.push("--scanner-retrieval".into());
     assert!(
         resolve(&launch)
             .unwrap_err()
             .message
+            .contains("scanner retrieval configuration")
+    );
+    let scanner =
+        mkit_server::hooks::HookSigner::new("scanner", zeroize::Zeroizing::new([0x55; 32]))
+            .unwrap();
+    let scanner_key = mkit_core::hash::to_hex(&scanner.public_key());
+    let retrieval = format!("active scanner {}", "44".repeat(32));
+    let resolve_keys = |flags: &[String], keys: &str, scanners: &str| {
+        common::resolve_with(
+            &flags.iter().map(String::as_str).collect::<Vec<_>>(),
+            &[("SCANNER_RETRIEVAL_KEYS", keys), ("SCANNER_KEYS", scanners)],
+        )
+    };
+    let config = resolve_keys(&launch, &retrieval, &scanner_key).unwrap();
+    assert!(config.pipeline.scanner_retrieval.is_some());
+    assert!(
+        resolve_keys(
+            &launch,
+            &format!("active scanner {}", "11".repeat(32)),
+            &scanner_key
+        )
+        .is_err()
+    );
+    assert!(
+        resolve_keys(
+            &launch,
+            &format!("active scanner {}", "33".repeat(32)),
+            &scanner_key
+        )
+        .is_err()
+    );
+    assert!(resolve_keys(&launch, &retrieval, "invalid scanner").is_err());
+    let mut async_flags = launch.clone();
+    async_flags.extend(["--inspect-mode".into(), "async".into()]);
+    assert!(
+        resolve_keys(&async_flags, &retrieval, &scanner_key)
+            .unwrap_err()
+            .message
             .contains("sync and fail_closed")
     );
+    for index in 1..=4 {
+        launch.extend([
+            "--hook-inspect-url".into(),
+            format!("https://scanner{index}.example"),
+        ]);
+        if index < 4 {
+            assert!(resolve_keys(&launch, &retrieval, &scanner_key).is_ok());
+        } else {
+            assert!(
+                resolve_keys(&launch, &retrieval, &scanner_key)
+                    .unwrap_err()
+                    .message
+                    .contains("at most four")
+            );
+        }
+    }
 }

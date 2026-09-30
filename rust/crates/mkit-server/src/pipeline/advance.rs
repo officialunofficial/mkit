@@ -1,6 +1,6 @@
 //! Ticket decisions before admission and guarded ticket consumption at apply.
 
-use futures::{StreamExt as _, stream};
+use futures::future::join_all;
 use mkit_core::hash::Hash;
 
 use super::{
@@ -117,28 +117,32 @@ async fn ticket_proofs<B: crate::BlobStore>(
 ) -> Vec<(usize, TicketV1, Result<Proof, ServerError>)> {
     // A ticket holds only one backend response at a time: its marker HEAD
     // completes before the pack HEAD starts. Seven tickets share six slots.
-    stream::iter(pending.into_iter().map(|(i, t)| async move {
-        let (marker_key, _) = upload_marker(&ids[i], &t.pack_id);
-        let proof = match blobs.head(&marker_key).await {
-            Err(e) => Err(store_error(StorageOp::BlobHead, e)),
-            Ok(None) => Ok(Proof::MarkerMissing),
-            Ok(Some(_)) => blobs
-                .head(&BlobKey::pack(t.pack_id))
-                .await
-                .map(|pack| {
-                    if pack.is_some() {
-                        Proof::Ready
-                    } else {
-                        Proof::PackMissing
-                    }
-                })
-                .map_err(|e| store_error(StorageOp::BlobHead, e)),
-        };
-        (i, t.clone(), proof)
-    }))
-    .buffer_unordered(6)
-    .collect()
-    .await
+    let mut proofs = Vec::with_capacity(pending.len());
+    for group in pending.chunks(6) {
+        proofs.extend(
+            join_all(group.iter().map(|&(i, t)| async move {
+                let (marker_key, _) = upload_marker(&ids[i], &t.pack_id);
+                let proof = match blobs.head(&marker_key).await {
+                    Err(e) => Err(store_error(StorageOp::BlobHead, e)),
+                    Ok(None) => Ok(Proof::MarkerMissing),
+                    Ok(Some(_)) => blobs
+                        .head(&BlobKey::pack(t.pack_id))
+                        .await
+                        .map(|pack| {
+                            if pack.is_some() {
+                                Proof::Ready
+                            } else {
+                                Proof::PackMissing
+                            }
+                        })
+                        .map_err(|e| store_error(StorageOp::BlobHead, e)),
+                };
+                (i, t.clone(), proof)
+            }))
+            .await,
+        );
+    }
+    proofs
 }
 
 fn reservation<'a>(snap: &'a Snapshot, id: &Hash, t: &TicketV1) -> Result<&'a Value, ServerError> {
@@ -437,7 +441,7 @@ mod concurrency_tests {
             unreachable!("ticket decisions cannot read payloads")
         }
         async fn head(&self, key: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
-            self.starts.lock().unwrap().push(key.clone());
+            self.starts.lock().unwrap().push(*key);
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(active, Ordering::SeqCst);
             futures::future::poll_fn(|cx| {

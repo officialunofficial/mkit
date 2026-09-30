@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server (WP-4.18, phase 1, R-194): explicit Paid indexed Uno launch selection
+  and startup validation for optional HTTP/URL tokens, signed hooks/binding,
+  synchronous inspection and private scanner retrieval. Native serves proofs;
+  Worker proofs stay unsupported. Leases/GC remain off with permanent retention.
+  Takedown activation still refuses until verified preservation (WP-5.6a-2).
+  Worker HTTP mounts retain read settlement in the fetch context; ticket and
+  implicit packmap checks use at most six simultaneous backend responses.
+  Added local conformance/evidence skeleton; complete runtime evidence and
+  embedding addenda are pending phase 2.
+
 - Server/Worker (default-off, WP-4.10b-2, R-186): complete consumed-group extraction
   with closure before effects, native union counts, bounded job header/body guards,
   resumable delta reconstruction and root-checked multipart uploads. Hold renewal

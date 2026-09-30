@@ -110,8 +110,9 @@ reconciliation; store links in the readiness record. No drill below has passed.
 | Scanner timing | Cold and warm global-denial proof plus every bounded range needed for pack decoding | Measure against actual Inspect timeout before activation. Worker HOOK_TIMEOUT_MS stays default 5,000 ms / maximum 30,000 ms; native/core retrieval supports up to 300,000 ms. Fail-closed retries keep tickets open and mint fresh capabilities, but timing must be proved for the deployed profile | 4.18 |
 | Purge sink down | Timeout/non-2xx or lost acknowledgement during overlapping block/visibility intents | Retain intents, retry with backoff, reconcile duplicates; local invalidation and authoritative global-block checks remain effective while sink is down. Manual acceptance returns purge id, not completion; later audit proves completion | 5.10 / 5.6a / 4.18 |
 
-R-193 scanner retrieval prefetches up to eight first descriptor pages
-concurrently, with at most 4 MiB of raw descriptor values plus bounded
+R-193 scanner retrieval prefetches up to six first descriptor pages
+concurrently, with at most 3 MiB of raw descriptor values (within the
+4 MiB contract ceiling) plus bounded
 key, cursor and collection overhead. Continuations and nested
 inventory, chunk and action proofs remain sequential under existing bounds,
 preserving fresh checks and the shared call budget. Host tests cover

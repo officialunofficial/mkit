@@ -8,6 +8,10 @@ use mkit_server::{BoxFuture, MaybeSend, MaybeSync, NamespaceStore, StoreError};
 /// Maximum external operations in one Paid Durable Object alarm.
 pub const ALARM_OPERATIONS: u32 = 1000;
 
+/// Launch work reserves headroom for alarm dispatch and response settlement.
+/// The project envelope stays 1,000; all launch handlers share the remainder.
+pub(crate) const LAUNCH_ALARM_OPERATIONS: u32 = ALARM_OPERATIONS - 40;
+
 /// Reserve a handler's worst-case external calls before any effect.
 pub(crate) struct Budgeted<H> {
     pub handler: H,
@@ -920,7 +924,7 @@ mod tests {
     async fn sixteen_heads_share_one_whole_alarm_budget_and_keep_unfinished_purges() {
         let store = MemoryKv::default();
         let clock = ManualClock::new(10);
-        let budget = SliceBudget::new(ALARM_OPERATIONS);
+        let budget = SliceBudget::new(LAUNCH_ALARM_OPERATIONS);
         let recorded = Arc::new(AtomicU32::new(0));
         let cache = Cache::default();
         let mut registry = TimerRegistry::new();
@@ -978,7 +982,7 @@ mod tests {
         let actual =
             recorded.load(Ordering::SeqCst) + u32::try_from(cache.0.lock().unwrap().len()).unwrap();
         assert!(actual <= budget.used());
-        assert!(budget.used() <= ALARM_OPERATIONS);
+        assert!(budget.used() <= LAUNCH_ALARM_OPERATIONS);
         let mut pending = 0;
         for (partition, id) in &partitions {
             pending += u32::from(read_request(&store, partition, id).await.unwrap().is_some());

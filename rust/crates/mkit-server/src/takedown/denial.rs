@@ -406,7 +406,7 @@ async fn prove<S: NamespaceStore>(
 }
 /// Only first descriptor pages are prefetched. Each shard's continuations and
 /// nested inventory/chunk proofs retain the existing serial working set.
-const SCANNER_PROOF_CONCURRENCY: usize = 8;
+const SCANNER_PROOF_CONCURRENCY: usize = 6;
 // At most 4 MiB of raw descriptor values, plus bounded key/cursor overhead;
 // nested proof allocations remain serial.
 const _: () = assert!(SCANNER_PROOF_CONCURRENCY * crate::store::MAX_VALUE_BYTES <= 4 * 1024 * 1024);
@@ -814,6 +814,7 @@ mod tests {
                     .await
                     .unwrap();
                 assert_eq!(store.peak.load(Ordering::SeqCst), concurrency);
+                assert!(store.peak.load(Ordering::SeqCst) <= 6);
                 assert_eq!(store.scans.load(Ordering::SeqCst), 4096);
                 assert_eq!(budget.used(), 4096);
                 assert_eq!(store.active.load(Ordering::SeqCst), 0);

@@ -35,12 +35,7 @@ fn launch_profile_is_paid_indexed_permanent_and_optional_features_are_off() {
     assert!(cfg.hooks.is_none());
     #[cfg(feature = "http-objects")]
     assert!(cfg.http_mount.is_none());
-    assert!(
-        check(&vars())
-            .unwrap_err()
-            .0
-            .contains("WP-4.10b-2 extraction driver")
-    );
+    assert!(check(&vars()).is_ok());
     for (name, value, diagnostic) in [
         ("LAUNCH_PROFILE", "full", "LAUNCH_PROFILE"),
         ("INDEXED_MODE", "false", "INDEXED_MODE=true"),
@@ -59,19 +54,19 @@ fn launch_profile_is_paid_indexed_permanent_and_optional_features_are_off() {
     }
 }
 #[test]
-fn launch_partial_inspection_and_preservation_refuse_before_extraction() {
+fn launch_partial_inspection_and_preservation_refuse_before_activation() {
     let mut v = vars();
     v.insert("HOOK_ROLES".into(), "inspect".into());
     assert!(check(&v).unwrap_err().0.contains("SCANNER_RETRIEVAL=true"));
     v.insert("SCANNER_RETRIEVAL".into(), "true".into());
-    assert!(check(&v).unwrap_err().0.contains("SCANNER_KEYS"));
-    v.insert("SCANNER_KEYS".into(), "not-validated-before-R193".into());
+    assert!(check(&v).unwrap_err().0.contains("SCANNER_RETRIEVAL_KEYS"));
+    v.insert("SCANNER_KEYS".into(), "invalid scanner".into());
     assert!(check(&v).unwrap_err().0.contains("SCANNER_RETRIEVAL_KEYS"));
     v.insert(
         "SCANNER_RETRIEVAL_KEYS".into(),
-        "not-validated-before-R193".into(),
+        "invalid retrieval key".into(),
     );
-    assert!(check(&v).unwrap_err().0.contains("requires R-193"));
+    assert!(check(&v).unwrap_err().0.contains("keys are invalid"));
     for (k, value) in [
         ("INSPECT_MODE", "async"),
         ("INSPECT_ON_UNAVAILABLE", "publish"),
@@ -109,7 +104,7 @@ fn launch_http_requires_tokens_and_preserves_role_separation() {
     assert!(check(&v).unwrap_err().0.contains("URL_TOKEN_KEYS"));
     v.insert(
         "URL_TOKEN_KEYS".into(),
-        format!("active {} {}", "aa".repeat(16), "22".repeat(32)),
+        format!("active {}", "22".repeat(32)),
     );
     let cfg = parse(&v).unwrap();
     assert!(cfg.http_mount.is_some());
@@ -120,7 +115,7 @@ fn launch_http_requires_tokens_and_preserves_role_separation() {
     v.remove("HTTP_ADMIT_READS");
     v.insert(
         "URL_TOKEN_KEYS".into(),
-        format!("active {} {}", "aa".repeat(16), "11".repeat(32)),
+        format!("active {}", "11".repeat(32)),
     );
     assert!(
         check(&v)
@@ -146,5 +141,37 @@ fn launch_signed_hooks_are_validated_at_startup_and_redact_keys() {
     v.insert("MKIT_HOOK_KEY".into(), format!("hook {}", "11".repeat(32)));
     assert!(check(&v).unwrap_err().0.contains("must differ"));
     v.insert("MKIT_HOOK_KEY".into(), format!("hook {}", "33".repeat(32)));
-    assert!(check(&v).unwrap_err().0.contains("WP-4.10b-2"));
+    assert!(check(&v).is_ok());
+}
+
+#[test]
+fn launch_inspection_uses_the_merged_retrieval_codec_and_separate_keys() {
+    let mut v = vars();
+    v.insert("HOOK_ROLES".into(), "inspect".into());
+    v.insert("SCANNER_RETRIEVAL".into(), "true".into());
+    let scanner =
+        mkit_server::hooks::HookSigner::new("scanner", zeroize::Zeroizing::new([0x55; 32]))
+            .unwrap();
+    v.insert(
+        "SCANNER_KEYS".into(),
+        mkit_core::hash::to_hex(&scanner.public_key()),
+    );
+    v.insert(
+        "SCANNER_RETRIEVAL_KEYS".into(),
+        format!("active scanner {}", "44".repeat(32)),
+    );
+    let config = check(&v).unwrap();
+    assert!(config.scanner_retrieval.is_some());
+    assert!(
+        config
+            .pipeline_config()
+            .unwrap()
+            .scanner_retrieval
+            .is_some()
+    );
+    v.insert(
+        "SCANNER_RETRIEVAL_KEYS".into(),
+        format!("active scanner {}", "11".repeat(32)),
+    );
+    assert!(check(&v).unwrap_err().0.contains("distinct"));
 }

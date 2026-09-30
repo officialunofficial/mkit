@@ -144,3 +144,63 @@ Any prerequisite remains default-inert/partial; fail-closed isolation/no-oracle 
 ## Verification
 
 Run all current common/full/area local gates at final immutable head, plus complete native and wrangler launch matrix. Gates include release/default-off regression and opted-in release Worker runtime, not test-faults alone. Count whole-alarm calls/ops/resident work and concurrent response lifetimes with adversarial inputs. Keep per-worktree ports/processes isolated; serialize known high-memory models appropriately. Two independent self-reviews including security/spec/crypto audit, followed by independent adversarial PR review. Open PR with exact commands/logs, measured limits and remaining user-owned staging/external review slots. No cloud/CI polling.
+
+
+## Addendum (2026-09-30): embedding support for Uno Kit (UNO-420), in scope for 4.18
+
+- Budget: up to about 350 extra production lines; the cap becomes 3,350.
+- Phase: 1 or 2.
+- **Scope:**
+  1. **The documented embedding surface.** Module docs plus a README section listing the supported public API for
+     embedding: `adapter::serve_with` / `fetch_with`, `adapter::ns_object_with`, `WorkerConfig` (including a
+     programmatic `WorkerHttpMountConfig`), `ns_object::NsObject`, `classes::ShardClass` and the `HookSet` /
+     `Authorizer` / `Admission` / `OutcomeSink` traits.
+     - The crate stays `publish = false`, consumed as a git dependency pinned to the release tag.
+     - Mark the surface "supported, 0.x; breaking changes called out in the CHANGELOG".
+  2. **Close the builder gap.** Today `ns_object_configured` (published-view config) can't take a custom outcome sink,
+     and `ns_object_with` can't take the published-view config. Add one constructor or builder that takes both.
+     Update the stale "Stage 2" wording.
+  3. **A `mkit_server_worker::durable_objects!` macro** (or an equivalent documented pattern if a `macro_rules!`
+     wrapping workers-rs `#[durable_object]` doesn't expand cleanly across crates). It generates the five DO classes
+     (RefStore, NsCoordinator, RefShard, RepoIndexShard and ContentIndexShard) with fetch and alarm glue, given a sink
+     factory and a config. `apps/vcs-worker` must use it, which proves it. If it can't work, document the 140-line
+     pattern from `apps/vcs-worker/src/worker_impl.rs` as the example instead, and say why.
+  4. **An example crate, `examples/embedded-worker`** (or `apps/`, whichever the repo convention is). Custom hooks that
+     call another Worker over a service binding; an in-process `serve_with` call with a constructed request,
+     including a streamed `UploadPart` body. Add it to the wasm32 check.
+     - Document that the envelope audience must equal `WorkerConfig`'s audience (`AUTH_AUDIENCE`, the exact public
+       origin) regardless of the constructed request's URL.
+     - Document that in-process dispatch shares the isolate's CPU, memory and subrequest budget with the caller.
+     - Add a wrangler test that an in-process streamed `UploadPart` works end to end.
+  5. **A feature and size table** in the README: the minimal feature set for the launch profile (with and without
+     `http-objects` / `signed-http-hooks`), and the measured release wasm size, raw and gzip, for each, against the
+     Workers script size limits. Record the exact build commands.
+- **Not in scope:** a `ListRepos` RPC. It's post-launch.
+
+### Addendum 2 (2026-09-30): embedding gaps found by Uno Kit's questions (cap now 3,500)
+
+6. **A custom purge sink.** The DO builder (addendum item 2) also accepts an optional
+   `Arc<dyn mkit_server::purge::PurgeSink>` (plus `LocalInvalidation`), so an embedder can purge in-process. Today
+   `ns_object_inner` hard-wires `purge_from_env` (a signed HTTPS `cache-purge` hook). Env-based configuration stays
+   the default. Startup validation must accept "takedown on plus a custom sink" without `HOOK_ROLES=cache-purge`.
+7. **Admin mount placement.** Add a `WorkerConfig` option to keep AdminService **off the public fetch path**, while
+   exposing an embedding entry point (for example `adapter::serve_admin_with(req, env, &cfg)`) that the host calls for
+   admin requests it routes itself.
+   - The default stays as today: mounted at `/mkit.server.admin.v1.AdminService/` when `ADMIN_KEYS` is set.
+   - `ADMIN_KEYS` stays the authentication in both modes.
+8. **Programmatic pipeline knobs for embedders.** Expose on `WorkerConfig`, programmatic only with no env vars:
+   - `RefPolicy`/`RefRule`, for fast-forward-only and signer rules, e.g. immutable tags via a fast-forward-only
+     `refs/tags/*` rule plus a no-delete policy if one exists;
+   - the takedown enablement you already wire (`takedown_denial`).
+
+   Document them in the embedding section.
+
+- **Also document in the embedding README section:**
+  - reserved path prefixes: Connect `/mkit.transport.v1.TransportService/`, `/mkit.server.admin.v1.AdminService/`,
+    any path containing `/-/` when HTTP serving is mounted, `/.well-known/mkit-*`, `/_mkit/`, and `/__mkit_test/` in
+    test builds;
+  - that a host may use any other prefix, such as `/_uno/`. Namespaces and repo names can't start with `_`.
+
+Executor phase assignment: both embedding addenda will be implemented and verified in phase 2. The final binding production-line cap is 3,500 (addendum 2). Phase 1 removes the extraction and retrieval placeholders after merged PRs #1244 and #1243; only WP-5.6a-2 preservation remains a startup refusal. The separate timer-12 repair is PR #1245 (`3038c158`), to merge before phase 2.
+
+A configured custom purge sink is the expressly authorized embedding alternative to the environment-based signed HTTPS purge hook. Public/admin-separated mounting and programmatic RefPolicy/takedown options remain phase-2 work.

@@ -79,9 +79,9 @@ rows. Confirm the bucket's access policy before the first deployment.
 Keep `WORKERS_PLAN=free` on a Free account.
 
 Indexed serving selects the Paid Uno launch profile described below. Free
-Workers cannot enable indexed mode. Phase 1 validates the profile and refuses
-release activation until WP-4.10b-2's extraction driver is merged; test-faults
-indexed conformance is separate evidence and does not activate a deployment.
+Workers cannot enable indexed mode. WP-4.18 validates the profile and activates the merged extraction driver;
+test-faults indexed conformance is separate evidence and does not establish
+the completed launch matrix.
 The alarm budget is shared across handlers; see the
 [launch budget audit](../../docs/plans/mkit-server/launch-budgets.md).
 
@@ -410,13 +410,15 @@ configuration before activation:
 |---|---|
 | HTTP objects / URL tokens | `HTTP_OBJECTS=true`, an `http-objects` build and dedicated `URL_TOKEN_KEYS`; retained signing keys follow the existing token grammar |
 | Signed hooks | `signed-http-hooks` build, `HOOK_URL` HTTPS, `HOOK_ROLES` and dedicated `MKIT_HOOK_KEY`; optional timeout/validity use the existing bounds. Alternatively use the isolated nonpublic `ADMISSION_HOOK` binding; both channels together are refused |
-| Inspection | Zero inspectors is valid. With inspection, up to four sync `fail_closed` inspectors, complete R-193 scanner allowlist and a dedicated retrieval key are required. Async, publish-on-unavailable and clear deadlines are refused |
+| Inspection | Zero inspectors is valid. With inspection, up to four sync `fail_closed` inspectors; `HOOK_ROLES=inspect`, `INSPECT_MODE=sync`, `INSPECT_ON_UNAVAILABLE=fail_closed`, `SCANNER_RETRIEVAL=true`, `SCANNER_KEYS` and dedicated `SCANNER_RETRIEVAL_KEYS`. Async, publish-on-unavailable and clear deadlines are refused |
 | Admin | Dedicated `ADMIN_KEYS` with signed requests, permitted roles, replay and gapless audit |
+| Paid HTTP reads | `HTTP_ADMIT_READS=true` additionally requires `HTTP_OBJECTS=true` and the `admit` hook role; response completion retains the fetch request waitUntil lifetime plus durable reconcile |
 | Takedown | `TAKEDOWN_ENABLED=true`, admin keys, separate preservation bucket, explicit retention, dedicated preservation signer and published key list under §14.7, plus signed HTTPS `cache-purge`. Partial configuration is refused |
 
-Phase 1 fails closed for unavailable extraction (WP-4.10b-2), preservation
-(WP-5.6a-2) and scanner retrieval (R-193). Phase 2 removes these refusals only
-when their merged implementations pass the complete local launch matrix.
+Extraction (WP-4.10b-2 / #1244) and scanner retrieval (R-193 / #1243) are
+merged; this activation wires their release paths. Phase 1 keeps takedown
+fail-closed until verified preservation (WP-5.6a-2) lands. Phase 2 requires
+the complete native and actual release Worker matrix before opening the PR.
 See the [conformance plan](../../docs/plans/mkit-server/launch-conformance.md)
 and [itemized evidence](../../docs/plans/mkit-server/launch-evidence.md).
 
@@ -432,3 +434,55 @@ With admin and takedown configured, the Worker admin subset is `Takedown`,
 and `ReadAuditLog`. Hold review operations and `Reinstate` remain unexposed.
 The launch creates no inspection holds or publication Events; async inspection,
 hold review, Events and Worker proofs are post-launch work (R-200).
+
+R-193 scanner retrieval mounts `POST /_mkit/scanner/pack`. `SCANNER_KEYS`
+contains 1–32 distinct non-weak Ed25519 public keys, one per line.
+`SCANNER_RETRIEVAL_KEYS` contains one `active <id> <64 hex>` line followed
+by up to 15 `retained <id> <64 hex> <retired_at_ms>` lines. Its capability
+and scanner auth-v2 signature authorize only assigned staged added-pack raw
+bytes in ranges of at most 1 MiB. Missing, foreign, expired, replayed,
+consumed-ticket and globally blocked requests uniformly answer 404.
+The scanner decodes packs and manifests itself. External delta bases need
+an independently authorized resolver or local scanner cache; retrieval never
+grants access to earlier packs or public object URLs. Proof-prefetch concurrency
+is at most six responses, with 512 KiB pages (up to 3 MiB raw data, within the
+4 MiB bound); nested checks remain sequential under the shared 8,500-op budget.
+
+## Embedding addenda (phase 2 pending)
+
+The WP-4.18 embedding addenda are assigned to phase 2. Their supported 0.x
+surface, combined publication/Outcome/purge DO builder, optional host-only
+admin entrypoint, programmatic ref policy/takedown controls, DO class glue
+and `embedded-worker` example remain **pending**. The final documentation
+must state the supported API and call out breaking changes in CHANGELOG;
+the crate remains `publish = false`, used as a git dependency pinned to the
+release tag. Existing adapter entrypoints alone do not certify these addenda.
+
+The future embedded example must prove a streamed in-process `UploadPart`
+under actual wrangler. Its envelope audience must equal WorkerConfig's
+`AUTH_AUDIENCE` (the exact public origin) regardless of the constructed
+request URL. In-process dispatch shares the caller's isolate CPU, memory
+and subrequest limits. The phase 2 API/source review must document reserved
+Connect/admin, `/-/`, `/.well-known/mkit-*`, `/_mkit/` and test-only
+`/__mkit_test/` paths; a host can choose another prefix such as `/_uno/`.
+Namespaces and repository names cannot begin with `_`.
+
+The minimal profile uses the default build without optional features.
+Core publication semantics are mandatory; `published-view` adds optional
+snapshot/cache optimization. The phase 2 feature/size audit verifies each
+variant against the final implementation. All raw/gzip sizes, script-limit comparisons and acceptance
+remain **UNRUN**. Run each exact command from `apps/vcs-worker`, pin SHA and
+artifact, and record the wasm file's raw byte count and deterministic gzip
+(`gzip -n`) byte count before another variant overwrites the build output.
+
+| Variant | Exact release build command | Raw wasm bytes | gzip bytes | Limit/acceptance |
+|---|---|---|---|---|
+| Profile without optional HTTP or signed HTTPS | `worker-build --release` | UNRUN | UNRUN | UNRUN |
+| HTTP objects / tokens | `worker-build --release --features http-objects` | UNRUN | UNRUN | UNRUN |
+| Signed HTTPS hooks | `worker-build --release --features signed-http-hooks` | UNRUN | UNRUN | UNRUN |
+| HTTP plus signed HTTPS and published snapshots | `worker-build --release --features launch` | UNRUN | UNRUN | UNRUN |
+
+The aggregate `launch` build enables `http-objects`, `signed-http-hooks` and
+`published-view`; runtime features remain configuration opt-ins. Add the
+example's independent wasm32 build and actual wrangler evidence to
+[B4.embedding](../../docs/plans/mkit-server/launch-evidence.md).
