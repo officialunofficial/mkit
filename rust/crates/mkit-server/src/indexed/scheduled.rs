@@ -642,26 +642,17 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
         .filter_map(|(pack, age)| age.map(|_| pack))
         .collect();
     if let Some(limit) = inspection_limit {
-        let additions: Vec<_> = ready
-            .iter()
-            .filter(|c| c.job.kind == Kind::Pack)
-            .map(|c| c.ticket.pack_id)
-            .collect();
-        staged.inspection = Some(
-            super::inspection::scheduled_entries(
-                blobs,
-                store,
-                shards,
-                repo,
-                source,
-                &additions,
-                cfg,
-                limit,
-                inspection_count,
-                metrics,
-            )
-            .await?,
+        let mut set = super::inspection::InspectionSet::new(limit);
+        set.reserve_added_count(inspection_count)?;
+        set.defer_scheduled(
+            ready
+                .iter()
+                .filter(|c| c.job.kind == Kind::Pack)
+                .map(|c| c.ticket.pack_id)
+                .collect(),
+            source.clone(),
         );
+        staged.inspection = Some(set);
     }
     Ok(staged)
 }

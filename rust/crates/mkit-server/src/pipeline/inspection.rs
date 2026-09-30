@@ -10,10 +10,10 @@ use mkit_rpc::hooks::InspectObject;
 pub const MAX_OBJECTS: usize = 10_000;
 /// The launch inspector bound.
 pub const MAX_INSPECTORS: usize = 4;
-/// Verification and enumeration share this request allocation.
+/// Indexed verification and pack-count preflight share this allocation.
 pub const VERIFY_CALLS: u32 = 300;
 /// Existing ancestry, resulting-pair walk, hooks, and other-stage allocations.
-pub const ADVANCE_CALLS: u32 = VERIFY_CALLS + 256 + 256 + MAX_INSPECTORS as u32 + 144;
+pub const ADVANCE_CALLS: u32 = VERIFY_CALLS + 256 + 256 + 4 + 144;
 const _: () = assert!(ADVANCE_CALLS <= 1_000);
 
 /// Configured inspection phase.
@@ -73,21 +73,6 @@ impl super::clearance::PublicationPolicy for Immediate {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn launch_advance_allocations_fit_the_repository_contract() {
-        // The 300 verification calls include preflight and all frame scans.
-        // Even seven independently rounded packs require <=16 pages for
-        // <=10,000 total entries at the Worker's 1,000-row page ceiling.
-        let frame_pages = super::MAX_OBJECTS.div_ceil(1_000) + 6;
-        assert_eq!(frame_pages, 16);
-        assert!(frame_pages < super::VERIFY_CALLS as usize);
-        assert_eq!(super::ADVANCE_CALLS, 960);
-        assert!(super::ADVANCE_CALLS <= 1_000);
-    }
-}
-
 impl<B: crate::store::MultipartBlobStore, N: crate::NamespaceStore, H: super::HookSet>
     super::Pipeline<B, N, H>
 {
@@ -120,7 +105,8 @@ impl<B: crate::store::MultipartBlobStore, N: crate::NamespaceStore, H: super::Ho
         let mut unavailable = None;
         for inspector in &self.inspectors {
             // The id binds the inspector, signed logical advance, phase and
-            // immutable batch. It is independent of hook authentication nonces.
+            // immutable batch. A changed resulting pair or metadata is a new
+            // logical batch; signing nonces do not change this identity.
             let bytes = serde_json::to_vec(&(
                 inspector.id(),
                 op.repo.namespace.as_str(),
@@ -147,7 +133,7 @@ impl<B: crate::store::MultipartBlobStore, N: crate::NamespaceStore, H: super::Ho
                 Ok(InspectVerdict::Pass) => {}
                 Ok(InspectVerdict::Reject(message)) => rejection = Some(message),
                 Err(_) => {
-                    unavailable = Some(ServerError::unavailable("inspection unavailable; retry"))
+                    unavailable = Some(ServerError::unavailable("inspection unavailable; retry"));
                 }
             }
         }
@@ -158,5 +144,24 @@ impl<B: crate::store::MultipartBlobStore, N: crate::NamespaceStore, H: super::Ho
             return Err(error);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn launch_advance_allocations_fit_the_repository_contract() {
+        // Verification has 300 calls. Pair closure, frame enumeration and
+        // dependency visibility share another 256 calls.
+        // Even seven independently rounded packs require <=16 pages for
+        // <=10,000 total entries at the Worker's 1,000-row page ceiling.
+        let frame_pages = super::MAX_OBJECTS.div_ceil(1_000) + 6;
+        assert_eq!(frame_pages, 16);
+        assert!(frame_pages < 256);
+        assert_eq!(super::MAX_INSPECTORS, 4);
+        assert_eq!(super::ADVANCE_CALLS, 960);
+        const {
+            assert!(super::ADVANCE_CALLS <= 1_000);
+        }
     }
 }

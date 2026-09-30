@@ -473,43 +473,39 @@ impl WorkerConfig {
             ));
         }
         let authority_fence = resolve_authority_fence(&var, multi, hooks.as_ref())?;
-        if let Some(fence) = &authority_fence {
-            if fence.public_keys().any(|key| {
+        if let Some(fence) = &authority_fence
+            && fence.public_keys().any(|key| {
                 ticket_keys
                     .as_ref()
                     .is_some_and(|tickets| tickets.contains_ed25519_public(&key))
-            }) {
-                return Err(ConfigError(
-                    "authority keys must differ from ticket keys".into(),
-                ));
-            }
-            #[cfg(feature = "http-objects")]
-            if fence.public_keys().any(|key| {
+            })
+        {
+            return Err(ConfigError(
+                "authority keys must differ from ticket keys".into(),
+            ));
+        }
+        #[cfg(feature = "http-objects")]
+        if let Some(fence) = &authority_fence
+            && fence.public_keys().any(|key| {
                 url_tokens
                     .as_ref()
                     .is_some_and(|tokens| tokens.keys().public_keys().any(|public| public == key))
-            }) {
-                return Err(ConfigError(
-                    "authority keys must differ from URL-token keys".into(),
-                ));
-            }
+            })
+        {
+            return Err(ConfigError(
+                "authority keys must differ from URL-token keys".into(),
+            ));
         }
-        if let Some(admin) = &admin {
-            if let Some(fence) = &authority_fence {
-                admin
-                    .check_separation(&fence.public_keys().collect::<Vec<_>>())
-                    .map_err(|_| {
-                        ConfigError("ADMIN_KEYS must differ from authority keys".into())
-                    })?;
-            }
-            #[cfg(feature = "http-objects")]
-            if let Some(tokens) = &url_tokens {
-                admin
-                    .check_separation(&tokens.keys().public_keys().collect::<Vec<_>>())
-                    .map_err(|_| {
-                        ConfigError("ADMIN_KEYS must differ from URL-token keys".into())
-                    })?;
-            }
+        if let (Some(admin), Some(fence)) = (&admin, &authority_fence) {
+            admin
+                .check_separation(&fence.public_keys().collect::<Vec<_>>())
+                .map_err(|_| ConfigError("ADMIN_KEYS must differ from authority keys".into()))?;
+        }
+        #[cfg(feature = "http-objects")]
+        if let (Some(admin), Some(tokens)) = (&admin, &url_tokens) {
+            admin
+                .check_separation(&tokens.keys().public_keys().collect::<Vec<_>>())
+                .map_err(|_| ConfigError("ADMIN_KEYS must differ from URL-token keys".into()))?;
         }
         Ok(Self {
             admin,

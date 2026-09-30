@@ -249,9 +249,6 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
         policy,
         published_generation: Some(advance.generation),
     };
-    if let Some(set) = &mut inspection {
-        set.finish_added();
-    }
     let mut queue = VecDeque::from_iter(value.head.map(|id| (id, None)));
     let mut visited = BTreeSet::new();
     let mut dependencies = chain;
@@ -308,7 +305,10 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
                 object,
                 mkit_core::object::Object::Blob(_) | mkit_core::object::Object::ChunkedBlob(_)
             );
-            if file && !set.contains(&id) {
+            if file
+                && !set.contains(&id)
+                && !set.in_added(store, shards, repo, id, located.pack).await?
+            {
                 let visible = resolve::locate_split(&published, shards, repo, &[id], metrics)
                     .await?
                     .remove(&id)
@@ -316,13 +316,13 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
                     .map_err(|_| capped())?
                     .is_some();
                 if !visible {
-                    set.entry(id, bytes.len() as u64, object.object_type() as u8)?;
+                    set.reachable_entry(id, bytes.len() as u64, object.object_type() as u8)?;
                 }
             }
             if let Some(kind) = role {
                 set.role(id, kind);
             }
-            set.roles(&object)?;
+            set.roles(&object);
         }
         match &object {
             mkit_core::object::Object::Tree(tree) if inspection.is_some() => {
@@ -351,6 +351,10 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
         if dependencies.len() > MAX_ADVANCE_ITEMS || bases.len() > MAX_ADVANCE_ITEMS {
             return Err(capped());
         }
+    }
+    if let Some(set) = &mut inspection {
+        set.complete_added(blobs, store, shards, repo, cfg, metrics)
+            .await?;
     }
     advance.dependencies = dependencies.into_iter().collect();
     advance.external_bases = bases.into_iter().collect();

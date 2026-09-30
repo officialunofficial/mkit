@@ -13,7 +13,7 @@ use futures::StreamExt as _;
 pub enum Kind {
     /// Plain file or surplus blob.
     Blob,
-    /// ChunkedBlob manifest.
+    /// `ChunkedBlob` manifest.
     ChunkedFile,
     /// Blob referenced only as a chunk.
     Chunk,
@@ -38,8 +38,23 @@ pub struct InspectionSet {
     files: BTreeSet<Hash>,
     chunks: BTreeSet<Hash>,
     added_entries: u64,
-    added_ids: Option<BTreeSet<Hash>>,
+    added_packs: Vec<Hash>,
+    pending: Option<Added>,
     newly_reachable: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct NativeEntry {
+    pub id: Hash,
+    pub size: u64,
+    pub object_type: u8,
+    pub roles: Option<Object>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Added {
+    Native(Vec<NativeEntry>),
+    Scheduled(crate::Partition),
 }
 
 /// The established bounded-index refusal; request size is never unavailability.
@@ -58,7 +73,8 @@ impl InspectionSet {
             files: BTreeSet::new(),
             chunks: BTreeSet::new(),
             added_entries: 0,
-            added_ids: None,
+            added_packs: Vec::new(),
+            pending: None,
             newly_reachable: 0,
         }
     }
@@ -84,23 +100,139 @@ impl InspectionSet {
         Ok(())
     }
 
-    /// Freeze added-pack identities before adding newly reachable objects.
-    pub fn finish_added(&mut self) {
-        self.added_ids = Some(self.objects.keys().copied().collect());
+    pub(super) fn defer_native(&mut self, packs: Vec<Hash>, entries: Vec<NativeEntry>) {
+        self.added_packs = packs;
+        self.pending = Some(Added::Native(entries));
     }
 
-    /// Record the role of an object that is already selected for inspection.
-    pub fn role(&mut self, id: Hash, kind: Kind) {
-        if self.contains(&id) {
-            match kind {
-                Kind::Blob => {
-                    self.files.insert(id);
+    pub(super) fn defer_scheduled(&mut self, packs: Vec<Hash>, source: crate::Partition) {
+        self.added_packs = packs;
+        self.pending = Some(Added::Scheduled(source));
+    }
+
+    /// Count a distinct newly reachable file outside added packs before collection.
+    ///
+    /// # Errors
+    /// The established conservative whole-advance index-limit refusal.
+    pub(super) fn reachable_entry(
+        &mut self,
+        id: Hash,
+        size: u64,
+        object_type: u8,
+    ) -> Result<(), ServerError> {
+        if !self.objects.contains_key(&id) {
+            let next = self.newly_reachable.saturating_add(1);
+            self.preflight(self.added_entries.saturating_add(next))?;
+            self.newly_reachable = next;
+        }
+        self.entry(id, size, object_type)
+    }
+
+    pub(super) async fn in_added<S: crate::NamespaceStore>(
+        &self,
+        store: &S,
+        shards: &dyn crate::pipeline::ShardMap,
+        repo: &crate::RepoId,
+        id: Hash,
+        located_pack: Hash,
+    ) -> Result<bool, ServerError> {
+        use crate::store::{codec, keys};
+        if self.added_packs.contains(&located_pack) {
+            return Ok(true);
+        }
+        if self.added_packs.is_empty() {
+            return Ok(false);
+        }
+        let keys: Vec<_> = self
+            .added_packs
+            .iter()
+            .map(|pack| keys::object_index(&repo.name, &id, pack))
+            .collect();
+        let rows = store
+            .get_many(&shards.object_index(repo, &id), &keys)
+            .await
+            .map_err(|_| ServerError::unavailable("object storage request failed"))?;
+        if rows.len() != keys.len() {
+            return Err(ServerError::unavailable("object storage request failed"));
+        }
+        let mut found = false;
+        for raw in rows.into_iter().flatten() {
+            codec::decode_object_index(&id, &raw)
+                .map_err(|_| ServerError::unavailable("object storage request failed"))?;
+            found = true;
+        }
+        Ok(found)
+    }
+
+    /// Enumerate added entries only after the combined conservative preflight.
+    ///
+    /// # Errors
+    /// Existing indexed storage, decoding and bounded-enumeration refusals.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn complete_added<B: BlobStore, S: crate::NamespaceStore>(
+        &mut self,
+        blobs: &B,
+        store: &S,
+        shards: &dyn crate::pipeline::ShardMap,
+        repo: &crate::RepoId,
+        cfg: super::IndexedConfig,
+        metrics: &dyn crate::telemetry::Metrics,
+    ) -> Result<(), ServerError> {
+        self.preflight(self.added_entries.saturating_add(self.newly_reachable))?;
+        match self.pending.take() {
+            Some(Added::Native(entries)) => {
+                for entry in &entries {
+                    self.entry(entry.id, entry.size, entry.object_type)?;
                 }
-                Kind::Chunk => {
-                    self.chunks.insert(id);
+                for entry in entries {
+                    if let Some(object) = entry.roles {
+                        self.roles(&object);
+                    }
                 }
-                Kind::ChunkedFile => {}
             }
+            Some(Added::Scheduled(source)) => {
+                let added = scheduled_entries(
+                    blobs,
+                    store,
+                    shards,
+                    repo,
+                    &source,
+                    &self.added_packs,
+                    cfg,
+                    self.limit,
+                    self.added_entries,
+                    Some(self),
+                    metrics,
+                )
+                .await?;
+                for entry in added.objects.into_values() {
+                    self.entry(
+                        entry.id,
+                        entry.size,
+                        match entry.kind {
+                            Kind::ChunkedFile => ObjectType::ChunkedBlob as u8,
+                            _ => ObjectType::Blob as u8,
+                        },
+                    )?;
+                }
+                self.files.extend(added.files);
+                self.chunks.extend(added.chunks);
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
+    /// Record a reachable role, including added objects collected after preflight.
+    pub fn role(&mut self, id: Hash, kind: Kind) {
+        match kind {
+            Kind::Blob => {
+                self.files.insert(id);
+            }
+            Kind::Chunk => {
+                self.chunks.insert(id);
+            }
+            Kind::ChunkedFile => {}
         }
     }
 
@@ -115,6 +247,11 @@ impl InspectionSet {
     /// # Errors
     /// Index-limit refusal or inconsistent immutable metadata.
     pub fn entry(&mut self, id: Hash, size: u64, object_type: u8) -> Result<(), ServerError> {
+        if !(ObjectType::Blob as u8..=ObjectType::Tag as u8).contains(&object_type) {
+            return Err(ServerError::unavailable(
+                "verified object metadata inconsistency",
+            ));
+        }
         let kind = if object_type == ObjectType::Blob as u8 {
             Kind::Blob
         } else if object_type == ObjectType::ChunkedBlob as u8 {
@@ -130,15 +267,6 @@ impl InspectionSet {
             }
             return Ok(());
         }
-        if self
-            .added_ids
-            .as_ref()
-            .is_some_and(|ids| !ids.contains(&id))
-        {
-            let next = self.newly_reachable.saturating_add(1);
-            self.preflight(self.added_entries.saturating_add(next))?;
-            self.newly_reachable = next;
-        }
         if self.objects.len() >= self.limit {
             return Err(limit_error());
         }
@@ -147,26 +275,24 @@ impl InspectionSet {
     }
 
     /// Record file/chunk usage from an already decoded tree or manifest.
-    ///
-    /// # Errors
-    /// Index-limit refusal for an excessive role-reference upper bound.
-    pub fn roles(&mut self, object: &Object) -> Result<(), ServerError> {
+    pub fn roles(&mut self, object: &Object) {
         match object {
             Object::ChunkedBlob(manifest) => {
                 for id in &manifest.chunks {
-                    self.role(*id, Kind::Chunk);
+                    if self.contains(id) {
+                        self.role(*id, Kind::Chunk);
+                    }
                 }
             }
             Object::Tree(tree) => {
                 for entry in &tree.entries {
-                    if entry.mode != EntryMode::Tree {
+                    if entry.mode != EntryMode::Tree && self.contains(&entry.object_hash) {
                         self.role(entry.object_hash, Kind::Blob);
                     }
                 }
             }
             _ => {}
         }
-        Ok(())
     }
 
     /// Final metadata in stable object-id order, with file/chunk precedence.
@@ -254,11 +380,16 @@ pub(super) async fn scheduled_entries<B: BlobStore, S: crate::NamespaceStore>(
     cfg: super::IndexedConfig,
     limit: usize,
     added_count: u64,
+    existing: Option<&InspectionSet>,
     metrics: &dyn crate::telemetry::Metrics,
 ) -> Result<InspectionSet, ServerError> {
     use crate::store::{index::LocatedObject, keys};
     let failed = || ServerError::unavailable("object storage request failed");
     let mut set = InspectionSet::new(limit);
+    if let Some(existing) = existing {
+        // Include outside-pack candidates when surplus trees/manifests assign roles.
+        set.objects.clone_from(&existing.objects);
+    }
     set.reserve_added_count(added_count)?;
     let mut entries = 0_u64;
     let mut roles = Vec::new();
@@ -328,9 +459,8 @@ pub(super) async fn scheduled_entries<B: BlobStore, S: crate::NamespaceStore>(
             .checked_sub(memo.retained_bytes())
             .ok_or_else(limit_error)?;
         let object = mkit_core::serialize::deserialize(&bytes).map_err(|_| failed())?;
-        set.roles(&object)?;
+        set.roles(&object);
     }
-    set.finish_added();
     Ok(set)
 }
 
@@ -352,6 +482,7 @@ mod tests {
     use mkit_core::sign::{KeyPair, sign_commit};
     use std::sync::Arc;
 
+    #[allow(clippy::unwrap_used)] // Deterministic valid objects used only by these tests.
     fn fixture() -> (Vec<u8>, Hash, Vec<(Hash, Kind)>) {
         let chunk = Object::Blob(Blob {
             data: b"one".to_vec(),
@@ -410,6 +541,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One native/scheduled parity scenario and its preflight failure.
     fn native_and_worker_enumerate_surplus_manifests_chunks_dual_uses_and_duplicates() {
         let (pack, head, expected) = fixture();
         let repo = repo("inspection-union");
@@ -418,7 +550,7 @@ mod tests {
         let clock = Arc::new(ManualClock::new(NOW));
         let store = MemoryKv::with_clock(clock.clone());
         let ticket = ticket(&repo, &pack, NOW as u64);
-        let native = block_on(super::super::verify::verify_ticketed_inspected(
+        let mut native = block_on(super::super::verify::verify_ticketed_inspected(
             &blobs,
             &store,
             &SinglePartition,
@@ -434,8 +566,18 @@ mod tests {
         ))
         .unwrap()
         .inspection
-        .unwrap()
-        .finalize();
+        .unwrap();
+        assert!(native.objects.is_empty());
+        block_on(native.complete_added(
+            &blobs,
+            &store,
+            &SinglePartition,
+            &repo,
+            super::super::IndexedConfig::default(),
+            &NoopMetrics,
+        ))
+        .unwrap();
+        let native = native.finalize();
         assert_eq!(
             native.iter().map(|e| (e.id, e.kind)).collect::<Vec<_>>(),
             expected
@@ -483,6 +625,7 @@ mod tests {
             super::super::IndexedConfig::default(),
             10,
             7,
+            None,
             &NoopMetrics,
         ))
         .unwrap()
@@ -511,7 +654,7 @@ mod tests {
                 }),
             );
         block_on(store.apply(&source(&repo), ready)).unwrap();
-        let checked = block_on(super::super::scheduled::check_inspected(
+        let mut checked = block_on(super::super::scheduled::check_inspected(
             &blobs,
             &store,
             &SinglePartition,
@@ -527,9 +670,18 @@ mod tests {
         ))
         .unwrap()
         .inspection
-        .unwrap()
-        .finalize();
-        assert_eq!(checked, native);
+        .unwrap();
+        assert!(checked.objects.is_empty());
+        block_on(checked.complete_added(
+            &blobs,
+            &store,
+            &SinglePartition,
+            &repo,
+            super::super::IndexedConfig::default(),
+            &NoopMetrics,
+        ))
+        .unwrap();
+        assert_eq!(checked.finalize(), native);
         let error = block_on(super::super::scheduled::check_inspected(
             &blobs,
             &store,
@@ -583,9 +735,113 @@ mod tests {
         set.reserve_added_count(4).unwrap();
         set.entry([1; 32], 11, ObjectType::Blob as u8).unwrap();
         set.entry([1; 32], 11, ObjectType::Blob as u8).unwrap();
-        set.finish_added();
-        assert!(set.entry([2; 32], 11, ObjectType::Blob as u8).is_err());
+        assert!(
+            set.reachable_entry([2; 32], 11, ObjectType::Blob as u8)
+                .is_err()
+        );
         assert_eq!(set.finalize().len(), 1);
+    }
+
+    #[test]
+    fn unknown_checkpoint_object_types_fail_closed() {
+        let mut set = InspectionSet::new(4);
+        for tag in [0, 8, 255] {
+            assert_eq!(
+                set.entry([tag; 32], 11, tag).unwrap_err().code(),
+                crate::Code::Unavailable
+            );
+        }
+        assert!(set.finalize().is_empty());
+    }
+
+    #[test]
+    fn worker_surplus_roles_include_newly_reachable_objects_outside_added_packs() {
+        let repo = repo("outside-surplus-roles");
+        let id = [8; 32];
+        let objects = [
+            Object::Tree(Tree {
+                entries: vec![TreeEntry {
+                    name: b"file".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: id,
+                }],
+            }),
+            Object::ChunkedBlob(ChunkedBlob {
+                total_size: 11,
+                chunk_size: 0,
+                chunks: vec![id],
+            }),
+        ];
+        let mut writer = PackWriter::new_raw_only();
+        for object in &objects {
+            writer
+                .push_raw(object.id().unwrap(), &serialize(object).unwrap())
+                .unwrap();
+        }
+        let pack = writer.finish().unwrap();
+        let pack_id = hash(&pack);
+        let blobs = MemoryBlobStore::default();
+        upload(&blobs, &pack);
+        let store = MemoryKv::default();
+        let mut batch = Batch::new();
+        decode_entries_with(
+            &pack,
+            &mut NoExternalBases,
+            DecodeLimits::default(),
+            |entry| {
+                let row = FrameRow {
+                    object_type: entry.object.object_type() as u8,
+                    external: None,
+                    value: IndexValue {
+                        frame_offset: entry.frame_offset,
+                        frame_length: entry.frame_length,
+                        wire_type: entry.wire_type,
+                        decoded_size: entry.bytes.len() as u64,
+                        chain_depth: 0,
+                        delta_base: None,
+                    },
+                };
+                batch = std::mem::take(&mut batch).put(
+                    keys::verify_row(&repo.name, &pack_id, keys::VC_FRAME, Some(&entry.id)),
+                    encode_frame(&entry.id, &row).unwrap(),
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+        block_on(store.apply(&source(&repo), batch)).unwrap();
+        let mut outside = InspectionSet::new(3);
+        outside
+            .reachable_entry(id, 11, ObjectType::Blob as u8)
+            .unwrap();
+        let added = block_on(scheduled_entries(
+            &blobs,
+            &store,
+            &SinglePartition,
+            &repo,
+            &source(&repo),
+            &[pack_id],
+            super::super::IndexedConfig::default(),
+            3,
+            2,
+            Some(&outside),
+            &NoopMetrics,
+        ))
+        .unwrap();
+        assert!(added.files.contains(&id));
+        assert!(added.chunks.contains(&id));
+        let entries = added.finalize();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.contains(&InspectObject {
+            id,
+            size: 11,
+            kind: Kind::Blob
+        }));
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.id == objects[1].id().unwrap() && e.kind == Kind::ChunkedFile)
+        );
     }
 
     #[test]
@@ -620,7 +876,7 @@ mod tests {
             }
             block_on(store.apply(&source(&repo), batch)).unwrap();
         }
-        let budget = super::super::budget::SliceBudget::new(300);
+        let budget = super::super::budget::SliceBudget::new(256);
         let bounded = super::super::budget::Budgeted::new(&store, &budget);
         let entries = block_on(scheduled_entries(
             &MemoryBlobStore::default(),
@@ -632,6 +888,7 @@ mod tests {
             super::super::IndexedConfig::default(),
             1500,
             1500,
+            None,
             &NoopMetrics,
         ))
         .unwrap()

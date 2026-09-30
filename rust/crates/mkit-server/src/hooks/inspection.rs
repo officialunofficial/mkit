@@ -16,7 +16,7 @@ use super::{DEFAULT_TIMEOUT, HookChannel, HookClient};
 use crate::error::ServerError;
 use crate::op::Operation;
 
-/// A validated R-200 launch verdict. Stage-5 integration remains pending.
+/// A validated launch-profile verdict. Quarantine rejects the push at stage 5.
 /// Quarantine is a rejection under the launch amendment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InspectVerdict {

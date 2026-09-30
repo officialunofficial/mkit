@@ -226,8 +226,10 @@ mod glue {
                 .inspectors
                 .into_iter()
                 .map(|inspector| {
-                    Arc::new(inspector)
-                        as Arc<dyn mkit_server::pipeline::inspection::ContentInspector>
+                    // Worker futures are single-threaded; core shares Arc on both targets.
+                    #[allow(clippy::arc_with_non_send_sync)]
+                    let inspector = Arc::new(inspector);
+                    inspector as Arc<dyn mkit_server::pipeline::inspection::ContentInspector>
                 })
                 .collect()
         })

@@ -473,6 +473,13 @@ pub struct Pipeline<B, N, H = Hooks> {
     http_seams: Option<crate::http_objects::HttpSeams>,
 }
 
+struct WriteInputs<'a> {
+    pending: Option<&'a reservation::PendingGuard>,
+    implicit: Option<&'a [PendingPack]>,
+    external_bases: &'a std::collections::BTreeSet<Hash>,
+    inspected: Option<&'a mut crate::indexed::inspection::InspectionSet>,
+}
+
 impl<B, N, H> core::fmt::Debug for Pipeline<B, N, H> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Pipeline")
@@ -2458,8 +2465,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     write,
                     ahead,
                     (lease, begin.as_ref()),
-                    (pending.as_ref(), implicit, &staged.external_bases),
-                    staged.inspection.as_mut(),
+                    WriteInputs {
+                        pending: pending.as_ref(),
+                        implicit,
+                        external_bases: &staged.external_bases,
+                        inspected: staged.inspection.as_mut(),
+                    },
                 )
                 .await
             }
@@ -3312,13 +3323,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         (kind, refs, charges): (WriteKind, &[RefUpdate], &[QuotaCharge]),
         ahead: Option<Snapshot>,
         (lease, begin): (Option<lease::LeaseWrite>, Option<&BeginWrite>),
-        (pending, implicit, external_bases): (
-            Option<&reservation::PendingGuard>,
-            Option<&[PendingPack]>,
-            &std::collections::BTreeSet<Hash>,
-        ),
-        inspected: Option<&mut crate::indexed::inspection::InspectionSet>,
+        inputs: WriteInputs<'_>,
     ) -> Result<StoredResult, ServerError> {
+        let WriteInputs {
+            pending,
+            implicit,
+            external_bases,
+            inspected,
+        } = inputs;
         let caps = self.meta.capabilities();
         let replay = upload::replay_guard(op);
         // Single's packs live in the repo directory itself; only Multi
@@ -3404,7 +3416,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if caps.atomic_multi_key || replay.is_some() || !charges.is_empty() {
             return self.apply_atomic(op, a, p, &req, ahead).await;
         }
+        self.apply_sequential(op, a, p, req).await
+    }
+
+    async fn apply_sequential(
+        &self,
+        op: &Operation,
+        a: &Authenticated,
+        p: &Partition,
+        mut req: WriteRequest<'_>,
+    ) -> Result<StoredResult, ServerError> {
         // `Transport::advance_refs`'s default: packmap first, then head.
+        let kind = req.kind;
+        let refs = req.refs;
         req.kind = WriteKind::UpdateRef;
         for (i, update) in refs.iter().enumerate() {
             req.refs = core::slice::from_ref(update);
@@ -3511,71 +3535,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             } else {
                 implicit_ids.map(<[Hash]>::to_vec).unwrap_or_default()
             };
-            if let Some(set) = inspected.as_deref_mut() {
-                crate::indexed::publication::verify_inspected(
-                    &self.blobs,
-                    &self.meta,
-                    self.shards.as_ref(),
-                    &op.repo,
-                    &pair,
-                    mkit_attest::grant::head_packmap(&crate::store::publication::sequence_ref(
-                        &req.refs[0].name,
-                    ))
-                    .is_some(),
-                    &mut prepared,
-                    policy,
-                    self.cfg
-                        .indexed
-                        .ok_or_else(|| internal("publication requires indexed mode"))?,
-                    self.metrics.as_ref(),
-                    set,
-                )
-                .await?;
-            } else {
-                crate::indexed::publication::verify(
-                    &self.blobs,
-                    &self.meta,
-                    self.shards.as_ref(),
-                    &op.repo,
-                    &pair,
-                    mkit_attest::grant::head_packmap(&crate::store::publication::sequence_ref(
-                        &req.refs[0].name,
-                    ))
-                    .is_some(),
-                    &mut prepared,
-                    policy,
-                    self.cfg
-                        .indexed
-                        .ok_or_else(|| internal("publication requires indexed mode"))?,
-                    self.metrics.as_ref(),
-                )
-                .await?;
-            }
-            prepared.external_bases = prepared
-                .external_bases
-                .iter()
-                .copied()
-                .chain(external_bases.iter().copied())
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .collect();
-            if prepared.external_bases.len() > crate::store::publication::MAX_ADVANCE_ITEMS {
-                return Err(ServerError::invalid_argument("object index limit exceeded"));
-            }
-            if prepared.state.publishable()
-                && !crate::timers::publication_recheck::dependencies(
-                    &self.meta,
-                    &self.meta,
-                    p,
-                    self.shards.as_ref(),
-                    &op.repo,
-                    &prepared,
-                )
-                .await
-                .map_err(meta_error)?
-            {
-                prepared.state = crate::store::publication::Clearance::Pending;
-            }
+            self.verify_publication(
+                op,
+                p,
+                &mut prepared,
+                policy,
+                mkit_attest::grant::head_packmap(&crate::store::publication::sequence_ref(
+                    &req.refs[0].name,
+                ))
+                .is_some(),
+                external_bases,
+                inspected.as_deref_mut(),
+            )
+            .await?;
             #[cfg(feature = "remote-hooks")]
             if let Some(set) = inspected {
                 self.inspect_advance(op, &prepared.value, set.clone().finalize())
@@ -3585,6 +3557,103 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         } else {
             Ok(None)
         }
+    }
+
+    async fn verify_publication(
+        &self,
+        op: &Operation,
+        p: &Partition,
+        prepared: &mut crate::store::publication::Advance,
+        policy: &dyn clearance::PublicationPolicy,
+        branch: bool,
+        external_bases: &std::collections::BTreeSet<Hash>,
+        mut inspected: Option<&mut crate::indexed::inspection::InspectionSet>,
+    ) -> Result<(), ServerError> {
+        // Pair verification and dependency visibility share one allocation.
+        let inspection_budget = crate::indexed::budget::SliceBudget::new(256);
+        let inspection_blobs =
+            crate::indexed::budget::Budgeted::new(&self.blobs, &inspection_budget);
+        let inspection_meta = crate::indexed::budget::Budgeted::new(&self.meta, &inspection_budget);
+        if let Some(set) = inspected.as_deref_mut() {
+            crate::indexed::publication::verify_inspected(
+                &inspection_blobs,
+                &inspection_meta,
+                self.shards.as_ref(),
+                &op.repo,
+                &prepared.value.clone(),
+                branch,
+                prepared,
+                policy,
+                self.cfg
+                    .indexed
+                    .ok_or_else(|| internal("publication requires indexed mode"))?,
+                self.metrics.as_ref(),
+                set,
+            )
+            .await?;
+        } else {
+            crate::indexed::publication::verify(
+                &self.blobs,
+                &self.meta,
+                self.shards.as_ref(),
+                &op.repo,
+                &prepared.value.clone(),
+                branch,
+                prepared,
+                policy,
+                self.cfg
+                    .indexed
+                    .ok_or_else(|| internal("publication requires indexed mode"))?,
+                self.metrics.as_ref(),
+            )
+            .await?;
+        }
+        prepared.external_bases = prepared
+            .external_bases
+            .iter()
+            .copied()
+            .chain(external_bases.iter().copied())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if prepared.external_bases.len() > crate::store::publication::MAX_ADVANCE_ITEMS {
+            return Err(ServerError::invalid_argument("object index limit exceeded"));
+        }
+        if prepared.state.publishable() {
+            let visible = if inspected.is_some() {
+                crate::timers::publication_recheck::dependencies(
+                    &inspection_meta,
+                    &inspection_meta,
+                    p,
+                    self.shards.as_ref(),
+                    &op.repo,
+                    prepared,
+                )
+                .await
+                .map_err(|error| {
+                    if crate::indexed::budget::is_exhausted(&error) {
+                        ServerError::invalid_argument("object index limit exceeded")
+                    } else {
+                        meta_error(error)
+                    }
+                })?
+            } else {
+                crate::timers::publication_recheck::dependencies(
+                    &self.meta,
+                    &self.meta,
+                    p,
+                    self.shards.as_ref(),
+                    &op.repo,
+                    prepared,
+                )
+                .await
+                .map_err(meta_error)?
+            };
+            if !visible {
+                prepared.state = crate::store::publication::Clearance::Pending;
+            }
+        }
+        Ok(())
     }
 
     /// [`Self::apply_loop`] on a store with atomic multi-key batches, which

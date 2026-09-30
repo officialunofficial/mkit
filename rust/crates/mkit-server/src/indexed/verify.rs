@@ -1123,27 +1123,38 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
         }
         acquired.remove(&pack.ticket.pack_id);
     }
+    let parents = staged
+        .iter()
+        .filter_map(|(id, (_, object, _))| Some((*id, history_parents(object)?)))
+        .collect();
+    let objects = staged.len();
     let mut inspection =
         inspection_limit.map(|(limit, _)| super::inspection::InspectionSet::new(limit));
     if let Some(set) = &mut inspection {
         if let Some((_, count)) = inspection_limit {
             set.reserve_added_count(count)?;
         }
-        for (id, (bytes, object, _)) in &staged {
-            set.entry(*id, bytes.len() as u64, object.object_type() as u8)?;
-        }
-        for (_, object, _) in staged.values() {
-            set.roles(object)?;
-        }
-        set.finish_added();
+        let entries = staged
+            .into_iter()
+            .map(|(id, (bytes, object, _))| {
+                let object_type = object.object_type() as u8;
+                super::inspection::NativeEntry {
+                    id,
+                    size: bytes.len() as u64,
+                    object_type,
+                    roles: matches!(&object, Object::Tree(_) | Object::ChunkedBlob(_))
+                        .then_some(object),
+                }
+            })
+            .collect();
+        set.defer_native(
+            tickets.iter().map(|ticket| ticket.pack_id).collect(),
+            entries,
+        );
     }
-    let parents = staged
-        .iter()
-        .filter_map(|(id, (_, object, _))| Some((*id, history_parents(object)?)))
-        .collect();
     Ok(StagedCommits {
         parents,
-        objects: staged.len(),
+        objects,
         bytes: staged_bytes,
         external_bases,
         inspection,

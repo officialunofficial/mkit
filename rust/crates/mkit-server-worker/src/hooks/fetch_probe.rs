@@ -52,6 +52,7 @@ pub async fn run(mode: &str) -> worker::Result<worker::Response> {
     worker::Response::from_json(&answer)
 }
 
+#[allow(clippy::arc_with_non_send_sync)] // Single-threaded Worker; core shares Arc on both targets.
 async fn inspect_probe() -> worker::Result<worker::Response> {
     use mkit_server::hooks::{HookClient, InspectVerdict, RemoteInspector};
     use mkit_server::{NamespaceKey, OpKind, Operation, Principal, RefUpdate, RepoId, RepoName};

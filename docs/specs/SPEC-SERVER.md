@@ -3582,7 +3582,7 @@ whole-advance input bound of `inspect_batch_max_objects` (positive and at most
 PRE_RECEIVE quarantine rejects with 403 and commits nothing. Startup MUST
 refuse async or unavailable-publish inspectors and a fifth inspector.
 The server MUST NOT create durable inspection continuations, outstanding
-obligations or holds at launch. No durable inspection-mode marker is required:
+inspection obligations or inspection holds at launch. No durable inspection-mode marker is required:
 disabling inspection stops only future scanning. Async inspection, holds,
 quarantine suspension, inspection review procedures and unrestricted whole-set
 multi-batch inspection are deferred to WP-5.5c; the durable marker belongs to

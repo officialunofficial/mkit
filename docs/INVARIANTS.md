@@ -2023,7 +2023,10 @@ the 1,000-call accounting contract.
 **If violated:** unscanned content can publish, retry can bypass inspection, or
 an accepted request can exhaust its Worker budget.
 
-**Enforced by:** `Pipeline::with_inspectors`, `InspectionSet::preflight` and
-header/frame checks; stage-5 verdict/replay integration is pending in the
-pipeline lane. Budget assertion: 960 calls, with <=16 frame pages inside 300
-verification calls. Async holds remain deferred to WP-5.5c.
+**Enforced by:** `Pipeline::with_inspectors`, `InspectionSet::preflight`,
+header/frame checks and `Pipeline::inspect_advance` before apply. Pipeline
+acceptance tests cover verdict dominance, unavailable replay exclusion and
+inspection-disabled identity. Budget assertion: 960 calls (300 verification,
+256 ancestry, 256 shared pair closure/enumeration/dependencies, four Inspect,
+144 other); <=16 frame pages fit inside the pair allocation. Async holds remain
+deferred to WP-5.5c.
