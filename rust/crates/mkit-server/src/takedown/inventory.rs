@@ -10,6 +10,8 @@ use mkit_core::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+/// Bound scan values and their temporary base64/JSON transport representation.
+pub const SCAN_ROWS: u32 = 8;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
@@ -24,11 +26,18 @@ struct Head {
     version: u8,
     length: u64,
     count: u64,
+    parents: u64,
+    parent_digest: Hash,
     digest: Hash,
     complete: bool,
 }
+#[must_use]
 pub fn entry_key(pack: &Hash, id: &Hash) -> Key {
     Key::new([keys::block(pack).as_bytes(), b"\0inventory\0", id].concat())
+}
+#[must_use]
+pub fn marker_key(pack: &Hash, id: &Hash) -> Key {
+    Key::new([keys::block(pack).as_bytes(), b"\0inventory-seal\0", id].concat())
 }
 fn head_key(pack: &Hash) -> Key {
     Key::new([keys::block(pack).as_bytes(), b"\0inventory-head"].concat())
@@ -58,8 +67,14 @@ fn guard(key: Key, raw: Option<Value>) -> Precondition {
 fn deadline(now: u64) -> Precondition {
     Precondition::NotAfter(now.saturating_add(crate::store::CONTENT_APPLY_WINDOW_MS))
 }
+fn entry_digest(id: &Hash, row: &Value) -> Hash {
+    let mut hash = blake3::Hasher::new();
+    hash.update(id);
+    hash.update(row.as_bytes());
+    *hash.finalize().as_bytes()
+}
 fn add_digest(digest: &mut Hash, id: &Hash, row: &Value) {
-    let hash = mkit_core::hash::hash(&[id.as_slice(), row.as_bytes()].concat());
+    let hash = entry_digest(id, row);
     for (a, b) in digest.iter_mut().zip(hash) {
         *a ^= b;
     }
@@ -83,14 +98,16 @@ pub async fn stage<S: NamespaceStore>(
             return Ok(());
         }
     }
-    let mut chunks: Vec<Hash> = match object {
-        Object::ChunkedBlob(cb) => cb.chunks.clone(),
-        Object::Tree(_) => children(object, ClosureMode::History).into_iter().collect(),
-        _ => Vec::new(),
+    let tree_refs: Vec<Hash> = if matches!(object, Object::Tree(_)) {
+        children(object, ClosureMode::History).into_iter().collect()
+    } else {
+        Vec::new()
     };
-    chunks.sort_unstable();
-    chunks.dedup();
-    let references = denial::stage_action(
+    let chunks = match object {
+        Object::ChunkedBlob(cb) => cb.chunks.as_slice(),
+        _ => tree_refs.as_slice(),
+    };
+    let references = denial::stage_references(
         store,
         pack,
         &BlockAction {
@@ -98,8 +115,10 @@ pub async fn stage<S: NamespaceStore>(
             takedown_id: *pack,
             reason: "inventory".into(),
             blocked_at_ms: 0,
-            chunk_ids: chunks,
+            chunk_ids: Vec::new(),
         },
+        chunks,
+        false,
         now,
     )
     .await?;
@@ -146,12 +165,20 @@ async fn put_entry<S: NamespaceStore>(
     }
     add_digest(&mut head.digest, id, &row);
     let parent: Entry = decode(&row)?;
+    if matches!(parent.kind, 2 | 5) {
+        head.parents = head.parents.checked_add(1).ok_or_else(bad)?;
+        add_digest(&mut head.parent_digest, id, &row);
+    }
     let mut batch = Batch::new()
         .require(guard(hk.clone(), old))
         .require(guard(key.clone(), existing))
         .require(deadline(now))
         .put(hk, encode(&head)?)
-        .put(key, row.clone());
+        .put(key, row.clone())
+        .put(
+            marker_key(pack, id),
+            Value::new(entry_digest(id, &row).to_vec()),
+        );
     if matches!(parent.kind, 2 | 5) {
         batch = batch.put(parent_key(pack, id), row);
     }
@@ -242,10 +269,22 @@ pub async fn entry<S: NamespaceStore>(
     pack: &Hash,
     id: &Hash,
 ) -> Result<Option<Entry>, StoreError> {
-    let raw = store
-        .get(&content_shard(pack), &entry_key(pack, id))
+    let values = store
+        .get_many(
+            &content_shard(pack),
+            &[entry_key(pack, id), marker_key(pack, id)],
+        )
         .await?;
-    let row: Option<Entry> = raw.as_ref().map(decode).transpose()?;
+    if values.len() != 2 {
+        return Err(bad());
+    }
+    let raw = values[0].as_ref();
+    if let Some(raw) = raw
+        && values[1].as_ref().map(Value::as_bytes) != Some(entry_digest(id, raw).as_slice())
+    {
+        return Err(bad());
+    }
+    let row: Option<Entry> = raw.map(decode).transpose()?;
     if let Some(row) = &row {
         if row.version != 1 || row.kind > 7 {
             return Err(bad());
@@ -346,15 +385,41 @@ where
     let mut digest = [0; 32];
     loop {
         let page = store
-            .scan(&content_shard(pack), &start, &end, after.as_ref(), 32)
+            .scan(
+                &content_shard(pack),
+                &start,
+                &end,
+                after.as_ref(),
+                SCAN_ROWS,
+            )
             .await?;
-        for (key, raw) in page.entries {
+        let marker_keys: Result<Vec<Key>, StoreError> = page
+            .entries
+            .iter()
+            .map(|(key, _)| {
+                let id: Hash = key
+                    .as_bytes()
+                    .strip_prefix(start.as_bytes())
+                    .ok_or_else(bad)?
+                    .try_into()
+                    .map_err(|_| bad())?;
+                Ok(marker_key(pack, &id))
+            })
+            .collect();
+        let markers = store.get_many(&content_shard(pack), &marker_keys?).await?;
+        if markers.len() != page.entries.len() {
+            return Err(bad());
+        }
+        for ((key, raw), marker) in page.entries.into_iter().zip(markers) {
             let id: Hash = key
                 .as_bytes()
                 .strip_prefix(start.as_bytes())
                 .ok_or_else(bad)?
                 .try_into()
                 .map_err(|_| bad())?;
+            if marker.as_ref().map(Value::as_bytes) != Some(entry_digest(&id, &raw).as_slice()) {
+                return Err(bad());
+            }
             let row: Entry = decode(&raw)?;
             if row.version != 1 || row.kind > 7 {
                 return Err(bad());
@@ -372,7 +437,12 @@ where
             None => break,
         }
     }
-    if !parents && (count != head.count || digest != head.digest) {
+    let expected = if parents {
+        (head.parents, head.parent_digest)
+    } else {
+        (head.count, head.digest)
+    };
+    if (count, digest) != expected {
         return Err(bad());
     }
     Ok(false)
@@ -392,7 +462,7 @@ pub async fn is_file<S: NamespaceStore>(
     if row.kind != 1 {
         return Ok(false);
     }
-    let chunks = visit(store, pack, false, |_, parent| async move {
+    let chunks = visit(store, pack, true, |_, parent| async move {
         if parent.kind != 5 {
             return Ok(false);
         }
@@ -404,7 +474,7 @@ pub async fn is_file<S: NamespaceStore>(
     if !chunks {
         return Ok(true);
     }
-    visit(store, pack, false, |_, parent| async move {
+    visit(store, pack, true, |_, parent| async move {
         if parent.kind != 2 {
             return Ok(false);
         }

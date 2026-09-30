@@ -451,6 +451,14 @@ impl core::fmt::Debug for VisibilityRequest {
     }
 }
 
+type DenialInputs<'a> = (
+    Option<&'a reservation::PendingGuard>,
+    Option<&'a [PendingPack]>,
+    &'a std::collections::BTreeSet<Hash>,
+    &'a std::collections::BTreeSet<Hash>,
+    &'a [Hash],
+);
+
 /// The request pipeline over blobs `B`, metadata `N` and hooks `H`.
 pub struct Pipeline<B, N, H = Hooks> {
     publication_policy: Option<Arc<dyn clearance::PublicationPolicy>>,
@@ -2364,6 +2372,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         implicit,
                         &staged.external_bases,
                         &staged.denial_ids,
+                        staged.denial_packs.as_slice(),
                     ),
                 )
                 .await
@@ -2789,18 +2798,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 Err(e) => return Err(e),
             }
         }
-        if member
-            && self.cfg.takedown_denial
-            && let Some(cfg) = self.cfg.indexed.as_ref()
-        {
+        if member && self.cfg.takedown_denial && self.cfg.indexed.is_some() {
             return match crate::takedown::denial::require_pack_clear(
-                &self.blobs,
                 &self.meta,
                 self.shards.as_ref(),
                 &a.repo().repo,
                 &key.0,
-                cfg,
-                self.metrics.as_ref(),
             )
             .await
             {
@@ -3245,12 +3248,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         (kind, refs, charges): (WriteKind, &[RefUpdate], &[QuotaCharge]),
         ahead: Option<Snapshot>,
         (lease, begin): (Option<lease::LeaseWrite>, Option<&BeginWrite>),
-        (pending, implicit, external_bases, denial_ids): (
-            Option<&reservation::PendingGuard>,
-            Option<&[PendingPack]>,
-            &std::collections::BTreeSet<Hash>,
-            &std::collections::BTreeSet<Hash>,
-        ),
+        (pending, implicit, external_bases, denial_ids, denial_packs): DenialInputs<'_>,
     ) -> Result<StoredResult, ServerError> {
         let caps = self.meta.capabilities();
         let replay = upload::replay_guard(op);
@@ -3265,6 +3263,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let advance = self.publication_ticket_write(op, a, p)?;
         let mut req = WriteRequest {
             denial_ids: Some(denial_ids),
+            denial_packs,
             authority_store: plan::AuthorityStore::from_capabilities(self.meta.capabilities()),
             authority_generation: op.authz.authority_generation,
             repo: &op.repo.name,
@@ -3387,8 +3386,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     ) -> Result<Option<crate::store::publication::Advance>, ServerError> {
         // Deletions establish an immediate boundary without consulting inspection
         // or verifying the surviving pair; older membership obligations remain retained.
-        if let Some(policy) = &self.publication_policy
-            && !req.refs.is_empty()
+        if let Some(policy) = self.publication_policy.as_deref().or_else(|| {
+            self.cfg
+                .takedown_denial
+                .then_some(&clearance::Immediate as &dyn clearance::PublicationPolicy)
+        }) && !req.refs.is_empty()
             && req.refs.iter().all(|update| update.new.is_some())
         {
             let snapshot = ahead.get_or_insert_with(Snapshot::default);
@@ -3425,6 +3427,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             } else {
                 implicit_ids.map(<[Hash]>::to_vec).unwrap_or_default()
             };
+            let mut indexed = self
+                .cfg
+                .indexed
+                .ok_or_else(|| internal("publication requires indexed mode"))?;
+            if self.cfg.takedown_denial {
+                indexed.decode_budget = indexed.decode_budget.min(8 << 20);
+            }
             crate::indexed::publication::verify(
                 &self.blobs,
                 &self.meta,
@@ -3436,10 +3445,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ))
                 .is_some(),
                 &mut prepared,
-                policy.as_ref(),
-                self.cfg
-                    .indexed
-                    .ok_or_else(|| internal("publication requires indexed mode"))?,
+                policy,
+                indexed,
                 self.metrics.as_ref(),
             )
             .await?;
@@ -3496,6 +3503,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// lost prune race retries once without the prune, uncounted. A missed
     /// deadline re-plans once while the envelope is still valid at the
     /// failed commit, then `unavailable` (SPEC-WRITE-GRANTS §5.5).
+    // Keep fresh denial, authorization and guarded apply together on every retry.
+    #[allow(clippy::too_many_lines)]
     async fn apply_loop(
         &self,
         op: &Operation,
@@ -3527,18 +3536,27 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 clock = self.plan_clock(skew_ms, &req);
             }
             first_attempt = false;
-            if let (Some(ids), Some(cfg)) = (req.denial_ids, self.cfg.indexed.as_ref())
+            let denial_packs: Vec<_> = req
+                .denial_packs
+                .iter()
+                .chain(
+                    req.publication
+                        .iter()
+                        .filter_map(|p| p.prepared)
+                        .flat_map(|a| a.dependencies.iter().chain(&a.external_bases)),
+                )
+                .copied()
+                .collect();
+            if let Some(ids) = req.denial_ids
                 && self.cfg.takedown_denial
-                && !ids.is_empty()
+                && (!ids.is_empty() || !denial_packs.is_empty())
             {
-                crate::takedown::denial::require_repo_clear(
-                    &self.blobs,
+                crate::takedown::denial::require_repo_clear_budgeted(
                     &self.meta,
                     self.shards.as_ref(),
                     &op.repo,
                     ids,
-                    cfg,
-                    self.metrics.as_ref(),
+                    &denial_packs,
                     &denial_budget,
                 )
                 .await?;

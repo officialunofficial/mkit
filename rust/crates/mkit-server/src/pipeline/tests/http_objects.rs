@@ -351,34 +351,51 @@ impl<H: HookSet> Fx<H> {
     ) -> (AdvanceOutcome, Hash) {
         let identity = self.identity(name);
         let pack_id = hash(pack);
-        let begin = signed(
-            &self.owner,
-            &identity,
-            Procedure::BeginUpload,
-            self.number(),
-        );
-        let BeginUploadResult::Ticket { id: ticket, .. } = block_on(self.pipe.begin_upload(
-            &self.auth(&begin),
-            head_ref,
-            &pack_id,
-            pack.len() as u64,
-        ))
-        .unwrap() else {
-            panic!("expected an upload ticket");
+        let upload =
+            |bytes: &[u8]| {
+                let id = hash(bytes);
+                let begin = signed(
+                    &self.owner,
+                    &identity,
+                    Procedure::BeginUpload,
+                    self.number(),
+                );
+                let BeginUploadResult::Ticket { id: ticket, .. } = block_on(
+                    self.pipe
+                        .begin_upload(&self.auth(&begin), head_ref, &id, bytes.len() as u64),
+                )
+                .unwrap() else {
+                    panic!("expected an upload ticket");
+                };
+                block_on(async {
+                    let mut sink = self
+                        .pipe
+                        .blobs
+                        .begin(BlobKey::pack(id), bytes.len() as u64)
+                        .await
+                        .unwrap();
+                    sink.write(Bytes::copy_from_slice(bytes)).await.unwrap();
+                    sink.commit().await.unwrap();
+                    write_upload_marker(&self.pipe.blobs, &ticket, &id)
+                        .await
+                        .unwrap();
+                });
+                ticket
+            };
+        let mut tickets = vec![upload(pack)];
+        let (map_id, map_condition) = if self.pipe.cfg.takedown_denial {
+            let map = mkit_core::transfer::encode_packlist(None, &[pack_id]).unwrap();
+            tickets.push(upload(&map));
+            let condition = match conditions.1 {
+                Match(old_pack) => Match(hash(
+                    &mkit_core::transfer::encode_packlist(None, &[old_pack]).unwrap(),
+                )),
+                other => other,
+            };
+            (hash(&map), condition)
+        } else {
+            (pack_id, conditions.1)
         };
-        block_on(async {
-            let mut sink = self
-                .pipe
-                .blobs
-                .begin(BlobKey::pack(pack_id), pack.len() as u64)
-                .await
-                .unwrap();
-            sink.write(Bytes::copy_from_slice(pack)).await.unwrap();
-            sink.commit().await.unwrap();
-            write_upload_marker(&self.pipe.blobs, &ticket, &pack_id)
-                .await
-                .unwrap();
-        });
         let advance = signed(
             &self.owner,
             &identity,
@@ -388,8 +405,8 @@ impl<H: HookSet> Fx<H> {
         let outcome = block_on(self.pipe.advance_refs_with_tickets(
             &self.auth(&advance),
             upd(head_ref, conditions.0, head),
-            upd(packmap_ref, conditions.1, pack_id),
-            vec![ticket],
+            upd(packmap_ref, map_condition, map_id),
+            tickets,
         ))
         .unwrap();
         (outcome, pack_id)

@@ -2387,7 +2387,7 @@
       "5.11a"
     ],
     "size": "L",
-    "summary": "R-190 part 1: V2 actions preserve current V1 producer denial, verified immutable pack inventory, fresh every-surface denial, signed replay-safe Takedown intent and asynchronous manual PurgeCache. Preservation pending; production takedown activation refused until part 2. Cap 2,500 non-test lines including docs.",
+    "summary": "R-190 part 1: V2 actions preserve current V1 producer denial, verified immutable pack inventory, fresh every-surface denial, signed replay-safe Takedown intent and asynchronous manual PurgeCache. Preservation pending; production takedown activation refused until part 2. User-ruling cap: 2,800 production Rust lines; tests, docs, proto and generated code excluded.",
     "human_action": false,
     "area_gates": [
       "rust",

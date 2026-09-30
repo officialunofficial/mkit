@@ -251,6 +251,7 @@ impl crate::purge::PurgeSink for RestartPurgeSink {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Delivery, restart and audited completion form one durable lifecycle.
 async fn manual_purge_completion_is_audited_only_after_durable_global_acknowledgement() {
     use crate::purge::{NoLocalCache, PurgeDelivery, SliceBudget};
     use crate::timers::{TickBudget, TimerRegistry, run_due};
@@ -1182,4 +1183,39 @@ fn automatic_audit_details_are_bounded_for_long_valid_source_identity() {
         details["sourcePartitionHash"],
         mkit_core::hash::to_hex(&mkit_core::hash::hash(&source.encode().unwrap()))
     );
+}
+
+#[tokio::test]
+async fn fresh_nonce_purge_replay_survives_removed_purge_configuration() {
+    let store = std::sync::Arc::new(MemoryKv::default());
+    let enabled = Engine::new(store.clone(), partition(), config(&["moderation"])).with_purge(true);
+    let input = purge_body();
+    let (headers, body) = request(PURGE_PATH, &input, 111);
+    let first = enabled.handle(PURGE_PATH, &headers, &body, 100).await;
+    assert_eq!(first.status, 200);
+    let timers = purge_timers(&store).await;
+    assert_eq!(timers.len(), 1);
+    let disabled = Engine::new(store.clone(), partition(), config(&["moderation"]));
+    assert_eq!(
+        disabled.handle(PURGE_PATH, &headers, &body, 101).await,
+        first
+    );
+    let (headers, body) = request(PURGE_PATH, &input, 112);
+    assert_eq!(
+        disabled.handle(PURGE_PATH, &headers, &body, 102).await,
+        first
+    );
+    assert_eq!(purge_timers(&store).await, timers);
+    let mut changed = input;
+    changed["reason"] = json!("changed reason");
+    let (headers, body) = request(PURGE_PATH, &changed, 113);
+    assert_eq!(
+        disabled
+            .handle(PURGE_PATH, &headers, &body, 103)
+            .await
+            .status,
+        400
+    );
+    assert_eq!(purge_timers(&store).await, timers);
+    assert_eq!(head(&store).await, 3);
 }

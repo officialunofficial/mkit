@@ -1872,19 +1872,21 @@ mod glue {
         env: &Env,
         cfg: &WorkerConfig,
         hooks: H,
+        request_budget: mkit_server::indexed::budget::SliceBudget,
         #[cfg(feature = "published-view")] snapshot_warm: bool,
     ) -> Result<WorkerPipeline<H>, ConfigError> {
         let bad = |e: &dyn core::fmt::Display| ConfigError(e.to_string());
         let mut config = cfg.pipeline_config()?;
         let blobs = R2BlobStore::new(
-            EnvBucket::new(env.clone(), cfg.blob_binding),
+            EnvBucket::new(env.clone(), cfg.blob_binding).with_budget(request_budget.clone()),
             PACKS_KEYSPACE,
         )
         .with_max_bytes(SINGLE_PUT_MAX_BYTES);
         let meta = WorkerNamespaceStore::new(
             StubTransport::new(env.clone(), cfg.placement.clone()),
             cfg.probe_partition(),
-        );
+        )
+        .with_budget(request_budget.clone());
         #[cfg(feature = "published-view")]
         let meta = if cfg.published_view.is_some() {
             meta.with_apply_reserve(3)
@@ -1930,8 +1932,11 @@ mod glue {
             .filter(|c| snapshot_warm || c.inspection_configured)
         {
             let source = crate::published_view::shared_reader(
-                crate::published_view::WorkerSnapshotBucket(env.clone()),
-                crate::published_view::WorkerCache,
+                crate::published_view::WorkerSnapshotBucket(
+                    env.clone(),
+                    Some(request_budget.clone()),
+                ),
+                crate::published_view::WorkerCache(Some(request_budget)),
                 config,
                 Arc::new(WorkerClock),
             );
@@ -2092,10 +2097,14 @@ mod glue {
         if is_options_preflight(&req) {
             return cors_preflight_response(&cors_allow_headers(), CORS_ALLOW_METHODS);
         }
+        // One invocation owns all backend phases and lazy upload/proof clones.
+        // Reserve 1000 calls for bounded remote hooks and response settlement.
+        let request_budget = mkit_server::indexed::budget::SliceBudget::new(9000);
         let meta = WorkerNamespaceStore::new(
             StubTransport::new(env.clone(), cfg.placement.clone()),
             cfg.probe_partition(),
-        );
+        )
+        .with_budget(request_budget.clone());
         let jurisdiction = cfg.placement.jurisdiction.as_deref();
         let multi = matches!(cfg.addressing, mkit_server::Addressing::Multi(_));
         let cached =
@@ -2167,6 +2176,7 @@ mod glue {
                 &env,
                 cfg,
                 hooks,
+                request_budget,
                 #[cfg(feature = "published-view")]
                 snapshot_warm,
             )
@@ -2386,11 +2396,23 @@ mod glue {
         );
         let registry = if let (Ok(cfg), Some(budget)) = (&cfg, &alarm_budget) {
             match crate::hooks::build::purge_from_env(env, cfg) {
-                Ok(Some(sink)) => registry.register(mkit_server::purge::PurgeDelivery::new(
-                    Arc::new(crate::purge::local_cache(cfg)),
-                    Some(Arc::new(sink)),
-                    budget.clone(),
-                )),
+                Ok(Some(sink)) => registry.register(crate::purge::NamespaceDelivery {
+                    delivery: mkit_server::purge::PurgeDelivery::new(
+                        Arc::new(mkit_server::purge::NoLocalCache),
+                        Some(Arc::new(sink)),
+                        budget.clone(),
+                    ),
+                    local: crate::purge::local_cache(cfg),
+                    remote: WorkerNamespaceStore::new(
+                        StubTransport::new(env.clone(), cfg.placement.clone()),
+                        cfg.probe_partition(),
+                    ),
+                    sharding: cfg.sharding,
+                    single: match &cfg.addressing {
+                        mkit_server::Addressing::Single { repo } => Some(repo.clone()),
+                        _ => None,
+                    },
+                }),
                 Ok(None) => registry,
                 Err(error) => {
                     crate::log_failure(&format!("purge sink unavailable: {error}"));
@@ -2455,7 +2477,7 @@ mod glue {
         let registry = if let (Some(alarm), Ok(coordinator)) = (&snapshot_alarm, snapshot_target) {
             registry.register(crate::purge::Budgeted {
                 handler: crate::published_view::SnapshotHandler {
-                    bucket: crate::published_view::WorkerSnapshotBucket(env.clone()),
+                    bucket: crate::published_view::WorkerSnapshotBucket(env.clone(), None),
                     coordinator,
                     clock: Arc::new(WorkerClock),
                     alarm: alarm.clone(),

@@ -57,7 +57,7 @@ pub async fn dependencies<S: NamespaceStore, T: NamespaceStore>(
         groups.entry(p).or_default().push(key);
     }
     for (p, keys) in groups {
-        for page in keys.chunks(256) {
+        for page in keys.chunks(8) {
             let rows = if p == *source {
                 local.get_many(&p, page).await?
             } else {

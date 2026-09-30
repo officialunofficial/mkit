@@ -1,10 +1,12 @@
 # WP-5.6a-1 pending intent and denial contract (R-190)
 
-**Status: INCOMPLETE checkpoint.** HTTP helper/shared denial-budget wiring and
+**Status: changes under verification.** HTTP helper/shared denial-budget wiring and
 namespace-wide manual purge remain unfinished. Full gates, actual Worker
 conformance and final independent reviews remain outstanding. The
 [brief](briefs/WP-5.6a-1.md) remains the required contract; this layout is not
 launch-readiness or complete every-surface enforcement evidence.
+The PR1 cap is 2,800 production Rust lines; tests, docs, proto and generated
+code are excluded by the user ruling and reported separately.
 
 The staged core implements denial and audited intent; production takedown activation
 awaits WP-5.6a-2 preservation and launch gates. Acceptance returns the existing

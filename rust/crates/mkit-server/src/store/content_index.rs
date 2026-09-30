@@ -425,13 +425,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
     ) -> Result<(), StoreError> {
         let key = keys::hold(object, hold_id);
         self.mutate(object, now_ms, None, None, true, |_, _| {
-            Ok(Step::Commit(
-                vec![
-                    Write::Delete(key.clone()),
-                    Write::Delete(crate::takedown::denial::legacy_descriptor_key(object)),
-                ],
-                (),
-            ))
+            Ok(Step::Commit(vec![Write::Delete(key.clone())], ()))
         })
         .await
     }
@@ -676,7 +670,13 @@ impl<S: NamespaceStore> ContentIndex<S> {
     pub async fn unblock(&self, object: &Hash, now_ms: u64) -> Result<(), StoreError> {
         let key = keys::block(object);
         self.mutate(object, now_ms, None, None, false, |_, _| {
-            Ok(Step::Commit(vec![Write::Delete(key.clone())], ()))
+            Ok(Step::Commit(
+                vec![
+                    Write::Delete(key.clone()),
+                    Write::Delete(crate::takedown::denial::legacy_descriptor_key(object)),
+                ],
+                (),
+            ))
         })
         .await
     }

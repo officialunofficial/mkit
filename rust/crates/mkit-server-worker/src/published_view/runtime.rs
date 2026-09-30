@@ -1,6 +1,7 @@
 use super::{MAX_BYTES, SNAPSHOTS_BINDING, SnapshotBucket, SnapshotCache, SnapshotObject};
 use futures::StreamExt;
 use mkit_server::StoreError;
+use mkit_server::indexed::budget::SliceBudget;
 use worker::{Cache, Conditional, Env, Response};
 fn error(e: impl core::fmt::Display) -> StoreError {
     crate::backend_error(mkit_server::storage_error::StorageOp::MetaCall, e)
@@ -18,9 +19,10 @@ async fn bounded(mut stream: worker::ByteStream) -> Result<Vec<u8>, StoreError> 
 }
 /// R2 implementation with conditional replacement and bounded body reads.
 #[derive(Clone, Debug)]
-pub struct WorkerSnapshotBucket(pub Env);
+pub struct WorkerSnapshotBucket(pub Env, pub Option<SliceBudget>);
 impl SnapshotBucket for WorkerSnapshotBucket {
     async fn get(&self, key: &str) -> Result<Option<SnapshotObject>, StoreError> {
+        crate::ns_client::charge_request(self.1.as_ref())?;
         let bucket = self.0.bucket(SNAPSHOTS_BINDING).map_err(error)?;
         let Some(object) = bucket.get(key).execute().await.map_err(error)? else {
             return Ok(None);
@@ -59,6 +61,7 @@ impl SnapshotBucket for WorkerSnapshotBucket {
                 ..Default::default()
             },
         };
+        crate::ns_client::charge_request(self.1.as_ref())?;
         Ok(self
             .0
             .bucket(SNAPSHOTS_BINDING)
@@ -71,6 +74,7 @@ impl SnapshotBucket for WorkerSnapshotBucket {
             .is_some())
     }
     async fn delete(&self, key: &str) -> Result<(), StoreError> {
+        crate::ns_client::charge_request(self.1.as_ref())?;
         self.0
             .bucket(SNAPSHOTS_BINDING)
             .map_err(error)?
@@ -81,9 +85,10 @@ impl SnapshotBucket for WorkerSnapshotBucket {
 }
 /// Default Cache API, with deployment-scoped internal keys and no public route.
 #[derive(Debug)]
-pub struct WorkerCache;
+pub struct WorkerCache(pub Option<SliceBudget>);
 impl SnapshotCache for WorkerCache {
     async fn get(&self, key: &str) -> Result<Option<(u64, Vec<u8>)>, StoreError> {
+        crate::ns_client::charge_request(self.0.as_ref())?;
         let Some(mut response) = Cache::default().get(key, false).await.map_err(error)? else {
             return Ok(None);
         };
@@ -109,6 +114,7 @@ impl SnapshotCache for WorkerCache {
             .headers_mut()
             .set("x-mkit-snapshot-cache-at", &at_ms.to_string())
             .map_err(error)?;
+        crate::ns_client::charge_request(self.0.as_ref())?;
         Cache::default().put(key, response).await.map_err(error)
     }
 }

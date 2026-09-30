@@ -179,6 +179,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
         }
     }
 
+    #[allow(clippy::too_many_lines)] // Upload target selection and replay validation share one lifecycle.
     async fn open(
         pipe: &'p Pipeline<B, N, H>,
         a: &Authenticated,
@@ -239,6 +240,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             if op.auth.is_some() || !charges.is_empty() {
                 let req = WriteRequest {
                     denial_ids: None,
+                    denial_packs: &[],
                     authority_store: super::plan::AuthorityStore::from_capabilities(
                         pipe.meta.capabilities(),
                     ),
@@ -477,6 +479,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             .await
     }
 
+    #[allow(clippy::too_many_lines)] // Upload commit and durable ticket completion share one lifecycle.
     async fn complete(&mut self) -> Result<(), ServerError> {
         let pipe = self.pipe;
         let done = self.validator.clone().finish()?;
@@ -544,6 +547,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
         }
         let req = WriteRequest {
             denial_ids: None,
+            denial_packs: &[],
             authority_store: super::plan::AuthorityStore::from_capabilities(
                 pipe.meta.capabilities(),
             ),

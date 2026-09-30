@@ -60,6 +60,29 @@ pub trait LocalInvalidation: MaybeSend + MaybeSync {
         cursor: u32,
         budget: &'a SliceBudget,
     ) -> BoxFuture<'a, Result<Option<u32>, StoreError>>;
+    /// Opaque durable position for catalog traversal; legacy local adapters use a u32.
+    fn invalidate_checkpoint<'a>(
+        &'a self,
+        request: &'a Request,
+        checkpoint: &'a [u8],
+        budget: &'a SliceBudget,
+    ) -> BoxFuture<'a, Result<Option<Vec<u8>>, StoreError>> {
+        Box::pin(async move {
+            let cursor = if checkpoint.is_empty() {
+                0
+            } else {
+                u32::from_be_bytes(
+                    checkpoint
+                        .try_into()
+                        .map_err(|_| StoreError::Corrupt("invalid purge cursor".into()))?,
+                )
+            };
+            Ok(self
+                .invalidate(request, cursor, budget)
+                .await?
+                .map(|next| next.to_be_bytes().to_vec()))
+        })
+    }
 }
 /// Deployments with no persistent local serving cache.
 #[derive(Debug, Clone, Copy)]
@@ -76,7 +99,7 @@ impl LocalInvalidation for NoLocalCache {
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Progress {
-    cursor: u32,
+    checkpoint: Vec<u8>,
     local_done: bool,
     attempt: u32,
 }
@@ -137,6 +160,17 @@ impl<S: NamespaceStore> TimerHandler<S> for PurgeDelivery {
         ctx: &'a TimerCtx<'a, S>,
         timer: &'a DueTimer,
     ) -> BoxFuture<'a, Result<Fired, StoreError>> {
+        self.fire_with_local(self.local.as_ref(), ctx, timer)
+    }
+}
+impl PurgeDelivery {
+    /// Use a context-local catalog reader without issuing a Durable Object self-call.
+    pub fn fire_with_local<'a, S: NamespaceStore>(
+        &'a self,
+        local: &'a dyn LocalInvalidation,
+        ctx: &'a TimerCtx<'a, S>,
+        timer: &'a DueTimer,
+    ) -> BoxFuture<'a, Result<Fired, StoreError>> {
         Box::pin(async move {
             let id = core::str::from_utf8(&timer.reference)
                 .map_err(|_| StoreError::Corrupt("invalid purge timer id".into()))?;
@@ -157,14 +191,19 @@ impl<S: NamespaceStore> TimerHandler<S> for PurgeDelivery {
                     .map_err(|_| StoreError::Corrupt("invalid purge progress".into()))?
             };
             if !progress.local_done {
-                match self
-                    .local
-                    .invalidate(&request, progress.cursor, &self.budget)
+                if progress.checkpoint.len() > 4096 {
+                    return Err(StoreError::Corrupt("oversized purge checkpoint".into()));
+                }
+                match local
+                    .invalidate_checkpoint(&request, &progress.checkpoint, &self.budget)
                     .await
                 {
                     Ok(None) => progress.local_done = true,
                     Ok(Some(cursor)) => {
-                        progress.cursor = cursor;
+                        if cursor.len() > 4096 {
+                            return Err(StoreError::Corrupt("oversized purge checkpoint".into()));
+                        }
+                        progress.checkpoint = cursor;
                         return Self::resume(ctx.now_ms, &progress, false);
                     }
                     Err(_) => {
@@ -215,7 +254,7 @@ impl<S: NamespaceStore> TimerHandler<S> for PurgeDelivery {
                     ctx.partition,
                     "system:timer",
                     "system:timer/PurgeCacheComplete",
-                    &[request.purge_id.clone()],
+                    std::slice::from_ref(&request.purge_id),
                     ctx.now_ms,
                 )
                 .await?;

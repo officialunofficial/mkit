@@ -8,8 +8,7 @@ use crate::store::{
     BlockEntry, BorrowedStore, ContentIndex, Key, NamespaceStore, Partition, StoreError, Value,
     keys,
 };
-use crate::telemetry::Metrics;
-use crate::{BlobStore, RepoId, ServerError};
+use crate::{RepoId, ServerError};
 use mkit_core::hash::Hash;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -34,6 +33,7 @@ struct ActionsV2 {
 #[serde(deny_unknown_fields)]
 pub struct StoredAction {
     pub action: BlockAction,
+    pub sorted_pages: bool,
     pub chunk_count: u64,
     pub chunk_digest: Hash,
     pub pages: Vec<ChunkPage>,
@@ -51,12 +51,15 @@ pub struct ChunkPage {
     pub digest: Hash,
 }
 const INDEX_PREFIX: &[u8] = b"b\0\xffdenial-action-descriptors-v2-index\0";
+#[must_use]
 pub fn descriptor_key(object: &Hash) -> Key {
     let mut bytes = INDEX_PREFIX.to_vec();
     bytes.extend_from_slice(object);
     Key::new(bytes)
 }
 const PAGE_HASHES: usize = crate::store::MAX_VALUE_BYTES / 32;
+#[cfg(test)]
+static STAGED_PAGE_PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 pub(super) fn chunk_page_key(object: &Hash, action: &Hash, page: u32) -> Key {
     let mut bytes = keys::block(object).as_bytes().to_vec();
     bytes.extend_from_slice(b"\0chunks\0");
@@ -75,10 +78,29 @@ pub async fn stage_action<S: NamespaceStore>(
     if action.chunk_ids.windows(2).any(|w| w[0] >= w[1]) {
         return Err(corrupt());
     }
+    stage_references(store, object, action, &action.chunk_ids, true, now).await
+}
+/// Sort only one canonical page at a time; no full manifest-sized copy.
+pub(super) async fn stage_references<S: NamespaceStore>(
+    store: &S,
+    object: &Hash,
+    action: &BlockAction,
+    ids: &[Hash],
+    sorted_pages: bool,
+    now: u64,
+) -> Result<StoredAction, StoreError> {
     let mut digest = blake3::Hasher::new();
     let mut pages = Vec::new();
-    for (page, chunks) in action.chunk_ids.chunks(PAGE_HASHES).enumerate() {
+    for (page, chunk_ids) in ids.chunks(PAGE_HASHES).enumerate() {
+        let mut chunks = chunk_ids.to_vec();
+        chunks.sort_unstable();
+        chunks.dedup();
         let bytes = chunks.concat();
+        #[cfg(test)]
+        STAGED_PAGE_PEAK.fetch_max(
+            chunks.capacity() * 32 + bytes.capacity(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         digest.update(&bytes);
         let key = chunk_page_key(
             object,
@@ -88,7 +110,7 @@ pub async fn stage_action<S: NamespaceStore>(
         pages.push(ChunkPage {
             first: chunks[0],
             last: chunks[chunks.len() - 1],
-            count: chunks.len() as u32,
+            count: u32::try_from(chunks.len()).map_err(|_| corrupt())?,
             digest: mkit_core::hash::hash(&bytes),
         });
         let value = Value::new(bytes);
@@ -121,7 +143,8 @@ pub async fn stage_action<S: NamespaceStore>(
     };
     Ok(StoredAction {
         action: header,
-        chunk_count: action.chunk_ids.len() as u64,
+        sorted_pages,
+        chunk_count: pages.iter().map(|p| u64::from(p.count)).sum(),
         chunk_digest: *digest.finalize().as_bytes(),
         pages,
         page_owner: *object,
@@ -188,6 +211,7 @@ pub(super) async fn chunks_intersect<S: NamespaceStore>(
 }
 
 /// Approved subkey; current V1 producers cannot replace independent actions.
+#[must_use]
 pub fn action_key(id: &Hash) -> Key {
     let mut bytes = keys::block(id).as_bytes().to_vec();
     bytes.extend_from_slice(b"\0actions");
@@ -212,7 +236,7 @@ pub fn decode_actions(raw: Option<&Value>) -> Result<Vec<StoredAction>, StoreErr
                 || a.pages
                     .iter()
                     .any(|p| p.count == 0 || p.count as usize > PAGE_HASHES || p.first > p.last)
-                || a.pages.windows(2).any(|w| w[0].last >= w[1].first)
+                || (a.sorted_pages && a.pages.windows(2).any(|w| w[0].last >= w[1].first))
                 || a.pages.iter().map(|p| u64::from(p.count)).sum::<u64>() != a.chunk_count
         })
     {
@@ -262,6 +286,7 @@ fn unavailable() -> ServerError {
 }
 
 /// A bounded proof target: supplied write IDs, or immutable source inventories.
+const MAX_PROOF_CONTEXT_BYTES: usize = 4 * 1024 * 1024;
 struct Target<'a> {
     ids: &'a BTreeSet<Hash>,
     manifests: Vec<StoredAction>,
@@ -285,7 +310,7 @@ impl Target<'_> {
         for pack in &self.packs {
             let keys: Vec<Key> = ids
                 .iter()
-                .map(|id| super::inventory::entry_key(pack, id))
+                .map(|id| super::inventory::marker_key(pack, id))
                 .collect();
             let rows = store
                 .get_many(&crate::store::content_shard(pack), &keys)
@@ -294,7 +319,26 @@ impl Target<'_> {
             if rows.len() != keys.len() {
                 return Err(unavailable());
             }
+            if rows.iter().flatten().any(|row| row.as_bytes().len() != 32) {
+                return Err(unavailable());
+            }
             if rows.iter().any(Option::is_some) {
+                return Ok(true);
+            }
+            if super::inventory::visit(store, pack, true, |_, row| {
+                let requested = &requested;
+                async move {
+                    if row.kind != 5 {
+                        return Ok(false);
+                    }
+                    chunks_intersect(store, pack, &row.references, requested)
+                        .await
+                        .map_err(|_| corrupt())
+                }
+            })
+            .await
+            .map_err(|_| unavailable())?
+            {
                 return Ok(true);
             }
         }
@@ -305,7 +349,17 @@ impl Target<'_> {
         store: &S,
         row: &StoredAction,
     ) -> Result<bool, ServerError> {
-        for n in 0..row.pages.len() {
+        for (n, desc) in row.pages.iter().enumerate() {
+            if self.packs.is_empty()
+                && self.ids.range(desc.first..=desc.last).next().is_none()
+                && !self
+                    .manifests
+                    .iter()
+                    .flat_map(|m| &m.pages)
+                    .any(|p| p.first <= desc.last && desc.first <= p.last)
+            {
+                continue;
+            }
             for ids in page(store, row, n).await?.chunks(256) {
                 if self.intersects(store, ids).await? {
                     return Ok(true);
@@ -315,6 +369,7 @@ impl Target<'_> {
         Ok(false)
     }
 }
+#[must_use]
 pub fn legacy_descriptor_key(object: &Hash) -> Key {
     let mut bytes = descriptor_key(object).as_bytes().to_vec();
     bytes.push(0);
@@ -437,15 +492,11 @@ async fn prove<S: NamespaceStore>(
     }
     Ok(())
 }
-#[allow(clippy::too_many_arguments)]
-pub async fn require_repo_clear<B: BlobStore, S: NamespaceStore>(
-    _blobs: &B,
+pub async fn require_repo_clear<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
     repo: &RepoId,
     ids: &BTreeSet<Hash>,
-    _cfg: &IndexedConfig,
-    _metrics: &dyn Metrics,
     budget: &SliceBudget,
 ) -> Result<(), ServerError> {
     prove(
@@ -460,28 +511,38 @@ pub async fn require_repo_clear<B: BlobStore, S: NamespaceStore>(
     )
     .await
 }
-#[allow(clippy::too_many_arguments)]
-pub async fn require_repo_clear_budgeted<B: BlobStore, S: NamespaceStore>(
-    blobs: &B,
+pub async fn require_repo_clear_budgeted<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
     repo: &RepoId,
     ids: &BTreeSet<Hash>,
-    cfg: &IndexedConfig,
-    metrics: &dyn Metrics,
+    packs: &[Hash],
     budget: &SliceBudget,
 ) -> Result<(), ServerError> {
-    require_repo_clear(blobs, store, shards, repo, ids, cfg, metrics, budget).await
+    let remote = Budgeted::new(store, budget);
+    for pack in packs {
+        super::inventory::visit(&remote, pack, false, |_, _| async { Ok(false) })
+            .await
+            .map_err(|_| unavailable())?;
+    }
+    prove(
+        &remote,
+        shards,
+        repo,
+        &Target {
+            ids,
+            manifests: Vec::new(),
+            packs: packs.to_vec(),
+        },
+    )
+    .await
 }
-#[allow(clippy::too_many_arguments)]
-pub async fn require_object_clear<B: BlobStore, S: NamespaceStore>(
-    _blobs: &B,
+pub async fn require_object_clear<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
     repo: &RepoId,
     id: &Hash,
     cfg: &IndexedConfig,
-    _metrics: &dyn Metrics,
     budget: &SliceBudget,
 ) -> Result<(), ServerError> {
     let remote = Budgeted::new(store, budget);
@@ -495,13 +556,23 @@ pub async fn require_object_clear<B: BlobStore, S: NamespaceStore>(
             .map_err(|_| unavailable())?;
         ids.insert(pack);
         if row.kind == 5 {
+            let size = |m: &StoredAction| {
+                std::mem::size_of::<StoredAction>()
+                    + m.action.reason.capacity()
+                    + m.pages.capacity() * std::mem::size_of::<ChunkPage>()
+            };
+            if manifests.iter().map(size).sum::<usize>() + size(&row.references) + ids.len() * 128
+                > MAX_PROOF_CONTEXT_BYTES
+            {
+                return Err(unavailable());
+            }
             manifests.push(row.references);
         }
         cursor = row.base;
-        if let Some(base) = cursor {
-            if !ids.insert(base) {
-                return Err(unavailable());
-            }
+        if let Some(base) = cursor
+            && !ids.insert(base)
+        {
+            return Err(unavailable());
         }
     }
     if cursor.is_some() {
@@ -519,15 +590,11 @@ pub async fn require_object_clear<B: BlobStore, S: NamespaceStore>(
     )
     .await
 }
-#[allow(clippy::too_many_arguments)]
-pub async fn require_pack_clear<B: BlobStore, S: NamespaceStore>(
-    _blobs: &B,
+pub async fn require_pack_clear<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
     repo: &RepoId,
     pack: &Hash,
-    _cfg: &IndexedConfig,
-    _metrics: &dyn Metrics,
 ) -> Result<(), ServerError> {
     let budget = SliceBudget::new(9000);
     let remote = Budgeted::new(store, &budget);
@@ -556,8 +623,7 @@ mod tests {
         content_shard,
         index::{IndexEntry, IndexValue},
     };
-    use crate::telemetry::NoopMetrics;
-    use crate::{Batch, ManualClock, MemoryBlobStore, MemoryKv, NamespaceKey, RepoName};
+    use crate::{Batch, ManualClock, MemoryKv, NamespaceKey, RepoName};
     use futures_executor::block_on;
     use std::sync::Arc;
 
@@ -619,7 +685,7 @@ mod tests {
                     .await
                     .is_err()
             );
-        })
+        });
     }
     #[test]
     fn empty_authoritative_scan_has_measured_bound() {
@@ -627,13 +693,10 @@ mod tests {
             let store = store();
             let budget = SliceBudget::new(9000);
             require_repo_clear(
-                &MemoryBlobStore::default(),
                 &store,
                 &D34Shards,
                 &repo("a"),
                 &BTreeSet::from([[8; 32]]),
-                &IndexedConfig::default(),
-                &NoopMetrics,
                 &budget,
             )
             .await
@@ -641,7 +704,7 @@ mod tests {
             // 4096 descriptor-shard scans plus two strong per-object reads:
             // BorrowedStore inherits get_many's sequential-get default.
             assert_eq!(budget.used(), 4098);
-        })
+        });
     }
     #[test]
     fn chunk_stop_uses_repository_membership_and_not_global_holders() {
@@ -679,7 +742,7 @@ mod tests {
             for batch in plan.direct {
                 let mut writes = Batch::new();
                 for (k, v) in batch.puts {
-                    writes = writes.put(k, v)
+                    writes = writes.put(k, v);
                 }
                 store.apply(&batch.target, writes).await.unwrap();
             }
@@ -691,31 +754,25 @@ mod tests {
                 .await
                 .unwrap();
             let result = require_repo_clear(
-                &MemoryBlobStore::default(),
                 &store,
                 &D34Shards,
                 &r,
                 &BTreeSet::from([chunk]),
-                &IndexedConfig::default(),
-                &NoopMetrics,
                 &SliceBudget::new(9000),
             )
             .await;
             assert_eq!(result.unwrap_err().public_message(), "object blocked");
             require_repo_clear(
-                &MemoryBlobStore::default(),
                 &store,
                 &D34Shards,
                 &repo("other"),
                 &BTreeSet::from([chunk]),
-                &IndexedConfig::default(),
-                &NoopMetrics,
                 &SliceBudget::new(9000),
             )
             .await
             .unwrap();
             assert!(!denied(&store, &chunk).await.unwrap());
-        })
+        });
     }
     #[test]
     fn large_chunk_set_reads_only_selected_verified_page_and_rejects_corruption() {
@@ -775,6 +832,229 @@ mod tests {
                 .is_err()
             );
             assert!(index.blocked(&manifest).await.unwrap().is_some());
-        })
+        });
+    }
+    async fn member_row(store: &MemoryKv, repo: &RepoId, pack: Hash, id: Hash) {
+        let value = IndexValue {
+            frame_offset: 1,
+            frame_length: 1,
+            wire_type: 0,
+            decoded_size: 1,
+            chain_depth: 0,
+            delta_base: None,
+        };
+        let plan = crate::store::index::plan_index_rows_direct(
+            &D34Shards,
+            repo,
+            &D34Shards.ref_shard(repo, "refs/heads/main"),
+            &pack,
+            &[IndexEntry { object: id, value }],
+            1,
+        )
+        .unwrap();
+        for batch in plan.direct {
+            let mut writes = Batch::new();
+            for (k, v) in batch.puts {
+                writes = writes.put(k, v);
+            }
+            store.apply(&batch.target, writes).await.unwrap();
+        }
+        store
+            .apply(
+                &D34Shards.membership(repo, &crate::BlobKey::pack(pack)),
+                Batch::new().put(keys::membership(&repo.name, &pack), Value::new(vec![1])),
+            )
+            .await
+            .unwrap();
+    }
+    #[test]
+    fn million_chunk_manifest_stages_and_proves_with_bounded_pages() {
+        use mkit_core::object::{ChunkedBlob, Object};
+        block_on(async {
+            let store = store();
+            let repo = repo("large");
+            let pack = [90; 32];
+            let chunks: Vec<Hash> = (0u32..1_000_000)
+                .rev()
+                .map(|n| {
+                    let mut id = [0; 32];
+                    id[..4].copy_from_slice(&n.to_be_bytes());
+                    id
+                })
+                .collect();
+            let object = Object::ChunkedBlob(ChunkedBlob {
+                total_size: 65_536_000_000,
+                chunk_size: 65_536,
+                chunks,
+            });
+            // This is the core's maximum accepted count, not a reduced server geometry.
+            let wire = mkit_core::serialize::serialize(&object).unwrap();
+            assert_eq!(mkit_core::serialize::deserialize(&wire).unwrap(), object);
+            drop(wire);
+            let id = object.id().unwrap();
+            super::super::inventory::stage(&store, &pack, 1, &id, &object, None, 1)
+                .await
+                .unwrap();
+            super::super::inventory::complete(&store, &pack, 1, 1)
+                .await
+                .unwrap();
+            let row = super::super::inventory::entry(&store, &pack, &id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.references.chunk_count, 1_000_000);
+            assert_eq!(
+                row.references.pages.len(),
+                1_000_000usize.div_ceil(PAGE_HASHES)
+            );
+            assert!(!row.references.sorted_pages);
+            assert!(
+                STAGED_PAGE_PEAK.load(std::sync::atomic::Ordering::Relaxed)
+                    <= 2 * crate::store::MAX_VALUE_BYTES
+            );
+            assert!(row.references.pages.capacity() * std::mem::size_of::<ChunkPage>() < 32 * 1024);
+            member_row(&store, &repo, pack, id).await;
+            let budget = SliceBudget::new(9000);
+            require_object_clear(
+                &store,
+                &D34Shards,
+                &repo,
+                &id,
+                &IndexedConfig::default(),
+                &budget,
+            )
+            .await
+            .unwrap();
+            assert!(budget.used() < 4200, "{}", budget.used());
+            // A separate held blocked manifest shares a chunk in the LAST canonical page.
+            let Object::ChunkedBlob(manifest) = &object else {
+                unreachable!()
+            };
+            let shared = *manifest.chunks.last().unwrap();
+            let blocked_id = [91; 32];
+            member_row(&store, &repo, pack, blocked_id).await;
+            ContentIndex::new(BorrowedStore(&store))
+                .install_block_action(&blocked_id, &action(92, vec![shared]), 1)
+                .await
+                .unwrap();
+            let budget = SliceBudget::new(9000);
+            let denied = require_object_clear(
+                &store,
+                &D34Shards,
+                &repo,
+                &id,
+                &IndexedConfig::default(),
+                &budget,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(denied.public_message(), "object blocked");
+            assert!(budget.used() < 4200, "{}", budget.used());
+        });
+    }
+    #[test]
+    fn legacy_hold_release_keeps_chunk_denial_and_unblock_removes_it() {
+        use mkit_core::object::{ChunkedBlob, Object};
+        block_on(async {
+            let store = store();
+            let repo = repo("legacy-context");
+            let pack = [81; 32];
+            let id = [82; 32];
+            let chunk = [83; 32];
+            super::super::inventory::stage(
+                &store,
+                &pack,
+                1,
+                &id,
+                &Object::ChunkedBlob(ChunkedBlob {
+                    total_size: 1,
+                    chunk_size: 0,
+                    chunks: vec![chunk],
+                }),
+                None,
+                1,
+            )
+            .await
+            .unwrap();
+            super::super::inventory::complete(&store, &pack, 1, 1)
+                .await
+                .unwrap();
+            member_row(&store, &repo, pack, id).await;
+            let index = ContentIndex::new(BorrowedStore(&store));
+            index
+                .block(&id, &BlockEntry::new("policy", 1), 1)
+                .await
+                .unwrap();
+            index.release_hold(&id, &[84; 32], 1).await.unwrap();
+            let result = require_repo_clear(
+                &store,
+                &D34Shards,
+                &repo,
+                &BTreeSet::from([chunk]),
+                &SliceBudget::new(9000),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(result.public_message(), "object blocked");
+            index.unblock(&id, 1).await.unwrap();
+            require_repo_clear(
+                &store,
+                &D34Shards,
+                &repo,
+                &BTreeSet::from([chunk]),
+                &SliceBudget::new(9000),
+            )
+            .await
+            .unwrap();
+        });
+    }
+    #[test]
+    fn inventory_row_corruption_cannot_change_manifest_type() {
+        use mkit_core::object::{ChunkedBlob, Object};
+        block_on(async {
+            let store = store();
+            let repo = repo("corrupt");
+            let pack = [71; 32];
+            let id = [72; 32];
+            super::super::inventory::stage(
+                &store,
+                &pack,
+                1,
+                &id,
+                &Object::ChunkedBlob(ChunkedBlob {
+                    total_size: 1,
+                    chunk_size: 0,
+                    chunks: vec![[73; 32]],
+                }),
+                None,
+                1,
+            )
+            .await
+            .unwrap();
+            super::super::inventory::complete(&store, &pack, 1, 1)
+                .await
+                .unwrap();
+            member_row(&store, &repo, pack, id).await;
+            let mut row = super::super::inventory::entry(&store, &pack, &id)
+                .await
+                .unwrap()
+                .unwrap();
+            row.kind = 1;
+            store
+                .apply(
+                    &content_shard(&pack),
+                    Batch::new().put(
+                        super::super::inventory::entry_key(&pack, &id),
+                        Value::new(serde_json::to_vec(&row).unwrap()),
+                    ),
+                )
+                .await
+                .unwrap();
+            assert!(
+                super::super::inventory::member(&store, &D34Shards, &repo, &id)
+                    .await
+                    .is_err()
+            );
+        });
     }
 }

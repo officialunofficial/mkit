@@ -80,6 +80,8 @@ pub struct StagedCommits {
     pub external_bases: BTreeSet<Hash>,
     /// Current decoded IDs and all reused chain sources for fresh denial at apply.
     pub denial_ids: BTreeSet<Hash>,
+    /// Immutable verified inventories, including canonical manifest pages.
+    pub denial_packs: Vec<Hash>,
 }
 
 /// The `parents` of a history object; `None` for a blob, tree or manifest.
@@ -688,7 +690,6 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
                             )
                         })?;
                         renew_all_pending(store, source, repo, acquired, clock).await?;
-                        denial_ids.extend(memo.rows().map(|((id, _, _), _)| *id));
                         for ((id, _, _), _) in memo.rows() {
                             crate::takedown::inventory::dependency(
                                 store,
@@ -995,7 +996,7 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
         staged: &staged,
         staged_bytes,
         resolved: std::sync::atomic::AtomicU64::new(0),
-        denial_ids: std::sync::Mutex::new(BTreeSet::new()),
+        denial_pack: std::sync::Mutex::new(None),
     };
     for pack in &work {
         if !pack.needs_index {
@@ -1060,6 +1061,8 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
             acquired,
             clock,
         };
+        *extractor.denial_pack.lock().map_err(|_| storage_failed())? =
+            Some((pack.ticket.pack_id, pack.ticket.bytes));
         for (id, kind) in &selected {
             if staged_owner.get(id) == Some(&pack.ticket.pack_id) {
                 // Boxed: the extraction future is large and rarely awaited.
@@ -1117,20 +1120,9 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
         .iter()
         .filter_map(|(id, (_, object, _))| Some((*id, history_parents(object)?)))
         .collect();
-    denial_ids.extend(
-        extractor
-            .denial_ids
-            .into_inner()
-            .map_err(|_| storage_failed())?,
-    );
-    for (_, object, _) in staged.values() {
-        if let Object::ChunkedBlob(cb) = object {
-            denial_ids.extend(cb.chunks.iter().copied());
-        }
-    }
-    denial_ids.extend(staged.keys().copied());
     denial_ids.extend(tickets.iter().map(|ticket| ticket.pack_id));
     Ok(StagedCommits {
+        denial_packs: tickets.iter().map(|ticket| ticket.pack_id).collect(),
         denial_ids,
         parents,
         objects: staged.len(),

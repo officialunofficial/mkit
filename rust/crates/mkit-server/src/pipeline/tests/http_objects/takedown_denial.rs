@@ -3,8 +3,7 @@ use super::*;
 use crate::store::{BorrowedStore, ContentIndex};
 use crate::takedown::denial::BlockAction;
 
-#[test]
-fn shared_chunk_stop_precedes_extracted_http_validators_proofs_and_pack_reads() {
+fn shared_chunk_stop(proofs: Arc<Proofs>) -> (Fx, Hash, Hash, Hash, String) {
     let tokens = crate::url_token::UrlTokenConfig::new(
         crate::url_token::UrlTokenKeys::new(zeroize::Zeroizing::new([13; 32]), vec![]).unwrap(),
     );
@@ -28,7 +27,6 @@ fn shared_chunk_stop_precedes_extracted_http_validators_proofs_and_pack_reads() 
         None,
     );
     let object_url = fx.object_url("room", &id(&visible));
-    let ref_url = fx.ref_url("room", "main", "visible.bin");
     assert_eq!(fx.get(&object_url).status, 200);
     let token = tokens
         .mint(
@@ -59,8 +57,7 @@ fn shared_chunk_stop_precedes_extracted_http_validators_proofs_and_pack_reads() 
         ),
     ))
     .unwrap();
-    let proofs = Arc::new(Proofs(Mutex::default()));
-    let fx = with_seams(fx, |s| s.proofs = proofs.clone());
+    let fx = with_seams(fx, |s| s.proofs = proofs);
     block_on(
         ContentIndex::new(BorrowedStore(&fx.pipe.meta)).install_block_action(
             &id(&blocked),
@@ -75,6 +72,15 @@ fn shared_chunk_stop_precedes_extracted_http_validators_proofs_and_pack_reads() 
         ),
     )
     .unwrap();
+    (fx, pack, foreign, id(&visible), token_query)
+}
+
+#[test]
+fn shared_chunk_stop_precedes_extracted_http_validators_proofs_and_pack_reads() {
+    let proofs = Arc::new(Proofs(Mutex::default()));
+    let (fx, pack, foreign, visible, token_query) = shared_chunk_stop(proofs.clone());
+    let object_url = fx.object_url("room", &visible);
+    let ref_url = fx.ref_url("room", "main", "visible.bin");
     for path in [&object_url, &ref_url] {
         for method in ["GET", "HEAD"] {
             for headers in [
@@ -117,7 +123,7 @@ fn shared_chunk_stop_precedes_extracted_http_validators_proofs_and_pack_reads() 
         block_on(fx.pipe.begin_upload(&fx.auth(&begin), HEAD, &pack, 100)).unwrap(),
         BeginUploadResult::AlreadyPresent
     ));
-    assert_eq!(fx.get(&fx.object_url("other", &id(&visible))).status, 200);
+    assert_eq!(fx.get(&fx.object_url("other", &visible)).status, 200);
     for (name, pack, expected) in [("room", pack, false), ("other", foreign, true)] {
         let request = signed(
             &fx.owner,
@@ -213,6 +219,94 @@ fn legacy_pack_denial_precedes_exists_download_and_already_present() {
     );
     assert!(!matches!(
         block_on(fx.pipe.begin_upload(&fx.auth(&request), HEAD, &pack, 100)).unwrap(),
+        BeginUploadResult::AlreadyPresent
+    ));
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn pre_action_plan_may_publish_but_blocked_bytes_remain_unservable() {
+    use crate::pipeline::faults::{FaultHooks, FaultPoint, TestDirectives};
+    struct InstallBlock {
+        store: Arc<Spy>,
+        object: Hash,
+        fired: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl FaultHooks for InstallBlock {
+        async fn at(
+            &self,
+            point: FaultPoint,
+            op: &Operation,
+            _: &TestDirectives,
+        ) -> Result<(), ServerError> {
+            if point == FaultPoint::BeforeFinalApply
+                && matches!(op.kind, OpKind::AdvanceRefs { .. })
+                && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                ContentIndex::new(BorrowedStore(&self.store))
+                    .install_block_action(
+                        &self.object,
+                        &BlockAction {
+                            id: [93; 32],
+                            takedown_id: [94; 32],
+                            reason: "manual".into(),
+                            blocked_at_ms: T0 as u64,
+                            chunk_ids: vec![],
+                        },
+                        T0 as u64,
+                    )
+                    .await
+                    .unwrap();
+            }
+            Ok(())
+        }
+    }
+    let mut fx = fixture_tweaked(Hooks::new(), http_cfg(), |cfg| {
+        cfg.takedown_denial = true;
+    });
+    let d = data();
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hook = InstallBlock {
+        store: fx.pipe.meta.clone(),
+        object: id(&d.big),
+        fired: fired.clone(),
+    };
+    fx.pipe = fx.pipe.with_faults(hook);
+    let (outcome, _) = fx.push_ref(
+        "room",
+        &d.refs(),
+        (HEAD, PACKMAP),
+        d.head(),
+        (Missing, Missing),
+    );
+    assert!(fired.load(std::sync::atomic::Ordering::SeqCst));
+    // SPEC-SERVER 14.2: the pre-action plan may apply within NotAfter.
+    assert_eq!(outcome, AdvanceOutcome::Committed);
+    assert_uniform_404(&fx.get(&fx.object_url("room", &id(&d.big))));
+    assert_uniform_404(&fx.get(&fx.ref_url("room", "main", "big.bin")));
+    let mut writer = PackWriter::new_raw_only();
+    for object in d.refs() {
+        writer
+            .push_raw(object.id().unwrap(), &serialize(object).unwrap())
+            .unwrap();
+    }
+    let pack_id = hash(&writer.finish().unwrap());
+    let exists = signed(
+        &fx.owner,
+        &fx.identity("room"),
+        Procedure::PackExists,
+        fx.number(),
+    );
+    assert!(!block_on(fx.pipe.pack_exists(&fx.auth(&exists), PackKey(pack_id))).unwrap());
+    // New reliance must not return AlreadyPresent after the action.
+    let begin = signed(
+        &fx.owner,
+        &fx.identity("room"),
+        Procedure::BeginUpload,
+        fx.number(),
+    );
+    assert!(!matches!(
+        block_on(fx.pipe.begin_upload(&fx.auth(&begin), HEAD, &pack_id, 100)).unwrap(),
         BeginUploadResult::AlreadyPresent
     ));
 }

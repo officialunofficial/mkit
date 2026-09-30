@@ -1595,3 +1595,136 @@ fn deletions_publish_without_waiting_for_inspection_or_closure() {
         }
     }
 }
+
+#[test]
+#[allow(clippy::too_many_lines)] // Real signed split-pack and relay setup verifies four deployment modes.
+fn ticketless_reuse_rechecks_file_in_another_source_pack_with_and_without_policy() {
+    for sharding in [Sharding::Single, Sharding::D34] {
+        for inspection in [false, true] {
+            let (mut env, owner, identity) = environment_with_sharding(sharding);
+            env.pipe.cfg.takedown_denial = true;
+            if inspection {
+                env.pipe = env
+                    .pipe
+                    .with_publication_policy(Arc::new(InspectionPolicy(
+                        crate::store::publication::Clearance::Cleared,
+                    )))
+                    .unwrap();
+            }
+            let file = Object::Blob(Blob {
+                data: b"blocked reused file".to_vec(),
+            });
+            let file_id = file.id().unwrap();
+            let tree = Object::Tree(Tree {
+                entries: vec![TreeEntry {
+                    name: b"file.txt".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: file_id,
+                }],
+            });
+            let signer = KeyPair::from_seed([9; 32]);
+            let mut commit = Commit::new_unannotated(
+                tree.id().unwrap(),
+                vec![],
+                Identity::ed25519(signer.public.0),
+                signer.public.0,
+                b"split source reuse".to_vec(),
+                42,
+                [0; 64],
+            );
+            commit.signature = sign_commit(&commit, &signer).unwrap().0;
+            let commit = Object::Commit(commit);
+            let head = commit.id().unwrap();
+            let write_pack = |objects: &[&Object]| {
+                let mut writer = PackWriter::new_raw_only();
+                for object in objects {
+                    writer
+                        .push_raw(object.id().unwrap(), &serialize(object).unwrap())
+                        .unwrap();
+                }
+                writer.finish().unwrap()
+            };
+            let file_pack = write_pack(&[&file]);
+            let head_pack = write_pack(&[&tree, &commit]);
+            let map_bytes = encode_packlist(None, &[hash(&file_pack), hash(&head_pack)]).unwrap();
+            let map = hash(&map_bytes);
+            let tickets = vec![
+                begin_and_upload(&env, &owner, &identity, &file_pack, 9880),
+                begin_and_upload(&env, &owner, &identity, &head_pack, 9881),
+                begin_and_upload(&env, &owner, &identity, &map_bytes, 9882),
+            ];
+            let advance = env
+                .auth(&signed(&owner, &identity, Procedure::AdvanceRefs, 9883))
+                .unwrap();
+            assert_eq!(
+                block_on(env.pipe.advance_refs_with_tickets(
+                    &advance,
+                    upd(HEAD, Missing, head),
+                    upd(PACKMAP, Missing, map),
+                    tickets,
+                ))
+                .unwrap(),
+                AdvanceOutcome::Committed,
+            );
+            // Ticketed publication had an implicit source view. A ticketless
+            // reader must observe the real D34 index/membership relay delivery.
+            let repo = advance.repo().repo.clone();
+            let source = env.pipe.shards.ref_shard(&repo, HEAD);
+            let relay = crate::timers::TimerRegistry::new().register(crate::relay::RelayHandler {
+                target: crate::store::BorrowedStore(&env.pipe.meta),
+                hook: crate::relay::NoHook,
+                budget: crate::relay::RelayBudget::default(),
+            });
+            for _ in 0..8 {
+                block_on(crate::timers::run_due(
+                    &env.pipe.meta,
+                    &source,
+                    &relay,
+                    env.clock.as_ref(),
+                    T0 as u64,
+                    &crate::timers::TickBudget::default(),
+                ))
+                .unwrap();
+            }
+            block_on(
+                crate::store::ContentIndex::new(crate::store::BorrowedStore(&env.pipe.meta))
+                    .install_block_action(
+                        &file_id,
+                        &crate::takedown::denial::BlockAction {
+                            id: [31; 32],
+                            takedown_id: [32; 32],
+                            reason: "manual".into(),
+                            blocked_at_ms: T0 as u64,
+                            chunk_ids: vec![],
+                        },
+                        T0 as u64,
+                    ),
+            )
+            .unwrap();
+            let reuse = env
+                .auth(&signed(&owner, &identity, Procedure::AdvanceRefs, 9884))
+                .unwrap();
+            let error = block_on(env.pipe.advance_refs(
+                &reuse,
+                upd("refs/heads/reuse", Missing, head),
+                upd("refs/mkit/packmap/reuse", Missing, map),
+            ))
+            .expect_err("ticketless reuse published a blocked file from another source pack");
+            assert_eq!(
+                error.code(),
+                Code::PermissionDenied,
+                "{sharding:?}, inspection={inspection}"
+            );
+            assert_eq!(error.public_message(), "object blocked");
+            let repo = reuse.repo().repo.clone();
+            let source = env.pipe.shards.ref_shard(&repo, "refs/heads/reuse");
+            for name in ["refs/heads/reuse", "refs/mkit/packmap/reuse"] {
+                assert!(
+                    block_on(env.pipe.meta.get(&source, &keys::ref_key(&repo.name, name)))
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+    }
+}

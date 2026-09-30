@@ -235,16 +235,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .map_err(|e| store_error(StorageOp::BlobHead, e))?
                 .is_some()
         };
-        let present = if present && let Some(cfg) = self.cfg.indexed.as_ref() {
+        let present = if present && self.cfg.indexed.is_some() {
             let clear = if self.cfg.takedown_denial {
                 crate::takedown::denial::require_pack_clear(
-                    &self.blobs,
                     &self.meta,
                     self.shards.as_ref(),
                     &op.repo,
                     &key.0,
-                    cfg,
-                    self.metrics.as_ref(),
                 )
                 .await
             } else {

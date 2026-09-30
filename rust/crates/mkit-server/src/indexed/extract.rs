@@ -427,7 +427,7 @@ pub(super) struct Extractor<'a, B, S> {
     pub staged_bytes: u64,
     /// Member bytes resolved so far in this advance, bases included.
     pub resolved: AtomicU64,
-    pub denial_ids: std::sync::Mutex<BTreeSet<Hash>>,
+    pub denial_pack: std::sync::Mutex<Option<(Hash, u64)>>,
 }
 
 impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
@@ -756,10 +756,20 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
             self.metrics,
         )
         .await;
-        self.denial_ids
-            .lock()
-            .map_err(|_| inconsistent())?
-            .extend(cache.rows().map(|((id, _, _), _)| *id));
+        let pack = *self.denial_pack.lock().map_err(|_| inconsistent())?;
+        if let Some((pack, length)) = pack {
+            for ((id, _, _), _) in cache.rows() {
+                crate::takedown::inventory::dependency(
+                    self.store,
+                    &pack,
+                    length,
+                    id,
+                    self.now_ms(),
+                )
+                .await
+                .map_err(|_| inconsistent())?;
+            }
+        }
         let total = self
             .resolved
             .load(Ordering::Relaxed)

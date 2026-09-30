@@ -249,14 +249,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
                 })?;
         }
         if self.cfg.takedown_denial {
-            crate::takedown::denial::require_repo_clear(
-                &self.blobs,
+            crate::takedown::denial::require_object_clear(
                 &self.meta,
                 self.shards.as_ref(),
                 repo,
-                &std::collections::BTreeSet::from([leaf_id]),
+                &leaf_id,
                 indexed,
-                self.metrics.as_ref(),
                 &denial_budget,
             )
             .await

@@ -253,6 +253,25 @@ struct ReadInput {
     #[serde(alias = "page_size")]
     page_size: Json,
 }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PurgeInput {
+    #[serde(alias = "operation_id")]
+    operation_id: String,
+    #[serde(default)]
+    repository: String,
+    #[serde(default)]
+    namespace: String,
+    #[serde(default, alias = "url_paths")]
+    url_paths: Vec<String>,
+    #[serde(default, alias = "object_ids")]
+    object_ids: Vec<String>,
+    #[serde(default)]
+    refs: Vec<String>,
+    reason: String,
+    #[serde(default, alias = "operator_label")]
+    operator_label: String,
+}
 enum Action {
     Read(u64, u32),
     Failure(ServerError),
@@ -468,7 +487,7 @@ impl<S: NamespaceStore> Engine<S> {
                 }
                 Action::Extension(input) => {
                     let planned = if verified.path == super::PURGE_PATH {
-                        self.plan_purge(input, now).await
+                        self.plan_purge(input, &verified.digest, now).await
                     } else if let Some(service) = &self.operations {
                         service
                             .plan(&verified.path, input, &verified.digest, now, budget)
@@ -611,32 +630,13 @@ impl<S: NamespaceStore> Engine<S> {
         }
     }
 
-    async fn plan_purge(&self, input: &Json, now: u64) -> Result<super::Prepared, ServerError> {
-        if !self.purge_enabled {
-            return Err(ServerError::failed_precondition(
-                "purge interface not configured",
-            ));
-        }
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase", deny_unknown_fields)]
-        struct Input {
-            #[serde(alias = "operation_id")]
-            operation_id: String,
-            #[serde(default)]
-            repository: String,
-            #[serde(default)]
-            namespace: String,
-            #[serde(default, alias = "url_paths")]
-            url_paths: Vec<String>,
-            #[serde(default, alias = "object_ids")]
-            object_ids: Vec<String>,
-            #[serde(default)]
-            refs: Vec<String>,
-            reason: String,
-            #[serde(default, alias = "operator_label")]
-            operator_label: String,
-        }
-        let input: Input = serde_json::from_value(input.clone())
+    async fn plan_purge(
+        &self,
+        input: &Json,
+        digest: &str,
+        now: u64,
+    ) -> Result<super::Prepared, ServerError> {
+        let input: PurgeInput = serde_json::from_value(input.clone())
             .map_err(|_| auth::invalid("invalid PurgeCache JSON"))?;
         if !auth::identifier(&input.operation_id, 128, true)
             || input.reason.is_empty()
@@ -670,6 +670,32 @@ impl<S: NamespaceStore> Engine<S> {
         request
             .validate()
             .map_err(|_| auth::invalid("invalid purge selectors"))?;
+        let mut prepared = super::Prepared {
+            batch: Batch::new(),
+            response: Response::json(&json!({"purgeId":id})),
+            operation_id: input.operation_id,
+            label: input.operator_label,
+            targets: vec![request.scope().into()],
+            details: input.reason,
+        };
+        if let OperationReplay::Existing(response) = plan_operation(
+            &self.store,
+            &self.partition,
+            &prepared.operation_id,
+            super::PURGE_PATH,
+            digest,
+            prepared.response.clone(),
+        )
+        .await?
+        {
+            prepared.response = response;
+            return Ok(prepared);
+        }
+        if !self.purge_enabled {
+            return Err(ServerError::failed_precondition(
+                "purge interface not configured",
+            ));
+        }
         let rows = self
             .store
             .get_many(
@@ -684,16 +710,10 @@ impl<S: NamespaceStore> Engine<S> {
         if rows.len() != 2 {
             return Err(ServerError::new(Code::DataLoss, "invalid purge state"));
         }
-        let batch = crate::purge::plan_enqueue(&request, now, rows[0].as_ref(), rows[1].as_ref())
-            .map_err(store_error)?;
-        Ok(super::Prepared {
-            batch,
-            response: Response::json(&json!({"purgeId":id})),
-            operation_id: input.operation_id,
-            label: input.operator_label,
-            targets: vec![request.scope().into()],
-            details: input.reason,
-        })
+        prepared.batch =
+            crate::purge::plan_enqueue(&request, now, rows[0].as_ref(), rows[1].as_ref())
+                .map_err(store_error)?;
+        Ok(prepared)
     }
 
     async fn read_page(&self, head: &Head, from: u64, size: u32) -> Result<Response, ServerError> {
