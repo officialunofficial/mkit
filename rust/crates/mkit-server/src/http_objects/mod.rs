@@ -18,6 +18,7 @@
 //! mounting (4.16) and takedown (5.9a).
 
 mod body;
+mod paid;
 pub mod range;
 pub mod reach;
 pub(crate) mod resolve;
@@ -25,6 +26,8 @@ pub mod route;
 pub mod seams;
 
 pub use body::{EndHook, HttpBody, exact as exact_body, with_hook as body_with_hook};
+pub use paid::HttpReadRuntime;
+pub(crate) use paid::ReadFinalizer;
 pub use reach::{Reachability, TtlReachability};
 pub use route::{BadUrl, ParsedUrl, Query, RepoPrefix, Target, is_http_object_path, parse};
 pub use seams::{
@@ -56,6 +59,12 @@ pub struct HttpObjectsConfig {
     /// page budget of this limit divided by the configured page size, rounded
     /// up. Exhaustion is 404 and [`METRIC_HTTP_REACH_CAPPED`].
     pub max_walk_objects: usize,
+    /// Run the Admission hook for GET and HEAD at step 11. Default off.
+    pub admit_reads: bool,
+    /// Maximum paid transmission time from reservation creation.
+    pub read_deadline: core::time::Duration,
+    /// Time reserved for completion persistence before abandonment (default 60 s).
+    pub read_reconcile_grace: core::time::Duration,
     /// How long a reachability proof is trusted, in milliseconds: a rewind
     /// or ref deletion is visible within it (§4 `reachability_lag`).
     pub reachability_lag_ms: u64,
@@ -74,6 +83,9 @@ impl Default for HttpObjectsConfig {
     fn default() -> Self {
         Self {
             max_walk_objects: 50_000,
+            admit_reads: false,
+            read_deadline: core::time::Duration::from_mins(5),
+            read_reconcile_grace: core::time::Duration::from_mins(1),
             reachability_lag_ms: 60_000,
             reach_cache_entries: 65_536,
             max_inline_object_bytes: DEFAULT_MAX_INLINE_OBJECT_BYTES,
@@ -89,7 +101,9 @@ impl HttpObjectsConfig {
     /// `invalid_argument` for a zero limit, an inline cap below
     /// `extract_min_bytes + 10`, or a decode budget below the inline cap.
     pub fn validate(&self, extract_min_bytes: u64) -> Result<(), ServerError> {
-        if self.max_walk_objects == 0
+        if self.read_deadline.is_zero()
+            || self.read_reconcile_grace.is_zero()
+            || self.max_walk_objects == 0
             || self.reachability_lag_ms == 0
             || self.reach_cache_entries == 0
             || self.max_inline_object_bytes < extract_min_bytes.saturating_add(10)
@@ -140,6 +154,9 @@ pub struct HttpObjectRequest<'a> {
     pub raw_query: Option<RedactedQuery<'a>>,
     /// Multi-value header lookup by lowercase name.
     pub headers: &'a HeaderValues<'a>,
+    /// Header names as received by the adapter, including repeated fields.
+    /// Credential forwarding preserves this spelling; values stay in `headers`.
+    pub header_names: &'a [&'a str],
 }
 
 impl core::fmt::Debug for HttpObjectRequest<'_> {

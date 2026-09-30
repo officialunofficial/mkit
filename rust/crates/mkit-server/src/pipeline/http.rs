@@ -11,8 +11,8 @@ use mkit_core::object::ObjectType;
 use tracing::Instrument as _;
 
 use super::{
-    Authorizer, HookSet, MultipartBlobStore, NamespaceStore, OpKind, Operation, Pipeline,
-    Principal, Procedure, ms,
+    HookSet, MultipartBlobStore, NamespaceStore, OpKind, Operation, Pipeline, Principal, Procedure,
+    ms,
 };
 use crate::http_objects::range::{self, Selection};
 use crate::http_objects::reach::{self, Reach};
@@ -20,7 +20,7 @@ use crate::http_objects::resolve::{self, Budget, Env, Leaf};
 use crate::http_objects::seams::{AdmitDecision, AdmitRequest, ProofRequest, TakedownVerdict};
 use crate::http_objects::{
     Fail, HttpBody, HttpObjectRequest, HttpObjectResponse, HttpSeams, METRIC_HTTP_REACH_CAPPED,
-    ParsedUrl, Target, cache_control, route,
+    ParsedUrl, Target, route,
 };
 use crate::repo::{NamespaceKey, RepoId, RepoName};
 use crate::store::read;
@@ -30,7 +30,7 @@ const ALLOW: &str = "GET, HEAD, OPTIONS";
 /// The ref namespace of packmaps: never a published tip.
 const PACKMAP_PREFIX: &str = "refs/mkit/packmap/";
 
-impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
+impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pipeline<B, N, H> {
     /// Replace the inert seams of an HTTP-objects pipeline: admission
     /// (WP-4.13), proofs (WP-4.14b), tokens (WP-4.15), takedown (WP-5.9a) or
     /// a maintained reachable set (WP-5.3a). A pipeline built without
@@ -66,13 +66,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let Ok(parsed) = route::parse_request(req) else {
             return HttpObjectResponse::error(400);
         };
-        // §3 step 5: a present token is prechecked before the repository
-        // lookup. A public repository ignores the result, and a private one
-        // is the uniform 404 for an anonymous read until WP-4.15 adds the
-        // token-authorized branch, so nothing consumes it yet.
-        if let Some(token) = &parsed.query.token {
-            let _ = seams.tokens.precheck(&parsed.target, token);
-        }
+        // Precheck before any repository lookup; public repositories
+        // discard both successes and failures without consulting claims.
+        let token = parsed
+            .query
+            .token
+            .as_ref()
+            .map(|token| seams.tokens.precheck(token, self.clock.now_ms()));
         let Some(repo) = repo_id(&parsed) else {
             return HttpObjectResponse::not_found();
         };
@@ -88,9 +88,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .map(ToString::to_string)
             .unwrap_or_default();
         let mut outcome = self.outcome_for(procedure, "anonymous", &identity);
-        let served = async { self.serve_repository(req, seams, &parsed, &repo).await }
-            .instrument(outcome.span.clone())
-            .await;
+        let served = async {
+            self.serve_repository(req, seams, &parsed, &repo, token)
+                .await
+        }
+        .instrument(outcome.span.clone())
+        .await;
         match served {
             Ok(response) => {
                 let code = match response.status {
@@ -120,6 +123,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         seams: &HttpSeams,
         parsed: &ParsedUrl,
         repo: &RepoId,
+        token: Option<Result<crate::url_token::Prechecked, crate::url_token::TokenRejected>>,
     ) -> Result<HttpObjectResponse, Fail> {
         let head = req.method == "HEAD";
         let (Some(cfg), Some(indexed)) = (&self.cfg.http_objects, &self.cfg.indexed) else {
@@ -136,19 +140,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             None,
             OpKind::HttpGet { ref_name },
         );
-        self.authorize_read(&op)
-            .await
-            .map_err(|error| Fail::from_server_error(&error))?;
-        // An `Authority` hook classifies callers on an RPC read and is not
-        // consulted for an unsigned one; §3 step 6 runs the Authorizer for
-        // every HTTP read.
-        if self.cfg.authorizer_role == super::AuthorizerRole::Authority {
-            self.hooks
-                .authorizer()
-                .authorize(&op)
-                .await
-                .map_err(|error| Fail::from_server_error(&error))?;
-        }
+        let expiry = self
+            .authorize_http_read(&op, &parsed.target, seams, token)
+            .await?;
 
         let env = Env {
             blobs: &self.blobs,
@@ -216,7 +210,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
         // Proof representations belong to WP-4.14b.
         if parsed.query.proof {
-            return seams
+            let mut response = seams
                 .proofs
                 .serve(&ProofRequest {
                     repo,
@@ -227,7 +221,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     query: &parsed.query,
                 })
                 .await
-                .map_err(|error| Fail::from_server_error(&error));
+                .map_err(|error| Fail::from_server_error(&error))?;
+            if response.status < 400
+                && (expiry.is_some() || cfg.admit_reads || seams.admission.is_configured())
+            {
+                response
+                    .headers
+                    .retain(|(name, _)| !name.eq_ignore_ascii_case("Cache-Control"));
+                response.headers.push((
+                    "Cache-Control",
+                    super::http_tokens::cache(ref_path, true, expiry, self.clock.now_ms()),
+                ));
+            }
+            return Ok(response);
         }
 
         let etag = format!("\"{}\"", to_hex(&leaf_id));
@@ -242,12 +248,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
         // A configured Admission makes every success private, a 304
         // included, without calling it for the 304 (§5.3).
-        let private_policy = seams.admission.is_configured();
+        let private_policy = cfg.admit_reads || seams.admission.is_configured();
 
         // §3 step 9: a matching validator, before Range and Admission.
         if range::if_none_match(&values("if-none-match"), &etag) {
-            let mut response = HttpObjectResponse::new(304)
-                .with_header("Cache-Control", cache_control(ref_path, private_policy));
+            let mut response = HttpObjectResponse::new(304).with_header(
+                "Cache-Control",
+                super::http_tokens::cache(ref_path, private_policy, expiry, self.clock.now_ms()),
+            );
             response.headers.extend(success);
             return Ok(response);
         }
@@ -280,31 +288,63 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let selected_len = window.map_or(leaf.len, |(a, b)| b - a + 1);
 
         // §3 step 11: read Admission, when configured.
-        let admitted = match seams
-            .admission
-            .admit(&AdmitRequest {
-                repo,
-                procedure: if ref_path {
-                    Procedure::HttpGetRefPath
-                } else {
-                    Procedure::HttpGetObject
-                },
-                head,
-                ref_path,
-                declared_bytes: selected_len,
-            })
-            .await
-            .map_err(|error| Fail::from_server_error(&error))?
-        {
-            AdmitDecision::Allow(admitted) => admitted,
-            AdmitDecision::Respond(response) => return Ok(response),
+        let first = |name: &str| (req.headers)(name).into_iter().next();
+        let meta = super::RequestMeta {
+            procedure: op.procedure(),
+            header: &first,
+            header_values: Some(req.headers),
+            unary_body: None,
+            transport_principal: None,
+        };
+        let credentials = if private_policy {
+            super::admission::validate_credentials(
+                &super::admission::capture_http_credentials(
+                    &meta,
+                    &self.cfg.admission_credential_headers,
+                    req.header_names,
+                )
+                .map_err(|e| Fail::from_server_error(&e))?,
+            )
+            .map_err(|e| Fail::from_server_error(&e))?
+        } else {
+            Vec::new()
+        };
+        let request = AdmitRequest {
+            repo,
+            procedure: op.procedure(),
+            head,
+            ref_path,
+            declared_bytes: selected_len,
+            credential_headers: &credentials,
+        };
+        let (admitted, mut finalizer) = if cfg.admit_reads {
+            match self.admit_http_read(seams, &op, &request, leaf_id).await {
+                Ok(result) => result,
+                Err(error) if error.http_status() == Some(402) => {
+                    return Ok(super::http_admission::challenge_response(&error, head));
+                }
+                Err(error) => return Err(Fail::from_server_error(&error)),
+            }
+        } else {
+            match seams
+                .admission
+                .admit(&request)
+                .await
+                .map_err(|e| Fail::from_server_error(&e))?
+            {
+                AdmitDecision::Allow(admitted) => (admitted, None),
+                AdmitDecision::Respond(response) => return Ok(response),
+            }
         };
 
         // §3 step 12: 200 or 206.
         let mut hook = admitted.on_end;
-        let body = if head {
+        let body = if head || selected_len == 0 {
             if let Some(hook) = hook.take() {
                 hook(0, Ok(()));
+            }
+            if let Some(finalizer) = finalizer.take() {
+                finalizer.complete(true).await;
             }
             HttpBody::Empty
         } else {
@@ -314,6 +354,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     if let Some(hook) = hook.take() {
                         hook(0, Err(&ServerError::unavailable("object unavailable")));
                     }
+                    if let Some(finalizer) = finalizer.take() {
+                        finalizer.complete(false).await;
+                    }
                     return Err(miss.into());
                 }
             }
@@ -322,7 +365,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .with_header("Accept-Ranges", "bytes")
             .with_header(
                 "Cache-Control",
-                cache_control(ref_path, admitted.private || private_policy),
+                super::http_tokens::cache(
+                    ref_path,
+                    admitted.private || private_policy,
+                    expiry,
+                    self.clock.now_ms(),
+                ),
             )
             .with_header("Content-Length", selected_len.to_string())
             .with_header("Content-Type", content_type(&leaf));
@@ -332,7 +380,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         response.headers.extend(success);
         response.headers.extend(admitted.headers);
-        response.body = body;
+        response.body = match finalizer {
+            Some(f) => f.wrap(body),
+            None => body,
+        };
         Ok(response)
     }
 

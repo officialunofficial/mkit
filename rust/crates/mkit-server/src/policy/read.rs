@@ -77,7 +77,11 @@ pub(crate) enum HookEval {
 
 /// Who calls a read, as §9.3 sees them.
 #[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)] // Independent authorization facts.
 pub(crate) struct Caller {
+    /// A fully verified URL token; authorizes only HTTP procedures.
+    #[cfg(feature = "http-objects")]
+    pub http_token_authorized: bool,
     /// The request carried a verified auth v2 envelope.
     pub signed: bool,
     /// The signer is the namespace's Ed25519 key and no grant was presented.
@@ -118,6 +122,16 @@ pub(crate) fn decide(procedure: Procedure, private: bool, c: Caller) -> ReadDeci
     };
     if !private {
         return ReadDecision::Allow(view);
+    }
+    #[cfg(feature = "http-objects")]
+    if c.http_token_authorized
+        && matches!(
+            procedure,
+            Procedure::HttpGetObject | Procedure::HttpGetRefPath
+        )
+        && matches!(c.hook, HookEval::Allow { .. })
+    {
+        return ReadDecision::Allow(CallerView::Anonymous);
     }
     if !c.signed || matches!(c.hook, HookEval::Deny) {
         return ReadDecision::NotFound;
@@ -160,12 +174,34 @@ mod tests {
 
     fn caller(signed: bool, owner: bool, grant: Option<GrantEval>, hook: HookEval) -> Caller {
         Caller {
+            #[cfg(feature = "http-objects")]
+            http_token_authorized: false,
             signed,
             owner,
             grant,
             hook,
             authority: false,
         }
+    }
+
+    #[cfg(feature = "http-objects")]
+    #[test]
+    fn url_tokens_authorize_only_http_and_never_confer_writer_view() {
+        let mut c = caller(false, false, None, HookEval::Allow { writer_view: true });
+        c.http_token_authorized = true;
+        c.authority = true;
+        for procedure in [Procedure::HttpGetObject, Procedure::HttpGetRefPath] {
+            assert_eq!(
+                decide(procedure, true, c),
+                ReadDecision::Allow(CallerView::Anonymous)
+            );
+        }
+        assert_eq!(decide(Procedure::ReadRef, true, c), ReadDecision::NotFound);
+        c.hook = HookEval::Deny;
+        assert_eq!(
+            decide(Procedure::HttpGetObject, true, c),
+            ReadDecision::NotFound
+        );
     }
 
     #[test]

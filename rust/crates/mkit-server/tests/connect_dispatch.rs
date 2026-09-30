@@ -2440,6 +2440,15 @@ async fn credential_retry_uses_the_same_nonce_and_duplicate_header_never_reaches
     let refusal = server.json("UpdateRef", &body, &duplicated).await;
     assert_eq!(refusal.status, StatusCode::FORBIDDEN);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+    for name in ["Payment-Authorization", "PAYMENT-SIGNATURE"] {
+        let mut joined = signed.clone();
+        joined.push((name, "first,second".into()));
+        assert_eq!(
+            server.json("UpdateRef", &body, &joined).await.status,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
     assert_eq!(
         server.json("UpdateRef", &body, &signed).await.status,
         StatusCode::PAYMENT_REQUIRED
