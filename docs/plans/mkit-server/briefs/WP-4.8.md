@@ -1,7 +1,7 @@
 ## Purpose
 
-Workers can verify consumed packs asynchronously in checkpointed, budgeted alarm slices, with the same answers as
-native inline verification. That removes one prerequisite for indexed mode on Workers. Indexed mode stays refused
+Workers can verify consumed packs asynchronously in checkpointed, budgeted alarm slices, with repository-isolated verification checks corresponding to
+native inline verification, subject to the review rulings below. That removes one prerequisite for indexed mode on Workers. Indexed mode stays refused
 until 4.10b.
 
 ## A. Fixed (do not change)
@@ -28,7 +28,10 @@ until 4.10b.
   - **D-8:** both the completion hook and the advance fallback.
   - **D-9:** the Extract stub fails closed.
 - **B2.** The slice model, the `vc` layout, `VerifyJobV1` and the phases, as in fact sheet §2.1. Content failures and
-  the index emission after `Done`, as §2.1–§2.3.
+  the index emission after `Done`, as §2.1–§2.3. **Review ruling:** Scheduled stops on decode/depth failures before
+  `Done`, so its error priority can differ from Inline. Both modes fail closed; neither persists membership-dependent
+  `Rejected`. At advance, sum persisted decoded totals across co-consumed jobs, conservatively counting duplicates
+  across packs; this is stricter than Inline deduplication and answers `pack exceeds indexed decode budget` when over.
 - **B3.** `IndexedConfig.verification: {Inline (default), Scheduled}`, programmatic only. The advance checks, as §2.2.
 - **B4. Stage 1 inertness (fact sheet §8):**
   - in non-test-faults builds, `INDEXED_MODE` is still refused, with the message "requires WP-4.10b";

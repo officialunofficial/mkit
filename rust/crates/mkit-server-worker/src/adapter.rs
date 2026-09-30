@@ -416,18 +416,7 @@ impl WorkerConfig {
             max_pack_bytes,
         )?;
         #[cfg(feature = "http-objects")]
-        let url_tokens = crate::http_mount::token_config(&var)?;
-        #[cfg(feature = "http-objects")]
-        if let (Some(tokens), Some(tickets)) = (&url_tokens, &ticket_keys)
-            && tokens
-                .keys()
-                .public_keys()
-                .any(|public| tickets.contains_ed25519_public(&public))
-        {
-            return Err(ConfigError(
-                "URL_TOKEN_KEYS must differ from TICKET_KEYS".into(),
-            ));
-        }
+        let url_tokens = crate::http_mount::token_config_for_tickets(&var, ticket_keys.as_ref())?;
         Ok(Self {
             indexed,
             sharding,

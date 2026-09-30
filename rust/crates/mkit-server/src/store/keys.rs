@@ -41,7 +41,7 @@
 //! | ticket expiry timer | `w 00 <expires_at:be64> 02 <ticket_id:32>` | empty |
 //! | local membership | `m 00 <repo> 00 <pack:32>` | empty |
 //! | indexed verification state | `vs 00 <repo> 00 <pack:32>` | `VerificationV1` |
-//! | scheduled-verification job (ref shard) | `vc 00 <repo> 00 <pack:32> <sub:u8> [<id:32>]` | sub 0 job `VerifyJobV1`; 1 frame; 2 closure child; 3 charged external base; 4 extraction candidate (WP-4.10b); 5 history edges (parents) |
+//! | scheduled-verification job (ref shard) | `vc 00 <repo> 00 <pack:32> <sub:u8> [<id:32>]` | sub 0 job `VerifyJobV1`; 1 frame; 2 closure child; 3 charged external base; 4 extraction candidate (WP-4.10b); 5 history edges (parents); 6 external source pack dependency |
 //! | repository object index | `i 00 <repo> 00 <object:32> <pack:32>` | binary `IndexValue` |
 //! | reservation and outcome | `o 00 <reservation_id>` | codec `ReservationV1` |
 //! | outcome pending index | `oq 00 <seq:be64> <reservation_id>` | empty |
@@ -202,6 +202,8 @@ pub const VC_CANDIDATE: u8 = 4;
 /// A commit's, remix's or tag's parents, keyed by object id: the history
 /// edges the fast-forward check reads (WP-4.17).
 pub const VC_HISTORY: u8 = 5;
+/// External delta-base source pack, including chain intermediates.
+pub const VC_DEPENDENCY: u8 = 6;
 
 /// A key decoded by [`parse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1023,7 +1025,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
             let (sub, id) = rest.split_first()?;
             let id = match (*sub, id.len()) {
                 (VC_JOB, 0) => None,
-                (VC_FRAME..=VC_HISTORY, 32) => Some(hash(id)?),
+                (VC_FRAME..=VC_DEPENDENCY, 32) => Some(hash(id)?),
                 _ => return None,
             };
             ParsedKey::VerifyCursor {
@@ -1254,6 +1256,12 @@ mod tests {
                 VC_CANDIDATE,
                 Some(s2),
             ),
+            (
+                verify_row(&a, &s, VC_DEPENDENCY, Some(&s2)),
+                [&b"vc\0a\0"[..], &s, &[6], &s2].concat(),
+                VC_DEPENDENCY,
+                Some(s2),
+            ),
         ] {
             assert_eq!(key.as_bytes(), golden.as_slice());
             assert_eq!(
@@ -1267,7 +1275,7 @@ mod tests {
             );
         }
         let (start, end) = verify_range(&a, &s, None);
-        for sub in [VC_JOB, VC_FRAME, VC_BASE] {
+        for sub in [VC_JOB, VC_FRAME, VC_BASE, VC_DEPENDENCY] {
             let row = verify_row(&a, &s, sub, (sub != VC_JOB).then_some(&s2));
             assert!(start <= row && row < end);
         }
@@ -1282,7 +1290,7 @@ mod tests {
         for bad in [
             [&b"vc\0a\0"[..], &s, &[0], &s2].concat(),
             [&b"vc\0a\0"[..], &s, &[1]].concat(),
-            [&b"vc\0a\0"[..], &s, &[6], &s2].concat(),
+            [&b"vc\0a\0"[..], &s, &[7], &s2].concat(),
         ] {
             assert_eq!(parse(&Key::new(bad)), None);
         }

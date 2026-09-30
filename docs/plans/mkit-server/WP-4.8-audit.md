@@ -113,3 +113,13 @@ stricter deployment limit than the fact sheet's proposed reader budget; it
 reserves space for copies, decoding and cache overhead. The post-job advance's
 late-member/head lookups are counted within its 600-call budget. The human-owned
 staging run and completion enqueue remain the explicitly recorded gaps.
+
+## Review rulings applied
+
+External delta-base source packs, including chain intermediates, now persist in guarded `vc` sub-6 rows and join the advance's batched membership recheck. Base dependency misses retain the delta-base lag/permanent messages. WP-5.3a must protect these dependencies as well as closure-satisfying packs.
+
+ClosureResolve and Recheck persist each examined id boundary. They reserve the full capped lookup allowance before an id, checkpoint successful progress when another lookup cannot fit, and end oversized single-id work with ticket-terminal ClosureCapped. Their durable attempts shrink work to one before terminating repeated interrupted passes. The kind-7 cap remains 256 calls.
+
+The advance conservatively sums all co-consumed decoded totals, including duplicates across packs. This is stricter than Inline deduplication. Scheduled decode/depth error priority may also differ from Inline because it stops before Done. These explicit rulings replace blanket native-priority parity claims; both modes fail closed and membership failures never become Rejected.
+
+Permanent regressions cover removal of an external source member after verification, the hot-closure replay loop, and the combined decode-budget overrun. R-171 also records the shared renewal path's authority-generation/acknowledgement handoff to WP-2.16.

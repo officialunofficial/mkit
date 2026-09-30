@@ -2,8 +2,8 @@
 //!
 //! In [`VerificationMode::Scheduled`](super::VerificationMode) an advance
 //! never verifies. For each consumed ticket it reads the job and `vs` in one
-//! call and answers as the native inline verifier would once the job has
-//! finished, or `PendingVerification` while it has not. Nothing here is
+//! call and checks the persisted result once the job has finished, or answers
+//! `PendingVerification` while it has not. Nothing here is
 //! stored for replay, and the advance batch is unchanged.
 //!
 //! Per-pack facts are the job's: identity, signatures, depth, index rows and
@@ -323,8 +323,78 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
     if let Some(ms) = pending {
         return Err(super::pending(ms));
     }
+    let decoded_total = ready.iter().fold(0_u64, |sum, held| {
+        sum.saturating_add(held.job.in_pack_bytes)
+            .saturating_add(held.job.external_bytes)
+    });
+    if decoded_total > cfg.decode_budget {
+        return Err(ServerError::invalid_argument(
+            "pack exceeds indexed decode budget",
+        ));
+    }
     let consumed: BTreeSet<Hash> = tickets.iter().map(|t| t.pack_id).collect();
     let packs: Vec<&Consumed<'_>> = ready.iter().filter(|c| c.job.kind == Kind::Pack).collect();
+
+    // The member packs that satisfied a child must still be members: §12.2's
+    // generation rule and GC, in the same batched read as the MKPL check.
+    let satisfying: BTreeSet<Hash> = packs
+        .iter()
+        .flat_map(|c| c.job.satisfying.iter().copied())
+        .filter(|pack| !consumed.contains(pack))
+        .collect();
+    // A dependency age distinguishes base misses from closure misses. Include
+    // all intermediate source packs, even when co-consumed in this advance.
+    let mut dependencies: BTreeMap<Hash, Option<u64>> =
+        satisfying.into_iter().map(|pack| (pack, None)).collect();
+    for held in &packs {
+        let (start, end) =
+            keys::verify_range(&repo.name, &held.ticket.pack_id, Some(keys::VC_DEPENDENCY));
+        let mut cursor = None;
+        loop {
+            let page = store
+                .scan(source, &start, &end, cursor.as_ref(), LOCAL_PAGE)
+                .await
+                .map_err(|_| storage_failed())?;
+            for (key, _) in page.entries {
+                let Some(keys::ParsedKey::VerifyCursor { id: Some(pack), .. }) = keys::parse(&key)
+                else {
+                    return Err(storage_failed());
+                };
+                let age = dependencies.entry(pack).or_default();
+                *age = Some(age.map_or(held.ticket.created_at_ms, |prior| {
+                    prior.min(held.ticket.created_at_ms)
+                }));
+            }
+            match page.next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+    }
+    let satisfying: Vec<Hash> = dependencies.keys().copied().collect();
+    let mut closure_missing = false;
+    for chunk in satisfying.chunks(MAX_LOOKUP_IDS) {
+        let found = read::members_many(store, shards, repo, source, chunk)
+            .await
+            .map_err(|_| storage_failed())?;
+        if found.len() != chunk.len() {
+            return Err(storage_failed());
+        }
+        for (pack, member) in chunk.iter().zip(found) {
+            if member {
+                continue;
+            }
+            if let Some(created) = dependencies[pack] {
+                return Err(resolve::missing_base(now, created, bound));
+            }
+            closure_missing = true;
+        }
+    }
+
+    if closure_missing {
+        let created = packs.first().map_or(now, |c| c.ticket.created_at_ms);
+        return Err(closure_error(now, created, bound));
+    }
 
     // Children no consumed pack's frame table holds must be repository members.
     let mut open: Option<&Consumed<'_>> = None;
@@ -414,24 +484,6 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
             return Err(super::pending(1_000));
         }
         return Err(closure_error(now, owner.ticket.created_at_ms, bound));
-    }
-
-    // The member packs that satisfied a child must still be members: §12.2's
-    // generation rule and GC, in the same batched read as the MKPL check.
-    let satisfying: BTreeSet<Hash> = packs
-        .iter()
-        .flat_map(|c| c.job.satisfying.iter().copied())
-        .filter(|pack| !consumed.contains(pack))
-        .collect();
-    let satisfying: Vec<Hash> = satisfying.into_iter().collect();
-    for chunk in satisfying.chunks(MAX_LOOKUP_IDS) {
-        let found = read::members_many(store, shards, repo, source, chunk)
-            .await
-            .map_err(|_| storage_failed())?;
-        if found.iter().any(|member| !member) {
-            let created = packs.first().map_or(now, |c| c.ticket.created_at_ms);
-            return Err(closure_error(now, created, bound));
-        }
     }
 
     // The head is a commit, remix or tag: in a consumed pack's frame table, or

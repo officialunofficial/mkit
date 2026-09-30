@@ -1,7 +1,8 @@
 //! Scheduled verification: the kind-7 slice machine (WP-4.8, R-171).
 //!
 //! A ticketed pack verifies in checkpointed slices, one per alarm fire, with
-//! the same answers as the native inline verifier. Each fire runs one phase
+//! repository-isolated checks; Scheduled error priority and duplicate budget
+//! charging follow R-171's stricter deployment rules. Each fire runs one phase
 //! step of a [`VerifyJobV1`] and ends in `Fired::Reschedule`, whose batch
 //! carries the job put guarded by the job row (and `vs`) as it was read, so a
 //! duplicate fire loses. Rows a slice writes ahead of that batch (frames,
@@ -88,8 +89,8 @@ const CACHE_BYTES: u64 = 8 << 20;
 const ATTEMPTS_PER_CAP: u32 = 3;
 /// Subrequests kept back when a slice decides to fetch its next entry.
 const ENTRY_RESERVE: u32 = 64;
-/// Ids per closure or recheck lookup.
-const CLOSURE_CHUNK: u32 = 16;
+/// Each closure lookup has its own durable id boundary.
+const CLOSURE_CHUNK: u32 = 1;
 /// Frame rows per index emission slice.
 const EMIT_PAGE: u32 = 256;
 /// Rows per cleanup batch.
@@ -278,6 +279,7 @@ impl DeltaBaseSource for CacheBases<'_> {
 /// Per-slice memory: nothing in it is authoritative, rows are.
 #[derive(Default)]
 struct SliceState {
+    job_guard: Option<Value>,
     cache: Lru,
     memo: MemberCache,
     visiting: BTreeSet<(Hash, Hash, u64)>,
@@ -376,13 +378,19 @@ where
         if job.phase == Phase::Watch {
             return Ok(self.watch(timer, job, raw, state.is_none(), &ticket));
         }
-        if job.phase == Phase::Decode {
-            match self.begin_decode(&mut job, &raw).await? {
+        if matches!(
+            job.phase,
+            Phase::Decode | Phase::ClosureResolve | Phase::Recheck
+        ) {
+            match self.begin_attempt(&mut job, &raw).await? {
                 Some(next) => raw = next,
                 None => return Err(StoreError::Unavailable("verification job contended".into())),
             }
         }
-        let mut st = SliceState::default();
+        let mut st = SliceState {
+            job_guard: Some(raw.clone()),
+            ..SliceState::default()
+        };
         let mut held = None;
         let start = job.clone();
         let mut ran = job.phase;
@@ -396,6 +404,8 @@ where
             && ran != Phase::Decode
             && job.phase != ran
             && job.phase != Phase::Watch
+            // Enter guarded lookup phases from a durable phase checkpoint.
+            && !matches!(job.phase, Phase::ClosureResolve | Phase::Recheck)
             && chained < 6
             && self.budget.remaining() >= ENTRY_RESERVE
         {
@@ -489,21 +499,27 @@ where
     }
 
     /// Count the slice durably before working, so a slice the runtime kills
-    /// leaves a mark: repeated kills on one cursor shrink its entry cap, and a
-    /// cap of one that still fails ends the job (`DecodeBudget`).
-    async fn begin_decode(
+    /// leaves a mark: repeated kills shrink decode/closure work to one, then
+    /// end the ticket with its phase's platform cap, never Rejected.
+    async fn begin_attempt(
         &self,
         job: &mut VerifyJobV1,
         raw: &Value,
     ) -> Result<Option<Value>, StoreError> {
-        job.entry_cap = job.entry_cap.min(self.h.limits.max_entries).max(1);
+        let (cap, outcome) = if job.phase == Phase::Decode {
+            job.entry_cap = job.entry_cap.min(self.h.limits.max_entries).max(1);
+            (&mut job.entry_cap, Outcome::DecodeBudget)
+        } else {
+            job.closure_cap = job.closure_cap.clamp(1, 4);
+            (&mut job.closure_cap, Outcome::ClosureCapped)
+        };
         if job.attempts >= ATTEMPTS_PER_CAP {
             job.attempts = 0;
-            if job.entry_cap <= 1 {
-                job.outcome = Some(Outcome::DecodeBudget);
+            if *cap <= 1 {
+                job.outcome = Some(outcome);
                 job.phase = Phase::Watch;
             } else {
-                job.entry_cap = (job.entry_cap / 2).max(1);
+                *cap = (*cap / 2).max(1);
             }
         }
         job.attempts += 1;
@@ -560,6 +576,9 @@ where
     async fn flush(&self, st: &mut SliceState) -> Result<(), StoreError> {
         for chunk in std::mem::take(&mut st.writes).chunks(WRITE_BATCH) {
             let mut batch = Batch::new().require(Precondition::NotAfter(self.deadline()));
+            if let Some(raw) = &st.job_guard {
+                batch = batch.require(Precondition::Equals(self.job_key(), raw.clone()));
+            }
             batch.writes.extend_from_slice(chunk);
             if !matches!(
                 self.local.apply(self.source, batch).await?,
@@ -1122,6 +1141,10 @@ where
             .map(|(location, (bytes, depth))| (*location, bytes.len() as u64, *depth))
             .collect();
         for ((id, pack, offset), size, depth) in fresh {
+            st.writes.push(Write::Put(
+                self.row(keys::VC_DEPENDENCY, &pack),
+                Value::default(),
+            ));
             st.charged.insert((id, pack, offset));
             let location = mkit_core::hash::domain_digest(
                 b"mkit:vc-base:v1\0",
@@ -1178,7 +1201,7 @@ where
     /// recheck read.
     async fn closure(&self, st: &mut SliceState, job: &mut VerifyJobV1) -> Result<bool, Stop> {
         let (start, end) = keys::verify_range(&self.repo.name, &self.pack, Some(keys::VC_CHILD));
-        for _ in 0..4 {
+        for _ in 0..job.closure_cap {
             if self.budget.remaining() < ENTRY_RESERVE
                 || st.settled.len() + CLOSURE_CHUNK as usize > WRITE_BATCH
             {
@@ -1212,6 +1235,15 @@ where
                     }
                 }
                 if !wanted.is_empty() {
+                    // Reserve the lesser of the lookup's worst case and a full
+                    // slice. A larger single-id lookup is a terminal cap.
+                    let reserve = self.h.limits.max_subrequests.min(
+                        u32::try_from(index::MAX_LOOKUP_PAGES + index::MAX_LOOKUP_MEMBERSHIP_READS)
+                            .unwrap_or(u32::MAX),
+                    );
+                    if self.budget.remaining() < reserve {
+                        return Ok(false);
+                    }
                     let found = resolve::locate_split(
                         self.remote,
                         self.h.shards.as_ref(),
@@ -1220,7 +1252,13 @@ where
                         self.h.metrics.as_ref(),
                     )
                     .await
-                    .map_err(|_| unavailable("index lookup failed"))?;
+                    .map_err(|_| {
+                        if self.budget.remaining() == 0 {
+                            Stop::Outcome(Outcome::ClosureCapped)
+                        } else {
+                            unavailable("index lookup failed")
+                        }
+                    })?;
                     for id in wanted {
                         match found.get(&id) {
                             Some(Ok(Some(located))) => {

@@ -825,7 +825,7 @@ fn repaired(mut pack: Vec<u8>, index: usize) -> Vec<u8> {
 }
 
 #[test]
-fn content_failures_persist_rejected_in_the_native_priority_order() {
+fn hash_failure_at_done_precedes_bad_signature() {
     let (pack, head) = tree_pack(12, 3_000);
     // A pack that does not hash to its trailer: identity first.
     let rig = Rig::new();
@@ -2014,4 +2014,367 @@ fn distinct_member_locations_of_one_base_are_each_charged() {
             "entry cap {max_entries}"
         );
     }
+}
+
+#[test]
+fn external_source_membership_is_rechecked_after_verification() {
+    for fail_at in 0..20 {
+        let rig = Rig::new();
+        let tree = Object::Tree(Tree {
+            entries: Vec::new(),
+        });
+        let tree_id = tree.id().unwrap();
+        let (base, base_id) = signed_commit(tree_id, Vec::new(), 8, b"old base");
+        let base_raw = serialize(&base).unwrap();
+        seed_member(&rig, base_id, &base_raw);
+        let mut q = PackWriter::new_raw_only();
+        q.push_raw(base_id, &base_raw).unwrap();
+        let q_id = hash(&q.finish().unwrap());
+        let (middle, middle_id) = signed_commit(tree_id, Vec::new(), 9, b"middle");
+        let middle_raw = serialize(&middle).unwrap();
+        let mut intermediate = PackWriter::new();
+        intermediate
+            .push_raw(tree_id, &serialize(&tree).unwrap())
+            .unwrap();
+        intermediate
+            .push_delta(
+                &base_id,
+                &mkit_core::delta::encode(&base_raw, &middle_raw).unwrap(),
+            )
+            .unwrap();
+        let (member, member_id) = rig.add(&intermediate.finish().unwrap());
+        rig.create(&member, member_id);
+        rig.drive(|r| r.finished(&member.pack_id));
+        block_on(rig.store.apply(
+            &rig.source(),
+            Batch::new().put(
+                keys::membership(&rig.repo.name, &member.pack_id),
+                Value::default(),
+            ),
+        ))
+        .unwrap();
+        let (target, head) = signed_commit(tree_id, Vec::new(), 7, b"new head");
+        let mut writer = PackWriter::new();
+        writer
+            .push_raw(tree_id, &serialize(&tree).unwrap())
+            .unwrap();
+        writer
+            .push_delta(
+                &middle_id,
+                &mkit_core::delta::encode(&middle_raw, &serialize(&target).unwrap()).unwrap(),
+            )
+            .unwrap();
+        let pack = writer.finish().unwrap();
+        let (ticket, id) = rig.add(&pack);
+        rig.create(&ticket, id);
+        let faulty = Faulty {
+            inner: rig.store.clone(),
+            applies: AtomicU32::new(0),
+            fail_at: AtomicU32::new(fail_at),
+        };
+        rig.drive_on(&faulty, |r| r.finished(&ticket.pack_id));
+        rig.check(&[(&ticket, id)], head).unwrap();
+        for dependency in [q_id, member.pack_id] {
+            assert!(
+                block_on(rig.store.has(
+                    &rig.source(),
+                    &keys::verify_row(
+                        &rig.repo.name,
+                        &ticket.pack_id,
+                        keys::VC_DEPENDENCY,
+                        Some(&dependency),
+                    )
+                ))
+                .unwrap()
+            );
+        }
+        block_on(rig.store.apply(
+            &rig.source(),
+            Batch::new().delete(keys::membership(&rig.repo.name, &q_id)),
+        ))
+        .unwrap();
+        let error = rig.check(&[(&ticket, id)], head).unwrap_err();
+        assert_eq!(error.code(), crate::error::Code::Unavailable);
+        assert_eq!(
+            error.public_message(),
+            "repository membership not yet visible"
+        );
+        rig.clock
+            .advance(i64::try_from(rig.cfg.relay_lag_bound_ms).unwrap());
+        let error = rig.check(&[(&ticket, id)], head).unwrap_err();
+        assert_eq!(error.code(), crate::error::Code::FailedPrecondition);
+        assert_eq!(
+            error.public_message(),
+            "delta base not available in this repository"
+        );
+        assert!(rejected(&rig, &ticket.pack_id).is_none());
+    }
+}
+#[test]
+fn co_consumed_jobs_share_the_decode_budget() {
+    for duplicate in [false, true] {
+        let mut rig = Rig::new();
+        rig.cfg.decode_budget = 3_000;
+        rig.cfg.max_pack_bytes = 3_000;
+        let (pack, head) = tree_pack(1, 2_000);
+        let (other, raw) = blob(if duplicate { 0 } else { 22 }, 2_000);
+        let mut writer = PackWriter::new_raw_only();
+        writer.push_raw(other, &raw).unwrap();
+        let second = writer.finish().unwrap();
+        let (first_t, first_id) = rig.add(&pack);
+        let (second_t, second_id) = rig.add(&second);
+        for (t, id) in [(&first_t, first_id), (&second_t, second_id)] {
+            rig.create(t, id);
+            rig.drive(|r| r.finished(&t.pack_id));
+        }
+        let scheduled = rig.check(&[(&first_t, first_id), (&second_t, second_id)], head);
+        let error = scheduled.unwrap_err();
+        assert_eq!(error.code(), crate::error::Code::InvalidArgument);
+        assert_eq!(error.public_message(), "pack exceeds indexed decode budget");
+        assert!(rejected(&rig, &first_t.pack_id).is_none());
+        assert!(rejected(&rig, &second_t.pack_id).is_none());
+    }
+}
+
+#[test]
+fn interrupted_closure_and_recheck_slices_shrink_then_end_terminal() {
+    for phase in [Phase::ClosureResolve, Phase::Recheck] {
+        let rig = Rig::new();
+        let (pack, head) = tree_pack(1, 100);
+        let (ticket, id) = rig.add(&pack);
+        rig.create(&ticket, id);
+        rig.tick();
+        let mut job = rig.job(&ticket.pack_id).unwrap();
+        job.phase = if phase == Phase::Recheck {
+            job.owed = 1;
+            Phase::Verify
+        } else {
+            phase
+        };
+        job.final_pass = true;
+        block_on(rig.store.apply(
+            &rig.source(),
+            Batch::new().put(
+                keys::verify_job(&rig.repo.name, &ticket.pack_id),
+                checkpoint::encode_job(&job),
+            ),
+        ))
+        .unwrap();
+        if phase == Phase::Recheck {
+            rig.clock.advance(1_000);
+            rig.tick();
+            assert_eq!(rig.job(&ticket.pack_id).unwrap().phase, Phase::Recheck);
+        }
+        let faulty = Faulty {
+            inner: rig.store.clone(),
+            applies: AtomicU32::new(0),
+            fail_at: AtomicU32::new(0),
+        };
+        let mut caps = BTreeSet::new();
+        for _ in 0..12 {
+            // Commit the attempt marker, then interrupt before progress commits.
+            faulty
+                .fail_at
+                .store(faulty.applies.load(Ordering::SeqCst) + 2, Ordering::SeqCst);
+            rig.tick_on(&faulty);
+            rig.clock.advance(5_000);
+            let job = rig.job(&ticket.pack_id).unwrap();
+            caps.insert(job.closure_cap);
+            if job.outcome.is_some() {
+                break;
+            }
+        }
+        assert_eq!(caps, BTreeSet::from([1, 2, 4]));
+        assert_eq!(
+            rig.job(&ticket.pack_id).unwrap().outcome,
+            Some(checkpoint::Outcome::ClosureCapped)
+        );
+        assert!(rejected(&rig, &ticket.pack_id).is_none());
+        assert_eq!(
+            rig.check(&[(&ticket, id)], head)
+                .unwrap_err()
+                .public_message(),
+            "object index limit exceeded"
+        );
+    }
+}
+
+/// A valid index backend serving smaller pages, so one id exceeds 256 calls.
+struct SmallPages(Shared<MemoryKv>);
+impl NamespaceStore for SmallPages {
+    fn capabilities(&self) -> StoreCapabilities {
+        self.0.capabilities()
+    }
+    async fn get(&self, partition: &Partition, keys: &Key) -> Result<Option<Value>, StoreError> {
+        self.0.get(partition, keys).await
+    }
+    async fn get_many(
+        &self,
+        partition: &Partition,
+        keys: &[Key],
+    ) -> Result<Vec<Option<Value>>, StoreError> {
+        self.0.get_many(partition, keys).await
+    }
+    async fn scan(
+        &self,
+        partition: &Partition,
+        start: &Key,
+        end: &Key,
+        cursor: Option<&Cursor>,
+        limit: u32,
+    ) -> Result<ScanPage, StoreError> {
+        self.0
+            .scan(partition, start, end, cursor, limit.min(16))
+            .await
+    }
+    async fn scan_many(
+        &self,
+        partition: &Partition,
+        ranges: &[RangeScan],
+    ) -> Result<Vec<ScanPage>, StoreError> {
+        let ranges: Vec<_> = ranges
+            .iter()
+            .cloned()
+            .map(|mut range| {
+                range.limit = range.limit.min(16);
+                range
+            })
+            .collect();
+        self.0.scan_many(partition, &ranges).await
+    }
+    async fn apply(&self, partition: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        self.0.apply(partition, batch).await
+    }
+    async fn stats(&self, partition: &Partition) -> Result<PartitionStats, StoreError> {
+        self.0.stats(partition).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.0.probe().await
+    }
+}
+
+#[test]
+fn a_single_closure_id_over_one_full_slice_ends_terminal() {
+    let rig = Rig::new();
+    let (pack, _, _, (tree, _)) = split_packs();
+    super::tests::seed_capped_index(&rig.store, &rig.repo, tree);
+    let (ticket, id) = rig.add(&pack);
+    rig.create(&ticket, id);
+    rig.tick();
+    let h = rig.handler();
+    let registry = TimerRegistry::new().register(VerifyTimer {
+        remote: SmallPages(h.remote),
+        blobs: h.blobs,
+        windows: h.windows,
+        shards: h.shards,
+        cfg: h.cfg,
+        limits: h.limits,
+        lease: h.lease,
+        clock: h.clock,
+        metrics: h.metrics,
+        extension: h.extension,
+    });
+    rig.clock.advance(1_000);
+    let report = block_on(run_due(
+        rig.store.as_ref(),
+        &rig.source(),
+        &registry,
+        rig.clock.as_ref(),
+        u64::try_from(rig.clock.now_ms()).unwrap(),
+        &TickBudget::default(),
+    ))
+    .unwrap();
+    assert_eq!(report.failed, 0);
+    assert_eq!(
+        rig.job(&ticket.pack_id).unwrap().outcome,
+        Some(checkpoint::Outcome::ClosureCapped)
+    );
+    assert!((*rig.recorder.slices.lock().unwrap().last().unwrap() - 256.0).abs() < f64::EPSILON);
+    assert!(rejected(&rig, &ticket.pack_id).is_none());
+}
+
+#[test]
+fn hot_closure_candidates_checkpoint_progress_instead_of_livelock() {
+    let rig = Rig::named("one", Arc::new(D34Shards));
+    let mut children = Vec::new();
+    let value = crate::store::index::IndexValue {
+        frame_offset: 12,
+        frame_length: 64,
+        wire_type: 0,
+        decoded_size: 4,
+        chain_depth: 0,
+        delta_base: None,
+    };
+    for prefix in 0..9u8 {
+        let mut child = [0u8; 32];
+        child[0] = prefix;
+        children.push(child);
+        let partition = rig.shards.object_index(&rig.repo, &child);
+        for chunk in (0..4096u32).collect::<Vec<_>>().chunks(90) {
+            let mut batch = Batch::new();
+            for n in chunk {
+                let mut candidate = [0u8; 32];
+                candidate[28..].copy_from_slice(&n.to_be_bytes());
+                batch = batch.put(
+                    keys::object_index(&rig.repo.name, &child, &candidate),
+                    codec::encode_object_index(&child, &value).unwrap(),
+                );
+            }
+            assert!(matches!(
+                block_on(rig.store.apply(&partition, batch)).unwrap(),
+                BatchOutcome::Committed
+            ));
+        }
+    }
+    let tree = Object::Tree(Tree {
+        entries: children
+            .into_iter()
+            .enumerate()
+            .map(|(n, child)| TreeEntry {
+                name: format!("f{n}").into_bytes(),
+                mode: EntryMode::Blob,
+                object_hash: child,
+            })
+            .collect(),
+    });
+    let mut writer = PackWriter::new_raw_only();
+    writer
+        .push_raw(tree.id().unwrap(), &serialize(&tree).unwrap())
+        .unwrap();
+    let pack = writer.finish().unwrap();
+    let (ticket, id) = rig.add(&pack);
+    rig.create(&ticket, id);
+    rig.tick();
+    assert_eq!(
+        rig.job(&ticket.pack_id).unwrap().phase,
+        Phase::ClosureResolve
+    );
+    // Each full lookup saves its id before another expensive lookup starts.
+    let mut checkpoints = BTreeSet::new();
+    for _ in 0..3 {
+        rig.clock.advance(1_000);
+        assert_eq!(rig.tick().failed, 0);
+        let job = rig.job(&ticket.pack_id).unwrap();
+        assert_eq!(job.phase, Phase::ClosureResolve);
+        assert!(!job.scan.is_empty());
+        assert!(checkpoints.insert(job.scan));
+    }
+    let slices = rig.drive(|r| r.finished(&ticket.pack_id));
+    assert!(slices < 200);
+    let job = rig.job(&ticket.pack_id).unwrap();
+    assert_eq!(job.outcome, None);
+    assert_eq!(job.owed, 9);
+    assert!(job.closure_final_at_ms.is_some());
+    assert!(rejected(&rig, &ticket.pack_id).is_none());
+    let error = rig.check(&[(&ticket, id)], [1; 32]).unwrap_err();
+    assert_eq!(error.code(), crate::error::Code::InvalidArgument);
+    assert_eq!(error.public_message(), "open closure");
+    assert!(
+        rig.recorder
+            .slices
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|calls| *calls <= 256.0)
+    );
 }
