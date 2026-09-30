@@ -54,10 +54,10 @@
 //! | pending cache purge | `cp 00 <purge_id>` | immutable protobuf JSON `purge::Request` |
 //! | durable snapshot refill fence | `cg 00 <scope>` | be64 invalidation time; never pruned |
 //! | admin audit head | `ah 00` | audit sequence and hash |
-//! | admin nonce result | `an 00 <nonce scope hash:32>` | durable exact result |
-//! | admin operation replay | `ao 00 <operation scope hash:32>` | durable result |
+//! | admin nonce result | `an 00 <nonce scope hash:64 lowercase hex>` | durable exact result |
+//! | admin operation replay | `ao 00 <operation_id>` | durable result |
 //! | admin audit entry | `ae 00 <seq:be64>` | canonical audit chain entry |
-//! | admin action intent | `ai 00 <action id>` | durable resumable acceptance |
+//! | automatic audit event/receipt | `ai 00 <source partition + purge id hash:64 lowercase hex>` | relay event and root deduplication receipt |
 //! | timer (owned by `timers`) | `w 00 <due_at:be64> <kind:u8> <ref>` | codec per kind |
 //! | holder (`ContentShard`) | `h 00 <object:32> <ns> 00 <repo>` | codec `HolderRecord` (`HolderV1`: `seq`, `op_id`) |
 //! | GC hold (`ContentShard`) | `g 00 <object:32> <hold_id:32>` | codec `hold` |
