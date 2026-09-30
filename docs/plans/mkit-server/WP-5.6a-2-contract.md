@@ -1,10 +1,11 @@
 # WP-5.6a-2 preservation core contract (R-190)
 
-**Status: core implemented, activation off; final gates ongoing.** The current
-reported production Rust count is 3,298 against `origin/feat/mkit-server`, below
+**Status: core implemented, locally checked with recorded baseline exceptions; activation off.** The current
+reported production Rust count is 3,298 against merged base `cd680351`, below
 PR2's 3,300 cap (64 production lines removed). Tests/docs/generated code do not
-count. This records the source contract and focused
-verification; it does not claim completed full gates or launch readiness.
+count. This records the source contract. The [verification report](WP-5.6a-2-verification.md)
+distinguishes full-suite failures, isolated passes and unchanged-parent results.
+It does not establish launch readiness.
 The [PR2 brief](briefs/WP-5.6a-2.md) remains binding. All three parts are required
 for launch; [PR3](briefs/WP-5.6a-3.md) supplies the restricted admin catalog.
 
@@ -88,8 +89,8 @@ PR3 must expose signed moderation-role Get/List/ReadPreserved/SetLegalHold with
 byte-free nonce descriptors and fresh audited verified streams. Its SetLegalHold
 must commit `plan_legal_hold` with the operator's audit and replay result in the
 same batch; the core planner alone supplies no signed admin operation.
-ReadPreserved remains unexposed. Final full gates, default Worker conformance,
-independent review, PR completion and activation/readiness work remain required;
-no passing full-gate result is asserted here. Storage provisioning and external
-staging are user work. The exhaustive Any catalog and full-profile rewrite,
+ReadPreserved remains unexposed. Local gates and independent reviews are recorded
+in the [verification report](WP-5.6a-2-verification.md), including the native timer
+and Worker transport baseline exceptions. Activation/readiness work remains
+required. Storage provisioning and external staging are user work. The exhaustive Any catalog and full-profile rewrite,
 notices/reinstatement/completion remain the approved post-launch scope.

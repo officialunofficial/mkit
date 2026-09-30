@@ -16,10 +16,11 @@ This limitation prevents completion claims, not denial or named-repo preservatio
 The [core contract](WP-5.6a-2-contract.md) records the final layout, source
 checkpoints, verified acquisition/manifest closure, ct ownership, retention/hold
 arbitration, action-owned audited purge and inert runtime wiring. The reported
-production Rust count is 3,298/3,300 against `origin/feat/mkit-server`; docs are
+production Rust count is 3,298/3,300 against merged base `cd680351`; docs are
 excluded. Five focused source tests pass, with at most 12 counted calls per
-selection step and 357 final-decode calls for the dense 50-hop fixtures. Full
-gates remain ongoing; this checkpoint does not claim them complete.
+selection step and 357 final-decode calls for the dense 50-hop fixtures. The
+[verification report](WP-5.6a-2-verification.md) records the completed local checks,
+full-run baseline failures, isolated passes and unchanged-parent results.
 
 Activation stays fixed false. PR3 owns Get/List/ReadPreserved/SetLegalHold,
 byte-free replay and fresh verified streams. ReadPreserved remains unexposed.
