@@ -459,11 +459,20 @@ where
             &[settings.public_key()?],
         )?;
     }
+    let mut pipeline_config = cfg.pipeline.clone();
+    if let Some(purge) = pipeline_config.purge.take() {
+        pipeline_config.purge = Some(purge.with_audit(Arc::new(
+            mkit_server::admin::SystemAudit::new(
+                meta.clone(),
+                crate::admin::partition(pipeline_config.sharding),
+            ),
+        )));
+    }
     let pipeline = Pipeline::new(
         blobs,
         meta.clone(),
         hooks,
-        cfg.pipeline.clone(),
+        pipeline_config.clone(),
         Arc::new(SystemClock),
         Arc::new(MetricsBridge),
     )
@@ -490,7 +499,10 @@ where
                 use commonware_cryptography::Signer as _;
                 let public = <[u8; 32]>::try_from(key.public_key().as_ref())
                     .map_err(|e| config_error("enc key", e))?;
-                admin.config.check_separation(&[public]).map_err(|e| config_error("admin key", e))?;
+                admin
+                    .config
+                    .check_separation(&[public])
+                    .map_err(|e| config_error("admin key", e))?;
             }
             // The enc key may be created on first run, so this is the first
             // place its public half is known (SPEC-SERVER §7.1).
@@ -508,7 +520,10 @@ where
         None => None,
     };
     Ok(Services {
-        admin: cfg.admin.as_ref().map(|settings| crate::admin::router(meta, settings, &cfg.pipeline)),
+        admin: cfg
+            .admin
+            .as_ref()
+            .map(|settings| crate::admin::router(meta, settings, &pipeline_config)),
         router: build_router(Arc::new(pipeline), &cfg.router),
         #[cfg(feature = "enc")]
         enc,
@@ -794,6 +809,14 @@ where
             .with_max_rows(options.max_rows)
             .with_clock(Arc::new(SystemClock));
             let registry = sqlite_timer_registry_with(blobs.clone(), meta.clone(), outcomes);
+            #[cfg(feature = "hooks")]
+            let registry = if let Some(sink) =
+                crate::purge::build(cfg.hooks.as_ref(), &outcome_audience(cfg))?
+            {
+                registry.register(crate::purge::NativeDelivery::new(sink))
+            } else {
+                registry
+            };
             let driver = TimerDriver::new(meta.clone(), registry, Arc::new(SystemClock));
             let mut services = build_services(blobs, meta, cfg, hooks)?;
             services.timers = Some(driver);
@@ -923,7 +946,9 @@ pub async fn serve_services(
         None => None,
     };
     let admin = match (&cfg.admin, services.admin) {
-        (Some(settings), Some(router)) => Some((bind(settings.listen, "--admin-listen").await?, router)),
+        (Some(settings), Some(router)) => {
+            Some((bind(settings.listen, "--admin-listen").await?, router))
+        }
         _ => None,
     };
     #[cfg(feature = "enc")]
@@ -966,8 +991,11 @@ pub async fn serve_services(
             .map_err(|e| ConfigError::new(exit::UNAVAILABLE, format!("mkit-server serve: {e}")))
     };
     let admin_run = async {
-        let Some((listener, router)) = admin else { return Ok(()); };
-        serve(listener, router, shutdown.clone(), &cfg.serve).await
+        let Some((listener, router)) = admin else {
+            return Ok(());
+        };
+        serve(listener, router, shutdown.clone(), &cfg.serve)
+            .await
             .map_err(|e| config_error("admin listener", e))
     };
     #[cfg(feature = "enc")]
@@ -990,9 +1018,11 @@ pub async fn serve_services(
     };
     #[cfg(not(feature = "enc"))]
     let enc_run = async { Ok(()) };
-    let (http_result, enc_result, admin_result) = tokio::join!(async { stop_on_error(http_run.await) }, async {
-        stop_on_error(enc_run.await)
-    }, async { stop_on_error(admin_run.await) });
+    let (http_result, enc_result, admin_result) = tokio::join!(
+        async { stop_on_error(http_run.await) },
+        async { stop_on_error(enc_run.await) },
+        async { stop_on_error(admin_run.await) }
+    );
     shutdown.trigger();
     timer_stop.trigger();
     if let Some(task) = timer_task {

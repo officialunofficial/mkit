@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use mkit_server::hooks::{
     HookChannel, HookClient, HookSigner, RemoteAdmission, RemoteAuthorizer, RemoteOutcomes,
+    RemotePurge,
 };
 use mkit_server::pipeline::{
     Choice, DefaultAdmission, Hooks, NoOutcomes, NoPreReceive, NoReceipts, OpenAuthorizer,
@@ -34,6 +35,8 @@ pub struct Built<C> {
     pub hooks: WorkerHooks<C>,
     /// Stage 8.
     pub sink: WorkerSink<C>,
+    /// Real signed global purge sink, absent by default.
+    pub purge: Option<RemotePurge<C>>,
 }
 
 /// The local hooks: open authorization, the built-in quota, local outcomes.
@@ -48,6 +51,7 @@ pub fn local<C>() -> Built<C> {
             outcomes: NoOutcomes,
         },
         sink: Choice::Left(NoOutcomes),
+        purge: None,
     }
 }
 
@@ -87,6 +91,9 @@ pub fn build_signed<C: HookChannel>(
         HookClient::new(channel, server_audience, signer, clock, sleep)
             .map_err(|e| ConfigError(format!("hook client: {e}")))?,
     );
+    if vars.roles.cache_purge {
+        built.purge = Some(RemotePurge::new(Arc::clone(&client)).with_timeout(vars.timeout));
+    }
     if vars.roles.authorize {
         built.hooks.authorizer =
             Choice::Right(RemoteAuthorizer::new(Arc::clone(&client)).with_timeout(vars.timeout));
@@ -105,7 +112,7 @@ pub fn build_signed<C: HookChannel>(
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use glue::{hooks_from_env, sink_from_env};
+pub use glue::{hooks_from_env, purge_from_env, sink_from_env};
 
 #[cfg(target_arch = "wasm32")]
 mod glue {
@@ -148,6 +155,9 @@ mod glue {
                 .unwrap_or_default();
             #[cfg(not(feature = "http-objects"))]
             let mut other_keys = Vec::new();
+            if let Some(admin) = &cfg.admin {
+                other_keys.extend(admin.public_keys());
+            }
             if let Some(fence) = &cfg.authority_fence {
                 other_keys.extend(fence.public_keys());
             }
@@ -194,6 +204,13 @@ mod glue {
         cfg: &WorkerConfig,
     ) -> Result<WorkerSink<WorkerChannel>, ConfigError> {
         from_env(env, cfg).map(|built| built.sink)
+    }
+    /// Build only a real signed sink; configuration errors never acknowledge work.
+    pub fn purge_from_env(
+        env: &Env,
+        cfg: &WorkerConfig,
+    ) -> Result<Option<mkit_server::hooks::RemotePurge<WorkerChannel>>, ConfigError> {
+        from_env(env, cfg).map(|built| built.purge)
     }
 }
 
@@ -277,6 +294,7 @@ mod tests {
                 authorize,
                 admit,
                 outcome,
+                cache_purge: false,
             },
             timeout: crate::hooks::config::DEFAULT_TIMEOUT,
             authorizer_role: mkit_server::policy::AuthorizerRole::Check,

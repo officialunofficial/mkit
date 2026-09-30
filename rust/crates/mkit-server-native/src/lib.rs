@@ -2,9 +2,9 @@
 #![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
 #![doc = include_str!("../README.md")]
 
-mod blocking;
 #[cfg(feature = "http")]
 pub mod admin;
+mod blocking;
 #[cfg(feature = "http")]
 pub mod config;
 #[cfg(feature = "enc")]
@@ -15,8 +15,6 @@ pub mod exit;
 mod guard;
 #[cfg(feature = "hooks")]
 pub mod hooks;
-#[cfg(feature = "hooks")]
-pub mod purge;
 #[cfg(feature = "http-objects")]
 pub mod http_mount;
 #[cfg(feature = "http")]
@@ -27,6 +25,8 @@ mod listen;
 pub mod portable;
 #[cfg(feature = "http")]
 pub mod pressure;
+#[cfg(feature = "hooks")]
+pub mod purge;
 #[cfg(feature = "http")]
 mod router;
 #[cfg(feature = "s3")]

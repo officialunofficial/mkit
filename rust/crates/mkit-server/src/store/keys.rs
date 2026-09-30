@@ -204,12 +204,21 @@ pub const TAG_CACHE_PURGE_GENERATION: &str = "cg";
 
 /// `cp 00 <purge_id>`; shares the reservation-id grammar.
 pub fn cache_purge(id: &str) -> Result<Key, StoreError> {
-    if id.is_empty() || id.len() > 128 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b)) { return Err(StoreError::Invalid("invalid purge id".into())); }
+    if id.is_empty()
+        || id.len() > 128
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
+    {
+        return Err(StoreError::Invalid("invalid purge id".into()));
+    }
     Ok(key(TAG_CACHE_PURGE, &[id.as_bytes()]))
 }
 /// `cg 00 <namespace or full repository identity>`.
 #[must_use]
-pub fn cache_purge_generation(scope: &str) -> Key { key(TAG_CACHE_PURGE_GENERATION, &[scope.as_bytes()]) }
+pub fn cache_purge_generation(scope: &str) -> Key {
+    key(TAG_CACHE_PURGE_GENERATION, &[scope.as_bytes()])
+}
 
 /// Tags whose layouts later work packages add. No M0 key uses them.
 pub const RESERVED_TAGS: &[&str] = &["tb", "l", "pp", TAG_NAMESPACE_LIST];
@@ -1025,7 +1034,11 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
     let (tag, body) = (&bytes[..split], &bytes[split + 1..]);
     let text = |b: &[u8]| String::from_utf8(b.to_vec()).ok();
     Some(match tag {
-        b"cp" => { let id = text(body)?; cache_purge(&id).ok()?; ParsedKey::CachePurge(id) },
+        b"cp" => {
+            let id = text(body)?;
+            cache_purge(&id).ok()?;
+            ParsedKey::CachePurge(id)
+        }
         b"cg" if !body.is_empty() => ParsedKey::CachePurgeGeneration(text(body)?),
         b"sm" if body.is_empty() => ParsedKey::ShardingMarker,
         b"am" if body.is_empty() => ParsedKey::AddressingMarker,

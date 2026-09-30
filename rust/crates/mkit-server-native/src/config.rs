@@ -1547,19 +1547,27 @@ pub fn resolve(
     }
     let (redactor, cors_extra_allow_headers) = credential_router_parts(&pipeline)?;
     let admin = crate::admin::resolve(&args.admin, &mut pipeline, &meta)?;
-    if admin.as_ref().is_some_and(|a| Some(a.listen) == args.listen) {
+    if admin
+        .as_ref()
+        .is_some_and(|a| Some(a.listen) == args.listen)
+    {
         return Err(usage("admin and client listeners must be separate"));
     }
     #[cfg(feature = "hooks")]
     {
         if let Some(settings) = &hooks {
             if let Some(admin) = &admin {
-                admin.config.check_separation(&[settings.public_key()?])
+                admin
+                    .config
+                    .check_separation(&[settings.public_key()?])
                     .map_err(|e| ConfigError::new(exit::CONFIG_ERROR, e.to_string()))?;
             }
             if settings.purge.is_some() {
                 pipeline.purge = Some(mkit_server::purge::PurgeConfig {
-                    audience: match &pipeline.auth { AuthMode::AuthV2(auth) => auth.audience().to_owned(), _ => String::new() },
+                    audience: match &pipeline.auth {
+                        AuthMode::AuthV2(auth) => auth.audience().to_owned(),
+                        _ => String::new(),
+                    },
                     shared_caches: true,
                     remote_sink: true,
                     audit: None,

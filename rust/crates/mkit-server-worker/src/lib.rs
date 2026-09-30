@@ -49,6 +49,7 @@
 //! [`DoNamespaceStore`]: ns_client::DoNamespaceStore
 
 pub mod adapter;
+pub mod admin;
 pub mod alarm;
 pub mod backup;
 pub mod classes;

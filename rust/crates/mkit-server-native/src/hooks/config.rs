@@ -53,7 +53,7 @@ pub struct HookArgs {
     /// `--meta sqlite:<PATH>`.
     #[arg(long, value_name = "URL")]
     pub hook_outcome_url: Option<String>,
-    /// Signed global CachePurge sink; acknowledges only after global invalidation.
+    /// Signed global `CachePurge` sink; acknowledges only after global invalidation.
     #[arg(long, value_name = "URL")]
     pub hook_cache_purge_url: Option<String>,
     /// The hook signing key: one line `<key-id> <64 hex seed>`, owner-only.
@@ -149,7 +149,10 @@ impl HookSettings {
     /// Whether any role is remote.
     #[must_use]
     pub fn any(&self) -> bool {
-        self.authorize.is_some() || self.admit.is_some() || self.outcome.is_some() || self.purge.is_some()
+        self.authorize.is_some()
+            || self.admit.is_some()
+            || self.outcome.is_some()
+            || self.purge.is_some()
     }
 }
 
@@ -307,7 +310,9 @@ pub fn resolve(
             "--hook-admit-url needs upload ticket keys (--ticket-key-file or MKIT_TICKET_KEYS)",
         ));
     }
-    if (args.hook_outcome_url.is_some() || args.hook_cache_purge_url.is_some()) && !matches!(meta, MetaChoice::Sqlite { .. }) {
+    if (args.hook_outcome_url.is_some() || args.hook_cache_purge_url.is_some())
+        && !matches!(meta, MetaChoice::Sqlite { .. })
+    {
         return Err(config(
             "--hook-outcome-url needs --meta sqlite:<PATH>: outcome delivery runs from the \
              timer driver",

@@ -86,11 +86,19 @@ role!(RemoteOutcomes);
 role!(RemotePurge);
 
 impl<C: HookChannel> crate::purge::PurgeSink for RemotePurge<C> {
-    fn deliver<'a>(&'a self, request: &'a crate::purge::Request) -> crate::BoxFuture<'a, Result<(), crate::StoreError>> {
+    fn deliver<'a>(
+        &'a self,
+        request: &'a crate::purge::Request,
+    ) -> crate::BoxFuture<'a, Result<(), crate::StoreError>> {
         Box::pin(async move {
             request.validate()?;
-            if request.audience != self.client.server_audience() { return Err(crate::StoreError::unavailable("purge audience mismatch")); }
-            self.client.deliver(Rpc::CachePurge, request, self.timeout).await.map_err(|_| crate::StoreError::unavailable("purge delivery failed"))
+            if request.audience != self.client.server_audience() {
+                return Err(crate::StoreError::unavailable("purge audience mismatch"));
+            }
+            self.client
+                .deliver(Rpc::CachePurge, request, self.timeout)
+                .await
+                .map_err(|_| crate::StoreError::unavailable("purge delivery failed"))
         })
     }
 }

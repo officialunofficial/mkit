@@ -177,6 +177,8 @@ pub fn response_header_plan(headers: &http::HeaderMap) -> Vec<(String, String, b
 #[cfg_attr(not(feature = "http-objects"), derive(PartialEq, Eq))]
 #[non_exhaustive]
 pub struct WorkerConfig {
+    /// Default-off signed operator keys, independent of client credentials.
+    pub admin: Option<mkit_server::admin::Config>,
     /// Optional dedicated deployment-authority keys (`AUTHORITY_FENCE`, `AUTHORITY_KEYS`).
     pub authority_fence: Option<mkit_server::authority::AuthorityFence>,
     /// `AUTH_AUDIENCE`: the canonical origin writes are signed for.
@@ -308,6 +310,10 @@ impl WorkerConfig {
         config.sharding = self.sharding;
         config.ticket_keys.clone_from(&self.ticket_keys);
         config.authority_fence.clone_from(&self.authority_fence);
+        config.admin_keys = self
+            .admin
+            .as_ref()
+            .map_or_else(Vec::new, mkit_server::admin::Config::public_keys);
         config.indexed = self.indexed;
         #[cfg(feature = "http-objects")]
         if let Some(mount) = &self.http_mount {
@@ -432,7 +438,13 @@ impl WorkerConfig {
         )?;
         #[cfg(feature = "http-objects")]
         let url_tokens = crate::http_mount::token_config_for_tickets(&var, ticket_keys.as_ref())?;
+        let admin = crate::admin::parse(&var, &audience, ticket_keys.as_ref())?;
         let hooks = crate::hooks::config::HookVars::parse(&var)?;
+        if hooks.as_ref().is_some_and(|hooks| hooks.roles.cache_purge)
+            && !var(PLAN_VAR).is_some_and(|plan| plan.trim().eq_ignore_ascii_case("paid"))
+        {
+            return Err(ConfigError("cache-purge requires WORKERS_PLAN=paid".into()));
+        }
         let authority_fence = resolve_authority_fence(&var, multi, hooks.as_ref())?;
         if let Some(fence) = &authority_fence {
             if fence.public_keys().any(|key| {
@@ -455,7 +467,25 @@ impl WorkerConfig {
                 ));
             }
         }
+        if let Some(admin) = &admin {
+            if let Some(fence) = &authority_fence {
+                admin
+                    .check_separation(&fence.public_keys().collect::<Vec<_>>())
+                    .map_err(|_| {
+                        ConfigError("ADMIN_KEYS must differ from authority keys".into())
+                    })?;
+            }
+            #[cfg(feature = "http-objects")]
+            if let Some(tokens) = &url_tokens {
+                admin
+                    .check_separation(&tokens.keys().public_keys().collect::<Vec<_>>())
+                    .map_err(|_| {
+                        ConfigError("ADMIN_KEYS must differ from URL-token keys".into())
+                    })?;
+            }
+        }
         Ok(Self {
+            admin,
             authority_fence,
             indexed,
             sharding,
@@ -491,7 +521,8 @@ impl WorkerConfig {
     #[cfg(target_arch = "wasm32")]
     pub fn from_env(env: &worker::Env) -> Result<Self, ConfigError> {
         Self::from_vars(|name| {
-            if name == "AUTHORITY_KEYS"
+            if name == crate::admin::KEYS_SECRET
+                || name == "AUTHORITY_KEYS"
                 || name == TICKET_KEYS_VAR
                 || cfg!(feature = "http-objects") && name == "URL_TOKEN_KEYS"
             {
@@ -1949,6 +1980,18 @@ mod glue {
         #[cfg(feature = "test-faults")]
         let mut req = req;
         install();
+        if req.path().starts_with(mkit_server::admin::PREFIX) {
+            // Parse hook configuration/signing too: invalid role separation must
+            // refuse the operator route before its authenticated effect.
+            if let Err(error) = crate::hooks::build::hooks_from_env(&env, cfg) {
+                return json_response(
+                    serde_json::json!({"code":"unavailable","message":error.to_string()})
+                        .to_string(),
+                    503,
+                );
+            }
+            return crate::admin::serve(req, env, cfg).await;
+        }
         if is_options_preflight(&req) {
             return cors_preflight_response(&cors_allow_headers(), CORS_ALLOW_METHODS);
         }

@@ -45,9 +45,9 @@ pub mod list;
 mod outcome;
 mod parts;
 mod plan;
-mod purge;
 #[cfg(feature = "published-view")]
 pub mod published;
+mod purge;
 mod ref_policy;
 mod reservation;
 mod revocation;
@@ -584,7 +584,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         clock: Arc<dyn Clock>,
         metrics: Arc<dyn Metrics>,
     ) -> Result<Self, ServerError> {
-        if let Some(purge) = &cfg.purge { purge.validate().map_err(meta_error)?; }
+        if let Some(purge) = &cfg.purge {
+            purge.validate().map_err(meta_error)?;
+        }
         if cfg.authority_fence.is_some()
             && (cfg.authorizer_role != AuthorizerRole::Authority
                 || hooks.authorizer().is_open()
@@ -954,8 +956,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let skew = 0;
         let now = self.clock.now_ms().saturating_add(skew);
         let mut a = auth::authenticate(&self.cfg.auth, meta, now, repo, &expected_repository)?;
-        if a.auth.as_ref().is_some_and(|auth| self.cfg.admin_keys.contains(&auth.signer)) {
-            return Err(ServerError::unauthenticated("admin key cannot authenticate client calls"));
+        if a.auth
+            .as_ref()
+            .is_some_and(|auth| self.cfg.admin_keys.contains(&auth.signer))
+        {
+            return Err(ServerError::unauthenticated(
+                "admin key cannot authenticate client calls",
+            ));
         }
         // Credentials are captured for admission, which only signed writes
         // reach: signed reads and `SetRepoVisibility` never run it (§9.1).
@@ -1595,7 +1602,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ));
             }
             match self.meta.apply(p, batch).await {
-                Ok(BatchOutcome::Committed) => { self.invalidate_local_cache(repo); return Ok(()); },
+                Ok(BatchOutcome::Committed) => {
+                    self.invalidate_local_cache(repo);
+                    return Ok(());
+                }
                 Ok(BatchOutcome::DeadlinePassed { .. }) => {
                     return Err(ServerError::unavailable("commit deadline passed; retry"));
                 }
@@ -1732,7 +1742,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let expired = read::expired_replay_keys(&self.meta, p, now, 32)
             .await
             .map_err(meta_error)?;
-        let purge = self.plan_repository_purge(p, repo, crate::purge::Trigger::VisibilityChange, &mkit_core::hash::to_hex(&auth.replay_scope), now).await?;
+        let purge = self
+            .plan_repository_purge(
+                p,
+                repo,
+                crate::purge::Trigger::VisibilityChange,
+                &mkit_core::hash::to_hex(&auth.replay_scope),
+                now,
+            )
+            .await?;
         batch.preconditions.extend(purge.preconditions);
         batch.writes.extend(purge.writes);
         let mut prune = Batch::new().require(Precondition::NotAfter(deadline));
@@ -1819,11 +1837,22 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         last_statement_id: Some(id.clone()),
                     }),
                 );
-            let purge = self.plan_repository_purge(p, repo, crate::purge::Trigger::VisibilityChange, &id, ms(self.clock.now_ms())).await?;
+            let purge = self
+                .plan_repository_purge(
+                    p,
+                    repo,
+                    crate::purge::Trigger::VisibilityChange,
+                    &id,
+                    ms(self.clock.now_ms()),
+                )
+                .await?;
             batch.preconditions.extend(purge.preconditions);
             batch.writes.extend(purge.writes);
             match self.meta.apply(p, batch).await {
-                Ok(BatchOutcome::Committed) => { self.invalidate_local_cache(repo); return Ok(()); },
+                Ok(BatchOutcome::Committed) => {
+                    self.invalidate_local_cache(repo);
+                    return Ok(());
+                }
                 Ok(BatchOutcome::DeadlinePassed { .. }) => {
                     return Err(ServerError::unavailable("commit deadline passed; retry"));
                 }
