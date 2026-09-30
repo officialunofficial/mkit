@@ -8,6 +8,7 @@ pub mod classify;
 pub mod entries;
 mod etag;
 mod extract;
+pub mod inspection;
 pub mod job;
 pub mod publication;
 pub mod resolve;

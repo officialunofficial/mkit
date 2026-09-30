@@ -127,10 +127,12 @@ mod tests {
                 admit: false,
                 outcome: true,
                 cache_purge: false,
+                inspect: false,
             },
             timeout: std::time::Duration::from_secs(5),
             authorizer_role: mkit_server::policy::AuthorizerRole::Check,
             http: None,
+            inspect_batch_max_objects: 10_000,
         };
         cfg.hooks = Some(hooks.clone());
         assert!(!purge_enabled(&cfg));

@@ -82,6 +82,8 @@ pub struct StagedCommits {
     pub denial_ids: BTreeSet<Hash>,
     /// Immutable verified inventories, including canonical manifest pages.
     pub denial_packs: Vec<Hash>,
+    /// Complete added-pack inspection metadata, only for configured inspection.
+    pub inspection: Option<super::inspection::InspectionSet>,
 }
 
 /// The `parents` of a history object; `None` for a blob, tree or manifest.
@@ -377,6 +379,68 @@ pub async fn verify_ticketed<B: MultipartBlobStore, S: NamespaceStore>(
     clock: &dyn Clock,
     metrics: &dyn Metrics,
 ) -> Result<StagedCommits, ServerError> {
+    verify_ticketed_optional(
+        blobs, store, shards, repo, source, tickets, ticket_ids, head, cfg, clock, metrics, None,
+    )
+    .await
+}
+
+/// Verify ticketed packs while gathering their bounded inspection metadata.
+///
+/// # Errors
+/// The same verification errors, plus the whole-advance inspection size refusal.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_ticketed_inspected<B: MultipartBlobStore, S: NamespaceStore>(
+    blobs: &B,
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    source: &Partition,
+    tickets: &[TicketV1],
+    ticket_ids: &[Hash],
+    head: Hash,
+    cfg: IndexedConfig,
+    clock: &dyn Clock,
+    metrics: &dyn Metrics,
+    inspection_limit: usize,
+) -> Result<StagedCommits, ServerError> {
+    verify_ticketed_optional(
+        blobs,
+        store,
+        shards,
+        repo,
+        source,
+        tickets,
+        ticket_ids,
+        head,
+        cfg,
+        clock,
+        metrics,
+        Some(inspection_limit),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn verify_ticketed_optional<B: MultipartBlobStore, S: NamespaceStore>(
+    blobs: &B,
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    source: &Partition,
+    tickets: &[TicketV1],
+    ticket_ids: &[Hash],
+    head: Hash,
+    cfg: IndexedConfig,
+    clock: &dyn Clock,
+    metrics: &dyn Metrics,
+    inspection_limit: Option<usize>,
+) -> Result<StagedCommits, ServerError> {
+    let inspection_count = if let Some(limit) = inspection_limit {
+        Some(super::inspection::preflight_native(blobs, tickets, limit).await?)
+    } else {
+        None
+    };
     let mut acquired = BTreeMap::new();
     let result = verify_ticketed_inner(
         blobs,
@@ -391,6 +455,7 @@ pub async fn verify_ticketed<B: MultipartBlobStore, S: NamespaceStore>(
         clock,
         metrics,
         &mut acquired,
+        inspection_limit.zip(inspection_count),
     )
     .await;
     if result.is_err() {
@@ -420,6 +485,7 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
     clock: &dyn Clock,
     metrics: &dyn Metrics,
     acquired: &mut BTreeMap<Hash, HeldLease>,
+    inspection_limit: Option<(usize, u64)>,
 ) -> Result<StagedCommits, ServerError> {
     let now = now_ms(clock);
     let consumed: BTreeSet<_> = tickets.iter().map(|ticket| ticket.pack_id).collect();
@@ -1121,12 +1187,33 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
         .filter_map(|(id, (_, object, _))| Some((*id, history_parents(object)?)))
         .collect();
     denial_ids.extend(tickets.iter().map(|ticket| ticket.pack_id));
+    let objects = staged.len();
+    let mut inspection =
+        inspection_limit.map(|(limit, _)| super::inspection::InspectionSet::new(limit));
+    if let Some(set) = &mut inspection {
+        if let Some((_, count)) = inspection_limit {
+            set.reserve_added_count(count)?;
+        }
+        let entries = staged
+            .into_iter()
+            .map(|(id, (bytes, object, _))| {
+                let object_type = object.object_type() as u8;
+                super::inspection::NativeEntry {
+                    id,
+                    size: bytes.len() as u64,
+                    object_type,
+                }
+            })
+            .collect();
+        set.defer_native(entries);
+    }
     Ok(StagedCommits {
         denial_packs: tickets.iter().map(|ticket| ticket.pack_id).collect(),
         denial_ids,
         parents,
-        objects: staged.len(),
+        objects,
         bytes: staged_bytes,
         external_bases,
+        inspection,
     })
 }

@@ -7429,6 +7429,11 @@ pub struct GetServerInfoResponseView<'a> {
     ///
     /// Field 18: `async_inspection`
     pub async_inspection: ::core::option::Option<bool>,
+    /// Maximum distinct inspected objects in one advance; absent when no inspector
+    /// is configured (SPEC-TRANSPORT-CONNECT §2.1; SPEC-SERVER §11.1).
+    ///
+    /// Field 19: `inspection_max_objects`
+    pub inspection_max_objects: ::core::option::Option<u32>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ::buffa::MessageView<'a> for GetServerInfoResponseView<'a> {
@@ -7584,6 +7589,15 @@ impl<'a> ::buffa::MessageView<'a> for GetServerInfoResponseView<'a> {
                 )?;
                 view.async_inspection = Some(::buffa::types::decode_bool(&mut cur)?);
             }
+            19u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.inspection_max_objects = Some(
+                    ::buffa::types::decode_uint32(&mut cur)?,
+                );
+            }
             13u32 => {
                 ::buffa::encoding::check_wire_type(
                     tag,
@@ -7641,6 +7655,7 @@ impl<'a> ::buffa::MessageView<'a> for GetServerInfoResponseView<'a> {
             max_delta_chain_depth: self.max_delta_chain_depth,
             leases: self.leases,
             async_inspection: self.async_inspection,
+            inspection_max_objects: self.inspection_max_objects,
             __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
             ..::core::default::Default::default()
         })
@@ -7706,6 +7721,9 @@ impl<'a> ::buffa::ViewEncode<'a> for GetServerInfoResponseView<'a> {
         if self.async_inspection.is_some() {
             size += 2u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
         }
+        if let Some(v) = self.inspection_max_objects {
+            size += 2u64 + ::buffa::types::uint32_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -7770,6 +7788,9 @@ impl<'a> ::buffa::ViewEncode<'a> for GetServerInfoResponseView<'a> {
         }
         if let Some(v) = self.async_inspection {
             ::buffa::types::put_bool_field(18u32, v, buf);
+        }
+        if let Some(v) = self.inspection_max_objects {
+            ::buffa::types::put_uint32_field(19u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -7873,6 +7894,13 @@ impl<'__a> ::serde::Serialize for GetServerInfoResponseView<'__a> {
         }
         if let ::core::option::Option::Some(__v) = self.async_inspection {
             __map.serialize_entry("asyncInspection", &__v)?;
+        }
+        if let ::core::option::Option::Some(__v) = self.inspection_max_objects {
+            __map
+                .serialize_entry(
+                    "inspectionMaxObjects",
+                    &::buffa::json_helpers::ProtoJson(&__v),
+                )?;
         }
         __map.end()
     }
@@ -8096,6 +8124,14 @@ impl GetServerInfoResponseOwnedView {
     #[must_use]
     pub fn async_inspection(&self) -> ::core::option::Option<bool> {
         self.0.reborrow().async_inspection
+    }
+    /// Maximum distinct inspected objects in one advance; absent when no inspector
+    /// is configured (SPEC-TRANSPORT-CONNECT §2.1; SPEC-SERVER §11.1).
+    ///
+    /// Field 19: `inspection_max_objects`
+    #[must_use]
+    pub fn inspection_max_objects(&self) -> ::core::option::Option<u32> {
+        self.0.reborrow().inspection_max_objects
     }
 }
 impl ::core::convert::From<::buffa::OwnedView<GetServerInfoResponseView<'static>>>

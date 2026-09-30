@@ -165,7 +165,7 @@
       "M0-04"
     ],
     "size": "L",
-    "summary": "Implements the transport-neutral pipeline for the unary RPCs (ListRefs, ReadRef, UpdateRef, AdvanceRefs, PackExists, health) with PRD §5.4 stages as traits, AuthMode, a ShardMap (SinglePartition in M0), the full AdmissionInput, and pure planners that turn each write into a guarded Batch carrying a NotAfter(plan_time + MAX_APPLY_WINDOW) deadline. Behavior equals today's servers.",
+    "summary": "Implements the transport-neutral pipeline for the unary RPCs (ListRefs, ReadRef, UpdateRef, AdvanceRefs, PackExists, health) with PRD \u00a75.4 stages as traits, AuthMode, a ShardMap (SinglePartition in M0), the full AdmissionInput, and pure planners that turn each write into a guarded Batch carrying a NotAfter(plan_time + MAX_APPLY_WINDOW) deadline. Behavior equals today's servers.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -987,11 +987,16 @@
     "title": "Client: split large pushes along first-parent history (R-164; post-launch, R-185)",
     "milestone": "M1",
     "track": "client",
-    "depends_on": ["1.17"],
+    "depends_on": [
+      "1.17"
+    ],
     "size": "M",
     "summary": "Automatically divide a push exceeding six data packs into ancestor advances, each with at most seven tickets including its MKPL node.",
     "human_action": false,
-    "area_gates": ["rust", "cli"]
+    "area_gates": [
+      "rust",
+      "cli"
+    ]
   },
   {
     "id": "1.21",
@@ -1071,7 +1076,7 @@
       "1.30"
     ],
     "size": "S",
-    "summary": "Keeps the standalone staging template/runbook and explicitly activates the Workers launch profile before REL-1 on real Cloudflare. Provision dedicated resources, secrets and routes, verify backup/recovery and measure deployed CPU, subrequests and cost; local wrangler evidence alone is insufficient. R-185 supersedes R-176’s post-REL-1 timing.",
+    "summary": "Keeps the standalone staging template/runbook and explicitly activates the Workers launch profile before REL-1 on real Cloudflare. Provision dedicated resources, secrets and routes, verify backup/recovery and measure deployed CPU, subrequests and cost; local wrangler evidence alone is insufficient. R-185 supersedes R-176\u2019s post-REL-1 timing.",
     "human_action": true,
     "area_gates": [
       "workers",
@@ -1090,7 +1095,7 @@
       "1.15"
     ],
     "size": "S",
-    "summary": "Adds a staging workflow that runs the full M0+M1 wire suite (including throughput and lag windows) and a real mkit push/clone round trip against deployed staging. The human adds the GitHub secrets and variables. R-185: run locally from the orchestrator’s machine against real Cloudflare before launch, including the Workers launch profile and measured CPU, subrequests and cost. The workflow remains main-only and is not dispatched against feat/mkit-server.",
+    "summary": "Adds a staging workflow that runs the full M0+M1 wire suite (including throughput and lag windows) and a real mkit push/clone round trip against deployed staging. The human adds the GitHub secrets and variables. R-185: run locally from the orchestrator\u2019s machine against real Cloudflare before launch, including the Workers launch profile and measured CPU, subrequests and cost. The workflow remains main-only and is not dispatched against feat/mkit-server.",
     "human_action": true,
     "area_gates": [
       "ci-yaml",
@@ -1142,7 +1147,7 @@
       "S2"
     ],
     "size": "L",
-    "summary": "Grant statement codec (SPEC-WRITE-GRANTS §3), ref scopes and effective flags, the X-Write-Grant header codec, grant id, and the §7.4 identity grammar; fuzz target and codec goldens.",
+    "summary": "Grant statement codec (SPEC-WRITE-GRANTS \u00a73), ref scopes and effective flags, the X-Write-Grant header codec, grant id, and the \u00a77.4 identity grammar; fuzz target and codec goldens.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -1159,7 +1164,7 @@
       "2.4a"
     ],
     "size": "M",
-    "summary": "Epoch statement (§5), visibility statement (§9.1), owner-scheme dispatch with ed25519 (§4), the stateless verifier (§7) and registration check (§10); signed goldens.",
+    "summary": "Epoch statement (\u00a75), visibility statement (\u00a79.1), owner-scheme dispatch with ed25519 (\u00a74), the stateless verifier (\u00a77) and registration check (\u00a710); signed goldens.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -1606,7 +1611,7 @@
       "3.9"
     ],
     "size": "S",
-    "summary": "Optional post-launch: a Cloudflare Queue OutcomeSink whose durable enqueue is the acknowledgement. Needs a SPEC-SERVER §7.3/§8 amendment with human review first (R-168).",
+    "summary": "Optional post-launch: a Cloudflare Queue OutcomeSink whose durable enqueue is the acknowledgement. Needs a SPEC-SERVER \u00a77.3/\u00a78 amendment with human review first (R-168).",
     "human_action": true,
     "area_gates": [
       "rust",
@@ -1626,7 +1631,7 @@
       "3.7b"
     ],
     "size": "L",
-    "summary": "Launch bundle with 2.16: signed Connect JSON over HTTPS to Uno’s external hook endpoint, origin-bound audience, fresh nonces, no redirects or internal retries, bounded response streaming and whole-call timeout/cancellation. Reuses the public mkit-rpc hook contract and supports later remote Inspect; durable HTTP outcome delivery makes Queue optional (R-185).",
+    "summary": "Launch bundle with 2.16: signed Connect JSON over HTTPS to Uno\u2019s external hook endpoint, origin-bound audience, fresh nonces, no redirects or internal retries, bounded response streaming and whole-call timeout/cancellation. Reuses the public mkit-rpc hook contract and supports later remote Inspect; durable HTTP outcome delivery makes Queue optional (R-185).",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -1940,11 +1945,19 @@
     "title": "Worker: root-verified bounded backend multipart completion",
     "milestone": "M4",
     "track": "worker",
-    "depends_on": ["4.8", "4.10"],
+    "depends_on": [
+      "4.8",
+      "4.10"
+    ],
     "size": "M",
     "summary": "Server-owned immutable root/CV plans and verified backend part receipts permit bounded R2 completion before visibility; prerequisite of checkpointed extraction (R-192). No extraction/holder or activation behavior is enabled.",
     "human_action": false,
-    "area_gates": ["rust", "wasm", "workers", "conf-wrangler"]
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
+      "conf-wrangler"
+    ]
   },
   {
     "id": "4.10b-1",
@@ -1978,7 +1991,7 @@
       "4.10b-multipart"
     ],
     "size": "L",
-    "summary": "Runs 4.10's extraction as checkpointed alarm slices before the Worker's Verified write, with R2 multipart for large objects, a content RelayHook that rewrites `h` puts into HolderV1 with a `c` guard, the relay blocklist check (SPEC-SERVER §14.2) and hold lifetime across relay lag (R-163). Stage 2.",
+    "summary": "Runs 4.10's extraction as checkpointed alarm slices before the Worker's Verified write, with R2 multipart for large objects, a content RelayHook that rewrites `h` puts into HolderV1 with a `c` guard, the relay blocklist check (SPEC-SERVER \u00a714.2) and hold lifetime across relay lag (R-163). Stage 2.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -2098,12 +2111,13 @@
   },
   {
     "id": "4.14b-2",
-    "title": "HTTP proofs: bounded Workers canonical ObjectSource prefetch",
+    "title": "HTTP proofs: bounded Workers canonical ObjectSource prefetch (post-launch, R-200)",
     "milestone": "M4",
     "track": "worker",
     "depends_on": [
       "4.14b-1",
-      "4.10b"
+      "4.10b",
+      "5.15"
     ],
     "size": "M",
     "summary": "Reuse the common prepared proof selection/admission seam; bound canonical repository-scoped object prefetch, verify offset hints and measure Worker subrequests, peak memory and staging CPU before activation.",
@@ -2113,7 +2127,8 @@
       "wasm",
       "workers",
       "golden"
-    ]
+    ],
+    "status": "deferred"
   },
   {
     "id": "4.15",
@@ -2178,7 +2193,7 @@
       "4.9",
       "4.10",
       "4.10b",
-      "4.14b",
+      "4.14b-1",
       "4.15",
       "4.16",
       "4.17",
@@ -2206,7 +2221,7 @@
       "4.4"
     ],
     "size": "M",
-    "summary": "SPEC-SERVER §12 storage leases and Event delivery, §13 fail-closed server GC, additive hooks/transport proto and goldens, and section renumbering.",
+    "summary": "SPEC-SERVER \u00a712 storage leases and Event delivery, \u00a713 fail-closed server GC, additive hooks/transport proto and goldens, and section renumbering.",
     "human_action": true,
     "area_gates": [
       "docs",
@@ -2224,7 +2239,7 @@
       "4.4"
     ],
     "size": "M",
-    "summary": "SPEC-SERVER §10 published pointers and caller views, §11 quarantine and inspection, additive Inspect/AuthorizeAllow fields and GetServerInfo.async_inspection.",
+    "summary": "SPEC-SERVER \u00a710 published pointers and caller views, \u00a711 quarantine and inspection, additive Inspect/AuthorizeAllow fields and GetServerInfo.async_inspection.",
     "human_action": true,
     "area_gates": [
       "docs",
@@ -2242,7 +2257,7 @@
       "5.1c"
     ],
     "size": "M",
-    "summary": "SPEC-SERVER §14 takedown, tombstones, delta-safe rewrite, preservation, signed notices, additive transport and hooks proto and goldens.",
+    "summary": "SPEC-SERVER \u00a714 takedown, tombstones, delta-safe rewrite, preservation, signed notices, additive transport and hooks proto and goldens.",
     "human_action": false,
     "area_gates": [
       "docs",
@@ -2259,7 +2274,7 @@
       "5.1b-1"
     ],
     "size": "M",
-    "summary": "SPEC-SERVER §16 admin procedures, role-separated keys, audited preservation access and remote CachePurge wire.",
+    "summary": "SPEC-SERVER \u00a716 admin procedures, role-separated keys, audited preservation access and remote CachePurge wire.",
     "human_action": false,
     "area_gates": [
       "docs",
@@ -2306,7 +2321,7 @@
   },
   {
     "id": "5.3a",
-    "title": "GC mark: roots, pins, grace, gc_pending; mark → wait → re-check protocol",
+    "title": "GC mark: roots, pins, grace, gc_pending; mark \u2192 wait \u2192 re-check protocol",
     "milestone": "M5",
     "track": "core",
     "depends_on": [
@@ -2368,10 +2383,11 @@
     "track": "core",
     "depends_on": [
       "5.5a",
+      "5.5c",
       "5.5b"
     ],
     "size": "L",
-    "summary": "Split into 5.5a (launch inspection and durable hit handoff, including remote Inspect) and 5.5b (post-launch takedown completion); retained as the historical aggregate (R-185).",
+    "summary": "Historical aggregate: launch sync-only inspection (5.5a), deferred async/holds/review (5.5c), then inspector takedown completion (5.5b); R-200 supersedes the R-185 scope.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -2381,16 +2397,18 @@
   },
   {
     "id": "5.5a",
-    "title": "ContentInspector without takedown completion: obligations, holds, serving stops, hit handoff, remote Inspect",
+    "title": "Synchronous added-pack file inspection for the launch profile",
     "milestone": "M5",
     "track": "core",
     "depends_on": [
       "5.4",
+      "5.10",
+      "5.11a",
       "3.9c",
       "4.8"
     ],
     "size": "L",
-    "summary": "Launch: durable inspection obligations and stable IDs, sync checks, async clearance, holds and serving stops across every byte/reuse/cache path, purge scheduling and retained roots. Hits durably hand off to takedown and stay unresolved until verified completion; a no-op does not resolve them. Wire metadata-only remote Inspect through native HTTP and the signed Worker channel. Pull forward audited review/purge foundations as needed; the lean 5.6a spec amendment permits unresolved requests under HANDOFF/R-190; 5.4 does not waive takedown completion.",
+    "summary": "R-200 launch: metadata-only signed Inspect at stage 5; sync/fail-closed only, at most four inspectors and one complete batch each. Inspect exactly every added-pack Blob and ChunkedBlob, surplus included and ids deduplicated, as BLOB/CHUNKED_FILE; CHUNK unused. Earlier membership was already scanned, so enabling inspection requires an empty store. Preflight added-pack header/job entry counts against positive inspect_batch_max_objects <=10,000 (default 10,000), advertised in server info, before enumeration/hooks/apply. Enumerate frame/checkpoint pages of <=1,000 rows without inspection tree walks, reference pages or R2 reads. Quarantine rejects, unavailable has no replay, stable ids survive retries. No durable continuation, mode marker or hold. R-193 scanner raw-pack retrieval follows.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -2401,12 +2419,52 @@
     ]
   },
   {
+    "id": "5.5a-0",
+    "title": "Durable inspection-mode marker (post-launch, R-199/R-200)",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "REL-1",
+      "5.4"
+    ],
+    "size": "S",
+    "summary": "Deferred until immediately before 5.5c; launch sync-only inspection has no outstanding obligations and needs no marker.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm"
+    ],
+    "status": "deferred"
+  },
+  {
+    "id": "5.5c",
+    "title": "Async inspection, holds and review operations (post-launch, R-200)",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "5.5a",
+      "5.5a-0",
+      "5.11a"
+    ],
+    "size": "L",
+    "summary": "Deferred full-profile inspection: complete \u00a711.1 set and file/chunk classification, unrestricted multi-batch sets, async obligations, timer 14, hold authority, strong serving stops, post-publication quarantine and audited ReleaseHold/Reinspect/ReleaseFlag/ResumeServing/WaiveObligations. Turn the three 5.4 hold regressions green; original WP-5.5a prompts now describe this follow-up.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
+      "conf-native",
+      "conf-wrangler"
+    ],
+    "status": "deferred"
+  },
+  {
     "id": "5.5b",
     "title": "Inspector takedown completion",
     "milestone": "M5",
     "track": "core",
     "depends_on": [
-      "5.5a",
+      "5.5c",
       "5.6"
     ],
     "size": "L",
@@ -2681,15 +2739,16 @@
   },
   {
     "id": "5.15",
-    "title": "Publication Event delivery",
+    "title": "Publication Event delivery (post-launch, R-200)",
     "milestone": "M5",
     "track": "core",
     "depends_on": [
       "5.4",
-      "3.3"
+      "3.3",
+      "5.5c"
     ],
     "size": "L",
-    "summary": "Launch: publication transitions through durable outbox recording and at-least-once remote Event delivery, extracted from 5.2. Correlate ref, advance sequence, published pair and operation. Committed Outcome means Sent; Delivered follows published-prefix advancement, not merely Inspect Pass. Receivers deduplicate and tolerate Event arriving before Outcome (R-185).",
+    "summary": "Post-launch (R-200): publication transitions through durable outbox recording and at-least-once remote Event delivery, extracted from 5.2. Correlate ref, advance sequence, published pair and operation. Committed Outcome means Sent; Delivered follows published-prefix advancement, not merely Inspect Pass. Receivers deduplicate and tolerate Event arriving before Outcome (R-185).",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -2698,7 +2757,8 @@
       "conf-native",
       "conf-wrangler",
       "docs"
-    ]
+    ],
+    "status": "deferred"
   },
   {
     "id": "REL-1",
@@ -2715,14 +2775,13 @@
       "2.16",
       "5.4",
       "5.5a",
-      "5.15",
       "4.18",
       "5.6",
       "5.11a",
       "1.20"
     ],
     "size": "S",
-    "summary": "R-185 supersedes R-154: one launch of everything merged so far plus the Workers-critical path for the Uno monorepo (UNO-403/UNO-404), at the full quality bar. Retain the former Stage 1 terminal set and add signed HTTP hooks/authority fencing, published view, inspection/remote Inspect, publication Events, Worker serving production opt-in/activation, launch takedown/admin review and real Cloudflare staging. Gate on an external full-code-and-spec review of the whole launch scope, validation of findings and adversarial review of fixes. The 5.4 spec amendment defines indexed serving/inspection without storage leases, permanent retention and GC disabled; do not claim the existing full profile. Bump to 0.5.0, publish mkit-server/-native/-conformance (-worker stays unpublished), cut the signed release and merge feat/mkit-server to main with a merge commit, never squash. Native remains the maintained reference/test server; all other work follows launch in plan order.",
+    "summary": "R-200 amends R-185: one launch of everything merged so far plus the Workers-critical path for the Uno monorepo (UNO-403/UNO-404), at the full quality bar. Retain the former Stage 1 terminal set and add signed HTTP hooks/authority fencing, published view, sync-only inspection/remote Inspect, Worker serving production opt-in/activation, launch takedown/admin review and real Cloudflare staging. Gate on an external full-code-and-spec review of the whole launch scope, validation of findings and adversarial review of fixes. The 5.4 spec amendment defines indexed serving/inspection without storage leases, permanent retention and GC disabled; do not claim the existing full profile. Bump to 0.5.0, publish mkit-server/-native/-conformance (-worker stays unpublished), cut the signed release and merge feat/mkit-server to main with a merge commit, never squash. Native remains the maintained reference/test server; all other work follows launch in plan order.",
     "human_action": true,
     "area_gates": [
       "full",
@@ -2743,7 +2802,7 @@
       "5.13"
     ],
     "size": "S",
-    "summary": "R-185: tracking aggregate for remaining work in plan order after the single Workers launch, not a second launch or a mandated next-minor release. Includes inspector takedown completion, leases/GC/receipts (5.2, 5.3a/b, 5.8), full admin operations and native-only extras (2.12 and native serving extras). Queue outcome sink 3.9b and the owner-approval bridge remain deferred and optional.",
+    "summary": "R-185: tracking aggregate for remaining work in plan order after the single Workers launch, not a second launch or a mandated next-minor release. Includes inspector takedown completion, leases/GC/receipts (5.2, 5.3a/b, 5.8), full admin operations and native-only extras (2.12 and native serving extras). Queue outcome sink 3.9b and the owner-approval bridge remain deferred and optional. R-200 follow-up order: 5.5a-0, 5.5c, 5.15, then 4.14b-2.",
     "human_action": true,
     "area_gates": [
       "full",

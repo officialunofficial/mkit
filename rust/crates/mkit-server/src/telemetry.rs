@@ -21,6 +21,8 @@ pub mod pressure;
 pub const METRIC_REQUESTS: &str = "mkit_server_requests_total";
 /// Histogram: request latency in milliseconds. Labels: `procedure`.
 pub const METRIC_LATENCY: &str = "mkit_server_request_duration_ms";
+/// Counter: synchronous inspector calls. Label: `result`.
+pub const METRIC_INSPECTION_CALLS: &str = "mkit_server_inspection_calls_total";
 /// Counter: accepted upload bytes.
 pub const METRIC_UPLOAD_BYTES: &str = "mkit_server_upload_bytes_total";
 /// Counter: an expired shard lease remains kept beyond the relay lag bound.

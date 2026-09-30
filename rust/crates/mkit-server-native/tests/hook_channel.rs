@@ -169,6 +169,60 @@ async fn an_oversized_2xx_outcome_still_acknowledges() {
     sink.deliver(&outcome).await.unwrap();
 }
 
+#[tokio::test]
+async fn synchronous_inspect_uses_signed_http_metadata_and_fresh_retry_nonces() {
+    use mkit_server::hooks::{InspectVerdict, RemoteInspector};
+    use mkit_server::{NamespaceKey, OpKind, Operation, Principal, RefUpdate, RepoId, RepoName};
+    use mkit_server_conformance::stubs::hook::{FakeHook, HookKey, Reply};
+
+    let signer = HookSigner::new("test-key", Zeroizing::new([7; 32])).unwrap();
+    let hook = FakeHook::start(vec![HookKey::new("test-key", signer.public_key())]);
+    for _ in 0..2 {
+        hook.script("Inspect", Reply::json(r#"{"pass":{}}"#));
+    }
+    let inspector = RemoteInspector::new("scanner", signed_client(&hook.origin()));
+    let op = Operation::new(
+        RepoId {
+            namespace: NamespaceKey::deployment_default(),
+            name: RepoName::new("test").unwrap(),
+        },
+        Principal::Anonymous,
+        None,
+        OpKind::UpdateRef(RefUpdate {
+            name: "refs/heads/main".into(),
+            condition: mkit_core::refs::RefWriteCondition::Missing,
+            new: Some([3; 32]),
+        }),
+    );
+    let objects = vec![
+        serde_json::from_value(serde_json::json!({
+            "id": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+            "size": "123",
+            "kind": "INSPECT_OBJECT_KIND_BLOB"
+        }))
+        .unwrap(),
+    ];
+    for _ in 0..2 {
+        assert_eq!(
+            inspector
+                .inspect(&op, "stable-inspection", &objects)
+                .await
+                .unwrap(),
+            InspectVerdict::Pass
+        );
+    }
+    let calls = hook.calls_to("Inspect");
+    assert_eq!(calls.len(), 2);
+    assert!(calls.iter().all(|call| call.verified));
+    assert_eq!(calls[0].body, calls[1].body);
+    assert_ne!(calls[0].nonce, calls[1].nonce);
+    let json = calls[0].json();
+    assert_eq!(json["phase"], "INSPECT_PHASE_PRE_RECEIVE");
+    assert_eq!(json["inspectionId"], "stable-inspection");
+    assert_eq!(json["objects"][0]["size"], "123");
+    assert!(json["objects"][0].get("bytes").is_none());
+}
+
 /// Set when the guard drops: the handler future was cancelled.
 struct Cancelled(Arc<AtomicBool>);
 impl Drop for Cancelled {

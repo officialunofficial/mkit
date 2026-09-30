@@ -16,6 +16,7 @@ globalThis.clearTimeout = (handle) => { active.delete(handle); originalClear(han
 globalThis.fetch = (request, init) => {
   if (new URL(request.url).hostname !== 'hook-probe.invalid') return originalFetch(request, init);
   calls++;
+  if (mode.startsWith('inspect-') && new URL(request.url).pathname !== '/prefix/mkit.server.hooks.v1.HooksService/Inspect') throw new Error('wrong Inspect procedure');
   if (request.redirect !== 'manual') throw new Error('hook redirects must be manual');
   init.signal.addEventListener('abort', () => { aborted++; }, {once: true});
   return originalFetch(new Request(`${fixture}/${mode}`, request), init);

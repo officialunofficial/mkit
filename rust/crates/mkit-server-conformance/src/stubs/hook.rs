@@ -317,7 +317,7 @@ impl FakeHook {
     }
 
     /// Queue `reply` for the next unanswered request to `procedure`
-    /// (`Authorize`, `Admit` or `Outcome`); once the queue is empty the default
+    /// (`Authorize`, `Admit`, `Inspect` or `Outcome`); once the queue is empty the default
     /// answer returns.
     pub fn script(&self, procedure: &str, reply: Reply) {
         self.shared
@@ -404,7 +404,7 @@ fn validate_metadata(
     unsigned: bool,
 ) -> Result<(), String> {
     if parts.method != axum::http::Method::POST
-        || !matches!(procedure, "Authorize" | "Admit" | "Outcome")
+        || !matches!(procedure, "Authorize" | "Admit" | "Inspect" | "Outcome")
     {
         return Err("not a hook procedure".to_owned());
     }

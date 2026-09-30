@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use mkit_server::SystemClock;
-use mkit_server::hooks::{HookClient, RemoteAdmission, RemoteAuthorizer, RemoteOutcomes};
+use mkit_server::hooks::{
+    HookClient, RemoteAdmission, RemoteAuthorizer, RemoteInspector, RemoteOutcomes,
+};
 use mkit_server::pipeline::{
     Choice, DefaultAdmission, Hooks, NoOutcomes, NoPreReceive, NoReceipts, OpenAuthorizer,
 };
@@ -33,6 +35,8 @@ pub struct Built {
     /// Whether the sink is remote (a real delivery, which needs the timer
     /// driver).
     pub remote_sink: bool,
+    /// Stage 5 synchronous inspectors, absent by default.
+    pub inspectors: Vec<RemoteInspector<HttpChannel>>,
 }
 
 fn config_error(what: &str, why: impl core::fmt::Display) -> ConfigError {
@@ -60,8 +64,18 @@ pub fn build(settings: Option<&HookSettings>, server_audience: &str) -> Result<B
             hooks,
             sink,
             remote_sink: false,
+            inspectors: Vec::new(),
         });
     };
+    if !settings.inspect.is_empty()
+        && (settings.inspect.len() > 4
+            || !(1..=10_000).contains(&settings.inspect_batch_max_objects))
+    {
+        return Err(config_error(
+            "inspection",
+            "at most four inspectors and batch size 1..=10000 are required",
+        ));
+    }
     let mut clients: Vec<(String, Arc<HookClient<HttpChannel>>)> = Vec::new();
     let mut client_for =
         |flag: &str, url: &str| -> Result<Arc<HookClient<HttpChannel>>, ConfigError> {
@@ -92,6 +106,13 @@ pub fn build(settings: Option<&HookSettings>, server_audience: &str) -> Result<B
         hooks.admission =
             Choice::Right(RemoteAdmission::new(client).with_timeout(settings.timeout));
     }
+    let mut inspectors = Vec::new();
+    for url in &settings.inspect {
+        let base = super::http::canonical_base(url).map_err(|e| config_error("inspection", e))?;
+        let name = mkit_core::hash::to_hex(&mkit_core::hash::hash(base.as_bytes()));
+        let client = client_for("--hook-inspect-url", url)?;
+        inspectors.push(RemoteInspector::new(name, client).with_timeout(settings.timeout));
+    }
     let mut remote_sink = false;
     if let Some(url) = &settings.outcome {
         let client = client_for("--hook-outcome-url", url)?;
@@ -102,6 +123,7 @@ pub fn build(settings: Option<&HookSettings>, server_audience: &str) -> Result<B
         hooks,
         sink,
         remote_sink,
+        inspectors,
     })
 }
 
