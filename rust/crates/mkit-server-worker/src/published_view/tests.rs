@@ -678,7 +678,12 @@ impl crate::backup::BackupBucket for BackupCalls {
 #[test]
 fn all_partition_heads_share_one_snapshot_fire_and_eight_calls_including_backup() {
     let clock = Arc::new(ManualClock::new(1000));
-    let store = local(&clock);
+    let store = crate::ns_object::PressureStore::new(
+        local(&clock),
+        crate::classes::ShardClass::RepoIndexShard,
+        clock.clone(),
+        Arc::new(mkit_server::NoopMetrics),
+    );
     let meta = CountStore::new(MemoryKv::default());
     public(&meta, false);
     meta.calls.store(0, Ordering::SeqCst);
@@ -723,17 +728,15 @@ fn all_partition_heads_share_one_snapshot_fire_and_eight_calls_including_backup(
     }
     clock.set(2000);
     alarm.reset();
-    for p in &partitions {
-        block_on(run_due(
-            &store,
-            p,
-            &registry,
-            clock.as_ref(),
-            2000,
-            &TickBudget::default(),
-        ))
-        .unwrap();
-    }
+    let report = block_on(crate::alarm::run_physical_alarm(
+        &store,
+        &registry,
+        clock.as_ref(),
+        2000,
+        TickBudget::default(),
+        &mut None,
+    ))
+    .unwrap();
     assert_eq!(bucket.puts.load(Ordering::SeqCst), 1);
     assert_eq!(meta.calls.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -743,12 +746,33 @@ fn all_partition_heads_share_one_snapshot_fire_and_eight_calls_including_backup(
         8
     );
     assert_eq!(backups.0.load(Ordering::SeqCst), 5);
-    assert!(
-        store
-            .timer_heads()
-            .unwrap()
+    assert_eq!(
+        report.attempted_for(mkit_server::timers::TimerKind::new(10)),
+        1
+    );
+    assert_eq!(report.next_wake_ms, Some(2000));
+    let timers = store.timer_window(None, 64).unwrap();
+    assert_eq!(timers.len(), 32);
+    assert_eq!(
+        timers
             .iter()
-            .all(|(_, due)| *due > 2000)
+            .filter(|row| matches!(
+                keys::parse(&row.key),
+                Some(keys::ParsedKey::Timer {
+                    due_at_ms: 2000,
+                    kind: 10,
+                    ..
+                })
+            ))
+            .count(),
+        15
+    );
+    assert_eq!(
+        timers
+            .iter()
+            .filter(|row| matches!(keys::parse(&row.key), Some(keys::ParsedKey::Timer { due_at_ms, kind: 10, .. }) if due_at_ms > 2000))
+            .count(),
+        1
     );
 }
 
