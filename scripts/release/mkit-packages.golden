@@ -215,6 +215,7 @@ serde_json
 serde_repr
 serde_spanned
 sha2
+sha3
 shlex
 signal-hook
 signal-hook-registry

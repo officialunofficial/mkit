@@ -331,10 +331,13 @@ pub fn resolve(
              hook key",
         ));
     }
-    // TODO(R-167 hand-off, WP-4.16): also refuse the URL-token active seed and
-    // any retired URL-token public key equal to the hook public key, once the
-    // adapter has a URL-token key flag (R-136/R-153). The enc server key is checked
-    // where it loads (`server::open`), since it may be created on first run.
+    #[cfg(feature = "http-objects")]
+    {
+        let public = HookSigner::new(key_id.clone(), seed.clone())
+            .map_err(|_| key_error())?
+            .public_key();
+        crate::http_mount::check_other_keys(pipeline.url_tokens.as_ref(), &[public])?;
+    }
     if let Some(role) = args.authorizer_role {
         pipeline.authorizer_role = match role {
             AuthorizerRoleArg::Check => AuthorizerRole::Check,

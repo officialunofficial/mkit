@@ -93,13 +93,13 @@ pub fn http_request_from_worker(
     mut keep_header: impl FnMut(&str) -> bool,
 ) -> Result<http::Request<Full<Bytes>>> {
     let method = to_http_method(req.method());
-    let uri = req.url()?.to_string();
+    let uri = req.inner().url();
 
     let mut http_req = http::Request::builder()
         .method(method)
         .uri(uri)
         .body(Full::new(body))
-        .map_err(|e| worker::Error::RustError(format!("build http request: {e}")))?;
+        .map_err(|_| worker::Error::RustError("invalid HTTP request URL".into()))?;
 
     copy_headers_filtered(
         req.headers().entries(),
