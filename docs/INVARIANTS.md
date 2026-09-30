@@ -2195,3 +2195,24 @@ set removes the role-reconstruction cost recorded in
 [the historical WP-5.5a escalation](plans/mkit-server/wp-5-5a-escalation.md#resolved-by-the-revised-r-200-added-pack-ruling).
 Full classification, async holds and unrestricted multi-batch inspection remain
 deferred to WP-5.5c; the durable marker belongs to WP-5.5a-0.
+
+## Publication rechecks retain bounded progress
+
+**Always:** timer 12 persists its next unchecked or unsatisfied routed witness position in
+its existing row, bound to the full retained advance plus publication generation
+and deletion boundary. Each fire makes at most 128 routed witness calls and
+stops before the shared Worker alarm budget is exhausted. Checkpoints and
+completion guard the advance, publication state and original timer row together.
+Local mutable witnesses are re-read each fire. Missing witnesses, outstanding
+obligations, holds and hits never authorize completion.
+
+**Because:** a valid D34 packmap may require more routed witness reads than one
+alarm permits, and restarting every check can leave it permanently pending.
+
+**If violated:** publication stalls, or stale progress skips a dependency after
+an obligation or generation change.
+
+**Enforced by:** `timers/publication_recheck.rs`, Worker shared alarm registration,
+and the publication recheck regressions. No tag, timer kind, public protocol,
+packmap limit or whole-alarm budget changes. Pre-launch timer codecs are reset,
+not migrated (R-198 B1).

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: publication timer 12 resumes bounded dependency checks across alarms
+  and restarts after guarded obligation, dependency or generation changes.
+  Valid large D34 packmaps no longer stall at the whole-alarm call limit.
+  Its internal timer-value codec changes; reset unsupported pre-launch stores.
+
 - Docs (WP-5.6a-2/3, R-190): specify finite root sweeps and support Any denial/
   preservation with incomplete discovery pending the post-launch catalog.
   Distinguish verified preservation from unresolved completion; require byte-free
