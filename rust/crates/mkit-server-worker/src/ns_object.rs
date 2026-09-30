@@ -11,7 +11,7 @@
 
 use core::future::Future;
 use mkit_server::sql::SqlError;
-use mkit_server::sql::{SqlConn, SqlKvStore};
+use mkit_server::sql::{SqlConn, SqlKvStore, TimerCursor};
 use mkit_server::storage_error::StorageOp;
 use mkit_server::store::export_page;
 use mkit_server::telemetry::{
@@ -126,12 +126,16 @@ impl<C: SqlConn> PressureStore<C> {
         self.inner.conn()
     }
 
-    /// Earliest timer per partition for the Durable Object alarm driver.
+    /// A bounded raw timer-index window for the physical alarm driver.
     ///
     /// # Errors
     /// Failed queries or corrupt timer rows.
-    pub fn timer_heads(&self) -> Result<Vec<(Partition, u64)>, StoreError> {
-        self.inner.timer_heads()
+    pub fn timer_window(
+        &self,
+        after: Option<&TimerCursor>,
+        limit: u32,
+    ) -> Result<Vec<TimerCursor>, StoreError> {
+        self.inner.timer_window(after, limit)
     }
 
     /// Forget logical stats cached by the underlying store.
@@ -588,12 +592,14 @@ mod object {
     use std::sync::Arc;
 
     use mkit_server::Clock;
-    use mkit_server::sql::{Capacity, SqlKvStore};
-    use mkit_server::timers::{TickBudget, TimerRegistry, run_due};
+    use mkit_server::sql::{Capacity, SqlKvStore, TimerCursor};
+    use mkit_server::timers::{TickBudget, TimerRegistry};
     use worker::{Method, Request, Response, ScheduledTime, State, Storage};
 
     use super::{PressureStore, decode_request, dispatch, encode, failure};
-    use crate::alarm::{AlarmAction, alarm_after_put, alarm_after_tick_with_dirty};
+    use crate::alarm::{
+        AlarmAction, alarm_after_put, alarm_after_tick_with_dirty, run_physical_alarm,
+    };
     use crate::classes::ShardClass;
     use crate::clock::WorkerClock;
     use crate::do_sql::{DO_CAPACITY, DoSqlConn};
@@ -622,6 +628,8 @@ mod object {
         backup_interval_ms: Option<u64>,
         /// A request committed a timer Put while an alarm handler awaited R2.
         alarm_dirty: Cell<bool>,
+        /// Volatile raw-index rotation; durable retry keys survive cold starts.
+        timer_cursor: Cell<Option<TimerCursor>>,
         #[cfg(feature = "published-view")]
         snapshot_alarm: Option<crate::published_view::SnapshotAlarm>,
         alarm_budget: Option<mkit_server::purge::SliceBudget>,
@@ -658,6 +666,7 @@ mod object {
                 registry: TimerRegistry::new(),
                 backup_interval_ms: None,
                 alarm_dirty: Cell::new(false),
+                timer_cursor: Cell::new(None),
                 #[cfg(feature = "published-view")]
                 snapshot_alarm: None,
                 alarm_budget: None,
@@ -812,24 +821,19 @@ mod object {
                 alarm.reset();
             }
             let store = self.store().map_err(|error| alarm_error(&error))?;
-            let heads = store.timer_heads().map_err(|error| alarm_error(&error))?;
             let now = self.now_ms();
-            let mut next_wake = None;
-            for (partition, _) in heads {
-                let report = run_due(
-                    store,
-                    &partition,
-                    &self.registry,
-                    &self.clock,
-                    now,
-                    &TickBudget::default(),
-                )
-                .await
-                .map_err(|error| alarm_error(&error))?;
-                if let Some(next) = report.next_wake_ms {
-                    next_wake = Some(next_wake.map_or(next, |current: u64| current.min(next)));
-                }
-            }
+            let mut cursor = self.timer_cursor.take();
+            let result = run_physical_alarm(
+                store,
+                &self.registry,
+                &self.clock,
+                now,
+                TickBudget::default(),
+                &mut cursor,
+            )
+            .await;
+            self.timer_cursor.set(cursor);
+            let report = result.map_err(|error| alarm_error(&error))?;
             let current = self.storage.get_alarm().await?;
             // A request can interleave while a backup awaits R2. Its timer
             // Put must survive this handler's final set/delete decision.
@@ -838,7 +842,7 @@ mod object {
             // alarm, rather than rearming the timestamp it is completing.
             let action = alarm_after_tick_with_dirty(
                 current,
-                next_wake,
+                report.next_wake_ms,
                 self.now_ms(),
                 self.alarm_dirty.get(),
             );

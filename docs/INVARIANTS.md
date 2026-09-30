@@ -1198,6 +1198,26 @@ cancellation must not hide a durable timer from the native driver.
 **Enforced by:** `mkit-server/src/timers/tests.rs` race and atomicity tests,
 `mkit-server-native/tests/timers.rs`, and the worker's pure alarm tests.
 
+## Physical timer alarms share bounds and retain cold fairness
+
+**Always:** Worker raw timer enumeration and every logical head share one
+512-row, 128-commit, 32-attempt-per-kind and 10-second injected-clock allowance.
+Enumeration uses bounded indexed raw windows. A volatile cursor rotates warm
+work; guarded failed/unknown-row moves persist capped exponential backoff for
+cold fairness. Retry moves preserve opaque payloads and original handler due
+times, never waive work, and require an absent destination.
+
+**Because:** a frozen Worker clock and repeated isolate restarts cannot bound
+unlimited head enumeration or prevent retained failures from pinning a window.
+
+**If violated:** one physical alarm can exceed its limits, or later durable work
+can remain permanently hidden behind failing or unknown rows.
+
+**Enforced by:** `timers::TickState`, `timers::run_due_with_state`,
+`mkit-server-worker::alarm::run_physical_alarm`, SQL indexed window/VM-step tests,
+and timer/alarm regressions for aggregate bounds, cold restarts and retained rows.
+See [the implementation contract](plans/mkit-server/timer-alarm-bounds.md).
+
 ## Worker shard classes reject foreign partition kinds
 
 **Always:** each Durable Object class accepts only its assigned partition kinds

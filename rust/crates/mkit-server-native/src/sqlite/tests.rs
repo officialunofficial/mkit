@@ -11,15 +11,20 @@ use futures::StreamExt as _;
 use futures::executor::block_on;
 use mkit_server::sql::{
     Capacity, DEFAULT_PAGE_SIZE, MAX_BOUND_PARAMS, SqlConn, SqlError, SqlKvStore, SqlValue,
-    TIMER_HEADS, TxFn, batch_growth_bytes, reserve_floor, schema,
+    TIMER_WINDOW_AFTER, TIMER_WINDOW_START, TimerCursor, TxFn, batch_growth_bytes, reserve_floor,
+    schema,
 };
 use mkit_server::store::{
     EXPORT_END, ExportReader, ImportMode, codec, encode_export_header, encode_export_record,
     export_partition, import_stream, keys,
 };
+use mkit_server::timers::{
+    DueTimer, Fired, RETRY_BACKOFF_MS, TickBudget, TimerCtx, TimerHandler, TimerKind,
+    TimerRegistry, registry::kinds, run_due,
+};
 use mkit_server::{
-    Batch, BatchOutcome, Key, MAX_BATCH_OPS, MAX_KEY_BYTES, NamespaceStore, Partition,
-    Precondition, Redacted, StoreError, StoreMaintenance, Value,
+    Batch, BatchOutcome, BoxFuture, Key, MAX_BATCH_OPS, MAX_KEY_BYTES, ManualClock, NamespaceStore,
+    Partition, Precondition, Redacted, StoreError, StoreMaintenance, Value,
 };
 
 use super::RusqliteConn;
@@ -77,16 +82,19 @@ fn timer_index_migrates_v1_and_reopening_is_idempotent() {
 }
 
 #[test]
-fn timer_heads_returns_minimum_per_partition() {
+fn timer_windows_return_raw_rows_in_key_and_partition_order() {
     let store = SqlKvStore::open(RusqliteConn::open_in_memory().unwrap()).unwrap();
-    assert!(store.timer_heads().unwrap().is_empty());
-    for (partition, due) in [(ns("a"), 90), (ns("b"), 20), (ns("a"), 10)] {
+    assert!(store.timer_window(None, 2).unwrap().is_empty());
+    let mut expected = Vec::new();
+    for (partition, due) in [(ns("a"), 90), (ns("b"), 20), (ns("a"), 20), (ns("a"), 10)] {
+        let key = keys::timer(due, 1, b"ref");
         apply(
             &store,
             &partition,
-            Batch::new().put(keys::timer(due, 1, b"ref"), v("timer")),
+            Batch::new().put(key.clone(), v("timer")),
         )
         .unwrap();
+        expected.push(TimerCursor { key, partition });
     }
     apply(
         &store,
@@ -94,13 +102,20 @@ fn timer_heads_returns_minimum_per_partition() {
         Batch::new().put(k("not-a-timer"), v("ref")),
     )
     .unwrap();
-    let mut heads = store.timer_heads().unwrap();
-    heads.sort();
-    assert_eq!(heads, vec![(ns("a"), 10), (ns("b"), 20)]);
+    expected.sort_by(|left, right| {
+        (&left.key, left.partition.encode().unwrap())
+            .cmp(&(&right.key, right.partition.encode().unwrap()))
+    });
+    let first = store.timer_window(None, 2).unwrap();
+    assert_eq!(first, expected[..2]);
+    let second = store.timer_window(first.last(), 2).unwrap();
+    assert_eq!(second, expected[2..]);
+    assert!(store.timer_window(second.last(), 2).unwrap().is_empty());
+    assert_eq!(store.timer_window(None, 2).unwrap(), first);
 }
 
 #[test]
-fn timer_heads_query_plan_uses_partial_index() {
+fn timer_window_query_plans_use_the_partial_index_without_aggregation() {
     let conn = RusqliteConn::open_in_memory().unwrap();
     let store = SqlKvStore::open(conn.clone()).unwrap();
     apply(
@@ -109,15 +124,159 @@ fn timer_heads_query_plan_uses_partial_index() {
         Batch::new().put(keys::timer(10, 1, b"ref"), v("timer")),
     )
     .unwrap();
-    let plan = conn
-        .query(&format!("EXPLAIN QUERY PLAN {TIMER_HEADS}"), &[])
-        .unwrap();
-    assert!(
-        plan.iter()
+    let after = store.timer_window(None, 1).unwrap().pop().unwrap();
+    let statements = [
+        (TIMER_WINDOW_START, vec![SqlValue::Integer(7)]),
+        (
+            TIMER_WINDOW_AFTER,
+            vec![
+                SqlValue::Blob(after.key.as_bytes().to_vec()),
+                SqlValue::Blob(after.partition.encode().unwrap().to_vec()),
+                SqlValue::Integer(7),
+            ],
+        ),
+    ];
+    for (statement, params) in statements {
+        assert!(!statement.contains("GROUP BY"));
+        assert!(!statement.contains("MIN("));
+        assert!(statement.contains("LIMIT"));
+        let plan = conn
+            .query(&format!("EXPLAIN QUERY PLAN {statement}"), &params)
+            .unwrap();
+        let details = plan
+            .iter()
             .flatten()
-            .any(|value| matches!(value, SqlValue::Text(detail) if detail.contains("kv_timers"))),
-        "timer heads index unused: {plan:?}"
+            .filter_map(|value| match value {
+                SqlValue::Text(detail) => Some(detail.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            details.iter().any(|detail| detail.contains("kv_timers")),
+            "timer window index unused: {plan:?}"
+        );
+        assert!(
+            !details.iter().any(|detail| detail.contains("TEMP B-TREE")),
+            "timer window sorts outside its index: {plan:?}"
+        );
+        if statement == TIMER_WINDOW_AFTER {
+            assert!(
+                details.iter().any(|detail| detail.contains("SEARCH")),
+                "timer window does not seek after its cursor: {plan:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn timer_window_frozen_rows_in_one_partition_are_read_in_hard_limited_windows() {
+    let conn = TestConn::memory();
+    let store = SqlKvStore::open(conn.clone()).unwrap();
+    let partition = ns("frozen");
+    let mut expected = Vec::new();
+    for position in 0_u32..1_301 {
+        let key = keys::timer(1_000_000, 250, &position.to_be_bytes());
+        apply(
+            &store,
+            &partition,
+            Batch::new().put(key.clone(), v("pending")),
+        )
+        .unwrap();
+        expected.push(TimerCursor {
+            key,
+            partition: partition.clone(),
+        });
+    }
+    conn.knobs.statements.lock().unwrap().clear();
+    let first = store.timer_window(None, 17).unwrap();
+    assert_eq!(first, expected[..17]);
+    let next = store.timer_window(first.last(), 17).unwrap();
+    assert_eq!(next, expected[17..34]);
+    assert_eq!(
+        *conn.knobs.statements.lock().unwrap(),
+        vec![TIMER_WINDOW_START, TIMER_WINDOW_AFTER]
     );
+    let mut all = Vec::new();
+    let mut after = None;
+    loop {
+        let window = store.timer_window(after.as_ref(), 17).unwrap();
+        assert!(window.len() <= 17);
+        if window.is_empty() {
+            break;
+        }
+        after = window.last().cloned();
+        all.extend(window);
+    }
+    assert_eq!(
+        all, expected,
+        "a full same-partition window must advance by its raw key"
+    );
+}
+
+#[test]
+fn timer_window_vm_work_stays_bounded_after_many_keys_and_tied_partitions() {
+    fn measured_query(conn: &RusqliteConn, statement: &str, params: &[SqlValue]) -> (usize, i32) {
+        let shared = conn.shared.lock();
+        let mut statement = shared.conn.prepare(statement).unwrap();
+        let count = {
+            let mut rows = statement
+                .query(rusqlite::params_from_iter(super::bind(params)))
+                .unwrap();
+            let mut count = 0;
+            while rows.next().unwrap().is_some() {
+                count += 1;
+            }
+            count
+        };
+        (
+            count,
+            statement.get_status(rusqlite::StatementStatus::VmStep),
+        )
+    }
+
+    for tied_keys in [false, true] {
+        let conn = RusqliteConn::open_in_memory().unwrap();
+        let store = SqlKvStore::open(conn.clone()).unwrap();
+        let mut positions = Vec::new();
+        for position in 0_u32..2_001 {
+            let partition = if tied_keys {
+                ns(&format!("p{position:04}"))
+            } else {
+                ns("frozen")
+            };
+            let reference = if tied_keys { 0 } else { position };
+            let key = keys::timer(1_000_000, 250, &reference.to_be_bytes());
+            apply(
+                &store,
+                &partition,
+                Batch::new().put(key.clone(), v("pending")),
+            )
+            .unwrap();
+            positions.push(TimerCursor { key, partition });
+        }
+        let (count, steps) = measured_query(&conn, TIMER_WINDOW_START, &[SqlValue::Integer(1)]);
+        assert_eq!(count, 1);
+        assert!(
+            steps < 1_000,
+            "initial one-row window consumed {steps} VM steps"
+        );
+        let after = &positions[1_999];
+        assert_eq!(
+            store.timer_window(Some(after), 1).unwrap(),
+            positions[2_000..]
+        );
+        let params = [
+            SqlValue::Blob(after.key.as_bytes().to_vec()),
+            SqlValue::Blob(after.partition.encode().unwrap().to_vec()),
+            SqlValue::Integer(1),
+        ];
+        let (count, steps) = measured_query(&conn, TIMER_WINDOW_AFTER, &params);
+        assert_eq!(count, 1);
+        assert!(
+            steps < 1_000,
+            "resumed one-row window consumed {steps} VM steps (tied keys: {tied_keys})"
+        );
+    }
 }
 
 fn apply<C: SqlConn>(
@@ -533,6 +692,153 @@ fn soft_limit_refuses_puts_below_the_hard_cap() {
     assert_eq!(all(&s, &p).len(), n - n / 2);
     // Freed pages bring the store back under the soft limit.
     apply(&s, &p, Batch::new().put(k("x"), v("1"))).unwrap();
+}
+
+fn timer_at_soft_limit(kind: u8, payload: Value) -> (SqlKvStore<RusqliteConn>, Partition, Key) {
+    let conn = RusqliteConn::open_in_memory().unwrap();
+    let seed = SqlKvStore::open(conn.clone()).unwrap();
+    let partition = ns("timer-soft-limit");
+    let key = keys::timer(0, kind, b"retained");
+    assert_eq!(
+        apply(&seed, &partition, Batch::new().put(key.clone(), payload)).unwrap(),
+        BatchOutcome::Committed
+    );
+    let used = conn.size_bytes().unwrap();
+    let reserve = reserve_floor(DEFAULT_PAGE_SIZE);
+    let capacity = Capacity::new(used + reserve).with_reserve(reserve);
+    let store = SqlKvStore::open_with_capacity(conn.clone(), capacity).unwrap();
+    assert_eq!(conn.size_bytes().unwrap(), capacity.soft_limit());
+    assert!(matches!(
+        apply(
+            &store,
+            &partition,
+            Batch::new().put(k("new-data"), v("ref"))
+        ),
+        Err(StoreError::Full)
+    ));
+    (store, partition, key)
+}
+
+#[test]
+fn timer_relay_reschedule_remains_immediate_at_sqlite_soft_limit() {
+    struct Reschedule;
+    impl<S: NamespaceStore> TimerHandler<S> for Reschedule {
+        fn kind(&self) -> TimerKind {
+            kinds::RELAY
+        }
+        fn fire<'a>(
+            &'a self,
+            ctx: &'a TimerCtx<'a, S>,
+            _timer: &'a DueTimer,
+        ) -> BoxFuture<'a, Result<Fired, StoreError>> {
+            Box::pin(async move {
+                Ok(Fired::Reschedule {
+                    due_at_ms: ctx.now_ms + 1,
+                    value: Value::default(),
+                    batch: Batch::new(),
+                })
+            })
+        }
+    }
+
+    let (store, partition, old) = timer_at_soft_limit(kinds::RELAY.get(), Value::default());
+    let registry = TimerRegistry::new().register(Reschedule);
+    let report = block_on(run_due(
+        &store,
+        &partition,
+        &registry,
+        &ManualClock::new(0),
+        0,
+        &TickBudget::default(),
+    ))
+    .unwrap();
+    assert_eq!((report.fired, report.failed, report.raced), (1, 0, 0));
+    assert_eq!(report.next_wake_ms, Some(1));
+    assert!(block_on(store.get(&partition, &old)).unwrap().is_none());
+    let next = keys::timer(1, kinds::RELAY.get(), b"retained");
+    assert_eq!(
+        block_on(store.get(&partition, &next)).unwrap(),
+        Some(Value::default())
+    );
+    assert_eq!(
+        store.timer_window(None, 2).unwrap(),
+        vec![TimerCursor {
+            key: next,
+            partition: partition.clone()
+        }]
+    );
+    assert!(matches!(
+        apply(
+            &store,
+            &partition,
+            Batch::new().put(k("new-data"), v("ref"))
+        ),
+        Err(StoreError::Full)
+    ));
+}
+
+#[test]
+fn timer_unknown_and_failed_handlers_back_off_at_sqlite_soft_limit() {
+    struct Fails;
+    impl<S: NamespaceStore> TimerHandler<S> for Fails {
+        fn kind(&self) -> TimerKind {
+            TimerKind::new(0xfd)
+        }
+        fn fire<'a>(
+            &'a self,
+            _ctx: &'a TimerCtx<'a, S>,
+            _timer: &'a DueTimer,
+        ) -> BoxFuture<'a, Result<Fired, StoreError>> {
+            Box::pin(async { Err(StoreError::unavailable("injected handler failure")) })
+        }
+    }
+
+    for registered in [false, true] {
+        let kind = if registered { 0xfd } else { 0xfe };
+        let payload = Value::new(b"opaque work survives the retry".to_vec());
+        let (store, partition, old) = timer_at_soft_limit(kind, payload.clone());
+        let registry = if registered {
+            TimerRegistry::new().register(Fails)
+        } else {
+            TimerRegistry::new()
+        };
+        let report = block_on(run_due(
+            &store,
+            &partition,
+            &registry,
+            &ManualClock::new(0),
+            0,
+            &TickBudget::default(),
+        ))
+        .unwrap();
+        assert_eq!(report.fired, 0);
+        assert_eq!(report.raced, 0);
+        assert_eq!(report.failed, u32::from(registered));
+        assert_eq!(report.unknown, u32::from(!registered));
+        assert_eq!(report.next_wake_ms, Some(RETRY_BACKOFF_MS));
+        assert!(block_on(store.get(&partition, &old)).unwrap().is_none());
+        let next = keys::timer_retry(RETRY_BACKOFF_MS, kind, b"retained", 0, 1);
+        assert_eq!(
+            block_on(store.get(&partition, &next)).unwrap(),
+            Some(payload)
+        );
+        assert_eq!(keys::timer_retry_state(&next), Some((0, 1)));
+        assert_eq!(
+            store.timer_window(None, 2).unwrap(),
+            vec![TimerCursor {
+                key: next,
+                partition: partition.clone()
+            }]
+        );
+        assert!(matches!(
+            apply(
+                &store,
+                &partition,
+                Batch::new().put(k("new-data"), v("ref"))
+            ),
+            Err(StoreError::Full)
+        ));
+    }
 }
 
 #[test]
