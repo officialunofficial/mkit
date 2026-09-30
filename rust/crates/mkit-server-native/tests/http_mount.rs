@@ -799,6 +799,7 @@ async fn redirects_are_explicit_and_relative_and_proofs_never_redirect() {
                 "application/vnd.mkit.disclosure"
             );
             assert_eq!(response.headers()["accept-ranges"], "none");
+            assert!(!response.headers().contains_key("content-disposition"));
             assert!(!response.headers().contains_key("location"));
         }
     }
@@ -1138,6 +1139,7 @@ async fn native_object_proofs_verify_blob_root_and_canonical_manifest() {
             "application/vnd.mkit.disclosure"
         );
         assert_eq!(response.headers()["accept-ranges"], "none");
+        assert!(!response.headers().contains_key("content-disposition"));
         assert!(!response.headers().contains_key("content-range"));
         assert!(!response.headers().contains_key("location"));
         proof_metadata(&response, commit, leaf, ty, "object");
@@ -1262,6 +1264,7 @@ async fn native_range_proofs_verify_plain_single_and_cross_chunk_exact_edges() {
         };
         assert_eq!(response.headers()["content-type"], media);
         assert_eq!(response.headers()["accept-ranges"], "none");
+        assert!(!response.headers().contains_key("content-disposition"));
         assert!(!response.headers().contains_key("content-range"));
         assert!(!response.headers().contains_key("location"));
         let selector = format!("range-{start}-{end}");
@@ -1720,5 +1723,70 @@ impl HttpAdmission for GoldenAdmission {
                 allowed
             })
         })
+    }
+}
+
+#[path = "../../../tests/fixtures/http_content_headers.rs"]
+mod content_headers_fixture;
+
+#[tokio::test]
+async fn native_content_header_wire_vectors_hold() {
+    let (pipe, prefix, object) = content_headers_fixture::fixture().await;
+    let router = build_router(Arc::new(pipe), &options(&[]));
+    let vectors: serde_json::Value =
+        serde_json::from_str(content_headers_fixture::VECTORS).unwrap();
+    for case in vectors["cases"].as_array().unwrap() {
+        let path = format!("{prefix}files/{}", case["path"].as_str().unwrap());
+        for method in ["GET", "HEAD"] {
+            for ranged in [false, true] {
+                let headers = if ranged {
+                    vec![("range", "bytes=1-2")]
+                } else {
+                    vec![]
+                };
+                let response = request(&router, method, &path, &headers).await;
+                assert_eq!(
+                    response.status().as_u16(),
+                    if ranged { 206 } else { 200 },
+                    "{path}"
+                );
+                assert_eq!(
+                    response.headers()["content-type"],
+                    case["media"].as_str().unwrap(),
+                    "{path}"
+                );
+                assert_eq!(
+                    response.headers()["content-disposition"],
+                    case["disposition"].as_str().unwrap(),
+                    "{path}"
+                );
+                assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+                assert_eq!(
+                    response.headers()["content-security-policy"],
+                    "sandbox; default-src 'none'"
+                );
+                assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+                let expected = if method == "HEAD" {
+                    b"".as_slice()
+                } else if ranged {
+                    &content_headers_fixture::CONTENT[1..3]
+                } else {
+                    content_headers_fixture::CONTENT
+                };
+                assert_eq!(body(response).await, expected);
+            }
+        }
+    }
+    let response = request(&router, "GET", &format!("{prefix}chunked.PDF"), &[]).await;
+    assert_eq!(response.headers()["content-type"], "application/pdf");
+    assert_eq!(
+        response.headers()["content-disposition"],
+        "inline; filename=\"chunked.PDF\"; filename*=UTF-8''chunked.PDF"
+    );
+    assert_eq!(body(response).await, content_headers_fixture::CONTENT);
+    for path in [object, prefix.clone(), format!("{prefix}files")] {
+        let response = request(&router, "GET", &path, &[]).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!response.headers().contains_key("content-disposition"));
     }
 }

@@ -552,6 +552,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
                 }
             }
         };
+        let filename = match (&parsed.target, ty, proof.is_none()) {
+            (Target::Ref { path, .. }, ObjectType::Blob | ObjectType::ChunkedBlob, true) => {
+                path.last().map(Vec::as_slice)
+            }
+            _ => None,
+        };
+        let file_headers = filename.map(crate::http_objects::content_headers::media_type);
         let mut response = HttpObjectResponse::new(if window.is_some() { 206 } else { 200 })
             .with_header(
                 "Accept-Ranges",
@@ -573,7 +580,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
                     Some(p) if p.span => "application/vnd.mkit.disclosure-span",
                     Some(_) => "application/vnd.mkit.disclosure",
                     None => match ty {
-                        ObjectType::Blob | ObjectType::ChunkedBlob => "application/octet-stream",
+                        ObjectType::Blob | ObjectType::ChunkedBlob => {
+                            file_headers.map_or("application/octet-stream", |(media, _)| media)
+                        }
                         _ => "application/vnd.mkit.object",
                     },
                 },
@@ -581,6 +590,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         if let (Some((start, end)), Some(leaf)) = (window, &leaf) {
             response =
                 response.with_header("Content-Range", format!("bytes {start}-{end}/{}", leaf.len));
+        }
+        if let (Some(name), Some((_, kind))) = (filename, file_headers) {
+            response = response.with_header(
+                "Content-Disposition",
+                crate::http_objects::content_headers::disposition(name, kind),
+            );
         }
         response.headers.extend(success);
         response.headers.extend(admitted.headers);
