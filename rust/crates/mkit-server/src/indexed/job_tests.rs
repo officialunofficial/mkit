@@ -343,6 +343,7 @@ impl Rig {
             *n
         };
         let ticket = TicketV1 {
+            authority_generation: None,
             repo: self.repo.name.clone(),
             ref_name: "refs/heads/main".into(),
             signer: [3; 32],
@@ -1599,6 +1600,8 @@ fn index_rows_reach_their_shards_before_verified_under_a_renewed_source_lease() 
     .unwrap();
     // An expired lease: the timer has to renew it through the D-1 seam.
     let stale = codec::EpochLease {
+        authority_ready: None,
+        authority_generation: None,
         epoch: 0,
         expires_at_ms: u64::try_from(NOW).unwrap() - 1,
         config_version: 1,
@@ -1678,6 +1681,8 @@ impl NamespaceStore for Rival {
         );
         if relay && self.armed.swap(false, Ordering::SeqCst) {
             let rival = codec::EpochLease {
+                authority_ready: None,
+                authority_generation: None,
                 epoch: 9,
                 expires_at_ms: u64::try_from(NOW).unwrap() + 3_600_000,
                 config_version: 1,

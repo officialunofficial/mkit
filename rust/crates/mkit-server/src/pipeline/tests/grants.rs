@@ -832,13 +832,11 @@ fn single_open_ignores_the_grant_header() {
         policy_hooks(false),
         clock,
     );
-    assert!(
-        e.update(
-            &request(&key(2), REPO, 24, Some("malformed")),
-            &upd(HEAD, Any, A)
-        )
-        .is_ok()
-    );
+    e.update(
+        &request(&key(2), REPO, 24, Some("malformed")),
+        &upd(HEAD, Any, A),
+    )
+    .unwrap();
 }
 
 /// Multi/Owner without a grant configuration denies any grant header.

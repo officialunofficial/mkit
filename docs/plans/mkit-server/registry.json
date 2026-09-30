@@ -1941,13 +1941,25 @@
     ]
   },
   {
+    "id": "4.10b-multipart",
+    "title": "Worker: root-verified bounded backend multipart completion",
+    "milestone": "M4",
+    "track": "worker",
+    "depends_on": ["4.8", "4.10"],
+    "size": "M",
+    "summary": "Server-owned immutable root/CV plans and verified backend part receipts permit bounded R2 completion before visibility; prerequisite of checkpointed extraction (R-192). No extraction/holder or activation behavior is enabled.",
+    "human_action": false,
+    "area_gates": ["rust", "wasm", "workers", "conf-wrangler"]
+  },
+  {
     "id": "4.10b",
     "title": "Worker: extraction slices and content relay hook",
     "milestone": "M4",
     "track": "worker",
     "depends_on": [
       "4.8",
-      "4.10"
+      "4.10",
+      "4.10b-multipart"
     ],
     "size": "L",
     "summary": "Runs 4.10's extraction as checkpointed alarm slices before the Worker's Verified write, with R2 multipart for large objects, a content RelayHook that rewrites `h` puts into HolderV1 with a `c` guard, the relay blocklist check (SPEC-SERVER \u00a714.2) and hold lifetime across relay lag (R-163). Stage 2.",

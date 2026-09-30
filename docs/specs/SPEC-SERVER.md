@@ -425,6 +425,113 @@ never 402, whatever `Deny.code` says, as STC §5 requires for an
 admission denial. The public-message sanitation rule above applies
 to denials from all three hooks.
 
+### 6.2.1 Optional namespace authority-generation fence
+
+A deployment MAY enable an independent, monotonically increasing unsigned
+64-bit authority generation per namespace. It MUST be disabled by default,
+require the Authority authorizer role and transactional storage, and MUST NOT
+reuse grant epochs or make them apply to external-authority writes.
+
+When enabled, every Authority allowance for a write MUST carry
+`authority_generation`, including zero. Missing or invalid facts MUST fail
+closed. Trusted Authority facts MUST survive admission, planning and retries;
+the established owner and grant facts MUST remain intact. Final acceptance
+MUST atomically compare those facts with the authoritative generation, or with
+the guarded shard lease's authority generation. A mismatch MUST return
+`permission_denied`, accept nothing, consume no tickets, and abort any admission
+reservation. This covers ref advances/deletes, ticketless upload acceptance,
+reserved `BeginUpload`, and authority envelope visibility writes. Upload tickets
+MUST bind the generation; ticket-only uploads and multipart operations MUST
+reject stale generations before staging additional bytes and before completion.
+Client-frame validation MUST remain independent of storage-write checkpoints.
+Implementations MAY privately coalesce frames in a bounded 256 KiB buffer;
+private buffering is not backend staging. Each actual staging write MUST check
+the authoritative generation before and after its backend await. Completion,
+authenticated part receipts, and verification markers retain their independent
+final checks. A revoked stream MUST stage no subsequent checkpoint or succeed
+at completion; an already in-flight checkpoint may leave unaccepted shared bytes.
+For the Worker 64 MiB single-upload limit this requires at most 512 routed
+staging checks plus five opening/finalization checks, regardless of framing.
+The default 8 MiB part requires at most 64 staging checks plus four receipt
+boundary checks; multipart completion independently requires three checks.
+Already accepted inspection/publication work is not cancelled by this fence.
+
+`GetAuthorityGeneration` and `SetAuthorityGeneration` are namespace-level RPCs
+outside auth-v2 envelopes. Disabled deployments MUST reject them. The setter
+MUST authorize a bounded canonical statement using a configured, dedicated
+Ed25519 deployment-authority key with explicit permission for the namespace;
+a namespace-owner key alone MUST NOT authorize it. Keys MUST differ from hook,
+accepted ticket, and active or retired URL-token keys.
+
+The wire statement is `<base64url(bytes)>.<base64url(signature)>`, both unpadded
+and canonical, at most 2,048 ASCII bytes. The signed UTF-8 bytes are exactly eight
+LF-separated fields, without a final LF, in this order: literal
+`mkit-authority-generation:v1`, key id (`[A-Za-z0-9._-]{1,64}`), canonical
+namespace, generation, canonical deployment audience, created milliseconds,
+expiry milliseconds, and nonce (64 lowercase hexadecimal characters). Decimal
+integers MUST have canonical unsigned representation. The signature is strict
+Ed25519 over BLAKE3 of those bytes. Expiry MUST exceed creation by at most
+300,000 milliseconds; the statement MUST be unexpired and creation MUST be no
+more than 30,000 milliseconds ahead of the verifier's clock. The key configuration
+MUST reject weak or duplicate public keys and namespace-owner keys for any of
+its permitted Ed25519 namespaces.
+
+The target MUST equal the stored generation (idempotent completion retry), or
+increase it by at most 1,024 without overflow. Rollback MUST be rejected. The
+nonce binds the authorization, but is not a single-use token: repeated valid
+statements for the same target MUST resume completion, including after restart.
+A caller MAY refresh an expired statement for the same target. Reusing a nonce
+cannot authorize a different target or namespace without a new signature.
+
+Generation changes MUST serialize with lease grants. Durable leases MUST carry
+both independent generations and acknowledgements; pushes MUST precede their
+acknowledgements, and renewing a live row MUST preserve each acknowledgement.
+Completion MUST wait for every old leased shard to acknowledge or expire,
+including cache/recovery holdoffs. Completion scans MUST remain bounded independently of elapsed clock time and use
+independent checkpoints for grant and authority barriers. Each slice reads at most
+eight pages of four rows and attempts at most four pushes; each push makes one
+attempt. A setter attempts at most one slice. Pending counts are
+conservative lower bounds, including one when an unscanned suffix remains. A pending setter MUST
+return `unavailable` with a `Retry-After` header in delay-seconds. Sharded batches
+MUST retain backend-evaluated
+`NotAfter(min(lease_expires - margin, plan_time + MAX_APPLY_WINDOW))`.
+After setter success, no older-generation acceptance may commit. Returning a
+previously committed replay result performs no new acceptance. An executor that
+cannot decode generation-bearing leases MUST NOT serve a fenced deployment.
+
+Activation MUST durably persist the authority mode and `ag = 0` atomically,
+without creating a business namespace or suppressing first-write admission and
+creation charges. Before the first fenced acceptance, it MUST finish the shared
+initial barrier, including old generation-zero leases. Activation MAY return
+bounded `unavailable` with `Retry-After: 1` while that barrier is pending. The
+optional authority mode and ready state live in the already-read `lr` record;
+a pure activation marker has no actual recovery timestamp, holdoff or
+watermark-reconciliation meaning. Fenced lease grants copy the ready state only
+after this barrier. Legacy records omit these fields and retain their encoding.
+An executor with fencing disabled MUST refuse generation-bearing leases or
+tickets and persisted namespace fence mode, including generation zero. It MUST
+NOT convert those records into unfenced grants. Truly unfenced records remain
+usable. Legacy tickets require one bounded authoritative mode read; ticket-only
+staging and completion revalidate after backend awaits before returning success.
+A retained shared pack or proof marker MUST NOT permit a stale ticket to create
+repository membership.
+
+Bounded scan progress MUST survive separate executor instances. Coordinator
+`fc 00 00` and `fc 00 01` hold independent version-one grant/authority cursors,
+bound to the exact generation and recovery/mode observation. Saves and resets
+MUST guard their prior value, generation and recovery/mode row. A failed push
+MUST retain the earliest unresolved prefix. Completion MUST revalidate current
+coordinator state and successfully guard the final cursor reset. Recovery and
+portable restore MUST invalidate cursors, preserve authority mode and generation,
+and refuse reconstruction or rollback of missing authoritative fence state.
+The setter's conservative metadata-call ceiling is 43, including three CAS
+transition attempts, activation, eight scan pages, four single-attempt pushes,
+cursor load/save and final validation; it does not require a Paid Worker plan.
+
+The authority service must stop delegate authorization, persist its target,
+complete this barrier, then acknowledge revocation. Re-enrolling an identical
+key requires fresh keys or incarnation/operation binding in that service.
+
 ### 6.3 Admit
 
 `AdmitRequest` supplies the operation after authorization and the
@@ -3384,6 +3491,8 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Authority-ticket streams use bounded physical-byte checkpoints independent of client framing, retaining pre/post staging and final acceptance checks (§6.2.1; WP-2.16). |
+| 1 | draft | Optional independent namespace authority generations, deployment-authority statements, lease completion and ticket fencing (§6.2.1; WP-2.16). |
 | `1` (WP-3.13) | draft | §6.3 preserves repeated challenge order while allowing RFC 9110 combination on platforms that fold fields; mirrors STC §5.1. |
 | 1 | draft | §9.7 clarifications: rules intersect, a packmap is covered through its head, a missing auth v2 signer denies, ancestry semantics and bounds, and the allowed-signer set MAY be checked before verification and at `BeginUpload`; §9.3 requires a ticketless indexed head to be a member commit, remix or tag (WP-4.17). |
 | 1 | draft | Indexed ingestion verifies every consumed object, including unreachable entries; closure and packlist index caps have the `object index limit exceeded` error (§9.3; WP-4.7). Indexed pack-size and decode-budget errors are pinned in §9.8. |

@@ -31,6 +31,26 @@ use crate::store::{
 
 use super::{ShardMap, meta_error};
 
+/// Actual backend support; never selected from deployment configuration.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthorityStore {
+    RefsOnly,
+    Inspected,
+    Guarded,
+}
+
+impl AuthorityStore {
+    pub(crate) fn from_capabilities(caps: crate::store::StoreCapabilities) -> Self {
+        if caps.key_classes == crate::store::KeyClasses::RefsOnly {
+            Self::RefsOnly
+        } else if caps.atomic_multi_key {
+            Self::Guarded
+        } else {
+            Self::Inspected
+        }
+    }
+}
+
 /// Most re-plans after a guard failed because another writer changed a
 /// value the plan read; then the write is a retryable `aborted`.
 pub(crate) const MAX_REPLAN: u32 = 8;
@@ -131,6 +151,8 @@ pub(crate) struct ImplicitConsume<'a> {
 #[derive(Clone)]
 #[non_exhaustive]
 pub(crate) struct WriteRequest<'a> {
+    /// Metadata inspection and CAS support, derived from the actual store.
+    pub(crate) authority_store: AuthorityStore,
     /// The repository whose refs are written.
     pub(crate) repo: &'a RepoName,
     /// What the refs are.
@@ -148,6 +170,8 @@ pub(crate) struct WriteRequest<'a> {
     pub(crate) namespace_charge: Option<NamespaceCharge>,
     /// The grant the write was authorized under (M2).
     pub(crate) grant: Option<GrantRef>,
+    /// Trusted Authority generation at authorization, unchanged on retries.
+    pub(crate) authority_generation: Option<u64>,
     /// D34 leased epoch and optional installation, guarded by the observed el.
     pub(crate) lease: Option<super::lease::LeaseWrite>,
     /// Whether to guard the layout version key: false on stores that
@@ -169,6 +193,12 @@ pub(crate) struct WriteRequest<'a> {
 }
 
 impl WriteRequest<'_> {
+    pub(crate) fn for_store(&self, caps: crate::store::StoreCapabilities) -> Self {
+        let mut request = self.clone();
+        request.authority_store = AuthorityStore::from_capabilities(caps);
+        request
+    }
+
     /// Every key the planner reads, besides prune candidates.
     #[must_use]
     pub(crate) fn read_keys(&self) -> Vec<Key> {
@@ -200,6 +230,10 @@ impl WriteRequest<'_> {
             out.push(keys::epoch_lease());
         } else if self.grant.is_some() {
             out.push(keys::grant_epoch());
+        }
+        if self.lease.is_none() && self.authority_store != AuthorityStore::RefsOnly {
+            out.push(keys::authority_generation());
+            out.push(keys::lease_recovery());
         }
         out.extend(self.charges.iter().map(|c| keys::quota(&c.scope)));
         if let Some(charge) = self.namespace_charge {
@@ -371,6 +405,11 @@ pub(crate) fn plan_write(
     snap: &Snapshot,
     clock: &PlanClock,
 ) -> Result<Planned, ServerError> {
+    if req.authority_generation.is_some() && req.authority_store != AuthorityStore::Guarded {
+        return Err(ServerError::unavailable(
+            "authority fencing requires transactional metadata",
+        ));
+    }
     // A racing retry may read ticket/reservation rows after its initial
     // replay observation. Resolve the committed answer before ticket planning.
     if let Some(pending) = req.pending
@@ -429,6 +468,54 @@ pub(crate) fn plan_write(
         }
         None => None,
     };
+    if req.lease.is_none() && req.authority_store != AuthorityStore::RefsOnly {
+        let mode = snap
+            .get(&keys::lease_recovery())
+            .map(codec::decode_lease_recovery)
+            .transpose()
+            .map_err(corrupt)?;
+        if req.authority_generation.is_none()
+            && (snap.get(&keys::authority_generation()).is_some()
+                || mode.is_some_and(|m| m.authority_fence == Some(true)))
+        {
+            return Err(ServerError::unavailable(
+                "persisted authority fence requires enabled executor",
+            ));
+        }
+        if req.authority_store == AuthorityStore::Guarded {
+            pre.push(guard(keys::lease_recovery(), snap));
+            if req.authority_generation.is_none() {
+                pre.push(guard(keys::authority_generation(), snap));
+            }
+        }
+    }
+    if let Some(generation) = req.authority_generation {
+        let current = if let Some(lease) = req.lease {
+            lease
+                .value
+                .authority_generation
+                .ok_or_else(|| ServerError::unavailable("lease missing authority generation"))?
+        } else {
+            snap.get(&keys::authority_generation())
+                .map(codec::decode_u64)
+                .transpose()
+                .map_err(corrupt)?
+                .unwrap_or(0)
+        };
+        if current != generation {
+            return Err(crate::authority::moved());
+        }
+        if tickets.as_ref().is_some_and(|tickets| {
+            tickets
+                .iter()
+                .any(|ticket| ticket.authority_generation != Some(generation))
+        }) {
+            return Err(crate::authority::moved());
+        }
+        if req.lease.is_none() {
+            pre.push(guard(keys::authority_generation(), snap));
+        }
+    }
     if req.layout_version {
         let key = keys::layout_version();
         match snap.get(&key).map(codec::decode_u32).transpose() {

@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use mkit_server::hooks::{
-    HookChannel, HookClient, RemoteAdmission, RemoteAuthorizer, RemoteOutcomes,
+    HookChannel, HookClient, HookSigner, RemoteAdmission, RemoteAuthorizer, RemoteOutcomes,
 };
 use mkit_server::pipeline::{
     Choice, DefaultAdmission, Hooks, NoOutcomes, NoPreReceive, NoReceipts, OpenAuthorizer,
@@ -64,12 +64,27 @@ pub fn build<C: HookChannel>(
     clock: Arc<dyn Clock>,
     sleep: Arc<dyn Sleep>,
 ) -> Result<Built<C>, ConfigError> {
+    build_signed(vars, channel, server_audience, None, clock, sleep)
+}
+
+/// Assemble signed or isolated channels over the same role contract.
+///
+/// # Errors
+/// An invalid channel, signer or audience.
+pub fn build_signed<C: HookChannel>(
+    vars: Option<&HookVars>,
+    channel: C,
+    server_audience: &str,
+    signer: Option<HookSigner>,
+    clock: Arc<dyn Clock>,
+    sleep: Arc<dyn Sleep>,
+) -> Result<Built<C>, ConfigError> {
     let mut built = local();
     let Some(vars) = vars else {
         return Ok(built);
     };
     let client = Arc::new(
-        HookClient::new(channel, server_audience, None, clock, sleep)
+        HookClient::new(channel, server_audience, signer, clock, sleep)
             .map_err(|e| ConfigError(format!("hook client: {e}")))?,
     );
     if vars.roles.authorize {
@@ -98,22 +113,62 @@ mod glue {
 
     use worker::Env;
 
-    use super::{Built, WorkerHooks, WorkerSink, build, local};
+    use super::{Built, WorkerHooks, WorkerSink, build_signed, local};
     use crate::adapter::{ConfigError, WorkerConfig, outcome_audience};
     use crate::clock::WorkerClock;
     use crate::hooks::binding::BindingChannel;
     use crate::hooks::config::{BINDING, HookVars};
+    use crate::hooks::fetch::{FetchChannel, WorkerChannel};
     use crate::sleep::WorkerSleep;
 
-    fn from_env(env: &Env, cfg: &WorkerConfig) -> Result<Built<BindingChannel>, ConfigError> {
-        HookVars::check_binding(cfg.hooks.as_ref(), env.service(BINDING).is_ok())?;
+    fn from_env(env: &Env, cfg: &WorkerConfig) -> Result<Built<WorkerChannel>, ConfigError> {
+        let binding = env.service(BINDING).is_ok();
+        let http = cfg.hooks.as_ref().and_then(|v| v.http.as_ref());
+        if http.is_some() && binding {
+            return Err(ConfigError(
+                "HOOK_URL and ADMISSION_HOOK are mutually exclusive".into(),
+            ));
+        }
+        let key = env.secret("MKIT_HOOK_KEY").ok().map(|s| s.to_string());
+        if http.is_none() && key.is_some() {
+            return Err(ConfigError("MKIT_HOOK_KEY needs HOOK_URL".into()));
+        }
+        if http.is_none() {
+            HookVars::check_binding(cfg.hooks.as_ref(), binding)?;
+        }
         if cfg.hooks.is_none() {
             return Ok(local());
         }
-        build(
+        let (channel, signer) = if let Some(http) = http {
+            #[cfg(feature = "http-objects")]
+            let mut other_keys = cfg
+                .url_tokens
+                .as_ref()
+                .map(|t| t.keys().public_keys().collect::<Vec<_>>())
+                .unwrap_or_default();
+            #[cfg(not(feature = "http-objects"))]
+            let mut other_keys = Vec::new();
+            if let Some(fence) = &cfg.authority_fence {
+                other_keys.extend(fence.public_keys());
+            }
+            let signer = super::super::config::http_signer(
+                key,
+                http,
+                cfg.ticket_keys.as_ref(),
+                &other_keys,
+            )?;
+            (
+                WorkerChannel::Http(FetchChannel::new(http.endpoint.clone())),
+                Some(signer),
+            )
+        } else {
+            (WorkerChannel::Binding(BindingChannel::from_env(env)?), None)
+        };
+        build_signed(
             cfg.hooks.as_ref(),
-            BindingChannel::from_env(env)?,
+            channel,
             &outcome_audience(cfg),
+            signer,
             Arc::new(WorkerClock),
             Arc::new(WorkerSleep),
         )
@@ -126,7 +181,7 @@ mod glue {
     pub fn hooks_from_env(
         env: &Env,
         cfg: &WorkerConfig,
-    ) -> Result<WorkerHooks<BindingChannel>, ConfigError> {
+    ) -> Result<WorkerHooks<WorkerChannel>, ConfigError> {
         from_env(env, cfg).map(|built| built.hooks)
     }
 
@@ -137,7 +192,7 @@ mod glue {
     pub fn sink_from_env(
         env: &Env,
         cfg: &WorkerConfig,
-    ) -> Result<WorkerSink<BindingChannel>, ConfigError> {
+    ) -> Result<WorkerSink<WorkerChannel>, ConfigError> {
         from_env(env, cfg).map(|built| built.sink)
     }
 }
@@ -225,6 +280,7 @@ mod tests {
             },
             timeout: crate::hooks::config::DEFAULT_TIMEOUT,
             authorizer_role: mkit_server::policy::AuthorizerRole::Check,
+            http: None,
         }
     }
 

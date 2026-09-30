@@ -1929,6 +1929,7 @@ async fn upload_part_stream_rejects_chunk_before_header_and_empty_chunk() {
         .await
         .unwrap();
     let claims = TicketClaims {
+        authority_generation: None,
         ticket_id: [0x11; 32],
         audience: AUDIENCE.into(),
         repository: REPO.into(),

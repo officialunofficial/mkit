@@ -41,7 +41,7 @@ impl CappedBody {
     /// Keep the part of `chunk` that fits under `max + 1`. `true` when the
     /// body is now over the cap and reading should stop.
     pub fn push(&mut self, chunk: &[u8]) -> bool {
-        let room = (self.max + 1).saturating_sub(self.bytes.len());
+        let room = self.max.saturating_add(1).saturating_sub(self.bytes.len());
         self.bytes
             .extend_from_slice(&chunk[..room.min(chunk.len())]);
         self.bytes.len() > self.max

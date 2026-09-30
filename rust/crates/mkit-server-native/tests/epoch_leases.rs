@@ -90,6 +90,7 @@ struct Controls {
     ack: Gate,
     scan_clock: Mutex<Option<Arc<ManualClock>>>,
     fail_push_once: AtomicBool,
+    push_conflict: AtomicBool,
     epoch_race_once: Mutex<Option<u64>>,
     epoch_after_cas_once: Mutex<Option<u64>>,
 }
@@ -170,6 +171,14 @@ impl<N: NamespaceStore> NamespaceStore for Store<N> {
                 .iter()
                 .all(|w| matches!(w, Write::Put(k, _) if *k == keys::epoch_lease()))
         {
+            if self.controls.push_conflict.load(Ordering::SeqCst) {
+                let outcome = BatchOutcome::PreconditionFailed {
+                    index: 0,
+                    observed: None,
+                };
+                self.record(Call::Apply(p.clone(), batch, outcome.clone()));
+                return Ok(outcome);
+            }
             if self.controls.fail_push_once.swap(false, Ordering::SeqCst) {
                 return Err(StoreError::unavailable(std::io::Error::other(
                     "injected epoch push failure",
@@ -249,6 +258,8 @@ enum Reject {
     Reserved,
     Challenge,
     Deny,
+    Authority(Option<u64>),
+    UnfencedAuthority(Option<u64>),
 }
 struct Policy(Reject);
 impl Authorizer for Policy {
@@ -256,12 +267,17 @@ impl Authorizer for Policy {
         if matches!(self.0, Reject::Deny) {
             Err(ServerError::permission_denied("test denial"))
         } else {
-            Ok(AuthzFacts::default())
+            let mut facts = AuthzFacts::default();
+            facts.authority_generation = match self.0 {
+                Reject::Authority(generation) | Reject::UnfencedAuthority(generation) => generation,
+                _ => None,
+            };
+            Ok(facts)
         }
     }
 }
 impl Admission for Policy {
-    async fn admit(&self, _: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
+    async fn admit(&self, input: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
         if matches!(self.0, Reject::Challenge) {
             Ok(AdmissionDecision::challenge(
                 vec![mkit_server::pipeline::Challenge {
@@ -272,7 +288,9 @@ impl Admission for Policy {
             ))
         } else {
             let allowed = AdmissionDecision::allow(vec![]);
-            Ok(if matches!(self.0, Reject::Reserved) {
+            Ok(if matches!(self.0, Reject::Authority(_)) {
+                allowed.with_reservation(input.idempotency_key.unwrap())
+            } else if matches!(self.0, Reject::Reserved) {
                 allowed.with_reservation("epoch-race")
             } else {
                 allowed
@@ -286,6 +304,26 @@ fn pipeline<N: NamespaceStore>(
     clock: Arc<ManualClock>,
     faults: Arc<Faults>,
     rejection: Reject,
+) -> Arc<Pipe<N>> {
+    pipeline_with_uploads(
+        store,
+        clock,
+        faults,
+        rejection,
+        MemoryBlobStore::default(),
+        UploadLimits {
+            max_total_bytes: 1024,
+            max_chunks: 4,
+        },
+    )
+}
+fn pipeline_with_uploads<N: NamespaceStore>(
+    store: Store<N>,
+    clock: Arc<ManualClock>,
+    faults: Arc<Faults>,
+    rejection: Reject,
+    blobs: MemoryBlobStore,
+    limits: UploadLimits,
 ) -> Arc<Pipe<N>> {
     let defaults = Hooks::new();
     let hooks = Hooks {
@@ -302,10 +340,7 @@ fn pipeline<N: NamespaceStore>(
             ),
         )),
         AuthMode::AuthV2(AuthV2Config::new(AUDIENCE, "").unwrap()),
-        UploadLimits {
-            max_total_bytes: 1024,
-            max_chunks: 4,
-        },
+        limits,
     );
     cfg.sharding = Sharding::D34;
     cfg.write_policy = WritePolicy::Owner;
@@ -317,19 +352,28 @@ fn pipeline<N: NamespaceStore>(
         )
         .unwrap(),
     );
+    if matches!(
+        rejection,
+        Reject::Authority(_) | Reject::UnfencedAuthority(_)
+    ) {
+        cfg.authorizer_role = mkit_server::policy::AuthorizerRole::Authority;
+    }
+    if matches!(rejection, Reject::Authority(_)) {
+        cfg.authority_fence = Some(
+            mkit_server::authority::AuthorityFence::parse(&format!(
+                "deployment {} {}",
+                Signer::new([7; 32], AUDIENCE, "unused").public_key_hex(),
+                identity().split_once('/').unwrap().0
+            ))
+            .unwrap(),
+        );
+    }
     cfg.write_quota = None;
     cfg.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap());
     Arc::new(
-        Pipeline::new(
-            MemoryBlobStore::default(),
-            store,
-            hooks,
-            cfg,
-            clock,
-            Arc::new(NoopMetrics),
-        )
-        .unwrap()
-        .with_faults(FaultControl(faults)),
+        Pipeline::new(blobs, store, hooks, cfg, clock, Arc::new(NoopMetrics))
+            .unwrap()
+            .with_faults(FaultControl(faults)),
     )
 }
 fn auth<N: NamespaceStore>(pipe: &Pipe<N>, token: Option<&str>) -> Authenticated {
@@ -868,6 +912,23 @@ async fn expired_row_renewal<N: NamespaceStore + 'static>(
     assert_eq!(el(&store, &a, REF).await.epoch, 1);
 }
 
+async fn finish_bounded_revoke<N: NamespaceStore + 'static>(
+    pipe: &Pipe<N>,
+    ns: &mkit_server::NamespaceKey,
+) {
+    for _ in 0..4 {
+        if pipe
+            .revoke_step(ns, &RevokeBudget::new(10_000))
+            .await
+            .unwrap()
+            == RevokeProgress::Complete
+        {
+            return;
+        }
+    }
+    panic!("revocation did not complete within four additional bounded slices");
+}
+
 async fn push_race<N: NamespaceStore + 'static>(
     backend: N,
     clock: Arc<ManualClock>,
@@ -896,7 +957,12 @@ async fn push_race<N: NamespaceStore + 'static>(
     assert_eq!(el(&store, &a, REF).await.epoch, 1);
     assert_eq!(ls(&store, &a, REF).await.acked_epoch, 0);
     store.controls.push.resume();
-    assert_eq!(revoke.await.unwrap().unwrap(), RevokeProgress::Complete);
+    assert_eq!(
+        revoke.await.unwrap().unwrap(),
+        RevokeProgress::Pending { remaining: 1 }
+    );
+    assert_eq!(ls(&store, &a, REF).await.acked_epoch, 0);
+    finish_bounded_revoke(&pipe, &a.repo().repo.namespace).await;
     let calls = store.take();
     let pushes: Vec<_> = calls
         .iter()
@@ -1020,8 +1086,12 @@ fn assert_renewal_ops(calls: &[Call], old_timer: &Key, new_timer: &Key) {
         if b.writes.contains(&Write::Delete((*old_timer).clone())) && b.writes.iter().any(|w| matches!(w, Write::Put(k, _) if k == new_timer))));
     assert!(moved, "timer move must share the lease grant batch");
     assert!(calls.iter().any(|c| matches!(c, Call::Apply(Partition::Coordinator(_), b, BatchOutcome::Committed)
-        if b.writes.contains(&Write::Delete((*old_timer).clone())) && b.writes.len() == 3 && b.preconditions.len() == 4)),
-        "renewal still uses four guards and three writes");
+        if b.writes.contains(&Write::Delete((*old_timer).clone())) && b.writes.len() == 3 && b.preconditions.len() == 5
+            && b.preconditions.contains(&Precondition::Absent(keys::lease_recovery())))),
+        "renewal uses five guards including raw recovery mode and three writes");
+    assert!(calls.iter().any(|c| matches!(c,
+        Call::Many(Partition::Coordinator(_), keys) if keys.len() == 5 && keys.contains(&keys::lease_recovery())
+    )), "renewal preserves the five-row coordinator read");
     let renewal_ref_ops = calls
         .iter()
         .find_map(|c| match c {
@@ -1368,6 +1438,8 @@ async fn plant_delayed_relay_and_expired_lease(
     use mkit_server::timers::{lease_sweep::lease_reference, registry::kinds};
 
     let lease = codec::LeasedShard {
+        authority_generation: None,
+        acked_authority_generation: None,
         epoch: 1,
         expires_at_ms: 100,
         acked_epoch: 1,
@@ -1792,7 +1864,12 @@ async fn renewal_between_push_and_ack<N: NamespaceStore + 'static>(
     committed(&pipe, &a, REF, 2).await;
     assert_eq!(el(&store, &a, REF).await.expires_at_ms, 54_500);
     store.controls.ack.resume();
-    assert_eq!(revoke.await.unwrap().unwrap(), RevokeProgress::Complete);
+    assert_eq!(
+        revoke.await.unwrap().unwrap(),
+        RevokeProgress::Pending { remaining: 1 }
+    );
+    assert_eq!(ls(&store, &a, REF).await.acked_epoch, 0);
+    finish_bounded_revoke(&pipe, &ns).await;
     let row = ls(&store, &a, REF).await;
     let copy = el(&store, &a, REF).await;
     assert_eq!(
@@ -2473,3 +2550,931 @@ backends!(
     epoch_rpc_rules_sqlite,
     epoch_rpc_rules
 );
+
+fn signed_authority(generation: u64) -> String {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ed25519_dalek::Signer as _;
+    let text = format!(
+        "mkit-authority-generation:v1\ndeployment\n{}\n{generation}\n{AUDIENCE}\n0\n240000\n{}",
+        identity().split_once('/').unwrap().0,
+        to_hex(&hash(b"authority-nonce"))
+    );
+    let signature = ed25519_dalek::SigningKey::from_bytes(&[7; 32]).sign(&hash(text.as_bytes()));
+    format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(text),
+        URL_SAFE_NO_PAD.encode(signature.to_bytes())
+    )
+}
+
+#[allow(clippy::too_many_lines)] // One paused-write regression also proves fresh authorization and committed replay after revocation.
+async fn authority_paused<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    store_clock: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let faults = Arc::new(Faults::default());
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        faults.clone(),
+        Reject::Authority(Some(0)),
+    );
+    let initial = auth(&pipe, None);
+    committed(&pipe, &initial, REF, 1).await;
+    // R-63: an already authorized delegate is paused at the final atomic apply.
+    let delegate = auth_as(&pipe, Some("a"), [2; 32], None);
+    faults.a.arm();
+    let task = {
+        let pipe = pipe.clone();
+        let delegate = delegate.clone();
+        tokio::spawn(async move { pipe.update_ref(&delegate, update(REF, 2)).await })
+    };
+    faults.a.entered().await;
+    assert_eq!(
+        pipe.set_authority_generation(&signed_authority(1))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        pipe.set_authority_generation(&signed_authority(1))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        ls(&store, &initial, REF).await.acked_authority_generation,
+        Some(1)
+    );
+    assert_eq!(
+        el(&store, &initial, REF).await.authority_generation,
+        Some(1)
+    );
+    faults.a.resume();
+    assert_eq!(
+        task.await.unwrap().unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    assert_grant_write_uncommitted(&store, &delegate, REF).await;
+    let aborted = store
+        .inner
+        .get(
+            &shard(&delegate, REF),
+            &keys::reservation(&delegate.auth.as_ref().unwrap().nonce).unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        codec::decode_reservation(&aborted).unwrap(),
+        codec::ReservationV1::Aborted {
+            reason: codec::AbortReason::EpochMismatch,
+            ..
+        }
+    ));
+    assert_eq!(
+        pipe.get_grant_epoch(identity().split_once('/').unwrap().0)
+            .await
+            .unwrap(),
+        0
+    );
+    // A stale reply must not gain a fresh generation by renewing its lease.
+    clock.set(31_000);
+    store_clock.set(31_000);
+    let stale = auth_as(&pipe, None, [2; 32], None);
+    assert_eq!(
+        pipe.update_ref(&stale, update(REF, 3))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+    let fresh = pipeline(
+        store.clone(),
+        clock.clone(),
+        faults.clone(),
+        Reject::Authority(Some(1)),
+    );
+    let current = auth_as(&fresh, None, [2; 32], None);
+    assert_eq!(
+        fresh.update_ref(&current, update(REF, 4)).await.unwrap(),
+        UpdateRefResult::Committed
+    );
+    // Replay of a committed result after a newer barrier is not new acceptance.
+    assert_eq!(
+        fresh
+            .set_authority_generation(&signed_authority(2))
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        fresh.update_ref(&current, update(REF, 4)).await.unwrap(),
+        UpdateRefResult::Committed
+    );
+    assert_eq!(
+        fresh
+            .set_authority_generation(&signed_authority(1))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+}
+backends!(
+    authority_paused_memory,
+    authority_paused_sqlite,
+    authority_paused
+);
+
+async fn authority_missing_and_recovery<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    store_clock: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let faults = Arc::new(Faults::default());
+    let missing = pipeline(
+        store.clone(),
+        clock.clone(),
+        faults.clone(),
+        Reject::Authority(None),
+    );
+    let a = auth_as(&missing, None, [2; 32], None);
+    assert_eq!(
+        missing
+            .update_ref(&a, update(REF, 1))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::Unavailable
+    );
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        faults,
+        Reject::Authority(Some(0)),
+    );
+    let a = auth_as(&pipe, None, [2; 32], None);
+    committed(&pipe, &a, REF, 1).await;
+    let old = el(&store, &a, REF).await;
+    // R-151: failed push cannot acknowledge; expiration plus backend NotAfter fences delayed writes.
+    store.controls.fail_push_once.store(true, Ordering::SeqCst);
+    assert_eq!(
+        pipe.set_authority_generation(&signed_authority(1))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::Internal
+    );
+    assert_eq!(
+        ls(&store, &a, REF).await.acked_authority_generation,
+        Some(0)
+    );
+    clock.set(31_000);
+    store_clock.set(31_000);
+    assert_eq!(
+        pipe.set_authority_generation(&signed_authority(1))
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(matches!(
+        store
+            .inner
+            .apply(&shard(&a, REF), old_batch(old))
+            .await
+            .unwrap(),
+        BatchOutcome::DeadlinePassed { .. }
+    ));
+    pipe.mark_lease_table_recovered(&a.repo().repo.namespace)
+        .await
+        .unwrap();
+    assert_eq!(
+        pipe.set_authority_generation(&signed_authority(2))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::Unavailable
+    );
+    clock.set(66_000);
+    store_clock.set(66_000);
+    assert_eq!(
+        pipe.set_authority_generation(&signed_authority(2))
+            .await
+            .unwrap(),
+        2
+    );
+}
+backends!(
+    authority_missing_recovery_memory,
+    authority_missing_recovery_sqlite,
+    authority_missing_and_recovery
+);
+
+async fn authority_during_authorize_and_begin<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    _: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let faults = Arc::new(Faults::default());
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        faults.clone(),
+        Reject::Authority(Some(0)),
+    );
+    let a = auth(&pipe, None);
+    committed(&pipe, &a, REF, 1).await;
+    let stale = auth_as(&pipe, Some("c"), [2; 32], None);
+    faults.c.arm();
+    let task = {
+        let pipe = pipe.clone();
+        tokio::spawn(async move { pipe.update_ref(&stale, update(REF, 2)).await })
+    };
+    faults.c.entered().await;
+    pipe.set_authority_generation(&signed_authority(1))
+        .await
+        .unwrap();
+    faults.c.resume();
+    assert_eq!(
+        task.await.unwrap().unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    let fresh = pipeline(
+        store.clone(),
+        clock,
+        faults.clone(),
+        Reject::Authority(Some(1)),
+    );
+    let a = auth_for(&fresh, Some("a"), [2; 32], None, Procedure::BeginUpload);
+    faults.a.arm();
+    let task = {
+        let fresh = fresh.clone();
+        let a = a.clone();
+        tokio::spawn(async move { fresh.begin_upload(&a, REF, &[2; 32], 10).await })
+    };
+    faults.a.entered().await;
+    fresh
+        .set_authority_generation(&signed_authority(2))
+        .await
+        .unwrap();
+    faults.a.resume();
+    assert_eq!(
+        task.await.unwrap().unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    let (first, end) = keys::class_range(keys::TAG_TICKET);
+    assert!(
+        store
+            .inner
+            .scan(&shard(&a, REF), &first, &end, None, 10)
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    let reservation = store
+        .inner
+        .get(
+            &shard(&a, REF),
+            &keys::reservation(&a.auth.as_ref().unwrap().nonce).unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        codec::decode_reservation(&reservation).unwrap(),
+        codec::ReservationV1::Aborted {
+            reason: codec::AbortReason::EpochMismatch,
+            ..
+        }
+    ));
+}
+backends!(
+    authority_authorize_begin_memory,
+    authority_authorize_begin_sqlite,
+    authority_during_authorize_and_begin
+);
+
+async fn authority_visibility<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    _: Arc<ManualClock>,
+) {
+    use mkit_attest::grant::Visibility;
+    use mkit_server::pipeline::VisibilityRequest;
+    let store = Store::new(backend);
+    let faults = Arc::new(Faults::default());
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        faults.clone(),
+        Reject::Authority(Some(0)),
+    );
+    let a = auth(&pipe, None);
+    committed(&pipe, &a, REF, 1).await;
+    let delegate = auth_for(&pipe, None, [2; 32], None, Procedure::SetRepoVisibility);
+    pipe.set_repo_visibility(&delegate, VisibilityRequest::Envelope(Visibility::Public))
+        .await
+        .unwrap();
+    pipe.set_authority_generation(&signed_authority(1))
+        .await
+        .unwrap();
+    let stale = auth_for(&pipe, None, [2; 32], None, Procedure::SetRepoVisibility);
+    assert_eq!(
+        pipe.set_repo_visibility(&stale, VisibilityRequest::Envelope(Visibility::Private))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+    let fresh = pipeline(store, clock, faults, Reject::Authority(Some(1)));
+    let current = auth_for(&fresh, None, [2; 32], None, Procedure::SetRepoVisibility);
+    fresh
+        .set_repo_visibility(&current, VisibilityRequest::Envelope(Visibility::Private))
+        .await
+        .unwrap();
+}
+backends!(
+    authority_visibility_memory,
+    authority_visibility_sqlite,
+    authority_visibility
+);
+
+async fn authority_renewal_between_push_and_ack<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    store_clock: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let faults = Arc::new(Faults::default());
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        faults.clone(),
+        Reject::Authority(Some(0)),
+    );
+    let a = auth(&pipe, None);
+    committed(&pipe, &a, REF, 1).await;
+    store.controls.ack.arm();
+    let task = {
+        let pipe = pipe.clone();
+        tokio::spawn(async move { pipe.set_authority_generation(&signed_authority(1)).await })
+    };
+    store.controls.ack.entered().await;
+    assert_eq!(el(&store, &a, REF).await.authority_generation, Some(1));
+    clock.set(24_500);
+    store_clock.set(24_500);
+    let fresh = pipeline(store.clone(), clock, faults, Reject::Authority(Some(1)));
+    let delegate = auth_as(&fresh, None, [2; 32], None);
+    assert_eq!(
+        fresh.update_ref(&delegate, update(REF, 2)).await.unwrap(),
+        UpdateRefResult::Committed
+    );
+    assert_eq!(
+        ls(&store, &a, REF).await.acked_authority_generation,
+        Some(0)
+    );
+    store.controls.ack.resume();
+    // Advancing the manual clock exhausted the original bounded call; retry resumes its barrier.
+    let pending = task.await.unwrap().unwrap_err();
+    assert_eq!(pending.code(), Code::Unavailable);
+    assert_eq!(
+        fresh
+            .set_authority_generation(&signed_authority(1))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        ls(&store, &a, REF).await.acked_authority_generation,
+        Some(1)
+    );
+    assert_eq!(el(&store, &a, REF).await.authority_generation, Some(1));
+    assert_eq!(el(&store, &a, REF).await.epoch, 0);
+}
+backends!(
+    authority_renew_ack_memory,
+    authority_renew_ack_sqlite,
+    authority_renewal_between_push_and_ack
+);
+
+#[tokio::test]
+async fn authority_setter_has_a_fixed_scan_bound_with_a_frozen_clock() {
+    use mkit_server::{Clock, NamespaceKey, RepoName};
+    let clock = Arc::new(ManualClock::new(100));
+    let store = Store::new(MemoryKv::with_clock(clock.clone()));
+    let ns = NamespaceKey::from_namespace(
+        &Namespace::parse(identity().split_once('/').unwrap().0).unwrap(),
+    );
+    let coordinator = Partition::Coordinator(ns);
+    for index in 0..1536 {
+        let row = codec::LeasedShard {
+            authority_generation: Some(0),
+            acked_authority_generation: Some(u64::from(index >= 4)),
+            epoch: 0,
+            acked_epoch: 0,
+            expires_at_ms: if index >= 4 && index % 2 == 0 {
+                99
+            } else {
+                100_000
+            },
+            relay_watermark_ms: 0,
+            sweep_due_ms: 100_000,
+        };
+        store
+            .inner
+            .apply(
+                &coordinator,
+                Batch::new().put(
+                    keys::leased_shard(&RepoName::new(format!("scan-{index:04}")).unwrap(), REF),
+                    codec::encode_leased_shard(&row),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        Arc::new(Faults::default()),
+        Reject::Authority(Some(1)),
+    );
+    store.take();
+    store.controls.push_conflict.store(true, Ordering::SeqCst);
+    let result = pipe.set_authority_generation(&signed_authority(1)).await;
+    let calls = store.take();
+    let mut max_calls = calls.len();
+    assert!(
+        calls.len() <= 50,
+        "one setter scanned {} calls at frozen time",
+        calls.len()
+    );
+    assert_eq!(result.unwrap_err().code(), Code::Unavailable);
+    store.controls.push_conflict.store(false, Ordering::SeqCst);
+    let mut complete = false;
+    for _ in 0..60 {
+        // Each slice runs in a fresh pipeline, as separate cold Worker calls do.
+        let pipe = pipeline(
+            store.clone(),
+            clock.clone(),
+            Arc::new(Faults::default()),
+            Reject::Authority(Some(1)),
+        );
+        let result = pipe.set_authority_generation(&signed_authority(1)).await;
+        let count = store.take().len();
+        max_calls = max_calls.max(count);
+        assert!(
+            count <= 50,
+            "setter exceeded general Worker budget: {count}"
+        );
+        if result.is_ok() {
+            complete = true;
+            break;
+        }
+        assert_eq!(result.unwrap_err().code(), Code::Unavailable);
+    }
+    assert!(
+        complete,
+        "durable confirmed prefix must advance across bounded retries"
+    );
+    eprintln!(
+        "maximum setter metadata calls including activation, collision and completion: {max_calls}"
+    );
+    assert_eq!(clock.now_ms(), 100);
+}
+
+async fn disabled_executor_refuses_persisted_authority<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    _: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let faults = Arc::new(Faults::default());
+    let enabled = pipeline(
+        store.clone(),
+        clock.clone(),
+        faults.clone(),
+        Reject::Authority(Some(0)),
+    );
+    let initial = auth(&enabled, None);
+    committed(&enabled, &initial, REF, 1).await;
+    let begin = auth_for(&enabled, None, [1; 32], None, Procedure::BeginUpload);
+    let mkit_server::BeginUploadResult::Ticket { token, .. } = enabled
+        .begin_upload(&begin, REF, &[3; 32], 10)
+        .await
+        .unwrap()
+    else {
+        panic!("expected ticket")
+    };
+    for generation in [0, 1] {
+        if generation == 1 {
+            enabled
+                .set_authority_generation(&signed_authority(1))
+                .await
+                .unwrap();
+        }
+        for rejection in [Reject::UnfencedAuthority(Some(0)), Reject::Allow] {
+            let disabled = pipeline(store.clone(), clock.clone(), faults.clone(), rejection);
+            let old = auth_as(&disabled, None, [1; 32], None);
+            assert!(
+                disabled.update_ref(&old, update(REF, 2)).await.is_err(),
+                "disabled usable lease accepted generation {generation}"
+            );
+            let visibility = auth_for(&disabled, None, [1; 32], None, Procedure::SetRepoVisibility);
+            assert!(
+                disabled
+                    .set_repo_visibility(
+                        &visibility,
+                        mkit_server::pipeline::VisibilityRequest::Envelope(
+                            mkit_attest::grant::Visibility::Public
+                        )
+                    )
+                    .await
+                    .is_err()
+            );
+            let complete = auth_for(&disabled, None, [1; 32], None, Procedure::CompleteUpload);
+            assert_eq!(
+                disabled
+                    .complete_upload(&complete, &token, &[])
+                    .await
+                    .unwrap_err()
+                    .code(),
+                Code::Unavailable
+            );
+            let fresh = auth_as(&disabled, None, [1; 32], None);
+            assert!(
+                disabled
+                    .update_ref(&fresh, update("refs/heads/fresh", 3))
+                    .await
+                    .is_err(),
+                "disabled fresh shard accepted generation {generation}"
+            );
+        }
+    }
+    clock.advance(30_000);
+    let disabled = pipeline(store, clock, faults, Reject::UnfencedAuthority(Some(0)));
+    let expired = auth_as(&disabled, None, [1; 32], None);
+    assert!(
+        disabled.update_ref(&expired, update(REF, 4)).await.is_err(),
+        "disabled expired renewal accepted"
+    );
+}
+backends!(
+    disabled_executor_refuses_persisted_authority_memory,
+    disabled_executor_refuses_persisted_authority_sqlite,
+    disabled_executor_refuses_persisted_authority
+);
+
+#[tokio::test]
+async fn authority_activation_before_business_creation_preserves_recovery_and_watermarks() {
+    use mkit_server::store::watermark::{check_recovery, mark_lease_table_reconciled};
+    use mkit_server::{NamespaceKey, RepoName};
+    let clock = Arc::new(ManualClock::new(100));
+    let store = Store::new(MemoryKv::with_clock(clock.clone()));
+    let pipe = pipeline(
+        store.clone(),
+        clock,
+        Arc::new(Faults::default()),
+        Reject::Authority(Some(0)),
+    );
+    let ns = NamespaceKey::from_namespace(
+        &Namespace::parse(identity().split_once('/').unwrap().0).unwrap(),
+    );
+    let coordinator = Partition::Coordinator(ns.clone());
+    pipe.set_authority_generation(&signed_authority(0))
+        .await
+        .unwrap();
+    assert!(
+        store
+            .inner
+            .get(&coordinator, &keys::namespace_record())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .inner
+            .get(
+                &coordinator,
+                &keys::repo_record(&RepoName::new("leases").unwrap())
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let raw = store
+        .inner
+        .get(&coordinator, &keys::lease_recovery())
+        .await
+        .unwrap()
+        .unwrap();
+    let mode = codec::decode_lease_recovery(&raw).unwrap();
+    assert_eq!(mode.authority_fence, Some(true));
+    assert_eq!(mode.authority_ready, Some(true));
+    assert_eq!(mode.recovery_time(), None);
+    assert!(check_recovery(&store, &coordinator, None).await.is_ok());
+    assert!(
+        mark_lease_table_reconciled(&store, &coordinator, 100)
+            .await
+            .is_err()
+    );
+    pipe.mark_lease_table_recovered(&ns).await.unwrap();
+    let raw = store
+        .inner
+        .get(&coordinator, &keys::lease_recovery())
+        .await
+        .unwrap()
+        .unwrap();
+    let mode = codec::decode_lease_recovery(&raw).unwrap();
+    assert_eq!(mode.authority_fence, Some(true));
+    assert_eq!(mode.authority_ready, Some(true));
+    assert_eq!(mode.recovery_time(), Some(100));
+    assert!(check_recovery(&store, &coordinator, None).await.is_err());
+    mark_lease_table_reconciled(&store, &coordinator, 101)
+        .await
+        .unwrap();
+    assert!(check_recovery(&store, &coordinator, None).await.is_ok());
+}
+
+fn stream_auth<N: NamespaceStore>(
+    pipe: &Pipe<N>,
+    procedure: Procedure,
+    commitment: String,
+) -> Authenticated {
+    let signer = owner();
+    let mut envelope = signer.envelope(procedure.connect_path(), commitment);
+    envelope.created_at = 0;
+    envelope.expires_at = 240_000;
+    let carriage = signer.sign(&envelope);
+    pipe.authenticate(&RequestMeta {
+        procedure,
+        header: &|name| {
+            carriage
+                .headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        },
+        header_values: None,
+        unary_body: None,
+        transport_principal: None,
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Same valid bytes exercise both ticket protocols and every framing.
+async fn authority_stream_metadata_work_is_independent_of_framing() {
+    use bytes::Bytes;
+    use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan, part_subtree_cv};
+    use mkit_server::store::{BlobKey, MultipartBlobStore};
+    use mkit_server::upload::token::TicketClaims;
+    use mkit_server_conformance::wire::sign::pack_commitment;
+    let data = vec![17; 8193];
+    for enabled in [false, true] {
+        for multipart in [false, true] {
+            let store = Store::new(MemoryKv::default());
+            let clock = Arc::new(ManualClock::new(100));
+            let blobs = MemoryBlobStore::default();
+            let pipe = pipeline_with_uploads(
+                store.clone(),
+                clock,
+                Arc::new(Faults::default()),
+                if enabled {
+                    Reject::Authority(Some(0))
+                } else {
+                    Reject::Allow
+                },
+                blobs.clone(),
+                UploadLimits {
+                    max_total_bytes: 64 * 1024 * 1024,
+                    max_chunks: u32::MAX,
+                },
+            );
+            if enabled {
+                pipe.set_authority_generation(&signed_authority(0))
+                    .await
+                    .unwrap();
+            }
+            let first = vec![5; usize::try_from(MIN_PART_SIZE).unwrap()];
+            let pack = if multipart {
+                [first.as_slice(), data.as_slice()].concat()
+            } else {
+                data.clone()
+            };
+            let pack_id = hash(&pack);
+            let session = if multipart {
+                blobs
+                    .begin_multipart(BlobKey::pack(pack_id), pack.len() as u64, MIN_PART_SIZE)
+                    .await
+                    .unwrap()
+            } else {
+                Vec::new()
+            };
+            let claims = TicketClaims {
+                authority_generation: enabled.then_some(0),
+                ticket_id: [19; 32],
+                audience: AUDIENCE.into(),
+                repository: identity(),
+                signer: mkit_core::hash::from_hex(&owner().public_key_hex()).unwrap(),
+                pack_id,
+                bytes: pack.len() as u64,
+                part_size: MIN_PART_SIZE,
+                expires_at_ms: 240_000,
+                upload_session: session,
+            };
+            let token = TicketKeys::new(vec![("test".into(), [9; 32])])
+                .unwrap()
+                .mint(&claims);
+            let plan =
+                PartPlan::new(MIN_PART_SIZE + data.len() as u64, MIN_PART_SIZE, 10_000).unwrap();
+            let index = u32::from(multipart);
+            let cv = if multipart {
+                part_subtree_cv(&plan, index, &data).unwrap()
+            } else {
+                [0; 32]
+            };
+            let mut receipts = Vec::new();
+            if multipart {
+                store.take();
+                let first_cv = part_subtree_cv(&plan, 0, &first).unwrap();
+                let a = stream_auth(
+                    &pipe,
+                    Procedure::UploadPart,
+                    format!(
+                        "part:{}:0:{}:{}",
+                        to_hex(&claims.ticket_id),
+                        to_hex(&first_cv),
+                        MIN_PART_SIZE
+                    ),
+                );
+                let mut part = pipe.open_part(&a, &token, 0).await.unwrap();
+                part.push(Bytes::copy_from_slice(&first)).await.unwrap();
+                receipts.push(part.finish().await.unwrap());
+                let calls = store.take().len();
+                assert_eq!(calls, 68);
+                eprintln!("full8MiB part metadata calls: enabled={enabled} calls={calls}");
+            }
+            let mut baseline = None;
+            for framing in [64 * 1024, 4 * 1024, 1] {
+                for replay in [false, true] {
+                    store.take();
+                    if multipart {
+                        let a = stream_auth(
+                            &pipe,
+                            Procedure::UploadPart,
+                            format!(
+                                "part:{}:{index}:{}:{}",
+                                to_hex(&claims.ticket_id),
+                                to_hex(&cv),
+                                data.len()
+                            ),
+                        );
+                        let mut part = pipe.open_part(&a, &token, index).await.unwrap();
+                        for chunk in data.chunks(framing) {
+                            part.push(Bytes::copy_from_slice(chunk)).await.unwrap();
+                        }
+                        let receipt = part.finish().await.unwrap();
+                        receipts.truncate(1);
+                        receipts.push(receipt);
+                    } else {
+                        let a = stream_auth(
+                            &pipe,
+                            Procedure::UploadPack,
+                            pack_commitment(&pack_id, claims.bytes),
+                        );
+                        let mut upload = pipe
+                            .open_ticketed_upload(&a, Some(&pack_id), Some(claims.bytes), &token)
+                            .await
+                            .unwrap();
+                        let mut offset = 0;
+                        for chunk in data.chunks(framing) {
+                            let end = offset + chunk.len();
+                            upload
+                                .push(
+                                    Some(&pack_id),
+                                    Some(offset as u64),
+                                    Bytes::copy_from_slice(chunk),
+                                    end == data.len(),
+                                )
+                                .await
+                                .unwrap();
+                            offset = end;
+                        }
+                        upload.finish().await.unwrap();
+                    }
+                    let calls = store.take().len();
+                    let expected = *baseline.get_or_insert(calls);
+                    assert_eq!(
+                        calls, expected,
+                        "enabled={enabled} multipart={multipart} framing={framing} replay={replay}"
+                    );
+                    assert!(calls <= 50, "whole request metadata calls={calls}");
+                    eprintln!(
+                        "stream calls: enabled={enabled} multipart={multipart} framing={framing} replay={replay} calls={calls}"
+                    );
+                }
+            }
+            if !multipart {
+                let large = Bytes::from(vec![23; 64 * 1024 * 1024]);
+                let mut full = claims.clone();
+                full.ticket_id = [20; 32];
+                full.pack_id = hash(&large);
+                full.bytes = large.len() as u64;
+                let token = TicketKeys::new(vec![("test".into(), [9; 32])])
+                    .unwrap()
+                    .mint(&full);
+                let a = stream_auth(
+                    &pipe,
+                    Procedure::UploadPack,
+                    pack_commitment(&full.pack_id, full.bytes),
+                );
+                store.take();
+                let mut upload = pipe
+                    .open_ticketed_upload(&a, Some(&full.pack_id), Some(full.bytes), &token)
+                    .await
+                    .unwrap();
+                for offset in (0..large.len()).step_by(64 * 1024) {
+                    let end = (offset + 64 * 1024).min(large.len());
+                    upload
+                        .push(
+                            Some(&full.pack_id),
+                            Some(offset as u64),
+                            large.slice(offset..end),
+                            end == large.len(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                upload.finish().await.unwrap();
+                let calls = store.take().len();
+                assert_eq!(calls, 517);
+                eprintln!("full64MiB single metadata calls: enabled={enabled} calls={calls}");
+            }
+            let mut stale_part = None;
+            if enabled && multipart {
+                let a = stream_auth(
+                    &pipe,
+                    Procedure::UploadPart,
+                    format!(
+                        "part:{}:{index}:{}:{}",
+                        to_hex(&claims.ticket_id),
+                        to_hex(&cv),
+                        data.len()
+                    ),
+                );
+                let mut part = pipe.open_part(&a, &token, index).await.unwrap();
+                part.push(Bytes::copy_from_slice(&data)).await.unwrap();
+                stale_part = Some(part);
+            }
+            if multipart {
+                for replay in [false, true] {
+                    store.take();
+                    let a = auth_for(&pipe, None, [1; 32], None, Procedure::CompleteUpload);
+                    pipe.complete_upload(&a, &token, &receipts).await.unwrap();
+                    let calls = store.take().len();
+                    assert!(calls <= 50);
+                    eprintln!("completion calls: enabled={enabled} replay={replay} calls={calls}");
+                }
+            }
+            if enabled {
+                if let Some(part) = stale_part {
+                    pipe.set_authority_generation(&signed_authority(1))
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        part.finish().await.unwrap_err().code(),
+                        Code::PermissionDenied
+                    );
+                } else {
+                    let a = stream_auth(
+                        &pipe,
+                        Procedure::UploadPack,
+                        pack_commitment(&pack_id, claims.bytes),
+                    );
+                    let mut upload = pipe
+                        .open_ticketed_upload(&a, Some(&pack_id), Some(claims.bytes), &token)
+                        .await
+                        .unwrap();
+                    upload
+                        .push(Some(&pack_id), Some(0), Bytes::copy_from_slice(&data), true)
+                        .await
+                        .unwrap();
+                    pipe.set_authority_generation(&signed_authority(1))
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        upload.finish().await.unwrap_err().code(),
+                        Code::PermissionDenied
+                    );
+                }
+            }
+        }
+    }
+}
