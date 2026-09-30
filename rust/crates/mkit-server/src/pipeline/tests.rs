@@ -267,7 +267,19 @@ fn single_ticket_advance_guards_the_grant_epoch() {
     assert!(batch.preconditions.iter().any(|guard| matches!(guard,
         Precondition::Absent(key) if *key == keys::grant_epoch()
     )));
-    assert_eq!(batch.preconditions.len() + batch.writes.len(), 78);
+    assert_eq!(
+        batch
+            .preconditions
+            .iter()
+            .filter(|guard| matches!(guard,
+                Precondition::Absent(key) if *key == keys::lease_recovery()
+            ))
+            .count(),
+        1
+    );
+    let ops = batch.preconditions.len() + batch.writes.len();
+    assert_eq!(ops, 79);
+    assert!(ops <= crate::store::MAX_BATCH_OPS);
 }
 
 /// WP-1.15 B9's largest implicit batch: a packmap write consuming
