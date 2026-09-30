@@ -47,6 +47,16 @@ pub fn charge_request(budget: Option<&SliceBudget>) -> Result<(), StoreError> {
     budget.map_or(Ok(()), SliceBudget::charge)
 }
 
+/// Charge the existing alarm-wide allowance before a backend call.
+/// # Errors
+/// Returns unavailable before a call would exceed the shared allowance.
+pub fn charge_alarm(budget: Option<&mkit_server::purge::SliceBudget>) -> Result<(), StoreError> {
+    if budget.is_some_and(|budget| !budget.charge(1)) {
+        return Err(StoreError::unavailable("alarm subrequest budget exhausted"));
+    }
+    Ok(())
+}
+
 /// The key-level store over per-partition Durable Objects.
 #[derive(Debug, Clone)]
 pub struct DoNamespaceStore<T> {
@@ -54,6 +64,7 @@ pub struct DoNamespaceStore<T> {
     probe_partition: Partition,
     reserved_batch_ops: usize,
     request_budget: Option<SliceBudget>,
+    alarm_budget: Option<mkit_server::purge::SliceBudget>,
 }
 
 fn op(call: &NsCall) -> &'static str {
@@ -93,6 +104,7 @@ impl<T: NsTransport> DoNamespaceStore<T> {
             probe_partition,
             reserved_batch_ops: 0,
             request_budget: None,
+            alarm_budget: None,
         }
     }
 
@@ -100,6 +112,13 @@ impl<T: NsTransport> DoNamespaceStore<T> {
     #[must_use]
     pub fn with_budget(mut self, budget: SliceBudget) -> Self {
         self.request_budget = Some(budget);
+        self
+    }
+
+    /// Share the whole alarm's allowance across remote metadata and blob calls.
+    #[must_use]
+    pub fn with_alarm_budget(mut self, budget: mkit_server::purge::SliceBudget) -> Self {
+        self.alarm_budget = Some(budget);
         self
     }
 
@@ -122,6 +141,7 @@ impl<T: NsTransport> DoNamespaceStore<T> {
         let body = serde_json::to_string(&NsRequest::new(p, call)?)
             .map_err(|e| backend_error(StorageOp::RequestSerialize, e))?;
         charge_request(self.request_budget.as_ref())?;
+        charge_alarm(self.alarm_budget.as_ref())?;
         let reply = self.transport.call(&target, op, body).await?;
         match serde_json::from_str::<NsReply>(&reply) {
             Ok(NsReply::Err { kind, message }) => Err(kind.into_error(message)),

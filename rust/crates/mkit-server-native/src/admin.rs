@@ -19,6 +19,18 @@ pub struct AdminArgs {
     /// Separate operator listener (default 127.0.0.1:19191).
     #[arg(long, value_name = "ADDR")]
     pub admin_listen: Option<SocketAddr>,
+    /// Restricted filesystem preservation root; enables launch takedown when indexed.
+    #[arg(long, value_name = "PATH")]
+    pub preservation_root: Option<PathBuf>,
+    /// Explicit preservation retention; no default.
+    #[arg(long, value_name = "MS")]
+    pub preservation_retention_ms: Option<u64>,
+    /// Owner-only receipt-and-notice Ed25519 seed file (64 hex).
+    #[arg(long, value_name = "PATH")]
+    pub receipt_key_file: Option<PathBuf>,
+    /// Published receipt-and-notice public key list.
+    #[arg(long, value_name = "PATH")]
+    pub receipt_keys_file: Option<PathBuf>,
 }
 /// Validated operator configuration, independent of client authentication.
 #[derive(Debug, Clone)]
@@ -27,6 +39,18 @@ pub struct Settings {
     pub listen: SocketAddr,
     /// Exact audience and role-bearing public keys.
     pub config: Config,
+    /// Default-off verified preservation configuration.
+    pub takedown: Option<TakedownSettings>,
+}
+/// Restricted preservation storage and required receipt key publication.
+#[derive(Debug, Clone)]
+pub struct TakedownSettings {
+    /// User-provisioned filesystem root, disjoint from serving storage.
+    pub root: PathBuf,
+    /// Explicit positive preservation lifetime.
+    pub retention_ms: u64,
+    /// Required receipt-and-notice public key publication.
+    pub publication: mkit_server::takedown::PublicationConfig,
 }
 fn invalid(message: impl std::fmt::Display) -> ConfigError {
     ConfigError::new(
@@ -43,7 +67,12 @@ pub fn resolve(
     meta: &MetaChoice,
 ) -> Result<Option<Settings>, ConfigError> {
     let Some(path) = &args.admin_keys_file else {
-        if args.admin_listen.is_some() {
+        if args.admin_listen.is_some()
+            || args.preservation_root.is_some()
+            || args.preservation_retention_ms.is_some()
+            || args.receipt_key_file.is_some()
+            || args.receipt_keys_file.is_some()
+        {
             return Err(invalid("--admin-listen requires --admin-keys-file"));
         }
         return Ok(None);
@@ -60,6 +89,13 @@ pub fn resolve(
     let json = read_secret_file(path, "--admin-keys-file", "admin public key list")?;
     let config = Config::parse(auth.audience(), &json).map_err(invalid)?;
     if !config.enabled() {
+        if args.preservation_root.is_some()
+            || args.preservation_retention_ms.is_some()
+            || args.receipt_key_file.is_some()
+            || args.receipt_keys_file.is_some()
+        {
+            return Err(invalid("takedown requires nonempty admin keys"));
+        }
         return Ok(None);
     }
     if pipeline.ticket_keys.as_ref().is_some_and(|tickets| {
@@ -82,12 +118,94 @@ pub fn resolve(
             .map_err(invalid)?;
     }
     pipeline.admin_keys = config.public_keys();
+    let takedown = preservation_settings(args, pipeline, &config, auth.audience())?;
+    pipeline.receipt_publication = takedown.as_ref().map(|s| s.publication.clone());
+    if let Some(settings) = &takedown {
+        pipeline
+            .admin_keys
+            .extend_from_slice(settings.publication.public_keys());
+    }
     Ok(Some(Settings {
         listen: args
             .admin_listen
             .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 19191))),
         config,
+        takedown,
     }))
+}
+/// Validate the independently provisioned preservation role and required publication.
+fn preservation_settings(
+    args: &AdminArgs,
+    pipeline: &PipelineConfig,
+    config: &Config,
+    audience: &str,
+) -> Result<Option<TakedownSettings>, ConfigError> {
+    let settings = match &args.preservation_root {
+        None => {
+            if args.preservation_retention_ms.is_some()
+                || args.receipt_key_file.is_some()
+                || args.receipt_keys_file.is_some()
+            {
+                return Err(invalid("preservation settings require --preservation-root"));
+            }
+            None
+        }
+        Some(root) => {
+            if audience.len() > 2048 {
+                return Err(invalid("takedown origin exceeds 2048 bytes"));
+            }
+            if pipeline.indexed.is_none() {
+                return Err(invalid("takedown requires indexed opt-in"));
+            }
+            let retention_ms = args
+                .preservation_retention_ms
+                .filter(|n| *n > 0)
+                .ok_or_else(|| {
+                    invalid("takedown requires explicit positive --preservation-retention-ms")
+                })?;
+            let seed = read_secret_file(
+                args.receipt_key_file
+                    .as_deref()
+                    .ok_or_else(|| invalid("takedown requires --receipt-key-file"))?,
+                "--receipt-key-file",
+                "receipt-and-notice key",
+            )?;
+            let keys = std::fs::read_to_string(
+                args.receipt_keys_file
+                    .as_deref()
+                    .ok_or_else(|| invalid("takedown requires --receipt-keys-file"))?,
+            )
+            .map_err(|_| invalid("cannot read receipt public key list"))?;
+            let publication = mkit_server::takedown::PublicationConfig::parse(seed.trim(), &keys)
+                .map_err(invalid)?;
+            config
+                .check_separation(publication.public_keys())
+                .map_err(invalid)?;
+            if pipeline.ticket_keys.as_ref().is_some_and(|keys| {
+                publication
+                    .public_keys()
+                    .iter()
+                    .any(|key| keys.contains_ed25519_public(key))
+            }) {
+                return Err(invalid("receipt key repeats ticket key"));
+            }
+            #[cfg(feature = "http-objects")]
+            if pipeline.url_tokens.as_ref().is_some_and(|tokens| {
+                tokens
+                    .keys()
+                    .public_keys()
+                    .any(|key| publication.public_keys().contains(&key))
+            }) {
+                return Err(invalid("receipt key repeats URL-token key"));
+            }
+            Some(TakedownSettings {
+                root: root.clone(),
+                retention_ms,
+                publication,
+            })
+        }
+    };
+    Ok(settings)
 }
 /// Stable deployment-wide audit/replay partition, inaccessible as a client namespace.
 #[must_use]
@@ -157,6 +275,27 @@ fn response(reply: mkit_server::admin::Response) -> Response {
         .unwrap_or_default()
 }
 
+pub(crate) fn publish(router: Router, settings: Option<&Settings>) -> Router {
+    let Some(settings) = settings.and_then(|a| a.takedown.as_ref()) else {
+        return router;
+    };
+    let keys = settings.publication.key_list.clone();
+    router.route(
+        "/.well-known/mkit-receipt-keys.json",
+        axum::routing::get(move || {
+            let keys = keys.clone();
+            async move {
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .header("cache-control", "public, max-age=300")
+                    .header("access-control-allow-origin", "*")
+                    .body(Body::from(keys))
+                    .unwrap_or_default()
+            }
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,6 +310,7 @@ mod tests {
         let settings = Settings {
             listen: SocketAddr::from(([127, 0, 0, 1], 19191)),
             config,
+            takedown: None,
         };
         let pipeline = PipelineConfig::new(
             mkit_server::Addressing::Single {
@@ -224,6 +364,7 @@ mod tests {
         let settings = Settings {
             listen: SocketAddr::from(([127, 0, 0, 1], 19191)),
             config,
+            takedown: None,
         };
         for enabled in [false, true] {
             let mut pipeline = PipelineConfig::new(
@@ -323,5 +464,121 @@ mod tests {
                 1
             );
         }
+    }
+    #[tokio::test]
+    async fn receipt_publication_is_public_and_cacheable() {
+        let public = [42; 32];
+        let config = Config::parse("https://server.example", &serde_json::json!({"version":1,"keys":[{"keyId":"operator","alg":"ed25519","publicKey":mkit_core::hash::to_hex(&public),"roles":["all"]}]}).to_string()).unwrap();
+        let settings = Settings {
+            listen: SocketAddr::from(([127, 0, 0, 1], 19191)),
+            config,
+            takedown: Some(TakedownSettings {
+                root: PathBuf::from("unused"),
+                retention_ms: 10,
+                publication: {
+                    let key = ed25519_dalek::SigningKey::from_bytes(&[17; 32])
+                        .verifying_key()
+                        .to_bytes();
+                    let list=serde_json::json!({"version":1,"keys":[{"keyId":mkit_core::hash::to_hex(&mkit_core::hash::hash(&key)),"alg":"ed25519","publicKey":mkit_core::hash::to_hex(&key)}]}).to_string();
+                    mkit_server::takedown::PublicationConfig::parse(
+                        &mkit_core::hash::to_hex(&[17; 32]),
+                        &list,
+                    )
+                    .unwrap()
+                },
+            }),
+        };
+        let response = publish(Router::new(), Some(&settings))
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/mkit-receipt-keys.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["cache-control"], "public, max-age=300");
+        assert_eq!(response.headers()["access-control-allow-origin"], "*");
+        assert_eq!(response.headers()["content-type"], "application/json");
+        let absent = publish(Router::new(), None)
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/mkit-receipt-keys.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(absent.status(), 404);
+    }
+
+    #[test]
+    fn preservation_configuration_requires_complete_distinct_keys_and_allows_any() {
+        use ed25519_dalek::SigningKey;
+        let temp = tempfile::tempdir().unwrap();
+        let seed = [17; 32];
+        let public = *SigningKey::from_bytes(&seed).verifying_key().as_bytes();
+        let operator = *SigningKey::from_bytes(&[18; 32]).verifying_key().as_bytes();
+        let admin_path = temp.path().join("admin.json");
+        let seed_path = temp.path().join("receipt.key");
+        let list_path = temp.path().join("receipt.json");
+        std::fs::write(&admin_path, serde_json::json!({"version":1,"keys":[{"keyId":"op","alg":"ed25519","publicKey":mkit_core::hash::to_hex(&operator),"roles":["all"]}]}).to_string()).unwrap();
+        std::fs::write(&seed_path, mkit_core::hash::to_hex(&seed)).unwrap();
+        std::fs::write(&list_path,serde_json::json!({"version":1,"keys":[{"keyId":mkit_core::hash::to_hex(&mkit_core::hash::hash(&public)),"alg":"ed25519","publicKey":mkit_core::hash::to_hex(&public)}]}).to_string()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            for file in [&admin_path, &seed_path] {
+                std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+        }
+        let mut args = AdminArgs {
+            admin_keys_file: Some(admin_path),
+            preservation_root: Some(temp.path().join("preserved")),
+            preservation_retention_ms: Some(1000),
+            receipt_key_file: Some(seed_path),
+            receipt_keys_file: Some(list_path),
+            ..Default::default()
+        };
+        let mut pipeline = PipelineConfig::new(
+            mkit_server::Addressing::Single {
+                repo: mkit_server::RepoId {
+                    namespace: NamespaceKey::deployment_default(),
+                    name: mkit_server::RepoName::new("repo").unwrap(),
+                },
+            },
+            AuthMode::AuthV2(
+                mkit_server::auth_v2::AuthV2Config::new("https://server.example", "repo").unwrap(),
+            ),
+            mkit_server::upload::UploadLimits {
+                max_total_bytes: 1024,
+                max_chunks: 1,
+            },
+        );
+        pipeline.indexed = Some(mkit_server::indexed::IndexedConfig::default());
+        let meta = MetaChoice::Sqlite {
+            path: temp.path().join("metadata.sqlite"),
+            capacity: mkit_server::sql::Capacity::new(64 * 1024 * 1024),
+        };
+        let settings = resolve(&args, &mut pipeline, &meta).unwrap().unwrap();
+        assert_eq!(settings.takedown.unwrap().retention_ms, 1000);
+        assert!(pipeline.admin_keys.contains(&public));
+        args.preservation_retention_ms = None;
+        assert!(resolve(&args, &mut pipeline, &meta).is_err());
+        args.preservation_retention_ms = Some(0);
+        assert!(resolve(&args, &mut pipeline, &meta).is_err());
+        args.preservation_retention_ms = Some(1000);
+        pipeline.addressing = mkit_server::Addressing::Multi(
+            mkit_server::MultiAddressing::new().with_namespace_policy(
+                mkit_server::policy::NamespacePolicy::Any {
+                    unsafe_without_admission: true,
+                },
+            ),
+        );
+        let open = resolve(&args, &mut pipeline, &meta).unwrap().unwrap();
+        assert_eq!(open.takedown.unwrap().retention_ms, 1000);
+        args = AdminArgs::default();
+        assert!(resolve(&args, &mut pipeline, &meta).unwrap().is_none());
     }
 }

@@ -2525,7 +2525,7 @@
       "4.10b-1"
     ],
     "size": "L",
-    "summary": "R-190 part 2: verified canonical preservation, checkpointed discovery and retention, legal holds, restricted audited streaming reads and native/Worker configuration/templates. Timer 15 TAKEDOWN_WORK and existing b subkeys only. User provisions storage. Merged 4.10b-1 supplies the actual ct/timer-13 codec; its owning consumer is required here, with durable acceptance before acknowledgment. Cap 2,600 non-test lines including docs.",
+    "summary": "R-190 part 2: verified canonical preservation, checkpointed discovery and retention, legal holds, restricted audited streaming reads and native/Worker configuration/templates. Timer 15 TAKEDOWN_WORK and existing b subkeys only. User provisions storage. Merged 4.10b-1 supplies the actual ct/timer-13 codec; its owning consumer is required here, with durable acceptance before acknowledgment. Launch finite roots are the configured allowlist or sole Root; Any supports denial/preservation and provable named/known-holder namespace sweeps without discovery/takedown completion pending the post-launch nl catalog. Cap 2,600 non-test lines including docs.",
     "human_action": true,
     "area_gates": [
       "rust",

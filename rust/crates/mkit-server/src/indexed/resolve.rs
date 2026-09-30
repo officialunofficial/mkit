@@ -174,6 +174,9 @@ async fn frame_bytes<B: BlobStore>(
         .map_err(|_| unavailable())?
         .ok_or_else(unavailable)?;
     let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(usize::try_from(length).map_err(|_| budget_exceeded())?)
+        .map_err(|_| budget_exceeded())?;
     match body {
         BlobBody::Bytes(value) => {
             if value.len() as u64 != length {
@@ -298,7 +301,7 @@ pub fn member_object<'a, B: BlobStore, S: NamespaceStore>(
     metrics: &'a dyn Metrics,
 ) -> BoxFuture<'a, Result<ResolvedMember, ResolveFailure>> {
     member_object_inner(
-        blobs, store, shards, repo, id, located, cap, budget, memo, visiting, metrics, true,
+        blobs, store, shards, repo, id, located, cap, budget, memo, visiting, metrics, true, None,
     )
 }
 
@@ -318,7 +321,47 @@ pub fn member_object_for_preservation<'a, B: BlobStore, S: NamespaceStore>(
     metrics: &'a dyn Metrics,
 ) -> BoxFuture<'a, Result<ResolvedMember, ResolveFailure>> {
     member_object_inner(
-        blobs, store, shards, repo, id, located, cap, budget, memo, visiting, metrics, false,
+        blobs, store, shards, repo, id, located, cap, budget, memo, visiting, metrics, false, None,
+    )
+}
+
+/// Independent limits for every encoded frame and decoded chain member.
+#[derive(Debug, Clone, Copy)]
+pub struct MemberSourceLimits {
+    pub max_frame_bytes: u64,
+    pub max_decoded_bytes: u64,
+}
+
+/// Restricted acquisition with admission-derived limits on every chain source.
+#[allow(clippy::too_many_arguments)]
+pub fn member_object_for_preservation_bounded<'a, B: BlobStore, S: NamespaceStore>(
+    blobs: &'a B,
+    store: &'a S,
+    shards: &'a dyn ShardMap,
+    repo: &'a RepoId,
+    id: Hash,
+    located: LocatedObject,
+    cap: u32,
+    budget: u64,
+    memo: &'a mut MemberCache,
+    visiting: &'a mut BTreeSet<Location>,
+    metrics: &'a dyn Metrics,
+    limits: MemberSourceLimits,
+) -> BoxFuture<'a, Result<ResolvedMember, ResolveFailure>> {
+    member_object_inner(
+        blobs,
+        store,
+        shards,
+        repo,
+        id,
+        located,
+        cap,
+        budget,
+        memo,
+        visiting,
+        metrics,
+        false,
+        Some(limits),
     )
 }
 
@@ -336,11 +379,18 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
     visiting: &'a mut BTreeSet<Location>,
     metrics: &'a dyn Metrics,
     enforce_denial: bool,
+    source_limits: Option<MemberSourceLimits>,
 ) -> BoxFuture<'a, Result<ResolvedMember, ResolveFailure>> {
     Box::pin(async move {
         if enforce_denial {
             crate::takedown::denial::require_clear(store, &id).await?;
             crate::takedown::denial::require_clear(store, &located.pack).await?;
+        }
+        if source_limits.is_some_and(|limits| {
+            located.value.frame_length > limits.max_frame_bytes
+                || located.value.decoded_size > limits.max_decoded_bytes
+        }) {
+            return Err(budget_exceeded().into());
         }
         let location = (id, located.pack, located.value.frame_offset);
         let available = budget
@@ -421,6 +471,7 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
                     visiting,
                     metrics,
                     enforce_denial,
+                    source_limits,
                 )
                 .await?;
                 base_bytes = Some((base, canonical));
@@ -432,14 +483,23 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
             let available = budget
                 .checked_sub(memo.retained_bytes)
                 .ok_or_else(budget_exceeded)?;
-            let frame =
-                frame_bytes(blobs, located.pack, frame_offset, frame_length, available).await?;
+            let frame = frame_bytes(
+                blobs,
+                located.pack,
+                frame_offset,
+                frame_length,
+                source_limits.map_or(available, |limits| limits.max_frame_bytes),
+            )
+            .await?;
             let mut source = CachedBase(base_bytes);
             let (actual, bytes) = decode_frame_with(
                 &frame,
                 version,
                 &mut source,
-                DecodeLimits::default().with_max_decoded_bytes(available),
+                DecodeLimits::default().with_max_decoded_bytes(
+                    source_limits
+                        .map_or(available, |limits| available.min(limits.max_decoded_bytes)),
+                ),
             )
             .map_err(|error| {
                 ResolveFailure::Other(if matches!(error, PackError::PackfileTooLarge) {

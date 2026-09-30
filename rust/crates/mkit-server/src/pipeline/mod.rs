@@ -268,8 +268,10 @@ pub struct PipelineConfig {
     /// URL-token key set and lifetime for `IssueObjectUrl`
     /// (SPEC-WRITE-GRANTS §9.4); `None` answers `unimplemented`.
     pub url_tokens: Option<crate::url_token::UrlTokenConfig>,
-    /// Dedicated operator keys, forbidden for client and owner authorization.
+    /// Dedicated role keys, forbidden for client and owner authorization.
     pub admin_keys: Vec<[u8; 32]>,
+    /// Receipt role key publication required by enabled takedown, without issuing receipts.
+    pub receipt_publication: Option<crate::takedown::PublicationConfig>,
     /// Durable invalidation; absent keeps launch purge machinery inert.
     pub purge: Option<crate::purge::PurgeConfig>,
     /// Ticket lifetime, positive and strictly below seven days.
@@ -355,6 +357,7 @@ impl PipelineConfig {
             ticket_keys: None,
             url_tokens: None,
             admin_keys: Vec::new(),
+            receipt_publication: None,
             purge: None,
             ticket_ttl_ms: 86_400_000,
             ticket_caps: TicketCaps {
@@ -604,6 +607,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         clock: Arc<dyn Clock>,
         metrics: Arc<dyn Metrics>,
     ) -> Result<Self, ServerError> {
+        if let Some(publication) = &cfg.receipt_publication {
+            if cfg.indexed.is_none() {
+                return Err(ServerError::invalid_argument(
+                    "takedown requires indexed mode",
+                ));
+            }
+            cfg.admin_keys.extend_from_slice(publication.public_keys());
+        }
         if let Some(purge) = &cfg.purge {
             purge.validate().map_err(meta_error)?;
         }

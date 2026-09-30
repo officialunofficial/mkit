@@ -179,6 +179,8 @@ pub fn response_header_plan(headers: &http::HeaderMap) -> Vec<(String, String, b
 pub struct WorkerConfig {
     /// Default-off signed operator keys, independent of client credentials.
     pub admin: Option<mkit_server::admin::Config>,
+    /// Default-off restricted preservation configuration.
+    pub takedown: Option<crate::admin::TakedownSettings>,
     /// Optional dedicated deployment-authority keys (`AUTHORITY_FENCE`, `AUTHORITY_KEYS`).
     pub authority_fence: Option<mkit_server::authority::AuthorityFence>,
     /// `AUTH_AUDIENCE`: the canonical origin writes are signed for.
@@ -314,6 +316,12 @@ impl WorkerConfig {
             .admin
             .as_ref()
             .map_or_else(Vec::new, mkit_server::admin::Config::public_keys);
+        config.receipt_publication = self.takedown.as_ref().map(|s| s.publication.clone());
+        if let Some(settings) = &self.takedown {
+            config
+                .admin_keys
+                .extend_from_slice(settings.publication.public_keys());
+        }
         config.indexed = self.indexed;
         #[cfg(feature = "http-objects")]
         if let Some(mount) = &self.http_mount {
@@ -456,6 +464,14 @@ impl WorkerConfig {
         let url_tokens = crate::http_mount::token_config_for_tickets(&var, ticket_keys.as_ref())?;
         let admin = crate::admin::parse(&var, &audience, ticket_keys.as_ref())?;
         let hooks = crate::hooks::config::HookVars::parse(&var)?;
+        let takedown = crate::admin::takedown(
+            &var,
+            admin.as_ref(),
+            indexed.is_some(),
+            &addressing,
+            var(PLAN_VAR).is_some_and(|p| p.trim().eq_ignore_ascii_case("paid")),
+            ticket_keys.as_ref(),
+        )?;
         if hooks.as_ref().is_some_and(|hooks| hooks.roles.cache_purge)
             && !var(PLAN_VAR).is_some_and(|plan| plan.trim().eq_ignore_ascii_case("paid"))
         {
@@ -507,7 +523,27 @@ impl WorkerConfig {
                 .check_separation(&tokens.keys().public_keys().collect::<Vec<_>>())
                 .map_err(|_| ConfigError("ADMIN_KEYS must differ from URL-token keys".into()))?;
         }
+        if let Some(settings) = &takedown {
+            let published = settings.publication.public_keys();
+            if audience.len() > 2048
+                || authority_fence
+                    .as_ref()
+                    .is_some_and(|f| f.public_keys().any(|key| published.contains(&key)))
+            {
+                return Err(ConfigError(
+                    "invalid receipt origin or overlapping authority key".into(),
+                ));
+            }
+            #[cfg(feature = "http-objects")]
+            if url_tokens
+                .as_ref()
+                .is_some_and(|t| t.keys().public_keys().any(|key| published.contains(&key)))
+            {
+                return Err(ConfigError("receipt key repeats URL-token key".into()));
+            }
+        }
         Ok(Self {
+            takedown,
             admin,
             authority_fence,
             indexed,
@@ -543,7 +579,10 @@ impl WorkerConfig {
     /// As [`Self::from_vars`].
     #[cfg(target_arch = "wasm32")]
     pub fn from_env(env: &worker::Env) -> Result<Self, ConfigError> {
-        Self::from_vars(|name| {
+        let config = Self::from_vars(|name| {
+            if name == crate::admin::RECEIPT_SECRET {
+                return env.secret(name).ok().map(|secret| secret.to_string());
+            }
             if name == crate::admin::KEYS_SECRET
                 || name == "AUTHORITY_KEYS"
                 || name == TICKET_KEYS_VAR
@@ -556,7 +595,25 @@ impl WorkerConfig {
             } else {
                 env.var(name).ok().map(|value| value.to_string())
             }
-        })
+        })?;
+        if let Some(settings) = &config.takedown {
+            if let Some(http) = config.hooks.as_ref().and_then(|hooks| hooks.http.as_ref()) {
+                crate::hooks::config::http_signer(
+                    env.secret("MKIT_HOOK_KEY").ok().map(|s| s.to_string()),
+                    http,
+                    config.ticket_keys.as_ref(),
+                    settings.publication.public_keys(),
+                )?;
+            }
+            env.bucket(crate::admin::PRESERVATION_BINDING)
+                .map_err(|_| ConfigError("PRESERVATION binding required".into()))?;
+            if config.blob_binding == crate::admin::PRESERVATION_BINDING {
+                return Err(ConfigError(
+                    "preservation binding must differ from serving storage".into(),
+                ));
+            }
+        }
+        Ok(config)
     }
 }
 
@@ -1948,12 +2005,33 @@ mod glue {
         Ok(response)
     }
 
+    fn receipt_keys(req: &Request, cfg: &WorkerConfig) -> worker::Result<Option<Response>> {
+        if req.path() == "/.well-known/mkit-receipt-keys.json"
+            && req.method() == worker::Method::Get
+            && let Some(settings) = &cfg.takedown
+        {
+            let mut response =
+                Response::from_bytes(settings.publication.key_list.as_bytes().to_vec())?;
+            response
+                .headers_mut()
+                .set("content-type", "application/json")?;
+            response
+                .headers_mut()
+                .set("cache-control", "public, max-age=300")?;
+            response
+                .headers_mut()
+                .set("access-control-allow-origin", "*")?;
+            return Ok(Some(response));
+        }
+        Ok(None)
+    }
+
     /// The pipeline for `cfg` over `env`'s bindings and `hooks`.
     fn pipeline<H: HookSet + 'static>(
         env: &Env,
         cfg: &WorkerConfig,
         hooks: H,
-        request_budget: mkit_server::indexed::budget::SliceBudget,
+        request_budget: &mkit_server::indexed::budget::SliceBudget,
         #[cfg(feature = "published-view")] snapshot_warm: bool,
     ) -> Result<WorkerPipeline<H>, ConfigError> {
         let bad = |e: &dyn core::fmt::Display| ConfigError(e.to_string());
@@ -2030,7 +2108,7 @@ mod glue {
                     env.clone(),
                     Some(request_budget.clone()),
                 ),
-                crate::published_view::WorkerCache(Some(request_budget)),
+                crate::published_view::WorkerCache(Some(request_budget.clone())),
                 config,
                 Arc::new(WorkerClock),
             );
@@ -2188,6 +2266,9 @@ mod glue {
         #[cfg(feature = "test-faults")]
         let mut req = req;
         install();
+        if let Some(response) = receipt_keys(&req, cfg)? {
+            return Ok(response);
+        }
         if is_options_preflight(&req) {
             return cors_preflight_response(&cors_allow_headers(), CORS_ALLOW_METHODS);
         }
@@ -2270,7 +2351,7 @@ mod glue {
                 &env,
                 cfg,
                 hooks,
-                request_budget,
+                &request_budget,
                 #[cfg(feature = "published-view")]
                 snapshot_warm,
             )

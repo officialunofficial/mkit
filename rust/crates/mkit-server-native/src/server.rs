@@ -515,6 +515,13 @@ where
                 use commonware_cryptography::Signer as _;
                 let public = <[u8; 32]>::try_from(key.public_key().as_ref())
                     .map_err(|e| config_error("enc key", e))?;
+                if admin
+                    .takedown
+                    .as_ref()
+                    .is_some_and(|settings| settings.publication.public_keys().contains(&public))
+                {
+                    return Err(config_error("receipt key", "repeats enc key"));
+                }
                 admin
                     .config
                     .check_separation(&[public])
@@ -540,7 +547,10 @@ where
             .admin
             .as_ref()
             .map(|settings| crate::admin::router(meta, settings, &pipeline_config)),
-        router: build_router(Arc::new(pipeline), &cfg.router),
+        router: crate::admin::publish(
+            build_router(Arc::new(pipeline), &cfg.router),
+            cfg.admin.as_ref(),
+        ),
         #[cfg(feature = "enc")]
         enc,
         timers: None,

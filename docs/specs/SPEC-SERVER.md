@@ -3357,6 +3357,9 @@ store an authenticated wrong-role denial as the terminal result and
 audit it once. The stored result MUST survive restart. A retry cannot
 substitute a later signature to change the original actor or label.
 
+The launch `ReadPreserved` subset has the byte-free replay exception specified
+in §18. All other procedures and the full profile retain the rule above.
+
 `Takedown`, `Reinstate`, `AddBlock`, `PurgeCache`, and a takedown-flagged
 `SetSuspension` additionally require a client
 `operation_id` of 1–128 bytes in `[A-Za-z0-9._:-]` (§6.6). Across
@@ -3595,9 +3598,11 @@ implements §2–§5) and:
 **Launch profile.** An indexed server MAY implement §§2–11, including
 synchronous inspection and HTTP object serving without storage leases, while
 advertising `leases = false`, retaining all repository content
-permanently and disabling GC. It MUST refuse lease terms, advertise empty
-receipt key fields and issue no storage receipts. The lease, GC and receipt
-requirements of §§12–13 and §15 do not apply to this profile; configured Event
+permanently and disabling GC. It MUST refuse lease terms and issue no storage
+receipts. Receipt key fields MUST follow §15.5: empty without a configured
+receipt-and-notice key; populated when takedown requires that key. The lease, GC
+and receipt-issuance requirements of §§12–13 and §15 do not apply to this profile;
+§15.5 key publication still applies when takedown is enabled. Configured Event
 sinks still obey §12.4, including publication transitions. Inspection and
 serving stops remain governed by §§10–11, subject to the launch amendments:
 only sync/fail-closed inspectors, at most four, one complete batch each, and a
@@ -3644,7 +3649,7 @@ requirements follow the deployment's declared launch scope.
 | Manual PurgeCache | Optional asynchronous acceptance and audited completion under R-190 below. |
 | Other admin procedures | Supported only by completed launch work; never advertise unimplemented operations. |
 
-**Pending takedown implementation (R-190).** A launch CONTENT `Takedown` names
+**Lean launch takedown (R-190).** A launch CONTENT `Takedown` names
 one repository for canonical source validation and exactly one of 1–256 distinct
 blob/manifest `object_ids` or one whole `pack_id` (admin schema field 9). This
 request shape overrides §16.5's repository-free CONTENT shape for this subset.
@@ -3657,7 +3662,70 @@ holder discovery or repository/global completion. The pending record MUST retain
 preservation work. Production takedown activation MUST remain refused until the
 preservation implementation, required §14.7 configuration and launch conformance
 gates are complete. This intermediate implementation does not waive §14's full
-completion requirements or offer preservation/reinstatement/review operations.
+completion requirements. Once implemented, the supported catalog is `Takedown`,
+`PurgeCache`, `GetTakedown`, `ListTakedowns`, `ReadPreserved`, `SetLegalHold` and
+`ReadAuditLog`. Inspection is sync-only: there are no launch inspection hits or holds.
+The `ReleaseHold`, `Reinspect`, `ReleaseFlag`, `ResumeServing` and
+`WaiveObligations` operations, reinstatement and signed notices are post-launch.
+Future inspection hits MUST enter through durable intake and MUST NOT resolve
+without their applicable real completion. Retained advances MUST NOT be rewound
+or cleared by accepting a request or preserving bytes.
+
+This profile permits an unresolved request after verified preservation while
+§14.3's rewrite, substitution, tombstones, notices and physical serving deletion
+remain unimplemented. It MUST retain immediate global denial and durable
+acquisition/discovery responsibility. It MUST NOT report repository/global
+completion, sign completion notices, or advertise those missing capabilities.
+For §14.2 push rejection it MUST return `permission_denied` with public message
+`object blocked`; the §14.6 signed-notice detail is omitted in this subset.
+The full profile retains every §14 completion and signed-detail requirement.
+
+Launch holder discovery MUST first read pack/extracted-object holder records
+and then durably sweep all named ids. Finite Multi addressing MUST use the
+complete configured namespace allowlist; Single addressing MUST sweep its sole
+Root. Under `namespace_policy = any`, normal global denial and preservation
+from the named repository MUST remain supported. Discovery MUST sweep provable
+named-namespace and known-holder namespaces, but MUST NOT report discovery or
+repository/global takedown completion under Any. The exhaustive `nl` catalog is
+post-launch; this subset requires no catalog or new cross-partition protocol.
+Known holders MUST NOT substitute for exhaustive roots. Each sweep MUST persist
+its safety cut and cursor, wait until strictly after
+`takedown time + MAX_APPLY_WINDOW + margin`, and wait for each root's relay
+watermark to pass the cut before reading its repository-registry/active-shard
+union. It MUST retry incomplete enumeration/index reads and disclose incomplete
+discovery. Finishing a sweep alone does not establish takedown completion.
+
+The restricted §14.7 record MUST bind verified canonical ids, kinds, sizes and
+bytes, including manifest order and every chunk, to the action and provenance.
+Acquisition and discovery progress, currently known holders, affected old packs
+and known signer metadata MUST be durable; missing final holders-at-completion
+MUST remain explicitly incomplete. Admin status MUST distinguish acceptance,
+pending acquisition, verified preservation, discovery progress, legal hold and
+actual completion, without exposing bytes. Preservation success MUST NOT imply
+discovery or takedown completion. The §14.7 retention, receipt-and-notice signing
+key and published §15.5 key-list startup requirements remain mandatory even
+though this profile issues no storage receipts or notices.
+Retention purge MUST be audited and own only that action's preserved copy;
+one action's purge MUST NOT delete another action's copy or remove denial.
+Legal hold MUST guard timed purge. A purged copy or an expired copy without an
+active hold MUST fail closed on read.
+
+For launch `ReadPreserved`, the nonce ledger MUST contain only a bounded,
+byte-free result descriptor binding the request to its action/object/range or
+terminal error. It MUST NOT cache preserved response bytes. A completed nonce
+retry MUST NOT repeat workflow effects; each attempt to read bytes MUST perform
+fresh current-key/role, retention/legal-hold and availability checks, and audit
+its acceptance before any byte is emitted. This is an explicit exception to
+§16.4's stored-response/unchanged-role retry rule. Each attempt MUST create a
+fresh bounded stream and verify each emitted piece against the durably verified
+copy before release; preflight verification followed by unchecked reads is
+insufficient. Retention/hold and purge ownership MUST be checked before each
+piece is emitted. Responses MUST have exact ordered offsets and exactly one `last`
+only on success. Offset equal to size returns an empty final response; offset
+greater than size is `invalid_argument`. Corruption, retention loss or backend
+failure during streaming MUST terminate with a Connect error and be audited,
+without preserved bytes in audit, logs or errors. An error MUST NOT emit `last`.
+
 Manual `PurgeCache` MAY be supported independently: acceptance MUST atomically
 commit its audit, replay result and timer-11 purge intent, return the purge id,
 and expose completion through the audit log rather than synchronous delivery.
@@ -3677,6 +3745,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | R-190 lean launch preservation: finite allowlist/Single Root safety-cut sweeps; Any supports denial/preservation and incomplete known-namespace discovery pending the post-launch catalog. Pending, verified preservation and real completion stay distinct. Restricted ReadPreserved uses byte-free replay descriptors and fresh audited verified streams; full-profile and §14.7 key/list requirements remain. No schema fields or versions change in this amendment. |
 | 1 | draft | R-190 pending launch takedown: repository-local object or whole-pack input (additive admin `pack_id = 9`), independent immediate denial and unresolved preservation work; production activation awaits preservation. Manual PurgeCache accepts asynchronously with audited completion. |
 | 1 | draft | R-200 launch inspection: sync/fail-closed only, at most four inspectors, positive whole-advance bound <=10,000 advertised as inspection_max_objects, conservative header/job-count refusal before enumeration with the existing index-limit error; one batch each and PRE_RECEIVE quarantine rejects. Inspect added-pack Blob/ChunkedBlob entries, surplus included, as BLOB/CHUNKED_FILE; chunk-only blobs MAY be BLOB, CHUNK unused. Earlier membership was synchronously inspected; activation requires an empty store. Enumerate frame/checkpoint pages of <=1,000 rows without inspection role reads. No durable continuation/marker; async, holds, quarantine, full classification and unrestricted multi-batch inspection deferred to WP-5.5c (§11, §18). |
 | 1 | draft | Launch admin foundation subset: signed framework, gapless audit/ReadAuditLog and automatic purge delivery; manual PurgeCache deferred. Automatic audit uses committed source relay events and atomic root append/dedup/watermark. |

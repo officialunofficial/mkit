@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Docs (WP-5.6a-2, R-190): specify finite root sweeps and support Any denial/
+  preservation with incomplete discovery pending the post-launch catalog.
+  Distinguish verified preservation from unresolved completion; require byte-free
+  admin replay and fresh audited verified streams. §14.7 signing/publication and
+  full-profile requirements remain; this amendment makes no activation claim.
+
 - Server (WP-5.6a-1, R-190): independent V2 denial actions, verified pack inventory
   and signed, audited pending takedown intents; manual PurgeCache returns a purge
   id asynchronously and audits completion. Preservation and production takedown
