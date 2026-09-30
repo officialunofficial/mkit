@@ -195,3 +195,8 @@ job tests pass. Logs: selection-red.log, selection-green.log and
 selection-job-suite.log in ~/.cache/mkit-test-tmp/wp-4-10b. No live handles remain.
 Root allocated additive WP-4.10b-multipart/R192 (1500 production-line cap) as an
 explicit prerequisite; parent scope and R186 remain complete extraction/relay.
+
+
+### Executor checkpoint: durable pending ownership foundation
+
+Integrated merged multipart prerequisite39998d86 at b1a1aae2. `gp` stores a strict bounded version1 identity binding repository, canonical source partition, job ticket and relay intent. Guarded insertion bumps object `c`; identical retry does not bump, replacement identity refuses, block/deleting checks are fresh and NotAfter guarded. GC performs a bounded first-row existence check and conservatively refuses even malformed pending state after expiring ordinary holds. Stale GC plans lose their c guard. No age-based release API exists. Hook-atomic holder/gp/TTL/watermark delivery and source reconciliation remain unfinished; this foundation does not lift Extract's fail-closed stub. ContentIndex focused15 and key codec tests green; red TTL regression evidence retained in owncache pending-protection-red.log.

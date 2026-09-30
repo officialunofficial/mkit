@@ -134,6 +134,8 @@ pub const TAG_TIMER: &str = "w";
 pub const TAG_HOLDER: &str = "h";
 /// `ContentIndex` GC hold tag.
 pub const TAG_HOLD: &str = "g";
+/// Durable queued-holder protection; no age expiry.
+pub const TAG_PENDING_HOLDER: &str = "gp";
 /// `ContentIndex` blocklist tag.
 pub const TAG_BLOCK: &str = "b";
 /// `ContentIndex` object state (last change and holder count) tag.
@@ -380,6 +382,13 @@ pub enum ParsedKey {
         /// Object id.
         object: Hash,
         /// Hold id.
+        hold_id: Hash,
+    },
+    /// `gp 00 <object> <hold_id>`: pending-holder ownership.
+    PendingHolder {
+        /// Object id.
+        object: Hash,
+        /// Matching extraction hold id.
         hold_id: Hash,
     },
     /// `b 00 <object>`.
@@ -855,6 +864,20 @@ pub fn holds_of(object: &Hash) -> (Key, Key) {
     (start, end)
 }
 
+/// `gp 00 <object> <hold_id>`; mutated only with the object state guard.
+#[must_use]
+pub fn pending_holder(object: &Hash, hold_id: &Hash) -> Key {
+    key(TAG_PENDING_HOLDER, &[object, hold_id])
+}
+
+/// Bounded existence scan for queued work protecting `object`.
+#[must_use]
+pub fn pending_holders_of(object: &Hash) -> (Key, Key) {
+    let start = key(TAG_PENDING_HOLDER, &[object]);
+    let end = successor(&start);
+    (start, end)
+}
+
 /// `b 00 <object>`.
 #[must_use]
 pub fn block(object: &Hash) -> Key {
@@ -1085,6 +1108,13 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"g" => {
             let (object, hold_id) = body.split_first_chunk::<32>()?;
             ParsedKey::Hold {
+                object: *object,
+                hold_id: hash(hold_id)?,
+            }
+        }
+        b"gp" => {
+            let (object, hold_id) = body.split_first_chunk::<32>()?;
+            ParsedKey::PendingHolder {
                 object: *object,
                 hold_id: hash(hold_id)?,
             }

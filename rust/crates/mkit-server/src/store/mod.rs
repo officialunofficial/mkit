@@ -13,6 +13,8 @@
 mod blob;
 pub mod codec;
 mod content_index;
+mod pending_holder;
+pub use pending_holder::PendingHolderV1;
 mod error;
 pub mod index;
 pub mod keys;
