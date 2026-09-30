@@ -150,6 +150,8 @@ pub struct TimerDriver {
     store: TimerStore,
     registry: TimerRegistry<'static, TimerStore>,
     clock: Arc<dyn Clock>,
+    #[cfg(feature = "test-faults")]
+    test_timer_gate: Option<Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl fmt::Debug for TimerDriver {
@@ -172,7 +174,17 @@ impl TimerDriver {
             store,
             registry,
             clock,
+            #[cfg(feature = "test-faults")]
+            test_timer_gate: None,
         }
+    }
+
+    /// Share test tick exclusion with the pipeline's explicit timer directives.
+    #[cfg(feature = "test-faults")]
+    #[must_use]
+    pub fn with_test_timer_gate(mut self, gate: Arc<tokio::sync::Mutex<()>>) -> Self {
+        self.test_timer_gate = Some(gate);
+        self
     }
 
     /// The notifying store this driver runs over: a write committed through it
@@ -252,6 +264,11 @@ impl TimerDriver {
         // Immediate puts cannot take a second turn before the other heads.
         let mut claimed = partitions.into_iter();
         while let Some(partition) = claimed.next() {
+            #[cfg(feature = "test-faults")]
+            let _tick_guard = match &self.test_timer_gate {
+                Some(gate) => Some(gate.lock().await),
+                None => None,
+            };
             if stop.is_some_and(Shutdown::is_triggered) {
                 // Give the unrun claims back, due now, so the shutdown drain
                 // (or a restart, from `SQLite`) still runs them.
