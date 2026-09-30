@@ -51,6 +51,7 @@ struct Handler {
     kind: u8,
     fail: bool,
     repeat_first: bool,
+    fail_guard: bool,
     advance_clock: Option<Arc<ManualClock>>,
     calls: Arc<Mutex<Vec<u32>>>,
 }
@@ -64,7 +65,7 @@ impl TimerHandler<Store> for Handler {
     }
     fn fire<'a>(
         &'a self,
-        _ctx: &'a TimerCtx<'a, Store>,
+        ctx: &'a TimerCtx<'a, Store>,
         timer: &'a DueTimer,
     ) -> BoxFuture<'a, Result<Fired, StoreError>> {
         Box::pin(async move {
@@ -77,6 +78,19 @@ impl TimerHandler<Store> for Handler {
                 return Err(StoreError::Invalid("fixture handler failure".into()));
             }
             if self.repeat_first && index == 0 {
+                let mut changed = timer.value.as_bytes().to_vec();
+                changed.push(1);
+                ctx.store
+                    .apply(
+                        ctx.partition,
+                        Batch::new().put(
+                            keys::timer(timer.due_at_ms, self.kind, &timer.reference),
+                            Value::new(changed),
+                        ),
+                    )
+                    .await?;
+            }
+            if self.fail_guard || self.repeat_first && index == 0 {
                 return Ok(Fired::Done(Batch::new().require(Precondition::Present(
                     Key::new(b"never-present".to_vec()),
                 ))));
@@ -93,6 +107,7 @@ fn handler(kind: u8, fail: bool, repeat_first: bool) -> (Handler, Arc<Mutex<Vec<
             kind,
             fail,
             repeat_first,
+            fail_guard: false,
             advance_clock: None,
             calls: calls.clone(),
         },
@@ -163,10 +178,10 @@ fn failed_handlers_cannot_refresh_their_kind_allowance_per_head() {
 
 #[test]
 fn unknown_and_failed_prefixes_move_durably_across_repeated_cold_alarms() {
-    for failed_prefix in [false, true] {
+    for failure_mode in 0..3 {
         let clock = Arc::new(ManualClock::new(1002));
         let store = store(&clock);
-        let prefix_kind = if failed_prefix { 240 } else { 239 };
+        let prefix_kind = if failure_mode > 0 { 240 } else { 239 };
         for index in 0..80 {
             block_on(store.apply(
                 &partition(index),
@@ -185,8 +200,10 @@ fn unknown_and_failed_prefixes_move_durably_across_repeated_cold_alarms() {
         .unwrap();
         let (later, calls) = handler(241, false, false);
         let mut registry = TimerRegistry::new().register(later);
-        if failed_prefix {
-            registry = registry.register(handler(240, true, false).0);
+        if failure_mode > 0 {
+            let mut prefix = handler(240, failure_mode == 1, false).0;
+            prefix.fail_guard = failure_mode == 2;
+            registry = registry.register(prefix);
         }
         for _cold_alarm in 0..8 {
             // Eviction deliberately discards every volatile enumeration cursor.
@@ -209,7 +226,7 @@ fn unknown_and_failed_prefixes_move_durably_across_repeated_cold_alarms() {
         assert_eq!(
             *calls.lock().unwrap(),
             vec![200],
-            "failed prefix: {failed_prefix}"
+            "failure mode: {failure_mode}"
         );
         assert!(
             block_on(store.get(&partition(200), &later_key))

@@ -402,7 +402,16 @@ async fn process_row<S: NamespaceStore>(
         }
         FireOutcome::Raced => {
             run.report.raced += 1;
-            run.retained_due = true;
+            // A failed ancillary guard can leave the exact timer unchanged.
+            // Move that retained work too; a replaced timer fails this guard.
+            match backoff(ctx, &timer, key, attempt).await {
+                FireOutcome::Committed(due) => {
+                    state.committed();
+                    run.progress = true;
+                    run.committed_due = min_due(run.committed_due, due);
+                }
+                FireOutcome::Raced | FireOutcome::Failed => run.retained_due = true,
+            }
         }
         FireOutcome::Failed => {
             run.report.failed += 1;

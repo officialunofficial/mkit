@@ -502,8 +502,11 @@ fn checkpoint_cas_rejects_concurrent_obligation_and_generation_changes() {
             assert_eq!(fixture.target.calls(), MAX_RECHECK_CALLS);
             assert_eq!(
                 fixture.timer().await,
-                before,
-                "CAS race must retain the old timer and cursor"
+                (
+                    keys::timer_retry(5_000, 12, fixture.advance_key().as_bytes(), 0, 1),
+                    before.1
+                ),
+                "CAS race must retain the old cursor while backing off the timer"
             );
             assert_eq!(fixture.published().await, 0);
             assert_eq!(fixture.fire(5_000).await.fired, 1);
@@ -531,7 +534,13 @@ fn completion_cas_cannot_publish_after_a_concurrent_obligation_change() {
         let report = fixture.fire(0).await;
         assert_eq!((report.raced, report.fired, report.failed), (1, 0, 0));
         assert_eq!(fixture.target.calls(), 1);
-        assert_eq!(fixture.timer().await, before);
+        assert_eq!(
+            fixture.timer().await,
+            (
+                keys::timer_retry(5_000, 12, fixture.advance_key().as_bytes(), 0, 1),
+                before.1
+            )
+        );
         assert_eq!(fixture.published().await, 0);
     });
 }

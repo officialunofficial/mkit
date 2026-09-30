@@ -244,12 +244,23 @@ async fn effects_are_atomic_and_failed_handler_condition_is_raced() {
             (report.fired, report.raced),
             (u32::from(!bad), u32::from(bad))
         );
-        assert_eq!(store.get(&partition(), &key).await.unwrap().is_some(), bad);
+        assert!(store.get(&partition(), &key).await.unwrap().is_none());
+        assert_eq!(
+            store
+                .get(
+                    &partition(),
+                    &keys::timer_retry(5100, 1, &1_u32.to_be_bytes(), 1, 1)
+                )
+                .await
+                .unwrap()
+                .is_some(),
+            bad
+        );
         assert_eq!(
             store.get(&partition(), &effect()).await.unwrap().is_some(),
             !bad
         );
-        // A raced row is still due: it must get a backoff wake, never none.
+        // Unchanged work after a failed condition gets a durable backoff wake.
         let wake = if bad {
             Some(100 + RETRY_BACKOFF_MS)
         } else {

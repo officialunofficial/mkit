@@ -28,8 +28,9 @@ commits no abandoned handler effects. Backoff starts at five seconds, doubles,
 and caps at ten minutes. Because the new due time and attempt survive a restart,
 retained failures move behind later due work even when every alarm is cold.
 Timers are never skipped because they were fired, nor deleted to gain fairness.
-An unavailable store, a guard race or a corrupt key leaves the original row for
-retry or repair. A complete traversal with no progress preserves the core's
+Failed ancillary handler guards also back off when the exact timer is unchanged.
+An unavailable store, a timer-value guard race or a corrupt key leaves the
+original row for retry or repair. A complete traversal with no progress preserves the core's
 conservative retry wake only for the exact already visited physical head;
 new earlier work and unfinished traversals wake immediately.
 
