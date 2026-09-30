@@ -328,6 +328,9 @@ async fn automatic_audit_does_not_commit_when_trigger_apply_loses() {
         .plan(&partition(), &automatic_request(), "automatic-op", 1)
         .await
         .unwrap();
+    let work = crate::purge::plan_enqueue(&automatic_request(), 1, None, None).unwrap();
+    batch.preconditions.extend(work.preconditions);
+    batch.writes.extend(work.writes);
     let state_key = crate::Key::new(b"state".to_vec());
     store
         .apply(
@@ -342,13 +345,15 @@ async fn automatic_audit_does_not_commit_when_trigger_apply_loses() {
         crate::BatchOutcome::PreconditionFailed { .. }
     ));
     assert_eq!(head(&store).await, 0);
-    assert!(
-        store
-            .get(&partition(), &crate::Key::new(b"ai\0automatic-1".to_vec()))
-            .await
-            .unwrap()
-            .is_none()
-    );
+    for key in [
+        crate::store::keys::cache_purge("automatic-1").unwrap(),
+        crate::store::keys::timer(1, 11, b"automatic-1"),
+        crate::store::keys::relay(1),
+        crate::store::keys::outbox_sequence(),
+        crate::store::keys::cache_purge_generation("root/repo"),
+    ] {
+        assert!(store.get(&partition(), &key).await.unwrap().is_none());
+    }
 }
 
 #[derive(Clone)]
@@ -675,6 +680,16 @@ async fn automatic_relay_duplicate_reordered_sources_keep_gapless_chain() {
     let response = engine.handle(AUDIT_PATH, &headers, &body, 201).await;
     assert_eq!(response.status, 200);
     let exported = page(&response);
+    let details: serde_json::Value =
+        serde_json::from_str(exported["entries"][0]["details"].as_str().unwrap()).unwrap();
+    assert_eq!(details["purgeId"], "automatic-1");
+    assert_eq!(
+        details["sourcePartitionHash"],
+        mkit_core::hash::to_hex(&mkit_core::hash::hash(
+            &source_partition(1).encode().unwrap()
+        ))
+    );
+    assert_eq!(details["trigger"], "CACHE_PURGE_TRIGGER_VISIBILITY_CHANGE");
     assert_eq!(exported["entries"][0]["recordedAtMs"], "200");
     assert_eq!(exported["entries"][1]["recordedAtMs"], "100");
     assert_eq!(
@@ -808,4 +823,40 @@ async fn unknown_terminal_commit_returns_stored_result_after_restart() {
         replay
     );
     assert_eq!(head(&inner).await, 1);
+}
+
+#[test]
+fn automatic_audit_details_are_bounded_for_long_valid_source_identity() {
+    let source = Partition::Ref {
+        ns: crate::NamespaceKey::deployment_default(),
+        repo: crate::RepoName::new("repo").unwrap(),
+        shard_ref: format!("refs/heads/{}", "a".repeat(200)),
+    };
+    let mut request = automatic_request();
+    request.purge_id = "p".repeat(128);
+    let audit = SystemAudit::new(MemoryKv::default(), root_partition());
+    let row = audit.relay_row(&source, &request, "op", 1).unwrap();
+    let mut batch = Batch::new();
+    for (key, value) in row.puts {
+        batch = batch.put(key, value);
+    }
+    extend_audit_batch(&root_partition(), &mut batch, |_| Ok(None)).unwrap();
+    let entry = batch
+        .writes
+        .iter()
+        .find_map(|write| match write {
+            crate::Write::Put(key, value) if key.as_bytes().starts_with(b"ae\0") => Some(
+                serde_json::from_slice::<serde_json::Value>(value.as_bytes()).expect("audit entry"),
+            ),
+            _ => None,
+        })
+        .unwrap();
+    let details = entry["details"].as_str().unwrap();
+    assert!(details.len() <= 512);
+    let details: serde_json::Value = serde_json::from_str(details).unwrap();
+    assert_eq!(details["purgeId"], request.purge_id);
+    assert_eq!(
+        details["sourcePartitionHash"],
+        mkit_core::hash::to_hex(&mkit_core::hash::hash(&source.encode().unwrap()))
+    );
 }

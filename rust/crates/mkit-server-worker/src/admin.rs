@@ -54,35 +54,33 @@ pub(crate) async fn serve(
         return worker::Response::error("POST required", 405);
     }
     let headers = req.headers().entries().collect();
-    let reply = match mkit_server::admin::precheck(&headers) {
-        Err(reply) => reply,
-        Ok(()) => {
-            let url = req.url()?;
-            let path = format!(
-                "{}{}",
-                url.path(),
-                url.query().map_or(String::new(), |q| format!("?{q}"))
-            );
-            let mut capture = BodyCapture::default();
-            let mut stream = req.stream()?;
-            while let Some(chunk) = stream.next().await {
-                capture.push(&chunk?);
-            }
-            let store = crate::ns_client::DoNamespaceStore::new(
-                crate::ns_client::StubTransport::new(env.clone(), cfg.placement.clone()),
-                cfg.probe_partition(),
-            );
-            let engine = Engine::new(store, cfg.probe_partition(), config.clone());
-            let reply = engine
-                .handle(
-                    &path,
-                    &headers,
-                    &capture,
-                    mkit_server::Clock::now_ms(&crate::clock::WorkerClock),
-                )
-                .await;
-            reply
+    let reply = if let Err(reply) = mkit_server::admin::precheck(&headers) {
+        reply
+    } else {
+        let url = req.url()?;
+        let path = format!(
+            "{}{}",
+            url.path(),
+            url.query().map_or(String::new(), |q| format!("?{q}"))
+        );
+        let mut capture = BodyCapture::default();
+        let mut stream = req.stream()?;
+        while let Some(chunk) = stream.next().await {
+            capture.push(&chunk?);
         }
+        let store = crate::ns_client::DoNamespaceStore::new(
+            crate::ns_client::StubTransport::new(env.clone(), cfg.placement.clone()),
+            cfg.probe_partition(),
+        );
+        let engine = Engine::new(store, cfg.probe_partition(), config.clone());
+        engine
+            .handle(
+                &path,
+                &headers,
+                &capture,
+                mkit_server::Clock::now_ms(&crate::clock::WorkerClock),
+            )
+            .await
     };
     let Response {
         status,

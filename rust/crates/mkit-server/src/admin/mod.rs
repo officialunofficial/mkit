@@ -2,8 +2,9 @@
 //!
 //! Adapters call [`precheck`] before reading a body, hash wire bytes with
 //! [`BodyCapture`], then dispatch through [`Engine`]. No keys means no routes.
-//! All ledgers and accepted purge work share one deployment partition; a CAS
-//! on the audit head commits acceptance, audit and replay before success.
+//! Operator replay and audit share the deployment root and commit before success.
+//! Automatic state, purge work and outbox events commit in their source partition;
+//! the existing relay atomically appends the root audit and advances its watermark.
 
 mod auth;
 mod automatic;

@@ -265,7 +265,7 @@ pub struct PipelineConfig {
     /// URL-token key set and lifetime for `IssueObjectUrl`
     /// (SPEC-WRITE-GRANTS §9.4); `None` answers `unimplemented`.
     pub url_tokens: Option<crate::url_token::UrlTokenConfig>,
-    /// Dedicated operator keys, forbidden as client authentication keys.
+    /// Dedicated operator keys, forbidden for client and owner authorization.
     pub admin_keys: Vec<[u8; 32]>,
     /// Durable invalidation; absent keeps launch purge machinery inert.
     pub purge: Option<crate::purge::PurgeConfig>,
@@ -956,9 +956,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let skew = 0;
         let now = self.clock.now_ms().saturating_add(skew);
         let mut a = auth::authenticate(&self.cfg.auth, meta, now, repo, &expected_repository)?;
-        if a.auth
-            .as_ref()
-            .is_some_and(|auth| self.cfg.admin_keys.contains(&auth.signer))
+        if a.principal
+            .ed25519()
+            .is_some_and(|key| self.cfg.admin_keys.contains(key))
         {
             return Err(ServerError::unauthenticated(
                 "admin key cannot authenticate client calls",
@@ -1792,6 +1792,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let verified =
             verify_visibility_statement(grants.verifier(), statement, &identity, a.business_now_ms)
                 .map_err(rejected)?;
+        if let Some(namespace) = identity.namespace() {
+            self.require_client_owner_key(namespace)?;
+        }
         let created = u64::try_from(verified.statement().created_ms)
             .map_err(|_| rejected(mkit_attest::grant::GrantError::DecimalOutOfRange))?;
         let id = to_hex(verified.id());
@@ -2469,12 +2472,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         // §7 steps 1–10 are stateless: run them before the coordinator
         // read, even when the repository turns out to be missing.
-        let check = op.write_grant.as_ref().and_then(|header| {
-            self.cfg
-                .grants
-                .as_ref()
-                .and_then(|g| read_policy::check_grant(g, header.expose(), op))
-        });
+        let admin_owner = Namespace::parse(op.repo.namespace.as_str())
+            .is_ok_and(|namespace| self.owner_key_is_admin(&namespace));
+        let check = op
+            .write_grant
+            .as_ref()
+            .filter(|_| !admin_owner)
+            .and_then(|header| {
+                self.cfg
+                    .grants
+                    .as_ref()
+                    .and_then(|g| read_policy::check_grant(g, header.expose(), op))
+            });
         let signed = op.auth.is_some();
         let owner = op.write_grant.is_none()
             && matches!(Namespace::parse(op.repo.namespace.as_str()),
@@ -3014,6 +3023,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
     }
 
+    fn owner_key_is_admin(&self, namespace: &Namespace) -> bool {
+        matches!(namespace, Namespace::Ed25519(key) if self.cfg.admin_keys.contains(key))
+    }
+
+    fn require_client_owner_key(&self, namespace: &Namespace) -> Result<(), ServerError> {
+        if self.owner_key_is_admin(namespace) {
+            return Err(ServerError::permission_denied(
+                "admin key cannot authorize client calls",
+            ));
+        }
+        Ok(())
+    }
+
     /// SPEC-TRANSPORT-CONNECT §7.5 rule 1: an allowlisted namespace whose
     /// principal owns it (`ed25519-<key>` ↔ the Ed25519 principal), and the
     /// M2 write grants that qualify it. `policy` is the deployment's
@@ -3028,6 +3050,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     ) -> Result<(AuthzFacts, Option<FastForward>), ServerError> {
         let namespace = Namespace::parse(op.repo.namespace.as_str())
             .map_err(|_| internal("invalid resolved owner-policy namespace"))?;
+        if op.write_grant.is_some() {
+            self.require_client_owner_key(&namespace)?;
+        }
         if let Some(NamespacePolicy::Allowlist(allowed)) = policy
             && !allowed.contains(&namespace)
         {

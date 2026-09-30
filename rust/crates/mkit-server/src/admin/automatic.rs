@@ -205,6 +205,9 @@ pub fn extend_audit_batch(
                 purge::Trigger::LeaseDeletion => "system:timer",
                 _ => "system:relay",
             };
+            let details = json!({"purgeId":event.request.purge_id,
+                "sourcePartitionHash":to_hex(&hash(&source.encode()?)),"trigger":event.request.trigger})
+            .to_string();
             let (entry, next) = audit_entry(
                 &head,
                 actor,
@@ -215,7 +218,7 @@ pub fn extend_audit_batch(
                 "",
                 &[event.request.scope().to_owned()],
                 &Response::json(&json!({})),
-                "",
+                &details,
                 event.recorded_at_ms,
             )
             .map_err(|_| invalid("invalid automatic audit entry"))?;

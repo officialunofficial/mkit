@@ -859,3 +859,52 @@ fn grant_header_without_grant_config_is_denied() {
     assert_eq!(error.code(), Code::PermissionDenied);
     assert_no_rows(&e, &owner);
 }
+
+#[test]
+fn admin_owner_cannot_delegate_client_writes() {
+    let owner = key(1);
+    let grantee = key(2);
+    let repo = repository(&owner);
+    for sharding in [Sharding::Single, Sharding::D34] {
+        let mut c = config(&owner, AuthorizerRole::Check);
+        c.admin_keys = vec![*owner.verifying_key().as_bytes()];
+        c.sharding = sharding;
+        let clock = clock();
+        let e = build(c, Spy::new(store(&clock)), policy_hooks(false), clock);
+        let delegated = grant(&owner, &grantee, |_| {});
+        let req = request(&grantee, &repo, 1, Some(&delegated));
+        assert_eq!(
+            e.update(&req, &upd(HEAD, Any, A)).unwrap_err().code(),
+            Code::PermissionDenied,
+            "{sharding:?}"
+        );
+        assert_no_rows(&e, &owner);
+    }
+}
+
+#[test]
+fn admin_owner_cannot_sign_epoch_statements() {
+    let owner = key(1);
+    for sharding in [Sharding::Single, Sharding::D34] {
+        let mut c = config(&owner, AuthorizerRole::Check);
+        c.admin_keys = vec![*owner.verifying_key().as_bytes()];
+        c.sharding = sharding;
+        let clock = clock();
+        let e = build(c, Spy::new(store(&clock)), policy_hooks(false), clock);
+        assert_eq!(
+            now(e.pipe.set_grant_epoch(&epoch_statement(&owner, 1)))
+                .unwrap_err()
+                .code(),
+            Code::PermissionDenied,
+            "{sharding:?}"
+        );
+        assert_eq!(
+            now(e.pipe.get_grant_epoch(
+                &Namespace::Ed25519(*owner.verifying_key().as_bytes()).to_string()
+            ))
+            .unwrap(),
+            0
+        );
+        assert_no_rows(&e, &owner);
+    }
+}
