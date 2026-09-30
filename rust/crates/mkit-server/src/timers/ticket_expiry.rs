@@ -64,6 +64,16 @@ impl<S: NamespaceStore, B: MultipartBlobStore> TimerHandler<S> for TicketExpiry<
         ctx: &'a TimerCtx<'a, S>,
         timer: &'a DueTimer,
     ) -> BoxFuture<'a, Result<Fired, StoreError>> {
+        Self::fire_with(&self.blobs, ctx, timer)
+    }
+}
+
+impl<B: MultipartBlobStore> TicketExpiry<B> {
+    fn fire_with<'a, S: NamespaceStore>(
+        blobs: &'a B,
+        ctx: &'a TimerCtx<'a, S>,
+        timer: &'a DueTimer,
+    ) -> BoxFuture<'a, Result<Fired, StoreError>> {
         Box::pin(async move {
             let fire = async {
                 let id: Hash = timer.reference.as_ref().try_into().map_err(|_| {
@@ -137,10 +147,7 @@ impl<S: NamespaceStore, B: MultipartBlobStore> TimerHandler<S> for TicketExpiry<
                 outbox.try_finish(&mut batch.preconditions, &mut batch.writes)?;
 
                 if let Some(session) = &ticket.upload_session
-                    && let Err(error) = self
-                        .blobs
-                        .abort(BlobKey::pack(ticket.pack_id), session)
-                        .await
+                    && let Err(error) = blobs.abort(BlobKey::pack(ticket.pack_id), session).await
                 {
                     ABORT_FAILURES.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(error = %error, ticket_id = %mkit_core::hash::to_hex(&id), "ticket expiry session abort failed");
@@ -159,6 +166,32 @@ impl<S: NamespaceStore, B: MultipartBlobStore> TimerHandler<S> for TicketExpiry<
                 other => other,
             }
         })
+    }
+}
+
+/// Borrow the pipeline's store for the test-only manual timer tick.
+#[cfg(feature = "test-faults")]
+#[derive(Debug)]
+pub(crate) struct BorrowedTicketExpiry<'a, B> {
+    pub(crate) blobs: &'a B,
+}
+
+#[cfg(feature = "test-faults")]
+impl<S: NamespaceStore, B: MultipartBlobStore> TimerHandler<S> for BorrowedTicketExpiry<'_, B> {
+    fn kind(&self) -> TimerKind {
+        kinds::TICKET_EXPIRY
+    }
+
+    fn max_per_tick(&self) -> Option<u32> {
+        Some(8)
+    }
+
+    fn fire<'a>(
+        &'a self,
+        ctx: &'a TimerCtx<'a, S>,
+        timer: &'a DueTimer,
+    ) -> BoxFuture<'a, Result<Fired, StoreError>> {
+        TicketExpiry::fire_with(self.blobs, ctx, timer)
     }
 }
 
