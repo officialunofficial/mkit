@@ -177,6 +177,8 @@ pub fn response_header_plan(headers: &http::HeaderMap) -> Vec<(String, String, b
 #[cfg_attr(not(feature = "http-objects"), derive(PartialEq, Eq))]
 #[non_exhaustive]
 pub struct WorkerConfig {
+    /// Explicit Paid indexed launch selection; absent retains the default adapter.
+    pub launch: Option<crate::launch::LaunchConfig>,
     /// Default-off signed operator keys, independent of client credentials.
     pub admin: Option<mkit_server::admin::Config>,
     /// Optional dedicated deployment-authority keys (`AUTHORITY_FENCE`, `AUTHORITY_KEYS`).
@@ -279,6 +281,7 @@ impl WorkerConfig {
         use mkit_server::pipeline::{AuthMode, PipelineConfig};
         use mkit_server::upload::UploadLimits;
 
+        self.check_launch_readiness()?;
         #[cfg(feature = "published-view")]
         if let Some(config) = &self.published_view {
             crate::published_view::PublishedViewConfig::new(config.deployment.clone())
@@ -380,16 +383,30 @@ impl WorkerConfig {
     /// `UNSAFE_OPEN_NAMESPACES` and `TICKET_KEYS` rules.
     #[allow(clippy::too_many_lines)] // Resolves the deployment fields together; authority statement grammar is factored separately.
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        let cfg = Self::parse_vars(&var)?;
+        cfg.check_launch_readiness()?;
+        Ok(cfg)
+    }
+
+    fn check_launch_readiness(&self) -> Result<(), ConfigError> {
+        if let Some(launch) = &self.launch {
+            launch.check_prerequisites()?;
+        }
+        Ok(())
+    }
+
+    // Pure grammar is separated from implementation readiness so all opt-ins
+    // are validated before the phase-1 prerequisite refusals.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn parse_vars(var: &impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let indexed_requested = var(INDEXED_MODE_VAR).is_some_and(|value| {
             !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
         });
-        // Stage 1: no released Worker verifies asynchronously. Extraction on
-        // Workers is WP-4.10b; until it lands a `Verified` pack could not
-        // imply "extracted" (R-163), so only test builds accept the var.
+        let launch = crate::launch::LaunchConfig::parse(&var)?;
         #[cfg(not(feature = "test-faults"))]
-        if indexed_requested {
+        if indexed_requested && launch.is_none() {
             return Err(ConfigError(
-                "indexed mode on Workers requires WP-4.10b".into(),
+                "INDEXED_MODE requires LAUNCH_PROFILE=uno; extraction requires WP-4.10b-2".into(),
             ));
         }
         let required =
@@ -507,7 +524,8 @@ impl WorkerConfig {
                 .check_separation(&tokens.keys().public_keys().collect::<Vec<_>>())
                 .map_err(|_| ConfigError("ADMIN_KEYS must differ from URL-token keys".into()))?;
         }
-        Ok(Self {
+        let mut cfg = Self {
+            launch,
             admin,
             authority_fence,
             indexed,
@@ -534,7 +552,9 @@ impl WorkerConfig {
             test_outbox_rows: test_number(&var, "TEST_OUTBOX_BACKLOG_ROWS", 16)?,
             #[cfg(feature = "test-faults")]
             test_ticket_ttl_ms: test_ticket_ttl(&var)?,
-        })
+        };
+        crate::launch::validate(&mut cfg, &var)?;
+        Ok(cfg)
     }
 
     /// The settings from `env`'s vars.
@@ -543,20 +563,36 @@ impl WorkerConfig {
     /// As [`Self::from_vars`].
     #[cfg(target_arch = "wasm32")]
     pub fn from_env(env: &worker::Env) -> Result<Self, ConfigError> {
-        Self::from_vars(|name| {
-            if name == crate::admin::KEYS_SECRET
-                || name == "AUTHORITY_KEYS"
-                || name == TICKET_KEYS_VAR
-                || cfg!(feature = "http-objects") && name == "URL_TOKEN_KEYS"
-            {
-                env.secret(name)
-                    .ok()
-                    .map(|secret| secret.to_string())
-                    .or_else(|| env.var(name).ok().map(|value| value.to_string()))
-            } else {
-                env.var(name).ok().map(|value| value.to_string())
+        let cfg = Self::parse_vars(&|name| {
+            env.secret(name)
+                .ok()
+                .map(|secret| secret.to_string())
+                .or_else(|| env.var(name).ok().map(|value| value.to_string()))
+        })?;
+        crate::hooks::config::HookVars::check_binding(
+            cfg.hooks.as_ref(),
+            env.service(crate::hooks::config::BINDING).is_ok(),
+        )?;
+        if cfg.launch.is_some() {
+            if env.bucket(cfg.blob_binding).is_err() {
+                return Err(ConfigError("launch requires STORAGE R2 binding".into()));
             }
-        })
+            for binding in [
+                "REFSTORE",
+                "NS_COORD",
+                "REF_SHARD",
+                "REPO_INDEX",
+                "CONTENT_INDEX",
+            ] {
+                if env.durable_object(binding).is_err() {
+                    return Err(ConfigError(format!(
+                        "launch requires {binding} Durable Object binding"
+                    )));
+                }
+            }
+        }
+        cfg.check_launch_readiness()?;
+        Ok(cfg)
     }
 }
 
@@ -2414,7 +2450,9 @@ mod glue {
         let cfg = WorkerConfig::from_env(env);
         #[cfg(feature = "published-view")]
         let cfg = cfg.and_then(|mut cfg| {
-            cfg.published_view = published_view;
+            if published_view.is_some() {
+                cfg.published_view = published_view;
+            }
             if cfg.published_view.is_some() {
                 cfg.pipeline_config()?;
             }
@@ -4026,7 +4064,7 @@ mod tests {
                     .unwrap_err();
             assert!(
                 err.to_string()
-                    .contains("indexed mode on Workers requires WP-4.10b"),
+                    .contains("INDEXED_MODE requires LAUNCH_PROFILE=uno"),
                 "{value}"
             );
         }

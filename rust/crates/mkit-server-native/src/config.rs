@@ -10,7 +10,6 @@ use std::time::Duration;
 use clap::{Args, ValueEnum};
 use http::{HeaderName, HeaderValue};
 use mkit_server::auth_v2::AuthV2Config;
-#[cfg(feature = "test-faults")]
 use mkit_server::indexed::IndexedConfig;
 use mkit_server::pipeline::{AuthMode, PipelineConfig, Sharding};
 use mkit_server::policy::{
@@ -177,11 +176,24 @@ pub enum LogFormat {
     Json,
 }
 
+/// The explicitly selected indexed, permanent-retention launch scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum LaunchProfileArg {
+    /// SPEC-SERVER §18: indexed serving, no storage leases, GC or receipts.
+    Uno,
+}
+
 /// `mkit-server serve`'s flags. Secrets never go on the command line: the
 /// bearer token comes from `--bearer-token-file` or `MKIT_API_TOKEN`.
 #[derive(Debug, Clone, Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ServeArgs {
+    /// Select the indexed launch profile; requires multi auth-v2, SQLite and tickets.
+    #[arg(long, value_enum)]
+    pub launch_profile: Option<LaunchProfileArg>,
+    /// Mount HTTP objects and native proofs inside the launch profile.
+    #[arg(long)]
+    pub http_objects: bool,
     /// Default-off signed admin API on a separate listener.
     #[command(flatten)]
     pub admin: crate::admin::AdminArgs,
@@ -285,7 +297,7 @@ pub struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     pub ticket_key_file: Option<PathBuf>,
     /// Dedicated URL-token key file: `active <seed>` and retained public keys.
-    /// Stage 2 only; does not enable indexed serving or mount routes.
+    /// Keys alone do not mount routes; --http-objects explicitly selects them.
     #[cfg(feature = "http-objects")]
     #[arg(long, value_name = "PATH")]
     pub url_token_key_file: Option<PathBuf>,
@@ -346,24 +358,22 @@ pub struct ServeArgs {
     /// Largest pack an upload may declare (default 4 GiB).
     #[arg(long, value_name = "N")]
     pub max_pack_bytes: Option<u64>,
-    /// Verify consumed packs and build repository object-index rows.
-    #[cfg(feature = "test-faults")]
+    /// Verify consumed packs and build repository object-index rows. Release
+    /// builds require --launch-profile uno; that profile also implies this flag.
     #[arg(long)]
     pub indexed: bool,
-    /// Indexed pack cap; defaults to 2 GiB.
-    #[cfg(feature = "test-faults")]
+    /// Indexed pack cap; defaults to --max-pack-bytes in the launch profile,
+    /// otherwise 2 GiB in test-faults builds.
     #[arg(long, value_name = "BYTES")]
     pub indexed_max_pack_bytes: Option<u64>,
-    /// Whole-pack decode budget; defaults to 2 GiB.
-    #[cfg(feature = "test-faults")]
+    /// Whole-pack decode budget; defaults to at least the launch pack cap,
+    /// otherwise 2 GiB in test-faults builds.
     #[arg(long, value_name = "BYTES")]
     pub indexed_decode_budget: Option<u64>,
     /// Total delta-chain cap; defaults to 50.
-    #[cfg(feature = "test-faults")]
     #[arg(long, value_name = "N")]
     pub indexed_max_delta_chain_depth: Option<u32>,
     /// Membership lag window; defaults to 60,000 ms.
-    #[cfg(feature = "test-faults")]
     #[arg(long, value_name = "MS")]
     pub indexed_relay_lag_bound_ms: Option<u64>,
     /// Enable namespace authority-generation fencing (Multi + auth v2 + Authority hook).
@@ -1409,6 +1419,37 @@ pub fn resolve(
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<ServeConfig, ConfigError> {
     let usage = |m: &str| ConfigError::new(exit::USAGE, format!("{PREFIX}: {m}"));
+    let launch = args.launch_profile.is_some();
+    if !launch && args.http_objects {
+        return Err(usage("--http-objects requires --launch-profile uno"));
+    }
+    if !launch && !cfg!(feature = "test-faults") && args.indexed {
+        return Err(usage(
+            "--indexed requires --launch-profile uno in release builds",
+        ));
+    }
+    if !args.indexed
+        && !launch
+        && (args.indexed_max_pack_bytes.is_some()
+            || args.indexed_decode_budget.is_some()
+            || args.indexed_max_delta_chain_depth.is_some()
+            || args.indexed_relay_lag_bound_ms.is_some())
+    {
+        return Err(usage(
+            "indexed limits require --indexed or --launch-profile uno",
+        ));
+    }
+    if launch && (args.listen.is_none() || args.listen_enc.is_some()) {
+        return Err(usage(
+            "--launch-profile uno requires --listen and refuses --listen-enc",
+        ));
+    }
+    #[cfg(not(feature = "http-objects"))]
+    if args.http_objects {
+        return Err(usage(
+            "--http-objects requires the http-objects cargo feature",
+        ));
+    }
     if args.max_concurrency == 0 || args.max_connections == 0 {
         return Err(usage(
             "--max-concurrency and --max-connections must be at least 1",
@@ -1481,16 +1522,29 @@ pub fn resolve(
     // The enc listener's sibling pipeline consumes implicitly and cannot
     // run ticketed verification, so `Pipeline::new` refuses `indexed` with
     // it (R-137); refuse here, before any pipeline is built.
-    #[cfg(all(feature = "test-faults", feature = "enc"))]
-    if args.indexed && multi && enc.is_some() {
+    #[cfg(feature = "enc")]
+    if (args.indexed || launch) && multi && enc.is_some() {
         return Err(usage(
             "--indexed cannot be combined with --addressing multi and --listen-enc: \
              implicit (enc) consumption skips ticketed pack verification",
         ));
     }
-    #[cfg(feature = "test-faults")]
-    if args.indexed {
+    if launch
+        && (!multi
+            || !matches!(pipeline.auth, AuthMode::AuthV2(_))
+            || pipeline.ticket_keys.is_none()
+            || sharding != Sharding::D34)
+    {
+        return Err(usage(
+            "--launch-profile uno requires --addressing multi, --auth auth-v2, --sharding d34, SQLite metadata and upload ticket keys",
+        ));
+    }
+    if args.indexed || launch {
         let mut indexed = IndexedConfig::default();
+        if launch {
+            indexed.max_pack_bytes = max_pack;
+            indexed.decode_budget = indexed.decode_budget.max(max_pack);
+        }
         if let Some(value) = args.indexed_max_pack_bytes {
             indexed.max_pack_bytes = value;
         }
@@ -1503,7 +1557,26 @@ pub fn resolve(
         if let Some(value) = args.indexed_relay_lag_bound_ms {
             indexed.relay_lag_bound_ms = value;
         }
+        if indexed.max_pack_bytes == 0
+            || indexed.max_pack_bytes > indexed.decode_budget
+            || indexed.max_delta_chain_depth == 0
+            || indexed.max_delta_chain_depth > u32::from(u16::MAX)
+            || indexed.relay_lag_bound_ms == 0
+        {
+            return Err(usage(
+                "invalid indexed pack, decode, delta-chain or relay-lag limit",
+            ));
+        }
+        pipeline.upload_limits.max_total_bytes = max_pack.min(indexed.max_pack_bytes);
+        pipeline.begin_upload_threshold_bytes = 0;
         pipeline.indexed = Some(indexed);
+    }
+    #[cfg(feature = "http-objects")]
+    if args.http_objects {
+        if pipeline.url_tokens.is_none() {
+            return Err(usage("--http-objects requires --url-token-key-file"));
+        }
+        pipeline.http_objects = Some(mkit_server::http_objects::HttpObjectsConfig::default());
     }
     #[cfg(feature = "hooks")]
     let hooks = crate::hooks::config::resolve(
@@ -1513,6 +1586,17 @@ pub fn resolve(
         Duration::from_secs(args.unary_timeout_secs),
         env,
     )?;
+    #[cfg(feature = "hooks")]
+    if launch
+        && hooks
+            .as_ref()
+            .is_some_and(|settings| !settings.inspect.is_empty())
+    {
+        return Err(ConfigError::new(
+            exit::UNAVAILABLE,
+            "launch inspection requires R-193 scanner retrieval; the retrieval contract is not available",
+        ));
+    }
     if args.authority_fence == args.authority_key.is_empty() {
         return Err(usage(
             "--authority-fence and --authority-key must be configured together",
@@ -1585,6 +1669,17 @@ pub fn resolve(
         cors: cors_policy(&args.cors_allow_origin)?,
         redactor,
         cors_extra_allow_headers,
+        #[cfg(feature = "http-objects")]
+        http_objects: args.http_objects.then(|| {
+            mkit_server::http_objects::mount::HttpMountOptions {
+                cors_origins: args
+                    .cors_allow_origin
+                    .iter()
+                    .filter(|origin| *origin != "*")
+                    .cloned()
+                    .collect(),
+            }
+        }),
         ..RouterOptions::default()
     };
     let serve = ServeOptions {

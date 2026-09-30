@@ -78,10 +78,12 @@ residency. Snapshots contain private ref names, signer keys, tickets and replay
 rows. Confirm the bucket's access policy before the first deployment.
 Keep `WORKERS_PLAN=free` on a Free account.
 
-Indexed mode is unavailable on Workers until WP-4.8. Workers Free cannot
-serve indexed mode: its 50-subrequest limit is below the budget for a single
-repository object-index lookup. Paid Workers use a relay budget of 32 targets
-per tick and eight ticks per alarm; Free keeps its smaller relay budget.
+Indexed serving selects the Paid Uno launch profile described below. Free
+Workers cannot enable indexed mode. Phase 1 validates the profile and refuses
+release activation until WP-4.10b-2's extraction driver is merged; test-faults
+indexed conformance is separate evidence and does not activate a deployment.
+The alarm budget is shared across handlers; see the
+[launch budget audit](../../docs/plans/mkit-server/launch-budgets.md).
 
 For a backend move or recovery beyond PITR, collect a complete, compatible
 set of `.kvlog` partition snapshots from R2 into the native export directory
@@ -166,12 +168,12 @@ Every hook call carries no `X-Mkit-Hook-*` headers. A custom business layer in
 a Rust Worker uses `adapter::fetch_with` and `adapter::ns_object_with` with its
 own `HookSet` and outcome sink instead of the vars.
 
-Not built: an outcome sink on a Cloudflare Queue (needs a SPEC-SERVER §7.3/§8
-amendment: WP-3.9b) and a signed webhook via `fetch` from a Worker. Test it
+A Cloudflare Queue outcome sink remains deferred (WP-3.9b). Signed HTTP hooks
+are available with the opt-in below. Test it
 locally with `scripts/vcs-worker-hooks.sh` (a stub hook Worker under
 `tests/hook-stub` and `wrangler.hooks.jsonc`).
 
-## Auth v2 (open write, no allow-list)
+## Auth v2 and namespace admission
 
 All writes (`UpdateRef`, `AdvanceRefs`, `BeginUpload`, `UploadPack`) require the
 destination-bound [auth v2 contract](../../docs/specs/SPEC-TRANSPORT-CONNECT.md#auth-v2-contract),
@@ -242,27 +244,32 @@ no deployments, so this is acceptable.
 - `NAMESPACE_POLICY=any` admits every self-certifying namespace and requires
   `UNSAFE_OPEN_NAMESPACES=true`: without non-default admission (M3) any
   fresh key resets its namespace's quota, so the open policy is an explicit
-  development opt-in (D27).
+  unsafe opt-in. The Uno Kit demo (UNO-420) selects it deliberately. Under
+  `any`, takedown discovery is incomplete; configured global denial and
+  preservation still apply, and completion must report that limitation.
 
 The four vars are documented in `wrangler.jsonc`; for a local Multi
 deployment under `wrangler dev`, pass them as `--var` (the conformance
 script's `--multi` phase does exactly that).
 
-The replay record, the per-signer write quota (300 writes and 128 MiB per
-hour) and the effect commit in one batch. A retry returns its recorded
-result, including after a newer ref update; a nonce reused for a different
-operation is `invalid_argument`. An upload reserves its declared size once
-and publishes the pack only after it verifies. Any valid key can write: this
-deployment implements no allow-list.
+With default admission, the replay record, per-signer write quota (300 writes
+and 128 MiB per hour) and effect commit in one batch. A remote Admit replaces
+that quota: the server makes no internal admission charges, and the remote
+hook owns abuse control. A retry returns its recorded result, including after
+a newer ref update; a nonce reused for a different operation is
+`invalid_argument`. An upload reserves its declared size once and publishes
+the pack only after it verifies. Multi addressing enforces namespace admission,
+owner-only writes and any configured grants or authority fence. Single
+addressing retains its auth-v2 write policy.
 
 ### Known limitations
 
-- **Open write**: no allow-list; any valid key may advance any ref.
-- **64 MiB pack cap**, a documented M1 stopgap (resumable parts replace it).
-  `UploadPack` and `DownloadPack` bodies stream: an upload holds about one
-  chunk in the isolate, and a download streams 800 KiB chunks. A request
-  body over 65 MiB (the cap plus framing) is refused with HTTP 400
-  `resource_exhausted`, with or without `Content-Length`.
+- **Pack size**: `MAX_PACK_BYTES` defaults to 1 GiB (1,073,741,824 bytes)
+  and accepts 1..=4.995 GiB (5,363,340,410 bytes). Larger packs use multipart
+  tickets; non-final parts are at least 8 MiB. The independent request-body
+  cap remains 65 MiB, enforced with or without `Content-Length`; exceeding
+  it answers HTTP 400 `resource_exhausted`. `UploadPack` and `DownloadPack`
+  stream, with download chunks of at most 800 KiB.
 - **Unary replies are one frame**: a `ListRefs` reply is held whole, about
   45 bytes per ref (1.2 MB for 30,000 refs), until WP-1.27 pages it. The
   conformance script's 1 MiB body-buffer bound covers the streaming RPCs
@@ -270,8 +277,8 @@ deployment implements no allow-list.
 - **Client deadlines are not enforced**: `connect-timeout-ms` and
   `grpc-timeout` are dropped before dispatch, because connectrpc would read
   `Instant::now()`, which panics on wasm32.
-- **One Durable Object** holds the whole repository's metadata; M1 shards it
-  (D34).
+- **Metadata routing**: D34 shards namespace, ref, repository-index and
+  content-index partitions; `SHARDING=single` uses the root RefStore.
 - **Storage cap**: each Durable Object's store stops accepting writes near
   the plan's limit, set by the `WORKERS_PLAN` var: `free` (1 GB, the
   default) or `paid` (10 GB). Set `paid` only on a Workers Paid account.
@@ -340,8 +347,10 @@ Object database for `auth_v2.mjs --corrupt-ref`.
 
 ## Deploy (not yet live)
 
-Stage 2 staging has an [inert template and activation runbook](staging/README.md)
-(WP-1.19, R-176). Provisioning and activation happen after REL-1.
+The historical [staging template](staging/README.md) is inert. The single Uno
+launch uses the [staging definition](../../docs/plans/mkit-server/staging-uno.md)
+and [operator runbook](../../docs/plans/mkit-server/launch-operations.md).
+Their user-owned staging and release gates remain unrun.
 
 1. **Provision storage** (one-time): `wrangler r2 bucket create
    mkit-vcs-objects`. The RefStore Durable Object and its `v1` SQLite
@@ -356,7 +365,7 @@ Stage 2 staging has an [inert template and activation runbook](staging/README.md
 
 ## Signed HTTP hooks (WP-3.9c)
 
-Build with `signed-http-hooks` to opt into the Stage 2 HTTP channel. Set
+Build with `signed-http-hooks` to opt into the signed HTTPS channel. Set
 `HOOK_URL` to an HTTPS origin with an optional base path, `HOOK_ROLES` to
 `authorize,admit,outcome` (or a subset), and the `MKIT_HOOK_KEY` secret to
 `<key-id> <64 hex seed>`, matching the native grammar. `HOOK_TIMEOUT_MS`
@@ -384,3 +393,42 @@ activation may return `unavailable` with `Retry-After: 1` until its bounded leas
 barrier completes. Repeating the signed target resumes durable progress; it does
 not create a namespace or charge first-write creation. Restore must preserve the
 authority mode and generation, then declare real lease-table recovery.
+
+## Paid Uno launch profile (WP-4.18 / R-194)
+
+Set `LAUNCH_PROFILE=uno`, `WORKERS_PLAN=paid`, `INDEXED_MODE=true`,
+`ADDRESSING=multi`, `SHARDING=d34` and `TICKET_KEYS`. The profile fixes
+`RETENTION=permanent`, `STORAGE_LEASES=false` and `GC_ENABLED=false`; other
+values are refused. Ticketed uploads use threshold zero. Namespace policy is
+`allowlist` with a nonempty canonical `NAMESPACE_ALLOWLIST`, or `any` with
+`UNSAFE_OPEN_NAMESPACES=true`. An unset profile retains the default deployment.
+
+Features are optional within this profile, and each validates its complete
+configuration before activation:
+
+| Opt-in | Required configuration |
+|---|---|
+| HTTP objects / URL tokens | `HTTP_OBJECTS=true`, an `http-objects` build and dedicated `URL_TOKEN_KEYS`; retained signing keys follow the existing token grammar |
+| Signed hooks | `signed-http-hooks` build, `HOOK_URL` HTTPS, `HOOK_ROLES` and dedicated `MKIT_HOOK_KEY`; optional timeout/validity use the existing bounds. Alternatively use the isolated nonpublic `ADMISSION_HOOK` binding; both channels together are refused |
+| Inspection | Zero inspectors is valid. With inspection, up to four sync `fail_closed` inspectors, complete R-193 scanner allowlist and a dedicated retrieval key are required. Async, publish-on-unavailable and clear deadlines are refused |
+| Admin | Dedicated `ADMIN_KEYS` with signed requests, permitted roles, replay and gapless audit |
+| Takedown | `TAKEDOWN_ENABLED=true`, admin keys, separate preservation bucket, explicit retention, dedicated preservation signer and published key list under §14.7, plus signed HTTPS `cache-purge`. Partial configuration is refused |
+
+Phase 1 fails closed for unavailable extraction (WP-4.10b-2), preservation
+(WP-5.6a-2) and scanner retrieval (R-193). Phase 2 removes these refusals only
+when their merged implementations pass the complete local launch matrix.
+See the [conformance plan](../../docs/plans/mkit-server/launch-conformance.md)
+and [itemized evidence](../../docs/plans/mkit-server/launch-evidence.md).
+
+Worker object-byte HTTP responses always use `application/octet-stream`,
+`X-Content-Type-Options: nosniff` and
+`Content-Security-Policy: sandbox; default-src 'none'`. They never render
+untrusted repository content as active browser content. HTTP `?proof=1`
+remains unsupported on the Worker, which advertises no proof capability;
+the native reference server advertises and serves proofs.
+
+With admin and takedown configured, the Worker admin subset is `Takedown`,
+`GetTakedown`, `ListTakedowns`, `ReadPreserved`, `SetLegalHold`, `PurgeCache`
+and `ReadAuditLog`. Hold review operations and `Reinstate` remain unexposed.
+The launch creates no inspection holds or publication Events; async inspection,
+hold review, Events and Worker proofs are post-launch work (R-200).

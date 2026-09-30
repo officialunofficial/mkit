@@ -1,0 +1,150 @@
+use super::*;
+use std::collections::BTreeMap;
+
+fn vars() -> BTreeMap<String, String> {
+    [
+        ("AUTH_AUDIENCE", "https://vcs.example"),
+        ("LAUNCH_PROFILE", "uno"),
+        ("INDEXED_MODE", "true"),
+        ("WORKERS_PLAN", "paid"),
+        ("ADDRESSING", "multi"),
+        ("NAMESPACE_POLICY", "any"),
+        ("UNSAFE_OPEN_NAMESPACES", "true"),
+        (
+            "TICKET_KEYS",
+            "ticket 1111111111111111111111111111111111111111111111111111111111111111",
+        ),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.into(), v.into()))
+    .collect()
+}
+fn parse(v: &BTreeMap<String, String>) -> Result<WorkerConfig, ConfigError> {
+    WorkerConfig::parse_vars(&|k| v.get(k).cloned())
+}
+fn check(v: &BTreeMap<String, String>) -> Result<WorkerConfig, ConfigError> {
+    WorkerConfig::from_vars(|k| v.get(k).cloned())
+}
+
+#[test]
+fn launch_profile_is_paid_indexed_permanent_and_optional_features_are_off() {
+    let cfg = parse(&vars()).unwrap();
+    assert_eq!(cfg.launch, Some(LaunchConfig { takedown: false }));
+    assert!(cfg.indexed.is_some());
+    assert!(cfg.admin.is_none());
+    assert!(cfg.hooks.is_none());
+    #[cfg(feature = "http-objects")]
+    assert!(cfg.http_mount.is_none());
+    assert!(
+        check(&vars())
+            .unwrap_err()
+            .0
+            .contains("WP-4.10b-2 extraction driver")
+    );
+    for (name, value, diagnostic) in [
+        ("LAUNCH_PROFILE", "full", "LAUNCH_PROFILE"),
+        ("INDEXED_MODE", "false", "INDEXED_MODE=true"),
+        ("WORKERS_PLAN", "free", "WORKERS_PLAN=paid"),
+        ("STORAGE_LEASES", "true", "leases and GC"),
+        ("GC_ENABLED", "true", "leases and GC"),
+        ("RETENTION", "30d", "RETENTION"),
+        ("HTTP_OBJECTS", "1", "HTTP_OBJECTS"),
+        ("TAKEDOWN_ENABLED", "yes", "TAKEDOWN_ENABLED"),
+        ("SHARDING", "single", "SHARDING=d34"),
+        ("UNSAFE_OPEN_NAMESPACES", "false", "UNSAFE_OPEN_NAMESPACES"),
+    ] {
+        let mut v = vars();
+        v.insert(name.into(), value.into());
+        assert!(check(&v).unwrap_err().0.contains(diagnostic), "{name}");
+    }
+}
+#[test]
+fn launch_partial_inspection_and_preservation_refuse_before_extraction() {
+    let mut v = vars();
+    v.insert("HOOK_ROLES".into(), "inspect".into());
+    assert!(check(&v).unwrap_err().0.contains("SCANNER_RETRIEVAL=true"));
+    v.insert("SCANNER_RETRIEVAL".into(), "true".into());
+    assert!(check(&v).unwrap_err().0.contains("SCANNER_KEYS"));
+    v.insert("SCANNER_KEYS".into(), "not-validated-before-R193".into());
+    assert!(check(&v).unwrap_err().0.contains("SCANNER_RETRIEVAL_KEYS"));
+    v.insert(
+        "SCANNER_RETRIEVAL_KEYS".into(),
+        "not-validated-before-R193".into(),
+    );
+    assert!(check(&v).unwrap_err().0.contains("requires R-193"));
+    for (k, value) in [
+        ("INSPECT_MODE", "async"),
+        ("INSPECT_ON_UNAVAILABLE", "publish"),
+    ] {
+        let mut bad = v.clone();
+        bad.insert(k.into(), value.into());
+        assert!(check(&bad).unwrap_err().0.contains("sync and fail_closed"));
+    }
+    let mut v = vars();
+    v.insert("TAKEDOWN_ENABLED".into(), "true".into());
+    assert!(check(&v).unwrap_err().0.contains("ADMIN_KEYS"));
+    let mut v = vars();
+    v.insert("PRESERVATION_BUCKET".into(), "preserved".into());
+    assert!(check(&v).unwrap_err().0.contains("TAKEDOWN_ENABLED=true"));
+}
+
+#[test]
+fn clear_deadlines_are_refused_even_without_an_inspector() {
+    for name in [
+        "INSPECT_CLEAR_DEADLINE_MS",
+        "INSPECT_CLEAR_DEADLINE",
+        "INSPECT_DEADLINE_MS",
+    ] {
+        let mut v = vars();
+        v.insert(name.into(), "1".into());
+        assert!(check(&v).unwrap_err().0.contains("clear deadlines"));
+    }
+}
+
+#[cfg(feature = "http-objects")]
+#[test]
+fn launch_http_requires_tokens_and_preserves_role_separation() {
+    let mut v = vars();
+    v.insert("HTTP_OBJECTS".into(), "true".into());
+    assert!(check(&v).unwrap_err().0.contains("URL_TOKEN_KEYS"));
+    v.insert(
+        "URL_TOKEN_KEYS".into(),
+        format!("active {} {}", "aa".repeat(16), "22".repeat(32)),
+    );
+    let cfg = parse(&v).unwrap();
+    assert!(cfg.http_mount.is_some());
+    assert!(cfg.url_tokens.is_some());
+    assert!(!cfg.http_mount.unwrap().http_objects.admit_reads);
+    v.insert("HTTP_ADMIT_READS".into(), "true".into());
+    assert!(check(&v).unwrap_err().0.contains("admit hook role"));
+    v.remove("HTTP_ADMIT_READS");
+    v.insert(
+        "URL_TOKEN_KEYS".into(),
+        format!("active {} {}", "aa".repeat(16), "11".repeat(32)),
+    );
+    assert!(
+        check(&v)
+            .unwrap_err()
+            .0
+            .contains("must differ from TICKET_KEYS")
+    );
+}
+
+#[cfg(feature = "signed-http-hooks")]
+#[test]
+fn launch_signed_hooks_are_validated_at_startup_and_redact_keys() {
+    let mut v = vars();
+    v.insert("HOOK_ROLES".into(), "admit".into());
+    v.insert("HOOK_URL".into(), "https://hooks.example".into());
+    assert!(check(&v).unwrap_err().0.contains("MKIT_HOOK_KEY"));
+    v.insert(
+        "MKIT_HOOK_KEY".into(),
+        "secret value must not escape".into(),
+    );
+    let err = check(&v).unwrap_err().0;
+    assert!(!err.contains("value must not escape"));
+    v.insert("MKIT_HOOK_KEY".into(), format!("hook {}", "11".repeat(32)));
+    assert!(check(&v).unwrap_err().0.contains("must differ"));
+    v.insert("MKIT_HOOK_KEY".into(), format!("hook {}", "33".repeat(32)));
+    assert!(check(&v).unwrap_err().0.contains("WP-4.10b-2"));
+}
