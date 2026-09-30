@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: publication timer 12 resumes bounded dependency checks across alarms
+  and restarts after guarded obligation, dependency or generation changes.
+  Valid large D34 packmaps no longer stall at the whole-alarm call limit.
+  Its internal timer-value codec changes; reset unsupported pre-launch stores.
+
 - Server/Worker (default-off, WP-4.10b-2, R-186): complete consumed-group extraction
   with closure before effects, native union counts, bounded job header/body guards,
   resumable delta reconstruction and root-checked multipart uploads. Hold renewal
