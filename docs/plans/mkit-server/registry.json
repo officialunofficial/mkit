@@ -984,7 +984,7 @@
   },
   {
     "id": "1.17b",
-    "title": "Client: split large pushes along first-parent history (R-164; Stage 2, R-154)",
+    "title": "Client: split large pushes along first-parent history (R-164; post-launch, R-185)",
     "milestone": "M1",
     "track": "client",
     "depends_on": ["1.17"],
@@ -1057,7 +1057,7 @@
   },
   {
     "id": "1.19",
-    "title": "Inert Stage 2 staging template and activation runbook (R-176)",
+    "title": "Staging template and pre-launch Workers activation runbook (R-176, R-185)",
     "milestone": "M1",
     "track": "ops",
     "depends_on": [
@@ -1071,7 +1071,7 @@
       "1.30"
     ],
     "size": "S",
-    "summary": "Ships a standalone, unloaded staging config template and runbook: ADDRESSING=multi, audience/CI allowlist placeholders, private packs/backups/published-view buckets, all DO bindings and v1/v2 migrations, CPU/pack measurements, secrets, backup/restore and explicit Stage 2 entrypoint activation. Provisioning, deployment, route mounting and production CPU sizing are post-REL-1 operations; Stage 1 configuration is unchanged.",
+    "summary": "Keeps the standalone staging template/runbook and explicitly activates the Workers launch profile before REL-1 on real Cloudflare. Provision dedicated resources, secrets and routes, verify backup/recovery and measure deployed CPU, subrequests and cost; local wrangler evidence alone is insufficient. R-185 supersedes R-176’s post-REL-1 timing.",
     "human_action": true,
     "area_gates": [
       "workers",
@@ -1090,7 +1090,7 @@
       "1.15"
     ],
     "size": "S",
-    "summary": "Adds a staging workflow that runs the full M0+M1 wire suite (including throughput and lag windows) and a real mkit push/clone round trip against deployed staging. The human adds the GitHub secrets and variables.",
+    "summary": "Adds a staging workflow that runs the full M0+M1 wire suite (including throughput and lag windows) and a real mkit push/clone round trip against deployed staging. The human adds the GitHub secrets and variables. R-185: run locally from the orchestrator’s machine against real Cloudflare before launch, including the Workers launch profile and measured CPU, subrequests and cost. The workflow remains main-only and is not dispatched against feat/mkit-server.",
     "human_action": true,
     "area_gates": [
       "ci-yaml",
@@ -1383,6 +1383,27 @@
     ]
   },
   {
+    "id": "2.16",
+    "title": "Namespace authority-generation fence for external-authority writes",
+    "milestone": "M2",
+    "track": "core",
+    "depends_on": [
+      "2.8",
+      "3.7"
+    ],
+    "size": "L",
+    "summary": "Launch bundle with 3.9c: independent monotonic namespace authority generation, separate from grant epochs. Preserve the authorized generation through planning/retries and atomically fence final acceptance, including visibility writes; completion waits for old leased shards to acknowledge or expire. A deployment-authority key authorizes generation changes; no dependency on the full admin framework or owner-approval bridge (R-185).",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "proto",
+      "conf-native",
+      "conf-wrangler",
+      "docs"
+    ]
+  },
+  {
     "id": "1.30b",
     "title": "Adapters: grant flags and relying-party config",
     "milestone": "M2",
@@ -1531,12 +1552,13 @@
       "3.7",
       "3.8"
     ],
-    "size": "S",
-    "summary": "Public lightweight hooks feature with JSON messages, signer and verifier; server re-exports; external acceptance vectors (R-174, Linear MKIT-67).",
+    "size": "M",
+    "summary": "Existing MKIT-67 prerequisite (R-174, bundled with 3.12/3.13): move the public hooks.v1 messages, HookSigner and HookVerifier into mkit-rpc with mkit-server re-exports, so Uno and the signed Worker channel can share the hook protocol without server-runtime dependencies.",
     "human_action": false,
     "area_gates": [
       "rust",
-      "wasm"
+      "wasm",
+      "proto"
     ]
   },
   {
@@ -1577,14 +1599,14 @@
   },
   {
     "id": "3.9b",
-    "title": "Worker Queue outcome sink and spec amendment (Stage 2, R-154)",
+    "title": "Worker Queue outcome sink and spec amendment (optional post-launch, R-185)",
     "milestone": "M3",
     "track": "worker",
     "depends_on": [
       "3.9"
     ],
     "size": "S",
-    "summary": "Stage 2: a Cloudflare Queue OutcomeSink whose durable enqueue is the acknowledgement. Needs a SPEC-SERVER §7.3/§8 amendment with human review first (R-168).",
+    "summary": "Optional post-launch: a Cloudflare Queue OutcomeSink whose durable enqueue is the acknowledgement. Needs a SPEC-SERVER §7.3/§8 amendment with human review first (R-168).",
     "human_action": true,
     "area_gates": [
       "rust",
@@ -1592,6 +1614,25 @@
       "workers",
       "conf-wrangler",
       "docs"
+    ]
+  },
+  {
+    "id": "3.9c",
+    "title": "Worker signed HTTP hook channel",
+    "milestone": "M3",
+    "track": "worker",
+    "depends_on": [
+      "3.9",
+      "3.7b"
+    ],
+    "size": "L",
+    "summary": "Launch bundle with 2.16: signed Connect JSON over HTTPS to Uno’s external hook endpoint, origin-bound audience, fresh nonces, no redirects or internal retries, bounded response streaming and whole-call timeout/cancellation. Reuses the public mkit-rpc hook contract and supports later remote Inspect; durable HTTP outcome delivery makes Queue optional (R-185).",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
+      "conf-wrangler"
     ]
   },
   {
@@ -2229,35 +2270,77 @@
     "milestone": "M5",
     "track": "core",
     "depends_on": [
-      "5.2",
-      "5.1a-2"
+      "2.9",
+      "1.10",
+      "1.28b",
+      "1.21",
+      "3.3"
     ],
     "size": "L",
-    "summary": "Adds the published pointer to ref shards and answers every read from the caller's view, including the D36 X-Mkit-Ref path (non-writers never see quarantined packs through it), and switches the M1 bucket snapshots to the published view.",
+    "summary": "Launch: published (head, packmap) pointers, retained advances and contiguous clearance; writer/live and reader/published views on every read path, including X-Mkit-Ref, snapshots, tokens, HTTP bytes/proofs and caches. Explicit dependencies provide signed reads, ticketed advances, ref-index relay, snapshots and durable outbox. Includes the launch-profile spec amendment permitting indexed serving/inspection without storage leases, permanent retention and GC disabled; unresolved inspection-hit handoff is explicit (R-185).",
     "human_action": false,
     "area_gates": [
       "rust",
+      "conf-native",
+      "conf-wrangler",
+      "docs"
+    ]
+  },
+  {
+    "id": "5.5",
+    "title": "ContentInspector: sync checks, async quarantine, clearance, hit -> takedown (split into 5.5a/5.5b)",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "5.5a",
+      "5.5b"
+    ],
+    "size": "L",
+    "summary": "Split into 5.5a (launch inspection and durable hit handoff, including remote Inspect) and 5.5b (post-launch takedown completion); retained as the historical aggregate (R-185).",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native"
+    ],
+    "status": "split"
+  },
+  {
+    "id": "5.5a",
+    "title": "ContentInspector without takedown completion: obligations, holds, serving stops, hit handoff, remote Inspect",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "5.4",
+      "3.9c",
+      "4.8"
+    ],
+    "size": "L",
+    "summary": "Launch: durable inspection obligations and stable IDs, sync checks, async clearance, holds and serving stops across every byte/reuse/cache path, purge scheduling and retained roots. Hits durably hand off to takedown and stay unresolved until verified completion; a no-op does not resolve them. Wire metadata-only remote Inspect through native HTTP and the signed Worker channel. Pull forward audited review/purge foundations as needed; the 5.4 spec amendment permits deferred completion (R-185).",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
       "conf-native",
       "conf-wrangler"
     ]
   },
   {
-    "id": "5.5",
-    "title": "ContentInspector: sync checks, async quarantine, clearance, hit -> takedown",
+    "id": "5.5b",
+    "title": "Inspector takedown completion",
     "milestone": "M5",
     "track": "core",
     "depends_on": [
-      "5.4",
-      "3.7",
-      "5.6",
-      "5.1a-2"
+      "5.5a",
+      "5.6"
     ],
     "size": "L",
-    "summary": "Sync fast checks in pre_receive, async quarantine per advance with clearance advancing the published pointer, per-inspector fail-closed/publish, and hits becoming takedowns.",
+    "summary": "Post-launch: complete the inspector-to-takedown lifecycle, resolving hits only after verified per-repository completion, with preservation, rewrite, notices and reinstatement integrations as applicable (R-185).",
     "human_action": false,
     "area_gates": [
       "rust",
-      "conf-native"
+      "conf-native",
+      "conf-wrangler"
     ]
   },
   {
@@ -2268,11 +2351,10 @@
     "depends_on": [
       "5.1b-1",
       "4.10",
-      "5.2",
       "5.10"
     ],
     "size": "L",
-    "summary": "Content/repo/namespace takedown with holder discovery, tombstone views in repo index shards, a global blocklist that the relay also checks on delivery, completion only after the relay watermark passes the takedown point, and a restricted preservation store reachable only through the admin API. Invokes WP-5.10's CachePurger. The human creates the preservation bucket. The blocklist row codec moves to V2.",
+    "summary": "Content/repo/namespace takedown with holder discovery, tombstone views in repo index shards, a global blocklist that the relay also checks on delivery, completion only after the relay watermark passes the takedown point, and a restricted preservation store reachable only through the admin API. Invokes WP-5.10's CachePurger. The human creates the preservation bucket. The blocklist row codec moves to V2. R-185 launch subset: blocking, preservation and suspension needed by inspection, independent of storage leases; lease-driven lifecycle and full inspector completion remain post-launch.",
     "human_action": true,
     "area_gates": [
       "rust",
@@ -2371,11 +2453,11 @@
     "milestone": "M5",
     "track": "core",
     "depends_on": [
-      "5.2",
+      "5.4",
       "5.1b-2"
     ],
     "size": "S",
-    "summary": "An implementer-provided CachePurger internal interface, triggered on suspension, lease deletion and visibility change; WP-5.6 adds the takedown trigger; remote CachePurge delivery follows the admin spec.",
+    "summary": "An implementer-provided CachePurger internal interface, triggered on suspension, lease deletion and visibility change; WP-5.6 adds the takedown trigger; remote CachePurge delivery follows the admin spec. R-185 pulls forward serving-stop, hit and visibility purge foundations for launch; lease-deletion triggers follow 5.2 after launch.",
     "human_action": false,
     "area_gates": [
       "rust"
@@ -2389,10 +2471,10 @@
     "depends_on": [
       "5.1b-2",
       "4.18",
-      "2.15"
+      "2.9"
     ],
     "size": "L",
-    "summary": "An mkit.server.admin.v1 service signed with a dedicated admin key under its own domain, with replay protection and an append-only audit log; off unless configured. The human generates and installs the admin key.",
+    "summary": "An mkit.server.admin.v1 service signed with a dedicated admin key under its own domain, with replay protection and an append-only audit log; off unless configured. The human generates and installs the admin key. R-185 launch scope includes the audited inspection review subset; use signed-read/visibility foundations directly, without waiting for native grant-registry staging. Full admin operations and CLI in 5.11b remain post-launch.",
     "human_action": true,
     "area_gates": [
       "rust",
@@ -2479,8 +2561,29 @@
     ]
   },
   {
+    "id": "5.15",
+    "title": "Publication Event delivery",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "5.4",
+      "3.3"
+    ],
+    "size": "L",
+    "summary": "Launch: publication transitions through durable outbox recording and at-least-once remote Event delivery, extracted from 5.2. Correlate ref, advance sequence, published pair and operation. Committed Outcome means Sent; Delivered follows published-prefix advancement, not merely Inspect Pass. Receivers deduplicate and tolerate Event arriving before Outcome (R-185).",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "proto",
+      "conf-native",
+      "conf-wrangler",
+      "docs"
+    ]
+  },
+  {
     "id": "REL-1",
-    "title": "Stage 1 merge to main: 0.5.0 bump, publish mkit-server crates, first server release (core profile)",
+    "title": "Single Workers launch for Uno: 0.5.0 bump, publish crates, release and merge to main",
     "milestone": "M3",
     "track": "release",
     "depends_on": [
@@ -2488,10 +2591,19 @@
       "1.30b",
       "2.14",
       "3.13",
-      "3.14"
+      "3.14",
+      "3.9c",
+      "2.16",
+      "5.4",
+      "5.5a",
+      "5.15",
+      "4.18",
+      "5.6",
+      "5.11a",
+      "1.20"
     ],
     "size": "S",
-    "summary": "After Stage 1 (M1 minus 1.21/1.19/1.20, M2 minus 2.12/2.15, all of M3, plus 1.30 and 1.30b) completes, merge feat/mkit-server to main with a merge commit (never squash; Stage 2 continues on the branch), bump the workspace to 0.5.0, make mkit-server, -native and -conformance publishable (-worker stays unpublished) and cut the signed release. The server conforms to the SPEC-SERVER §18 core profile. The PR closes #1084, #1085, #1086, #1089 and #1090. The human confirms ghcr package creation for Actions, tags and publishes per the mkit-release runbook, adds the team owners to the new crates and checks the ghcr package (R-154).",
+    "summary": "R-185 supersedes R-154: one launch of everything merged so far plus the Workers-critical path for the Uno monorepo (UNO-403/UNO-404), at the full quality bar. Retain the former Stage 1 terminal set and add signed HTTP hooks/authority fencing, published view, inspection/remote Inspect, publication Events, Worker serving production opt-in/activation, launch takedown/admin review and real Cloudflare staging. Gate on an external full-code-and-spec review of the whole launch scope, validation of findings and adversarial review of fixes. The 5.4 spec amendment defines indexed serving/inspection without storage leases, permanent retention and GC disabled; do not claim the existing full profile. Bump to 0.5.0, publish mkit-server/-native/-conformance (-worker stays unpublished), cut the signed release and merge feat/mkit-server to main with a merge commit, never squash. Native remains the maintained reference/test server; all other work follows launch in plan order.",
     "human_action": true,
     "area_gates": [
       "full",
@@ -2500,7 +2612,7 @@
   },
   {
     "id": "REL-2",
-    "title": "Stage 2 merge to main: next-minor bump, full-profile server release",
+    "title": "Post-launch follow-ups",
     "milestone": "M5",
     "track": "release",
     "depends_on": [
@@ -2512,7 +2624,7 @@
       "5.13"
     ],
     "size": "S",
-    "summary": "After Stage 2 (M4 serving, M5 lifecycle, 2.12, 1.21, staging) completes, merge feat/mkit-server to main with a merge commit and cut the next-minor release; the server moves to the SPEC-SERVER §18 full profile (R-154).",
+    "summary": "R-185: tracking aggregate for remaining work in plan order after the single Workers launch, not a second launch or a mandated next-minor release. Includes inspector takedown completion, leases/GC/receipts (5.2, 5.3a/b, 5.8), full admin operations and native-only extras (2.12 and native serving extras). Queue outcome sink 3.9b and the owner-approval bridge remain deferred and optional.",
     "human_action": true,
     "area_gates": [
       "full",

@@ -11,7 +11,7 @@ The implementation plan for the production mkit server epic. The canonical PRD i
 | [`conventions.md`](conventions.md) | Shared executor rules: base branch, branch naming, TMPDIR, commit trailer, no CI polling or comments, size target, per-PR gate, pre-production policy, credit rule for spec PRs. |
 | [`prd-snapshot.md`](prd-snapshot.md) | Snapshot of the approved PRD (decisions D1–D36). |
 | [`registry.json`](registry.json) | Machine-readable WP registry: id, title, milestone, track, dependencies, size, area gates. |
-| [`linear-groups.json`](linear-groups.json) | The 25 Linear work groups (G01–G25) and the WPs each one contains. |
+| [`linear-groups.json`](linear-groups.json) | The 26 Linear work groups (G01–G26) and the WPs each one contains. |
 | [`m0-overview.md`](m0-overview.md) | M0 (foundation) overview. |
 | [`m1-m2-breakdown.md`](m1-m2-breakdown.md), [`m3-m5-breakdown.md`](m3-m5-breakdown.md) | Coarse breakdowns for the later milestones (rolling wave: detailed briefs are written at each milestone boundary). |
 | [`briefs/`](briefs/) | Executor briefs, one per WP (`WP-<id>.md`). Currently Prep, Specs and M0. |
@@ -25,7 +25,7 @@ The implementation plan for the production mkit server epic. The canonical PRD i
 
 ## Linear tracking
 
-Linear tracks the epic as **25 work groups (G01–G25)**, the sub-issues of MKIT-29. Each group lists its WPs;
+Linear tracks the epic as **26 work groups (G01–G26)**, the sub-issues of MKIT-29. Each group lists its WPs;
 [`linear-groups.json`](linear-groups.json) is the mapping. The **WP id stays the unit of execution**: one brief, one branch
 and one PR per WP. A group is done when all of its WPs have merged.
 
@@ -44,18 +44,32 @@ and one PR per WP. A group is done when all of its WPs have merged.
 | G11 | M1 Addressing & uploads | M1: client changes, ssh/enc multi-repo and published-view snapshots | 1.15, 1.16, 1.17, 1.18, 1.21 |
 | G12 | M1 Addressing & uploads | M1: staging, ops (backups, alerts) and M1 exit conformance | 1.19, 1.20, 1.27, 1.29 |
 | G13 | M2 Identity | M2: grant and epoch formats and verifiers (mkit-attest) | 2.2, 2.3, 2.4, 2.5 |
-| G14 | M2 Identity | M2: server authorization, ref scopes, epochs, signed reads, private repos, URL tokens | 2.6, 2.7, 2.8, 2.9, 2.11, 2.12 |
+| G14 | M2 Identity | M2: authorization, epochs, signed reads, private repos, URL tokens and authority fence | 2.6, 2.7, 2.8, 2.9, 2.11, 2.12, 2.16 |
 | G15 | M2 Identity | M2: client signed reads, grant/epoch CLI and M2 exit | 2.10, 2.13, 2.14, 2.15 |
 | G16 | M3 Admission | M3: admission (402), outcome outbox and adapter delivery | 3.1, 3.2, 3.3, 3.4, 3.5 |
-| G17 | M3 Admission | M3: SPEC-SERVER, remote hooks and hook channels | 3.6, 3.7, 3.8, 3.9, 3.14 |
+| G17 | M3 Admission | M3: SPEC-SERVER, remote hooks and hook channels | 3.6, 3.7, 3.7b, 3.8, 3.9, 3.9b, 3.9c, 3.14 |
 | G18 | M3 Admission | M3: client 402 handling, admission_helper and M3 exit | 3.10, 3.11, 3.12, 3.13 |
 | G19 | M4 Indexed mode | M4: indexed ingestion, verification and D32 extraction | 4.1, 4.2, 4.4, 4.5, 4.6, 4.7, 4.8, 4.8a, 4.9, 4.10, 4.10a, 4.17 |
 | G20 | M4 Indexed mode | M4: HTTP serving, proofs, paid/private reads and M4 exit | 4.3, 4.11, 4.12, 4.13, 4.14a, 4.14b, 4.15, 4.16, 4.18 |
 | G21 | M5 Lifecycle | M5: lifecycle specs, leases and GC | 5.1a, 5.1b-1, 5.1b-2, 5.1c, 5.2, 5.3a, 5.3b |
-| G22 | M5 Lifecycle | M5: published view and quarantine (ContentInspector) | 5.4, 5.5 |
+| G22 | M5 Lifecycle | M5: launch published view, inspector/hit handoff and publication Events; post-launch completion | 5.4, 5.5 (split), 5.5a, 5.5b, 5.15 |
 | G23 | M5 Lifecycle | M5: storage receipts (server signing and client storage) | 5.8, 5.12 |
 | G24 | M5 Lifecycle | M5: takedown, redaction notices, cache purge, admin API, reinstatement | 5.6, 5.7a, 5.7b, 5.9a, 5.9b, 5.10, 5.11a, 5.11b, 5.14 |
-| G25 | Release | M5 exit conformance and final release to main (0.5.0) | 5.13, REL |
+| G25 | Release | Post-launch follow-ups and M5 exit conformance (R-185) | 5.13, REL-2 |
+| G26 | Release | Single Workers launch for Uno (0.5.0, R-185) | REL-1 |
+
+## Delivery status (R-185, 2026-09-29)
+
+One Workers launch for the Uno monorepo (UNO-403/UNO-404) replaces R-154's two-stage release.
+The [launch mapping and critical path](00-plan.md#3-launch-mapping-delivery-and-critical-path-r-185)
+govern delivery; older milestone/WP states below are historical tracking, not current release gates.
+
+| Delivery | State | Gate / scope |
+|---|---|---|
+| REL-1: single Workers launch | planned | Everything merged plus Workers hooks/fence, publication/inspection/Events, serving activation, launch takedown/admin review; external full-code-and-spec review and adversarially reviewed fixes; real Cloudflare staging with CPU, subrequests and cost measurements |
+| Launch profile | spec amendment with 5.4 | Indexed serving/inspection without storage leases; permanent retention and GC disabled |
+| REL-2: post-launch follow-ups | deferred, in plan order | Inspector takedown completion, leases/GC/receipts, full admin and native-only extras; native reference/test server stays maintained |
+| Queue outcomes (3.9b), owner-approval bridge | deferred and optional | Outside launch |
 
 ## Milestone status
 
@@ -135,8 +149,8 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 | 1.18 | G11 | Client: resumable part upload with client-held receipts | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.21 | G11 | Worker: published-view ref snapshots per ref-index bucket (R2/Cache, debounced) for readers | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.27 | G12 | M1 conformance: D34, tickets and growth cases (wire, storage, load) | [M1/M2](m1-m2-breakdown.md) | | planned |
-| 1.19 | G12 | Staging vcs-worker deployment config and runbook | [M1/M2](m1-m2-breakdown.md) | | planned |
-| 1.20 | G12 | CI: conformance and e2e against deployed staging (M1 exit) | [M1/M2](m1-m2-breakdown.md) | | planned |
+| 1.19 | G12 | Staging vcs-worker deployment config and runbook | [M1/M2](m1-m2-breakdown.md) | | planned (pre-launch staging activation) |
+| 1.20 | G12 | CI: conformance and e2e against deployed staging (M1 exit) | [M1/M2](m1-m2-breakdown.md) | | planned (pre-launch; measure CPU, subrequests and cost) |
 | 2.2 | G13 | Proto additions for M2 | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 2.3 | G13 | mkit-attest: Keccak-256, EIP-191, secp256k1 recovery, address derivation | [brief](briefs/WP-2.3.md) | [#1110](https://github.com/officialunofficial/mkit/pull/1110) | merged |
 | 2.4a | G13 | grant codec, ref scopes, header codec, repository-name grammar | [brief](briefs/WP-2.4.md) | [#1114](https://github.com/officialunofficial/mkit/pull/1114) | merged |
@@ -149,10 +163,11 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 | 2.9 | G14 | Server: signed reads, visibility via SetRepoVisibility, read grants, not_found | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 2.10 | G15 | Client: signed reads and grant header | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 2.11 | G14 | IssueObjectUrl and signed URL tokens (mint and verify) | [M1/M2](m1-m2-breakdown.md) | | planned |
-| 2.12 | G14 | ssh and enc: server-side grant registry (mkit-server grant register) | [M1/M2](m1-m2-breakdown.md) | | planned |
+| 2.12 | G14 | ssh and enc: server-side grant registry (mkit-server grant register) | [M1/M2](m1-m2-breakdown.md) | | post-launch |
 | 2.13 | G15 | CLI: mkit grant create/add/list and the client grant store | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 2.14 | G15 | CLI: mkit grant revoke and mkit epoch | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 2.15 | G15 | Staging: enable M2 features and run M2 conformance (M2 exit) | [M1/M2](m1-m2-breakdown.md) | | planned |
+| 2.16 | G14 | Namespace authority-generation fence for external-authority writes | [launch plan](00-plan.md#3-launch-mapping-delivery-and-critical-path-r-185) | | planned (launch bundle with 3.9c) |
 | 3.1 | G16 | Proto: AdmissionChallenge error detail and goldens | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 3.2 | G16 | Core: two-phase Admission (Allow/Challenge/Deny), 402 mapping, GetServerInfo fields | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 3.3 | G16 | Core: outcome outbox, OutcomeSink, exactly-one-outcome, backpressure, read outcomes | [M3–M5](m3-m5-breakdown.md) | | planned |
@@ -160,9 +175,10 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 | 3.5 | G16 | Worker adapter: outbox delivery timer kind, CORS/redaction | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 3.6 | G17 | Spec: SPEC-SERVER v1 (M3 sections) and the mkit.server.hooks.v1 proto | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 3.7 | G17 | Core: remote-hook adapter (remote-hooks feature) | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 3.7b | G17 | Public hooks.v1 types and mkit-hook:v1 verifier in mkit-rpc | [bundle brief](briefs/WP-3.7b-3.12-3.13.md) | | implemented; public acceptance and semver pass |
+| 3.7b | G17 | Public hooks.v1 types and mkit-hook:v1 verifier in mkit-rpc | [bundle brief](briefs/WP-3.7b-3.12-3.13.md), [launch plan](00-plan.md#3-launch-mapping-delivery-and-critical-path-r-185) | | implemented; public acceptance and semver pass |
 | 3.8 | G17 | Native hook channels: HTTP and signed webhook outcome sink | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 3.9 | G17 | Worker hook channels: service binding and Queue outcomes | [M3–M5](m3-m5-breakdown.md) | | planned |
+| 3.9 | G17 | Worker hook channels: service binding and HookSet-generic entry points | [M3–M5](m3-m5-breakdown.md) | | planned |
+| 3.9c | G17 | Worker signed HTTP hook channel | [launch plan](00-plan.md#3-launch-mapping-delivery-and-critical-path-r-185) | | planned (launch bundle with 2.16) |
 | 3.10 | G18 | Client: 402 detection -> AdmissionRequired, receipt passthrough | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 3.11 | G18 | Client: admission_helper, header allowlist and hard-reserved set (D30) | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 3.12 | G18 | Stub MPP hook server and helper; end-to-end tests (M3 exit) | [exit evidence](m3-exit-report.md) | | implemented; native helper and Worker M3 lane pass |
@@ -192,21 +208,25 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 | 5.1a | G21 | Spec: leases, lifecycle events, server GC, published view and quarantine (#1091 part 1) | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 5.1b-1 and 5.1b-2 | G21 | Specs: takedown and RedactionNotice; admin API and audit log (#1091 parts 2a–2b) | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 5.1c | G21 | Spec: storage receipts predicate (#1092) | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 5.2 | G21 | Leases and lifecycle states: model, enforcement, events | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 5.3a | G21 | GC mark: roots, pins, grace, gc_pending; mark → wait → re-check protocol | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 5.3b | G21 | GC sweep: membership drop, holder removal, zero-holder deletion, adapters | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 5.4 | G22 | Published view: (head, packmap) pointer storage and caller view on every read path | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 5.5 | G22 | ContentInspector: sync checks, async quarantine, clearance, hit -> takedown | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 5.6 | G24 | Takedown core: tombstones, blocklist (checked by the relay), preservation store, per-repo views, suspension | [M3–M5](m3-m5-breakdown.md) | | planned |
+| 5.2 | G21 | Leases and lifecycle states: model, enforcement, events | [M3–M5](m3-m5-breakdown.md) | | post-launch |
+| 5.3a | G21 | GC mark: roots, pins, grace, gc_pending; mark → wait → re-check protocol | [M3–M5](m3-m5-breakdown.md) | | post-launch |
+| 5.3b | G21 | GC sweep: membership drop, holder removal, zero-holder deletion, adapters | [M3–M5](m3-m5-breakdown.md) | | post-launch |
+| 5.4 | G22 | Published view: (head, packmap) pointer storage and caller view on every read path | [M3–M5](m3-m5-breakdown.md) | | planned (launch; includes profile amendment) |
+| 5.5 | G22 | ContentInspector: sync checks, async quarantine, clearance, hit -> takedown | [M3–M5](m3-m5-breakdown.md) | | **split into 5.5a/5.5b** |
+| 5.5a | G22 | ContentInspector without takedown completion: obligations, holds, serving stops, hit handoff, remote Inspect | [launch plan](00-plan.md#3-launch-mapping-delivery-and-critical-path-r-185) | | planned (launch) |
+| 5.5b | G22 | Inspector takedown completion | [launch plan](00-plan.md#3-launch-mapping-delivery-and-critical-path-r-185) | | post-launch |
+| 5.6 | G24 | Takedown core: tombstones, blocklist (checked by the relay), preservation store, per-repo views, suspension | [M3–M5](m3-m5-breakdown.md) | | planned (launch subset) |
 | 5.7a | G24 | mkit-core: delta-safe pack rewrite primitive | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 5.7b | G24 | Server: rewrite orchestration, packlist chain rebuild, packmap CAS | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 5.8 | G23 | Storage receipts: ReceiptSigner, receipt key, key list, AdvanceRefs field | [M3–M5](m3-m5-breakdown.md) | | planned |
+| 5.8 | G23 | Storage receipts: ReceiptSigner, receipt key, key list, AdvanceRefs field | [M3–M5](m3-m5-breakdown.md) | | post-launch |
 | 5.9a | G24 | Server: RedactionNotice detail, HTTP 451, notice signing | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 5.9b | G24 | Client: redaction-aware fetch and push re-plan | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 5.10 | G24 | CachePurger hook and purge triggers (before takedown) | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 5.11a | G24 | Admin API framework: signed envelope, replay protection, audit log | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 5.11b | G24 | Admin operations and the mkit-server admin CLI | [M3–M5](m3-m5-breakdown.md) | | planned |
+| 5.11a | G24 | Admin API framework: signed envelope, replay protection, audit log | [M3–M5](m3-m5-breakdown.md) | | planned (launch review subset) |
+| 5.11b | G24 | Admin operations and the mkit-server admin CLI | [M3–M5](m3-m5-breakdown.md) | | post-launch |
 | 5.12 | G23 | Client: receipt storage under .mkit/attestations (not GC roots, not pushed) | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 5.13 | G25 | Conformance: lifecycle wire suite (M5 exit) | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 5.14 | G24 | Reinstatement via server-side pack rewrite | [M3–M5](m3-m5-breakdown.md) | | planned |
-| REL | G25 | Final merge to main: 0.5.0 bump, publish mkit-server crates, first server release | [plan §2](00-plan.md#2-work-package-registry) | | planned |
+| 5.15 | G22 | Publication Event delivery | [launch plan](00-plan.md#3-launch-mapping-delivery-and-critical-path-r-185) | | planned (launch) |
+| REL-1 | G26 | Single Workers launch for Uno: 0.5.0 bump, publish crates, release and merge to main | [launch plan](00-plan.md#3-launch-mapping-delivery-and-critical-path-r-185) | | planned |
+| REL-2 | G25 | Post-launch follow-ups | [launch plan](00-plan.md#3-launch-mapping-delivery-and-critical-path-r-185) | | deferred, in plan order |

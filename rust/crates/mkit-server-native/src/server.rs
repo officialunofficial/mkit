@@ -447,6 +447,13 @@ where
     N: NamespaceStore + Clone + 'static,
     H: HookSet + Clone + 'static,
 {
+    #[cfg(all(feature = "http-objects", feature = "hooks"))]
+    if let Some(settings) = &cfg.hooks {
+        crate::http_mount::check_other_keys(
+            cfg.pipeline.url_tokens.as_ref(),
+            &[settings.public_key()?],
+        )?;
+    }
     let pipeline = Pipeline::new(
         blobs,
         meta,
@@ -467,6 +474,13 @@ where
                 .with_auth(mkit_server::pipeline::AuthMode::TransportIdentity)
                 .map_err(|e| config_error("pipeline", e))?;
             let key = crate::enc::load_server_key(&opts.server_key)?;
+            #[cfg(feature = "http-objects")]
+            {
+                use commonware_cryptography::Signer as _;
+                let public = <[u8; 32]>::try_from(key.public_key().as_ref())
+                    .map_err(|_| config_error("enc key", "invalid public key"))?;
+                crate::http_mount::check_other_keys(cfg.pipeline.url_tokens.as_ref(), &[public])?;
+            }
             // The enc key may be created on first run, so this is the first
             // place its public half is known (SPEC-SERVER §7.1).
             #[cfg(feature = "hooks")]

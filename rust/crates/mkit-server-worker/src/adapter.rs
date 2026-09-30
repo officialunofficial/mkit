@@ -170,7 +170,8 @@ pub fn response_header_plan(headers: &http::HeaderMap) -> Vec<(String, String, b
 }
 
 /// Deployment settings read from the Worker's vars.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "http-objects"), derive(PartialEq, Eq))]
 #[non_exhaustive]
 pub struct WorkerConfig {
     /// `AUTH_AUDIENCE`: the canonical origin writes are signed for.
@@ -208,6 +209,12 @@ pub struct WorkerConfig {
     /// call the hook Worker over the `ADMISSION_HOOK` service binding. `None`
     /// runs the built-in hooks (WP-3.9).
     pub hooks: Option<crate::hooks::config::HookVars>,
+    /// Explicit Stage 2 indexed + HTTP configuration and route opt-in.
+    #[cfg(feature = "http-objects")]
+    pub http_mount: Option<crate::http_mount::WorkerHttpMountConfig>,
+    /// Feature-gated `URL_TOKEN_KEYS`/`URL_TOKEN_TTL`; no mount is enabled by these vars.
+    #[cfg(feature = "http-objects")]
+    pub url_tokens: Option<mkit_server::url_token::UrlTokenConfig>,
     /// Stage 2 only, programmatic opt-in; environment parsing always leaves None.
     #[cfg(feature = "published-view")]
     pub published_view: Option<crate::published_view::PublishedViewConfig>,
@@ -254,7 +261,9 @@ impl WorkerConfig {
 
     /// Build the deployment pipeline configuration without store access.
     #[cfg(any(target_arch = "wasm32", test))]
-    fn pipeline_config(&self) -> Result<mkit_server::pipeline::PipelineConfig, ConfigError> {
+    pub(crate) fn pipeline_config(
+        &self,
+    ) -> Result<mkit_server::pipeline::PipelineConfig, ConfigError> {
         use mkit_server::auth_v2::AuthV2Config;
         use mkit_server::pipeline::{AuthMode, PipelineConfig};
         use mkit_server::upload::UploadLimits;
@@ -289,6 +298,12 @@ impl WorkerConfig {
         config.single_upload_max_bytes = Some(SINGLE_PUT_MAX_BYTES);
         config.sharding = self.sharding;
         config.ticket_keys.clone_from(&self.ticket_keys);
+        #[cfg(feature = "http-objects")]
+        if let Some(mount) = &self.http_mount {
+            config.indexed = Some(mount.indexed);
+            config.http_objects = Some(mount.http_objects);
+            config.url_tokens.clone_from(&self.url_tokens);
+        }
         if let Some(hooks) = &self.hooks {
             config.authorizer_role = hooks.authorizer_role;
         }
@@ -386,6 +401,19 @@ impl WorkerConfig {
         let addressing =
             resolve_addressing(&var, multi, repository.as_deref(), ticket_keys.is_some())?;
         let grants = resolve_grants(&var, multi, &audience)?;
+        #[cfg(feature = "http-objects")]
+        let url_tokens = crate::http_mount::token_config(&var)?;
+        #[cfg(feature = "http-objects")]
+        if let (Some(tokens), Some(tickets)) = (&url_tokens, &ticket_keys)
+            && tokens
+                .keys()
+                .public_keys()
+                .any(|public| tickets.contains_ed25519_public(&public))
+        {
+            return Err(ConfigError(
+                "URL_TOKEN_KEYS must differ from TICKET_KEYS".into(),
+            ));
+        }
         Ok(Self {
             sharding,
             placement,
@@ -398,6 +426,10 @@ impl WorkerConfig {
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             blob_binding: crate::r2::STORAGE_BINDING,
             hooks: crate::hooks::config::HookVars::parse(&var)?,
+            #[cfg(feature = "http-objects")]
+            http_mount: None,
+            #[cfg(feature = "http-objects")]
+            url_tokens,
             #[cfg(feature = "published-view")]
             published_view: None,
             #[cfg(feature = "test-faults")]
@@ -416,7 +448,8 @@ impl WorkerConfig {
     #[cfg(target_arch = "wasm32")]
     pub fn from_env(env: &worker::Env) -> Result<Self, ConfigError> {
         Self::from_vars(|name| {
-            if name == TICKET_KEYS_VAR {
+            if name == TICKET_KEYS_VAR || cfg!(feature = "http-objects") && name == "URL_TOKEN_KEYS"
+            {
                 env.secret(name)
                     .ok()
                     .map(|secret| secret.to_string())
@@ -1634,6 +1667,15 @@ mod glue {
             Arc::new(ConsoleMetrics::default()),
         )
         .map_err(|e| bad(&e))?;
+        #[cfg(feature = "http-objects")]
+        let pipe = if let Some(mount) = &cfg.http_mount {
+            pipe.with_http_seams(|mut seams| {
+                seams.read_runtime.clone_from(&mount.read_runtime);
+                seams
+            })
+        } else {
+            pipe
+        };
         #[cfg(feature = "published-view")]
         let pipe = if let Some(config) = cfg
             .published_view
@@ -1669,9 +1711,9 @@ mod glue {
             .map_or_else(worker::Body::empty, worker::Body::new);
         let mut http_req = http::Request::builder()
             .method(to_http_method(req.method()))
-            .uri(req.url()?.to_string())
+            .uri(req.inner().url())
             .body(LimitedBody::new(body, max_body_bytes, watch.clone()))
-            .map_err(|e| worker::Error::RustError(format!("build http request: {e}")))?;
+            .map_err(|_| worker::Error::RustError("invalid HTTP request URL".into()))?;
         copy_headers_filtered(req.headers().entries(), http_req.headers_mut(), |k| {
             !is_deadline_header(k)
         });
@@ -1754,6 +1796,41 @@ mod glue {
         H: HookSet + 'static,
         F: FnOnce(&Env, &WorkerConfig) -> Result<H, ConfigError>,
     {
+        #[cfg(feature = "http-objects")]
+        if crate::http_mount::glue::mounted_request(&req, cfg) {
+            let method = req.method();
+            let origin = req.headers().get("Origin")?;
+            let response = match crate::http_mount::glue::early(&req, cfg) {
+                Ok(Some(response)) => response,
+                Ok(None) => match serve_inner_with(req, env, cfg, make_hooks).await {
+                    Ok(response) => response,
+                    Err(_) => Response::error("HTTP object adapter failed", 503)?,
+                },
+                Err(_) => Response::error("HTTP object adapter failed", 503)?,
+            };
+            if let Some(mount) = &cfg.http_mount {
+                return crate::http_mount::glue::finish(
+                    response,
+                    method.as_ref(),
+                    origin.as_deref(),
+                    &mount.options,
+                );
+            }
+            return Ok(response);
+        }
+        serve_inner_with(req, env, cfg, make_hooks).await
+    }
+
+    async fn serve_inner_with<H, F>(
+        req: Request,
+        env: Env,
+        cfg: &WorkerConfig,
+        make_hooks: F,
+    ) -> worker::Result<Response>
+    where
+        H: HookSet + 'static,
+        F: FnOnce(&Env, &WorkerConfig) -> Result<H, ConfigError>,
+    {
         #[cfg(feature = "test-faults")]
         let mut req = req;
         install();
@@ -1794,7 +1871,8 @@ mod glue {
         #[cfg(feature = "test-faults")]
         if req.method() == worker::Method::Get && req.path() == test::STATS_PATH {
             let scope = req
-                .url()?
+                .url()
+                .map_err(|_| worker::Error::RustError("invalid request URL".into()))?
                 .query_pairs()
                 .find_map(|(k, v)| (k == "ref").then(|| v.into_owned()));
             return Ok(cors(test::stats(&env, cfg, scope.as_deref()).await?));
@@ -1807,7 +1885,11 @@ mod glue {
             }
         }
         let length = req.headers().get("content-length").ok().flatten();
-        if content_length_exceeds(length.as_deref(), cfg.max_body_bytes) {
+        #[cfg(feature = "http-objects")]
+        let check_body_cap = !crate::http_mount::glue::mounted_request(&req, cfg);
+        #[cfg(not(feature = "http-objects"))]
+        let check_body_cap = true;
+        if check_body_cap && content_length_exceeds(length.as_deref(), cfg.max_body_bytes) {
             let body = body_too_large_json(cfg.max_body_bytes);
             return Ok(cors(json_response(body, 400)?));
         }
@@ -1825,8 +1907,21 @@ mod glue {
             Ok(pipe) => pipe,
             Err(e) => return Ok(cors(json_response(unavailable_json(&e.0), 503)?)),
         };
+        #[cfg(feature = "http-objects")]
+        if crate::http_mount::glue::mounted_request(&req, cfg) {
+            return crate::http_mount::glue::serve(&pipe, &req).await;
+        }
+        serve_connect(&req, cfg, pipe).await
+    }
+
+    /// Dispatch Connect and bridge its streaming response with request-cap accounting.
+    async fn serve_connect<H: HookSet + 'static>(
+        req: &Request,
+        cfg: &WorkerConfig,
+        pipe: WorkerPipeline<H>,
+    ) -> worker::Result<Response> {
         let watch = BodyWatch::default();
-        let http_req = http_request(&req, cfg.max_body_bytes, &watch)?;
+        let http_req = http_request(req, cfg.max_body_bytes, &watch)?;
         // The binding takes an `Arc` and holds it in a `SendWrapper` on
         // wasm32, where the pipeline's Workers handles are `!Send`.
         #[allow(clippy::arc_with_non_send_sync)]
@@ -2756,8 +2851,11 @@ mod tests {
             ),
         ]);
         let cfg = WorkerConfig::from_vars(vars(&pairs)).unwrap();
-        assert_eq!(cfg, WorkerConfig::from_vars(vars(&pairs)).unwrap());
-        assert_ne!(cfg, off);
+        assert_eq!(
+            cfg.grants,
+            WorkerConfig::from_vars(vars(&pairs)).unwrap().grants
+        );
+        assert_ne!(cfg.grants, off.grants);
         let settings = cfg.grants.as_ref().unwrap();
         assert_eq!(settings.relying_parties.len(), 2);
         assert!(!settings.allow_loopback);
