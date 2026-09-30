@@ -955,8 +955,18 @@ fn timer_registry_budgeted<
         && plan.is_some_and(|p| p.trim().eq_ignore_ascii_case("paid"))
     {
         match target.clone() {
-            Ok(target) => registry
-                .register(mkit_server::timers::publication_recheck::PublicationRecheck { target }),
+            Ok(mut target) => {
+                // The recheck reserves shared calls before reading, so it can
+                // checkpoint when none remain. Avoid charging them twice.
+                target.1 = None;
+                let recheck =
+                    mkit_server::timers::publication_recheck::PublicationRecheck::new(target);
+                if let Some(budget) = alarm_budget {
+                    registry.register(recheck.with_alarm_budget(budget.clone()))
+                } else {
+                    registry.register(recheck)
+                }
+            }
             Err(_) => registry,
         }
     } else {
@@ -2860,6 +2870,152 @@ mod tests {
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
         move |k| map.get(k).cloned()
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keeps shared alarm reservation and adapter restart in one regression"
+    )]
+    fn publication_recheck_checkpoints_at_the_shared_alarm_limit() {
+        use mkit_server::pipeline::{D34Shards, ShardMap};
+        use mkit_server::store::publication::{Advance, Clearance, Pair, Publication, Witness};
+        use mkit_server::timers::{TickBudget, run_due};
+        use mkit_server::{
+            Batch, BatchOutcome, NamespaceKey, NamespaceStore, RepoId, RepoName, Value,
+        };
+        block_on(async {
+            let clock = Arc::new(mkit_server::ManualClock::new(0));
+            let kv = Arc::new(mkit_server::MemoryKv::with_clock(clock.clone()));
+            let repo = RepoId {
+                namespace: NamespaceKey::deployment_default(),
+                name: RepoName::new("budgeted").unwrap(),
+            };
+            let name = "refs/heads/main";
+            let source = D34Shards.ref_shard(&repo, name);
+            let key = mkit_server::store::keys::advance(&repo.name, name, 1);
+            let state = Publication {
+                sequence: 1,
+                published: 0,
+                boundary: 0,
+                generation: 0,
+                value: Pair::default(),
+            };
+            let advance = Advance {
+                sequence: 1,
+                generation: 0,
+                value: Pair::default(),
+                additions: vec![],
+                dependencies: vec![[1; 32], [2; 32]],
+                external_bases: vec![],
+                obligations: vec![],
+                state: Clearance::Pending,
+                operation: [3; 32],
+            };
+            // Current fixed-width initial cursor: version 1, zero binding/position.
+            let mut initial = vec![0; 37];
+            initial[0] = 1;
+            assert_eq!(
+                kv.apply(
+                    &source,
+                    Batch::new()
+                        .put(key.clone(), advance.encode().unwrap())
+                        .put(
+                            mkit_server::store::keys::publication(&repo.name, name),
+                            state.encode().unwrap()
+                        )
+                        .put(
+                            mkit_server::store::keys::timer(0, 12, key.as_bytes()),
+                            Value::new(initial)
+                        )
+                )
+                .await
+                .unwrap(),
+                BatchOutcome::Committed
+            );
+            for pack in &advance.dependencies {
+                let target = D34Shards.membership(&repo, &mkit_server::BlobKey::pack(*pack));
+                let witness = Witness {
+                    generation: 0,
+                    sequence: 1,
+                    published: true,
+                    held: false,
+                };
+                kv.apply(
+                    &target,
+                    Batch::new().put(
+                        mkit_server::store::keys::published_member(&repo.name, pack),
+                        witness.encode(),
+                    ),
+                )
+                .await
+                .unwrap();
+            }
+            let budget = mkit_server::purge::SliceBudget::new(crate::purge::ALARM_OPERATIONS);
+            assert!(budget.charge(crate::purge::ALARM_OPERATIONS - 1));
+            let registry = timer_registry_budgeted::<_, _>(
+                crate::classes::ShardClass::RefShard,
+                Ok(kv.clone()),
+                Some("paid"),
+                Some(&budget),
+            );
+            let report = run_due(
+                &kv,
+                &source,
+                &registry,
+                clock.as_ref(),
+                0,
+                &TickBudget::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!((report.fired, report.failed), (1, 0));
+            assert_eq!(budget.used(), crate::purge::ALARM_OPERATIONS);
+            assert_eq!(
+                mkit_server::store::publication::read(&kv, &source, &repo.name, name)
+                    .await
+                    .unwrap()
+                    .published,
+                0
+            );
+            let continued = kv
+                .get(
+                    &source,
+                    &mkit_server::store::keys::timer(5_000, 12, key.as_bytes()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                &continued.as_bytes()[33..],
+                &1u32.to_le_bytes(),
+                "one charged call must checkpoint one witness"
+            );
+            budget.reset();
+            let report = run_due(
+                &kv,
+                &source,
+                &registry,
+                clock.as_ref(),
+                5_000,
+                &TickBudget::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!((report.fired, report.failed), (1, 0));
+            assert_eq!(
+                budget.used(),
+                1,
+                "resume must neither reread nor double-charge"
+            );
+            assert_eq!(
+                mkit_server::store::publication::read(&kv, &source, &repo.name, name)
+                    .await
+                    .unwrap()
+                    .published,
+                1
+            );
+        });
     }
 
     #[test]

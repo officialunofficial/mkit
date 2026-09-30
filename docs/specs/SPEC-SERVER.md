@@ -1542,6 +1542,16 @@ survive restarts, recheck delayed membership projections without client traffic,
 and remain scheduled while dependencies, inspection obligations, holds, hits,
 or replacement dependencies remain outstanding. Timer completion is guarded
 against concurrent obligation and generation changes; a timer cannot waive work.
+A recheck may persist its witness position in the existing timer value and
+continue within a bounded share of the whole alarm budget. The cursor must bind
+the retained advance (including its complete dependency and obligation sets)
+and the publication generation and deletion boundary. A change to that binding
+restarts the check; an unrelated later advance or prefix movement need not.
+Checkpointing and completion must atomically guard the current advance,
+publication state and original timer value. A missing witness leaves the cursor
+at that witness, never beyond it. Launch published-membership projections are
+monotonic within a generation; mutable source-local witnesses are re-read in
+full on each fire rather than trusted across checkpoints.
 
 A pack added by another advance that has not cleared or resolved blocks
 clearance. `AlreadyPresent` establishes live membership, not published
@@ -3677,6 +3687,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Bounded resumable publication rechecks retain a binding and witness position in the existing timer-12 value, guard checkpoints against obligation/generation changes, and preserve valid dependency limits. Unsupported pre-launch timer values require store reset (R-198 B1). |
 | 1 | draft | R-190 pending launch takedown: repository-local object or whole-pack input (additive admin `pack_id = 9`), independent immediate denial and unresolved preservation work; production activation awaits preservation. Manual PurgeCache accepts asynchronously with audited completion. |
 | 1 | draft | R-200 launch inspection: sync/fail-closed only, at most four inspectors, positive whole-advance bound <=10,000 advertised as inspection_max_objects, conservative header/job-count refusal before enumeration with the existing index-limit error; one batch each and PRE_RECEIVE quarantine rejects. Inspect added-pack Blob/ChunkedBlob entries, surplus included, as BLOB/CHUNKED_FILE; chunk-only blobs MAY be BLOB, CHUNK unused. Earlier membership was synchronously inspected; activation requires an empty store. Enumerate frame/checkpoint pages of <=1,000 rows without inspection role reads. No durable continuation/marker; async, holds, quarantine, full classification and unrestricted multi-batch inspection deferred to WP-5.5c (§11, §18). |
 | 1 | draft | Launch admin foundation subset: signed framework, gapless audit/ReadAuditLog and automatic purge delivery; manual PurgeCache deferred. Automatic audit uses committed source relay events and atomic root append/dedup/watermark. |

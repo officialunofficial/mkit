@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: publication timer 12 resumes bounded dependency checks across alarms
+  and restarts after guarded obligation, dependency or generation changes.
+  Valid large D34 packmaps no longer stall at the whole-alarm call limit.
+  Its internal timer-value codec changes; reset unsupported pre-launch stores.
+
 - Server (WP-5.6a-1, R-190): independent V2 denial actions, verified pack inventory
   and signed, audited pending takedown intents; manual PurgeCache returns a purge
   id asynchronously and audits completion. Preservation and production takedown
