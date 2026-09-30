@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and durable holder delivery precede Verified; release activation waits for 4.18.
 
 
+- Server (WP-5.6a-1, R-190): independent V2 denial actions, verified pack inventory
+  and signed, audited pending takedown intents; manual PurgeCache returns a purge
+  id asynchronously and audits completion. Preservation and production takedown
+  activation await WP-5.6a-2. Timer 15 is TAKEDOWN_WORK; no new key tag or migration.
+
 - Server (WP-5.5a, R-200): synchronous added-pack file inspection before apply,
   fail-closed retries without replay, signed remote Inspect, and advertised
   launch input limits (default 10,000 objects, maximum four inspectors).

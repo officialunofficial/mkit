@@ -302,6 +302,8 @@ pub struct PipelineConfig {
     pub outbox_backlog_cap: Option<OutboxBacklogCap>,
     /// Indexed ingestion and pre-receive verification, off by default.
     pub indexed: Option<crate::indexed::IndexedConfig>,
+    /// Global takedown proofs. Programmatic only until preservation is integrated.
+    pub takedown_denial: bool,
     /// Per-ref allowed signers and fast-forward-only rules (SPEC-SERVER
     /// §9.7). Programmatic only and Stage 2: no adapter exposes it. A
     /// fast-forward-only rule needs `indexed`.
@@ -373,6 +375,7 @@ impl PipelineConfig {
                 bytes: 64 * 1024 * 1024,
             }),
             indexed: None,
+            takedown_denial: false,
             ref_policy: None,
             #[cfg(feature = "http-objects")]
             http_objects: None,
@@ -474,6 +477,8 @@ pub struct Pipeline<B, N, H = Hooks> {
 }
 
 struct WriteInputs<'a> {
+    denial_ids: &'a std::collections::BTreeSet<Hash>,
+    denial_packs: &'a [Hash],
     pending: Option<&'a reservation::PendingGuard>,
     implicit: Option<&'a [PendingPack]>,
     external_bases: &'a std::collections::BTreeSet<Hash>,
@@ -635,6 +640,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     "authority keys must differ from URL-token keys",
                 ));
             }
+        }
+        if cfg.takedown_denial && cfg.indexed.is_none() {
+            return Err(ServerError::invalid_argument(
+                "takedown denial requires indexed mode",
+            ));
         }
         if let Some(indexed) = &cfg.indexed {
             if !matches!(cfg.auth, AuthMode::AuthV2(_))
@@ -2466,6 +2476,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     ahead,
                     (lease, begin.as_ref()),
                     WriteInputs {
+                        denial_ids: &staged.denial_ids,
+                        denial_packs: &staged.denial_packs,
                         pending: pending.as_ref(),
                         implicit,
                         external_bases: &staged.external_bases,
@@ -2879,7 +2891,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             writer: caller == CallerView::Writer,
             policy: self.publication_policy.as_deref(),
         };
-        read::is_member(
+        let member = read::is_member(
             &view,
             self.shards.as_ref(),
             &a.repo().repo,
@@ -2887,7 +2899,29 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             a.ref_hint.as_deref(),
         )
         .await
-        .map_err(meta_error)
+        .map_err(meta_error)?;
+        if member && self.cfg.indexed.is_some() {
+            match crate::takedown::denial::require_clear(&self.meta, &key.0).await {
+                Ok(()) => {}
+                Err(e) if e.public_message() == "object blocked" => return Ok(false),
+                Err(e) => return Err(e),
+            }
+        }
+        if member && self.cfg.takedown_denial && self.cfg.indexed.is_some() {
+            return match crate::takedown::denial::require_pack_clear(
+                &self.meta,
+                self.shards.as_ref(),
+                &a.repo().repo,
+                &key.0,
+            )
+            .await
+            {
+                Ok(()) => Ok(true),
+                Err(e) if e.public_message() == "object blocked" => Ok(false),
+                Err(e) => Err(e),
+            };
+        }
+        Ok(member)
     }
 
     /// A unary write's ref writes in decision order (packmap first) and
@@ -3326,6 +3360,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         inputs: WriteInputs<'_>,
     ) -> Result<StoredResult, ServerError> {
         let WriteInputs {
+            denial_ids,
+            denial_packs,
             pending,
             implicit,
             external_bases,
@@ -3343,6 +3379,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .map(implicit::implicit_packs);
         let advance = self.publication_ticket_write(op, a, p)?;
         let mut req = WriteRequest {
+            denial_ids: Some(denial_ids),
+            denial_packs,
             authority_store: plan::AuthorityStore::from_capabilities(self.meta.capabilities()),
             authority_generation: op.authz.authority_generation,
             repo: &op.repo.name,
@@ -3491,7 +3529,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     ) -> Result<Option<crate::store::publication::Advance>, ServerError> {
         // Deletions establish an immediate boundary without consulting inspection
         // or verifying the surviving pair; older membership obligations remain retained.
-        let policy = self.publication_policy.as_deref();
+        let policy = self.publication_policy.as_deref().or_else(|| {
+            self.cfg
+                .takedown_denial
+                .then_some(&clearance::Immediate as &dyn clearance::PublicationPolicy)
+        });
         #[cfg(feature = "remote-hooks")]
         let policy = policy.or_else(|| {
             (!self.inspectors.is_empty())
@@ -3575,6 +3617,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         external_bases: &std::collections::BTreeSet<Hash>,
         mut inspected: Option<&mut crate::indexed::inspection::InspectionSet>,
     ) -> Result<(), ServerError> {
+        let mut indexed = self
+            .cfg
+            .indexed
+            .ok_or_else(|| internal("publication requires indexed mode"))?;
+        if self.cfg.takedown_denial {
+            indexed.decode_budget = indexed.decode_budget.min(8 << 20);
+        }
         // Pair verification and dependency visibility share one allocation.
         let inspection_budget = crate::indexed::budget::SliceBudget::new(256);
         let inspection_blobs =
@@ -3590,9 +3639,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 branch,
                 prepared,
                 policy,
-                self.cfg
-                    .indexed
-                    .ok_or_else(|| internal("publication requires indexed mode"))?,
+                indexed,
                 self.metrics.as_ref(),
                 set,
             )
@@ -3607,9 +3654,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 branch,
                 prepared,
                 policy,
-                self.cfg
-                    .indexed
-                    .ok_or_else(|| internal("publication requires indexed mode"))?,
+                indexed,
                 self.metrics.as_ref(),
             )
             .await?;
@@ -3684,6 +3729,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// lost prune race retries once without the prune, uncounted. A missed
     /// deadline re-plans once while the envelope is still valid at the
     /// failed commit, then `unavailable` (SPEC-WRITE-GRANTS §5.5).
+    // Keep fresh denial, authorization and guarded apply together on every retry.
+    #[allow(clippy::too_many_lines)]
     async fn apply_loop(
         &self,
         op: &Operation,
@@ -3701,6 +3748,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let skew_ms = a.business_skew_ms;
         let (mut replans, mut deadline_missed, mut prune_ok) = (0, false, true);
         let mut first_attempt = true;
+        let denial_budget = crate::indexed::budget::SliceBudget::new(9000);
         loop {
             let mut clock = self.plan_clock(skew_ms, &req);
             let base = ahead.take().unwrap_or_default();
@@ -3714,6 +3762,31 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 clock = self.plan_clock(skew_ms, &req);
             }
             first_attempt = false;
+            let denial_packs: Vec<_> = req
+                .denial_packs
+                .iter()
+                .chain(
+                    req.publication
+                        .iter()
+                        .filter_map(|p| p.prepared)
+                        .flat_map(|a| a.dependencies.iter().chain(&a.external_bases)),
+                )
+                .copied()
+                .collect();
+            if let Some(ids) = req.denial_ids
+                && self.cfg.takedown_denial
+                && (!ids.is_empty() || !denial_packs.is_empty())
+            {
+                crate::takedown::denial::require_repo_clear_budgeted(
+                    &self.meta,
+                    self.shards.as_ref(),
+                    &op.repo,
+                    ids,
+                    &denial_packs,
+                    &denial_budget,
+                )
+                .await?;
+            }
             let plan = match plan_write(&req, &snap, &clock)? {
                 Planned::Done(result) => return Ok(result),
                 Planned::Apply(plan) => plan,

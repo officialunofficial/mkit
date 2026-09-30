@@ -23,6 +23,20 @@ pub trait PublicationPolicy: MaybeSend + MaybeSync {
     fn pack_available(&self, repo: &RepoId, pack: &Hash) -> bool;
 }
 
+pub(crate) struct Immediate;
+impl PublicationPolicy for Immediate {
+    fn prepare<'a>(
+        &'a self,
+        _: &'a Operation,
+        value: &'a Pair,
+    ) -> BoxFuture<'a, Result<Advance, ServerError>> {
+        Box::pin(async move { Ok(immediate(value.clone(), [0; 32], Vec::new())) })
+    }
+    fn pack_available(&self, _: &RepoId, _: &Hash) -> bool {
+        true
+    }
+}
+
 /// Planner context is present on all atomic stores, even without an inspector.
 #[derive(Clone)]
 pub(crate) struct PublicationWrite<'a> {

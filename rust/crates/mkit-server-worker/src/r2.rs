@@ -729,6 +729,7 @@ impl Stream for Pieces {
 pub struct EnvBucket {
     env: worker::Env,
     binding: &'static str,
+    request_budget: Option<mkit_server::indexed::budget::SliceBudget>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -736,10 +737,23 @@ impl EnvBucket {
     /// The bucket bound as `binding` ([`STORAGE_BINDING`]).
     #[must_use]
     pub fn new(env: worker::Env, binding: &'static str) -> Self {
-        Self { env, binding }
+        Self {
+            env,
+            binding,
+            request_budget: None,
+        }
+    }
+
+    /// Share the incoming request's allowance across R2 calls and upload clones.
+    #[must_use]
+    pub fn with_budget(mut self, budget: mkit_server::indexed::budget::SliceBudget) -> Self {
+        self.request_budget = Some(budget);
+        self
     }
 
     fn bucket(&self) -> Result<worker::Bucket, String> {
+        crate::ns_client::charge_request(self.request_budget.as_ref())
+            .map_err(|e| e.to_string())?;
         self.env.bucket(self.binding).map_err(|e| e.to_string())
     }
 }
@@ -947,6 +961,8 @@ impl ObjectBucket for EnvBucket {
     }
 
     async fn probe(&self) -> Result<(), String> {
+        crate::ns_client::charge_request(self.request_budget.as_ref())
+            .map_err(|e| e.to_string())?;
         if mkit_worker_common::health::r2_head_probe(&self.env, self.binding).await {
             Ok(())
         } else {

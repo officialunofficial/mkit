@@ -2917,8 +2917,17 @@ async fn holder_delivery_lost_reply_is_atomic_and_never_double_bumps() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // The durable handoff is checked through materialization and protection release.
+async fn late_v2_blocked_holder_after_ttl_retains_real_takedown_handoff() {
+    late_blocked_holder_handoff(true).await;
+}
+
+#[tokio::test]
 async fn late_blocked_holder_after_ttl_retains_real_takedown_handoff() {
+    late_blocked_holder_handoff(false).await;
+}
+
+#[allow(clippy::too_many_lines)] // The durable handoff is checked through materialization and protection release.
+async fn late_blocked_holder_handoff(v2: bool) {
     let local = memory();
     let object = [0x46; 32];
     let hold = [0x47; 32];
@@ -2952,7 +2961,23 @@ async fn late_blocked_holder_after_ttl_retains_real_takedown_handoff() {
         crate::store::HoldOutcome::Held
     );
     let blocked = crate::store::BlockEntry::new("late", 101);
-    idx.block(&object, &blocked, 101).await.unwrap();
+    if v2 {
+        idx.install_block_action(
+            &object,
+            &crate::takedown::denial::BlockAction {
+                id: [0x4a; 32],
+                takedown_id: [0x4b; 32],
+                reason: "late".into(),
+                blocked_at_ms: 101,
+                chunk_ids: vec![],
+            },
+            101,
+        )
+        .await
+        .unwrap();
+    } else {
+        idx.block(&object, &blocked, 101).await.unwrap();
+    }
     append(
         &local,
         &p,

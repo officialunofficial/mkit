@@ -39,6 +39,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             return Err(error);
         };
         let req = WriteRequest {
+            denial_ids: None,
+            denial_packs: &[],
             authority_store: super::plan::AuthorityStore::from_capabilities(
                 self.meta.capabilities(),
             ),

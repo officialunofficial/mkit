@@ -77,6 +77,7 @@ fn stored_error(code: &str, message: &str) -> ServerError {
 /// The permanent answer for a terminal job outcome.
 fn outcome_error(outcome: Outcome, now: u64, ticket: &TicketV1, bound: u64) -> ServerError {
     match outcome {
+        Outcome::Blocked => ServerError::permission_denied("object blocked"),
         Outcome::BaseMissing => resolve::missing_base(now, ticket.created_at_ms, bound),
         Outcome::BaseCapped => {
             ServerError::failed_precondition("delta base not available in this repository")
@@ -594,6 +595,8 @@ async fn staged_commits<N: NamespaceStore>(
     }
     let (objects, bytes) = totals;
     Ok(StagedCommits {
+        denial_ids: BTreeSet::new(),
+        denial_packs: Vec::new(),
         parents,
         objects,
         external_bases: BTreeSet::new(),
@@ -1054,6 +1057,10 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
         }
     }
     let mut staged = staged_commits(store, source, repo, &ready, head, cfg, totals).await?;
+    staged.denial_packs = ready.iter().map(|held| held.ticket.pack_id).collect();
+    staged
+        .denial_ids
+        .extend(staged.denial_packs.iter().copied());
     // vc6 includes every intermediate external source, even for surplus entries
     // and sources co-consumed by this advance; publication must not waive them.
     staged.external_bases = dependencies

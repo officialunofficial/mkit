@@ -27,6 +27,49 @@ pub const PREFIX: &str = "/mkit.server.admin.v1.AdminService/";
 pub const PURGE_PATH: &str = "/mkit.server.admin.v1.AdminService/PurgeCache";
 /// Canonical audit export procedure.
 pub const AUDIT_PATH: &str = "/mkit.server.admin.v1.AdminService/ReadAuditLog";
+/// Procedures in the lean takedown catalog.
+pub const TAKEDOWN_PATH: &str = "/mkit.server.admin.v1.AdminService/Takedown";
+
+/// A prepared operation committed together with its audit and replay result.
+#[derive(Debug)]
+pub struct Prepared {
+    /// Effects in the deployment's operator partition.
+    pub batch: crate::Batch,
+    /// Stable acceptance response, never preserved bytes.
+    pub response: Response,
+    /// Persistent operation identity, empty for reads.
+    pub operation_id: String,
+    /// Signed operator label.
+    pub label: String,
+    /// Audited targets.
+    pub targets: Vec<String>,
+    /// Private audit reason or progress text.
+    pub details: String,
+}
+
+/// Internal extension of the signed, audited operator lifecycle.
+pub trait AdminOperations: crate::MaybeSend + crate::MaybeSync {
+    /// Prepare root effects after staging immutable action metadata; no denial is activated here.
+    fn plan<'a>(
+        &'a self,
+        path: &'a str,
+        input: &'a serde_json::Value,
+        digest: &'a str,
+        now: u64,
+        budget: &'a crate::indexed::budget::SliceBudget,
+    ) -> crate::BoxFuture<'a, Result<Prepared, ServerError>>;
+    /// Resume accepted denial activation from durable validated metadata.
+    /// Called on nonce and operation replay as well as first acceptance.
+    fn after_commit<'a>(
+        &'a self,
+        path: &'a str,
+        input: &'a serde_json::Value,
+        response: Response,
+        now: u64,
+        budget: &'a crate::indexed::budget::SliceBudget,
+    ) -> crate::BoxFuture<'a, Result<Response, ServerError>>;
+}
+
 /// Maximum admin body size, both on the wire and decoded.
 pub const MAX_BODY: usize = 1_048_576;
 /// Adapter headers, preserving duplicates and the original values.
@@ -92,7 +135,9 @@ impl Response {
         };
         Self { status, content_type: "application/json".into(), body: serde_json::json!({"code": error.code().as_str(), "message": error.public_message()}).to_string().into_bytes() }
     }
-    pub(crate) fn json(value: &serde_json::Value) -> Self {
+    /// A bounded replayable JSON response.
+    #[must_use]
+    pub fn json(value: &serde_json::Value) -> Self {
         Self {
             status: 200,
             content_type: "application/json".into(),
@@ -128,11 +173,12 @@ pub fn precheck(headers: &Headers) -> Result<(), Response> {
 }
 
 /// Durable admin service over one deployment-wide metadata partition.
-#[derive(Debug)]
 pub struct Engine<S> {
     store: S,
     partition: Partition,
     config: Config,
+    operations: Option<std::sync::Arc<dyn AdminOperations>>,
+    purge_enabled: bool,
 }
 impl<S: NamespaceStore> Engine<S> {
     /// Build the signed audit export framework.
@@ -141,7 +187,21 @@ impl<S: NamespaceStore> Engine<S> {
             store,
             partition,
             config,
+            operations: None,
+            purge_enabled: false,
         }
+    }
+    /// Enable manual acceptance only when a real purge interface is configured.
+    #[must_use]
+    pub fn with_purge(mut self, enabled: bool) -> Self {
+        self.purge_enabled = enabled;
+        self
+    }
+    /// Attach the opt-in takedown catalog.
+    #[must_use]
+    pub fn with_operations(mut self, operations: std::sync::Arc<dyn AdminOperations>) -> Self {
+        self.operations = Some(operations);
+        self
     }
     /// Dispatch exact signed bytes. Adapters must reject decompression errors
     /// through `decoded` after authentication, preserving authenticated audit.
@@ -199,5 +259,15 @@ mod encoded_bytes {
         STANDARD
             .decode(String::deserialize(deserializer)?)
             .map_err(serde::de::Error::custom)
+    }
+}
+
+impl<S> core::fmt::Debug for Engine<S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Engine")
+            .field("partition", &self.partition)
+            .field("operations_enabled", &self.operations.is_some())
+            .field("purge_enabled", &self.purge_enabled)
+            .finish_non_exhaustive()
     }
 }

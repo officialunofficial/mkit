@@ -115,6 +115,7 @@ struct Faulty {
     inner: Arc<MemoryKv>,
     applies: AtomicU32,
     fail_at: AtomicU32,
+    inventory_guard: Option<(RepoName, Hash, BTreeSet<Hash>)>,
 }
 
 impl NamespaceStore for Faulty {
@@ -135,6 +136,29 @@ impl NamespaceStore for Faulty {
         self.inner.scan(p, start, end, after, limit).await
     }
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        if let Some((repo, pack, expected)) = &self.inventory_guard {
+            let key = keys::verification(repo, pack);
+            if batch.writes.iter().any(|write| {
+                matches!(write,
+                crate::store::Write::Put(k, value) if k == &key
+                    && matches!(super::state::decode(value), Ok(VerificationV1::Verified { .. })))
+            }) {
+                let mut rows = BTreeSet::new();
+                assert!(
+                    !crate::takedown::inventory::visit(
+                        self.inner.as_ref(),
+                        pack,
+                        false,
+                        |id, _| {
+                            assert!(rows.insert(id));
+                            async { Ok(false) }
+                        }
+                    )
+                    .await?
+                );
+                assert_eq!(&rows, expected, "Verified preceded the complete inventory");
+            }
+        }
         let n = self.applies.fetch_add(1, Ordering::SeqCst) + 1;
         if n == self.fail_at.load(Ordering::SeqCst) {
             return Err(StoreError::Unavailable("injected fault".into()));
@@ -674,6 +698,7 @@ fn a_crash_at_every_batch_boundary_resumes_to_the_same_result() {
             inner: rig.store.clone(),
             applies: AtomicU32::new(0),
             fail_at: AtomicU32::new(fail_at),
+            inventory_guard: None,
         };
         rig.drive_on(&faulty, |rig| rig.finished(&ticket.pack_id));
         assert_eq!(
@@ -1432,6 +1457,7 @@ fn a_crash_cannot_lose_a_satisfying_member_pack() {
             inner: rig.store.clone(),
             applies: AtomicU32::new(0),
             fail_at: AtomicU32::new(fail_at),
+            inventory_guard: None,
         };
         rig.drive_on(&faulty, |rig| rig.finished(&ticket.pack_id));
         let job = rig.job(&ticket.pack_id).unwrap();
@@ -2138,6 +2164,7 @@ fn external_source_membership_is_rechecked_after_verification() {
             inner: rig.store.clone(),
             applies: AtomicU32::new(0),
             fail_at: AtomicU32::new(fail_at),
+            inventory_guard: None,
         };
         rig.drive_on(&faulty, |r| r.finished(&ticket.pack_id));
         let staged = rig.check(&[(&ticket, id)], head).unwrap();
@@ -2271,6 +2298,7 @@ fn interrupted_closure_and_recheck_slices_shrink_then_end_terminal() {
             inner: rig.store.clone(),
             applies: AtomicU32::new(0),
             fail_at: AtomicU32::new(0),
+            inventory_guard: None,
         };
         let mut caps = BTreeSet::new();
         for _ in 0..12 {
@@ -2560,6 +2588,7 @@ fn large_manifest_reference_pages_resume_after_partial_decode_writes() {
             inner: rig.store.clone(),
             applies: AtomicU32::new(0),
             fail_at: AtomicU32::new(fail_at),
+            inventory_guard: None,
         };
         let replies = LostPageReply {
             inner: &faulty,
@@ -2625,6 +2654,82 @@ impl PackWindows for OpaqueEtagWindows {
             Ok(window)
         })
     }
+}
+
+#[test]
+fn packlist_inventory_resumes_its_checkpoint_after_a_failed_slice() {
+    let rig = Rig::new();
+    let ids: Vec<Hash> = (0u32..263)
+        .map(|n| {
+            let mut id = [17; 32];
+            id[..4].copy_from_slice(&n.to_be_bytes());
+            id
+        })
+        .collect();
+    let pack = mkit_core::transfer::encode_packlist(None, &ids).unwrap();
+    let (ticket, id) = rig.add(&pack);
+    rig.create(&ticket, id);
+    rig.drive(|r| {
+        r.job(&ticket.pack_id)
+            .is_some_and(|j| j.phase == Phase::Verify && !j.scan.is_empty())
+    });
+    let checkpoint = rig.job(&ticket.pack_id).unwrap();
+    let offset = codec::decode_u64(&Value::new(checkpoint.scan)).unwrap();
+    assert!(offset > 0 && offset < 263);
+    assert!(!matches!(
+        rig.state(&ticket.pack_id),
+        Some(VerificationV1::Verified { .. })
+    ));
+    assert!(
+        block_on(crate::takedown::inventory::seal(
+            rig.store.as_ref(),
+            &ticket.pack_id
+        ))
+        .is_err()
+    );
+    let faulty = Faulty {
+        inner: rig.store.clone(),
+        applies: AtomicU32::new(0),
+        fail_at: AtomicU32::new(1),
+        inventory_guard: Some((
+            rig.repo.name.clone(),
+            ticket.pack_id,
+            ids.iter().copied().collect(),
+        )),
+    };
+    assert_eq!(rig.tick_on(&faulty).failed, 1);
+    assert_eq!(
+        codec::decode_u64(&Value::new(rig.job(&ticket.pack_id).unwrap().scan)).unwrap(),
+        offset
+    );
+    rig.clock.advance(1_000);
+    // tick constructs a fresh registry/handler and reloads every cursor.
+    rig.drive_on(&faulty, |r| r.finished(&ticket.pack_id));
+    let done = rig.job(&ticket.pack_id).unwrap();
+    assert!(done.scan.is_empty());
+    assert_eq!(done.entries, 0);
+    assert_eq!(done.outcome, None);
+    assert!(matches!(
+        rig.state(&ticket.pack_id),
+        Some(VerificationV1::Verified { .. })
+    ));
+    let mut rows = BTreeSet::new();
+    assert!(
+        !block_on(crate::takedown::inventory::visit(
+            rig.store.as_ref(),
+            &ticket.pack_id,
+            false,
+            |id, _| {
+                assert!(
+                    rows.insert(id),
+                    "dependency replay duplicated an inventory row"
+                );
+                async { Ok(false) }
+            }
+        ))
+        .unwrap()
+    );
+    assert_eq!(rows, ids.into_iter().collect());
 }
 
 #[test]

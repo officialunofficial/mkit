@@ -53,6 +53,9 @@ message TakedownRequest {
   string operator_label = 7;
   // Public reason from SPEC-SERVER §14.6; reason is private audit text.
   string reason_token = 8;
+  // Launch CONTENT alternative to object_ids: one repository-local whole pack.
+  // Exactly one of object_ids and pack_id; repository supplies canonical sources.
+  bytes pack_id = 9;
 }
 message TakedownResponse {
   // Repository/namespace lease receipts are read through GetReceipt (§15).

@@ -290,7 +290,11 @@ pub(crate) async fn walk<B: BlobStore, N: NamespaceStore>(
         let ids: Vec<Hash> = batch.iter().map(|(id, _)| *id).collect();
         let kinds: BTreeMap<Hash, Kind> = batch.into_iter().collect();
         for (id, located) in resolve::locate_many(env, &ids).await? {
-            if takedown.stops_descent(env.repo, &id) {
+            if crate::takedown::denial::denied(env.meta, &id)
+                .await
+                .map_err(|_| Miss::Unavailable)?
+                || takedown.stops_descent(env.repo, &id)
+            {
                 continue;
             }
             if kinds[&id] == Kind::File && !manifest_sized(located.value.decoded_size) {

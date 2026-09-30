@@ -850,7 +850,17 @@ fn proof_caps_stop_chunk_metadata_lookups_before_missing_later_chunk() {
                 usize::from(index == 0) * expected_lookups
             );
         }
-        assert!(fx.pipe.meta.calls() - before < 30);
+        // Five canonical loads check both object and source pack; the
+        // resolved leaf check adds two more. These strong denial reads
+        // are separate from the original bounded proof metadata work.
+        let denial_reads = seen
+            .iter()
+            .filter(|key| key.as_bytes().starts_with(b"b\0") && key.as_bytes().len() == 34)
+            .count();
+        assert_eq!(denial_reads, 12);
+        let calls = usize::try_from(fx.pipe.meta.calls() - before).unwrap();
+        assert_eq!(calls, 38 + 2 * expected_lookups);
+        assert!(calls - denial_reads < 30);
     }
     assert!(admission.calls.lock().unwrap().is_empty());
     assert!(proofs.0.lock().unwrap().is_empty());
