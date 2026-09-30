@@ -15,6 +15,10 @@ use super::{HookSet, Pipeline, internal, lease::observed_guard, meta_error, ms};
 /// Largest allowed epoch increment (SPEC-WRITE-GRANTS §1.1).
 pub const MAX_EPOCH_STEP: u64 = mkit_attest::grant::MAX_EPOCH_STEP;
 const PAGE_SIZE: u32 = 4;
+// A frozen clock and acknowledged/expired rows must not permit an unbounded
+// walk. Each slice reads at most 32 rows in eight pages, besides four bounded
+// push loops (at most 32 attempts, at most five store calls each).
+const MAX_SCAN_PAGES: u32 = 8;
 // Bound contention even with a frozen injected clock.
 const MAX_PUSH_ATTEMPTS: u32 = 32;
 
@@ -280,8 +284,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let mut cursor = self.revocation_cursors.get(ns, &state);
         let mut checkpoint = cursor.clone();
         let (mut visited, mut remaining, mut prefix_complete) = (0, 0_u64, true);
+        let mut pages = 0;
         loop {
-            if self.revoke_budget_passed(start, *budget) {
+            if pages == MAX_SCAN_PAGES || self.revoke_budget_passed(start, *budget) {
                 self.revocation_cursors.set(ns, &state, checkpoint);
                 return Ok(RevokeProgress::Pending {
                     remaining: remaining.max(1),
@@ -292,6 +297,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .scan(&coordinator, &first, &end, cursor.as_ref(), PAGE_SIZE)
                 .await
                 .map_err(meta_error)?;
+            pages += 1;
+            if page.entries.len() > PAGE_SIZE as usize {
+                return Err(internal("revocation scan exceeded its row bound"));
+            }
             for (key, value) in page.entries {
                 if self.revoke_budget_passed(start, *budget) {
                     self.revocation_cursors.set(ns, &state, checkpoint);

@@ -476,8 +476,11 @@ Generation changes MUST serialize with lease grants. Durable leases MUST carry
 both independent generations and acknowledgements; pushes MUST precede their
 acknowledgements, and renewing a live row MUST preserve each acknowledgement.
 Completion MUST wait for every old leased shard to acknowledge or expire,
-including cache/recovery holdoffs. Completion scans MUST remain bounded and use
-independent checkpoints for grant and authority barriers. A pending setter MUST
+including cache/recovery holdoffs. Completion scans MUST remain bounded independently of elapsed clock time and use
+independent checkpoints for grant and authority barriers. Each slice reads at most
+eight pages of four rows and attempts at most four pushes; each push retries at
+most 32 times. A setter attempts at most five slices. Pending counts are
+conservative lower bounds, including one when an unscanned suffix remains. A pending setter MUST
 return `unavailable` with a `Retry-After` header in delay-seconds. Sharded batches
 MUST retain backend-evaluated
 `NotAfter(min(lease_expires - margin, plan_time + MAX_APPLY_WINDOW))`.

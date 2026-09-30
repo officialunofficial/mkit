@@ -2906,3 +2906,66 @@ backends!(
     authority_renew_ack_sqlite,
     authority_renewal_between_push_and_ack
 );
+
+#[tokio::test]
+async fn authority_setter_has_a_fixed_scan_bound_with_a_frozen_clock() {
+    use mkit_server::{Clock, NamespaceKey, RepoName};
+    let clock = Arc::new(ManualClock::new(100));
+    let store = Store::new(MemoryKv::with_clock(clock.clone()));
+    let ns = NamespaceKey::from_namespace(
+        &Namespace::parse(identity().split_once('/').unwrap().0).unwrap(),
+    );
+    let coordinator = Partition::Coordinator(ns);
+    for index in 0..1024 {
+        let row = codec::LeasedShard {
+            authority_generation: Some(0),
+            acked_authority_generation: Some(1),
+            epoch: 0,
+            acked_epoch: 0,
+            expires_at_ms: if index % 2 == 0 { 99 } else { 100_000 },
+            relay_watermark_ms: 0,
+            sweep_due_ms: 100_000,
+        };
+        store
+            .inner
+            .apply(
+                &coordinator,
+                Batch::new().put(
+                    keys::leased_shard(&RepoName::new(format!("scan-{index:04}")).unwrap(), REF),
+                    codec::encode_leased_shard(&row),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        Arc::new(Faults::default()),
+        Reject::Authority(Some(1)),
+    );
+    store.take();
+    let result = pipe.set_authority_generation(&signed_authority(1)).await;
+    let calls = store.take();
+    assert!(
+        calls.len() <= 64,
+        "one setter scanned {} calls at frozen time",
+        calls.len()
+    );
+    assert_eq!(result.unwrap_err().code(), Code::Unavailable);
+    let mut complete = false;
+    for _ in 0..10 {
+        let result = pipe.set_authority_generation(&signed_authority(1)).await;
+        assert!(store.take().len() <= 64);
+        if result.is_ok() {
+            complete = true;
+            break;
+        }
+        assert_eq!(result.unwrap_err().code(), Code::Unavailable);
+    }
+    assert!(
+        complete,
+        "durable confirmed prefix must advance across bounded retries"
+    );
+    assert_eq!(clock.now_ms(), 100);
+}
