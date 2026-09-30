@@ -102,12 +102,14 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
     }
     fn shared(&self, x: &ExtractionV1) -> Result<Key, Stop> {
         let first = x.sources.first().ok_or_else(corrupt)?;
-        Ok(keys::verify_row(
-            &self.repo.name,
+        Ok(self.source_row(
             &first.member.pack,
             keys::VC_CANDIDATE,
-            Some(&hash_row(b"charged", &x.group, &[0; 32], 0)),
+            &hash_row(b"charged", &x.group, &[0; 32], 0),
         ))
+    }
+    async fn put_aux(&self, st: &SliceState, key: Key, value: Value) -> Result<(), Stop> {
+        self.auxiliary(st, vec![Write::Put(key, value)]).await
     }
     /// Auxiliary writes are deterministic, guarded by this exact job. A crash
     /// before the final cursor replays them; it cannot advance an accounting row.
@@ -566,12 +568,10 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
             if selected {
                 x.selected_bytes = x.selected_bytes.checked_add(p.size).ok_or_else(corrupt)?;
                 if !source.member.already_verified && source.member.pack == self.pack {
-                    self.auxiliary(
+                    self.put_aux(
                         st,
-                        vec![Write::Put(
-                            self.aux(x, b"selected", &id, 0),
-                            codec::encode_u64(p.size),
-                        )],
+                        self.aux(x, b"selected", &id, 0),
+                        codec::encode_u64(p.size),
                     )
                     .await?;
                 }
@@ -762,9 +762,8 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
             let mut bytes = if offset == 0 {
                 Vec::new()
             } else {
-                self.get(&key)
+                self.require(&key)
                     .await?
-                    .ok_or_else(corrupt)?
                     .as_bytes()
                     .get(..offset)
                     .ok_or_else(corrupt)?
@@ -875,12 +874,10 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         x.chunk_offset += take as u64;
         if x.chunk_offset == blob.data.len() as u64 {
             if x.stage == PREFLIGHT {
-                self.auxiliary(
+                self.put_aux(
                     st,
-                    vec![Write::Put(
-                        self.aux(x, b"offset", &id, x.chunk),
-                        codec::encode_u64(x.written),
-                    )],
+                    self.aux(x, b"offset", &id, x.chunk),
+                    codec::encode_u64(x.written),
                 )
                 .await?;
             }
@@ -904,20 +901,11 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         let bytes = self.fragment_bytes(x, id, b"payload", len).await?;
         let cv = part_subtree_cv(&plan(x.length)?, index, &bytes).map_err(|_| corrupt())?;
         if x.stage == PREFLIGHT {
-            self.auxiliary(
-                st,
-                vec![Write::Put(
-                    self.aux(x, b"cv", &id, index),
-                    Value::new(cv.to_vec()),
-                )],
-            )
-            .await?;
+            self.put_aux(st, self.aux(x, b"cv", &id, index), Value::new(cv.to_vec()))
+                .await?;
             x.cvs = index + 1;
         } else {
-            let expected = self
-                .get(&self.aux(x, b"cv", &id, index))
-                .await?
-                .ok_or_else(corrupt)?;
+            let expected = self.require(&self.aux(x, b"cv", &id, index)).await?;
             check(expected.as_bytes() == cv)?;
             self.extraction_lease().await?;
             let tag = self
@@ -935,14 +923,8 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
                 .await?
                 .ok_or_else(|| unavailable("extraction callback unavailable"))?;
             check(tag.len() <= 1089)?;
-            self.auxiliary(
-                st,
-                vec![Write::Put(
-                    self.aux(x, b"receipt", &id, index),
-                    Value::new(tag),
-                )],
-            )
-            .await?;
+            self.put_aux(st, self.aux(x, b"receipt", &id, index), Value::new(tag))
+                .await?;
             x.uploaded = index + 1;
         }
         Ok(())
@@ -1031,12 +1013,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         x.stage = OFFSETS;
         Ok(())
     }
-    async fn offsets(
-        &self,
-        _st: &mut SliceState,
-        job: &VerifyJobV1,
-        x: &mut ExtractionV1,
-    ) -> Result<(), Stop> {
+    async fn offsets(&self, job: &VerifyJobV1, x: &mut ExtractionV1) -> Result<(), Stop> {
         self.protect(job, x).await?;
         let id = x.object.ok_or_else(corrupt)?;
         let (_, p) = self.selected_projection(x, id).await?;
@@ -1145,7 +1122,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
             PREFLIGHT | UPLOAD => self.walk_source(st, job, &mut x).await,
             START => self.start_object(job, &mut x).await,
             COMPLETE => self.complete_object(job, &mut x).await,
-            OFFSETS => self.offsets(st, job, &mut x).await,
+            OFFSETS => self.offsets(job, &mut x).await,
             ENQUEUE => self.enqueue_holder(st, job, &mut x).await,
             DELIVERY => self.delivery(st, job, &mut x).await,
             _ => return Err(corrupt()),

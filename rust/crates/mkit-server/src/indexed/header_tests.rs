@@ -110,7 +110,7 @@ fn largest_job(extracting: bool) -> VerifyJobV1 {
                 level: u32::from(u16::MAX),
                 local: true,
                 ascending: true,
-                canonical: Some(([255; 32], 8 << 20, u32::MAX)),
+                canonical: Some(([255; 32], 8 << 20, u32::MAX, [255; 32])),
                 bytes: u64::MAX,
             }),
             stage: 13,

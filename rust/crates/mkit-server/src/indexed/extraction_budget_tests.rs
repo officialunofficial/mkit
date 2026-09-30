@@ -982,6 +982,272 @@ fn publish_member_pack(rig: &Rig, bytes: &[u8]) -> Hash {
     ticket.pack_id
 }
 
+fn seed_one_thin_member(rig: &Rig, base: Hash, canonical_base: Vec<u8>, target: &[u8]) -> Hash {
+    let bytes = thin(base, &canonical_base, target);
+    let (ticket, _) = rig.add(&bytes);
+    let mut frames = Vec::new();
+    decode_entries_with(
+        &bytes,
+        &mut OneBase(base, canonical_base),
+        DecodeLimits::default(),
+        |entry| {
+            frames.push(FrameMeta {
+                id: entry.id,
+                frame_offset: entry.frame_offset,
+                frame_length: entry.frame_length,
+                wire_type: entry.wire_type,
+                delta_base: entry.delta_base,
+                decoded_size: u64::try_from(entry.bytes.len()).unwrap(),
+            });
+            Ok(())
+        },
+    )
+    .unwrap();
+    let entry = index_entries(&frames, 50).unwrap().remove(0);
+    block_on(
+        rig.store.apply(
+            &rig.source(),
+            Batch::new()
+                .put(
+                    keys::membership(&rig.repo.name, &ticket.pack_id),
+                    Value::default(),
+                )
+                .put(
+                    keys::object_index(&rig.repo.name, &entry.object, &ticket.pack_id),
+                    codec::encode_object_index(&entry.object, &entry.value).unwrap(),
+                ),
+        ),
+    )
+    .unwrap();
+    ticket.pack_id
+}
+
+#[test]
+fn a_thin_member_blob_with_a_tree_base_matches_native_identity_and_offsets() {
+    let leaf = Object::Blob(Blob { data: vec![57] });
+    let base = Object::Tree(Tree {
+        entries: vec![TreeEntry {
+            name: b"base".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: leaf.id().unwrap(),
+        }],
+    });
+    let base_id = base.id().unwrap();
+    let canonical_base = serialize(&base).unwrap();
+    assert_ne!(hash(&canonical_base), base_id);
+    let data = vec![61; 2_000];
+    let chunk = Object::Blob(Blob { data: data.clone() });
+    let canonical_chunk = serialize(&chunk).unwrap();
+    let manifest = Object::ChunkedBlob(ChunkedBlob {
+        total_size: u64::try_from(data.len()).unwrap(),
+        chunk_size: 0,
+        chunks: vec![chunk.id().unwrap()],
+    });
+    let object = manifest.id().unwrap();
+    let (tree, commit, head) = tree_head(&[object]);
+    let bytes = pack(&[manifest, tree, commit]);
+    let scheduled = Rig::new();
+    let oracle = Rig::new();
+    for rig in [&scheduled, &oracle] {
+        seed_member(rig, leaf.id().unwrap(), &serialize(&leaf).unwrap());
+        seed_member(rig, base_id, &canonical_base);
+        seed_one_thin_member(rig, base_id, canonical_base.clone(), &canonical_chunk);
+    }
+    let native_ticket = oracle.add(&bytes);
+    let expected = native(&oracle, &[native_ticket], head);
+    let ticket = scheduled.add(&bytes);
+    assert!(scheduled.check(&[(&ticket.0, ticket.1)], head).is_err());
+    let extension = TestExtraction::new(&scheduled);
+    drive(&scheduled, &extension, &[ticket.0.pack_id]);
+    assert_eq!(
+        scheduled.check(&[(&ticket.0, ticket.1)], head).unwrap(),
+        expected
+    );
+    assert_eq!(
+        read_blob(&scheduled.blobs, &BlobKey::object(object)),
+        Some(data)
+    );
+    assert_eq!(
+        read_blob(&scheduled.blobs, &BlobKey::object_offsets(object)),
+        Some(crate::indexed::extract::encode_offsets(&[0, 2_000]))
+    );
+    for key in [BlobKey::object(object), BlobKey::object_offsets(object)] {
+        assert_eq!(
+            read_blob(&scheduled.blobs, &key),
+            read_blob(&oracle.blobs, &key)
+        );
+    }
+    assert_holder(&scheduled, object);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Live and restored denial identities share frozen-source and IO observations.
+fn a_denial_after_source_descent_prevents_chunk_and_ancestor_reads() {
+    use crate::timers::{DueTimer, Fired, TimerCtx, TimerHandler};
+    for (ancestor, deny_pack, restored) in [
+        (false, false, false),
+        (false, true, false),
+        (true, false, false),
+        (true, true, false),
+        (true, false, true),
+        (true, true, true),
+    ] {
+        let rig = Rig::new();
+        let (base, canonical_base) = blob(0, 2_000);
+        seed_member(&rig, base, &canonical_base);
+        let mut writer = PackWriter::new_raw_only();
+        writer.push_raw(base, &canonical_base).unwrap();
+        let base_pack = hash(&writer.finish().unwrap());
+        let chunk = if ancestor {
+            let (target, canonical) = blob(1, 2_000);
+            seed_one_thin_member(&rig, base, canonical_base, &canonical);
+            target
+        } else {
+            base
+        };
+        let manifest = Object::ChunkedBlob(ChunkedBlob {
+            total_size: 2_002,
+            chunk_size: 0,
+            chunks: vec![chunk],
+        });
+        let object = manifest.id().unwrap();
+        let (tree, commit, head) = tree_head(&[object]);
+        let (ticket, id) = rig.add(&pack(&[manifest, tree, commit]));
+        assert!(rig.check(&[(&ticket, id)], head).is_err());
+        let extension = TestExtraction::new(&rig);
+        for _ in 0..200 {
+            let cursor = persisted_member_cursor(&rig, ticket.pack_id);
+            if cursor.get("ascending").and_then(serde_json::Value::as_bool) == Some(true)
+                && (!restored
+                    || cursor
+                        .get("canonical")
+                        .is_some_and(|value| !value.is_null()))
+            {
+                assert_eq!(
+                    cursor.get("level").and_then(serde_json::Value::as_u64),
+                    Some(u64::from(ancestor && !restored))
+                );
+                if restored {
+                    assert_eq!(
+                        cursor.get("canonical").unwrap()[0],
+                        serde_json::to_value(base).unwrap()
+                    );
+                    let group = rig.job(&ticket.pack_id).unwrap().extraction.unwrap().group;
+                    let mut digest = mkit_core::hash::Hasher::new();
+                    for bytes in [
+                        b"mkit-extraction-row:v1".as_slice(),
+                        b"member-bytes".as_slice(),
+                        group.as_slice(),
+                        base.as_slice(),
+                        0_u32.to_be_bytes().as_slice(),
+                    ] {
+                        digest.update(bytes);
+                    }
+                    let key = keys::verify_row(
+                        &rig.repo.name,
+                        &ticket.pack_id,
+                        keys::VC_CANDIDATE,
+                        Some(&digest.finalize()),
+                    );
+                    let raw = block_on(rig.store.get(&rig.source(), &key))
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(raw.as_bytes(), blob(0, 2_000).1);
+                }
+                break;
+            }
+            fire_pack(&rig, &extension, ticket.pack_id);
+            relay_only(&rig);
+            rig.clock.advance(1_000);
+        }
+        assert_eq!(
+            persisted_member_cursor(&rig, ticket.pack_id)
+                .get("ascending")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        let denied = if deny_pack { base_pack } else { base };
+        let now = u64::try_from(rig.clock.now_ms()).unwrap();
+        block_on(
+            ContentIndex::new(crate::store::BorrowedStore(rig.store.as_ref())).block(
+                &denied,
+                &crate::store::BlockEntry::new("manual", now),
+                now,
+            ),
+        )
+        .unwrap();
+        let error = block_on(crate::takedown::denial::require_clear(
+            rig.store.as_ref(),
+            &denied,
+        ))
+        .unwrap_err();
+        assert_eq!(error.code(), crate::Code::PermissionDenied);
+        let reads = Arc::new(AtomicU32::new(0));
+        let h = extraction_handler(&rig, extension);
+        let handler = VerifyTimer {
+            blobs: CountBlobCalls {
+                inner: rig.blobs.clone(),
+                calls: reads.clone(),
+            },
+            remote: h.remote,
+            windows: h.windows,
+            shards: h.shards,
+            cfg: h.cfg,
+            limits: h.limits,
+            lease: h.lease,
+            clock: h.clock,
+            metrics: h.metrics,
+            extension: h.extension,
+        };
+        for _ in 0..8 {
+            let now = u64::try_from(rig.clock.now_ms()).unwrap();
+            match block_on(handler.fire(
+                &TimerCtx {
+                    store: rig.store.as_ref(),
+                    partition: &rig.source(),
+                    now_ms: now,
+                },
+                &DueTimer {
+                    due_at_ms: now,
+                    kind: crate::timers::registry::kinds::VERIFY,
+                    reference: Bytes::from(checkpoint::timer_reference(
+                        &rig.repo.name,
+                        &ticket.pack_id,
+                    )),
+                    value: Value::default(),
+                },
+            ))
+            .unwrap()
+            {
+                Fired::Done(batch) | Fired::Reschedule { batch, .. } => assert_eq!(
+                    block_on(rig.store.apply(&rig.source(), batch)).unwrap(),
+                    BatchOutcome::Committed
+                ),
+                Fired::Retry => panic!("denial must become a definite blocked outcome"),
+            }
+            if rig.job(&ticket.pack_id).unwrap().outcome.is_some() {
+                break;
+            }
+            rig.clock.advance(1_000);
+        }
+        assert_eq!(
+            rig.job(&ticket.pack_id).unwrap().outcome,
+            Some(checkpoint::Outcome::Blocked),
+            "ancestor {ancestor}, pack denial {deny_pack}, restored {restored}"
+        );
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            0,
+            "denied source was read before denial admission"
+        );
+        assert!(read_blob(&rig.blobs, &BlobKey::object(object)).is_none());
+        assert_eq!(
+            rig.check(&[(&ticket, id)], head).unwrap_err().code(),
+            crate::Code::PermissionDenied
+        );
+    }
+}
+
 #[test]
 #[allow(clippy::too_many_lines)] // The late source change, native oracle and restarted alarms form one race regression.
 fn a_staged_thin_chunk_resumes_when_its_member_base_changes_after_decode() {

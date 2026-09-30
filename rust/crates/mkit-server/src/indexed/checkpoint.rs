@@ -273,8 +273,8 @@ pub struct MemberCursor {
     pub local: bool,
     /// Decode the stored chain toward its requested source.
     pub ascending: bool,
-    /// Immediate canonical parent (id, length, total depth).
-    pub canonical: Option<(Hash, u64, u32)>,
+    /// Immediate canonical parent (id, length, total depth, source pack).
+    pub canonical: Option<(Hash, u64, u32, Hash)>,
     /// Native canonical byte cost, including discarded ancestors.
     pub bytes: u64,
 }
@@ -385,7 +385,7 @@ fn validate_header(job: &VerifyJobV1, raw: &Value) -> Result<(), StoreError> {
                 && x.uploaded <= 10_000
                 && x.reconstruction
                     .as_ref()
-                    .is_none_or(|r| r.canonical.is_none_or(|(_, n, _)| n <= 8 << 20))
+                    .is_none_or(|r| r.canonical.is_none_or(|(_, n, _, _)| n <= 8 << 20))
                 && x.stage <= 13
                 && x.member <= x.sources.len()
                 && x.sources.len() <= crate::store::outbox::MAX_TICKETS_PER_ADVANCE

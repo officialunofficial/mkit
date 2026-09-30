@@ -18,8 +18,8 @@ has changed.
 
 The 50-hop test uses actual producer-generated index rows and native as its oracle.
 With 2 KiB source nodes it makes **101 durable reconstruction steps**, consuming
-**1,636 observed / 1,648 charged calls** across the complete run. The 250 KiB-node
-case also makes **101 steps and 1,636 / 1,648 calls**: cumulative canonical source
+**2,306 observed / 2,318 charged calls** across extraction and final verification. The 250 KiB-node
+case also makes **101 steps and 2,306 / 2,318 calls**: cumulative canonical source
 size exceeds the entry allowance while the live accumulator remains bounded.
 Every alarm stays within 256 calls and advances its durable reconstruction state.
 A fresh handler resumes midway through descent without changing persisted rows.
@@ -30,14 +30,19 @@ both paths return the budget error after bounded progress.
 Lookup examines at most eight raw index values at a time, preserves ordered
 membership selection and the same-pack earlier-frame preference, and retains
 bounded row, page-work and distinct membership-partition counters. Frames retain
-existing index encodings. Ascent hashes every canonical accumulator and validates
-actual depth, geometry and identity. A single accumulator uses 128 KiB fragments;
+existing index encodings. Ascent validates every canonical accumulator through
+the core pack decoder's object identity rules, including Merkle-addressed bases,
+plus actual depth and geometry. Fresh source authorization and object/pack denial
+checks precede frame reads and checkpointed canonical-base reuse.
+A single accumulator uses 128 KiB fragments;
 ancestors are not held together in memory. Source-byte cost includes every decoded
 member node and is charged atomically with the completed chunk cursor, once per
 manifest occurrence. The upload pass reconstructs again without charging again.
 
 Feature tip `8bc30385` (merged PR1 #1238, including duplicate-holder intent drain)
-was merged in `b2285099`; the interop security lock update was merged in `64e1d683`. Reviewed relay changes remain intact. Full final gate
+was merged in `b2285099`; the interop security lock update was merged in `64e1d683`.
+The sync-inspection integration and global V2 denial/admin/inventory changes are
+also merged through feature tip `bc114103`. Reviewed relay changes remain intact. Full final gate
 results, the final line count and independent review findings are recorded in the
 PR body. Staging heap/CPU evidence remains WP-4.18's activation responsibility.
 
@@ -146,8 +151,10 @@ Peer reuse guards only peer headers. Seven ready groups each with six other
 peers need at most 49 distinct observed headers; allowing seven rewritten
 headers gives 56 x 16 KiB = **917,504 bytes**, leaving **131,072 bytes** for bounded
 keys, tickets/state observations and timers. Exact Batch validation remains the
-final check. Actual six-group/256-member fixture measurements are recorded in the
-PR body; the complete immutable bodies never enter peer guards.
+final check. The six-group/256-member fixture's 42 peer headers total **133,093
+bytes**, and its new-job claim uses **160,271 bytes**. The complete immutable
+bodies never enter peer guards. Maximum header fixtures measure 12,592 bytes
+ordinarily and 13,465 bytes while extracting; their member body is 67,500 bytes.
 
 Cleanup retains facts for a matching unfinished peer while its ticket is live or
 an object is already started/draining. Ticketless pre-effect peers do not retain

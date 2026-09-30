@@ -2094,7 +2094,7 @@ replaced/expired tickets and canceled owners. Gone tombstones retain generations
 **Always:** each unfinished extraction-source reconstruction alarm persists one
 lookup prefix or one ancestry/decode step. Only a previous canonical accumulator
 and one decoded frame are resident; descriptors and fragments use existing vc4.
-Every decoded frame and accumulator hash matches its identity before upload, and
+Every decoded frame and accumulator matches its core object identity before upload, and
 completed source charge advances atomically with the chunk cursor. Restart cannot
 lose or double that charge.
 

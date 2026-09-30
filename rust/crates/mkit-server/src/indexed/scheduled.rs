@@ -77,7 +77,6 @@ fn stored_error(code: &str, message: &str) -> ServerError {
 /// The permanent answer for a terminal job outcome.
 fn outcome_error(outcome: Outcome, now: u64, ticket: &TicketV1, bound: u64) -> ServerError {
     match outcome {
-        Outcome::Blocked => ServerError::permission_denied("object blocked"),
         Outcome::BaseMissing => resolve::missing_base(now, ticket.created_at_ms, bound),
         Outcome::BaseCapped => {
             ServerError::failed_precondition("delta base not available in this repository")
@@ -90,7 +89,9 @@ fn outcome_error(outcome: Outcome, now: u64, ticket: &TicketV1, bound: u64) -> S
         Outcome::ExtractionUnavailable => {
             ServerError::unavailable("pack extraction is not available on this deployment")
         }
-        Outcome::ObjectBlocked => ServerError::permission_denied("object blocked"),
+        Outcome::Blocked | Outcome::ObjectBlocked => {
+            ServerError::permission_denied("object blocked")
+        }
         Outcome::ClosureMissing | Outcome::OpenClosure => {
             ServerError::invalid_argument("open closure")
         }

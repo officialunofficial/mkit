@@ -94,6 +94,19 @@ filter = 'test(=backup::tests::sqlite_eighty_thousand_small_rows_at_cap_under_fi
 threads-required = "num-test-threads"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
+# The six-group reuse proof completes 42 real 256-member lookup jobs. It takes
+# 47-53s alone but exceeded 60s in the suite on the shared machine. Retain all
+# 10,752 lookup assertions, reserve this run's threads and use CI's 120s ceiling.
+[[profile.default.overrides]]
+filter = 'test(=indexed::job_tests::scheduled_reclaim_tests::completed_groups_with_full_member_lists_remain_claimable)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'test(=indexed::job_tests::scheduled_reclaim_tests::completed_groups_with_full_member_lists_remain_claimable)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 # CPU-bound debug-build tests that the suite's own parallelism pushes past
 # the default 60s. Named one by one: each took 40s or more in a full
 # `cargo nextest run --workspace --all-features` in WP-M0-20's quiet-machine

@@ -250,7 +250,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
                 id: cursor.next,
                 pack: location.pack,
                 index: codec::encode_object_index(&cursor.next, &location.value)?
-                    .into_bytes()
+                    .as_bytes()
                     .to_vec(),
                 local,
             };
@@ -272,8 +272,27 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         let frame: Frame = decode(&self.require(&frame_key).await?)?;
         let index = codec::decode_object_index(&frame.id, &Value::new(frame.index))?;
         let (budget, wire_budget) = self.member_limits(index)?;
-        let (version, wire) = if frame.local {
+        if frame.local {
             check(x.sources.iter().any(|s| s.member.pack == frame.pack))?;
+        } else if !self.member_has(frame.pack).await? {
+            return Err(Stop::Outcome(Outcome::ClosureMissing));
+        }
+        let mut subjects = vec![frame.id, frame.pack];
+        if let Some((base, _, _, pack)) = cursor.canonical {
+            if !x.sources.iter().any(|s| s.member.pack == pack) && !self.member_has(pack).await? {
+                return Err(Stop::Outcome(Outcome::ClosureMissing));
+            }
+            subjects.extend([base, pack]);
+        }
+        for subject in subjects {
+            crate::takedown::denial::require_clear(self.remote, &subject)
+                .await
+                .map_err(|error| match error.code() {
+                    crate::Code::PermissionDenied => Stop::Outcome(Outcome::Blocked),
+                    _ => super::unavailable("extraction source unavailable"),
+                })?;
+        }
+        let (version, wire) = if frame.local {
             let raw = self
                 .require(&keys::verify_job(&self.repo.name, &frame.pack))
                 .await?;
@@ -289,9 +308,6 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
                 .bytes;
             (job.version, wire)
         } else {
-            if !self.member_has(frame.pack).await? {
-                return Err(Stop::Outcome(Outcome::ClosureMissing));
-            }
             let prefix = resolve::frame_bytes(self.blobs, frame.pack, 0, 8, wire_budget)
                 .await
                 .map_err(|_| corrupt())?;
@@ -309,13 +325,12 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
             (version, wire)
         };
         let mut depth = 0;
-        if let Some((base, length, previous_depth)) = cursor.canonical {
+        if let Some((base, length, previous_depth, _)) = cursor.canonical {
             check(index.delta_base == Some(base))?;
             check(length <= budget)?;
             let bytes = self
                 .fragment_bytes(x, base, b"member-bytes", length)
                 .await?;
-            check(hash(&bytes) == base)?;
             st.cache.insert(base, Arc::from(bytes));
             depth = previous_depth.checked_add(1).ok_or_else(corrupt)?;
         } else if index.delta_base.is_some() {
@@ -335,7 +350,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         check(actual == frame.id && length == index.decoded_size)?;
         cursor.bytes = cursor.bytes.checked_add(length).ok_or_else(corrupt)?;
         st.settled.push(Write::Delete(frame_key));
-        if let Some((base, length, _)) = cursor.canonical {
+        if let Some((base, length, _, _)) = cursor.canonical {
             for i in 0..length.div_ceil(FRAGMENT) {
                 st.settled
                     .push(Write::Delete(self.aux(x, b"member-bytes", &base, n32(i)?)));
@@ -350,7 +365,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         self.append_fragment(st, x, actual, b"member-bytes", 0, &bytes)
             .await?;
         cursor.level -= 1;
-        cursor.canonical = Some((actual, length, depth));
+        cursor.canonical = Some((actual, length, depth, frame.pack));
         x.reconstruction = Some(cursor);
         Ok(None)
     }

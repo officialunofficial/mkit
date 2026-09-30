@@ -1095,6 +1095,7 @@ fn every_extraction_checkpoint_boundary_replays_without_losing_protection() {
             inner: rig.store.clone(),
             applies: AtomicU32::new(0),
             fail_at: AtomicU32::new(1),
+            inventory_guard: None,
         };
         tick(&rig, &extension, &faulty, false);
         assert!(faulty.applies.load(Ordering::SeqCst) >= 1);
