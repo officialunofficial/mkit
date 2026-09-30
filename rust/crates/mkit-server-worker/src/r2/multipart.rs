@@ -89,25 +89,30 @@ impl<B: ObjectBucket> R2BlobStore<B> {
     }
 
     async fn delete_prefix(&self, prefix: &str, except: Option<&str>) -> Result<(), StoreError> {
-        loop {
-            let page = self
-                .bucket
-                .list(prefix, None)
-                .await
-                .map_err(|e| backend_error(StorageOp::BlobRead, e))?;
-            let keys: Vec<_> = page
-                .keys
-                .into_iter()
-                .filter(|k| Some(k.as_str()) != except)
-                .collect();
-            if keys.is_empty() {
-                return Ok(());
-            }
-            self.bucket
-                .delete_many(keys)
-                .await
-                .map_err(|e| backend_error(StorageOp::BlobPut, e))?;
+        // One page keeps cleanup to two R2 calls; the lifecycle reclaims any remainder.
+        let page = self
+            .bucket
+            .list(prefix, None)
+            .await
+            .map_err(|e| backend_error(StorageOp::BlobRead, e))?;
+        let keys: Vec<_> = page
+            .keys
+            .into_iter()
+            .filter(|k| Some(k.as_str()) != except)
+            .collect();
+        if keys.is_empty() {
+            return Ok(());
         }
+        self.bucket
+            .delete_many(keys)
+            .await
+            .map_err(|e| backend_error(StorageOp::BlobPut, e))?;
+        if page.cursor.is_some() {
+            return Err(StoreError::Unavailable(
+                "multipart cleanup deferred to bucket lifecycle".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -253,6 +258,11 @@ impl<B: ObjectBucket> MultipartBlobStore for R2BlobStore<B> {
     }
 
     async fn abort(&self, _key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
+        if self.defer_abort {
+            return Err(StoreError::Unavailable(
+                "expiry cleanup deferred: Free alarm R2 budget".into(),
+            ));
+        }
         let prefix = session_prefix(self, session)?;
         self.bucket
             .delete(&format!("{prefix}meta"))
@@ -365,5 +375,206 @@ impl<B: ObjectBucket> R2BlobStore<B> {
             tracing::warn!(%error, "R2 multipart cleanup failed");
         }
         Ok(outcome)
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::r2::{ObjectPage, ObjectStream, PutBody, PutResult};
+    use futures::{channel::oneshot, executor::block_on};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(Clone)]
+    struct CountBucket {
+        remaining: Arc<AtomicUsize>,
+        calls: Arc<AtomicUsize>,
+    }
+    impl CountBucket {
+        fn new(parts: usize) -> Self {
+            Self {
+                remaining: Arc::new(AtomicUsize::new(parts)),
+                calls: Arc::default(),
+            }
+        }
+    }
+    impl ObjectBucket for CountBucket {
+        async fn probe(&self) -> Result<(), String> {
+            Ok(())
+        }
+        fn spawn_put(&self, _: String, _: u64, _: PutBody) -> oneshot::Receiver<PutResult> {
+            panic!("unused put")
+        }
+        async fn head(&self, _: &str) -> Result<Option<u64>, String> {
+            panic!("unused head")
+        }
+        async fn get(
+            &self,
+            _: &str,
+            _: Option<std::ops::Range<u64>>,
+        ) -> Result<Option<(u64, ObjectStream)>, String> {
+            panic!("unused get")
+        }
+        async fn delete(&self, _: &str) -> Result<(), String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn list(&self, prefix: &str, _: Option<&str>) -> Result<ObjectPage, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let count = self.remaining.load(Ordering::SeqCst);
+            Ok(ObjectPage {
+                keys: (0..count.min(1000))
+                    .map(|n| format!("{prefix}{n}"))
+                    .collect(),
+                cursor: (count > 1000).then(|| "more".into()),
+            })
+        }
+        async fn delete_many(&self, keys: Vec<String>) -> Result<(), String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.remaining.fetch_sub(keys.len(), Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn session_abort_has_a_fixed_call_cap_and_retains_lifecycle_remainder() {
+        let bucket = CountBucket::new(10_000);
+        let store = R2BlobStore::new(bucket.clone(), "packs");
+        assert!(block_on(store.abort(BlobKey::pack([0; 32]), &[1; 32])).is_err());
+        assert_eq!(bucket.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(bucket.remaining.load(Ordering::SeqCst), 9_000);
+    }
+
+    #[test]
+    fn session_abort_drains_a_worker_sized_upload_in_three_calls() {
+        let bucket = CountBucket::new(640);
+        let store = R2BlobStore::new(bucket.clone(), "packs");
+        block_on(store.abort(BlobKey::pack([0; 32]), &[1; 32])).unwrap();
+        assert_eq!(bucket.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(bucket.remaining.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn free_expiry_session_abort_uses_no_r2_calls() {
+        let bucket = CountBucket::new(640);
+        let store = R2BlobStore::new(bucket.clone(), "packs").with_deferred_abort(true);
+        assert!(block_on(store.abort(BlobKey::pack([0; 32]), &[1; 32])).is_err());
+        assert_eq!(bucket.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(bucket.remaining.load(Ordering::SeqCst), 640);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // End-to-end registration and cleanup fixture.
+    fn free_expiry_closes_tickets_and_records_deferred_abort_failures() {
+        use mkit_server::store::{codec, keys, tickets};
+        use mkit_server::timers::{TickBudget, TimerRegistry, run_due};
+        use mkit_server::{
+            Batch, ManualClock, MemoryKv, NamespaceKey, NamespaceStore, Partition, RepoName,
+        };
+        let clock = Arc::new(ManualClock::new(1000));
+        let local = MemoryKv::with_clock(clock.clone());
+        let source = Partition::Namespace(NamespaceKey::deployment_default());
+        let bucket = CountBucket::new(640);
+        let store = R2BlobStore::new(bucket.clone(), "packs").with_deferred_abort(true);
+        let registry = TimerRegistry::new()
+            .register(mkit_server::timers::ticket_expiry::TicketExpiry { blobs: store });
+        let before = mkit_server::timers::ticket_expiry::abort_failures();
+        let mut ids = Vec::new();
+        for n in 0..8_u8 {
+            let ticket = codec::TicketV1 {
+                authority_generation: None,
+                repo: RepoName::new("room").unwrap(),
+                ref_name: "refs/heads/main".into(),
+                signer: [3; 32],
+                pack_id: [n; 32],
+                bytes: 8 << 20,
+                part_size: 8 << 20,
+                expires_at_ms: 900,
+                created_at_ms: 100,
+                reservation_id: format!("s:expiry-{n}"),
+                upload_session: Some(vec![n; 32]),
+            };
+            let id = tickets::ticket_id(&ticket.reservation_id);
+            block_on(
+                local.apply(
+                    &source,
+                    Batch::new()
+                        .put(keys::ticket(&id), codec::encode_ticket(&ticket))
+                        .put(
+                            keys::reservation(&ticket.reservation_id).unwrap(),
+                            codec::encode_reservation(&codec::ReservationV1::Ticketed {
+                                ticket_id: id,
+                            }),
+                        )
+                        .put(
+                            keys::ticket_index(
+                                &ticket.repo,
+                                &ticket.ref_name,
+                                &ticket.pack_id,
+                                &ticket.signer,
+                            )
+                            .unwrap(),
+                            codec::encode_ref_id(&id),
+                        )
+                        .put(
+                            keys::tickets_per_ref(&ticket.repo, &ticket.ref_name).unwrap(),
+                            codec::encode_u64(8),
+                        )
+                        .put(
+                            keys::tickets_per_signer(
+                                &ticket.repo,
+                                &ticket.ref_name,
+                                &ticket.signer,
+                            )
+                            .unwrap(),
+                            codec::encode_u64(8),
+                        )
+                        .put(
+                            keys::timer(
+                                900,
+                                mkit_server::timers::registry::kinds::TICKET_EXPIRY.get(),
+                                &id,
+                            ),
+                            mkit_server::Value::default(),
+                        ),
+                ),
+            )
+            .unwrap();
+            ids.push((id, ticket.reservation_id));
+        }
+        let report = block_on(run_due(
+            &local,
+            &source,
+            &registry,
+            clock.as_ref(),
+            1000,
+            &TickBudget::default(),
+        ))
+        .unwrap();
+        assert_eq!(report.fired, 8);
+        let calls = bucket.calls.load(Ordering::SeqCst);
+        assert!(
+            49 + calls <= 50,
+            "expiry must fit the existing Free alarm split"
+        );
+        assert_eq!(calls, 0);
+        assert!(mkit_server::timers::ticket_expiry::abort_failures() >= before + 8);
+        for (id, reservation) in ids {
+            assert!(
+                block_on(local.get(&source, &keys::ticket(&id)))
+                    .unwrap()
+                    .is_none()
+            );
+            let raw = block_on(local.get(&source, &keys::reservation(&reservation).unwrap()))
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                codec::decode_reservation(&raw).unwrap(),
+                codec::ReservationV1::Expired { .. }
+            ));
+        }
     }
 }

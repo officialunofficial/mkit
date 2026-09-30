@@ -39,7 +39,7 @@ impl TimerKind {
 /// | 10 | PUBLISHED_VIEW (Worker only, WP-1.21) |
 /// | 11 | CACHE_PURGE (WP-5.10) |
 /// | 12 | PUBLICATION_RECHECK (WP-5.4, R-182) |
-/// | 13 | CONTENT_TAKEDOWN_REQUEST (reserved for WP-4.10b, R-198) |
+/// | 13 | CONTENT_TAKEDOWN_REQUEST (WP-4.10b, R-186) |
 /// | 14 | INSPECTION (reserved for WP-5.5a, R-198) |
 /// | 15..=0xEF | Production, unallocated |
 /// | 0xF0..=0xFE | Reserved for tests |
@@ -63,6 +63,8 @@ pub mod kinds {
     pub const RESERVATION_RECONCILE: super::TimerKind = super::TimerKind::new(9);
     /// Published ref-index snapshots (Stage 2 Worker opt-in only).
     pub const PUBLISHED_VIEW: super::TimerKind = super::TimerKind::new(10);
+    /// Materialize a durable late-holder takedown handoff; not takedown completion.
+    pub const CONTENT_TAKEDOWN_REQUEST: super::TimerKind = super::TimerKind::new(13);
     /// Durable local and shared cache purge.
     pub const CACHE_PURGE: super::TimerKind = super::TimerKind::new(11);
     /// Retained inspection and published-membership dependency clearance.
