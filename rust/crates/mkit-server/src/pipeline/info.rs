@@ -104,8 +104,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             atomic_advance: self.capabilities().atomic_advance,
             indexed_mode: self.cfg.indexed_mode(),
             admission,
-            receipt_public_key: Vec::new(),
-            receipt_key_id: String::new(),
+            receipt_public_key: self
+                .cfg
+                .receipt_publication
+                .as_ref()
+                .map_or_else(Vec::new, |keys| keys.public_key.to_vec()),
+            receipt_key_id: self
+                .cfg
+                .receipt_publication
+                .as_ref()
+                .map_or_else(String::new, |keys| keys.key_id.clone()),
             grant_schemes: self.cfg.grants.as_ref().map_or_else(Vec::new, |grants| {
                 grants.schemes().tokens().map(str::to_owned).collect()
             }),

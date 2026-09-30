@@ -22,14 +22,14 @@ fn invalid() -> ServerError {
 fn unavailable() -> ServerError {
     ServerError::unavailable("takedown storage unavailable")
 }
-fn encode<T: Serialize>(value: &T) -> Result<Value, ServerError> {
+pub(super) fn encode<T: Serialize>(value: &T) -> Result<Value, ServerError> {
     let bytes = serde_json::to_vec(value).map_err(|_| unavailable())?;
     if bytes.len() > crate::MAX_VALUE_BYTES {
         return Err(invalid());
     }
     Ok(Value::new(bytes))
 }
-fn decode<T: serde::de::DeserializeOwned>(raw: &Value) -> Result<T, ServerError> {
+pub(super) fn decode<T: serde::de::DeserializeOwned>(raw: &Value) -> Result<T, ServerError> {
     serde_json::from_slice(raw.as_bytes()).map_err(|_| unavailable())
 }
 fn key(prefix: &[u8], id: &Hash) -> Key {
@@ -60,7 +60,7 @@ fn parse_id(s: &str) -> Result<Hash, ServerError> {
     }
     raw.try_into().map_err(|_| invalid())
 }
-fn repository(s: &str) -> Result<RepoId, ServerError> {
+pub(super) fn repository(s: &str) -> Result<RepoId, ServerError> {
     let (ns, name) = s.rsplit_once('/').ok_or_else(invalid)?;
     mkit_core::repo_identity::validate_name(name).map_err(|_| invalid())?;
     let namespace = if ns == "root" {
@@ -130,26 +130,26 @@ impl Request {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Reference {
-    object: Hash,
-    descriptor_hash: Hash,
+pub(super) struct Reference {
+    pub(super) object: Hash,
+    pub(super) descriptor_hash: Hash,
 }
 /// Durable launch handoff: denial progress is independent of preservation completion.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
-    version: u8,
-    id: Hash,
-    digest: String,
-    operation: String,
-    repository: String,
-    reason: String,
-    reason_token: String,
-    created: u64,
-    pack: Option<Hash>,
-    actions: Vec<Reference>,
-    activation_cursor: usize,
-    preservation_pending: bool,
+    pub(super) version: u8,
+    pub(super) id: Hash,
+    pub(super) digest: String,
+    pub(super) operation: String,
+    pub(super) repository: String,
+    pub(super) reason: String,
+    pub(super) reason_token: String,
+    pub(super) created: u64,
+    pub(super) pack: Option<Hash>,
+    pub(super) actions: Vec<Reference>,
+    pub(super) activation_cursor: usize,
+    pub(super) preservation_pending: bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -225,7 +225,7 @@ impl<N: NamespaceStore + Clone> Service<N> {
         }
         Err(unavailable())
     }
-    async fn record<S: NamespaceStore>(
+    pub(super) async fn record<S: NamespaceStore>(
         &self,
         store: &S,
         id: &Hash,

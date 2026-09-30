@@ -56,10 +56,16 @@ impl NsTransport for EmptyTransport {
 struct CountedBucket {
     inner: common::SimBucket,
     budget: SliceBudget,
+    alarm: Option<mkit_server::purge::SliceBudget>,
+    dispatches: Arc<AtomicU32>,
 }
 impl CountedBucket {
     fn dispatch(&self) -> Result<(), String> {
-        charge_request(Some(&self.budget)).map_err(|error| error.to_string())
+        charge_request(Some(&self.budget)).map_err(|error| error.to_string())?;
+        mkit_server_worker::ns_client::charge_alarm(self.alarm.as_ref())
+            .map_err(|error| error.to_string())?;
+        self.dispatches.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 }
 impl ObjectBucket for CountedBucket {
@@ -135,6 +141,8 @@ fn request_budget_combines_do_r2_range_proofs_and_pipeline_serving() {
             CountedBucket {
                 inner: bucket.clone(),
                 budget: budget.clone(),
+                alarm: None,
+                dispatches: Arc::default(),
             },
             PACKS_KEYSPACE,
         );
@@ -254,4 +262,65 @@ fn inventory_transport_peak_includes_base64_reply_and_nested_raw_pages() {
     // and one 1 MiB chunk page. These phases precede canonical leaf decoding.
     let peak = raw_capacity * 3 + json.capacity() + (1 << 20) + (4 << 20) * 2 + (1 << 20);
     assert!(peak < 48 << 20, "{peak}");
+}
+
+#[test]
+fn alarm_budget_counts_real_range_and_delete_calls_and_survives_clones() {
+    block_on(async {
+        let budget = mkit_server::purge::SliceBudget::new(5);
+        let dispatches = Arc::new(AtomicU32::new(0));
+        let transport = EmptyTransport::default();
+        let meta = DoNamespaceStore::new(
+            transport.clone(),
+            Partition::Namespace(repo().namespace.clone()),
+        )
+        .with_alarm_budget(budget.clone());
+        let bucket = common::SimBucket::default();
+        let blobs = R2BlobStore::new(
+            CountedBucket {
+                inner: bucket.clone(),
+                budget: SliceBudget::new(1000),
+                alarm: Some(budget.clone()),
+                dispatches: dispatches.clone(),
+            },
+            PACKS_KEYSPACE,
+        );
+        let key = BlobKey::pack([5; 32]);
+        bucket.replace_object(
+            &blobs.object_key(&key).unwrap(),
+            Bytes::from_static(b"test"),
+        );
+        let partition = Partition::Namespace(repo().namespace);
+        let metadata = mkit_server::Key::new(b"b\0test".to_vec());
+        meta.get(&partition, &metadata).await.unwrap();
+        assert!(
+            blobs
+                .clone()
+                .get(
+                    &key,
+                    Some(ByteRange {
+                        start: 0,
+                        end_inclusive: 1
+                    })
+                )
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(budget.used(), 3);
+        assert!(blobs.delete(&key).await.unwrap());
+        assert_eq!(budget.used(), 5);
+        let actual = transport.0.load(Ordering::SeqCst) + dispatches.load(Ordering::SeqCst);
+        assert_eq!(actual, 5);
+        assert!(meta.clone().get(&partition, &metadata).await.is_err());
+        assert!(blobs.head(&key).await.is_err());
+        assert_eq!(
+            transport.0.load(Ordering::SeqCst) + dispatches.load(Ordering::SeqCst),
+            actual
+        );
+        budget.reset();
+        meta.clone().get(&partition, &metadata).await.unwrap();
+        assert_eq!(budget.used(), 1);
+        assert_eq!(transport.0.load(Ordering::SeqCst), 2);
+    });
 }

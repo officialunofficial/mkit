@@ -438,6 +438,23 @@ pub fn bind_database(conn: &RusqliteConn, root_id: &str, db: &Path) -> Result<()
     }
 }
 
+/// Attach the configured purge framework to this server's durable audit log.
+fn audited_pipeline_config<N: NamespaceStore + Clone + 'static>(
+    cfg: &ServeConfig,
+    meta: &N,
+) -> mkit_server::pipeline::PipelineConfig {
+    let mut config = cfg.pipeline.clone();
+    if let Some(purge) = config.purge.take() {
+        config.purge = Some(
+            purge.with_audit(Arc::new(mkit_server::admin::SystemAudit::new(
+                meta.clone(),
+                crate::admin::partition(config.sharding),
+            ))),
+        );
+    }
+    config
+}
+
 /// The pipeline over `blobs` and `meta` as a router and, with an enc
 /// listener, the enc service over its `TransportIdentity` sibling (same
 /// stores, same write gate).
@@ -464,15 +481,7 @@ where
     if let (Some(retrieval), Some(settings)) = (&cfg.pipeline.scanner_retrieval, &cfg.hooks) {
         settings.check_scanner_keys(retrieval)?;
     }
-    let mut pipeline_config = cfg.pipeline.clone();
-    if let Some(purge) = pipeline_config.purge.take() {
-        pipeline_config.purge = Some(purge.with_audit(Arc::new(
-            mkit_server::admin::SystemAudit::new(
-                meta.clone(),
-                crate::admin::partition(pipeline_config.sharding),
-            ),
-        )));
-    }
+    let pipeline_config = audited_pipeline_config(cfg, &meta);
     let pipeline = Pipeline::new(
         blobs,
         meta.clone(),
@@ -525,6 +534,13 @@ where
                 use commonware_cryptography::Signer as _;
                 let public = <[u8; 32]>::try_from(key.public_key().as_ref())
                     .map_err(|e| config_error("enc key", e))?;
+                if admin
+                    .takedown
+                    .as_ref()
+                    .is_some_and(|settings| settings.publication.public_keys().contains(&public))
+                {
+                    return Err(config_error("receipt key", "repeats enc key"));
+                }
                 admin
                     .config
                     .check_separation(&[public])
@@ -550,7 +566,10 @@ where
             .admin
             .as_ref()
             .map(|settings| crate::admin::router(meta, settings, &pipeline_config)),
-        router: build_router(Arc::new(pipeline), &cfg.router),
+        router: crate::admin::publish(
+            build_router(Arc::new(pipeline), &cfg.router),
+            cfg.admin.as_ref(),
+        ),
         #[cfg(feature = "enc")]
         enc,
         timers: None,
@@ -855,6 +874,14 @@ where
             } else {
                 registry
             };
+            let registry = crate::admin::register(
+                registry,
+                blobs.clone(),
+                meta.clone(),
+                cfg.admin.as_ref().and_then(|a| a.takedown.as_ref()),
+                &cfg.pipeline,
+                mkit_server::takedown::ACTIVATED,
+            )?;
             let driver = TimerDriver::new(meta.clone(), registry, Arc::new(SystemClock));
             #[cfg(feature = "test-faults")]
             let test_timer_gate = Arc::new(tokio::sync::Mutex::new(()));
