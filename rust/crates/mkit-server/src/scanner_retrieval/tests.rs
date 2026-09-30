@@ -131,6 +131,48 @@ fn capability_binds_origin_bytes_and_exclusive_validity_window() {
 }
 
 #[test]
+fn capability_claim_substitutions_cannot_reuse_the_original_mac() {
+    let config = config();
+    let token = config
+        .mint(
+            "https://scanner.test",
+            "stable",
+            &assignment(),
+            Duration::from_secs(10),
+            1_000,
+        )
+        .unwrap()
+        .capability
+        .unwrap();
+    let claims = config
+        .verify(&token, "https://scanner.test", 1_000)
+        .unwrap();
+    let original = serde_json::to_vec(&claims).unwrap();
+    assert_eq!(
+        token.split('.').nth(2).unwrap(),
+        mkit_core::hash::to_hex_bytes(&original)
+    );
+    for case in 0..5 {
+        let mut changed: super::Claims = serde_json::from_slice(&original).unwrap();
+        match case {
+            0 => changed.assignment.packs[0].id = [99; 32],
+            1 => changed.assignment.repository = "test/other".into(),
+            2 => changed.audience = "https://other.test".into(),
+            3 => changed.expires_at_ms += 1,
+            _ => changed.inspection_id = "another-inspection".into(),
+        }
+        let mut fields: Vec<_> = token.split('.').map(str::to_owned).collect();
+        fields[2] = mkit_core::hash::to_hex_bytes(&serde_json::to_vec(&changed).unwrap());
+        let error = config
+            .verify(&fields.join("."), "https://scanner.test", 1_000)
+            .err()
+            .unwrap();
+        assert_eq!(error.code(), crate::Code::NotFound, "substitution {case}");
+        assert_eq!(error.public_message(), "pack not found");
+    }
+}
+
+#[test]
 fn retained_key_rotation_is_bounded_and_mint_uses_active_key() {
     let old = config();
     let token = old

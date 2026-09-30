@@ -279,6 +279,39 @@ fn uniform_failures_cover_capability_scanner_origin_and_ticket_bindings() {
 }
 
 #[test]
+fn scanner_signatures_cannot_authenticate_ordinary_client_calls() {
+    let (mut env, _, identity) = environment();
+    let scanner = key(41);
+    for procedure in [
+        Procedure::ListRefs,
+        Procedure::ReadRef,
+        Procedure::PackExists,
+        Procedure::DownloadPack,
+        Procedure::GetReceipt,
+        Procedure::IssueObjectUrl,
+        Procedure::UpdateRef,
+        Procedure::AdvanceRefs,
+        Procedure::BeginUpload,
+        Procedure::CompleteUpload,
+        Procedure::SetRepoVisibility,
+    ] {
+        let request = signed(&scanner, &identity, procedure, 193_090);
+        env.pipe.cfg.scanner_retrieval = None;
+        assert!(
+            env.auth(&request).is_ok(),
+            "valid envelope for {procedure:?}"
+        );
+        env.pipe.cfg.scanner_retrieval = Some(scanner_config());
+        let error = env.auth(&request).err().unwrap();
+        assert_eq!(error.code(), Code::Unauthenticated, "{procedure:?}");
+        assert_eq!(
+            error.public_message(),
+            "scanner key cannot authenticate client calls"
+        );
+    }
+}
+
+#[test]
 fn consumed_closed_and_expired_tickets_end_retrieval() {
     for sharding in [Sharding::Single, Sharding::D34] {
         for terminal in 0..3 {
