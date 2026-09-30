@@ -2093,3 +2093,45 @@ or unverified canonical content reaches the object store.
 `extraction_budget_tests` compares native results, per-alarm progress/calls and
 restart midway through a 50-hop chain, including 250 KiB nodes and the exact
 whole-source decode-budget boundary. Apply validation retains 100 ops / 1 MiB.
+
+## Launch inspection checks the complete bounded set before apply
+
+**Always:** launch inspection uses at most four sync/fail-closed inspectors,
+with one complete, deduplicated metadata batch per inspector. The set contains
+every Blob and ChunkedBlob entry of the added packs, surplus included, reported
+as BLOB and CHUNKED_FILE; chunk-only blobs remain BLOB and CHUNK is unused.
+Inspection starts from an empty store; every consumed pack ticket's file entries
+pass inspection before membership apply. Earlier membership remains covered even
+when D34 relay lag delays publication or refs are deleted and recreated; upload
+completion and verification alone add no membership. Added-pack entry counts preflight the positive
+whole-advance bound (at most 10,000) before enumeration; oversize uses the
+ordinary index-limit refusal before hooks/apply. Reject/quarantine dominates;
+unavailable cannot commit or enter replay. With inspection disabled, existing
+bytes and calls remain identical. No durable inspection continuation is created.
+
+**Because:** whole-pack downloads expose surplus entries. Frame/checkpoint pages
+of at most 1,000 rows enumerate the set without an inspection tree walk,
+reference-page reads, object-store reads or role classification; inspection shares
+the 1,000-call accounting contract. Scanners decode chunk membership through
+R-193 private retrieval.
+
+**If violated:** unscanned content can publish, retry can bypass inspection, or
+an accepted request can exhaust its Worker budget.
+
+**Enforced by:** the empty-store activation rule is a documented operator
+precondition of the supported launch profile, not a runtime existing-content
+check; there is no durable mode marker at launch. Inspector configuration,
+input limits and verdicts are enforced by `Pipeline::with_inspectors`, `InspectionSet::preflight`,
+header/frame checks and `Pipeline::inspect_advance` before apply. Request-local
+accepted verification snapshots are checked before/after frame enumeration;
+each pack's decoded-size sum must match its verified first-occurrence total.
+Changed jobs or missing frames retain pending-verification behavior. Pipeline
+acceptance tests cover verdict dominance, unavailable replay exclusion and
+inspection-disabled identity. Budget assertion: 960 calls (300 verification,
+256 ancestry, 256 shared pair closure/enumeration/dependencies, four Inspect,
+144 other); <=16 frame pages plus two batched verification-snapshot reads
+fit inside the pair allocation. The revised R-200
+set removes the role-reconstruction cost recorded in
+[the historical WP-5.5a escalation](plans/mkit-server/wp-5-5a-escalation.md#resolved-by-the-revised-r-200-added-pack-ruling).
+Full classification, async holds and unrestricted multi-batch inspection remain
+deferred to WP-5.5c; the durable marker belongs to WP-5.5a-0.

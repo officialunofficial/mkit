@@ -364,6 +364,9 @@ message GetServerInfoResponse {
   // non-held pending content. Held content is hidden from every caller,
   // including with sync holds when false (SPEC-SERVER §§10–11).
   bool async_inspection = 18;
+  // Maximum distinct inspected objects in one advance; absent when no inspector
+  // is configured (SPEC-TRANSPORT-CONNECT §2.1; SPEC-SERVER §11.1).
+  uint32 inspection_max_objects = 19;
 }
 
 // ----------------------------------------------------------------------------

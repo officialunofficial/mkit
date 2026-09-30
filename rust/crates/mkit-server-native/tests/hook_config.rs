@@ -528,6 +528,10 @@ fn resolve_takes_the_same_args_type_the_binary_parses() {
     assert_eq!(args.hooks.hook_admit_url.as_deref(), Some(HOOK));
     assert_eq!(args.hooks.hook_timeout_secs, 5);
     assert_eq!(args.hooks.hook_signature_validity_secs, 60);
+    assert!(args.hooks.hook_inspect_url.is_empty());
+    assert_eq!(args.hooks.inspect_mode, None);
+    assert_eq!(args.hooks.inspect_on_unavailable, None);
+    assert_eq!(args.hooks.inspect_batch_max_objects, 10_000);
     let _ = resolve; // the entry point under test
 }
 
@@ -574,4 +578,123 @@ fn authority_configuration_requires_dedicated_keys_and_authority_role() {
     let mut bad = flags;
     bad[10] = &repeated;
     assert!(rig.with_key(&bad).is_err());
+}
+
+#[test]
+#[cfg(feature = "test-faults")]
+fn inspection_configuration_requires_launch_profile_and_restricted_indexed_tickets() {
+    let rig = Rig::new();
+    let namespace = "ed25519-0101010101010101010101010101010101010101010101010101010101010101";
+    let list = rig.root.path().join("inspection-namespaces");
+    std::fs::write(&list, namespace).unwrap();
+    let base = [
+        "--addressing",
+        "multi",
+        "--namespace-allowlist",
+        common::s(&list),
+        "--indexed",
+        "--hook-inspect-url",
+        HOOK,
+    ];
+    let config = rig.with_key(&base).unwrap();
+    let mut duplicate = base.to_vec();
+    duplicate.extend(["--hook-inspect-url", HOOK]);
+    refused(
+        rig.with_key(&duplicate),
+        exit::CONFIG_ERROR,
+        "repeats an inspector",
+    );
+    assert_eq!(config.pipeline.begin_upload_threshold_bytes, 0);
+    assert_eq!(
+        config.hooks.as_ref().unwrap().inspect_batch_max_objects,
+        10_000
+    );
+    let mut explicit = base.to_vec();
+    explicit.extend([
+        "--inspect-mode",
+        "sync",
+        "--inspect-on-unavailable",
+        "fail_closed",
+        "--inspect-batch-max-objects",
+        "1",
+    ]);
+    assert_eq!(
+        rig.with_key(&explicit)
+            .unwrap()
+            .hooks
+            .unwrap()
+            .inspect_batch_max_objects,
+        1
+    );
+    let built = mkit_server_native::hooks::build::build(config.hooks.as_ref(), AUDIENCE).unwrap();
+    assert_eq!(built.inspectors.len(), 1);
+    assert!(!format!("{built:?}").contains(HOOK));
+    for extra in [
+        ["--inspect-mode", "async"],
+        ["--inspect-on-unavailable", "publish"],
+        ["--inspect-batch-max-objects", "0"],
+        ["--inspect-batch-max-objects", "10001"],
+    ] {
+        let mut flags = base.to_vec();
+        flags.extend(extra);
+        refused(rig.with_key(&flags), exit::CONFIG_ERROR, "inspect");
+    }
+    refused(
+        rig.with_key(&["--hook-inspect-url", HOOK]),
+        exit::CONFIG_ERROR,
+        "indexed mode",
+    );
+    refused(
+        rig.with_key(&["--indexed", "--hook-inspect-url", HOOK]),
+        exit::CONFIG_ERROR,
+        "restricted writes",
+    );
+    let mut pipeline = config.pipeline.clone();
+    pipeline.ticket_keys = None;
+    let args = HookArgs {
+        hook_inspect_url: vec![HOOK.into()],
+        inspect_batch_max_objects: 10_000,
+        ..HookArgs::default()
+    };
+    let error = mkit_server_native::hooks::config::resolve(
+        &args,
+        &mut pipeline,
+        &config.meta,
+        std::time::Duration::from_secs(30),
+        &|_| None,
+    )
+    .unwrap_err();
+    assert!(error.message.contains("ticket keys"));
+}
+
+#[test]
+fn inspection_configuration_refuses_fifth_inspector() {
+    let rig = Rig::new();
+    let flags = [
+        "--hook-inspect-url",
+        "https://one.example",
+        "--hook-inspect-url",
+        "https://two.example",
+        "--hook-inspect-url",
+        "https://three.example",
+        "--hook-inspect-url",
+        "https://four.example",
+        "--hook-inspect-url",
+        "https://five.example",
+    ];
+    refused(rig.with_key(&flags), exit::CONFIG_ERROR, "four inspectors");
+    let mut settings =
+        mkit_server_native::hooks::config::HookSettings::new("test", [9; 32]).unwrap();
+    settings.inspect = (1..=4)
+        .map(|n| format!("https://scanner{n}.example"))
+        .collect();
+    assert_eq!(
+        mkit_server_native::hooks::build::build(Some(&settings), AUDIENCE)
+            .unwrap()
+            .inspectors
+            .len(),
+        4
+    );
+    settings.inspect.push("https://scanner5.example".into());
+    assert!(mkit_server_native::hooks::build::build(Some(&settings), AUDIENCE).is_err());
 }

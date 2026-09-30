@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resumable delta reconstruction and root-checked multipart uploads. Hold renewal
   and durable holder delivery precede Verified; release activation waits for 4.18.
 
+
+- Server (WP-5.5a, R-200): synchronous added-pack file inspection before apply,
+  fail-closed retries without replay, signed remote Inspect, and advertised
+  launch input limits (default 10,000 objects, maximum four inspectors).
+  Inspect every Blob and ChunkedBlob, surplus included, without role reads;
+  enabling inspection requires an empty store. Full classification follows in WP-5.5c.
 - Server/Worker (inert, WP-4.10b-1, R-186): pending-holder protection and atomic
   content-holder relay delivery retain protection beyond hold expiry; late
   blocked holders leave durable takedown requests for WP-5.6a. Add bounded

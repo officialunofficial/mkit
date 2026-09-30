@@ -317,3 +317,29 @@ pub async fn verify<B: BlobStore, S: NamespaceStore>(
     }
     result
 }
+
+/// Verify the resulting pair, then collect only the added-pack inspection metadata.
+///
+/// Inspection does not alter the publication closure walk or its classification.
+/// # Errors
+/// Existing closed-closure, storage and index-limit refusals.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_inspected<B: BlobStore, S: NamespaceStore>(
+    blobs: &B,
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    value: &Pair,
+    branch: bool,
+    advance: &mut Advance,
+    policy: &dyn PublicationPolicy,
+    cfg: IndexedConfig,
+    metrics: &dyn Metrics,
+    inspection: &mut super::inspection::InspectionSet,
+) -> Result<(), ServerError> {
+    verify(
+        blobs, store, shards, repo, value, branch, advance, policy, cfg, metrics,
+    )
+    .await?;
+    inspection.complete_added(store, repo).await
+}

@@ -22,6 +22,9 @@ pub const HOOK_KEY_ENV: &str = "MKIT_HOOK_KEY";
 /// Default `--hook-timeout-secs` (SPEC-SERVER §8, informative).
 pub const DEFAULT_TIMEOUT_SECS: u64 = 5;
 
+/// Default maximum metadata objects in one Inspect call.
+pub const DEFAULT_INSPECT_BATCH_MAX_OBJECTS: usize = 10_000;
+
 /// Default `--hook-signature-validity-secs`.
 pub const DEFAULT_VALIDITY_SECS: u64 = 60;
 
@@ -56,6 +59,18 @@ pub struct HookArgs {
     /// Signed global `CachePurge` sink; acknowledges only after global invalidation.
     #[arg(long, value_name = "URL")]
     pub hook_cache_purge_url: Option<String>,
+    /// Base URL of an Inspect RPC; repeat for independent inspectors.
+    #[arg(long, value_name = "URL")]
+    pub hook_inspect_url: Vec<String>,
+    /// Launch profile: only synchronous inspection is supported.
+    #[arg(long, value_name = "MODE")]
+    pub inspect_mode: Option<String>,
+    /// Launch profile: only `fail_closed` is supported.
+    #[arg(long, value_name = "POLICY")]
+    pub inspect_on_unavailable: Option<String>,
+    /// Maximum objects per Inspect call (1..=10000).
+    #[arg(long, default_value_t = DEFAULT_INSPECT_BATCH_MAX_OBJECTS)]
+    pub inspect_batch_max_objects: usize,
     /// The hook signing key: one line `<key-id> <64 hex seed>`, owner-only.
     /// Without it, `MKIT_HOOK_KEY` is read. It must differ from every ticket,
     /// URL-token and enc key (SPEC-SERVER §7.1). Print the public key list
@@ -86,6 +101,10 @@ pub struct HookSettings {
     pub outcome: Option<String>,
     /// Global cache purge sink.
     pub purge: Option<String>,
+    /// Independent synchronous, fail-closed Inspect endpoints.
+    pub inspect: Vec<String>,
+    /// Bound on one Inspect metadata batch.
+    pub inspect_batch_max_objects: usize,
     key_id: String,
     seed: Zeroizing<[u8; 32]>,
     /// The validity each signature carries.
@@ -100,6 +119,7 @@ impl fmt::Debug for HookSettings {
             .field("authorize", &self.authorize.is_some())
             .field("admit", &self.admit.is_some())
             .field("outcome", &self.outcome.is_some())
+            .field("inspectors", &self.inspect.len())
             .field("key_id", &self.key_id)
             .field("timeout", &self.timeout)
             .finish_non_exhaustive()
@@ -119,6 +139,8 @@ impl HookSettings {
             admit: None,
             outcome: None,
             purge: None,
+            inspect: Vec::new(),
+            inspect_batch_max_objects: DEFAULT_INSPECT_BATCH_MAX_OBJECTS,
             key_id: key_id.to_owned(),
             seed,
             validity: Duration::from_secs(DEFAULT_VALIDITY_SECS),
@@ -153,6 +175,7 @@ impl HookSettings {
             || self.admit.is_some()
             || self.outcome.is_some()
             || self.purge.is_some()
+            || !self.inspect.is_empty()
     }
 }
 
@@ -254,6 +277,51 @@ pub fn check_key_separation(
     Ok(())
 }
 
+fn resolve_inspection(args: &HookArgs, pipeline: &mut PipelineConfig) -> Result<(), ConfigError> {
+    let usage = |m: &str| ConfigError::new(exit::USAGE, format!("{PREFIX}: {m}"));
+    let config = |m: &str| ConfigError::new(exit::CONFIG_ERROR, format!("{PREFIX}: {m}"));
+    if args.hook_inspect_url.is_empty()
+        && (args.inspect_mode.is_some() || args.inspect_on_unavailable.is_some())
+    {
+        return Err(usage("inspection options need --hook-inspect-url"));
+    }
+    if args.hook_inspect_url.len() > 4 {
+        return Err(config("inspection supports at most four inspectors"));
+    }
+    if !args.hook_inspect_url.is_empty() {
+        if args.inspect_mode.as_deref().is_some_and(|v| v != "sync")
+            || args
+                .inspect_on_unavailable
+                .as_deref()
+                .is_some_and(|v| v != "fail_closed")
+        {
+            return Err(config("launch inspection requires sync and fail_closed"));
+        }
+        if args.inspect_batch_max_objects == 0 || args.inspect_batch_max_objects > 10_000 {
+            return Err(config("--inspect-batch-max-objects must be 1..=10000"));
+        }
+        if pipeline.indexed.is_none()
+            || pipeline.write_policy == mkit_server::policy::WritePolicy::Open
+            || pipeline.ticket_keys.is_none()
+        {
+            return Err(config(
+                "inspection requires indexed mode, restricted writes and upload ticket keys",
+            ));
+        }
+        pipeline.begin_upload_threshold_bytes = 0;
+        let mut bases = Vec::new();
+        for url in &args.hook_inspect_url {
+            let base = super::http::canonical_base(url)
+                .map_err(|e| config(&format!("--hook-inspect-url: {e}")))?;
+            if bases.contains(&base) {
+                return Err(config("--hook-inspect-url repeats an inspector endpoint"));
+            }
+            bases.push(base);
+        }
+    }
+    Ok(())
+}
+
 /// Resolve the hook flags. Sets `pipeline.authorizer_role` from
 /// `--authorizer-role`.
 ///
@@ -277,7 +345,8 @@ pub fn resolve(
         ("--hook-outcome-url", &args.hook_outcome_url),
         ("--hook-cache-purge-url", &args.hook_cache_purge_url),
     ];
-    if urls.iter().all(|(_, url)| url.is_none()) {
+    resolve_inspection(args, pipeline)?;
+    if urls.iter().all(|(_, url)| url.is_none()) && args.hook_inspect_url.is_empty() {
         if args.authorizer_role.is_some() {
             return Err(usage("--authorizer-role needs --hook-authorize-url"));
         }
@@ -361,6 +430,8 @@ pub fn resolve(
         admit: args.hook_admit_url.clone(),
         outcome: args.hook_outcome_url.clone(),
         purge: args.hook_cache_purge_url.clone(),
+        inspect: args.hook_inspect_url.clone(),
+        inspect_batch_max_objects: args.inspect_batch_max_objects,
         key_id,
         seed,
         validity,

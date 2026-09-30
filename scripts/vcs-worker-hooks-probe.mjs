@@ -10,6 +10,7 @@ import net from 'node:net';
 const root = resolve(import.meta.dirname, '..');
 const scratch = await mkdtemp(join(process.env.TMPDIR, 'hook-runtime-'));
 let calls = 0, closed = 0, redirected = 0;
+const inspections = [];
 const server = createServer((request, response) => {
   calls++;
   request.on('close', () => { closed++; });
@@ -17,6 +18,18 @@ const server = createServer((request, response) => {
   let body = '';
   request.on('data', chunk => { body += chunk; });
   request.on('end', () => {
+    if (request.url.startsWith('/inspect-')) {
+      const json = JSON.parse(body);
+      assert.equal(json.phase, 'INSPECT_PHASE_PRE_RECEIVE');
+      assert.equal(json.inspectionId, 'inspection:runtime-probe');
+      assert.deepEqual(json.objects, [{id:'IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=', size:'123', kind:'INSPECT_OBJECT_KIND_BLOB'}]);
+      assert.equal(request.headers['x-mkit-hook-audience'], 'https://hook-probe.invalid');
+      assert.ok(request.headers['x-mkit-hook-signature']);
+      inspections.push({body, nonce:request.headers['x-mkit-hook-nonce']});
+      response.writeHead(200, {'content-type':'application/json'});
+      response.end(request.url === '/inspect-pass' ? '{"pass":{}}' : request.url === '/inspect-reject' ? '{"quarantine":{"reason":"policy"}}' : '{"defer":{"retryAfterMs":1}}');
+      return;
+    }
     assert.equal(body, '{ "probe": true }');
     assert.equal(request.headers['x-mkit-hook-audience'], 'https://hook-probe.invalid');
     if (request.url === '/redirect') { response.writeHead(302, {location:'/redirect-target'}); response.end(); }
@@ -61,6 +74,19 @@ try {
     console.log(`PASS WorkerSleep/FetchChannel ${mode}`);
   }
   assert.equal(redirected, 0);
+  for (const [mode, verdict] of [['inspect-pass','pass'], ['inspect-reject','reject'], ['inspect-defer','unavailable']]) {
+    const before = inspections.length;
+    const response = await fetch(`${origin}/__mkit_test/hook-fetch?mode=${mode}`, {signal:AbortSignal.timeout(5000)});
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.deepEqual(result.verdicts, [verdict, verdict]);
+    assert.equal(result.calls, 2);
+    assert.equal(result.activeTimers, 0);
+    assert.equal(inspections.length - before, 2);
+    assert.equal(inspections[before].body, inspections[before + 1].body);
+    assert.notEqual(inspections[before].nonce, inspections[before + 1].nonce);
+    console.log(`PASS Worker RemoteInspector/FetchChannel ${mode}`);
+  }
   assert.ok(closed >= 3, 'local fixture observed cancellation');
   console.log('PASS runtime timer expiry, cancellation cleanup, streamed cap and manual redirect');
 } finally {

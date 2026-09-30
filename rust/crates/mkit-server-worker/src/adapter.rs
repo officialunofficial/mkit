@@ -327,6 +327,15 @@ impl WorkerConfig {
         });
         if let Some(hooks) = &self.hooks {
             config.authorizer_role = hooks.authorizer_role;
+            if hooks.roles.inspect {
+                if config.indexed.is_none()
+                    || config.ticket_keys.is_none()
+                    || config.write_policy == mkit_server::policy::WritePolicy::Open
+                {
+                    return Err(ConfigError("inspection requires indexed mode, restricted writes and upload ticket keys".into()));
+                }
+                config.begin_upload_threshold_bytes = 0;
+            }
             if hooks.roles.cache_purge {
                 config.purge = Some(mkit_server::purge::PurgeConfig::new(
                     self.audience.clone(),
@@ -452,46 +461,51 @@ impl WorkerConfig {
         {
             return Err(ConfigError("cache-purge requires WORKERS_PLAN=paid".into()));
         }
+        if hooks.as_ref().is_some_and(|hooks| hooks.roles.inspect)
+            && (indexed.is_none()
+                || !multi
+                || ticket_keys.is_none()
+                || !var(PLAN_VAR).is_some_and(|plan| plan.trim().eq_ignore_ascii_case("paid")))
+        {
+            return Err(ConfigError(
+                "inspection requires Paid indexed mode, restricted writes and upload ticket keys"
+                    .into(),
+            ));
+        }
         let authority_fence = resolve_authority_fence(&var, multi, hooks.as_ref())?;
-        #[cfg_attr(not(feature = "http-objects"), allow(clippy::collapsible_if))]
-        if let Some(fence) = &authority_fence {
-            if fence.public_keys().any(|key| {
+        if let Some(fence) = &authority_fence
+            && fence.public_keys().any(|key| {
                 ticket_keys
                     .as_ref()
                     .is_some_and(|tickets| tickets.contains_ed25519_public(&key))
-            }) {
-                return Err(ConfigError(
-                    "authority keys must differ from ticket keys".into(),
-                ));
-            }
-            #[cfg(feature = "http-objects")]
-            if fence.public_keys().any(|key| {
+            })
+        {
+            return Err(ConfigError(
+                "authority keys must differ from ticket keys".into(),
+            ));
+        }
+        #[cfg(feature = "http-objects")]
+        if let Some(fence) = &authority_fence
+            && fence.public_keys().any(|key| {
                 url_tokens
                     .as_ref()
                     .is_some_and(|tokens| tokens.keys().public_keys().any(|public| public == key))
-            }) {
-                return Err(ConfigError(
-                    "authority keys must differ from URL-token keys".into(),
-                ));
-            }
+            })
+        {
+            return Err(ConfigError(
+                "authority keys must differ from URL-token keys".into(),
+            ));
         }
-        #[cfg_attr(not(feature = "http-objects"), allow(clippy::collapsible_if))]
-        if let Some(admin) = &admin {
-            if let Some(fence) = &authority_fence {
-                admin
-                    .check_separation(&fence.public_keys().collect::<Vec<_>>())
-                    .map_err(|_| {
-                        ConfigError("ADMIN_KEYS must differ from authority keys".into())
-                    })?;
-            }
-            #[cfg(feature = "http-objects")]
-            if let Some(tokens) = &url_tokens {
-                admin
-                    .check_separation(&tokens.keys().public_keys().collect::<Vec<_>>())
-                    .map_err(|_| {
-                        ConfigError("ADMIN_KEYS must differ from URL-token keys".into())
-                    })?;
-            }
+        if let (Some(admin), Some(fence)) = (&admin, &authority_fence) {
+            admin
+                .check_separation(&fence.public_keys().collect::<Vec<_>>())
+                .map_err(|_| ConfigError("ADMIN_KEYS must differ from authority keys".into()))?;
+        }
+        #[cfg(feature = "http-objects")]
+        if let (Some(admin), Some(tokens)) = (&admin, &url_tokens) {
+            admin
+                .check_separation(&tokens.keys().public_keys().collect::<Vec<_>>())
+                .map_err(|_| ConfigError("ADMIN_KEYS must differ from URL-token keys".into()))?;
         }
         Ok(Self {
             admin,
@@ -1981,6 +1995,15 @@ mod glue {
             Arc::new(ConsoleMetrics::default()),
         )
         .map_err(|e| bad(&e))?;
+        let pipe = if let Some(vars) = cfg.hooks.as_ref().filter(|v| v.roles.inspect) {
+            pipe.with_inspectors(
+                crate::hooks::build::inspectors_from_env(env, cfg)?,
+                vars.inspect_batch_max_objects,
+            )
+            .map_err(|e| bad(&e))?
+        } else {
+            pipe
+        };
         #[cfg(feature = "http-objects")]
         let pipe = if let Some(mount) = &cfg.http_mount {
             pipe.with_http_seams(|mut seams| {
@@ -1994,6 +2017,10 @@ mod glue {
         let pipe = if let Some(config) = cfg
             .published_view
             .clone()
+            .map(|mut config| {
+                config.inspection_configured |= cfg.hooks.as_ref().is_some_and(|v| v.roles.inspect);
+                config
+            })
             .filter(|c| snapshot_warm || c.inspection_configured)
         {
             let source = crate::published_view::shared_reader(
@@ -2930,6 +2957,43 @@ mod tests {
         assert_eq!(purge.audience, "https://vcs.example");
         let roles = config.hooks.unwrap().roles;
         assert!(roles.cache_purge && !roles.admit && !roles.authorize && !roles.outcome);
+    }
+
+    #[test]
+    fn inspection_requires_restricted_indexed_tickets_and_forces_ticket_threshold() {
+        let namespace = ns(1);
+        let secret = "dev 1111111111111111111111111111111111111111111111111111111111111111";
+        let pairs = [
+            (AUDIENCE_VAR, "https://vcs.example"),
+            (ADDRESSING_VAR, "multi"),
+            (NAMESPACE_ALLOWLIST_VAR, namespace.as_str()),
+            (TICKET_KEYS_VAR, secret),
+        ];
+        let mut config = WorkerConfig::from_vars(vars(&pairs)).unwrap();
+        config.hooks = crate::hooks::config::HookVars::parse(&|name| {
+            (name == "HOOK_ROLES").then(|| "inspect".into())
+        })
+        .unwrap();
+        assert!(config.pipeline_config().is_err());
+        config.indexed = Some(mkit_server::indexed::IndexedConfig::scheduled(
+            config.max_pack_bytes,
+        ));
+        assert_eq!(
+            config
+                .pipeline_config()
+                .unwrap()
+                .begin_upload_threshold_bytes,
+            0
+        );
+        config.ticket_keys = None;
+        assert!(config.pipeline_config().is_err());
+        let invalid = [
+            (AUDIENCE_VAR, "https://vcs.example"),
+            (REPOSITORY_VAR, "default"),
+            ("HOOK_ROLES", "inspect"),
+            (PLAN_VAR, "paid"),
+        ];
+        assert!(WorkerConfig::from_vars(vars(&invalid)).is_err());
     }
 
     #[test]

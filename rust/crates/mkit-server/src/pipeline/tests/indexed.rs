@@ -1595,3 +1595,6 @@ fn deletions_publish_without_waiting_for_inspection_or_closure() {
         }
     }
 }
+
+#[cfg(feature = "remote-hooks")]
+mod inspection;

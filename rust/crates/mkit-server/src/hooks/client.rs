@@ -24,6 +24,7 @@ pub(crate) enum Rpc {
     Admit,
     Outcome,
     CachePurge,
+    Inspect,
 }
 
 impl Rpc {
@@ -33,6 +34,7 @@ impl Rpc {
             Self::Admit => "/mkit.server.hooks.v1.HooksService/Admit",
             Self::Outcome => "/mkit.server.hooks.v1.HooksService/Outcome",
             Self::CachePurge => "/mkit.server.hooks.v1.HooksService/CachePurge",
+            Self::Inspect => "/mkit.server.hooks.v1.HooksService/Inspect",
         }
     }
 }
