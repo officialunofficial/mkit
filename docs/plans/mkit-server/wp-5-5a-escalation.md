@@ -131,3 +131,78 @@ included in the shared 256-call pair allocation, not added to verification.
 to 300. The historical stop/check record above
 describes the pre-ruling tree; integration and the PR proceed under this ruling
 without increasing the platform limit.
+
+## Second escalation: role classification is not covered by the row-page bound
+
+The explicit 10,000-object / four-inspector ruling resolves the original
+checkpoint-page-count problem. The final independent budget review found a
+different cost that the implementation and its initial budget explanation
+underestimated: Worker inspection must reconstruct each added `Tree` and
+`ChunkedBlob` to classify blobs used as chunks, including references from
+surplus entries. Native verification already has these decoded facts; the
+Worker's frame checkpoints currently retain locations, sizes and object types,
+without the role references.
+
+`indexed::inspection::scheduled_entries` first scans checkpoint rows in
+1,000-row pages, then calls `indexed::resolve::member_object` for every
+structural role source. A raw, non-delta role source requires two R2 reads
+(prefix and frame). These calls are charged to the shared 256-call
+publication/inspection allocation. Consequently, row scans are bounded but
+are not the complete enumeration cost.
+
+A small valid counterexample is one added pack with 200 distinct one-byte
+blobs and 200 one-chunk manifests referencing those blobs. All 400 entries
+may be surplus beside an unchanged, already published head. This is below
+the configured 10,000-entry limit and ordinary size limits, yet role
+classification alone needs 400 R2 reads, plus its checkpoint scan. The
+shared allocation refuses it before any Inspect call. That refusal is safe
+and does not apply the advance, but it is an additional input refusal not
+established by the two explicit launch limits. Increasing the allocation
+does not solve the general case: 5,000 such pairs still fit the 10,000-entry
+cap and need 10,000 role reads.
+
+This triggers the prompt's Section D: the complete inspected set cannot be
+enumerated within the stated call bounds using the current checkpoint
+metadata. No new key tag, timer, durable role/inspection state, platform
+limit increase, narrowed inspected set or additional input limit has been
+introduced to conceal the problem. The branch is committed locally; no PR
+is opened while this ruling remains unresolved.
+
+The focused regression
+`indexed::inspection::tests::small_valid_manifest_pack_exceeds_worker_role_enumeration_budget`
+passes and measures the counterexample: **15,044 bytes, 400 entries, 401
+calls** (400 R2 reads plus one checkpoint scan). Native collection and a
+Worker allocation of 1,000 produce the same 400-object set; the launch
+allocation refuses exactly at 256 calls. The test intentionally records
+this limitation rather than claiming launch acceptance. Publication's
+exhausted-budget wrapper converts the refusal to the existing
+`invalid_argument` index-limit error before hooks or apply.
+
+Options requiring a ruling include retaining verified role facts in existing
+indexed checkpoint metadata, or adding an explicit structural-role/input-
+complexity bound. Raw frame-window coalescing can reduce reads for clustered
+non-delta objects, but does not by itself prove the bound for arbitrary frame
+placement and external delta bases.
+
+### Gate status at the second escalation
+
+- Formatting, whole-workspace all-target/all-feature clippy, touched/reverse-
+  dependency doctests and rustdoc, default and all-feature wasm32 clippy,
+  `just ci-scripts`, `just ci-security`, and feature-base proto checks pass.
+- Reverse-dependency nextest: 1,664 pass, nine skips. The initial parallel
+  run timed out five existing CLI cases; all five pass individually and on
+  unchanged parent `8e72df1d`; the full lower-concurrency rerun passes.
+- Worker default conformance: 84 pass, zero failures, 131 skips, including
+  30/30 cold-start checks. Signed runtime probes cover pass, quarantine
+  rejection, invalid defer, stable request ids and fresh nonces.
+- Focused complete-set/pipeline filter: 19 pass; shared dependency-budget
+  regression passes; six native/channel/schema tests pass; new role-cost
+  reproduction passes.
+- `just ci-server` remains incomplete: its later run passed 2,153 tests,
+  failed existing `wire_binary::binary_fs_sqlite_auth_v2_d34` at conformance
+  `timers.redelivery_is_idempotent` (test timer tick returned unavailable),
+  and left 332 tests unrun due to fail-fast. No isolated retry or parent
+  comparison of that wire failure is claimed; Section D stops further gates.
+- Production additions: 1,615 handwritten Rust lines; 1,760 including
+  regenerated Rust and proto additions, excluding test-only artifacts and
+  documentation. No production-cap escalation is needed.

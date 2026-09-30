@@ -845,6 +845,124 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One blocker reproduction compares native and both Worker budgets.
+    fn small_valid_manifest_pack_exceeds_worker_role_enumeration_budget() {
+        let repo = repo("manifest-budget-reproduction");
+        let mut writer = PackWriter::new_raw_only();
+        for n in 0_u8..200 {
+            let blob = Object::Blob(Blob { data: vec![n] });
+            let manifest = Object::ChunkedBlob(ChunkedBlob {
+                total_size: 1,
+                chunk_size: 0,
+                chunks: vec![blob.id().unwrap()],
+            });
+            for object in [&blob, &manifest] {
+                writer
+                    .push_raw(object.id().unwrap(), &serialize(object).unwrap())
+                    .unwrap();
+            }
+        }
+        let pack = writer.finish().unwrap();
+        let pack_id = hash(&pack);
+        let blobs = MemoryBlobStore::default();
+        upload(&blobs, &pack);
+        let store = MemoryKv::default();
+        let mut frames = Vec::new();
+        let mut entries = Vec::new();
+        decode_entries_with(
+            &pack,
+            &mut NoExternalBases,
+            DecodeLimits::default(),
+            |entry| {
+                let object_type = entry.object.object_type() as u8;
+                let row = FrameRow {
+                    object_type,
+                    external: None,
+                    value: IndexValue {
+                        frame_offset: entry.frame_offset,
+                        frame_length: entry.frame_length,
+                        wire_type: entry.wire_type,
+                        decoded_size: entry.bytes.len() as u64,
+                        chain_depth: 0,
+                        delta_base: None,
+                    },
+                };
+                frames.push((
+                    keys::verify_row(&repo.name, &pack_id, keys::VC_FRAME, Some(&entry.id)),
+                    encode_frame(&entry.id, &row).unwrap(),
+                ));
+                entries.push(NativeEntry {
+                    id: entry.id,
+                    size: entry.bytes.len() as u64,
+                    object_type,
+                    roles: matches!(entry.object, Object::ChunkedBlob(_)).then_some(entry.object),
+                });
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(entries.len(), 400);
+        for rows in frames.chunks(90) {
+            let batch = rows.iter().fold(Batch::new(), |batch, (key, raw)| {
+                batch.put(key.clone(), raw.clone())
+            });
+            block_on(store.apply(&source(&repo), batch)).unwrap();
+        }
+        let mut native = InspectionSet::new(10_000);
+        native.reserve_added_count(400).unwrap();
+        native.defer_native(vec![pack_id], entries);
+        block_on(native.complete_added(
+            &blobs,
+            &store,
+            &SinglePartition,
+            &repo,
+            super::super::IndexedConfig::default(),
+            &NoopMetrics,
+        ))
+        .unwrap();
+        let native = native.finalize();
+        assert_eq!(native.len(), 400);
+        let generous = super::super::budget::SliceBudget::new(1000);
+        let mut worker = InspectionSet::new(10_000);
+        worker.reserve_added_count(400).unwrap();
+        worker.defer_scheduled(vec![pack_id], source(&repo));
+        block_on(worker.complete_added(
+            &super::super::budget::Budgeted::new(&blobs, &generous),
+            &super::super::budget::Budgeted::new(&store, &generous),
+            &SinglePartition,
+            &repo,
+            super::super::IndexedConfig::default(),
+            &NoopMetrics,
+        ))
+        .unwrap();
+        assert_eq!(worker.finalize(), native);
+        assert_eq!(generous.used(), 401);
+        let actual = super::super::budget::SliceBudget::new(256);
+        let mut worker = InspectionSet::new(10_000);
+        worker.reserve_added_count(400).unwrap();
+        worker.defer_scheduled(vec![pack_id], source(&repo));
+        let error = block_on(worker.complete_added(
+            &super::super::budget::Budgeted::new(&blobs, &actual),
+            &super::super::budget::Budgeted::new(&store, &actual),
+            &SinglePartition,
+            &repo,
+            super::super::IndexedConfig::default(),
+            &NoopMetrics,
+        ))
+        .unwrap_err();
+        assert_eq!(actual.used(), 256);
+        assert_eq!(error.code(), crate::Code::Unavailable);
+        eprintln!(
+            "valid pack bytes={}, entries=400; native objects={}; Worker calls={}; shared256 refuses after {} calls: {}",
+            pack.len(),
+            native.len(),
+            generous.used(),
+            actual.used(),
+            error.public_message()
+        );
+    }
+
+    #[test]
     fn worker_enumeration_resumes_frame_pages_within_the_shared_call_budget() {
         let repo = repo("inspection-pages");
         let store = MemoryKv::default();

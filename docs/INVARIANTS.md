@@ -2028,5 +2028,9 @@ header/frame checks and `Pipeline::inspect_advance` before apply. Pipeline
 acceptance tests cover verdict dominance, unavailable replay exclusion and
 inspection-disabled identity. Budget assertion: 960 calls (300 verification,
 256 ancestry, 256 shared pair closure/enumeration/dependencies, four Inspect,
-144 other); <=16 frame pages fit inside the pair allocation. Async holds remain
-deferred to WP-5.5c.
+144 other); <=16 frame pages fit inside the pair allocation. This proves the
+call cap, not completion for every pack below the object cap: reconstructing
+structural role metadata can exceed that allocation. The 400-entry/401-call
+regression records this unresolved Section D blocker; see
+[the WP-5.5a escalation](plans/mkit-server/wp-5-5a-escalation.md#second-escalation-role-classification-is-not-covered-by-the-row-page-bound).
+Async holds remain deferred to WP-5.5c.
