@@ -178,3 +178,20 @@ assertion that C must remain unclaimed, then passed after the fix. Evidence is
 under `~/.cache/mkit-test-tmp/wp-4-10b/group-{red,green}.log`. This focused result
 does not establish complete native/Scheduled selection parity or production
 readiness.
+
+### Selection-fact checkpoint before additive multipart prerequisite (2026-09-30)
+
+Decoded entries now persist versioned payload-free selection facts in vc sub-4:
+Blob size, manifest size/chunk references, Tree child references, or Other.
+Native selection remains unchanged; an independent fact-union regression compares
+its result with native selection when manifest/tree context comes from reused
+members. This is only a fact-capture foundation: group readiness, bounded union
+selection, legacy Verified reconstruction, extraction and holder delivery are
+still unfinished. `selection.rs` functions not yet used by the future driver may
+produce temporary dead-code warnings at this checkpoint; no final gate claim.
+
+Focused regression red (missing fact projection) then green, and all40 scheduled
+job tests pass. Logs: selection-red.log, selection-green.log and
+selection-job-suite.log in ~/.cache/mkit-test-tmp/wp-4-10b. No live handles remain.
+Root allocated additive WP-4.10b-multipart/R192 (1500 production-line cap) as an
+explicit prerequisite; parent scope and R186 remain complete extraction/relay.

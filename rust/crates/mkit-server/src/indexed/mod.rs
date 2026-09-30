@@ -10,6 +10,7 @@ mod extract;
 pub mod job;
 pub mod resolve;
 pub mod scheduled;
+mod selection;
 pub mod state;
 pub mod verify;
 

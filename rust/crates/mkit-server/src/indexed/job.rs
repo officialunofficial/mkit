@@ -989,6 +989,10 @@ where
             st.writes
                 .push(Write::Put(self.row(keys::VC_FRAME, &id), encoded));
             st.frames.insert(id, row);
+            st.writes.push(Write::Put(
+                self.row(keys::VC_CANDIDATE, &id),
+                super::selection::SelectionFact::from_object(&object).encode(),
+            ));
             if let Some(parents) = super::verify::history_parents(&object) {
                 st.writes.push(Write::Put(
                     self.row(keys::VC_HISTORY, &id),

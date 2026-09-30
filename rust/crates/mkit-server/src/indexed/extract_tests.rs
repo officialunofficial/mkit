@@ -2142,3 +2142,43 @@ fn a_hold_alone_beats_commit_collect() {
     );
     protected(&blobs, &kv, &id);
 }
+
+#[test]
+fn durable_selection_facts_include_reused_manifest_and_tree_context() {
+    use super::extract::SelectionFact;
+    let chunks = vec![content(7, BIG)];
+    let (manifest_id, cb, blobs) = manifest(&chunks);
+    let (tree_id, tree_raw, _, _) = commit_of(&[("file", blobs[0].0)]);
+    let tree = mkit_core::serialize::deserialize(&tree_raw).unwrap();
+    let entries = [
+        blobs[0].clone(),
+        (manifest_id, Vec::new(), Object::ChunkedBlob(cb)),
+        (tree_id, tree_raw, tree),
+    ];
+    let facts: BTreeMap<_, _> = entries
+        .iter()
+        .map(|(id, _, obj)| {
+            let encoded = SelectionFact::from_object(obj).encode();
+            (*id, SelectionFact::decode(&encoded).unwrap())
+        })
+        .collect();
+    let staged = entries
+        .into_iter()
+        .map(|(id, raw, obj)| (id, (raw, obj, 0)))
+        .collect();
+    assert_eq!(
+        extract::select_facts(&facts, 65_536),
+        extract::select(&staged, 65_536)
+    );
+    assert_eq!(facts[&blobs[0].0].content_len(), BIG as u64);
+    let mut chunk_only = facts.clone();
+    chunk_only.remove(&tree_id);
+    assert_eq!(
+        extract::select_facts(&chunk_only, 65_536)
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![manifest_id]
+    );
+    assert!(SelectionFact::decode(&Value::new(vec![255])).is_err());
+}
