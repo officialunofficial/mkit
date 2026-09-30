@@ -140,8 +140,20 @@ mod glue {
             return Ok(local());
         }
         let (channel, signer) = if let Some(http) = http {
-            let signer =
-                super::super::config::http_signer(key, http, cfg.ticket_keys.as_ref(), &[])?;
+            #[cfg(feature = "http-objects")]
+            let other_keys = cfg
+                .url_tokens
+                .as_ref()
+                .map(|t| t.keys().public_keys().collect::<Vec<_>>())
+                .unwrap_or_default();
+            #[cfg(not(feature = "http-objects"))]
+            let other_keys = Vec::new();
+            let signer = super::super::config::http_signer(
+                key,
+                http,
+                cfg.ticket_keys.as_ref(),
+                &other_keys,
+            )?;
             (
                 WorkerChannel::Http(FetchChannel::new(http.endpoint.clone())),
                 Some(signer),
