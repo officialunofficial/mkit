@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verification projections, opaque ETag capture and default-compatible internal
   R2 upload callbacks. Worker Extract remains fail-closed; the driver is PR2.
 
+- HTTP proofs on the opt-in native mount: canonical Object bundles and MKDP/MKDS query ranges now share validators, caps, payment and durable settlement with ordinary reads; exact core wire-size planning constructs no proof, and native canonical reads bound prefix memory (WP-4.14b-1). Workers prefetch follows in WP-4.14b-2. Unshipped `ProofServer` now builds selected bytes through a repository-scoped `ProofSource`.
 - WP-5.10: durable timer-11 automatic cache purge intents, signed global delivery
   with stable ids and fresh nonces, local invalidation and snapshot refill fences.
 - WP-5.11a: default-off signed admin framework with separate role keys, durable

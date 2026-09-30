@@ -570,49 +570,6 @@ pub fn plan_range_proof(
     })
 }
 
-fn build_prefix<S: ObjectSource + ?Sized>(
-    source: &S,
-    commit_id: &Hash,
-    path: &[&[u8]],
-) -> Result<(Vec<u8>, Vec<Step>, Hash), RangeProofError> {
-    if path.len() > crate::store::MAX_TREE_DEPTH {
-        return Err(VerifyError::TooManySteps(path.len()).into());
-    }
-    let commit_bytes = source.read(commit_id)?;
-    let commit_obj = crate::serialize::deserialize(&commit_bytes)?;
-    let tree_hash = match commit_obj {
-        Object::Commit(c) => c.tree_hash,
-        Object::Remix(r) => r.tree_hash,
-        other => return Err(VerifyError::NotACommitOrRemix(other.object_type()).into()),
-    };
-    let mut steps = Vec::new();
-    let mut current_tree_id = tree_hash;
-    let mut leaf_id = tree_hash;
-    for (i, &name) in path.iter().enumerate() {
-        let Object::Tree(tree) = source.read_object(&current_tree_id)? else {
-            return Err(VerifyError::PathThroughNonTree.into());
-        };
-        let position =
-            merkle::tree_entry_position(&tree, name).ok_or(VerifyError::PathNotFound(i))?;
-        let entry = tree.entries[position as usize].clone();
-        steps.push(Step {
-            name: name.to_vec(),
-            mode: entry.mode,
-            child_id: entry.object_hash,
-            inner_root: merkle::tree_inner_root(&tree),
-            position,
-            proof: merkle::build_tree_entry_proof(&tree, position).map_err(VerifyError::from)?,
-        });
-        leaf_id = entry.object_hash;
-        if entry.mode == EntryMode::Tree {
-            current_tree_id = leaf_id;
-        } else if i + 1 != path.len() {
-            return Err(VerifyError::PathThroughNonTree.into());
-        }
-    }
-    Ok((commit_bytes, steps, leaf_id))
-}
-
 fn range_payload(
     cb: &crate::object::ChunkedBlob,
     index: usize,
@@ -781,23 +738,24 @@ pub fn build_range_proof_from<S: ObjectSource + ?Sized>(
     let end = offset
         .checked_add(len)
         .ok_or(RangeProofError::OffsetOverflow)?;
-    let (commit_bytes, steps, leaf_id) = build_prefix(source, commit_id, path)?;
+    let (commit_bytes, steps, leaf_id) = super::build_prefix(source, commit_id, path)?;
     let leaf = source.read_object(&leaf_id)?;
     let cb = match leaf {
         Object::Blob(_) => {
             if boundaries.is_some() {
                 return Err(RangeProofError::InvalidBoundaries);
             }
-            let proof = super::build_disclosure_from(
+            let payload = super::build_payload(
                 source,
-                commit_id,
-                path,
+                &leaf_id,
                 Selector::Range {
                     offset,
                     len,
                     with_offsets: true,
                 },
             )?;
+            encoded_disclosure_size(&commit_bytes, &steps, &payload)?;
+            let proof = encode_disclosure(commit_id, &commit_bytes, &steps, &payload);
             return Ok(RangeProof::Mkdp(proof));
         }
         Object::ChunkedBlob(cb) => cb,
@@ -1426,5 +1384,57 @@ mod tests {
             build_range_proof_from(&store, &commit_id, &[b"blob"], 0, 1, Some(&[0, 10])),
             Err(RangeProofError::InvalidBoundaries)
         ));
+    }
+    #[test]
+    fn span_goldens_have_exact_metadata_planned_lengths() {
+        use super::super::proof_size::{PrefixStep, chunked_range_proof_size};
+        for bytes in [
+            include_bytes!("../../../../tests/golden/http-objects/span_two_chunks.bin").as_slice(),
+            include_bytes!("../../../../tests/golden/http-objects/span_three_chunks.bin")
+                .as_slice(),
+            include_bytes!("../../../../tests/golden/http-objects/span_first_zero.bin").as_slice(),
+        ] {
+            let span = decode(bytes).unwrap();
+            let (_, commit, steps, payload) = super::super::decode_disclosure(span.anchor).unwrap();
+            let PayloadWire::Range {
+                chunk: Some(chunk),
+                chunk_len_proofs,
+                ..
+            } = payload
+            else {
+                panic!("anchor")
+            };
+            let mut lengths: Vec<u64> = chunk_len_proofs
+                .iter()
+                .map(|proof| u64::from_le_bytes(proof.slice[..8].try_into().unwrap()) - 10)
+                .collect();
+            for bundle in span.chunks {
+                let (_, _, _, PayloadWire::Chunk { bytes, .. }) =
+                    super::super::decode_disclosure(bundle).unwrap()
+                else {
+                    panic!("chunk")
+                };
+                lengths.push(bytes.len() as u64 - 10);
+            }
+            let metadata: Vec<PrefixStep> = steps
+                .iter()
+                .map(|step| PrefixStep {
+                    name_len: step.name.len(),
+                    position: step.position,
+                    leaf_count: step.proof.leaf_count,
+                })
+                .collect();
+            let plan = chunked_range_proof_size(
+                commit.len() as u64,
+                &metadata,
+                chunk.proof.leaf_count - 1,
+                &lengths,
+                span.offset,
+                span.len,
+            )
+            .unwrap();
+            assert_eq!(plan.kind, RangeProofKind::Mkds);
+            assert_eq!(plan.encoded_size, bytes.len() as u64);
+        }
     }
 }
