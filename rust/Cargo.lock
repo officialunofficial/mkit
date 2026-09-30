@@ -3609,6 +3609,7 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "mkit-attest",
  "mkit-core",
  "mkit-server",
  "mkit-server-conformance",

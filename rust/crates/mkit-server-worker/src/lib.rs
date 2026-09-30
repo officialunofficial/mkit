@@ -55,6 +55,7 @@ pub mod backup;
 pub mod classes;
 pub mod clock;
 pub mod do_sql;
+pub mod embedding;
 #[cfg(feature = "test-faults")]
 pub mod faults;
 pub mod hooks;
