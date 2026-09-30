@@ -18,6 +18,7 @@ impl Authorizer for PolicyHook {
         } else {
             // The hook cannot manufacture ownership or an M2 grant.
             Ok(AuthzFacts {
+                authority_generation: Some(u64::MAX),
                 owner: true,
                 grant: None,
                 ..AuthzFacts::default()
@@ -187,6 +188,7 @@ fn check_policy_case(
         assert_eq!(
             observed[0].authz,
             AuthzFacts {
+                authority_generation: None,
                 owner,
                 grant: None,
                 caller_view: CallerView::Writer
@@ -198,6 +200,7 @@ fn check_policy_case(
         assert_eq!(
             admitted.lock().unwrap()[0],
             AuthzFacts {
+                authority_generation: None,
                 owner,
                 grant: None,
                 caller_view: CallerView::Writer
@@ -457,6 +460,7 @@ fn namespaced_single_owner_policy() {
             assert_eq!(
                 seen.lock().unwrap()[0].authz,
                 AuthzFacts {
+                    authority_generation: None,
                     owner: true,
                     grant: None,
                     caller_view: CallerView::Writer,
@@ -466,6 +470,7 @@ fn namespaced_single_owner_policy() {
             assert_eq!(
                 admitted.lock().unwrap()[0],
                 AuthzFacts {
+                    authority_generation: None,
                     owner: true,
                     grant: None,
                     caller_view: CallerView::Writer,
@@ -603,4 +608,19 @@ fn reads_keep_hook_behavior_and_invalid_multi_namespace_is_internal() {
         now(e.pipe.authorize(&op)).unwrap_err().public_message(),
         "write not permitted"
     );
+}
+
+#[test]
+fn check_hook_generation_injection_is_ignored_with_fencing_off() {
+    let e = env(AuthMode::Open);
+    let mut built_in = AuthzFacts::default();
+    let returned = AuthzFacts {
+        authority_generation: Some(u64::MAX),
+        owner: true,
+        ..AuthzFacts::default()
+    };
+    e.pipe
+        .merge_authority_facts(&mut built_in, &returned)
+        .unwrap();
+    assert_eq!(built_in, AuthzFacts::default());
 }

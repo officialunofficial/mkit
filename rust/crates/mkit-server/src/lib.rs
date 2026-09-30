@@ -26,6 +26,7 @@
 
 pub mod admin;
 pub mod auth_v2;
+pub mod authority;
 #[cfg(feature = "connect")]
 pub mod connect;
 pub mod download;

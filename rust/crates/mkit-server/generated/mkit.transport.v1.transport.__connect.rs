@@ -110,6 +110,22 @@ pub type OwnedSetGrantEpochRequestView = ::buffa::view::OwnedView<
 pub type OwnedSetGrantEpochResponseView = ::buffa::view::OwnedView<
     __buffa::view::SetGrantEpochResponseView<'static>,
 >;
+///Shorthand for `OwnedView<GetAuthorityGenerationRequestView<'static>>`.
+pub type OwnedGetAuthorityGenerationRequestView = ::buffa::view::OwnedView<
+    __buffa::view::GetAuthorityGenerationRequestView<'static>,
+>;
+///Shorthand for `OwnedView<GetAuthorityGenerationResponseView<'static>>`.
+pub type OwnedGetAuthorityGenerationResponseView = ::buffa::view::OwnedView<
+    __buffa::view::GetAuthorityGenerationResponseView<'static>,
+>;
+///Shorthand for `OwnedView<SetAuthorityGenerationRequestView<'static>>`.
+pub type OwnedSetAuthorityGenerationRequestView = ::buffa::view::OwnedView<
+    __buffa::view::SetAuthorityGenerationRequestView<'static>,
+>;
+///Shorthand for `OwnedView<SetAuthorityGenerationResponseView<'static>>`.
+pub type OwnedSetAuthorityGenerationResponseView = ::buffa::view::OwnedView<
+    __buffa::view::SetAuthorityGenerationResponseView<'static>,
+>;
 ///Shorthand for `OwnedView<SetRepoVisibilityRequestView<'static>>`.
 pub type OwnedSetRepoVisibilityRequestView = ::buffa::view::OwnedView<
     __buffa::view::SetRepoVisibilityRequestView<'static>,
@@ -574,6 +590,74 @@ for ::buffa::view::OwnedView<__buffa::view::SetGrantEpochResponseView<'static>> 
         )
     }
 }
+impl ::connectrpc::Encodable<GetAuthorityGenerationResponse>
+for __buffa::view::GetAuthorityGenerationResponseView<'_> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<GetAuthorityGenerationResponse>
+for ::buffa::view::OwnedView<
+    __buffa::view::GetAuthorityGenerationResponseView<'static>,
+> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
+}
+impl ::connectrpc::Encodable<SetAuthorityGenerationResponse>
+for __buffa::view::SetAuthorityGenerationResponseView<'_> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<SetAuthorityGenerationResponse>
+for ::buffa::view::OwnedView<
+    __buffa::view::SetAuthorityGenerationResponseView<'static>,
+> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
+}
 impl ::connectrpc::Encodable<SetRepoVisibilityResponse>
 for __buffa::view::SetRepoVisibilityResponseView<'_> {
     fn encode(
@@ -721,6 +805,18 @@ pub const TRANSPORT_SERVICE_GET_GRANT_EPOCH_SPEC: ::connectrpc::Spec = ::connect
 /// Static [`Spec`](::connectrpc::Spec) for the `SetGrantEpoch` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const TRANSPORT_SERVICE_SET_GRANT_EPOCH_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.transport.v1.TransportService/SetGrantEpoch",
+        ::connectrpc::StreamType::Unary,
+    )
+    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
+/// Static [`Spec`](::connectrpc::Spec) for the `GetAuthorityGeneration` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
+pub const TRANSPORT_SERVICE_GET_AUTHORITY_GENERATION_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+        "/mkit.transport.v1.TransportService/GetAuthorityGeneration",
+        ::connectrpc::StreamType::Unary,
+    )
+    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
+/// Static [`Spec`](::connectrpc::Spec) for the `SetAuthorityGeneration` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
+pub const TRANSPORT_SERVICE_SET_AUTHORITY_GENERATION_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+        "/mkit.transport.v1.TransportService/SetAuthorityGeneration",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
@@ -1052,6 +1148,46 @@ pub trait TransportService: Send + Sync + 'static {
     ) -> impl ::std::future::Future<
         Output = ::connectrpc::ServiceResult<
             impl ::connectrpc::Encodable<SetGrantEpochResponse> + Send + use<'a, Self>,
+        >,
+    > + Send;
+    /// Outside auth-v2; the setter verifies a deployment-authority statement.
+    ///
+    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
+    ///
+    /// `request` is borrowed from the request body and is valid for the
+    /// duration of the call; message fields are read directly on it
+    /// (zero-copy). The response cannot borrow from `request` — use
+    /// `.to_owned_message()` (or copy the specific fields) for anything
+    /// returned, stored, or moved into `tokio::spawn`.
+    fn get_authority_generation<'a>(
+        &'a self,
+        ctx: ::connectrpc::RequestContext,
+        request: ::connectrpc::ServiceRequest<'_, GetAuthorityGenerationRequest>,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            impl ::connectrpc::Encodable<
+                GetAuthorityGenerationResponse,
+            > + Send + use<'a, Self>,
+        >,
+    > + Send;
+    /// Handle the SetAuthorityGeneration RPC.
+    ///
+    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
+    ///
+    /// `request` is borrowed from the request body and is valid for the
+    /// duration of the call; message fields are read directly on it
+    /// (zero-copy). The response cannot borrow from `request` — use
+    /// `.to_owned_message()` (or copy the specific fields) for anything
+    /// returned, stored, or moved into `tokio::spawn`.
+    fn set_authority_generation<'a>(
+        &'a self,
+        ctx: ::connectrpc::RequestContext,
+        request: ::connectrpc::ServiceRequest<'_, SetAuthorityGenerationRequest>,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            impl ::connectrpc::Encodable<
+                SetAuthorityGenerationResponse,
+            > + Send + use<'a, Self>,
         >,
     > + Send;
     /// Repository visibility and URL tokens (SPEC-WRITE-GRANTS §9.1, §9.4).
@@ -1465,6 +1601,56 @@ impl<S: TransportService> TransportServiceExt for S {
             .with_spec(TRANSPORT_SERVICE_SET_GRANT_EPOCH_SPEC)
             .route_view(
                 TRANSPORT_SERVICE_SERVICE_NAME,
+                "GetAuthorityGeneration",
+                {
+                    let svc = ::std::sync::Arc::clone(&self);
+                    ::connectrpc::view_handler_fn(move |
+                        ctx,
+                        req: ::buffa::view::OwnedView<
+                            __buffa::view::GetAuthorityGenerationRequestView<'static>,
+                        >,
+                        format|
+                    {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            let sreq = ::connectrpc::ServiceRequest::<
+                                GetAuthorityGenerationRequest,
+                            >::from_parts(req.reborrow(), req.bytes());
+                            svc.get_authority_generation(ctx, sreq)
+                                .await?
+                                .encode::<GetAuthorityGenerationResponse>(format)
+                        }
+                    })
+                },
+            )
+            .with_spec(TRANSPORT_SERVICE_GET_AUTHORITY_GENERATION_SPEC)
+            .route_view(
+                TRANSPORT_SERVICE_SERVICE_NAME,
+                "SetAuthorityGeneration",
+                {
+                    let svc = ::std::sync::Arc::clone(&self);
+                    ::connectrpc::view_handler_fn(move |
+                        ctx,
+                        req: ::buffa::view::OwnedView<
+                            __buffa::view::SetAuthorityGenerationRequestView<'static>,
+                        >,
+                        format|
+                    {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            let sreq = ::connectrpc::ServiceRequest::<
+                                SetAuthorityGenerationRequest,
+                            >::from_parts(req.reborrow(), req.bytes());
+                            svc.set_authority_generation(ctx, sreq)
+                                .await?
+                                .encode::<SetAuthorityGenerationResponse>(format)
+                        }
+                    })
+                },
+            )
+            .with_spec(TRANSPORT_SERVICE_SET_AUTHORITY_GENERATION_SPEC)
+            .route_view(
+                TRANSPORT_SERVICE_SERVICE_NAME,
                 "SetRepoVisibility",
                 {
                     let svc = ::std::sync::Arc::clone(&self);
@@ -1649,6 +1835,18 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
                 Some(
                     ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
                         .with_spec(TRANSPORT_SERVICE_SET_GRANT_EPOCH_SPEC),
+                )
+            }
+            "GetAuthorityGeneration" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
+                        .with_spec(TRANSPORT_SERVICE_GET_AUTHORITY_GENERATION_SPEC),
+                )
+            }
+            "SetAuthorityGeneration" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
+                        .with_spec(TRANSPORT_SERVICE_SET_AUTHORITY_GENERATION_SPEC),
                 )
             }
             "SetRepoVisibility" => {
@@ -1864,6 +2062,42 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
                     svc.set_grant_epoch(ctx, req)
                         .await?
                         .encode::<SetGrantEpochResponse>(format)
+                })
+            }
+            "GetAuthorityGeneration" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        GetAuthorityGenerationRequest,
+                    >(request.encoded()?, format)?;
+                    let req: __buffa::view::GetAuthorityGenerationRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                        &body,
+                        ctx.decode_options(),
+                    )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        GetAuthorityGenerationRequest,
+                    >::from_parts(&req, &body);
+                    svc.get_authority_generation(ctx, req)
+                        .await?
+                        .encode::<GetAuthorityGenerationResponse>(format)
+                })
+            }
+            "SetAuthorityGeneration" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        SetAuthorityGenerationRequest,
+                    >(request.encoded()?, format)?;
+                    let req: __buffa::view::SetAuthorityGenerationRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                        &body,
+                        ctx.decode_options(),
+                    )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        SetAuthorityGenerationRequest,
+                    >::from_parts(&req, &body);
+                    svc.set_authority_generation(ctx, req)
+                        .await?
+                        .encode::<SetAuthorityGenerationResponse>(format)
                 })
             }
             "SetRepoVisibility" => {
@@ -2639,6 +2873,88 @@ where
                 &self.transport,
                 &self.config,
                 TRANSPORT_SERVICE_SET_GRANT_EPOCH_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
+                request,
+                options,
+            )
+            .await
+    }
+    /// Call the GetAuthorityGeneration RPC. Sends a request to /mkit.transport.v1.TransportService/GetAuthorityGeneration.
+    pub async fn get_authority_generation(
+        &self,
+        request: GetAuthorityGenerationRequest,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<
+                __buffa::view::GetAuthorityGenerationResponseView<'static>,
+            >,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.get_authority_generation_with_options(
+                request,
+                ::connectrpc::client::CallOptions::default(),
+            )
+            .await
+    }
+    /// Call the GetAuthorityGeneration RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    pub async fn get_authority_generation_with_options(
+        &self,
+        request: GetAuthorityGenerationRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<
+                __buffa::view::GetAuthorityGenerationResponseView<'static>,
+            >,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_unary(
+                &self.transport,
+                &self.config,
+                TRANSPORT_SERVICE_GET_AUTHORITY_GENERATION_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
+                request,
+                options,
+            )
+            .await
+    }
+    /// Call the SetAuthorityGeneration RPC. Sends a request to /mkit.transport.v1.TransportService/SetAuthorityGeneration.
+    pub async fn set_authority_generation(
+        &self,
+        request: SetAuthorityGenerationRequest,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<
+                __buffa::view::SetAuthorityGenerationResponseView<'static>,
+            >,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.set_authority_generation_with_options(
+                request,
+                ::connectrpc::client::CallOptions::default(),
+            )
+            .await
+    }
+    /// Call the SetAuthorityGeneration RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    pub async fn set_authority_generation_with_options(
+        &self,
+        request: SetAuthorityGenerationRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<
+                __buffa::view::SetAuthorityGenerationResponseView<'static>,
+            >,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_unary(
+                &self.transport,
+                &self.config,
+                TRANSPORT_SERVICE_SET_AUTHORITY_GENERATION_SPEC
                     .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,

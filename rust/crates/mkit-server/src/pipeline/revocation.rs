@@ -1,6 +1,7 @@
 //! Epoch changes serialize with grants in the coordinator. Pushes and
 //! acknowledgements are separate guarded transactions, always in that order.
 
+use crate::authority::FenceKind;
 use crate::error::ServerError;
 use crate::repo::NamespaceKey;
 use crate::store::{
@@ -14,8 +15,12 @@ use super::{HookSet, Pipeline, internal, lease::observed_guard, meta_error, ms};
 /// Largest allowed epoch increment (SPEC-WRITE-GRANTS §1.1).
 pub const MAX_EPOCH_STEP: u64 = mkit_attest::grant::MAX_EPOCH_STEP;
 const PAGE_SIZE: u32 = 4;
+// A frozen clock and acknowledged/expired rows must not permit an unbounded
+// walk. Each slice reads at most 32 rows in eight pages, besides four bounded
+// push loops (one attempt, at most five store calls each).
+const MAX_SCAN_PAGES: u32 = 8;
 // Bound contention even with a frozen injected clock.
-const MAX_PUSH_ATTEMPTS: u32 = 32;
+const MAX_PUSH_ATTEMPTS: u32 = 1;
 
 /// One revocation slice processes at most four shards, within this time budget.
 #[derive(Debug, Clone, Copy)]
@@ -64,46 +69,33 @@ pub enum RevokeProgress {
 /// rows cannot become outstanding again at the same epoch: live renewal
 /// preserves their ack, expired renewal acknowledges that epoch immediately,
 /// and any newly inserted row grants the coordinator's current epoch.
-type RevokeCheckpoint = (u64, Option<codec::LeaseRecovery>, crate::store::Cursor);
-
-#[derive(Default)]
-pub(super) struct RevokeCursors(
-    std::sync::Mutex<std::collections::BTreeMap<NamespaceKey, RevokeCheckpoint>>,
-);
-
-impl RevokeCursors {
-    fn get(&self, ns: &NamespaceKey, state: &CoordinatorState) -> Option<crate::store::Cursor> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(ns)
-            .filter(|(e, recovery, _)| *e == state.epoch && *recovery == state.recovery)
-            .map(|(_, _, cursor)| cursor.clone())
-    }
-
-    fn set(
-        &self,
-        ns: &NamespaceKey,
-        state: &CoordinatorState,
-        cursor: Option<crate::store::Cursor>,
-    ) {
-        let mut cursors = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(cursor) = cursor {
-            cursors.insert(ns.clone(), (state.epoch, state.recovery, cursor));
-        } else {
-            cursors.remove(ns);
-        }
-    }
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevokeCheckpoint {
+    generation: u64,
+    recovery: Option<codec::LeaseRecovery>,
+    cursor: Vec<u8>,
 }
 
 struct CoordinatorState {
+    kind: FenceKind,
     epoch_value: Option<Value>,
     epoch: u64,
     config_version: u64,
     recovery: Option<codec::LeaseRecovery>,
+}
+
+fn generation(row: &codec::LeasedShard, kind: FenceKind) -> u64 {
+    match kind {
+        FenceKind::Grant => row.epoch,
+        FenceKind::Authority => row.authority_generation.unwrap_or(0),
+    }
+}
+fn acked(row: &codec::LeasedShard, kind: FenceKind) -> Option<u64> {
+    match kind {
+        FenceKind::Grant => Some(row.acked_epoch),
+        FenceKind::Authority => row.acked_authority_generation,
+    }
 }
 
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
@@ -128,13 +120,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         ns: &NamespaceKey,
         new_epoch: u64,
     ) -> Result<EpochTransition, ServerError> {
+        self.transition_fence(ns, new_epoch, FenceKind::Grant).await
+    }
+
+    pub(super) async fn transition_fence(
+        &self,
+        ns: &NamespaceKey,
+        new_epoch: u64,
+        kind: FenceKind,
+    ) -> Result<EpochTransition, ServerError> {
         let p = self.shards.coordinator(ns);
         for _ in 0..super::coordinator::CREATION_ATTEMPTS {
-            let current = self
-                .meta
-                .get(&p, &keys::grant_epoch())
-                .await
-                .map_err(meta_error)?;
+            let current = self.meta.get(&p, &kind.key()).await.map_err(meta_error)?;
             let epoch = current
                 .as_ref()
                 .map(codec::decode_u64)
@@ -146,8 +143,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 return Ok(transition);
             }
             let batch = Batch::new()
-                .require(observed_guard(keys::grant_epoch(), current.as_ref()))
-                .put(keys::grant_epoch(), codec::encode_u64(new_epoch));
+                .require(observed_guard(kind.key(), current.as_ref()))
+                .put(kind.key(), codec::encode_u64(new_epoch));
             match self.meta.apply(&p, batch).await.map_err(meta_error)? {
                 BatchOutcome::Committed => return Ok(EpochTransition::Advance),
                 BatchOutcome::PreconditionFailed { .. } => {}
@@ -176,16 +173,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         .map_err(meta_error)
     }
 
-    async fn coordinator_state(&self, p: &Partition) -> Result<CoordinatorState, ServerError> {
+    async fn coordinator_state(
+        &self,
+        p: &Partition,
+        kind: FenceKind,
+    ) -> Result<CoordinatorState, ServerError> {
         let rows = self
             .meta
             .get_many(
                 p,
-                &[
-                    keys::grant_epoch(),
-                    keys::namespace_record(),
-                    keys::lease_recovery(),
-                ],
+                &[kind.key(), keys::namespace_record(), keys::lease_recovery()],
             )
             .await
             .map_err(meta_error)?;
@@ -193,6 +190,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             return Err(internal("revocation get_many returned the wrong row count"));
         };
         Ok(CoordinatorState {
+            kind,
             epoch: epoch
                 .as_ref()
                 .map(codec::decode_u64)
@@ -215,16 +213,82 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     fn recovery_pending(&self, state: &CoordinatorState) -> bool {
-        state.recovery.is_some_and(|lr| {
-            ms(self.clock.now_ms())
-                < lr.resumed_at_ms
-                    .saturating_add(self.cfg.epoch_lease_ms)
-                    .saturating_add(self.cfg.lease_margin_ms)
-        })
+        state
+            .recovery
+            .and_then(codec::LeaseRecovery::recovery_time)
+            .is_some_and(|resumed| {
+                ms(self.clock.now_ms())
+                    < resumed
+                        .saturating_add(self.cfg.epoch_lease_ms)
+                        .saturating_add(self.cfg.lease_margin_ms)
+            })
     }
 
     fn revoke_budget_passed(&self, start: u64, budget: RevokeBudget) -> bool {
         ms(self.clock.now_ms()).saturating_sub(start) >= budget.max_elapsed_ms.max(1)
+    }
+
+    async fn read_revoke_cursor(
+        &self,
+        p: &Partition,
+        state: &CoordinatorState,
+    ) -> Result<(Option<Value>, Option<crate::store::Cursor>), ServerError> {
+        let raw = self
+            .meta
+            .get(p, &keys::revoke_cursor(state.kind == FenceKind::Authority))
+            .await
+            .map_err(meta_error)?;
+        let cursor = if let Some(raw) = raw.as_ref() {
+            let bytes = raw.as_bytes();
+            if bytes.len() > 32_768 || bytes.first() != Some(&1) {
+                return Err(internal("invalid revocation checkpoint"));
+            }
+            let checkpoint: RevokeCheckpoint = serde_json::from_slice(&bytes[1..])
+                .map_err(|_| internal("invalid revocation checkpoint"))?;
+            if checkpoint.cursor.len() > crate::store::MAX_KEY_BYTES {
+                return Err(internal("oversized revocation cursor"));
+            }
+            (checkpoint.generation == state.epoch && checkpoint.recovery == state.recovery)
+                .then(|| crate::store::Cursor::new(checkpoint.cursor))
+        } else {
+            None
+        };
+        Ok((raw, cursor))
+    }
+
+    async fn save_revoke_cursor(
+        &self,
+        p: &Partition,
+        state: &CoordinatorState,
+        prior: Option<&Value>,
+        cursor: Option<crate::store::Cursor>,
+    ) -> Result<bool, ServerError> {
+        let key = keys::revoke_cursor(state.kind == FenceKind::Authority);
+        let recovery = state.recovery.as_ref().map(codec::encode_lease_recovery);
+        let batch = Batch::new()
+            .require(observed_guard(key.clone(), prior))
+            .require(observed_guard(state.kind.key(), state.epoch_value.as_ref()))
+            .require(observed_guard(keys::lease_recovery(), recovery.as_ref()));
+        let batch = if let Some(cursor) = cursor {
+            let checkpoint = RevokeCheckpoint {
+                generation: state.epoch,
+                recovery: state.recovery,
+                cursor: cursor.as_bytes().to_vec(),
+            };
+            let mut bytes = vec![1];
+            bytes.extend(
+                serde_json::to_vec(&checkpoint)
+                    .map_err(|_| internal("cannot encode revocation checkpoint"))?,
+            );
+            batch.put(key, Value::new(bytes))
+        } else {
+            batch.delete(key)
+        };
+        match self.meta.apply(p, batch).await.map_err(meta_error)? {
+            BatchOutcome::Committed => Ok(true),
+            BatchOutcome::PreconditionFailed { .. } => Ok(false),
+            BatchOutcome::DeadlinePassed { .. } => Err(internal("checkpoint had no deadline")),
+        }
     }
 
     /// Push and acknowledge at most four live shards in one bounded slice.
@@ -240,16 +304,27 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         ns: &NamespaceKey,
         budget: &RevokeBudget,
     ) -> Result<RevokeProgress, ServerError> {
+        self.revoke_fence_step(ns, budget, FenceKind::Grant).await
+    }
+
+    pub(super) async fn revoke_fence_step(
+        &self,
+        ns: &NamespaceKey,
+        budget: &RevokeBudget,
+        kind: FenceKind,
+    ) -> Result<RevokeProgress, ServerError> {
         let start = ms(self.clock.now_ms());
         let coordinator = self.shards.coordinator(ns);
-        let state = self.coordinator_state(&coordinator).await?;
+        let state = self.coordinator_state(&coordinator, kind).await?;
         let (first, end) = keys::class_range(keys::TAG_LEASED_SHARD);
-        let mut cursor = self.revocation_cursors.get(ns, &state);
+        let (cursor_value, mut cursor) = self.read_revoke_cursor(&coordinator, &state).await?;
         let mut checkpoint = cursor.clone();
         let (mut visited, mut remaining, mut prefix_complete) = (0, 0_u64, true);
+        let mut pages = 0;
         loop {
-            if self.revoke_budget_passed(start, *budget) {
-                self.revocation_cursors.set(ns, &state, checkpoint);
+            if pages == MAX_SCAN_PAGES || self.revoke_budget_passed(start, *budget) {
+                self.save_revoke_cursor(&coordinator, &state, cursor_value.as_ref(), checkpoint)
+                    .await?;
                 return Ok(RevokeProgress::Pending {
                     remaining: remaining.max(1),
                 });
@@ -259,18 +334,30 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .scan(&coordinator, &first, &end, cursor.as_ref(), PAGE_SIZE)
                 .await
                 .map_err(meta_error)?;
+            pages += 1;
+            if page.entries.len() > PAGE_SIZE as usize {
+                return Err(internal("revocation scan exceeded its row bound"));
+            }
             for (key, value) in page.entries {
                 if self.revoke_budget_passed(start, *budget) {
-                    self.revocation_cursors.set(ns, &state, checkpoint);
+                    self.save_revoke_cursor(
+                        &coordinator,
+                        &state,
+                        cursor_value.as_ref(),
+                        checkpoint,
+                    )
+                    .await?;
                     return Ok(RevokeProgress::Pending {
                         remaining: remaining.max(1),
                     });
                 }
                 let row = codec::decode_leased_shard(&value).map_err(meta_error)?;
-                if row.expires_at_ms <= ms(self.clock.now_ms()) || row.acked_epoch == state.epoch {
+                if row.expires_at_ms <= ms(self.clock.now_ms())
+                    || acked(&row, state.kind) == Some(state.epoch)
+                {
                     continue;
                 }
-                if row.acked_epoch > state.epoch || visited == 4 {
+                if acked(&row, state.kind).is_some_and(|n| n > state.epoch) || visited == 4 {
                     remaining += 1;
                     prefix_complete = false;
                     continue;
@@ -293,26 +380,35 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
         }
         // Detect a newer epoch or recovery declaration during the slice.
-        let latest = self.coordinator_state(&coordinator).await?;
+        let latest = self.coordinator_state(&coordinator, kind).await?;
         if remaining == 0 && latest.epoch == state.epoch && !self.recovery_pending(&latest) {
-            self.revocation_cursors.set(ns, &state, None);
-            Ok(RevokeProgress::Complete)
+            if self
+                .save_revoke_cursor(&coordinator, &state, cursor_value.as_ref(), None)
+                .await?
+            {
+                Ok(RevokeProgress::Complete)
+            } else {
+                Ok(RevokeProgress::Pending { remaining: 1 })
+            }
         } else {
-            self.revocation_cursors.set(
-                ns,
+            self.save_revoke_cursor(
+                &coordinator,
                 &state,
+                cursor_value.as_ref(),
                 if latest.epoch == state.epoch && latest.recovery == state.recovery {
                     checkpoint
                 } else {
                     None
                 },
-            );
+            )
+            .await?;
             Ok(RevokeProgress::Pending {
                 remaining: remaining.max(1),
             })
         }
     }
 
+    #[allow(clippy::too_many_lines)] // The guarded push-before-ack sequence preserves both independently updated generations.
     async fn push_and_ack(
         &self,
         coordinator: &Partition,
@@ -337,10 +433,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 return Ok(false);
             }
             let mut row = codec::decode_leased_shard(&value).map_err(meta_error)?;
-            if row.expires_at_ms <= ms(self.clock.now_ms()) || row.acked_epoch == state.epoch {
+            if row.expires_at_ms <= ms(self.clock.now_ms())
+                || acked(&row, state.kind) == Some(state.epoch)
+            {
                 return Ok(true);
             }
-            if row.epoch > state.epoch || row.acked_epoch > state.epoch {
+            if generation(&row, state.kind) > state.epoch
+                || acked(&row, state.kind).is_some_and(|n| n > state.epoch)
+            {
                 return Ok(false);
             }
             let old = self
@@ -352,7 +452,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 let old = codec::decode_epoch_lease(old).map_err(meta_error)?;
                 // A stale slice must never undo a newer push or shorten a
                 // concurrent renewal. Retry that coordinator observation.
-                if old.epoch > state.epoch {
+                if match state.kind {
+                    FenceKind::Grant => old.epoch,
+                    FenceKind::Authority => old.authority_generation.unwrap_or(0),
+                } > state.epoch
+                {
                     return Ok(false);
                 }
                 if old.expires_at_ms > row.expires_at_ms {
@@ -367,8 +471,25 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             if self.revoke_budget_passed(start, *budget) {
                 return Ok(false);
             }
+            let prior = old
+                .as_ref()
+                .map(codec::decode_epoch_lease)
+                .transpose()
+                .map_err(meta_error)?;
             let lease = codec::EpochLease {
-                epoch: state.epoch,
+                authority_ready: prior.and_then(|el| el.authority_ready),
+                epoch: if state.kind == FenceKind::Grant {
+                    state.epoch
+                } else {
+                    prior.map_or(row.epoch, |el| el.epoch)
+                },
+                authority_generation: if state.kind == FenceKind::Authority {
+                    Some(state.epoch)
+                } else {
+                    prior
+                        .and_then(|el| el.authority_generation)
+                        .or(row.authority_generation)
+                },
                 expires_at_ms: row.expires_at_ms,
                 config_version: state.config_version,
             };
@@ -385,13 +506,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             if self.revoke_budget_passed(start, *budget) {
                 return Ok(false);
             }
-            row.acked_epoch = state.epoch;
+            match state.kind {
+                FenceKind::Grant => row.acked_epoch = state.epoch,
+                FenceKind::Authority => row.acked_authority_generation = Some(state.epoch),
+            }
             let ack = Batch::new()
                 .require(Precondition::Equals(key.clone(), value))
-                .require(observed_guard(
-                    keys::grant_epoch(),
-                    state.epoch_value.as_ref(),
-                ))
+                .require(observed_guard(state.kind.key(), state.epoch_value.as_ref()))
                 .put(key.clone(), codec::encode_leased_shard(&row));
             match self
                 .meta

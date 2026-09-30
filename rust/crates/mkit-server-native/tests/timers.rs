@@ -116,6 +116,7 @@ async fn sqlite_driver_fires_ticket_expiry() {
     let id = tickets::ticket_id(rid);
     let due = now();
     let ticket = codec::TicketV1 {
+        authority_generation: None,
         repo: repo.clone(),
         ref_name: ref_name.clone(),
         signer: [1; 32],
@@ -206,6 +207,7 @@ async fn sqlite_driver_fires_ticket_expiry_on_a_namespaced_partition() {
     let id = tickets::ticket_id(rid);
     let due = now();
     let ticket = codec::TicketV1 {
+        authority_generation: None,
         repo: repo.clone(),
         ref_name: ref_name.clone(),
         signer: [1; 32],

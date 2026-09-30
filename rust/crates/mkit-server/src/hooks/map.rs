@@ -241,6 +241,7 @@ pub(super) fn authorize_answer(
         // hook cannot confer writer status.
         Some(one::authorize_response::Result::Allow(allow)) => {
             let mut facts = op.authz.clone();
+            facts.authority_generation = allow.authority_generation;
             if allow.writer_view == Some(true) {
                 facts.caller_view = CallerView::Writer;
             }

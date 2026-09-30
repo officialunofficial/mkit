@@ -31,7 +31,8 @@
 //! | grant epoch | `e 00` | be64; absent means 0, never written as 0 |
 //! | epoch lease (ref shard) | `el 00` | codec `EpochLease` |
 //! | leased shard (`Coordinator`) | `ls 00 <repo> 00 <shard_ref>` | codec `LeasedShard` |
-//! | lease recovery (`Coordinator`) | `lr 00` | codec `LeaseRecovery` |
+//! | lease recovery/authority mode (`Coordinator`) | `lr 00` | codec `LeaseRecovery` |
+//! | bounded fence checkpoint (`Coordinator`) | `fc 00 <kind:u8>`; 0 grant, 1 authority | v1 generation/recovery/cursor JSON |
 //! | published snapshot state (configured Worker `RefIndex` only) | `ps 00` | v1: version:u8, dirty:u8, generation/due/last-success:be64 |
 //! | backup state (Worker only; never pruned) | `bk 00` | codec `BackupStateV1` |
 //! | ticket | `t 00 <ticket_id:32>` | codec `TicketV1` |
@@ -125,6 +126,10 @@ pub const TAG_QUOTA_CONTRIBUTION: &str = "qc";
 pub const TAG_QUOTA_TOTAL: &str = "qt";
 /// Grant epoch tag.
 pub const TAG_GRANT_EPOCH: &str = "e";
+/// Independent namespace authority generation.
+pub const TAG_AUTHORITY_GENERATION: &str = "ag";
+/// Durable generation/recovery-bound completion cursor; kind 0 grant, 1 authority.
+pub const TAG_FENCE_CURSOR: &str = "fc";
 /// Ref shard's epoch lease tag.
 pub const TAG_EPOCH_LEASE: &str = "el";
 /// Coordinator's leased shard table tag.
@@ -368,6 +373,8 @@ pub enum ParsedKey {
     OutcomeBacklog,
     /// `e 00`.
     GrantEpoch,
+    /// Independent deployment-authority generation.
+    AuthorityGeneration,
     /// `el 00`.
     EpochLease,
     /// `ls 00 <repo> 00 <shard_ref>`.
@@ -379,6 +386,8 @@ pub enum ParsedKey {
     },
     /// `lr 00`.
     LeaseRecovery,
+    /// `fc 00 <kind:u8>`: independent generation/recovery-bound cursor.
+    FenceCursor(u8),
     /// `lrc 00`.
     LeaseReconcile,
     /// `w 00 <due_at> <kind> <ref>`.
@@ -792,6 +801,18 @@ pub fn outcome_backlog() -> Key {
     key(TAG_OUTCOME_BACKLOG, &[])
 }
 
+/// Independent namespace authority generation; absent means generation zero.
+#[must_use]
+pub fn authority_generation() -> Key {
+    key(TAG_AUTHORITY_GENERATION, &[])
+}
+
+/// Durable checkpoint for one independent generation's bounded scan.
+#[must_use]
+pub fn revoke_cursor(authority: bool) -> Key {
+    key(TAG_FENCE_CURSOR, &[&[u8::from(authority)]])
+}
+
 /// `e 00`.
 #[must_use]
 pub fn grant_epoch() -> Key {
@@ -1010,8 +1031,10 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"am" if body.is_empty() => ParsedKey::AddressingMarker,
         b"v" if body.is_empty() => ParsedKey::LayoutVersion,
         b"e" if body.is_empty() => ParsedKey::GrantEpoch,
+        b"ag" if body.is_empty() => ParsedKey::AuthorityGeneration,
         b"el" if body.is_empty() => ParsedKey::EpochLease,
         b"lr" if body.is_empty() => ParsedKey::LeaseRecovery,
+        b"fc" if body.len() == 1 && body[0] <= 1 => ParsedKey::FenceCursor(body[0]),
         b"lrc" if body.is_empty() => ParsedKey::LeaseReconcile,
         b"bk" if body.is_empty() => ParsedKey::BackupState,
         b"ls" => parse_leased_shard(body)?,
@@ -1161,6 +1184,7 @@ mod tests {
             TAG_EPOCH_LEASE,
             TAG_LEASED_SHARD,
             TAG_LEASE_RECOVERY,
+            TAG_FENCE_CURSOR,
             TAG_BACKUP_STATE,
             TAG_TIMER,
             TAG_HOLDER,
@@ -1585,6 +1609,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Exhaustive fixture includes both fence checkpoint kinds.
     fn parse_roundtrip_every_class() {
         let s = [0x22; 32];
         let q = scope();
@@ -1616,6 +1641,8 @@ mod tests {
             (grant_epoch(), ParsedKey::GrantEpoch),
             (epoch_lease(), ParsedKey::EpochLease),
             (lease_recovery(), ParsedKey::LeaseRecovery),
+            (revoke_cursor(false), ParsedKey::FenceCursor(0)),
+            (revoke_cursor(true), ParsedKey::FenceCursor(1)),
             (lease_reconcile(), ParsedKey::LeaseReconcile),
             (
                 leased_shard(&repo("a"), "refs/heads/main"),

@@ -83,12 +83,18 @@ pub enum StoredVisibility {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EpochLease {
+    /// Initial generation-zero activation barrier completed before this grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_ready: Option<bool>,
     /// Epoch against which the shard can authorize writes.
     pub epoch: u64,
     /// Lease expiry, Unix milliseconds from the pipeline clock.
     pub expires_at_ms: u64,
     /// Namespace configuration version at grant, starting at 1.
     pub config_version: u64,
+    /// Independent authority generation; absent in legacy unfenced codecs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_generation: Option<u64>,
 }
 
 /// The coordinator's durable lease grant and installation acknowledgement.
@@ -107,6 +113,12 @@ pub struct LeasedShard {
     pub expires_at_ms: u64,
     /// Epoch whose installation in the shard has been acknowledged.
     pub acked_epoch: u64,
+    /// Authority generation granted alongside the epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_generation: Option<u64>,
+    /// Raised only after a committed push, or expiry of every older lease.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acked_authority_generation: Option<u64>,
     /// Greatest source relay lower bound observed for this shard.
     pub relay_watermark_ms: u64,
     /// Due time of the one sweep timer owned by this row.
@@ -117,8 +129,25 @@ pub struct LeasedShard {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LeaseRecovery {
+    /// Durable namespace authority mode, independent of business creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_fence: Option<bool>,
+    /// Initial barrier is complete; fenced grants can now be installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_ready: Option<bool>,
+    /// This row carries activation state without declaring a real recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_only: Option<bool>,
     /// Recovery time, Unix milliseconds from the pipeline clock.
     pub resumed_at_ms: u64,
+}
+
+impl LeaseRecovery {
+    /// Actual recovery time; a pure activation marker creates no holdoff.
+    #[must_use]
+    pub fn recovery_time(self) -> Option<u64> {
+        (self.activation_only != Some(true)).then_some(self.resumed_at_ms)
+    }
 }
 
 /// The last consistent Worker snapshot of one partition. A zero export time
@@ -140,6 +169,9 @@ pub struct BackupStateV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TicketV1 {
+    /// Authority generation authorized when this ticket was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_generation: Option<u64>,
     /// Repository name within the partition's namespace.
     #[serde(with = "repo_json")]
     pub repo: RepoName,
@@ -616,6 +648,9 @@ pub fn encode_epoch_lease(lease: &EpochLease) -> Value {
 /// Decode an epoch lease; namespace configuration versions start at 1.
 pub fn decode_epoch_lease(value: &Value) -> Result<EpochLease, StoreError> {
     let lease: EpochLease = decode_json(value, "bad epoch lease")?;
+    if lease.authority_ready.is_some() && lease.authority_generation.is_none() {
+        return Err(corrupt("authority ready lease missing generation"));
+    }
     if lease.config_version == 0 {
         return Err(corrupt("lease configuration version is zero"));
     }
@@ -641,7 +676,15 @@ pub fn encode_lease_recovery(recovery: &LeaseRecovery) -> Value {
 
 /// Decode a declared lease-table recovery marker.
 pub fn decode_lease_recovery(value: &Value) -> Result<LeaseRecovery, StoreError> {
-    decode_json(value, "bad lease recovery")
+    let mode: LeaseRecovery = decode_json(value, "bad lease recovery")?;
+    if mode.authority_fence == Some(false)
+        || mode.activation_only == Some(false)
+        || ((mode.authority_ready.is_some() || mode.activation_only == Some(true))
+            && mode.authority_fence != Some(true))
+    {
+        return Err(corrupt("invalid authority activation marker"));
+    }
+    Ok(mode)
 }
 
 /// Encode a per-partition Worker backup state.
@@ -1284,6 +1327,7 @@ mod tests {
 
     fn ticket_fixture() -> TicketV1 {
         TicketV1 {
+            authority_generation: None,
             repo: RepoName::new("a").unwrap(),
             ref_name: "refs/heads/main".into(),
             signer: [0x11; 32],
@@ -1883,11 +1927,15 @@ mod tests {
     #[test]
     fn lease_codecs_roundtrip_and_golden_bytes() {
         let epoch = EpochLease {
+            authority_ready: None,
+            authority_generation: None,
             epoch: 7,
             expires_at_ms: 30000,
             config_version: 2,
         };
         let shard = LeasedShard {
+            authority_generation: None,
+            acked_authority_generation: None,
             epoch: 7,
             expires_at_ms: 30000,
             acked_epoch: 6,
@@ -1895,6 +1943,9 @@ mod tests {
             sweep_due_ms: 30000,
         };
         let recovery = LeaseRecovery {
+            authority_fence: None,
+            authority_ready: None,
+            activation_only: None,
             resumed_at_ms: 100_000,
         };
         let epoch_value = encode_epoch_lease(&epoch);

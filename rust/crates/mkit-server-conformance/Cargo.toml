@@ -77,6 +77,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 hmac = { version = "0.13", optional = true }
 
 [dev-dependencies]
+base64 = "0.22"
 # tests/fs_backends.rs: the `.mkit`-layout stores (native only, like this
 # crate).
 mkit-server = { version = "0.4", path = "../mkit-server", features = ["fs"] }
