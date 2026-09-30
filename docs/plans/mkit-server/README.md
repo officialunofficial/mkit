@@ -168,19 +168,19 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 | 2.14 | G15 | CLI: mkit grant revoke and mkit epoch | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 2.15 | G15 | Staging: enable M2 features and run M2 conformance (M2 exit) | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 2.16 | G14 | Namespace authority-generation fence for external-authority writes | [launch plan](00-plan.md#3-launch-mapping-delivery-and-critical-path-r-185) | | planned (launch bundle with 3.9c) |
-| 3.1 | G16 | Proto: AdmissionChallenge error detail and goldens | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 3.2 | G16 | Core: two-phase Admission (Allow/Challenge/Deny), 402 mapping, GetServerInfo fields | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 3.3 | G16 | Core: outcome outbox, OutcomeSink, exactly-one-outcome, backpressure, read outcomes | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 3.4 | G16 | Native adapter: outbox delivery task, CORS/redaction, ssh/enc 'use mkit+https' | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 3.5 | G16 | Worker adapter: outbox delivery timer kind, CORS/redaction | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 3.6 | G17 | Spec: SPEC-SERVER v1 (M3 sections) and the mkit.server.hooks.v1 proto | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 3.7 | G17 | Core: remote-hook adapter (remote-hooks feature) | [M3–M5](m3-m5-breakdown.md) | | planned |
+| 3.1 | G16 | Proto: AdmissionChallenge error detail and goldens | [M3–M5](m3-m5-breakdown.md) | [#1192](https://github.com/officialunofficial/mkit/pull/1192) | merged |
+| 3.2 | G16 | Core: two-phase Admission (Allow/Challenge/Deny), 402 mapping, GetServerInfo fields | [M3–M5](m3-m5-breakdown.md) | [#1212](https://github.com/officialunofficial/mkit/pull/1212) | merged |
+| 3.3 | G16 | Core: outcome outbox, OutcomeSink, exactly-one-outcome, backpressure, read outcomes | [M3–M5](m3-m5-breakdown.md) | [#1212](https://github.com/officialunofficial/mkit/pull/1212) | merged |
+| 3.4 | G16 | Native adapter: outbox delivery task, CORS/redaction, ssh/enc 'use mkit+https' | [M3–M5](m3-m5-breakdown.md) | [#1219](https://github.com/officialunofficial/mkit/pull/1219) | merged |
+| 3.5 | G16 | Worker adapter: outbox delivery timer kind, CORS/redaction | [M3–M5](m3-m5-breakdown.md) | [#1219](https://github.com/officialunofficial/mkit/pull/1219) | merged |
+| 3.6 | G17 | Spec: SPEC-SERVER v1 (M3 sections) and the mkit.server.hooks.v1 proto | [M3–M5](m3-m5-breakdown.md) | [#1142](https://github.com/officialunofficial/mkit/pull/1142) | merged |
+| 3.7 | G17 | Core: remote-hook adapter (remote-hooks feature) | [M3–M5](m3-m5-breakdown.md) | [#1217](https://github.com/officialunofficial/mkit/pull/1217) | merged |
 | 3.7b | G17 | Public hooks.v1 types and mkit-hook:v1 verifier in mkit-rpc | [bundle brief](briefs/WP-3.7b-3.12-3.13.md), [launch plan](00-plan.md#3-launch-mapping-delivery-and-critical-path-r-185) | | implemented; public acceptance and semver pass |
-| 3.8 | G17 | Native hook channels: HTTP and signed webhook outcome sink | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 3.9 | G17 | Worker hook channels: service binding and HookSet-generic entry points | [M3–M5](m3-m5-breakdown.md) | | planned |
+| 3.8 | G17 | Native hook channels: HTTP and signed webhook outcome sink | [M3–M5](m3-m5-breakdown.md) | [#1222](https://github.com/officialunofficial/mkit/pull/1222) | merged |
+| 3.9 | G17 | Worker hook channels: service binding and HookSet-generic entry points | [M3–M5](m3-m5-breakdown.md) | [#1222](https://github.com/officialunofficial/mkit/pull/1222) | merged |
 | 3.9c | G17 | Worker signed HTTP hook channel | [launch plan](00-plan.md#3-launch-mapping-delivery-and-critical-path-r-185) | | planned (launch bundle with 2.16) |
-| 3.10 | G18 | Client: 402 detection -> AdmissionRequired, receipt passthrough | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 3.11 | G18 | Client: admission_helper, header allowlist and hard-reserved set (D30) | [M3–M5](m3-m5-breakdown.md) | | planned |
+| 3.10 | G18 | Client: 402 detection -> AdmissionRequired, receipt passthrough | [M3–M5](m3-m5-breakdown.md) | [#1201](https://github.com/officialunofficial/mkit/pull/1201) | merged |
+| 3.11 | G18 | Client: admission_helper, header allowlist and hard-reserved set (D30) | [M3–M5](m3-m5-breakdown.md) | [#1201](https://github.com/officialunofficial/mkit/pull/1201) | merged |
 | 3.12 | G18 | Stub MPP hook server and helper; end-to-end tests (M3 exit) | [exit evidence](m3-exit-report.md) | | implemented; native helper and Worker M3 lane pass |
 | 3.13 | G18 | Wire conformance: admission, outcomes and backpressure on both adapters | [exit evidence](m3-exit-report.md) | | implemented; both adapters pass M3; core race corrected |
 | 3.14 | G17 | Docs: TypeScript mppx reference Worker (documentation only) | [M3–M5](m3-m5-breakdown.md) | | planned |

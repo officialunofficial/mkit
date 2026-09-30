@@ -1,6 +1,6 @@
 # M3 exit report (WP-3.7b, WP-3.12, WP-3.13)
 
-Evidence from merged base `d9ff5f96` (including WP-1.27, WP-4.13/4.15,
+Historical evidence from merged base `d9ff5f96` (including WP-1.27, WP-4.13/4.15,
 WP-4.16 and the R-185 launch plan), on 2026-09-29–30. Machine: macOS aarch64, Rust 1.95.0. Builds used
 `CARGO_PROFILE_DEV_DEBUG=0`, `CARGO_PROFILE_TEST_DEBUG=0`, this worktree's
 own target directory, and `$HOME/.cache/mkit-test-tmp/3-12-3-13` as a
@@ -18,6 +18,8 @@ and unchanged-parent comparisons. Full just ci passes before the final WP-4.16/R
 Worker M1 network-loss failures are recorded with isolated and parent evidence.
 After the final adapter merge, strict workspace clippy/docs and the
 complete 15-case Worker M3 phase pass; the server gate and wasm checks repeat.
+Latest-base `45616828` verification in §6 passes all affected gates and
+both complete Worker scripts without reruns.
 
 ## 1. Core outcome completion correction and native lanes
 
@@ -241,6 +243,37 @@ pipeline or CI configuration was weakened. The complete serial server
 gate passes without retries; subsequent complete runs use the existing
 CI profile and record any retries rather than concealing them.
 
+### Final latest-base integration (2026-09-30)
+
+Base `45616828` (WP-4.8) is merged at `6599393d`. The two additive
+conflicts retain `IndexedAsync` alongside all M3 capabilities, and retain
+both `--indexed` and `--hooks` runner phases. Source was clean during these
+runs. Fresh evidence is under `$HOME/.cache/mkit-test-tmp/wp-3-12-3-13`,
+with a nonsymlinked TMPDIR and the same debug-profile settings. Worker
+hooks used port 8931; the serialized default run uses 8933.
+
+| Integration check | Result and log |
+|---|---|
+| Complete `just ci-server` | 2,340 passed, 8 declared skips, no retries; wasm checks and CLI baseline pass; ci-server-integration.log |
+| RPC and CLI all-feature nextest | 1,559 passed, 9 declared skips, no retries, including public hooks goldens/signatures and helper tests; rpc-cli-integration.log |
+| Strict workspace all-target/all-feature Clippy | Pass; clippy-integration.log |
+| Formatting, all-feature touched-crate doctests and warning-strict docs | Pass; docs-wasm-integration.log |
+| Strict wasm32 Clippy | RPC hooks, server remote-hooks, Worker default/test-faults pass; docs-wasm-integration.log |
+| `just ci-scripts` / `just ci-security` | Pass; scripts-security-integration.log |
+| Six app/probe lockfiles | Locked offline metadata passes; metadata-integration.log |
+| Default Worker configuration regression | release_never_reads_m3_test_vars passes; release-config-integration.log |
+| Full Worker `--test-faults --hooks` | M1 93/0/122; growth 2/0/0; quotas 4/0/1; all 15 M3 cases pass with no skips; worker-integration.log |
+| Default Worker / production artifact | 84 passed, zero failures, 131 declared skips; cold-start 30/30; all three M3 markers absent from default wasm; worker-default-integration.log |
+
+The full Worker run also passes both 30-request cold-start probes and the
+planted relay. Peak upload/download buffering is 863,989 bytes, below
+1,048,576. The quota skip remains the undeclared multi-namespace capability.
+No isolated reruns or baseline comparisons were needed for these latest
+integration runs. The earlier full `just ci` remains historical evidence;
+it was not rerun on base `45616828`. The fresh affected gates above cover
+the integrated server, RPC, CLI, wasm, scripts/security and real Worker
+surfaces. No staging or deployment was run.
+
 ## 7. PRD M3 exit criteria mapped to evidence
 
 | PRD §8 exit bullet | Test/evidence | Status |
@@ -265,7 +298,10 @@ parameter whitespace; preserved raw CLI values; tested helper challenge
 selection; fixed Multi owner-repository allocation expectations; corrected
 backlog setup and the script double-shift; and found the shared outcome
 race. Temporary native debug tracing used during diagnosis was removed.
-Two review passes are recorded below. Their last fixture edits pass the
+Two local review passes are recorded below. Two independent read-only reviews
+at `6599393d` additionally found no actionable correctness/security or
+spec/brief/crypto findings. The final status-table audit corrected stale
+planned labels for merged WP-3.1–3.11 using their merged PR references. Their last fixture edits pass the
 complete serial server gate; merged-tree runs are recorded in §6.
 
 The diff adds 2,075 handwritten non-test source/build-script/shell/JS lines,
@@ -304,8 +340,8 @@ change is proposed. Gates are not waived by this review.
 | B7 | Report and PRD mapping, README and registry; both adapter behavior demonstrated; §6 records full gates |
 | B8 | R-172/R-173 and separate CHANGELOG lines for all three WPs |
 
-Base d9ff5f96 is merged, including WP-1.27, paid/private HTTP reads,
-the WP-4.16 adapter mounts and R-185. This local M3 exit is distinct
+Base 45616828 is merged, including WP-1.27, paid/private HTTP reads,
+the WP-4.16 adapter mounts, WP-4.8 scheduled verification and R-185. This local M3 exit is distinct
 from the new single launch gate; the brief still authorizes no staging.
 Both sides of adjacent CHANGELOG, wire-table, configuration, registry
 and runner changes are retained. The six Worker/probe lockfiles pass
