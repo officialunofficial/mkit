@@ -2884,7 +2884,16 @@ async fn authority_renewal_between_push_and_ack<N: NamespaceStore + 'static>(
         Some(0)
     );
     store.controls.ack.resume();
-    assert_eq!(task.await.unwrap().unwrap(), 1);
+    // Advancing the manual clock exhausted the original bounded call; retry resumes its barrier.
+    let pending = task.await.unwrap().unwrap_err();
+    assert_eq!(pending.code(), Code::Unavailable);
+    assert_eq!(
+        fresh
+            .set_authority_generation(&signed_authority(1))
+            .await
+            .unwrap(),
+        1
+    );
     assert_eq!(
         ls(&store, &a, REF).await.acked_authority_generation,
         Some(1)
