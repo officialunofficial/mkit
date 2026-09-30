@@ -994,6 +994,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             faults::run_timers(
                 a.test_directives(),
                 &self.meta,
+                &self.blobs,
                 self.shards.as_ref(),
                 &op.repo,
                 self.clock.as_ref(),

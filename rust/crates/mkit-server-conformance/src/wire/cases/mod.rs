@@ -35,6 +35,7 @@ mod growth;
 mod health;
 mod indexed;
 mod info;
+mod lag;
 mod leases;
 mod list;
 mod multipart;
@@ -79,6 +80,23 @@ pub(crate) type CaseResult = Result<(), Failure>;
 /// Relay lag is expected on both local D34 and remote deployments.
 pub(crate) async fn eventually_listed<T, F, Fut>(
     label: &str,
+    fetch: F,
+    ready: impl Fn(&T) -> bool,
+) -> Result<T, Failure>
+where
+    T: Debug,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, Failure>>,
+{
+    let bound = Duration::from_millis(mkit_server::relay::RELAY_LAG_BOUND_MS);
+    eventually_listed_within(bound, label, fetch, ready).await
+}
+
+/// [`eventually_listed`] with its own deadline, for a backlog (tens of
+/// thousands of writes) that the per-delivery lag bound does not cover.
+pub(crate) async fn eventually_listed_within<T, F, Fut>(
+    bound: Duration,
+    label: &str,
     mut fetch: F,
     ready: impl Fn(&T) -> bool,
 ) -> Result<T, Failure>
@@ -87,8 +105,7 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, Failure>>,
 {
-    let deadline =
-        tokio::time::Instant::now() + Duration::from_millis(mkit_server::relay::RELAY_LAG_BOUND_MS);
+    let deadline = tokio::time::Instant::now() + bound;
     loop {
         let listing = fetch().await?;
         if ready(&listing) {
@@ -273,6 +290,8 @@ cases! {
     "tickets.begin_upload_new" => tickets::begin_upload_new, M1, [Tickets, AuthV2], [];
     "tickets.begin_upload_idempotent" => tickets::begin_upload_idempotent, M1, [Tickets, AuthV2], [];
     "tickets.begin_upload_caps" => tickets::begin_upload_caps, M1, [Tickets, AuthV2], [];
+    "tickets.expiry_timer_frees_cap_slot" => tickets::expiry_timer_frees_cap_slot, M1, [Tickets, AuthV2, TestFaults], [MultiRepo];
+    "tickets.begin_upload_per_ref_cap" => tickets::begin_upload_per_ref_cap, M1, [Tickets, AuthV2], [MultiRepo];
     "tickets.begin_upload_packmap_refused" => tickets::begin_upload_packmap_refused, M1, [Tickets, AuthV2], [];
     "tickets.upload_pack_ticketed" => tickets::upload_pack_ticketed, M1, [Tickets, AuthV2], [];
     "tickets.upload_pack_bad_token" => tickets::upload_pack_bad_token, M1, [Tickets, AuthV2], [];
@@ -282,11 +301,15 @@ cases! {
     "tickets.advance_marker_then_upload" => tickets::advance_marker_then_upload, M1, [Tickets, AuthV2], [];
     "tickets.advance_conflicts_keep_ticket" => tickets::advance_conflicts_keep_ticket, M1, [Tickets, AuthV2], [];
     "refs.delete_pair" => refs::delete_pair, M1, [], [];
-    "tickets.advance_ticket_bindings" => tickets::advance_ticket_bindings, M1, [Tickets, AuthV2], [MultiRepo];
+    "tickets.advance_ticket_bindings" => tickets::advance_ticket_bindings, M1, [Tickets, AuthV2], [];
     "tickets.advance_other_repository" => tickets::advance_other_repository, M1, [Tickets, AuthV2, MultiRepo], [];
     "tickets.advance_expired_ticket" => tickets::advance_expired_ticket, M1, [Tickets, AuthV2, TestFaults], [];
     "indexed.pending_verification_unavailable" => indexed::pending_verification_unavailable, M4, [IndexedMode, MultiRepo, Tickets, AuthV2, TestFaults], [];
-    "leases.bump_completes_and_writes_continue" => leases::bump_completes_and_writes_continue, M1, [EpochLeases, TestFaults], [];
+    "leases.bump_completes_and_writes_continue" => leases::bump_completes_and_writes_continue, M1, [EpochLeases, TestFaults], [MultiRepo];
+    "leases.idle_shard_renews_at_new_epoch" => leases::idle_shard_renews_at_new_epoch, M2, [EpochLeases, Grants, MultiRepo, AuthV2, TestFaults], [];
+    "leases.lease_expires_before_revocation_completes" => leases::lease_expires_before_revocation_completes, M2, [EpochLeases, Grants, MultiRepo, AuthV2, TestFaults], [];
+    "lag.list_refs_window" => lag::list_refs_window, M1, [AuthV2, TestFaults], [MultiRepo];
+    "lag.membership_window" => repository::membership_lag_window, M1, [MultiRepo, AuthV2, Tickets, TestFaults], [];
     "info.shape_and_policy" => info::shape_and_policy, M1, [], [];
     "info.ignores_repository_header" => info::ignores_repository_header, M1, [], [];
     "repo.single_header_mismatch_not_found" => repository::single_header_mismatch, M0, [], [MultiRepo];
@@ -302,6 +325,8 @@ cases! {
     "repo.isolation_packs" => repository::isolation_packs, M1, [MultiRepo, AuthV2], [];
     "repo.membership_read_your_writes" => repository::membership_read_your_writes, M1, [MultiRepo, AuthV2], [];
     "repo.malformed_membership_hint_no_op" => repository::malformed_membership_hint, M1, [MultiRepo, AuthV2], [];
+    "repo.d36_hint_reads_during_lag" => repository::d36_hint_reads_during_lag, M1, [MultiRepo, AuthV2, Tickets, TestFaults], [];
+    "repo.isolation_replay" => repository::isolation_replay, M1, [MultiRepo, AuthV2, Replay], [];
     "policy.owner_write_allowed" => policy::owner_write_allowed, M1, [NamespacePolicy, MultiRepo, AuthV2], [];
     "policy.non_owner_write_denied" => policy::non_owner_write_denied, M1, [NamespacePolicy, MultiRepo, AuthV2], [];
     "policy.non_allowlisted_namespace_denied" => policy::non_allowlisted_namespace_denied, M1, [NamespacePolicy, MultiRepo, AuthV2], [];
@@ -323,6 +348,7 @@ cases! {
     "refs.list_invalid_prefix_invalid_argument" => refs::list_invalid_prefix, M0, [], [];
     "refs.concurrent_missing_one_winner" => concurrent::missing_one_winner, M0, [], [];
     "refs.concurrent_match_one_winner" => concurrent::match_one_winner, M0, [], [];
+    "refs.many_refs_one_repository" => concurrent::many_refs, M1, [], [MultiRepo];
     "advance.committed" => advance::committed, M0, [], [];
     "advance.head_conflict_typed" => advance::head_conflict_typed, M0, [], [];
     "advance.packmap_conflict_typed" => advance::packmap_conflict_typed, M0, [], [];
@@ -381,6 +407,8 @@ cases! {
     "growth.replay_and_quota_pruned" => growth::replay_and_quota_pruned, M0, [AuthV2, Replay, Quota, TestFaults], [];
     "list.large_response_within_limit" => list::large_response_within_limit, M0, [], [];
     "list.paging_wire" => list::paging_wire, M0, [], [];
+    "list.merge_paging_over_32_mib" => list::merge_paging_over_32_mib, M1, [], [];
+    "growth.tickets_and_outbox_pruned" => growth::tickets_and_outbox_pruned, M1, [AuthV2, Tickets, Quota, TestFaults, Timers], [];
 }
 
 /// The context one case runs in.

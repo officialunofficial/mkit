@@ -4,17 +4,19 @@ use buffa::Message;
 use mkit_core::hash::hash;
 use mkit_transport_connect::generated::__buffa::oneof::begin_upload_response::Result as BeginResult;
 use mkit_transport_connect::generated::{
-    AdvanceOutcome, AdvanceRefsRequest, BeginUploadRequest, BeginUploadResponse, UploadPackRequest,
-    UploadTicket,
+    AdvanceOutcome, AdvanceRefsRequest, AdvanceRefsResponse, BeginUploadRequest,
+    BeginUploadResponse, UploadPackRequest, UploadTicket,
 };
 
 use super::{
-    A, B, CaseResult, Commit, Ctx, Exp, Failure, advance_req, ensure, sign_unary, upload_msgs,
-    want_code, want_ok, want_outcome,
+    A, B, CaseResult, Commit, Ctx, Exp, Failure, advance_req, ensure, repository, sign_unary,
+    upload_msgs, want_code, want_ok, want_outcome,
 };
-use crate::wire::client::Rpc;
+use crate::wire::client::{Rpc, RpcError};
+use crate::wire::profile::Feature;
+use crate::wire::sign::Signer;
 
-fn request(name: String, salt: u64) -> BeginUploadRequest {
+pub(super) fn request(name: String, salt: u64) -> BeginUploadRequest {
     BeginUploadRequest {
         r#ref: Some(name),
         pack_id: Some(hash(&salt.to_be_bytes()).to_vec()),
@@ -23,7 +25,7 @@ fn request(name: String, salt: u64) -> BeginUploadRequest {
     }
 }
 
-fn ticket(response: BeginUploadResponse) -> Result<UploadTicket, Failure> {
+pub(super) fn ticket(response: BeginUploadResponse) -> Result<UploadTicket, Failure> {
     match response.result {
         Some(BeginResult::Ticket(ticket)) => Ok(*ticket),
         other => Err(Failure::Fail(format!(
@@ -274,39 +276,185 @@ pub(super) async fn advance_conflicts_keep_ticket(ctx: Ctx) -> CaseResult {
     )
 }
 
+/// Where a case's ticketed calls go: the deployment's one repository, or,
+/// under Multi, a repository the `repository-a` signer owns (so its
+/// tickets bind to that owner; any other signer is denied by policy).
+struct Target(Option<(Signer, String)>);
+
+impl Target {
+    fn new(ctx: &Ctx, name: &str) -> Result<Self, Failure> {
+        if !ctx.profile().has(Feature::MultiRepo) {
+            return Ok(Self(None));
+        }
+        let (repository, _) = repository::identities(ctx, name, "unused")?;
+        Ok(Self(Some((ctx.v2_signer("repository-a")?, repository))))
+    }
+
+    /// `rpc` as the owner, or as the `other-signer` stranger.
+    async fn call<M: Message>(
+        &self,
+        ctx: &Ctx,
+        stranger: bool,
+        rpc: Rpc,
+        req: &impl Message,
+    ) -> Result<Result<M, RpcError>, String> {
+        let label = if stranger { "other-signer" } else { "main" };
+        let Some((owner, repository)) = &self.0 else {
+            return ctx.call_as(label, rpc, req).await;
+        };
+        let other;
+        let who = if stranger {
+            other = ctx
+                .v2_signer(label)
+                .map_err(|_| "needs auth v2".to_owned())?;
+            &other
+        } else {
+            owner
+        };
+        let request = sign_unary(who, rpc, req, |env| {
+            repository.clone_into(&mut env.repository);
+        });
+        ctx.send(&request).await
+    }
+}
+
 pub(super) async fn advance_ticket_bindings(ctx: Ctx) -> CaseResult {
+    let target = Target::new(&ctx, "bindings")?;
     let pack = b"ticket advance bindings";
-    let opened = open_for_pack(&ctx, pack).await?;
-    let id = opened
-        .id
-        .clone()
-        .ok_or_else(|| Failure::Fail("missing ticket id".into()))?;
-    let invalid = ticket_advance(&ctx, "ticketed", vec![vec![0xff; 32]]);
+    let begin = BeginUploadRequest {
+        r#ref: Some(ctx.head("ticketed")),
+        pack_id: Some(hash(pack).to_vec()),
+        bytes: Some(pack.len() as u64),
+        ..Default::default()
+    };
+    let id = ticket(want_ok(
+        target.call(&ctx, false, Rpc::BeginUpload, &begin).await?,
+        "BeginUpload",
+    )?)?
+    .id
+    .ok_or_else(|| Failure::Fail("missing ticket id".into()))?;
+    let advance = |branch: &str, ids, stranger| {
+        let req = ticket_advance(&ctx, branch, ids);
+        let (target, ctx) = (&target, &ctx);
+        async move {
+            target
+                .call::<AdvanceRefsResponse>(ctx, stranger, Rpc::AdvanceRefs, &req)
+                .await
+        }
+    };
     exact(
         want_code(
-            ctx.advance(&invalid).await?,
+            advance("ticketed", vec![vec![0xff; 32]], false).await?,
             "failed_precondition",
             "unknown ticket",
         )?,
         "invalid or expired upload ticket",
     )?;
-    let wrong_ref = ticket_advance(&ctx, "wrong-ref", vec![id.clone()]);
     exact(
         want_code(
-            ctx.advance(&wrong_ref).await?,
+            advance("wrong-ref", vec![id.clone()], false).await?,
             "failed_precondition",
             "ticket ref mismatch",
         )?,
         "invalid or expired upload ticket",
     )?;
-    let correct = ticket_advance(&ctx, "ticketed", vec![id]);
-    let response: Result<mkit_transport_connect::generated::AdvanceRefsResponse, _> = ctx
-        .call_as("other-signer", Rpc::AdvanceRefs, &correct)
-        .await?;
+    let error = want_code(
+        advance("ticketed", vec![id], true).await?,
+        "permission_denied",
+        "ticket signer mismatch",
+    )?;
+    // Under Multi the stranger is refused as a non-owner before the ticket
+    // binding is looked at, with the policy's own message.
+    if !ctx.profile().has(Feature::MultiRepo) {
+        exact(error, "upload ticket binding mismatch")?;
+    }
+    Ok(())
+}
+
+pub(super) async fn begin_upload_per_ref_cap(ctx: Ctx) -> CaseResult {
+    let (per_ref, per_signer) = (
+        ctx.profile().ticket_per_ref,
+        ctx.profile().ticket_per_signer,
+    );
+    ensure!(
+        per_ref > 0 && per_signer > 0,
+        "ticket caps must be positive"
+    );
+    if per_ref > 4_096 {
+        return Err(Failure::Skip(format!(
+            "a per-ref cap of {per_ref} needs too many BeginUpload calls"
+        )));
+    }
+    let name = ctx.head("per-ref");
+    let mut opened = 0;
+    while opened < per_ref {
+        // A fresh signer per block keeps every signer under its own cap.
+        let label = format!("per-ref-{}", opened / per_signer);
+        let req = request(name.clone(), 1_000 + opened);
+        let result: BeginUploadResponse = want_ok(
+            ctx.call_as(&label, Rpc::BeginUpload, &req).await?,
+            "BeginUpload below the per-ref cap",
+        )?;
+        ticket(result)?;
+        opened += 1;
+    }
+    let over = request(name, 1_000 + per_ref);
+    let result: Result<BeginUploadResponse, _> =
+        ctx.call_as("per-ref-over", Rpc::BeginUpload, &over).await?;
     exact(
-        want_code(response, "permission_denied", "ticket signer mismatch")?,
-        "upload ticket binding mismatch",
-    )
+        want_code(
+            result,
+            "failed_precondition",
+            "BeginUpload at the per-ref cap",
+        )?,
+        "too many open upload tickets",
+    )?;
+    // The cap is per target ref: the same signer opens one on another ref.
+    let elsewhere = request(ctx.head("per-ref-other"), 1);
+    let result: BeginUploadResponse = want_ok(
+        ctx.call_as("per-ref-over", Rpc::BeginUpload, &elsewhere)
+            .await?,
+        "BeginUpload on another ref",
+    )?;
+    ticket(result)?;
+    Ok(())
+}
+
+pub(super) async fn expiry_timer_frees_cap_slot(ctx: Ctx) -> CaseResult {
+    let cap = ctx.profile().ticket_per_signer;
+    ensure!(cap > 0, "ticket_per_signer must be positive");
+    let name = ctx.head("expiring");
+    let mut last_expiry = 0;
+    for salt in 0..cap {
+        let mut req = request(name.clone(), salt);
+        // One real session suffices; the remaining tickets fill the cap
+        // without spending a large upload quota or opening needless sessions.
+        if salt == 0
+            && ctx.profile().has(Feature::Multipart)
+            && ctx.profile().max_pack_bytes > mkit_core::upload_parts::MIN_PART_SIZE
+        {
+            req.bytes = Some(mkit_core::upload_parts::MIN_PART_SIZE + 1);
+        }
+        let result: BeginUploadResponse = want_ok(
+            ctx.call_as("expiring", Rpc::BeginUpload, &req).await?,
+            "BeginUpload below cap",
+        )?;
+        last_expiry = last_expiry.max(ticket(result)?.expires_unix_ms.unwrap_or_default());
+    }
+    let next = request(name.clone(), cap);
+    let full: Result<BeginUploadResponse, _> =
+        ctx.call_as("expiring", Rpc::BeginUpload, &next).await?;
+    want_code(full, "failed_precondition", "BeginUpload at the cap")?;
+    // Skew the business clock past every expiry and tick the shard: the
+    // kind-2 handler closes each ticket and returns its cap slots.
+    let skew = last_expiry - crate::wire::sign::now_ms() + 1_000;
+    super::timers::tick_shard(&ctx, &name, skew).await?;
+    let freed: BeginUploadResponse = want_ok(
+        ctx.call_as("expiring", Rpc::BeginUpload, &next).await?,
+        "BeginUpload after the expiry timer",
+    )?;
+    ticket(freed)?;
+    Ok(())
 }
 
 pub(super) async fn advance_other_repository(ctx: Ctx) -> CaseResult {

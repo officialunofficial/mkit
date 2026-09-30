@@ -65,6 +65,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shard, coordinator and root classes; the quota conformance cases run under
   D34 (per-branch) and a Multi + D34 case checks the namespace cap across
   branches after a forced rollup (WP-1.26b).
+- Server: the M1 exit wire conformance suite (WP-1.27): isolation replay, target-ref ticket caps and expiry, the
+  D34 lag windows and D36 hinted reads over a held relay, idle and expired epoch-lease renewal, 64-ref writes, an
+  over-32 MiB native listing and bounded ticket growth; the `test-faults` timer directive also expires tickets and
+  the Worker stats hook is scoped to one ref's shard under D34. The report is
+  `docs/plans/mkit-server/m1-exit-report.md`. `mkit-server-conformance` `Profile` gains `ticket_per_ref` and
+  `merge_paging_refs` (WP-1.27).
 - Server: `mkit-server serve` gains `--grant-schemes`, a repeatable
   `--webauthn-rp <id=origin[,origin...]>` and the development-only
   `--unsafe-allow-loopback-grants`; the Worker gains the `GRANT_SCHEMES` and

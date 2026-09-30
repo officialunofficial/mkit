@@ -23,12 +23,24 @@
 //!
 //! The case needs a disposable server: other records expiring on the same
 //! partition would be pruned during calibration and skew the measurement.
+//!
+//! Under D34 every write of these cases goes to one ref, whose shard is the
+//! partition the stats hook reads (`?ref=<name>`); Single sharding keeps the
+//! one deployment-wide partition. [`tickets_and_outbox_pruned`] runs the same
+//! measurement over upload tickets: the load opens tickets, they expire on
+//! the server's own clock (it needs a short ticket lifetime: the Worker's
+//! `TEST_TICKET_TTL_MS`), and the shard must shrink once their expiry
+//! timers run and the outcome and relay outboxes drain. The clock-skew
+//! directive cannot stand in: the timers it fires schedule their outcome
+//! delivery on the skewed clock, an hour ahead of the real one.
 
 use std::time::Duration;
 
-use mkit_transport_connect::generated::UpdateRefResponse;
+use mkit_transport_connect::generated::{BeginUploadResponse, UpdateRefResponse};
 
-use super::{A, CaseResult, Ctx, Exp, Failure, Signed, ensure, sign_unary, update_req, want_ok};
+use super::{
+    A, CaseResult, Ctx, Exp, Failure, Signed, ensure, sign_unary, tickets, update_req, want_ok,
+};
 use crate::wire::STATS_PATH;
 use crate::wire::client::{Rpc, RpcError};
 use crate::wire::sign::{Signer, now_ms};
@@ -51,6 +63,16 @@ const PROBE_WRITES: u32 = 1 + CALIBRATE + MAX_TRIGGERS;
 
 /// Keys the load leaves for good: its two refs (`load`, `last`).
 const LASTING_KEYS: u64 = 2;
+
+/// Writes that flush an earlier case's expired records before calibration.
+const FLUSH_WRITES: u32 = 64;
+
+/// Tickets the ticket load opens at most.
+const TICKETS: u64 = 32;
+/// The longest ticket lifetime the case waits out.
+const MAX_TICKET_WAIT_MS: i64 = 120_000;
+/// After the last ticket expires: its timer, then outcome and relay delivery.
+const DRAIN_ALLOWANCE_MS: i64 = 30_000;
 
 /// One stats reading.
 #[derive(Debug, Clone, Copy)]
@@ -77,9 +99,16 @@ impl Stats {
     }
 }
 
-/// The stats endpoint's reading.
-async fn stats(ctx: &Ctx) -> Result<Stats, Failure> {
-    let reply = ctx.client().get(STATS_PATH).await?;
+/// The stats endpoint's reading: of the partition holding `scope`'s replay
+/// records when the server shards by ref (D34), else of the one partition.
+async fn stats(ctx: &Ctx, scope: &str) -> Result<Stats, Failure> {
+    let path = if ctx.profile().sharding_d34 {
+        let scope: String = url::form_urlencoded::byte_serialize(scope.as_bytes()).collect();
+        format!("{STATS_PATH}?ref={scope}")
+    } else {
+        STATS_PATH.to_owned()
+    };
+    let reply = ctx.client().get(&path).await?;
     ensure!(
         reply.status == 200,
         "GET {STATS_PATH}: HTTP {}",
@@ -108,27 +137,62 @@ async fn send(ctx: &Ctx, s: &Signed) -> Result<Result<UpdateRefResponse, RpcErro
     ctx.send(s).await
 }
 
-#[allow(clippy::cast_precision_loss)] // byte counts far below 2^52
+/// What the case loads onto the partition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Load {
+    /// [`LOAD`] writes by their own signers: replay records and quota windows.
+    Replay,
+    /// Open tickets, which expire on the server's clock.
+    Tickets,
+}
+
 pub(super) async fn replay_and_quota_pruned(ctx: Ctx) -> CaseResult {
+    pruned(ctx, Load::Replay).await
+}
+
+pub(super) async fn tickets_and_outbox_pruned(ctx: Ctx) -> CaseResult {
+    pruned(ctx, Load::Tickets).await
+}
+
+#[allow(clippy::cast_precision_loss, clippy::too_many_lines)] // Byte counts far below 2^52; one measurement.
+async fn pruned(ctx: Ctx, load: Load) -> CaseResult {
     let profile = ctx.profile();
-    let Some(quota) = profile.quota.filter(|q| q.window_ms <= MAX_WINDOW_MS) else {
+    let quota = profile.quota.filter(|q| q.window_ms <= MAX_WINDOW_MS);
+    if load == Load::Replay && quota.is_none() {
         return Err(Failure::Skip(format!(
             "needs a declared quota window of at most {MAX_WINDOW_MS} ms"
         )));
-    };
-    if quota.max_ops < PROBE_WRITES {
+    }
+    if quota.is_some_and(|q| q.max_ops < PROBE_WRITES) {
         return Err(Failure::Skip(format!(
             "needs a quota of at least {PROBE_WRITES} writes per window"
         )));
     }
+    let window_ms = quota.map_or(0, |q| q.window_ms);
     let probe = ctx.v2_signer("probe")?;
+    if load == Load::Tickets && !profile.sharding_d34 {
+        // One partition holds every case's records: let the replay case's
+        // last records expire, then flush them with writes of another signer
+        // (pruning runs on writes), or they are pruned mid-calibration.
+        let settle = VALIDITY_MS + profile.replay_prune_grace_ms + window_ms + SKEW_ALLOWANCE_MS;
+        tokio::time::sleep(Duration::from_millis(u64::try_from(settle).unwrap_or(0))).await;
+        let warm = ctx.v2_signer("warm")?;
+        for i in 0..FLUSH_WRITES {
+            let s = write(&ctx, &warm, "probe", Exp::Any);
+            want_ok(send(&ctx, &s).await?, &format!("flush write {i}"))?;
+        }
+    }
+    // Under D34 the probe, the load and the triggers share one ref, and so
+    // one shard: the partition the stats hook reads.
+    let home = "probe";
+    let scope = ctx.head(home);
     // Calibrate: one probe write opens its quota window, the next ones add
     // one replay record each.
     want_ok(
         send(&ctx, &write(&ctx, &probe, "probe", Exp::Any)).await?,
         "probe write",
     )?;
-    let first = stats(&ctx).await?;
+    let first = stats(&ctx, &scope).await?;
     let unit = if first.keys.is_some() {
         Unit::Keys
     } else {
@@ -139,7 +203,7 @@ pub(super) async fn replay_and_quota_pruned(ctx: Ctx) -> CaseResult {
         let s = write(&ctx, &probe, "probe", Exp::Any);
         want_ok(send(&ctx, &s).await?, &format!("calibration write {i}"))?;
     }
-    let before = stats(&ctx).await?.get(unit)?;
+    let before = stats(&ctx, &scope).await?.get(unit)?;
     // A server holding other expired records may prune some of them here,
     // which would understate this: run the case on a disposable server.
     ensure!(
@@ -149,29 +213,22 @@ pub(super) async fn replay_and_quota_pruned(ctx: Ctx) -> CaseResult {
     );
     let per_probe = (before - calibrating) as f64 / f64::from(CALIBRATE);
 
-    // Load: all but the last write go to one ref, so the load's lasting
-    // growth is replay records and quota windows, not new refs. The last
-    // is create-only, so a replay answered by re-execution would fail.
-    for i in 0..LOAD - 1 {
-        let signer = ctx.v2_signer(&format!("load{i}"))?;
-        let s = write(&ctx, &signer, "load", Exp::Any);
-        want_ok(send(&ctx, &s).await?, &format!("load write {i}"))?;
-    }
-    let last = write(&ctx, &ctx.v2_signer("load-last")?, "last", Exp::Missing);
-    want_ok(send(&ctx, &last).await?, "the last load write")?;
-    let loaded = stats(&ctx).await?.get(unit)?;
+    let loaded_by = match load {
+        Load::Replay => replay_load(&ctx, home).await?,
+        Load::Tickets => ticket_load(&ctx, &scope).await?,
+    };
+    let loaded = stats(&ctx, &scope).await?.get(unit)?;
     ensure!(
         loaded > before,
         "no growth under load: {before} -> {loaded} {unit:?}"
     );
-    // Lower bound: before its expiry the record still answers its replay.
-    want_ok(
-        send(&ctx, &last).await?,
-        "a load write replayed before its expiry",
-    )?;
-
     let signed_at = now_ms();
-    let wait_ms = VALIDITY_MS + profile.replay_prune_grace_ms + quota.window_ms + SKEW_ALLOWANCE_MS;
+    let mut wait_ms = VALIDITY_MS + profile.replay_prune_grace_ms + window_ms + SKEW_ALLOWANCE_MS;
+    if let Some(last_expiry) = loaded_by {
+        // The tickets close at their expiry; their outcome and relay rows
+        // then drain within the allowance.
+        wait_ms = wait_ms.max(last_expiry - signed_at + DRAIN_ALLOWANCE_MS);
+    }
     tokio::time::sleep(Duration::from_millis(u64::try_from(wait_ms).unwrap_or(0))).await;
     ensure!(now_ms() >= signed_at + wait_ms, "suite bug: short sleep");
 
@@ -184,7 +241,7 @@ pub(super) async fn replay_and_quota_pruned(ctx: Ctx) -> CaseResult {
     for t in 1..=MAX_TRIGGERS {
         let s = write(&ctx, &probe, "probe", Exp::Any);
         want_ok(send(&ctx, &s).await?, &format!("trigger write {t}"))?;
-        now = stats(&ctx).await?.get(unit)?;
+        now = stats(&ctx, &scope).await?.get(unit)?;
         if now as f64 <= bound(t) {
             ctx.set_note(format!(
                 "{unit:?}: {before} -> {loaded} under load; {now} after {t} trigger writes \
@@ -199,4 +256,50 @@ pub(super) async fn replay_and_quota_pruned(ctx: Ctx) -> CaseResult {
          trigger writes {wait_ms} ms later, bound {:.0} ({per_probe:.1} per probe write)",
         bound(MAX_TRIGGERS)
     )))
+}
+
+/// The replay load. Nearly every write goes to one ref, so the load's
+/// lasting growth is replay records and quota windows, not new refs. The
+/// last is create-only, so a replay answered by re-execution would fail.
+async fn replay_load(ctx: &Ctx, home: &str) -> Result<Option<i64>, Failure> {
+    let shared = if ctx.profile().sharding_d34 {
+        home
+    } else {
+        "load"
+    };
+    for i in 0..LOAD - 1 {
+        let signer = ctx.v2_signer(&format!("load{i}"))?;
+        let s = write(ctx, &signer, shared, Exp::Any);
+        want_ok(send(ctx, &s).await?, &format!("load write {i}"))?;
+    }
+    let last = write(ctx, &ctx.v2_signer("load-last")?, "last", Exp::Missing);
+    want_ok(send(ctx, &last).await?, "the last load write")?;
+    // Lower bound: before its expiry the record still answers its replay.
+    want_ok(
+        send(ctx, &last).await?,
+        "a load write replayed before its expiry",
+    )?;
+    Ok(None)
+}
+
+/// The ticket load: as many open tickets as one signer may hold on `scope`,
+/// at most [`TICKETS`]. Returns when the last expires, in Unix milliseconds.
+async fn ticket_load(ctx: &Ctx, scope: &str) -> Result<Option<i64>, Failure> {
+    let signer = ctx.v2_signer("load-tickets")?;
+    let mut last_expiry = 0;
+    for salt in 0..ctx.profile().ticket_per_signer.min(TICKETS) {
+        let req = tickets::request(scope.to_owned(), salt);
+        let begin = sign_unary(&signer, Rpc::BeginUpload, &req, |env| {
+            env.expires_at = env.created_at + VALIDITY_MS;
+        });
+        let opened: BeginUploadResponse = want_ok(ctx.send(&begin).await?, "load BeginUpload")?;
+        let expires = tickets::ticket(opened)?.expires_unix_ms.unwrap_or_default();
+        if expires - now_ms() > MAX_TICKET_WAIT_MS {
+            return Err(Failure::Skip(format!(
+                "tickets live longer than {MAX_TICKET_WAIT_MS} ms: needs a short ticket lifetime"
+            )));
+        }
+        last_expiry = last_expiry.max(expires);
+    }
+    Ok(Some(last_expiry))
 }

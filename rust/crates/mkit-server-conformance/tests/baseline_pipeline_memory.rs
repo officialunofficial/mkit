@@ -212,6 +212,19 @@ async fn serve_sharding(
     sharding: mkit_server::pipeline::Sharding,
     max_pack: u64,
 ) -> (String, Shared) {
+    let (origin, meta, _) =
+        serve_observed_sharding(auth, quota, mutant, multi, sharding, max_pack).await;
+    (origin, meta)
+}
+
+async fn serve_observed_sharding(
+    auth: impl FnOnce(&str) -> AuthMode,
+    quota: Option<ServerQuota>,
+    mutant: Mutant,
+    multi: Option<&Profile>,
+    sharding: mkit_server::pipeline::Sharding,
+    max_pack: u64,
+) -> (String, Shared, MemoryBlobStore) {
     let (listener, origin) = common::listener().await;
     let repo = RepoId {
         namespace: NamespaceKey::deployment_default(),
@@ -266,6 +279,7 @@ async fn serve_sharding(
         .unwrap(),
     );
     cfg.ticket_caps.per_signer = 4;
+    cfg.ticket_caps.per_ref = 8;
     let clock = Arc::new(SystemClock);
     let kv = Arc::new(MemoryKv::with_clock(clock.clone()));
     let meta = Shared(kv, mutant, Arc::default());
@@ -274,7 +288,7 @@ async fn serve_sharding(
         plant_membership(&blobs, &meta, &cfg.addressing, sharding, profile).await;
     }
     let pipe = Pipeline::new(
-        blobs,
+        blobs.clone(),
         meta.clone(),
         Hooks::new(),
         cfg,
@@ -292,7 +306,7 @@ async fn serve_sharding(
         }),
     );
     tokio::spawn(async move { axum::serve(listener, app).await });
-    (origin, meta)
+    (origin, meta, blobs)
 }
 
 /// Seed the wire fixtures directly, so Multi uploads keep their ticket guard.
@@ -386,7 +400,10 @@ fn multi_allowlist(profile: &Profile) -> BTreeSet<mkit_core::repo_identity::Name
     };
     let mut allowed: BTreeSet<_> = mkit_server_conformance::wire::CASES
         .iter()
-        .filter(|case| case.requires.contains(&Feature::MultiRepo))
+        .filter(|case| {
+            case.requires.contains(&Feature::MultiRepo)
+                || case.name == "tickets.advance_ticket_bindings"
+        })
         .flat_map(|case| {
             ["repository-a", "repository-b"].map(|label| {
                 let label = format!("{}/{label}", case.name);
@@ -452,6 +469,7 @@ fn v2_profile(origin: &str) -> Profile {
     p.features.insert(Feature::StrictGzipAuth);
     p.features.insert(Feature::Tickets);
     p.ticket_per_signer = 4;
+    p.ticket_per_ref = 8;
     p
 }
 
@@ -664,6 +682,12 @@ async fn pipeline_multi_repository() {
     let multipart_report = run(&target, Some("multipart.")).await;
     let policy_report = run(&target, Some("policy.")).await;
     let ticket_repo_report = run(&target, Some("tickets.advance_other_repository")).await;
+    let bindings_report = run(&target, Some("tickets.advance_ticket_bindings")).await;
+    common::judge(&bindings_report, PIPELINE_DIVERGENCES);
+    assert!(matches!(
+        bindings_report.verdict("tickets.advance_ticket_bindings"),
+        Some(Verdict::Pass(_))
+    ));
     let info_report = run(&target, Some("info.")).await;
     common::judge(&info_report, PIPELINE_DIVERGENCES);
     for name in ["info.shape_and_policy", "info.ignores_repository_header"] {
@@ -688,6 +712,8 @@ async fn pipeline_multi_repository() {
             && !c.requires.contains(&Feature::IndexedMode)
             // Needs a declared quota: run by its own baseline.
             && !c.requires.contains(&Feature::Quota)
+            // Needs the `test-faults` directives and a relay: the served lanes.
+            && !c.requires.contains(&Feature::TestFaults)
     }) {
         let case_report = if case.name.starts_with("policy.") {
             &policy_report
@@ -695,6 +721,8 @@ async fn pipeline_multi_repository() {
             &multipart_report
         } else if case.name.starts_with("repository.") {
             &repository_report
+        } else if case.name.starts_with("tickets.advance_ticket_bindings") {
+            &bindings_report
         } else if case.name.starts_with("tickets.") {
             &ticket_repo_report
         } else {
@@ -759,6 +787,7 @@ async fn pipeline_d34_multi_membership() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)] // Explicit grant/epoch case table and D34 lease checks.
 async fn pipeline_grants_single_and_d34() {
     for sharding in [
         mkit_server::pipeline::Sharding::Single,
@@ -776,6 +805,10 @@ async fn pipeline_grants_single_and_d34() {
         #[cfg(feature = "test-faults")]
         profile.features.insert(Feature::TestFaults);
         profile.sharding_d34 = sharding == mkit_server::pipeline::Sharding::D34;
+        #[cfg(feature = "test-faults")]
+        if profile.sharding_d34 {
+            profile.features.insert(Feature::EpochLeases);
+        }
         let auth = |origin: &str| AuthMode::AuthV2(AuthV2Config::new(origin, "").unwrap());
         let (origin, _) = serve_sharding(
             auth,
@@ -856,6 +889,17 @@ async fn pipeline_grants_single_and_d34() {
             let report = run(&target, Some(case)).await;
             common::judge(&report, PIPELINE_DIVERGENCES);
             assert_eq!(report.passes(), [case], "{case} did not run and pass");
+        }
+        #[cfg(feature = "test-faults")]
+        if target.profile.sharding_d34 {
+            for case in [
+                "leases.idle_shard_renews_at_new_epoch",
+                "leases.lease_expires_before_revocation_completes",
+            ] {
+                let report = run(&target, Some(case)).await;
+                common::judge(&report, PIPELINE_DIVERGENCES);
+                assert_eq!(report.passes(), [case], "{case} did not run and pass");
+            }
         }
     }
 }
@@ -975,6 +1019,7 @@ async fn pipeline_auth_v2_test_faults() {
         "timers.directive_fires_due",
         "timers.redelivery_is_idempotent",
         "replay.expired_retry_rejected",
+        "tickets.expiry_timer_frees_cap_slot",
         "growth.replay_and_quota_pruned",
     ] {
         let report = run(&target, Some(case)).await;
@@ -1089,4 +1134,47 @@ async fn pipeline_d34_epoch_leases() {
             .is_none(),
         "D34 wire coverage must not use the Single partition"
     );
+}
+
+/// The manual timer wire case must physically abort the sessions it opens,
+/// not only delete tickets. The instrumented memory store can observe this
+/// beyond the public RPC's ticket validation (WP-1.27 B1(k)).
+#[cfg(feature = "test-faults")]
+#[tokio::test]
+async fn wire_expiry_timer_aborts_multipart_sessions() {
+    use mkit_server::pipeline::Sharding;
+    for sharding in [Sharding::Single, Sharding::D34] {
+        let max_pack = mkit_core::upload_parts::MIN_PART_SIZE + 1;
+        let (origin, _, blobs) =
+            serve_observed_sharding(authv2, None, Mutant::None, None, sharding, max_pack).await;
+        assert_eq!(blobs.multipart_session_count(), 0);
+        let mut profile = v2_profile(&origin);
+        profile.quota = None;
+        profile.max_pack_bytes = max_pack;
+        profile.sharding_d34 = sharding == Sharding::D34;
+        profile.features.insert(Feature::TestFaults);
+        profile.features.insert(Feature::Multipart);
+        let target = WireTarget {
+            base_url: origin.parse().unwrap(),
+            profile,
+        };
+        let suite = run(&target, Some("tickets.expiry_timer_frees_cap_slot"));
+        tokio::pin!(suite);
+        tokio::select! {
+            report = &mut suite => panic!("expiry case finished without an observed open session: {report:?}"),
+            () = async {
+                while blobs.multipart_session_count() == 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            } => {}
+        }
+        let report = suite.await;
+        common::judge(&report, &[]);
+        assert_eq!(report.passes(), ["tickets.expiry_timer_frees_cap_slot"]);
+        assert_eq!(
+            blobs.multipart_session_count(),
+            0,
+            "expiry leaked sessions under {sharding:?}"
+        );
+    }
 }
