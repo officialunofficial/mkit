@@ -182,6 +182,9 @@ pub enum LogFormat {
 #[derive(Debug, Clone, Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ServeArgs {
+    /// Default-off signed admin API on a separate listener.
+    #[command(flatten)]
+    pub admin: crate::admin::AdminArgs,
     /// Address to listen on, e.g. `127.0.0.1:8080`. Plaintext HTTP/1.1 and
     /// h2c: terminate TLS at a reverse proxy. Optional with `--listen-enc`;
     /// at least one listener is required.
@@ -489,6 +492,8 @@ impl fmt::Display for BlobChoice {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ServeConfig {
+    /// Validated operator keys and separate listener; absent by default.
+    pub admin: Option<crate::admin::Settings>,
     /// Where the HTTP listener listens, if there is one.
     pub listen: Option<SocketAddr>,
     /// The enc listener, if there is one.
@@ -1502,6 +1507,26 @@ pub fn resolve(
         env,
     )?;
     let (redactor, cors_extra_allow_headers) = credential_router_parts(&pipeline)?;
+    let admin = crate::admin::resolve(&args.admin, &mut pipeline, &meta)?;
+    if admin.as_ref().is_some_and(|a| Some(a.listen) == args.listen) {
+        return Err(usage("admin and client listeners must be separate"));
+    }
+    #[cfg(feature = "hooks")]
+    {
+        if let Some(settings) = &hooks {
+            if let Some(admin) = &admin {
+                admin.config.check_separation(&[settings.public_key()?])
+                    .map_err(|e| ConfigError::new(exit::CONFIG_ERROR, e.to_string()))?;
+            }
+            if settings.purge.is_some() {
+                pipeline.purge = Some(mkit_server::purge::PurgeConfig {
+                    audience: match &pipeline.auth { AuthMode::AuthV2(auth) => auth.audience().to_owned(), _ => String::new() },
+                    shared_caches: true,
+                    remote_sink: true,
+                });
+            }
+        }
+    }
     let router = RouterOptions {
         unary_timeout: Duration::from_secs(args.unary_timeout_secs),
         stream_timeout: Duration::from_secs(args.stream_timeout_secs),
@@ -1521,6 +1546,7 @@ pub fn resolve(
         ..ServeOptions::default()
     };
     Ok(ServeConfig {
+        admin,
         listen: args.listen,
         #[cfg(feature = "enc")]
         enc,

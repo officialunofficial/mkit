@@ -49,6 +49,13 @@
 //! | relay scan progress (source shard) | `rs 00` | codec `RelayScanV1`; one per source, never pruned |
 //! | outbox sequence | `os 00` | be64; last allocated, starts at 1, never deleted |
 //! | outcome backlog | `oc 00` | codec `Backlog`; absent means zero |
+//! | pending cache purge | `cp 00 <purge_id>` | immutable protobuf JSON `purge::Request` |
+//! | durable snapshot refill fence | `cg 00 <scope>` | be64 invalidation time; never pruned |
+//! | admin audit head | `ah 00` | audit sequence and hash |
+//! | admin nonce result | `an 00 <nonce scope hash:32>` | durable exact result |
+//! | admin operation replay | `ao 00 <operation scope hash:32>` | durable result |
+//! | admin audit entry | `ae 00 <seq:be64>` | canonical audit chain entry |
+//! | admin action intent | `ai 00 <action id>` | durable resumable acceptance |
 //! | timer (owned by `timers`) | `w 00 <due_at:be64> <kind:u8> <ref>` | codec per kind |
 //! | holder (`ContentShard`) | `h 00 <object:32> <ns> 00 <repo>` | codec `HolderRecord` (`HolderV1`: `seq`, `op_id`) |
 //! | GC hold (`ContentShard`) | `g 00 <object:32> <hold_id:32>` | codec `hold` |
@@ -182,6 +189,19 @@ pub const TAG_RELAY_SCAN: &str = "rs";
 pub const TAG_OUTBOX_SEQUENCE: &str = "os";
 /// Terminal outcome backlog tag.
 pub const TAG_OUTCOME_BACKLOG: &str = "oc";
+/// Immutable pending cache purge.
+pub const TAG_CACHE_PURGE: &str = "cp";
+/// Durable cache refill fence.
+pub const TAG_CACHE_PURGE_GENERATION: &str = "cg";
+
+/// `cp 00 <purge_id>`; shares the reservation-id grammar.
+pub fn cache_purge(id: &str) -> Result<Key, StoreError> {
+    if id.is_empty() || id.len() > 128 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b)) { return Err(StoreError::Invalid("invalid purge id".into())); }
+    Ok(key(TAG_CACHE_PURGE, &[id.as_bytes()]))
+}
+/// `cg 00 <namespace or full repository identity>`.
+#[must_use]
+pub fn cache_purge_generation(scope: &str) -> Key { key(TAG_CACHE_PURGE_GENERATION, &[scope.as_bytes()]) }
 
 /// Tags whose layouts later work packages add. No M0 key uses them.
 pub const RESERVED_TAGS: &[&str] = &["tb", "l", "pp", "vc", TAG_NAMESPACE_LIST];
@@ -190,6 +210,10 @@ pub const RESERVED_TAGS: &[&str] = &["tb", "l", "pp", "vc", TAG_NAMESPACE_LIST];
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ParsedKey {
+    /// Pending cache purge id.
+    CachePurge(String),
+    /// Durable cache scope invalidation time.
+    CachePurgeGeneration(String),
     /// `bk 00`.
     BackupState,
     /// `sm 00`: the Worker deployment sharding mode.
@@ -916,6 +940,8 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
     let (tag, body) = (&bytes[..split], &bytes[split + 1..]);
     let text = |b: &[u8]| String::from_utf8(b.to_vec()).ok();
     Some(match tag {
+        b"cp" => { let id = text(body)?; cache_purge(&id).ok()?; ParsedKey::CachePurge(id) },
+        b"cg" if !body.is_empty() => ParsedKey::CachePurgeGeneration(text(body)?),
         b"sm" if body.is_empty() => ParsedKey::ShardingMarker,
         b"am" if body.is_empty() => ParsedKey::AddressingMarker,
         b"v" if body.is_empty() => ParsedKey::LayoutVersion,
@@ -1079,6 +1105,8 @@ mod tests {
             TAG_RELAY,
             TAG_OUTBOX_SEQUENCE,
             TAG_OUTCOME_BACKLOG,
+            TAG_CACHE_PURGE,
+            TAG_CACHE_PURGE_GENERATION,
         ];
         tags.extend_from_slice(RESERVED_TAGS);
         tags

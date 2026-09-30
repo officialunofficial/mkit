@@ -60,6 +60,8 @@ pub struct ServerLocks {
 /// hooks and write gate.
 #[derive(Debug)]
 pub struct Services {
+    /// Separate default-off operator router.
+    pub admin: Option<axum::Router>,
     /// The router over the configured stores (served only with
     /// [`ServeConfig::listen`]).
     pub router: axum::Router,
@@ -76,6 +78,8 @@ pub struct Services {
 /// A server ready to bind: its services, and the root's locks.
 #[derive(Debug)]
 pub struct Opened {
+    /// Separate default-off operator router.
+    pub admin: Option<axum::Router>,
     /// The router over the configured stores.
     pub router: axum::Router,
     /// The enc listener's service, when configured.
@@ -95,6 +99,7 @@ impl Opened {
     #[must_use = "the locks release when dropped"]
     pub fn into_parts(self) -> (Services, ServerLocks) {
         let services = Services {
+            admin: self.admin,
             router: self.router,
             #[cfg(feature = "enc")]
             enc: self.enc,
@@ -456,7 +461,7 @@ where
     }
     let pipeline = Pipeline::new(
         blobs,
-        meta,
+        meta.clone(),
         hooks,
         cfg.pipeline.clone(),
         Arc::new(SystemClock),
@@ -481,6 +486,12 @@ where
                     .map_err(|_| config_error("enc key", "invalid public key"))?;
                 crate::http_mount::check_other_keys(cfg.pipeline.url_tokens.as_ref(), &[public])?;
             }
+            if let Some(admin) = &cfg.admin {
+                use commonware_cryptography::Signer as _;
+                let public = <[u8; 32]>::try_from(key.public_key().as_ref())
+                    .map_err(|e| config_error("enc key", e))?;
+                admin.config.check_separation(&[public]).map_err(|e| config_error("admin key", e))?;
+            }
             // The enc key may be created on first run, so this is the first
             // place its public half is known (SPEC-SERVER §7.1).
             #[cfg(feature = "hooks")]
@@ -497,6 +508,7 @@ where
         None => None,
     };
     Ok(Services {
+        admin: cfg.admin.as_ref().map(|settings| crate::admin::router(meta, settings, &cfg.pipeline)),
         router: build_router(Arc::new(pipeline), &cfg.router),
         #[cfg(feature = "enc")]
         enc,
@@ -714,6 +726,7 @@ where
         )?,
     };
     Ok(Opened {
+        admin: services.admin,
         router: services.router,
         #[cfg(feature = "enc")]
         enc: services.enc,
@@ -909,6 +922,10 @@ pub async fn serve_services(
         Some(addr) => Some(bind(addr, "--listen").await?),
         None => None,
     };
+    let admin = match (&cfg.admin, services.admin) {
+        (Some(settings), Some(router)) => Some((bind(settings.listen, "--admin-listen").await?, router)),
+        _ => None,
+    };
     #[cfg(feature = "enc")]
     let enc = match (&cfg.enc, services.enc) {
         (Some(opts), Some(service)) => Some((bind(opts.listen, "--listen-enc").await?, service)),
@@ -948,6 +965,11 @@ pub async fn serve_services(
             .await
             .map_err(|e| ConfigError::new(exit::UNAVAILABLE, format!("mkit-server serve: {e}")))
     };
+    let admin_run = async {
+        let Some((listener, router)) = admin else { return Ok(()); };
+        serve(listener, router, shutdown.clone(), &cfg.serve).await
+            .map_err(|e| config_error("admin listener", e))
+    };
     #[cfg(feature = "enc")]
     let enc_run = async {
         let (Some(opts), Some((listener, service))) = (&cfg.enc, enc) else {
@@ -968,9 +990,9 @@ pub async fn serve_services(
     };
     #[cfg(not(feature = "enc"))]
     let enc_run = async { Ok(()) };
-    let (http_result, enc_result) = tokio::join!(async { stop_on_error(http_run.await) }, async {
+    let (http_result, enc_result, admin_result) = tokio::join!(async { stop_on_error(http_run.await) }, async {
         stop_on_error(enc_run.await)
-    },);
+    }, async { stop_on_error(admin_run.await) });
     shutdown.trigger();
     timer_stop.trigger();
     if let Some(task) = timer_task {
@@ -981,7 +1003,7 @@ pub async fn serve_services(
             .map_err(|e| config_error("storage pressure monitor", e))?;
     }
     tracing::info!("stopped");
-    http_result.and(enc_result)
+    http_result.and(enc_result).and(admin_result)
 }
 
 /// [`open`], then [`serve_services`]; the locks are released on return.

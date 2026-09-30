@@ -4,6 +4,8 @@
 
 mod blocking;
 #[cfg(feature = "http")]
+pub mod admin;
+#[cfg(feature = "http")]
 pub mod config;
 #[cfg(feature = "enc")]
 pub mod enc;
@@ -13,6 +15,8 @@ pub mod exit;
 mod guard;
 #[cfg(feature = "hooks")]
 pub mod hooks;
+#[cfg(feature = "hooks")]
+pub mod purge;
 #[cfg(feature = "http-objects")]
 pub mod http_mount;
 #[cfg(feature = "http")]

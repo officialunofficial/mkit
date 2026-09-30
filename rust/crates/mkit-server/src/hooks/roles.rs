@@ -36,6 +36,12 @@ pub struct RemoteOutcomes<C> {
     timeout: Duration,
 }
 
+/// Signed durable global cache-purge delivery, distinct from admission.
+pub struct RemotePurge<C> {
+    client: Arc<HookClient<C>>,
+    timeout: Duration,
+}
+
 macro_rules! role {
     ($name:ident) => {
         impl<C> core::fmt::Debug for $name<C> {
@@ -77,6 +83,17 @@ macro_rules! role {
 role!(RemoteAuthorizer);
 role!(RemoteAdmission);
 role!(RemoteOutcomes);
+role!(RemotePurge);
+
+impl<C: HookChannel> crate::purge::PurgeSink for RemotePurge<C> {
+    fn deliver<'a>(&'a self, request: &'a crate::purge::Request) -> crate::BoxFuture<'a, Result<(), crate::StoreError>> {
+        Box::pin(async move {
+            request.validate()?;
+            if request.audience != self.client.server_audience() { return Err(crate::StoreError::unavailable("purge audience mismatch")); }
+            self.client.deliver(Rpc::CachePurge, request, self.timeout).await.map_err(|_| crate::StoreError::unavailable("purge delivery failed"))
+        })
+    }
+}
 
 /// What a [`WipeOnDrop`] holds: credential values that must not outlive the
 /// call that carried them.

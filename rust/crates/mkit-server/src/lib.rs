@@ -24,6 +24,7 @@
 //! `http-objects` feature adds the `http_objects` module and
 //! `Pipeline::serve_http_object` (Stage 2, inert in Stage 1).
 
+pub mod admin;
 pub mod auth_v2;
 #[cfg(feature = "connect")]
 pub mod connect;
@@ -41,6 +42,7 @@ mod memory;
 mod op;
 pub mod pipeline;
 pub mod policy;
+pub mod purge;
 mod principal;
 pub mod quota;
 pub mod refs;

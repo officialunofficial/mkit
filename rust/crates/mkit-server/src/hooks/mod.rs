@@ -69,7 +69,7 @@ mod proto {
 
 pub use channel::{ChannelError, HookChannel, HookRequest, HookResponse};
 pub use client::{DEFAULT_TIMEOUT, HookClient, HookConfigError, MAX_RESPONSE_BYTES};
-pub use roles::{RemoteAdmission, RemoteAuthorizer, RemoteOutcomes};
+pub use roles::{RemoteAdmission, RemoteAuthorizer, RemoteOutcomes, RemotePurge};
 pub use sign::{
     DEFAULT_VALIDITY, DOMAIN, HookSigner, MAX_VALIDITY, NonceSource, OsNonces, SignerError,
 };

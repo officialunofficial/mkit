@@ -44,6 +44,7 @@ pub mod list;
 mod outcome;
 mod parts;
 mod plan;
+mod purge;
 #[cfg(feature = "published-view")]
 pub mod published;
 mod ref_policy;
@@ -259,6 +260,10 @@ pub struct PipelineConfig {
     /// URL-token key set and lifetime for `IssueObjectUrl`
     /// (SPEC-WRITE-GRANTS §9.4); `None` answers `unimplemented`.
     pub url_tokens: Option<crate::url_token::UrlTokenConfig>,
+    /// Dedicated operator keys, forbidden as client authentication keys.
+    pub admin_keys: Vec<[u8; 32]>,
+    /// Durable invalidation; absent keeps launch purge machinery inert.
+    pub purge: Option<crate::purge::PurgeConfig>,
     /// Ticket lifetime, positive and strictly below seven days.
     pub ticket_ttl_ms: u64,
     /// Open-ticket bounds in each ref shard.
@@ -338,6 +343,8 @@ impl PipelineConfig {
             begin_upload_threshold_bytes: u64::MAX,
             ticket_keys: None,
             url_tokens: None,
+            admin_keys: Vec::new(),
+            purge: None,
             ticket_ttl_ms: 86_400_000,
             ticket_caps: TicketCaps {
                 per_ref: 1024,
@@ -572,6 +579,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         clock: Arc<dyn Clock>,
         metrics: Arc<dyn Metrics>,
     ) -> Result<Self, ServerError> {
+        if let Some(purge) = &cfg.purge { purge.validate().map_err(meta_error)?; }
         if let Some(indexed) = &cfg.indexed {
             if !matches!(cfg.auth, AuthMode::AuthV2(_))
                 || cfg.ticket_keys.is_none()
@@ -911,6 +919,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let skew = 0;
         let now = self.clock.now_ms().saturating_add(skew);
         let mut a = auth::authenticate(&self.cfg.auth, meta, now, repo, &expected_repository)?;
+        if a.auth.as_ref().is_some_and(|auth| self.cfg.admin_keys.contains(&auth.signer)) {
+            return Err(ServerError::unauthenticated("admin key cannot authenticate client calls"));
+        }
         // Credentials are captured for admission, which only signed writes
         // reach: signed reads and `SetRepoVisibility` never run it (§9.1).
         if matches!(self.cfg.auth, AuthMode::AuthV2(_))
@@ -1499,7 +1510,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .plan_visibility(p, auth, repo, visibility, stored.as_ref())
                 .await?;
             match self.meta.apply(p, batch).await {
-                Ok(BatchOutcome::Committed) => return Ok(()),
+                Ok(BatchOutcome::Committed) => { self.invalidate_local_cache(repo); return Ok(()); },
                 Ok(BatchOutcome::DeadlinePassed { .. }) => {
                     return Err(ServerError::unavailable("commit deadline passed; retry"));
                 }
@@ -1630,6 +1641,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let expired = read::expired_replay_keys(&self.meta, p, now, 32)
             .await
             .map_err(meta_error)?;
+        let purge = self.plan_repository_purge(p, repo, crate::purge::Trigger::VisibilityChange, &mkit_core::hash::to_hex(&auth.replay_scope), now).await?;
+        batch.preconditions.extend(purge.preconditions);
+        batch.writes.extend(purge.writes);
         let mut prune = Batch::new().require(Precondition::NotAfter(deadline));
         for (index, target) in &expired {
             if batch.preconditions.len() + batch.writes.len() + 2 > MAX_BATCH_OPS {
@@ -1703,7 +1717,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 Some(value) => Precondition::Equals(rv_key.clone(), value.clone()),
                 None => Precondition::Absent(rv_key.clone()),
             };
-            let batch = Batch::new()
+            let mut batch = Batch::new()
                 .require(Precondition::NotAfter(deadline))
                 .require(rv_guard)
                 .put(
@@ -1714,8 +1728,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         last_statement_id: Some(id.clone()),
                     }),
                 );
+            let purge = self.plan_repository_purge(p, repo, crate::purge::Trigger::VisibilityChange, &id, ms(self.clock.now_ms())).await?;
+            batch.preconditions.extend(purge.preconditions);
+            batch.writes.extend(purge.writes);
             match self.meta.apply(p, batch).await {
-                Ok(BatchOutcome::Committed) => return Ok(()),
+                Ok(BatchOutcome::Committed) => { self.invalidate_local_cache(repo); return Ok(()); },
                 Ok(BatchOutcome::DeadlinePassed { .. }) => {
                     return Err(ServerError::unavailable("commit deadline passed; retry"));
                 }
