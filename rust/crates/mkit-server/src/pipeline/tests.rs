@@ -5239,3 +5239,6 @@ fn prepared_publication_pair_cannot_survive_a_counterpart_guard_race() {
             .is_none()
     );
 }
+
+#[cfg(feature = "remote-hooks")]
+mod inspection_budget;

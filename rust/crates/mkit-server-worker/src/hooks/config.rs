@@ -11,7 +11,7 @@ use crate::adapter::ConfigError;
 
 /// The service binding to the hook Worker.
 pub const BINDING: &str = "ADMISSION_HOOK";
-/// `HOOK_ROLES`: a comma list of `authorize`, `admit` and `outcome`.
+/// `HOOK_ROLES`: comma-separated `authorize`, `admit`, `outcome`, `cache-purge`, `inspect`.
 pub const ROLES_VAR: &str = "HOOK_ROLES";
 /// `HOOK_TIMEOUT_MS`: the bound on one hook call.
 pub const TIMEOUT_VAR: &str = "HOOK_TIMEOUT_MS";
@@ -36,6 +36,8 @@ pub struct HookRoles {
     pub outcome: bool,
     /// Signed global cache invalidation (Paid-only).
     pub cache_purge: bool,
+    /// Stage 5 synchronous fail-closed Inspect.
+    pub inspect: bool,
 }
 
 /// The parsed hook vars.
@@ -49,10 +51,38 @@ pub struct HookVars {
     pub authorizer_role: AuthorizerRole,
     /// Signed HTTPS channel; absent uses the service binding.
     pub http: Option<HttpVars>,
+    /// Maximum metadata objects per Inspect call.
+    pub inspect_batch_max_objects: usize,
 }
 
 fn config(message: impl Into<String>) -> ConfigError {
     ConfigError(message.into())
+}
+
+fn parse_inspection(
+    enabled: bool,
+    var: &impl Fn(&str) -> Option<String>,
+) -> Result<usize, ConfigError> {
+    let inspection_vars = [
+        "INSPECT_MODE",
+        "INSPECT_ON_UNAVAILABLE",
+        "INSPECT_BATCH_MAX_OBJECTS",
+    ];
+    if !enabled && inspection_vars.iter().any(|name| var(name).is_some()) {
+        return Err(config("inspection options need inspect in HOOK_ROLES"));
+    }
+    if var("INSPECT_MODE").is_some_and(|v| v != "sync")
+        || var("INSPECT_ON_UNAVAILABLE").is_some_and(|v| v != "fail_closed")
+    {
+        return Err(config("launch inspection requires sync and fail_closed"));
+    }
+    let inspect_batch_max_objects = var("INSPECT_BATCH_MAX_OBJECTS").map_or(Ok(10_000), |v| {
+        v.parse::<usize>()
+            .ok()
+            .filter(|n| (1..=10_000).contains(n))
+            .ok_or_else(|| config("INSPECT_BATCH_MAX_OBJECTS must be 1..=10000"))
+    })?;
+    Ok(inspect_batch_max_objects)
 }
 
 impl HookVars {
@@ -69,7 +99,16 @@ impl HookVars {
             if http.is_some() {
                 return Err(config("HOOK_URL needs HOOK_ROLES"));
             }
-            if var(TIMEOUT_VAR).is_some() || var(AUTHORIZER_ROLE_VAR).is_some() {
+            if [
+                TIMEOUT_VAR,
+                AUTHORIZER_ROLE_VAR,
+                "INSPECT_MODE",
+                "INSPECT_ON_UNAVAILABLE",
+                "INSPECT_BATCH_MAX_OBJECTS",
+            ]
+            .iter()
+            .any(|name| var(name).is_some())
+            {
                 return Err(config(format!(
                     "{TIMEOUT_VAR} and {AUTHORIZER_ROLE_VAR} need {ROLES_VAR}"
                 )));
@@ -81,6 +120,7 @@ impl HookVars {
             admit: false,
             outcome: false,
             cache_purge: false,
+            inspect: false,
         };
         for name in list.split(',').map(str::trim) {
             let slot = match name {
@@ -88,9 +128,10 @@ impl HookVars {
                 "admit" => &mut roles.admit,
                 "outcome" => &mut roles.outcome,
                 "cache-purge" => &mut roles.cache_purge,
+                "inspect" => &mut roles.inspect,
                 _ => {
                     return Err(config(format!(
-                        "{ROLES_VAR} must list authorize, admit, outcome and cache-purge, comma separated"
+                        "{ROLES_VAR} must list authorize, admit, outcome, cache-purge and inspect, comma separated"
                     )));
                 }
             };
@@ -102,6 +143,7 @@ impl HookVars {
         if roles.cache_purge && http.is_none() {
             return Err(config("cache-purge requires signed HTTPS HOOK_URL"));
         }
+        let inspect_batch_max_objects = parse_inspection(roles.inspect, var)?;
         let timeout = match var(TIMEOUT_VAR) {
             None => DEFAULT_TIMEOUT,
             Some(text) => text
@@ -130,6 +172,7 @@ impl HookVars {
             timeout,
             authorizer_role,
             http,
+            inspect_batch_max_objects,
         }))
     }
 
@@ -186,7 +229,8 @@ mod tests {
                 authorize: false,
                 admit: true,
                 outcome: true,
-                cache_purge: false
+                cache_purge: false,
+                inspect: false
             }
         );
         assert_eq!(vars.timeout, DEFAULT_TIMEOUT);
@@ -204,7 +248,7 @@ mod tests {
             " ",
             "admit,",
             "admit,,outcome",
-            "inspect",
+            "inspect,inspect",
             "Admit",
             "admit;outcome",
             "admit,admit",
@@ -461,5 +505,45 @@ mod purge_tests {
         assert!(
             HookVars::parse(&|name| (name == "HOOK_ROLES").then(|| "cache-purge".into())).is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod inspection_tests {
+    use super::*;
+
+    fn parse(extra: &[(&str, &str)]) -> Result<Option<HookVars>, ConfigError> {
+        HookVars::parse(&|name| {
+            if name == ROLES_VAR {
+                return Some("inspect".into());
+            }
+            extra
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).into())
+        })
+    }
+
+    #[test]
+    fn launch_inspection_configuration_is_strict_and_bounded() {
+        let vars = parse(&[]).unwrap().unwrap();
+        assert!(vars.roles.inspect);
+        assert_eq!(vars.inspect_batch_max_objects, 10_000);
+        assert_eq!(
+            parse(&[("INSPECT_BATCH_MAX_OBJECTS", "1")])
+                .unwrap()
+                .unwrap()
+                .inspect_batch_max_objects,
+            1
+        );
+        for pair in [
+            ("INSPECT_MODE", "async"),
+            ("INSPECT_ON_UNAVAILABLE", "publish"),
+            ("INSPECT_BATCH_MAX_OBJECTS", "0"),
+            ("INSPECT_BATCH_MAX_OBJECTS", "10001"),
+        ] {
+            assert!(parse(&[pair]).is_err());
+        }
+        assert!(HookVars::parse(&|name| (name == "INSPECT_MODE").then(|| "sync".into())).is_err());
     }
 }

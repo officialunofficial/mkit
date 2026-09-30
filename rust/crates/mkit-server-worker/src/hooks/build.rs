@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use mkit_server::hooks::{
-    HookChannel, HookClient, HookSigner, RemoteAdmission, RemoteAuthorizer, RemoteOutcomes,
-    RemotePurge,
+    HookChannel, HookClient, HookSigner, RemoteAdmission, RemoteAuthorizer, RemoteInspector,
+    RemoteOutcomes, RemotePurge,
 };
 use mkit_server::pipeline::{
     Choice, DefaultAdmission, Hooks, NoOutcomes, NoPreReceive, NoReceipts, OpenAuthorizer,
@@ -37,6 +37,8 @@ pub struct Built<C> {
     pub sink: WorkerSink<C>,
     /// Real signed global purge sink, absent by default.
     pub purge: Option<RemotePurge<C>>,
+    /// Stage 5 synchronous inspectors over the same channel.
+    pub inspectors: Vec<RemoteInspector<C>>,
 }
 
 /// The local hooks: open authorization, the built-in quota, local outcomes.
@@ -52,6 +54,7 @@ pub fn local<C>() -> Built<C> {
         },
         sink: Choice::Left(NoOutcomes),
         purge: None,
+        inspectors: Vec::new(),
     }
 }
 
@@ -105,6 +108,17 @@ pub fn build_signed<C: HookChannel>(
         built.hooks.admission =
             Choice::Right(RemoteAdmission::new(Arc::clone(&client)).with_timeout(vars.timeout));
     }
+    if vars.roles.inspect {
+        let identity = vars.http.as_ref().map_or_else(
+            || super::config::BINDING.to_owned(),
+            |http| {
+                mkit_core::hash::to_hex(&mkit_core::hash::hash(http.endpoint.url("").as_bytes()))
+            },
+        );
+        built
+            .inspectors
+            .push(RemoteInspector::new(identity, Arc::clone(&client)).with_timeout(vars.timeout));
+    }
     if vars.roles.outcome {
         // Kind 8 also bounds each call by `OUTCOME_SINK_TIMEOUT`.
         built.sink = Choice::Right(
@@ -115,7 +129,7 @@ pub fn build_signed<C: HookChannel>(
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use glue::{hooks_from_env, purge_from_env, sink_from_env};
+pub use glue::{hooks_from_env, inspectors_from_env, purge_from_env, sink_from_env};
 
 #[cfg(target_arch = "wasm32")]
 mod glue {
@@ -196,6 +210,29 @@ mod glue {
         cfg: &WorkerConfig,
     ) -> Result<WorkerHooks<WorkerChannel>, ConfigError> {
         from_env(env, cfg).map(|built| built.hooks)
+    }
+
+    /// Stage 5 inspectors using the configured binding or signed HTTP channel.
+    ///
+    /// # Errors
+    /// As [`hooks_from_env`].
+    pub fn inspectors_from_env(
+        env: &Env,
+        cfg: &WorkerConfig,
+    ) -> Result<Vec<Arc<dyn mkit_server::pipeline::inspection::ContentInspector>>, ConfigError>
+    {
+        from_env(env, cfg).map(|built| {
+            built
+                .inspectors
+                .into_iter()
+                .map(|inspector| {
+                    // Worker futures are single-threaded; core shares Arc on both targets.
+                    #[allow(clippy::arc_with_non_send_sync)]
+                    let inspector = Arc::new(inspector);
+                    inspector as Arc<dyn mkit_server::pipeline::inspection::ContentInspector>
+                })
+                .collect()
+        })
     }
 
     /// The kind-8 sink of `cfg`'s hook vars over `env`'s [`BINDING`].
@@ -298,10 +335,12 @@ mod tests {
                 admit,
                 outcome,
                 cache_purge: false,
+                inspect: false,
             },
             timeout: crate::hooks::config::DEFAULT_TIMEOUT,
             authorizer_role: mkit_server::policy::AuthorizerRole::Check,
             http: None,
+            inspect_batch_max_objects: 10_000,
         }
     }
 

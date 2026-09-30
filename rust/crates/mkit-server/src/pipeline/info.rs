@@ -43,6 +43,8 @@ pub struct ServerInfo {
     pub index_fanout: u32,
     /// Delta-chain depth cap; 0 while indexed mode is off (SPEC-SERVER §9.8).
     pub max_delta_chain_depth: u32,
+    /// Distinct inspected-object cap per advance; absent without inspectors.
+    pub inspection_max_objects: Option<u32>,
 }
 
 impl PipelineConfig {
@@ -114,6 +116,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .indexed
                 .as_ref()
                 .map_or(0, |cfg| cfg.max_delta_chain_depth),
+            inspection_max_objects: self.inspection_max_objects(),
         }
     }
 }

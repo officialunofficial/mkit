@@ -152,6 +152,7 @@ impl RelayHook for HolderRelayHook {
                 gp,
                 keys::object_state(&identity.object),
                 keys::block(&identity.object),
+                crate::takedown::denial::action_key(&identity.object),
                 keys::hold(&identity.object, &identity.hold_id),
                 keys::holder(&identity.object, &identity.holder.ns, &identity.holder.repo)?,
                 keys::content_takedown(&identity.object, &identity.intent),
@@ -199,12 +200,14 @@ impl RelayHook for HolderRelayHook {
                 if !seen.iter().any(|(key, _)| matches!(keys::parse(key), Some(keys::ParsedKey::RelayHighWater(source)) if source == identity.source)) { return Err(bad()); }
                 let c = keys::object_state(&identity.object);
                 let b = keys::block(&identity.object);
+                let actions = crate::takedown::denial::action_key(&identity.object);
                 let g = keys::hold(&identity.object, &identity.hold_id);
                 let h = keys::holder(&identity.object, &identity.holder.ns, &identity.holder.repo)?;
                 let ct = keys::content_takedown(&identity.object, &identity.intent);
                 for key in [
                     c.clone(),
                     b.clone(),
+                    actions.clone(),
                     g.clone(),
                     h.clone(),
                     gp.clone(),
@@ -271,7 +274,9 @@ impl RelayHook for HolderRelayHook {
                     codec::encode_holder(&HolderRecord::new(state.seq, identity.ticket)),
                 ));
                 writes.extend([Write::Delete(g), Write::Delete(gp)]);
-                if let Some(blocked) = raw(seen, &b)?.map(codec::decode_block_entry).transpose()? {
+                let blocked = raw(seen, &b)?.map(codec::decode_block_entry).transpose()?;
+                let independent = crate::takedown::denial::representative(raw(seen, &actions)?)?;
+                if let Some(blocked) = blocked.or(independent) {
                     let request = match raw(seen, &ct)? {
                         Some(raw) => {
                             let request = ContentTakedownV1::decode(raw)?;
