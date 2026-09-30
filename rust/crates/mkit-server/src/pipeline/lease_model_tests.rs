@@ -47,6 +47,7 @@ struct Model {
 impl Model {
     fn lease(epoch: u64, expires_at_ms: u64) -> EpochLease {
         EpochLease {
+            authority_ready: None,
             authority_generation: None,
             epoch,
             expires_at_ms,
@@ -370,6 +371,9 @@ fn declared_recovery_waits_from_resume_instead_of_namespace_creation() {
         "empty table without recovery implies no lost leases"
     );
     model.recovery = Some(LeaseRecovery {
+        authority_fence: None,
+        authority_ready: None,
+        activation_only: None,
         resumed_at_ms: model.now,
     });
     assert!(

@@ -200,7 +200,10 @@ pub async fn check_recovery<S: NamespaceStore>(
         .map(codec::decode_lease_recovery)
         .transpose()?;
     let reconciled = reconcile.as_ref().map(codec::decode_u64).transpose()?;
-    if recovered.is_some_and(|lr| reconciled.is_none_or(|at| at <= lr.resumed_at_ms)) {
+    if recovered
+        .and_then(codec::LeaseRecovery::recovery_time)
+        .is_some_and(|resumed| reconciled.is_none_or(|at| at <= resumed))
+    {
         return Err(WatermarkError::Recovering);
     }
     Ok(generation)
@@ -229,7 +232,8 @@ pub async fn mark_lease_table_reconciled<S: NamespaceStore>(
         .ok_or_else(|| StoreError::Invalid("no lease recovery to reconcile".into()))?;
     let recovery = codec::decode_lease_recovery(&value)?;
     let later = recovery
-        .resumed_at_ms
+        .recovery_time()
+        .ok_or_else(|| StoreError::Invalid("no actual lease recovery to reconcile".into()))?
         .checked_add(1)
         .ok_or_else(|| StoreError::Invalid("lease recovery time has no successor".into()))?;
     let timestamp = at_ms.max(later);
@@ -420,6 +424,9 @@ mod tests {
                         Batch::new().put(
                             keys::lease_recovery(),
                             codec::encode_lease_recovery(&codec::LeaseRecovery {
+                                authority_fence: None,
+                                authority_ready: None,
+                                activation_only: None,
                                 resumed_at_ms: 110,
                             }),
                         ),
@@ -528,7 +535,12 @@ mod tests {
                 Batch::new()
                     .put(
                         keys::lease_recovery(),
-                        codec::encode_lease_recovery(&codec::LeaseRecovery { resumed_at_ms: 90 }),
+                        codec::encode_lease_recovery(&codec::LeaseRecovery {
+                            authority_fence: None,
+                            authority_ready: None,
+                            activation_only: None,
+                            resumed_at_ms: 90,
+                        }),
                     )
                     .put(keys::lease_reconcile(), codec::encode_u64(91)),
             )
@@ -548,7 +560,12 @@ mod tests {
                 Batch::new()
                     .put(
                         keys::lease_recovery(),
-                        codec::encode_lease_recovery(&codec::LeaseRecovery { resumed_at_ms: 110 }),
+                        codec::encode_lease_recovery(&codec::LeaseRecovery {
+                            authority_fence: None,
+                            authority_ready: None,
+                            activation_only: None,
+                            resumed_at_ms: 110,
+                        }),
                     )
                     .put(keys::lease_reconcile(), codec::encode_u64(111)),
             )
@@ -571,7 +588,12 @@ mod tests {
                 Batch::new()
                     .put(
                         keys::lease_recovery(),
-                        codec::encode_lease_recovery(&codec::LeaseRecovery { resumed_at_ms: 130 }),
+                        codec::encode_lease_recovery(&codec::LeaseRecovery {
+                            authority_fence: None,
+                            authority_ready: None,
+                            activation_only: None,
+                            resumed_at_ms: 130,
+                        }),
                     )
                     .delete(keys::lease_reconcile()),
             )
@@ -666,7 +688,12 @@ mod tests {
                 &coordinator(),
                 Batch::new().put(
                     keys::lease_recovery(),
-                    codec::encode_lease_recovery(&codec::LeaseRecovery { resumed_at_ms: 100 }),
+                    codec::encode_lease_recovery(&codec::LeaseRecovery {
+                        authority_fence: None,
+                        authority_ready: None,
+                        activation_only: None,
+                        resumed_at_ms: 100,
+                    }),
                 ),
             )
             .await

@@ -344,6 +344,7 @@ mod tests {
     #[test]
     fn expired_source_lease_cannot_enqueue() {
         let lease = codec::encode_epoch_lease(&codec::EpochLease {
+            authority_ready: None,
             authority_generation: None,
             epoch: 1,
             expires_at_ms: 1_010,
@@ -370,12 +371,14 @@ mod tests {
             Err(StoreError::Corrupt(_))
         ));
         let stale = codec::encode_epoch_lease(&codec::EpochLease {
+            authority_ready: None,
             authority_generation: None,
             epoch: 1,
             expires_at_ms: 10_000,
             config_version: 1,
         });
         let current = codec::encode_epoch_lease(&codec::EpochLease {
+            authority_ready: None,
             authority_generation: None,
             epoch: 2,
             expires_at_ms: 10_000,

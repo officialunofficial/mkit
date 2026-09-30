@@ -453,7 +453,6 @@ pub struct Pipeline<B, N, H = Hooks> {
     #[cfg(feature = "test-faults")]
     faults: Option<Arc<dyn faults::DynFaultHooks>>,
     gate: Option<Arc<gate::WriteGate>>,
-    revocation_cursors: Arc<revocation::RevokeCursors>,
     #[cfg(feature = "http-objects")]
     http_seams: Option<crate::http_objects::HttpSeams>,
 }
@@ -813,7 +812,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             #[cfg(feature = "test-faults")]
             faults: None,
             gate: None,
-            revocation_cursors: Arc::default(),
             #[cfg(feature = "http-objects")]
             http_seams,
         })
@@ -891,7 +889,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         )?;
         sibling.shards = Arc::clone(&self.shards);
         sibling.gate.clone_from(&self.gate);
-        sibling.revocation_cursors = Arc::clone(&self.revocation_cursors);
         #[cfg(feature = "test-faults")]
         sibling.faults.clone_from(&self.faults);
         #[cfg(feature = "http-objects")]
@@ -1504,7 +1501,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let rv_key = keys::repo_visibility(&repo.name);
         let rows = self
             .meta
-            .get_many(p, &[replay_key.clone(), rv_key.clone()])
+            .get_many(
+                p,
+                &[
+                    replay_key.clone(),
+                    rv_key.clone(),
+                    keys::authority_generation(),
+                    keys::lease_recovery(),
+                ],
+            )
             .await
             .map_err(meta_error)?;
         let mut rows = rows.into_iter();
@@ -1530,19 +1535,40 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ));
             }
         }
+        Box::pin(self.ensure_authority_activation(&repo.namespace)).await?;
         let facts = self.authorize_visibility_envelope(&op).await?;
         let mut replans = 0;
         loop {
             let (mut batch, prune) = self
                 .plan_visibility(p, auth, repo, visibility, stored.as_ref())
                 .await?;
+            let fence_rows = self
+                .meta
+                .get_many(p, &[keys::authority_generation(), keys::lease_recovery()])
+                .await
+                .map_err(meta_error)?;
+            let [generation_value, mode_value] = fence_rows.as_slice() else {
+                return Err(internal("visibility fence row count"));
+            };
+            let mode = mode_value
+                .as_ref()
+                .map(codec::decode_lease_recovery)
+                .transpose()
+                .map_err(meta_error)?;
+            if facts.authority_generation.is_none()
+                && (generation_value.is_some()
+                    || mode.is_some_and(|m| m.authority_fence == Some(true)))
+            {
+                return Err(ServerError::unavailable(
+                    "persisted authority fence requires enabled executor",
+                ));
+            }
+            batch = batch.require(lease::observed_guard(
+                keys::lease_recovery(),
+                mode_value.as_ref(),
+            ));
             if let Some(generation) = facts.authority_generation {
-                let value = self
-                    .meta
-                    .get(p, &keys::authority_generation())
-                    .await
-                    .map_err(meta_error)?;
-                let current = value
+                let current = generation_value
                     .as_ref()
                     .map(codec::decode_u64)
                     .transpose()
@@ -1553,7 +1579,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 }
                 batch = batch.require(lease::observed_guard(
                     keys::authority_generation(),
-                    value.as_ref(),
+                    generation_value.as_ref(),
                 ));
             }
             match self.meta.apply(p, batch).await {
@@ -2912,6 +2938,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         tracing::debug!(stage = "authorize");
         if !op.procedure().is_write() {
             return Ok((self.authorize_read(op).await?.facts, None));
+        }
+        if self.cfg.authority_fence.is_some() && self.cfg.sharding == Sharding::Single {
+            Box::pin(self.ensure_authority_activation(&op.repo.namespace)).await?;
         }
         match &self.cfg.addressing {
             Addressing::Multi(multi) => self.owner_rule(op, Some(&multi.namespace_policy)).await,

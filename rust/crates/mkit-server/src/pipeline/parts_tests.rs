@@ -1,5 +1,5 @@
-//! Multipart pipeline regression tests. `NoMeta` panics on every operation:
-//! the upload and completion paths must remain stateless.
+//! Multipart pipeline regression tests. Only the authority-mode read is allowed;
+//! upload and completion must not write business metadata.
 
 use std::sync::{Arc, Mutex};
 
@@ -36,8 +36,13 @@ impl NamespaceStore for NoMeta {
     fn capabilities(&self) -> StoreCapabilities {
         StoreCapabilities::full()
     }
-    async fn get(&self, _: &Partition, _: &Key) -> Result<Option<Value>, StoreError> {
-        panic!("metadata get")
+    async fn get(&self, _: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
+        assert!(
+            key == &crate::store::keys::authority_generation()
+                || key == &crate::store::keys::lease_recovery(),
+            "unexpected metadata get"
+        );
+        Ok(None)
     }
     async fn scan(
         &self,
@@ -1015,6 +1020,16 @@ impl NamespaceStore for CompletionGeneration {
         StoreCapabilities::full()
     }
     async fn get(&self, _: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
+        if key == &crate::store::keys::lease_recovery() {
+            return Ok(Some(crate::store::codec::encode_lease_recovery(
+                &crate::store::codec::LeaseRecovery {
+                    resumed_at_ms: 0,
+                    authority_fence: Some(true),
+                    authority_ready: Some(true),
+                    activation_only: Some(true),
+                },
+            )));
+        }
         assert_eq!(key, &crate::store::keys::authority_generation());
         Ok(Some(crate::store::codec::encode_u64(
             self.0.load(std::sync::atomic::Ordering::SeqCst),

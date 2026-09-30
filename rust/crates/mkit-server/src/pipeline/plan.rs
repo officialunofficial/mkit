@@ -203,8 +203,9 @@ impl WriteRequest<'_> {
         } else if self.grant.is_some() {
             out.push(keys::grant_epoch());
         }
-        if self.authority_generation.is_some() && self.lease.is_none() {
+        if self.lease.is_none() {
             out.push(keys::authority_generation());
+            out.push(keys::lease_recovery());
         }
         out.extend(self.charges.iter().map(|c| keys::quota(&c.scope)));
         if let Some(charge) = self.namespace_charge {
@@ -434,6 +435,22 @@ pub(crate) fn plan_write(
         }
         None => None,
     };
+    if req.lease.is_none() {
+        let mode = snap
+            .get(&keys::lease_recovery())
+            .map(codec::decode_lease_recovery)
+            .transpose()
+            .map_err(corrupt)?;
+        if req.authority_generation.is_none()
+            && (snap.get(&keys::authority_generation()).is_some()
+                || mode.is_some_and(|m| m.authority_fence == Some(true)))
+        {
+            return Err(ServerError::unavailable(
+                "persisted authority fence requires enabled executor",
+            ));
+        }
+        pre.push(guard(keys::lease_recovery(), snap));
+    }
     if let Some(generation) = req.authority_generation {
         let current = if let Some(lease) = req.lease {
             lease

@@ -65,6 +65,8 @@ struct SnapshotInfo {
     max_relay_sequence: u64,
     has_relay: bool,
     sharding_marker: Option<ExportRecord>,
+    authority_fence: bool,
+    authority_generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +119,8 @@ fn inspect(
     let mut max_relay_sequence = 0;
     let mut has_relay = false;
     let mut sharding_marker = None;
+    let mut authority_fence = false;
+    let mut authority_generation = None;
     for record in reader {
         let record = record?;
         match &partition {
@@ -126,7 +130,22 @@ fn inspect(
             None => partition = Some(record.partition.clone()),
             _ => {}
         }
+        if record.key == keys::authority_generation() {
+            authority_generation = Some(codec::decode_u64(&record.value)?);
+            authority_fence = true;
+        } else if record.key == keys::epoch_lease() {
+            authority_generation = codec::decode_epoch_lease(&record.value)?.authority_generation;
+            authority_fence |= authority_generation.is_some();
+        } else if record.key == keys::lease_recovery() {
+            authority_fence |=
+                codec::decode_lease_recovery(&record.value)?.authority_fence == Some(true);
+        }
         match keys::parse(&record.key) {
+            Some(ParsedKey::Ticket(_)) => {
+                let ticket = codec::decode_ticket(&record.value)?;
+                authority_generation = authority_generation.max(ticket.authority_generation);
+                authority_fence |= ticket.authority_generation.is_some();
+            }
             Some(ParsedKey::GrantEpoch) => epoch = codec::decode_u64(&record.value)?,
             Some(ParsedKey::OutboxSequence) => {
                 outbox_sequence = codec::decode_u64(&record.value)?;
@@ -184,11 +203,15 @@ fn inspect(
         max_relay_sequence,
         has_relay,
         sharding_marker,
+        authority_fence,
+        authority_generation,
     })
 }
 
 fn should_drop(record: &ExportRecord) -> bool {
-    record.key == keys::backup_state()
+    record.key == keys::revoke_cursor(false)
+        || record.key == keys::revoke_cursor(true)
+        || record.key == keys::backup_state()
         || record.key == keys::epoch_lease()
         || record.key == keys::relay_scan()
         || record.key == keys::lease_reconcile()
@@ -206,12 +229,42 @@ pub async fn mark_lease_table_recovered<S: NamespaceStore>(
     partition: &Partition,
     recovered_at_ms: u64,
 ) -> Result<(), StoreError> {
-    let batch = Batch::new().delete(keys::lease_reconcile()).put(
-        keys::lease_recovery(),
-        codec::encode_lease_recovery(&LeaseRecovery {
-            resumed_at_ms: recovered_at_ms,
-        }),
-    );
+    let key = keys::lease_recovery();
+    let prior = store.get(partition, &key).await?;
+    let authority = store.get(partition, &keys::authority_generation()).await?;
+    if let Some(value) = authority.as_ref() {
+        codec::decode_u64(value)?;
+    }
+    let mode = prior
+        .as_ref()
+        .map(codec::decode_lease_recovery)
+        .transpose()?;
+    if mode.is_some_and(|m| m.authority_fence == Some(true)) && authority.is_none() {
+        return Err(corrupt("fenced recovery requires authority generation"));
+    }
+    let batch = Batch::new()
+        .require(match authority.as_ref() {
+            Some(value) => super::Precondition::Equals(keys::authority_generation(), value.clone()),
+            None => super::Precondition::Absent(keys::authority_generation()),
+        })
+        .require(match prior.as_ref() {
+            Some(value) => super::Precondition::Equals(key.clone(), value.clone()),
+            None => super::Precondition::Absent(key.clone()),
+        })
+        .delete(keys::lease_reconcile())
+        .delete(keys::revoke_cursor(false))
+        .delete(keys::revoke_cursor(true))
+        .put(
+            key,
+            codec::encode_lease_recovery(&LeaseRecovery {
+                authority_fence: authority.as_ref().map(|_| true),
+                authority_ready: authority
+                    .as_ref()
+                    .map(|_| mode.is_some_and(|m| m.authority_ready == Some(true))),
+                activation_only: None,
+                resumed_at_ms: recovered_at_ms,
+            }),
+        );
     match store.apply(partition, batch).await? {
         BatchOutcome::Committed => Ok(()),
         _ => Err(StoreError::unavailable(
@@ -320,6 +373,7 @@ fn check_completeness(
     })
 }
 
+#[allow(clippy::too_many_lines)] // All portable input, fence and arithmetic checks must finish before any import writes.
 async fn prepare<S: NamespaceStore>(
     snapshots: &[Vec<u8>],
     target: &S,
@@ -365,6 +419,29 @@ async fn prepare<S: NamespaceStore>(
         };
         if incompatible {
             return Err(invalid("snapshot partition conflicts with sharding marker"));
+        }
+    }
+    for info in infos.iter().filter(|info| info.authority_fence) {
+        let owner = infos.iter().find(|candidate| {
+            mode.coordinator(&candidate.partition)
+                && namespace(&candidate.partition) == namespace(&info.partition)
+        });
+        if owner.is_none_or(|owner| {
+            owner.authority_generation.is_none()
+                || info.authority_generation > owner.authority_generation
+        }) {
+            return Err(invalid(
+                "fenced snapshot requires authoritative generation without rollback",
+            ));
+        }
+    }
+    for coordinator in &missing_coordinators {
+        if infos.iter().any(|info| {
+            info.authority_fence && namespace(&info.partition) == namespace(coordinator)
+        }) {
+            return Err(invalid(
+                "fenced namespace coordinator cannot be reconstructed without authority state",
+            ));
         }
     }
     for partition in missing_sources
@@ -576,9 +653,15 @@ async fn seed_relay_leases<S: NamespaceStore>(
             .map(codec::decode_u64)
             .transpose()?
             .unwrap_or(0);
+        let authority_generation = target
+            .get(&coordinator, &keys::authority_generation())
+            .await?
+            .as_ref()
+            .map(codec::decode_u64)
+            .transpose()?;
         let row = codec::LeasedShard {
-            authority_generation: None,
-            acked_authority_generation: None,
+            authority_generation,
+            acked_authority_generation: authority_generation,
             epoch,
             expires_at_ms: recovered_at_ms,
             acked_epoch: epoch,
@@ -731,6 +814,7 @@ mod tests {
 
     fn old_lease() -> Value {
         codec::encode_epoch_lease(&codec::EpochLease {
+            authority_ready: None,
             authority_generation: None,
             epoch: 7,
             expires_at_ms: 999_999,
@@ -1422,5 +1506,88 @@ mod tests {
             )),
             Err(StoreError::Invalid(_))
         ));
+    }
+    #[test]
+    fn fenced_restore_preserves_mode_without_business_creation_and_rejects_missing_state() {
+        let mode = codec::LeaseRecovery {
+            authority_fence: Some(true),
+            authority_ready: Some(true),
+            activation_only: Some(true),
+            resumed_at_ms: 0,
+        };
+        let archives = [
+            snapshot(
+                &root(),
+                vec![(keys::sharding_marker(), Value::new(b"d34".to_vec()))],
+            ),
+            snapshot(
+                &coordinator(),
+                vec![
+                    (keys::authority_generation(), codec::encode_u64(7)),
+                    (keys::lease_recovery(), codec::encode_lease_recovery(&mode)),
+                ],
+            ),
+        ];
+        let store = MemoryKv::default();
+        block_on(restore(
+            &archives,
+            &store,
+            RestoreOptions {
+                recovered_at_ms: 100,
+                ..RestoreOptions::default()
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            block_on(store.get(&coordinator(), &keys::authority_generation())).unwrap(),
+            Some(codec::encode_u64(7))
+        );
+        assert!(
+            block_on(store.get(&coordinator(), &keys::namespace_record()))
+                .unwrap()
+                .is_none()
+        );
+        let raw = block_on(store.get(&coordinator(), &keys::lease_recovery()))
+            .unwrap()
+            .unwrap();
+        let recovered = codec::decode_lease_recovery(&raw).unwrap();
+        assert_eq!(recovered.authority_fence, Some(true));
+        assert_eq!(recovered.authority_ready, Some(true));
+        assert_eq!(recovered.recovery_time(), Some(100));
+        let lease = codec::EpochLease {
+            epoch: 0,
+            config_version: 1,
+            expires_at_ms: 1000,
+            authority_generation: Some(7),
+            authority_ready: Some(true),
+        };
+        let incomplete = [
+            snapshot(
+                &root(),
+                vec![(keys::sharding_marker(), Value::new(b"d34".to_vec()))],
+            ),
+            snapshot(
+                &source(),
+                vec![(keys::epoch_lease(), codec::encode_epoch_lease(&lease))],
+            ),
+        ];
+        let fresh = MemoryKv::default();
+        assert!(
+            block_on(restore(
+                &incomplete,
+                &fresh,
+                RestoreOptions {
+                    allow_incomplete: true,
+                    epoch_at_least: Some(0),
+                    ..RestoreOptions::default()
+                }
+            ))
+            .is_err()
+        );
+        assert!(
+            block_on(fresh.get(&root(), &keys::sharding_marker()))
+                .unwrap()
+                .is_none()
+        );
     }
 }

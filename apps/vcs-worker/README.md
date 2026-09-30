@@ -377,3 +377,10 @@ line per dedicated deployment-authority key. It requires Multi addressing and
 `AUTHORIZER_ROLE=authority`; every write allowance must carry the namespace's
 `authority_generation`. SPEC-SERVER §6.2.1 defines signed setter statements and
 completion. Default is off; launch activation is WP-4.18.
+
+Once a namespace has persisted authority fencing, disabling the executor setting
+refuses new writes for that namespace, including generation zero. Initial
+activation may return `unavailable` with `Retry-After: 1` until its bounded lease
+barrier completes. Repeating the signed target resumes durable progress; it does
+not create a namespace or charge first-write creation. Restore must preserve the
+authority mode and generation, then declare real lease-table recovery.

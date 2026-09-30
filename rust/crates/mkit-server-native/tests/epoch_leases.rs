@@ -90,6 +90,7 @@ struct Controls {
     ack: Gate,
     scan_clock: Mutex<Option<Arc<ManualClock>>>,
     fail_push_once: AtomicBool,
+    push_conflict: AtomicBool,
     epoch_race_once: Mutex<Option<u64>>,
     epoch_after_cas_once: Mutex<Option<u64>>,
 }
@@ -170,6 +171,14 @@ impl<N: NamespaceStore> NamespaceStore for Store<N> {
                 .iter()
                 .all(|w| matches!(w, Write::Put(k, _) if *k == keys::epoch_lease()))
         {
+            if self.controls.push_conflict.load(Ordering::SeqCst) {
+                let outcome = BatchOutcome::PreconditionFailed {
+                    index: 0,
+                    observed: None,
+                };
+                self.record(Call::Apply(p.clone(), batch, outcome.clone()));
+                return Ok(outcome);
+            }
             if self.controls.fail_push_once.swap(false, Ordering::SeqCst) {
                 return Err(StoreError::unavailable(std::io::Error::other(
                     "injected epoch push failure",
@@ -250,6 +259,7 @@ enum Reject {
     Challenge,
     Deny,
     Authority(Option<u64>),
+    UnfencedAuthority(Option<u64>),
 }
 struct Policy(Reject);
 impl Authorizer for Policy {
@@ -259,7 +269,7 @@ impl Authorizer for Policy {
         } else {
             let mut facts = AuthzFacts::default();
             facts.authority_generation = match self.0 {
-                Reject::Authority(generation) => generation,
+                Reject::Authority(generation) | Reject::UnfencedAuthority(generation) => generation,
                 _ => None,
             };
             Ok(facts)
@@ -325,8 +335,13 @@ fn pipeline<N: NamespaceStore>(
         )
         .unwrap(),
     );
-    if matches!(rejection, Reject::Authority(_)) {
+    if matches!(
+        rejection,
+        Reject::Authority(_) | Reject::UnfencedAuthority(_)
+    ) {
         cfg.authorizer_role = mkit_server::policy::AuthorizerRole::Authority;
+    }
+    if matches!(rejection, Reject::Authority(_)) {
         cfg.authority_fence = Some(
             mkit_server::authority::AuthorityFence::parse(&format!(
                 "deployment {} {}",
@@ -2916,13 +2931,17 @@ async fn authority_setter_has_a_fixed_scan_bound_with_a_frozen_clock() {
         &Namespace::parse(identity().split_once('/').unwrap().0).unwrap(),
     );
     let coordinator = Partition::Coordinator(ns);
-    for index in 0..1024 {
+    for index in 0..1536 {
         let row = codec::LeasedShard {
             authority_generation: Some(0),
-            acked_authority_generation: Some(1),
+            acked_authority_generation: Some(u64::from(index >= 4)),
             epoch: 0,
             acked_epoch: 0,
-            expires_at_ms: if index % 2 == 0 { 99 } else { 100_000 },
+            expires_at_ms: if index >= 4 && index % 2 == 0 {
+                99
+            } else {
+                100_000
+            },
             relay_watermark_ms: 0,
             sweep_due_ms: 100_000,
         };
@@ -2945,18 +2964,33 @@ async fn authority_setter_has_a_fixed_scan_bound_with_a_frozen_clock() {
         Reject::Authority(Some(1)),
     );
     store.take();
+    store.controls.push_conflict.store(true, Ordering::SeqCst);
     let result = pipe.set_authority_generation(&signed_authority(1)).await;
     let calls = store.take();
+    let mut max_calls = calls.len();
     assert!(
-        calls.len() <= 64,
+        calls.len() <= 50,
         "one setter scanned {} calls at frozen time",
         calls.len()
     );
     assert_eq!(result.unwrap_err().code(), Code::Unavailable);
+    store.controls.push_conflict.store(false, Ordering::SeqCst);
     let mut complete = false;
-    for _ in 0..10 {
+    for _ in 0..60 {
+        // Each slice runs in a fresh pipeline, as separate cold Worker calls do.
+        let pipe = pipeline(
+            store.clone(),
+            clock.clone(),
+            Arc::new(Faults::default()),
+            Reject::Authority(Some(1)),
+        );
         let result = pipe.set_authority_generation(&signed_authority(1)).await;
-        assert!(store.take().len() <= 64);
+        let count = store.take().len();
+        max_calls = max_calls.max(count);
+        assert!(
+            count <= 50,
+            "setter exceeded general Worker budget: {count}"
+        );
         if result.is_ok() {
             complete = true;
             break;
@@ -2967,5 +3001,162 @@ async fn authority_setter_has_a_fixed_scan_bound_with_a_frozen_clock() {
         complete,
         "durable confirmed prefix must advance across bounded retries"
     );
+    eprintln!(
+        "maximum setter metadata calls including activation, collision and completion: {max_calls}"
+    );
     assert_eq!(clock.now_ms(), 100);
+}
+
+async fn disabled_executor_refuses_persisted_authority<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    _: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let faults = Arc::new(Faults::default());
+    let enabled = pipeline(
+        store.clone(),
+        clock.clone(),
+        faults.clone(),
+        Reject::Authority(Some(0)),
+    );
+    let initial = auth(&enabled, None);
+    committed(&enabled, &initial, REF, 1).await;
+    let begin = auth_for(&enabled, None, [1; 32], None, Procedure::BeginUpload);
+    let mkit_server::BeginUploadResult::Ticket { token, .. } = enabled
+        .begin_upload(&begin, REF, &[3; 32], 10)
+        .await
+        .unwrap()
+    else {
+        panic!("expected ticket")
+    };
+    for generation in [0, 1] {
+        if generation == 1 {
+            enabled
+                .set_authority_generation(&signed_authority(1))
+                .await
+                .unwrap();
+        }
+        for rejection in [Reject::UnfencedAuthority(Some(0)), Reject::Allow] {
+            let disabled = pipeline(store.clone(), clock.clone(), faults.clone(), rejection);
+            let old = auth_as(&disabled, None, [1; 32], None);
+            assert!(
+                disabled.update_ref(&old, update(REF, 2)).await.is_err(),
+                "disabled usable lease accepted generation {generation}"
+            );
+            let visibility = auth_for(&disabled, None, [1; 32], None, Procedure::SetRepoVisibility);
+            assert!(
+                disabled
+                    .set_repo_visibility(
+                        &visibility,
+                        mkit_server::pipeline::VisibilityRequest::Envelope(
+                            mkit_attest::grant::Visibility::Public
+                        )
+                    )
+                    .await
+                    .is_err()
+            );
+            let complete = auth_for(&disabled, None, [1; 32], None, Procedure::CompleteUpload);
+            assert_eq!(
+                disabled
+                    .complete_upload(&complete, &token, &[])
+                    .await
+                    .unwrap_err()
+                    .code(),
+                Code::Unavailable
+            );
+            let fresh = auth_as(&disabled, None, [1; 32], None);
+            assert!(
+                disabled
+                    .update_ref(&fresh, update("refs/heads/fresh", 3))
+                    .await
+                    .is_err(),
+                "disabled fresh shard accepted generation {generation}"
+            );
+        }
+    }
+    clock.advance(30_000);
+    let disabled = pipeline(store, clock, faults, Reject::UnfencedAuthority(Some(0)));
+    let expired = auth_as(&disabled, None, [1; 32], None);
+    assert!(
+        disabled.update_ref(&expired, update(REF, 4)).await.is_err(),
+        "disabled expired renewal accepted"
+    );
+}
+backends!(
+    disabled_executor_refuses_persisted_authority_memory,
+    disabled_executor_refuses_persisted_authority_sqlite,
+    disabled_executor_refuses_persisted_authority
+);
+
+#[tokio::test]
+async fn authority_activation_before_business_creation_preserves_recovery_and_watermarks() {
+    use mkit_server::store::watermark::{check_recovery, mark_lease_table_reconciled};
+    use mkit_server::{NamespaceKey, RepoName};
+    let clock = Arc::new(ManualClock::new(100));
+    let store = Store::new(MemoryKv::with_clock(clock.clone()));
+    let pipe = pipeline(
+        store.clone(),
+        clock,
+        Arc::new(Faults::default()),
+        Reject::Authority(Some(0)),
+    );
+    let ns = NamespaceKey::from_namespace(
+        &Namespace::parse(identity().split_once('/').unwrap().0).unwrap(),
+    );
+    let coordinator = Partition::Coordinator(ns.clone());
+    pipe.set_authority_generation(&signed_authority(0))
+        .await
+        .unwrap();
+    assert!(
+        store
+            .inner
+            .get(&coordinator, &keys::namespace_record())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .inner
+            .get(
+                &coordinator,
+                &keys::repo_record(&RepoName::new("leases").unwrap())
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let raw = store
+        .inner
+        .get(&coordinator, &keys::lease_recovery())
+        .await
+        .unwrap()
+        .unwrap();
+    let mode = codec::decode_lease_recovery(&raw).unwrap();
+    assert_eq!(mode.authority_fence, Some(true));
+    assert_eq!(mode.authority_ready, Some(true));
+    assert_eq!(mode.recovery_time(), None);
+    assert!(check_recovery(&store, &coordinator, None).await.is_ok());
+    assert!(
+        mark_lease_table_reconciled(&store, &coordinator, 100)
+            .await
+            .is_err()
+    );
+    pipe.mark_lease_table_recovered(&ns).await.unwrap();
+    let raw = store
+        .inner
+        .get(&coordinator, &keys::lease_recovery())
+        .await
+        .unwrap()
+        .unwrap();
+    let mode = codec::decode_lease_recovery(&raw).unwrap();
+    assert_eq!(mode.authority_fence, Some(true));
+    assert_eq!(mode.authority_ready, Some(true));
+    assert_eq!(mode.recovery_time(), Some(100));
+    assert!(check_recovery(&store, &coordinator, None).await.is_err());
+    mark_lease_table_reconciled(&store, &coordinator, 101)
+        .await
+        .unwrap();
+    assert!(check_recovery(&store, &coordinator, None).await.is_ok());
 }

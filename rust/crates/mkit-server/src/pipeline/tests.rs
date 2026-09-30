@@ -129,6 +129,7 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
         }),
         lease: d34.then_some(lease::LeaseWrite {
             value: codec::EpochLease {
+                authority_ready: None,
                 authority_generation: None,
                 epoch: 1,
                 expires_at_ms: ms(T0) + 30_000,
@@ -324,6 +325,7 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
         grant: None,
         lease: Some(lease::LeaseWrite {
             value: codec::EpochLease {
+                authority_ready: None,
                 authority_generation: None,
                 epoch: 1,
                 expires_at_ms: ms(T0) + 30_000,
@@ -732,6 +734,9 @@ fn single_sharding_watermark_reads_namespace_outbox() {
         Batch::new().put(
             keys::lease_recovery(),
             codec::encode_lease_recovery(&codec::LeaseRecovery {
+                authority_fence: None,
+                authority_ready: None,
+                activation_only: None,
                 resumed_at_ms: u64::try_from(T0).unwrap(),
             }),
         ),
@@ -4107,6 +4112,7 @@ fn prune_race_then_push(kv: MemoryKv, pushed: codec::EpochLease) -> Spy {
 fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
     let clock = clock();
     let pushed = codec::EpochLease {
+        authority_ready: None,
         authority_generation: None,
         epoch: 1,
         expires_at_ms: ms(T0) + 30_000,
@@ -4124,6 +4130,7 @@ fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
     let env = build(config, meta, Hooks::new(), clock);
     let p = D34Shards.ref_shard(&repo(), HEAD);
     let old = codec::EpochLease {
+        authority_ready: None,
         authority_generation: None,
         epoch: 0,
         ..pushed
@@ -4256,6 +4263,7 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
     let name = repo_name();
     let refs = [upd(HEAD, Any, A)];
     let stored = codec::EpochLease {
+        authority_ready: None,
         authority_generation: None,
         epoch: 6,
         expires_at_ms: ms(T0) + 30_000,
@@ -4291,6 +4299,7 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
             implicit: None,
             lease: Some(lease::LeaseWrite {
                 value: codec::EpochLease {
+                    authority_ready: None,
                     authority_generation: None,
                     epoch: 7,
                     expires_at_ms,

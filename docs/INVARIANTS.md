@@ -1918,7 +1918,13 @@ content or tokens, or serves a different object from the requested URL.
 barrier prevents every older Authority allowance from accepting a new write.
 Facts survive retries, visibility writes compare the coordinator generation,
 and D34 writes guard generation-bearing leases and backend deadlines. Ticket
-staging checks the ticket's generation. Grant epochs remain independent.
+staging checks the ticket's generation before and after backend awaits. Durable
+mode at generation zero prevents a disabled executor from accepting through a
+fenced lease, fresh shard, visibility operation or ticket. Initial activation
+finishes its barrier before granting ready leases and creates no accounting
+namespace. Grant epochs remain independent. Generation/recovery-bound durable
+cursors keep bounded completion progressing across cold executor instances;
+recovery invalidates them while preserving the fence.
 
 **Because:** stopping future hook allowances cannot revoke an allowance already
 paused between authorization and durable acceptance.

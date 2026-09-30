@@ -390,6 +390,14 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             return Err(err.clone());
         }
         let result = async {
+            if self.ticket_id.is_some() {
+                self.pipe
+                    .check_ticket_generation(
+                        &self.op.repo.namespace,
+                        self.op.authz.authority_generation,
+                    )
+                    .await?;
+            }
             let progress = self
                 .validator
                 .push(chunk_pack_id, offset, data.len(), last)?;
@@ -402,6 +410,14 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                     hasher.update(&data);
                 }
                 None => return Err(internal("upload sink gone")),
+            }
+            if self.ticket_id.is_some() {
+                self.pipe
+                    .check_ticket_generation(
+                        &self.op.repo.namespace,
+                        self.op.authz.authority_generation,
+                    )
+                    .await?;
             }
             Ok(progress.complete)
         }

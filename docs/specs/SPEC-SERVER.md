@@ -478,8 +478,8 @@ acknowledgements, and renewing a live row MUST preserve each acknowledgement.
 Completion MUST wait for every old leased shard to acknowledge or expire,
 including cache/recovery holdoffs. Completion scans MUST remain bounded independently of elapsed clock time and use
 independent checkpoints for grant and authority barriers. Each slice reads at most
-eight pages of four rows and attempts at most four pushes; each push retries at
-most 32 times. A setter attempts at most five slices. Pending counts are
+eight pages of four rows and attempts at most four pushes; each push makes one
+attempt. A setter attempts at most one slice. Pending counts are
 conservative lower bounds, including one when an unscanned suffix remains. A pending setter MUST
 return `unavailable` with a `Retry-After` header in delay-seconds. Sharded batches
 MUST retain backend-evaluated
@@ -487,6 +487,35 @@ MUST retain backend-evaluated
 After setter success, no older-generation acceptance may commit. Returning a
 previously committed replay result performs no new acceptance. An executor that
 cannot decode generation-bearing leases MUST NOT serve a fenced deployment.
+
+Activation MUST durably persist the authority mode and `ag = 0` atomically,
+without creating a business namespace or suppressing first-write admission and
+creation charges. Before the first fenced acceptance, it MUST finish the shared
+initial barrier, including old generation-zero leases. Activation MAY return
+bounded `unavailable` with `Retry-After: 1` while that barrier is pending. The
+optional authority mode and ready state live in the already-read `lr` record;
+a pure activation marker has no actual recovery timestamp, holdoff or
+watermark-reconciliation meaning. Fenced lease grants copy the ready state only
+after this barrier. Legacy records omit these fields and retain their encoding.
+An executor with fencing disabled MUST refuse generation-bearing leases or
+tickets and persisted namespace fence mode, including generation zero. It MUST
+NOT convert those records into unfenced grants. Truly unfenced records remain
+usable. Legacy tickets require one bounded authoritative mode read; ticket-only
+staging and completion revalidate after backend awaits before returning success.
+A retained shared pack or proof marker MUST NOT permit a stale ticket to create
+repository membership.
+
+Bounded scan progress MUST survive separate executor instances. Coordinator
+`fc 00 00` and `fc 00 01` hold independent version-one grant/authority cursors,
+bound to the exact generation and recovery/mode observation. Saves and resets
+MUST guard their prior value, generation and recovery/mode row. A failed push
+MUST retain the earliest unresolved prefix. Completion MUST revalidate current
+coordinator state and successfully guard the final cursor reset. Recovery and
+portable restore MUST invalidate cursors, preserve authority mode and generation,
+and refuse reconstruction or rollback of missing authoritative fence state.
+The setter's conservative metadata-call ceiling is 43, including three CAS
+transition attempts, activation, eight scan pages, four single-attempt pushes,
+cursor load/save and final validation; it does not require a Paid Worker plan.
 
 The authority service must stop delegate authorization, persist its target,
 complete this barrier, then acknowledge revocation. Re-enrolling an identical

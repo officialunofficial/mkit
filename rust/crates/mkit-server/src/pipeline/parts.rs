@@ -113,6 +113,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
             .write(chunk)
             .await
             .map_err(|e| multipart_error(StorageOp::MultipartPart, e))?;
+        self.pipe
+            .check_ticket_generation(&self.namespace, self.generation)
+            .await?;
         self.seen = next;
         Ok(())
     }
@@ -282,6 +285,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .begin_part(key, &claims.upload_session, &plan, index, subtree)
                 .await
                 .map_err(|e| multipart_error(StorageOp::MultipartPart, e))?;
+            if let Err(err) = self
+                .check_ticket_generation(&a.repo().repo.namespace, claims.authority_generation)
+                .await
+            {
+                sink.abort().await;
+                return Err(err);
+            }
             Ok((ticket, subtree, len, sink, claims.authority_generation))
         }
         .await;
