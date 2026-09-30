@@ -853,14 +853,14 @@ fn timer_registry_budgeted<
     class: crate::classes::ShardClass,
     target: Result<T, ConfigError>,
     plan: Option<&str>,
-    alarm_budget: Option<mkit_server::purge::SliceBudget>,
+    alarm_budget: Option<&mkit_server::purge::SliceBudget>,
 ) -> mkit_server::timers::TimerRegistry<'static, S> {
     use crate::classes::ShardClass;
     use mkit_server::relay::{RelayBudget, RelayHandler};
     use mkit_server::timers::{TimerRegistry, lease_sweep::LeaseSweep};
 
     // One target client serves the class's relay or lease sweep and its rollup.
-    let target = target.map(|store| SharedStore(Arc::new(store), alarm_budget.clone()));
+    let target = target.map(|store| SharedStore(Arc::new(store), alarm_budget.cloned()));
     let registry = TimerRegistry::new();
     let registry = match class {
         ShardClass::NsCoordinator => {
@@ -2272,7 +2272,7 @@ mod glue {
     }
 
     // Keep the one-time DO construction and typed handler wiring together.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::arc_with_non_send_sync)] // Worker futures are single-threaded; core shares Arc on both targets.
     fn ns_object_inner<O, F>(
         state: State,
         env: &Env,
@@ -2333,7 +2333,7 @@ mod glue {
             .filter(|plan| plan.trim().eq_ignore_ascii_case("paid"))
             .map(|_| mkit_server::purge::SliceBudget::new(crate::purge::ALARM_OPERATIONS));
         let registry =
-            super::timer_registry_budgeted(class, target, plan.as_deref(), alarm_budget.clone());
+            super::timer_registry_budgeted(class, target, plan.as_deref(), alarm_budget.as_ref());
         let registry = if matches!(
             class,
             crate::classes::ShardClass::RefStore | crate::classes::ShardClass::RefShard

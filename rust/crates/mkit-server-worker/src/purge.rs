@@ -61,6 +61,7 @@ impl<C: CacheDelete> LocalInvalidation for LocalCache<C> {
                     "namespace purge needs repository intents".into(),
                 ));
             }
+            #[allow(unused_mut)] // Snapshot keys are appended only with published-view enabled.
             let mut keys = request
                 .url_paths
                 .iter()
@@ -159,7 +160,10 @@ mod tests {
     impl CacheDelete for Cache {
         fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<(), StoreError>> {
             Box::pin(async move {
-                self.0.lock().unwrap().push(key.to_owned());
+                self.0
+                    .lock()
+                    .expect("cache fixture mutex should be available")
+                    .push(key.to_owned());
                 Ok(())
             })
         }
@@ -247,12 +251,133 @@ mod tests {
         );
     }
 
-    struct Calls {
+    #[cfg(feature = "published-view")]
+    fn remote_snapshot_keys(request: &Request) -> std::collections::BTreeSet<String> {
+        use std::collections::BTreeMap;
+        // A real signed sink needs this explicit deployment mapping and its
+        // namespace repository registry; neither value travels in CachePurge.
+        let deployments = BTreeMap::from([("https://server.example", "fixture-deployment")]);
+        let deployment = deployments[request.audience.as_str()];
+        let names = if request.repository.is_empty() {
+            assert_eq!(request.namespace, "root");
+            vec!["repo", "other"]
+        } else {
+            vec![request.repository.rsplit_once('/').unwrap().1]
+        };
+        names
+            .into_iter()
+            .flat_map(|name| {
+                (0..16).map(move |bucket| {
+                    crate::published_view::cache_key(
+                        deployment,
+                        &Partition::RefIndex {
+                            ns: NamespaceKey::deployment_default(),
+                            repo: RepoName::new(name).unwrap(),
+                            bucket,
+                        },
+                    )
+                    .unwrap()
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    #[cfg(feature = "published-view")]
+    fn remote_snapshot_mapping_agrees_with_local_repository_keys_and_namespace_expansion() {
+        use futures::executor::block_on;
+        use std::collections::BTreeSet;
+        for selector in 0..4 {
+            let mut request = request("mapping");
+            request.url_paths.clear();
+            if selector == 1 {
+                request
+                    .object_ids
+                    .push("BwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into());
+            }
+            if selector == 2 {
+                request.refs.push("refs/heads/main".into());
+            }
+            if selector == 3 {
+                request.url_paths.push("/proof".into());
+            }
+            let cache = Cache::default();
+            let invalidator = LocalCache {
+                cache: cache.clone(),
+                snapshot_deployment: Some("fixture-deployment".into()),
+            };
+            assert!(
+                block_on(invalidator.invalidate(&request, 0, &SliceBudget::new(100)))
+                    .unwrap()
+                    .is_none()
+            );
+            let actual = cache
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|key| key.starts_with("https://mkit-snapshot.invalid/"))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            assert_eq!(actual, remote_snapshot_keys(&request));
+            if selector != 0 {
+                assert!(request.tags().contains(&mkit_server::purge::cache_tag(
+                    &request.audience,
+                    "proof",
+                    "root/repo"
+                )));
+                assert!(request.tags().contains(&mkit_server::purge::cache_tag(
+                    &request.audience,
+                    "snapshot",
+                    "root/repo"
+                )));
+            }
+        }
+        let mut namespace = request("namespace-mapping");
+        namespace.repository.clear();
+        namespace.namespace = "root".into();
+        namespace.url_paths.clear();
+        let cache = Cache::default();
+        let invalidator = LocalCache {
+            cache: cache.clone(),
+            snapshot_deployment: Some("fixture-deployment".into()),
+        };
+        for name in ["repo", "other"] {
+            let mut repository = namespace.clone();
+            repository.namespace.clear();
+            repository.repository = format!("root/{name}");
+            assert!(
+                block_on(invalidator.invalidate(&repository, 0, &SliceBudget::new(100)))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            cache
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            remote_snapshot_keys(&namespace)
+        );
+        assert_eq!(
+            namespace.tags(),
+            [mkit_server::purge::cache_tag(
+                &namespace.audience,
+                "namespace",
+                "root"
+            )]
+        );
+    }
+
+    struct HandlerCalls {
         kind: u8,
         calls: u32,
         recorded: Arc<AtomicU32>,
     }
-    impl<S: NamespaceStore> TimerHandler<S> for Calls {
+    impl<S: NamespaceStore> TimerHandler<S> for HandlerCalls {
         fn kind(&self) -> TimerKind {
             TimerKind::new(self.kind)
         }
@@ -282,7 +407,7 @@ mod tests {
         let mut registry = TimerRegistry::new();
         for (kind, calls) in [(3, 64), (7, 256), (8, 16), (10, 3), (4, 1)] {
             registry = registry.register(Budgeted {
-                handler: Calls {
+                handler: HandlerCalls {
                     kind,
                     calls,
                     recorded: recorded.clone(),

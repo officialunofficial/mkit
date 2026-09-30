@@ -18,7 +18,7 @@ The feature-gated secret `URL_TOKEN_KEYS` uses the key-file grammar:
 are copied into the pipeline only when a mount is configured. Active and
 retained public keys cannot repeat ticket-key material. Service-binding
 hooks have no signing key; signed hook, receipt and admin roles must keep
-their own separation checks when introduced.
+their own separation checks. Signed hook and admin keys are checked at startup.
 
 The mount uses the runtime's escaped URL directly, preserving an empty
 trailing query. Objects dispatch by `/-/`; RPC service dispatch stays exact.
@@ -67,11 +67,15 @@ to WP-5.6a. Admin requests use a separate signed envelope and cannot authenticat
 client writes. Operator keys must differ from ticket, token, hook and authority
 keys. Persisted sharding/addressing checks run before operator dispatch.
 
-For a global purger, explicitly include `cache-purge` in `HOOK_ROLES`, set an
+For a global purger, build with `signed-http-hooks`, explicitly include
+`cache-purge` in `HOOK_ROLES`, set an
 HTTPS `HOOK_URL` and the `MKIT_HOOK_KEY` signing secret, and use `WORKERS_PLAN=paid`.
 A purge-only role list does not enable Authorize, Admit or Outcome. Invalid or
 unsigned purge configuration refuses startup. The signed sink must acknowledge
-with an empty JSON object; retries keep the body/id and use fresh nonces.
+with an empty JSON object; retries keep the body/id and use fresh nonces. The
+sink must map the audience to the configured snapshot deployment and purge the
+actual custom keys, including all 16 snapshot buckets; selector strings alone
+do not attach Cache-Tag headers to existing snapshot entries.
 
 Automatic callers accept repository-scoped intents in the triggering state apply.
 The colo-local Cache API deletes paths and all existing snapshot cache keys.
@@ -80,4 +84,8 @@ does not expose namespace manual acceptance. Gated entrypoints keep Workers
 Caching disabled. The existing snapshot seam strongly checks durable invalidation
 before and after lookup/refill, so retained R2 bytes cannot resurrect an invalidated
 snapshot. Root audit append and its relay watermark share the target SQL apply.
-All Paid alarm heads share one external-operation allowance.
+All Paid alarm heads share one external-operation allowance. Until WP-5.4
+integrates generation-aware publication, an invalidated repository uses live
+reads rather than accepting a refreshed snapshot. Future inspector callers in
+RepoIndex must integrate that published/serving authority seam before enabling
+inspection snapshots.

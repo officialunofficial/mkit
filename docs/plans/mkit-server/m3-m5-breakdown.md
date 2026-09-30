@@ -980,15 +980,15 @@ Entry condition:
 - **Goal:** durable timer-11 local and signed remote `CachePurge` delivery, snapshot invalidation and serving-stop/hit/visibility automatic intents in the triggering state apply. Retry an unchanged body/id with fresh signing nonces until an empty acknowledgement. Keep gated Workers entrypoint caching disabled; Paid-only activation shares one enumeration/delivery budget.
 - **Scope:** 5.5a/5.6a call automatic seams. Manual `PurgeCache` moves to 5.6a (R-190), accepted asynchronously with completion in audit. No no-op acknowledgement for shared caches.
 - **Files:** `mkit-server/src/purge/`, automatic pipeline seams and native/Worker adapters.
-- **Size:** bundle cap 3,000 non-test lines with WP-5.11a.
+- **Size:** bundle cap 3,000 non-test lines with WP-5.11a; user authorized a modest excess for the completed invalidation/fence work.
 
 ### WP-5.11a: Admin API framework: signed envelope, replay protection, audit log
 - **Depends on:** WP-5.1b-2, WP-2.9 (signed reads/visibility), WP-1.10 (metadata), WP-3.7b/WP-3.9c (hook authentication) and WP-5.10. Aggregate activation WP-4.18 follows these foundations (R-189, R-198).
 - **Goal:** default-off `mkit.server.admin.v1` signed requests, dedicated role keys, durable nonce/result and persistent operation-id replay, gapless deployment audit and `ReadAuditLog`. Durable action acceptance and audit precede effects/success; Workers effects must be resumable.
-- **Scope:** manual purge, inspection review and takedown operations land in later lanes. Cross-partition automatic audit acceptance is refused until an orchestrator ruling; do not invent a protocol.
+- **Scope:** manual purge, inspection review and takedown operations land in later lanes. The approved existing outbox relay carries automatic audit events: source state, purge intent, timer and event commit together; the root receipt, gapless append and watermark commit together in arrival order.
 - **Files:** `mkit-server/src/admin/` and adapter configuration/mounts.
 - **Tests:** exact signature/body/path/origin binding, mixed credentials and roles, same-nonce stored results, operation-id deduplication, audit continuity/export and default-off adapters.
-- **Size:** bundle cap 3,000 non-test lines with WP-5.10.
+- **Size:** bundle cap 3,000 non-test lines with WP-5.10; user authorized a modest excess for the completed invalidation/fence work.
 
 ### WP-5.11b: Admin operations and the `mkit-server admin` CLI
 - **Depends on:**

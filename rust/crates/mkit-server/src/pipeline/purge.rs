@@ -3,7 +3,7 @@ use crate::pipeline::HookSet;
 use crate::purge::{Request, Trigger, plan_enqueue};
 use crate::store::{Batch, MultipartBlobStore, NamespaceStore, Partition, keys};
 use crate::{RepoId, ServerError};
-use mkit_core::hash::{hash, to_hex};
+use mkit_core::hash::{hash, to_hex, to_hex_bytes};
 
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Plan an audited safety purge in the same batch as a serving stop.
@@ -21,12 +21,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             return Ok(Batch::new());
         };
         let repository = format!("{}/{}", repo.namespace.as_str(), repo.name.as_str());
+        let source = to_hex_bytes(&partition.encode().map_err(meta_error)?);
         let request = Request {
             purge_id: format!(
                 "purge:{}",
                 to_hex(&hash(
                     format!(
-                        "{}\0{repository}\0{trigger:?}\0{operation_id}",
+                        "{}\0{repository}\0{source}\0{trigger:?}\0{operation_id}",
                         config.audience
                     )
                     .as_bytes()
@@ -102,6 +103,66 @@ mod tests {
     };
     use std::sync::{Arc, Mutex};
 
+    #[tokio::test]
+    async fn automatic_purge_identity_is_source_partition_bound_and_retry_stable() {
+        let store = Arc::new(MemoryKv::default());
+        let repo = RepoId {
+            namespace: NamespaceKey::deployment_default(),
+            name: RepoName::new("repo").unwrap(),
+        };
+        let coordinator = Partition::Coordinator(repo.namespace.clone());
+        let index = Partition::RepoIndex {
+            ns: repo.namespace.clone(),
+            repo: repo.name.clone(),
+            prefix: 1,
+        };
+        let mut config = crate::pipeline::PipelineConfig::new(
+            Addressing::Single { repo: repo.clone() },
+            crate::pipeline::AuthMode::Open,
+            crate::upload::UploadLimits {
+                max_total_bytes: 1024,
+                max_chunks: 32,
+            },
+        );
+        config.purge = Some(
+            PurgeConfig::new("https://server.example".into(), true, true).with_audit(Arc::new(
+                crate::admin::SystemAudit::new(store.clone(), coordinator.clone()),
+            )),
+        );
+        let pipeline = Pipeline::new(
+            MemoryBlobStore::default(),
+            store,
+            crate::pipeline::Hooks::new(),
+            config,
+            Arc::new(ManualClock::new(10)),
+            Arc::new(crate::NoopMetrics),
+        )
+        .unwrap();
+        let mut requests = Vec::new();
+        for partition in [&coordinator, &index, &coordinator] {
+            let batch = pipeline
+                .plan_repository_purge(partition, &repo, Trigger::Suspension, "same-op", 10)
+                .await
+                .unwrap();
+            requests.push(
+                batch
+                    .writes
+                    .iter()
+                    .find_map(|write| match write {
+                        crate::Write::Put(key, value) if key.as_bytes().starts_with(b"cp\0") => {
+                            Some(
+                                serde_json::from_slice::<Request>(value.as_bytes())
+                                    .expect("planned purge request"),
+                            )
+                        }
+                        _ => None,
+                    })
+                    .unwrap(),
+            );
+        }
+        assert_ne!(requests[0].purge_id, requests[1].purge_id);
+        assert_eq!(requests[0].purge_id, requests[2].purge_id);
+    }
     struct FailingLocal {
         store: Arc<MemoryKv>,
         partition: Partition,
@@ -120,7 +181,10 @@ mod tests {
                         .await?
                         .is_some()
                 );
-                self.seen.lock().unwrap().push(request.clone());
+                self.seen
+                    .lock()
+                    .expect("local invalidation recording lock")
+                    .push(request.clone());
                 Err(StoreError::unavailable("local cache offline"))
             })
         }

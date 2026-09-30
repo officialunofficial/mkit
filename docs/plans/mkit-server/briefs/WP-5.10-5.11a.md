@@ -93,3 +93,10 @@ From the fact sheet's required tests:
 - `cargo nextest run --locked -p mkit-server -p mkit-server-native -p mkit-server-worker -p mkit-server-conformance --all-features`.
 - wasm32 clippy and the worker build.
 - `scripts/vcs-worker-conformance.sh`, with a free `VCS_CONFORMANCE_PORT`.
+
+### Production cap exception (user, 2026-09-30)
+
+The user authorized a modest excess over the original 3,000-line cap to finish
+local invalidation and snapshot fencing ("fine to pass the cap for a bit").
+The final Rust production diff has 3,301 additions and 115 removals; the mandatory
+review and gates still apply.
