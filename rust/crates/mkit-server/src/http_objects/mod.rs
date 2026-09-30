@@ -287,7 +287,6 @@ impl Fail {
     pub(crate) fn from_server_error(error: &ServerError) -> Self {
         match error.code() {
             Code::NotFound => Self::NotFound,
-            Code::OutOfRange => Self::ProofRange,
             Code::PermissionDenied | Code::Unauthenticated => Self::Forbidden,
             _ => Self::Unavailable,
         }

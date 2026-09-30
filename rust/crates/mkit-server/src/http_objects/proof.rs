@@ -120,6 +120,7 @@ impl Context {
     pub(crate) async fn select<B: BlobStore, N: NamespaceStore>(
         &self,
         env: &Env<'_, B, N>,
+        gate: &dyn TakedownGate,
         range: Option<(u64, u64)>,
     ) -> Result<PreparedProof, Fail> {
         let mut span = false;
@@ -147,6 +148,7 @@ impl Context {
                 let mut selected = None;
                 let mut total = 0u64;
                 for id in &cb.chunks {
+                    clear(gate, env, *id).await?;
                     let located = resolve::locate(env, *id).await?;
                     let length = located
                         .value

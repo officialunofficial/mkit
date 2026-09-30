@@ -1,6 +1,113 @@
 //! Proof contexts use published refs and membership, including warm cache hits.
 use super::*;
 
+struct Blocked(Hash);
+impl TakedownGate for Blocked {
+    fn stops_descent(&self, _: &RepoId, id: &Hash) -> bool {
+        *id == self.0
+    }
+    fn check<'a>(
+        &'a self,
+        _: &'a RepoId,
+        id: &'a Hash,
+    ) -> crate::BoxFuture<'a, Result<TakedownVerdict, ServerError>> {
+        Box::pin(async move {
+            Ok(if *id == self.0 {
+                TakedownVerdict::NotFound
+            } else {
+                TakedownVerdict::Clear
+            })
+        })
+    }
+}
+
+struct FailedChunkGate(Hash);
+impl TakedownGate for FailedChunkGate {
+    fn check<'a>(
+        &'a self,
+        _: &'a RepoId,
+        id: &'a Hash,
+    ) -> crate::BoxFuture<'a, Result<TakedownVerdict, ServerError>> {
+        Box::pin(async move {
+            if *id == self.0 {
+                Err(ServerError::new(Code::OutOfRange, "gate failed"))
+            } else {
+                Ok(TakedownVerdict::Clear)
+            }
+        })
+    }
+}
+
+#[test]
+fn range_proof_gate_errors_cannot_be_deferred_as_selector_errors() {
+    let (fx, d) = published();
+    let (fx, admission, proofs) = counters(fx);
+    let fx = with_seams(fx, |s| {
+        s.takedown = Arc::new(FailedChunkGate(id(&d.chunks[0])));
+    });
+    for method in ["GET", "HEAD"] {
+        let got = read(fx.request(
+            method,
+            &fx.ref_url("room", "main", "chunked.bin"),
+            Some("proof=1&range=0-0"),
+            &[("if-none-match", "*")],
+        ));
+        assert_eq!(got.status, 503);
+        assert_eq!(got.header("Cache-Control"), Some("no-store"));
+        assert!(got.header("ETag").is_none());
+    }
+    assert!(admission.seen.lock().unwrap().is_empty());
+    assert!(proofs.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn proof_validators_precede_selector_and_cap_errors_without_building() {
+    let (fx, d) = published();
+    let (mut fx, admission, proofs) = counters(fx);
+    let config = fx.pipe.cfg.http_objects.as_mut().unwrap();
+    config.max_proof_content_bytes = 1;
+    config.max_proof_bundle_bytes = 1;
+    for (leaf, proof_path, selector) in [
+        (id(&d.small), "small.txt", ""),
+        (id(&d.small), "small.txt", "&range=0-1"),
+        (id(&d.small), "small.txt", "&range=0-18446744073709551615"),
+        (id(&d.root), "", "&range=0-0"),
+    ] {
+        let path = fx.object_url("room", &leaf);
+        let query = format!(
+            "proof=1&commit={}&path={proof_path}{selector}",
+            to_hex(&d.head())
+        );
+        for method in ["GET", "HEAD"] {
+            assert_eq!(
+                read(fx.request(method, &path, Some(&query), &[])).status,
+                416
+            );
+            assert_eq!(
+                read(fx.request(method, &path, Some(&query), &[("if-none-match", "*")])).status,
+                304
+            );
+        }
+    }
+    let fx = with_seams(fx, |s| {
+        s.proofs = Arc::new(crate::http_objects::UnsupportedProofs);
+    });
+    for method in ["GET", "HEAD"] {
+        assert_eq!(
+            read(fx.request(
+                method,
+                &fx.ref_url("room", "main", "small.txt"),
+                Some("proof=1"),
+                &[("if-none-match", "*")]
+            ))
+            .status,
+            304
+        );
+    }
+    assert!(admission.seen.lock().unwrap().is_empty());
+    assert!(proofs.0.lock().unwrap().is_empty());
+}
+
 fn counters(fx: Fx) -> (Fx, Arc<Admit>, Arc<Proofs>) {
     let admission = Arc::new(Admit {
         seen: Mutex::default(),
@@ -177,4 +284,81 @@ fn held_membership_overrides_warm_proof_validators_before_admission() {
     }
     assert!(admission.seen.lock().unwrap().is_empty());
     assert!(proofs.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn blocked_proof_ancestors_override_a_warm_leaf_cache() {
+    let (fx, d) = published();
+    let leaf = match &d.dir {
+        Object::Tree(t) => t.entries[0].object_hash,
+        _ => panic!("tree"),
+    };
+    let path = fx.object_url("room", &leaf);
+    assert_eq!(fx.get(&path).status, 200);
+    let (mut fx, admission, proofs) = counters(fx);
+    let query = format!("proof=1&commit={}&path=dir/inner.txt", to_hex(&d.head()));
+    for ancestor in [d.head(), id(&d.root), id(&d.dir)] {
+        fx = with_seams(fx, |s| s.takedown = Arc::new(Blocked(ancestor)));
+        for method in ["GET", "HEAD"] {
+            let missing = read(fx.request(method, &fx.object_url("room", &[99; 32]), None, &[]));
+            let got = read(fx.request(method, &path, Some(&query), &[("if-none-match", "*")]));
+            same_response(&got, &missing);
+        }
+    }
+    assert!(admission.seen.lock().unwrap().is_empty());
+    assert!(proofs.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn range_proof_checks_required_chunk_stops_before_validators_and_payment() {
+    for membership_stop in [true, false] {
+        let fx = fixture();
+        let d = data();
+        // Publish one surplus chunk in a different pack before the manifest.
+        let root = tree(&[]);
+        let initial = commit(&root, &[], "initial");
+        let pack = fx.push("room", &[&root, &initial, &d.chunks[0]], id(&initial), None);
+        let objects: Vec<_> = d
+            .refs()
+            .into_iter()
+            .filter(|o| id(o) != id(&d.chunks[0]))
+            .collect();
+        fx.push("room", &objects, d.head(), Some((id(&initial), pack)));
+        let path = fx.ref_url("room", "main", "chunked.bin");
+        assert_eq!(fx.get(&path).status, 200);
+        let (mut fx, admission, proofs) = counters(fx);
+        if membership_stop {
+            let repo = fx.repo_id("room");
+            let partition = fx.pipe.shards.ref_shard(&repo, HEAD);
+            let key = keys::membership(&repo.name, &pack);
+            let value = block_on(fx.pipe.meta.get(&partition, &key))
+                .unwrap()
+                .unwrap();
+            let mut witness = crate::store::publication::Witness::decode(&value).unwrap();
+            witness.held = true;
+            block_on(
+                fx.pipe
+                    .meta
+                    .inner
+                    .apply(&partition, Batch::new().put(key, witness.encode())),
+            )
+            .unwrap();
+        } else {
+            fx = with_seams(fx, |s| s.takedown = Arc::new(Blocked(id(&d.chunks[0]))));
+        }
+        // First-chunk, preceding-chunk and cross-chunk dependencies all stop.
+        for range in ["0-0", "60000-60000", "59999-60000"] {
+            for method in ["GET", "HEAD"] {
+                let missing =
+                    read(fx.request(method, &fx.object_url("room", &[99; 32]), None, &[]));
+                let query = format!("proof=1&range={range}");
+                for headers in [vec![], vec![("if-none-match", "*")]] {
+                    let got = read(fx.request(method, &path, Some(&query), &headers));
+                    same_response(&got, &missing);
+                }
+            }
+        }
+        assert!(admission.seen.lock().unwrap().is_empty());
+        assert!(proofs.0.lock().unwrap().is_empty());
+    }
 }

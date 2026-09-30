@@ -301,6 +301,21 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         } else {
             None
         };
+        // Required canonical chunks are authorization dependencies too.
+        // Prepare their metadata before validators, but defer selector/cap
+        // errors so a matching validator still precedes a 416 (§3 step 9).
+        let proof = if let Some(context) = &context {
+            match context
+                .select(&env, seams.takedown.as_ref(), parsed.query.range)
+                .await
+            {
+                Ok(proof) => Some(Ok(proof)),
+                Err(Fail::ProofRange) => Some(Err(Fail::ProofRange)),
+                Err(other) => return Err(other),
+            }
+        } else {
+            None
+        };
         let etag = context.as_ref().map_or_else(
             || format!("\"{}\"", to_hex(&leaf_id)),
             |c| c.etag(parsed.query.range),
@@ -335,14 +350,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         }
 
         // §3 step 10: representation selection and caps, before Admission.
-        let proof = if let Some(context) = &context {
-            if !seams.proofs.is_supported() {
-                return Err(Fail::ProofRange);
-            }
-            Some(context.select(&env, parsed.query.range).await?)
-        } else {
-            None
-        };
+        let proof = proof.transpose()?;
+        if proof.is_some() && !seams.proofs.is_supported() {
+            return Err(Fail::ProofRange);
+        }
         let window = if let Some(leaf) = &leaf {
             let single = |name: &str| {
                 let mut all = values(name);

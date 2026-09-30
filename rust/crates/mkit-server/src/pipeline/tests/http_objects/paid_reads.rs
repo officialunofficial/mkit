@@ -37,6 +37,7 @@ impl Sleep for Timer {
 struct PaidAdmission {
     calls: Mutex<Vec<(u64, Vec<crate::pipeline::CredentialHeader>)>>,
     challenge: AtomicBool,
+    deny: AtomicBool,
     next: AtomicU32,
 }
 impl Admission for Arc<PaidAdmission> {
@@ -59,7 +60,11 @@ impl Admission for Arc<PaidAdmission> {
             .lock()
             .unwrap()
             .push((input.declared_bytes, input.credential_headers.to_vec()));
-        if self.challenge.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.deny.load(Ordering::SeqCst) {
+            Ok(AdmissionDecision::Deny(ServerError::permission_denied(
+                "read denied",
+            )))
+        } else if self.challenge.load(std::sync::atomic::Ordering::SeqCst) {
             Ok(AdmissionDecision::challenge(
                 vec![Challenge {
                     scheme: "mpp".into(),
@@ -771,6 +776,43 @@ fn proof_challenge_denial_revalidation_caps_and_context_never_build() {
     );
     assert_eq!(admission.calls.lock().unwrap().len(), calls);
     assert_eq!(admission.next.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(proofs.0.lock().unwrap().is_empty());
+    tasks.join();
+}
+
+#[test]
+fn proof_admission_denial_never_builds_or_reserves_get_or_head() {
+    let (fx, d, admission, tasks) = setup();
+    let proofs = Arc::new(Proofs(Mutex::default()));
+    let fx = with_seams(fx, |s| s.proofs = proofs.clone());
+    admission.deny.store(true, Ordering::SeqCst);
+    let query = format!("proof=1&commit={}&path=small.txt", to_hex(&d.head()));
+    for method in ["GET", "HEAD"] {
+        let got = read(fx.request(
+            method,
+            &fx.object_url("room", &id(&d.small)),
+            Some(&query),
+            &[("payment-authorization", "valid")],
+        ));
+        assert_eq!(got.status, 403);
+        assert_eq!(got.header("Cache-Control"), Some("no-store"));
+        assert!(
+            !got.headers
+                .iter()
+                .any(|(n, _)| n.starts_with("X-Mkit-") || *n == "ETag" || *n == "Payment-Receipt")
+        );
+    }
+    assert_eq!(admission.calls.lock().unwrap().len(), 2);
+    assert_eq!(admission.next.load(Ordering::SeqCst), 0);
+    let repo = fx.repo_id("room");
+    assert!(
+        block_on(fx.pipe.meta.get(
+            &fx.pipe.shards.coordinator(&repo.namespace),
+            &keys::reservation("read-0").unwrap()
+        ))
+        .unwrap()
+        .is_none()
+    );
     assert!(proofs.0.lock().unwrap().is_empty());
     tasks.join();
 }
