@@ -126,6 +126,22 @@ class DelayHandler(BaseHTTPRequestHandler):
         pass
 
 
+def stop_process_group(process):
+    # This group was created by this probe. Never signal unrelated workers.
+    for stop_signal in [signal.SIGINT, signal.SIGTERM, signal.SIGKILL]:
+        try:
+            os.killpg(process.pid, stop_signal)
+        except ProcessLookupError:
+            process.wait(timeout=5)
+            return
+        try:
+            process.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+    raise RuntimeError(f"Owned probe process group {process.pid} did not stop")
+
+
 def main():
     if "CARGO_TARGET_DIR" in os.environ:
         raise RuntimeError("Unset CARGO_TARGET_DIR; the probe uses this worktree's rust/target")
@@ -180,20 +196,13 @@ def main():
             print(json.dumps(result, indent=2))
             print(f"Evidence: {scratch}")
     finally:
-        if process is not None:
-            # This group was created by this probe. Never kill other workerd processes.
-            try:
-                os.killpg(process.pid, signal.SIGINT)
-            except ProcessLookupError:
-                pass
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGTERM)
-                process.wait(timeout=5)
-        delay.shutdown()
-        delay.server_close()
-        thread.join(timeout=5)
+        try:
+            if process is not None:
+                stop_process_group(process)
+        finally:
+            delay.shutdown()
+            delay.server_close()
+            thread.join(timeout=5)
 
 
 if __name__ == "__main__":
