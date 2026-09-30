@@ -2408,3 +2408,123 @@ fn hot_closure_candidates_checkpoint_progress_instead_of_livelock() {
             .all(|calls| *calls <= 256.0)
     );
 }
+
+/// Lose a committed reference-page response once. The durable entry cursor
+/// must not advance until replay has reconstructed every provisional page.
+struct LostPageReply<'a> {
+    inner: &'a Faulty,
+    enabled: bool,
+    lost: std::sync::atomic::AtomicBool,
+}
+
+impl NamespaceStore for LostPageReply<'_> {
+    fn capabilities(&self) -> StoreCapabilities {
+        self.inner.capabilities()
+    }
+    async fn get(&self, p: &Partition, k: &Key) -> Result<Option<Value>, StoreError> {
+        self.inner.get(p, k).await
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&Cursor>,
+        limit: u32,
+    ) -> Result<ScanPage, StoreError> {
+        self.inner.scan(p, start, end, after, limit).await
+    }
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        let page = batch.writes.iter().any(|write| {
+            matches!(write,
+            crate::store::Write::Put(key, value)
+            if matches!(keys::parse(key), Some(keys::ParsedKey::VerifyCursor {
+                sub: keys::VC_CANDIDATE, .. })) && value.as_bytes().first() == Some(&3))
+        });
+        let result = self.inner.apply(p, batch).await?;
+        if self.enabled
+            && page
+            && matches!(result, BatchOutcome::Committed)
+            && !self.lost.swap(true, Ordering::SeqCst)
+        {
+            return Err(StoreError::Unavailable("lost committed page reply".into()));
+        }
+        Ok(result)
+    }
+    async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
+        self.inner.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.inner.probe().await
+    }
+}
+
+#[test]
+fn large_manifest_reference_pages_resume_after_partial_decode_writes() {
+    use super::selection::{Projection, REFERENCES_PER_PAGE};
+    let references: Vec<Hash> = (0_u32..30_000)
+        .map(|n| {
+            let mut id = [0; 32];
+            id[..4].copy_from_slice(&n.to_be_bytes());
+            id
+        })
+        .collect();
+    let object = Object::ChunkedBlob(mkit_core::object::ChunkedBlob {
+        total_size: 30_000 * 65_536,
+        chunk_size: 65_536,
+        chunks: references.clone(),
+    });
+    let raw = serialize(&object).unwrap();
+    assert!(raw.len() < 1024 * 1024);
+    let owner = mkit_core::object::id_from_object(&object, &raw);
+    let mut writer = PackWriter::new();
+    writer.push_raw(owner, &raw).unwrap();
+    let pack = writer.finish().unwrap();
+    for (fail_at, lost_reply) in [(0, false), (4, false), (5, false), (6, false), (0, true)] {
+        let rig = Rig::new();
+        let (ticket, id) = rig.add(&pack);
+        rig.create(&ticket, id);
+        let faulty = Faulty {
+            inner: rig.store.clone(),
+            applies: AtomicU32::new(0),
+            fail_at: AtomicU32::new(fail_at),
+        };
+        let replies = LostPageReply {
+            inner: &faulty,
+            enabled: lost_reply,
+            lost: std::sync::atomic::AtomicBool::new(false),
+        };
+        rig.drive_on(&replies, |rig| {
+            rig.job(&ticket.pack_id)
+                .is_some_and(|job| !matches!(job.phase, Phase::Decode))
+        });
+        let raw = block_on(rig.store.get(&rig.source(),
+            &keys::verify_row(&rig.repo.name, &ticket.pack_id, keys::VC_CANDIDATE, Some(&owner))))
+            .unwrap().unwrap_or_else(|| panic!("completed decode retains projection (fault {fail_at}, rows {}, frames {:?}): {:?}, {:?}", rig.rows(&ticket.pack_id, keys::VC_CANDIDATE).len(), rig.rows(&ticket.pack_id, keys::VC_FRAME), rig.job(&ticket.pack_id), rig.state(&ticket.pack_id)));
+        assert_eq!(replies.lost.load(Ordering::SeqCst), lost_reply);
+        let projection = Projection::decode(&owner, &raw).unwrap();
+        assert_eq!(projection.references, 30_000);
+        let mut restored = Vec::new();
+        for index in 0..projection.pages() {
+            let value = block_on(rig.store.get(
+                &rig.source(),
+                &keys::verify_row(
+                    &rig.repo.name,
+                    &ticket.pack_id,
+                    keys::VC_CANDIDATE,
+                    Some(&projection.page_id(index)),
+                ),
+            ))
+            .unwrap()
+            .unwrap();
+            assert!(value.as_bytes().len() <= 89 + REFERENCES_PER_PAGE * 32);
+            restored.extend(projection.decode_page(index, &value).unwrap());
+        }
+        assert_eq!(restored, references);
+        assert_eq!(rig.job(&ticket.pack_id).unwrap().entries, 1);
+        assert!(!matches!(
+            rig.state(&ticket.pack_id),
+            Some(VerificationV1::Verified { .. })
+        ));
+    }
+}

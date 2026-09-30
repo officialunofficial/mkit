@@ -205,3 +205,29 @@ Integrated merged multipart prerequisite39998d86 at b1a1aae2. `gp` stores a stri
 ### Holder consumer prototype checkpoint
 
 The declared RelayHook read/snapshot seam preserves old callbacks and NoHook get/apply behavior; target reads now combine rh and declared metadata in one get_many. A bounded prefix is selected before IO, deduplicating to at most8 keys (4MiB maximum raw corrupt snapshot). Pure shrinking reuses observations; CAS retries refill. This is a component bound, NOT a whole48MiB proof including Worker JSON/JS copies. The content hook has no store/client and uses exact c/holder/gp/hold/block/request/layout observations; holder/count/c, TTL+gp release, ct+timer13 and rh commit atomically. Transport lost reply/redelivery does not bump twice. Domain-bound identity now additionally includes object, hold and stable operation; ct validates this complete provenance. A blocked delivery after24h records a real versioned ct request. Timer13 materializes Ready and reschedules, retaining the request for5.6a; Ready never means takedown completed. Prototype50 relay tests green including original generic96 and Paid/Free whole-call fixtures, explicit2 routed methods, lost reply and late block/retained handoff. Worker/native registration, driver integration, comprehensive race/count/heap matrix and whole alarm proof remain unfinished.
+
+### Bounded reference projection checkpoint
+
+Integrated fence squash4d1c8fd4 at1c76515d. A valid 20,000-reference manifest
+(canonical bytes below1MiB) reproduced a1,368,862-byte selection JSON value,
+above512KiB: selection-paging-red.log contains the actual assertion failure.
+Decode now emits vc sub4 version2 bound summaries and version3 reference pages,
+128 references/page, preserving order and every identity. Each page repeats
+owner/kind/count/full-reference digest and index; page keys bind owner/digest/
+kind/count/index. Readers must validate all pages and the final digest before
+selection effects; the group driver enforcing this is still unfinished.
+Pages precede summaries and Decode completion; partial provisional writes replay
+under the exact job guard. Reference projection allocation is released before
+closure-child projection. Ninety largest page writes plus a512KiB job guard and
+maximum1024-byte keys fit the existing1MiB batch contract (dedicated test).
+This is a batch bound, not the final whole-slice/JS48MiB proof.
+
+Three codec/large-reference tests pass (20,000-reference manifest,15,000-entry
+legal Tree, maximum batch envelope). A30,000-reference manifest spanning several
+page batches survives partial-write faults and a committed/lost page response;
+all references and one entry count are retained without publishing Verified.
+Logs selection-paging-{codecs,replay}.log retain exact runs. Local vc row writes
+use ctx.store rather than routed Budgeted calls; SQL/CPU/memory work must still
+be included in the final resource ledger. No256 outgoing-call failure is claimed
+for those local writes. Extraction/selection-group freeze, source passes,
+registration and whole-alarm gates remain unfinished; exposure is unchanged.

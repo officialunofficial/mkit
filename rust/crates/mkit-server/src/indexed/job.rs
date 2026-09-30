@@ -989,9 +989,29 @@ where
             st.writes
                 .push(Write::Put(self.row(keys::VC_FRAME, &id), encoded));
             st.frames.insert(id, row);
+            let fact = super::selection::SelectionFact::from_object(&object);
+            let projection = super::selection::Projection::from_fact(id, &fact);
+            for (index, references) in fact
+                .references()
+                .chunks(super::selection::REFERENCES_PER_PAGE)
+                .enumerate()
+            {
+                let index = u32::try_from(index).expect("decoded entry bounds page count");
+                st.writes.push(Write::Put(
+                    self.row(keys::VC_CANDIDATE, &projection.page_id(index)),
+                    projection.encode_page(index, references),
+                ));
+                if st.writes.len() >= WRITE_BATCH {
+                    self.flush(st).await?;
+                }
+            }
+            drop(fact);
+            // The summary is written after its pages. Decode's durable phase
+            // transition is the full-pack completion marker; partial pages
+            // are provisional and replay identically after a lost reply.
             st.writes.push(Write::Put(
                 self.row(keys::VC_CANDIDATE, &id),
-                super::selection::SelectionFact::from_object(&object).encode(),
+                projection.encode(),
             ));
             if let Some(parents) = super::verify::history_parents(&object) {
                 st.writes.push(Write::Put(

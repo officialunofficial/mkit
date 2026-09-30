@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use mkit_core::hash::Hash;
+use mkit_core::hash::{Hash, Hasher};
 use mkit_core::object::Object;
 use mkit_core::ops::graph::{ClosureMode, children};
 use serde::{Deserialize, Serialize};
@@ -60,6 +60,151 @@ impl SelectionFact {
     }
 }
 
+/// Reference pages are deliberately small enough that ninety rows and their
+/// guards fit the existing one-MiB batch envelope.
+pub(super) const REFERENCES_PER_PAGE: usize = 128;
+
+/// A frozen projection descriptor. All pages must be read in order and their
+/// full reference digest checked before any group selection is committed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Projection {
+    pub(super) owner: Hash,
+    pub(super) kind: u8,
+    pub(super) size: u64,
+    pub(super) references: u32,
+    pub(super) digest: Hash,
+}
+
+impl Projection {
+    pub(super) fn from_fact(owner: Hash, fact: &SelectionFact) -> Self {
+        let (kind, refs): (u8, &[Hash]) = match fact {
+            SelectionFact::Blob { .. } => (0, &[]),
+            SelectionFact::Manifest { chunks, .. } => (1, chunks),
+            SelectionFact::Tree { files } => (2, files),
+            SelectionFact::Other => (3, &[]),
+        };
+        let mut hash = Self::reference_hasher(&owner, kind);
+        for id in refs {
+            hash.update(id);
+        }
+        Self {
+            owner,
+            kind,
+            size: fact.content_len(),
+            references: u32::try_from(refs.len()).expect("decoded entry is bounded"),
+            digest: hash.finalize(),
+        }
+    }
+
+    pub(super) fn reference_hasher(owner: &Hash, kind: u8) -> Hasher {
+        let mut hash = Hasher::new();
+        hash.update(b"mkit-selection-references:v2");
+        hash.update(owner);
+        hash.update(&[kind]);
+        hash
+    }
+
+    pub(super) fn pages(&self) -> u32 {
+        self.references.div_ceil(REFERENCES_PER_PAGE as u32)
+    }
+
+    pub(super) fn encode(&self) -> Value {
+        let mut out = vec![2, self.kind];
+        out.extend(self.owner);
+        out.extend(self.size.to_be_bytes());
+        out.extend(self.references.to_be_bytes());
+        out.extend(self.pages().to_be_bytes());
+        out.extend(self.digest);
+        Value::new(out)
+    }
+
+    pub(super) fn decode(owner: &Hash, value: &Value) -> Result<Self, StoreError> {
+        let b = value.as_bytes();
+        if b.len() != 82 || b[0] != 2 || b[1] > 3 || &b[2..34] != owner {
+            return Err(StoreError::Corrupt("bad selection projection".into()));
+        }
+        let result = Self {
+            owner: *owner,
+            kind: b[1],
+            size: u64::from_be_bytes(b[34..42].try_into().unwrap()),
+            references: u32::from_be_bytes(b[42..46].try_into().unwrap()),
+            digest: b[50..82].try_into().unwrap(),
+        };
+        if u32::from_be_bytes(b[46..50].try_into().unwrap()) != result.pages()
+            || (matches!(result.kind, 0 | 3) && result.references != 0)
+            || (matches!(result.kind, 2 | 3) && result.size != 0)
+        {
+            return Err(StoreError::Corrupt(
+                "bad selection projection geometry".into(),
+            ));
+        }
+        Ok(result)
+    }
+
+    /// Page identities are domain separated from object identities, and every
+    /// page carries its full owning object, kind, count, digest and index.
+    pub(super) fn page_id(&self, index: u32) -> Hash {
+        let mut hash = Hasher::new();
+        hash.update(b"mkit-selection-reference-page:v2");
+        hash.update(&self.owner);
+        hash.update(&self.digest);
+        hash.update(&[self.kind]);
+        hash.update(&self.references.to_be_bytes());
+        hash.update(&index.to_be_bytes());
+        hash.finalize()
+    }
+
+    pub(super) fn encode_page(&self, index: u32, refs: &[Hash]) -> Value {
+        let mut out = vec![3];
+        out.extend(self.encode().as_bytes());
+        out.extend(index.to_be_bytes());
+        out.extend(
+            u16::try_from(refs.len())
+                .expect("bounded reference page")
+                .to_be_bytes(),
+        );
+        for id in refs {
+            out.extend(id);
+        }
+        Value::new(out)
+    }
+
+    pub(super) fn decode_page<'a>(
+        &self,
+        index: u32,
+        value: &'a Value,
+    ) -> Result<impl Iterator<Item = Hash> + 'a, StoreError> {
+        let b = value.as_bytes();
+        if index >= self.pages()
+            || b.len() < 89
+            || b[0] != 3
+            || Self::decode(&self.owner, &Value::new(b[1..83].to_vec()))? != *self
+            || u32::from_be_bytes(b[83..87].try_into().unwrap()) != index
+        {
+            return Err(StoreError::Corrupt("bad selection reference page".into()));
+        }
+        let count = usize::from(u16::from_be_bytes(b[87..89].try_into().unwrap()));
+        let expected = (self.references as usize - index as usize * REFERENCES_PER_PAGE)
+            .min(REFERENCES_PER_PAGE);
+        if count != expected || b.len() != 89 + count * 32 {
+            return Err(StoreError::Corrupt(
+                "bad selection reference page geometry".into(),
+            ));
+        }
+        Ok(b[89..].chunks_exact(32).map(|id| id.try_into().unwrap()))
+    }
+}
+
+impl SelectionFact {
+    pub(super) fn references(&self) -> &[Hash] {
+        match self {
+            Self::Manifest { chunks, .. } => chunks,
+            Self::Tree { files } => files,
+            _ => &[],
+        }
+    }
+}
+
 /// The native union rule, operating without retaining decoded Blob payloads.
 /// Group drivers may accumulate referenced identities in bounded persistent
 /// rows; this function is also the native reference implementation.
@@ -87,4 +232,107 @@ pub(super) fn select_facts(
             _ => None,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod paging_tests {
+    use super::*;
+
+    #[test]
+    fn legal_large_manifest_projection_fits_storage_values() {
+        // Canonical references fit the existing decoded-entry allowance.
+        let object = Object::ChunkedBlob(mkit_core::object::ChunkedBlob {
+            total_size: 20_000 * 65_536,
+            chunk_size: 65_536,
+            chunks: (0_u32..20_000)
+                .map(|i| {
+                    let mut id = [0; 32];
+                    id[..4].copy_from_slice(&i.to_be_bytes());
+                    id
+                })
+                .collect(),
+        });
+        let canonical = mkit_core::serialize::serialize(&object).unwrap();
+        assert!(canonical.len() < 1024 * 1024);
+        let fact = SelectionFact::from_object(&object);
+        let owner = [7; 32];
+        let projection = Projection::from_fact(owner, &fact);
+        assert_eq!(
+            Projection::decode(&owner, &projection.encode()).unwrap(),
+            projection
+        );
+        let mut hash = Projection::reference_hasher(&owner, projection.kind);
+        let mut consumed = 0;
+        for (index, refs) in fact.references().chunks(REFERENCES_PER_PAGE).enumerate() {
+            let index = index as u32;
+            let value = projection.encode_page(index, refs);
+            assert!(value.as_bytes().len() <= crate::store::MAX_VALUE_BYTES);
+            for id in projection.decode_page(index, &value).unwrap() {
+                hash.update(&id);
+                consumed += 1;
+            }
+            assert!(projection.decode_page(index + 1, &value).is_err());
+            let mut trailing = value.as_bytes().to_vec();
+            trailing.push(0);
+            assert!(
+                projection
+                    .decode_page(index, &Value::new(trailing))
+                    .is_err()
+            );
+        }
+        assert_eq!(consumed, 20_000);
+        assert_eq!(hash.finalize(), projection.digest);
+    }
+    #[test]
+    fn large_tree_projection_preserves_every_reference() {
+        use mkit_core::object::{EntryMode, Tree, TreeEntry};
+        let object = Object::Tree(Tree {
+            entries: (0_u32..15_000)
+                .map(|n| {
+                    let mut id = [0; 32];
+                    id[..4].copy_from_slice(&n.to_be_bytes());
+                    TreeEntry {
+                        name: format!("f{n:05}").into_bytes(),
+                        mode: EntryMode::Blob,
+                        object_hash: id,
+                    }
+                })
+                .collect(),
+        });
+        let bytes = mkit_core::serialize::serialize(&object).unwrap();
+        assert!(bytes.len() < 1024 * 1024);
+        assert_eq!(mkit_core::serialize::deserialize(&bytes).unwrap(), object);
+        let fact = SelectionFact::from_object(&object);
+        let owner = object.id().unwrap();
+        let projection = Projection::from_fact(owner, &fact);
+        let mut recovered = Vec::new();
+        for (index, refs) in fact.references().chunks(REFERENCES_PER_PAGE).enumerate() {
+            let value = projection.encode_page(index as u32, refs);
+            assert!(value.as_bytes().len() < 9 * 1024);
+            recovered.extend(projection.decode_page(index as u32, &value).unwrap());
+        }
+        assert_eq!(recovered, fact.references());
+        assert_eq!(projection.kind, 2);
+        assert_eq!(projection.references, 15_000);
+    }
+    #[test]
+    fn page_batch_fits_even_with_largest_job_guard_and_keys() {
+        use crate::store::{Batch, Key, Precondition, StoreCapabilities, Write};
+        let fact = SelectionFact::Tree {
+            files: vec![[1; 32]; REFERENCES_PER_PAGE],
+        };
+        let projection = Projection::from_fact([2; 32], &fact);
+        let value = projection.encode_page(0, fact.references());
+        let key = Key::new(vec![b'x'; crate::store::MAX_KEY_BYTES]);
+        let mut batch = Batch::new()
+            .require(Precondition::Equals(
+                key.clone(),
+                Value::new(vec![0; crate::store::MAX_VALUE_BYTES]),
+            ))
+            .require(Precondition::NotAfter(1));
+        batch
+            .writes
+            .extend((0..90).map(|_| Write::Put(key.clone(), value.clone())));
+        batch.validate(&StoreCapabilities::full()).unwrap();
+    }
 }
