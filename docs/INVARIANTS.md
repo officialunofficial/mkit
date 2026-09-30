@@ -2022,17 +2022,36 @@ root/length pin. Public pack receipt limits and upload semantics are unchanged.
 
 **Because:** R2 completion immediately publishes and has no conditional object
 write option. An ETag selects a backend part and does not prove integrity.
-Safety across pre-upgrade objects additionally depends on the canonical
-verifier binding object identity to one correct raw root; AlreadyPresent is
+The canonical verifier binds object identity to one correct raw root; AlreadyPresent is
 advisory and cannot replace repository-local source verification or charging.
 
 **If violated:** a replacement, forged receipt or competing writer could expose
 unverified bytes or falsely authorize reuse in another repository.
 
-**Enforced by:** `r2/object_multipart.rs`, legacy R2 object sink/completion root
+**Enforced by:** `r2/object_multipart.rs`, R2 object sink/completion root
 pins, bounded-object multipart model tests, and the local R2 runtime probe.
 The parent WP-4.10b must establish canonical identity plus immutable verified
 source evidence in its first bounded source pass; that integration is pending.
+
+### Pending holder work protects bytes beyond hold TTL (WP-4.10b foundation)
+
+**Always:** any content-shard `gp` row for an object prevents collection.
+Insertion guards and bumps `c`; the row does not expire by age. Identical
+ownership retry does not bump, and changed ownership refuses.
+
+**Because:** queued holder work may still apply after its ticket or ordinary
+GC hold expires. Removing that protection can delete an object before its
+durable holder arrives.
+
+**Enforced by:** `ContentIndex::protect_pending_holder` uses guarded fresh
+block/deleting observations and NotAfter. `collectable` checks one pending row
+and its final plan guards `c`; unknown pending state closes collection. The
+content relay hook atomically commits holder/count/c changes, ordinary hold and
+exact pending-row release, and the watermark. A late blocked holder retains a
+durable takedown request for WP-5.6a. No permissive release API is exposed.
+
+WP-4.10b-1 keeps Extract fail-closed. Source verification, holder enqueue/renewal
+and extraction-driver integration remain WP-4.10b-2 work.
 
 ## Launch inspection checks the complete bounded set before apply
 

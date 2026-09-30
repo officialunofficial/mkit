@@ -225,6 +225,7 @@ pub struct R2BlobStore<B> {
     bucket: B,
     keyspace: &'static str,
     max_bytes: u64,
+    defer_abort: bool,
     #[cfg(feature = "test-faults")]
     fail_final: Arc<AtomicBool>,
 }
@@ -246,6 +247,7 @@ impl<B: ObjectBucket> R2BlobStore<B> {
             bucket,
             keyspace,
             max_bytes: DEFAULT_MAX_BYTES,
+            defer_abort: false,
             #[cfg(feature = "test-faults")]
             fail_final: Arc::default(),
         }
@@ -255,6 +257,13 @@ impl<B: ObjectBucket> R2BlobStore<B> {
     #[must_use]
     pub fn with_max_bytes(mut self, max_bytes: u64) -> Self {
         self.max_bytes = max_bytes;
+        self
+    }
+
+    /// Leave expiry session cleanup to the bucket lifecycle when its alarm has no R2 budget.
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub(crate) fn with_deferred_abort(mut self, defer: bool) -> Self {
+        self.defer_abort = defer;
         self
     }
 

@@ -114,6 +114,62 @@ pub trait SliceExtension: crate::MaybeSend + crate::MaybeSync {
     /// Whether `object` must be extracted into the object store before its
     /// pack is `Verified`.
     fn needs_extraction(&self, object: &Object, cfg: &IndexedConfig) -> bool;
+
+    /// Whether this existing extension supplies the internal upload callbacks.
+    fn extraction_enabled(&self) -> bool {
+        false
+    }
+
+    /// Start a root-pinned private object session after all source CVs verify.
+    fn begin_object<'a>(
+        &'a self,
+        _key: crate::BlobKey,
+        _plan: &'a mkit_core::upload_parts::PartPlan,
+        _root: Hash,
+        _cvs: &'a [Hash],
+        _operation: Hash,
+        _budget: &'a SliceBudget,
+    ) -> BoxFuture<'a, Result<Option<Vec<u8>>, StoreError>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    /// Verify and commit one bounded private part, returning its opaque receipt.
+    fn put_object_part<'a>(
+        &'a self,
+        _key: crate::BlobKey,
+        _session: &'a [u8],
+        _plan: &'a mkit_core::upload_parts::PartPlan,
+        _index: u32,
+        _cv: Hash,
+        _bytes: Vec<u8>,
+        _budget: &'a SliceBudget,
+    ) -> BoxFuture<'a, Result<Option<Vec<u8>>, StoreError>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    /// Publish only the exact root-pinned parts selected by these receipts.
+    fn complete_object<'a>(
+        &'a self,
+        _key: crate::BlobKey,
+        _session: &'a [u8],
+        _plan: &'a mkit_core::upload_parts::PartPlan,
+        _parts: Vec<crate::PartRef>,
+        _root: Hash,
+        _budget: &'a SliceBudget,
+    ) -> BoxFuture<'a, Result<Option<crate::CommitOutcome>, StoreError>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    /// Abort the private session; the default extension has no session.
+    fn abort_object<'a>(
+        &'a self,
+        _key: crate::BlobKey,
+        _session: &'a [u8],
+        _plan: &'a mkit_core::upload_parts::PartPlan,
+        _budget: &'a SliceBudget,
+    ) -> BoxFuture<'a, Result<(), StoreError>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Every `ChunkedBlob` and every Blob of at least `extract_min_bytes` needs
@@ -692,15 +748,35 @@ where
 
     /// One bounded read of the pack, bound to the job's etag.
     async fn read(&self, job: &mut VerifyJobV1, offset: u64, len: u64) -> Result<Window, Stop> {
+        let etag = super::etag::resolve(
+            self.local,
+            self.source,
+            &self.repo.name,
+            &self.pack,
+            job.etag.as_deref(),
+        )
+        .await?;
         self.budget.charge()?;
         match self
             .h
             .windows
-            .read(&self.pack, offset, len, job.etag.as_deref())
+            .read(&self.pack, offset, len, etag.as_deref())
             .await
         {
             Ok(window) => {
-                job.etag.get_or_insert_with(|| window.etag.clone());
+                if job.etag.is_none() {
+                    job.etag = Some(
+                        super::etag::capture(
+                            self.local,
+                            self.source,
+                            &self.repo.name,
+                            &self.pack,
+                            &window.etag,
+                            self.deadline(),
+                        )
+                        .await?,
+                    );
+                }
                 Ok(window)
             }
             Err(WindowError::EtagChanged) => Err(Stop::Restart),
@@ -989,6 +1065,30 @@ where
             st.writes
                 .push(Write::Put(self.row(keys::VC_FRAME, &id), encoded));
             st.frames.insert(id, row);
+            let fact = super::selection::SelectionFact::from_object(&object);
+            let projection = super::selection::Projection::from_fact(id, &fact);
+            for (index, references) in fact
+                .references()
+                .chunks(super::selection::REFERENCES_PER_PAGE)
+                .enumerate()
+            {
+                let index = u32::try_from(index).expect("decoded entry bounds page count");
+                st.writes.push(Write::Put(
+                    self.row(keys::VC_CANDIDATE, &projection.page_id(index)),
+                    projection.encode_page(index, references),
+                ));
+                if st.writes.len() >= WRITE_BATCH {
+                    self.flush(st).await?;
+                }
+            }
+            drop(fact);
+            // The summary is written after its pages. Decode's durable phase
+            // transition is the full-pack completion marker; partial pages
+            // are provisional and replay identically after a lost reply.
+            st.writes.push(Write::Put(
+                self.row(keys::VC_CANDIDATE, &id),
+                projection.encode(),
+            ));
             if let Some(parents) = super::verify::history_parents(&object) {
                 st.writes.push(Write::Put(
                     self.row(keys::VC_HISTORY, &id),
