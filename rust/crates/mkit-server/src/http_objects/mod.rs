@@ -18,6 +18,7 @@
 //! mounting (4.16) and takedown (5.9a).
 
 mod body;
+pub(crate) mod content_headers;
 pub mod mount;
 mod paid;
 pub(crate) mod proof;
@@ -188,7 +189,8 @@ impl core::fmt::Debug for HttpObjectRequest<'_> {
 }
 
 /// A complete response. Header names are static; values never carry request
-/// text, so nothing here can inject a header.
+/// text verbatim. Filenames are derived and fully percent-encoded outside
+/// RFC 5987 attr-char, with a sanitized ASCII fallback, preventing injection.
 #[derive(Debug)]
 pub struct HttpObjectResponse {
     /// The status code.
