@@ -4103,6 +4103,7 @@ fn prune_race_then_push(kv: MemoryKv, pushed: codec::EpochLease) -> Spy {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // The race fixture verifies both attempts, deadline and refreshed lease state.
 fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
     let clock = clock();
     let pushed = codec::EpochLease {

@@ -703,7 +703,7 @@ mod tests {
                 .filter_map(|line| line.trim().strip_prefix('"')?.strip_suffix("\","))
                 .filter(|path| path.starts_with("/mkit.transport.v1.TransportService/"))
                 .collect();
-            assert_eq!(procedures.len(), 16);
+            assert_eq!(procedures.len(), 18);
             for procedure in procedures {
                 let method = procedure.rsplit('/').next().unwrap();
                 let expected = match method {

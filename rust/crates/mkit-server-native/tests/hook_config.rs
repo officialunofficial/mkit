@@ -530,3 +530,48 @@ fn resolve_takes_the_same_args_type_the_binary_parses() {
     assert_eq!(args.hooks.hook_signature_validity_secs, 60);
     let _ = resolve; // the entry point under test
 }
+
+#[test]
+fn authority_configuration_requires_dedicated_keys_and_authority_role() {
+    let rig = Rig::new();
+    let ns = "ed25519-0101010101010101010101010101010101010101010101010101010101010101";
+    let list = rig.root.path().join("namespaces");
+    std::fs::write(&list, ns).unwrap();
+    let public = mkit_core::hash::to_hex(
+        ed25519_dalek::SigningKey::from_bytes(&[7; 32])
+            .verifying_key()
+            .as_bytes(),
+    );
+    let key = format!("deployment {public} {ns}");
+    let flags = [
+        "--addressing",
+        "multi",
+        "--namespace-allowlist",
+        common::s(&list),
+        "--hook-authorize-url",
+        HOOK,
+        "--authorizer-role",
+        "authority",
+        "--authority-fence",
+        "--authority-key",
+        &key,
+    ];
+    assert!(
+        rig.with_key(&flags)
+            .unwrap()
+            .pipeline
+            .authority_fence
+            .is_some()
+    );
+    assert!(rig.with_key(&["--authority-fence"]).is_err());
+    assert!(rig.with_key(&["--authority-key", &key]).is_err());
+    let repeated_public = mkit_core::hash::to_hex(
+        ed25519_dalek::SigningKey::from_bytes(&[0x22; 32])
+            .verifying_key()
+            .as_bytes(),
+    );
+    let repeated = format!("deployment {repeated_public} {ns}");
+    let mut bad = flags;
+    bad[10] = &repeated;
+    assert!(rig.with_key(&bad).is_err());
+}

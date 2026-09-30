@@ -1,4 +1,4 @@
-//! Actual Worker D34 authority fence probe; run by vcs-worker-hooks.sh --authority.
+//! Actual Worker D34 authority fence probe; run by vcs-worker-authority.sh --authority.
 #![allow(clippy::unwrap_used)]
 use base64::{
     Engine as _,

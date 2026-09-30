@@ -1523,6 +1523,12 @@ pub fn resolve(
                 "authority fencing requires Multi, auth v2, an Authority hook and transactional metadata",
             ));
         }
+        #[cfg(feature = "enc")]
+        if enc.is_some() {
+            return Err(usage(
+                "authority fencing requires auth-v2 on every write listener; --listen-enc is incompatible",
+            ));
+        }
         let fence = mkit_server::authority::AuthorityFence::parse(&args.authority_key.join("\n"))
             .map_err(|_| usage("--authority-key is invalid"))?;
         #[cfg(feature = "hooks")]

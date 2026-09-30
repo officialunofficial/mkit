@@ -18,7 +18,7 @@ impl Authorizer for PolicyHook {
         } else {
             // The hook cannot manufacture ownership or an M2 grant.
             Ok(AuthzFacts {
-                authority_generation: None,
+                authority_generation: Some(u64::MAX),
                 owner: true,
                 grant: None,
                 ..AuthzFacts::default()
@@ -608,4 +608,19 @@ fn reads_keep_hook_behavior_and_invalid_multi_namespace_is_internal() {
         now(e.pipe.authorize(&op)).unwrap_err().public_message(),
         "write not permitted"
     );
+}
+
+#[test]
+fn check_hook_generation_injection_is_ignored_with_fencing_off() {
+    let e = env(AuthMode::Open);
+    let mut built_in = AuthzFacts::default();
+    let returned = AuthzFacts {
+        authority_generation: Some(u64::MAX),
+        owner: true,
+        ..AuthzFacts::default()
+    };
+    e.pipe
+        .merge_authority_facts(&mut built_in, &returned)
+        .unwrap();
+    assert_eq!(built_in, AuthzFacts::default());
 }

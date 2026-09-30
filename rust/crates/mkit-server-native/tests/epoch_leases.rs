@@ -2663,6 +2663,7 @@ async fn authority_missing_and_recovery<N: NamespaceStore + 'static>(
     );
     let a = auth_as(&pipe, None, [2; 32], None);
     committed(&pipe, &a, REF, 1).await;
+    let old = el(&store, &a, REF).await;
     // R-151: failed push cannot acknowledge; expiration plus backend NotAfter fences delayed writes.
     store.controls.fail_push_once.store(true, Ordering::SeqCst);
     assert_eq!(
@@ -2684,6 +2685,14 @@ async fn authority_missing_and_recovery<N: NamespaceStore + 'static>(
             .unwrap(),
         1
     );
+    assert!(matches!(
+        store
+            .inner
+            .apply(&shard(&a, REF), old_batch(old))
+            .await
+            .unwrap(),
+        BatchOutcome::DeadlinePassed { .. }
+    ));
     pipe.mark_lease_table_recovered(&a.repo().repo.namespace)
         .await
         .unwrap();
@@ -2838,4 +2847,53 @@ backends!(
     authority_visibility_memory,
     authority_visibility_sqlite,
     authority_visibility
+);
+
+async fn authority_renewal_between_push_and_ack<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    store_clock: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let faults = Arc::new(Faults::default());
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        faults.clone(),
+        Reject::Authority(Some(0)),
+    );
+    let a = auth(&pipe, None);
+    committed(&pipe, &a, REF, 1).await;
+    store.controls.ack.arm();
+    let task = {
+        let pipe = pipe.clone();
+        tokio::spawn(async move { pipe.set_authority_generation(&signed_authority(1)).await })
+    };
+    store.controls.ack.entered().await;
+    assert_eq!(el(&store, &a, REF).await.authority_generation, Some(1));
+    clock.set(24_500);
+    store_clock.set(24_500);
+    let fresh = pipeline(store.clone(), clock, faults, Reject::Authority(Some(1)));
+    let delegate = auth_as(&fresh, None, [2; 32], None);
+    assert_eq!(
+        fresh.update_ref(&delegate, update(REF, 2)).await.unwrap(),
+        UpdateRefResult::Committed
+    );
+    assert_eq!(
+        ls(&store, &a, REF).await.acked_authority_generation,
+        Some(0)
+    );
+    store.controls.ack.resume();
+    assert_eq!(task.await.unwrap().unwrap(), 1);
+    assert_eq!(
+        ls(&store, &a, REF).await.acked_authority_generation,
+        Some(1)
+    );
+    assert_eq!(el(&store, &a, REF).await.authority_generation, Some(1));
+    assert_eq!(el(&store, &a, REF).await.epoch, 0);
+}
+backends!(
+    authority_renew_ack_memory,
+    authority_renew_ack_sqlite,
+    authority_renewal_between_push_and_ack
 );

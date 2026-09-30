@@ -731,3 +731,5 @@ keys are dedicated deployment-authority verification keys, separate from owner,
 hook, ticket and URL-token keys. `GetAuthorityGeneration` and
 `SetAuthorityGeneration` use SPEC-SERVER §6.2.1 outside auth-v2; pending completion
 returns `unavailable` and `Retry-After: 1`. Fencing is off by default.
+`--listen-enc` is incompatible: every write listener must use auth v2 when the
+authority fence is enabled.
