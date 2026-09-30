@@ -282,6 +282,30 @@ fn witness_codec_golden_and_fail_closed() {
         assert!(Witness::decode(&Value::new(bytes)).is_err());
     }
 }
+
+#[test]
+fn releasing_one_advance_must_preserve_another_hold_on_the_same_pack() {
+    block_on(async {
+        let kv = MemoryKv::default();
+        let shards = SinglePartition;
+        let r = repo();
+        let p = shards.ref_shard(&r, "refs/heads/main");
+        let first = advance(1, Clearance::Held);
+        apply(&kv, &shards, "refs/heads/main", first.clone(), false).await;
+        apply(&kv, &shards, "refs/heads/main", first, false).await;
+        finish(&kv, &shards, "refs/heads/main", 1, Clearance::Cleared).await;
+        let raw = kv
+            .get(&p, &keys::membership(&r.name, &[3; 32]))
+            .await
+            .unwrap()
+            .unwrap();
+        let witness = Witness::decode(&raw).unwrap();
+        assert!(
+            witness.held,
+            "releasing advance 1 erased advance 2's retained hold: {witness:?}"
+        );
+    });
+}
 #[test]
 fn advance_codec_rejects_unresolved_obligations_and_unknown_fields() {
     let mut a = advance(1, Clearance::Cleared);

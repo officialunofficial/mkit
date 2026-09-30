@@ -1097,6 +1097,114 @@ fn inspection_pending_is_writer_visible_but_held_bytes_are_absent_for_everyone()
     }
 }
 
+#[allow(clippy::too_many_lines)]
+fn restart_without_inspector_reuse(sharding: Sharding) {
+    let (mut env, owner, identity) = environment_with_sharding(sharding);
+    env.pipe = env
+        .pipe
+        .with_publication_policy(Arc::new(InspectionPolicy(
+            crate::store::publication::Clearance::Held,
+        )))
+        .unwrap();
+    let (bytes, head) = pack();
+    let pack_id = hash(&bytes);
+    let node = encode_packlist(None, &[pack_id]).unwrap();
+    let map = hash(&node);
+    let tickets = vec![
+        begin_and_upload(&env, &owner, &identity, &bytes, 9700),
+        begin_and_upload(&env, &owner, &identity, &node, 9701),
+    ];
+    let other_head = "refs/heads/reuse";
+    let other_map = "refs/mkit/packmap/reuse";
+    // Legitimate tickets can remain open on another ref when the first hold commits.
+    let mut reuse_tickets = Vec::new();
+    for (number, data) in [(9703, bytes.as_slice()), (9704, node.as_slice())] {
+        let begin = env
+            .auth(&signed(&owner, &identity, Procedure::BeginUpload, number))
+            .unwrap();
+        let BeginUploadResult::Ticket { id, .. } =
+            block_on(
+                env.pipe
+                    .begin_upload(&begin, other_head, &hash(data), data.len() as u64),
+            )
+            .unwrap()
+        else {
+            panic!("expected pre-hold reuse ticket")
+        };
+        upload(&env, data, id);
+        reuse_tickets.push(id);
+    }
+    let auth = env
+        .auth(&signed(&owner, &identity, Procedure::AdvanceRefs, 9702))
+        .unwrap();
+    block_on(env.pipe.advance_refs_with_tickets(
+        &auth,
+        upd(HEAD, Missing, head),
+        upd(PACKMAP, Missing, map),
+        tickets,
+    ))
+    .unwrap();
+    let repo = auth.repo().repo.clone();
+    let source = env.pipe.shards.ref_shard(&repo, HEAD);
+    let member = keys::membership(&repo.name, &pack_id);
+    assert!(
+        crate::store::publication::Witness::decode(
+            &block_on(env.pipe.meta.get(&source, &member))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+        .held
+    );
+    // Reconstruct the real pipeline over the same durable stores with default-off policy.
+    env.pipe = Pipeline::new(
+        env.pipe.blobs,
+        env.pipe.meta,
+        Hooks::new(),
+        env.pipe.cfg,
+        env.clock.clone(),
+        env.metrics.clone(),
+    )
+    .unwrap();
+    let auth = env
+        .auth(&signed(&owner, &identity, Procedure::AdvanceRefs, 9705))
+        .unwrap();
+    let result = block_on(env.pipe.advance_refs_with_tickets(
+        &auth,
+        upd(other_head, Missing, head),
+        upd(other_map, Missing, map),
+        reuse_tickets,
+    ));
+    let source = env.pipe.shards.ref_shard(&repo, other_head);
+    let witness = crate::store::publication::Witness::decode(
+        &block_on(env.pipe.meta.get(&source, &member))
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let writer = env
+        .auth(
+            &signed(&owner, &identity, Procedure::PackExists, 9706)
+                .header("x-mkit-ref", other_head),
+        )
+        .unwrap();
+    let visible = block_on(env.pipe.pack_exists(&writer, PackKey(pack_id))).unwrap();
+    assert!(
+        !visible,
+        "{sharding:?}: policy removal accepted {result:?}, replaced hold with {witness:?}, and served the pack"
+    );
+}
+
+#[test]
+fn single_restart_without_inspector_must_not_clear_a_reused_held_pack() {
+    restart_without_inspector_reuse(Sharding::Single);
+}
+
+#[test]
+fn d34_restart_without_inspector_must_not_clear_a_reused_held_pack() {
+    restart_without_inspector_reuse(Sharding::D34);
+}
+
 #[test]
 fn head_only_and_packmap_only_updates_verify_the_unchanged_counterpart() {
     let (mut env, owner, identity) = environment();
