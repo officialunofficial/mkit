@@ -328,7 +328,6 @@ fn project_refs(
     writes: &mut Vec<Write>,
     outbox: &mut OutboxBuilder,
 ) {
-    outbox.publication_era();
     for (name, id) in value_refs(name, value) {
         let key = keys::published_ref(&repo.name, &name);
         writes.push(id.map_or_else(
@@ -353,7 +352,6 @@ fn project_members(
     writes: &mut Vec<Write>,
     outbox: &mut OutboxBuilder,
 ) {
-    outbox.publication_era();
     for pack in &advance.additions {
         let witness = Witness {
             generation: advance.generation,

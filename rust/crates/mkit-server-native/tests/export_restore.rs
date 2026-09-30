@@ -115,7 +115,6 @@ fn seed_d34_invariants(store: &SqlKvStore<RusqliteConn>) -> (Partition, Partitio
         codec::encode_u64(3).as_bytes(),
     );
     let relay = codec::RelayV1 {
-        publication_era: false,
         at_ms: 1,
         target: target_index.clone(),
         puts: vec![(

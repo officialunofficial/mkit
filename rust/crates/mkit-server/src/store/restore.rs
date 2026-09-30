@@ -948,7 +948,6 @@ mod tests {
         );
         let relay_to = |target, key: &[u8]| {
             codec::encode_relay(&codec::RelayV1 {
-                publication_era: false,
                 at_ms: 100,
                 target,
                 puts: vec![(Key::new(key.to_vec()), Value::default())],
@@ -1225,7 +1224,6 @@ mod tests {
             Some(codec::encode_u64(10))
         );
         let relay = codec::encode_relay(&codec::RelayV1 {
-            publication_era: false,
             at_ms: 100,
             target: target(),
             puts: vec![(

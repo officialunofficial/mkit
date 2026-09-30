@@ -826,12 +826,6 @@ where
         }
         _ => registry,
     };
-    let registry = match class {
-        ShardClass::RefStore | ShardClass::RefShard | ShardClass::RepoIndexShard => {
-            registry.register(mkit_server::timers::publication_migration::PublicationMigration)
-        }
-        _ => registry,
-    };
     #[cfg(feature = "test-faults")]
     let registry = registry.register(mkit_server::timers::test_kind::TestTimer);
     registry
@@ -2436,7 +2430,13 @@ mod glue {
                     let mut outbox = OutboxBuilder::new(observed.as_ref(), None)?;
                     let now = u64::try_from(super::WorkerClock.now_ms()).unwrap_or(0);
                     outbox.relay_at(now);
-                    outbox.relay(&target, vec![(key.clone(), Value::default())]);
+                    outbox.relay(
+                        &target,
+                        vec![
+                            (key.clone(), Value::default()),
+                            (keys::published_member(&repo.name, &pack), Value::default()),
+                        ],
+                    );
                     let mut batch = Batch::new().put(key, Value::default());
                     outbox.try_finish(&mut batch.preconditions, &mut batch.writes)?;
                     if store.apply(&source, batch).await? != BatchOutcome::Committed {

@@ -48,14 +48,7 @@ impl<N: NamespaceStore> BucketSource for ReaderBucket<'_, N> {
             if source.inspection_configured() && !source.uses_published_values() {
                 return Err(StoreError::unavailable("published view unavailable"));
             }
-            if let Some(rows) = source.bucket(repo, self.partition, self.now_ms).await?
-                && (!self.store.capabilities().atomic_multi_key
-                    || matches!(
-                        crate::store::migration::observe(self.store, self.partition, &repo.name)
-                            .await?,
-                        crate::store::migration::State::Managed
-                    ))
-            {
+            if let Some(rows) = source.bucket(repo, self.partition, self.now_ms).await? {
                 if self.store.capabilities().atomic_multi_key && !source.uses_published_values() {
                     return Err(StoreError::unavailable("published view unavailable"));
                 }

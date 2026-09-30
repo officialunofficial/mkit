@@ -1241,7 +1241,6 @@ async fn append_model_relay(
         .unwrap();
     let lease = codec::decode_epoch_lease(&lease_value).unwrap();
     let row = codec::RelayV1 {
-        publication_era: false,
         at_ms,
         target: coordinator(a),
         puts: vec![(Key::new(&b"x\0"[..]), codec::encode_u64(seq))],
@@ -1376,7 +1375,6 @@ async fn plant_delayed_relay_and_expired_lease(
         sweep_due_ms: 100,
     };
     let relay = codec::RelayV1 {
-        publication_era: false,
         at_ms: 90,
         target: coordinator.clone(),
         puts: vec![(Key::new(&b"x\0"[..]), Value::default())],
@@ -1536,7 +1534,6 @@ async fn revocation_completes_with_expired_kept_row() {
     committed(&pipe, &a, REF, 1).await;
     let source = shard(&a, REF);
     let relay = codec::RelayV1 {
-        publication_era: false,
         at_ms: 1,
         target: coordinator(&a),
         puts: vec![(Key::new(&b"x\0"[..]), Value::default())],

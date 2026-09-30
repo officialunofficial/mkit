@@ -119,5 +119,3 @@ pub async fn source_relay_state<S: NamespaceStore>(
 
 #[cfg(all(test, feature = "memory"))]
 mod tests;
-
-mod publication;

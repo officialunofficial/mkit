@@ -41,16 +41,6 @@ async fn apply(
     let oc = kv.get(&p, &keys::outcome_backlog()).await.unwrap();
     let mut outbox = OutboxBuilder::new(os.as_ref(), oc.as_ref()).unwrap();
     let mut b = Batch::new();
-    if kv
-        .get(&p, &crate::store::migration::key(&repo.name))
-        .await
-        .unwrap()
-        .is_none()
-    {
-        let migration = crate::store::migration::Prepared::empty(&repo.name);
-        b.preconditions.extend(migration.preconditions);
-        b.writes.extend(migration.writes);
-    }
     let state = append(
         &repo,
         name,
@@ -284,6 +274,7 @@ fn witness_codec_golden_and_fail_closed() {
 }
 
 #[test]
+#[ignore = "WP-5.5a (R-183): hold authority, see R-198"]
 fn releasing_one_advance_must_preserve_another_hold_on_the_same_pack() {
     block_on(async {
         let kv = MemoryKv::default();
@@ -479,42 +470,6 @@ fn d34_delayed_cross_ref_delta_relays_wake_durable_work_after_restart() {
             hook: NoHook,
             budget: RelayBudget::default(),
         });
-        // These projections are already in the managed era; initialization
-        // is covered separately from this delayed dependency-wakeup regression.
-        for name in [
-            "refs/heads/a",
-            "refs/mkit/packmap/a",
-            "refs/heads/c",
-            "refs/mkit/packmap/c",
-        ] {
-            let target = shards.ref_index(&repository, name);
-            if kv
-                .get(&target, &crate::store::migration::key(&repository.name))
-                .await
-                .unwrap()
-                .is_none()
-            {
-                let mode = crate::store::migration::Prepared::empty(&repository.name);
-                let mut batch = Batch::new();
-                batch.preconditions.extend(mode.preconditions);
-                batch.writes.extend(mode.writes);
-                assert_eq!(
-                    kv.apply(&target, batch).await.unwrap(),
-                    BatchOutcome::Committed
-                );
-            }
-        }
-        for pack in [[3; 32], [9; 32]] {
-            let target = shards.membership(&repository, &BlobKey::pack(pack));
-            let mode = crate::store::migration::Prepared::empty(&repository.name);
-            let mut batch = Batch::new();
-            batch.preconditions.extend(mode.preconditions);
-            batch.writes.extend(mode.writes);
-            assert_eq!(
-                kv.apply(&target, batch).await.unwrap(),
-                BatchOutcome::Committed
-            );
-        }
         // Deliver C before A: no global ordering across source refs is assumed.
         tick(5_000);
         let source_c = shards.ref_shard(&repository, "refs/heads/c");

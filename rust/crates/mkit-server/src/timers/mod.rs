@@ -332,6 +332,3 @@ fn next_wake(
     };
     min_due(next, committed_due).map(|due| due.max(now_ms))
 }
-
-/// Bounded persisted-state publication initialization.
-pub mod publication_migration;

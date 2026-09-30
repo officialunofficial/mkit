@@ -191,9 +191,6 @@ pub const TAG_OUTBOX_SEQUENCE: &str = "os";
 /// Terminal outcome backlog tag.
 pub const TAG_OUTCOME_BACKLOG: &str = "oc";
 
-/// Durable publication-era initialization and permanent seal.
-pub const TAG_PUBLICATION_ERA: &str = "pv";
-
 /// Persistent paired sequence, pointer and deletion boundary.
 pub const TAG_PUBLICATION: &str = "pp";
 /// Retained advance values and obligations.
@@ -260,8 +257,6 @@ pub enum ParsedKey {
         /// Full ref name.
         name: String,
     },
-    /// `pv 00 <repo>` or its permanent `00 seal` companion.
-    PublicationEra { repo: RepoName, sealed: bool },
     /// Publication key with a validated full sequence/ref name.
     Publication { repo: RepoName, name: String },
     /// Retained advance, with nonzero sequence.
@@ -1096,15 +1091,6 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
             let (repo, name) = parse_named_ref(body)?;
             ParsedKey::RefIndexEntry { repo, name }
         }
-        b"pv" => {
-            let (body, sealed) = body
-                .strip_suffix(b"\0seal")
-                .map_or((body, false), |repo| (repo, true));
-            ParsedKey::PublicationEra {
-                repo: RepoName::new(text(body)?).ok()?,
-                sealed,
-            }
-        }
         b"pp" | b"pr" | b"py" => {
             let (repo, name) = parse_named_ref(body)?;
             check_ticket_ref(&name).ok()?;
@@ -1295,7 +1281,6 @@ mod tests {
             TAG_RELAY,
             TAG_OUTBOX_SEQUENCE,
             TAG_OUTCOME_BACKLOG,
-            TAG_PUBLICATION_ERA,
             TAG_PUBLICATION,
             TAG_ADVANCE,
             TAG_PUBLISHED_REF,

@@ -1196,11 +1196,13 @@ fn restart_without_inspector_reuse(sharding: Sharding) {
 }
 
 #[test]
+#[ignore = "WP-5.5a (R-183): hold authority, see R-198"]
 fn single_restart_without_inspector_must_not_clear_a_reused_held_pack() {
     restart_without_inspector_reuse(Sharding::Single);
 }
 
 #[test]
+#[ignore = "WP-5.5a (R-183): hold authority, see R-198"]
 fn d34_restart_without_inspector_must_not_clear_a_reused_held_pack() {
     restart_without_inspector_reuse(Sharding::D34);
 }

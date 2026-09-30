@@ -1164,25 +1164,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         .await
                         .map_err(meta_error)?
                     {
-                        if !self.meta.capabilities().atomic_multi_key
-                            || matches!(
-                                crate::store::migration::observe(
-                                    &self.meta,
-                                    &partition,
-                                    &op.repo.name
-                                )
-                                .await
-                                .map_err(meta_error)?,
-                                crate::store::migration::State::Managed
-                            )
+                        if self.meta.capabilities().atomic_multi_key
+                            && !source.uses_published_values()
                         {
-                            if self.meta.capabilities().atomic_multi_key
-                                && !source.uses_published_values()
-                            {
-                                return Err(ServerError::unavailable("published view unavailable"));
-                            }
-                            return Ok(rows.into_iter().find(|(n, _)| n == name).map(|(_, id)| id));
+                            return Err(ServerError::unavailable("published view unavailable"));
                         }
+                        return Ok(rows.into_iter().find(|(n, _)| n == name).map(|(_, id)| id));
                     }
                 }
             }
@@ -2698,8 +2685,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if let Some(update) = refs.first() {
             let name = crate::store::publication::sequence_ref(&update.name);
             wanted.push(keys::publication(&op.repo.name, &name));
-            wanted.push(crate::store::migration::key(&op.repo.name));
-            wanted.push(crate::store::migration::seal_key(&op.repo.name));
             wanted.push(keys::ref_key(&op.repo.name, &name));
             if let Some(packmap) = mkit_attest::grant::head_packmap(&name) {
                 wanted.push(keys::ref_key(&op.repo.name, &packmap));
@@ -3066,7 +3051,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             rejection: None,
             publication: (caps.atomic_multi_key && !refs.is_empty()).then_some(
                 clearance::PublicationWrite {
-                    migration: None,
                     repo: &op.repo,
                     source: p,
                     shards: self.shards.as_ref(),
@@ -3084,24 +3068,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }),
         };
         let mut ahead = ahead;
-        if req.publication.is_some() {
-            let snapshot = ahead.get_or_insert_with(Snapshot::default);
-            self.fill(p, snapshot, req.read_keys()).await?;
-            let migration = crate::store::migration::prepare(
-                &self.meta,
-                p,
-                &op.repo.name,
-                snapshot.get(&crate::store::migration::key(&op.repo.name)),
-                snapshot.get(&crate::store::migration::seal_key(&op.repo.name)),
-                u64::try_from(self.clock.now_ms()).unwrap_or(0),
-            )
-            .await
-            .map_err(meta_error)?;
-            req.publication
-                .as_mut()
-                .expect("publication context")
-                .migration = Some(migration);
-        }
         let prepared = self
             .prepare_publication(
                 op,

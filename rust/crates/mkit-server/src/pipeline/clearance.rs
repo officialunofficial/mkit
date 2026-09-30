@@ -30,7 +30,6 @@ pub(crate) struct PublicationWrite<'a> {
     pub source: &'a crate::Partition,
     pub shards: &'a dyn super::ShardMap,
     pub prepared: Option<&'a Advance>,
-    pub migration: Option<crate::store::migration::Prepared>,
 }
 
 pub(crate) fn resulting_pair(

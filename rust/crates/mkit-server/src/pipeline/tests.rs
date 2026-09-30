@@ -77,14 +77,9 @@ fn planned_ticket_advance(count: usize) -> Batch {
 
 #[allow(clippy::too_many_lines)] // A full ticket snapshot and its expected maximal planner shape.
 fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
-    planned_ticket_publication(count, d34, true, false)
+    planned_ticket_publication(count, d34, false)
 }
-fn planned_ticket_publication(
-    count: usize,
-    d34: bool,
-    initializing: bool,
-    retained: bool,
-) -> Batch {
+fn planned_ticket_publication(count: usize, d34: bool, retained: bool) -> Batch {
     use crate::store::codec::{ReservationV1, TicketV1};
     let repo = RepoId {
         namespace: NamespaceKey::deployment_default(),
@@ -137,17 +132,6 @@ fn planned_ticket_publication(
                 state: crate::store::publication::Clearance::Cleared,
             });
     }
-    let migration = if initializing {
-        crate::store::migration::Prepared::empty(&repo.name)
-    } else {
-        let raw = crate::store::migration::State::Managed.encode();
-        let seal = Value::new(vec![1]);
-        crate::store::migration::Prepared {
-            preconditions: crate::store::migration::guards(&repo.name, Some(&raw), Some(&seal))
-                .unwrap(),
-            writes: vec![],
-        }
-    };
     let req = WriteRequest {
         repo: &repo.name,
         kind: WriteKind::AdvanceRefs,
@@ -176,7 +160,6 @@ fn planned_ticket_publication(
         implicit: None,
         rejection: None,
         publication: Some(clearance::PublicationWrite {
-            migration: Some(migration),
             repo: &repo,
             source: &source,
             shards,
@@ -239,18 +222,14 @@ fn planned_ticket_publication(
 }
 
 #[test]
-fn seven_ticket_publication_initialization_and_steady_bounds_are_real_batches() {
-    for (d34, initializing, retained, expected) in [
-        (true, true, false, 97),
-        (true, true, true, 98),
-        (true, false, false, 95),
-        (true, false, true, 96),
-        (false, true, false, 86),
-        (false, true, true, 87),
-        (false, false, false, 84),
-        (false, false, true, 85),
+fn seven_ticket_publication_bounds_are_real_batches() {
+    for (d34, retained, expected) in [
+        (true, false, 93),
+        (true, true, 94),
+        (false, false, 82),
+        (false, true, 83),
     ] {
-        let batch = planned_ticket_publication(7, d34, initializing, retained);
+        let batch = planned_ticket_publication(7, d34, retained);
         assert_eq!(batch.preconditions.len() + batch.writes.len(), expected);
         batch.validate(&StoreCapabilities::full()).unwrap();
     }
@@ -260,7 +239,7 @@ fn seven_ticket_publication_initialization_and_steady_bounds_are_real_batches() 
 fn seven_ticket_advance_plans_a_valid_real_batch() {
     let batch = planned_ticket_advance(7);
     let ops = batch.preconditions.len() + batch.writes.len();
-    assert_eq!(ops, 97);
+    assert_eq!(ops, 93);
     for key in [
         keys::epoch_lease(),
         keys::layout_version(),
@@ -768,7 +747,6 @@ fn single_sharding_watermark_reads_namespace_outbox() {
         u64::try_from(T0).unwrap()
     );
     let row = codec::RelayV1 {
-        publication_era: false,
         at_ms: u64::try_from(T0).unwrap() - 5,
         target: ns(),
         puts: vec![(Key::new(&b"x\0"[..]), Value::default())],
@@ -4894,7 +4872,6 @@ fn prepared_publication_pair_cannot_survive_a_counterpart_guard_race() {
         rejection: None,
         pending: None,
         publication: Some(clearance::PublicationWrite {
-            migration: None,
             repo: &repo,
             source: &source,
             shards: &SinglePartition,

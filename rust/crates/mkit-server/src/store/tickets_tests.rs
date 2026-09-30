@@ -456,7 +456,7 @@ fn duplicate_close_and_second_open_on_same_ref_leave_first_fragment_untouched() 
 }
 
 #[test]
-fn membership_is_local_under_single_and_relays_identical_deduplicated_upserts_under_d34() {
+fn immediate_membership_is_local_under_single_and_relays_both_views_under_d34() {
     let spec = spec();
     let repo_id = RepoId {
         namespace: NamespaceKey::deployment_default(),
@@ -516,7 +516,16 @@ fn membership_is_local_under_single_and_relays_identical_deduplicated_upserts_un
                 relays[0].target,
                 shards.membership(&repo_id, &BlobKey::pack(pack))
             );
-            assert_eq!(relays[0].puts, vec![membership]);
+            assert_eq!(
+                relays[0].puts,
+                vec![
+                    membership,
+                    (
+                        layout::published_member(&spec.repo, &pack),
+                        Value::default()
+                    )
+                ]
+            );
         }
     }
 }

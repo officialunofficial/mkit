@@ -306,7 +306,6 @@ mod tests {
                 Batch::new().put(
                     keys::relay(1),
                     codec::encode_relay(&codec::RelayV1 {
-                        publication_era: false,
                         at_ms: 50,
                         target: partition(),
                         puts: vec![(Key::new(&b"x\0"[..]), Value::default())],

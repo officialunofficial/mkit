@@ -723,3 +723,5 @@ only public ref GET/HEAD without a proof may redirect after the normal
 checks, to a relative object URL preserving the repository prefix.
 Configured admission disables redirects. Traces record method and escaped
 path only; credentials and queries are redacted.
+
+Stores written by earlier unreleased mkit-server builds are unsupported; reset them.
