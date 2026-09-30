@@ -37,6 +37,20 @@ pub struct WindowRequest {
     pub len: u64,
 }
 
+/// Where the entry a reader last yielded sat in the pack: its complete
+/// frame, type and length prefix included, exactly as `DecodedEntry` reports
+/// it for the buffered decoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FrameInfo {
+    /// Offset of the complete frame in the pack.
+    pub offset: u64,
+    /// Length of the complete frame, including its five header bytes.
+    pub length: u64,
+    /// Encoded frame type (`0x00`, `0x02`, `0x03` or `0x04`).
+    pub wire_type: u8,
+}
+
 /// The next action for a window-reader driver.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -98,6 +112,7 @@ pub struct WindowReader {
     carry: Vec<u8>,
     trailer: [u8; 32],
     resume_prefix: Option<Hash>,
+    last_frame: Option<FrameInfo>,
     #[cfg(test)]
     peak: usize,
 }
@@ -181,6 +196,7 @@ impl WindowReader {
             carry: Vec::new(),
             trailer: [0; 32],
             resume_prefix: None,
+            last_frame: None,
             #[cfg(test)]
             peak: 0,
         }
@@ -500,6 +516,19 @@ impl WindowReader {
     }
 
     fn entry_finished(&mut self) -> Result<(), PackError> {
+        let length = self
+            .payload_len
+            .checked_add(5)
+            .ok_or(PackError::PackfileTooLarge)?;
+        self.last_frame = Some(FrameInfo {
+            offset: self
+                .state
+                .pos
+                .checked_sub(length)
+                .ok_or(PackError::PackfileCorrupted)?,
+            length,
+            wire_type: self.kind,
+        });
         self.state.index = self
             .state
             .index
@@ -632,6 +661,13 @@ impl WindowReader {
             self.trailer[dst..dst + n].copy_from_slice(&bytes[src..src + n]);
         }
         Ok(())
+    }
+
+    /// The frame of the entry the latest [`Step::Entry`] returned, or `None`
+    /// before the first one. A resumed reader starts with `None`.
+    #[must_use]
+    pub fn last_frame(&self) -> Option<FrameInfo> {
+        self.last_frame
     }
 
     /// A compact checkpoint only at an entry boundary, never within an entry.

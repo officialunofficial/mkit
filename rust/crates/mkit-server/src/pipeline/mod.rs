@@ -118,6 +118,7 @@ pub use hooks::{
 pub(crate) use implicit::IMPLICIT_PACKMAP_UNKNOWN;
 pub(crate) use implicit::PendingPack;
 pub use info::ServerInfo;
+pub use lease::{LeaseParams, renew_for_relay};
 use outcome::Outcome as RequestOutcome;
 pub use parts::PartUploadSession;
 use plan::{
@@ -2011,20 +2012,38 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     .new
                     .ok_or_else(|| ServerError::invalid_argument("delete consumes no tickets"))?;
                 ticket_ms = rows.iter().map(|ticket| ticket.created_at_ms).min();
-                staged = crate::indexed::verify::verify_ticketed(
-                    &self.blobs,
-                    &self.meta,
-                    self.shards.as_ref(),
-                    &op.repo,
-                    &p,
-                    &rows,
-                    tickets,
-                    tip,
-                    indexed,
-                    self.clock.as_ref(),
-                    self.metrics.as_ref(),
-                )
-                .await?;
+                staged = if indexed.verification == crate::indexed::VerificationMode::Scheduled {
+                    // Kind-7 slices verify; the advance only checks their result.
+                    crate::indexed::scheduled::check(
+                        &self.blobs,
+                        &self.meta,
+                        self.shards.as_ref(),
+                        &op.repo,
+                        &p,
+                        &rows,
+                        tickets,
+                        tip,
+                        indexed,
+                        self.clock.as_ref(),
+                        self.metrics.as_ref(),
+                    )
+                    .await?
+                } else {
+                    crate::indexed::verify::verify_ticketed(
+                        &self.blobs,
+                        &self.meta,
+                        self.shards.as_ref(),
+                        &op.repo,
+                        &p,
+                        &rows,
+                        tickets,
+                        tip,
+                        indexed,
+                        self.clock.as_ref(),
+                        self.metrics.as_ref(),
+                    )
+                    .await?
+                };
             }
         } else if let Err(error) = self.check_ticketless_head(&op).await {
             return self

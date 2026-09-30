@@ -1255,3 +1255,110 @@ fn synchronous_driver_propagates_source_and_sink_errors() {
         Err(PackError::TrailingData)
     ));
 }
+
+struct Prior(std::collections::HashMap<Hash, Vec<u8>>);
+impl crate::pack::DeltaBaseSource for Prior {
+    fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+        Ok(self.0.get(id).cloned())
+    }
+}
+
+/// `last_frame` and `decode_entry_with` reproduce what the buffered decoder
+/// reports for every self-contained golden pack, at both window sizes.
+#[test]
+fn last_frame_and_decode_entry_agree_with_the_buffered_decoder() {
+    let mut paths = Vec::new();
+    pack_fixtures(&golden_root(), &mut paths);
+    let mut compared = 0;
+    for path in paths {
+        let bytes = std::fs::read(&path).unwrap();
+        let mut reference = Vec::new();
+        if crate::pack::decode_entries_with(
+            &bytes,
+            &mut crate::pack::NoExternalBases,
+            DecodeLimits::default(),
+            |entry| {
+                reference.push((
+                    entry.id,
+                    entry.bytes.to_vec(),
+                    (entry.frame_offset, entry.frame_length, entry.wire_type),
+                ));
+                Ok(())
+            },
+        )
+        .is_err()
+        {
+            continue;
+        }
+        for window in [WINDOW, 1024 * 1024] {
+            let mut reader = WindowReader::new(
+                u64::try_from(bytes.len()).unwrap(),
+                window,
+                DecodeLimits::default(),
+                None,
+            )
+            .unwrap();
+            assert_eq!(reader.last_frame(), None);
+            let mut bases = Prior(std::collections::HashMap::new());
+            let mut actual = Vec::new();
+            loop {
+                match reader.step().unwrap() {
+                    Step::NeedWindow(request) => {
+                        let mut source = bytes.as_slice();
+                        let piece = source.read_window(request.offset, request.len).unwrap();
+                        reader.feed(request.offset, &piece).unwrap();
+                    }
+                    Step::Entry(entry) => {
+                        let frame = reader.last_frame().unwrap();
+                        let (id, decoded) = crate::pack::decode_entry_with(
+                            entry,
+                            &mut bases,
+                            DecodeLimits::default(),
+                        )
+                        .unwrap();
+                        bases.0.insert(id, decoded.clone());
+                        actual.push((id, decoded, (frame.offset, frame.length, frame.wire_type)));
+                    }
+                    Step::Done(_) => break,
+                }
+            }
+            assert_eq!(actual, reference, "{}", path.display());
+            compared += 1;
+        }
+    }
+    assert!(compared > 4, "golden coverage: {compared}");
+}
+
+#[test]
+fn a_resumed_reader_reports_frames_only_for_entries_it_yields() {
+    let payloads: Vec<_> = (0..5_u8).map(|n| vec![n; 100]).collect();
+    let pack = raw_pack(&payloads);
+    let mut reader = WindowReader::new(
+        u64::try_from(pack.len()).unwrap(),
+        WINDOW,
+        DecodeLimits::default(),
+        None,
+    )
+    .unwrap();
+    let mut source = pack.as_slice();
+    let mut cursor = None;
+    let mut seen = 0;
+    while cursor.is_none() {
+        match reader.step().unwrap() {
+            Step::NeedWindow(request) => {
+                let piece = source.read_window(request.offset, request.len).unwrap();
+                reader.feed(request.offset, &piece).unwrap();
+            }
+            Step::Entry(_) => {
+                seen += 1;
+                if seen == 2 {
+                    assert_eq!(reader.last_frame().unwrap().offset, 12 + 105);
+                    cursor = reader.checkpoint();
+                }
+            }
+            Step::Done(_) => unreachable!("cursor taken at the second entry"),
+        }
+    }
+    let resumed = WindowReader::resume(&cursor.unwrap(), DecodeLimits::default()).unwrap();
+    assert_eq!(resumed.last_frame(), None);
+}

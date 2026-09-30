@@ -99,6 +99,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `WEBAUTHN_RPS` vars and a `test-faults`-only `UNSAFE_LOOPBACK_GRANTS`, to
   configure write grants on Multi + auth v2 deployments. Any bad or partial
   value refuses to start; unset keeps grants off (WP-1.30b).
+
+- Server: a Worker can verify a ticketed pack asynchronously in checkpointed,
+  budgeted alarm slices (timer kind 7, `IndexedConfig::verification =
+  Scheduled`) with the same answers as native inline verification: the advance
+  answers `PendingVerification` until the slices finish (Paid plan only; index
+  rows are relayed after the decode reaches `Done`, and `Verified` waits for
+  their delivery). The job lives in the new `vc` key class; kind 2 now also
+  removes an expired unconsumed pack's verification state. Indexed mode stays
+  refused on Workers until WP-4.10b (WP-4.8). `mkit-core` gains
+  `WindowReader::last_frame` and `pack::decode_entry_with` (additive).
 - Server: in indexed mode, extract every ChunkedBlob (as its reassembled content,
   with a chunk-offset sidecar) and every file Blob of at least 64 KiB into the
   deployment-wide object store under its object id, before a pack is marked
