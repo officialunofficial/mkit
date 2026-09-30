@@ -38,7 +38,9 @@ pub fn build(
             format!("{PREFIX}: purge sink: {e}"),
         )
     })?;
-    Ok(Some(RemotePurge::new(Arc::new(client))))
+    Ok(Some(
+        RemotePurge::new(Arc::new(client)).with_timeout(settings.timeout),
+    ))
 }
 
 /// Each native timer fire has its own budget; unlike a Worker alarm it does
@@ -75,5 +77,48 @@ impl<S: mkit_server::NamespaceStore> mkit_server::timers::TimerHandler<S> for Na
     {
         self.budget.reset();
         mkit_server::timers::TimerHandler::fire(&self.delivery, ctx, timer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mkit_server::purge::{PurgeSink, Request, Trigger};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn native_purge_honors_the_configured_hook_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let router = axum::Router::new().route(
+            "/mkit.server.hooks.v1.HooksService/CachePurge",
+            axum::routing::post(|| async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                axum::Json(serde_json::json!({}))
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut settings = HookSettings::new("purger", [7; 32]).unwrap();
+        settings.purge = Some(url);
+        settings.timeout = Duration::from_millis(10);
+        let sink = build(Some(&settings), "https://server.example")
+            .unwrap()
+            .unwrap();
+        let request = Request {
+            purge_id: "purge:timeout".into(),
+            audience: "https://server.example".into(),
+            repository: "root/repo".into(),
+            namespace: String::new(),
+            trigger: Trigger::VisibilityChange,
+            url_paths: Vec::new(),
+            object_ids: Vec::new(),
+            refs: Vec::new(),
+        };
+        let result = sink.deliver(&request).await;
+        server.abort();
+        assert!(
+            result.is_err(),
+            "configured 10 ms timeout must refuse a 100 ms reply"
+        );
     }
 }

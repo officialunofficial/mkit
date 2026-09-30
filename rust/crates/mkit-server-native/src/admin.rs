@@ -97,7 +97,7 @@ pub fn partition(sharding: Sharding) -> Partition {
         _ => Partition::Coordinator(NamespaceKey::deployment_default()),
     }
 }
-/// Build only the two supported operator procedures on the separate router.
+/// Build the audit export procedure on the separate operator router.
 pub fn router<S: NamespaceStore + Clone + 'static>(
     store: S,
     settings: &Settings,
@@ -107,8 +107,7 @@ pub fn router<S: NamespaceStore + Clone + 'static>(
         store,
         partition(pipeline.sharding),
         settings.config.clone(),
-        // Canonical scope handoff and persistent local invalidation are required
-        // before manual purge may return an accepted result.
+        // R-198 defers manual PurgeCache to WP-5.6a.
         false,
     ));
     let dispatch = move |req: Request| {
@@ -142,15 +141,10 @@ pub fn router<S: NamespaceStore + Clone + 'static>(
             response(engine.handle(&path, &headers, &capture, now).await)
         }
     };
-    Router::new()
-        .route(
-            "/mkit.server.admin.v1.AdminService/PurgeCache",
-            axum::routing::post(dispatch.clone()),
-        )
-        .route(
-            "/mkit.server.admin.v1.AdminService/ReadAuditLog",
-            axum::routing::post(dispatch),
-        )
+    Router::new().route(
+        mkit_server::admin::AUDIT_PATH,
+        axum::routing::post(dispatch),
+    )
 }
 fn response(reply: mkit_server::admin::Response) -> Response {
     Response::builder()
@@ -159,4 +153,50 @@ fn response(reply: mkit_server::admin::Response) -> Response {
         .header("cache-control", "no-store")
         .body(Body::from(reply.body))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mkit_server::memory::MemoryKv;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn manual_purge_has_no_native_route() {
+        let mut public = [0x66; 32];
+        public[0] = 0x58;
+        let config = Config::parse("https://server.example", &serde_json::json!({"version":1,"keys":[{"keyId":"operator","alg":"ed25519","publicKey":mkit_core::hash::to_hex(&public),"roles":["all"]}]}).to_string()).unwrap();
+        let settings = Settings {
+            listen: SocketAddr::from(([127, 0, 0, 1], 19191)),
+            config,
+        };
+        let pipeline = PipelineConfig::new(
+            mkit_server::Addressing::Single {
+                repo: mkit_server::RepoId {
+                    namespace: NamespaceKey::deployment_default(),
+                    name: mkit_server::RepoName::new("repo").unwrap(),
+                },
+            },
+            AuthMode::TransportIdentity,
+            mkit_server::upload::UploadLimits {
+                max_total_bytes: 1024,
+                max_chunks: 1,
+            },
+        );
+        let response = router(
+            std::sync::Arc::new(MemoryKv::default()),
+            &settings,
+            &pipeline,
+        )
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(mkit_server::admin::PURGE_PATH)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), 404);
+    }
 }

@@ -1980,18 +1980,6 @@ mod glue {
         #[cfg(feature = "test-faults")]
         let mut req = req;
         install();
-        if req.path().starts_with(mkit_server::admin::PREFIX) {
-            // Parse hook configuration/signing too: invalid role separation must
-            // refuse the operator route before its authenticated effect.
-            if let Err(error) = crate::hooks::build::hooks_from_env(&env, cfg) {
-                return json_response(
-                    serde_json::json!({"code":"unavailable","message":error.to_string()})
-                        .to_string(),
-                    503,
-                );
-            }
-            return crate::admin::serve(req, env, cfg).await;
-        }
         if is_options_preflight(&req) {
             return cors_preflight_response(&cors_allow_headers(), CORS_ALLOW_METHODS);
         }
@@ -2021,6 +2009,18 @@ mod glue {
                 unavailable_json(error.public_message()),
                 503,
             )?));
+        }
+        if req.path().starts_with(mkit_server::admin::PREFIX) {
+            // Parse hook configuration/signing too: invalid role separation must
+            // refuse the operator route before its authenticated effect.
+            if let Err(error) = crate::hooks::build::hooks_from_env(&env, cfg) {
+                return json_response(
+                    serde_json::json!({"code":"unavailable","message":error.to_string()})
+                        .to_string(),
+                    503,
+                );
+            }
+            return crate::admin::serve(req, env, cfg).await;
         }
         #[cfg(feature = "test-faults")]
         if let Some(response) = test::backup_round_trip(&mut req, &env, cfg).await? {

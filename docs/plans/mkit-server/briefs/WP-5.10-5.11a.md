@@ -1,3 +1,5 @@
+> Restart scope (R-198, 2026-09-30): this original brief is narrowed to purge delivery, automatic purge intents, the admin framework and ReadAuditLog. Manual PurgeCache moves to 5.6a (R-190); it is not exposed here. Automatic intents commit in the triggering state apply. No new cross-partition protocol, key or timer may be invented without an orchestrator ruling. Merge the latest feature base before final gates; integrate 5.4 if available, otherwise retain its snapshot seam and record the carry-forward.
+
 ## Purpose
 
 - **Cache purge.** Every event that hides content (quarantine and hits, via 5.5a/5.6a seams, visibility change,

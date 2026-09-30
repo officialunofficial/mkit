@@ -2121,7 +2121,9 @@
       "4.14b",
       "4.15",
       "4.16",
-      "4.17"
+      "4.17",
+      "5.10",
+      "5.11a"
     ],
     "size": "L",
     "summary": "Black-box cases for verification before refs move, oracle-free thin-delta rejection, MKPL rule, polling, reachability serving, D32 dedup and Range, private serving and proofs, on native, wrangler dev and staging. The human enables indexed mode and CPU limits on staging.",
@@ -2466,10 +2468,11 @@
     "track": "core",
     "depends_on": [
       "5.4",
-      "5.1b-2"
+      "5.1b-2",
+      "3.9c"
     ],
     "size": "S",
-    "summary": "An implementer-provided CachePurger internal interface, triggered on suspension, lease deletion and visibility change; WP-5.6 adds the takedown trigger; remote CachePurge delivery follows the admin spec. R-185 pulls forward serving-stop, hit and visibility purge foundations for launch; lease-deletion triggers follow 5.2 after launch.",
+    "summary": "Timer-11 durable local and signed remote CachePurge delivery, snapshot invalidation and automatic serving-stop/hit/visibility intents (R-188, R-198). Workers requires Paid and keeps gated-entrypoint caching disabled. Manual PurgeCache belongs to 5.6a (R-190); lease-deletion triggers depend on 5.2 after launch.",
     "human_action": false,
     "area_gates": [
       "rust"
@@ -2482,11 +2485,14 @@
     "track": "core",
     "depends_on": [
       "5.1b-2",
-      "4.18",
-      "2.9"
+      "2.9",
+      "1.10",
+      "3.7b",
+      "3.9c",
+      "5.10"
     ],
     "size": "L",
-    "summary": "An mkit.server.admin.v1 service signed with a dedicated admin key under its own domain, with replay protection and an append-only audit log; off unless configured. The human generates and installs the admin key. R-185 launch scope includes the audited inspection review subset; use signed-read/visibility foundations directly, without waiting for native grant-registry staging. Full admin operations and CLI in 5.11b remain post-launch.",
+    "summary": "Default-off signed admin framework with separate role keys, durable nonce/result and operation-id replay, gapless audit and ReadAuditLog (R-189, R-198). Uses existing signed-read, visibility, storage, hook-auth and purge foundations; aggregate activation 4.18 follows the foundations. Manual PurgeCache moves to 5.6a; inspection review and takedown operations land in their later lanes.",
     "human_action": true,
     "area_gates": [
       "rust",

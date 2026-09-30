@@ -191,6 +191,10 @@ impl<C: HookChannel> HookClient<C> {
         &self.server_audience
     }
 
+    pub(crate) fn is_signed(&self) -> bool {
+        self.signer.is_some()
+    }
+
     /// Sign and send `request` to `rpc` and return the hook's answer whatever
     /// its status. Every signature carries a fresh nonce and validity window.
     async fn send<Req: Serialize>(

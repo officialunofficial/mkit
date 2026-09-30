@@ -56,6 +56,118 @@ fn selectors_include_proof_and_snapshot_and_budget_is_shared() {
     assert_eq!(budget.used(), 2);
 }
 
+#[test]
+fn all_selector_variants_are_audience_and_scope_bound() {
+    let mut request = request();
+    request.object_ids = vec![STANDARD.encode([7; 32])];
+    request.refs = vec!["refs/heads/main".into()];
+    request.validate().unwrap();
+    let tags = request.tags();
+    for kind in ["path", "object", "ref", "proof", "snapshot"] {
+        assert!(
+            tags.iter()
+                .any(|tag| tag.starts_with(&format!("mkit-{kind}-")))
+        );
+    }
+    request.url_paths.clear();
+    request.object_ids.clear();
+    request.refs.clear();
+    let repository = request.tags();
+    assert_eq!(
+        repository,
+        [cache_tag(&request.audience, "repository", "root/repo")]
+    );
+    request.repository.clear();
+    request.namespace = "root".into();
+    request.validate().unwrap();
+    assert_eq!(
+        request.tags(),
+        [cache_tag(&request.audience, "namespace", "root")]
+    );
+    request.audience = "https://other.example".into();
+    assert_ne!(request.tags()[0], repository[0]);
+}
+
+struct EnumeratedLocal(std::sync::Arc<std::sync::Mutex<Vec<u32>>>);
+impl LocalInvalidation for EnumeratedLocal {
+    fn invalidate<'a>(
+        &'a self,
+        _: &'a Request,
+        mut cursor: u32,
+        budget: &'a SliceBudget,
+    ) -> crate::BoxFuture<'a, Result<Option<u32>, StoreError>> {
+        Box::pin(async move {
+            while cursor < 2 {
+                // Enumeration and deletion must share the delivery allowance.
+                if !budget.charge(2) {
+                    return Ok(Some(cursor));
+                }
+                self.0.lock().unwrap().push(cursor);
+                cursor += 1;
+            }
+            Ok(None)
+        })
+    }
+}
+
+#[tokio::test]
+async fn cold_slices_resume_local_cursor_and_reserve_budget_before_global_delivery() {
+    use crate::timers::{TickBudget, TimerRegistry, run_due};
+    use std::sync::{Arc, Mutex};
+    let store = MemoryKv::default();
+    let p = Partition::Namespace(NamespaceKey::deployment_default());
+    let request = request();
+    store
+        .apply(&p, plan_enqueue(&request, 10, None, None).unwrap())
+        .await
+        .unwrap();
+    let deleted = Arc::new(Mutex::new(Vec::new()));
+    // This fixture has already failed once, so the next actual delivery succeeds.
+    let attempts = Arc::new(Mutex::new(vec![request.clone()]));
+    let clock = crate::ManualClock::new(10);
+    for now in 10..=12 {
+        clock.set(now);
+        let budget = SliceBudget::new(2);
+        let registry = TimerRegistry::new().register(PurgeDelivery::new(
+            Arc::new(EnumeratedLocal(deleted.clone())),
+            Some(Arc::new(RetrySink(attempts.clone()))),
+            budget.clone(),
+        ));
+        run_due(
+            &store,
+            &p,
+            &registry,
+            &clock,
+            now as u64,
+            &TickBudget::new(1, 1, 16, 1000),
+        )
+        .await
+        .unwrap();
+        assert!(budget.used() <= 2);
+        if now < 12 {
+            assert_eq!(
+                attempts.lock().unwrap().len(),
+                1,
+                "no sink call without allowance"
+            );
+            assert!(
+                read_request(&store, &p, &request.purge_id)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+    }
+    assert_eq!(*deleted.lock().unwrap(), [0, 1]);
+    assert_eq!(attempts.lock().unwrap().len(), 2);
+    assert!(
+        read_request(&store, &p, &request.purge_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
 struct RetrySink(std::sync::Arc<std::sync::Mutex<Vec<Request>>>);
 impl PurgeSink for RetrySink {
     fn deliver<'a>(&'a self, request: &'a Request) -> crate::BoxFuture<'a, Result<(), StoreError>> {

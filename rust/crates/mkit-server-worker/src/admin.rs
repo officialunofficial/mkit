@@ -31,6 +31,11 @@ pub fn parse(
     }
     Ok(Some(config))
 }
+#[cfg(any(target_arch = "wasm32", test))]
+fn supported_path(path: &str) -> bool {
+    path == mkit_server::admin::AUDIT_PATH
+}
+
 #[cfg(target_arch = "wasm32")]
 pub(crate) async fn serve(
     mut req: worker::Request,
@@ -42,6 +47,9 @@ pub(crate) async fn serve(
     let Some(config) = &cfg.admin else {
         return worker::Response::error("admin disabled", 404);
     };
+    if !supported_path(&req.path()) {
+        return worker::Response::error("admin operation unavailable", 404);
+    }
     if req.method() != worker::Method::Post {
         return worker::Response::error("POST required", 405);
     }
@@ -73,8 +81,6 @@ pub(crate) async fn serve(
                     mkit_server::Clock::now_ms(&crate::clock::WorkerClock),
                 )
                 .await;
-            // Manual purge remains fail-closed until the real local/global
-            // delivery and publication invalidation seams are installed.
             reply
         }
     };
@@ -92,6 +98,15 @@ pub(crate) async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_audit_export_is_exposed() {
+        assert!(supported_path(mkit_server::admin::AUDIT_PATH));
+        assert!(!supported_path(mkit_server::admin::PURGE_PATH));
+        assert!(!supported_path(
+            "/mkit.server.admin.v1.AdminService/Takedown"
+        ));
+    }
+
     #[test]
     fn keys_default_off_and_overlap_is_refused() {
         assert!(

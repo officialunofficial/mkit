@@ -37,7 +37,10 @@ impl TimerKind {
 /// | 9 | RESERVATION_RECONCILE (WP-3.3) |
 /// | 10 | PUBLISHED_VIEW (Worker only, WP-1.21) |
 /// | 11 | CACHE_PURGE (WP-5.10) |
-/// | 12..=0xEF | Production, unallocated |
+/// | 12 | PUBLICATION_RECHECK (reserved for WP-5.4, R-198) |
+/// | 13 | CONTENT_TAKEDOWN_REQUEST (reserved for WP-4.10b, R-198) |
+/// | 14 | INSPECTION (reserved for WP-5.5a, R-198) |
+/// | 15..=0xEF | Production, unallocated |
 /// | 0xF0..=0xFE | Reserved for tests |
 /// | 0xFF | TEST (`test-faults` only) |
 pub mod kinds {
