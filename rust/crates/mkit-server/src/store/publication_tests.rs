@@ -284,3 +284,115 @@ fn advance_codec_rejects_unresolved_obligations_and_unknown_fields() {
     assert_eq!(Advance::decode(&a.encode().unwrap()).unwrap(), a);
     assert!(Publication::decode(Some(&Value::new(b"\x01{\"unknown\":true}".to_vec()))).is_err());
 }
+
+#[test]
+fn durable_cross_ref_and_external_base_rechecks_need_no_client_traffic() {
+    block_on(async {
+        use crate::rt::ManualClock;
+        use crate::timers::publication_recheck::PublicationRecheck;
+        use crate::timers::{TickBudget, TimerRegistry, run_due};
+        use std::sync::Arc;
+        let clock = Arc::new(ManualClock::new(0));
+        let kv = Arc::new(MemoryKv::with_clock(clock.clone()));
+        let s = SinglePartition;
+        let r = repo();
+        let p = s.ref_shard(&r, "refs/heads/b");
+        let mut b = advance(4, Clearance::Pending);
+        b.dependencies = vec![[3; 32]];
+        b.external_bases = vec![[3; 32]];
+        apply(&kv, &s, "refs/heads/b", b, false).await;
+        let registry = TimerRegistry::new().register(PublicationRecheck { target: kv.clone() });
+        let budget = TickBudget::default();
+        assert_eq!(
+            run_due(&kv, &p, &registry, clock.as_ref(), 0, &budget)
+                .await
+                .unwrap()
+                .fired,
+            1
+        );
+        assert_eq!(
+            read(&kv, &p, &r.name, "refs/heads/b")
+                .await
+                .unwrap()
+                .published,
+            0
+        );
+        apply(
+            &kv,
+            &s,
+            "refs/heads/a",
+            advance(1, Clearance::Cleared),
+            false,
+        )
+        .await;
+        // Restart: reconstruct the registry from durable rows, no request to B.
+        let registry = TimerRegistry::new().register(PublicationRecheck { target: kv.clone() });
+        clock.set(5_000);
+        assert_eq!(
+            run_due(&kv, &p, &registry, clock.as_ref(), 5_000, &budget)
+                .await
+                .unwrap()
+                .fired,
+            1
+        );
+        assert_eq!(
+            read(&kv, &p, &r.name, "refs/heads/b")
+                .await
+                .unwrap()
+                .published,
+            1
+        );
+        assert!(
+            Witness::decode(
+                &kv.get(&p, &keys::membership(&r.name, &[6; 32]))
+                    .await
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap()
+            .published
+        );
+    });
+}
+
+#[test]
+fn own_additions_never_satisfy_an_external_delta_dependency() {
+    block_on(async {
+        use crate::rt::ManualClock;
+        use crate::timers::publication_recheck::PublicationRecheck;
+        use crate::timers::{TickBudget, TimerRegistry, run_due};
+        let kv = std::sync::Arc::new(MemoryKv::with_clock(std::sync::Arc::new(ManualClock::new(
+            0,
+        ))));
+        let s = SinglePartition;
+        let r = repo();
+        let p = s.ref_shard(&r, "refs/heads/main");
+        let mut a = advance(1, Clearance::Pending);
+        a.external_bases = a.additions.clone();
+        apply(&kv, &s, "refs/heads/main", a, false).await;
+        let registry = TimerRegistry::new().register(PublicationRecheck { target: kv.clone() });
+        run_due(
+            &kv,
+            &p,
+            &registry,
+            &ManualClock::new(0),
+            0,
+            &TickBudget::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read(&kv, &p, &r.name, "refs/heads/main")
+                .await
+                .unwrap()
+                .published,
+            0
+        );
+        let timer = keys::timer(
+            RECHECK_MS,
+            crate::timers::registry::kinds::PUBLICATION_RECHECK.get(),
+            keys::advance(&r.name, "refs/heads/main", 1).as_bytes(),
+        );
+        assert!(kv.get(&p, &timer).await.unwrap().is_some());
+    });
+}

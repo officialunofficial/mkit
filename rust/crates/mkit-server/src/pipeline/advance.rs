@@ -181,15 +181,17 @@ pub(super) fn plan_consumption(
             })
             .map_err(meta_error)?,
         );
-        if membership { tickets::plan_membership(
-            &t.repo,
-            &[t.pack_id],
-            advance.source,
-            advance.shards,
-            advance.repo_id,
-            outbox,
-            writes,
-        ); }
+        if membership {
+            tickets::plan_membership(
+                &t.repo,
+                &[t.pack_id],
+                advance.source,
+                advance.shards,
+                advance.repo_id,
+                outbox,
+                writes,
+            );
+        }
     }
     Ok(())
 }

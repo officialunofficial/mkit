@@ -19,8 +19,11 @@ pub struct ViewStore<'a, S> {
 }
 impl<S> core::fmt::Debug for ViewStore<'_, S> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("ViewStore").field("repo", self.repo).field("writer", &self.writer)
-            .field("serving_stop", &self.policy.is_some()).finish_non_exhaustive()
+        f.debug_struct("ViewStore")
+            .field("repo", self.repo)
+            .field("writer", &self.writer)
+            .field("serving_stop", &self.policy.is_some())
+            .finish_non_exhaustive()
     }
 }
 fn retag(key: &Key, from: &[u8], to: &[u8]) -> Key {

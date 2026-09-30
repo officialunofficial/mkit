@@ -18,6 +18,8 @@ use crate::repo::{RepoId, RepoName};
 pub const MAX_UNPUBLISHED_ADVANCES: u64 = 64;
 /// Maximum durable dependency/obligation entries per advance.
 pub const MAX_ADVANCE_ITEMS: usize = 4096;
+/// Durable blocked advances retry without client traffic every five seconds.
+pub const RECHECK_MS: u64 = 5_000;
 
 /// The branch head and packmap, or one non-branch target.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,6 +281,19 @@ pub fn append(
     advance.sequence = state.sequence;
     advance.generation = state.generation;
     advance.validate()?;
+    if !advance.state.publishable() {
+        // One timer per advance, installed in the same transaction as its retained
+        // obligations. Periodic rechecks cover cross-ref publication and delayed
+        // projections without an unbounded reverse dependency fanout.
+        writes.push(Write::Put(
+            keys::timer(
+                0,
+                crate::timers::registry::kinds::PUBLICATION_RECHECK.get(),
+                keys::advance(&repo.name, &name, advance.sequence).as_bytes(),
+            ),
+            Value::default(),
+        ));
+    }
     let key = keys::publication(&repo.name, &name);
     pre.push(guard(key.clone(), prior));
     writes.push(Write::Put(

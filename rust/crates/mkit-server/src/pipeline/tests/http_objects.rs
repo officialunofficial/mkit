@@ -892,9 +892,9 @@ fn excluded_packmap_refs_exhaust_the_ref_scan_budget() {
         let repo = fx.repo_id("room");
         // Move the published tip after the excluded namespace in listing order.
         let partition = fx.pipe.shards.ref_shard(&repo, HEAD);
-        let mut batch = Batch::new().delete(keys::ref_key(&repo.name, HEAD));
+        let mut batch = Batch::new().delete(keys::published_ref(&repo.name, HEAD));
         batch = batch.put(
-            keys::ref_key(&repo.name, "refs/tags/z"),
+            keys::published_ref(&repo.name, "refs/tags/z"),
             codec::encode_ref_id(&d.head()),
         );
         assert_eq!(
@@ -903,7 +903,7 @@ fn excluded_packmap_refs_exhaust_the_ref_scan_budget() {
         );
         for index in 0..100 {
             let batch = Batch::new().put(
-                keys::ref_key(&repo.name, &format!("refs/mkit/packmap/p{index:03}")),
+                keys::published_ref(&repo.name, &format!("refs/mkit/packmap/p{index:03}")),
                 codec::encode_ref_id(&[0x55; 32]),
             );
             assert_eq!(

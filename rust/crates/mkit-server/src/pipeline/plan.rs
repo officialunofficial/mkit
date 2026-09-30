@@ -501,7 +501,9 @@ pub(crate) fn plan_write(
         }
         if !conflict {
             add_ref_index_relays(req, &mut outbox);
-            if let Some(implicit) = &req.implicit && req.publication.is_none() {
+            if let Some(implicit) = &req.implicit
+                && req.publication.is_none()
+            {
                 tickets::plan_membership(
                     req.repo,
                     implicit.packs,

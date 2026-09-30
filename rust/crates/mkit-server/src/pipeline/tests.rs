@@ -1040,7 +1040,10 @@ impl<H: HookSet> Env<H> {
 fn seed(kv: &MemoryKv, refs: &[(&str, Hash)]) {
     let name = RepoName::new(REPO).unwrap();
     for (n, id) in refs {
-        let batch = Batch::new().put(keys::ref_key(&name, n), codec::encode_ref_id(id));
+        let mut batch = Batch::new().put(keys::ref_key(&name, n), codec::encode_ref_id(id));
+        if kv.capabilities().atomic_multi_key {
+            batch = batch.put(keys::published_ref(&name, n), codec::encode_ref_id(id));
+        }
         assert_eq!(
             now(kv.apply(&ns(), batch)).unwrap(),
             BatchOutcome::Committed
@@ -3873,7 +3876,9 @@ fn lost_prune_race_retries_without_prune_uncounted() {
     env.update(&Req::update(&key(7), n, &u, T0), &u).unwrap();
     let batches = env.batches();
     assert_eq!(batches.len(), usize::try_from(MAX_REPLAN).unwrap() + 2);
-    let deletes = |b: &Batch| b.writes.iter().any(|w| matches!(w, Write::Delete(_)));
+    let deletes = |b: &Batch| {
+        b.writes.iter().any(|w| matches!(w, Write::Delete(k) if matches!(keys::parse(k), Some(keys::ParsedKey::Quota(_) | keys::ParsedKey::QuotaWindow { .. }))))
+    };
     assert!(deletes(&batches[0]), "the first attempt prunes");
     assert!(!batches[1..].iter().any(deletes), "the retries do not");
     let kept = now(env.pipe.meta.inner.get(&ns(), &quota)).unwrap();

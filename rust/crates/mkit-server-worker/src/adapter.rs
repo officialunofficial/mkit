@@ -783,6 +783,20 @@ where
         }
         _ => registry,
     };
+    // Inspection is Paid-only. Kind 12 retains blocked work and makes at most
+    // one bounded dependency recheck per alarm; Free's reserved 49-call split
+    // remains unchanged, and unknown timers are retained rather than cleared.
+    let registry = if matches!(class, ShardClass::RefShard | ShardClass::RefStore)
+        && plan.is_some_and(|p| p.trim().eq_ignore_ascii_case("paid"))
+    {
+        match target.clone().map(SharedStore) {
+            Ok(target) => registry
+                .register(mkit_server::timers::publication_recheck::PublicationRecheck { target }),
+            Err(_) => registry,
+        }
+    } else {
+        registry
+    };
     let registry = match class {
         ShardClass::NsCoordinator | ShardClass::RefShard | ShardClass::RefStore => {
             registry.register(WorkerQuotaRollup::new(target.map(SharedStore), plan))

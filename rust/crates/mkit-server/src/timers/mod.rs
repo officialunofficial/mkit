@@ -2,6 +2,7 @@
 
 pub mod lease_sweep;
 pub mod outcome_delivery;
+pub mod publication_recheck;
 pub mod quota_rollup;
 pub mod registry;
 pub mod reservation_reconcile;

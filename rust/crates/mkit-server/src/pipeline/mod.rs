@@ -1021,6 +1021,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             };
             let partitions = self.shards.ref_index_partitions(&op.repo);
             #[cfg(feature = "published-view")]
+            if authorized.facts.caller_view != CallerView::Writer
+                && self
+                    .published
+                    .as_ref()
+                    .is_some_and(|s| s.inspection_configured() && !s.uses_published_values())
+            {
+                return Err(ServerError::unavailable("published view unavailable"));
+            }
+            #[cfg(feature = "published-view")]
             let source = self.published.as_deref().filter(|_| {
                 self.visibility_gates_reads()
                     && op.auth.is_none()
@@ -2668,6 +2677,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .iter()
             .map(|r| keys::ref_key(&op.repo.name, &r.name))
             .collect();
+        if let Some(update) = refs.first() {
+            let name = crate::store::publication::sequence_ref(&update.name);
+            wanted.push(keys::publication(&op.repo.name, &name));
+            wanted.push(keys::ref_key(&op.repo.name, &name));
+            if let Some(packmap) = mkit_attest::grant::head_packmap(&name) {
+                wanted.push(keys::ref_key(&op.repo.name, &packmap));
+            }
+            wanted.push(keys::outbox_sequence());
+        }
         if caps.implicit_layout_version.is_none() {
             wanted.push(keys::layout_version());
         }
@@ -3066,7 +3084,70 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             let snapshot = ahead.get_or_insert_with(Snapshot::default);
             self.fill(p, snapshot, req.read_keys()).await?;
             let pair = clearance::resulting_pair(&op.repo.name, refs, snapshot)?;
-            Some(policy.prepare(op, &pair).await?)
+            let mut prepared = policy.prepare(op, &pair).await?;
+            if prepared.value != pair {
+                return Err(internal("publication policy changed the resulting pair"));
+            }
+            // Membership dependencies belong to the server, not to an
+            // inspector's verdict. An Inspect Pass alone cannot publish.
+            prepared.generation =
+                crate::store::publication::Publication::decode(snapshot.get(&keys::publication(
+                    &op.repo.name,
+                    &crate::store::publication::sequence_ref(&refs[0].name),
+                )))
+                .map_err(meta_error)?
+                .generation;
+            prepared.additions = if let Some(advance) = &req.advance {
+                advance
+                    .ids
+                    .iter()
+                    .map(|id| {
+                        snapshot
+                            .get(&keys::ticket(id))
+                            .ok_or_else(|| internal("publication ticket missing"))
+                            .and_then(|raw| {
+                                codec::decode_ticket(raw)
+                                    .map(|t| t.pack_id)
+                                    .map_err(meta_error)
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                implicit_ids.clone().unwrap_or_default()
+            };
+            crate::indexed::publication::verify(
+                &self.blobs,
+                &self.meta,
+                self.shards.as_ref(),
+                &op.repo,
+                &pair,
+                mkit_attest::grant::head_packmap(&crate::store::publication::sequence_ref(
+                    &refs[0].name,
+                ))
+                .is_some(),
+                &mut prepared,
+                policy.as_ref(),
+                self.cfg
+                    .indexed
+                    .ok_or_else(|| internal("publication requires indexed mode"))?,
+                self.metrics.as_ref(),
+            )
+            .await?;
+            if prepared.state.publishable()
+                && !crate::timers::publication_recheck::dependencies(
+                    &self.meta,
+                    &self.meta,
+                    p,
+                    self.shards.as_ref(),
+                    &op.repo,
+                    &prepared,
+                )
+                .await
+                .map_err(meta_error)?
+            {
+                prepared.state = crate::store::publication::Clearance::Pending;
+            }
+            Some(prepared)
         } else {
             None
         };

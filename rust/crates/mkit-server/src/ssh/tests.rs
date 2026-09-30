@@ -1231,8 +1231,17 @@ fn no_replay_or_quota_rows_are_written() {
     let tags: Vec<u8> = page.entries.iter().map(|(k, _)| k.as_bytes()[0]).collect();
     assert!(!tags.is_empty());
     assert!(
-        tags.iter().all(|t| matches!(t, b'r' | b'v')),
-        "only ref and layout-version rows, got tags {tags:?}"
+        page.entries.iter().all(|(key, _)| matches!(
+            keys::parse(key),
+            Some(
+                keys::ParsedKey::Ref { .. }
+                    | keys::ParsedKey::LayoutVersion
+                    | keys::ParsedKey::Publication { .. }
+                    | keys::ParsedKey::Advance { .. }
+                    | keys::ParsedKey::PublishedRef { .. }
+            )
+        )),
+        "only ref, publication and layout-version rows, got tags {tags:?}"
     );
 }
 

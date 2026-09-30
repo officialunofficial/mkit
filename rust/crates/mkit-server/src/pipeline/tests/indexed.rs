@@ -6,6 +6,7 @@ use crate::repo::MultiAddressing;
 use crate::store::{BlobKey, BlobStore, PackSink};
 use crate::upload::marker::write_upload_marker;
 use bytes::Bytes;
+use futures::StreamExt as _;
 use mkit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
 use mkit_core::pack::PackWriter;
 use mkit_core::repo_identity::Namespace;
@@ -529,7 +530,9 @@ fn indexed_concurrent_lease_has_no_replay_row_and_retry_commits() {
 
 #[test]
 fn indexed_seven_ticket_advance_adds_no_batch_rows() {
-    for (sharding, expected) in [(Sharding::D34, 89), (Sharding::Single, 78)] {
+    // Publication adds one guard, one retained advance, two paired values and
+    // one sequence write to the former 89/78-operation ticket batches.
+    for (sharding, expected) in [(Sharding::D34, 94), (Sharding::Single, 83)] {
         let d34 = sharding == Sharding::D34;
         let batch = planned_ticket_advance_mode(7, d34);
         assert_eq!(batch.preconditions.len() + batch.writes.len(), expected);
@@ -866,5 +869,229 @@ fn indexed_limits_of_zero_are_refused_at_construction() {
             built.err().unwrap().public_message(),
             "invalid indexed limits"
         );
+    }
+}
+
+struct InspectionPolicy(crate::store::publication::Clearance);
+impl clearance::PublicationPolicy for InspectionPolicy {
+    fn prepare<'a>(
+        &'a self,
+        _: &'a Operation,
+        pair: &'a crate::store::publication::Pair,
+    ) -> crate::BoxFuture<'a, Result<crate::store::publication::Advance, ServerError>> {
+        Box::pin(async move {
+            let mut a = clearance::immediate(pair.clone(), [0; 32], vec![]);
+            a.state = self.0;
+            a.obligations.push(crate::store::publication::Obligation {
+                id: [1; 32],
+                state: self.0,
+            });
+            Ok(a)
+        })
+    }
+    fn pack_available(&self, _: &RepoId, _: &Hash) -> bool {
+        true
+    }
+}
+
+#[test]
+fn no_inspector_real_advance_reader_and_writer_views_are_identical() {
+    let (env, owner, identity) = environment();
+    let (bytes, head) = pack();
+    let pack_id = hash(&bytes);
+    let node = encode_packlist(None, &[pack_id]).unwrap();
+    let map = hash(&node);
+    let tickets = vec![
+        begin_and_upload(&env, &owner, &identity, &bytes, 9000),
+        begin_and_upload(&env, &owner, &identity, &node, 9001),
+    ];
+    let a = env
+        .auth(&signed(&owner, &identity, Procedure::AdvanceRefs, 9002))
+        .unwrap();
+    assert_eq!(
+        block_on(env.pipe.advance_refs_with_tickets(
+            &a,
+            upd(HEAD, Missing, head),
+            upd(PACKMAP, Missing, map),
+            tickets
+        ))
+        .unwrap(),
+        AdvanceOutcome::Committed
+    );
+    let repo = a.repo().repo.clone();
+    let source = env.pipe.shards.ref_shard(&repo, HEAD);
+    let state = block_on(crate::store::publication::read(
+        &env.pipe.meta,
+        &source,
+        &repo.name,
+        HEAD,
+    ))
+    .unwrap();
+    assert_eq!(state.sequence, state.published);
+    assert_eq!(
+        state.value,
+        crate::store::publication::Pair {
+            head: Some(head),
+            packmap: Some(map)
+        }
+    );
+    let anonymous = |procedure| {
+        env.auth(&Req::unsigned(procedure).header("x-repository", &identity))
+            .unwrap()
+    };
+    let reader = anonymous(Procedure::ListRefs);
+    let writer = env
+        .auth(&signed(&owner, &identity, Procedure::ListRefs, 9003))
+        .unwrap();
+    assert_eq!(
+        block_on(env.pipe.list_refs(&reader, "")).unwrap(),
+        block_on(env.pipe.list_refs(&writer, "")).unwrap()
+    );
+    for name in [HEAD, PACKMAP] {
+        let reader = anonymous(Procedure::ReadRef);
+        let writer = env
+            .auth(&signed(&owner, &identity, Procedure::ReadRef, 9004))
+            .unwrap();
+        assert_eq!(
+            block_on(env.pipe.read_ref(&reader, name)).unwrap(),
+            block_on(env.pipe.read_ref(&writer, name)).unwrap()
+        );
+    }
+    let reader = anonymous(Procedure::PackExists);
+    let writer = env
+        .auth(&signed(&owner, &identity, Procedure::PackExists, 9005))
+        .unwrap();
+    assert!(block_on(env.pipe.pack_exists(&reader, PackKey(pack_id))).unwrap());
+    assert_eq!(
+        block_on(env.pipe.pack_exists(&reader, PackKey(pack_id))).unwrap(),
+        block_on(env.pipe.pack_exists(&writer, PackKey(pack_id))).unwrap()
+    );
+    let read_bytes = |auth: &Authenticated| {
+        block_on(async {
+            let mut stream = env.pipe.download(auth, PackKey(pack_id)).await.unwrap();
+            let mut out = Vec::new();
+            while let Some(chunk) = stream.chunks.next().await {
+                out.extend_from_slice(&chunk.unwrap().data);
+            }
+            out
+        })
+    };
+    let reader = anonymous(Procedure::DownloadPack);
+    let writer = env
+        .auth(&signed(&owner, &identity, Procedure::DownloadPack, 9006))
+        .unwrap();
+    assert_eq!(read_bytes(&reader), bytes);
+    assert_eq!(read_bytes(&reader), read_bytes(&writer));
+}
+
+#[test]
+fn inspection_pending_is_writer_visible_but_held_bytes_are_absent_for_everyone() {
+    let (mut env, owner, identity) = environment();
+    env.pipe = env
+        .pipe
+        .with_publication_policy(Arc::new(InspectionPolicy(
+            crate::store::publication::Clearance::Pending,
+        )))
+        .unwrap();
+    let (bytes, head) = pack();
+    let pack_id = hash(&bytes);
+    let node = encode_packlist(None, &[pack_id]).unwrap();
+    let map = hash(&node);
+    let tickets = vec![
+        begin_and_upload(&env, &owner, &identity, &bytes, 9100),
+        begin_and_upload(&env, &owner, &identity, &node, 9101),
+    ];
+    let a = env
+        .auth(&signed(&owner, &identity, Procedure::AdvanceRefs, 9102))
+        .unwrap();
+    assert_eq!(
+        block_on(env.pipe.advance_refs_with_tickets(
+            &a,
+            upd(HEAD, Missing, head),
+            upd(PACKMAP, Missing, map),
+            tickets
+        ))
+        .unwrap(),
+        AdvanceOutcome::Committed
+    );
+    let reader = env
+        .auth(&Req::unsigned(Procedure::ReadRef).header("x-repository", &identity))
+        .unwrap();
+    let writer = env
+        .auth(&signed(&owner, &identity, Procedure::ReadRef, 9103))
+        .unwrap();
+    assert_eq!(block_on(env.pipe.read_ref(&reader, HEAD)).unwrap(), None);
+    assert_eq!(
+        block_on(env.pipe.read_ref(&writer, HEAD)).unwrap(),
+        Some(head)
+    );
+    let reader = env
+        .auth(&Req::unsigned(Procedure::ListRefs).header("x-repository", &identity))
+        .unwrap();
+    let writer = env
+        .auth(&signed(&owner, &identity, Procedure::ListRefs, 9105))
+        .unwrap();
+    assert!(
+        block_on(env.pipe.list_refs(&reader, ""))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !block_on(env.pipe.list_refs(&writer, ""))
+            .unwrap()
+            .is_empty()
+    );
+    let r = a.repo().repo.clone();
+    let p = env.pipe.shards.ref_shard(&r, HEAD);
+    for procedure in [Procedure::PackExists, Procedure::DownloadPack] {
+        let reader = env
+            .auth(&Req::unsigned(procedure).header("x-repository", &identity))
+            .unwrap();
+        let writer = env
+            .auth(&signed(&owner, &identity, procedure, 9104))
+            .unwrap();
+        if procedure == Procedure::PackExists {
+            assert!(!block_on(env.pipe.pack_exists(&reader, PackKey(pack_id))).unwrap());
+            assert!(block_on(env.pipe.pack_exists(&writer, PackKey(pack_id))).unwrap());
+        } else {
+            assert_eq!(
+                block_on(env.pipe.download(&reader, PackKey(pack_id)))
+                    .err()
+                    .unwrap()
+                    .code(),
+                Code::NotFound
+            );
+            assert!(block_on(env.pipe.download(&writer, PackKey(pack_id))).is_ok());
+        }
+        let key = keys::membership(&r.name, &pack_id);
+        let raw = block_on(env.pipe.meta.get(&p, &key)).unwrap().unwrap();
+        let mut w = crate::store::publication::Witness::decode(&raw).unwrap();
+        w.held = true;
+        block_on(
+            env.pipe
+                .meta
+                .inner
+                .apply(&p, Batch::new().put(key, w.encode())),
+        )
+        .unwrap();
+        for auth in [&reader, &writer] {
+            if procedure == Procedure::PackExists {
+                assert!(!block_on(env.pipe.pack_exists(auth, PackKey(pack_id))).unwrap());
+            } else {
+                assert_eq!(
+                    block_on(env.pipe.download(auth, PackKey(pack_id)))
+                        .err()
+                        .unwrap()
+                        .code(),
+                    Code::NotFound
+                );
+            }
+        }
+        w.held = false;
+        block_on(env.pipe.meta.inner.apply(
+            &p,
+            Batch::new().put(keys::membership(&r.name, &pack_id), w.encode()),
+        ))
+        .unwrap();
     }
 }
