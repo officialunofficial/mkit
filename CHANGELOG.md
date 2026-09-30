@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Docs: add the early Uno launch-readiness skeleton (WP-1.20, R-195 / R-198):
+  D35 environment/key roles, operator reset/rollback/rotation/drills, empty
+  user-owned evidence slots and a DRAFT user-only REL-1 prompt. Final readiness
+  waits for 4.18; no staging, measurements or release actions are claimed.
+
 - Add optional namespace authority-generation fencing with dedicated deployment-authority statements, native/Worker configuration, independent D34 lease barriers and generation-bound upload tickets (WP-2.16).
   Ticket streams coalesce legal client frames into bounded 256 KiB storage
   checkpoints, preserving revocation checks within Worker request budgets.
