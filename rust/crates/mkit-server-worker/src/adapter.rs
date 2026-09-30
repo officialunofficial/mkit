@@ -95,6 +95,9 @@ pub const WEBAUTHN_RPS_VAR: &str = "WEBAUTHN_RPS";
 /// write grants. Honoured only in `test-faults` builds; a release build that
 /// sees it set refuses to start.
 pub const UNSAFE_LOOPBACK_GRANTS_VAR: &str = "UNSAFE_LOOPBACK_GRANTS";
+/// The Worker var that turns indexed mode on (`test-faults` builds only;
+/// every other build refuses it until WP-4.10b).
+pub const INDEXED_MODE_VAR: &str = "INDEXED_MODE";
 /// Maximum ticketed pack size (bytes), bounded by R2's single-object limit.
 pub const MAX_PACK_BYTES_VAR: &str = "MAX_PACK_BYTES";
 
@@ -205,6 +208,10 @@ pub struct WorkerConfig {
     /// The R2 bucket binding ([`crate::r2::STORAGE_BINDING`]). Durable
     /// Object bindings come from [`crate::naming`].
     pub blob_binding: &'static str,
+    /// Indexed mode with scheduled verification (WP-4.8): `Some` only in a
+    /// `test-faults` build with `INDEXED_MODE` set on a Paid plan; every
+    /// release build refuses the var (Stage 1, R-171).
+    pub indexed: Option<mkit_server::indexed::IndexedConfig>,
     /// `HOOK_ROLES`, `HOOK_TIMEOUT_MS` and `AUTHORIZER_ROLE`: which stages
     /// call the hook Worker over the `ADMISSION_HOOK` service binding. `None`
     /// runs the built-in hooks (WP-3.9).
@@ -298,12 +305,17 @@ impl WorkerConfig {
         config.single_upload_max_bytes = Some(SINGLE_PUT_MAX_BYTES);
         config.sharding = self.sharding;
         config.ticket_keys.clone_from(&self.ticket_keys);
+        config.indexed = self.indexed;
         #[cfg(feature = "http-objects")]
         if let Some(mount) = &self.http_mount {
             config.indexed = Some(mount.indexed);
             config.http_objects = Some(mount.http_objects);
             config.url_tokens.clone_from(&self.url_tokens);
         }
+        config.indexed = config.indexed.map(|mut indexed| {
+            indexed.max_ancestry_commits = indexed.max_ancestry_commits.min(64);
+            indexed
+        });
         if let Some(hooks) = &self.hooks {
             config.authorizer_role = hooks.authorizer_role;
         }
@@ -342,11 +354,16 @@ impl WorkerConfig {
     /// combination: `NAMESPACE_POLICY`/`NAMESPACE_ALLOWLIST`/
     /// `UNSAFE_OPEN_NAMESPACES` and `TICKET_KEYS` rules.
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
-        if var("INDEXED_MODE").is_some_and(|value| {
+        let indexed_requested = var(INDEXED_MODE_VAR).is_some_and(|value| {
             !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-        }) {
+        });
+        // Stage 1: no released Worker verifies asynchronously. Extraction on
+        // Workers is WP-4.10b; until it lands a `Verified` pack could not
+        // imply "extracted" (R-163), so only test builds accept the var.
+        #[cfg(not(feature = "test-faults"))]
+        if indexed_requested {
             return Err(ConfigError(
-                "indexed mode on Workers requires WP-4.8 and WP-4.10b".into(),
+                "indexed mode on Workers requires WP-4.10b".into(),
             ));
         }
         let required =
@@ -401,20 +418,18 @@ impl WorkerConfig {
         let addressing =
             resolve_addressing(&var, multi, repository.as_deref(), ticket_keys.is_some())?;
         let grants = resolve_grants(&var, multi, &audience)?;
+        let indexed = resolve_indexed(
+            indexed_requested,
+            var(PLAN_VAR).as_deref(),
+            multi,
+            sharding,
+            ticket_keys.is_some(),
+            max_pack_bytes,
+        )?;
         #[cfg(feature = "http-objects")]
-        let url_tokens = crate::http_mount::token_config(&var)?;
-        #[cfg(feature = "http-objects")]
-        if let (Some(tokens), Some(tickets)) = (&url_tokens, &ticket_keys)
-            && tokens
-                .keys()
-                .public_keys()
-                .any(|public| tickets.contains_ed25519_public(&public))
-        {
-            return Err(ConfigError(
-                "URL_TOKEN_KEYS must differ from TICKET_KEYS".into(),
-            ));
-        }
+        let url_tokens = crate::http_mount::token_config_for_tickets(&var, ticket_keys.as_ref())?;
         Ok(Self {
+            indexed,
             sharding,
             placement,
             audience,
@@ -459,6 +474,40 @@ impl WorkerConfig {
             }
         })
     }
+}
+
+/// The indexed configuration `INDEXED_MODE` asks for: scheduled verification
+/// (WP-4.8), which needs a Paid plan (a slice spends about 256 of an alarm's
+/// 1,000 subrequests; Free's 50 are all assigned, R-147), D34 (the slices run
+/// on ref shards), Multi addressing and upload tickets. Release builds never
+/// get here with `requested` (see `from_vars`).
+#[allow(clippy::unnecessary_wraps)] // `Ok(None)` outside `test-faults`.
+fn resolve_indexed(
+    requested: bool,
+    plan: Option<&str>,
+    multi: bool,
+    sharding: Sharding,
+    has_ticket_keys: bool,
+    max_pack_bytes: u64,
+) -> Result<Option<mkit_server::indexed::IndexedConfig>, ConfigError> {
+    if !requested {
+        return Ok(None);
+    }
+    if !plan.is_some_and(|plan| plan.trim().eq_ignore_ascii_case("paid")) {
+        return Err(ConfigError(
+            "INDEXED_MODE requires WORKERS_PLAN=paid: scheduled verification does not fit a \
+             Free alarm's 50 subrequests"
+                .into(),
+        ));
+    }
+    if !multi || sharding != Sharding::D34 || !has_ticket_keys {
+        return Err(ConfigError(
+            "INDEXED_MODE requires ADDRESSING=multi, SHARDING=d34 and TICKET_KEYS".into(),
+        ));
+    }
+    Ok(Some(mkit_server::indexed::IndexedConfig::scheduled(
+        max_pack_bytes,
+    )))
 }
 
 /// The `Addressing` from the `ADDRESSING`/`NAMESPACE_*` vars: multi reads
@@ -2093,6 +2142,9 @@ mod glue {
             Arc::new(crate::sleep::WorkerSleep),
             Arc::new(WorkerClock),
         );
+        // Kind 7 (WP-4.8): registered only for an indexed Paid deployment,
+        // which no release build can be.
+        let registry = crate::verify::register_from_env(registry, env, class, plan.as_deref());
         let backup = BackupConfig::from_vars(|name| env.var(name).ok().map(|v| v.to_string()))
             .map_err(|error| {
                 BACKUPS_INVALID_LOG
@@ -3233,16 +3285,121 @@ mod tests {
         assert_eq!(v["message"], "a \"b\"");
     }
 
+    /// Stage 1 inertness (R-171): a release build refuses `INDEXED_MODE`,
+    /// so no Worker builds an indexed pipeline or registers kind 7.
+    #[cfg(not(feature = "test-faults"))]
     #[test]
-    fn worker_refuses_indexed_mode_until_async_driver() {
+    fn a_release_worker_refuses_indexed_mode_until_extraction_lands() {
         for value in ["true", "1", "yes", "on"] {
             let err =
                 WorkerConfig::from_vars(|name| (name == "INDEXED_MODE").then(|| value.to_owned()))
                     .unwrap_err();
             assert!(
                 err.to_string()
-                    .contains("indexed mode on Workers requires WP-4.8"),
+                    .contains("indexed mode on Workers requires WP-4.10b"),
                 "{value}"
+            );
+        }
+        for value in ["", "0", "false", "FALSE"] {
+            let vars = |name: &str| match name {
+                "INDEXED_MODE" => Some(value.to_owned()),
+                AUDIENCE_VAR => Some("https://example.test".to_owned()),
+                REPOSITORY_VAR => Some("repo".to_owned()),
+                _ => None,
+            };
+            assert_eq!(
+                WorkerConfig::from_vars(vars).unwrap().indexed,
+                None,
+                "{value:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "test-faults")]
+    fn indexed_vars<'a>(extra: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            if let Some((_, value)) = extra.iter().find(|(key, _)| *key == name) {
+                return Some((*value).to_owned());
+            }
+            match name {
+                "INDEXED_MODE" => Some("true".to_owned()),
+                AUDIENCE_VAR => Some("https://example.test".to_owned()),
+                "ADDRESSING" => Some("multi".to_owned()),
+                NAMESPACE_ALLOWLIST_VAR => Some(ns(1)),
+                TICKET_KEYS_VAR => Some(
+                    "dev 1111111111111111111111111111111111111111111111111111111111111111"
+                        .to_owned(),
+                ),
+                _ => None,
+            }
+        }
+    }
+
+    /// Under `test-faults` the var is accepted only on Paid, in Multi + D34.
+    #[cfg(feature = "test-faults")]
+    #[test]
+    fn indexed_mode_is_scheduled_and_paid_only() {
+        let config = WorkerConfig::from_vars(indexed_vars(&[(PLAN_VAR, "paid")])).unwrap();
+        let indexed = config.indexed.expect("indexed on Paid");
+        assert_eq!(
+            indexed.verification,
+            mkit_server::indexed::VerificationMode::Scheduled
+        );
+        assert!(indexed.max_pack_bytes <= indexed.decode_budget);
+        assert_eq!(indexed.max_pack_bytes, config.max_pack_bytes);
+        assert_eq!(config.pipeline_config().unwrap().indexed, Some(indexed));
+        assert_eq!(indexed.max_ancestry_commits, 64);
+        let mut enlarged = config.clone();
+        enlarged.indexed.as_mut().unwrap().max_ancestry_commits = 256;
+        assert_eq!(
+            enlarged
+                .pipeline_config()
+                .unwrap()
+                .indexed
+                .unwrap()
+                .max_ancestry_commits,
+            64
+        );
+        // Free (or an unset plan) cannot run it: every subrequest is assigned.
+        for plan in [Some("free"), None] {
+            let extra: Vec<(&str, &str)> = plan.map(|plan| (PLAN_VAR, plan)).into_iter().collect();
+            let err = WorkerConfig::from_vars(indexed_vars(&extra)).unwrap_err();
+            assert!(err.to_string().contains("WORKERS_PLAN=paid"), "{plan:?}");
+        }
+        let err =
+            WorkerConfig::from_vars(indexed_vars(&[(PLAN_VAR, "paid"), ("SHARDING", "single")]))
+                .unwrap_err();
+        assert!(err.to_string().contains("SHARDING=d34"));
+    }
+
+    /// A deployment that does not ask for indexed mode is unchanged: the
+    /// pipeline carries no indexed config, so `GetServerInfo` reports
+    /// `indexed_mode=false` and no kind-7 handler is ever built.
+    #[test]
+    fn a_deployment_without_indexed_mode_stays_unindexed() {
+        let vars = |name: &str| match name {
+            AUDIENCE_VAR => Some("https://example.test".to_owned()),
+            REPOSITORY_VAR => Some("repo".to_owned()),
+            _ => None,
+        };
+        let config = WorkerConfig::from_vars(vars).unwrap();
+        assert_eq!(config.indexed, None);
+        assert_eq!(config.pipeline_config().unwrap().indexed, None);
+        for class in [
+            crate::classes::ShardClass::RefStore,
+            crate::classes::ShardClass::NsCoordinator,
+            crate::classes::ShardClass::RefShard,
+            crate::classes::ShardClass::RepoIndexShard,
+            crate::classes::ShardClass::ContentIndexShard,
+        ] {
+            let registry = timer_registry::<mkit_server::MemoryKv, mkit_server::MemoryKv>(
+                class,
+                Ok(mkit_server::MemoryKv::default()),
+                Some("paid"),
+            );
+            assert!(
+                !format!("{registry:?}").contains("TimerKind(7)"),
+                "{class:?}"
             );
         }
     }

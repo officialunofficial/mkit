@@ -1866,8 +1866,26 @@ pub fn decode_frame_with<B: DeltaBaseSource>(
         }
         _ => {}
     }
-    let decoded = decode_payload(frame[0], version, &frame[ENTRY_FRAME_LEN..])?;
-    let bytes = match decoded {
+    decode_entry_with(
+        decode_payload(frame[0], version, &frame[ENTRY_FRAME_LEN..])?,
+        bases,
+        limits,
+    )
+}
+
+/// Resolve one already-framed entry, such as a [`window::WindowReader`]
+/// yield, into its canonical bytes and id, with the payload rules of
+/// [`decode_frame_with`]: a delta's base comes only from `bases`, and the
+/// result is a storable canonical object bounded by `limits`.
+///
+/// # Errors
+/// A missing or invalid base, an invalid object, or a result beyond `limits`.
+pub fn decode_entry_with<B: DeltaBaseSource>(
+    entry: PackEntry<'_>,
+    bases: &mut B,
+    limits: DecodeLimits,
+) -> Result<(Hash, Vec<u8>), PackError> {
+    let bytes = match entry {
         PackEntry::Raw { bytes } => bytes.into_owned(),
         PackEntry::Delta { base, stream } => {
             if validate_delta_result_size(stream.as_ref())? as u64 > limits.max_decoded_bytes {

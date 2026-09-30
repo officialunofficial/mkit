@@ -258,6 +258,7 @@
 //! | `tickets.advance_other_repository` | `tickets`, `auth-v2`, `multi-repo` | a ticket cannot cross a repository boundary |
 //! | `tickets.advance_expired_ticket` | `tickets`, `auth-v2`, `test-faults` | an expired ticket fails with its exact error |
 //! | `indexed.pending_verification_unavailable` | `indexed-mode`, `multi-repo`, `tickets`, `auth-v2`, `test-faults` | HTTP 503, `Retry-After: 5`, one golden `PendingVerification` detail, and a successful same-nonce retry without replay |
+//! | `indexed.async_verification_commits` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`, `test-faults` | a push of three 16 MiB windows answers `PendingVerification` until its scheduled slices finish (the Worker fails one mid-pack slice on purpose), then the same signed advance commits |
 //! | `multipart.three_parts` | `multipart`, `auth-v2`; excludes `multi-repo` | a roughly 17 MiB three-part pack at the minimum part size completes and becomes visible |
 //! | `multipart.resume_receipts` | `multipart`, `auth-v2`; excludes `multi-repo` | a client reconnects after partial upload, re-sends a part, and completes using old and new receipts |
 //! | `multipart.root_mismatch_invisible` | `multipart`, `auth-v2`; excludes `multi-repo` | a wrong completion root never makes the pack visible |

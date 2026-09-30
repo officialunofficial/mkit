@@ -1119,6 +1119,14 @@ reported only on the consuming `AdvanceRefs`.
 Asynchronous scheduling does not turn a permanent validation failure
 into a successful completion of the advance.
 
+Informative. A server that verifies in scheduled slices answers
+`PendingVerification` while a delta base is not yet a member inside the
+membership lag window (§9.4), where an inline verifier answers
+`repository membership not yet visible`: the pack is simply not verified
+yet. The membership message applies to the closure, head and packlist
+misses found when the advance checks the consumed set, and a base that is
+still absent after the window is the permanent §9.4 answer, as inline.
+
 Verification state is per `(repository, pack)`. A pack verified for
 one repository is not thereby verified for another. Global byte
 reuse does not carry repository membership or verification authority

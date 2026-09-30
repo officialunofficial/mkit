@@ -1821,6 +1821,26 @@ the pipeline `private_repository_reads_return_the_missing_repository_error`
 and `a_signed_read_writes_no_replay_rows` tests; the connect_dispatch and
 wire `reads.private_not_found_byte_identical` cases.
 
+
+## Scheduled verification checkpoints retain closure authority
+
+**Always:** a scheduled job's guarded checkpoint and the deletion of a child
+satisfied by a member pack commit together. The checkpoint retains that pack
+for the consuming advance's membership recheck. Only a completed decode may
+emit index rows, and Verified follows delivery and extraction. Rebuilding job
+rows cannot downgrade an already Verified pack.
+
+**Because:** a crash between deleting a child and recording its member would
+lose the evidence needed to catch GC or generation changes. Async verification
+must retain the same repository authority as inline verification.
+
+**If violated:** an advance can accept an open closure, or storage damage can
+turn a monotone verification result into a contradictory persisted rejection.
+
+**Enforced by:** `mkit-server/src/indexed/job.rs` atomic closure checkpoints and
+state guards; the job-driver crash sweeps, satisfying-member removal test,
+Verified rebuild test, and Scheduled pipeline pending/delivery tests.
+
 ## Paid HTTP reads reserve durably and settle once
 
 **Always:** a reservation-bearing HTTP read records Pending(Read) before

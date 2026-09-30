@@ -151,6 +151,9 @@ pub enum Feature {
     BacklogCap,
     /// Indexed mode (M4).
     IndexedMode,
+    /// Indexed mode whose packs verify asynchronously in scheduled slices,
+    /// answering `PendingVerification` until they finish (WP-4.8, Workers).
+    IndexedAsync,
     /// Plain-HTTP object serving (M4).
     HttpObjects,
     /// Lifecycle leases and GC (M5).
@@ -163,7 +166,7 @@ pub enum Feature {
     Admin,
 }
 
-const FEATURE_NAMES: [(Feature, &str); 27] = [
+const FEATURE_NAMES: [(Feature, &str); 28] = [
     (Feature::Bearer, "bearer"),
     (Feature::AuthV2, "auth-v2"),
     (Feature::AtomicAdvance, "atomic-advance"),
@@ -189,6 +192,7 @@ const FEATURE_NAMES: [(Feature, &str); 27] = [
         "combined-challenge-fields",
     ),
     (Feature::IndexedMode, "indexed-mode"),
+    (Feature::IndexedAsync, "indexed-async"),
     (Feature::HttpObjects, "http-objects"),
     (Feature::Leases, "leases"),
     (Feature::Takedown, "takedown"),
