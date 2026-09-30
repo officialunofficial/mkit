@@ -1,7 +1,7 @@
 # WP-5.6a-2 preservation core contract (R-190)
 
 **Status: core implemented, activation off; final gates ongoing.** The current
-reported production Rust count is 3,294 against `origin/feat/mkit-server`, below
+reported production Rust count is 3,298 against `origin/feat/mkit-server`, below
 PR2's 3,300 cap (64 production lines removed). Tests/docs/generated code do not
 count. This records the source contract and focused
 verification; it does not claim completed full gates or launch readiness.
@@ -67,6 +67,15 @@ that arithmetic and do not establish whole-Worker RSS. The inherited decoder's
 post-block output check for later-corrupted zstd is a known limitation, not a
 memory-bound theorem. Exhausted budgets or corrupt sources keep denial and
 checkpoint responsibility; they never create verified-preservation success.
+
+Native profiles retain at most the configured decode budget and validate
+configured chain-depth caps through 65,535. Their checked resident allowance
+is eight times that budget plus 128 MiB; the logical slice-call allowance is the greater of 700 and
+`8 * (depth + 1) + 256`. Worker work uses 700 logical calls and shares the actual
+1,000-call alarm counter across remote metadata and R2. Each acquisition step
+copies at most eight pieces; closure advances at most 64 ordered chunks (196
+counted calls for its full slice). Initial object seeding advances at most 32
+targets and whole-pack inventory pages at most eight entries per step.
 
 Finite namespace sweeps wait for the safety cut and relay watermarks. Any
 supports named-repo preservation and provable named/known-holder namespace

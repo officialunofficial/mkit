@@ -16,7 +16,7 @@ This limitation prevents completion claims, not denial or named-repo preservatio
 The [core contract](WP-5.6a-2-contract.md) records the final layout, source
 checkpoints, verified acquisition/manifest closure, ct ownership, retention/hold
 arbitration, action-owned audited purge and inert runtime wiring. The reported
-production Rust count is 3,294/3,300 against `origin/feat/mkit-server`; docs are
+production Rust count is 3,298/3,300 against `origin/feat/mkit-server`; docs are
 excluded. Five focused source tests pass, with at most 12 counted calls per
 selection step and 357 final-decode calls for the dense 50-hop fixtures. Full
 gates remain ongoing; this checkpoint does not claim them complete.

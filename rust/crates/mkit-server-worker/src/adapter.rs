@@ -933,6 +933,10 @@ where
     timer_registry_budgeted(class, target, plan, None, None)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep allocated timer ownership together"
+)]
 fn timer_registry_budgeted<
     S: mkit_server::NamespaceStore,
     T: mkit_server::NamespaceStore + 'static,
