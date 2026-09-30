@@ -25,19 +25,18 @@ Staging data has no retention promise and may be reset by the user.
 | Addressing / sharding | `ADDRESSING=multi`, `SHARDING=d34` | Existing deployment markers; never change them over existing state |
 | Namespace admission | `NAMESPACE_POLICY=allowlist`, `NAMESPACE_ALLOWLIST=<dedicated CI namespace>` | Existing grammar; no open namespace policy |
 | Account plan | `WORKERS_PLAN=paid`, actual Workers Paid account | Paid-only launch; 4.18 validates profile. CPU allowance remains user-owned and unfilled |
-| Indexed serving | Scheduled verification, extraction, HTTP objects and proofs | 4.10b and proof prerequisites; 4.18 activates the release build. Current release adapter refuses `INDEXED_MODE`; test builds are not production activation |
+| Indexed serving | Scheduled verification, extraction, HTTP objects and native/core proofs (Worker proofs 4.14b-2 are a post-launch follow-up, R-200) | 4.10b and 4.14b-1; 4.18 activates the release build. Current release adapter refuses `INDEXED_MODE`; test builds are not production activation |
 | Storage leases | Off | 5.4 launch spec amendment; 4.18 config and discovery. Existing epoch leases and authority fencing remain separate |
 | Serving retention | Permanent | 5.4 / 4.18; no lifecycle deletion of packs or extracted `objects/` |
 | Serving-store GC | Off; enabling GC in indexed mode refused | R-198 B4; 4.18 validates. No post-launch GC machinery in this skeleton |
-| Inspection | Durable inspection mode, fail-closed scanner, explicit asynchronous deadline | 5.5a owns mode, holds, registry and audited review. R-193 owns remote Inspect and private retrieval; 4.18 activates |
-| Publication Events | Durable delivery, receiver deduplication and Outcome/Event reordering | 5.15 owns delivery and combined alarm accounting; 4.18 integrates |
+| Inspection | Synchronous PRE_RECEIVE only (R-200): `pass`, `reject` (a `quarantine` is rejected), fail-closed when unavailable; async inspectors and publish-on-unavailable are refused | 5.5a (sync scope). R-193 owns scanner byte retrieval; 4.18 activates. Async inspection, holds and review ops are follow-up 5.5c |
+| Publication Events | Not at launch (R-200): with sync-only inspection every advance publishes at apply, so `Committed` means delivered | 5.15 is a post-launch follow-up |
 | Lean takedown | Immediate global denial, verified restricted preservation, retention/legal holds, audited review; requests can remain unresolved | 5.6a owns concrete operations and normative exception; 4.18 activates. No rewrite, 451 notices or reinstatement claim |
 | Uploads | Ticketed uploads with threshold zero; measured pack/decode/concurrency limits | Final grammar and limits in 4.18; user fills staging sizing evidence |
 
-Inspection mode cannot be enabled over a nonempty store or disabled after it
-is persisted (R-198 B3; enforcement pending 5.5a). Removing an inspector configuration
-does not waive its durable obligations. Only the audited `WaiveObligations`
-operation can do so. Do not advertise incomplete capabilities in GetServerInfo.
+Sync-only inspection leaves no durable obligations or holds, so the launch has
+no persisted inspection-mode marker (R-200). The marker, async obligations and
+`WaiveObligations` arrive with follow-ups 5.5a-0 and 5.5c. Do not advertise incomplete capabilities in GetServerInfo.
 
 ## Bindings and storage isolation
 

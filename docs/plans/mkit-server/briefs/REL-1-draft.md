@@ -36,7 +36,7 @@ Fill the following user-owned pending pins before execution:
    [server artifact feature list](../../../../scripts/release/mkit-server-features)
    and current release signing/attestation policy. Revalidate these references
    at the final candidate; this draft does not amend release machinery.
-2. Confirm every REL-1 dependency and concrete 5.5a/R-193/5.15/5.6a/4.18,
+2. Confirm every REL-1 dependency and concrete 5.5a (sync)/R-193/5.6a/4.18,
    purge/admin, extraction and proof prerequisite is merged and independently
    reviewed. Reconcile the historical registry aggregates/activation edges
    without cycles. Do not depend on withdrawn R-196/R-197.
@@ -77,8 +77,8 @@ Fill the following user-owned pending pins before execution:
 6. User deploys the approved Workers artifact/config under separately authorized
    production resources and exact origins, using the final
    [operator runbook](../launch-operations.md). Verify conformance, advertised
-   active capabilities, held/global-block denial, preservation/audit, durable
-   Event/purge delivery and rollback readiness. Record actual outcomes.
+   active capabilities, sync inspection, global-block denial, preservation/audit, durable
+   purge delivery and rollback readiness. Record actual outcomes.
 
 The Uno profile is Paid-only indexed serving/inspection, storage leases off,
 permanent serving retention, serving GC off and lean takedown. Unresolved

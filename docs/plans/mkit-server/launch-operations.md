@@ -18,13 +18,13 @@ Use the [D35 definition](staging-uno.md) and [readiness record](launch-readiness
 3. User installs dedicated secrets and public trust lists, retention and key
    list configuration. Prepare hook receiver, scanner and purge sink first;
    verify their audiences, permitted roles and replay/deduplication behavior.
-   Concrete scanner provisioning is R-193; Events 5.15; preservation 5.6a.
+   Concrete scanner provisioning is R-193; preservation 5.6a. No publication Events at launch (R-200).
 4. User deploys the exact opted-in release artifact with consistent fetch and
    every DO's configured entrypoint/alarm wiring from 4.18. Use a fresh store
    for first activation; do not convert persisted inspection/sharding modes.
 5. User mounts only the D35 staging hostname behind approved network controls.
-   Check honest GetServerInfo, signed push/clone, private reads/proofs, scanner
-   assignment, held/global-block denial, audit and delivery reconciliation.
+   Check honest GetServerInfo, signed push/clone, private reads/proofs, sync scanner
+   verdicts, global-block denial, audit and delivery reconciliation.
    Run final local and deployed conformance and failure drills; fill the evidence
    slots. Choose CPU/pack/concurrency limits from deployed evidence.
 6. User approves release separately. The [DRAFT REL-1 prompt](briefs/REL-1-draft.md)
@@ -40,8 +40,8 @@ intents and evidence. Record the failed artifact/config and outstanding work.
 
 Rollback to a prior artifact only when it implements the **same current store
 contracts**, persisted inspection/authority modes, role matrix and timer kinds.
-Removing inspectors or disabling their mode is not a rollback: obligations
-remain and serving must not bypass their holds. Do not restore an older snapshot
+Sync-only inspection keeps no obligations or holds (R-200); removing the scanner
+only stops scanning future pushes and must never be used to publish rejected content. Do not restore an older snapshot
 that could remove a global block or legal hold. Pending purge delivery does not
 relax authoritative serving denial. If compatibility is uncertain, leave the
 deployment offline and use the pre-launch reset procedure for disposable test
@@ -106,11 +106,11 @@ reconciliation; store links in the readiness record. No drill below has passed.
 | Drill | Injection | Expected contract and recovery | Finalizing lane |
 |---|---|---|---|
 | Hooks down | Authorize/Admit timeout, connection failure, non-2xx, invalid or oversize response; redirect and cancellation | Decisions fail closed with retryable unavailable and no state write; preserve §8's otherwise-authorized public-read classification exception. Outcome delivery stays durable until acknowledgement; restore receiver and reconcile by reservation id | Existing 3.9c; Event durable/reordered replay 5.15; integrated 4.18 |
-| Scanner down | Unreachable Inspect endpoint; invalid verdict; private retrieval expiry/revocation mid-read | Sync fail-closed inspection returns unavailable. Async committed push is not rejected, but obligations remain pending/held and publication cannot clear without valid verdict. Restore assigned scanner; prove restart-safe holds, no public/private oracle and global-block denial | 5.5a / R-193 / 4.18 |
+| Scanner down | Unreachable Inspect endpoint; invalid verdict; private retrieval expiry/revocation mid-read | Sync fail-closed inspection returns unavailable and nothing commits. Restore the scanner; prove no public/private oracle and global-block denial | 5.5a / R-193 / 4.18 |
 | Purge sink down | Timeout/non-2xx or lost acknowledgement during overlapping block/visibility intents | Retain intents, retry with backoff, reconcile duplicates; local invalidation and authoritative hold/block checks remain effective while sink is down. Manual acceptance returns purge id, not completion; later audit proves completion | 5.10 / 5.6a / 4.18 |
 
-Also capture Outcome-before/after-Event duplicates, disconnect settlement,
-multicolo held/block denial and cache convergence, key rotation and incompatible
+Also capture Outcome duplicates, disconnect settlement,
+multicolo block denial and cache convergence, key rotation and incompatible
 profile startup refusal. Do not release a hold, waive an obligation or claim
 takedown completion solely to drain a failed drill's backlog. Hits and late-holder
 requests remain unresolved until their actual applicable completion.

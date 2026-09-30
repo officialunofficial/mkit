@@ -29,8 +29,7 @@ outcome and owning-spec/R evidence for the final candidate.
 | 3.9c | Signed Worker hooks; SPEC-SERVER §7 / R-180 | |
 | 2.16 | Namespace authority fence; SPEC-SERVER §6.2.1 / R-181 | |
 | 5.4 | Published view and launch-profile amendment; SPEC-SERVER §§10–12, 18 / R-182, R-198 | |
-| 5.5a | Durable mode, per-advance holds, registry, inspection and audited review; SPEC-SERVER §11 / R-183, R-198 | |
-| 5.15 | Atomic publication Event recording and delivery; SPEC-SERVER §§5, 12.4 / R-184 | |
+| 5.5a | Synchronous inspection and the launch-profile §11/§18 amendment; SPEC-SERVER §11 / R-183, R-200 | |
 | 4.18 | Complete release Worker activation and indexed/serving conformance; SPEC-SERVER §§9–11, 18 / R-194 | |
 | 5.6 | Historical full aggregate: launch uses lean **5.6a**, not all full-profile operations; SPEC-SERVER §§14, 16 / R-190, R-198 | |
 | 5.11a | Signed admin framework, roles, replay and audit; SPEC-SERVER §16 / R-189, R-198 | |
@@ -42,14 +41,15 @@ activation edges (including 5.11a → 4.18). This early docs PR does not rewrite
 their DAG or treat historical aggregates as completed. Final 4.18 / 1.20 must
 verify an acyclic concrete graph and replace the full 5.6 aggregate with lean
 5.6a; include R-193 and final proof/extraction prerequisites. R-196 and R-197
-are withdrawn, retired and not launch dependencies.
+are withdrawn, retired and not launch dependencies. Under R-200, 5.15, 4.14b-2,
+5.5a-0 and 5.5c are post-launch follow-ups, not launch dependencies.
 
 | Concrete prerequisite to reconcile | Owner / evidence required | Evidence link (user-owned; pending) |
 |---|---|---|
 | Durable inspection storage + authority | 5.5a, including R-199 storage prerequisite and R-198 B3 acceptance | |
 | Remote Inspect / private canonical retrieval | R-193; merged contract, vectors and independent crypto/security reviews | |
 | Extraction driver and multipart primitive | 4.10b / R-186, R-192; canonical source and bounded whole-phase accounting | |
-| Native/core and Worker proofs | 4.14b-1 / R-187 and 4.14b-2 / R-191; final integrated conformance | |
+| Native/core proofs | 4.14b-1 / R-187; final integrated conformance (Worker proofs 4.14b-2 / R-191 are post-launch) | |
 | Automatic purge and admin foundations | 5.10 / R-188 and 5.11a / R-189; no reverse activation dependency | |
 | Lean takedown + manual asynchronous PurgeCache | 5.6a / R-190; preservation, retention/legal holds, audit and unresolved status | |
 
@@ -100,7 +100,7 @@ also cannot substitute for pre-main user-operated staging.
 | Native reference | Final full/local gates and indexed serving/inspection/preservation matrix | |
 | Worker local runtime | Final native parity, default-off release regression and opted-in **release** wasm runtime; test-faults separately identified | |
 | Real staging conformance | Full wire suite and real push/clone; private/proof/scanner isolation, role collisions, authority/profile refusal and key rotation | |
-| Network settlement/events | Outcome → Event correlation, duplicate/reordered delivery, disconnect settlement/reconciliation, hook header/body limits, redirects, timeout/cancellation | |
+| Network settlement | Outcome delivery, duplicate/reordered delivery, disconnect settlement/reconciliation, hook header/body limits, redirects, timeout/cancellation | |
 | Failure drills | [Hooks/scanner/purge outage drills](launch-operations.md#failure-drills-and-evidence), restart/recovery and durable backlog evidence | |
 | External whole-launch code/spec review | User-selected external reviewer, candidate SHA, report and explicit outcome | |
 | Validated review findings/fixes | Source validation per finding, fix SHA/PR, affected gate reruns and independent adversarial review | |
