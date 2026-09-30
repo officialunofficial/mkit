@@ -117,6 +117,8 @@ pub const TAG_QUOTA_CONTRIBUTION: &str = "qc";
 pub const TAG_QUOTA_TOTAL: &str = "qt";
 /// Grant epoch tag.
 pub const TAG_GRANT_EPOCH: &str = "e";
+/// Independent namespace authority generation.
+pub const TAG_AUTHORITY_GENERATION: &str = "ag";
 /// Ref shard's epoch lease tag.
 pub const TAG_EPOCH_LEASE: &str = "el";
 /// Coordinator's leased shard table tag.
@@ -314,6 +316,8 @@ pub enum ParsedKey {
     OutcomeBacklog,
     /// `e 00`.
     GrantEpoch,
+    /// Independent deployment-authority generation.
+    AuthorityGeneration,
     /// `el 00`.
     EpochLease,
     /// `ls 00 <repo> 00 <shard_ref>`.
@@ -704,6 +708,12 @@ pub fn outcome_backlog() -> Key {
     key(TAG_OUTCOME_BACKLOG, &[])
 }
 
+/// Independent namespace authority generation; absent means generation zero.
+#[must_use]
+pub fn authority_generation() -> Key {
+    key(TAG_AUTHORITY_GENERATION, &[])
+}
+
 /// `e 00`.
 #[must_use]
 pub fn grant_epoch() -> Key {
@@ -920,6 +930,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"am" if body.is_empty() => ParsedKey::AddressingMarker,
         b"v" if body.is_empty() => ParsedKey::LayoutVersion,
         b"e" if body.is_empty() => ParsedKey::GrantEpoch,
+        b"ag" if body.is_empty() => ParsedKey::AuthorityGeneration,
         b"el" if body.is_empty() => ParsedKey::EpochLease,
         b"lr" if body.is_empty() => ParsedKey::LeaseRecovery,
         b"lrc" if body.is_empty() => ParsedKey::LeaseReconcile,

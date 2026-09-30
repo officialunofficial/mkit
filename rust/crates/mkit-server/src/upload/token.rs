@@ -19,6 +19,8 @@ pub const PART_RECEIPT_CONTEXT: &str = "mkit-server part receipt v1";
 /// as opaque; no metadata read is needed to verify them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TicketClaims {
+    /// Authority generation authorized when this ticket was created.
+    pub authority_generation: Option<u64>,
     /// Reservation-derived ticket id.
     pub ticket_id: Hash,
     /// Canonical deployment audience.
@@ -228,7 +230,7 @@ impl TicketKeys {
     pub fn mint(&self, claims: &TicketClaims) -> Vec<u8> {
         let key = &self.keys[0]; // constructors enforce a nonempty key set
         let id_len = u8::try_from(key.id.len()).expect("validated ticket key id");
-        let mut bytes = vec![1, id_len];
+        let mut bytes = vec![if claims.authority_generation.is_some() { 2 } else { 1 }, id_len];
         bytes.extend_from_slice(key.id.as_bytes());
         bytes.extend_from_slice(&claims.ticket_id);
         append_field(&mut bytes, claims.audience.as_bytes());
@@ -239,6 +241,7 @@ impl TicketKeys {
             bytes.extend_from_slice(&number.to_be_bytes());
         }
         append_field(&mut bytes, &claims.upload_session);
+        if let Some(generation) = claims.authority_generation { bytes.extend_from_slice(&generation.to_be_bytes()); }
         bytes.extend_from_slice(blake3::keyed_hash(&key.mac_key(), &bytes).as_bytes());
         bytes
     }
@@ -261,7 +264,8 @@ impl TicketKeys {
         }
 
         let mut reader = Reader(message);
-        if reader.take(1)? != [1] {
+        let version = reader.take(1)?[0];
+        if version != 1 && version != 2 {
             return Err(invalid_token());
         }
         reader.take(1 + id_len)?;
@@ -275,6 +279,7 @@ impl TicketKeys {
             part_size: u64::from_be_bytes(reader.array()?),
             expires_at_ms: u64::from_be_bytes(reader.array()?),
             upload_session: reader.field()?.to_vec(),
+            authority_generation: if version == 2 { Some(u64::from_be_bytes(reader.array()?)) } else { None },
         };
         if !reader.0.is_empty() || claims.expires_at_ms <= now_ms {
             return Err(invalid_token());

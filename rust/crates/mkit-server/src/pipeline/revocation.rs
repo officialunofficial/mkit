@@ -1,6 +1,7 @@
 //! Epoch changes serialize with grants in the coordinator. Pushes and
 //! acknowledgements are separate guarded transactions, always in that order.
 
+use crate::authority::FenceKind;
 use crate::error::ServerError;
 use crate::repo::NamespaceKey;
 use crate::store::{
@@ -68,7 +69,7 @@ type RevokeCheckpoint = (u64, Option<codec::LeaseRecovery>, crate::store::Cursor
 
 #[derive(Default)]
 pub(super) struct RevokeCursors(
-    std::sync::Mutex<std::collections::BTreeMap<NamespaceKey, RevokeCheckpoint>>,
+    std::sync::Mutex<std::collections::BTreeMap<(NamespaceKey, FenceKind), RevokeCheckpoint>>,
 );
 
 impl RevokeCursors {
@@ -76,7 +77,7 @@ impl RevokeCursors {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(ns)
+            .get(&(ns.clone(), state.kind))
             .filter(|(e, recovery, _)| *e == state.epoch && *recovery == state.recovery)
             .map(|(_, _, cursor)| cursor.clone())
     }
@@ -92,18 +93,35 @@ impl RevokeCursors {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(cursor) = cursor {
-            cursors.insert(ns.clone(), (state.epoch, state.recovery, cursor));
+            cursors.insert(
+                (ns.clone(), state.kind),
+                (state.epoch, state.recovery, cursor),
+            );
         } else {
-            cursors.remove(ns);
+            cursors.remove(&(ns.clone(), state.kind));
         }
     }
 }
 
 struct CoordinatorState {
+    kind: FenceKind,
     epoch_value: Option<Value>,
     epoch: u64,
     config_version: u64,
     recovery: Option<codec::LeaseRecovery>,
+}
+
+fn generation(row: &codec::LeasedShard, kind: FenceKind) -> u64 {
+    match kind {
+        FenceKind::Grant => row.epoch,
+        FenceKind::Authority => row.authority_generation.unwrap_or(0),
+    }
+}
+fn acked(row: &codec::LeasedShard, kind: FenceKind) -> Option<u64> {
+    match kind {
+        FenceKind::Grant => Some(row.acked_epoch),
+        FenceKind::Authority => row.acked_authority_generation,
+    }
 }
 
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
@@ -128,13 +146,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         ns: &NamespaceKey,
         new_epoch: u64,
     ) -> Result<EpochTransition, ServerError> {
+        self.transition_fence(ns, new_epoch, FenceKind::Grant).await
+    }
+
+    pub(super) async fn transition_fence(
+        &self,
+        ns: &NamespaceKey,
+        new_epoch: u64,
+        kind: FenceKind,
+    ) -> Result<EpochTransition, ServerError> {
         let p = self.shards.coordinator(ns);
         for _ in 0..super::coordinator::CREATION_ATTEMPTS {
-            let current = self
-                .meta
-                .get(&p, &keys::grant_epoch())
-                .await
-                .map_err(meta_error)?;
+            let current = self.meta.get(&p, &kind.key()).await.map_err(meta_error)?;
             let epoch = current
                 .as_ref()
                 .map(codec::decode_u64)
@@ -146,8 +169,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 return Ok(transition);
             }
             let batch = Batch::new()
-                .require(observed_guard(keys::grant_epoch(), current.as_ref()))
-                .put(keys::grant_epoch(), codec::encode_u64(new_epoch));
+                .require(observed_guard(kind.key(), current.as_ref()))
+                .put(kind.key(), codec::encode_u64(new_epoch));
             match self.meta.apply(&p, batch).await.map_err(meta_error)? {
                 BatchOutcome::Committed => return Ok(EpochTransition::Advance),
                 BatchOutcome::PreconditionFailed { .. } => {}
@@ -176,16 +199,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         .map_err(meta_error)
     }
 
-    async fn coordinator_state(&self, p: &Partition) -> Result<CoordinatorState, ServerError> {
+    async fn coordinator_state(
+        &self,
+        p: &Partition,
+        kind: FenceKind,
+    ) -> Result<CoordinatorState, ServerError> {
         let rows = self
             .meta
             .get_many(
                 p,
-                &[
-                    keys::grant_epoch(),
-                    keys::namespace_record(),
-                    keys::lease_recovery(),
-                ],
+                &[kind.key(), keys::namespace_record(), keys::lease_recovery()],
             )
             .await
             .map_err(meta_error)?;
@@ -193,6 +216,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             return Err(internal("revocation get_many returned the wrong row count"));
         };
         Ok(CoordinatorState {
+            kind,
             epoch: epoch
                 .as_ref()
                 .map(codec::decode_u64)
@@ -240,9 +264,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         ns: &NamespaceKey,
         budget: &RevokeBudget,
     ) -> Result<RevokeProgress, ServerError> {
+        self.revoke_fence_step(ns, budget, FenceKind::Grant).await
+    }
+
+    pub(super) async fn revoke_fence_step(
+        &self,
+        ns: &NamespaceKey,
+        budget: &RevokeBudget,
+        kind: FenceKind,
+    ) -> Result<RevokeProgress, ServerError> {
         let start = ms(self.clock.now_ms());
         let coordinator = self.shards.coordinator(ns);
-        let state = self.coordinator_state(&coordinator).await?;
+        let state = self.coordinator_state(&coordinator, kind).await?;
         let (first, end) = keys::class_range(keys::TAG_LEASED_SHARD);
         let mut cursor = self.revocation_cursors.get(ns, &state);
         let mut checkpoint = cursor.clone();
@@ -267,10 +300,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     });
                 }
                 let row = codec::decode_leased_shard(&value).map_err(meta_error)?;
-                if row.expires_at_ms <= ms(self.clock.now_ms()) || row.acked_epoch == state.epoch {
+                if row.expires_at_ms <= ms(self.clock.now_ms())
+                    || acked(&row, state.kind) == Some(state.epoch)
+                {
                     continue;
                 }
-                if row.acked_epoch > state.epoch || visited == 4 {
+                if acked(&row, state.kind).is_some_and(|n| n > state.epoch) || visited == 4 {
                     remaining += 1;
                     prefix_complete = false;
                     continue;
@@ -293,7 +328,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
         }
         // Detect a newer epoch or recovery declaration during the slice.
-        let latest = self.coordinator_state(&coordinator).await?;
+        let latest = self.coordinator_state(&coordinator, kind).await?;
         if remaining == 0 && latest.epoch == state.epoch && !self.recovery_pending(&latest) {
             self.revocation_cursors.set(ns, &state, None);
             Ok(RevokeProgress::Complete)
@@ -337,10 +372,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 return Ok(false);
             }
             let mut row = codec::decode_leased_shard(&value).map_err(meta_error)?;
-            if row.expires_at_ms <= ms(self.clock.now_ms()) || row.acked_epoch == state.epoch {
+            if row.expires_at_ms <= ms(self.clock.now_ms())
+                || acked(&row, state.kind) == Some(state.epoch)
+            {
                 return Ok(true);
             }
-            if row.epoch > state.epoch || row.acked_epoch > state.epoch {
+            if generation(&row, state.kind) > state.epoch
+                || acked(&row, state.kind).is_some_and(|n| n > state.epoch)
+            {
                 return Ok(false);
             }
             let old = self
@@ -352,7 +391,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 let old = codec::decode_epoch_lease(old).map_err(meta_error)?;
                 // A stale slice must never undo a newer push or shorten a
                 // concurrent renewal. Retry that coordinator observation.
-                if old.epoch > state.epoch {
+                if match state.kind {
+                    FenceKind::Grant => old.epoch,
+                    FenceKind::Authority => old.authority_generation.unwrap_or(0),
+                } > state.epoch
+                {
                     return Ok(false);
                 }
                 if old.expires_at_ms > row.expires_at_ms {
@@ -367,8 +410,24 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             if self.revoke_budget_passed(start, *budget) {
                 return Ok(false);
             }
+            let prior = old
+                .as_ref()
+                .map(codec::decode_epoch_lease)
+                .transpose()
+                .map_err(meta_error)?;
             let lease = codec::EpochLease {
-                epoch: state.epoch,
+                epoch: if state.kind == FenceKind::Grant {
+                    state.epoch
+                } else {
+                    prior.map_or(row.epoch, |el| el.epoch)
+                },
+                authority_generation: if state.kind == FenceKind::Authority {
+                    Some(state.epoch)
+                } else {
+                    prior
+                        .and_then(|el| el.authority_generation)
+                        .or(row.authority_generation)
+                },
                 expires_at_ms: row.expires_at_ms,
                 config_version: state.config_version,
             };
@@ -385,13 +444,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             if self.revoke_budget_passed(start, *budget) {
                 return Ok(false);
             }
-            row.acked_epoch = state.epoch;
+            match state.kind {
+                FenceKind::Grant => row.acked_epoch = state.epoch,
+                FenceKind::Authority => row.acked_authority_generation = Some(state.epoch),
+            }
             let ack = Batch::new()
                 .require(Precondition::Equals(key.clone(), value))
-                .require(observed_guard(
-                    keys::grant_epoch(),
-                    state.epoch_value.as_ref(),
-                ))
+                .require(observed_guard(state.kind.key(), state.epoch_value.as_ref()))
                 .put(key.clone(), codec::encode_leased_shard(&row));
             match self
                 .meta

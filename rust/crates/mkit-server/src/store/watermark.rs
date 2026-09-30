@@ -454,6 +454,8 @@ mod tests {
     }
     fn lease(watermark: u64, expiry: u64) -> codec::LeasedShard {
         codec::LeasedShard {
+            authority_generation: None,
+            acked_authority_generation: None,
             epoch: 1,
             expires_at_ms: expiry,
             acked_epoch: 1,

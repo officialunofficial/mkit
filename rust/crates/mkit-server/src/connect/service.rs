@@ -32,7 +32,7 @@ use super::proto::mkit::transport::v1::{
     UploadPackResponse, UploadPartRequest, UploadPartResponse, UploadTicket,
 };
 use super::proto::mkit::transport::v1::{
-    GetGrantEpochRequest, GetGrantEpochResponse, IssueObjectUrlRequest, IssueObjectUrlResponse,
+    GetAuthorityGenerationRequest, GetAuthorityGenerationResponse, SetAuthorityGenerationRequest, SetAuthorityGenerationResponse, GetGrantEpochRequest, GetGrantEpochResponse, IssueObjectUrlRequest, IssueObjectUrlResponse,
     RepoVisibility, SetGrantEpochRequest, SetGrantEpochResponse, SetRepoVisibilityRequest,
     SetRepoVisibilityResponse,
 };
@@ -630,6 +630,46 @@ where
                 .await?;
             Response::ok(SetGrantEpochResponse {
                 epoch: Some(epoch),
+                ..Default::default()
+            })
+        })
+        .await
+    }
+
+    async fn get_authority_generation(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, GetAuthorityGenerationRequest>,
+    ) -> ServiceResult<GetAuthorityGenerationResponse> {
+        // Unsigned by design: no repository selector or auth headers are read.
+        let message = request.to_owned_message();
+        let pipe = self.pipe.arc();
+        send_wrap(async move {
+            let generation = pipe
+                .get_authority_generation(message.namespace.as_deref().unwrap_or_default())
+                .await?;
+            Response::ok(GetAuthorityGenerationResponse {
+                generation: Some(generation),
+                ..Default::default()
+            })
+        })
+        .await
+    }
+
+    async fn set_authority_generation(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, SetAuthorityGenerationRequest>,
+    ) -> ServiceResult<SetAuthorityGenerationResponse> {
+        // Unsigned forever: the deployment-authority statement is its sole authorization.
+        let message = request.to_owned_message();
+        let pipe = self.pipe.arc();
+        send_wrap(async move {
+            let generation = pipe
+                .set_authority_generation(message.signed_statement.as_deref().unwrap_or_default())
+                .await?;
+            Response::ok(SetAuthorityGenerationResponse {
+                generation: Some(generation),
                 ..Default::default()
             })
         })

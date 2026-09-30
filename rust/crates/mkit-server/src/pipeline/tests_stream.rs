@@ -126,6 +126,7 @@ fn ticket_token<H: HookSet>(
         .as_ref()
         .unwrap()
         .mint(&TicketClaims {
+            authority_generation: None,
             ticket_id,
             audience: AUDIENCE.into(),
             repository: REPO.into(),
@@ -386,6 +387,7 @@ fn ticketed_upload_failures_leave_no_marker() {
             .as_ref()
             .unwrap()
             .mint(&TicketClaims {
+                authority_generation: None,
                 ticket_id: [0x55; 32],
                 audience: audience.into(),
                 repository: repository.into(),

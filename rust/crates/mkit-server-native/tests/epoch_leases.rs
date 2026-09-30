@@ -1368,6 +1368,8 @@ async fn plant_delayed_relay_and_expired_lease(
     use mkit_server::timers::{lease_sweep::lease_reference, registry::kinds};
 
     let lease = codec::LeasedShard {
+        authority_generation: None,
+        acked_authority_generation: None,
         epoch: 1,
         expires_at_ms: 100,
         acked_epoch: 1,

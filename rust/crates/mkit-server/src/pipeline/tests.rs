@@ -113,6 +113,7 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
         expires_at_ms: T0 + 60_000,
     };
     let req = WriteRequest {
+        authority_generation: None,
         repo: &repo.name,
         kind: WriteKind::AdvanceRefs,
         refs: &refs,
@@ -127,6 +128,7 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
         }),
         lease: d34.then_some(lease::LeaseWrite {
             value: codec::EpochLease {
+                authority_generation: None,
                 epoch: 1,
                 expires_at_ms: ms(T0) + 30_000,
                 config_version: 1,
@@ -149,6 +151,7 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
             let mut pack_id = [0; 32];
             pack_id[0] = u8::try_from(i).unwrap() << 4;
             TicketV1 {
+                authority_generation: None,
                 repo: repo.name.clone(),
                 ref_name: HEAD.into(),
                 signer,
@@ -308,6 +311,7 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
         shards: &shards,
     };
     let req = WriteRequest {
+        authority_generation: None,
         repo: &repo.name,
         kind: WriteKind::UpdateRef,
         refs: &refs,
@@ -319,6 +323,7 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
         grant: None,
         lease: Some(lease::LeaseWrite {
             value: codec::EpochLease {
+                authority_generation: None,
                 epoch: 1,
                 expires_at_ms: ms(T0) + 30_000,
                 config_version: 1,
@@ -411,6 +416,7 @@ fn ticket_reservation_id_mismatch_is_corruption() {
     snap.insert(
         keys::ticket(&id),
         Some(codec::encode_ticket(&codec::TicketV1 {
+            authority_generation: None,
             repo: repo.name.clone(),
             ref_name: HEAD.into(),
             signer: [7; 32],
@@ -2409,6 +2415,7 @@ struct GrantEpochZero;
 impl Authorizer for GrantEpochZero {
     async fn authorize(&self, _: &Operation) -> Result<AuthzFacts, ServerError> {
         Ok(AuthzFacts {
+            authority_generation: None,
             grant: Some(crate::op::GrantRef {
                 id: [9; 32],
                 epoch: 0,
@@ -2569,6 +2576,7 @@ fn simple_index_batch(
     index: bool,
 ) -> Planned {
     let req = WriteRequest {
+        authority_generation: None,
         repo: &repo.name,
         kind: if refs.len() == 1 {
             WriteKind::UpdateRef
@@ -2729,6 +2737,7 @@ fn plan_cas_any_missing_match_on_snapshot() {
     for (condition, current, commits) in cases {
         let refs = [upd(HEAD, condition, C)];
         let req = WriteRequest {
+            authority_generation: None,
             repo: &name,
             kind: WriteKind::UpdateRef,
             refs: &refs,
@@ -2786,6 +2795,7 @@ fn plan_conflict_writes_only_the_replay_record() {
     let name = repo_name();
     let refs = [upd(PACKMAP, Match(A), C), upd(HEAD, Match(A), C)];
     let req = WriteRequest {
+        authority_generation: None,
         repo: &name,
         kind: WriteKind::AdvanceRefs,
         refs: &refs,
@@ -2858,6 +2868,7 @@ fn plan_quota_exhaustion_yields_no_batch() {
     let refs = [upd(HEAD, Any, C)];
     let charges = [charge(1)];
     let req = WriteRequest {
+        authority_generation: None,
         repo: &name,
         kind: WriteKind::UpdateRef,
         refs: &refs,
@@ -2913,6 +2924,7 @@ proptest! {
         let refs = if advance { &refs[..] } else { &refs[1..] };
         let charges: Vec<_> = quota.map(|_| charge(2)).into_iter().collect();
         let req = WriteRequest {
+            authority_generation: None,
             repo: &name,
             kind: if advance { WriteKind::AdvanceRefs } else { WriteKind::UpdateRef },
             refs,
@@ -3536,6 +3548,7 @@ fn plan_signed_conflict_still_charges_quota() {
     let refs = [upd(HEAD, Missing, C)];
     let charges = [charge(5)];
     let req = WriteRequest {
+        authority_generation: None,
         repo: &name,
         kind: WriteKind::UpdateRef,
         refs: &refs,
@@ -3596,6 +3609,7 @@ fn plan_prune_fits_the_batch_op_cap() {
         })
         .collect();
     let req = WriteRequest {
+        authority_generation: None,
         repo: &name,
         kind: WriteKind::AdvanceRefs,
         refs: &refs,
@@ -3649,6 +3663,7 @@ fn prune_sampling_is_deterministic_one_in_eight() {
     let name = repo_name();
     let refs = [upd(HEAD, Any, C)];
     let request = |replay: Option<ReplayGuard>| WriteRequest {
+        authority_generation: None,
         repo: &name,
         kind: WriteKind::UpdateRef,
         refs: &refs,
@@ -3781,6 +3796,7 @@ struct Granting;
 impl Authorizer for Granting {
     async fn authorize(&self, _: &Operation) -> Result<AuthzFacts, ServerError> {
         Ok(AuthzFacts {
+            authority_generation: None,
             owner: true,
             grant: Some(crate::op::GrantRef {
                 id: [9; 32],
@@ -4089,6 +4105,7 @@ fn prune_race_then_push(kv: MemoryKv, pushed: codec::EpochLease) -> Spy {
 fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
     let clock = clock();
     let pushed = codec::EpochLease {
+        authority_generation: None,
         epoch: 1,
         expires_at_ms: ms(T0) + 30_000,
         config_version: 1,
@@ -4104,7 +4121,11 @@ fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
     config.sharding = Sharding::D34;
     let env = build(config, meta, Hooks::new(), clock);
     let p = D34Shards.ref_shard(&repo(), HEAD);
-    let old = codec::EpochLease { epoch: 0, ..pushed };
+    let old = codec::EpochLease {
+        authority_generation: None,
+        epoch: 0,
+        ..pushed
+    };
     assert_eq!(
         now(env.pipe.meta.inner.apply(
             &p,
@@ -4123,6 +4144,7 @@ fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
         limits: DEFAULT_WRITE_QUOTA,
     }];
     let req = WriteRequest {
+        authority_generation: None,
         repo: &repo_name(),
         kind: WriteKind::UpdateRef,
         refs: &refs,
@@ -4232,6 +4254,7 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
     let name = repo_name();
     let refs = [upd(HEAD, Any, A)];
     let stored = codec::EpochLease {
+        authority_generation: None,
         epoch: 6,
         expires_at_ms: ms(T0) + 30_000,
         config_version: 1,
@@ -4241,6 +4264,7 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
         (ms(T0) + 7_000, ms(T0) + 2_000),
     ] {
         let req = WriteRequest {
+            authority_generation: None,
             repo: &name,
             kind: WriteKind::UpdateRef,
             refs: &refs,
@@ -4265,6 +4289,7 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
             implicit: None,
             lease: Some(lease::LeaseWrite {
                 value: codec::EpochLease {
+                    authority_generation: None,
                     epoch: 7,
                     expires_at_ms,
                     ..stored

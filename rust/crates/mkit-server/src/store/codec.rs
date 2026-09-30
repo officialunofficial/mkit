@@ -89,6 +89,9 @@ pub struct EpochLease {
     pub expires_at_ms: u64,
     /// Namespace configuration version at grant, starting at 1.
     pub config_version: u64,
+    /// Independent authority generation; absent in legacy unfenced codecs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_generation: Option<u64>,
 }
 
 /// The coordinator's durable lease grant and installation acknowledgement.
@@ -107,6 +110,12 @@ pub struct LeasedShard {
     pub expires_at_ms: u64,
     /// Epoch whose installation in the shard has been acknowledged.
     pub acked_epoch: u64,
+    /// Authority generation granted alongside the epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_generation: Option<u64>,
+    /// Raised only after a committed push, or expiry of every older lease.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acked_authority_generation: Option<u64>,
     /// Greatest source relay lower bound observed for this shard.
     pub relay_watermark_ms: u64,
     /// Due time of the one sweep timer owned by this row.
@@ -140,6 +149,9 @@ pub struct BackupStateV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TicketV1 {
+    /// Authority generation authorized when this ticket was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_generation: Option<u64>,
     /// Repository name within the partition's namespace.
     #[serde(with = "repo_json")]
     pub repo: RepoName,
@@ -1284,6 +1296,7 @@ mod tests {
 
     fn ticket_fixture() -> TicketV1 {
         TicketV1 {
+            authority_generation: None,
             repo: RepoName::new("a").unwrap(),
             ref_name: "refs/heads/main".into(),
             signer: [0x11; 32],
@@ -1883,11 +1896,14 @@ mod tests {
     #[test]
     fn lease_codecs_roundtrip_and_golden_bytes() {
         let epoch = EpochLease {
+            authority_generation: None,
             epoch: 7,
             expires_at_ms: 30000,
             config_version: 2,
         };
         let shard = LeasedShard {
+            authority_generation: None,
+            acked_authority_generation: None,
             epoch: 7,
             expires_at_ms: 30000,
             acked_epoch: 6,

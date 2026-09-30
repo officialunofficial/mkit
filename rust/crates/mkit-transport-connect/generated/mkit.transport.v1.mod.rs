@@ -79,6 +79,10 @@ pub mod __buffa {
         reg.register_json_any(super::__CHALLENGE_JSON_ANY);
         reg.register_json_any(super::__PENDING_VERIFICATION_JSON_ANY);
         reg.register_json_any(super::__REDACTION_NOTICE_JSON_ANY);
+        reg.register_json_any(super::__GET_AUTHORITY_GENERATION_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__GET_AUTHORITY_GENERATION_RESPONSE_JSON_ANY);
+        reg.register_json_any(super::__SET_AUTHORITY_GENERATION_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__SET_AUTHORITY_GENERATION_RESPONSE_JSON_ANY);
     }
 }
 #[doc(inline)]
@@ -269,6 +273,22 @@ pub use self::__buffa::view::PendingVerificationOwnedView;
 pub use self::__buffa::view::RedactionNoticeView;
 #[doc(inline)]
 pub use self::__buffa::view::RedactionNoticeOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::GetAuthorityGenerationRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::GetAuthorityGenerationRequestOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::GetAuthorityGenerationResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::GetAuthorityGenerationResponseOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::SetAuthorityGenerationRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::SetAuthorityGenerationRequestOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::SetAuthorityGenerationResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::SetAuthorityGenerationResponseOwnedView;
 #[doc(inline)]
 pub use self::__buffa::register_types;
 include!("mkit.transport.v1.transport.__connect.rs");

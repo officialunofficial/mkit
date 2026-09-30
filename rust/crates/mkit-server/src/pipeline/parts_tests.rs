@@ -161,6 +161,7 @@ fn claims(blobs: &MemoryBlobStore, data: &[u8], signer: &SigningKey) -> TicketCl
         block_on(blobs.begin_multipart(BlobKey::pack(pack_id), data.len() as u64, MIN_PART_SIZE))
             .unwrap();
     TicketClaims {
+        authority_generation: None,
         ticket_id: [0x11; 32],
         audience: AUDIENCE.into(),
         repository: REPO.into(),

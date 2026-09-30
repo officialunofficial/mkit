@@ -212,6 +212,7 @@ mod tests {
 
     fn ticket(n: usize, expiry: u64, session: Option<Vec<u8>>) -> TicketV1 {
         TicketV1 {
+            authority_generation: None,
             repo: RepoName::new("repo").unwrap(),
             ref_name: format!("refs/heads/branch-{n}"),
             signer: [1; 32],

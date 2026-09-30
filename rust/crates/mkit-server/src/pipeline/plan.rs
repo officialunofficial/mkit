@@ -148,6 +148,8 @@ pub(crate) struct WriteRequest<'a> {
     pub(crate) namespace_charge: Option<NamespaceCharge>,
     /// The grant the write was authorized under (M2).
     pub(crate) grant: Option<GrantRef>,
+    /// Trusted Authority generation at authorization, unchanged on retries.
+    pub(crate) authority_generation: Option<u64>,
     /// D34 leased epoch and optional installation, guarded by the observed el.
     pub(crate) lease: Option<super::lease::LeaseWrite>,
     /// Whether to guard the layout version key: false on stores that
@@ -200,6 +202,9 @@ impl WriteRequest<'_> {
             out.push(keys::epoch_lease());
         } else if self.grant.is_some() {
             out.push(keys::grant_epoch());
+        }
+        if self.authority_generation.is_some() && self.lease.is_none() {
+            out.push(keys::authority_generation());
         }
         out.extend(self.charges.iter().map(|c| keys::quota(&c.scope)));
         if let Some(charge) = self.namespace_charge {
@@ -429,6 +434,26 @@ pub(crate) fn plan_write(
         }
         None => None,
     };
+    if let Some(generation) = req.authority_generation {
+        let current = if let Some(lease) = req.lease {
+            lease
+                .value
+                .authority_generation
+                .ok_or_else(|| ServerError::unavailable("lease missing authority generation"))?
+        } else {
+            snap.get(&keys::authority_generation())
+                .map(codec::decode_u64)
+                .transpose()
+                .map_err(corrupt)?
+                .unwrap_or(0)
+        };
+        if current != generation {
+            return Err(crate::authority::moved());
+        }
+        if req.lease.is_none() {
+            pre.push(guard(keys::authority_generation(), snap));
+        }
+    }
     if req.layout_version {
         let key = keys::layout_version();
         match snap.get(&key).map(codec::decode_u32).transpose() {

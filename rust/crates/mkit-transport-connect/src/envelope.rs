@@ -114,7 +114,9 @@ fn procedure_auth(procedure: &str) -> Option<ProcedureAuth> {
         "UploadPack" => ProcedureAuth::Commitment("pack:"),
         "UploadPart" => ProcedureAuth::Commitment("part:"),
         "GetServerInfo" => ProcedureAuth::Unsigned { repository: true },
-        "GetGrantEpoch" | "SetGrantEpoch" => ProcedureAuth::Unsigned { repository: false },
+        "GetGrantEpoch" | "SetGrantEpoch" | "GetAuthorityGeneration" | "SetAuthorityGeneration" => {
+            ProcedureAuth::Unsigned { repository: false }
+        }
         _ => return None,
     })
 }
@@ -712,9 +714,10 @@ mod tests {
                     "UploadPack" => ProcedureAuth::Commitment("pack:"),
                     "UploadPart" => ProcedureAuth::Commitment("part:"),
                     "GetServerInfo" => ProcedureAuth::Unsigned { repository: true },
-                    "GetGrantEpoch" | "SetGrantEpoch" => {
-                        ProcedureAuth::Unsigned { repository: false }
-                    }
+                    "GetGrantEpoch"
+                    | "SetGrantEpoch"
+                    | "GetAuthorityGeneration"
+                    | "SetAuthorityGeneration" => ProcedureAuth::Unsigned { repository: false },
                     _ => panic!("new generated procedure requires classification: {procedure}"),
                 };
                 assert_eq!(procedure_auth(procedure), Some(expected), "{procedure}");

@@ -52,6 +52,8 @@ fn multipart_error(op: StorageOp, err: StoreError) -> ServerError {
 pub struct PartUploadSession<'p, B: MultipartBlobStore, N, H> {
     pipe: &'p Pipeline<B, N, H>,
     ticket: [u8; 32],
+    namespace: crate::repo::NamespaceKey,
+    generation: Option<u64>,
     index: u32,
     subtree: [u8; 32],
     len: u64,
@@ -90,6 +92,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
     }
 
     async fn push_inner(&mut self, chunk: Bytes) -> Result<(), ServerError> {
+        self.pipe.check_ticket_generation(&self.namespace, self.generation).await?;
         if chunk.is_empty() {
             return Err(ServerError::invalid_argument("empty upload part chunk"));
         }
@@ -136,6 +139,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
     }
 
     async fn finish_inner(&mut self) -> Result<Vec<u8>, ServerError> {
+        self.pipe.check_ticket_generation(&self.namespace, self.generation).await?;
         let sink = self
             .sink
             .take()
@@ -181,7 +185,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         self.outcome(a).record(Err(err));
     }
 
-    fn part_ticket(
+    async fn part_ticket(
         &self,
         a: &Authenticated,
         expected: Procedure,
@@ -209,14 +213,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .auth
             .as_ref()
             .ok_or_else(|| ServerError::unauthenticated("missing auth v2 authorization"))?;
-        verify_ticket(
+        let claims = verify_ticket(
             keys,
             token,
             ms(self.clock.now_ms().saturating_add(a.business_skew_ms)),
             cfg.audience(),
             &a.repo().identity,
             &auth.signer,
-        )
+        )?;
+        self.check_ticket_generation(&a.repo().repo.namespace, claims.authority_generation).await?;
+        Ok(claims)
     }
 
     /// Validate a part header and ticket before opening any part sink.
@@ -232,7 +238,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     ) -> Result<PartUploadSession<'_, B, N, H>, ServerError> {
         let mut outcome = self.outcome(a);
         let opened = async {
-            let claims = self.part_ticket(a, Procedure::UploadPart, token)?;
+            let claims = self.part_ticket(a, Procedure::UploadPart, token).await?;
             let Some(auth) = &a.auth else {
                 return Err(ServerError::unauthenticated(
                     "missing auth v2 authorization",
@@ -268,12 +274,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .begin_part(key, &claims.upload_session, &plan, index, subtree)
                 .await
                 .map_err(|e| multipart_error(StorageOp::MultipartPart, e))?;
-            Ok((ticket, subtree, len, sink))
+            Ok((ticket, subtree, len, sink, claims.authority_generation))
         }
         .await;
         match opened {
-            Ok((ticket, subtree, len, sink)) => Ok(PartUploadSession {
+            Ok((ticket, subtree, len, sink, generation)) => Ok(PartUploadSession {
                 pipe: self,
+                namespace: a.repo().repo.namespace.clone(),
+                generation,
                 ticket,
                 index,
                 subtree,
@@ -302,7 +310,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         receipts: &[Vec<u8>],
     ) -> Result<(), ServerError> {
         self.observe(a, async {
-            let claims = self.part_ticket(a, Procedure::CompleteUpload, token)?;
+            let claims = self.part_ticket(a, Procedure::CompleteUpload, token).await?;
             let plan = PartPlan::new(claims.bytes, claims.part_size, self.cfg.max_parts)
                 .map_err(part_error)?;
             if u32::try_from(receipts.len()) != Ok(plan.count()) {

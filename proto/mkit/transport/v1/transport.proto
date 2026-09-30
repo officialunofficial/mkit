@@ -166,6 +166,9 @@ service TransportService {
   // Namespace grant epoch RPCs (SPEC-WRITE-GRANTS §5.3).
   rpc GetGrantEpoch(GetGrantEpochRequest) returns (GetGrantEpochResponse);
   rpc SetGrantEpoch(SetGrantEpochRequest) returns (SetGrantEpochResponse);
+  // Outside auth-v2; the setter verifies a deployment-authority statement.
+  rpc GetAuthorityGeneration(GetAuthorityGenerationRequest) returns (GetAuthorityGenerationResponse);
+  rpc SetAuthorityGeneration(SetAuthorityGenerationRequest) returns (SetAuthorityGenerationResponse);
 
   // Repository visibility and URL tokens (SPEC-WRITE-GRANTS §9.1, §9.4).
   rpc SetRepoVisibility(SetRepoVisibilityRequest) returns (SetRepoVisibilityResponse);
@@ -528,4 +531,19 @@ message PendingVerification {
 // The sole field is the exact DSSE JSON envelope (SPEC-SERVER §14.6).
 message RedactionNotice {
   bytes envelope = 1;
+}
+
+// Optional namespace authority fence; SPEC-SERVER §6.2.1.
+message GetAuthorityGenerationRequest {
+  string namespace = 1;
+}
+message GetAuthorityGenerationResponse {
+  uint64 generation = 1;
+}
+// Bounded, canonical deployment-authority statement; never an owner fallback.
+message SetAuthorityGenerationRequest {
+  string signed_statement = 1;
+}
+message SetAuthorityGenerationResponse {
+  uint64 generation = 1;
 }

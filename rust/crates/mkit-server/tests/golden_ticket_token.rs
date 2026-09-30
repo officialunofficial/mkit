@@ -16,6 +16,7 @@ const SECRET: [u8; 32] = [7; 32];
 
 fn claims() -> TicketClaims {
     TicketClaims {
+        authority_generation: None,
         ticket_id: [0x11; 32],
         audience: "https://api.example.test".into(),
         repository: format!("ed25519-{}/demo", "22".repeat(32)),

@@ -170,6 +170,7 @@ fn mint_token(
     ticket_id: [u8; 32],
 ) -> Vec<u8> {
     keys.mint(&TicketClaims {
+        authority_generation: None,
         ticket_id,
         audience: AUDIENCE.into(),
         repository: repository.into(),

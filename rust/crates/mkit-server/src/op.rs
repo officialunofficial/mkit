@@ -424,6 +424,8 @@ pub struct AuthzFacts {
     /// The caller's view; `Writer` is honoured only when the
     /// authorizer's role is `Authority`.
     pub caller_view: CallerView,
+    /// Generation of a trusted Authority allowance; preserved through retries.
+    pub authority_generation: Option<u64>,
 }
 
 /// Namespace and repository creation facts for a write.
@@ -524,7 +526,7 @@ mod tests {
 
     /// `TransportService` RPCs that deliberately stay outside `Procedure`:
     /// unauthenticated forever (SPEC-WRITE-GRANTS §5.3, §9.2; STC §2.1).
-    const EXEMPT: [&str; 3] = ["GetServerInfo", "GetGrantEpoch", "SetGrantEpoch"];
+    const EXEMPT: [&str; 5] = ["GetServerInfo", "GetGrantEpoch", "SetGrantEpoch", "GetAuthorityGeneration", "SetAuthorityGeneration"];
 
     #[test]
     fn every_transport_rpc_is_classified_or_exempt() {

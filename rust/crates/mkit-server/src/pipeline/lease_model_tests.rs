@@ -96,6 +96,8 @@ impl Model {
             self.epoch
         };
         let row = LeasedShard {
+            authority_generation: None,
+            acked_authority_generation: None,
             epoch: self.epoch,
             expires_at_ms,
             acked_epoch,
@@ -172,6 +174,8 @@ impl Model {
             && push.row.acked_epoch < push.target
         {
             self.rows[push.shard] = Some(LeasedShard {
+                authority_generation: None,
+                acked_authority_generation: None,
                 acked_epoch: push.target,
                 ..push.row
             });

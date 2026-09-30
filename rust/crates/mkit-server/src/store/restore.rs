@@ -577,6 +577,8 @@ async fn seed_relay_leases<S: NamespaceStore>(
             .transpose()?
             .unwrap_or(0);
         let row = codec::LeasedShard {
+            authority_generation: None,
+            acked_authority_generation: None,
             epoch,
             expires_at_ms: recovered_at_ms,
             acked_epoch: epoch,
@@ -729,6 +731,7 @@ mod tests {
 
     fn old_lease() -> Value {
         codec::encode_epoch_lease(&codec::EpochLease {
+            authority_generation: None,
             epoch: 7,
             expires_at_ms: 999_999,
             config_version: 1,
@@ -976,6 +979,8 @@ mod tests {
                 (
                     keys::leased_shard(&RepoName::new("other").unwrap(), "refs/heads/main"),
                     codec::encode_leased_shard(&codec::LeasedShard {
+                        authority_generation: None,
+                        acked_authority_generation: None,
                         epoch: 7,
                         expires_at_ms: 999_999,
                         acked_epoch: 7,

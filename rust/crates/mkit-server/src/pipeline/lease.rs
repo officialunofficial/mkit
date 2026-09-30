@@ -37,6 +37,8 @@ pub(super) struct CoordinatorLease {
     namespace: Option<Value>,
     repo: Option<Value>,
     epoch: Option<Value>,
+    authority: Option<Value>,
+    authority_generation: Option<u64>,
     leased_epoch: u64,
     shard: Option<Value>,
     observed_el: Option<codec::EpochLease>,
@@ -149,6 +151,12 @@ fn grant_batch(
         expires_at_ms: old
             .map_or(0, |l| l.expires_at_ms)
             .max(now.saturating_add(cfg.epoch_lease_ms)),
+        authority_generation: read.authority_generation,
+        acked_authority_generation: if old.is_some_and(|l| l.expires_at_ms > now) {
+            old.and_then(|l| l.acked_authority_generation)
+        } else {
+            read.authority_generation
+        },
         acked_epoch: old
             .filter(|l| l.expires_at_ms > now)
             .map_or(epoch, |l| l.acked_epoch),
@@ -182,6 +190,12 @@ fn grant_batch(
         })
         .require(observed_guard(keys::grant_epoch(), read.epoch.as_ref()))
         .require(observed_guard(ls_key.clone(), read.shard.as_ref()));
+    if cfg.authority_fence.is_some() {
+        batch = batch.require(observed_guard(
+            keys::authority_generation(),
+            read.authority.as_ref(),
+        ));
+    }
     if creation.namespace {
         batch = batch.put(nr_key, codec::encode_namespace_record(&namespace));
     }
@@ -206,6 +220,7 @@ fn grant_batch(
         );
     let value = codec::EpochLease {
         epoch,
+        authority_generation: read.authority_generation,
         expires_at_ms: shard.expires_at_ms,
         config_version: namespace.config_version,
     };
@@ -233,7 +248,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .map(codec::decode_epoch_lease)
             .transpose()
             .map_err(meta_error)?;
-        if let Some(lease) = observed_el {
+        if let Some(lease) = observed_el.filter(|lease| {
+            self.cfg.authority_fence.is_none() || lease.authority_generation.is_some()
+        }) {
             let now = ms(self.clock.now_ms());
             let usable_until = lease.expires_at_ms.checked_sub(self.cfg.lease_margin_ms);
             if usable_until
@@ -261,6 +278,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             keys::grant_epoch(),
             keys::leased_shard(&op.repo.name, shard_ref(p)?),
             keys::lease_recovery(),
+            keys::authority_generation(),
         ];
         if let Some(window) = seed_window {
             wanted.push(keys::quota_total(window));
@@ -281,12 +299,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if rows.len() != wanted.len() {
             return Err(internal("lease get_many returned the wrong row count"));
         }
-        let [namespace, repo, epoch, shard, recovery] = &rows[..5] else {
+        let [namespace, repo, epoch, shard, recovery, authority] = &rows[..6] else {
             return Err(internal("lease get_many returned the wrong row count"));
         };
         let quota_seed = seed_window
             .map(|window| {
-                rows[5]
+                rows[6]
                     .as_ref()
                     .map(codec::decode_namespace_usage)
                     .transpose()
@@ -310,6 +328,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             namespace: namespace.clone(),
             repo: repo.clone(),
             epoch: epoch.clone(),
+            authority: authority.clone(),
+            authority_generation: if self.cfg.authority_fence.is_some() {
+                Some(
+                    authority
+                        .as_ref()
+                        .map(codec::decode_u64)
+                        .transpose()
+                        .map_err(meta_error)?
+                        .unwrap_or(0),
+                )
+            } else {
+                None
+            },
             leased_epoch: epoch
                 .as_ref()
                 .map(codec::decode_u64)
@@ -357,6 +388,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .is_some_and(|grant| grant.epoch != read.leased_epoch)
             {
                 return Err(super::plan::epoch_moved());
+            }
+            if let Some(generation) = op.authz.authority_generation
+                && Some(generation) != read.authority_generation
+            {
+                return Err(crate::authority::moved());
             }
             let now = ms(self.clock.now_ms());
             let created_at_ms = ms(self.clock.now_ms().saturating_add(skew_ms));

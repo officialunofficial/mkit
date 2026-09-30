@@ -2,6 +2,7 @@ use super::*;
 
 fn claims() -> TicketClaims {
     TicketClaims {
+        authority_generation: None,
         ticket_id: [0x11; 32],
         audience: "https://api.example.test".into(),
         repository: "ed25519-test/demo".into(),

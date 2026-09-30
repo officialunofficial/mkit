@@ -26,6 +26,7 @@ async fn single_and_ref_shard_expiry_timers_fire() {
         let rid = "s:1111111111111111111111111111111111111111111111111111111111111111";
         let id = tickets::ticket_id(rid);
         let ticket = codec::TicketV1 {
+            authority_generation: None,
             repo: repo.clone(),
             ref_name: ref_name.clone(),
             signer: [1; 32],

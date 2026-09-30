@@ -178,6 +178,7 @@ fn granted_op(kind: OpKind, nonce: &str) -> Operation {
         kind,
     );
     op.authz = AuthzFacts {
+        authority_generation: None,
         grant: Some(GrantRef {
             id: [0x44; 32],
             epoch: 7,
