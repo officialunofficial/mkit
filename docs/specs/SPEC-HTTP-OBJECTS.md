@@ -190,7 +190,42 @@ advances to writers. A signed reader-side binding is a later follow-up.
 
 Blob responses MUST carry raw content; ChunkedBlob responses MUST carry
 concatenated chunk content in manifest order, not the manifest. Both use
-`Content-Type: application/octet-stream`. Other object types MUST carry
+`Content-Type: application/octet-stream` on object-id routes. Successful
+ordinary ref-path file responses (200/206, including HEAD) MUST instead select
+Content-Type from the last decoded path segment's final extension, compared
+case-insensitively against this fixed allowlist. Content bytes MUST NOT be
+sniffed. This applies equally to public, private and URL-token requests.
+
+| Extension | Content-Type | Content-Disposition |
+|---|---|---|
+| png | image/png | inline |
+| jpg, jpeg | image/jpeg | inline |
+| gif | image/gif | inline |
+| webp | image/webp | inline |
+| avif | image/avif | inline |
+| txt | text/plain; charset=utf-8 | inline |
+| json | application/json | attachment |
+| pdf | application/pdf | inline |
+| Every other extension, or none | application/octet-stream | attachment |
+
+SVG, HTML, HTM, XHTML, XML, JS, MJS and CSS MUST NOT receive their real media
+types. Each such ref-path file response MUST carry Content-Disposition with
+both `filename="<ASCII fallback>"` and
+`filename*=UTF-8''<encoded last decoded segment>`. The extended filename MUST
+preserve the decoded segment's octets, including non-UTF-8 octets permitted by
+§2, without normalization or a second URL decode. Every octet outside RFC 5987
+`attr-char` MUST be percent-encoded. The ASCII fallback MUST retain only
+`[A-Za-z0-9._-]`, replacing every other octet with `_`, and MUST be capped at
+255 bytes. Header values are derived and fully percent-encoded outside
+`attr-char`, with a separately sanitized fallback; no raw request text is
+interpolated.
+
+These rules MUST NOT change object-id routes, proof representations, non-file
+objects, errors, 402 or 304 responses. The 304 header list in §5.3 is unchanged:
+Content-Type and Content-Disposition need not be repeated. Validators, bytes,
+ranges, caching, admission and token bindings are unchanged.
+
+Other object types MUST carry
 canonical object bytes with `Content-Type: application/vnd.mkit.object`.
 Pack-only Delta objects MUST NOT be served (SPEC-OBJECTS §1).
 
@@ -386,7 +421,8 @@ Preflight MUST use 204 without auth or payment and allow these values:
 
 [`rust/tests/golden/http-objects/`](../../rust/tests/golden/http-objects/)
 pins versioned JSON tables (`schema_version: 1`, `cases`) for URL parsing
-and response expectations, MKDP proof bodies, and MKDS accept/reject
+and response expectations (including `content-headers.json`, shared by native
+and local Worker wire tests), MKDP proof bodies, and MKDS accept/reject
 bodies with sidecars. In response rows, `expect.headers` is the required
 header subset and `absent_headers` lists forbidden headers. Header names
 compare case-insensitively, and an `absent_headers` entry ending in `*` forbids
@@ -422,6 +458,7 @@ separate work.
 
 | Version | Status | Changes |
 |---|---|---|
+| 1 | draft | WP-4.16b (R-201) adds an extension allowlist and encoded filenames to successful ordinary ref-path Blob/ChunkedBlob responses, including HEAD and 206; object-id, proof, non-file, 304 and error responses are unchanged. |
 | 1 | draft | WP-4.12 clarifies §4: the global content store decides no membership, reachability, or existence, but may supply the bytes of an id already resolved in this repository and held by it (SPEC-SERVER §9.6; R-163, R-169). |
 | 1 | draft | WP-4.14a clarifies that the boundary-aware builder reduces reads and memory, while complete preceding length proofs still impose an O(first chunk index) encoded-size cost and 416 on oversize. |
 | 1 | draft | Initial HTTP contract, selecting MKDP v2 or MKDS v1 without changing object bytes or protobuf. Fix round 1 clarifies bearer and paid caching, proof-cost ordering, admission input, reservation grace, token timing, 402/304 headers, redirects, route dispatch, and vectors. |

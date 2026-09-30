@@ -521,3 +521,42 @@ fn valid_private_url_tokens_and_proofs_cannot_expose_pending_content() {
     }
     assert!(proofs.0.lock().unwrap().is_empty());
 }
+
+#[test]
+fn private_ref_token_file_headers_do_not_change_binding_or_caching() {
+    let (fx, d, _, tokens) = setup();
+    let target = UrlTarget::Path {
+        reference: HEAD.into(),
+        path: "small.txt".into(),
+    };
+    let token = mint(&fx, &tokens, &target, 0);
+    let path = fx.ref_url("room", "main", "small.txt");
+    for method in ["GET", "HEAD"] {
+        let got = with_token(&fx, method, &path, &token, &[]);
+        assert_eq!(got.status, 200);
+        assert_eq!(
+            got.header("Content-Type"),
+            Some("text/plain; charset=utf-8")
+        );
+        assert_eq!(
+            got.header("Content-Disposition"),
+            Some("inline; filename=\"small.txt\"; filename*=UTF-8''small.txt")
+        );
+        assert_eq!(got.header("Cache-Control"), Some("private, no-cache"));
+        assert_eq!(
+            got.body,
+            if method == "HEAD" {
+                vec![]
+            } else {
+                d.small_bytes.clone()
+            }
+        );
+    }
+    assert_uniform_404(&with_token(
+        &fx,
+        "GET",
+        &fx.ref_url("room", "main", "big.bin"),
+        &token,
+        &[],
+    ));
+}

@@ -291,7 +291,7 @@ pub fn append(
                 crate::timers::registry::kinds::PUBLICATION_RECHECK.get(),
                 keys::advance(&repo.name, &name, advance.sequence).as_bytes(),
             ),
-            Value::default(),
+            crate::timers::publication_recheck::initial_value(),
         ));
     }
     let key = keys::publication(&repo.name, &name);

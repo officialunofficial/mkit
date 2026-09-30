@@ -2227,3 +2227,41 @@ runtime lifetime evidence is pending phase 2. Cold SQL timer-head enumeration
 and repeated-restart fairness remain an explicitly escalated audit finding;
 this invariant does not claim that unresolved work is bounded. The separate
 resumable publication recheck repair (#1245) is required before phase 2.
+
+## HTTP file headers never interpolate raw filenames
+
+**Always:** ordinary successful ref-path Blob/ChunkedBlob responses select media
+and disposition only from the fixed extension allowlist. Extended filenames
+are derived and fully percent-encoded outside RFC 5987 attr-char; the ASCII
+fallback retains only alphanumerics and `._-` and is capped at 255 bytes.
+
+**Because:** repository entry names may contain quotes, delimiters, control or
+non-UTF-8 bytes. Their bytes must never become header syntax or active media.
+
+**If violated:** a filename could inject response headers or enable active
+content under the serving origin.
+
+**Enforced by:** `http_objects/content_headers.rs`, success-only selection in
+`pipeline/http.rs`, common pipeline tests, and shared `content-headers.json`
+wire vectors on the native mount and local workerd probe (WP-4.16b, R-201).
+
+## Publication rechecks retain bounded progress
+
+**Always:** timer 12 persists its next unchecked or unsatisfied routed witness position in
+its existing row, bound to the full retained advance plus publication generation
+and deletion boundary. Each fire makes at most 128 routed witness calls and
+stops before the shared Worker alarm budget is exhausted. Checkpoints and
+completion guard the advance, publication state and original timer row together.
+Local mutable witnesses are re-read each fire. Missing witnesses, outstanding
+obligations, holds and hits never authorize completion.
+
+**Because:** a valid D34 packmap may require more routed witness reads than one
+alarm permits, and restarting every check can leave it permanently pending.
+
+**If violated:** publication stalls, or stale progress skips a dependency after
+an obligation or generation change.
+
+**Enforced by:** `timers/publication_recheck.rs`, Worker shared alarm registration,
+and the publication recheck regressions. No tag, timer kind, public protocol,
+packmap limit or whole-alarm budget changes. Pre-launch timer codecs are reset,
+not migrated (R-198 B1).
