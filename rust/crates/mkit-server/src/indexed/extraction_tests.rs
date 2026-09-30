@@ -1,6 +1,8 @@
 //! Scheduled extraction acceptance, using the same native verifier as the oracle.
 #[path = "extraction_count_tests.rs"]
 mod extraction_count_tests;
+#[path = "member_lookup_tests.rs"]
+mod member_lookup_tests;
 use super::*;
 use crate::indexed::budget::SliceBudget;
 use crate::indexed::job::SliceExtension;

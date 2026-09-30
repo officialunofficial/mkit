@@ -3,11 +3,10 @@
 use super::super::checkpoint::{ExtractionSource, ExtractionV1};
 use super::super::selection::Projection;
 use super::{
-    BTreeSet, Batch, BatchOutcome, BlobStore, Cursor, FrameRow, Hash, Key, MemberCache,
-    NamespaceStore, Object, Outcome, PackWindows, Partition, Phase, Precondition, Run,
-    SliceExtension, SliceState, Stop, StoreError, Value, VerificationV1, VerifyJobV1, Write,
-    checkpoint, codec, decode_frame, hash, keys, now_ms, relay_delivered_through, renew_for_relay,
-    resolve, state, unavailable,
+    Batch, BatchOutcome, BlobStore, Cursor, FrameRow, Hash, Key, NamespaceStore, Object, Outcome,
+    PackWindows, Partition, Phase, Precondition, Run, SliceExtension, SliceState, Stop, StoreError,
+    Value, VerificationV1, VerifyJobV1, Write, checkpoint, codec, decode_frame, hash, keys, now_ms,
+    relay_delivered_through, renew_for_relay, resolve, state, unavailable,
 };
 use crate::store::{
     BlobKey, BorrowedStore, ContentIndex, HoldOutcome, Holder, PackSink, PartRef, PendingHolderV1,
@@ -16,6 +15,8 @@ use crate::store::{
 use bytes::Bytes;
 use mkit_core::object::ObjectType;
 use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan, merge_to_root, part_subtree_cv};
+
+mod member;
 
 const FRAGMENT: u64 = 128 << 10;
 const PART: u64 = MIN_PART_SIZE;
@@ -43,6 +44,9 @@ fn unfrozen(x: &ExtractionV1) -> bool {
 
 fn corrupt() -> Stop {
     Stop::Store(StoreError::Corrupt("bad extraction checkpoint".into()))
+}
+fn check(valid: bool) -> Result<(), Stop> {
+    valid.then_some(()).ok_or_else(corrupt)
 }
 fn number(value: &Value) -> Result<u64, Stop> {
     Ok(codec::decode_u64(value)?)
@@ -83,6 +87,12 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
     }
     async fn has(&self, key: &Key) -> Result<bool, Stop> {
         Ok(self.local.has(self.source, key).await?)
+    }
+    async fn require(&self, key: &Key) -> Result<Value, Stop> {
+        self.get(key).await?.ok_or_else(corrupt)
+    }
+    fn source_row(&self, pack: &Hash, kind: u8, object: &Hash) -> Key {
+        keys::verify_row(&self.repo.name, pack, kind, Some(object))
     }
     fn aux(&self, x: &ExtractionV1, label: &[u8], object: &Hash, index: u32) -> Key {
         self.row(
@@ -271,32 +281,18 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         frame: &FrameRow,
         marking: Option<(&SliceState, &ExtractionV1)>,
     ) -> Result<Projection, Stop> {
-        let key = keys::verify_row(
-            &self.repo.name,
-            &source.member.pack,
-            keys::VC_CANDIDATE,
-            Some(&id),
-        );
-        let raw = self.get(&key).await?.ok_or_else(corrupt)?;
+        let key = self.source_row(&source.member.pack, keys::VC_CANDIDATE, &id);
+        let raw = self.require(&key).await?;
         let p = Projection::decode(&id, &raw)?;
         p.validate_frame(frame, source.member.bytes, source.decoded)?;
         let mut digest = Projection::reference_hasher(&id, p.kind);
         for start in (0..p.pages()).step_by(8) {
             let end = (start + 8).min(p.pages());
             let keys: Vec<_> = (start..end)
-                .map(|i| {
-                    keys::verify_row(
-                        &self.repo.name,
-                        &source.member.pack,
-                        keys::VC_CANDIDATE,
-                        Some(&p.page_id(i)),
-                    )
-                })
+                .map(|i| self.source_row(&source.member.pack, keys::VC_CANDIDATE, &p.page_id(i)))
                 .collect();
             let values = self.local.get_many(self.source, &keys).await?;
-            if values.len() != keys.len() {
-                return Err(corrupt());
-            }
+            check(values.len() == keys.len())?;
             for (i, raw) in (start..end).zip(values) {
                 let mut writes = Vec::new();
                 for id in p.decode_page(i, &raw.ok_or_else(corrupt)?)? {
@@ -315,9 +311,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
                 }
             }
         }
-        if digest.finalize() != p.digest {
-            return Err(corrupt());
-        }
+        check(digest.finalize() == p.digest)?;
         Ok(p)
     }
     async fn scan_group(&self, st: &mut SliceState, x: &mut ExtractionV1) -> Result<(), Stop> {
@@ -369,7 +363,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
     /// Validate all owed children against the staged union, then recheck the
     /// member packs that satisfied children or delta bases during decode.
     /// Neither this pass nor the union scan performs extraction effects.
-    async fn closure_rows(&self, x: &mut ExtractionV1) -> Result<(), Stop> {
+    async fn closure_rows(&self, st: &mut SliceState, x: &mut ExtractionV1) -> Result<(), Stop> {
         if x.member == x.sources.len() {
             x.member = 0;
             x.scan.clear();
@@ -405,9 +399,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
                     &[id],
                 )
                 .await?;
-                if found.len() != 1 {
-                    return Err(corrupt());
-                }
+                check(found.len() == 1)?;
                 !found[0]
             } else if self
                 .local
@@ -416,20 +408,19 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
             {
                 false
             } else {
-                let found = resolve::locate_split(
-                    self.remote,
-                    self.h.shards.as_ref(),
-                    &self.repo,
-                    &[id],
-                    self.h.metrics.as_ref(),
-                )
-                .await
-                .map_err(|_| unavailable("closure lookup failed"))?;
-                match found.get(&id) {
-                    Some(Ok(Some(_))) => false,
-                    Some(Err(_)) => return Err(Stop::Outcome(Outcome::ClosureCapped)),
-                    _ => true,
-                }
+                let found =
+                    self.member_lookup(st, x, (id, id), None, 0)
+                        .await
+                        .map_err(|e| match e {
+                            Stop::Outcome(Outcome::BaseCapped) => {
+                                Stop::Outcome(Outcome::ClosureCapped)
+                            }
+                            other => other,
+                        })?;
+                let Some(found) = found else {
+                    return Ok(());
+                };
+                found.is_none()
             };
             if missing {
                 return Err(self.missing_closure(
@@ -496,9 +487,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
                 &[pack],
             )
             .await?;
-            if found.len() != 1 {
-                return Err(corrupt());
-            }
+            check(found.len() == 1)?;
             if !found[0] {
                 return Err(self.missing_closure(
                     source.member.created_at_ms,
@@ -513,25 +502,28 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         x.chunk = x.chunk.checked_add(1).ok_or_else(corrupt)?;
         Ok(())
     }
-    async fn closure_head(&self, x: &mut ExtractionV1, job: &mut VerifyJobV1) -> Result<(), Stop> {
+    async fn closure_head(
+        &self,
+        st: &mut SliceState,
+        x: &mut ExtractionV1,
+        job: &mut VerifyJobV1,
+    ) -> Result<(), Stop> {
         let head = job
             .extraction_head
             .ok_or(Stop::Outcome(Outcome::ExtractionUnavailable))?;
         let mut kind = None;
         for source in &x.sources {
-            let key = keys::verify_row(
-                &self.repo.name,
-                &source.member.pack,
-                keys::VC_FRAME,
-                Some(&head),
-            );
+            let key = self.source_row(&source.member.pack, keys::VC_FRAME, &head);
             if let Some(raw) = self.get(&key).await? {
                 kind = Some(decode_frame(&head, &raw)?.object_type);
                 break;
             }
         }
         if kind.is_none() {
-            let (object, bytes) = self.source_object(x, head).await?;
+            let (object, bytes) = self
+                .incremental_member(st, x, head)
+                .await?
+                .ok_or(Stop::Yield(1_000))?;
             if x.staged_bytes.saturating_add(bytes) > self.h.cfg.decode_budget {
                 return Err(Stop::Outcome(Outcome::DecodeBudget));
             }
@@ -613,7 +605,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         // this object, the next scan must not start over.
         x.scan = next.map_or_else(
             || {
-                keys::verify_row(&self.repo.name, &self.pack, keys::VC_FRAME, Some(&id))
+                self.source_row(&self.pack, keys::VC_FRAME, &id)
                     .into_bytes()
                     .to_vec()
             },
@@ -686,87 +678,19 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         }
         Ok(())
     }
-    /// Reconstruct canonical staged sources from the frozen local frames. The
-    /// disposable decoding state never writes or charges the source job again.
-    async fn source_object(&self, x: &ExtractionV1, id: Hash) -> Result<(Object, u64), Stop> {
-        for source in &x.sources {
-            let key = keys::verify_row(
-                &self.repo.name,
-                &source.member.pack,
-                keys::VC_FRAME,
-                Some(&id),
-            );
-            if self.has(&key).await? {
-                let raw = self
-                    .get(&keys::verify_job(&self.repo.name, &source.member.pack))
-                    .await?
-                    .ok_or_else(corrupt)?;
-                let mut job = checkpoint::decode_job(&raw)?;
-                job.in_pack_bytes = 0;
-                job.external_bytes = 0;
-                let run = Run {
-                    repo: self.repo.clone(),
-                    pack: source.member.pack,
-                    ..*self
-                };
-                let mut st = SliceState {
-                    entry_idx: u64::MAX,
-                    ..SliceState::default()
-                };
-                run.ensure_base(&mut st, &mut job, id, u64::MAX).await?;
-                let bytes = st.cache.map.get(&id).ok_or_else(corrupt)?;
-                let object = mkit_core::serialize::deserialize(bytes).map_err(|_| corrupt())?;
-                if object.id().map_err(|_| corrupt())? != id {
-                    return Err(corrupt());
-                }
-                return Ok((object, 0));
-            }
-        }
-        let found = resolve::locate_split(
-            self.remote,
-            self.h.shards.as_ref(),
-            &self.repo,
-            &[id],
-            self.h.metrics.as_ref(),
-        )
-        .await
-        .map_err(|_| unavailable("extraction source lookup failed"))?;
-        let location = match found.get(&id) {
-            Some(Ok(Some(found))) => *found,
-            Some(Err(_)) => return Err(Stop::Outcome(Outcome::BaseCapped)),
-            _ => {
-                return Err(self.missing_closure(
-                    x.sources
-                        .iter()
-                        .map(|s| s.member.created_at_ms)
-                        .min()
-                        .ok_or_else(corrupt)?,
-                    Outcome::ClosureMissing,
-                ));
-            }
-        };
-        let mut cache = MemberCache::default();
-        let (bytes, _) = resolve::member_object(
-            self.blobs,
-            self.remote,
-            self.h.shards.as_ref(),
-            &self.repo,
-            id,
-            location,
-            self.h.cfg.max_delta_chain_depth,
-            self.decode_limits().max_decoded_bytes,
-            &mut cache,
-            &mut BTreeSet::new(),
-            self.h.metrics.as_ref(),
-        )
-        .await
-        .map_err(|_| unavailable("extraction member unavailable"))?;
-        let object = mkit_core::serialize::deserialize(&bytes).map_err(|_| corrupt())?;
-        if object.id().map_err(|_| corrupt())? != id {
-            return Err(corrupt());
-        }
-        Ok((object, cache.retained_bytes()))
+    async fn selected_projection(
+        &self,
+        x: &ExtractionV1,
+        id: Hash,
+    ) -> Result<(Hash, Projection), Stop> {
+        let owner = number(&self.require(&self.aux(x, b"owner", &id, 0)).await?)?;
+        let pack = x.sources.get(size(owner)?).ok_or_else(corrupt)?.member.pack;
+        let key = self.source_row(&pack, keys::VC_CANDIDATE, &id);
+        let p = Projection::decode(&id, &self.require(&key).await?)?;
+        check(matches!(p.kind, 0 | 1) && p.size == x.length)?;
+        Ok((pack, p))
     }
+
     async fn charge_sources(
         &self,
         st: &mut SliceState,
@@ -795,25 +719,25 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         st.settled.push(Write::Put(key, codec::encode_u64(next)));
         Ok(())
     }
-    async fn fragment_bytes(&self, x: &ExtractionV1, id: Hash, len: u64) -> Result<Vec<u8>, Stop> {
-        if len > PART {
-            return Err(corrupt());
-        }
+    async fn fragment_bytes(
+        &self,
+        x: &ExtractionV1,
+        id: Hash,
+        label: &[u8],
+        len: u64,
+    ) -> Result<Vec<u8>, Stop> {
+        check(len <= PART)?;
         let mut bytes = Vec::with_capacity(size(len)?);
         let count = len.div_ceil(FRAGMENT);
         for start in (0..count).step_by(8) {
             let keys = (start..(start + 8).min(count))
-                .map(|i| Ok(self.aux(x, b"payload", &id, n32(i)?)))
+                .map(|i| Ok(self.aux(x, label, &id, n32(i)?)))
                 .collect::<Result<Vec<_>, Stop>>()?;
             let rows = self.local.get_many(self.source, &keys).await?;
-            if rows.len() != keys.len() {
-                return Err(corrupt());
-            }
+            check(rows.len() == keys.len())?;
             for row in rows {
                 let raw = row.ok_or_else(corrupt)?;
-                if raw.as_bytes().len() != size(FRAGMENT.min(len - bytes.len() as u64))? {
-                    return Err(corrupt());
-                }
+                check(raw.as_bytes().len() == size(FRAGMENT.min(len - bytes.len() as u64))?)?;
                 bytes.extend_from_slice(raw.as_bytes());
             }
         }
@@ -824,16 +748,17 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         st: &SliceState,
         x: &ExtractionV1,
         id: Hash,
+        label: &[u8],
+        start: u64,
         data: &[u8],
     ) -> Result<(), Stop> {
-        let start = x.written % PART;
         let mut at = start;
         let mut rest = data;
         let mut writes = Vec::new();
         while !rest.is_empty() {
             let slot = n32(at / FRAGMENT)?;
             let offset = (at % FRAGMENT) as usize;
-            let key = self.aux(x, b"payload", &id, slot);
+            let key = self.aux(x, label, &id, slot);
             let mut bytes = if offset == 0 {
                 Vec::new()
             } else {
@@ -866,23 +791,17 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
                 .map(|i| self.aux(x, label, &id, i))
                 .collect();
             let rows = self.local.get_many(self.source, &keys).await?;
-            if rows.len() != keys.len() {
-                return Err(corrupt());
-            }
+            check(rows.len() == keys.len())?;
             for row in rows {
                 let raw = row.ok_or_else(corrupt)?;
-                if raw.as_bytes().len() > if label == b"receipt" { 1089 } else { 32 } {
-                    return Err(corrupt());
-                }
+                check(raw.as_bytes().len() <= if label == b"receipt" { 1089 } else { 32 })?;
                 out.push(raw);
             }
         }
         Ok(out)
     }
     async fn cv_list(&self, x: &ExtractionV1, id: Hash) -> Result<Vec<Hash>, Stop> {
-        if x.cvs != plan(x.length)?.count() {
-            return Err(corrupt());
-        }
+        check(x.cvs == plan(x.length)?.count())?;
         self.bulk(x, id, b"cv", x.cvs)
             .await?
             .into_iter()
@@ -897,24 +816,15 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
     ) -> Result<(), Stop> {
         let id = x.object.ok_or_else(corrupt)?;
         self.protect(job, x).await?;
-        let (object, _) = self.source_object(x, id).await?;
-        let (chunk_id, count) = match &object {
-            Object::Blob(_) => (id, 1),
-            Object::ChunkedBlob(cb) => (
-                cb.chunks.get(x.chunk as usize).copied().unwrap_or(id),
-                n32(cb.chunks.len() as u64)?,
-            ),
-            _ => return Err(corrupt()),
-        };
-        if x.chunk > count {
-            return Err(corrupt());
-        }
+        let (pack, p) = self.selected_projection(x, id).await?;
+        let count = if p.kind == 0 { 1 } else { p.references };
+        check(x.chunk <= count)?;
         if x.chunk == count {
             if x.written != x.length {
                 return Err(Stop::Reject("object hash mismatch"));
             }
             if x.length <= PART {
-                let bytes = self.fragment_bytes(x, id, x.length).await?;
+                let bytes = self.fragment_bytes(x, id, b"payload", x.length).await?;
                 x.root = Some(hash(&bytes));
             } else {
                 x.root = Some(
@@ -929,20 +839,24 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
             };
             return Ok(());
         }
-        let (chunk, charged) = if chunk_id == id {
-            (object, 0)
+        let chunk_id = if p.kind == 0 {
+            id
         } else {
-            // The manifest's reference vector is no longer needed while the
-            // member decoder uses its reserved scratch regions.
-            drop(object);
-            self.source_object(x, chunk_id).await?
+            let page = x.chunk / 128;
+            let key = self.source_row(&pack, keys::VC_CANDIDATE, &p.page_id(page));
+            let raw = self.require(&key).await?;
+            p.decode_page(page, &raw)?
+                .nth((x.chunk % 128) as usize)
+                .ok_or_else(corrupt)?
         };
+        let (chunk, charged) = self
+            .incremental_member(st, x, chunk_id)
+            .await?
+            .ok_or(Stop::Yield(1_000))?;
         let Object::Blob(blob) = chunk else {
             return Err(Stop::Reject("object hash mismatch"));
         };
-        if x.chunk_offset > blob.data.len() as u64 {
-            return Err(corrupt());
-        }
+        check(x.chunk_offset <= blob.data.len() as u64)?;
         let remaining = PART - x.written % PART;
         let available = &blob.data[size(x.chunk_offset)?..];
         let take = size(remaining.min(available.len() as u64))?;
@@ -952,7 +866,8 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         {
             return Err(Stop::Reject("object hash mismatch"));
         }
-        self.append_fragment(st, x, id, &available[..take]).await?;
+        self.append_fragment(st, x, id, b"payload", x.written % PART, &available[..take])
+            .await?;
         if x.stage == PREFLIGHT && x.chunk_offset == 0 {
             self.charge_sources(st, x, charged).await?;
         }
@@ -986,7 +901,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
     ) -> Result<(), Stop> {
         let index = n32((x.written - 1) / PART)?;
         let len = plan(x.length)?.expected_len(index).map_err(|_| corrupt())?;
-        let bytes = self.fragment_bytes(x, id, len).await?;
+        let bytes = self.fragment_bytes(x, id, b"payload", len).await?;
         let cv = part_subtree_cv(&plan(x.length)?, index, &bytes).map_err(|_| corrupt())?;
         if x.stage == PREFLIGHT {
             self.auxiliary(
@@ -1003,9 +918,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
                 .get(&self.aux(x, b"cv", &id, index))
                 .await?
                 .ok_or_else(corrupt)?;
-            if expected.as_bytes() != cv {
-                return Err(corrupt());
-            }
+            check(expected.as_bytes() == cv)?;
             self.extraction_lease().await?;
             let tag = self
                 .h
@@ -1021,9 +934,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
                 )
                 .await?
                 .ok_or_else(|| unavailable("extraction callback unavailable"))?;
-            if tag.len() > 1089 {
-                return Err(corrupt());
-            }
+            check(tag.len() <= 1089)?;
             self.auxiliary(
                 st,
                 vec![Write::Put(
@@ -1054,9 +965,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
                 )
                 .await?
                 .ok_or_else(|| unavailable("extraction callback unavailable"))?;
-            if x.session.len() > 1024 {
-                return Err(corrupt());
-            }
+            check(x.session.len() <= 1024)?;
             x.chunk = 0;
             x.chunk_offset = 0;
             x.written = 0;
@@ -1087,14 +996,12 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         self.protect(job, x).await?;
         let id = x.object.ok_or_else(corrupt)?;
         if x.length <= PART {
-            let bytes = self.fragment_bytes(x, id, x.length).await?;
+            let bytes = self.fragment_bytes(x, id, b"payload", x.length).await?;
             self.put_small(BlobKey::object(id), bytes, x.root.ok_or_else(corrupt)?)
                 .await?;
         } else {
             let p = plan(x.length)?;
-            if x.uploaded != p.count() {
-                return Err(corrupt());
-            }
+            check(x.uploaded == p.count())?;
             let parts = self
                 .bulk(x, id, b"receipt", x.uploaded)
                 .await?
@@ -1124,21 +1031,22 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         x.stage = OFFSETS;
         Ok(())
     }
-    async fn offsets(&self, job: &VerifyJobV1, x: &mut ExtractionV1) -> Result<(), Stop> {
+    async fn offsets(
+        &self,
+        st: &mut SliceState,
+        job: &VerifyJobV1,
+        x: &mut ExtractionV1,
+    ) -> Result<(), Stop> {
         self.protect(job, x).await?;
         let id = x.object.ok_or_else(corrupt)?;
-        if let (Object::ChunkedBlob(cb), _) = self.source_object(x, id).await? {
-            let mut offsets = Vec::with_capacity(cb.chunks.len() + 1);
+        let (_, p) = self.selected_projection(x, id).await?;
+        if p.kind == 1 {
+            let mut offsets = Vec::with_capacity(p.references as usize + 1);
             offsets.push(0);
-            for value in self
-                .bulk(x, id, b"offset", n32(cb.chunks.len() as u64)?)
-                .await?
-            {
+            for value in self.bulk(x, id, b"offset", p.references).await? {
                 offsets.push(number(&value)?);
             }
-            if offsets.last() != Some(&cb.total_size) || offsets.windows(2).any(|w| w[0] > w[1]) {
-                return Err(corrupt());
-            }
+            check(offsets.last() == Some(&p.size) && offsets.windows(2).all(|w| w[0] <= w[1]))?;
             let bytes = super::super::extract::encode_offsets(&offsets);
             let root = hash(&bytes);
             self.put_small(BlobKey::object_offsets(id), bytes, root)
@@ -1227,22 +1135,23 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
                 return Ok(1_000);
             }
         }
-        match x.stage {
-            SCAN => self.scan_group(st, &mut x).await?,
-            CLOSURE | DEPENDENCIES => self.closure_rows(&mut x).await?,
-            MEMBERS => self.closure_members(&mut x).await?,
-            HEAD => self.closure_head(&mut x, job).await?,
-            SELECT => self.select_group(st, &mut x).await?,
-            CHOOSE => self.choose_object(&mut x, job).await?,
-            PREFLIGHT | UPLOAD => self.walk_source(st, job, &mut x).await?,
-            START => self.start_object(job, &mut x).await?,
-            COMPLETE => self.complete_object(job, &mut x).await?,
-            OFFSETS => self.offsets(job, &mut x).await?,
-            ENQUEUE => self.enqueue_holder(st, job, &mut x).await?,
-            DELIVERY => self.delivery(st, job, &mut x).await?,
+        let result = match x.stage {
+            SCAN => self.scan_group(st, &mut x).await,
+            CLOSURE | DEPENDENCIES => self.closure_rows(st, &mut x).await,
+            MEMBERS => self.closure_members(&mut x).await,
+            HEAD => self.closure_head(st, &mut x, job).await,
+            SELECT => self.select_group(st, &mut x).await,
+            CHOOSE => self.choose_object(&mut x, job).await,
+            PREFLIGHT | UPLOAD => self.walk_source(st, job, &mut x).await,
+            START => self.start_object(job, &mut x).await,
+            COMPLETE => self.complete_object(job, &mut x).await,
+            OFFSETS => self.offsets(st, job, &mut x).await,
+            ENQUEUE => self.enqueue_holder(st, job, &mut x).await,
+            DELIVERY => self.delivery(st, job, &mut x).await,
             _ => return Err(corrupt()),
-        }
+        };
         job.extraction = Some(x);
+        result?;
         Ok(1_000)
     }
 }

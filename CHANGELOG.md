@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server/Worker (default-off, WP-4.10b-2, R-186): complete consumed-group extraction
+  with closure before effects, native union counts, bounded job header/body guards,
+  resumable delta reconstruction and root-checked multipart uploads. Hold renewal
+  and durable holder delivery precede Verified; release activation waits for 4.18.
+
 - Server/Worker (inert, WP-4.10b-1, R-186): pending-holder protection and atomic
   content-holder relay delivery retain protection beyond hold expiry; late
   blocked holders leave durable takedown requests for WP-5.6a. Add bounded

@@ -251,6 +251,30 @@ pub struct ExtractionV1 {
     pub uploaded: u32,
     /// Atomic holder outbox sequence.
     pub relay: Option<u64>,
+    /// Resumable member reconstruction; ancestry and bytes remain in vc4.
+    pub reconstruction: Option<MemberCursor>,
+}
+
+/// One member resolution; only its immediate canonical parent remains live.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemberCursor {
+    /// Immutable source being resolved.
+    pub target: Hash,
+    /// Current descent frontier.
+    pub next: Hash,
+    /// Previous pack and offset for same-pack preference.
+    pub preferred: Option<(Hash, u64)>,
+    /// Stack row cursor.
+    pub level: u32,
+    /// Whether the current descent still follows a staged pack.
+    pub local: bool,
+    /// Decode the stored chain toward its requested source.
+    pub ascending: bool,
+    /// Immediate canonical parent (id, length, total depth).
+    pub canonical: Option<(Hash, u64, u32)>,
+    /// Native canonical byte cost, including discarded ancestors.
+    pub bytes: u64,
 }
 
 /// Identity of one verified source's selection facts.
@@ -357,6 +381,9 @@ fn validate_header(job: &VerifyJobV1, raw: &Value) -> Result<(), StoreError> {
                 && x.session.len() <= 1024
                 && x.cvs <= 10_000
                 && x.uploaded <= 10_000
+                && x.reconstruction
+                    .as_ref()
+                    .is_none_or(|r| r.canonical.is_none_or(|(_, n, _)| n <= 8 << 20))
                 && x.stage <= 13
                 && x.member <= x.sources.len()
                 && x.sources.len() <= crate::store::outbox::MAX_TICKETS_PER_ADVANCE

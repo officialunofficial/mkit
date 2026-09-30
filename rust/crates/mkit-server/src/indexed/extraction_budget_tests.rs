@@ -328,6 +328,7 @@ fn multipart_preflight_upload_and_completion_read_at_most_eight_raw_rows() {
 struct CountWindows {
     inner: Arc<Windows>,
     maximum: Arc<Mutex<u64>>,
+    calls: Option<Arc<AtomicU32>>,
 }
 
 impl PackWindows for CountWindows {
@@ -338,6 +339,9 @@ impl PackWindows for CountWindows {
         len: u64,
         etag: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Window, WindowError>> {
+        if let Some(calls) = &self.calls {
+            calls.fetch_add(1, Ordering::SeqCst);
+        }
         {
             let mut maximum = self.maximum.lock().unwrap();
             *maximum = (*maximum).max(len);
@@ -353,12 +357,15 @@ enum BadFrame {
     Depth,
 }
 
+#[allow(clippy::too_many_lines)] // One valid fixture isolates three faults at the same read boundary.
 fn corrupt_frame_is_rejected_before_ranged_read(damage: BadFrame) {
-    use crate::timers::{DueTimer, TimerCtx, TimerHandler};
+    use crate::timers::{DueTimer, Fired, TimerCtx, TimerHandler};
     let mut rig = Rig::new();
     rig.cfg.extract_min_bytes = 8 << 20;
     let chunk = Object::Blob(Blob { data: vec![181] });
     let chunk_id = chunk.id().unwrap();
+    let earlier_base = Object::Blob(Blob { data: vec![180] });
+    let earlier_base_id = earlier_base.id().unwrap();
     let manifest = Object::ChunkedBlob(ChunkedBlob {
         total_size: 1,
         chunk_size: 0,
@@ -368,7 +375,7 @@ fn corrupt_frame_is_rejected_before_ranged_read(damage: BadFrame) {
     let (tree, commit, head) = tree_head(&[object]);
     // The pack is larger than the entry/window allowance, while each current
     // producer's frame is individually valid and below the decoded limit.
-    let objects = [chunk, manifest, tree, commit]
+    let objects = [earlier_base, chunk, manifest, tree, commit]
         .into_iter()
         .chain((0..6_u8).map(|i| {
             Object::Blob(Blob {
@@ -400,12 +407,12 @@ fn corrupt_frame_is_rejected_before_ranged_read(damage: BadFrame) {
         &rig.repo.name,
         &ticket.pack_id,
         keys::VC_FRAME,
-        Some(&object),
+        Some(&chunk_id),
     );
     let prior = block_on(rig.store.get(&rig.source(), &key))
         .unwrap()
         .unwrap();
-    let mut frame = checkpoint::decode_frame(&object, &prior).unwrap();
+    let mut frame = checkpoint::decode_frame(&chunk_id, &prior).unwrap();
     let decoded_limit = rig
         .limits
         .resident_bytes
@@ -417,7 +424,7 @@ fn corrupt_frame_is_rejected_before_ranged_read(damage: BadFrame) {
         BadFrame::DecodedSize => frame.value.decoded_size = decoded_limit + 1,
         BadFrame::Depth => {
             frame.value.wire_type = 0x02;
-            frame.value.delta_base = Some(chunk_id);
+            frame.value.delta_base = Some(earlier_base_id);
             frame.value.chain_depth = rig.cfg.max_delta_chain_depth + 1;
         }
     }
@@ -425,7 +432,7 @@ fn corrupt_frame_is_rejected_before_ranged_read(damage: BadFrame) {
     assert_eq!(
         block_on(rig.store.apply(
             &rig.source(),
-            Batch::new().put(key, checkpoint::encode_frame(&object, &frame).unwrap())
+            Batch::new().put(key, checkpoint::encode_frame(&chunk_id, &frame).unwrap())
         ))
         .unwrap(),
         BatchOutcome::Committed
@@ -436,6 +443,7 @@ fn corrupt_frame_is_rejected_before_ranged_read(damage: BadFrame) {
         windows: CountWindows {
             inner: h.windows,
             maximum: maximum.clone(),
+            calls: None,
         },
         remote: h.remote,
         blobs: h.blobs,
@@ -447,20 +455,45 @@ fn corrupt_frame_is_rejected_before_ranged_read(damage: BadFrame) {
         metrics: h.metrics,
         extension: h.extension,
     };
-    let now = u64::try_from(rig.clock.now_ms()).unwrap();
-    let _fired = block_on(handler.fire(
-        &TimerCtx {
-            store: rig.store.as_ref(),
-            partition: &rig.source(),
-            now_ms: now,
-        },
-        &DueTimer {
-            due_at_ms: now,
-            kind: crate::timers::registry::kinds::VERIFY,
-            reference: Bytes::from(checkpoint::timer_reference(&rig.repo.name, &ticket.pack_id)),
-            value: Value::default(),
-        },
-    ));
+    let mut rejected = false;
+    for _ in 0..8 {
+        let now = u64::try_from(rig.clock.now_ms()).unwrap();
+        match block_on(handler.fire(
+            &TimerCtx {
+                store: rig.store.as_ref(),
+                partition: &rig.source(),
+                now_ms: now,
+            },
+            &DueTimer {
+                due_at_ms: now,
+                kind: crate::timers::registry::kinds::VERIFY,
+                reference: Bytes::from(checkpoint::timer_reference(
+                    &rig.repo.name,
+                    &ticket.pack_id,
+                )),
+                value: Value::default(),
+            },
+        )) {
+            Ok(Fired::Done(batch) | Fired::Reschedule { batch, .. }) => {
+                assert_eq!(
+                    block_on(rig.store.apply(&rig.source(), batch)).unwrap(),
+                    BatchOutcome::Committed
+                );
+                if let Some(outcome) = rig.job(&ticket.pack_id).unwrap().outcome {
+                    assert_eq!(outcome, checkpoint::Outcome::DecodeBudget);
+                    rejected = true;
+                    break;
+                }
+            }
+            Err(StoreError::Corrupt(_)) => {
+                rejected = true;
+                break;
+            }
+            other => panic!("invalid source metadata did not fail closed: {other:?}"),
+        }
+        rig.clock.advance(1_000);
+    }
+    assert!(rejected, "invalid frame metadata was never rejected");
     assert_eq!(
         *maximum.lock().unwrap(),
         0,
@@ -492,11 +525,11 @@ impl mkit_core::pack::DeltaBaseSource for OneBase {
     }
 }
 
-fn seed_fifty_cross_pack_member_deltas(rig: &Rig) -> Hash {
-    let (mut base, mut prior) = blob(0, 2_000);
+fn seed_fifty_cross_pack_member_deltas(rig: &Rig, payload_bytes: usize) -> Hash {
+    let (mut base, mut prior) = blob(0, payload_bytes);
     seed_member(rig, base, &prior);
     for depth in 1..=50_u16 {
-        let (id, raw) = blob(depth, 2_000);
+        let (id, raw) = blob(depth, payload_bytes);
         let bytes = thin(base, &prior, &raw);
         let (ticket, _) = rig.add(&bytes);
         let mut frames = Vec::new();
@@ -570,24 +603,82 @@ impl BlobStore for CountBlobCalls {
     }
 }
 
-#[test]
-#[allow(clippy::too_many_lines)] // Native oracle and counted alarm replay share one valid depth-50 fixture.
-fn a_valid_fifty_deep_member_chunk_finishes_under_the_default_alarm_budget() {
+type CountedExtraction =
+    VerifyTimer<Shared<CountReads>, CountBlobCalls, CountWindows, TestExtraction>;
+
+fn counted_extraction(rig: &Rig, calls: Arc<AtomicU32>, pack: Hash) -> CountedExtraction {
+    let h = extraction_handler(rig, TestExtraction::new(rig));
+    VerifyTimer {
+        remote: Shared(Arc::new(CountReads {
+            inner: rig.store.clone(),
+            job: keys::verify_job(&rig.repo.name, &pack),
+            maximum: Mutex::default(),
+            calls: calls.clone(),
+        })),
+        blobs: CountBlobCalls {
+            inner: rig.blobs.clone(),
+            calls: calls.clone(),
+        },
+        windows: CountWindows {
+            inner: h.windows,
+            maximum: Arc::default(),
+            calls: Some(calls),
+        },
+        shards: h.shards,
+        cfg: h.cfg,
+        limits: h.limits,
+        lease: h.lease,
+        clock: h.clock,
+        metrics: h.metrics,
+        extension: h.extension,
+    }
+}
+
+fn persisted_member_cursor(rig: &Rig, pack: Hash) -> serde_json::Value {
+    let raw = block_on(
+        rig.store
+            .get(&rig.source(), &keys::verify_job(&rig.repo.name, &pack)),
+    )
+    .unwrap()
+    .unwrap();
+    let header: serde_json::Value = serde_json::from_slice(&raw.as_bytes()[1..]).unwrap();
+    header
+        .get("extraction")
+        .and_then(|x| x.get("reconstruction"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null)
+}
+
+#[allow(clippy::too_many_lines)] // Native oracle, durable progress, restart and resource bounds share one valid fixture.
+fn fifty_deep_member_chunk(payload_bytes: usize, window_bytes: u64, quota_shortfall: bool) {
     use crate::timers::{DueTimer, Fired, TimerCtx, TimerHandler};
-    let native = Rig::new();
+    let mut native = Rig::new();
+    native.limits.window_bytes = window_bytes;
     assert_eq!(native.cfg.max_delta_chain_depth, 50);
-    let chunk = seed_fifty_cross_pack_member_deltas(&native);
+    let chunk = seed_fifty_cross_pack_member_deltas(&native, payload_bytes);
+    let length = u64::try_from(payload_bytes).unwrap() + 2;
     let manifest = Object::ChunkedBlob(ChunkedBlob {
         // The shared blob fixture prepends its two-byte distinguishing tag.
-        total_size: 2_002,
+        total_size: length,
         chunk_size: 0,
         chunks: vec![chunk],
     });
     let object = manifest.id().unwrap();
     let (tree, commit, head) = tree_head(&[object]);
-    let bytes = pack(&[manifest, tree, commit]);
+    let objects = [manifest, tree, commit];
+    let staged_bytes: u64 = objects
+        .iter()
+        .map(|o| u64::try_from(serialize(o).unwrap().len()).unwrap())
+        .sum();
+    let source_bytes: u64 = (0..=50)
+        .map(|n| u64::try_from(blob(n, payload_bytes).1.len()).unwrap())
+        .sum();
+    let bytes = pack(&objects);
+    native.cfg.max_pack_bytes = u64::try_from(payload_bytes).unwrap() + 1_000;
+    native.cfg.max_extract_bytes = Some(source_bytes);
+    native.cfg.decode_budget = staged_bytes + source_bytes - u64::from(quota_shortfall);
     let (ticket, id) = native.add(&bytes);
-    block_on(crate::indexed::verify::verify_ticketed(
+    let expected = block_on(crate::indexed::verify::verify_ticketed(
         native.blobs.as_ref(),
         native.store.as_ref(),
         native.shards.as_ref(),
@@ -599,12 +690,44 @@ fn a_valid_fifty_deep_member_chunk_finishes_under_the_default_alarm_budget() {
         native.cfg,
         native.clock.as_ref(),
         native.recorder.as_ref(),
-    ))
-    .unwrap();
-    assert_holder(&native, object);
+    ));
+    if quota_shortfall {
+        assert_eq!(
+            expected.as_ref().unwrap_err().public_message(),
+            "pack exceeds indexed decode budget"
+        );
+        assert!(read_blob(&native.blobs, &BlobKey::object(object)).is_none());
+    } else {
+        assert_eq!(expected.as_ref().unwrap().bytes, staged_bytes);
+        assert_eq!(expected.as_ref().unwrap().objects, 3);
+        assert_holder(&native, object);
+        let Object::Blob(last_chunk) =
+            mkit_core::serialize::deserialize(&blob(50, payload_bytes).1).unwrap()
+        else {
+            panic!("the member chain resolves a Blob");
+        };
+        assert_eq!(
+            read_blob(&native.blobs, &BlobKey::object(object)),
+            Some(last_chunk.data)
+        );
+        assert_eq!(
+            read_blob(&native.blobs, &BlobKey::object_offsets(object)),
+            Some(crate::indexed::extract::encode_offsets(&[0, length]))
+        );
+    }
 
-    let rig = Rig::new();
-    assert_eq!(seed_fifty_cross_pack_member_deltas(&rig), chunk);
+    let mut rig = Rig::new();
+    rig.limits.window_bytes = window_bytes;
+    rig.cfg = native.cfg;
+    assert_eq!(
+        seed_fifty_cross_pack_member_deltas(&rig, payload_bytes),
+        chunk
+    );
+    if payload_bytes == 250 << 10 {
+        let entry_limit = (rig.limits.resident_bytes - 2 * window_bytes - (8 << 20)) / 8;
+        assert!(u64::try_from(blob(0, payload_bytes).1.len()).unwrap() < entry_limit);
+        assert!(source_bytes > entry_limit && source_bytes > 12 << 20);
+    }
     let (ticket, id) = rig.add(&bytes);
     assert!(rig.check(&[(&ticket, id)], head).is_err());
     let extension = TestExtraction::new(&rig);
@@ -618,35 +741,22 @@ fn a_valid_fifty_deep_member_chunk_finishes_under_the_default_alarm_budget() {
     }
     assert_eq!(rig.job(&ticket.pack_id).unwrap().phase, Phase::Extract);
     let calls = Arc::new(AtomicU32::new(0));
-    let h = extraction_handler(&rig, extension);
-    let handler = VerifyTimer {
-        remote: Shared(Arc::new(CountReads {
-            inner: rig.store.clone(),
-            job: keys::verify_job(&rig.repo.name, &ticket.pack_id),
-            maximum: Mutex::default(),
-            calls: calls.clone(),
-        })),
-        blobs: CountBlobCalls {
-            inner: rig.blobs.clone(),
-            calls: calls.clone(),
-        },
-        windows: h.windows,
-        shards: h.shards,
-        cfg: h.cfg,
-        limits: h.limits,
-        lease: h.lease,
-        clock: h.clock,
-        metrics: h.metrics,
-        extension: h.extension,
-    };
+    let mut handler = counted_extraction(&rig, calls.clone(), ticket.pack_id);
+    rig.recorder.slices.lock().unwrap().clear();
     let mut failures = Vec::new();
-    for _ in 0..100 {
+    let mut total_calls = 0_u64;
+    let mut progress_steps = 0;
+    let mut restarted = false;
+    for _ in 0..200 {
         if rig.finished(&ticket.pack_id) {
             break;
         }
+        let before = rig.job(&ticket.pack_id).unwrap().extraction;
+        let cursor_before = persisted_member_cursor(&rig, ticket.pack_id);
+        let rows_before = rig.rows(&ticket.pack_id, keys::VC_CANDIDATE);
         calls.store(0, Ordering::SeqCst);
         let now = u64::try_from(rig.clock.now_ms()).unwrap();
-        match block_on(handler.fire(
+        let fired = block_on(handler.fire(
             &TimerCtx {
                 store: rig.store.as_ref(),
                 partition: &rig.source(),
@@ -661,14 +771,80 @@ fn a_valid_fifty_deep_member_chunk_finishes_under_the_default_alarm_budget() {
                 )),
                 value: Value::default(),
             },
-        )) {
+        ));
+        let succeeded = fired.is_ok();
+        match fired {
             Ok(Fired::Done(batch) | Fired::Reschedule { batch, .. }) => {
-                block_on(rig.store.apply(&rig.source(), batch)).unwrap();
+                assert_eq!(
+                    block_on(rig.store.apply(&rig.source(), batch)).unwrap(),
+                    BatchOutcome::Committed
+                );
             }
             Ok(Fired::Retry) => {}
             Err(error) => failures.push((calls.load(Ordering::SeqCst), error.to_string())),
         }
         assert!(calls.load(Ordering::SeqCst) <= 256);
+        let measured = u64::from(calls.load(Ordering::SeqCst));
+        total_calls += measured;
+        let charged = *rig.recorder.slices.lock().unwrap().last().unwrap();
+        assert!(f64::from(calls.load(Ordering::SeqCst)) <= charged && charged <= 256.0);
+        let after = rig.job(&ticket.pack_id).unwrap().extraction;
+        let cursor_after = persisted_member_cursor(&rig, ticket.pack_id);
+        if cursor_before.get("target").is_some()
+            && cursor_before.get("target") == cursor_after.get("target")
+            && cursor_before
+                .get("ascending")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+            && cursor_after
+                .get("ascending")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+        {
+            assert!(
+                cursor_after
+                    .get("level")
+                    .and_then(serde_json::Value::as_u64)
+                    >= cursor_before
+                        .get("level")
+                        .and_then(serde_json::Value::as_u64),
+                "restart must resume the saved chain prefix instead of resolving it again"
+            );
+        }
+        if succeeded
+            && before
+                .as_ref()
+                .is_some_and(|x| x.stage == 3 && x.chunk == 0 && x.written == 0)
+            && after
+                .as_ref()
+                .is_some_and(|x| x.stage == 3 && x.chunk == 0 && x.written == 0)
+        {
+            assert!(
+                cursor_after != cursor_before
+                    || rig.rows(&ticket.pack_id, keys::VC_CANDIDATE) != rows_before,
+                "a source-resolution alarm must advance durable cursor or lookup state"
+            );
+            progress_steps += 1;
+        }
+        if !restarted
+            && cursor_after
+                .get("level")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|level| level >= 20)
+            && cursor_after
+                .get("ascending")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+        {
+            let key = keys::verify_job(&rig.repo.name, &ticket.pack_id);
+            let saved = block_on(rig.store.get(&rig.source(), &key)).unwrap();
+            let saved_rows = rig.rows(&ticket.pack_id, keys::VC_CANDIDATE);
+            // Recreate all handler state over the same persisted storage.
+            handler = counted_extraction(&rig, calls.clone(), ticket.pack_id);
+            assert_eq!(block_on(rig.store.get(&rig.source(), &key)).unwrap(), saved);
+            assert_eq!(rig.rows(&ticket.pack_id, keys::VC_CANDIDATE), saved_rows);
+            restarted = true;
+        }
         relay_only(&rig);
         rig.clock.advance(1_000);
         if failures.len() == 3 {
@@ -680,7 +856,303 @@ fn a_valid_fifty_deep_member_chunk_finishes_under_the_default_alarm_budget() {
         "native accepted depth50; Scheduled stalled at {:?}, counted remote/R2 leaf requests {failures:?}",
         rig.job(&ticket.pack_id).unwrap().extraction
     );
-    assert_eq!(rig.job(&ticket.pack_id).unwrap().outcome, None);
+    assert!(failures.is_empty());
+    assert!(
+        restarted,
+        "the handler was recreated during the member-chain descent"
+    );
+    assert!(
+        progress_steps >= 2,
+        "member reconstruction must span durable alarms"
+    );
+    // For 51 nodes, allow two transitions per node at 32 charged calls each,
+    // plus 256 calls for the remaining phases. Restart must reuse
+    // saved work rather than replaying the already resolved chain prefix.
+    let charged_total: f64 = rig.recorder.slices.lock().unwrap().iter().sum();
+    assert!(
+        charged_total > 256.0 && charged_total <= 3_520.0,
+        "charged {charged_total} calls across alarms"
+    );
+    assert!(
+        total_calls <= 3_520,
+        "observed {total_calls} backend calls across alarms"
+    );
+    eprintln!(
+        "depth50 {payload_bytes}-byte nodes: {progress_steps} durable steps, {total_calls} observed and {charged_total} charged calls"
+    );
+    if quota_shortfall {
+        assert_eq!(
+            rig.job(&ticket.pack_id).unwrap().outcome,
+            Some(checkpoint::Outcome::DecodeBudget)
+        );
+        let actual = rig.check(&[(&ticket, id)], head).unwrap_err();
+        let expected = expected.unwrap_err();
+        assert_eq!(actual.code(), expected.code());
+        assert_eq!(actual.public_message(), expected.public_message());
+        assert!(read_blob(&rig.blobs, &BlobKey::object(object)).is_none());
+        assert!(
+            block_on(rig.store.get(
+                &content_shard(&object),
+                &keys::holder(&object, &rig.repo.namespace, &rig.repo.name).unwrap()
+            ))
+            .unwrap()
+            .is_none()
+        );
+    } else {
+        assert_eq!(rig.job(&ticket.pack_id).unwrap().outcome, None);
+        assert_eq!(
+            rig.check(&[(&ticket, id)], head).unwrap(),
+            expected.unwrap()
+        );
+        for key in [BlobKey::object(object), BlobKey::object_offsets(object)] {
+            assert_eq!(read_blob(&rig.blobs, &key), read_blob(&native.blobs, &key));
+        }
+        assert_holder(&rig, object);
+    }
+}
+
+#[test]
+fn a_valid_fifty_deep_member_chunk_finishes_under_the_default_alarm_budget() {
+    fifty_deep_member_chunk(2_000, WINDOW, false);
+}
+
+#[test]
+fn a_valid_fifty_deep_member_chunk_exceeding_one_entrys_memory_finishes() {
+    fifty_deep_member_chunk(250 << 10, 16 << 20, false);
+}
+
+#[test]
+fn a_fifty_deep_member_chunk_matches_native_at_the_whole_source_quota_boundary() {
+    fifty_deep_member_chunk(250 << 10, 16 << 20, true);
+}
+
+fn lower_order_forty_nine_hop_pack(before: Hash) -> Vec<u8> {
+    let nodes: Vec<_> = (0..=49).map(|n| blob(n, 2_000)).collect();
+    let deltas: Vec<_> = nodes
+        .windows(2)
+        .map(|pair| mkit_core::delta::encode(&pair[0].1, &pair[1].1).unwrap())
+        .collect();
+    for nonce in 1_000..10_000 {
+        let mut writer = PackWriter::new();
+        writer.push_raw(nodes[0].0, &nodes[0].1).unwrap();
+        for (base, delta) in nodes.iter().zip(&deltas) {
+            writer.push_delta(&base.0, delta).unwrap();
+        }
+        let (salt, canonical) = blob(nonce, 0);
+        writer.push_raw(salt, &canonical).unwrap();
+        let bytes = writer.finish().unwrap();
+        if hash(&bytes) < before {
+            return bytes;
+        }
+    }
+    panic!("could not find a lower-order current-producer member pack");
+}
+
+fn publish_member_pack(rig: &Rig, bytes: &[u8]) -> Hash {
+    let (ticket, _) = rig.add(bytes);
+    let mut frames = Vec::new();
+    decode_entries_with(
+        bytes,
+        &mut OneBase([0; 32], Vec::new()),
+        DecodeLimits::default(),
+        |entry| {
+            frames.push(FrameMeta {
+                id: entry.id,
+                frame_offset: entry.frame_offset,
+                frame_length: entry.frame_length,
+                wire_type: entry.wire_type,
+                delta_base: entry.delta_base,
+                decoded_size: u64::try_from(entry.bytes.len()).unwrap(),
+            });
+            Ok(())
+        },
+    )
+    .unwrap();
+    let mut batch = Batch::new().put(
+        keys::membership(&rig.repo.name, &ticket.pack_id),
+        Value::default(),
+    );
+    for entry in index_entries(&frames, 50).unwrap() {
+        batch = batch.put(
+            keys::object_index(&rig.repo.name, &entry.object, &ticket.pack_id),
+            codec::encode_object_index(&entry.object, &entry.value).unwrap(),
+        );
+    }
+    block_on(rig.store.apply(&rig.source(), batch)).unwrap();
+    ticket.pack_id
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // The late source change, native oracle and restarted alarms form one race regression.
+fn a_staged_thin_chunk_resumes_when_its_member_base_changes_after_decode() {
+    use crate::timers::{DueTimer, Fired, TimerCtx, TimerHandler};
+    let (base, canonical_base) = blob(49, 2_000);
+    let (chunk, canonical_chunk) = blob(50, 2_000);
+    let mut raw_writer = PackWriter::new_raw_only();
+    raw_writer.push_raw(base, &canonical_base).unwrap();
+    let raw_pack = hash(&raw_writer.finish().unwrap());
+    let later = lower_order_forty_nine_hop_pack(raw_pack);
+    let manifest = Object::ChunkedBlob(ChunkedBlob {
+        total_size: 2_002,
+        chunk_size: 0,
+        chunks: vec![chunk],
+    });
+    let object = manifest.id().unwrap();
+    let (tree, commit, head) = tree_head(&[object]);
+    let consumed = [
+        thin(base, &canonical_base, &canonical_chunk),
+        pack(&[manifest, tree, commit]),
+    ];
+    let rig = Rig::new();
+    seed_member(&rig, base, &canonical_base);
+    let tickets = consumed
+        .iter()
+        .map(|bytes| rig.add(bytes))
+        .collect::<Vec<_>>();
+    let items = tickets.iter().map(|(t, id)| (t, *id)).collect::<Vec<_>>();
+    assert!(rig.check(&items, head).is_err());
+    let extension = TestExtraction::new(&rig);
+    for _ in 0..100 {
+        if tickets
+            .iter()
+            .all(|(t, _)| rig.job(&t.pack_id).unwrap().phase == Phase::Extract)
+        {
+            break;
+        }
+        tick(&rig, &extension, rig.store.as_ref(), true);
+        rig.clock.advance(1_000);
+    }
+    assert!(
+        tickets
+            .iter()
+            .all(|(t, _)| rig.job(&t.pack_id).unwrap().phase == Phase::Extract)
+    );
+    assert!(read_blob(&rig.blobs, &BlobKey::object(object)).is_none());
+    let later_pack = publish_member_pack(&rig, &later);
+    assert!(later_pack < raw_pack);
+    let chosen = block_on(crate::indexed::resolve::locate_split(
+        rig.store.as_ref(),
+        rig.shards.as_ref(),
+        &rig.repo,
+        &[base],
+        rig.recorder.as_ref(),
+    ))
+    .unwrap();
+    assert_eq!(
+        chosen[&base].as_ref().unwrap().as_ref().unwrap().pack,
+        later_pack
+    );
+    assert_eq!(
+        chosen[&base]
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .value
+            .chain_depth,
+        49
+    );
+
+    let oracle = Rig::new();
+    seed_member(&oracle, base, &canonical_base);
+    publish_member_pack(&oracle, &later);
+    let oracle_tickets = consumed
+        .iter()
+        .map(|bytes| oracle.add(bytes))
+        .collect::<Vec<_>>();
+    let expected = native(&oracle, &oracle_tickets, head);
+    let Object::Blob(blob) = mkit_core::serialize::deserialize(&canonical_chunk).unwrap() else {
+        panic!("expected Blob")
+    };
+    assert_eq!(
+        read_blob(&oracle.blobs, &BlobKey::object(object)),
+        Some(blob.data)
+    );
+    let owner = tickets[1].0.pack_id;
+    let calls = Arc::new(AtomicU32::new(0));
+    let mut handler = counted_extraction(&rig, calls.clone(), owner);
+    let mut restarted = false;
+    let mut total = 0_u64;
+    let mut failures = Vec::new();
+    for _ in 0..200 {
+        if rig.finished(&owner) {
+            break;
+        }
+        calls.store(0, Ordering::SeqCst);
+        let now = u64::try_from(rig.clock.now_ms()).unwrap();
+        let fired = block_on(handler.fire(
+            &TimerCtx {
+                store: rig.store.as_ref(),
+                partition: &rig.source(),
+                now_ms: now,
+            },
+            &DueTimer {
+                due_at_ms: now,
+                kind: crate::timers::registry::kinds::VERIFY,
+                reference: Bytes::from(checkpoint::timer_reference(&rig.repo.name, &owner)),
+                value: Value::default(),
+            },
+        ));
+        match fired {
+            Ok(Fired::Done(batch) | Fired::Reschedule { batch, .. }) => assert_eq!(
+                block_on(rig.store.apply(&rig.source(), batch)).unwrap(),
+                BatchOutcome::Committed
+            ),
+            Ok(Fired::Retry) => {}
+            Err(error) => failures.push((calls.load(Ordering::SeqCst), error.to_string())),
+        }
+        let used = calls.load(Ordering::SeqCst);
+        assert!(used <= 256);
+        total += u64::from(used);
+        let cursor = persisted_member_cursor(&rig, owner);
+        if !restarted
+            && cursor.get("target") == Some(&serde_json::to_value(chunk).unwrap())
+            && cursor
+                .get("level")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|level| level >= 20)
+        {
+            let before = rig.rows(&owner, keys::VC_CANDIDATE);
+            handler = counted_extraction(&rig, calls.clone(), owner);
+            assert_eq!(rig.rows(&owner, keys::VC_CANDIDATE), before);
+            restarted = true;
+        }
+        relay_only(&rig);
+        rig.clock.advance(1_000);
+        if failures.len() == 3 {
+            break;
+        }
+    }
+    assert!(
+        rig.finished(&owner),
+        "staged thin source stalled after member changed: {failures:?}"
+    );
+    assert!(failures.is_empty());
+    assert!(
+        restarted,
+        "staged reconstruction must resume a durable descent after restart"
+    );
+    assert!(
+        total > 256 && total <= 3_520,
+        "observed {total} backend calls"
+    );
+    drive(&rig, &extension, &[tickets[0].0.pack_id, owner]);
+    let actual = rig.check(&items, head).unwrap();
+    assert_eq!(actual.objects, expected.objects);
+    assert_eq!(actual.bytes, expected.bytes);
+    assert_eq!(actual.parents, expected.parents);
+    // Decode's dependency snapshot was taken before the new member arrived.
+    assert_eq!(
+        actual.external_bases,
+        std::collections::BTreeSet::from([raw_pack])
+    );
+    assert_eq!(
+        expected.external_bases,
+        std::collections::BTreeSet::from([later_pack])
+    );
+    for key in [BlobKey::object(object), BlobKey::object_offsets(object)] {
+        assert_eq!(read_blob(&rig.blobs, &key), read_blob(&oracle.blobs, &key));
+    }
     assert_holder(&rig, object);
 }
 

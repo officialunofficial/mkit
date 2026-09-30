@@ -103,6 +103,16 @@ fn largest_job(extracting: bool) -> VerifyJobV1 {
                 7
             ],
             group: [255; 32],
+            reconstruction: Some(checkpoint::MemberCursor {
+                target: [255; 32],
+                next: [255; 32],
+                preferred: Some(([255; 32], u64::MAX)),
+                level: u32::from(u16::MAX),
+                local: true,
+                ascending: true,
+                canonical: Some(([255; 32], 8 << 20, u32::MAX)),
+                bytes: u64::MAX,
+            }),
             stage: 13,
             member: 7,
             scan: vec![255; 324],
@@ -350,7 +360,7 @@ fn cleanup_group(rig: &Rig, peer_phase: Phase) -> (Hash, Value, Key, Hash, Value
         .collect();
     let mut own = VerifyJobV1::new(pack, 0, 0, 1);
     own.phase = Phase::Watch;
-    own.extraction_group = group.clone();
+    own.extraction_group.clone_from(&group);
     own.satisfying = vec![[7; 32]];
     let own_raw = save(rig, &pack, &mut own, None);
     let body = body_key(rig, &pack, &own);

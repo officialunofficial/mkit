@@ -5,68 +5,41 @@ checkpoints inside existing `vc`; it adds no tag, timer kind, relay codec, wire
 format, trait or cross-partition seam. Indexed mode remains release-default-off
 until WP-4.18. Both parts share R-186.
 
-**Working checkpoint, not acceptance:** the whole-phase resource analysis below
-does not prove completion for every valid source. A native-valid 2,002-byte member
-chunk reached through 50 separate delta packs stalls the current Scheduled
-preflight at chunk 0 / written 0. Three successive fires consume 254/255/255
-remote/R2 leaf requests and retry without advancing. The fresh consumed pack is
-421 bytes and contains a manifest, tree and commit (362 canonical bytes).
-The regression uses unchanged producer-generated index values and checks native
-first. Its failing assertion remains in `extraction_budget_tests.rs`; evidence
-is retained in the executor's `final-resource-red.log`. Bounded incremental
-member reconstruction is still required; raising the 256-call allowance or
-rejecting this otherwise valid push is not a solution. Full gates and PR2
-completion remain pending.
+## Incremental reconstruction acceptance
 
-## Feature integration checkpoint (2026-09-30)
+The user approved a **2,300 changed physical non-test Rust line** cap solely for
+incremental source lookup/reconstruction in existing vc4 and review/clippy fixes.
+The original native-valid member source stalled synchronous reconstruction at
+chunk 0; the new cursor preserves lookup, descent and ascent across alarms.
+Each alarm examines one bounded index prefix or reconstructs one ancestry frame.
+Descriptors and opaque lookup continuation live in vc4; only a bounded cursor,
+level and cumulative byte charge enter the guarded header. No protocol surface
+has changed.
 
-Feature tip `8bc30385` (merged PR1 #1238, including duplicate-holder intent
-cleanup, plus HTTP proofs) was merged into the driver in `b2285099`. The reviewed
-relay implementation and regressions are retained verbatim. Formatting and
-native server/Worker compilation passed; 76 relay/header/count/cleanup regressions
-and 181 indexed tests passed in focused nextest runs. The latter deliberately
-excluded the failing native-valid depth-50 case and the six-group fixture that
-previously exceeded the default timeout; these exclusions are not gate waivers.
-The two-peer stale closure error and stable error until late source arrival now
-pass, with native count parity checked after recovery.
+The 50-hop test uses actual producer-generated index rows and native as its oracle.
+With 2 KiB source nodes it makes **101 durable reconstruction steps**, consuming
+**1,636 observed / 1,648 charged calls** across the complete run. The 250 KiB-node
+case also makes **101 steps and 1,636 / 1,648 calls**: cumulative canonical source
+size exceeds the entry allowance while the live accumulator remains bounded.
+Every alarm stays within 256 calls and advances its durable reconstruction state.
+A fresh handler resumes midway through descent without changing persisted rows.
+Both reconstructed files, offsets and Scheduled outcome match native. A third
+case sets the whole-source decode allowance one byte below the native charge;
+both paths return the budget error after bounded progress.
 
-Against that feature tip, production Rust changes measure **1,928 added + 72
-removed = 2,000 physical non-test lines**, including blanks and comments. Test
-files and inline test modules are excluded. This exhausts the approved PR2 cap.
-Bounded source reconstruction needs an explicit scope decision before adding
-production lines. Full gates, wasm checks, Worker conformance and PR opening
-remain outstanding; this checkpoint is not a finished extraction implementation.
+Lookup examines at most eight raw index values at a time, preserves ordered
+membership selection and the same-pack earlier-frame preference, and retains
+bounded row, page-work and distinct membership-partition counters. Frames retain
+existing index encodings. Ascent hashes every canonical accumulator and validates
+actual depth, geometry and identity. A single accumulator uses 128 KiB fragments;
+ancestors are not held together in memory. Source-byte cost includes every decoded
+member node and is charged atomically with the completed chunk cursor, once per
+manifest occurrence. The upload pass reconstructs again without charging again.
 
-## Proposed bounded reconstruction amendment (approval pending)
-
-The merged depth-50 regression reproduces the same stall. The proposed fix replaces
-synchronous recursive source reconstruction with resumable lookup, descent and
-ascent using only existing vc4 rows. Each alarm checks at most one bounded lookup
-page or reconstructs one bounded frame. Existing index/frame codecs and checkpoint
-JSON/hex encoders are reused. Opaque lookup continuation and ancestry descriptors
-stay outside the header; the header adds only a small group-bound cursor and
-counters. No new trait, tag, timer, wire/relay codec or cross-partition seam is
-needed.
-
-One canonical accumulator lives in 128 KiB vc4 fragments; descent records visited
-locations and ascent verifies each decoded hash and actual depth. Every consumed
-location rechecks repository membership. Total canonical source bytes accumulate
-without retaining the whole chain. Charge and completed chunk cursor advance in
-one guarded commit, preserving replay and native's per-chunk charging; the upload
-pass does not charge again. The proposal retains 256 calls, 48 MiB, 100 ops and
-1 MiB per apply. Tests must cover the native-valid depth-50 case, lookup pagination,
-restart on each descent/ascent boundary, source changes, hash/depth failures and
-charge replay.
-
-Independent implementation review estimates **220–270 net production lines**.
-Request a **2,300-line PR2 cap**, under the same R-186 and two-PR split, solely for
-this bounded reconstruction and review fixes. This is a proposal, not permission
-or implemented behavior. The current source has not exceeded 2,000 lines.
-
-Remaining gate work also includes a cleanup-function lint (109 lines), test lint
-fixes and reducing the six-group fixture's redundant setup cost without reducing
-its six groups, 42 real jobs, 256 members or actual claim/race assertions. Targeted
-clippy failed on those lints; no full-gate success is claimed.
+Feature tip `8bc30385` (merged PR1 #1238, including duplicate-holder intent drain)
+was merged in `b2285099`; the interop security lock update was merged in `64e1d683`. Reviewed relay changes remain intact. Full final gate
+results, the final line count and independent review findings are recorded in the
+PR body. Staging heap/CPU evidence remains WP-4.18's activation responsibility.
 
 ## Whole alarm and verification calls
 
@@ -104,8 +77,9 @@ on deployed staging remain an activation gate in WP-4.18.
   entry-sized regions E=(48 MiB-2W-8 MiB)/8. Default W=16 MiB gives E=1 MiB.
   Source frames are checked *before* range reads: encoded length is at most
   max(W,E)+128 bytes, decoded size is at most E, and actual dependency depth is
-  bounded. In-pack recursion strictly decreases validated chain depth. Member
-  resolution has its existing retained-canonical and bounded-frame limits.
+  bounded. Checkpointed ancestry is depth bounded. Member
+  reconstruction retains only the previous canonical accumulator and the newly
+  decoded frame, with ancestry descriptors outside the guarded header.
   Parsing, delta output, temporary bases, source object and R2 range copies fit
   the reserved regions. An encoded frame plus the other entry buffers leaves
   an entry-sized margin at default windows; bounded headers/body/metadata fit

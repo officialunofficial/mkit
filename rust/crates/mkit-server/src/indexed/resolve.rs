@@ -148,7 +148,7 @@ async fn locate_split_inner<S: NamespaceStore>(
 
 /// Read one bounded range into memory, preserving the blob contract's
 /// streaming cap and refusing short or overlong backend responses.
-async fn frame_bytes<B: BlobStore>(
+pub(super) async fn frame_bytes<B: BlobStore>(
     blobs: &B,
     pack: Hash,
     offset: u64,

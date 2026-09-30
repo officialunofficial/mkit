@@ -284,6 +284,8 @@ enum Stop {
     Outcome(Outcome),
     /// Membership may still catch up: run again later.
     Wait(u64),
+    /// Persist bounded reconstruction progress before the next alarm.
+    Yield(u64),
     /// The source changed under the job: start over.
     Restart,
 }
@@ -491,7 +493,7 @@ where
                 .await;
         }
         let delay = match result {
-            Ok(delay) => delay,
+            Ok(delay) | Err(Stop::Yield(delay)) => delay,
             Err(Stop::Store(error)) => {
                 if is_exhausted(&error) {
                     tracing::warn!(pack = %mkit_core::hash::to_hex(&self.pack), phase = ?job.phase, "verification slice spent its subrequest budget");
@@ -679,6 +681,7 @@ where
     /// Delete a finished or abandoned job's rows, then `vs` unless the pack
     /// became a member (kind-2 self-cleaning, R-148). Local rows only, so
     /// several pages fit one fire.
+    #[allow(clippy::too_many_lines)] // Keep peer lifetime guards and the Gone transition together.
     async fn cleanup(
         &self,
         timer: &DueTimer,
