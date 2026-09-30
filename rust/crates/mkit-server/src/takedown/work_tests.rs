@@ -285,6 +285,7 @@ async fn duplicate_manifest_chunks_are_queued_once_and_wrong_child_kind_fails_cl
     let f = fixture(&[manifest, child], false).await;
     let action = accept(&f, "duplicate", None, &[f.canonical[0].0]).await;
     advance(&f, action, 20_000).await;
+    advance(&f, action, 20_000).await;
     let (state, calls) = advance(&f, action, 20_000).await;
     assert_eq!(state.phase, Phase::Acquire);
     assert!(calls < 100);
@@ -370,6 +371,7 @@ async fn whole_packlist_walks_dependency_inventories_before_verified_claim() {
 async fn failed_checkpoint_leaves_a_durable_piece_intent_that_retention_can_purge() {
     let f = fixture(&[small()], true).await;
     let id = accept(&f, "crash", None, &[f.canonical[0].0]).await;
+    advance(&f, id, 20_000).await;
     advance(&f, id, 20_000).await;
     let budget = SliceBudget::new(700);
     // PUT and its owner intent are durable, but intentionally lose the final acquisition checkpoint.
@@ -601,6 +603,7 @@ async fn retention_retry_does_not_depend_on_discovery_making_progress() {
     let id = accept(&f, "purge-progress", None, &[f.canonical[0].0]).await;
     advance(&f, id, 20_000).await;
     advance(&f, id, 20_000).await;
+    advance(&f, id, 20_000).await;
     advance(&f, id, 1_100_000).await;
     advance(&f, id, 1_100_000).await;
     let (state, _) = advance(&f, id, 1_100_000).await;
@@ -713,7 +716,7 @@ async fn timer15_uses_firing_local_store_for_owner_and_durable_copy_intents() {
         reference: Bytes::copy_from_slice(&id),
         value: Value::default(),
     };
-    for _ in 0..3 {
+    for _ in 0..4 {
         let Fired::Reschedule { batch, .. } = work.fire(&ctx, &timer).await.unwrap() else {
             panic!("pending timer drained");
         };
@@ -901,4 +904,125 @@ async fn ordered_duplicate_manifest_closure_completes_using_bounded_verified_pre
         }
     }
     panic!("verified manifest did not finish");
+}
+
+#[derive(Debug)]
+struct StaleSource<'a> {
+    store: &'a MemoryKv,
+    key: Key,
+    old: Value,
+}
+impl NamespaceStore for StaleSource<'_> {
+    fn capabilities(&self) -> crate::StoreCapabilities {
+        self.store.capabilities()
+    }
+    async fn get(&self, p: &Partition, k: &Key) -> Result<Option<Value>, StoreError> {
+        if k == &self.key {
+            Ok(Some(self.old.clone()))
+        } else {
+            self.store.get(p, k).await
+        }
+    }
+    async fn get_many(&self, p: &Partition, k: &[Key]) -> Result<Vec<Option<Value>>, StoreError> {
+        self.store.get_many(p, k).await
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&Cursor>,
+        limit: u32,
+    ) -> Result<crate::ScanPage, StoreError> {
+        self.store.scan(p, start, end, after, limit).await
+    }
+    async fn apply(&self, p: &Partition, b: Batch) -> Result<BatchOutcome, StoreError> {
+        self.store.apply(p, b).await
+    }
+    async fn stats(&self, p: &Partition) -> Result<crate::PartitionStats, StoreError> {
+        self.store.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.store.probe().await
+    }
+}
+#[tokio::test]
+async fn stale_source_cursor_cannot_overwrite_progress_with_a_fresh_audit_head() {
+    let f = fixture(&[small()], true).await;
+    let object = f.canonical[0].0;
+    let original = codec::encode_object_index(
+        &object,
+        &IndexValue {
+            frame_offset: 12,
+            frame_length: f.canonical[0].1.len() as u64 + 5,
+            wire_type: 0,
+            decoded_size: f.canonical[0].1.len() as u64,
+            chain_depth: 0,
+            delta_base: None,
+        },
+    )
+    .unwrap();
+    let mut batch = Batch::new();
+    for number in 1u64..=16 {
+        let mut pack = [0; 32];
+        pack[24..].copy_from_slice(&number.to_be_bytes());
+        assert!(pack < f.pack);
+        batch = batch.put(
+            keys::object_index(&f.repo.name, &object, &pack),
+            original.clone(),
+        );
+    }
+    f.work
+        .metadata
+        .apply(&SinglePartition.object_index(&f.repo, &object), batch)
+        .await
+        .unwrap();
+    let id = accept(&f, "stale-source", None, &[object]).await;
+    advance(&f, id, 20_000).await;
+    advance(&f, id, 20_000).await;
+    let checkpoint_key = key(b"source", &id, &object);
+    let stale = f
+        .work
+        .metadata
+        .get(&f.work.root, &checkpoint_key)
+        .await
+        .unwrap()
+        .unwrap();
+    advance(&f, id, 20_000).await;
+    advance(&f, id, 20_000).await;
+    let ready = f
+        .work
+        .metadata
+        .get(&f.work.root, &checkpoint_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(decode::<source::Checkpoint>(&ready).unwrap().next.is_none());
+    let stale_store = StaleSource {
+        store: f.work.metadata.as_ref(),
+        key: checkpoint_key.clone(),
+        old: stale,
+    };
+    let budget = SliceBudget::new(700);
+    let Fired::Reschedule { batch, .. } = f
+        .work
+        .step(&Budgeted::new(&stale_store, &budget), id, 20_000, &budget)
+        .await
+        .unwrap()
+    else {
+        panic!("missing stale continuation")
+    };
+    // State is unchanged and the audit head is fresh; only the source CAS detects this race.
+    assert_ne!(
+        f.work.metadata.apply(&f.work.root, batch).await.unwrap(),
+        BatchOutcome::Committed
+    );
+    assert_eq!(
+        f.work
+            .metadata
+            .get(&f.work.root, &checkpoint_key)
+            .await
+            .unwrap(),
+        Some(ready)
+    );
 }

@@ -224,9 +224,16 @@ pub struct MemberCache {
     rows: BTreeMap<Location, ResolvedMember>,
     retained_bytes: u64,
     remaining_work: Option<u32>,
+    selection: Option<(crate::Partition, crate::Key)>,
 }
 
 impl MemberCache {
+    pub(crate) fn with_selection(limit: u32, root: crate::Partition, prefix: crate::Key) -> Self {
+        Self {
+            selection: Some((root, prefix)),
+            ..Self::with_work_budget(limit)
+        }
+    }
     pub(crate) fn with_work_budget(limit: u32) -> Self {
         Self {
             remaining_work: Some(limit),
@@ -365,6 +372,37 @@ pub fn member_object_for_preservation_bounded<'a, B: BlobStore, S: NamespaceStor
     )
 }
 
+async fn selected_frame<S: NamespaceStore>(
+    store: &S,
+    selection: Option<&(crate::Partition, crate::Key)>,
+    level: usize,
+    id: Hash,
+) -> Result<Option<LocatedObject>, ServerError> {
+    let Some((root, prefix)) = selection else {
+        return Ok(None);
+    };
+    let key = crate::Key::new(
+        [
+            prefix.as_bytes(),
+            &u32::try_from(level)
+                .map_err(|_| unavailable())?
+                .to_be_bytes(),
+        ]
+        .concat(),
+    );
+    let raw = store
+        .get(root, &key)
+        .await
+        .map_err(|_| unavailable())?
+        .ok_or_else(unavailable)?;
+    let (found, selected) =
+        crate::takedown::source::decode_frame(&raw).map_err(|_| unavailable())?;
+    if found != id {
+        return Err(unavailable());
+    }
+    Ok(Some(selected))
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
     blobs: &'a B,
@@ -393,6 +431,23 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
             return Err(budget_exceeded().into());
         }
         let location = (id, located.pack, located.value.frame_offset);
+        if let Some(selected) =
+            selected_frame(store, memo.selection.as_ref(), visiting.len(), id).await?
+        {
+            if selected != located {
+                return Err(unavailable().into());
+            }
+            if !store
+                .has(
+                    &shards.membership(repo, &BlobKey::pack(located.pack)),
+                    &keys::membership(&repo.name, &located.pack),
+                )
+                .await
+                .map_err(|_| unavailable())?
+            {
+                return Err(ResolveFailure::Missing);
+            }
+        }
         let available = budget
             .checked_sub(memo.retained_bytes)
             .ok_or_else(budget_exceeded)?;
@@ -427,12 +482,18 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
                 if visiting.len() > usize::try_from(cap).unwrap_or(usize::MAX) {
                     return Err(ServerError::invalid_argument("delta chain too deep").into());
                 }
+                let selected =
+                    selected_frame(store, memo.selection.as_ref(), visiting.len(), base).await?;
                 let partition = shards.object_index(repo, &base);
                 let key = keys::object_index(&repo.name, &base, &located.pack);
-                let same = store
-                    .get_many(&partition, &[key])
-                    .await
-                    .map_err(|_| unavailable())?;
+                let same = if selected.is_some() {
+                    vec![None]
+                } else {
+                    store
+                        .get_many(&partition, &[key])
+                        .await
+                        .map_err(|_| unavailable())?
+                };
                 if same.len() != 1 {
                     return Err(unavailable().into());
                 }
@@ -447,7 +508,7 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
                 } else {
                     None
                 };
-                let next = match next {
+                let next = match selected.or(next) {
                     Some(next) => next,
                     None => match locate_split(store, shards, repo, &[base], metrics)
                         .await?

@@ -703,7 +703,7 @@ mod tests {
         let key = BlobKey::pack(mkit_core::hash::hash(&bytes));
         let mut sink = workflow
             .preserved
-            .begin(key.clone(), bytes.len() as u64)
+            .begin(key, bytes.len() as u64)
             .await
             .unwrap();
         sink.write(bytes).await.unwrap();

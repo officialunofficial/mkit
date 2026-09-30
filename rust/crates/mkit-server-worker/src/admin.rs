@@ -209,12 +209,14 @@ pub(crate) async fn serve(
         let mut engine = Engine::new(store.clone(), cfg.probe_partition(), config.clone())
             .with_purge(purge_enabled(cfg));
         if enabled {
-            engine =
-                engine.with_operations(std::sync::Arc::new(mkit_server::takedown::Service::new(
-                    store,
-                    cfg.probe_partition(),
-                    shards(cfg.sharding),
-                )));
+            // Workers run on one thread; the shared core operations interface uses Arc.
+            #[allow(clippy::arc_with_non_send_sync)]
+            let operations = std::sync::Arc::new(mkit_server::takedown::Service::new(
+                store,
+                cfg.probe_partition(),
+                shards(cfg.sharding),
+            ));
+            engine = engine.with_operations(operations);
         }
         engine
             .handle(

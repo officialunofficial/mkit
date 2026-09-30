@@ -12,6 +12,7 @@ mod local;
 pub mod work;
 pub use local::LocalStore;
 mod publication;
+pub(crate) mod source;
 #[cfg(test)]
 mod tests;
 pub use intent::{Record, Service};

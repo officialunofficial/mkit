@@ -10,7 +10,7 @@ use mkit_core::{
     serialize::serialize,
 };
 use mkit_server::indexed::budget::{Budgeted, SliceBudget};
-use mkit_server::pipeline::{ShardMap, SinglePartition};
+use mkit_server::pipeline::{D34Shards, ShardMap, SinglePartition};
 use mkit_server::store::{
     codec,
     index::{IndexEntry, IndexValue},
@@ -155,6 +155,239 @@ fn admitted(mut pack: &[u8], expected: usize) {
     .unwrap();
     assert_eq!(count, expected);
 }
+
+// All 4096 candidates fit the existing locator's admitted geometry. Only the
+// real source has membership, but all 487 candidate partitions are probed.
+async fn dense_candidates(store: &MemoryKv, repo: &RepoId, pack: Hash, entry: IndexEntry) {
+    let actual = u16::from_be_bytes([pack[0], pack[1]]) >> 4;
+    let mut prefixes: Vec<u16> = (0..487).collect();
+    if !prefixes.contains(&actual) {
+        prefixes[486] = actual;
+    }
+    let mut rows = Vec::with_capacity(4096);
+    for sequence in 0u32..4095 {
+        let prefix = prefixes[usize::try_from(sequence).unwrap() % prefixes.len()];
+        let mut candidate = [0; 32];
+        candidate[0] = u8::try_from(prefix >> 4).unwrap();
+        candidate[1] = u8::try_from((prefix & 15) << 4).unwrap();
+        candidate[2..6].copy_from_slice(&sequence.to_be_bytes());
+        assert_ne!(candidate, pack);
+        rows.push(candidate);
+    }
+    rows.push(pack);
+    assert_eq!(
+        rows.iter()
+            .map(|id| D34Shards.membership(repo, &BlobKey::pack(*id)))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        487
+    );
+    let value = codec::encode_object_index(&entry.object, &entry.value).unwrap();
+    for page in rows.chunks(96) {
+        let mut batch = Batch::new();
+        for candidate in page {
+            batch = batch.put(
+                keys::object_index(&repo.name, &entry.object, candidate),
+                value.clone(),
+            );
+        }
+        store
+            .apply(&D34Shards.object_index(repo, &entry.object), batch)
+            .await
+            .unwrap();
+    }
+    store
+        .apply(
+            &D34Shards.membership(repo, &BlobKey::pack(pack)),
+            Batch::new().put(keys::membership(&repo.name, &pack), Value::default()),
+        )
+        .await
+        .unwrap();
+}
+
+async fn dense_chain(external: bool) -> (MemoryBlobStore, MemoryKv, RepoId, Hash) {
+    let size = 1 << 20;
+    let store = MemoryKv::default();
+    let blobs = MemoryBlobStore::default();
+    let repo = RepoId {
+        namespace: NamespaceKey::deployment_default(),
+        name: RepoName::new("dense").unwrap(),
+    };
+    let mut pack = b"MKIT\x01\0\0\0\0\0\0\0".to_vec();
+    let mut entries = Vec::new();
+    let mut previous = [0; 32];
+    for sequence in 0..=50 {
+        let canonical = blob(size, sequence);
+        let id = hash(&canonical);
+        let payload = if sequence == 0 {
+            canonical
+        } else {
+            let mut payload = previous.to_vec();
+            payload.extend_from_slice(&delta(size, sequence));
+            payload
+        };
+        let (offset, length) = append(&mut pack, if sequence == 0 { 0 } else { 2 }, &payload);
+        entries.push(IndexEntry {
+            object: id,
+            value: IndexValue {
+                frame_offset: offset,
+                frame_length: length,
+                wire_type: if sequence == 0 { 0 } else { 2 },
+                decoded_size: size as u64,
+                chain_depth: if external && sequence != 0 {
+                    1
+                } else {
+                    sequence
+                },
+                delta_base: (sequence != 0).then_some(previous),
+            },
+        });
+        previous = id;
+        if !external && sequence < 50 {
+            continue;
+        }
+        let bytes = finish(std::mem::take(&mut pack), if external { 1 } else { 51 });
+        if external {
+            // Each external frame is independently verified with its canonical
+            // base, matching admission without assuming in-pack predecessors.
+            let mut base = Latest(if sequence == 0 {
+                vec![]
+            } else {
+                vec![(hash(&blob(size, sequence - 1)), blob(size, sequence - 1))]
+            });
+            let mut reader = bytes.as_slice();
+            pack::window::read_all(
+                &mut reader,
+                bytes.len() as u64,
+                16 << 20,
+                DecodeLimits::default().with_max_decoded_bytes(1 << 20),
+                Some(hash(&bytes)),
+                |entry| {
+                    pack::decode_entry_with(entry, &mut base, DecodeLimits::default())
+                        .map(|decoded| assert_eq!(decoded.0, id))
+                },
+            )
+            .unwrap();
+        } else {
+            admitted(&bytes, 51);
+        }
+        let pack_id = hash(&bytes);
+        let mut sink = blobs
+            .begin(BlobKey::pack(pack_id), bytes.len() as u64)
+            .await
+            .unwrap();
+        for piece in bytes.chunks(mkit_server::store::MAX_BLOB_PIECE_BYTES) {
+            sink.write(Bytes::copy_from_slice(piece)).await.unwrap();
+        }
+        sink.commit().await.unwrap();
+        for entry in &entries {
+            if external || entry.object == previous {
+                dense_candidates(&store, &repo, pack_id, *entry).await;
+            } else {
+                store
+                    .apply(
+                        &D34Shards.object_index(&repo, &entry.object),
+                        Batch::new().put(
+                            keys::object_index(&repo.name, &entry.object, &pack_id),
+                            codec::encode_object_index(&entry.object, &entry.value).unwrap(),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        entries.clear();
+        pack = b"MKIT\x01\0\0\0\0\0\0\0".to_vec();
+    }
+    (blobs, store, repo, previous)
+}
+
+#[tokio::test]
+async fn dense_same_pack_max_chain_exceeds_alarm_budget_without_source_checkpoint() {
+    let (blobs, store, repo, id) = dense_chain(false).await;
+    for _ in 0..2 {
+        let budget = SliceBudget::new(700);
+        assert!(
+            resolve(
+                &Budgeted::new(&blobs, &budget),
+                &Budgeted::new(&store, &budget),
+                &D34Shards,
+                &repo,
+                id,
+                &Profile::scheduled(),
+                &NoopMetrics
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            budget.used(),
+            700,
+            "fresh retry repeats the same exhausted acquisition"
+        );
+    }
+    for limit in [900, 30_000] {
+        let budget = SliceBudget::new(limit);
+        let result = resolve(
+            &Budgeted::new(&blobs, &budget),
+            &Budgeted::new(&store, &budget),
+            &D34Shards,
+            &repo,
+            id,
+            &Profile::scheduled(),
+            &NoopMetrics,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.canonical.as_ref(), blob(1 << 20, 50));
+        assert_eq!(
+            budget.used(),
+            773,
+            "32 scans + 487 membership reads + 204 ranges + 50 same-pack probes"
+        );
+    }
+}
+
+#[tokio::test]
+async fn dense_external_max_chain_repeats_candidate_lookup_for_every_base() {
+    let (blobs, store, repo, id) = dense_chain(true).await;
+    for limit in [700, 900] {
+        let budget = SliceBudget::new(limit);
+        assert!(
+            resolve(
+                &Budgeted::new(&blobs, &budget),
+                &Budgeted::new(&store, &budget),
+                &D34Shards,
+                &repo,
+                id,
+                &Profile::scheduled(),
+                &NoopMetrics
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(budget.used(), limit);
+    }
+    let budget = SliceBudget::new(30_000);
+    let result = resolve(
+        &Budgeted::new(&blobs, &budget),
+        &Budgeted::new(&store, &budget),
+        &D34Shards,
+        &repo,
+        id,
+        &Profile::scheduled(),
+        &NoopMetrics,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.canonical.as_ref(), blob(1 << 20, 50));
+    assert_eq!(
+        budget.used(),
+        26_723,
+        "51 dense lookups + 204 ranges + 50 failed same-pack probes"
+    );
+}
+
 #[tokio::test]
 async fn scheduled_acquires_fifty_hop_chain_after_independent_lookup() {
     let size = 1 << 20;

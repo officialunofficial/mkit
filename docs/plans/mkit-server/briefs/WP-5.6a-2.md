@@ -4,7 +4,8 @@ The [launch/base brief](WP-5.6a.md) remains binding except for the latest
 approved split and namespace ruling below. All three PRs are required for
 launch. PR2 branches from merged PR1 and targets `feat/mkit-server`; open the
 PR without merging. Latest PR2 cap: 3,300 non-test Rust production lines;
-docs do not count. Stop and report before exceeding it.
+tests/docs/generated code do not count. The approved overflow split moves the
+admin catalog to PR3; keep PR2 at or below 3,300 with no further scope deferrals.
 
 PR2 owns bounded canonical acquisition, manifest/chunk closure verification,
 holder/context discovery, retention and legal-hold arbitration, audited
@@ -41,3 +42,6 @@ remain. Run the base/common gates, including wasm32 clippy and default vcs-worke
 conformance on a free port, then self-review and open the PR. Activation remains
 fixed false in PR2; all three parts and launch gates are required. Docs are not
 runtime evidence.
+
+The [core contract](../WP-5.6a-2-contract.md) records layout and focused evidence;
+full gates are ongoing and activation remains false.

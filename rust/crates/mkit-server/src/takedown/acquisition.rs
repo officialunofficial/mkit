@@ -8,10 +8,11 @@ use std::{collections::BTreeSet, sync::Arc};
 /// Validated limits; the caller budgets the actual namespace and blob boundaries.
 #[derive(Debug, Clone, Copy)]
 pub struct Profile {
-    limits: MemberSourceLimits,
-    chain_depth: u32,
+    pub(super) limits: MemberSourceLimits,
+    pub(super) chain_depth: u32,
     retained: u64,
     resident: u64,
+    slice_calls: u32,
 }
 impl Profile {
     /// Inline verification's configured retained budget and checked resident bound.
@@ -34,6 +35,7 @@ impl Profile {
             chain_depth,
             retained: decode_budget,
             resident,
+            slice_calls: ((chain_depth + 1) * 8 + 256).max(700),
         })
     }
     /// Current Worker admission: 1 MiB entries, 16 MiB windows, 50 delta hops.
@@ -49,12 +51,16 @@ impl Profile {
             chain_depth: 50,
             retained: 51 << 20,
             resident: 96 << 20,
+            slice_calls: 700,
         }
     }
     /// Conservative per-acquisition resident allowance for startup reporting.
     #[must_use]
     pub const fn resident_upper_bound(&self) -> u64 {
         self.resident
+    }
+    pub(super) const fn slice_calls(&self) -> u32 {
+        self.slice_calls
     }
 }
 
@@ -88,6 +94,64 @@ pub async fn resolve<B: BlobStore, S: NamespaceStore>(
         .flatten()
         .ok_or_else(|| ServerError::unavailable("canonical member source unavailable"))?;
     let mut memo = MemberCache::with_work_budget(profile.chain_depth + 1);
+    decode(
+        blobs, store, shards, repo, id, located, profile, metrics, &mut memo,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn resolve_selected<B: BlobStore, S: NamespaceStore>(
+    blobs: &B,
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    id: Hash,
+    profile: &Profile,
+    root: &crate::Partition,
+    prefix: &crate::Key,
+) -> Result<Verified, ServerError> {
+    let raw = store
+        .get(
+            root,
+            &crate::Key::new([prefix.as_bytes(), &0u32.to_be_bytes()].concat()),
+        )
+        .await
+        .map_err(|_| ServerError::unavailable("selected source unavailable"))?
+        .ok_or_else(|| ServerError::unavailable("selected source unavailable"))?;
+    let (found, located) = super::source::decode_frame(&raw)
+        .map_err(|_| ServerError::unavailable("selected source unavailable"))?;
+    if found != id {
+        return Err(ServerError::unavailable("selected source unavailable"));
+    }
+    let mut memo =
+        MemberCache::with_selection(profile.chain_depth + 1, root.clone(), prefix.clone());
+    decode(
+        blobs,
+        store,
+        shards,
+        repo,
+        id,
+        located,
+        profile,
+        &crate::NoopMetrics,
+        &mut memo,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn decode<B: BlobStore, S: NamespaceStore>(
+    blobs: &B,
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    id: Hash,
+    located: crate::store::index::LocatedObject,
+    profile: &Profile,
+    metrics: &dyn Metrics,
+    memo: &mut MemberCache,
+) -> Result<Verified, ServerError> {
     let (canonical, _) = resolve::member_object_for_preservation_bounded(
         blobs,
         store,
@@ -97,7 +161,7 @@ pub async fn resolve<B: BlobStore, S: NamespaceStore>(
         located,
         profile.chain_depth,
         profile.retained,
-        &mut memo,
+        memo,
         &mut BTreeSet::new(),
         metrics,
         profile.limits,

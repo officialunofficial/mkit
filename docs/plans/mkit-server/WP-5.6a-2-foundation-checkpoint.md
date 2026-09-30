@@ -13,17 +13,17 @@ and the [`nl` reservation](../../../rust/crates/mkit-server/src/store/keys.rs).
 Known holders cannot establish an exhaustive namespace set before relay delivery.
 This limitation prevents completion claims, not denial or named-repo preservation.
 
-The latest authorized split assigns PR2's remaining core scope: bounded canonical
-acquisition, manifest/chunk closure, discovery, actual ct ownership transfer,
-retention/legal-hold arbitration, audited action-owned purge and gated-off runtime
-wiring. These are required work in progress, not a completion claim. Activation
-stays fixed false. PR3 owns the restricted admin catalog and byte-free replay/
-verified ReadPreserved; reads remain unexposed. All three parts are launch gates.
+The [core contract](WP-5.6a-2-contract.md) records the final layout, source
+checkpoints, verified acquisition/manifest closure, ct ownership, retention/hold
+arbitration, action-owned audited purge and inert runtime wiring. The reported
+production Rust count is 3,294/3,300 against `origin/feat/mkit-server`; docs are
+excluded. Five focused source tests pass, with at most 12 counted calls per
+selection step and 357 final-decode calls for the dense 50-hop fixtures. Full
+gates remain ongoing; this checkpoint does not claim them complete.
 
-The old 2,600-line total cap is superseded: PR2's cap is 3,300 non-test Rust
-production lines, excluding docs. Final full gates/default Worker conformance,
-review and the PR remain required; this checkpoint claims none completed.
-PR1 [#1242](https://github.com/officialunofficial/mkit/pull/1242) and its
-[contract](WP-5.6a-1-contract.md) remain the denial/pending-intent baseline.
-The [PR2](briefs/WP-5.6a-2.md)/[PR3](briefs/WP-5.6a-3.md) briefs own the remaining
-scope; this document is not runtime verification or launch-readiness evidence.
+Activation stays fixed false. PR3 owns Get/List/ReadPreserved/SetLegalHold,
+byte-free replay and fresh verified streams. ReadPreserved remains unexposed.
+All three parts and final launch gates remain required. Historical closure
+verification does not replace fresh verification of every streamed piece.
+The [PR2](briefs/WP-5.6a-2.md)/[PR3](briefs/WP-5.6a-3.md) briefs retain the remaining
+scope. This document is not launch-readiness evidence.

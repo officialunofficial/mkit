@@ -438,6 +438,23 @@ pub fn bind_database(conn: &RusqliteConn, root_id: &str, db: &Path) -> Result<()
     }
 }
 
+/// Attach the configured purge framework to this server's durable audit log.
+fn audited_pipeline_config<N: NamespaceStore + Clone + 'static>(
+    cfg: &ServeConfig,
+    meta: &N,
+) -> mkit_server::pipeline::PipelineConfig {
+    let mut config = cfg.pipeline.clone();
+    if let Some(purge) = config.purge.take() {
+        config.purge = Some(
+            purge.with_audit(Arc::new(mkit_server::admin::SystemAudit::new(
+                meta.clone(),
+                crate::admin::partition(config.sharding),
+            ))),
+        );
+    }
+    config
+}
+
 /// The pipeline over `blobs` and `meta` as a router and, with an enc
 /// listener, the enc service over its `TransportIdentity` sibling (same
 /// stores, same write gate).
@@ -463,15 +480,7 @@ where
     if let (Some(retrieval), Some(settings)) = (&cfg.pipeline.scanner_retrieval, &cfg.hooks) {
         settings.check_scanner_keys(retrieval)?;
     }
-    let mut pipeline_config = cfg.pipeline.clone();
-    if let Some(purge) = pipeline_config.purge.take() {
-        pipeline_config.purge = Some(purge.with_audit(Arc::new(
-            mkit_server::admin::SystemAudit::new(
-                meta.clone(),
-                crate::admin::partition(pipeline_config.sharding),
-            ),
-        )));
-    }
+    let pipeline_config = audited_pipeline_config(cfg, &meta);
     let pipeline = Pipeline::new(
         blobs,
         meta.clone(),

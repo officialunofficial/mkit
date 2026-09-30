@@ -2579,7 +2579,7 @@ mod glue {
             && cfg.takedown.is_some()
             && class
                 == match cfg.sharding {
-                    Sharding::Single => crate::classes::ShardClass::RefStore,
+                    mkit_server::pipeline::Sharding::Single => crate::classes::ShardClass::RefStore,
                     _ => crate::classes::ShardClass::NsCoordinator,
                 } {
             match crate::admin::work(env, cfg, budget) {
