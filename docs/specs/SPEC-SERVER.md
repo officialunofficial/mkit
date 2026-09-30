@@ -585,6 +585,11 @@ invalidates the response under §6.6.
 
 ### 6.5 Outcome
 
+`Committed` means **Sent, never Delivered**. It is the terminal result of
+live apply, including when inspection or membership dependencies delay
+publication. It MUST NOT later become `Aborted`. Delivery is reported by the
+publication transition (§12.4), when the published prefix reaches that send.
+
 `OutcomeRequest.outcome` contains the terminal result recorded under
 §5. `OutcomeResponse` is empty; its successful Connect response
 acknowledges delivery under §8.
@@ -1679,7 +1684,14 @@ Policy MUST explicitly set all three terms when assigning a lease.
 The server MUST reject terms whose state boundaries cannot be represented
 without overflow; it MUST NOT silently substitute defaults.
 
-Indexed deployments MUST support per-ref storage leases. The ref shard
+Indexed deployments in the full profile MUST support per-ref storage leases.
+An indexed deployment MAY instead select the launch profile (§18), advertise
+`leases = false`, retain content permanently and disable garbage collection.
+That profile MUST NOT accept lease terms or advertise lease, GC or receipt
+support that it does not implement. Leases, GC and receipts remain full-profile
+requirements when applicable to its configuration.
+
+For a deployment that supports leases, The ref shard
 holds the per-ref terms; the namespace coordinator holds the
 repository-level default and propagates changes with `config_version`.
 An explicit per-ref lease overrides that default while the repository
@@ -1840,7 +1852,7 @@ under a valid epoch lease. They MUST NOT use cached lease terms.
 | `repository = 3` | Full repository identity under STC §7.4; empty only for namespace scope. |
 | `occurred_unix_ms = 4` | Transition time as signed 64-bit Unix epoch milliseconds, independent of delivery time. |
 | `sequence = 5` | Unsigned 64-bit sequence, strictly increasing per repository/ref scope or namespace scope for distinct events of every kind. |
-| `kind` | Exactly one transition kind; `lease = 6` and `takedown = 8` are defined here. Field 7 remains available for publication. |
+| `kind` | Exactly one transition kind; `lease = 6`, `publication = 7`, and `takedown = 8` are defined here. |
 | `namespace = 9` | Namespace identity for a namespace-scoped override; empty otherwise. |
 
 `LeaseTransition` has these fields:
@@ -1902,6 +1914,35 @@ for repository or namespace level.
 These events obey the same outbox, deduplication, sequence, and
 signing rules as lease transitions; §16 defines the global audit
 record.
+
+A `PublicationTransition` uses Event kind field `publication = 7`. It has:
+
+| Field | Meaning |
+|---|---|
+| `ref = 1` | Full canonical ref name; a branch uses its head ref name. |
+| `advance_sequence = 2` | Nonzero advance sequence from §10.2, distinct from the shared Event sequence. |
+| `head = 3` | Raw 32-byte published head or non-branch target; empty for deletion. |
+| `packmap = 4` | Raw 32-byte paired published packmap; empty for a non-branch ref or deletion. |
+| `operation_id = 5` | Raw 32-byte logical write correlation, stable across retries; never credentials or a delivery nonce. |
+
+A publication transition MUST be recorded in the same authoritative RefShard
+commit that changes the published pointer when a publication Event sink is
+configured. Its ref, advance sequence, pair and operation correlation MUST
+identify the resulting prefix value, including a deletion boundary. A pointer
+jump over several cleared advances reports its resulting prefix; membership
+clearance alone MUST NOT emit a publication transition. The pair is the
+post-takedown pair for a resolved advance. The sender MUST durably retain
+correlation with the originating operation through delayed clearance.
+Publication events share the ref scope's Event sequence with lease events;
+advance numbers MUST NOT be substituted for that shared sequence.
+
+`Committed` means **Sent, never Delivered**: it records the live apply and is
+terminal for its reservation. Delivered means that the published prefix has
+reached the send's advance, as reported by publication. An Inspect Pass alone
+is insufficient. Event and Outcome delivery may arrive in either order;
+receivers MUST deduplicate events and MUST NOT regress state on a late Outcome
+or Event. Durable recording of one logical event and at-least-once delivery
+are distinct guarantees; delivery is not exactly once.
 
 When an Event sink is configured, events MUST use the same durable outbox
 as outcomes (§5), be delivered at least once, and remain retained until
@@ -3356,11 +3397,21 @@ implements §2–§5) and:
   does not apply. Unreferenced upload bytes may accumulate until a full-profile
   server collects them.
 - **Indexed mode (§9).** It does not offer indexed mode and advertises
-  `indexed_mode = false`, because §12.1 requires per-ref storage leases in
-  indexed deployments.
+  `indexed_mode = false`. Indexed deployments use the launch or full profile.
 - **Takedown, receipts and admin (§14–§16).** It offers none of them: its
   receipt key fields are empty (§15.5), it issues no redaction notices, and it
   mounts no admin service (§16.1).
+
+**Launch profile.** An indexed server MAY implement §§2–11 and HTTP object
+serving while advertising `leases = false`, retaining all repository content
+permanently and disabling GC. It MUST refuse lease terms, advertise empty
+receipt key fields and issue no storage receipts. The lease, GC and receipt
+requirements of §§12–13 and §15 do not apply to this profile; configured Event
+sinks still obey §12.4, including publication transitions. Inspection and
+serving stops remain governed by §§10–11; the profile does not waive takedown
+or admin requirements applicable to its configuration. The profile and its
+permanent-retention/disabled-GC policy MUST be documented in deployment
+capabilities. It MUST NOT claim full-profile conformance.
 
 **Full profile.** The server implements every section that applies to its
 configuration, including §9–§16. An indexed deployment MUST support per-ref
@@ -3372,6 +3423,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Launch profile permits indexed permanent retention with `leases = false` and GC disabled (§12.1, §18); publication transitions use Event field 7 with operation correlation, durable recording and at-least-once delivery (§12.4). Committed means Sent, never Delivered (§6.5; WP-5.4). |
 | 1 | draft | §9.7 clarifications: rules intersect, a packmap is covered through its head, a missing auth v2 signer denies, ancestry semantics and bounds, and the allowed-signer set MAY be checked before verification and at `BeginUpload`; §9.3 requires a ticketless indexed head to be a member commit, remix or tag (WP-4.17). |
 | 1 | draft | Indexed ingestion verifies every consumed object, including unreachable entries; closure and packlist index caps have the `object index limit exceeded` error (§9.3; WP-4.7). Indexed pack-size and decode-budget errors are pinned in §9.8. |
 | 1 | draft | §18 conformance scope: a core profile (§2–§8; no inspectors, storage leases, GC, indexed mode, takedown, receipts or admin service) and a full profile; §1 defers the §§9–16 obligations to the profile. |

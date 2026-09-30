@@ -2164,7 +2164,7 @@
       "2.15"
     ],
     "size": "L",
-    "summary": "Per-ref leases in ref shards with timer-driven active/grace/suspended/deleted transitions, a LeasePolicy hook, and exactly-once lifecycle events through the outbox.",
+    "summary": "Per-ref leases in ref shards with timer-driven active/grace/suspended/deleted transitions, a LeasePolicy hook, and durably recorded lifecycle events with at-least-once delivery through the outbox.",
     "human_action": false,
     "area_gates": [
       "rust",

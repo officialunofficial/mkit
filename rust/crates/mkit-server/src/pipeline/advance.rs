@@ -133,6 +133,7 @@ pub(super) fn plan_consumption(
     pre: &mut Vec<Precondition>,
     writes: &mut Vec<Write>,
     outbox: &mut OutboxBuilder,
+    membership: bool,
 ) -> Result<(), ServerError> {
     let outcome_refs: Vec<_> = refs
         .iter()
@@ -180,7 +181,7 @@ pub(super) fn plan_consumption(
             })
             .map_err(meta_error)?,
         );
-        tickets::plan_membership(
+        if membership { tickets::plan_membership(
             &t.repo,
             &[t.pack_id],
             advance.source,
@@ -188,7 +189,7 @@ pub(super) fn plan_consumption(
             advance.repo_id,
             outbox,
             writes,
-        );
+        ); }
     }
     Ok(())
 }

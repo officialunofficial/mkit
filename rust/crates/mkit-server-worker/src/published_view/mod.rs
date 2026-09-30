@@ -129,6 +129,9 @@ impl<B: SnapshotBucket, C: SnapshotCache> PublishedSource for SnapshotReader<B, 
     fn inspection_configured(&self) -> bool {
         self.config.inspection_configured
     }
+    fn uses_published_values(&self) -> bool {
+        true
+    }
     fn read_ref_enabled(&self) -> bool {
         self.config.unsigned_read_ref
     }
@@ -139,9 +142,6 @@ impl<B: SnapshotBucket, C: SnapshotCache> PublishedSource for SnapshotReader<B, 
         now_ms: u64,
     ) -> BoxFuture<'a, mkit_server::pipeline::published::PublishedBucket> {
         Box::pin(async move {
-            if self.config.inspection_configured {
-                return Err(StoreError::unavailable("published view unavailable"));
-            }
             let key = object_key(partition)?;
             let cache = cache_key(&self.config.deployment, partition)?;
             if let Ok(Some((at, bytes))) = self.cache.get(&cache).await

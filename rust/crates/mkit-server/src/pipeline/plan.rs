@@ -164,6 +164,8 @@ pub(crate) struct WriteRequest<'a> {
     /// A final rejection: upload `pre_receive`, or a replay-only built-in
     /// policy denial with no refs or other mutable effects.
     pub(crate) rejection: Option<&'a StoredRejection>,
+    /// Paired publication context; absent only on ref-only stores.
+    pub(crate) publication: Option<super::clearance::PublicationWrite<'a>>,
     /// A separately committed admission reservation, if one was granted.
     pub(crate) pending: Option<&'a super::reservation::PendingGuard>,
 }
@@ -173,6 +175,17 @@ impl WriteRequest<'_> {
     #[must_use]
     pub(crate) fn read_keys(&self) -> Vec<Key> {
         let mut out = Vec::new();
+        if self.publication.is_some()
+            && let Some(update) = self.refs.first()
+        {
+            let name = crate::store::publication::sequence_ref(&update.name);
+            out.push(keys::publication(self.repo, &name));
+            out.push(keys::ref_key(self.repo, &name));
+            if let Some(packmap) = mkit_attest::grant::head_packmap(&name) {
+                out.push(keys::ref_key(self.repo, &packmap));
+            }
+            out.extend([keys::outbox_sequence(), keys::outcome_backlog()]);
+        }
         if let Some(super::begin::BeginWrite::Open(open)) = self.begin {
             out.extend(super::begin::open_keys(&open.spec));
         }
@@ -463,6 +476,7 @@ pub(crate) fn plan_write(
         || req.ref_index.is_some() && !req.refs.is_empty()
         || !conflict && req.implicit.is_some()
         || req.pending.is_some() && req.kind != WriteKind::BeginUpload
+        || req.publication.is_some() && !req.refs.is_empty()
     {
         // One outbox per batch: an implicit consuming packmap write can
         // also carry D34 ref-index relays, and two builders seeded from the
@@ -482,11 +496,12 @@ pub(crate) fn plan_write(
                 &mut pre,
                 &mut puts,
                 &mut outbox,
+                req.publication.is_none(),
             )?;
         }
         if !conflict {
             add_ref_index_relays(req, &mut outbox);
-            if let Some(implicit) = &req.implicit {
+            if let Some(implicit) = &req.implicit && req.publication.is_none() {
                 tickets::plan_membership(
                     req.repo,
                     implicit.packs,
@@ -497,6 +512,41 @@ pub(crate) fn plan_write(
                     &mut puts,
                 );
             }
+        }
+        if !conflict
+            && req.rejection.is_none()
+            && !req.refs.is_empty()
+            && let Some(publication) = &req.publication
+        {
+            let name = crate::store::publication::sequence_ref(&req.refs[0].name);
+            let pair = super::clearance::resulting_pair(req.repo, req.refs, snap)?;
+            let additions = tickets
+                .as_ref()
+                .map(|ts| ts.iter().map(|t| t.pack_id).collect())
+                .or_else(|| req.implicit.as_ref().map(|i| i.packs.to_vec()))
+                .unwrap_or_default();
+            let operation = req.replay.map_or([0; 32], |r| r.scope);
+            let mut advance = publication.prepared.cloned().unwrap_or_else(|| {
+                super::clearance::immediate(pair.clone(), operation, additions.clone())
+            });
+            if advance.value != pair {
+                return Err(ServerError::unavailable("publication pair changed; retry"));
+            }
+            advance.additions = additions;
+            advance.operation = operation;
+            crate::store::publication::append(
+                publication.repo,
+                &name,
+                publication.source,
+                publication.shards,
+                snap.get(&keys::publication(req.repo, &name)),
+                advance,
+                req.refs.iter().any(|u| u.new.is_none()),
+                &mut pre,
+                &mut puts,
+                &mut outbox,
+            )
+            .map_err(meta_error)?;
         }
         if let Some(pending) = req.pending {
             let record = if conflict {

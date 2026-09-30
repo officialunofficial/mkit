@@ -790,7 +790,7 @@ Entry condition:
   - Storage and wire tests for each transition.
   - Renewal in grace restores active.
   - A read is blocked in suspended.
-  - An event is emitted exactly once per transition (idempotent delivery).
+  - One logical event is durably recorded per transition, with at-least-once delivery and receiver deduplication.
 - **Size:** L (~1200).
 
 ### WP-5.3a: GC mark: roots, pins, grace, GC-pending, apply precondition

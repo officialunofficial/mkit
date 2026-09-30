@@ -11,8 +11,12 @@ pub type PublishedBucket = Result<Option<PublishedRows>, StoreError>;
 
 /// Ref data only: the pipeline authorizes each request before invoking this seam.
 pub trait PublishedSource: MaybeSend + MaybeSync {
-    /// No published source is wired for inspection until WP-5.4/5.5.
+    /// Whether the deployment configures inspection.
     fn inspection_configured(&self) -> bool;
+    /// Whether inputs contain exclusively published values, using the current snapshot format.
+    fn uses_published_values(&self) -> bool {
+        false
+    }
     /// Optional unsigned `ReadRef` acceleration; false by default.
     fn read_ref_enabled(&self) -> bool {
         false
@@ -41,7 +45,7 @@ impl<N: NamespaceStore> BucketSource for ReaderBucket<'_, N> {
         limit: u32,
     ) -> Result<Scan, StoreError> {
         if let Some(source) = self.source {
-            if source.inspection_configured() {
+            if source.inspection_configured() && !source.uses_published_values() {
                 return Err(StoreError::unavailable("published view unavailable"));
             }
             if let Some(rows) = source.bucket(repo, self.partition, self.now_ms).await? {

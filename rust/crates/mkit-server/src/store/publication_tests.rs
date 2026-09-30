@@ -1,0 +1,286 @@
+use super::*;
+use crate::pipeline::{D34Shards, SinglePartition};
+use crate::{Batch, BatchOutcome, MemoryKv, NamespaceKey};
+use futures_executor::block_on;
+fn repo() -> RepoId {
+    RepoId {
+        namespace: NamespaceKey::deployment_default(),
+        name: RepoName::new("r").unwrap(),
+    }
+}
+fn advance(value: u8, state: Clearance) -> Advance {
+    Advance {
+        sequence: 1,
+        generation: 0,
+        value: Pair {
+            head: Some([value; 32]),
+            packmap: Some([value + 1; 32]),
+        },
+        additions: vec![[value + 2; 32]],
+        dependencies: vec![],
+        external_bases: vec![],
+        obligations: vec![],
+        state,
+        operation: [value; 32],
+    }
+}
+async fn apply(
+    kv: &MemoryKv,
+    shards: &dyn ShardMap,
+    name: &str,
+    record: Advance,
+    deleted: bool,
+) -> Publication {
+    let repo = repo();
+    let p = shards.ref_shard(&repo, name);
+    let old = kv
+        .get(&p, &keys::publication(&repo.name, &sequence_ref(name)))
+        .await
+        .unwrap();
+    let os = kv.get(&p, &keys::outbox_sequence()).await.unwrap();
+    let oc = kv.get(&p, &keys::outcome_backlog()).await.unwrap();
+    let mut outbox = OutboxBuilder::new(os.as_ref(), oc.as_ref()).unwrap();
+    let mut b = Batch::new();
+    let state = append(
+        &repo,
+        name,
+        &p,
+        shards,
+        old.as_ref(),
+        record,
+        deleted,
+        &mut b.preconditions,
+        &mut b.writes,
+        &mut outbox,
+    )
+    .unwrap();
+    outbox.relay_at(1);
+    outbox
+        .try_finish(&mut b.preconditions, &mut b.writes)
+        .unwrap();
+    assert_eq!(kv.apply(&p, b).await.unwrap(), BatchOutcome::Committed);
+    state
+}
+async fn finish(
+    kv: &MemoryKv,
+    shards: &dyn ShardMap,
+    name: &str,
+    sequence: u64,
+    status: Clearance,
+) -> Publication {
+    let repo = repo();
+    let p = shards.ref_shard(&repo, name);
+    let name = sequence_ref(name);
+    let sr = kv
+        .get(&p, &keys::publication(&repo.name, &name))
+        .await
+        .unwrap()
+        .unwrap();
+    let ar = kv
+        .get(&p, &keys::advance(&repo.name, &name, sequence))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut changed = Advance::decode(&ar).unwrap();
+    changed.state = status;
+    let state = Publication::decode(Some(&sr)).unwrap();
+    let eligible = prefix(kv, &p, &repo.name, &name, &state, &changed)
+        .await
+        .unwrap();
+    let os = kv.get(&p, &keys::outbox_sequence()).await.unwrap();
+    let oc = kv.get(&p, &keys::outcome_backlog()).await.unwrap();
+    let mut o = OutboxBuilder::new(os.as_ref(), oc.as_ref()).unwrap();
+    let mut b = Batch::new();
+    clear(
+        &repo,
+        &name,
+        &p,
+        shards,
+        &sr,
+        &ar,
+        &changed,
+        eligible,
+        &mut b.preconditions,
+        &mut b.writes,
+        &mut o,
+    )
+    .unwrap();
+    o.relay_at(2);
+    o.try_finish(&mut b.preconditions, &mut b.writes).unwrap();
+    assert_eq!(kv.apply(&p, b).await.unwrap(), BatchOutcome::Committed);
+    read(kv, &p, &repo.name, &name).await.unwrap()
+}
+#[test]
+fn out_of_order_membership_does_not_skip_the_pointer() {
+    block_on(async {
+        let kv = MemoryKv::default();
+        let s = SinglePartition;
+        apply(
+            &kv,
+            &s,
+            "refs/heads/main",
+            advance(1, Clearance::Pending),
+            false,
+        )
+        .await;
+        apply(
+            &kv,
+            &s,
+            "refs/heads/main",
+            advance(4, Clearance::Pending),
+            false,
+        )
+        .await;
+        assert_eq!(
+            finish(&kv, &s, "refs/heads/main", 2, Clearance::Cleared)
+                .await
+                .published,
+            0
+        );
+        let r = repo();
+        let p = s.ref_shard(&r, "refs/heads/main");
+        let raw = kv
+            .get(&p, &keys::membership(&r.name, &[6; 32]))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(Witness::decode(&raw).unwrap().published);
+        assert!(
+            kv.get(&p, &keys::published_ref(&r.name, "refs/heads/main"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let state = finish(&kv, &s, "refs/heads/main", 1, Clearance::Cleared).await;
+        assert_eq!(state.published, 2);
+        assert_eq!(state.value, advance(4, Clearance::Cleared).value);
+    });
+}
+#[test]
+fn deletion_and_recreation_preserve_sequence_and_old_membership() {
+    block_on(async {
+        let kv = MemoryKv::default();
+        let s = SinglePartition;
+        apply(
+            &kv,
+            &s,
+            "refs/heads/main",
+            advance(1, Clearance::Pending),
+            false,
+        )
+        .await;
+        let mut deletion = advance(3, Clearance::Cleared);
+        deletion.value = Pair::default();
+        deletion.additions.clear();
+        let deleted = apply(&kv, &s, "refs/mkit/packmap/main", deletion, true).await;
+        assert_eq!((deleted.sequence, deleted.boundary), (2, 2));
+        assert_eq!(
+            apply(
+                &kv,
+                &s,
+                "refs/heads/main",
+                advance(5, Clearance::Pending),
+                false
+            )
+            .await
+            .sequence,
+            3
+        );
+        let late = finish(&kv, &s, "refs/heads/main", 1, Clearance::Cleared).await;
+        assert_eq!(late.value, Pair::default());
+        assert_eq!(late.published, 2);
+        let r = repo();
+        let p = s.ref_shard(&r, "refs/heads/main");
+        assert!(
+            Witness::decode(
+                &kv.get(&p, &keys::membership(&r.name, &[3; 32]))
+                    .await
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap()
+            .published
+        );
+        assert_eq!(
+            finish(&kv, &s, "refs/heads/main", 3, Clearance::Cleared)
+                .await
+                .published,
+            3
+        );
+    });
+}
+#[test]
+fn paired_names_share_one_persistent_sequence() {
+    block_on(async {
+        let kv = MemoryKv::default();
+        let s = D34Shards;
+        assert_eq!(
+            apply(
+                &kv,
+                &s,
+                "refs/heads/main",
+                advance(1, Clearance::Cleared),
+                false
+            )
+            .await
+            .sequence,
+            1
+        );
+        assert_eq!(
+            apply(
+                &kv,
+                &s,
+                "refs/mkit/packmap/main",
+                advance(4, Clearance::Cleared),
+                false
+            )
+            .await
+            .sequence,
+            2
+        );
+        assert_eq!(
+            apply(
+                &kv,
+                &s,
+                "refs/tags/v1",
+                advance(7, Clearance::Cleared),
+                false
+            )
+            .await
+            .sequence,
+            1
+        );
+    });
+}
+#[test]
+fn witness_codec_golden_and_fail_closed() {
+    let w = Witness {
+        generation: 2,
+        sequence: 3,
+        published: true,
+        held: false,
+    };
+    assert_eq!(
+        w.encode().as_bytes(),
+        &[1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3]
+    );
+    assert_eq!(Witness::decode(&w.encode()).unwrap(), w);
+    assert!(!w.visible(false, 1));
+    assert!(w.visible(false, 2));
+    assert!(!Witness { held: true, ..w }.visible(true, 2));
+    for bytes in [vec![2; 19], vec![1; 18], vec![1, 2, 0]] {
+        assert!(Witness::decode(&Value::new(bytes)).is_err());
+    }
+}
+#[test]
+fn advance_codec_rejects_unresolved_obligations_and_unknown_fields() {
+    let mut a = advance(1, Clearance::Cleared);
+    a.obligations.push(Obligation {
+        id: [1; 32],
+        state: Clearance::Pending,
+    });
+    assert!(a.encode().is_err());
+    a.state = Clearance::Pending;
+    assert_eq!(Advance::decode(&a.encode().unwrap()).unwrap(), a);
+    assert!(Publication::decode(Some(&Value::new(b"\x01{\"unknown\":true}".to_vec()))).is_err());
+}

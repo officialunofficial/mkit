@@ -1,0 +1,74 @@
+//! Trusted inspection preparation and immediate serving-stop seam for WP-5.5a.
+use crate::ServerError;
+use crate::op::Operation;
+use crate::repo::RepoId;
+use crate::rt::{BoxFuture, MaybeSend, MaybeSync};
+use crate::store::publication::{Advance, Clearance, Pair};
+use mkit_core::hash::Hash;
+
+/// Prepared inspection obligations and verified pair dependencies.
+/// Implementations must verify that the resulting packmap reconstructs the
+/// entire head closure, including on head-only and packmap-only UpdateRef.
+/// This does not confer authorization; the pipeline has already authorized.
+pub trait PublicationPolicy: MaybeSend + MaybeSync {
+    /// Prepare the stable advance record from a verified resulting pair.
+    /// Sequence, generation and operation correlation are set by the pipeline.
+    fn prepare<'a>(
+        &'a self,
+        op: &'a Operation,
+        value: &'a Pair,
+    ) -> BoxFuture<'a, Result<Advance, ServerError>>;
+    /// Immediate serving stop, including containing packs and external delta sources.
+    /// A configured inspector must install a coherent gate before applying a hold.
+    fn pack_available(&self, repo: &RepoId, pack: &Hash) -> bool;
+}
+
+/// Planner context is present on all atomic stores, even without an inspector.
+#[derive(Clone)]
+pub(crate) struct PublicationWrite<'a> {
+    pub repo: &'a RepoId,
+    pub source: &'a crate::Partition,
+    pub shards: &'a dyn super::ShardMap,
+    pub prepared: Option<&'a Advance>,
+}
+
+pub(crate) fn resulting_pair(
+    repo: &crate::RepoName,
+    refs: &[super::RefUpdate],
+    snap: &super::Snapshot,
+) -> Result<Pair, ServerError> {
+    let Some(update) = refs.first() else {
+        return Ok(Pair::default());
+    };
+    let name = crate::store::publication::sequence_ref(&update.name);
+    let target = |name: &str| -> Result<Option<Hash>, ServerError> {
+        if let Some(update) = refs.iter().find(|u| u.name == name) {
+            return Ok(update.new);
+        }
+        snap.get(&crate::store::keys::ref_key(repo, name))
+            .map(crate::store::codec::decode_ref_id)
+            .transpose()
+            .map_err(super::meta_error)
+    };
+    Ok(Pair {
+        head: target(&name)?,
+        packmap: mkit_attest::grant::head_packmap(&name)
+            .map(|name| target(&name))
+            .transpose()?
+            .flatten(),
+    })
+}
+
+pub(crate) fn immediate(value: Pair, operation: Hash, additions: Vec<Hash>) -> Advance {
+    Advance {
+        sequence: 1,
+        generation: 0,
+        value,
+        operation,
+        additions,
+        dependencies: Vec::new(),
+        external_bases: Vec::new(),
+        obligations: Vec::new(),
+        state: Clearance::Cleared,
+    }
+}

@@ -139,6 +139,12 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
         advance: Some(advance.clone()),
         implicit: None,
         rejection: None,
+        publication: Some(clearance::PublicationWrite {
+            repo: &repo,
+            source: &source,
+            shards,
+            prepared: None,
+        }),
         pending: None,
     };
     let mut snap = snapshot(&req, &[]);
@@ -199,7 +205,7 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
 fn seven_ticket_advance_plans_a_valid_real_batch() {
     let batch = planned_ticket_advance(7);
     let ops = batch.preconditions.len() + batch.writes.len();
-    assert_eq!(ops, 89);
+    assert_eq!(ops, 94);
     for key in [
         keys::epoch_lease(),
         keys::layout_version(),
@@ -261,7 +267,7 @@ fn single_ticket_advance_guards_the_grant_epoch() {
     assert!(batch.preconditions.iter().any(|guard| matches!(guard,
         Precondition::Absent(key) if *key == keys::grant_epoch()
     )));
-    assert_eq!(batch.preconditions.len() + batch.writes.len(), 78);
+    assert_eq!(batch.preconditions.len() + batch.writes.len(), 83);
 }
 
 /// WP-1.15 B9's largest implicit batch: a packmap write consuming
@@ -329,6 +335,7 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
         mark_repo_known: true,
         begin: None,
         advance: None,
+        publication: None,
         pending: None,
         implicit: Some(implicit),
         rejection: None,
@@ -2588,6 +2595,7 @@ fn simple_index_batch(
         advance: None,
         implicit: None,
         rejection: None,
+        publication: None,
         pending: None,
     };
     plan_write(&req, &snapshot(&req, values), &clock_at(5, None)).unwrap()
@@ -2741,6 +2749,7 @@ fn plan_cas_any_missing_match_on_snapshot() {
             mark_repo_known: false,
             lease: None,
             rejection: None,
+            publication: None,
             pending: None,
             begin: None,
             advance: None,
@@ -2798,6 +2807,7 @@ fn plan_conflict_writes_only_the_replay_record() {
         mark_repo_known: false,
         lease: None,
         rejection: None,
+        publication: None,
         pending: None,
         begin: None,
         advance: None,
@@ -2870,6 +2880,7 @@ fn plan_quota_exhaustion_yields_no_batch() {
         mark_repo_known: false,
         lease: None,
         rejection: None,
+        publication: None,
         pending: None,
         begin: None,
         advance: None,
@@ -2925,7 +2936,8 @@ proptest! {
             mark_repo_known: false,
                     lease: None,
             rejection: None,
-            pending: None,
+            publication: None,
+        pending: None,
                     begin: None,
             advance: None,
             implicit: None,
@@ -3548,6 +3560,7 @@ fn plan_signed_conflict_still_charges_quota() {
         mark_repo_known: false,
         lease: None,
         rejection: None,
+        publication: None,
         pending: None,
         begin: None,
         advance: None,
@@ -3608,6 +3621,7 @@ fn plan_prune_fits_the_batch_op_cap() {
         mark_repo_known: false,
         lease: None,
         rejection: None,
+        publication: None,
         pending: None,
         begin: None,
         advance: None,
@@ -3661,6 +3675,7 @@ fn prune_sampling_is_deterministic_one_in_eight() {
         mark_repo_known: false,
         lease: None,
         rejection: None,
+        publication: None,
         pending: None,
         begin: None,
         advance: None,
@@ -4146,6 +4161,7 @@ fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
             install: false,
         }),
         rejection: None,
+        publication: None,
         pending: None,
         begin: None,
         advance: None,
@@ -4259,6 +4275,7 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
             layout_version: false,
             mark_repo_known: false,
             rejection: None,
+            publication: None,
             pending: None,
             begin: None,
             advance: None,
