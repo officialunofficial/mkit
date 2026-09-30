@@ -75,12 +75,8 @@ where
                 };
                 if mounted {
                     let mut policy = HttpObjectResponse::new(response.status().as_u16());
-                    if let Some(vary) = response
-                        .headers()
-                        .get("vary")
-                        .and_then(|value| value.to_str().ok())
-                    {
-                        policy.headers.push(("Vary", vary.to_owned()));
+                    if let Some(vary) = combined_vary(response.headers()) {
+                        policy.headers.push(("Vary", vary));
                     }
                     apply_cors(&mut policy, origin.as_deref(), &options);
                     for name in [
@@ -122,6 +118,16 @@ where
             }
         },
     ))
+}
+
+fn combined_vary(headers: &http::HeaderMap) -> Option<String> {
+    let vary = headers
+        .get_all("vary")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect::<Vec<_>>()
+        .join(", ");
+    (!vary.is_empty()).then_some(vary)
 }
 
 async fn dispatch<B, N, H>(

@@ -590,9 +590,37 @@ impl HttpAdmission for Challenge {
             Ok(AdmitDecision::Respond(
                 HttpObjectResponse::error(402)
                     .with_header("WWW-Authenticate", "Payment realm=repo")
-                    .with_header("WWW-Authenticate", "Other realm=repo"),
+                    .with_header("WWW-Authenticate", "Other realm=repo")
+                    .with_header("Vary", "Accept")
+                    .with_header("Vary", "Accept-Encoding"),
             ))
         })
+    }
+}
+
+#[tokio::test]
+async fn repeated_vary_fields_survive_mount_policy() {
+    for origins in [&[][..], &["https://allowed.test"][..]] {
+        let fx = fixture(false, false).await;
+        let path = fx.ref_url("big.bin");
+        let pipe = fx.pipe.with_http_seams(|mut seams| {
+            seams.admission = Arc::new(Challenge);
+            seams
+        });
+        let router = build_router(Arc::new(pipe), &options(origins));
+        let response = request(&router, "GET", &path, &[("origin", "https://allowed.test")]).await;
+        let vary: Vec<_> = response
+            .headers()
+            .get_all("vary")
+            .iter()
+            .flat_map(|value| value.to_str().unwrap().split(','))
+            .map(str::trim)
+            .collect();
+        assert!(vary.contains(&"Accept"));
+        assert!(vary.contains(&"Accept-Encoding"));
+        if !origins.is_empty() {
+            assert!(vary.contains(&"Origin"));
+        }
     }
 }
 
