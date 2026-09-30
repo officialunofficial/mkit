@@ -1625,7 +1625,11 @@ These settings govern only unavailability (§8); they MUST NOT override
 `reject`, `quarantine`, or `defer`. A deployment MUST refuse startup if
 opaque mode or `write_policy = open` is combined with any inspector.
 Opaque mode cannot enumerate pack objects; open writes let any signer
-obtain the writer view (§10.1). An async inspector or an inspector with
+obtain the writer view (§10.1). The launch profile (§18) MUST accept only
+`sync` inspectors with `on_unavailable = fail_closed`, and MUST refuse startup
+with any other inspector setting or more than four inspectors. The following
+async and unavailable-publish configuration rules apply to the full profile
+(deferred to WP-5.5c). An async inspector or an inspector with
 `on_unavailable = publish` MUST configure
 `inspection_clear_deadline_ms`; otherwise startup MUST be refused.
 
@@ -1652,7 +1656,25 @@ entry; a blob used both as a file and as a chunk is reported once as a
 inspection. Commit, tag and remix messages and tree entry names are
 not inspected; they remain a residual content channel.
 
-An inspected set larger than `inspect_batch_max_objects` MUST be sent
+**Launch input bound (R-200).** `inspect_batch_max_objects` MUST be positive
+and at most 10,000 (default 10,000). It bounds the whole advance's inspected
+set, with exactly one batch per inspector, subject also to §6.6. The server
+MUST advertise the effective bound as `GetServerInfo.inspection_max_objects`
+when inspection is enabled, and omit that optional field otherwise.
+Before enumerating added-pack entries, the server MUST preflight the sum of
+entry counts already recorded in their pack headers or verification jobs,
+plus newly reachable file objects outside those added packs and outside
+published membership. Pack entry counts are a conservative upper bound,
+including duplicate and non-file entries. An upper bound above the configured
+limit MUST fail before any Inspect call or apply, with `invalid_argument`
+and `object index limit exceeded`, following ordinary entry-count-limit replay
+behavior (STC §7.1). It MUST NOT be reported as inspector unavailability.
+This bound applies regardless of reachability; surplus entries alone remain
+permitted. Inspection-disabled deployments retain their existing limits.
+
+**Full-profile batching (deferred to WP-5.5c).** The full profile has no
+launch whole-set bound. An inspected set larger than
+`inspect_batch_max_objects` MUST be sent
 in multiple Inspect calls of at most that many objects each. This named
 parameter defaults to 10,000. Each inspector has a separate obligation
 for each batch. Its advance-level obligation is satisfied only when
@@ -1671,6 +1693,19 @@ Packs MUST NOT be rejected merely for surplus entries.
 
 At stage 5, the server MUST call each synchronous inspector with
 `phase = INSPECT_PHASE_PRE_RECEIVE` before apply:
+
+In the launch profile, `pass` continues; `reject` and `quarantine` both
+MUST return `permission_denied` (HTTP 403) without committing. Unavailability
+MUST return retryable `unavailable` without committing or storing replay.
+A reject (including quarantine) from any inspector MUST dominate other
+verdicts, including unavailability. `defer` remains invalid at PRE_RECEIVE.
+Each logical call MUST use a stable inspection id for its inspector, advance,
+phase and batch across retries, while each signed attempt uses a fresh nonce.
+Requests contain object metadata only; scanner byte retrieval is a separate
+private-channel capability (R-193).
+
+The following synchronous hold and unavailable-publish behavior applies to
+the full profile (deferred to WP-5.5c):
 
 | Result | Effect |
 |---|---|
@@ -1694,6 +1729,8 @@ A synchronous `fail_closed` `unavailable` is excluded from replay
 storage by STC §7.1. A retry therefore re-runs the pre-receive check.
 
 ### 11.3 Asynchronous checks and resolution
+
+Full-profile semantics in this subsection are deferred to WP-5.5c.
 
 Stage 6 commits live ref values, added membership, obligations, and
 durable scheduling in the same apply. Stage 9 calls MUST be scheduled
@@ -3532,12 +3569,26 @@ implements §2–§5) and:
   mounts no admin service (§16.1).
 
 **Launch profile.** An indexed server MAY implement §§2–11, including
-inspection and HTTP object serving without storage leases, while advertising `leases = false`, retaining all repository content
+synchronous inspection and HTTP object serving without storage leases, while
+advertising `leases = false`, retaining all repository content
 permanently and disabling GC. It MUST refuse lease terms, advertise empty
 receipt key fields and issue no storage receipts. The lease, GC and receipt
 requirements of §§12–13 and §15 do not apply to this profile; configured Event
 sinks still obey §12.4, including publication transitions. Inspection and
-serving stops remain governed by §§10–11; the profile does not waive takedown
+serving stops remain governed by §§10–11, subject to the launch amendments:
+only sync/fail-closed inspectors, at most four, one complete batch each, and a
+whole-advance input bound of `inspect_batch_max_objects` (positive and at most
+10,000; default 10,000), advertised as optional `inspection_max_objects`.
+PRE_RECEIVE quarantine rejects with 403 and commits nothing. Startup MUST
+refuse async or unavailable-publish inspectors and a fifth inspector.
+The server MUST NOT create durable inspection continuations, outstanding
+obligations or holds at launch. No durable inspection-mode marker is required:
+disabling inspection stops only future scanning. Async inspection, holds,
+quarantine suspension, inspection review procedures and unrestricted whole-set
+multi-batch inspection are deferred to WP-5.5c; the durable marker belongs to
+WP-5.5a-0 immediately before that follow-up. Publication Event implementation
+(WP-5.15) and Worker proofs (WP-4.14b-2) are post-launch work. The profile does
+not waive takedown
 or admin requirements applicable to its configuration. The profile and its
 permanent-retention/disabled-GC policy MUST be documented in deployment
 capabilities. It MUST NOT claim full-profile conformance.
@@ -3572,6 +3623,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | R-200 launch inspection: sync/fail-closed only, at most four inspectors, positive whole-advance bound <=10,000 advertised as inspection_max_objects, conservative pre-enumeration refusal with the existing index-limit error; one batch each and PRE_RECEIVE quarantine rejects. No durable continuation/marker; async, holds, quarantine and full multi-batch inspection deferred to WP-5.5c (§11, §18). |
 | 1 | draft | Launch admin foundation subset: signed framework, gapless audit/ReadAuditLog and automatic purge delivery; manual PurgeCache deferred. Automatic audit uses committed source relay events and atomic root append/dedup/watermark. |
 | 1 | draft | Launch profile permits indexed permanent retention with `leases = false` and GC disabled (§12.1, §18); publication transitions use Event field 7 with operation correlation, durable recording and at-least-once delivery (§12.4). Committed means Sent, never Delivered (§6.5; WP-5.4). |
 | 1 | draft | Authority-ticket streams use bounded physical-byte checkpoints independent of client framing, retaining pre/post staging and final acceptance checks (§6.2.1; WP-2.16). |

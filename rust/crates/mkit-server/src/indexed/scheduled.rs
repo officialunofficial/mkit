@@ -205,6 +205,7 @@ async fn staged_commits<N: NamespaceStore>(
             .map(|c| usize::try_from(c.job.entries).unwrap_or(usize::MAX))
             .fold(0, usize::saturating_add),
         external_bases: BTreeSet::new(),
+        inspection: None,
         bytes: ready
             .iter()
             .map(|c| c.job.in_pack_bytes)
@@ -229,7 +230,68 @@ pub async fn check<B: BlobStore, N: NamespaceStore>(
     clock: &dyn Clock,
     metrics: &dyn Metrics,
 ) -> Result<StagedCommits, ServerError> {
-    let budget = super::budget::SliceBudget::new(ADVANCE_CALLS);
+    check_optional(
+        blobs, store, shards, repo, source, tickets, ticket_ids, head, cfg, clock, metrics, None,
+    )
+    .await
+}
+
+/// Check scheduled verification and collect bounded added-pack file metadata.
+///
+/// # Errors
+/// Existing verification errors or the launch whole-advance index-limit refusal.
+#[allow(clippy::too_many_arguments)]
+pub async fn check_inspected<B: BlobStore, N: NamespaceStore>(
+    blobs: &B,
+    store: &N,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    source: &Partition,
+    tickets: &[TicketV1],
+    ticket_ids: &[Hash],
+    head: Hash,
+    cfg: IndexedConfig,
+    clock: &dyn Clock,
+    metrics: &dyn Metrics,
+    inspection_limit: usize,
+) -> Result<StagedCommits, ServerError> {
+    check_optional(
+        blobs,
+        store,
+        shards,
+        repo,
+        source,
+        tickets,
+        ticket_ids,
+        head,
+        cfg,
+        clock,
+        metrics,
+        Some(inspection_limit),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn check_optional<B: BlobStore, N: NamespaceStore>(
+    blobs: &B,
+    store: &N,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    source: &Partition,
+    tickets: &[TicketV1],
+    ticket_ids: &[Hash],
+    head: Hash,
+    cfg: IndexedConfig,
+    clock: &dyn Clock,
+    metrics: &dyn Metrics,
+    inspection_limit: Option<usize>,
+) -> Result<StagedCommits, ServerError> {
+    let budget = super::budget::SliceBudget::new(if inspection_limit.is_some() {
+        300
+    } else {
+        ADVANCE_CALLS
+    });
     let result = check_inner(
         &super::budget::Budgeted::new(blobs, &budget),
         &super::budget::Budgeted::new(store, &budget),
@@ -242,6 +304,7 @@ pub async fn check<B: BlobStore, N: NamespaceStore>(
         cfg,
         clock,
         metrics,
+        inspection_limit,
     )
     .await;
     if result.is_err() && budget.remaining() == 0 {
@@ -263,6 +326,7 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
     cfg: IndexedConfig,
     clock: &dyn Clock,
     metrics: &dyn Metrics,
+    inspection_limit: Option<usize>,
 ) -> Result<StagedCommits, ServerError> {
     let now = u64::try_from(clock.now_ms()).unwrap_or(0);
     let bound = cfg.relay_lag_bound_ms;
@@ -323,6 +387,17 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
     }
     if let Some(ms) = pending {
         return Err(super::pending(ms));
+    }
+    let inspection_count = ready
+        .iter()
+        .filter(|c| c.job.kind == Kind::Pack)
+        .fold(0_u64, |sum, c| sum.saturating_add(c.job.entries));
+    if let Some(limit) = inspection_limit {
+        let entries = ready
+            .iter()
+            .filter(|c| c.job.kind == Kind::Pack)
+            .fold(0_u64, |sum, c| sum.saturating_add(c.job.entries));
+        super::inspection::InspectionSet::new(limit).preflight(entries)?;
     }
     let decoded_total = ready.iter().fold(0_u64, |sum, held| {
         sum.saturating_add(held.job.in_pack_bytes)
@@ -566,5 +641,27 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
         .into_iter()
         .filter_map(|(pack, age)| age.map(|_| pack))
         .collect();
+    if let Some(limit) = inspection_limit {
+        let additions: Vec<_> = ready
+            .iter()
+            .filter(|c| c.job.kind == Kind::Pack)
+            .map(|c| c.ticket.pack_id)
+            .collect();
+        staged.inspection = Some(
+            super::inspection::scheduled_entries(
+                blobs,
+                store,
+                shards,
+                repo,
+                source,
+                &additions,
+                cfg,
+                limit,
+                inspection_count,
+                metrics,
+            )
+            .await?,
+        );
+    }
     Ok(staged)
 }

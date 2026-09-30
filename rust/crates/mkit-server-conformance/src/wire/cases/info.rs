@@ -33,6 +33,24 @@ pub(super) async fn shape_and_policy(ctx: Ctx) -> CaseResult {
         "incorrect protocol"
     );
     ensure!(info.spec_version == Some(2), "incorrect spec_version");
+    if let Some(limit) = info.inspection_max_objects {
+        ensure!(
+            (1..=10_000).contains(&limit),
+            "invalid inspection_max_objects: {limit}"
+        );
+        ensure!(
+            info.indexed_mode == Some(true),
+            "inspection requires indexed mode"
+        );
+        ensure!(
+            info.begin_upload_threshold_bytes == Some(0),
+            "inspection must require BeginUpload"
+        );
+        ensure!(
+            info.async_inspection == Some(false),
+            "launch inspection must be synchronous"
+        );
+    }
     let part_size = info.part_size.ok_or("missing part_size")?;
     ensure!(
         part_size.is_power_of_two() && part_size >= 8 * 1024 * 1024,

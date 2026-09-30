@@ -41,6 +41,8 @@ mod http_admission;
 mod http_tokens;
 mod implicit;
 mod info;
+#[cfg(feature = "remote-hooks")]
+pub mod inspection;
 mod lease;
 pub mod list;
 mod outcome;
@@ -451,6 +453,10 @@ impl core::fmt::Debug for VisibilityRequest {
 /// The request pipeline over blobs `B`, metadata `N` and hooks `H`.
 pub struct Pipeline<B, N, H = Hooks> {
     publication_policy: Option<Arc<dyn clearance::PublicationPolicy>>,
+    #[cfg(feature = "remote-hooks")]
+    inspectors: Vec<Arc<dyn inspection::ContentInspector>>,
+    #[cfg(feature = "remote-hooks")]
+    inspect_limit: usize,
     #[cfg(feature = "published-view")]
     published: Option<Arc<dyn published::PublishedSource>>,
     blobs: B,
@@ -818,6 +824,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             #[cfg(feature = "published-view")]
             published: None,
             publication_policy: None,
+            #[cfg(feature = "remote-hooks")]
+            inspectors: Vec::new(),
+            #[cfg(feature = "remote-hooks")]
+            inspect_limit: inspection::MAX_OBJECTS,
             blobs,
             meta,
             hooks,
@@ -831,6 +841,59 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             #[cfg(feature = "http-objects")]
             http_seams,
         })
+    }
+
+    /// Total launch inspected-set cap, absent when inspection is disabled.
+    #[must_use]
+    pub fn inspection_max_objects(&self) -> Option<u32> {
+        #[cfg(feature = "remote-hooks")]
+        if !self.inspectors.is_empty() {
+            return u32::try_from(self.inspect_limit).ok();
+        }
+        None
+    }
+
+    /// Configure the launch's synchronous, fail-closed inspectors.
+    ///
+    /// # Errors
+    /// Invalid launch settings or a deployment without indexed, ticketed,
+    /// restricted writes and atomic metadata.
+    #[cfg(feature = "remote-hooks")]
+    pub fn with_inspectors(
+        mut self,
+        inspectors: Vec<Arc<dyn inspection::ContentInspector>>,
+        batch_max: usize,
+    ) -> Result<Self, ServerError> {
+        if inspectors.is_empty() {
+            return Ok(self);
+        }
+        let mut names = std::collections::BTreeSet::new();
+        if inspectors.len() > inspection::MAX_INSPECTORS
+            || !(1..=inspection::MAX_OBJECTS).contains(&batch_max)
+            || inspectors.iter().any(|i| {
+                i.id().is_empty()
+                    || !names.insert(i.id())
+                    || i.phase() != inspection::InspectorPhase::Sync
+                    || i.on_unavailable() != inspection::OnUnavailable::FailClosed
+            })
+        {
+            return Err(ServerError::invalid_argument(
+                "invalid launch inspection configuration",
+            ));
+        }
+        if self.cfg.indexed.is_none()
+            || self.cfg.write_policy == WritePolicy::Open
+            || self.cfg.ticket_keys.is_none()
+            || self.cfg.begin_upload_threshold_bytes != 0
+            || !self.meta.capabilities().atomic_multi_key
+        {
+            return Err(ServerError::invalid_argument(
+                "inspection requires indexed mode, restricted writes and ticketed uploads with threshold zero",
+            ));
+        }
+        self.inspectors = inspectors;
+        self.inspect_limit = batch_max;
+        Ok(self)
     }
 
     /// Install test fault hooks (feature `test-faults` only).
@@ -905,6 +968,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         )?;
         sibling.shards = Arc::clone(&self.shards);
         sibling.gate.clone_from(&self.gate);
+        #[cfg(feature = "remote-hooks")]
+        {
+            sibling.inspectors.clone_from(&self.inspectors);
+            sibling.inspect_limit = self.inspect_limit;
+        }
         #[cfg(feature = "test-faults")]
         sibling.faults.clone_from(&self.faults);
         #[cfg(feature = "http-objects")]
@@ -2197,7 +2265,41 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     .new
                     .ok_or_else(|| ServerError::invalid_argument("delete consumes no tickets"))?;
                 ticket_ms = rows.iter().map(|ticket| ticket.created_at_ms).min();
-                staged = if indexed.verification == crate::indexed::VerificationMode::Scheduled {
+                staged = if let Some(limit) = self.inspection_max_objects() {
+                    if indexed.verification == crate::indexed::VerificationMode::Scheduled {
+                        crate::indexed::scheduled::check_inspected(
+                            &self.blobs,
+                            &self.meta,
+                            self.shards.as_ref(),
+                            &op.repo,
+                            &p,
+                            &rows,
+                            tickets,
+                            tip,
+                            indexed,
+                            self.clock.as_ref(),
+                            self.metrics.as_ref(),
+                            limit as usize,
+                        )
+                        .await?
+                    } else {
+                        crate::indexed::verify::verify_ticketed_inspected(
+                            &self.blobs,
+                            &self.meta,
+                            self.shards.as_ref(),
+                            &op.repo,
+                            &p,
+                            &rows,
+                            tickets,
+                            tip,
+                            indexed,
+                            self.clock.as_ref(),
+                            self.metrics.as_ref(),
+                            limit as usize,
+                        )
+                        .await?
+                    }
+                } else if indexed.verification == crate::indexed::VerificationMode::Scheduled {
                     // Kind-7 slices verify; the advance only checks their result.
                     crate::indexed::scheduled::check(
                         &self.blobs,
@@ -2235,6 +2337,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .store_policy_denial(&op, a, &p, ahead, error, false)
                 .await
                 .map(|stored| (stored, ResponseMeta::default()));
+        }
+        if staged.inspection.is_none() {
+            staged.inspection = self
+                .inspection_max_objects()
+                .map(|limit| crate::indexed::inspection::InspectionSet::new(limit as usize));
         }
         if let Some(pending) = implicit {
             let upd = refs
@@ -2352,6 +2459,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     ahead,
                     (lease, begin.as_ref()),
                     (pending.as_ref(), implicit, &staged.external_bases),
+                    staged.inspection.as_mut(),
                 )
                 .await
             }
@@ -3209,6 +3317,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             Option<&[PendingPack]>,
             &std::collections::BTreeSet<Hash>,
         ),
+        inspected: Option<&mut crate::indexed::inspection::InspectionSet>,
     ) -> Result<StoredResult, ServerError> {
         let caps = self.meta.capabilities();
         let replay = upload::replay_guard(op);
@@ -3266,7 +3375,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }),
         };
         let mut ahead = ahead;
-        let prepared = self
+        let prepared = match self
             .prepare_publication(
                 op,
                 p,
@@ -3274,8 +3383,21 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 &mut ahead,
                 implicit_ids.as_deref(),
                 external_bases,
+                inspected,
             )
-            .await?;
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error)
+                if self.inspection_max_objects().is_some()
+                    && error.code() == crate::Code::PermissionDenied =>
+            {
+                return self
+                    .store_policy_denial(op, a, p, ahead, error, pending.is_some())
+                    .await;
+            }
+            Err(error) => return Err(error),
+        };
         if let Some(publication) = &mut req.publication {
             publication.prepared = prepared.as_ref();
         }
@@ -3341,10 +3463,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         ahead: &mut Option<Snapshot>,
         implicit_ids: Option<&[Hash]>,
         external_bases: &std::collections::BTreeSet<Hash>,
+        mut inspected: Option<&mut crate::indexed::inspection::InspectionSet>,
     ) -> Result<Option<crate::store::publication::Advance>, ServerError> {
         // Deletions establish an immediate boundary without consulting inspection
         // or verifying the surviving pair; older membership obligations remain retained.
-        if let Some(policy) = &self.publication_policy
+        let policy = self.publication_policy.as_deref();
+        #[cfg(feature = "remote-hooks")]
+        let policy = policy.or_else(|| {
+            (!self.inspectors.is_empty())
+                .then_some(&inspection::Immediate as &dyn clearance::PublicationPolicy)
+        });
+        if let Some(policy) = policy
             && !req.refs.is_empty()
             && req.refs.iter().all(|update| update.new.is_some())
         {
@@ -3382,24 +3511,46 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             } else {
                 implicit_ids.map(<[Hash]>::to_vec).unwrap_or_default()
             };
-            crate::indexed::publication::verify(
-                &self.blobs,
-                &self.meta,
-                self.shards.as_ref(),
-                &op.repo,
-                &pair,
-                mkit_attest::grant::head_packmap(&crate::store::publication::sequence_ref(
-                    &req.refs[0].name,
-                ))
-                .is_some(),
-                &mut prepared,
-                policy.as_ref(),
-                self.cfg
-                    .indexed
-                    .ok_or_else(|| internal("publication requires indexed mode"))?,
-                self.metrics.as_ref(),
-            )
-            .await?;
+            if let Some(set) = inspected.as_deref_mut() {
+                crate::indexed::publication::verify_inspected(
+                    &self.blobs,
+                    &self.meta,
+                    self.shards.as_ref(),
+                    &op.repo,
+                    &pair,
+                    mkit_attest::grant::head_packmap(&crate::store::publication::sequence_ref(
+                        &req.refs[0].name,
+                    ))
+                    .is_some(),
+                    &mut prepared,
+                    policy,
+                    self.cfg
+                        .indexed
+                        .ok_or_else(|| internal("publication requires indexed mode"))?,
+                    self.metrics.as_ref(),
+                    set,
+                )
+                .await?;
+            } else {
+                crate::indexed::publication::verify(
+                    &self.blobs,
+                    &self.meta,
+                    self.shards.as_ref(),
+                    &op.repo,
+                    &pair,
+                    mkit_attest::grant::head_packmap(&crate::store::publication::sequence_ref(
+                        &req.refs[0].name,
+                    ))
+                    .is_some(),
+                    &mut prepared,
+                    policy,
+                    self.cfg
+                        .indexed
+                        .ok_or_else(|| internal("publication requires indexed mode"))?,
+                    self.metrics.as_ref(),
+                )
+                .await?;
+            }
             prepared.external_bases = prepared
                 .external_bases
                 .iter()
@@ -3424,6 +3575,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .map_err(meta_error)?
             {
                 prepared.state = crate::store::publication::Clearance::Pending;
+            }
+            #[cfg(feature = "remote-hooks")]
+            if let Some(set) = inspected {
+                self.inspect_advance(op, &prepared.value, set.clone().finalize())
+                    .await?;
             }
             Ok(Some(prepared))
         } else {

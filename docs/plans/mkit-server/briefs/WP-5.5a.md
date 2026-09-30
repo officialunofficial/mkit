@@ -85,3 +85,30 @@ body.
 - the vcs-worker conformance default phase on a free port.
 
 Do the self-review, then open the PR.
+
+## R-200 input-limit ruling (supersedes launch multi-batch requirement)
+
+The original batching and multi-batch test requirements above are historical;
+the ruling below replaces them with one-batch launch limits and boundary tests.
+
+Ruling: explicit launch-profile input limits. No durable inspection continuation.
+1. The launch profile caps the inspected set per advance at inspect_batch_max_objects (default 10,000), so there is exactly
+   one batch per inspector.
+   - Advertise the limit in server info.
+   - Check it before enumerating, from the pack entry counts already recorded in the header or verify job. The sum of
+   entries across the advance's added packs is an upper bound on the added-pack part of the set. Add the newly reachable
+   objects to it.
+   - An oversize advance is rejected before any Inspect call and before apply, using the same error and replay behavior as
+   the existing pack-size and entry-count limits. It is never unavailable.
+   - The rule applies to the whole set's count regardless of reachability. It does not single out surplus entries, so
+   §11.1's "not rejected merely for surplus entries" still holds.
+2. At most 4 inspectors in the launch profile. Refuse startup above that.
+3. Put both limits in the R-200 launch-profile amendment (§11/§18, plus a version-history row). The full profile keeps
+   unbounded multi-batch inspection, noted as deferred to 5.5c.
+4. Budget: re-derive the advance's worst case: enumeration scans at 1,000 rows per call for 10,000 objects or fewer, plus
+   at most 4 Inspect calls. Assert it in a test, and document it against the repository's 1,000-call accounting contract.
+   Don't rely on raising the Paid platform limit.
+
+Tests to add: over-limit rejection before any hook call, exactly-at-limit acceptance, and the 5-inspector startup refusal.
+
+Then continue with the pipeline integration, gates and PR. No new tag, timer or durable state.

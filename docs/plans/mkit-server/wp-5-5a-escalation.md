@@ -111,3 +111,21 @@ native configuration, R-200 spec/plan/registry/changelog amendments, full accept
 tests, all required gates, adversarial self-review, and the PR.
 
 No PR is opened or branch pushed under the Section D stop instruction.
+
+## Resolved by the R-200 input-limit ruling
+
+The user authorized one whole-advance batch (default 10,000 objects), at most
+four inspectors and server-info advertisement. Preflight added-pack header/job
+entry counts plus newly reachable files outside additions; oversize uses the
+existing index-limit error/replay before hooks/apply. Full multi-batch inspection
+is deferred to WP-5.5c. No durable continuation, tag, timer or marker is added.
+
+The launch advance allocates 300 calls jointly to verification and enumeration,
+256 to ancestry, 256 to resulting-pair verification, four to Inspect and 144
+to remaining stages: **960 <= 1,000**. Scans return at most 1,000 rows per call;
+10,000 entries across at most seven ticketed packs need at most 10 + 6 = 16
+pages (independent pack rounding), included in the 300-call allocation.
+`pipeline::inspection` asserts the budget; scans share `SliceBudget`, replacing
+the old 600-call verification allocation. The historical stop/check record above
+describes the pre-ruling tree; integration and the PR proceed under this ruling
+without increasing the platform limit.

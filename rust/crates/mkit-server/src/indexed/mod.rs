@@ -7,6 +7,7 @@ pub mod checkpoint;
 pub mod classify;
 pub mod entries;
 mod extract;
+pub mod inspection;
 pub mod job;
 pub mod publication;
 pub mod resolve;

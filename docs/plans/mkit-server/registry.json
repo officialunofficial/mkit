@@ -2036,7 +2036,7 @@
   },
   {
     "id": "4.14b",
-    "title": "Every HTTP proof=1 representation and Workers prefetch",
+    "title": "Native/core HTTP proof representations (4.14b-1 launch scope, R-200)",
     "milestone": "M4",
     "track": "core",
     "depends_on": [
@@ -2046,14 +2046,32 @@
       "4.14a"
     ],
     "size": "M",
-    "summary": "Stage 2: serve every proof=1 response (MKDP object bundles and MKDP/MKDS query ranges) through 4.12's ProofServer seam with 416 mapping and the proof ETag; establish encoded size and declared_bytes before Admission, then use in-memory ObjectSource prefetch on Workers (R-161, R-169).",
+    "summary": "Launch native/core: serve every proof=1 response (MKDP object bundles and MKDP/MKDS query ranges) through 4.12's ProofServer seam with 416 mapping and proof ETag; establish encoded size and declared_bytes before Admission (R-161, R-169). Worker proof serving/prefetch is deferred to 4.14b-2 (R-200).",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "golden"
+    ]
+  },
+  {
+    "id": "4.14b-2",
+    "title": "Worker proofs (post-launch, R-191/R-200)",
+    "milestone": "M4",
+    "track": "core",
+    "depends_on": [
+      "4.14b",
+      "5.15"
+    ],
+    "size": "M",
+    "summary": "Post-launch Worker proof serving and prefetch follows 5.15; the native/core 4.14b-1 scope remains on the launch path.",
     "human_action": false,
     "area_gates": [
       "rust",
       "wasm",
       "workers",
-      "golden"
-    ]
+      "conf-wrangler"
+    ],
+    "status": "deferred"
   },
   {
     "id": "4.15",
@@ -2307,10 +2325,11 @@
     "track": "core",
     "depends_on": [
       "5.5a",
+      "5.5c",
       "5.5b"
     ],
     "size": "L",
-    "summary": "Split into 5.5a (launch inspection and durable hit handoff, including remote Inspect) and 5.5b (post-launch takedown completion); retained as the historical aggregate (R-185).",
+    "summary": "Historical aggregate: launch sync-only inspection (5.5a), deferred async/holds/review (5.5c), then inspector takedown completion (5.5b); R-200 supersedes the R-185 scope.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -2320,16 +2339,18 @@
   },
   {
     "id": "5.5a",
-    "title": "ContentInspector without takedown completion: obligations, holds, serving stops, hit handoff, remote Inspect",
+    "title": "Synchronous complete-set inspection for the launch profile",
     "milestone": "M5",
     "track": "core",
     "depends_on": [
       "5.4",
+      "5.10",
+      "5.11a",
       "3.9c",
       "4.8"
     ],
     "size": "L",
-    "summary": "Launch: durable inspection obligations and stable IDs, sync checks, async clearance, holds and serving stops across every byte/reuse/cache path, purge scheduling and retained roots. Hits durably hand off to takedown and stay unresolved until verified completion; a no-op does not resolve them. Wire metadata-only remote Inspect through native HTTP and the signed Worker channel. Pull forward audited review/purge foundations as needed; the lean 5.6a spec amendment permits unresolved requests under HANDOFF/R-190; 5.4 does not waive takedown completion.",
+    "summary": "R-200 launch: metadata-only signed Inspect at stage 5; sync/fail-closed only, at most four inspectors and one complete batch each. Preflight whole-advance input bound (positive inspect_batch_max_objects <=10,000; default 10,000) before enumeration/hooks/apply; advertise the limit. Quarantine rejects, unavailable has no replay, stable ids survive retries. No durable continuation, inspection marker or hold. R-193 scanner byte retrieval follows.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -2340,12 +2361,52 @@
     ]
   },
   {
+    "id": "5.5a-0",
+    "title": "Durable inspection-mode marker (post-launch, R-199/R-200)",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "REL-1",
+      "5.4"
+    ],
+    "size": "S",
+    "summary": "Deferred until immediately before 5.5c; launch sync-only inspection has no outstanding obligations and needs no marker.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm"
+    ],
+    "status": "deferred"
+  },
+  {
+    "id": "5.5c",
+    "title": "Async inspection, holds and review operations (post-launch, R-200)",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "5.5a",
+      "5.5a-0",
+      "5.11a"
+    ],
+    "size": "L",
+    "summary": "Deferred full-profile inspection: unrestricted multi-batch sets, async obligations, timer 14, hold authority, strong serving stops, post-publication quarantine and audited ReleaseHold/Reinspect/ReleaseFlag/ResumeServing/WaiveObligations. Turn the three 5.4 hold regressions green; original WP-5.5a prompts now describe this follow-up.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
+      "conf-native",
+      "conf-wrangler"
+    ],
+    "status": "deferred"
+  },
+  {
     "id": "5.5b",
     "title": "Inspector takedown completion",
     "milestone": "M5",
     "track": "core",
     "depends_on": [
-      "5.5a",
+      "5.5c",
       "5.6"
     ],
     "size": "L",
@@ -2580,15 +2641,16 @@
   },
   {
     "id": "5.15",
-    "title": "Publication Event delivery",
+    "title": "Publication Event delivery (post-launch, R-200)",
     "milestone": "M5",
     "track": "core",
     "depends_on": [
       "5.4",
-      "3.3"
+      "3.3",
+      "5.5c"
     ],
     "size": "L",
-    "summary": "Launch: publication transitions through durable outbox recording and at-least-once remote Event delivery, extracted from 5.2. Correlate ref, advance sequence, published pair and operation. Committed Outcome means Sent; Delivered follows published-prefix advancement, not merely Inspect Pass. Receivers deduplicate and tolerate Event arriving before Outcome (R-185).",
+    "summary": "Post-launch (R-200): publication transitions through durable outbox recording and at-least-once remote Event delivery, extracted from 5.2. Correlate ref, advance sequence, published pair and operation. Committed Outcome means Sent; Delivered follows published-prefix advancement, not merely Inspect Pass. Receivers deduplicate and tolerate Event arriving before Outcome (R-185).",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -2597,7 +2659,8 @@
       "conf-native",
       "conf-wrangler",
       "docs"
-    ]
+    ],
+    "status": "deferred"
   },
   {
     "id": "REL-1",
@@ -2614,14 +2677,13 @@
       "2.16",
       "5.4",
       "5.5a",
-      "5.15",
       "4.18",
       "5.6",
       "5.11a",
       "1.20"
     ],
     "size": "S",
-    "summary": "R-185 supersedes R-154: one launch of everything merged so far plus the Workers-critical path for the Uno monorepo (UNO-403/UNO-404), at the full quality bar. Retain the former Stage 1 terminal set and add signed HTTP hooks/authority fencing, published view, inspection/remote Inspect, publication Events, Worker serving production opt-in/activation, launch takedown/admin review and real Cloudflare staging. Gate on an external full-code-and-spec review of the whole launch scope, validation of findings and adversarial review of fixes. The 5.4 spec amendment defines indexed serving/inspection without storage leases, permanent retention and GC disabled; do not claim the existing full profile. Bump to 0.5.0, publish mkit-server/-native/-conformance (-worker stays unpublished), cut the signed release and merge feat/mkit-server to main with a merge commit, never squash. Native remains the maintained reference/test server; all other work follows launch in plan order.",
+    "summary": "R-200 amends R-185: one launch of everything merged so far plus the Workers-critical path for the Uno monorepo (UNO-403/UNO-404), at the full quality bar. Retain the former Stage 1 terminal set and add signed HTTP hooks/authority fencing, published view, sync-only inspection/remote Inspect, Worker serving production opt-in/activation, launch takedown/admin review and real Cloudflare staging. Gate on an external full-code-and-spec review of the whole launch scope, validation of findings and adversarial review of fixes. The 5.4 spec amendment defines indexed serving/inspection without storage leases, permanent retention and GC disabled; do not claim the existing full profile. Bump to 0.5.0, publish mkit-server/-native/-conformance (-worker stays unpublished), cut the signed release and merge feat/mkit-server to main with a merge commit, never squash. Native remains the maintained reference/test server; all other work follows launch in plan order.",
     "human_action": true,
     "area_gates": [
       "full",
@@ -2642,7 +2704,7 @@
       "5.13"
     ],
     "size": "S",
-    "summary": "R-185: tracking aggregate for remaining work in plan order after the single Workers launch, not a second launch or a mandated next-minor release. Includes inspector takedown completion, leases/GC/receipts (5.2, 5.3a/b, 5.8), full admin operations and native-only extras (2.12 and native serving extras). Queue outcome sink 3.9b and the owner-approval bridge remain deferred and optional.",
+    "summary": "R-185: tracking aggregate for remaining work in plan order after the single Workers launch, not a second launch or a mandated next-minor release. Includes inspector takedown completion, leases/GC/receipts (5.2, 5.3a/b, 5.8), full admin operations and native-only extras (2.12 and native serving extras). Queue outcome sink 3.9b and the owner-approval bridge remain deferred and optional. R-200 follow-up order: 5.5a-0, 5.5c, 5.15, then 4.14b-2.",
     "human_action": true,
     "area_gates": [
       "full",

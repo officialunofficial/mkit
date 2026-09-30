@@ -5427,6 +5427,17 @@ pub struct GetServerInfoResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub async_inspection: ::core::option::Option<bool>,
+    /// Maximum distinct inspected objects in one advance; absent when no inspector
+    /// is configured (SPEC-TRANSPORT-CONNECT §2.1; SPEC-SERVER §11.1).
+    ///
+    /// Field 19: `inspection_max_objects`
+    #[serde(
+        rename = "inspectionMaxObjects",
+        alias = "inspection_max_objects",
+        with = "::buffa::json_helpers::opt_uint32",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub inspection_max_objects: ::core::option::Option<u32>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -5452,6 +5463,7 @@ impl ::core::fmt::Debug for GetServerInfoResponse {
             .field("max_delta_chain_depth", &self.max_delta_chain_depth)
             .field("leases", &self.leases)
             .field("async_inspection", &self.async_inspection)
+            .field("inspection_max_objects", &self.inspection_max_objects)
             .finish()
     }
 }
@@ -5594,6 +5606,13 @@ impl GetServerInfoResponse {
         self.async_inspection = Some(value);
         self
     }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::inspection_max_objects`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_inspection_max_objects(mut self, value: u32) -> Self {
+        self.inspection_max_objects = Some(value);
+        self
+    }
 }
 ::buffa::impl_default_instance!(GetServerInfoResponse);
 impl ::buffa::MessageName for GetServerInfoResponse {
@@ -5669,6 +5688,9 @@ impl ::buffa::Message for GetServerInfoResponse {
         if self.async_inspection.is_some() {
             size += 2u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
         }
+        if let Some(v) = self.inspection_max_objects {
+            size += 2u64 + ::buffa::types::uint32_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -5732,6 +5754,9 @@ impl ::buffa::Message for GetServerInfoResponse {
         }
         if let Some(v) = self.async_inspection {
             ::buffa::types::put_bool_field(18u32, v, buf);
+        }
+        if let Some(v) = self.inspection_max_objects {
+            ::buffa::types::put_uint32_field(19u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -5922,6 +5947,15 @@ impl ::buffa::Message for GetServerInfoResponse {
                     ::buffa::types::decode_bool(buf)?,
                 );
             }
+            19u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.inspection_max_objects = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint32(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -5948,6 +5982,7 @@ impl ::buffa::Message for GetServerInfoResponse {
         self.max_delta_chain_depth = ::core::option::Option::None;
         self.leases = ::core::option::Option::None;
         self.async_inspection = ::core::option::Option::None;
+        self.inspection_max_objects = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }

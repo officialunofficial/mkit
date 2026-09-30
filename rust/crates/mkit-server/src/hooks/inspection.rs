@@ -108,6 +108,21 @@ impl<C: HookChannel> RemoteInspector<C> {
     }
 }
 
+impl<C: HookChannel> crate::pipeline::inspection::ContentInspector for RemoteInspector<C> {
+    fn id(&self) -> &str {
+        self.id()
+    }
+
+    fn inspect<'a>(
+        &'a self,
+        op: &'a Operation,
+        inspection_id: &'a str,
+        objects: &'a [pb::InspectObject],
+    ) -> crate::BoxFuture<'a, Result<InspectVerdict, ServerError>> {
+        Box::pin(self.inspect(op, inspection_id, objects))
+    }
+}
+
 fn valid_object(object: &pb::InspectObject) -> bool {
     object.id.as_ref().is_some_and(|id| id.len() == 32)
         && object.size.is_some()
@@ -227,7 +242,11 @@ mod tests {
             r#"{"pass":{},"takedownReason":"policy"}"#,
             r#"{"quarantine":{},"takedownReason":"policy"}"#,
         ] {
-            assert_eq!(answer(json).unwrap_err().code(), Code::Unavailable, "{json}");
+            assert_eq!(
+                answer(json).unwrap_err().code(),
+                Code::Unavailable,
+                "{json}"
+            );
         }
         let long = serde_json::json!({"quarantine": {"reason": "x".repeat(513)}});
         assert_eq!(
@@ -242,7 +261,17 @@ mod tests {
             MockChannel::new(Step::json(r#"{"pass":{}}"#)),
             ManualSleep::new(),
         );
-        let inspector = RemoteInspector::new("scanner", client.clone());
+        let remote = RemoteInspector::new("scanner", client.clone());
+        let inspector: &dyn crate::pipeline::inspection::ContentInspector = &remote;
+        assert_eq!(inspector.id(), "scanner");
+        assert_eq!(
+            inspector.phase(),
+            crate::pipeline::inspection::InspectorPhase::Sync
+        );
+        assert_eq!(
+            inspector.on_unavailable(),
+            crate::pipeline::inspection::OnUnavailable::FailClosed
+        );
         let op = Operation::new(
             RepoId {
                 namespace: NamespaceKey::deployment_default(),

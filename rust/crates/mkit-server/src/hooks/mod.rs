@@ -18,15 +18,15 @@
 //! - [`RemoteAuthorizer`], [`RemoteAdmission`] and [`RemoteOutcomes`] share
 //!   one [`HookClient`] and implement the stage traits, so any subset plugs
 //!   into [`Hooks`](crate::pipeline::Hooks).
-//! - [`RemoteInspector`] is a transport adapter only. Its caller owns complete
-//!   inspected-set enumeration, batching and stable inspection ids. Stage 5
-//!   integration is blocked by WP-5.5a's Section D budget escalation.
+//! - [`RemoteInspector`] implements synchronous inspection at stage 5. The
+//!   pipeline owns complete inspected-set enumeration, batching and stable
+//!   inspection ids.
 //!
 //! # Failure semantics
 //!
-//! Authorize and Admit fail closed (§8): a transport error, timeout, non-2xx
+//! Authorize, Admit and Inspect fail closed (§8): a transport error, timeout, non-2xx
 //! status, Connect error body, non-JSON content type, body over 64 KiB,
-//! malformed JSON, absent decision or a failed §6.6 check all answer
+//! malformed JSON, absent decision/verdict or a failed §6.6 check all answer
 //! retryable `unavailable` and write nothing. There is no retry inside a call.
 //! A deliberate `deny` in a 2xx answer is a decision, sanitised per §6.2. An
 //! Outcome is acknowledged by any 2xx; every other result is a
@@ -43,8 +43,7 @@
 //!
 //! # Not here
 //!
-//! Inspection deployment and pipeline integration are not implemented; a
-//! core-profile server must still refuse inspector configuration (§18).
+//! The launch profile accepts synchronous fail-closed inspection only (§18).
 //! Async inspection belongs to WP-5.5c. Event belongs to WP-5.2.
 //! `AuthorizeAllow.writer_view` becomes `AuthzFacts::caller_view`, which the
 //! pipeline honours only under the `authority` role (§10.1). Reservation-id

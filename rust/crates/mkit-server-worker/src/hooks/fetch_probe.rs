@@ -8,6 +8,9 @@ use zeroize::Zeroizing;
 
 /// Exercise the real channel with a harness-local HTTPS route interception.
 pub async fn run(mode: &str) -> worker::Result<worker::Response> {
+    if mode.starts_with("inspect-") {
+        return inspect_probe().await;
+    }
     let endpoint = Endpoint::new("https://hook-probe.invalid/prefix")
         .map_err(|e| worker::Error::RustError(e.to_string()))?;
     let channel = FetchChannel::new(endpoint);
@@ -47,4 +50,57 @@ pub async fn run(mode: &str) -> worker::Result<worker::Response> {
         Err(_) => serde_json::json!({"transportError":true}),
     };
     worker::Response::from_json(&answer)
+}
+
+async fn inspect_probe() -> worker::Result<worker::Response> {
+    use mkit_server::hooks::{HookClient, InspectVerdict, RemoteInspector};
+    use mkit_server::{NamespaceKey, OpKind, Operation, Principal, RefUpdate, RepoId, RepoName};
+    use std::sync::Arc;
+
+    let fail = |error: String| worker::Error::RustError(error);
+    let endpoint =
+        Endpoint::new("https://hook-probe.invalid/prefix").map_err(|e| fail(e.to_string()))?;
+    let client = HookClient::new(
+        FetchChannel::new(endpoint),
+        "https://vcs.example.test",
+        Some(
+            HookSigner::new("probe", Zeroizing::new([0x19; 32]))
+                .map_err(|e| fail(e.to_string()))?,
+        ),
+        Arc::new(crate::clock::WorkerClock),
+        Arc::new(WorkerSleep),
+    )
+    .map_err(|e| fail(e.to_string()))?;
+    let inspector = RemoteInspector::new("probe", Arc::new(client));
+    let op = Operation::new(
+        RepoId {
+            namespace: NamespaceKey::deployment_default(),
+            name: RepoName::new("probe").map_err(|e| fail(e.to_string()))?,
+        },
+        Principal::Anonymous,
+        None,
+        OpKind::UpdateRef(RefUpdate {
+            name: "refs/heads/main".into(),
+            condition: mkit_core::refs::RefWriteCondition::Missing,
+            new: Some([3; 32]),
+        }),
+    );
+    let objects = vec![serde_json::from_value(serde_json::json!({
+        "id": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=", "size": "123", "kind": "INSPECT_OBJECT_KIND_BLOB"
+    })).map_err(|e| fail(e.to_string()))?];
+    let mut verdicts = Vec::new();
+    for _ in 0..2 {
+        verdicts.push(
+            match inspector
+                .inspect(&op, "inspection:runtime-probe", &objects)
+                .await
+            {
+                Ok(InspectVerdict::Pass) => "pass",
+                Ok(InspectVerdict::Reject(_)) => "reject",
+                Err(error) if error.code() == mkit_server::Code::Unavailable => "unavailable",
+                Err(_) => "unexpected",
+            },
+        );
+    }
+    worker::Response::from_json(&serde_json::json!({"verdicts":verdicts}))
 }

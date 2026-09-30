@@ -481,6 +481,22 @@ where
     // serialize each partition's writes here rather than race them
     // through re-plans.
     .with_write_gate();
+    #[cfg(feature = "hooks")]
+    let pipeline = if let Some(settings) = cfg.hooks.as_ref().filter(|s| !s.inspect.is_empty()) {
+        let built = crate::hooks::build::build(Some(settings), &outcome_audience(cfg))?;
+        let inspectors = built
+            .inspectors
+            .into_iter()
+            .map(|inspector| {
+                Arc::new(inspector) as Arc<dyn mkit_server::pipeline::inspection::ContentInspector>
+            })
+            .collect();
+        pipeline
+            .with_inspectors(inspectors, settings.inspect_batch_max_objects)
+            .map_err(|e| config_error("inspection", e))?
+    } else {
+        pipeline
+    };
     #[cfg(feature = "enc")]
     let enc = match &cfg.enc {
         Some(opts) => {

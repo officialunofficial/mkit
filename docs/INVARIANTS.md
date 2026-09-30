@@ -2006,3 +2006,24 @@ unverified bytes or falsely authorize reuse in another repository.
 pins, bounded-object multipart model tests, and the local R2 runtime probe.
 The parent WP-4.10b must establish canonical identity plus immutable verified
 source evidence in its first bounded source pass; that integration is pending.
+
+## Launch inspection checks the complete bounded set before apply
+
+**Always:** launch inspection uses at most four sync/fail-closed inspectors,
+with one complete, deduplicated metadata batch per inspector. Added-pack entry
+counts plus newly reachable files outside the additions preflight the positive
+whole-advance bound (at most 10,000) before enumeration; oversize uses the
+ordinary index-limit refusal before hooks/apply. Reject/quarantine dominates;
+unavailable cannot commit or enter replay. With inspection disabled, existing
+bytes and calls remain identical. No durable inspection continuation is created.
+
+**Because:** whole-pack downloads expose surplus entries; inspection shares
+the 1,000-call accounting contract.
+
+**If violated:** unscanned content can publish, retry can bypass inspection, or
+an accepted request can exhaust its Worker budget.
+
+**Enforced by:** `Pipeline::with_inspectors`, `InspectionSet::preflight` and
+header/frame checks; stage-5 verdict/replay integration is pending in the
+pipeline lane. Budget assertion: 960 calls, with <=16 frame pages inside 300
+verification calls. Async holds remain deferred to WP-5.5c.
