@@ -2060,11 +2060,15 @@ an accepted request can exhaust its Worker budget.
 precondition of the supported launch profile, not a runtime existing-content
 check; there is no durable mode marker at launch. Inspector configuration,
 input limits and verdicts are enforced by `Pipeline::with_inspectors`, `InspectionSet::preflight`,
-header/frame checks and `Pipeline::inspect_advance` before apply. Pipeline
+header/frame checks and `Pipeline::inspect_advance` before apply. Request-local
+accepted verification snapshots are checked before/after frame enumeration;
+each pack's decoded-size sum must match its verified first-occurrence total.
+Changed jobs or missing frames retain pending-verification behavior. Pipeline
 acceptance tests cover verdict dominance, unavailable replay exclusion and
 inspection-disabled identity. Budget assertion: 960 calls (300 verification,
 256 ancestry, 256 shared pair closure/enumeration/dependencies, four Inspect,
-144 other); <=16 frame pages fit inside the pair allocation. The revised R-200
+144 other); <=16 frame pages plus two batched verification-snapshot reads
+fit inside the pair allocation. The revised R-200
 set removes the role-reconstruction cost recorded in
 [the historical WP-5.5a escalation](plans/mkit-server/wp-5-5a-escalation.md#resolved-by-the-revised-r-200-added-pack-ruling).
 Full classification, async holds and unrestricted multi-batch inspection remain

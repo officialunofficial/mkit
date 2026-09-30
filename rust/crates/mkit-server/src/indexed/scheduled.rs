@@ -347,6 +347,7 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
         return Err(storage_failed());
     }
     let mut ready = Vec::with_capacity(tickets.len());
+    let mut inspection_packs = Vec::new();
     let mut pending: Option<u64> = None;
     for (i, (ticket, id)) in tickets.iter().zip(ticket_ids).enumerate() {
         let job = rows[2 * i]
@@ -382,6 +383,14 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
         if !(job.usable() && verified) {
             pending = Some(pending.unwrap_or(0).max(retry_after(Some(&job))));
             continue;
+        }
+        if inspection_limit.is_some() && job.kind == Kind::Pack {
+            inspection_packs.push(super::inspection::ScheduledPack {
+                pack: ticket.pack_id,
+                job: rows[2 * i].clone().ok_or_else(storage_failed)?,
+                verification: rows[2 * i + 1].clone().ok_or_else(storage_failed)?,
+                decoded_bytes: job.in_pack_bytes,
+            });
         }
         ready.push(Consumed { ticket, job });
     }
@@ -644,14 +653,7 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
     if let Some(limit) = inspection_limit {
         let mut set = super::inspection::InspectionSet::new(limit);
         set.reserve_added_count(inspection_count)?;
-        set.defer_scheduled(
-            ready
-                .iter()
-                .filter(|c| c.job.kind == Kind::Pack)
-                .map(|c| c.ticket.pack_id)
-                .collect(),
-            source.clone(),
-        );
+        set.defer_scheduled(inspection_packs, source.clone());
         staged.inspection = Some(set);
     }
     Ok(staged)

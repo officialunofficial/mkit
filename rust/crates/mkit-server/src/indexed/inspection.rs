@@ -34,7 +34,6 @@ pub struct InspectionSet {
     limit: usize,
     objects: BTreeMap<Hash, InspectObject>,
     added_entries: u64,
-    added_packs: Vec<Hash>,
     pending: Option<Added>,
 }
 
@@ -48,7 +47,16 @@ pub(super) struct NativeEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Added {
     Native(Vec<NativeEntry>),
-    Scheduled(crate::Partition),
+    Scheduled(crate::Partition, Vec<ScheduledPack>),
+}
+
+/// Request-local proof of the exact verified job accepted during ticket checking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ScheduledPack {
+    pub pack: Hash,
+    pub job: crate::Value,
+    pub verification: crate::Value,
+    pub decoded_bytes: u64,
 }
 
 /// The established bounded-index refusal; request size is never unavailability.
@@ -65,7 +73,6 @@ impl InspectionSet {
             limit,
             objects: BTreeMap::new(),
             added_entries: 0,
-            added_packs: Vec::new(),
             pending: None,
         }
     }
@@ -95,9 +102,8 @@ impl InspectionSet {
         self.pending = Some(Added::Native(entries));
     }
 
-    pub(super) fn defer_scheduled(&mut self, packs: Vec<Hash>, source: crate::Partition) {
-        self.added_packs = packs;
-        self.pending = Some(Added::Scheduled(source));
+    pub(super) fn defer_scheduled(&mut self, packs: Vec<ScheduledPack>, source: crate::Partition) {
+        self.pending = Some(Added::Scheduled(source, packs));
     }
 
     /// Collect added entries after header/job preflight, without reading bytes.
@@ -116,16 +122,10 @@ impl InspectionSet {
                     self.entry(entry.id, entry.size, entry.object_type)?;
                 }
             }
-            Some(Added::Scheduled(source)) => {
-                let added = scheduled_entries(
-                    store,
-                    repo,
-                    &source,
-                    &self.added_packs,
-                    self.limit,
-                    self.added_entries,
-                )
-                .await?;
+            Some(Added::Scheduled(source, packs)) => {
+                let added =
+                    scheduled_entries(store, repo, &source, &packs, self.limit, self.added_entries)
+                        .await?;
                 self.objects = added.objects;
             }
             None => {}
@@ -227,12 +227,54 @@ pub(super) async fn preflight_native<B: BlobStore>(
     Ok(count)
 }
 
+fn metadata_error(error: crate::StoreError) -> ServerError {
+    if super::budget::is_exhausted(&error) {
+        limit_error()
+    } else {
+        ServerError::unavailable("object storage request failed")
+    }
+}
+
+async fn guard_jobs<S: crate::NamespaceStore>(
+    store: &S,
+    repo: &crate::RepoId,
+    source: &crate::Partition,
+    packs: &[ScheduledPack],
+) -> Result<(), ServerError> {
+    if packs.is_empty() {
+        return Ok(());
+    }
+    let keys = packs
+        .iter()
+        .flat_map(|pack| {
+            [
+                crate::store::keys::verify_job(&repo.name, &pack.pack),
+                crate::store::keys::verification(&repo.name, &pack.pack),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let current = store
+        .get_many(source, &keys)
+        .await
+        .map_err(metadata_error)?;
+    if current.len() != keys.len() {
+        return Err(ServerError::unavailable("object storage request failed"));
+    }
+    if packs.iter().enumerate().any(|(i, pack)| {
+        current[2 * i].as_ref() != Some(&pack.job)
+            || current[2 * i + 1].as_ref() != Some(&pack.verification)
+    }) {
+        return Err(super::pending(1000));
+    }
+    Ok(())
+}
+
 /// Page verified first-occurrence frame rows, without reference scans or R2 reads.
 pub(super) async fn scheduled_entries<S: crate::NamespaceStore>(
     store: &S,
     repo: &crate::RepoId,
     source: &crate::Partition,
-    additions: &[Hash],
+    additions: &[ScheduledPack],
     limit: usize,
     added_count: u64,
 ) -> Result<InspectionSet, ServerError> {
@@ -240,21 +282,17 @@ pub(super) async fn scheduled_entries<S: crate::NamespaceStore>(
     let failed = || ServerError::unavailable("object storage request failed");
     let mut set = InspectionSet::new(limit);
     set.reserve_added_count(added_count)?;
+    guard_jobs(store, repo, source, additions).await?;
     let mut entries = 0_u64;
     for pack in additions {
-        let (start, end) = keys::verify_range(&repo.name, pack, Some(keys::VC_FRAME));
+        let mut decoded_bytes = 0_u64;
+        let (start, end) = keys::verify_range(&repo.name, &pack.pack, Some(keys::VC_FRAME));
         let mut after = None;
         loop {
             let page = store
                 .scan(source, &start, &end, after.as_ref(), 1000)
                 .await
-                .map_err(|error| {
-                    if super::budget::is_exhausted(&error) {
-                        limit_error()
-                    } else {
-                        failed()
-                    }
-                })?;
+                .map_err(metadata_error)?;
             if page.entries.len() > 1000 {
                 return Err(failed());
             }
@@ -268,7 +306,7 @@ pub(super) async fn scheduled_entries<S: crate::NamespaceStore>(
                 else {
                     return Err(failed());
                 };
-                if found != repo.name || pack_id != *pack || sub != keys::VC_FRAME {
+                if found != repo.name || pack_id != pack.pack || sub != keys::VC_FRAME {
                     return Err(failed());
                 }
                 entries = entries.saturating_add(1);
@@ -276,6 +314,9 @@ pub(super) async fn scheduled_entries<S: crate::NamespaceStore>(
                     return Err(failed());
                 }
                 let frame = super::checkpoint::decode_frame(&id, &raw).map_err(|_| failed())?;
+                decoded_bytes = decoded_bytes
+                    .checked_add(frame.value.decoded_size)
+                    .ok_or_else(failed)?;
                 set.entry(id, frame.value.decoded_size, frame.object_type)?;
             }
             match page.next {
@@ -284,7 +325,11 @@ pub(super) async fn scheduled_entries<S: crate::NamespaceStore>(
                 None => break,
             }
         }
+        if decoded_bytes != pack.decoded_bytes {
+            return Err(super::pending(1000));
+        }
     }
+    guard_jobs(store, repo, source, additions).await?;
     Ok(set)
 }
 
@@ -307,6 +352,44 @@ mod tests {
     use mkit_core::serialize::serialize;
     use mkit_core::sign::{KeyPair, sign_commit};
     use std::sync::Arc;
+
+    fn verified_pack(
+        store: &MemoryKv,
+        repo: &crate::RepoId,
+        pack: Hash,
+        entries: u64,
+        decoded_bytes: u64,
+    ) -> ScheduledPack {
+        let mut job = super::super::checkpoint::VerifyJobV1::new(hash(&pack), NOW as u64, 1, 4096);
+        job.kind = super::super::checkpoint::Kind::Pack;
+        job.phase = super::super::checkpoint::Phase::Watch;
+        job.entries = entries;
+        job.in_pack_bytes = decoded_bytes;
+        let snapshot = ScheduledPack {
+            pack,
+            job: super::super::checkpoint::encode_job(&job),
+            verification: super::super::state::encode(
+                &super::super::state::VerificationV1::Verified {
+                    pack_len: 1,
+                    verified_at_ms: NOW as u64,
+                },
+            ),
+            decoded_bytes,
+        };
+        block_on(
+            store.apply(
+                &source(repo),
+                Batch::new()
+                    .put(keys::verify_job(&repo.name, &pack), snapshot.job.clone())
+                    .put(
+                        keys::verification(&repo.name, &pack),
+                        snapshot.verification.clone(),
+                    ),
+            ),
+        )
+        .unwrap();
+        snapshot
+    }
 
     #[allow(clippy::unwrap_used)] // Deterministic valid objects used only by these tests.
     fn fixture() -> (Vec<u8>, Hash, Vec<(Hash, Kind)>) {
@@ -425,6 +508,15 @@ mod tests {
             },
         )
         .unwrap();
+        let in_pack_bytes = frames
+            .iter()
+            .map(|(id, raw)| {
+                super::super::checkpoint::decode_frame(id, raw)
+                    .unwrap()
+                    .value
+                    .decoded_size
+            })
+            .sum();
         let mut batch = Batch::new();
         for (id, raw) in frames {
             batch = batch.put(
@@ -433,17 +525,6 @@ mod tests {
             );
         }
         block_on(store.apply(&source(&repo), batch)).unwrap();
-        let worker = block_on(scheduled_entries(
-            &store,
-            &repo,
-            &source(&repo),
-            &[ticket.pack_id],
-            10,
-            7,
-        ))
-        .unwrap()
-        .finalize();
-        assert_eq!(native, worker);
         let mut job = super::super::checkpoint::VerifyJobV1::new(
             hash(&ticket.pack_id),
             NOW as u64,
@@ -453,7 +534,7 @@ mod tests {
         job.kind = super::super::checkpoint::Kind::Pack;
         job.phase = super::super::checkpoint::Phase::Watch;
         job.entries = 7;
-        job.in_pack_bytes = native.iter().map(|e| e.size).sum();
+        job.in_pack_bytes = in_pack_bytes;
         let ready = Batch::new()
             .put(
                 keys::verify_job(&repo.name, &ticket.pack_id),
@@ -467,6 +548,28 @@ mod tests {
                 }),
             );
         block_on(store.apply(&source(&repo), ready)).unwrap();
+        let accepted = ScheduledPack {
+            pack: ticket.pack_id,
+            job: super::super::checkpoint::encode_job(&job),
+            verification: super::super::state::encode(
+                &super::super::state::VerificationV1::Verified {
+                    pack_len: pack.len() as u64,
+                    verified_at_ms: NOW as u64,
+                },
+            ),
+            decoded_bytes: job.in_pack_bytes,
+        };
+        let worker = block_on(scheduled_entries(
+            &store,
+            &repo,
+            &source(&repo),
+            &[accepted],
+            10,
+            7,
+        ))
+        .unwrap()
+        .finalize();
+        assert_eq!(native, worker);
         let mut checked = block_on(super::super::scheduled::check_inspected(
             &blobs,
             &store,
@@ -538,20 +641,21 @@ mod tests {
     fn frame_scan_budget_exhaustion_is_an_index_limit_refusal() {
         let repo = repo("inspection-scan-budget");
         let store = MemoryKv::default();
-        let budget = super::super::budget::SliceBudget::new(0);
+        let accepted = verified_pack(&store, &repo, [1; 32], 1, 11);
+        let budget = super::super::budget::SliceBudget::new(1);
         let bounded = super::super::budget::Budgeted::new(&store, &budget);
         let error = block_on(scheduled_entries(
             &bounded,
             &repo,
             &source(&repo),
-            &[[1; 32]],
+            &[accepted],
             10_000,
             1,
         ))
         .unwrap_err();
         assert_eq!(error.code(), crate::Code::InvalidArgument);
         assert_eq!(error.public_message(), "object index limit exceeded");
-        assert_eq!(budget.used(), 0);
+        assert_eq!(budget.used(), 1);
     }
 
     #[test]
@@ -578,7 +682,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)] // One real 400-entry pack compares native and Worker enumeration.
-    fn small_valid_manifest_pack_accepts_with_one_worker_scan_and_native_parity() {
+    fn small_valid_manifest_pack_accepts_with_one_scan_two_guards_and_native_parity() {
         let repo = repo("manifest-budget-reproduction");
         let mut writer = PackWriter::new_raw_only();
         for n in 0_u8..200 {
@@ -648,14 +752,21 @@ mod tests {
         let metadata = super::super::budget::SliceBudget::new(256);
         let mut worker = InspectionSet::new(10_000);
         worker.reserve_added_count(400).unwrap();
-        worker.defer_scheduled(vec![pack_id], source(&repo));
+        let accepted = verified_pack(
+            &store,
+            &repo,
+            pack_id,
+            400,
+            native.iter().map(|e| e.size).sum(),
+        );
+        worker.defer_scheduled(vec![accepted], source(&repo));
         block_on(worker.complete_added(
             &super::super::budget::Budgeted::new(&store, &metadata),
             &repo,
         ))
         .unwrap();
         assert_eq!(worker.finalize(), native);
-        assert_eq!(metadata.used(), 1);
+        assert_eq!(metadata.used(), 3);
     }
 
     #[test]
@@ -663,6 +774,7 @@ mod tests {
         let repo = repo("inspection-pages");
         let store = MemoryKv::default();
         let pack = [9; 32];
+        let mut decoded_bytes = 0_u64;
         for first in (0_u64..1500).step_by(90) {
             let mut batch = Batch::new();
             for n in first..(first + 90).min(1500) {
@@ -670,6 +782,7 @@ mod tests {
                     data: n.to_le_bytes().to_vec(),
                 }))
                 .unwrap();
+                decoded_bytes += bytes.len() as u64;
                 let id = hash(&bytes);
                 let frame = FrameRow {
                     object_type: ObjectType::Blob as u8,
@@ -690,25 +803,26 @@ mod tests {
             }
             block_on(store.apply(&source(&repo), batch)).unwrap();
         }
+        let accepted = verified_pack(&store, &repo, pack, 1500, decoded_bytes);
         let budget = super::super::budget::SliceBudget::new(256);
         let bounded = super::super::budget::Budgeted::new(&store, &budget);
         let entries = block_on(scheduled_entries(
             &bounded,
             &repo,
             &source(&repo),
-            &[pack],
+            &[accepted],
             1500,
             1500,
         ))
         .unwrap()
         .finalize();
         assert_eq!(entries.len(), 1500);
-        assert_eq!(budget.used(), 2);
+        assert_eq!(budget.used(), 4);
         assert!(entries.windows(2).all(|w| w[0].id < w[1].id));
     }
     #[test]
     #[allow(clippy::too_many_lines)] // Worst-case page rounding across seven consumed packs.
-    fn cap_across_seven_packs_uses_sixteen_scans_without_r2_and_matches_native() {
+    fn cap_across_seven_packs_uses_sixteen_scans_two_guards_and_matches_native() {
         let repo = repo("inspection-seven-pack-cap");
         let store = MemoryKv::default();
         let counts = [1001_u64, 1001, 1001, 1001, 1001, 1001, 3994];
@@ -717,7 +831,7 @@ mod tests {
         let mut sequence = 0_u64;
         for (pack_number, count) in counts.into_iter().enumerate() {
             let pack = [u8::try_from(pack_number + 1).unwrap(); 32];
-            packs.push(pack);
+            let mut decoded_bytes = 0_u64;
             for first in (0..count).step_by(90) {
                 let mut batch = Batch::new();
                 for n in first..(first + 90).min(count) {
@@ -726,6 +840,7 @@ mod tests {
                     }))
                     .unwrap();
                     sequence += 1;
+                    decoded_bytes += bytes.len() as u64;
                     let id = hash(&bytes);
                     let row = FrameRow {
                         object_type: ObjectType::Blob as u8,
@@ -751,9 +866,10 @@ mod tests {
                 }
                 block_on(store.apply(&source(&repo), batch)).unwrap();
             }
+            packs.push(verified_pack(&store, &repo, pack, count, decoded_bytes));
         }
         assert_eq!(sequence, 10_000);
-        let metadata = super::super::budget::SliceBudget::new(16);
+        let metadata = super::super::budget::SliceBudget::new(18);
         let bounded_store = super::super::budget::Budgeted::new(&store, &metadata);
         let mut native = InspectionSet::new(10_000);
         native.reserve_added_count(10_000).unwrap();
@@ -767,6 +883,137 @@ mod tests {
         let native = native.finalize();
         assert_eq!(native.len(), 10_000);
         assert_eq!(worker.finalize(), native);
-        assert_eq!(metadata.used(), 16);
+        assert_eq!(metadata.used(), 18);
+    }
+    #[test]
+    fn missing_verified_frames_are_pending_before_inspection() {
+        let repo = repo("inspection-missing-frames");
+        let store = MemoryKv::default();
+        let pack = [7; 32];
+        let accepted = verified_pack(&store, &repo, pack, 1, 11);
+        let mut worker = InspectionSet::new(10_000);
+        worker.reserve_added_count(1).unwrap();
+        worker.defer_scheduled(vec![accepted], source(&repo));
+        let error = block_on(worker.complete_added(&store, &repo)).unwrap_err();
+        assert_eq!(error.public_message(), "pack verification pending");
+    }
+    struct ReplaceAfterScan<'a> {
+        inner: &'a MemoryKv,
+        job_key: crate::Key,
+        replacement: crate::Value,
+    }
+    impl NamespaceStore for ReplaceAfterScan<'_> {
+        fn capabilities(&self) -> crate::StoreCapabilities {
+            self.inner.capabilities()
+        }
+        async fn get(
+            &self,
+            p: &crate::Partition,
+            key: &crate::Key,
+        ) -> Result<Option<crate::Value>, crate::StoreError> {
+            self.inner.get(p, key).await
+        }
+        async fn get_many(
+            &self,
+            p: &crate::Partition,
+            keys: &[crate::Key],
+        ) -> Result<Vec<Option<crate::Value>>, crate::StoreError> {
+            self.inner.get_many(p, keys).await
+        }
+        async fn scan(
+            &self,
+            p: &crate::Partition,
+            start: &crate::Key,
+            end: &crate::Key,
+            after: Option<&crate::store::Cursor>,
+            limit: u32,
+        ) -> Result<crate::store::ScanPage, crate::StoreError> {
+            let page = self.inner.scan(p, start, end, after, limit).await?;
+            self.inner
+                .apply(
+                    p,
+                    Batch::new().put(self.job_key.clone(), self.replacement.clone()),
+                )
+                .await?;
+            Ok(page)
+        }
+        async fn apply(
+            &self,
+            p: &crate::Partition,
+            batch: Batch,
+        ) -> Result<crate::BatchOutcome, crate::StoreError> {
+            self.inner.apply(p, batch).await
+        }
+        async fn stats(
+            &self,
+            p: &crate::Partition,
+        ) -> Result<crate::PartitionStats, crate::StoreError> {
+            self.inner.stats(p).await
+        }
+        async fn probe(&self) -> Result<(), crate::StoreError> {
+            self.inner.probe().await
+        }
+    }
+
+    #[test]
+    fn replacement_verification_job_is_pending_before_and_during_enumeration() {
+        for during_scan in [false, true] {
+            let repo = repo("inspection-replaced-job");
+            let store = MemoryKv::default();
+            let pack = [7; 32];
+            let accepted = verified_pack(&store, &repo, pack, 1, 11);
+            let frame = FrameRow {
+                object_type: ObjectType::Blob as u8,
+                external: None,
+                value: IndexValue {
+                    frame_offset: 12,
+                    frame_length: 23,
+                    wire_type: 0,
+                    decoded_size: 11,
+                    chain_depth: 0,
+                    delta_base: None,
+                },
+            };
+            block_on(store.apply(
+                &source(&repo),
+                Batch::new().put(
+                    keys::verify_row(&repo.name, &pack, keys::VC_FRAME, Some(&[9; 32])),
+                    encode_frame(&[9; 32], &frame).unwrap(),
+                ),
+            ))
+            .unwrap();
+            let mut replacement = super::super::checkpoint::decode_job(&accepted.job).unwrap();
+            replacement.ticket_id = [99; 32];
+            replacement.phase = super::super::checkpoint::Phase::Decode;
+            let replacement = super::super::checkpoint::encode_job(&replacement);
+            let job_key = keys::verify_job(&repo.name, &pack);
+            let budget = super::super::budget::SliceBudget::new(3);
+            let mut worker = InspectionSet::new(10_000);
+            worker.reserve_added_count(1).unwrap();
+            worker.defer_scheduled(vec![accepted], source(&repo));
+            let error =
+                if during_scan {
+                    let racing = ReplaceAfterScan {
+                        inner: &store,
+                        job_key,
+                        replacement,
+                    };
+                    block_on(worker.complete_added(
+                        &super::super::budget::Budgeted::new(&racing, &budget),
+                        &repo,
+                    ))
+                    .unwrap_err()
+                } else {
+                    block_on(store.apply(&source(&repo), Batch::new().put(job_key, replacement)))
+                        .unwrap();
+                    block_on(worker.complete_added(
+                        &super::super::budget::Budgeted::new(&store, &budget),
+                        &repo,
+                    ))
+                    .unwrap_err()
+                };
+            assert_eq!(error.public_message(), "pack verification pending");
+            assert_eq!(budget.used(), if during_scan { 3 } else { 1 });
+        }
     }
 }

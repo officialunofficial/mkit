@@ -156,7 +156,11 @@ mod tests {
         // <=10,000 total entries at the Worker's 1,000-row page ceiling.
         let frame_pages = super::MAX_OBJECTS.div_ceil(1_000) + 6;
         assert_eq!(frame_pages, 16);
-        assert!(frame_pages < 256);
+        // Two batched reads bind the accepted verification-job snapshots
+        // before and after enumeration, including all seven packs per read.
+        let enumeration_calls = frame_pages + 2;
+        assert_eq!(enumeration_calls, 18);
+        assert!(enumeration_calls < 256);
         assert_eq!(super::MAX_INSPECTORS, 4);
         assert_eq!(super::ADVANCE_CALLS, 960);
         const {

@@ -232,11 +232,18 @@ membership itself. The mode marker belongs to WP-5.5a-0 and WP-5.5c.
 The conservative preflight now sums added-pack header/job entry counts only,
 before enumeration, hooks and apply. The 10,000-object cap and four-inspector
 limit remain. At most seven added packs require at most 16 checkpoint scans,
-inside the shared pair-stage allocation. The 960-call allocation described
+plus two batched verification-snapshot reads, inside the shared pair-stage
+allocation. The collector retains the accepted job and verification rows in
+request-local memory, checks them before and after scanning, and compares each
+pack's decoded-size sum with its verified first-occurrence byte total. Changed
+jobs or missing frames return existing pending verification before Inspect.
+These checks prevent concurrent verification cleanup from omitting surplus files;
+they add no durable state or per-object reads. The 960-call allocation described
 above remains under the repository's 1,000-call accounting contract; the
 former per-manifest role-read cost is removed rather than budgeted separately.
 The 400-entry counterexample becomes an acceptance/parity case, with no
-inspection R2 calls, and the cap case asserts the worst scan count.
+inspection R2 calls: one scan plus two snapshot reads, three calls total.
+The cap case asserts 16 scans plus two snapshot reads, 18 calls total.
 
 The gate observations in the preceding section belong to the historical tree.
 Final gates, independent review and the isolated/base timer comparison are
