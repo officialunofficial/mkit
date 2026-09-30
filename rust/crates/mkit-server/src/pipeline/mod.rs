@@ -600,6 +600,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 "authority fencing requires Multi, auth v2, an Authority hook and transactional storage",
             ));
         }
+        // Collapsible only when `http-objects` is off.
+        #[allow(clippy::collapsible_if)]
         if let Some(fence) = &cfg.authority_fence {
             if fence.public_keys().any(|key| {
                 cfg.ticket_keys
