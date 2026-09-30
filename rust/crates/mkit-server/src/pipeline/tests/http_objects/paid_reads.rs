@@ -667,3 +667,186 @@ fn simultaneous_completion_and_reconcile_commit_exactly_one_outcome() {
         .unwrap();
     assert_eq!(codec::decode_backlog(&backlog).unwrap().rows, initial + 1);
 }
+
+#[test]
+fn proof_get_head_share_admission_and_declare_encoded_bytes() {
+    let (fx, d, admission, tasks) = setup();
+    let proofs = Arc::new(Proofs(Mutex::default()));
+    let fx = with_seams(fx, |s| s.proofs = proofs.clone());
+    let path = fx.object_url("room", &id(&d.small));
+    let query = format!("proof=1&commit={}&path=small.txt", to_hex(&d.head()));
+    let got = read(fx.request(
+        "GET",
+        &path,
+        Some(&query),
+        &[("Range", "bytes=0-1"), ("payment-authorization", "paid")],
+    ));
+    assert_eq!(got.status, 200);
+    let len = got.body.len() as u64;
+    assert_eq!(got.header("Content-Length"), Some(len.to_string().as_str()));
+    assert_eq!(got.header("Payment-Receipt"), Some("receipt"));
+    assert_eq!(
+        got.header("Cache-Control"),
+        Some("private, max-age=31536000, immutable")
+    );
+    served(&fx, 0, id(&d.small), len);
+    let head = read(fx.request("HEAD", &path, Some(&query), &[]));
+    assert_eq!(head.status, 200);
+    assert!(head.body.is_empty());
+    assert_eq!(head.header("Content-Length"), got.header("Content-Length"));
+    served(&fx, 1, id(&d.small), 0);
+    assert_eq!(proofs.0.lock().unwrap().len(), 1); // HEAD never builds.
+    let calls = admission.calls.lock().unwrap();
+    assert_eq!(calls.iter().map(|c| c.0).collect::<Vec<_>>(), [len, len]);
+    assert_eq!(calls[0].1.len(), 1);
+    assert_eq!(calls[0].1[0].name, "payment-authorization");
+    drop(calls);
+    tasks.join();
+}
+
+#[test]
+fn proof_challenge_denial_revalidation_caps_and_context_never_build() {
+    let (mut fx, d, admission, tasks) = setup();
+    let proofs = Arc::new(Proofs(Mutex::default()));
+    fx = with_seams(fx, |s| s.proofs = proofs.clone());
+    let path = fx.object_url("room", &id(&d.small));
+    let query = format!("proof=1&commit={}&path=small.txt", to_hex(&d.head()));
+    let etag = format!("\"{}.{}.object\"", to_hex(&d.head()), to_hex(&id(&d.small)));
+    let response = read(fx.request("GET", &path, Some(&query), &[("if-none-match", &etag)]));
+    assert_eq!(response.status, 304);
+    assert_eq!(
+        response.header("Cache-Control"),
+        Some("private, max-age=31536000, immutable")
+    );
+    assert!(admission.calls.lock().unwrap().is_empty());
+    for method in ["GET", "HEAD"] {
+        admission
+            .challenge
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let got = read(fx.request(method, &path, Some(&query), &[]));
+        assert_eq!(got.status, 402);
+        assert!(got.header("ETag").is_none());
+        assert!(got.header("X-Mkit-Object").is_none());
+    }
+    admission
+        .challenge
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    // Credential denial precedes Admission and proof construction.
+    assert_eq!(
+        read(fx.request(
+            "GET",
+            &path,
+            Some(&query),
+            &[("payment-authorization", "a,b")]
+        ))
+        .status,
+        403
+    );
+    let calls = admission.calls.lock().unwrap().len();
+    for suffix in ["&range=0-18446744073709551615", "&range=99999-99999"] {
+        assert_eq!(
+            read(fx.request("GET", &path, Some(&format!("{query}{suffix}")), &[])).status,
+            416
+        );
+    }
+    fx.pipe
+        .cfg
+        .http_objects
+        .as_mut()
+        .unwrap()
+        .max_proof_bundle_bytes = 1;
+    assert_eq!(
+        read(fx.request("GET", &path, Some(&query), &[])).status,
+        416
+    );
+    assert_eq!(
+        read(fx.request(
+            "GET",
+            &path,
+            Some(&query.replace("small.txt", "big.bin")),
+            &[("if-none-match", "*")]
+        ))
+        .status,
+        404
+    );
+    assert_eq!(admission.calls.lock().unwrap().len(), calls);
+    assert_eq!(admission.next.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(proofs.0.lock().unwrap().is_empty());
+    tasks.join();
+}
+
+struct FailedProof(bool);
+impl ProofServer for FailedProof {
+    fn build<'a>(
+        &'a self,
+        request: &'a PreparedProof,
+        _: &'a mut dyn ProofSource,
+    ) -> BoxFuture<'a, Result<Vec<u8>, ServerError>> {
+        Box::pin(async move {
+            if self.0 {
+                Ok(vec![0; request.encoded_len as usize - 1])
+            } else {
+                Err(ServerError::unavailable("build failed"))
+            }
+        })
+    }
+}
+#[test]
+fn proof_build_failure_and_planned_length_mismatch_abort_reservation() {
+    for short in [false, true] {
+        let (fx, d, admission, tasks) = setup();
+        let fx = with_seams(fx, |s| s.proofs = Arc::new(FailedProof(short)));
+        let query = format!("proof=1&commit={}&path=small.txt", to_hex(&d.head()));
+        let got = read(fx.request(
+            "GET",
+            &fx.object_url("room", &id(&d.small)),
+            Some(&query),
+            &[],
+        ));
+        assert_eq!(got.status, 503);
+        assert!(matches!(
+            reservation(&fx, 0),
+            ReservationV1::Aborted {
+                reason: AbortReason::Internal,
+                ..
+            }
+        ));
+        assert_eq!(admission.calls.lock().unwrap().len(), 1);
+        tasks.join();
+    }
+}
+
+#[test]
+fn proof_drop_before_or_after_first_byte_settles_once() {
+    for poll in [false, true] {
+        let (fx, d, _, tasks) = setup();
+        let fx = with_seams(fx, |s| s.proofs = Arc::new(Proofs(Mutex::default())));
+        let query = format!("proof=1&commit={}&path=small.txt", to_hex(&d.head()));
+        let got = fx.request(
+            "GET",
+            &fx.object_url("room", &id(&d.small)),
+            Some(&query),
+            &[],
+        );
+        assert!(matches!(reservation(&fx, 0), ReservationV1::Pending { .. }));
+        let HttpBody::Stream { mut stream, .. } = got.body else {
+            panic!("paid proof stream");
+        };
+        if poll {
+            let bytes = block_on(stream.next()).unwrap().unwrap().len() as u64;
+            drop(stream);
+            tasks.join();
+            served(&fx, 0, id(&d.small), bytes);
+        } else {
+            drop(stream);
+            tasks.join();
+            assert!(matches!(
+                reservation(&fx, 0),
+                ReservationV1::Aborted {
+                    reason: AbortReason::Internal,
+                    ..
+                }
+            ));
+        }
+    }
+}

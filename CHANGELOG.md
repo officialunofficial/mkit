@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- HTTP proofs on the opt-in native mount: canonical Object bundles and MKDP/MKDS query ranges now share validators, caps, payment and durable settlement with ordinary reads; exact core wire-size planning constructs no proof, and native canonical reads bound prefix memory (WP-4.14b-1). Workers prefetch follows in WP-4.14b-2. Unshipped `ProofServer` now builds selected bytes through a repository-scoped `ProofSource`.
+
 - Server (Stage 2, inert): default-off `http-objects` adapter features mount
   raw escaped HTTP object routes with streaming Range/HEAD, read CORS on
   every response, query-free diagnostics, and public URL-token key documents.

@@ -1885,3 +1885,24 @@ content or tokens, or serves a different object from the requested URL.
 
 **Enforced by:** native `tests/http_mount.rs`, Worker `http_mount` tests,
  default feature/startup configuration, and the release feature gate.
+
+## HTTP proofs share content admission and settlement
+
+**Always:** proof contexts are published-reachable and their exact decoded paths
+match the selected leaf before validators/payment. Proof ETags are selected before
+common weak validation. Requested-content and exact encoded-size caps precede
+anonymous GET/HEAD admission; no Merkle/Bao proof is built until allowance. HEAD
+never builds. Build or planned-length failure after reservation aborts before bytes;
+consumption and cancellation settle actual encoded bytes through the common read
+finalizer. Canonical source reads enforce repository membership, takedown checks,
+integrity and a cumulative decode budget, retaining one preceding chunk at a time.
+
+**Because:** a proof representation must not bypass payment, reveal unpublished
+contexts, trust global CAS as authority, or retain an unbounded prefix of file bytes.
+
+**If violated:** free paid downloads, disclosure of pending content, leaked
+reservations, incorrect byte accounting or prefix-dependent memory exhaustion.
+
+**Enforced by:** common HTTP `proof`/`paid_reads` tests, native mount verifier round
+trips, core structural/golden sizing tests and the existing bounded prefix builder
+tests. Native mounts remain opt-in; Workers prefetch is WP-4.14b-2.

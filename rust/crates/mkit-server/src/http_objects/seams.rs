@@ -4,11 +4,9 @@
 use std::sync::Arc;
 
 use mkit_core::hash::Hash;
-use mkit_core::object::ObjectType;
 
 use super::body::EndHook;
 use super::reach::{Reachability, TtlReachability};
-use super::route::Query;
 use super::{HttpObjectResponse, HttpObjectsConfig};
 use crate::Procedure;
 use crate::repo::RepoId;
@@ -182,45 +180,63 @@ impl TakedownGate for NoTakedown {
     }
 }
 
-/// A `?proof=1` request that resolved to a reachable leaf.
-#[derive(Debug)]
-#[non_exhaustive]
-pub struct ProofRequest<'a> {
-    /// The selected repository.
-    pub repo: &'a RepoId,
-    /// The resolved leaf.
+/// Canonical repository objects supplied to a proof builder. Reads verify
+/// membership and integrity and share one bounded decode allowance.
+pub trait ProofSource: MaybeSend {
+    /// Read one canonical object; never concatenated extracted file bytes.
+    fn read<'a>(&'a mut self, id: Hash) -> BoxFuture<'a, Result<Vec<u8>, ServerError>>;
+}
+
+/// Selected proof. Preparation constructs no Merkle or Bao proofs.
+#[derive(Debug, Clone)]
+pub struct PreparedProof {
+    /// Published-reachable commit or remix.
+    pub commit: Hash,
+    /// Leaf matched by the exact decoded path.
     pub leaf: Hash,
-    /// Its object type.
-    pub ty: ObjectType,
-    /// The resolved commit of a ref path.
-    pub commit: Option<Hash>,
-    /// A ref path rather than an object id.
-    pub ref_path: bool,
-    /// The parsed query (`range`, `commit`, `path`).
-    pub query: &'a Query,
+    /// Path below the commit's tree.
+    pub path: Vec<Vec<u8>>,
+    /// Inclusive content range, or canonical Object selector.
+    pub range: Option<(u64, u64)>,
+    /// Exact encoded GET length, checked before Admission.
+    pub encoded_len: u64,
+    /// Cross-chunk range uses MKDS; all other selections use MKDP.
+    pub span: bool,
 }
 
-/// WP-4.14b owns every `proof=1` representation: MKDP and MKDS, their `ETag`s,
-/// caps and `Accept-Ranges: none`.
+/// Build only the already selected representation, after common Admission.
 pub trait ProofServer: MaybeSend + MaybeSync {
-    /// The complete response for a proof request.
-    fn serve<'a>(
+    /// Whether the adapter can build proofs. Unsupported selections return
+    /// 416 before admission, rather than reserving an unservable request.
+    fn is_supported(&self) -> bool {
+        true
+    }
+    /// Return encoded bytes; the common path enforces the planned length.
+    fn build<'a>(
         &'a self,
-        request: &'a ProofRequest<'a>,
-    ) -> BoxFuture<'a, Result<HttpObjectResponse, ServerError>>;
+        request: &'a PreparedProof,
+        source: &'a mut dyn ProofSource,
+    ) -> BoxFuture<'a, Result<Vec<u8>, ServerError>>;
 }
 
-/// Proofs are unsupported until WP-4.14b: 416, which §3 step 10 allows for an
-/// unsupported proof.
+/// Workers gain canonical-object prefetch in WP-4.14b-2.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UnsupportedProofs;
-
 impl ProofServer for UnsupportedProofs {
-    fn serve<'a>(
+    fn is_supported(&self) -> bool {
+        false
+    }
+    fn build<'a>(
         &'a self,
-        _: &'a ProofRequest<'a>,
-    ) -> BoxFuture<'a, Result<HttpObjectResponse, ServerError>> {
-        Box::pin(async { Ok(HttpObjectResponse::error(416)) })
+        _: &'a PreparedProof,
+        _: &'a mut dyn ProofSource,
+    ) -> BoxFuture<'a, Result<Vec<u8>, ServerError>> {
+        Box::pin(async {
+            Err(ServerError::new(
+                crate::Code::OutOfRange,
+                "proof unsupported",
+            ))
+        })
     }
 }
 

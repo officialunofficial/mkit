@@ -165,7 +165,7 @@
       "M0-04"
     ],
     "size": "L",
-    "summary": "Implements the transport-neutral pipeline for the unary RPCs (ListRefs, ReadRef, UpdateRef, AdvanceRefs, PackExists, health) with PRD §5.4 stages as traits, AuthMode, a ShardMap (SinglePartition in M0), the full AdmissionInput, and pure planners that turn each write into a guarded Batch carrying a NotAfter(plan_time + MAX_APPLY_WINDOW) deadline. Behavior equals today's servers.",
+    "summary": "Implements the transport-neutral pipeline for the unary RPCs (ListRefs, ReadRef, UpdateRef, AdvanceRefs, PackExists, health) with PRD \u00a75.4 stages as traits, AuthMode, a ShardMap (SinglePartition in M0), the full AdmissionInput, and pure planners that turn each write into a guarded Batch carrying a NotAfter(plan_time + MAX_APPLY_WINDOW) deadline. Behavior equals today's servers.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -987,11 +987,16 @@
     "title": "Client: split large pushes along first-parent history (R-164; post-launch, R-185)",
     "milestone": "M1",
     "track": "client",
-    "depends_on": ["1.17"],
+    "depends_on": [
+      "1.17"
+    ],
     "size": "M",
     "summary": "Automatically divide a push exceeding six data packs into ancestor advances, each with at most seven tickets including its MKPL node.",
     "human_action": false,
-    "area_gates": ["rust", "cli"]
+    "area_gates": [
+      "rust",
+      "cli"
+    ]
   },
   {
     "id": "1.21",
@@ -1071,7 +1076,7 @@
       "1.30"
     ],
     "size": "S",
-    "summary": "Keeps the standalone staging template/runbook and explicitly activates the Workers launch profile before REL-1 on real Cloudflare. Provision dedicated resources, secrets and routes, verify backup/recovery and measure deployed CPU, subrequests and cost; local wrangler evidence alone is insufficient. R-185 supersedes R-176’s post-REL-1 timing.",
+    "summary": "Keeps the standalone staging template/runbook and explicitly activates the Workers launch profile before REL-1 on real Cloudflare. Provision dedicated resources, secrets and routes, verify backup/recovery and measure deployed CPU, subrequests and cost; local wrangler evidence alone is insufficient. R-185 supersedes R-176\u2019s post-REL-1 timing.",
     "human_action": true,
     "area_gates": [
       "workers",
@@ -1090,7 +1095,7 @@
       "1.15"
     ],
     "size": "S",
-    "summary": "Adds a staging workflow that runs the full M0+M1 wire suite (including throughput and lag windows) and a real mkit push/clone round trip against deployed staging. The human adds the GitHub secrets and variables. R-185: run locally from the orchestrator’s machine against real Cloudflare before launch, including the Workers launch profile and measured CPU, subrequests and cost. The workflow remains main-only and is not dispatched against feat/mkit-server.",
+    "summary": "Adds a staging workflow that runs the full M0+M1 wire suite (including throughput and lag windows) and a real mkit push/clone round trip against deployed staging. The human adds the GitHub secrets and variables. R-185: run locally from the orchestrator\u2019s machine against real Cloudflare before launch, including the Workers launch profile and measured CPU, subrequests and cost. The workflow remains main-only and is not dispatched against feat/mkit-server.",
     "human_action": true,
     "area_gates": [
       "ci-yaml",
@@ -1142,7 +1147,7 @@
       "S2"
     ],
     "size": "L",
-    "summary": "Grant statement codec (SPEC-WRITE-GRANTS §3), ref scopes and effective flags, the X-Write-Grant header codec, grant id, and the §7.4 identity grammar; fuzz target and codec goldens.",
+    "summary": "Grant statement codec (SPEC-WRITE-GRANTS \u00a73), ref scopes and effective flags, the X-Write-Grant header codec, grant id, and the \u00a77.4 identity grammar; fuzz target and codec goldens.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -1159,7 +1164,7 @@
       "2.4a"
     ],
     "size": "M",
-    "summary": "Epoch statement (§5), visibility statement (§9.1), owner-scheme dispatch with ed25519 (§4), the stateless verifier (§7) and registration check (§10); signed goldens.",
+    "summary": "Epoch statement (\u00a75), visibility statement (\u00a79.1), owner-scheme dispatch with ed25519 (\u00a74), the stateless verifier (\u00a77) and registration check (\u00a710); signed goldens.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -1606,7 +1611,7 @@
       "3.9"
     ],
     "size": "S",
-    "summary": "Optional post-launch: a Cloudflare Queue OutcomeSink whose durable enqueue is the acknowledgement. Needs a SPEC-SERVER §7.3/§8 amendment with human review first (R-168).",
+    "summary": "Optional post-launch: a Cloudflare Queue OutcomeSink whose durable enqueue is the acknowledgement. Needs a SPEC-SERVER \u00a77.3/\u00a78 amendment with human review first (R-168).",
     "human_action": true,
     "area_gates": [
       "rust",
@@ -1626,7 +1631,7 @@
       "3.7b"
     ],
     "size": "L",
-    "summary": "Launch bundle with 2.16: signed Connect JSON over HTTPS to Uno’s external hook endpoint, origin-bound audience, fresh nonces, no redirects or internal retries, bounded response streaming and whole-call timeout/cancellation. Reuses the public mkit-rpc hook contract and supports later remote Inspect; durable HTTP outcome delivery makes Queue optional (R-185).",
+    "summary": "Launch bundle with 2.16: signed Connect JSON over HTTPS to Uno\u2019s external hook endpoint, origin-bound audience, fresh nonces, no redirects or internal retries, bounded response streaming and whole-call timeout/cancellation. Reuses the public mkit-rpc hook contract and supports later remote Inspect; durable HTTP outcome delivery makes Queue optional (R-185).",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -1946,7 +1951,7 @@
       "4.10"
     ],
     "size": "L",
-    "summary": "Runs 4.10's extraction as checkpointed alarm slices before the Worker's Verified write, with R2 multipart for large objects, a content RelayHook that rewrites `h` puts into HolderV1 with a `c` guard, the relay blocklist check (SPEC-SERVER §14.2) and hold lifetime across relay lag (R-163). Stage 2.",
+    "summary": "Runs 4.10's extraction as checkpointed alarm slices before the Worker's Verified write, with R2 multipart for large objects, a content RelayHook that rewrites `h` puts into HolderV1 with a `c` guard, the relay blocklist check (SPEC-SERVER \u00a714.2) and hold lifetime across relay lag (R-163). Stage 2.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -2029,13 +2034,52 @@
     "milestone": "M4",
     "track": "core",
     "depends_on": [
-      "4.12",
-      "4.10",
-      "4.10b",
-      "4.14a"
+      "4.13",
+      "4.14b-1",
+      "4.14b-2"
     ],
     "size": "M",
-    "summary": "Stage 2: serve every proof=1 response (MKDP object bundles and MKDP/MKDS query ranges) through 4.12's ProofServer seam with 416 mapping and the proof ETag; establish encoded size and declared_bytes before Admission, then use in-memory ObjectSource prefetch on Workers (R-161, R-169).",
+    "summary": "Aggregate launch dependency for native/core HTTP proofs (4.14b-1) and bounded Workers canonical-object prefetch (4.14b-2), with merged common read admission (4.13). Syntax errors are 400; bounds, unsupported selectors, inclusive-length overflow and proof caps are 416 (R-187).",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
+      "golden"
+    ]
+  },
+  {
+    "id": "4.14b-1",
+    "title": "HTTP proofs: native and core common selection, admission and caching",
+    "milestone": "M4",
+    "track": "core",
+    "depends_on": [
+      "4.12",
+      "4.13",
+      "4.14a",
+      "5.4"
+    ],
+    "size": "M",
+    "summary": "Prepare/select canonical Object, MKDP and MKDS proofs; compute exact encoded GET length without building; common validators/caps/admission and abort-safe settlement; native repository-scoped canonical reads; shared prefix builder (R-187).",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "conf-native",
+      "golden"
+    ]
+  },
+  {
+    "id": "4.14b-2",
+    "title": "HTTP proofs: bounded Workers canonical ObjectSource prefetch",
+    "milestone": "M4",
+    "track": "worker",
+    "depends_on": [
+      "4.14b-1",
+      "4.10b"
+    ],
+    "size": "M",
+    "summary": "Reuse the common prepared proof selection/admission seam; bound canonical repository-scoped object prefetch, verify offset hints and measure Worker subrequests, peak memory and staging CPU before activation.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -2132,7 +2176,7 @@
       "4.4"
     ],
     "size": "M",
-    "summary": "SPEC-SERVER §12 storage leases and Event delivery, §13 fail-closed server GC, additive hooks/transport proto and goldens, and section renumbering.",
+    "summary": "SPEC-SERVER \u00a712 storage leases and Event delivery, \u00a713 fail-closed server GC, additive hooks/transport proto and goldens, and section renumbering.",
     "human_action": true,
     "area_gates": [
       "docs",
@@ -2150,7 +2194,7 @@
       "4.4"
     ],
     "size": "M",
-    "summary": "SPEC-SERVER §10 published pointers and caller views, §11 quarantine and inspection, additive Inspect/AuthorizeAllow fields and GetServerInfo.async_inspection.",
+    "summary": "SPEC-SERVER \u00a710 published pointers and caller views, \u00a711 quarantine and inspection, additive Inspect/AuthorizeAllow fields and GetServerInfo.async_inspection.",
     "human_action": true,
     "area_gates": [
       "docs",
@@ -2168,7 +2212,7 @@
       "5.1c"
     ],
     "size": "M",
-    "summary": "SPEC-SERVER §14 takedown, tombstones, delta-safe rewrite, preservation, signed notices, additive transport and hooks proto and goldens.",
+    "summary": "SPEC-SERVER \u00a714 takedown, tombstones, delta-safe rewrite, preservation, signed notices, additive transport and hooks proto and goldens.",
     "human_action": false,
     "area_gates": [
       "docs",
@@ -2185,7 +2229,7 @@
       "5.1b-1"
     ],
     "size": "M",
-    "summary": "SPEC-SERVER §16 admin procedures, role-separated keys, audited preservation access and remote CachePurge wire.",
+    "summary": "SPEC-SERVER \u00a716 admin procedures, role-separated keys, audited preservation access and remote CachePurge wire.",
     "human_action": false,
     "area_gates": [
       "docs",
@@ -2232,7 +2276,7 @@
   },
   {
     "id": "5.3a",
-    "title": "GC mark: roots, pins, grace, gc_pending; mark → wait → re-check protocol",
+    "title": "GC mark: roots, pins, grace, gc_pending; mark \u2192 wait \u2192 re-check protocol",
     "milestone": "M5",
     "track": "core",
     "depends_on": [
