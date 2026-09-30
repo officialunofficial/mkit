@@ -1929,6 +1929,11 @@ finishes its barrier before granting ready leases and creates no accounting
 namespace. Grant epochs remain independent. Generation/recovery-bound durable
 cursors keep bounded completion progressing across cold executor instances;
 recovery invalidates them while preserving the fence.
+All-key stores inspect durable fence evidence even on disabled Single
+executors; atomic all-key stores also guard the observed mode at acceptance.
+Ref-only stores omit unsupported metadata reads and retain sequential ref
+batches. Their capabilities cannot enable fencing; generation-bearing plans
+on any incapable store refuse rather than dropping their protection.
 
 **Because:** stopping future hook allowances cannot revoke an allowance already
 paused between authorization and durable acceptance.

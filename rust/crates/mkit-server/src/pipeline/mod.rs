@@ -3097,6 +3097,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             _ => None,
         };
         let mut req = WriteRequest {
+            authority_store: plan::AuthorityStore::from_capabilities(self.meta.capabilities()),
             authority_generation: op.authz.authority_generation,
             repo: &op.repo.name,
             kind,
@@ -3186,7 +3187,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         req: &WriteRequest<'_>,
         mut ahead: Option<Snapshot>,
     ) -> Result<StoredResult, ServerError> {
-        let mut req = req.clone();
+        let mut req = req.for_store(self.meta.capabilities());
         // Held until the loop ends (see `with_write_gate`).
         let _gate = match &self.gate {
             Some(gate) => Some(gate.enter(p).await),

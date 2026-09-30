@@ -39,6 +39,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             return Err(error);
         };
         let req = WriteRequest {
+            authority_store: super::plan::AuthorityStore::from_capabilities(
+                self.meta.capabilities(),
+            ),
             authority_generation: None,
             repo: &op.repo.name,
             kind: WriteKind::UpdateRef,

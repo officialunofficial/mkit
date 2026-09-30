@@ -31,6 +31,26 @@ use crate::store::{
 
 use super::{ShardMap, meta_error};
 
+/// Actual backend support; never selected from deployment configuration.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthorityStore {
+    RefsOnly,
+    Inspected,
+    Guarded,
+}
+
+impl AuthorityStore {
+    pub(crate) fn from_capabilities(caps: crate::store::StoreCapabilities) -> Self {
+        if caps.key_classes == crate::store::KeyClasses::RefsOnly {
+            Self::RefsOnly
+        } else if caps.atomic_multi_key {
+            Self::Guarded
+        } else {
+            Self::Inspected
+        }
+    }
+}
+
 /// Most re-plans after a guard failed because another writer changed a
 /// value the plan read; then the write is a retryable `aborted`.
 pub(crate) const MAX_REPLAN: u32 = 8;
@@ -131,6 +151,8 @@ pub(crate) struct ImplicitConsume<'a> {
 #[derive(Clone)]
 #[non_exhaustive]
 pub(crate) struct WriteRequest<'a> {
+    /// Metadata inspection and CAS support, derived from the actual store.
+    pub(crate) authority_store: AuthorityStore,
     /// The repository whose refs are written.
     pub(crate) repo: &'a RepoName,
     /// What the refs are.
@@ -171,6 +193,12 @@ pub(crate) struct WriteRequest<'a> {
 }
 
 impl WriteRequest<'_> {
+    pub(crate) fn for_store(&self, caps: crate::store::StoreCapabilities) -> Self {
+        let mut request = self.clone();
+        request.authority_store = AuthorityStore::from_capabilities(caps);
+        request
+    }
+
     /// Every key the planner reads, besides prune candidates.
     #[must_use]
     pub(crate) fn read_keys(&self) -> Vec<Key> {
@@ -203,7 +231,7 @@ impl WriteRequest<'_> {
         } else if self.grant.is_some() {
             out.push(keys::grant_epoch());
         }
-        if self.lease.is_none() {
+        if self.lease.is_none() && self.authority_store != AuthorityStore::RefsOnly {
             out.push(keys::authority_generation());
             out.push(keys::lease_recovery());
         }
@@ -377,6 +405,11 @@ pub(crate) fn plan_write(
     snap: &Snapshot,
     clock: &PlanClock,
 ) -> Result<Planned, ServerError> {
+    if req.authority_generation.is_some() && req.authority_store != AuthorityStore::Guarded {
+        return Err(ServerError::unavailable(
+            "authority fencing requires transactional metadata",
+        ));
+    }
     // A racing retry may read ticket/reservation rows after its initial
     // replay observation. Resolve the committed answer before ticket planning.
     if let Some(pending) = req.pending
@@ -435,7 +468,7 @@ pub(crate) fn plan_write(
         }
         None => None,
     };
-    if req.lease.is_none() {
+    if req.lease.is_none() && req.authority_store != AuthorityStore::RefsOnly {
         let mode = snap
             .get(&keys::lease_recovery())
             .map(codec::decode_lease_recovery)
@@ -449,7 +482,9 @@ pub(crate) fn plan_write(
                 "persisted authority fence requires enabled executor",
             ));
         }
-        pre.push(guard(keys::lease_recovery(), snap));
+        if req.authority_store == AuthorityStore::Guarded {
+            pre.push(guard(keys::lease_recovery(), snap));
+        }
     }
     if let Some(generation) = req.authority_generation {
         let current = if let Some(lease) = req.lease {
