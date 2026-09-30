@@ -56,8 +56,6 @@ use mkit_core::transfer::decode_packlist;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
-mod extraction;
-
 /// Fixed work units of one slice. A Worker fixes them for its plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SliceLimits {
@@ -109,8 +107,9 @@ const WATCH_POLL_MS: u64 = 3_600_000;
 /// Distinct member packs one job may depend on.
 const MAX_SATISFYING: usize = index::MAX_LOOKUP_IDS;
 
-/// The existing extraction extension of the `Extract` phase. Enabled Workers
-/// use the internal upload callbacks; the disconnected default fails closed.
+/// The extraction seam of the `Extract` phase. WP-4.10b implements
+/// extraction on Workers; until then the default fails closed so `Verified`
+/// still implies "extracted" (R-163).
 pub trait SliceExtension: crate::MaybeSend + crate::MaybeSync {
     /// Whether `object` must be extracted into the object store before its
     /// pack is `Verified`.
@@ -336,7 +335,6 @@ impl DeltaBaseSource for CacheBases<'_> {
 /// Per-slice memory: nothing in it is authoritative, rows are.
 #[derive(Default)]
 struct SliceState {
-    guards: Vec<Precondition>,
     job_guard: Option<Value>,
     cache: Lru,
     memo: MemberCache,
@@ -419,7 +417,6 @@ where
         fired
     }
 
-    #[allow(clippy::too_many_lines)] // Phase results and their guarded checkpoint commit together.
     async fn slice_inner(&self, timer: &DueTimer) -> Result<Fired, StoreError> {
         let (job, state) =
             checkpoint::read_job(self.local, self.source, &self.repo.name, &self.pack).await?;
@@ -431,24 +428,11 @@ where
             .get(self.source, &keys::ticket(&job.ticket_id))
             .await?
         {
-            Some(value) => Some(decode_ticket(&value)?),
-            None if job.phase == Phase::Extract
-                && job.extraction.as_ref().is_some_and(|x| x.object.is_some()) =>
-            {
-                None
-            }
+            Some(value) => decode_ticket(&value)?,
             None => return self.cleanup(timer, Some(raw), Some(job.ticket_id)).await,
         };
         if job.phase == Phase::Watch {
-            return Ok(self.watch(
-                timer,
-                job,
-                raw,
-                state.is_none(),
-                ticket
-                    .as_ref()
-                    .ok_or_else(|| StoreError::Corrupt("missing watch ticket".into()))?,
-            ));
+            return Ok(self.watch(timer, job, raw, state.is_none(), &ticket));
         }
         if matches!(
             job.phase,
@@ -477,7 +461,7 @@ where
             && job.phase != ran
             && job.phase != Phase::Watch
             // Enter guarded lookup phases from a durable phase checkpoint.
-            && !matches!(job.phase, Phase::ClosureResolve | Phase::Recheck | Phase::Extract)
+            && !matches!(job.phase, Phase::ClosureResolve | Phase::Recheck)
             && chained < 6
             && self.budget.remaining() >= ENTRY_RESERVE
         {
@@ -532,7 +516,6 @@ where
         // Closure deletions and the satisfying-pack list commit together.
         // A crash cannot discard the row before recording its dependency.
         batch.writes.extend(st.settled);
-        batch.preconditions.extend(st.guards);
         Ok(self.reschedule(timer, delay, batch.put(self.job_key(), encode_job(&job))))
     }
 
@@ -674,29 +657,6 @@ where
         mut job: Option<Value>,
         ticket: Option<Hash>,
     ) -> Result<Fired, StoreError> {
-        if let Some(raw) = &job {
-            let current = checkpoint::decode_job(raw)?;
-            for member in &current.extraction_group {
-                if member.pack == self.pack {
-                    continue;
-                }
-                if let Some(peer) = self
-                    .local
-                    .get(
-                        self.source,
-                        &keys::verify_job(&self.repo.name, &member.pack),
-                    )
-                    .await?
-                {
-                    let peer = checkpoint::decode_job(&peer)?;
-                    if peer.extraction_group == current.extraction_group
-                        && peer.phase == Phase::Extract
-                    {
-                        return Ok(self.reschedule(timer, 1_000, Batch::new()));
-                    }
-                }
-            }
-        }
         let (start, end) = keys::verify_range(&self.repo.name, &self.pack, None);
         for _ in 0..CLEANUP_ROUNDS {
             let page = self
@@ -774,9 +734,6 @@ where
             Phase::EmitIndex => self.emit(job).await,
             Phase::AwaitDelivery => self.await_delivery(job).await,
             Phase::Extract => {
-                if self.h.extension.extraction_enabled() {
-                    return self.extraction(st, job).await;
-                }
                 if job.extract_needed {
                     return Err(Stop::Outcome(Outcome::ExtractionUnavailable));
                 }

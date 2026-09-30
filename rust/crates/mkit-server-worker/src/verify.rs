@@ -271,32 +271,18 @@ pub fn register_from_env<S: NamespaceStore>(
     let windows = MidPackCrash(R2Windows(bucket()));
     #[cfg(not(feature = "test-faults"))]
     let windows = R2Windows(bucket());
-    let Some(indexed) = cfg
-        .indexed
-        .filter(|c| c.verification == VerificationMode::Scheduled)
-    else {
-        return registry;
-    };
-    if class != ShardClass::RefShard || !plan.is_some_and(|p| p.trim().eq_ignore_ascii_case("paid"))
-    {
-        return registry;
-    }
-    let blobs = R2BlobStore::new(bucket(), PACKS_KEYSPACE);
-    registry.register(VerifyTimer {
-        remote: WorkerNamespaceStore::new(StubTransport::new(env.clone(), cfg.placement), probe),
-        extension: R2Extraction(blobs.clone()),
-        blobs,
+    with_verification_timers(
+        registry,
+        class,
+        cfg.indexed,
+        cfg.authority_fence.is_some(),
+        plan,
+        WorkerNamespaceStore::new(StubTransport::new(env.clone(), cfg.placement), probe),
+        R2BlobStore::new(bucket(), PACKS_KEYSPACE),
         windows,
-        shards: Arc::new(D34Shards),
-        cfg: indexed,
-        limits: SliceLimits::default(),
-        lease: LeaseParams {
-            authority_fence: cfg.authority_fence.is_some(),
-            ..LeaseParams::default()
-        },
-        clock: Arc::new(WorkerClock),
-        metrics: Arc::new(ConsoleMetrics::default()),
-    })
+        Arc::new(WorkerClock),
+        Arc::new(ConsoleMetrics::default()),
+    )
 }
 
 #[cfg(test)]

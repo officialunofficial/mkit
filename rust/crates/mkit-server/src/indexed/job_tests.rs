@@ -2816,8 +2816,3 @@ fn verified_duplicate_pack_rebuild_keeps_both_tickets_and_first_decode_owner() {
     );
 }
 
-#[path = "extraction_tests.rs"]
-mod extraction_tests;
-
-#[path = "scheduled_reclaim_tests.rs"]
-mod scheduled_reclaim_tests;

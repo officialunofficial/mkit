@@ -89,7 +89,6 @@ fn outcome_error(outcome: Outcome, now: u64, ticket: &TicketV1, bound: u64) -> S
         Outcome::ExtractionUnavailable => {
             ServerError::unavailable("pack extraction is not available on this deployment")
         }
-        Outcome::ObjectBlocked => ServerError::permission_denied("object blocked"),
     }
 }
 
@@ -144,86 +143,9 @@ struct Consumed<'a> {
     job: VerifyJobV1,
 }
 
-/// A new Advance may release a failed group only before extraction effects.
-/// The exact failed observation is included in the replacement transaction.
-async fn failed_group<N: NamespaceStore>(
-    store: &N,
-    source: &Partition,
-    repo: &RepoId,
-    job: &VerifyJobV1,
-) -> Result<Option<Precondition>, ServerError> {
-    for member in &job.extraction_group {
-        let ticket = keys::ticket(&member.ticket);
-        if store
-            .get(source, &ticket)
-            .await
-            .map_err(|_| storage_failed())?
-            .is_none()
-        {
-            return Ok(Some(Precondition::Absent(ticket)));
-        }
-        let state = keys::verification(&repo.name, &member.pack);
-        if let Some(raw) = store
-            .get(source, &state)
-            .await
-            .map_err(|_| storage_failed())?
-            && matches!(
-                super::state::decode(&raw).map_err(|_| storage_failed())?,
-                VerificationV1::Rejected { .. }
-            )
-        {
-            return Ok(Some(Precondition::Equals(state, raw)));
-        }
-        let key = keys::verify_job(&repo.name, &member.pack);
-        if let Some(raw) = store
-            .get(source, &key)
-            .await
-            .map_err(|_| storage_failed())?
-            && super::checkpoint::decode_job(&raw)
-                .map_err(|_| storage_failed())?
-                .outcome
-                .is_some()
-        {
-            return Ok(Some(Precondition::Equals(key, raw)));
-        }
-    }
-    Ok(None)
-}
-
-/// A finished source remains pinned while an older group uses its facts.
-/// Guard every finished peer before changing that source's retention group.
-async fn finished_peers<N: NamespaceStore>(
-    store: &N,
-    source: &Partition,
-    repo: &RepoId,
-    job: &VerifyJobV1,
-) -> Result<Vec<Precondition>, ServerError> {
-    let mut guards = Vec::new();
-    for member in &job.extraction_group {
-        if member.ticket == job.ticket_id {
-            continue;
-        }
-        let key = keys::verify_job(&repo.name, &member.pack);
-        let raw = store
-            .get(source, &key)
-            .await
-            .map_err(|_| storage_failed())?;
-        if let Some(raw) = raw {
-            let peer = super::checkpoint::decode_job(&raw).map_err(|_| storage_failed())?;
-            if !peer.usable() && peer.outcome.is_none() {
-                return Err(super::pending(retry_after(Some(&peer))));
-            }
-            guards.push(Precondition::Equals(key, raw));
-        } else {
-            guards.push(Precondition::Absent(key));
-        }
-    }
-    Ok(guards)
-}
-
 /// Claim every new member together. Waiting on a foreign unfinished group
 /// creates no partial group: A+B and B+C serialize before either can extract.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One atomic group claim.
+#[allow(clippy::too_many_arguments)]
 async fn claim_extraction_group<N: NamespaceStore>(
     store: &N,
     source: &Partition,
@@ -272,7 +194,7 @@ async fn claim_extraction_group<N: NamespaceStore>(
             return Err(super::pending(1_000));
         }
     }
-    let mut new = jobs
+    let new = jobs
         .iter()
         .zip(ticket_ids)
         .enumerate()
@@ -289,38 +211,6 @@ async fn claim_extraction_group<N: NamespaceStore>(
             })
         })
         .collect::<Vec<_>>();
-    let mut release = Vec::new();
-    for (i, job) in jobs.iter().enumerate() {
-        let Some(job) = job else {
-            continue;
-        };
-        let changed = job
-            .extraction_group
-            .iter()
-            .map(|m| (m.pack, m.ticket))
-            .ne(tickets
-                .iter()
-                .zip(ticket_ids)
-                .map(|(t, id)| (t.pack_id, *id)));
-        let before_effects = job
-            .extraction
-            .as_ref()
-            .is_none_or(|x| x.stage <= 2 && x.object.is_none());
-        if changed
-            && before_effects
-            && let Some(witness) = failed_group(store, source, repo, job).await?
-        {
-            new[i] |= !job.usable();
-            release.push(witness);
-        } else if new[i] && !job.usable() {
-            // The ticket index includes the signer, so another signer can
-            // legitimately hold a distinct ticket for this same pack.
-            return Err(super::pending(retry_after(Some(job))));
-        }
-        if new[i] && job.usable() {
-            release.extend(finished_peers(store, source, repo, job).await?);
-        }
-    }
     if !new.iter().any(|new| *new) {
         return Ok(false);
     }
@@ -355,11 +245,6 @@ async fn claim_extraction_group<N: NamespaceStore>(
         });
     }
     let mut batch = Batch::new().require(Precondition::NotAfter(now.saturating_add(10_000)));
-    for guard in release {
-        if !batch.preconditions.contains(&guard) {
-            batch.preconditions.push(guard);
-        }
-    }
     for (i, (ticket, id)) in tickets.iter().zip(ticket_ids).enumerate() {
         let job_key = keys::verify_job(&repo.name, &ticket.pack_id);
         let state_key = keys::verification(&repo.name, &ticket.pack_id);
@@ -396,18 +281,7 @@ async fn claim_extraction_group<N: NamespaceStore>(
                 ),
                 Value::default(),
             );
-        } else if let Some(prior) = &jobs[i]
-            && prior.usable()
-            && prior.extraction_group != group
-        {
-            for guard in finished_peers(store, source, repo, prior).await? {
-                if !batch.preconditions.contains(&guard) {
-                    batch.preconditions.push(guard);
-                }
-            }
-            let mut retained = prior.clone();
-            retained.extraction_group.clone_from(&group);
-            batch = batch.put(job_key, encode_job(&retained));
+
         }
     }
     match store

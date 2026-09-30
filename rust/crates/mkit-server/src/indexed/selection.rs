@@ -100,56 +100,6 @@ impl Projection {
         }
     }
 
-    /// Bound page geometry to the frozen job's verified frame before any
-    /// reference-page query. The caller also checks the source/job guards and
-    /// completes the reference digest scan before freezing group selection.
-    pub(super) fn validate_frame(
-        &self,
-        frame: &super::checkpoint::FrameRow,
-        pack_len: u64,
-        decoded_bytes: u64,
-    ) -> Result<(), StoreError> {
-        use mkit_core::object::ObjectType;
-        let size = frame.value.decoded_size;
-        let refs = u64::from(self.references);
-        let typed = match self.kind {
-            0 => {
-                frame.object_type == ObjectType::Blob as u8
-                    && self.size.checked_add(10) == Some(size)
-                    && refs == 0
-            }
-            1 => {
-                frame.object_type == ObjectType::ChunkedBlob as u8
-                    && refs.checked_mul(32).and_then(|n| n.checked_add(22)) == Some(size)
-            }
-            2 => {
-                frame.object_type == ObjectType::Tree as u8
-                    && self.size == 0
-                    && refs <= u64::from(mkit_core::serialize::MAX_TREE_ENTRIES)
-                    && refs
-                        .checked_mul(38)
-                        .and_then(|n| n.checked_add(10))
-                        .is_some_and(|minimum| minimum <= size)
-            }
-            3 => matches!(frame.object_type, 3 | 4 | 7) && refs == 0 && self.size == 0,
-            _ => false,
-        };
-        if !typed
-            || size > decoded_bytes
-            || frame.value.frame_length == 0
-            || frame
-                .value
-                .frame_offset
-                .checked_add(frame.value.frame_length)
-                .is_none_or(|end| end > pack_len)
-        {
-            return Err(StoreError::Corrupt(
-                "selection frame geometry mismatch".into(),
-            ));
-        }
-        Ok(())
-    }
-
     pub(super) fn reference_hasher(owner: &Hash, kind: u8) -> Hasher {
         let mut hash = Hasher::new();
         hash.update(b"mkit-selection-references:v2");
@@ -172,6 +122,7 @@ impl Projection {
         Value::new(out)
     }
 
+    #[cfg(test)]
     pub(super) fn decode(owner: &Hash, value: &Value) -> Result<Self, StoreError> {
         let b = value.as_bytes();
         if b.len() != 82 || b[0] != 2 || b[1] > 3 || &b[2..34] != owner {
@@ -237,6 +188,7 @@ impl Projection {
         Value::new(out)
     }
 
+    #[cfg(test)]
     pub(super) fn decode_page<'a>(
         &self,
         index: u32,
