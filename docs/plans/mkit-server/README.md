@@ -160,13 +160,13 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 | 3.5 | G16 | Worker adapter: outbox delivery timer kind, CORS/redaction | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 3.6 | G17 | Spec: SPEC-SERVER v1 (M3 sections) and the mkit.server.hooks.v1 proto | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 3.7 | G17 | Core: remote-hook adapter (remote-hooks feature) | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 3.7b | G17 | Public hooks.v1 types and mkit-hook:v1 verifier in mkit-rpc | [bundle brief](briefs/WP-3.7b-3.12-3.13.md) | | implemented locally; gates incomplete |
+| 3.7b | G17 | Public hooks.v1 types and mkit-hook:v1 verifier in mkit-rpc | [bundle brief](briefs/WP-3.7b-3.12-3.13.md) | | implemented; public acceptance and semver pass |
 | 3.8 | G17 | Native hook channels: HTTP and signed webhook outcome sink | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 3.9 | G17 | Worker hook channels: service binding and Queue outcomes | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 3.10 | G18 | Client: 402 detection -> AdmissionRequired, receipt passthrough | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 3.11 | G18 | Client: admission_helper, header allowlist and hard-reserved set (D30) | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 3.12 | G18 | Stub MPP hook server and helper; end-to-end tests (M3 exit) | [exit evidence](m3-exit-report.md) | | native helper and Worker M3 lane pass; full gates incomplete |
-| 3.13 | G18 | Wire conformance: admission, outcomes and backpressure on both adapters | [exit evidence](m3-exit-report.md) | | implemented; core race corrected; final gates and publication pending |
+| 3.12 | G18 | Stub MPP hook server and helper; end-to-end tests (M3 exit) | [exit evidence](m3-exit-report.md) | | implemented; native helper and Worker M3 lane pass |
+| 3.13 | G18 | Wire conformance: admission, outcomes and backpressure on both adapters | [exit evidence](m3-exit-report.md) | | implemented; both adapters pass M3; core race corrected |
 | 3.14 | G17 | Docs: TypeScript mppx reference Worker (documentation only) | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 4.1 | G19 | mkit-core: pack-ruzstd decode feature and dep-graph check | [brief](briefs/WP-4.1.md) | [#1116](https://github.com/officialunofficial/mkit/pull/1116) | merged |
 | 4.2 | G19 | mkit-core: repo-isolated delta-base seam and incremental push verification | [brief](briefs/WP-4.2.md) | [#1123](https://github.com/officialunofficial/mkit/pull/1123) | merged |
