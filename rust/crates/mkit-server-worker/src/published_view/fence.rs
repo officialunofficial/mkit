@@ -43,6 +43,9 @@ impl<S: NamespaceStore> PublishedSource for FencedReader<S> {
     fn inspection_configured(&self) -> bool {
         self.source.inspection_configured()
     }
+    fn uses_published_values(&self) -> bool {
+        self.source.uses_published_values()
+    }
     fn read_ref_enabled(&self) -> bool {
         self.source.read_ref_enabled()
     }
@@ -53,7 +56,7 @@ impl<S: NamespaceStore> PublishedSource for FencedReader<S> {
         now_ms: u64,
     ) -> BoxFuture<'a, PublishedBucket> {
         Box::pin(async move {
-            if self.source.inspection_configured() {
+            if self.source.inspection_configured() && !self.source.uses_published_values() {
                 return Err(StoreError::unavailable("published view unavailable"));
             }
             if self.invalidated(repo).await? {
