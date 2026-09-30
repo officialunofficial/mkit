@@ -101,6 +101,7 @@ async fn wire_suite_fs_sqlite_auth_v2() {
     for skipped in report.skips() {
         assert!(
             skipped == "advance.nonatomic_packmap_first"
+                || common::M3_CASES.contains(&skipped)
                 || matches!(
                     skipped,
                     "leases.bump_completes_and_writes_continue"
@@ -132,4 +133,27 @@ async fn wire_suite_fs_sqlite_auth_v2() {
     assert!(root.path().join(".mkit/server-meta").exists());
     assert!(!root.path().join("refs").exists());
     drop(opened);
+}
+
+#[cfg(feature = "hooks")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wire_helper_flow_commit_fs_sqlite() {
+    common::mpp::suite(&[], &["admission.helper_flow_commit"]).await;
+}
+
+#[cfg(feature = "hooks")]
+#[tokio::test]
+async fn wire_m3_all_cases_fs_sqlite() {
+    common::mpp::suite(
+        &[],
+        &[
+            "admission.",
+            "cors.",
+            "outcomes.aborted_on_cas_loss",
+            "outcomes.expired_ticket",
+            "outcomes.backpressure_hook_down",
+            "outcomes.eventual_completeness",
+        ],
+    )
+    .await;
 }

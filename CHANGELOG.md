@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - HTTP proofs on the opt-in native mount: canonical Object bundles and MKDP/MKDS query ranges now share validators, caps, payment and durable settlement with ordinary reads; exact core wire-size planning constructs no proof, and native canonical reads bound prefix memory (WP-4.14b-1). Workers prefetch follows in WP-4.14b-2. Unshipped `ProofServer` now builds selected bytes through a repository-scoped `ProofSource`.
+- Server: kind-8 completion uses the guarded fresh backlog, preserving delivery
+  after a concurrent outcome append (WP-3.13; correction to #1219).
+
+- Server conformance: M3 cases cover admission, CORS, CAS-loss and ticket expiry; the
+  orchestrator rulings preserve pipeline ordering and accept ordered combined
+  WWW-Authenticate lists on Workers (WP-3.13).
+
+- Server conformance: MPP stub, loopback controls, real native binary/exec-helper
+  push tests and a shared admission commit case; isolated Worker forwarder
+  calls the same Rust fixture (WP-3.12). Release guards reject `stubs`.
+
+- RPC: public `mkit-rpc::hooks` message types with JSON support and runtime-free
+  `HookSigner` and `HookVerifier`, enabled by the `hooks` feature. The server
+  re-exports its authentication surface (WP-3.7b, Linear MKIT-67).
 
 - Server (Stage 2, inert): default-off `http-objects` adapter features mount
   raw escaped HTTP object routes with streaming Range/HEAD, read CORS on
@@ -101,6 +115,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `WEBAUTHN_RPS` vars and a `test-faults`-only `UNSAFE_LOOPBACK_GRANTS`, to
   configure write grants on Multi + auth v2 deployments. Any bad or partial
   value refuses to start; unset keeps grants off (WP-1.30b).
+
+- Server: a Worker can verify a ticketed pack asynchronously in checkpointed,
+  budgeted alarm slices (timer kind 7, `IndexedConfig::verification =
+  Scheduled`) with the same answers as native inline verification: the advance
+  answers `PendingVerification` until the slices finish (Paid plan only; index
+  rows are relayed after the decode reaches `Done`, and `Verified` waits for
+  their delivery). The job lives in the new `vc` key class; kind 2 now also
+  removes an expired unconsumed pack's verification state. Indexed mode stays
+  refused on Workers until WP-4.10b (WP-4.8). `mkit-core` gains
+  `WindowReader::last_frame` and `pack::decode_entry_with` (additive).
 - Server: in indexed mode, extract every ChunkedBlob (as its reassembled content,
   with a chunk-offset sidecar) and every file Blob of at least 64 KiB into the
   deployment-wide object store under its object id, before a pack is marked

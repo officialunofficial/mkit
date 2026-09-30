@@ -710,6 +710,8 @@ async fn pipeline_multi_repository() {
             && !c.requires.contains(&Feature::Grants)
             && !c.requires.contains(&Feature::SignedReads)
             && !c.requires.contains(&Feature::IndexedMode)
+            // Scheduled verification needs the Worker's alarm and a Paid plan.
+            && !c.requires.contains(&Feature::IndexedAsync)
             // Needs a declared quota: run by its own baseline.
             && !c.requires.contains(&Feature::Quota)
             // Needs the `test-faults` directives and a relay: the served lanes.

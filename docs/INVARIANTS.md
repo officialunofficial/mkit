@@ -1310,6 +1310,9 @@ durable until acknowledgement, which deletes their delivery index and subtracts
 the exact stored key/value byte count. Shared counters and sequence/backlog
 values are guarded once per batch. A zero-to-positive backlog transition adds
 one kind-8 delivery kick; delivery may repeat but never drops an unacked row.
+A positive backlog keeps exactly one kind-8 row. Delivery decides completion
+from the same backlog snapshot its acknowledgment batch guards; concurrent
+appends either retain a rescheduled timer or fail that guard for re-planning.
 
 **Because:** consumption and expiry race; delivery may repeat or crash. An
 unguarded replacement could record two outcomes, erase a replacement ticket's
@@ -1325,6 +1328,9 @@ and SQLite. WP-1.10 exercises consumption and the defensive abort over native
 memory/SQLite and wire cases; the kind-2 expiry handler closes tickets with
 one guarded `Expired` row and best-effort session abort. WP-3.3 enforces guarded
 Pending reservations, ReadServed, reconciliation and backlog limits.
+WP-3.13 corrects the kind-8 acknowledgment/completion window from #1219;
+regular `timers/outcome_delivery.rs` regressions cover appends before and
+after the guarded fresh read and complete empty-backlog acknowledgment.
 ## Relay delivery advances durable per-source watermarks before source cleanup
 
 **Always:** relay rows for a source/target pair apply in sequence order. Each
@@ -1814,6 +1820,26 @@ difference, or reads consume replay capacity.
 the pipeline `private_repository_reads_return_the_missing_repository_error`
 and `a_signed_read_writes_no_replay_rows` tests; the connect_dispatch and
 wire `reads.private_not_found_byte_identical` cases.
+
+
+## Scheduled verification checkpoints retain closure authority
+
+**Always:** a scheduled job's guarded checkpoint and the deletion of a child
+satisfied by a member pack commit together. The checkpoint retains that pack
+for the consuming advance's membership recheck. Only a completed decode may
+emit index rows, and Verified follows delivery and extraction. Rebuilding job
+rows cannot downgrade an already Verified pack.
+
+**Because:** a crash between deleting a child and recording its member would
+lose the evidence needed to catch GC or generation changes. Async verification
+must retain the same repository authority as inline verification.
+
+**If violated:** an advance can accept an open closure, or storage damage can
+turn a monotone verification result into a contradictory persisted rejection.
+
+**Enforced by:** `mkit-server/src/indexed/job.rs` atomic closure checkpoints and
+state guards; the job-driver crash sweeps, satisfying-member removal test,
+Verified rebuild test, and Scheduled pipeline pending/delivery tests.
 
 ## Paid HTTP reads reserve durably and settle once
 

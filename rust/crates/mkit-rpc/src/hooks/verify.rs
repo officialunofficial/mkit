@@ -3,8 +3,7 @@
 //! sends.
 //!
 //! [`HookVerifier`] depends only on the hash, the signature scheme and `std`:
-//! no server runtime, so a Rust hook implementer can use it (WP-3.7b, MKIT-67,
-//! relocates it beside the signer and the `hooks.v1` messages). It performs
+//! no server runtime, so a Rust hook implementer can use it. It performs
 //! every check §7.1 lists: the eight headers and their canonical forms, the
 //! key id against the key list (§7.2) with its validity bounds, the audience,
 //! the validity window, the digest of the exact body bytes, the strict

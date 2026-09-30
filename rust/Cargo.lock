@@ -3463,9 +3463,13 @@ dependencies = [
  "arbitrary",
  "buffa",
  "buffa-build",
+ "ed25519-dalek",
  "hex",
  "mkit-core",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
+ "zeroize",
 ]
 
 [[package]]
@@ -3475,7 +3479,6 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "buffa",
- "buffa-build",
  "bytes",
  "connectrpc",
  "connectrpc-build",
@@ -3511,6 +3514,7 @@ name = "mkit-server-conformance"
 version = "0.4.2"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "buffa",
  "bytes",
  "clap",
@@ -3525,6 +3529,7 @@ dependencies = [
  "k256",
  "mkit-attest",
  "mkit-core",
+ "mkit-rpc",
  "mkit-server",
  "mkit-server-native",
  "mkit-transport-connect",
@@ -3544,6 +3549,7 @@ name = "mkit-server-native"
 version = "0.4.2"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "buffa",
  "bytes",
  "clap",
