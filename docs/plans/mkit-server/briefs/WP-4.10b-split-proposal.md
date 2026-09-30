@@ -1,8 +1,11 @@
 # WP-4.10b: checkpoint and proposed split (2026-09-30)
 
-Status: escalation under the restart prompt's production cap and summed-guard
-rule. This document is a proposal, not approval to split, a new R-row, or a
-completion claim. No branch has been pushed and no PR has been opened.
+Status: **historical checkpoint; the user approved this split on 2026-09-30.**
+The authoritative scopes are [PR1](WP-4.10b-1.md) and [PR2](WP-4.10b-2.md), sharing
+R-186, with caps of 3,000 and 2,000 production lines respectively. PR2 opens into
+`feat/mkit-server` after PR1 merges. The measurements and validation below
+belong to checkpoint `472d7a72`; they are not final PR1 gate or completion claims.
+Statements below describing approval as outstanding record the original proposal.
 
 ## Measured size and reason to stop
 
@@ -50,7 +53,7 @@ prevents its surviving duplicate from becoming Verified without extraction.
 The exact ticket observation is guarded. Queued work can still drain and renew
 protection after its own ticket disappears. Its regression passes.
 
-## Proposed partition for approval
+## Historical partition submitted for approval
 
 **PR 1, protection and bounded upload integration:** retain the frozen gp/ct,
 timer-13 and observed RelayHook foundations; current generic 96-effect relay

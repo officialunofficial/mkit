@@ -145,7 +145,7 @@ struct Consumed<'a> {
 
 /// Claim every new member together. Waiting on a foreign unfinished group
 /// creates no partial group: A+B and B+C serialize before either can extract.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One atomic group claim.
 async fn claim_extraction_group<N: NamespaceStore>(
     store: &N,
     source: &Partition,
@@ -281,7 +281,6 @@ async fn claim_extraction_group<N: NamespaceStore>(
                 ),
                 Value::default(),
             );
-
         }
     }
     match store

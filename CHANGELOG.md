@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server/Worker (inert, WP-4.10b-1, R-186): pending-holder protection and atomic
+  content-holder relay delivery retain protection beyond hold expiry; late
+  blocked holders leave durable takedown requests for WP-5.6a. Add bounded
+  verification projections, opaque ETag capture and default-compatible internal
+  R2 upload callbacks. Worker Extract remains fail-closed; the driver is PR2.
+
 - WP-5.10: durable timer-11 automatic cache purge intents, signed global delivery
   with stable ids and fresh nonces, local invalidation and snapshot refill fences.
 - WP-5.11a: default-off signed admin framework with separate role keys, durable

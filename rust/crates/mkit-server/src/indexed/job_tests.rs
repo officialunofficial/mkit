@@ -2586,6 +2586,7 @@ impl PackWindows for OpaqueEtagWindows {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // The fixture measures both the opaque and bounded guard ledgers.
 fn seven_captured_job_guards_have_an_explicit_opaque_etag_byte_ledger() {
     use crate::store::{MAX_BATCH_BYTES, MAX_VALUE_BYTES, Precondition};
     for (padding, packlists) in [(171, false), (150_000, false), (171, true), (150_000, true)] {
@@ -2599,7 +2600,7 @@ fn seven_captured_job_guards_have_an_explicit_opaque_etag_byte_ledger() {
                     .map(|id| {
                         let mut hash = [255; 32];
                         hash[..2].copy_from_slice(&id.to_be_bytes());
-                        hash[31] = n as u8;
+                        hash[31] = u8::try_from(n).unwrap();
                         hash
                     })
                     .collect();
@@ -2646,7 +2647,7 @@ fn seven_captured_job_guards_have_an_explicit_opaque_etag_byte_ledger() {
                 &rig.source(),
                 &registry,
                 rig.clock.as_ref(),
-                rig.clock.now_ms() as u64,
+                u64::try_from(rig.clock.now_ms()).unwrap(),
                 &TickBudget::default(),
             ))
             .unwrap();
@@ -2823,4 +2824,3 @@ fn verified_duplicate_pack_rebuild_keeps_both_tickets_and_first_decode_owner() {
             .is_some()
     );
 }
-

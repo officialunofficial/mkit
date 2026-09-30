@@ -2006,7 +2006,22 @@ pins, bounded-object multipart model tests, and the local R2 runtime probe.
 The parent WP-4.10b must establish canonical identity plus immutable verified
 source evidence in its first bounded source pass; that integration is pending.
 
-
 ### Pending holder work protects bytes beyond hold TTL (WP-4.10b foundation)
 
-Always: any content-shard `gp` row for an object prevents collection; insertion guards and bumps `c`, and does not expire by age. Because: an already queued holder intent may still apply after its ticket or ordinary GC hold expires. If violated: GC can delete a globally visible object before its durable holder arrives. Enforcement: `ContentIndex::protect_pending_holder` uses guarded block/deleting observations and NotAfter; `collectable` checks one pending row and its final plan guards `c`. Unknown pending state closes collection. Identical ownership retry does not bump; changed ownership refuses. Atomic delivery/removal and extraction-driver integration remain parent work; no permissive release API is exposed.
+**Always:** any content-shard `gp` row for an object prevents collection.
+Insertion guards and bumps `c`; the row does not expire by age. Identical
+ownership retry does not bump, and changed ownership refuses.
+
+**Because:** queued holder work may still apply after its ticket or ordinary
+GC hold expires. Removing that protection can delete an object before its
+durable holder arrives.
+
+**Enforced by:** `ContentIndex::protect_pending_holder` uses guarded fresh
+block/deleting observations and NotAfter. `collectable` checks one pending row
+and its final plan guards `c`; unknown pending state closes collection. The
+content relay hook atomically commits holder/count/c changes, ordinary hold and
+exact pending-row release, and the watermark. A late blocked holder retains a
+durable takedown request for WP-5.6a. No permissive release API is exposed.
+
+WP-4.10b-1 keeps Extract fail-closed. Source verification, holder enqueue/renewal
+and extraction-driver integration remain WP-4.10b-2 work.

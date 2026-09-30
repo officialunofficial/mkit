@@ -1,3 +1,17 @@
+## Authoritative approved split (2026-09-30)
+
+The user approved [WP-4.10b-1](WP-4.10b-1.md), protection and bounded upload
+prerequisites with Extract still fail-closed, followed by
+[WP-4.10b-2](WP-4.10b-2.md), the extraction driver. Both share R-186. PR1's
+production cap is 3,000 lines; PR2's is 2,000. PR2 is based on PR1 and opens into
+`feat/mkit-server` after PR1 merges. Neither PR is merged by the executor.
+
+The original purpose and A/B requirements below define the complete package;
+they are not a claim that PR1 finishes extraction. All executor checkpoint
+sections below are historical. The [split checkpoint](WP-4.10b-split-proposal.md)
+records the evidence behind the approved partition. Final budgets, gates and
+scope are reported separately in each PR.
+
 ## Purpose
 
 Workers extract large objects (Blobs ≥ 64 KiB and ChunkedBlobs) into the global object store in checkpointed alarm

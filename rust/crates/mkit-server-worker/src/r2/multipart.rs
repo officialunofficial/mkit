@@ -467,6 +467,7 @@ mod cleanup_tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // End-to-end registration and cleanup fixture.
     fn free_expiry_closes_tickets_and_records_deferred_abort_failures() {
         use mkit_server::store::{codec, keys, tickets};
         use mkit_server::timers::{TickBudget, TimerRegistry, run_due};

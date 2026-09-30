@@ -453,6 +453,7 @@ impl WorkerConfig {
             return Err(ConfigError("cache-purge requires WORKERS_PLAN=paid".into()));
         }
         let authority_fence = resolve_authority_fence(&var, multi, hooks.as_ref())?;
+        #[cfg_attr(not(feature = "http-objects"), allow(clippy::collapsible_if))]
         if let Some(fence) = &authority_fence {
             if fence.public_keys().any(|key| {
                 ticket_keys
@@ -474,6 +475,7 @@ impl WorkerConfig {
                 ));
             }
         }
+        #[cfg_attr(not(feature = "http-objects"), allow(clippy::collapsible_if))]
         if let Some(admin) = &admin {
             if let Some(fence) = &authority_fence {
                 admin
@@ -916,25 +918,7 @@ fn timer_registry_budgeted<
         let relay = match target.clone() {
             Ok(target) => Some(RelayHandler {
                 target,
-                hook: WorkerRelayHook {
-                    content: mkit_server::relay::HolderRelayHook {
-                        #[cfg(target_arch = "wasm32")]
-                        clock: Arc::new(crate::clock::WorkerClock),
-                        #[cfg(not(target_arch = "wasm32"))]
-                        clock: Arc::new(mkit_server::SystemClock),
-                    },
-                    audit: mkit_server::admin::AuditReserveHook::new(
-                        if class == ShardClass::RefStore {
-                            mkit_server::Partition::Namespace(
-                                mkit_server::NamespaceKey::deployment_default(),
-                            )
-                        } else {
-                            mkit_server::Partition::Coordinator(
-                                mkit_server::NamespaceKey::deployment_default(),
-                            )
-                        },
-                    ),
-                },
+                hook: WorkerRelayHook::new(class),
                 budget,
             }),
             Err(error) => {
@@ -1440,6 +1424,30 @@ impl<S: mkit_server::NamespaceStore, T: mkit_server::NamespaceStore + 'static>
 struct WorkerRelayHook {
     content: mkit_server::relay::HolderRelayHook,
     audit: mkit_server::admin::AuditReserveHook,
+}
+
+impl WorkerRelayHook {
+    fn new(class: crate::classes::ShardClass) -> Self {
+        Self {
+            content: mkit_server::relay::HolderRelayHook {
+                #[cfg(target_arch = "wasm32")]
+                clock: Arc::new(crate::clock::WorkerClock),
+                #[cfg(not(target_arch = "wasm32"))]
+                clock: Arc::new(mkit_server::SystemClock),
+            },
+            audit: mkit_server::admin::AuditReserveHook::new(
+                if class == crate::classes::ShardClass::RefStore {
+                    mkit_server::Partition::Namespace(
+                        mkit_server::NamespaceKey::deployment_default(),
+                    )
+                } else {
+                    mkit_server::Partition::Coordinator(
+                        mkit_server::NamespaceKey::deployment_default(),
+                    )
+                },
+            ),
+        }
+    }
 }
 
 impl mkit_server::relay::RelayHook for WorkerRelayHook {
@@ -3291,6 +3299,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // End-to-end registration and cleanup fixture.
     fn worker_registry_delivers_a_current_96_effect_generic_relay_in_two_calls() {
         use mkit_server::store::{codec, keys, outbox::OutboxBuilder};
         use mkit_server::timers::{TickBudget, run_due};

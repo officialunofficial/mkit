@@ -13,6 +13,7 @@ use mkit_server::{BlobKey, BlobStore, PackSink, PartSink};
 use mkit_server_worker::r2::R2BlobStore;
 
 #[test]
+#[allow(clippy::too_many_lines)] // Upload lifetime matrix shares one root-pinned fixture.
 fn extraction_callbacks_check_cvs_replacement_abort_and_cold_restart() {
     use mkit_server::PartRef;
     use mkit_server::indexed::budget::SliceBudget;
@@ -25,15 +26,17 @@ fn extraction_callbacks_check_cvs_replacement_abort_and_cold_restart() {
         let bucket = common::SimBucket::default();
         let store = R2BlobStore::new(bucket.clone(), "packs");
         let extension = R2Extraction(store.clone());
-        let bytes = vec![17; MIN_PART_SIZE as usize + 10];
+        let part_size = usize::try_from(MIN_PART_SIZE).unwrap();
+        let bytes = vec![17; part_size + 10];
         let plan = PartPlan::new(bytes.len() as u64, MIN_PART_SIZE, 10_000).unwrap();
         let cvs: Vec<_> = (0..plan.count())
             .map(|index| {
-                let start = plan.offset(index).unwrap() as usize;
+                let start = usize::try_from(plan.offset(index).unwrap()).unwrap();
                 part_subtree_cv(
                     &plan,
                     index,
-                    &bytes[start..start + plan.expected_len(index).unwrap() as usize],
+                    &bytes[start
+                        ..start + usize::try_from(plan.expected_len(index).unwrap()).unwrap()],
                 )
                 .unwrap()
             })
@@ -71,13 +74,13 @@ fn extraction_callbacks_check_cvs_replacement_abort_and_cold_restart() {
                 &plan,
                 0,
                 cvs[0],
-                bytes[..MIN_PART_SIZE as usize].to_vec(),
+                bytes[..part_size].to_vec(),
                 &budget,
             )
             .await
             .unwrap()
             .unwrap();
-        let mut replacement = bytes[..MIN_PART_SIZE as usize].to_vec();
+        let mut replacement = bytes[..part_size].to_vec();
         replacement[0] ^= 1;
         assert!(
             extension
@@ -107,7 +110,7 @@ fn extraction_callbacks_check_cvs_replacement_abort_and_cold_restart() {
                 &plan,
                 1,
                 cvs[1],
-                bytes[MIN_PART_SIZE as usize..].to_vec(),
+                bytes[part_size..].to_vec(),
                 &budget,
             )
             .await
@@ -159,7 +162,7 @@ fn extraction_callbacks_check_cvs_replacement_abort_and_cold_restart() {
                     &plan,
                     0,
                     cvs[0],
-                    bytes[..MIN_PART_SIZE as usize].to_vec(),
+                    bytes[..part_size].to_vec(),
                     &budget
                 )
                 .await
