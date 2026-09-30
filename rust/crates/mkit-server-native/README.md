@@ -690,3 +690,36 @@ gauges always emit; latency observations emit every hundredth call across an
 isolate. Info events use the log console; warning/error events use the error
 console. Debug and trace events are disabled. Pressure state is per DO instance;
 a new instance starts a new alert interval.
+
+## HTTP object serving (Stage 2, opt-in)
+
+The default build and shipped Stage 1 feature list omit `http-objects`.
+With that adapter feature, an embedder must configure both
+`PipelineConfig::indexed` and `PipelineConfig::http_objects`, then set
+`RouterOptions::http_objects = Some(HttpMountOptions::default())`.
+The mount dispatches original escaped URIs by `/-/`; opaque pipelines and
+unset mount options keep their usual RPC missing-route behavior. The binary
+has no production indexed or HTTP mount flag; activation belongs to WP-4.18/5.2.
+
+`http_objects::mount::HttpMountOptions` defaults to read CORS `*`.
+Set `cors_origins` to exact origins to echo only allowed origins and emit
+`Vary: Origin` on every response. No response permits browser credentials.
+GET and Range stream directly; HEAD retains GET metadata with no body on
+any status. The mount supplies a Tokio runtime that retains paid-read
+settlement after body cancellation. HTTP serving performs no shared-cache
+lookups or insertions, including for private responses.
+
+Feature-gated `--url-token-key-file PATH` accepts `active <64 hex seed>`
+and `retired <64 hex public key> <retired_at_ms>` lines. The file must satisfy
+owner-only secret-file rules. `--url-token-ttl SECONDS` defaults to 900 and
+is bounded to 1–86400; it requires the key file. These flags configure keys
+without enabling indexed mode or routes. Active and retained token keys
+must differ from all ticket, hook and enc keys. The opt-in mount publishes
+`/.well-known/mkit-url-token-keys.json` outside bearer/payment gates with
+`public, max-age=300` and read CORS.
+
+`HttpObjectsConfig::redirect_public_refs` defaults to false. When enabled,
+only public ref GET/HEAD without a proof may redirect after the normal
+checks, to a relative object URL preserving the repository prefix.
+Configured admission disables redirects. Traces record method and escaped
+path only; credentials and queries are redacted.

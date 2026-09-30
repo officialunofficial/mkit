@@ -13,7 +13,7 @@ use crate::guard::{BearerGateLayer, CapLayer};
 use tower_http::body::Limited;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
-use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
 use mkit_server::pipeline::ADMISSION_EXPOSE_HEADERS;
@@ -106,6 +106,7 @@ pub(crate) fn apply(
     router: axum::Router,
     opts: &RouterOptions,
     bearer: Option<&str>,
+    cap: Option<CapLayer>,
 ) -> axum::Router {
     // The limit wraps the body in `Limited`; the route takes axum's
     // `Body`, so box it back. An oversize `Content-Length` is answered 413
@@ -120,9 +121,11 @@ pub(crate) fn apply(
     let redact_resp = opts.redactor.clone();
     // `Router::layer` layers each route on its own; the cap's semaphore is
     // shared by every clone of the layer.
-    let router = router
-        .layer(body_limit)
-        .layer(CapLayer::new(opts.max_concurrency, opts.queue_timeout));
+    let router = router.layer(body_limit);
+    let router = match cap {
+        Some(cap) => router.layer(cap),
+        None => router,
+    };
     let router = match bearer {
         // Outside the cap: a request without the token takes no permit.
         Some(token) => router.layer(BearerGateLayer::new(token)),
@@ -137,11 +140,12 @@ pub(crate) fn apply(
         }))
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(
-                    DefaultMakeSpan::new()
-                        .level(Level::INFO)
-                        .include_headers(true),
-                )
+                .make_span_with(|req: &Request<Body>| {
+                    tracing::info_span!(
+                        "http_request", method = %req.method(), path = req.uri().path(),
+                        version = ?req.version(), headers = ?req.headers()
+                    )
+                })
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
         // Outside the trace layer, so the values are marked before a span

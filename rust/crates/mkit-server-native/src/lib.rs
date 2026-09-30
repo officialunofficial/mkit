@@ -13,6 +13,8 @@ pub mod exit;
 mod guard;
 #[cfg(feature = "hooks")]
 pub mod hooks;
+#[cfg(feature = "http-objects")]
+pub mod http_mount;
 #[cfg(feature = "http")]
 pub mod layers;
 #[cfg(feature = "http")]

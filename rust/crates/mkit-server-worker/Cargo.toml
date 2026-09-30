@@ -37,6 +37,7 @@ workspace = true
 test-faults = ["mkit-server/test-faults"]
 signed-http-hooks = []
 published-view = ["mkit-server/published-view"]
+http-objects = ["mkit-server/http-objects"]
 
 [dependencies]
 # `connect` (on by default) for M0-17's fetch adapter; `sql` for the shared
