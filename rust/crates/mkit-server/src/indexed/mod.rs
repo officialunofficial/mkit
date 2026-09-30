@@ -6,11 +6,13 @@ pub mod budget;
 pub mod checkpoint;
 pub mod classify;
 pub mod entries;
+mod etag;
 mod extract;
 pub mod job;
 pub mod publication;
 pub mod resolve;
 pub mod scheduled;
+mod selection;
 pub mod state;
 pub mod verify;
 

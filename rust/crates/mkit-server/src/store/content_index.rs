@@ -414,6 +414,43 @@ impl<S: NamespaceStore> ContentIndex<S> {
         .await
     }
 
+    /// Establish durable queued-holder ownership before creating a source
+    /// relay intent. Identical retries do not bump `c`; a different owner
+    /// cannot replace it. No expiration or unguarded removal is supported.
+    /// The value binds repository, source, verification job and intent.
+    pub async fn protect_pending_holder(
+        &self,
+        object: &Hash,
+        hold_id: &Hash,
+        identity: &super::PendingHolderV1,
+        now_ms: u64,
+    ) -> Result<HoldOutcome, StoreError> {
+        if identity.object != *object || identity.hold_id != *hold_id {
+            return Err(StoreError::Corrupt("pending holder key mismatch".into()));
+        }
+        let identity = identity.encode()?;
+        let key = keys::pending_holder(object, hold_id);
+        self.mutate(object, now_ms, Some(&key), None, true, |seen, state| {
+            if let Some(entry) = &seen.blocked {
+                return Ok(Step::Stop(HoldOutcome::Blocked(entry.clone())));
+            }
+            refuse_while_deleting(state)?;
+            if let Some(prior) = &seen.probe {
+                if prior != &identity {
+                    return Err(StoreError::Corrupt(
+                        "pending-holder identity changed".into(),
+                    ));
+                }
+                return Ok(Step::Stop(HoldOutcome::Held));
+            }
+            Ok(Step::Commit(
+                vec![Write::Put(key.clone(), identity.clone())],
+                HoldOutcome::Held,
+            ))
+        })
+        .await
+    }
+
     /// Release hold `hold_id`. Normally the relay step that records the
     /// holder row releases it in the same batch (see [`Self::add_holder`],
     /// WP-4.10, R-75); this standalone form is for abandoned uploads.
@@ -739,6 +776,19 @@ impl<S: NamespaceStore> ContentIndex<S> {
         {
             return Ok(None);
         }
+        // Pending holder intents remain applicable beyond ticket/hold expiry.
+        // Even unknown/corrupt rows block deletion; reconciliation must prove
+        // that no durable source intent can still deliver before removing one.
+        let (start, end) = keys::pending_holders_of(object);
+        if !self
+            .store
+            .scan(&p, &start, &end, None, 1)
+            .await?
+            .entries
+            .is_empty()
+        {
+            return Ok(None);
+        }
         let mut expired = Vec::new();
         let (start, end) = keys::holds_of(object);
         let mut after = None;
@@ -923,6 +973,75 @@ mod tests {
         block_on(idx.collectable(object, now, GRACE))
             .unwrap()
             .is_some()
+    }
+
+    #[test]
+    fn pending_holder_insert_invalidates_gc_and_retries_do_not_bump() {
+        let idx = ContentIndex::new(kv());
+        let object = [0x47; 32];
+        let hold = [0x74; 32];
+        let prior = block_on(idx.collectable(&object, GRACE, GRACE))
+            .unwrap()
+            .unwrap();
+        let owner = super::super::PendingHolderV1::new(
+            holder("repo"),
+            Partition::Namespace(NamespaceKey::deployment_default()),
+            OP,
+            object,
+            hold,
+            [0x55; 32],
+        )
+        .unwrap();
+        held(block_on(
+            idx.protect_pending_holder(&object, &hold, &owner, GRACE),
+        ));
+        assert!(!block_on(idx.commit_collect(prior)).unwrap());
+        let recorded = state(&idx, &object);
+        held(block_on(idx.protect_pending_holder(
+            &object,
+            &hold,
+            &owner,
+            GRACE + 1,
+        )));
+        assert_eq!(state(&idx, &object), recorded);
+        assert!(!collectable(&idx, &object, u64::MAX));
+        let mut replacement = owner.clone();
+        replacement.intent = [0x56; 32];
+        assert!(matches!(
+            block_on(idx.protect_pending_holder(&object, &hold, &replacement, GRACE + 1)),
+            Err(StoreError::Corrupt(_))
+        ));
+        let raw = owner.encode().unwrap();
+        assert_eq!(super::super::PendingHolderV1::decode(&raw).unwrap(), owner);
+        let mut trailing = raw.as_bytes().to_vec();
+        trailing.push(0);
+        assert!(super::super::PendingHolderV1::decode(&Value::new(trailing)).is_err());
+        assert_eq!(
+            keys::parse(&keys::pending_holder(&object, &hold)),
+            Some(ParsedKey::PendingHolder {
+                object,
+                hold_id: hold
+            })
+        );
+    }
+
+    #[test]
+    fn pending_holder_protection_survives_expired_hold() {
+        let store = kv();
+        let idx = ContentIndex::new(store);
+        let object = [0x42; 32];
+        let hold = [0x24; 32];
+        held(block_on(idx.add_hold(&object, &hold, 5_000, 0)));
+        let key = keys::pending_holder(&object, &hold);
+        block_on(idx.store().apply(
+            &content_shard(&object),
+            Batch::new().put(key, Value::new(vec![1])),
+        ))
+        .unwrap();
+        assert!(
+            !collectable(&idx, &object, MAX_HOLD_TTL_MS + GRACE),
+            "queued holder work protects bytes after the TTL expires"
+        );
     }
 
     /// Remove `repo`'s holder at the sequence its row carries now.

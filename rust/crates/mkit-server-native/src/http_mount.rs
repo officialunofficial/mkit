@@ -178,7 +178,11 @@ where
             match tokio::runtime::Handle::try_current() {
                 Ok(handle) => {
                     pipeline
-                        .serve_http_object_with_runtime(&request, read_runtime(handle))
+                        .serve_http_object_with_proofs(
+                            &request,
+                            read_runtime(handle),
+                            Arc::new(crate::NativeProofs),
+                        )
                         .await
                 }
                 Err(_) => pipeline.serve_http_object(&request).await,

@@ -149,6 +149,11 @@ impl<B: BlobStore> BlobStore for Budgeted<'_, B> {
         range: Option<ByteRange>,
     ) -> Result<Option<BlobBody>, StoreError> {
         self.budget.charge()?;
+        // R2's ranged BlobStore read checks metadata before fetching bytes.
+        // Reserve both backend requests even for stores that need only one.
+        if range.is_some() {
+            self.budget.charge()?;
+        }
         self.inner.get(key, range).await
     }
     async fn head(&self, key: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {

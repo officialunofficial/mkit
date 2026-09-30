@@ -26,11 +26,116 @@ use mkit_core::hash::Hash;
 use mkit_server::indexed::IndexedConfig;
 use mkit_server::indexed::VerificationMode;
 use mkit_server::indexed::budget::{PackWindows, Window, WindowError};
-use mkit_server::indexed::job::{FailClosedExtraction, SliceLimits, VerifyTimer};
+use mkit_server::indexed::job::{FailClosedExtraction, SliceExtension, SliceLimits, VerifyTimer};
 use mkit_server::pipeline::{D34Shards, LeaseParams};
 use mkit_server::timers::TimerRegistry;
 use mkit_server::{BlobKey, BlobStore, BoxFuture, Clock, Metrics, NamespaceStore};
 use std::sync::Arc;
+
+/// Existing extraction extension backed by R-192's root-pinned R2 uploads.
+#[derive(Debug, Clone)]
+pub struct R2Extraction<B>(pub crate::r2::R2BlobStore<B>);
+
+fn reserve(
+    budget: &mkit_server::indexed::budget::SliceBudget,
+    count: u32,
+) -> Result<(), mkit_server::StoreError> {
+    for _ in 0..count {
+        budget.charge()?;
+    }
+    Ok(())
+}
+
+impl<B: ObjectBucket> SliceExtension for R2Extraction<B> {
+    fn needs_extraction(&self, object: &mkit_core::object::Object, cfg: &IndexedConfig) -> bool {
+        FailClosedExtraction.needs_extraction(object, cfg)
+    }
+    fn extraction_enabled(&self) -> bool {
+        true
+    }
+    fn begin_object<'a>(
+        &'a self,
+        key: BlobKey,
+        plan: &'a mkit_core::upload_parts::PartPlan,
+        root: Hash,
+        cvs: &'a [Hash],
+        operation: Hash,
+        budget: &'a mkit_server::indexed::budget::SliceBudget,
+    ) -> BoxFuture<'a, Result<Option<Vec<u8>>, mkit_server::StoreError>> {
+        Box::pin(async move {
+            reserve(budget, 8)?;
+            self.0
+                .begin_verified_object(key, plan, root, cvs, operation)
+                .await
+                .map(Some)
+        })
+    }
+    fn put_object_part<'a>(
+        &'a self,
+        key: BlobKey,
+        session: &'a [u8],
+        plan: &'a mkit_core::upload_parts::PartPlan,
+        index: u32,
+        cv: Hash,
+        bytes: Vec<u8>,
+        budget: &'a mkit_server::indexed::budget::SliceBudget,
+    ) -> BoxFuture<'a, Result<Option<Vec<u8>>, mkit_server::StoreError>> {
+        use mkit_server::PartSink;
+        Box::pin(async move {
+            reserve(budget, 3)?;
+            let mut sink = self
+                .0
+                .begin_verified_object_part(key, session, plan, index, cv)
+                .await?;
+            for piece in bytes.chunks(mkit_server::store::MAX_BLOB_PIECE_BYTES) {
+                if let Err(error) = sink.write(bytes::Bytes::copy_from_slice(piece)).await {
+                    sink.abort().await;
+                    return Err(error);
+                }
+            }
+            sink.commit().await.map(Some)
+        })
+    }
+    fn complete_object<'a>(
+        &'a self,
+        key: BlobKey,
+        session: &'a [u8],
+        plan: &'a mkit_core::upload_parts::PartPlan,
+        parts: Vec<mkit_server::PartRef>,
+        root: Hash,
+        budget: &'a mkit_server::indexed::budget::SliceBudget,
+    ) -> BoxFuture<'a, Result<Option<mkit_server::CommitOutcome>, mkit_server::StoreError>> {
+        Box::pin(async move {
+            reserve(budget, 7)?;
+            // Move receipt tags: cloning the maximum receipt vector would add
+            // eleven MiB to the bounded finalization allowance.
+            let parts: Vec<_> = parts
+                .into_iter()
+                .map(|p| crate::r2::VerifiedObjectPartRef {
+                    index: p.index,
+                    len: p.len,
+                    tag: p.tag,
+                })
+                .collect();
+            self.0
+                .complete_verified_object(key, session, plan, &parts, root)
+                .await
+                .map(Some)
+        })
+    }
+    fn abort_object<'a>(
+        &'a self,
+        key: BlobKey,
+        session: &'a [u8],
+        plan: &'a mkit_core::upload_parts::PartPlan,
+        budget: &'a mkit_server::indexed::budget::SliceBudget,
+    ) -> BoxFuture<'a, Result<(), mkit_server::StoreError>> {
+        Box::pin(async move {
+            reserve(budget, 2)?;
+            self.0.abort_verified_object(key, session, plan).await
+        })
+    }
+}
 
 /// Range reads of a pack in the `STORAGE` bucket, bound to its etag.
 #[derive(Debug, Clone)]
