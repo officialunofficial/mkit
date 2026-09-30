@@ -102,6 +102,22 @@ pub struct ObjectPage {
     pub cursor: Option<String>,
 }
 
+/// The answer of [`ObjectBucket::get_range_etag`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum RangeRead {
+    /// No such object.
+    Absent,
+    /// The object no longer has the etag the caller required.
+    EtagChanged,
+    /// The requested range, and the etag of the object it came from.
+    Bytes {
+        /// Exactly the requested range.
+        bytes: Vec<u8>,
+        /// The object's etag.
+        etag: String,
+    },
+}
+
 /// The object-store operations [`R2BlobStore`] needs: R2 on Workers
 /// (`EnvBucket`, wasm32), a simulation in tests. Errors carry the backend's
 /// detail, which the store logs and never returns.
@@ -122,6 +138,19 @@ pub trait ObjectBucket: MaybeSend + MaybeSync + Clone + 'static {
         key: &str,
         range: Option<Range<u64>>,
     ) -> impl Future<Output = Result<Option<(u64, ObjectStream)>, String>> + MaybeSend;
+
+    /// `range` of the object, only while it still has `etag` (when given),
+    /// and the etag it has. Scheduled verification reads a pack in windows
+    /// across alarms and binds every read to the etag of the first
+    /// (SPEC-PACKFILE §11); a backend without conditional reads fails.
+    fn get_range_etag(
+        &self,
+        _key: &str,
+        _range: Range<u64>,
+        _etag: Option<&str>,
+    ) -> impl Future<Output = Result<RangeRead, String>> + MaybeSend {
+        async { Err("conditional range reads are not supported".to_owned()) }
+    }
 
     /// Remove the object; absent is not an error.
     fn delete(&self, key: &str) -> impl Future<Output = Result<(), String>> + MaybeSend;
@@ -724,6 +753,36 @@ impl ObjectBucket for EnvBucket {
         let stream = body.stream().map_err(|e| e.to_string())?;
         let stream = stream.map(|piece| piece.map(Bytes::from).map_err(|e| e.to_string()));
         Ok(Some((object.size(), Box::pin(stream))))
+    }
+
+    async fn get_range_etag(
+        &self,
+        key: &str,
+        range: Range<u64>,
+        etag: Option<&str>,
+    ) -> Result<RangeRead, String> {
+        let bucket = self.bucket()?;
+        let mut get = bucket.get(key).range(worker::Range::OffsetWithLength {
+            offset: range.start,
+            length: range.end - range.start,
+        });
+        if let Some(etag) = etag {
+            get = get.only_if(worker::Conditional {
+                etag_matches: Some(etag.to_owned()),
+                ..Default::default()
+            });
+        }
+        let Some(object) = get.execute().await.map_err(|e| e.to_string())? else {
+            return Ok(RangeRead::Absent);
+        };
+        // A failed condition answers the object's metadata without a body.
+        let Some(body) = object.body() else {
+            return Ok(RangeRead::EtagChanged);
+        };
+        Ok(RangeRead::Bytes {
+            bytes: body.bytes().await.map_err(|e| e.to_string())?,
+            etag: object.etag(),
+        })
     }
 
     async fn delete(&self, key: &str) -> Result<(), String> {

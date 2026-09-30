@@ -2,15 +2,21 @@
 //! scheduling. Verification extracts large objects into the global object
 //! store before a pack's `Verified` state is written (WP-4.10).
 
+pub mod budget;
+pub mod checkpoint;
 pub mod classify;
 pub mod entries;
 mod extract;
+pub mod job;
 pub mod resolve;
+pub mod scheduled;
 pub mod state;
 pub mod verify;
 
 #[cfg(all(test, feature = "memory"))]
 mod extract_tests;
+#[cfg(all(test, feature = "memory"))]
+mod job_tests;
 #[cfg(all(test, feature = "memory"))]
 mod tests;
 
@@ -63,6 +69,9 @@ pub struct IndexedConfig {
     /// `4 * max_pack_bytes` when the pipeline is built; a set value must be
     /// at least `max_pack_bytes`.
     pub max_extract_bytes: Option<u64>,
+    /// Where verification runs: inline in the advance, or in checkpointed
+    /// alarm slices (WP-4.8). Programmatic only.
+    pub verification: VerificationMode,
     /// Most member commits and uncached delta bases one fast-forward check
     /// may resolve (WP-4.17), from 1 to [`MAX_ANCESTRY_COMMITS_LIMIT`].
     /// Beyond it the check is unproven and
@@ -70,7 +79,34 @@ pub struct IndexedConfig {
     pub max_ancestry_commits: u32,
 }
 
+/// Where a ticketed pack is verified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum VerificationMode {
+    /// In the advance, whole-pack and in memory (native).
+    #[default]
+    Inline,
+    /// By kind-7 slices; an advance only checks their result and answers
+    /// `PendingVerification` until they finish (Workers).
+    Scheduled,
+}
+
 impl IndexedConfig {
+    /// Scheduled verification (WP-4.8) for packs up to `max_pack_bytes`, every
+    /// other limit at its default; the decode budget is raised to cover the
+    /// pack cap when that is larger.
+    #[must_use]
+    pub fn scheduled(max_pack_bytes: u64) -> Self {
+        let defaults = Self::default();
+        Self {
+            verification: VerificationMode::Scheduled,
+            max_pack_bytes,
+            decode_budget: defaults.decode_budget.max(max_pack_bytes),
+            max_ancestry_commits: SCHEDULED_MAX_ANCESTRY_COMMITS,
+            ..defaults
+        }
+    }
+
     /// [`Self::max_extract_bytes`], or `4 * max_pack_bytes` when unset.
     #[must_use]
     pub fn effective_max_extract_bytes(&self) -> u64 {
@@ -81,6 +117,10 @@ impl IndexedConfig {
 
 /// The largest accepted [`IndexedConfig::max_ancestry_commits`].
 pub const MAX_ANCESTRY_COMMITS_LIMIT: u32 = 65_536;
+
+/// [`IndexedConfig::max_ancestry_commits`] under scheduled verification: a
+/// Worker alarm cannot walk more (WP-4.17's Worker cap, R-171).
+pub const SCHEDULED_MAX_ANCESTRY_COMMITS: u32 = 64;
 
 /// The default [`IndexedConfig::max_ancestry_commits`].
 pub const DEFAULT_MAX_ANCESTRY_COMMITS: u32 = 256;
@@ -97,6 +137,7 @@ impl Default for IndexedConfig {
             decode_budget: 2 << 30,
             extract_min_bytes: DEFAULT_EXTRACT_MIN_BYTES,
             max_extract_bytes: None,
+            verification: VerificationMode::Inline,
             max_ancestry_commits: DEFAULT_MAX_ANCESTRY_COMMITS,
         }
     }

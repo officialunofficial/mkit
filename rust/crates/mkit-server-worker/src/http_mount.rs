@@ -55,6 +55,25 @@ pub fn token_config(
     Ok(Some(tokens))
 }
 
+/// Parse tokens and enforce separation from every accepted ticket secret.
+pub(crate) fn token_config_for_tickets(
+    var: &impl Fn(&str) -> Option<String>,
+    tickets: Option<&mkit_server::upload::token::TicketKeys>,
+) -> Result<Option<UrlTokenConfig>, ConfigError> {
+    let tokens = token_config(var)?;
+    if let (Some(tokens), Some(tickets)) = (&tokens, tickets)
+        && tokens
+            .keys()
+            .public_keys()
+            .any(|public| tickets.contains_ed25519_public(&public))
+    {
+        return Err(ConfigError(
+            "URL_TOKEN_KEYS must differ from TICKET_KEYS".into(),
+        ));
+    }
+    Ok(tokens)
+}
+
 /// Split the runtime's already-serialized URL without decoding or reparsing it.
 /// An empty query stays Some(""). No error contains URL text.
 ///

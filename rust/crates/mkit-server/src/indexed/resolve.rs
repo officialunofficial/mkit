@@ -255,6 +255,13 @@ impl MemberCache {
         self.retained_bytes
     }
 
+    /// The retained locations, with their canonical bytes and total depth.
+    pub(super) fn rows(&self) -> impl Iterator<Item = (&Location, (&Arc<[u8]>, &u32))> {
+        self.rows
+            .iter()
+            .map(|(location, (bytes, depth))| (location, (bytes, depth)))
+    }
+
     fn insert(
         &mut self,
         location: Location,
