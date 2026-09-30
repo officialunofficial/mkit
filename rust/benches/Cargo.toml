@@ -179,6 +179,10 @@ harness = false
 name = "restore_chunk_fanout"
 harness = false
 
+[[bench]]
+name = "restore_small_files"
+harness = false
+
 # Push planning's per-candidate delta encoding
 # (`transfer::encode_delta_candidate`, fanned out via `mkit-cli`'s
 # `remote_dispatch::encode_delta_candidates_batch`) — per-candidate
