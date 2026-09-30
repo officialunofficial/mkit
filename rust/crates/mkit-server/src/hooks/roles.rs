@@ -36,6 +36,12 @@ pub struct RemoteOutcomes<C> {
     timeout: Duration,
 }
 
+/// Signed durable global cache-purge delivery, distinct from admission.
+pub struct RemotePurge<C> {
+    client: Arc<HookClient<C>>,
+    timeout: Duration,
+}
+
 macro_rules! role {
     ($name:ident) => {
         impl<C> core::fmt::Debug for $name<C> {
@@ -77,6 +83,37 @@ macro_rules! role {
 role!(RemoteAuthorizer);
 role!(RemoteAdmission);
 role!(RemoteOutcomes);
+role!(RemotePurge);
+
+type PurgeAcknowledgement = std::collections::BTreeMap<String, serde_json::Value>;
+
+impl<C: HookChannel> crate::purge::PurgeSink for RemotePurge<C> {
+    fn deliver<'a>(
+        &'a self,
+        request: &'a crate::purge::Request,
+    ) -> crate::BoxFuture<'a, Result<(), crate::StoreError>> {
+        Box::pin(async move {
+            request.validate()?;
+            if !self.client.is_signed() {
+                return Err(crate::StoreError::unavailable("purge signing required"));
+            }
+            if request.audience != self.client.server_audience() {
+                return Err(crate::StoreError::unavailable("purge audience mismatch"));
+            }
+            let acknowledgement = self
+                .client
+                .decide::<_, PurgeAcknowledgement>(Rpc::CachePurge, request, self.timeout)
+                .await
+                .map_err(|_| crate::StoreError::unavailable("purge delivery failed"))?;
+            if !acknowledgement.is_empty() {
+                return Err(crate::StoreError::unavailable(
+                    "invalid purge acknowledgement",
+                ));
+            }
+            Ok(())
+        })
+    }
+}
 
 /// What a [`WipeOnDrop`] holds: credential values that must not outlive the
 /// call that carried them.
@@ -148,5 +185,102 @@ impl<C: HookChannel> OutcomeSink for RemoteOutcomes<C> {
             .deliver(Rpc::Outcome, &request, self.timeout)
             .await
             .map_err(|failure| DeliveryError::new(failure.0, None))
+    }
+}
+
+#[cfg(test)]
+mod purge_tests {
+    use super::*;
+    use crate::hooks::tests::{MockChannel, Step, channel_of, client};
+    use crate::purge::{PurgeSink, Request, Trigger};
+    use crate::{ManualClock, ManualSleep};
+    use futures_executor::block_on;
+
+    fn request() -> Request {
+        Request {
+            purge_id: "purge:test".into(),
+            audience: "https://vcs.example.test".into(),
+            repository: "root/repo".into(),
+            namespace: String::new(),
+            trigger: Trigger::VisibilityChange,
+            url_paths: Vec::new(),
+            object_ids: Vec::new(),
+            refs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn cache_purge_requires_an_empty_json_acknowledgement() {
+        for step in [
+            Step::json(r#"{"code":"error"}"#),
+            Step::json("null"),
+            Step::json("[]"),
+            Step::json(""),
+            Step::Reply(204, None, Vec::new()),
+            Step::Reply(200, Some("text/plain"), b"{}".to_vec()),
+            Step::Reply(200, Some("application/json"), vec![b' '; 65_537]),
+            Step::Reply(503, Some("application/json"), b"{}".to_vec()),
+        ] {
+            let client = client(MockChannel::new(step), ManualSleep::new());
+            assert!(block_on(RemotePurge::new(client).deliver(&request())).is_err());
+        }
+        let client = client(MockChannel::new(Step::json(" {} ")), ManualSleep::new());
+        block_on(RemotePurge::new(client).deliver(&request())).unwrap();
+    }
+
+    #[test]
+    fn retry_retains_body_and_id_but_refreshes_signature_nonce() {
+        let client = client(MockChannel::new(Step::json("{}")), ManualSleep::new());
+        let sink = RemotePurge::new(client.clone());
+        for _ in 0..2 {
+            block_on(sink.deliver(&request())).unwrap();
+        }
+        let seen = channel_of(&client).seen.lock().unwrap();
+        assert_eq!(seen[0].body, seen[1].body);
+        assert_eq!(
+            seen[0].procedure,
+            "/mkit.server.hooks.v1.HooksService/CachePurge"
+        );
+        assert_eq!(
+            serde_json::from_slice::<Request>(&seen[0].body).unwrap(),
+            request()
+        );
+        let nonce = |i: usize| {
+            &seen[i]
+                .headers
+                .iter()
+                .find(|(name, _)| *name == "X-Mkit-Hook-Nonce")
+                .unwrap()
+                .1
+        };
+        assert_ne!(nonce(0), nonce(1));
+    }
+
+    struct UnsignedBinding;
+    impl HookChannel for UnsignedBinding {
+        fn audience(&self) -> Option<&str> {
+            None
+        }
+        fn isolated(&self) -> bool {
+            true
+        }
+        async fn call(
+            &self,
+            _: crate::hooks::HookRequest,
+        ) -> Result<crate::hooks::HookResponse, crate::hooks::ChannelError> {
+            panic!("an unsigned purge must be refused before transport");
+        }
+    }
+    #[test]
+    fn cache_purge_refuses_unsigned_service_bindings() {
+        let client = HookClient::new(
+            UnsignedBinding,
+            request().audience,
+            None,
+            Arc::new(ManualClock::new(1)),
+            Arc::new(ManualSleep::new()),
+        )
+        .unwrap();
+        assert!(block_on(RemotePurge::new(Arc::new(client)).deliver(&request())).is_err());
     }
 }

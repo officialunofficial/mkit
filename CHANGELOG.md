@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- WP-5.10: durable timer-11 automatic cache purge intents, signed global delivery
+  with stable ids and fresh nonces, local invalidation and snapshot refill fences.
+- WP-5.11a: default-off signed admin framework with separate role keys, durable
+  replay and gapless audit export. Automatic actions join the audit through the
+  existing outbox relay; manual PurgeCache moves to WP-5.6a.
 - Server (WP-5.4, R-198): remove compatibility with unreleased publication stores;
   reset existing stores. Hold authority belongs to post-launch WP-5.5c; timer 15 and `pv` are freed.
 

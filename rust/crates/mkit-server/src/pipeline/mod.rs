@@ -48,6 +48,7 @@ mod parts;
 mod plan;
 #[cfg(feature = "published-view")]
 pub mod published;
+mod purge;
 mod ref_policy;
 mod reservation;
 mod revocation;
@@ -265,6 +266,10 @@ pub struct PipelineConfig {
     /// URL-token key set and lifetime for `IssueObjectUrl`
     /// (SPEC-WRITE-GRANTS §9.4); `None` answers `unimplemented`.
     pub url_tokens: Option<crate::url_token::UrlTokenConfig>,
+    /// Dedicated operator keys, forbidden for client and owner authorization.
+    pub admin_keys: Vec<[u8; 32]>,
+    /// Durable invalidation; absent keeps launch purge machinery inert.
+    pub purge: Option<crate::purge::PurgeConfig>,
     /// Ticket lifetime, positive and strictly below seven days.
     pub ticket_ttl_ms: u64,
     /// Open-ticket bounds in each ref shard.
@@ -345,6 +350,8 @@ impl PipelineConfig {
             begin_upload_threshold_bytes: u64::MAX,
             ticket_keys: None,
             url_tokens: None,
+            admin_keys: Vec::new(),
+            purge: None,
             ticket_ttl_ms: 86_400_000,
             ticket_caps: TicketCaps {
                 per_ref: 1024,
@@ -579,6 +586,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         clock: Arc<dyn Clock>,
         metrics: Arc<dyn Metrics>,
     ) -> Result<Self, ServerError> {
+        if let Some(purge) = &cfg.purge {
+            purge.validate().map_err(meta_error)?;
+        }
         if cfg.authority_fence.is_some()
             && (cfg.authorizer_role != AuthorizerRole::Authority
                 || hooks.authorizer().is_open()
@@ -949,6 +959,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let skew = 0;
         let now = self.clock.now_ms().saturating_add(skew);
         let mut a = auth::authenticate(&self.cfg.auth, meta, now, repo, &expected_repository)?;
+        if a.principal
+            .ed25519()
+            .is_some_and(|key| self.cfg.admin_keys.contains(key))
+        {
+            return Err(ServerError::unauthenticated(
+                "admin key cannot authenticate client calls",
+            ));
+        }
         // Credentials are captured for admission, which only signed writes
         // reach: signed reads and `SetRepoVisibility` never run it (§9.1).
         if matches!(self.cfg.auth, AuthMode::AuthV2(_))
@@ -1625,7 +1643,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ));
             }
             match self.meta.apply(p, batch).await {
-                Ok(BatchOutcome::Committed) => return Ok(()),
+                Ok(BatchOutcome::Committed) => {
+                    self.invalidate_local_cache(repo).await;
+                    return Ok(());
+                }
                 Ok(BatchOutcome::DeadlinePassed { .. }) => {
                     return Err(ServerError::unavailable("commit deadline passed; retry"));
                 }
@@ -1762,6 +1783,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let expired = read::expired_replay_keys(&self.meta, p, now, 32)
             .await
             .map_err(meta_error)?;
+        let purge = self
+            .plan_repository_purge(
+                p,
+                repo,
+                crate::purge::Trigger::VisibilityChange,
+                &mkit_core::hash::to_hex(&auth.replay_scope),
+                now,
+            )
+            .await?;
+        batch.preconditions.extend(purge.preconditions);
+        batch.writes.extend(purge.writes);
         let mut prune = Batch::new().require(Precondition::NotAfter(deadline));
         for (index, target) in &expired {
             if batch.preconditions.len() + batch.writes.len() + 2 > MAX_BATCH_OPS {
@@ -1801,6 +1833,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let verified =
             verify_visibility_statement(grants.verifier(), statement, &identity, a.business_now_ms)
                 .map_err(rejected)?;
+        if let Some(namespace) = identity.namespace() {
+            self.require_client_owner_key(namespace)?;
+        }
         let created = u64::try_from(verified.statement().created_ms)
             .map_err(|_| rejected(mkit_attest::grant::GrantError::DecimalOutOfRange))?;
         let id = to_hex(verified.id());
@@ -1835,7 +1870,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 Some(value) => Precondition::Equals(rv_key.clone(), value.clone()),
                 None => Precondition::Absent(rv_key.clone()),
             };
-            let batch = Batch::new()
+            let mut batch = Batch::new()
                 .require(Precondition::NotAfter(deadline))
                 .require(rv_guard)
                 .put(
@@ -1846,8 +1881,22 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         last_statement_id: Some(id.clone()),
                     }),
                 );
+            let purge = self
+                .plan_repository_purge(
+                    p,
+                    repo,
+                    crate::purge::Trigger::VisibilityChange,
+                    &id,
+                    ms(self.clock.now_ms()),
+                )
+                .await?;
+            batch.preconditions.extend(purge.preconditions);
+            batch.writes.extend(purge.writes);
             match self.meta.apply(p, batch).await {
-                Ok(BatchOutcome::Committed) => return Ok(()),
+                Ok(BatchOutcome::Committed) => {
+                    self.invalidate_local_cache(repo).await;
+                    return Ok(());
+                }
                 Ok(BatchOutcome::DeadlinePassed { .. }) => {
                     return Err(ServerError::unavailable("commit deadline passed; retry"));
                 }
@@ -2467,12 +2516,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         // §7 steps 1–10 are stateless: run them before the coordinator
         // read, even when the repository turns out to be missing.
-        let check = op.write_grant.as_ref().and_then(|header| {
-            self.cfg
-                .grants
-                .as_ref()
-                .and_then(|g| read_policy::check_grant(g, header.expose(), op))
-        });
+        let admin_owner = Namespace::parse(op.repo.namespace.as_str())
+            .is_ok_and(|namespace| self.owner_key_is_admin(&namespace));
+        let check = op
+            .write_grant
+            .as_ref()
+            .filter(|_| !admin_owner)
+            .and_then(|header| {
+                self.cfg
+                    .grants
+                    .as_ref()
+                    .and_then(|g| read_policy::check_grant(g, header.expose(), op))
+            });
         let signed = op.auth.is_some();
         let owner = op.write_grant.is_none()
             && matches!(Namespace::parse(op.repo.namespace.as_str()),
@@ -3032,6 +3087,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
     }
 
+    fn owner_key_is_admin(&self, namespace: &Namespace) -> bool {
+        matches!(namespace, Namespace::Ed25519(key) if self.cfg.admin_keys.contains(key))
+    }
+
+    fn require_client_owner_key(&self, namespace: &Namespace) -> Result<(), ServerError> {
+        if self.owner_key_is_admin(namespace) {
+            return Err(ServerError::permission_denied(
+                "admin key cannot authorize client calls",
+            ));
+        }
+        Ok(())
+    }
+
     /// SPEC-TRANSPORT-CONNECT §7.5 rule 1: an allowlisted namespace whose
     /// principal owns it (`ed25519-<key>` ↔ the Ed25519 principal), and the
     /// M2 write grants that qualify it. `policy` is the deployment's
@@ -3046,6 +3114,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     ) -> Result<(AuthzFacts, Option<FastForward>), ServerError> {
         let namespace = Namespace::parse(op.repo.namespace.as_str())
             .map_err(|_| internal("invalid resolved owner-policy namespace"))?;
+        if op.write_grant.is_some() {
+            self.require_client_owner_key(&namespace)?;
+        }
         if let Some(NamespacePolicy::Allowlist(allowed)) = policy
             && !allowed.contains(&namespace)
         {

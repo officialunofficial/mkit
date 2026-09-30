@@ -1224,3 +1224,77 @@ fn a_visibility_request_debug_hides_the_statement() {
     );
     assert!(!shown.contains("secret"), "{shown}");
 }
+
+#[test]
+fn admin_owner_cannot_grant_private_repository_reads() {
+    let owner = key(1);
+    let grantee = key(2);
+    let repo = repository(&owner);
+    for sharding in [Sharding::Single, Sharding::D34] {
+        let mut c = config(&owner, AuthorizerRole::Check);
+        c.admin_keys = vec![*owner.verifying_key().as_bytes()];
+        c.sharding = sharding;
+        let clock = clock();
+        let e = build(
+            c,
+            Spy::new(store(&clock)),
+            super::policy::policy_hooks(false),
+            clock,
+        );
+        let id = repo_id(&e, &owner);
+        put_repo(&e, &id, Some(codec::StoredVisibility::Private));
+        for capability in [Capabilities::Read, Capabilities::Write] {
+            let delegated = grant(&owner, &grantee, |g| {
+                if matches!(capability, Capabilities::Read) {
+                    g.ref_scopes = None;
+                }
+                g.capabilities = capability;
+            });
+            for procedure in READS {
+                let err = try_read(
+                    &e,
+                    &signed_read(&grantee, &repo, procedure, Some(&delegated)),
+                    procedure,
+                )
+                .unwrap_err();
+                assert_not_found(&err, "admin-owner private read grant");
+            }
+        }
+    }
+}
+
+#[test]
+fn admin_owner_cannot_sign_visibility_statements() {
+    let owner = key(1);
+    let repo = repository(&owner);
+    for sharding in [Sharding::Single, Sharding::D34] {
+        let mut c = config(&owner, AuthorizerRole::Check);
+        c.admin_keys = vec![*owner.verifying_key().as_bytes()];
+        c.sharding = sharding;
+        let clock = clock();
+        let e = build(
+            c,
+            Spy::new(store(&clock)),
+            super::policy::policy_hooks(false),
+            clock,
+        );
+        let id = repo_id(&e, &owner);
+        put_repo(&e, &id, Some(codec::StoredVisibility::Private));
+        let (signed, _) = statement(&owner, &repo, Visibility::Public, T0, [8; 32]);
+        assert_eq!(
+            set(
+                &e,
+                &unsigned_visibility(&repo),
+                VisibilityRequest::Statement(signed)
+            )
+            .unwrap_err()
+            .code(),
+            Code::PermissionDenied,
+            "{sharding:?}"
+        );
+        assert_eq!(
+            stored_visibility_row(&e, &id).visibility,
+            codec::StoredVisibility::Private
+        );
+    }
+}

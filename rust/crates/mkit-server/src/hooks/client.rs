@@ -23,6 +23,7 @@ pub(crate) enum Rpc {
     Authorize,
     Admit,
     Outcome,
+    CachePurge,
 }
 
 impl Rpc {
@@ -31,6 +32,7 @@ impl Rpc {
             Self::Authorize => "/mkit.server.hooks.v1.HooksService/Authorize",
             Self::Admit => "/mkit.server.hooks.v1.HooksService/Admit",
             Self::Outcome => "/mkit.server.hooks.v1.HooksService/Outcome",
+            Self::CachePurge => "/mkit.server.hooks.v1.HooksService/CachePurge",
         }
     }
 }
@@ -187,6 +189,10 @@ impl<C: HookChannel> HookClient<C> {
     /// This server's canonical origin, as bodies carry it.
     pub(crate) fn server_audience(&self) -> &str {
         &self.server_audience
+    }
+
+    pub(crate) fn is_signed(&self) -> bool {
+        self.signer.is_some()
     }
 
     /// Sign and send `request` to `rpc` and return the hook's answer whatever

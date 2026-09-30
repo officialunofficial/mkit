@@ -116,6 +116,41 @@ where
     B: BlobStore + 'static,
     W: PackWindows + 'static,
 {
+    with_verification_timers_budgeted(
+        registry,
+        class,
+        indexed,
+        authority_fence,
+        plan,
+        remote,
+        blobs,
+        windows,
+        clock,
+        metrics,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn with_verification_timers_budgeted<S, T, B, W>(
+    registry: TimerRegistry<'static, S>,
+    class: ShardClass,
+    indexed: Option<IndexedConfig>,
+    authority_fence: bool,
+    plan: Option<&str>,
+    remote: T,
+    blobs: B,
+    windows: W,
+    clock: Arc<dyn Clock>,
+    metrics: Arc<dyn Metrics>,
+    alarm_budget: Option<mkit_server::purge::SliceBudget>,
+) -> TimerRegistry<'static, S>
+where
+    S: NamespaceStore,
+    T: NamespaceStore + 'static,
+    B: BlobStore + 'static,
+    W: PackWindows + 'static,
+{
     let paid = plan.is_some_and(|plan| plan.trim().eq_ignore_ascii_case("paid"));
     let Some(cfg) = indexed.filter(|cfg| cfg.verification == VerificationMode::Scheduled) else {
         return registry;
@@ -123,20 +158,24 @@ where
     if class != ShardClass::RefShard || !paid {
         return registry;
     }
-    registry.register(VerifyTimer {
-        remote,
-        blobs,
-        windows,
-        shards: Arc::new(D34Shards),
-        cfg,
-        limits: SliceLimits::default(),
-        lease: LeaseParams {
-            authority_fence,
-            ..LeaseParams::default()
+    registry.register(crate::purge::Budgeted {
+        handler: VerifyTimer {
+            remote,
+            blobs,
+            windows,
+            shards: Arc::new(D34Shards),
+            cfg,
+            limits: SliceLimits::default(),
+            lease: LeaseParams {
+                authority_fence,
+                ..LeaseParams::default()
+            },
+            clock,
+            metrics,
+            extension: FailClosedExtraction,
         },
-        clock,
-        metrics,
-        extension: FailClosedExtraction,
+        budget: alarm_budget,
+        calls: 256,
     })
 }
 
@@ -150,6 +189,17 @@ pub fn register_from_env<S: NamespaceStore>(
     env: &worker::Env,
     class: ShardClass,
     plan: Option<&str>,
+) -> TimerRegistry<'static, S> {
+    register_from_env_budgeted(registry, env, class, plan, None)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn register_from_env_budgeted<S: NamespaceStore>(
+    registry: TimerRegistry<'static, S>,
+    env: &worker::Env,
+    class: ShardClass,
+    plan: Option<&str>,
+    alarm_budget: Option<mkit_server::purge::SliceBudget>,
 ) -> TimerRegistry<'static, S> {
     use crate::adapter::WorkerConfig;
     use crate::clock::WorkerClock;
@@ -166,7 +216,7 @@ pub fn register_from_env<S: NamespaceStore>(
     let windows = MidPackCrash(R2Windows(bucket()));
     #[cfg(not(feature = "test-faults"))]
     let windows = R2Windows(bucket());
-    with_verification_timers(
+    with_verification_timers_budgeted(
         registry,
         class,
         cfg.indexed,
@@ -177,6 +227,7 @@ pub fn register_from_env<S: NamespaceStore>(
         windows,
         Arc::new(WorkerClock),
         Arc::new(ConsoleMetrics::default()),
+        alarm_budget,
     )
 }
 

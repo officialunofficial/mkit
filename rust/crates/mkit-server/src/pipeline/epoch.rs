@@ -101,6 +101,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .map_err(|error| rejected(error.reason()))?;
         let statement = verified.statement();
         let namespace = &statement.namespace;
+        if self.owner_key_is_admin(namespace) {
+            return Err(rejected("admin key cannot authorize client calls"));
+        }
         let key = NamespaceKey::from_namespace(namespace);
 
         // §5.2 check 6. Allowlisted namespaces can raise an epoch before a
