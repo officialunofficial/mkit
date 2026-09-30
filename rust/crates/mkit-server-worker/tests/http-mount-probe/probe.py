@@ -30,6 +30,9 @@ def request(path, method="GET", headers=None):
 
 def verify():
     passed = []
+    status, _, body = request("/multipart")
+    assert status == 200 and json.loads(body) == {"verified": True, "parts": 2}, (status, body)
+    passed.append("local R2 multipart verifies before visibility and preserves exact bytes")
     status, headers, body = request("/raw?")
     assert status == 200 and json.loads(body)["query"] == ""
     passed.append("runtime trailing empty query preserved")

@@ -1055,6 +1055,7 @@ dependencies = [
  "futures",
  "getrandom 0.2.17",
  "getrandom 0.4.3",
+ "mkit-core",
  "mkit-server",
  "mkit-server-worker",
  "serde_json",
