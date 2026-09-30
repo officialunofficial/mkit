@@ -455,17 +455,15 @@ async fn hold_suspends_timed_purge_and_overlapping_action_keeps_its_copy() {
             }
         }
     }
-    let (_, raw) = f.work.state(&f.work.metadata, &second, 10).await.unwrap();
-    let mut held: State = decode(&raw.unwrap()).unwrap();
-    held.hold = true;
-    f.work
-        .metadata
-        .apply(
-            &f.work.root,
-            Batch::new().put(key(b"state", &second, &[]), value(&held).unwrap()),
-        )
+    let hold = f
+        .work
+        .plan_legal_hold(&f.work.metadata, second, true, 20_000)
         .await
         .unwrap();
+    assert_eq!(
+        f.work.metadata.apply(&f.work.root, hold).await.unwrap(),
+        BatchOutcome::Committed
+    );
     let (state, _) = advance(&f, second, 1_100_000).await;
     assert!(state.hold && !state.purged);
     for _ in 0..10 {
@@ -735,7 +733,7 @@ async fn timer15_uses_firing_local_store_for_owner_and_durable_copy_intents() {
 }
 
 #[tokio::test]
-async fn manifest_canonical_bytes_do_not_claim_completed_reassembly_validation() {
+async fn malformed_manifest_closure_stays_unresolved_after_restart() {
     let chunk = small();
     let object = hash(&serialize(&chunk).unwrap());
     let manifest = Object::ChunkedBlob(ChunkedBlob {
@@ -745,13 +743,162 @@ async fn manifest_canonical_bytes_do_not_claim_completed_reassembly_validation()
     });
     let f = fixture(&[manifest, chunk], true).await;
     let id = accept(&f, "pending-closure", None, &[f.canonical[0].0]).await;
+    f.clock.set(20_000);
     for _ in 0..40 {
-        let (state, _) = advance(&f, id, 20_000).await;
-        if state.phase == Phase::Retain {
+        let budget = SliceBudget::new(700);
+        let result = f
+            .work
+            .step(
+                &Budgeted::new(&f.work.metadata, &budget),
+                id,
+                20_000,
+                &budget,
+            )
+            .await;
+        if result.is_err() {
+            let state = f.work.state(&f.work.metadata, &id, 10).await.unwrap().0;
+            assert_eq!(state.phase, Phase::Closure);
             assert_eq!(state.verification, Verification::ManifestClosurePending);
+            assert!(!state.acquisition_complete() && !state.discovery_complete);
+            assert!(
+                ContentIndex::new(BorrowedStore(&f.work.metadata))
+                    .blocked(&f.canonical[0].0)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            return;
+        }
+        let Fired::Reschedule { batch, .. } = result.unwrap() else {
+            panic!("missing checkpoint")
+        };
+        assert_eq!(
+            f.work.metadata.apply(&f.work.root, batch).await.unwrap(),
+            BatchOutcome::Committed
+        );
+    }
+    panic!("invalid manifest incorrectly completed preservation");
+}
+
+#[tokio::test]
+async fn legal_hold_and_purge_claim_race_atomically_in_both_orders() {
+    for hold_first in [true, false] {
+        let f = fixture(&[small()], false).await;
+        let id = accept(&f, "hold-race", None, &[f.canonical[0].0]).await;
+        for _ in 0..30 {
+            if advance(&f, id, 20_000).await.0.phase == Phase::Retain {
+                break;
+            }
+        }
+        f.clock.set(1_100_000);
+        let hold = f
+            .work
+            .plan_legal_hold(&f.work.metadata, id, true, 1_100_000)
+            .await
+            .unwrap();
+        let budget = SliceBudget::new(700);
+        let Fired::Reschedule { batch: purge, .. } = f
+            .work
+            .step(
+                &Budgeted::new(&f.work.metadata, &budget),
+                id,
+                1_100_000,
+                &budget,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("missing purge claim")
+        };
+        let (winner, loser) = if hold_first {
+            (hold, purge)
+        } else {
+            (purge, hold)
+        };
+        assert_eq!(
+            f.work.metadata.apply(&f.work.root, winner).await.unwrap(),
+            BatchOutcome::Committed
+        );
+        assert_ne!(
+            f.work.metadata.apply(&f.work.root, loser).await.unwrap(),
+            BatchOutcome::Committed
+        );
+        let state = f.work.state(&f.work.metadata, &id, 10).await.unwrap().0;
+        assert_eq!(state.hold, hold_first);
+        if hold_first {
+            assert_ne!(state.phase, Phase::Purging);
+            let release = f
+                .work
+                .plan_legal_hold(&f.work.metadata, id, false, 1_100_000)
+                .await
+                .unwrap();
+            assert_eq!(
+                f.work.metadata.apply(&f.work.root, release).await.unwrap(),
+                BatchOutcome::Committed
+            );
+            assert_eq!(advance(&f, id, 1_100_000).await.0.phase, Phase::Purging);
+        }
+        assert!(
+            f.work
+                .plan_legal_hold(&f.work.metadata, id, true, 1_100_000)
+                .await
+                .is_err()
+        );
+        for _ in 0..5 {
+            advance(&f, id, 1_100_000).await;
+        }
+        assert!(
+            f.work
+                .state(&f.work.metadata, &id, 10)
+                .await
+                .unwrap()
+                .0
+                .purged
+        );
+        assert!(
+            f.work
+                .plan_legal_hold(&f.work.metadata, id, true, 1_100_000)
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn ordered_duplicate_manifest_closure_completes_using_bounded_verified_preserved_reads() {
+    let child = small();
+    let chunk = hash(&serialize(&child).unwrap());
+    let manifest = Object::ChunkedBlob(ChunkedBlob {
+        total_size: 14 * 129,
+        chunk_size: 14,
+        chunks: vec![chunk; 129],
+    });
+    let f = fixture(&[manifest, child], false).await;
+    let id = accept(&f, "closed-manifest", None, &[f.canonical[0].0]).await;
+    let mut closure_ticks = 0;
+    let mut max_calls = 0;
+    for _ in 0..80 {
+        let (state, calls) = advance(&f, id, 20_000).await;
+        max_calls = max_calls.max(calls);
+        if state.phase == Phase::Closure {
+            closure_ticks += 1;
             assert!(!state.acquisition_complete());
+            // Closure must survive loss of its serving source.
+            f.work.serving.delete(&BlobKey::pack(f.pack)).await.unwrap();
+        }
+        if state.phase == Phase::Retain {
+            assert!(state.acquisition_complete() && state.discovery_complete);
+            assert_eq!(state.verified_objects, 2);
+            assert!(
+                closure_ticks >= 3,
+                "129 ordered chunks require multiple bounded checkpoints"
+            );
+            assert!(
+                max_calls < 350,
+                "assert the shared real closure+acquisition metadata/blob calls: {max_calls}"
+            );
             return;
         }
     }
-    panic!("source acquisition did not checkpoint pending manifest validation");
+    panic!("verified manifest did not finish");
 }

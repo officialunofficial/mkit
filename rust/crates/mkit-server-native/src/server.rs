@@ -855,6 +855,14 @@ where
             } else {
                 registry
             };
+            let registry = crate::admin::register(
+                registry,
+                blobs.clone(),
+                meta.clone(),
+                cfg.admin.as_ref().and_then(|a| a.takedown.as_ref()),
+                &cfg.pipeline,
+                mkit_server::takedown::ACTIVATED,
+            )?;
             let driver = TimerDriver::new(meta.clone(), registry, Arc::new(SystemClock));
             let mut services = build_services(blobs, meta, cfg, hooks)?;
             services.timers = Some(driver);

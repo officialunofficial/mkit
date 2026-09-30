@@ -13,30 +13,17 @@ and the [`nl` reservation](../../../rust/crates/mkit-server/src/store/keys.rs).
 Known holders cannot establish an exhaustive namespace set before relay delivery.
 This limitation prevents completion claims, not denial or named-repo preservation.
 
-Continue bounded acquisition/discovery, actual ct/timer-13 ownership transfer,
-verified streaming, retention/legal holds, adapters and templates under the cap.
-The end-to-end owning workflow and admin reads remain unfinished/unregistered;
-this ruling/amendment is not runtime verification or launch-readiness evidence.
+The latest authorized split assigns PR2's remaining core scope: bounded canonical
+acquisition, manifest/chunk closure, discovery, actual ct ownership transfer,
+retention/legal-hold arbitration, audited action-owned purge and gated-off runtime
+wiring. These are required work in progress, not a completion claim. Activation
+stays fixed false. PR3 owns the restricted admin catalog and byte-free replay/
+verified ReadPreserved; reads remain unexposed. All three parts are launch gates.
+
+The old 2,600-line total cap is superseded: PR2's cap is 3,300 non-test Rust
+production lines, excluding docs. Final full gates/default Worker conformance,
+review and the PR remain required; this checkpoint claims none completed.
 PR1 [#1242](https://github.com/officialunofficial/mkit/pull/1242) and its
 [contract](WP-5.6a-1-contract.md) remain the denial/pending-intent baseline.
-
-## Implementation checkpoint after PR1 merge
-
-PR1 review fixes were merged from `origin/feat/mkit-server` at `596782c7`.
-The new core uses existing blob/storage primitives, timer 15 on its local store,
-bounded namespace candidates and action-owned copy intents. It keeps intents
-through audited retention passes so delayed PUTs remain purge-discoverable.
-Any remains explicitly incomplete; no catalog was introduced. The actual ct
-owner commits provenance, audit and timer responsibility before acknowledgment.
-
-This checkpoint is inert and incomplete. Manifest reassembly validation,
-GetTakedown/ListTakedowns/SetLegalHold, byte-free replay and verified ReadPreserved
-streaming, native/Worker store and timer registration remain required. Manifest
-sources stay `ManifestClosurePending`; they do not claim verified preservation.
-The cap stops further implementation; nothing is removed from launch scope.
-Focused tests, host clippy and wasm32 clippy pass. Full gates, default vcs-worker
-conformance and opening the PR remain pending. Activation stays off.
-
-The measured acquisition bound covers valid Worker-admitted content, including
-compressed 50-hop chains. Arbitrary later-corrupted zstd blocks retain the
-existing decoder's post-block output-check limitation; no decoder fork is added.
+The [PR2](briefs/WP-5.6a-2.md)/[PR3](briefs/WP-5.6a-3.md) briefs own the remaining
+scope; this document is not runtime verification or launch-readiness evidence.

@@ -1,5 +1,6 @@
 //! Inert lean denial and durable, unresolved takedown intent foundation.
 pub mod acquisition;
+mod closure;
 mod copy;
 pub mod denial;
 pub mod discovery;
@@ -15,6 +16,9 @@ mod publication;
 mod tests;
 pub use intent::{Record, Service};
 pub use publication::PublicationConfig;
+
+/// Launch stays disabled until the remaining signed admin catalog is delivered.
+pub const ACTIVATED: bool = false;
 
 /// Configured namespace roots; an open policy has no exhaustive configured set.
 #[must_use]

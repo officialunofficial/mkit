@@ -215,16 +215,89 @@ pub fn partition(sharding: Sharding) -> Partition {
         _ => Partition::Coordinator(NamespaceKey::deployment_default()),
     }
 }
+pub(crate) fn shards(sharding: Sharding) -> Arc<dyn mkit_server::pipeline::ShardMap> {
+    match sharding {
+        Sharding::Single => Arc::new(mkit_server::pipeline::SinglePartition),
+        _ => Arc::new(mkit_server::pipeline::D34Shards),
+    }
+}
+pub(crate) fn work<B: mkit_server::BlobStore, N: NamespaceStore + Clone>(
+    serving: B,
+    metadata: N,
+    settings: &TakedownSettings,
+    pipeline: &PipelineConfig,
+) -> Result<
+    mkit_server::takedown::work::Work<N, B, crate::Blocking<mkit_server::fs::FsBlobStore>>,
+    ConfigError,
+> {
+    let indexed = pipeline
+        .indexed
+        .ok_or_else(|| invalid("preservation requires indexed limits"))?;
+    Ok(mkit_server::takedown::work::Work {
+        metadata,
+        serving,
+        preserved: crate::Blocking::new(mkit_server::fs::FsBlobStore::new(&settings.root)),
+        root: partition(pipeline.sharding),
+        shards: shards(pipeline.sharding),
+        addressing: pipeline.addressing.clone(),
+        retention_ms: settings.retention_ms,
+        discovery_margin_ms: indexed.relay_lag_bound_ms,
+        profile: mkit_server::takedown::acquisition::Profile::inline(
+            indexed.decode_budget,
+            indexed.max_delta_chain_depth,
+        )
+        .map_err(invalid)?,
+        clock: Arc::new(mkit_server::SystemClock),
+    })
+}
+pub(crate) fn register<B, N, S>(
+    registry: mkit_server::timers::TimerRegistry<'static, S>,
+    serving: B,
+    metadata: N,
+    settings: Option<&TakedownSettings>,
+    pipeline: &PipelineConfig,
+    enabled: bool,
+) -> Result<mkit_server::timers::TimerRegistry<'static, S>, ConfigError>
+where
+    B: mkit_server::BlobStore + 'static,
+    N: NamespaceStore + Clone + 'static,
+    S: NamespaceStore,
+{
+    if enabled && let Some(settings) = settings {
+        Ok(registry
+            .register(work(serving, metadata.clone(), settings, pipeline)?)
+            .register(mkit_server::takedown::late::LateTimer {
+                acceptance: mkit_server::takedown::late_owner::LateOwner::new(
+                    metadata,
+                    partition(pipeline.sharding),
+                ),
+                max_subrequests: 700,
+            }))
+    } else {
+        Ok(registry)
+    }
+}
 /// Build the audit export procedure on the separate operator router.
 pub fn router<S: NamespaceStore + Clone + 'static>(
     store: S,
     settings: &Settings,
     pipeline: &PipelineConfig,
 ) -> Router {
-    let engine = Arc::new(
-        Engine::new(store, partition(pipeline.sharding), settings.config.clone())
-            .with_purge(pipeline.purge.is_some()),
-    );
+    let enabled = mkit_server::takedown::ACTIVATED && settings.takedown.is_some();
+    let mut engine = Engine::new(
+        store.clone(),
+        partition(pipeline.sharding),
+        settings.config.clone(),
+    )
+    .with_purge(pipeline.purge.is_some());
+    if enabled {
+        engine = engine.with_operations(Arc::new(mkit_server::takedown::Service::new(
+            store,
+            partition(pipeline.sharding),
+            shards(pipeline.sharding),
+        )));
+    }
+    let engine = Arc::new(engine);
     let dispatch = move |req: Request| {
         let engine = Arc::clone(&engine);
         async move {
@@ -256,15 +329,23 @@ pub fn router<S: NamespaceStore + Clone + 'static>(
             response(engine.handle(&path, &headers, &capture, now).await)
         }
     };
-    Router::new()
+    let router = Router::new()
         .route(
             mkit_server::admin::AUDIT_PATH,
             axum::routing::post(dispatch.clone()),
         )
         .route(
             mkit_server::admin::PURGE_PATH,
+            axum::routing::post(dispatch.clone()),
+        );
+    if enabled {
+        router.route(
+            mkit_server::admin::TAKEDOWN_PATH,
             axum::routing::post(dispatch),
         )
+    } else {
+        router
+    }
 }
 fn response(reply: mkit_server::admin::Response) -> Response {
     Response::builder()
@@ -580,5 +661,76 @@ mod tests {
         assert_eq!(open.takedown.unwrap().retention_ms, 1000);
         args = AdminArgs::default();
         assert!(resolve(&args, &mut pipeline, &meta).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn real_preservation_factory_is_separate_and_registration_stays_gated() {
+        use mkit_server::{BlobKey, BlobStore, PackSink};
+        let serving = tempfile::tempdir().unwrap();
+        let preserved = tempfile::tempdir().unwrap();
+        let seed = [17; 32];
+        let public = ed25519_dalek::SigningKey::from_bytes(&seed)
+            .verifying_key()
+            .to_bytes();
+        let list=serde_json::json!({"version":1,"keys":[{"keyId":mkit_core::hash::to_hex(&mkit_core::hash::hash(&public)),"alg":"ed25519","publicKey":mkit_core::hash::to_hex(&public)}]}).to_string();
+        let settings = TakedownSettings {
+            root: preserved.path().to_owned(),
+            retention_ms: 12345,
+            publication: mkit_server::takedown::PublicationConfig::parse(
+                &mkit_core::hash::to_hex(&seed),
+                &list,
+            )
+            .unwrap(),
+        };
+        let mut pipeline = PipelineConfig::new(
+            mkit_server::Addressing::Single {
+                repo: mkit_server::RepoId {
+                    namespace: NamespaceKey::deployment_default(),
+                    name: mkit_server::RepoName::new("repo").unwrap(),
+                },
+            },
+            AuthMode::TransportIdentity,
+            mkit_server::upload::UploadLimits {
+                max_total_bytes: 1024,
+                max_chunks: 1,
+            },
+        );
+        pipeline.indexed = Some(mkit_server::indexed::IndexedConfig::default());
+        let source = crate::Blocking::new(mkit_server::fs::FsBlobStore::new(serving.path()));
+        let metadata = Arc::new(MemoryKv::default());
+        let workflow = work(source.clone(), metadata.clone(), &settings, &pipeline).unwrap();
+        let bytes = bytes::Bytes::from_static(b"restricted preserved bytes");
+        let key = BlobKey::pack(mkit_core::hash::hash(&bytes));
+        let mut sink = workflow
+            .preserved
+            .begin(key.clone(), bytes.len() as u64)
+            .await
+            .unwrap();
+        sink.write(bytes).await.unwrap();
+        sink.commit().await.unwrap();
+        assert!(workflow.preserved.head(&key).await.unwrap().is_some());
+        assert!(workflow.serving.head(&key).await.unwrap().is_none());
+        assert_eq!(workflow.retention_ms, 12345);
+        let off = register::<_, _, MemoryKv>(
+            mkit_server::timers::TimerRegistry::new(),
+            source.clone(),
+            metadata.clone(),
+            Some(&settings),
+            &pipeline,
+            mkit_server::takedown::ACTIVATED,
+        )
+        .unwrap();
+        assert_eq!(format!("{off:?}"), "TimerRegistry { kinds: [] }");
+        let on = register::<_, _, MemoryKv>(
+            mkit_server::timers::TimerRegistry::new(),
+            source,
+            metadata,
+            Some(&settings),
+            &pipeline,
+            true,
+        )
+        .unwrap();
+        assert!(format!("{on:?}").contains("TimerKind(13)"));
+        assert!(format!("{on:?}").contains("TimerKind(15)"));
     }
 }

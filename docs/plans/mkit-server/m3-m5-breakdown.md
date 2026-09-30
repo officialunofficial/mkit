@@ -892,8 +892,8 @@ Entry condition:
 
 ### WP-5.6: Takedown core: tombstones, blocklist, preservation store, per-repo views, suspension
 - **Launch split (R-190):** required parts are WP-5.6a-1 denial/pending intent and
-  WP-5.6a-2 verified preservation, whose prerequisites are 5.6a-1 and merged
-  4.10b-1. Finite root sweeps remain; Any supports denial/preservation and known
+  WP-5.6a-2 preservation/retention core, then 5.6a-3 restricted administration.
+  PR2 prerequisites are 5.6a-1 and merged 4.10b-1; PR3 depends on PR2. Finite root sweeps remain; Any supports denial/preservation and known
   namespace discovery without completion pending the catalog. The full-profile scope
   below follows launch; it does not add a launch dependency on leases or rewrite.
 - **Depends on:** WP-5.1b, WP-4.10, WP-5.2, WP-5.10 (R-82: the CachePurger lands first; this WP invokes it).

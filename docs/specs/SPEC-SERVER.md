@@ -3761,8 +3761,10 @@ action descriptors and activate every requested denial before returning success.
 It returns `complete = false`; acceptance MUST NOT imply verified preservation,
 holder discovery or repository/global completion. The pending record MUST retain
 preservation work. Production takedown activation MUST remain refused until the
-preservation implementation, required §14.7 configuration and launch conformance
-gates are complete. This intermediate implementation does not waive §14's full
+preservation core (WP-5.6a-2), restricted admin catalog (WP-5.6a-3), required
+§14.7 configuration and launch conformance gates are complete. PR2 MUST keep
+activation fixed false and ReadPreserved unexposed. All three parts are required
+for launch. This intermediate implementation does not waive §14's full
 completion requirements. Once implemented, the supported catalog is `Takedown`,
 `PurgeCache`, `GetTakedown`, `ListTakedowns`, `ReadPreserved`, `SetLegalHold` and
 `ReadAuditLog`. Inspection is sync-only: there are no launch inspection hits or holds.

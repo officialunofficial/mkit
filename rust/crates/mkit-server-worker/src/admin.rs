@@ -102,8 +102,65 @@ pub fn parse(
     Ok(Some(config))
 }
 #[cfg(any(target_arch = "wasm32", test))]
-fn supported_path(path: &str) -> bool {
-    path == mkit_server::admin::AUDIT_PATH || path == mkit_server::admin::PURGE_PATH
+pub(crate) fn shards(
+    sharding: mkit_server::pipeline::Sharding,
+) -> std::sync::Arc<dyn mkit_server::pipeline::ShardMap> {
+    match sharding {
+        mkit_server::pipeline::Sharding::Single => {
+            std::sync::Arc::new(mkit_server::pipeline::SinglePartition)
+        }
+        _ => std::sync::Arc::new(mkit_server::pipeline::D34Shards),
+    }
+}
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn work(
+    env: &worker::Env,
+    cfg: &crate::adapter::WorkerConfig,
+    budget: &mkit_server::purge::SliceBudget,
+) -> Result<
+    mkit_server::takedown::work::Work<
+        crate::ns_client::DoNamespaceStore<crate::ns_client::StubTransport>,
+        crate::r2::WorkerBlobStore,
+        crate::r2::WorkerBlobStore,
+    >,
+    ConfigError,
+> {
+    let settings = cfg
+        .takedown
+        .as_ref()
+        .ok_or_else(|| ConfigError("preservation disabled".into()))?;
+    let indexed = cfg
+        .indexed
+        .as_ref()
+        .ok_or_else(|| ConfigError("preservation requires indexed storage".into()))?;
+    let blob = |binding, keyspace| {
+        crate::r2::R2BlobStore::new(
+            crate::r2::EnvBucket::new(env.clone(), binding).with_alarm_budget(budget.clone()),
+            keyspace,
+        )
+    };
+    Ok(mkit_server::takedown::work::Work {
+        metadata: crate::ns_client::DoNamespaceStore::new(
+            crate::ns_client::StubTransport::new(env.clone(), cfg.placement.clone()),
+            cfg.probe_partition(),
+        )
+        .with_alarm_budget(budget.clone()),
+        serving: blob(cfg.blob_binding, crate::r2::PACKS_KEYSPACE),
+        preserved: blob(PRESERVATION_BINDING, "preserved"),
+        root: cfg.probe_partition(),
+        shards: shards(cfg.sharding),
+        addressing: cfg.addressing.clone(),
+        retention_ms: settings.retention_ms,
+        discovery_margin_ms: indexed.relay_lag_bound_ms,
+        profile: mkit_server::takedown::acquisition::Profile::scheduled(),
+        clock: std::sync::Arc::new(crate::clock::WorkerClock),
+    })
+}
+#[cfg(any(target_arch = "wasm32", test))]
+fn supported_path(path: &str, enabled: bool) -> bool {
+    path == mkit_server::admin::AUDIT_PATH
+        || path == mkit_server::admin::PURGE_PATH
+        || enabled && path == mkit_server::admin::TAKEDOWN_PATH
 }
 #[cfg(any(target_arch = "wasm32", test))]
 fn purge_enabled(cfg: &crate::adapter::WorkerConfig) -> bool {
@@ -123,7 +180,8 @@ pub(crate) async fn serve(
     let Some(config) = &cfg.admin else {
         return worker::Response::error("admin disabled", 404);
     };
-    if !supported_path(&req.path()) {
+    let enabled = mkit_server::takedown::ACTIVATED && cfg.takedown.is_some();
+    if !supported_path(&req.path(), enabled) {
         return worker::Response::error("admin operation unavailable", 404);
     }
     if req.method() != worker::Method::Post {
@@ -148,8 +206,16 @@ pub(crate) async fn serve(
             crate::ns_client::StubTransport::new(env.clone(), cfg.placement.clone()),
             cfg.probe_partition(),
         );
-        let engine = Engine::new(store, cfg.probe_partition(), config.clone())
+        let mut engine = Engine::new(store.clone(), cfg.probe_partition(), config.clone())
             .with_purge(purge_enabled(cfg));
+        if enabled {
+            engine =
+                engine.with_operations(std::sync::Arc::new(mkit_server::takedown::Service::new(
+                    store,
+                    cfg.probe_partition(),
+                    shards(cfg.sharding),
+                )));
+        }
         engine
             .handle(
                 &path,
@@ -297,10 +363,11 @@ mod tests {
     }
     #[test]
     fn manual_purge_is_exposed_and_takedown_stays_unexposed() {
-        assert!(supported_path(mkit_server::admin::AUDIT_PATH));
-        assert!(supported_path(mkit_server::admin::PURGE_PATH));
+        assert!(supported_path(mkit_server::admin::AUDIT_PATH, false));
+        assert!(supported_path(mkit_server::admin::PURGE_PATH, false));
         assert!(!supported_path(
-            "/mkit.server.admin.v1.AdminService/Takedown"
+            "/mkit.server.admin.v1.AdminService/Takedown",
+            false
         ));
     }
 
@@ -379,5 +446,18 @@ mod tests {
                 .unwrap()
                 .enabled()
         );
+    }
+
+    #[test]
+    fn configured_storage_cannot_enable_takedown_intake() {
+        let fixture = PreservationFixture::new();
+        let configured = fixture.settings(true, true).unwrap().is_some();
+        assert!(configured);
+        assert!(!supported_path(
+            mkit_server::admin::TAKEDOWN_PATH,
+            mkit_server::takedown::ACTIVATED && configured
+        ));
+        assert!(supported_path(mkit_server::admin::TAKEDOWN_PATH, true));
+        let _shards = shards(mkit_server::pipeline::Sharding::Single);
     }
 }

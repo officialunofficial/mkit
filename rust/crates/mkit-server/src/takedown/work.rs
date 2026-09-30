@@ -1,5 +1,5 @@
 //! One durable acquisition, discovery or independently owned retention step.
-use super::{LocalStore, Service, acquisition, copy, discovery, intent, inventory};
+use super::{LocalStore, Service, acquisition, closure, copy, discovery, intent, inventory};
 use crate::indexed::budget::{Budgeted, SliceBudget};
 use crate::pipeline::ShardMap;
 use crate::store::{BlobKey, BlobStore, ContentIndex, StoreError};
@@ -51,6 +51,7 @@ fn prefix_end(start: &Key) -> Key {
 pub(super) enum Phase {
     Seed,
     Acquire,
+    Closure,
     Discover,
     Retain,
     Purging,
@@ -118,6 +119,50 @@ impl<N, B, P> std::fmt::Debug for Work<N, B, P> {
     }
 }
 impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
+    /// Prepare guarded legal-hold state for the signed admin framework.
+    /// Commit with the operator's audit and replay result; no public route exists yet.
+    ///
+    /// # Errors
+    /// Unknown requests, ended purge ownership, storage errors or invalid retention.
+    pub async fn plan_legal_hold<S: NamespaceStore>(
+        &self,
+        store: &S,
+        id: Hash,
+        enabled: bool,
+        now: u64,
+    ) -> Result<Batch, StoreError> {
+        let service = Service::new(
+            LocalStore::new(store, &self.root, store),
+            self.root.clone(),
+            self.shards.clone(),
+        );
+        let (record, _) = service
+            .record(store, &id)
+            .await
+            .map_err(|_| bad())?
+            .ok_or_else(bad)?;
+        let (mut state, old) = self.state(store, &id, record.created).await?;
+        if enabled && (state.purged || state.phase == Phase::Purging) {
+            return Err(StoreError::unavailable(
+                "preservation purge already owns request",
+            ));
+        }
+        state.hold = enabled;
+        let state_key = key(b"state", &id, &[]);
+        Ok(Batch::new()
+            .require(old.map_or_else(
+                || Precondition::Absent(state_key.clone()),
+                |old| Precondition::Equals(state_key.clone(), old),
+            ))
+            .require(Precondition::NotAfter(
+                now.saturating_add(crate::store::CONTENT_APPLY_WINDOW_MS),
+            ))
+            .put(state_key, value(&state)?)
+            .put(
+                crate::store::keys::timer(now.saturating_add(1), kinds::TAKEDOWN_WORK.get(), &id),
+                Value::default(),
+            ))
+    }
     async fn state<S: NamespaceStore>(
         &self,
         store: &S,
@@ -310,7 +355,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
                 {
                     return Err(bad());
                 }
-                // Canonical manifest bytes are verified; cross-chunk closure stays pending.
+                // Reassembly validation runs over preserved bytes after every child is acquired.
                 if source.kind == 5 {
                     state.verification = Verification::ManifestClosurePending;
                 }
@@ -412,6 +457,12 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
                         batch = batch
                             .delete(todo.clone())
                             .put(key(b"discover", &id, &object), Value::default());
+                        if source.kind == 5 {
+                            batch = batch.put(
+                                key(b"closure", &id, &object),
+                                value(&closure::Checkpoint::default())?,
+                            );
+                        }
                     }
                 }
                 batch = batch.put(key(b"object", &id, &object), value(&info)?);
@@ -419,12 +470,49 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
                 if state.verification == Verification::CanonicalPending {
                     state.verification = Verification::Verified;
                 }
-                state.phase = Phase::Discover;
+                state.phase = if state.acquisition_complete() {
+                    Phase::Discover
+                } else {
+                    Phase::Closure
+                };
                 event = if state.acquisition_complete() {
                     "PreservationVerified"
                 } else {
                     "PreservationClosurePending"
                 };
+            }
+        } else if state.phase == Phase::Closure && state.purged {
+            state.phase = Phase::Discover;
+        } else if state.phase == Phase::Closure {
+            let (start, end) = range(b"closure", &id);
+            let page = store.scan(&self.root, &start, &end, None, 1).await?;
+            if let Some((row, raw)) = page.entries.first() {
+                let manifest: Hash = row
+                    .as_bytes()
+                    .strip_prefix(start.as_bytes())
+                    .ok_or_else(bad)?
+                    .try_into()
+                    .map_err(|_| bad())?;
+                let info = self.info(store, &id, &manifest).await?;
+                let next = closure::step(
+                    store,
+                    &preserved,
+                    &self.root,
+                    &id,
+                    &manifest,
+                    &info,
+                    decode(raw)?,
+                )
+                .await?;
+                batch = if next.complete {
+                    batch.delete(row.clone())
+                } else {
+                    batch.put(row.clone(), value(&next.checkpoint)?)
+                };
+            } else {
+                state.verification = Verification::Verified;
+                state.phase = Phase::Discover;
+                event = "PreservationVerified";
             }
         } else if state.phase == Phase::Discover {
             let (start, end) = range(b"discover", &id);
@@ -581,7 +669,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
                 event = "PreservationPiecePurged";
             } else {
                 state.phase = match state.resume_phase {
-                    Phase::Acquire => Phase::Discover,
+                    Phase::Acquire | Phase::Closure => Phase::Discover,
                     Phase::Retain => Phase::Purged,
                     other => other,
                 };

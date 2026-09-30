@@ -930,7 +930,7 @@ where
     S: mkit_server::NamespaceStore,
     T: mkit_server::NamespaceStore + 'static,
 {
-    timer_registry_budgeted(class, target, plan, None)
+    timer_registry_budgeted(class, target, plan, None, None)
 }
 
 fn timer_registry_budgeted<
@@ -941,6 +941,7 @@ fn timer_registry_budgeted<
     target: Result<T, ConfigError>,
     plan: Option<&str>,
     alarm_budget: Option<&mkit_server::purge::SliceBudget>,
+    takedown_root: Option<mkit_server::Partition>,
 ) -> mkit_server::timers::TimerRegistry<'static, S> {
     use crate::classes::ShardClass;
     use mkit_server::relay::{RelayBudget, RelayHandler};
@@ -971,9 +972,13 @@ fn timer_registry_budgeted<
                 max_per_tick,
             })
         }
-        ShardClass::ContentIndexShard => {
-            registry.register(mkit_server::relay::TakedownRequestTimer)
-        }
+        ShardClass::ContentIndexShard => match (takedown_root, target.clone()) {
+            (Some(root), Ok(store)) => registry.register(mkit_server::takedown::late::LateTimer {
+                acceptance: mkit_server::takedown::late_owner::LateOwner::new(store, root),
+                max_subrequests: 700,
+            }),
+            _ => registry.register(mkit_server::relay::TakedownRequestTimer),
+        },
         _ => registry,
     };
     let registry = if class == ShardClass::RefShard
@@ -2557,8 +2562,36 @@ mod glue {
             .as_deref()
             .filter(|plan| plan.trim().eq_ignore_ascii_case("paid"))
             .map(|_| mkit_server::purge::SliceBudget::new(crate::purge::ALARM_OPERATIONS));
-        let registry =
-            super::timer_registry_budgeted(class, target, plan.as_deref(), alarm_budget.as_ref());
+        let takedown_root = cfg
+            .as_ref()
+            .ok()
+            .filter(|cfg| mkit_server::takedown::ACTIVATED && cfg.takedown.is_some())
+            .map(WorkerConfig::probe_partition);
+        let registry = super::timer_registry_budgeted(
+            class,
+            target,
+            plan.as_deref(),
+            alarm_budget.as_ref(),
+            takedown_root,
+        );
+        let registry = if mkit_server::takedown::ACTIVATED
+            && let (Ok(cfg), Some(budget)) = (&cfg, &alarm_budget)
+            && cfg.takedown.is_some()
+            && class
+                == match cfg.sharding {
+                    Sharding::Single => crate::classes::ShardClass::RefStore,
+                    _ => crate::classes::ShardClass::NsCoordinator,
+                } {
+            match crate::admin::work(env, cfg, budget) {
+                Ok(work) => registry.register(work),
+                Err(error) => {
+                    crate::log_failure(&error.to_string());
+                    registry
+                }
+            }
+        } else {
+            registry
+        };
         let registry = if matches!(
             class,
             crate::classes::ShardClass::RefStore | crate::classes::ShardClass::RefShard
@@ -4523,5 +4556,126 @@ mod tests {
         ] {
             assert!(!out.contains(secret), "{secret} leaked: {out}");
         }
+    }
+
+    async fn late_holder_fixture() -> (
+        Arc<mkit_server::ManualClock>,
+        Arc<mkit_server::MemoryKv>,
+        mkit_server::Partition,
+        mkit_server::Partition,
+        mkit_server::Key,
+    ) {
+        use mkit_server::store::{BlockEntry, ContentIndex, Holder, PendingHolderV1, keys};
+        use mkit_server::{
+            Batch, ManualClock, MemoryKv, NamespaceKey, NamespaceStore, Partition, RepoName, Value,
+        };
+        let clock = Arc::new(ManualClock::new(1000));
+        let store = Arc::new(MemoryKv::with_clock(clock.clone()));
+        let root = Partition::Namespace(NamespaceKey::deployment_default());
+        let request = mkit_server::relay::ContentTakedownV1 {
+            identity: PendingHolderV1::new(
+                Holder::new(
+                    NamespaceKey::deployment_default(),
+                    RepoName::new("late").unwrap(),
+                ),
+                root.clone(),
+                [3; 32],
+                [1; 32],
+                [2; 32],
+                [4; 32],
+            )
+            .unwrap(),
+            blocked: BlockEntry::new("private reason", 998),
+            queued_at_ms: 999,
+            ready_at_ms: Some(1000),
+        };
+        let partition = mkit_server::store::content_shard(&request.identity.object);
+        ContentIndex::new(store.clone())
+            .block(&request.identity.object, &request.blocked, 1000)
+            .await
+            .unwrap();
+        let row = keys::content_takedown(&request.identity.object, &request.identity.intent);
+        let reference = [
+            request.identity.object.as_slice(),
+            request.identity.intent.as_slice(),
+        ]
+        .concat();
+        store
+            .apply(
+                &partition,
+                Batch::new()
+                    .put(row.clone(), request.encode().unwrap())
+                    .put(keys::timer(1000, 13, &reference), Value::default()),
+            )
+            .await
+            .unwrap();
+        (clock, store, root, partition, row)
+    }
+
+    #[test]
+    fn real_late_holder_registration_takes_ownership_only_when_selected() {
+        use mkit_server::store::keys;
+        use mkit_server::timers::{TickBudget, run_due};
+        use mkit_server::{MemoryKv, NamespaceStore};
+        block_on(async {
+            let (clock, store, root, partition, row) = late_holder_fixture().await;
+            let off = timer_registry::<MemoryKv, _>(
+                crate::classes::ShardClass::ContentIndexShard,
+                Ok(store.clone()),
+                Some("paid"),
+            );
+            run_due(
+                store.as_ref(),
+                &partition,
+                &off,
+                clock.as_ref(),
+                1000,
+                &TickBudget::default(),
+            )
+            .await
+            .unwrap();
+            assert!(store.get(&partition, &row).await.unwrap().is_some());
+            assert!(
+                store
+                    .get(&root, &mkit_server::Key::new(b"ah\0".to_vec()))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            clock.set(3_601_000);
+            let budget = mkit_server::purge::SliceBudget::new(1000);
+            let on = timer_registry_budgeted::<MemoryKv, _>(
+                crate::classes::ShardClass::ContentIndexShard,
+                Ok(store.clone()),
+                Some("paid"),
+                Some(&budget),
+                Some(root.clone()),
+            );
+            run_due(
+                store.as_ref(),
+                &partition,
+                &on,
+                clock.as_ref(),
+                3_601_000,
+                &TickBudget::default(),
+            )
+            .await
+            .unwrap();
+            assert!(store.get(&partition, &row).await.unwrap().is_none());
+            assert!(
+                store
+                    .get(&root, &mkit_server::Key::new(b"ah\0".to_vec()))
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            let (start, end) = keys::class_range(keys::TAG_TIMER);
+            let timers = store.scan(&root, &start, &end, None, 16).await.unwrap();
+            assert!(timers.entries.iter().any(|(key, _)| matches!(
+                keys::parse(key),
+                Some(keys::ParsedKey::Timer { kind: 15, .. })
+            )));
+            assert!(budget.used() > 0 && budget.used() < 1000);
+        });
     }
 }

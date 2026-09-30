@@ -1,16 +1,22 @@
-# WP-5.6a-2: verified preservation and restricted administration (R-190)
+# WP-5.6a-2: verified preservation core (R-190)
 
-The [approved split](WP-5.6a-1.md) and [launch/base brief](WP-5.6a.md)
-remain binding, with the latest namespace ruling below taking precedence.
-Both parts are required for launch. Branch from 5.6a-1; target `feat/mkit-server`
-after PR1 merges. Open the PR; do not merge it. Cap: 2,600 non-test lines,
-including docs. Stop and report the measured count before exceeding it.
+The [launch/base brief](WP-5.6a.md) remains binding except for the latest
+approved split and namespace ruling below. All three PRs are required for
+launch. PR2 branches from merged PR1 and targets `feat/mkit-server`; open the
+PR without merging. Latest PR2 cap: 3,300 non-test Rust production lines;
+docs do not count. Stop and report before exceeding it.
 
-Implement bounded canonical acquisition and holder/context discovery; verified
-streaming `ReadPreserved`; retention, legal holds and audited per-action purge;
-native/Worker adapters and user provisioning templates; remaining lean normative
-amendments; and timer-store locality without self-DO calls. User provisions
-preservation storage; no cloud calls. Nothing else is deferred to fit the cap.
+PR2 owns bounded canonical acquisition, manifest/chunk closure verification,
+holder/context discovery, retention and legal-hold arbitration, audited
+per-action purge, adapters/templates, actual ct ownership transfer and local
+timer-15 runtime wiring. Acquisition cannot report success for an unverified
+manifest or missing chunk. Legal-hold/purge concurrency stays in this core.
+Runtime wiring remains gated off: activation is fixed false and `ReadPreserved`
+is unexposed. User provisions storage; no cloud calls or new schema/protocol.
+
+The approved [PR3](WP-5.6a-3.md) owns admin Get/List/ReadPreserved/SetLegalHold,
+byte-free replay and fresh verified streaming; these remain required for launch.
+This is an authorized split, not removal of launch scope. No other deferrals.
 
 **Latest namespace ruling (supersedes finite-only):** Any supports normal global
 denial and preservation from the named repository. Discovery sweeps provable
@@ -33,4 +39,5 @@ No rewrite, notices, reinstatement, inspection hits or hold-review operations at
 launch. §14.7 signing key, public key list and retention startup requirements
 remain. Run the base/common gates, including wasm32 clippy and default vcs-worker
 conformance on a free port, then self-review and open the PR. Activation remains
-off until both parts and launch gates are complete; docs are not runtime evidence.
+fixed false in PR2; all three parts and launch gates are required. Docs are not
+runtime evidence.
