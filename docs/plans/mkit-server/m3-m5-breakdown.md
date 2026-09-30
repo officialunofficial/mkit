@@ -637,12 +637,22 @@ Entry condition: M1 is merged. The M4 private-serving WPs (4.15) need M2 read au
 - **Tests:** Product/reference verifier parity, golden byte identity, adversarial reasons, wasm round trips and fuzz/property coverage (R-161).
 - **Size:** M (production cap 1,500 lines).
 
-### WP-4.14b: HTTP proof query ranges and Workers prefetch
-- **Depends on:** WP-4.12, WP-4.10, WP-4.14a.
-- **Stage:** 2.
-- **Goal:** Serve `?proof=1&range=a-b` through the 4.14a builder. Return 416 on invalid or oversized ranges, produce the proof ETag, precompute encoded proof size and `declared_bytes` before Admission, and prefetch the needed chunks into an in-memory `ObjectSource` on Workers. Object-by-id URLs take proofs only with commit context (R-109, R-161).
-- **Files:** `mkit-server/src/http_objects/proof.rs`, the Workers HTTP serving adapter, and conformance tests.
-- **Tests:** HTTP query selection, 416 ordering, ETag, Admission cost and serving proof round trips through `mkit-wasm`.
+### WP-4.14b: HTTP proofs aggregate (R-187)
+- **Depends on:** merged WP-4.13, WP-4.14b-1, WP-4.14b-2.
+- **Goal:** Deliver native/core proofs; Workers proof serving follows after launch (R-200).
+
+### WP-4.14b-1: HTTP proofs, native and core
+- **Depends on:** WP-4.12, merged WP-4.13, WP-4.14a, WP-5.4 published view.
+- **Goal:** Prepare/select → common validators and caps → common admission → build/body. Every `proof=1` representation uses canonical Object, MKDP plain/single-chunk Range or MKDS cross-chunk Range. Validate published-reachable commits and exact paths before validators/payment. Compute exact encoded GET length and caps without building; build failure after reservation aborts.
+- **Responses:** Syntax errors are 400; content bounds, unsupported selectors, inclusive-length overflow and proof caps are 416. Proof ETag, cache and metadata follow SPEC-HTTP-OBJECTS §5.2/§5.3. Ignore HTTP Range/If-Range, always 200, Accept-Ranges none.
+- **Files:** core structural sizing/shared prefix, `mkit-server/src/http_objects/proof.rs`, common pipeline glue, native builder and mount.
+- **Tests:** URL/response goldens; Object/root/manifest and plain/single/cross-chunk exact edges; cap ordering, ETag/304, ignored Range, cache matrix; GET/HEAD payment parity; no build on challenge/deny/304/416; planned/actual lengths; cancellation/abort; mismatched/unpublished/blocked contexts; corrupt-offset independence; no post-span reads, bounded prefix memory and client-verifier round trips.
+- **Size:** M (production cap 2,000 non-test lines).
+
+### WP-4.14b-2: Workers canonical ObjectSource prefetch
+- **Depends on:** WP-4.14b-1, WP-4.10b.
+- **Goal:** Reuse prepared selection and common admission; bounded repository-scoped integrity-verified canonical prefetch, not concatenated file bytes. Validate offset hints against canonical lengths.
+- **Tests:** Worker prefetch/resource cases; actual subrequest counts, peak memory and deployed staging CPU measurements before activation.
 - **Size:** M.
 
 ### WP-4.15: Private serving via M2 signed URLs and read auth

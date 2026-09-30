@@ -215,9 +215,6 @@ impl RelayHook for HolderRelayHook {
                         pre.push(guard(seen, key)?);
                     }
                 }
-                if raw(seen, &gp)? != Some(&encoded) {
-                    return Err(bad());
-                }
                 if raw(seen, &keys::layout_version())?
                     .map(codec::decode_u32)
                     .transpose()?
@@ -226,6 +223,27 @@ impl RelayHook for HolderRelayHook {
                     return Err(bad());
                 }
                 writes.retain(|write| !matches!(write, Write::Put(key, _) if key == &gp));
+                match raw(seen, &gp)? {
+                    None => {
+                        // The producer protected this intent before enqueue.
+                        // A matching holder now covers a delivered duplicate;
+                        // the exact h/c values and gp absence are guarded above.
+                        let holder = raw(seen, &h)?.map(codec::decode_holder).transpose()?;
+                        let state = raw(seen, &c)?.map(codec::decode_object_state).transpose()?;
+                        if holder.is_some_and(|holder| holder.op_id == identity.ticket)
+                            && state.is_some_and(|state| !state.deleting)
+                        {
+                            continue;
+                        }
+                        // The delivery engine logs this diagnostic and retains
+                        // the row when its former holder cannot prove completion.
+                        return Err(StoreError::unavailable(
+                            "pending holder marker absent without matching live holder; retry",
+                        ));
+                    }
+                    Some(prior) if prior != &encoded => return Err(bad()),
+                    Some(_) => {}
+                }
                 if !applied.insert(identity.intent) {
                     continue;
                 }

@@ -2722,6 +2722,90 @@ async fn holder_re_records_bump_once_and_duplicate_intents_fold() {
 }
 
 #[tokio::test]
+async fn duplicate_holder_intent_drains_across_bounded_target_applies() {
+    let local = memory();
+    let remote = memory();
+    let a = [0x72; 32];
+    let mut b = a;
+    b[31] = 0x73;
+    let destination = crate::store::content_shard(&a);
+    assert_eq!(crate::store::content_shard(&b), destination);
+    let idx = crate::store::ContentIndex::new(crate::store::BorrowedStore(&remote));
+    let mut identities = Vec::new();
+    for object in [a, b] {
+        let identity = crate::store::PendingHolderV1::new(
+            crate::store::Holder::new(
+                NamespaceKey::deployment_default(),
+                RepoName::new("a").unwrap(),
+            ),
+            source(),
+            [0x75; 32],
+            object,
+            object,
+            [0x76; 32],
+        )
+        .unwrap();
+        assert_eq!(
+            idx.add_hold(&object, &object, 10_000, 100).await.unwrap(),
+            crate::store::HoldOutcome::Held
+        );
+        assert_eq!(
+            idx.protect_pending_holder(&object, &object, &identity, 100)
+                .await
+                .unwrap(),
+            crate::store::HoldOutcome::Held
+        );
+        identities.push(identity);
+    }
+    for identity in [&identities[0], &identities[1], &identities[0]] {
+        append(
+            &local,
+            &destination,
+            vec![(
+                keys::pending_holder(&identity.object, &identity.hold_id),
+                identity.encode().unwrap(),
+            )],
+            50,
+        )
+        .await;
+    }
+    let h = RelayHandler {
+        target: remote,
+        hook: HolderRelayHook {
+            clock: Arc::new(ManualClock::new(100)),
+        },
+        budget: RelayBudget {
+            max_target_calls: Some(2),
+            ..RelayBudget::default()
+        },
+    };
+    for _ in 0..6 {
+        fire(&h, &local).await.unwrap();
+    }
+    let state = codec::decode_object_state(
+        &h.target
+            .get(&destination, &keys::object_state(&a))
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state.holders, 1);
+    assert_eq!(state.seq, 3, "duplicate intent must not bump again");
+    assert!(
+        queued(&local).await.is_empty(),
+        "duplicate intent must drain after gp release"
+    );
+    assert_eq!(
+        h.target
+            .get(&destination, &keys::relay_high_water(&source()).unwrap())
+            .await
+            .unwrap(),
+        Some(codec::encode_u64(3))
+    );
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // Keep the lost-reply boundary and all atomic effects together.
 async fn holder_delivery_lost_reply_is_atomic_and_never_double_bumps() {
     let local = memory();
@@ -2967,4 +3051,293 @@ async fn late_blocked_holder_after_ttl_retains_real_takedown_handoff() {
     let mut bad = ready.encode().unwrap().as_bytes().to_vec();
     bad.push(0);
     assert!(ContentTakedownV1::decode(&Value::new(bad)).is_err());
+}
+
+fn duplicate_proof_identity() -> crate::store::PendingHolderV1 {
+    crate::store::PendingHolderV1::new(
+        crate::store::Holder::new(
+            NamespaceKey::deployment_default(),
+            RepoName::new("a").unwrap(),
+        ),
+        source(),
+        [0x75; 32],
+        [0x72; 32],
+        [0x73; 32],
+        [0x76; 32],
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Check both a new block and an already-retained late-block request.
+async fn duplicate_holder_intent_after_block_has_only_watermark_effects() {
+    for initially_blocked in [false, true] {
+        let local = memory();
+        let h = RelayHandler {
+            target: Instrumented::new(),
+            hook: HolderRelayHook {
+                clock: Arc::new(ManualClock::new(100)),
+            },
+            budget: RelayBudget {
+                max_target_calls: Some(2),
+                ..RelayBudget::default()
+            },
+        };
+        let identity = duplicate_proof_identity();
+        let object = identity.object;
+        let destination = crate::store::content_shard(&object);
+        let gp = keys::pending_holder(&object, &identity.hold_id);
+        let holder = keys::holder(&object, &identity.holder.ns, &identity.holder.repo).unwrap();
+        let c = keys::object_state(&object);
+        let ct = keys::content_takedown(&object, &identity.intent);
+        let idx = crate::store::ContentIndex::new(crate::store::BorrowedStore(&h.target.inner));
+        assert_eq!(
+            idx.add_hold(&object, &identity.hold_id, 10_000, 100)
+                .await
+                .unwrap(),
+            crate::store::HoldOutcome::Held
+        );
+        assert_eq!(
+            idx.protect_pending_holder(&object, &identity.hold_id, &identity, 100)
+                .await
+                .unwrap(),
+            crate::store::HoldOutcome::Held
+        );
+        if initially_blocked {
+            idx.block(&object, &crate::store::BlockEntry::new("initial", 100), 100)
+                .await
+                .unwrap();
+        }
+        append(
+            &local,
+            &destination,
+            vec![(gp.clone(), identity.encode().unwrap())],
+            50,
+        )
+        .await;
+        fire(&h, &local).await.unwrap();
+        assert!(queued(&local).await.is_empty());
+        idx.block(
+            &object,
+            &crate::store::BlockEntry::new("after delivery", 100),
+            100,
+        )
+        .await
+        .unwrap();
+        let prior_c = h.target.inner.get(&destination, &c).await.unwrap().unwrap();
+        let prior_h = h
+            .target
+            .inner
+            .get(&destination, &holder)
+            .await
+            .unwrap()
+            .unwrap();
+        let prior_ct = h.target.inner.get(&destination, &ct).await.unwrap();
+        assert_eq!(prior_ct.is_some(), initially_blocked);
+        append(
+            &local,
+            &destination,
+            vec![(gp.clone(), identity.encode().unwrap())],
+            50,
+        )
+        .await;
+        fire(&h, &local).await.unwrap();
+        assert!(
+            queued(&local).await.is_empty(),
+            "matching protected duplicate must drain after a block"
+        );
+        assert_eq!(
+            h.target.inner.get(&destination, &c).await.unwrap(),
+            Some(prior_c.clone())
+        );
+        assert_eq!(
+            h.target.inner.get(&destination, &holder).await.unwrap(),
+            Some(prior_h.clone())
+        );
+        assert_eq!(
+            h.target.inner.get(&destination, &ct).await.unwrap(),
+            prior_ct
+        );
+        let batches = h.target.applies.lock().unwrap();
+        let batch = &batches.last().unwrap().1;
+        batch.validate(&StoreCapabilities::full()).unwrap();
+        assert_eq!(
+            batch.writes,
+            vec![Write::Put(
+                keys::relay_high_water(&source()).unwrap(),
+                codec::encode_u64(2)
+            )]
+        );
+        assert!(batch.preconditions.contains(&Precondition::Absent(gp)));
+        assert!(
+            batch
+                .preconditions
+                .contains(&Precondition::Equals(holder, prior_h))
+        );
+        assert!(
+            batch
+                .preconditions
+                .contains(&Precondition::Equals(c, prior_c))
+        );
+    }
+}
+
+#[tokio::test]
+async fn absent_pending_marker_without_matching_live_holder_stays_queued_with_diagnostic() {
+    let identity = duplicate_proof_identity();
+    for (ticket, state_present, deleting) in [
+        (None, true, false),
+        (Some([0x77; 32]), true, false),
+        (Some(identity.ticket), true, true),
+        (Some(identity.ticket), false, false),
+    ] {
+        let local = memory();
+        let h = RelayHandler {
+            target: Instrumented::new(),
+            hook: HolderRelayHook {
+                clock: Arc::new(ManualClock::new(100)),
+            },
+            budget: RelayBudget::default(),
+        };
+        let destination = crate::store::content_shard(&identity.object);
+        let gp = keys::pending_holder(&identity.object, &identity.hold_id);
+        let mut fixture = Batch::new();
+        if let Some(ticket) = ticket {
+            fixture = fixture.put(
+                keys::holder(&identity.object, &identity.holder.ns, &identity.holder.repo).unwrap(),
+                codec::encode_holder(&crate::store::HolderRecord::new(7, ticket)),
+            );
+        }
+        if state_present {
+            fixture = fixture.put(
+                keys::object_state(&identity.object),
+                codec::encode_object_state(&crate::store::ObjectState::new(
+                    7,
+                    100,
+                    u64::from(ticket.is_some()),
+                    deleting,
+                )),
+            );
+        }
+        h.target.inner.apply(&destination, fixture).await.unwrap();
+        append(
+            &local,
+            &destination,
+            vec![(gp.clone(), identity.encode().unwrap())],
+            50,
+        )
+        .await;
+        fire(&h, &local).await.unwrap();
+        assert_eq!(queued(&local).await.len(), 1);
+        assert!(h.target.applies.lock().unwrap().is_empty());
+        assert!(
+            h.target
+                .inner
+                .get(&destination, &keys::relay_high_water(&source()).unwrap())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let row = codec::decode_relay(&queued(&local).await[0].1).unwrap();
+        let rows = [(1, row)];
+        let mut wanted = h.hook.read_keys(&destination, &rows).unwrap();
+        wanted.push(keys::relay_high_water(&source()).unwrap());
+        let values = h
+            .target
+            .inner
+            .get_many(&destination, &wanted)
+            .await
+            .unwrap();
+        let seen: Vec<_> = wanted.into_iter().zip(values).collect();
+        let error = h
+            .hook
+            .before_apply_observed(&destination, &rows, &seen, &mut Vec::new(), &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StoreError::Unavailable(message)
+            if message.to_string() == "pending holder marker absent without matching live holder; retry"));
+    }
+}
+
+#[tokio::test]
+async fn absent_pending_marker_proof_rejects_concurrent_holder_state_or_marker_changes() {
+    let identity = duplicate_proof_identity();
+    let destination = crate::store::content_shard(&identity.object);
+    let gp = keys::pending_holder(&identity.object, &identity.hold_id);
+    let holder =
+        keys::holder(&identity.object, &identity.holder.ns, &identity.holder.repo).unwrap();
+    let c = keys::object_state(&identity.object);
+    let rh = keys::relay_high_water(&source()).unwrap();
+    let hook = HolderRelayHook {
+        clock: Arc::new(ManualClock::new(100)),
+    };
+    let rows = [(
+        1,
+        RelayV1 {
+            at_ms: 50,
+            target: destination.clone(),
+            puts: vec![(gp.clone(), identity.encode().unwrap())],
+            deletes: Vec::new(),
+        },
+    )];
+    for changed in [holder.clone(), c.clone(), gp.clone()] {
+        let remote = memory();
+        remote
+            .apply(
+                &destination,
+                Batch::new()
+                    .put(
+                        holder.clone(),
+                        codec::encode_holder(&crate::store::HolderRecord::new(7, identity.ticket)),
+                    )
+                    .put(
+                        c.clone(),
+                        codec::encode_object_state(&crate::store::ObjectState::new(
+                            7, 100, 1, false,
+                        )),
+                    ),
+            )
+            .await
+            .unwrap();
+        let mut wanted = hook.read_keys(&destination, &rows).unwrap();
+        wanted.push(rh.clone());
+        let values = remote.get_many(&destination, &wanted).await.unwrap();
+        let seen: Vec<_> = wanted.into_iter().zip(values).collect();
+        let mut batch = Batch::new()
+            .require(Precondition::Absent(rh.clone()))
+            .put(gp.clone(), identity.encode().unwrap())
+            .put(rh.clone(), codec::encode_u64(1));
+        hook.before_apply_observed(
+            &destination,
+            &rows,
+            &seen,
+            &mut batch.preconditions,
+            &mut batch.writes,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            batch.writes,
+            vec![Write::Put(rh.clone(), codec::encode_u64(1))]
+        );
+        remote
+            .apply(
+                &destination,
+                Batch::new().put(changed.clone(), Value::new(vec![255])),
+            )
+            .await
+            .unwrap();
+        let expected = batch
+            .preconditions
+            .iter()
+            .position(|pre| match pre {
+                Precondition::Absent(key) | Precondition::Equals(key, _) => key == &changed,
+                _ => false,
+            })
+            .unwrap();
+        assert!(
+            matches!(remote.apply(&destination, batch).await.unwrap(), BatchOutcome::PreconditionFailed { index, .. } if index == expected)
+        );
+        assert!(remote.get(&destination, &rh).await.unwrap().is_none());
+    }
 }

@@ -816,6 +816,21 @@ pub fn tree_entry_position(tree: &Tree, name: &[u8]) -> Option<u32> {
     tree.entries.iter().position(|e| e.name == name).map(u32_of)
 }
 
+/// Wire size of a proof, calculated from tree shape without hashing leaves.
+pub(crate) fn proof_encoded_size(
+    leaf_count: u32,
+    positions: impl IntoIterator<Item = u32>,
+) -> Result<usize, MerkleError> {
+    let siblings = siblings_required_for_multi_proof(leaf_count, positions)?.len();
+    let mut count = siblings;
+    let mut prefix = 1;
+    while count >= 128 {
+        prefix += 1;
+        count >>= 7;
+    }
+    Ok(4 + prefix + siblings * 32)
+}
+
 // ---------------------------------------------------------------------------
 // Proof construction
 // ---------------------------------------------------------------------------
