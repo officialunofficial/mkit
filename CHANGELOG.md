@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   admin replay and fresh audited verified streams. §14.7 signing/publication and
   full-profile requirements remain. PR2 owns preservation/retention/hold core; PR3
   owns the restricted admin catalog. Activation stays off; no completed gates claimed.
+
+- Server/Worker (default-off, WP-4.10b-2, R-186): complete consumed-group extraction
+  with closure before effects, native union counts, bounded job header/body guards,
+  resumable delta reconstruction and root-checked multipart uploads. Hold renewal
+  and durable holder delivery precede Verified; release activation waits for 4.18.
+
 - Server (R-193): default-off private raw-pack retrieval for synchronous
   scanners, with separate capability MAC and scanner signing keys, bounded
   ranges, current-ticket lifetime checks, uniform `not_found` and global
