@@ -208,7 +208,7 @@ cases! {
     "outcomes.aborted_on_cas_loss" => outcomes::aborted_on_cas_loss, M3, [Admission, HookStub, AuthV2, Timers], [];
     "outcomes.expired_ticket" => outcomes::expired_ticket, M3, [Admission, HookStub, AuthV2, ShortTickets, Timers], [];
     "outcomes.backpressure_hook_down" => outcomes::backpressure_hook_down, M3, [Admission, HookStub, AuthV2, BacklogCap, Timers], [];
-    "outcomes.eventual_completeness" => outcomes::eventual_completeness, M3, [Admission, HookStub, AuthV2, BacklogCap, Timers], [];
+    "outcomes.eventual_completeness" => outcomes::eventual_completeness, M3, [Admission, HookStub, AuthV2, Timers], [];
     "admission.concurrent_duplicate_during_admit" => admission::concurrent_duplicate_during_admit, M3, [Admission, HookStub, AuthV2], [];
     "admission.helper_flow_commit" => admission::helper_flow_commit, M3, [Admission, HookStub, AuthV2, Tickets, Timers], [];
     "grants.valid_ed25519" => grants::valid_ed25519, M2, [Grants, MultiRepo, AuthV2], [];

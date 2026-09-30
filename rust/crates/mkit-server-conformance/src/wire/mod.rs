@@ -61,8 +61,9 @@
 //! # Cases
 //!
 //! Names are stable: a baseline or a divergence list may refer to them.
-//! Discovery, multi-repository, namespace-policy, epoch-lease and multipart cases are milestone M1;
-//! the rest are M0.
+//! Discovery, multi-repository, namespace-policy, epoch-lease and multipart cases are milestone M1.
+//! Admission, payment CORS and outcome cases are M3. Each registry entry
+//! fixes its case's milestone and required capabilities.
 //!
 //! | Case | Requires | Asserts |
 //! |---|---|---|
@@ -79,7 +80,7 @@
 //! | `outcomes.aborted_on_cas_loss` | `admission`, `hook-stub`, `auth-v2`, `timers` | One CAS winner settles; `REF_CONFLICT` loser releases |
 //! | `outcomes.expired_ticket` | `admission`, `hook-stub`, `auth-v2`, `short-tickets`, `timers` | Unused ticket expires and releases without settlement |
 //! | `outcomes.backpressure_hook_down` | `admission`, `hook-stub`, `auth-v2`, `backlog-cap`, `timers` | Backlog blocks new admission, preserves reads and ticketed writes, then drains |
-//! | `outcomes.eventual_completeness` | `admission`, `hook-stub`, `auth-v2`, `backlog-cap`, `timers` | Nine retained outcomes eventually complete under the Free sink budget |
+//! | `outcomes.eventual_completeness` | `admission`, `hook-stub`, `auth-v2`, `timers` | Nine retained outcomes eventually complete under the Free sink budget |
 //! | `admission.helper_flow_commit` | `admission`, `hook-stub`, `auth-v2`, `tickets`, `timers` | MPP helper flow commits and settles one outcome per reservation |
 //! | `grants.valid_ed25519` | `grants`, `multi-repo`, `auth-v2` | an ed25519 owner grants a write |
 //! | `grants.valid_secp256k1_eip191` | `grants`, `multi-repo`, `auth-v2` | a 0x secp256k1 owner grants a write |
