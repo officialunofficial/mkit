@@ -3487,7 +3487,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         ahead: &mut Option<Snapshot>,
         implicit_ids: Option<&[Hash]>,
         external_bases: &std::collections::BTreeSet<Hash>,
-        mut inspected: Option<&mut crate::indexed::inspection::InspectionSet>,
+        inspected: Option<&mut crate::indexed::inspection::InspectionSet>,
     ) -> Result<Option<crate::store::publication::Advance>, ServerError> {
         // Deletions establish an immediate boundary without consulting inspection
         // or verifying the surviving pair; older membership obligations remain retained.
@@ -3535,6 +3535,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             } else {
                 implicit_ids.map(<[Hash]>::to_vec).unwrap_or_default()
             };
+            #[cfg(feature = "remote-hooks")]
+            let mut inspected = inspected;
+            #[cfg(feature = "remote-hooks")]
+            let verification_set = inspected.as_deref_mut();
+            #[cfg(not(feature = "remote-hooks"))]
+            let verification_set = inspected;
             self.verify_publication(
                 op,
                 p,
@@ -3545,7 +3551,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ))
                 .is_some(),
                 external_bases,
-                inspected.as_deref_mut(),
+                verification_set,
             )
             .await?;
             #[cfg(feature = "remote-hooks")]

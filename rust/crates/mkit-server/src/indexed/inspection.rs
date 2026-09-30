@@ -1,5 +1,5 @@
 //! Bounded, metadata-only enumeration of added-pack files for launch inspection.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use mkit_core::hash::Hash;
 use mkit_core::object::ObjectType;
@@ -179,7 +179,11 @@ pub(super) async fn preflight_native<B: BlobStore>(
     limit: usize,
 ) -> Result<u64, ServerError> {
     let mut count = 0_u64;
+    let mut packs = BTreeSet::new();
     for ticket in tickets {
+        if !packs.insert(ticket.pack_id) {
+            continue;
+        }
         let body = blobs
             .get(
                 &BlobKey::pack(ticket.pack_id),
@@ -606,6 +610,32 @@ mod tests {
         ))
         .unwrap_err();
         assert_eq!(error.public_message(), "object index limit exceeded");
+    }
+
+    #[test]
+    fn native_preflight_counts_repeated_pack_once_at_the_entry_limit() {
+        let (pack, _, _) = fixture();
+        let repo = repo("inspection-repeated-pack");
+        let blobs = MemoryBlobStore::default();
+        upload(&blobs, &pack);
+        let mut first = ticket(&repo, &pack, NOW as u64);
+        first.reservation_id = "s:duplicate-first".into();
+        let mut second = first.clone();
+        second.reservation_id = "s:duplicate-second".into();
+        assert_ne!(
+            crate::store::tickets::ticket_id(&first.reservation_id),
+            crate::store::tickets::ticket_id(&second.reservation_id),
+        );
+        assert_eq!(first.pack_id, second.pack_id);
+        let calls = super::super::budget::SliceBudget::new(4);
+        let counted = super::super::budget::Budgeted::new(&blobs, &calls);
+        assert_eq!(
+            block_on(preflight_native(&counted, &[first, second], 7))
+                .map_err(|error| (error.code(), error.public_message().to_owned())),
+            Ok(7),
+        );
+        // One header range reserves both metadata and byte requests.
+        assert_eq!(calls.used(), 2);
     }
 
     #[test]
