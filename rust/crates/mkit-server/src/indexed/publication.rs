@@ -33,7 +33,6 @@ struct PairStore<'a, S> {
     additions: &'a [Hash],
     packs: Option<&'a BTreeSet<Hash>>,
     policy: &'a dyn PublicationPolicy,
-    published_generation: Option<u64>,
 }
 impl<S: NamespaceStore> PairStore<'_, S> {
     fn member(&self, key: &Key, value: Option<Value>) -> Option<Value> {
@@ -47,12 +46,7 @@ impl<S: NamespaceStore> PairStore<'_, S> {
             if self.additions.contains(&pack_id) {
                 return Some(Value::default());
             }
-            return value.filter(|v| {
-                store::publication::Witness::decode(v).is_ok_and(|w| {
-                    self.published_generation
-                        .map_or(!w.held, |generation| w.visible(false, generation))
-                })
-            });
+            return value.filter(|v| store::publication::Witness::decode(v).is_ok_and(|w| !w.held));
         }
         value
     }
@@ -192,7 +186,6 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
     policy: &dyn PublicationPolicy,
     cfg: IndexedConfig,
     metrics: &dyn Metrics,
-    mut inspection: Option<&mut super::inspection::InspectionSet>,
 ) -> Result<(), ServerError> {
     if branch && value.head.is_some() && value.packmap.is_none() {
         return Err(closed());
@@ -203,7 +196,6 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
         additions: &advance.additions,
         packs: None,
         policy,
-        published_generation: None,
     };
     let mut chain = BTreeSet::new();
     let mut packs = BTreeSet::new();
@@ -239,25 +231,13 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
         additions: &advance.additions,
         packs: restricted.then_some(&packs),
         policy,
-        published_generation: None,
     };
-    let published = PairStore {
-        store,
-        repo,
-        additions: &[],
-        packs: None,
-        policy,
-        published_generation: Some(advance.generation),
-    };
-    let mut queue = VecDeque::from_iter(value.head.map(|id| (id, None)));
+    let mut queue = VecDeque::from_iter(value.head);
     let mut visited = BTreeSet::new();
     let mut dependencies = chain;
     dependencies.extend(packs.iter().copied());
     let mut bases = BTreeSet::new();
-    while let Some((id, role)) = queue.pop_front() {
-        if let (Some(set), Some(kind)) = (&mut inspection, role) {
-            set.role(id, kind);
-        }
+    while let Some(id) = queue.pop_front() {
         if !visited.insert(id) {
             continue;
         }
@@ -300,61 +280,10 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
         if Some(id) == value.head && super::verify::history_parents(&object).is_none() {
             return Err(closed());
         }
-        if let Some(set) = &mut inspection {
-            let file = matches!(
-                object,
-                mkit_core::object::Object::Blob(_) | mkit_core::object::Object::ChunkedBlob(_)
-            );
-            if file
-                && !set.contains(&id)
-                && !set.in_added(store, shards, repo, id, located.pack).await?
-            {
-                let visible = resolve::locate_split(&published, shards, repo, &[id], metrics)
-                    .await?
-                    .remove(&id)
-                    .ok_or_else(closed)?
-                    .map_err(|_| capped())?
-                    .is_some();
-                if !visible {
-                    set.reachable_entry(id, bytes.len() as u64, object.object_type() as u8)?;
-                }
-            }
-            if let Some(kind) = role {
-                set.role(id, kind);
-            }
-            set.roles(&object);
-        }
-        match &object {
-            mkit_core::object::Object::Tree(tree) if inspection.is_some() => {
-                queue.extend(tree.entries.iter().map(|entry| {
-                    (
-                        entry.object_hash,
-                        (entry.mode != mkit_core::object::EntryMode::Tree)
-                            .then_some(super::inspection::Kind::Blob),
-                    )
-                }));
-            }
-            mkit_core::object::Object::ChunkedBlob(manifest) if inspection.is_some() => {
-                queue.extend(
-                    manifest
-                        .chunks
-                        .iter()
-                        .map(|id| (*id, Some(super::inspection::Kind::Chunk))),
-                );
-            }
-            _ => queue.extend(
-                children(&object, ClosureMode::History)
-                    .into_iter()
-                    .map(|id| (id, None)),
-            ),
-        }
+        queue.extend(children(&object, ClosureMode::History));
         if dependencies.len() > MAX_ADVANCE_ITEMS || bases.len() > MAX_ADVANCE_ITEMS {
             return Err(capped());
         }
-    }
-    if let Some(set) = &mut inspection {
-        set.complete_added(blobs, store, shards, repo, cfg, metrics)
-            .await?;
     }
     advance.dependencies = dependencies.into_iter().collect();
     advance.external_bases = bases.into_iter().collect();
@@ -376,16 +305,24 @@ pub async fn verify<B: BlobStore, S: NamespaceStore>(
     cfg: IndexedConfig,
     metrics: &dyn Metrics,
 ) -> Result<(), ServerError> {
-    verify_optional(
-        blobs, store, shards, repo, value, branch, advance, policy, cfg, metrics, None,
+    let budget = super::budget::SliceBudget::new(256);
+    let blobs = super::budget::Budgeted::new(blobs, &budget);
+    let store = super::budget::Budgeted::new(store, &budget);
+    let result = verify_inner(
+        &blobs, &store, shards, repo, value, branch, advance, policy, cfg, metrics,
     )
-    .await
+    .await;
+    if result.is_err() && budget.remaining() == 0 {
+        return Err(capped());
+    }
+    result
 }
 
-/// Verify the resulting pair while extending its complete inspected set.
+/// Verify the resulting pair, then collect only the added-pack inspection metadata.
 ///
+/// Inspection does not alter the publication closure walk or its classification.
 /// # Errors
-/// Existing closed-closure/index-limit errors; oversized inspection is permanent.
+/// Existing closed-closure, storage and index-limit refusals.
 #[allow(clippy::too_many_arguments)]
 pub async fn verify_inspected<B: BlobStore, S: NamespaceStore>(
     blobs: &B,
@@ -400,128 +337,9 @@ pub async fn verify_inspected<B: BlobStore, S: NamespaceStore>(
     metrics: &dyn Metrics,
     inspection: &mut super::inspection::InspectionSet,
 ) -> Result<(), ServerError> {
-    verify_optional(
-        blobs,
-        store,
-        shards,
-        repo,
-        value,
-        branch,
-        advance,
-        policy,
-        cfg,
-        metrics,
-        Some(inspection),
+    verify(
+        blobs, store, shards, repo, value, branch, advance, policy, cfg, metrics,
     )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn verify_optional<B: BlobStore, S: NamespaceStore>(
-    blobs: &B,
-    store: &S,
-    shards: &dyn ShardMap,
-    repo: &RepoId,
-    value: &Pair,
-    branch: bool,
-    advance: &mut Advance,
-    policy: &dyn PublicationPolicy,
-    cfg: IndexedConfig,
-    metrics: &dyn Metrics,
-    inspection: Option<&mut super::inspection::InspectionSet>,
-) -> Result<(), ServerError> {
-    let budget = super::budget::SliceBudget::new(256);
-    let blobs = super::budget::Budgeted::new(blobs, &budget);
-    let store = super::budget::Budgeted::new(store, &budget);
-    let result = verify_inner(
-        &blobs, &store, shards, repo, value, branch, advance, policy, cfg, metrics, inspection,
-    )
-    .await;
-    if result.is_err() && budget.remaining() == 0 {
-        return Err(capped());
-    }
-    result
-}
-
-#[cfg(all(test, feature = "memory"))]
-mod inspection_tests {
-    use super::*;
-    use crate::indexed::tests::{repo, source};
-    use crate::memory::MemoryKv;
-    use crate::pipeline::SinglePartition;
-    use crate::rt::BoxFuture;
-    use crate::store::{codec, index::IndexValue};
-    use crate::telemetry::NoopMetrics;
-    use futures_executor::block_on;
-
-    struct Available;
-    impl PublicationPolicy for Available {
-        fn prepare<'a>(
-            &'a self,
-            _: &'a crate::Operation,
-            value: &'a Pair,
-        ) -> BoxFuture<'a, Result<Advance, ServerError>> {
-            Box::pin(async move {
-                Ok(crate::pipeline::clearance::immediate(
-                    value.clone(),
-                    [0; 32],
-                    vec![],
-                ))
-            })
-        }
-        fn pack_available(&self, _: &RepoId, _: &Hash) -> bool {
-            true
-        }
-    }
-
-    #[test]
-    fn published_lookup_finds_any_published_candidate_after_an_unpublished_one() {
-        let repo = repo("published-candidates");
-        let store = MemoryKv::default();
-        let id = [3; 32];
-        let value = IndexValue {
-            frame_offset: 12,
-            frame_length: 16,
-            wire_type: 0,
-            decoded_size: 11,
-            chain_depth: 0,
-            delta_base: None,
-        };
-        let mut batch = Batch::new();
-        for (pack, published) in [([1; 32], false), ([2; 32], true)] {
-            batch = batch
-                .put(
-                    keys::object_index(&repo.name, &id, &pack),
-                    codec::encode_object_index(&id, &value).unwrap(),
-                )
-                .put(
-                    keys::membership(&repo.name, &pack),
-                    store::publication::Witness {
-                        generation: 0,
-                        sequence: 1,
-                        published,
-                        held: false,
-                    }
-                    .encode(),
-                );
-        }
-        block_on(store.apply(&source(&repo), batch)).unwrap();
-        let published = PairStore {
-            store: &store,
-            repo: &repo,
-            additions: &[],
-            packs: None,
-            policy: &Available,
-            published_generation: Some(0),
-        };
-        let found = block_on(resolve::locate_split(
-            &published,
-            &SinglePartition,
-            &repo,
-            &[id],
-            &NoopMetrics,
-        ))
-        .unwrap();
-        assert_eq!(found[&id].unwrap().unwrap().pack, [2; 32]);
-    }
+    .await?;
+    inspection.complete_added(store, repo).await
 }

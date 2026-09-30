@@ -112,3 +112,39 @@ Ruling: explicit launch-profile input limits. No durable inspection continuation
 Tests to add: over-limit rejection before any hook call, exactly-at-limit acceptance, and the 5-inspector startup refusal.
 
 Then continue with the pipeline integration, gates and PR. No new tag, timer or durable state.
+
+## Revised R-200 added-pack ruling (supersedes role classification and selection-fact dependency)
+
+The following revised ruling supersedes the original launch inspected-set
+classification and the earlier selection-fact dependency. The original prompt
+above is retained as the first-commit brief. The input cap and four-inspector
+limit remain; their preflight now uses added-pack entry counts only.
+
+Revised ruling: drop role classification and the dependency on #1238's selection facts.
+1. The inspected set in the launch profile. With sync-only inspection, every advance clears at apply, so all earlier
+   membership was already inspected. The only newly reachable objects outside published membership are those in the advance's
+   added packs. The inspected set is therefore exactly the file-typed entries of the added packs: every Blob and ChunkedBlob
+   entry, surplus included. Enumerate it from the frame/checkpoint rows, at up to 1,000 rows per scan against the
+   10,000-object cap. No tree walk, no reference pages, no R2 reads.
+2. Kinds by object type.
+   - A Blob is reported as BLOB, and a ChunkedBlob as CHUNKED_FILE.
+   - CHUNK isn't used in the launch profile.
+   - The scanner gets chunk membership from the manifests. R-193 retrieval will give it the raw pack bytes to decode.
+3. The spec amendment (inside your R-200 launch-profile text):
+   - the reduced inspected set, and why it's complete;
+   - chunk-only blobs MAY be reported as BLOB, with CHUNK unused;
+   - enabling inspection over existing, unscanned content is unsupported in the launch profile: start from an empty store.
+   The durable mode marker arrives with 5.5a-0 and 5.5c.
+
+   The full profile keeps the complete §11.1 classification, deferred to 5.5c.
+4. Your branch. Remove the #1238 merge if nothing else of yours needs it: rebuild the branch from your last pre-merge
+   commit and cherry-pick your later work. That keeps #1238's diff out of your PR.
+5. Tests. Turn the 400-entry case into an acceptance test on the Worker with native parity, add a worst case at the cap,
+   and assert the call count.
+
+Keep the timer-failure check as ruled. Then finish the gates and open the PR.
+
+The retained timer ruling requires rerunning `timers.redelivery_is_idempotent`
+alone and on a clean `origin/feat/mkit-server`: record a reproduced base failure
+as pre-existing and continue; fix a branch-only failure. No new tag, timer or
+durable state is authorized.

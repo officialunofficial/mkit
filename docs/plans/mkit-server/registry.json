@@ -2339,7 +2339,7 @@
   },
   {
     "id": "5.5a",
-    "title": "Synchronous complete-set inspection for the launch profile",
+    "title": "Synchronous added-pack file inspection for the launch profile",
     "milestone": "M5",
     "track": "core",
     "depends_on": [
@@ -2350,7 +2350,7 @@
       "4.8"
     ],
     "size": "L",
-    "summary": "R-200 launch: metadata-only signed Inspect at stage 5; sync/fail-closed only, at most four inspectors and one complete batch each. Preflight whole-advance input bound (positive inspect_batch_max_objects <=10,000; default 10,000) before enumeration/hooks/apply; advertise the limit. Quarantine rejects, unavailable has no replay, stable ids survive retries. No durable continuation, inspection marker or hold. R-193 scanner byte retrieval follows.",
+    "summary": "R-200 launch: metadata-only signed Inspect at stage 5; sync/fail-closed only, at most four inspectors and one complete batch each. Inspect exactly every added-pack Blob and ChunkedBlob, surplus included and ids deduplicated, as BLOB/CHUNKED_FILE; CHUNK unused. Earlier membership was already scanned, so enabling inspection requires an empty store. Preflight added-pack header/job entry counts against positive inspect_batch_max_objects <=10,000 (default 10,000), advertised in server info, before enumeration/hooks/apply. Enumerate frame/checkpoint pages of <=1,000 rows without inspection tree walks, reference pages or R2 reads. Quarantine rejects, unavailable has no replay, stable ids survive retries. No durable continuation, mode marker or hold. R-193 scanner raw-pack retrieval follows.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -2389,7 +2389,7 @@
       "5.11a"
     ],
     "size": "L",
-    "summary": "Deferred full-profile inspection: unrestricted multi-batch sets, async obligations, timer 14, hold authority, strong serving stops, post-publication quarantine and audited ReleaseHold/Reinspect/ReleaseFlag/ResumeServing/WaiveObligations. Turn the three 5.4 hold regressions green; original WP-5.5a prompts now describe this follow-up.",
+    "summary": "Deferred full-profile inspection: complete §11.1 set and file/chunk classification, unrestricted multi-batch sets, async obligations, timer 14, hold authority, strong serving stops, post-publication quarantine and audited ReleaseHold/Reinspect/ReleaseFlag/ResumeServing/WaiveObligations. Turn the three 5.4 hold regressions green; original WP-5.5a prompts now describe this follow-up.",
     "human_action": false,
     "area_gates": [
       "rust",

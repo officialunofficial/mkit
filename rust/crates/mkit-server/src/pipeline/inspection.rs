@@ -94,7 +94,6 @@ impl<B: crate::store::MultipartBlobStore, N: crate::NamespaceStore, H: super::Ho
                         crate::indexed::inspection::Kind::ChunkedFile => {
                             K::INSPECT_OBJECT_KIND_CHUNKED_FILE
                         }
-                        crate::indexed::inspection::Kind::Chunk => K::INSPECT_OBJECT_KIND_CHUNK,
                     }
                     .into(),
                 ),

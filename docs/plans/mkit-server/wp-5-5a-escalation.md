@@ -3,6 +3,10 @@
 Base: `e99e2b241959932150febb8a3bc4957b08134864` (WP-5.4 and WP-5.10/5.11a merged).
 Branch: `mkit-server/wp-5-5a-sync-inspection`.
 
+Status: historical escalations, resolved by the revised R-200 added-pack ruling
+below. These records describe the rejected earlier design; they do not block
+the revised implementation, gates or PR.
+
 ## Stop condition
 
 The brief requires the complete inspected set, default batches of at most 10,000,
@@ -206,3 +210,34 @@ placement and external delta bases.
 - Production additions: 1,615 handwritten Rust lines; 1,760 including
   regenerated Rust and proto additions, excluding test-only artifacts and
   documentation. No production-cap escalation is needed.
+
+## Resolved by the revised R-200 added-pack ruling
+
+The user replaced launch role classification with object-type classification:
+inspect every Blob and ChunkedBlob entry of the added packs, surplus included
+and ids deduplicated, as BLOB and CHUNKED_FILE. Chunk-only blobs remain BLOB;
+CHUNK is unused. Sync-only earlier membership was already inspected, so the
+set is complete when inspection starts from an empty store. Enabling inspection
+over existing unscanned content is unsupported. Complete full-profile
+classification remains deferred to WP-5.5c.
+
+Enumeration reads verified frame/checkpoint metadata in pages of at most
+1,000 rows, without inspection tree walks, reference-page reads or R2 reads.
+The earlier selection-fact dependency was explicitly withdrawn. The branch
+was rebuilt from the last pre-merge commit, removing the unneeded #1238 merge;
+no new storage tag, timer, durable continuation or inspection marker is added.
+R-193 gives the scanner private raw pack bytes so it can decode manifest chunk
+membership itself. The mode marker belongs to WP-5.5a-0 and WP-5.5c.
+
+The conservative preflight now sums added-pack header/job entry counts only,
+before enumeration, hooks and apply. The 10,000-object cap and four-inspector
+limit remain. At most seven added packs require at most 16 checkpoint scans,
+inside the shared pair-stage allocation. The 960-call allocation described
+above remains under the repository's 1,000-call accounting contract; the
+former per-manifest role-read cost is removed rather than budgeted separately.
+The 400-entry counterexample becomes an acceptance/parity case, with no
+inspection R2 calls, and the cap case asserts the worst scan count.
+
+The gate observations in the preceding section belong to the historical tree.
+Final gates, independent review and the isolated/base timer comparison are
+recorded in the PR body on the revised tree; the earlier stop is resolved.

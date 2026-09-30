@@ -2010,27 +2010,35 @@ source evidence in its first bounded source pass; that integration is pending.
 ## Launch inspection checks the complete bounded set before apply
 
 **Always:** launch inspection uses at most four sync/fail-closed inspectors,
-with one complete, deduplicated metadata batch per inspector. Added-pack entry
-counts plus newly reachable files outside the additions preflight the positive
+with one complete, deduplicated metadata batch per inspector. The set contains
+every Blob and ChunkedBlob entry of the added packs, surplus included, reported
+as BLOB and CHUNKED_FILE; chunk-only blobs remain BLOB and CHUNK is unused.
+Inspection starts from an empty store; earlier membership was already inspected
+because sync advances clear at apply. Added-pack entry counts preflight the positive
 whole-advance bound (at most 10,000) before enumeration; oversize uses the
 ordinary index-limit refusal before hooks/apply. Reject/quarantine dominates;
 unavailable cannot commit or enter replay. With inspection disabled, existing
 bytes and calls remain identical. No durable inspection continuation is created.
 
-**Because:** whole-pack downloads expose surplus entries; inspection shares
-the 1,000-call accounting contract.
+**Because:** whole-pack downloads expose surplus entries. Frame/checkpoint pages
+of at most 1,000 rows enumerate the set without an inspection tree walk,
+reference-page reads, object-store reads or role classification; inspection shares
+the 1,000-call accounting contract. Scanners decode chunk membership through
+R-193 private retrieval.
 
 **If violated:** unscanned content can publish, retry can bypass inspection, or
 an accepted request can exhaust its Worker budget.
 
-**Enforced by:** `Pipeline::with_inspectors`, `InspectionSet::preflight`,
+**Enforced by:** the empty-store activation rule is a documented operator
+precondition of the supported launch profile, not a runtime existing-content
+check; there is no durable mode marker at launch. Inspector configuration,
+input limits and verdicts are enforced by `Pipeline::with_inspectors`, `InspectionSet::preflight`,
 header/frame checks and `Pipeline::inspect_advance` before apply. Pipeline
 acceptance tests cover verdict dominance, unavailable replay exclusion and
 inspection-disabled identity. Budget assertion: 960 calls (300 verification,
 256 ancestry, 256 shared pair closure/enumeration/dependencies, four Inspect,
-144 other); <=16 frame pages fit inside the pair allocation. This proves the
-call cap, not completion for every pack below the object cap: reconstructing
-structural role metadata can exceed that allocation. The 400-entry/401-call
-regression records this unresolved Section D blocker; see
-[the WP-5.5a escalation](plans/mkit-server/wp-5-5a-escalation.md#second-escalation-role-classification-is-not-covered-by-the-row-page-bound).
-Async holds remain deferred to WP-5.5c.
+144 other); <=16 frame pages fit inside the pair allocation. The revised R-200
+set removes the role-reconstruction cost recorded in
+[the historical WP-5.5a escalation](plans/mkit-server/wp-5-5a-escalation.md#resolved-by-the-revised-r-200-added-pack-ruling).
+Full classification, async holds and unrestricted multi-batch inspection remain
+deferred to WP-5.5c; the durable marker belongs to WP-5.5a-0.

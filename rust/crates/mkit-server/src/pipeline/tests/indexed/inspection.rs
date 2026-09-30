@@ -165,7 +165,7 @@ fn file_fixture() -> (Vec<Object>, Hash, Vec<(Hash, InspectObjectKind, u64)>) {
         ),
         (
             chunk.id().unwrap(),
-            InspectObjectKind::INSPECT_OBJECT_KIND_CHUNK,
+            InspectObjectKind::INSPECT_OBJECT_KIND_BLOB,
             serialize(&chunk).unwrap().len() as u64,
         ),
         (
@@ -406,6 +406,8 @@ fn exactly_at_inspection_upper_bound_is_accepted() {
 #[test]
 fn exactly_ten_thousand_distinct_file_objects_are_inspected_and_accepted() {
     let (mut env, owner, identity) = environment();
+    let scanner = Scanner::new("ten-thousand");
+    configure(&mut env, vec![scanner.clone()], 10_000);
     let (initial_pack, head) = pack();
     let initial_map = encode_packlist(None, &[hash(&initial_pack)]).unwrap();
     let initial_tickets = vec![
@@ -423,8 +425,8 @@ fn exactly_ten_thousand_distinct_file_objects_are_inspected_and_accepted() {
     );
     assert_eq!(initial.unwrap(), AdvanceOutcome::Committed);
 
-    let scanner = Scanner::new("ten-thousand");
-    configure(&mut env, vec![scanner.clone()], 10_000);
+    assert_eq!(scanner.calls.lock().unwrap().len(), 1);
+    scanner.calls.lock().unwrap().clear();
     let objects: Vec<_> = (0_u32..10_000)
         .map(|number| {
             Object::Blob(Blob {
@@ -573,253 +575,52 @@ fn four_inspectors_are_accepted_and_deletion_skips_them() {
     }
 }
 
-fn tree_commit(entries: Vec<TreeEntry>, parents: Vec<Hash>) -> (Object, Object, Hash) {
-    let tree = Object::Tree(Tree { entries });
-    let signer = KeyPair::from_seed([9; 32]);
-    let mut commit = Commit::new_unannotated(
-        tree.id().unwrap(),
-        parents,
-        Identity::ed25519(signer.public.0),
-        signer.public.0,
-        b"existing file inspection".to_vec(),
-        42,
-        [0; 64],
-    );
-    commit.signature = sign_commit(&commit, &signer).unwrap().0;
-    let commit = Object::Commit(commit);
-    let head = commit.id().unwrap();
-    (tree, commit, head)
-}
-
-struct ExistingFilesAdvance {
-    env: Env,
-    owner: SigningKey,
-    identity: String,
-    old_head: Hash,
-    old_map: Hash,
-    new_head: Hash,
-    new_map: Hash,
-    added_pack: Hash,
-    candidate_pack: Hash,
-    candidate: Hash,
-    published: Hash,
-    tickets: Vec<Hash>,
-}
-
-impl ExistingFilesAdvance {
-    fn new(scanner: Arc<Scanner>, limit: usize) -> Self {
-        let (mut env, owner, identity) = environment();
-        let published = Object::Blob(Blob {
-            data: b"published file".to_vec(),
-        });
-        let candidate = Object::Blob(Blob {
-            data: b"newly reachable existing file".to_vec(),
-        });
-        let entry = |name: &[u8], object: &Object| TreeEntry {
-            name: name.to_vec(),
-            mode: EntryMode::Blob,
-            object_hash: object.id().unwrap(),
-        };
-        let (old_tree, old_commit, old_head) =
-            tree_commit(vec![entry(b"published", &published)], vec![]);
-        let initial_pack = object_pack(&[old_tree, old_commit, published.clone()]);
-        let candidate_pack = object_pack(std::slice::from_ref(&candidate));
-        let old_map = encode_packlist(None, &[hash(&initial_pack), hash(&candidate_pack)]).unwrap();
-        let initial_tickets = [
-            (&initial_pack, 10800),
-            (&candidate_pack, 10801),
-            (&old_map, 10802),
-        ]
-        .into_iter()
-        .map(|(bytes, n)| begin_and_upload(&env, &owner, &identity, bytes, n))
-        .collect();
-        let (_, initial) = advance(
-            &env,
-            &owner,
-            &identity,
-            &old_map,
-            old_head,
-            initial_tickets,
-            10803,
-        );
-        assert_eq!(initial.unwrap(), AdvanceOutcome::Committed);
-
-        // Seed the full-profile state this launch consumer must correctly read:
-        // the old pack is live to writers but has not acquired published membership.
-        let auth = env
-            .auth(&signed(&owner, &identity, Procedure::AdvanceRefs, 10804))
-            .unwrap();
-        let repo = &auth.repo().repo;
-        let source = env.pipe.shards.ref_shard(repo, HEAD);
-        let key = keys::membership(&repo.name, &hash(&candidate_pack));
-        let raw = block_on(env.pipe.meta.inner.get(&source, &key))
-            .unwrap()
-            .unwrap();
-        let mut witness = crate::store::publication::Witness::decode(&raw).unwrap();
-        witness.published = false;
-        block_on(
-            env.pipe
-                .meta
-                .inner
-                .apply(&source, Batch::new().put(key, witness.encode())),
-        )
-        .unwrap();
-        configure(&mut env, vec![scanner], limit);
-
-        let (tree, commit, new_head) = tree_commit(
-            vec![entry(b"new", &candidate), entry(b"published", &published)],
-            vec![old_head],
-        );
-        let added_pack = object_pack(&[tree, commit]);
-        let new_map = encode_packlist(Some(hash(&old_map)), &[hash(&added_pack)]).unwrap();
-        let tickets = vec![
-            begin_and_upload(&env, &owner, &identity, &added_pack, 10805),
-            begin_and_upload(&env, &owner, &identity, &new_map, 10806),
-        ];
-        Self {
-            env,
-            owner,
-            identity,
-            old_head,
-            old_map: hash(&old_map),
-            new_head,
-            new_map: hash(&new_map),
-            added_pack: hash(&added_pack),
-            candidate_pack: hash(&candidate_pack),
-            candidate: candidate.id().unwrap(),
-            published: published.id().unwrap(),
-            tickets,
-        }
-    }
-
-    fn run(&self) -> (Req, Result<AdvanceOutcome, ServerError>) {
-        let request = signed(&self.owner, &self.identity, Procedure::AdvanceRefs, 10807);
-        let result = block_on(self.env.pipe.advance_refs_with_tickets(
-            &self.env.auth(&request).unwrap(),
-            upd(HEAD, Match(self.old_head), self.new_head),
-            upd(PACKMAP, Match(self.old_map), self.new_map),
-            self.tickets.clone(),
-        ));
-        (request, result)
-    }
-
-    fn assert_unmoved(&self) {
-        let auth = self
-            .env
-            .auth(&signed(
-                &self.owner,
-                &self.identity,
-                Procedure::AdvanceRefs,
-                10807,
-            ))
-            .unwrap();
-        let repo = &auth.repo().repo;
-        let source = self.env.pipe.shards.ref_shard(repo, HEAD);
-        for (name, target) in [(HEAD, self.old_head), (PACKMAP, self.old_map)] {
-            assert_eq!(
-                block_on(
-                    self.env
-                        .pipe
-                        .meta
-                        .get(&source, &keys::ref_key(&repo.name, name))
-                )
-                .unwrap(),
-                Some(codec::encode_ref_id(&target))
-            );
-        }
-        for pack in [self.added_pack, self.new_map] {
-            assert!(
-                block_on(
-                    self.env
-                        .pipe
-                        .meta
-                        .get(&source, &keys::membership(&repo.name, &pack))
-                )
-                .unwrap()
-                .is_none()
-            );
-        }
-    }
-
-    fn publish_existing_pack(&self) {
-        let auth = self
-            .env
-            .auth(&signed(
-                &self.owner,
-                &self.identity,
-                Procedure::AdvanceRefs,
-                10807,
-            ))
-            .unwrap();
-        let repo = &auth.repo().repo;
-        let source = self.env.pipe.shards.ref_shard(repo, HEAD);
-        let key = keys::membership(&repo.name, &self.candidate_pack);
-        let raw = block_on(self.env.pipe.meta.inner.get(&source, &key))
-            .unwrap()
-            .unwrap();
-        let mut witness = crate::store::publication::Witness::decode(&raw).unwrap();
-        witness.published = true;
-        block_on(
-            self.env
-                .pipe
-                .meta
-                .inner
-                .apply(&source, Batch::new().put(key, witness.encode())),
-        )
-        .unwrap();
-    }
-}
-
 #[test]
-fn newly_reachable_existing_file_is_inspected_and_published_files_are_excluded() {
-    let scanner = Scanner::new("existing-files");
-    let fixture = ExistingFilesAdvance::new(scanner.clone(), 3); // Two added entries + one existing file.
-    assert_eq!(fixture.run().1.unwrap(), AdvanceOutcome::Committed);
-    let calls = scanner.calls.lock().unwrap();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].objects.len(), 1);
-    assert_eq!(
-        calls[0].objects[0].id.as_deref(),
-        Some(&fixture.candidate[..])
-    );
-    assert!(
-        !calls[0]
-            .objects
-            .iter()
-            .any(|object| object.id.as_deref() == Some(&fixture.published[..]))
-    );
-}
-
-#[test]
-fn newly_reachable_existing_file_counts_toward_upper_bound_before_hooks_and_apply() {
-    let scanner = Scanner::new("bounded-existing-files");
-    let fixture = ExistingFilesAdvance::new(scanner.clone(), 2);
-    let (request, result) = fixture.run();
-    let error = result.unwrap_err();
-    assert_eq!(error.code(), Code::InvalidArgument);
-    assert_eq!(error.public_message(), "object index limit exceeded");
-    assert!(scanner.calls.lock().unwrap().is_empty());
-    assert!(replay(&fixture.env, &request).is_none());
-    fixture.assert_unmoved();
-}
-
-#[test]
-fn unavailable_retry_uses_new_inspection_id_for_a_changed_logical_batch() {
-    let scanner = Scanner::new("membership-retry");
+fn unavailable_retry_uses_new_inspection_id_when_resulting_head_changes() {
+    let (mut env, owner, identity) = environment();
+    let scanner = Scanner::new("head-retry");
     scanner.unavailable.store(true, Ordering::SeqCst);
-    let fixture = ExistingFilesAdvance::new(scanner.clone(), 3);
-    let (request, result) = fixture.run();
+    configure(&mut env, vec![scanner.clone()], 10_000);
+    let (mut objects, first_head, _) = file_fixture();
+    let Object::Commit(mut alternate) = objects[1].clone() else {
+        panic!("fixture commit missing");
+    };
+    alternate.message = b"alternative inspected advance".to_vec();
+    alternate.signature = sign_commit(&alternate, &KeyPair::from_seed([9; 32]))
+        .unwrap()
+        .0;
+    let alternate = Object::Commit(alternate);
+    let second_head = alternate.id().unwrap();
+    objects.push(alternate);
+    let pack = object_pack(&objects);
+    let list = encode_packlist(None, &[hash(&pack)]).unwrap();
+    let tickets = vec![
+        begin_and_upload(&env, &owner, &identity, &pack, 10800),
+        begin_and_upload(&env, &owner, &identity, &list, 10801),
+    ];
+    let (request, result) = advance(
+        &env,
+        &owner,
+        &identity,
+        &list,
+        first_head,
+        tickets.clone(),
+        10802,
+    );
     assert_eq!(result.unwrap_err().code(), Code::Unavailable);
-    assert!(replay(&fixture.env, &request).is_none());
-    fixture.assert_unmoved();
-    fixture.publish_existing_pack();
+    assert!(replay(&env, &request).is_none());
+    assert_advance_unmoved(
+        &env,
+        &env.auth(&request).unwrap().repo().repo,
+        &[hash(&list)],
+    );
     scanner.unavailable.store(false, Ordering::SeqCst);
-    assert_eq!(fixture.run().1.unwrap(), AdvanceOutcome::Committed);
+    let (_, retried) = advance(&env, &owner, &identity, &list, second_head, tickets, 10802);
+    assert_eq!(retried.unwrap(), AdvanceOutcome::Committed);
     let calls = scanner.calls.lock().unwrap();
     assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].objects.len(), 1);
-    assert!(calls[1].objects.is_empty());
-    // Publishing existing membership changes this batch's immutable content.
-    // An inspector's cached result for the earlier batch must not be reused.
+    assert_eq!(calls[0].objects, calls[1].objects);
+    // The same file set under a different resulting head is a different
+    // logical advance, so a scanner's cached verdict must not be reused.
     assert_ne!(calls[0].id, calls[1].id);
 }

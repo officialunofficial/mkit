@@ -1142,15 +1142,10 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
                     id,
                     size: bytes.len() as u64,
                     object_type,
-                    roles: matches!(&object, Object::Tree(_) | Object::ChunkedBlob(_))
-                        .then_some(object),
                 }
             })
             .collect();
-        set.defer_native(
-            tickets.iter().map(|ticket| ticket.pack_id).collect(),
-            entries,
-        );
+        set.defer_native(entries);
     }
     Ok(StagedCommits {
         parents,

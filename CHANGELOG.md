@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Server (WP-5.5a, R-200): synchronous complete-set inspection before apply,
+- Server (WP-5.5a, R-200): synchronous added-pack file inspection before apply,
   fail-closed retries without replay, signed remote Inspect, and advertised
   launch input limits (default 10,000 objects, maximum four inspectors).
+  Inspect every Blob and ChunkedBlob, surplus included, without role reads;
+  enabling inspection requires an empty store. Full classification follows in WP-5.5c.
 
 - WP-5.10: durable timer-11 automatic cache purge intents, signed global delivery
   with stable ids and fresh nonces, local invalidation and snapshot refill fences.
