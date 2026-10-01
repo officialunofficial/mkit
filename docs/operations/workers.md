@@ -206,11 +206,19 @@ operator mount while preserving canonical signature verification. Keep operator
 ingress trusted and network-restricted; the remaining unauthenticated admin-body
 lifetime issue must be hardened before offering admin to untrusted ingress.
 
-The cached Public in-process reader with `takedown_denial=false` has a deferred
-reachability-refresh defect: repeated cache hits can extend stale authorization.
-Keep that affected embedding configuration disabled. Configured complete
+The cached Public in-process reader and batch URL issuance (`issue_urls`) with
+`takedown_denial=false` have an open reachability-refresh defect: repeated cache
+hits can extend stale authorization and bearer HTTP reads after ref rewind or
+deletion. Keep those affected configurations disabled until corrected and
+verified against the original invalidation deadline. Configured complete
 takedown with fresh global denial avoids that cache path; a programmatic denial
 flag alone cannot bypass preservation/purge prerequisites.
+
+Custom paid HTTP Admission and Authority/fence hooks currently require remote
+hook configuration, including an external binding or signed HTTPS channel, even
+when supplied in process.
+Keep those configurations disabled until that validation defect is corrected;
+custom write admission with free public reads is the exercised example.
 
 Pin the git dependency to an approved immutable commit until a release tag exists.
 
@@ -266,8 +274,13 @@ timestamps, stable ids, redacted errors, backlog and recovered results.
 
 1. With a moderation admin signer, submit a stable `operation_id`, named source
    repository and either 1–256 distinct Blob/manifest ids or one whole pack id.
-   Keep reason private. Acceptance activates global denial and returns pending
-   `complete=false`; retain the takedown id and audit reference.
+   Keep reason private. The intended acceptance contract activates every
+   requested global denial and returns pending `complete=false`; retain the
+   takedown id and audit reference. An open replay defect can return stored HTTP
+   200 after interrupted activation while some requested denials remain inactive.
+   Its correction and regression evidence are required before candidate selection.
+   Until corrected, verify every requested denial and use the emergency WAF
+   isolation procedure when needed; successful replay alone proves no such check.
 2. Check public HTTP/token/pack/reuse denial, then poll GetTakedown and bounded
    ListTakedowns for acquisition, verification, discovery, retention, holds and
    purge status. Under `any`, holder discovery remains incomplete.
@@ -308,6 +321,11 @@ Measure all nested work and retries; arbitrary host hook work shares those limit
 
 Whole-isolate memory is still an open acceptance gate. A local sampled
 allocated-capacity sum was 104604962 bytes (about 105 MB), with attribution gaps.
+The current launch and Uno Worker feature graphs omit the server-local pure-Rust
+decoder scratch reservation and idle-reader release. Correct those actual
+deployment graphs and run their focused allocator regressions before candidate
+selection; bounded core decoding alone does not establish the verification
+allowance. This defect is separate from preservation's acquisition allowance.
 The current preservation Rust allowance is 96 MiB; its reduction to at most
 48 MiB is required before selecting the launch candidate. Neither value certifies
 fit in a 128 MB isolate once JS, transport and overlap are counted. Measure

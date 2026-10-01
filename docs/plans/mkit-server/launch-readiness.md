@@ -152,6 +152,20 @@ informational. Size does not establish runtime/resource acceptance.
   Medium/unclassified. #1260 and the requested Uno matrix do not constitute a
   rerun/closure of many_refs. Diagnose at its original geometry and preserve
   its failed evidence.
+- **Confirmed delta-review findings at `c3921b06`, still open:** High 7-1
+  (interrupted Takedown can replay success before every denial is activated),
+  High 4-1 (actual Worker/Uno feature graphs omit server-local decoder scratch
+  reservation and idle-reader release), and High 6-1 (batch URL issuance renews
+  stale reachability when takedown denial is off) require source corrections and
+  focused regression evidence before selecting the affected launch candidate.
+  Medium 8b-1 (custom paid HTTP/Authority hooks require an unused remote channel)
+  and Medium 9-2 (native takedown timers omit the automatic-purge audit seam)
+  require fixes before using those configurations. Low 12-3 (the isolated
+  pure-Rust scheduled allocator regression is absent from mandatory gates)
+  remains a regression-gate gap, not a measured heap failure. Only Medium 10-1
+  is resolved by this docs PR's registry reconciliation. These delta dispositions
+  are separate from the historical deferred Mediums below; no runtime fix or
+  final-artifact resource acceptance is supplied by this docs PR.
 - **Review Mediums deferred post-launch:** full review at `e8164870` retains
   2-1 (Any + Address authority generation), 3-2 (native implicit
   TransportIdentity denial), 3-3 (larger configurable outcome batches),
