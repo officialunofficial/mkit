@@ -334,7 +334,9 @@ impl Client {
 
     /// A new HTTP client for the same server, with no connection state.
     pub fn reconnect(&self) -> Result<Self, String> {
-        Self::new(&Url::parse(&self.base).map_err(|e| e.to_string())?)
+        let mut fresh = Self::new(&Url::parse(&self.base).map_err(|e| e.to_string())?)?;
+        fresh.http_trace.clone_from(&self.http_trace);
+        Ok(fresh)
     }
 
     async fn send(&self, req: http::Request<Bytes>) -> Result<Reply, String> {

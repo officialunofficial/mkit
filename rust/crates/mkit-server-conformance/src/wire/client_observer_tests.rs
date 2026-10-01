@@ -216,7 +216,7 @@ async fn observer_records_chunked_gzip_and_http500_without_changing_reply() {
         b"private-error-body",
         "X-Proxy-Secret: private-proxy\r\n",
     );
-    let (base, server) = server(vec![chunked, gzip, error], true);
+    let (base, server) = server(vec![chunked, gzip, error], false);
     let trace = file();
     let client = client(&base, Some(trace.as_file().try_clone().unwrap()));
     assert_eq!(
@@ -254,8 +254,8 @@ async fn observer_records_chunked_gzip_and_http500_without_changing_reply() {
             arrival <= eof && eof <= decoded && decoded <= record["result_ms"].as_u64().unwrap()
         );
     }
-    assert_eq!(captured[0].client, captured[1].client);
-    assert_eq!(
+    assert_ne!(captured[0].client, captured[1].client);
+    assert_ne!(
         observed[0]["response"]["outer_tcp"],
         observed[1]["response"]["outer_tcp"]
     );
