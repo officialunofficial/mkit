@@ -28,6 +28,7 @@ RPC = "/mkit.transport.v1.TransportService/GetServerInfo"
 FILE_BYTES = 512 * 1024
 PACK_CAP = 64 * 1024 * 1024
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+WRITER_SEED = "5e" * 32
 
 
 def git(root, *args):
@@ -323,7 +324,20 @@ def main():
         del wasm
         tls = certificates(run, env, evidence)
         origin = f"https://localhost:{port}"
-        remote = "mkit+" + origin + "/default"
+        # Multi addresses require the self-certifying owner namespace. Derive
+        # the public key independently from the same local fixture seed the CLI
+        # will load; a bare /default is invalid X-Repository in this profile.
+        public = subprocess.check_output(["node", "-e", """
+const {createPrivateKey,createPublicKey}=require('node:crypto');
+const key=createPrivateKey({format:'der',type:'pkcs8',key:Buffer.concat([
+  Buffer.from('302e020100300506032b657004220420','hex'),Buffer.from(process.argv[1],'hex')])});
+process.stdout.write(createPublicKey(key).export({format:'der',type:'spki'}).subarray(-32).toString('hex'));
+""", WRITER_SEED], cwd=ROOT, env=env, text=True, timeout=10)
+        if not re.fullmatch(r"[0-9a-f]{64}", public):
+            raise RuntimeError("fixture signer public key is invalid")
+        repository = "ed25519-" + public + "/default"
+        remote = "mkit+" + origin + "/" + repository
+        evidence["repository"] = repository
         classes = [("REFSTORE", "RefStore"), ("NS_COORD", "NsCoordinator"),
                    ("REF_SHARD", "RefShard"), ("REPO_INDEX", "RepoIndexShard"),
                    ("CONTENT_INDEX", "ContentIndexShard")]
@@ -408,7 +422,7 @@ def main():
             keys = repo / ".mkit/keys"
             keys.mkdir(mode=0o700, exist_ok=True)
             key = keys / "default.key"
-            key.write_bytes(bytes.fromhex("11" * 32))
+            key.write_bytes(bytes.fromhex(WRITER_SEED))
             key.chmod(0o600)
             # Both source and fresh clone resolve this existing signer from
             # isolated user config. Security-sensitive -c keys are refused.
