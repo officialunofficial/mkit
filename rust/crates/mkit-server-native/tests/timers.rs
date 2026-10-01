@@ -470,6 +470,106 @@ async fn shutdown_drains_current_tick_and_starts_no_next_tick() {
     );
 }
 
+/// Both explicit timer drains and an auth sibling wait for an in-flight native
+/// tick. The memory pipeline completes synchronously without the gate, so a
+/// single poll detects missing exclusion without a sleep or a timing race.
+#[cfg(feature = "test-faults")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_timer_drain_waits_for_native_tick_and_auth_sibling_shares_gate() {
+    use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig, RequestMeta};
+    use mkit_server::upload::UploadLimits;
+    use mkit_server::{Addressing, MemoryKv, NoopMetrics, Procedure, RepoId};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = open(&root.path().join("gated.sqlite3"));
+    put(&store, now(), b"blocked").await;
+    let gate = Arc::new(tokio::sync::Mutex::new(()));
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let stop = Shutdown::new();
+    let task = TimerDriver::new(
+        store.clone(),
+        TimerRegistry::new().register(Blocked {
+            entered: entered.clone(),
+            release: release.clone(),
+        }),
+        Arc::new(SystemClock),
+    )
+    .with_test_timer_gate(gate.clone())
+    .start(stop.clone())
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), entered.notified())
+        .await
+        .unwrap();
+    assert!(
+        gate.try_lock().is_err(),
+        "native tick did not hold the gate"
+    );
+
+    let pipeline = Pipeline::new(
+        MemoryBlobStore::default(),
+        Arc::new(MemoryKv::default()),
+        Hooks::new(),
+        PipelineConfig::new(
+            Addressing::Single {
+                repo: RepoId {
+                    namespace: NamespaceKey::deployment_default(),
+                    name: RepoName::new("default").unwrap(),
+                },
+            },
+            AuthMode::Open,
+            UploadLimits {
+                max_total_bytes: 1024,
+                max_chunks: 8,
+            },
+        ),
+        Arc::new(SystemClock),
+        Arc::new(NoopMetrics),
+    )
+    .unwrap()
+    .with_test_timer_gate(gate);
+    let sibling = pipeline.with_auth(AuthMode::Open).unwrap();
+    let request = RequestMeta {
+        procedure: Procedure::ListRefs,
+        header: &|h| (h == "x-mkit-test-run-timers").then(|| "refs/heads/main".into()),
+        header_values: None,
+        unary_body: None,
+        transport_principal: None,
+    };
+    let authenticated = pipeline.authenticate(&request).unwrap();
+    let sibling_authenticated = sibling.authenticate(&request).unwrap();
+    let mut drain = Box::pin(pipeline.list_refs(&authenticated, "refs/heads/"));
+    let mut sibling_drain = Box::pin(sibling.list_refs(&sibling_authenticated, "refs/heads/"));
+    assert!(futures::poll!(drain.as_mut()).is_pending());
+    assert!(futures::poll!(sibling_drain.as_mut()).is_pending());
+
+    let ordinary = pipeline
+        .authenticate(&RequestMeta {
+            header: &|_| None,
+            ..request
+        })
+        .unwrap();
+    let mut listing = Box::pin(pipeline.list_refs(&ordinary, "refs/heads/"));
+    assert!(futures::poll!(listing.as_mut()).is_ready());
+    stop.trigger();
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        task.await.unwrap();
+        assert!(drain.await.unwrap().is_empty());
+        assert!(sibling_drain.await.unwrap().is_empty());
+    })
+    .await
+    .unwrap();
+    assert!(
+        store
+            .get(&partition(), &result_key(b"blocked"))
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_put_during_tick_survives_directory_update() {
     let root = tempfile::tempdir().unwrap();

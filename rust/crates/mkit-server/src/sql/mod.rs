@@ -23,7 +23,7 @@ mod tests;
 pub use capacity::{
     Capacity, DEFAULT_PAGE_SIZE, RESERVE_TREE_DEPTH, batch_growth_bytes, reserve_floor,
 };
-pub use kv::{GET_MANY_CHUNK, SqlKvStore, TIMER_HEADS};
+pub use kv::{GET_MANY_CHUNK, SqlKvStore, TIMER_WINDOW_AFTER, TIMER_WINDOW_START, TimerCursor};
 
 use crate::error::Redacted;
 use crate::rt::{MaybeSend, MaybeSync};
