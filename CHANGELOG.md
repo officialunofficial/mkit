@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server (R-205): `DEFAULT_REPO_VISIBILITY=public|private` on Workers and
+  native `--default-repo-visibility` select visibility for repositories without
+  a stored setting. The default remains public; explicit visibility wins.
+  Set it at deployment creation: changing it affects all unset repositories.
+
 - Server (R-204): embedders can issue batches of up to 16 URL tokens through
   `ObjectReader::issue_urls`, sharing RPC authorization, epochs and minting,
   with bounded published-view reachability and denial preflight.

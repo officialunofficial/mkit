@@ -38,7 +38,7 @@ mkit-server serve [--listen <ADDR>] [--listen-enc <ADDR>] --repo-root <DIR>
     [--bearer-token-file <PATH>]          # or MKIT_API_TOKEN
     [--ticket-key-file <PATH>]            # or MKIT_TICKET_KEYS
     [--audience <ORIGIN>] [--repository <ID>]
-    [--addressing single|multi]
+    [--addressing single|multi] [--default-repo-visibility public|private]
     [--namespace-policy allowlist|any] [--namespace-allowlist <PATH>]
     [--unsafe-open-namespaces] [--enc-repository <NS>/<NAME>]
     [--grant-schemes <TOKENS>] [--webauthn-rp <ID=ORIGINS>]... [--unsafe-allow-loopback-grants]
@@ -181,6 +181,11 @@ Under `--addressing multi`, `--listen-enc` requires `--enc-repository
 <NS>/<NAME>` naming the one repository the listener's sessions bind
 (SPEC-TRANSPORT-CONNECT §7.4), and `--unsafe-allow-any-enc-peer` is
 refused: an enc session needs the repository its peer is authorized for.
+
+`--default-repo-visibility public|private` defaults to `public` for repositories
+without an explicit visibility. `SetRepoVisibility` always wins. Changing this
+setting changes every repository without an explicit setting; configure it when
+creating the deployment.
 
 ### Write grants
 

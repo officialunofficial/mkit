@@ -75,6 +75,8 @@ pub const PLAN_VAR: &str = "WORKERS_PLAN";
 pub const TICKET_KEYS_VAR: &str = "TICKET_KEYS";
 /// The Worker var selecting `single` (default) or `multi` addressing.
 pub const ADDRESSING_VAR: &str = "ADDRESSING";
+/// Visibility when no explicit repository visibility is stored.
+pub const DEFAULT_REPO_VISIBILITY_VAR: &str = "DEFAULT_REPO_VISIBILITY";
 /// The Worker var for a multi deployment's namespace policy: `allowlist`
 /// (default) or `any`.
 pub const NAMESPACE_POLICY_VAR: &str = "NAMESPACE_POLICY";
@@ -195,6 +197,8 @@ pub struct WorkerConfig {
     /// repository (default) or `X-Repository` routing across the
     /// policy's namespaces.
     pub addressing: mkit_server::Addressing,
+    /// `DEFAULT_REPO_VISIBILITY`: public (default) or private for missing visibility rows.
+    pub default_repo_visibility: mkit_server::pipeline::RepoVisibility,
     /// Upload MAC keys; missing keys disable `BeginUpload` (and refuse a
     /// multi deployment outright).
     pub ticket_keys: Option<TicketKeys>,
@@ -311,6 +315,7 @@ impl WorkerConfig {
         }
         config.single_upload_max_bytes = Some(SINGLE_PUT_MAX_BYTES);
         config.sharding = self.sharding;
+        config.default_repo_visibility = self.default_repo_visibility;
         config.ticket_keys.clone_from(&self.ticket_keys);
         config.authority_fence.clone_from(&self.authority_fence);
         config.scanner_retrieval.clone_from(&self.scanner_retrieval);
@@ -410,6 +415,15 @@ impl WorkerConfig {
             None | Some("single") => false,
             Some("multi") => true,
             Some(_) => return Err(ConfigError("ADDRESSING must be single or multi".into())),
+        };
+        let default_repo_visibility = match var(DEFAULT_REPO_VISIBILITY_VAR).as_deref() {
+            None | Some("public") => mkit_server::pipeline::RepoVisibility::Public,
+            Some("private") => mkit_server::pipeline::RepoVisibility::Private,
+            Some(_) => {
+                return Err(ConfigError(
+                    "DEFAULT_REPO_VISIBILITY must be public or private".into(),
+                ));
+            }
         };
         let repository = if multi {
             // `wrangler.jsonc` ships a default; under multi it is ignored.
@@ -561,6 +575,7 @@ impl WorkerConfig {
             audience,
             repository,
             addressing,
+            default_repo_visibility,
             ticket_keys,
             max_pack_bytes,
             grants,
@@ -2735,9 +2750,12 @@ mod glue {
             registry.register(BackupDrain)
         };
         #[cfg(feature = "published-view")]
-        let registry = if let (Some(alarm), Ok(coordinator)) = (&snapshot_alarm, snapshot_target) {
+        let registry = if let (Some(alarm), Ok(coordinator), Ok(cfg)) =
+            (&snapshot_alarm, snapshot_target, cfg.as_ref())
+        {
             registry.register(crate::purge::Budgeted {
                 handler: crate::published_view::SnapshotHandler {
+                    default_repo_visibility: cfg.default_repo_visibility,
                     bucket: crate::published_view::WorkerSnapshotBucket(env.clone(), None),
                     coordinator,
                     clock: Arc::new(WorkerClock),
@@ -3228,6 +3246,47 @@ mod tests {
             WorkerConfig::from_vars(vars(&[(AUDIENCE_VAR, "https://vcs.example")])).unwrap_err(),
             ConfigError("AUTH_REPOSITORY is not configured".into())
         );
+    }
+
+    #[test]
+    fn default_repo_visibility_is_public_configurable_and_propagated() {
+        use mkit_server::pipeline::RepoVisibility;
+        let base = [
+            (AUDIENCE_VAR, "https://vcs.example"),
+            (REPOSITORY_VAR, "default"),
+        ];
+        let mut cfg = WorkerConfig::from_vars(vars(&base)).unwrap();
+        assert_eq!(cfg.default_repo_visibility, RepoVisibility::Public);
+        assert_eq!(
+            cfg.pipeline_config().unwrap().default_repo_visibility,
+            RepoVisibility::Public
+        );
+        for (value, expected) in [
+            ("public", RepoVisibility::Public),
+            ("private", RepoVisibility::Private),
+        ] {
+            let mut pairs = base.to_vec();
+            pairs.push((DEFAULT_REPO_VISIBILITY_VAR, value));
+            let cfg = WorkerConfig::from_vars(vars(&pairs)).unwrap();
+            assert_eq!(cfg.default_repo_visibility, expected);
+            assert_eq!(
+                cfg.pipeline_config().unwrap().default_repo_visibility,
+                expected
+            );
+        }
+        cfg.default_repo_visibility = RepoVisibility::Private;
+        assert_eq!(
+            cfg.pipeline_config().unwrap().default_repo_visibility,
+            RepoVisibility::Private
+        );
+        for value in ["", "PRIVATE", "friends", " public"] {
+            let mut pairs = base.to_vec();
+            pairs.push((DEFAULT_REPO_VISIBILITY_VAR, value));
+            assert_eq!(
+                WorkerConfig::from_vars(vars(&pairs)).unwrap_err(),
+                ConfigError("DEFAULT_REPO_VISIBILITY must be public or private".into())
+            );
+        }
     }
 
     /// The hook vars are part of the config: absent means the built-in hooks,

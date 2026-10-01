@@ -12,6 +12,11 @@ provides indexed configuration, HTTP configuration and read-CORS options;
 call `adapter::serve_with` with that configuration. Environment variables
 cannot activate the mount. Production activation belongs to WP-4.18/5.2.
 
+`DEFAULT_REPO_VISIBILITY=public|private` defaults to `public` and supplies
+`WorkerConfig::default_repo_visibility` when no explicit visibility is stored.
+An explicit `SetRepoVisibility` wins. Changing the default changes every repository
+without an explicit setting; set it when creating the deployment.
+
 The feature-gated secret `URL_TOKEN_KEYS` uses the key-file grammar:
 `active <64 hex seed>` and `retired <64 hex public key> <retired_at_ms>`.
 `URL_TOKEN_TTL` is seconds, defaults to 900 and accepts 1–86400. Parsed keys

@@ -1396,3 +1396,54 @@ fn issue_urls_paths_and_reachability_share_one_decode_budget() {
         );
     }
 }
+
+#[test]
+fn private_default_fresh_repo_requires_explicit_public_for_connect_http_and_reader() {
+    let fx = fixture_tweaked(Hooks::new(), http_cfg(), |cfg| {
+        cfg.default_repo_visibility = crate::pipeline::RepoVisibility::Private;
+        cfg.url_tokens = Some(super::private_tokens::tokens());
+    });
+    let d = data();
+    fx.push("room", &d.refs(), d.head(), None);
+    let repo = fx.repo_id("room");
+    assert!(
+        block_on(fx.pipe.meta.inner.get(
+            &fx.pipe.shards.coordinator(&repo.namespace),
+            &keys::repo_visibility(&repo.name)
+        ))
+        .unwrap()
+        .is_none(),
+        "first push does not store a visibility"
+    );
+    let anonymous = Req::unsigned(Procedure::ListRefs).header("x-repository", &fx.identity("room"));
+    assert_eq!(
+        block_on(fx.pipe.list_refs(&fx.auth(&anonymous), "refs/"))
+            .unwrap_err()
+            .code(),
+        Code::NotFound
+    );
+    assert_uniform_404(&fx.get(&fx.object_url("room", &id(&d.small))));
+    assert_uniform_404(&fx.get(&fx.ref_url("room", "main", "small.txt")));
+    assert_eq!(public_read(&fx, "room", &[id(&d.small)]), vec![None]);
+    assert!(public_urls(&fx, &[UrlTarget::Object(id(&d.small))], 0).unwrap()[0].is_none());
+    let set = signed(
+        &fx.owner,
+        &fx.identity("room"),
+        Procedure::SetRepoVisibility,
+        fx.number(),
+    );
+    block_on(fx.pipe.set_repo_visibility(
+        &fx.auth(&set),
+        VisibilityRequest::Envelope(crate::pipeline::RepoVisibility::Public),
+    ))
+    .unwrap();
+    assert!(
+        !block_on(fx.pipe.list_refs(&fx.auth(&anonymous), "refs/"))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(fx.get(&fx.object_url("room", &id(&d.small))).status, 200);
+    assert_eq!(fx.get(&fx.ref_url("room", "main", "small.txt")).status, 200);
+    assert!(public_read(&fx, "room", &[id(&d.small)])[0].is_some());
+    assert!(public_urls(&fx, &[UrlTarget::Object(id(&d.small))], 0).unwrap()[0].is_some());
+}

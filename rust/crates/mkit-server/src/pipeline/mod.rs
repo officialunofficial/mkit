@@ -72,6 +72,7 @@ use core::future::Future;
 use core::time::Duration;
 use std::sync::Arc;
 
+pub use mkit_attest::grant::Visibility as RepoVisibility;
 use mkit_attest::grant::{Visibility, verify_visibility_statement};
 use mkit_core::hash::{Hash, to_hex, to_hex_bytes};
 use mkit_core::protocol::{AdvanceOutcome, PackKey};
@@ -254,6 +255,8 @@ pub struct PipelineConfig {
     pub authority_fence: Option<crate::authority::AuthorityFence>,
     /// Write authorization policy; Open for Single, Owner for Multi.
     pub write_policy: WritePolicy,
+    /// Visibility of repositories without an explicit stored setting (default public).
+    pub default_repo_visibility: RepoVisibility,
     /// Role of the authorizer hook, defaulting to an additional check.
     pub authorizer_role: AuthorizerRole,
     /// Upload caps, supplied by the binding (used by M0-05b).
@@ -351,6 +354,7 @@ impl PipelineConfig {
         };
         Self {
             write_policy,
+            default_repo_visibility: RepoVisibility::Public,
             authorizer_role: AuthorizerRole::Check,
             addressing,
             sharding: Sharding::Single,
@@ -552,6 +556,15 @@ fn replay_answer(decision: ReplayDecision) -> Result<Option<StoredResult>, Serve
 
 fn ms(ms: i64) -> u64 {
     u64::try_from(ms).unwrap_or(0)
+}
+
+/// Resolve visibility for reads and snapshot publication. Explicit rows always
+/// override the deployment default; callers strongly read the row, never cache it.
+#[must_use]
+pub fn repo_is_private(stored: Option<&codec::RepoVisibilityV1>, default: RepoVisibility) -> bool {
+    stored.map_or(default == RepoVisibility::Private, |row| {
+        row.visibility == codec::StoredVisibility::Private
+    })
 }
 
 /// The `rv` codec's visibility for a statement/envelope [`Visibility`].
@@ -2844,10 +2857,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .map_err(meta_error)?
             .unwrap_or(0);
         Ok(Some((
-            matches!(
-                stored.map(|v| v.visibility),
-                Some(codec::StoredVisibility::Private)
-            ),
+            repo_is_private(stored.as_ref(), self.cfg.default_repo_visibility),
             epoch,
         )))
     }

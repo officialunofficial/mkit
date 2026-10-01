@@ -2301,3 +2301,14 @@ not migrated (R-198 B1).
   or reveal inaccessible content through batch presence.
 - **Enforced:** `Pipeline::issue_url`, `ObjectReader::issue_urls` and its shared
   bounded reader preflight; parity, private, denial and pending-publication tests.
+
+### Deployment default visibility (R-205)
+
+- **Always:** every visibility read uses a stored visibility when present, and
+  otherwise the deployment default, which is public unless configured.
+- **Because:** first writes must honor private defaults, and an explicit owner
+  setting must have identical precedence on every serving surface.
+- **If violated:** an unset repository could leak through a path with a hard-coded
+  public fallback, or a deployment change could override an owner's explicit setting.
+- **Enforced:** `pipeline::repo_is_private` in the three strong visibility lookups; Connect,
+  HTTP, URL issuance, readers and snapshots use those paths. No visibility cache.
