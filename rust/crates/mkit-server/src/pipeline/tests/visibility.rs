@@ -1298,3 +1298,39 @@ fn admin_owner_cannot_sign_visibility_statements() {
         );
     }
 }
+
+#[test]
+fn deployment_default_visibility_is_resolved_for_every_connect_read() {
+    let owner = key(1);
+    for default in [Visibility::Public, Visibility::Private] {
+        for explicit in [
+            None,
+            Some(codec::StoredVisibility::Public),
+            Some(codec::StoredVisibility::Private),
+        ] {
+            let clock = clock();
+            let mut c = config(&owner, AuthorizerRole::Check);
+            c.default_repo_visibility = default;
+            let e = build(
+                c,
+                Spy::new(store(&clock)),
+                super::policy::policy_hooks(false),
+                clock,
+            );
+            let repo = repository(&owner);
+            let id = repo_id(&e, &owner);
+            put_repo(&e, &id, explicit);
+            let private = explicit.map_or(default == Visibility::Private, |v| {
+                v == codec::StoredVisibility::Private
+            });
+            for procedure in READS {
+                let result = try_read(&e, &anonymous_read(&repo, procedure), procedure);
+                if private {
+                    assert_not_found(&result.unwrap_err(), "deployment default");
+                } else {
+                    assert_served(result, "explicit or default public");
+                }
+            }
+        }
+    }
+}

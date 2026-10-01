@@ -35,3 +35,6 @@ lto = true
 test-faults = ["mkit-server-worker/test-faults"]
 
 [workspace]
+
+[patch.crates-io]
+ruzstd = { path = "../../../../rust/vendor/ruzstd" }

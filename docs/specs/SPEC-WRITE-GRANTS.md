@@ -761,12 +761,19 @@ packmap consistent and lets the head's flags stand for both.
 ### 9.1 Visibility
 
 Each repository has a visibility, `public` or `private`, stored in the
-namespace coordinator. It is `public` unless changed.
+namespace coordinator. It is the deployment's default visibility (`public`
+unless configured) unless changed. A stored visibility always takes precedence
+over the deployment default.
 
 **`SetRepoVisibility(repository, visibility)`** is the only way to
-change it. It is a unary call, authorized only by the owner key (§6
-path 1), an authority source, or an owner-signed visibility statement.
+store an explicit repository visibility. It is a unary call, authorized only by
+the owner key (§6 path 1), an authority source, or an owner-signed visibility
+statement.
 A grant never authorizes it.
+
+Changing the deployment default changes the effective visibility of every
+repository that has never had an explicit visibility stored, including existing
+repositories. Operators should set this default at deployment creation.
 
 - Under the owner key or an authority source, the request is signed
   with auth v2 and a `body:` commitment, and is replay-protected like
@@ -802,7 +809,8 @@ A grant never authorizes it.
   visibility without creating the repository. The repository is created
   by its first authorized write, with the recorded visibility. A client
   that wants a private repository sets `private` before its first push,
-  so no content is ever public.
+  so no content is ever public. A deployment may instead configure its default
+  visibility as `private` at deployment creation.
 
 A change to `private` is reported complete only when no read that
 begins afterwards can be answered as `public`: every currently leased
@@ -1214,6 +1222,7 @@ Landed so far (each pinned by BLAKE3 in the directory's `MANIFEST.txt`):
 
 | Version | Status | Changes |
 |---|---|---|
+| `1` (R-205 amendment) | draft | Repository visibility without a stored setting follows the deployment default, public unless configured; explicit visibility always wins. Changing the default also changes existing repositories without explicit visibility. |
 | `1` | draft | Initial grant statement (audiences, ref scopes, capabilities), owner schemes, exact-epoch revocation with bounded epoch statements, epoch leases and the commit deadline, server policy, signed reads, private repositories and URL tokens, and server-side grants for ssh and enc (mkit#1085, mkit#1089). WP-4.11 adds the `token=` URL form and key-set publication, and amends token paths to 0–1024 bytes so an empty path names the root tree. Fix round 1 orders stateless token checks before the stored-epoch read. WP-2.9 pins the `DownloadPack` signed-read body; WP-2.11 lands the URL-token fixtures. Fix round 2 caps `url_token_ttl` at 24 h and excludes control characters from token paths. |
 
 ---

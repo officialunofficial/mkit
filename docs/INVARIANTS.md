@@ -708,13 +708,16 @@ bomb guards (claim ≤ `MAX_RAW_OBJECT_SIZE` before decoding, output bounded
 to the claim, exact length re-check). Both paths reserve output fallibly
 without zero-filling the claim; unpack charges the resident budget first.
 The pure-Rust path reads out at most `claim + 1` bytes and never grows the
-reserved output. Its separate decoder ring rounds up to a power of two
-and holds up to one window of pending output, outside the owned-payload
+reserved output. Its decode window is capped at 8 MiB independently of the
+claim. Vendored ruzstd checks `min(Window_Size, 128 KiB)` before raw/RLE
+materialization and before executing any compressed sequences. Its separate
+ring and block scratch have a fixed 28 MiB working allowance, including
+transient old/new ring allocations during growth, outside the owned-payload
 resident cap and the window reader's carry/output budget. The pure-Rust path also
 checks what `ruzstd` skips and the C decoder enforces: the declared
 content size against the claim and the decoded length, the content
 checksum, the reserved descriptor and sequence-mode bits, and the
-block-size bound for windows under 128 KiB. When both features are on,
+per-block size bound for every window. When both features are on,
 the C decoder serves reads.
 
 **Because:** a pack must mean the same objects on the native server (C)
@@ -728,12 +731,11 @@ The hand-written frame parsing assembles header fields in `u64`, never
 `usize`, so it behaves the same on 32-bit wasm32 as on 64-bit native.
 
 **Residual divergence (documented, not closed):** the two decoders agree
-on every frame an encoder produces (differential proptest over
-`PackWriter` output, C-encoded fixtures) and on the curated adversarial
+on the encoder frames covered by the differential proptest over
+`PackWriter` output and C-encoded fixtures, and on the curated adversarial
 table. On *malformed* frames they do not fully agree. Fail-closed on
 `pack-ruzstd` (it rejects, C accepts): frames declaring a window above
-`max(claim, 8 MiB)`, windowed frames under 128 KiB whose output exceeds
-the window (legal for raw blocks and for multi-block frames), and
+8 MiB, and
 corrupt entropy-coded sections the C one-shot decoder tolerates. Fail-open
 (it accepts, C rejects) and both-accept-different-bytes cases also exist
 for a small share of corrupted frames, in Huffman/FSE table internals
@@ -2290,6 +2292,47 @@ an obligation or generation change.
 and the publication recheck regressions. No tag, timer kind, public protocol,
 packmap limit or whole-alarm budget changes. Pre-launch timer codecs are reset,
 not migrated (R-198 B1).
+
+## Corrupt preservation sources have terminal audited checkpoints
+
+**Always:** decoding or hash validation failure of a selected verified-member
+source records a terminal source failure and an audit entry atomically. Denial
+stays in force, the request remains unresolved, and a restart does not decode
+that source again. Storage unavailability and resource exhaustion remain retryable.
+Raw and compressed delta result headers are compared with immutable verified
+decoded sizes before ordinary decode budgeting. Compressed prefix inspection
+reads nine output bytes under the fixed window/block bounds, releases its decoder
+before full decode, and does not reserve the advertised stream or result size.
+
+**Because:** later storage corruption can invalidate historical verification;
+retrying the same bad bytes cannot repair them and can monopolize Worker alarms.
+
+**If violated:** a request can loop forever or falsely report preservation success.
+
+**Enforced by:** preservation work corruption/restart and transient-I/O regressions;
+`zstd_heap_bounds` measures the actual decoder on native and wasm32.
+
+### Embedder URL token issuance (R-204)
+
+- **Always:** reader URL batches share RPC read authorization, stored epoch,
+  audience and TTL minting, and return tokens only for accessible published targets.
+- **Because:** a verified reader envelope delegates in-process authority without
+  creating a second token policy; HTTP URL tokens serve only the published view.
+- **If violated:** an embedder could issue credentials under stale grant authority
+  or reveal inaccessible content through batch presence.
+- **Enforced:** `Pipeline::issue_url`, `ObjectReader::issue_urls` and its shared
+  bounded reader preflight; parity, private, denial and pending-publication tests.
+
+### Deployment default visibility (R-205)
+
+- **Always:** every visibility read uses a stored visibility when present, and
+  otherwise the deployment default, which is public unless configured.
+- **Because:** first writes must honor private defaults, and an explicit owner
+  setting must have identical precedence on every serving surface.
+- **If violated:** an unset repository could leak through a path with a hard-coded
+  public fallback, or a deployment change could override an owner's explicit setting.
+- **Enforced:** `pipeline::repo_is_private` in the three strong visibility lookups; Connect,
+  HTTP, URL issuance, readers and snapshots use those paths. No visibility cache.
 
 ## Restricted preserved reads and atomic operator holds (WP-5.6a-3)
 

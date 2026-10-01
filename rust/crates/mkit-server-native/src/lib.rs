@@ -66,4 +66,4 @@ mod http_proofs;
 pub use http_proofs::NativeProofs;
 
 #[cfg(feature = "http-objects")]
-pub use mkit_server::pipeline::{ObjectReader, ReaderView};
+pub use mkit_server::pipeline::{IssuedUrl, ObjectReader, ReaderView};
