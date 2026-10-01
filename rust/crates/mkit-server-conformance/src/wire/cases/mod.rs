@@ -987,6 +987,14 @@ impl Ctx {
     /// one, the declared total. Returns the bytes.
     pub(crate) async fn fetch(&self, id: &[u8]) -> Result<Vec<u8>, Failure> {
         let reply = self.download(id).await?;
+        Self::downloaded_bytes(id, reply)
+    }
+
+    /// Validate the complete stream from an explicitly addressed public read.
+    pub(crate) fn downloaded_bytes(
+        id: &[u8],
+        reply: StreamReply<DownloadPackResponse>,
+    ) -> Result<Vec<u8>, Failure> {
         if let Some(e) = reply.error {
             return Err(Failure::Fail(format!("DownloadPack: expected ok, got {e}")));
         }

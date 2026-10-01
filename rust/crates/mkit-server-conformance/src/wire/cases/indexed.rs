@@ -1,5 +1,6 @@
 //! Indexed-mode responses over the real Connect wire.
 
+use buffa::Message as _;
 use mkit_core::hash::{Hash, hash, to_hex};
 use mkit_core::object::{Commit, Identity, Object, Tree};
 use mkit_core::pack::PackWriter;
@@ -9,15 +10,15 @@ use mkit_transport_connect::generated::__buffa::oneof::begin_upload_response::Re
 use mkit_transport_connect::generated::__buffa::oneof::upload_pack_request::Body as UploadBody;
 use mkit_transport_connect::generated::{
     AdvanceOutcome, AdvanceRefsResponse, BeginUploadRequest, BeginUploadResponse,
-    GetServerInfoResponse, ReadRefRequest, ReadRefResponse,
+    DownloadPackRequest, DownloadPackResponse, GetServerInfoResponse, ReadRefRequest,
+    ReadRefResponse,
 };
 
 use super::{
     CaseResult, Commit as WireCommit, Ctx, Exp, Failure, Feature, Signed, advance_req, ensure,
     eventually_listed, sign_unary, upload_msgs, want_ok, want_outcome,
 };
-use crate::wire::client::{Rpc, UNARY_PROTO, decode_unary};
-use crate::wire::profile::WireAuth;
+use crate::wire::client::{Rpc, UNARY_PROTO, decode_unary, frame};
 use crate::wire::sign::pack_commitment;
 
 fn pack() -> Result<(Vec<u8>, Hash), Failure> {
@@ -455,21 +456,12 @@ pub(super) async fn launch_verification_commits(ctx: Ctx) -> CaseResult {
     super::visibility::set_envelope(&ctx, &ctx.v2_signer("repository-a")?, &repository, false)
         .await?;
 
-    let mut profile = ctx.profile().clone();
-    if let WireAuth::AuthV2 {
-        repository: selected,
-        ..
-    } = &mut profile.auth
-    {
-        repository.clone_into(selected);
-    }
-    let reader = Ctx::new(ctx.client().clone(), std::sync::Arc::new(profile), ctx.case);
     eventually_listed(
         "published head and packmap",
         || async {
             Ok((
-                reader.read(&reader.head("async")).await?,
-                reader.read(&reader.packmap("async")).await?,
+                public_read_ref(&ctx, &repository, ctx.head("async")).await?,
+                public_read_ref(&ctx, &repository, ctx.packmap("async")).await?,
             ))
         },
         |pair| {
@@ -478,8 +470,23 @@ pub(super) async fn launch_verification_commits(ctx: Ctx) -> CaseResult {
         },
     )
     .await?;
+    let body = frame(
+        &DownloadPackRequest {
+            pack_id: Some(pack_id.to_vec()),
+            ..Default::default()
+        }
+        .encode_to_vec(),
+    );
+    let reply = ctx
+        .client()
+        .stream::<DownloadPackResponse>(
+            Rpc::DownloadPack,
+            body,
+            &[("x-repository".into(), repository.clone())],
+        )
+        .await?;
     ensure!(
-        reader.fetch(&pack_id).await? == pack,
+        Ctx::downloaded_bytes(&pack_id, reply)? == pack,
         "public DownloadPack bytes differ"
     );
     if ctx.profile().has(Feature::HttpObjects) {
@@ -495,6 +502,35 @@ pub(super) async fn launch_verification_commits(ctx: Ctx) -> CaseResult {
         ctx.profile().has(Feature::HttpObjects)
     ));
     Ok(())
+}
+
+async fn public_read_ref(
+    ctx: &Ctx,
+    repository: &str,
+    name: String,
+) -> Result<Option<Vec<u8>>, Failure> {
+    let response: ReadRefResponse = want_ok(
+        ctx.client()
+            .unary(
+                Rpc::ReadRef,
+                ReadRefRequest {
+                    name: Some(name),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+                &[("x-repository".into(), repository.into())],
+            )
+            .await?,
+        "public ReadRef",
+    )?;
+    let id = response.object_id.unwrap_or_default();
+    if response.exists == Some(true) {
+        ensure!(id.len() == 32, "public ReadRef returned an invalid id");
+        Ok(Some(id))
+    } else {
+        ensure!(id.is_empty(), "absent public ReadRef returned an id");
+        Ok(None)
+    }
 }
 
 async fn check_extracted_http(
