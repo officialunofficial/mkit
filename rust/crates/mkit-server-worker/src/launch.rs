@@ -15,6 +15,17 @@ fn error(message: impl Into<String>) -> ConfigError {
 
 /// Check supported programmatic changes against the parsed launch contract.
 pub(crate) fn validate_programmatic(cfg: &WorkerConfig) -> Result<(), ConfigError> {
+    #[cfg(not(feature = "test-faults"))]
+    {
+        let indexed = cfg.indexed.is_some();
+        #[cfg(feature = "http-objects")]
+        let indexed = indexed || cfg.http_mount.is_some();
+        if indexed && cfg.launch.is_none() {
+            return Err(error(
+                "indexed Worker configuration requires LAUNCH_PROFILE=uno",
+            ));
+        }
+    }
     if cfg.launch.is_some()
         && (cfg.indexed.is_none_or(|indexed| {
             indexed.verification != mkit_server::indexed::VerificationMode::Scheduled

@@ -24,8 +24,8 @@
       "routes": [{ "pattern": "REPLACE_STAGING_HOST", "custom_domain": true }],
       "observability": { "enabled": true },
       "placement": { "mode": "smart" },
-      // Local Uno whole-upload profile: 28.224 s active samples.
-      // 60 s gives >2x headroom; verify per-invocation CPU on staging.
+      // Heavy AdvanceRefs: 17.17 s OS process CPU, including concurrent work.
+      // 60 s is provisional; verify deployed per-invocation CPU on staging.
       "limits": { "cpu_ms": 60000 },
       // Environment bindings and vars do not inherit: repeat every binding.
       "vars": {

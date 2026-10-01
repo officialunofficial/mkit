@@ -36,6 +36,30 @@ fn programmatic_launch_changes_cannot_disable_the_extraction_driver() {
     assert!(cfg.validate().unwrap_err().0.contains("scheduled indexed"));
 }
 
+#[cfg(not(feature = "test-faults"))]
+#[test]
+fn programmatic_indexed_activation_requires_the_launch_profile() {
+    let mut cfg = check(&vars()).unwrap();
+    cfg.launch = None;
+    assert!(cfg.validate().unwrap_err().0.contains("LAUNCH_PROFILE=uno"));
+    #[cfg(feature = "http-objects")]
+    {
+        cfg.http_mount = Some(crate::http_mount::WorkerHttpMountConfig {
+            indexed: cfg.indexed.take().unwrap(),
+            http_objects: mkit_server::http_objects::HttpObjectsConfig::default(),
+            options: mkit_server::http_objects::mount::HttpMountOptions::default(),
+            read_runtime: None,
+        });
+        assert!(cfg.validate().unwrap_err().0.contains("LAUNCH_PROFILE=uno"));
+    }
+    cfg.indexed = None;
+    #[cfg(feature = "http-objects")]
+    {
+        cfg.http_mount = None;
+    }
+    assert!(cfg.validate().is_ok());
+}
+
 #[test]
 fn programmatic_launch_audience_requires_https() {
     let mut cfg = check(&vars()).unwrap();

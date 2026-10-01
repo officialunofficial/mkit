@@ -440,8 +440,8 @@ the native reference server advertises and serves proofs.
 
 With admin plus complete takedown configuration, the Worker admin subset is `Takedown`,
 `GetTakedown`, `ListTakedowns`, `ReadPreserved`, `SetLegalHold`, `PurgeCache`
-and `ReadAuditLog`. Without takedown, only audit and configured purge
-endpoints are exposed. `ReadPreserved` streams freshly verified bounded pieces
+and `ReadAuditLog`. All seven endpoints remain unavailable without admin plus
+complete takedown configuration. `ReadPreserved` streams freshly verified bounded pieces
 with `Cache-Control: no-store`; retries retain byte-free descriptors and recheck
 authority, retention and ownership. Hold review operations and `Reinstate` remain unexposed.
 The launch creates no inspection holds or publication Events; async inspection,

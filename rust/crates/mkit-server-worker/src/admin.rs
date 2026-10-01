@@ -208,9 +208,6 @@ fn build_work(
 }
 #[cfg(any(target_arch = "wasm32", test))]
 fn supported_path(path: &str, cfg: &crate::adapter::WorkerConfig) -> bool {
-    if path == mkit_server::admin::AUDIT_PATH || path == mkit_server::admin::PURGE_PATH {
-        return true;
-    }
     cfg.admin.as_ref().is_some_and(Config::enabled)
         && cfg.takedown.is_some()
         && cfg.takedown_denial
@@ -221,7 +218,13 @@ fn supported_path(path: &str, cfg: &crate::adapter::WorkerConfig) -> bool {
             .is_some_and(|operation| {
                 matches!(
                     operation,
-                    "Takedown" | "GetTakedown" | "ListTakedowns" | "ReadPreserved" | "SetLegalHold"
+                    "Takedown"
+                        | "GetTakedown"
+                        | "ListTakedowns"
+                        | "ReadPreserved"
+                        | "SetLegalHold"
+                        | "PurgeCache"
+                        | "ReadAuditLog"
                 )
             })
 }
@@ -477,6 +480,8 @@ mod tests {
             "ListTakedowns",
             "ReadPreserved",
             "SetLegalHold",
+            "PurgeCache",
+            "ReadAuditLog",
         ] {
             let path = format!("{}{op}", mkit_server::admin::PREFIX);
             assert!(!supported_path(&path, &cfg), "unconfigured {op}");
@@ -501,8 +506,8 @@ mod tests {
             cfg.launch = None;
             cfg.takedown = None;
         }
-        assert!(supported_path(mkit_server::admin::AUDIT_PATH, &cfg));
-        assert!(supported_path(mkit_server::admin::PURGE_PATH, &cfg));
+        assert!(!supported_path(mkit_server::admin::AUDIT_PATH, &cfg));
+        assert!(!supported_path(mkit_server::admin::PURGE_PATH, &cfg));
         cfg.launch = Some(crate::launch::LaunchConfig { takedown: true });
         for op in [
             "Reinstate",

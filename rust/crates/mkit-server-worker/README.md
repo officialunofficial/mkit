@@ -76,9 +76,10 @@ authority mode and generation, then declare real lease-table recovery.
 ## Launch purge and audit configuration
 
 `ADMIN_KEYS` contains the SPEC-SERVER §16.3 public-key list as a Worker secret.
-It defaults off. `ReadAuditLog` and configured `PurgeCache` use the operator
-mount. Complete takedown configuration adds `Takedown`, `GetTakedown`,
-`ListTakedowns`, streamed `ReadPreserved` and audited `SetLegalHold`.
+It defaults off. Admin plus complete takedown configuration exposes `Takedown`,
+`GetTakedown`, `ListTakedowns`, streamed `ReadPreserved`, audited `SetLegalHold`,
+`PurgeCache` and `ReadAuditLog` on the operator mount. All seven routes remain
+unavailable without that configuration.
 Every admin response uses `Cache-Control: no-store`; preserved bytes are
 freshly verified and never buffered into replay. Admin requests use a separate signed envelope and cannot authenticate
 client writes. Operator keys must differ from ticket, token, hook and authority

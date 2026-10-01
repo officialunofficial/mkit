@@ -183,3 +183,27 @@ deployed per-isolate accounting. The earlier pending polls each used 0.01–0.10
 seconds of bracketed process CPU. These measurements support the provisional
 60-second allowance without changing alarm slicing. See the
 [completed local Uno matrix](launch-read-failure-evidence.md) for pins and limits.
+
+## Whole-isolate memory gate
+
+The local 104,604,962-byte sampled allocated-capacity maximum is not a peak
+certificate: only 154 of 1,667 samples identify the user module, with 27 gaps.
+The admitted preservation profile permits 51 MiB of retained canonical delta
+chain plus a 16 MiB source frame and bounded decoder scratch inside its 96 MiB
+Rust allowance. That phase and concurrent request buffers can plausibly exceed
+the shared 128 MB isolate limit once JS, transport and allocator capacity count.
+The 48 MiB verification allowance and 96 MiB acquisition allowance remain fixed.
+
+Before accepting memory headroom, stage the exact final Uno artifact/config and
+record its source, Wasm, configuration and runtime pins. Preserve a valid
+50-hop chain with near-1-MiB canonical members and the largest admitted source
+frames/compressed windows; exercise Takedown through the acquisition alarm and
+streamed ReadPreserved. Repeat cold and warm, with two slow streamed UploadPart
+or public-read responses active and mixed due verification/purge/Outcome alarms.
+Record per-isolate memory high-water across Wasm linear capacity, V8 heap,
+backing/embedder storage and transport buffers, including retained capacity after
+completion; attribute every module/isolate and retain memory-limit outcomes.
+Use allocation/phase high-water instrumentation alongside platform telemetry so
+unobserved transient peaks cannot become a passing sampled maximum. If the
+combined peak cannot fit with headroom, decide a shared resident-work admission
+or retention change before activation; do not raise the project allowances.
