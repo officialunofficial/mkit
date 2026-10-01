@@ -447,6 +447,9 @@ impl<S: NamespaceStore> Engine<S> {
                     )
                     .await?
                     {
+                        if stored.status == 200 {
+                            return self.record_takedown_success(&verified, now, stored).await;
+                        }
                         result = stored;
                     }
                 }
@@ -559,6 +562,25 @@ impl<S: NamespaceStore> Engine<S> {
         now: i64,
         result: Response,
     ) -> Result<Response, ServerError> {
+        self.record_result_inner(verified, now, result, false).await
+    }
+
+    async fn record_takedown_success(
+        &self,
+        verified: &Verified,
+        now: i64,
+        result: Response,
+    ) -> Result<Response, ServerError> {
+        self.record_result_inner(verified, now, result, true).await
+    }
+
+    async fn record_result_inner(
+        &self,
+        verified: &Verified,
+        now: i64,
+        result: Response,
+        finalize_nonce: bool,
+    ) -> Result<Response, ServerError> {
         for _ in 0..RETRIES {
             let old = self
                 .store
@@ -579,9 +601,31 @@ impl<S: NamespaceStore> Engine<S> {
                 "",
                 u64::try_from(now).unwrap_or(0),
             )?;
-            let batch = guarded(Batch::new(), head_key(), old)
+            let mut batch = guarded(Batch::new(), head_key(), old)
                 .put(entry_key(next.seq), encode(&entry)?)
                 .put(head_key(), encode(&next)?);
+            if finalize_nonce {
+                let nonce_key = key("an", verified.replay_key.as_bytes());
+                let raw = self
+                    .store
+                    .get(&self.partition, &nonce_key)
+                    .await
+                    .map_err(store_error)?
+                    .ok_or_else(|| ServerError::unavailable("missing takedown nonce"))?;
+                let mut nonce: Nonce = decode(&raw)?;
+                if nonce.digest != verified.digest
+                    || nonce.path != verified.path
+                    || !nonce
+                        .result
+                        .as_ref()
+                        .is_some_and(|r| r.status == 200 || pending_takedown(r))
+                {
+                    return Err(ServerError::unavailable("invalid takedown nonce binding"));
+                }
+                nonce.result = Some(result.clone());
+                batch =
+                    guarded(batch, nonce_key.clone(), Some(raw)).put(nonce_key, encode(&nonce)?);
+            }
             if self
                 .store
                 .apply(&self.partition, batch)
@@ -810,6 +854,9 @@ impl<S: NamespaceStore> Engine<S> {
             )
             .await
         {
+            Ok(response) if response.status == 200 => {
+                self.record_takedown_success(verified, now, response).await
+            }
             Ok(response) => Ok(response),
             Err(error) => {
                 self.record_result(
