@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Native Connect transport: retry unary reads and replay-safe auth-v2 writes
+  once on a fresh connection when a reused HTTP/1 socket fails before any
+  response bytes; preserve the signed envelope and deadline. Streaming RPCs
+  start on fresh connections and are never replayed.
+
 - Server: align the receipt-golden test SHA-256 dependency with the repository
   sha2 0.11 crypto channel (launch review 12-2).
 
