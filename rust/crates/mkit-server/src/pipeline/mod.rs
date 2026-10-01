@@ -247,6 +247,8 @@ pub struct PipelineConfig {
     pub addressing: Addressing,
     /// How metadata partitions are routed.
     pub sharding: Sharding,
+    /// Durable inspection mode, default-off and reserved for WP-5.5a wiring.
+    pub inspection_mode: bool,
     /// How requests authenticate.
     pub auth: AuthMode,
     /// Owner-signed write grant verifier for Multi/Owner deployments.
@@ -358,6 +360,7 @@ impl PipelineConfig {
             authorizer_role: AuthorizerRole::Check,
             addressing,
             sharding: Sharding::Single,
+            inspection_mode: false,
             auth,
             grants: None,
             authority_fence: None,

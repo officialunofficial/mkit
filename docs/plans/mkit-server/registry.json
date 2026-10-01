@@ -2512,11 +2512,30 @@
     "status": "split"
   },
   {
+    "id": "5.5a-0",
+    "title": "Durable inspection mode, flag registry and hold records",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "REL-1",
+      "5.4"
+    ],
+    "size": "S",
+    "summary": "R-206 / R-198 B3: tested default-off core marker and Worker guard, guarded repository flag registry and bounded per-advance hold plans. Pipeline and serving integration remains 5.5c; sync-only launch inspection is unchanged. Carry-forward: the 94-op seven-ticket D34 advance plus seven new hold effects (9 ops) is 103, over the 100-op cap; resolve before integration.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers"
+    ]
+  },
+  {
     "id": "5.5a",
     "title": "Synchronous added-pack file inspection for the launch profile",
     "milestone": "M5",
     "track": "core",
     "depends_on": [
+      "5.5a-0",
       "5.4",
       "5.10",
       "5.11a",
@@ -2557,24 +2576,6 @@
       "docs"
     ],
     "status": "merged"
-  },
-  {
-    "id": "5.5a-0",
-    "title": "Durable inspection-mode marker (post-launch, R-199/R-200)",
-    "milestone": "M5",
-    "track": "core",
-    "depends_on": [
-      "REL-1",
-      "5.4"
-    ],
-    "size": "S",
-    "summary": "Deferred until immediately before 5.5c; launch sync-only inspection has no outstanding obligations and needs no marker.",
-    "human_action": false,
-    "area_gates": [
-      "rust",
-      "wasm"
-    ],
-    "status": "deferred"
   },
   {
     "id": "5.5c",

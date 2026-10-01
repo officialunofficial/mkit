@@ -2467,3 +2467,17 @@ bad file could silently use another trust configuration.
 augmented roots and its standard verifier. Real TLS Connect/streaming tests
 cover trusted CA, hostname mismatch and default refusal; subprocess tests cover
 selection and CLI config layering. Browser clients keep browser-managed trust.
+
+## Durable inspection mode and repository flags (WP-5.5a-0)
+
+**Always:** Inspection mode is default-off and one-way: an empty store may
+record `on`; a non-empty unmarked store cannot enable it, and a marked store
+cannot disable it. Each repository flag install or audited release changes its
+monotonic registry version in the same atomic apply as the corresponding flag
+record. Re-installing an unchanged flag is idempotent and does not bump the
+version. **Because:** later inspection work uses the marker to distinguish
+deployments with durable obligations and the version to detect a concurrent
+registry change. **If violated:** existing deployments could acquire inspection
+semantics silently, or a concurrent flag update could be missed. **Enforced by:**
+the core `InspectionMode` and `InspectionFlags` stores, guarded compare-and-swap
+plans, restore/export validation, and Worker startup guard tests.

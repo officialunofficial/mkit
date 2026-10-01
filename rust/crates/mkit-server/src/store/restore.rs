@@ -65,6 +65,7 @@ struct SnapshotInfo {
     max_relay_sequence: u64,
     has_relay: bool,
     sharding_marker: Option<ExportRecord>,
+    inspection_marker: Option<ExportRecord>,
     authority_fence: bool,
     authority_generation: Option<u64>,
 }
@@ -119,6 +120,7 @@ fn inspect(
     let mut max_relay_sequence = 0;
     let mut has_relay = false;
     let mut sharding_marker = None;
+    let mut inspection_marker = None;
     let mut authority_fence = false;
     let mut authority_generation = None;
     for record in reader {
@@ -172,6 +174,34 @@ fn inspect(
                 *prior = (*prior).max(rh);
             }
             Some(ParsedKey::ShardingMarker) => sharding_marker = Some(record),
+            Some(ParsedKey::InspectionMarker) => {
+                if record.value.as_bytes() != b"on" {
+                    return Err(corrupt("invalid inspection marker"));
+                }
+                inspection_marker = Some(record);
+            }
+            Some(ParsedKey::InspectionFlag { repo, id }) => {
+                inspection_partition(&record.partition, &repo, true)?;
+                if super::inspection_flags::decode_flag(&record.value)?.id != id {
+                    return Err(corrupt("inspection flag id disagrees with key"));
+                }
+            }
+            Some(ParsedKey::InspectionVersion(repo)) => {
+                inspection_partition(&record.partition, &repo, true)?;
+                if codec::decode_u64(&record.value)? == 0 {
+                    return Err(corrupt("inspection registry version is zero"));
+                }
+            }
+            Some(ParsedKey::InspectionHold { repo, .. }) => {
+                inspection_partition(&record.partition, &repo, false)?;
+                if !record.value.as_bytes().is_empty() {
+                    return Err(corrupt("invalid inspection hold row"));
+                }
+            }
+            Some(ParsedKey::InspectionHoldIndex { repo, .. }) => {
+                inspection_partition(&record.partition, &repo, false)?;
+                super::inspection_holds::validate_manifest(&record.value)?;
+            }
             _ => {}
         }
     }
@@ -193,6 +223,13 @@ fn inspect(
     {
         return Err(corrupt("sharding marker outside root namespace partition"));
     }
+    if inspection_marker.is_some()
+        && partition != Partition::Namespace(NamespaceKey::deployment_default())
+    {
+        return Err(corrupt(
+            "inspection marker outside root namespace partition",
+        ));
+    }
     Ok(SnapshotInfo {
         index,
         partition,
@@ -203,9 +240,27 @@ fn inspect(
         max_relay_sequence,
         has_relay,
         sharding_marker,
+        inspection_marker,
         authority_fence,
         authority_generation,
     })
+}
+
+fn inspection_partition(
+    partition: &Partition,
+    repo: &crate::RepoName,
+    registry: bool,
+) -> Result<(), StoreError> {
+    match partition {
+        Partition::Namespace(_) => Ok(()),
+        Partition::RepoIndex {
+            repo: stored,
+            prefix: 0,
+            ..
+        } if registry && stored == repo => Ok(()),
+        Partition::Ref { repo: stored, .. } if !registry && stored == repo => Ok(()),
+        _ => Err(corrupt("inspection row outside its authority partition")),
+    }
 }
 
 fn should_drop(record: &ExportRecord) -> bool {
@@ -511,9 +566,15 @@ async fn import_one<S: NamespaceStore>(
     if let Some(marker) = &info.sharding_marker {
         importer.push(marker.clone()).await?;
     }
+    if let Some(marker) = &info.inspection_marker {
+        importer.push(marker.clone()).await?;
+    }
     for record in reader {
         let mut record = record?;
         if record.key == keys::sharding_marker() && info.sharding_marker.is_some() {
+            continue;
+        }
+        if record.key == keys::inspection_marker() && info.inspection_marker.is_some() {
             continue;
         }
         if should_drop(&record)

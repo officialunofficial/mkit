@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: add default-off durable inspection mode, a guarded repository flag
+  registry, and bounded per-advance hold records as storage foundations for
+  post-launch asynchronous inspection (WP-5.5a-0, R-206).
+
 - Worker embedding: supplied Admission, Authorizer/Authority and OutcomeSink
   capabilities satisfy launch validation without an unused external hook channel.
   `fetch_with` now takes explicit `HookCapabilities`; shared config factories use
