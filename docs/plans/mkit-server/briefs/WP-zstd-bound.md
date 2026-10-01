@@ -71,3 +71,15 @@ forever. Anything that runs ruzstd on the Worker over stored or pushed frames is
 - the vcs-worker default conformance on a free port.
 
 Do the self-review, then open the PR.
+
+## Approved execution amendment
+
+The user approved Option B: vendor ruzstd 0.9.0 with its MIT LICENSE,
+upstream commit provenance, minimal block-limit checks, and a fixed 8 MiB
+caller window cap. The 500-line cap excludes the pristine vendor import;
+report authored production changes and the upstream-relative patch separately.
+Add allocator regressions on native `pack-ruzstd` and the wasm check harness.
+Corruption during acquisition of a verified member must produce a terminal,
+audited source checkpoint while keeping denial in force. Keep admission unchanged;
+decoder enablement on the launch Worker belongs to WP-4.18.
+After #1249 merged, rebase onto `origin/feat/mkit-server` before opening the PR.

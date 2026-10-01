@@ -44,8 +44,9 @@ unsafe impl GlobalAlloc for CountingAllocator {
 }
 
 // A fixed 8 MiB window can grow an 8 MiB ring to 16 MiB before freeing the
-// old ring: 24 MiB transiently. The other 4 MiB covers decoder tables, block
-// buffers and allocator overhead, independently of attacker output length.
+// old ring: 24 MiB transiently. The other 4 MiB covers decoder tables and block
+// buffers, independently of attacker output length. This meters requested live
+// bytes, not allocator metadata or whole-process resident memory.
 const WORKING_ALLOWANCE: usize = 28 << 20;
 const SMALL_CAP: usize = 64 << 10;
 const BLOCK_MAXIMUM: usize = 128 << 10;

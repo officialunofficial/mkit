@@ -484,7 +484,9 @@ pub(crate) async fn member_dependencies_clear<S: NamespaceStore>(
         located = match member_base(store, shards, repo, base, located, metrics, None).await {
             Ok(next) => next,
             Err(ResolveFailure::Missing | ResolveFailure::Capped) => return Ok(false),
-            Err(ResolveFailure::Other(error)) => return Err(error),
+            Err(ResolveFailure::Other(error) | ResolveFailure::Corrupt(error)) => {
+                return Err(error);
+            }
         };
         id = base;
     }
