@@ -270,11 +270,16 @@ async fn commit_large_pack(ctx: &Ctx, pack: &[u8], head: Hash) -> Result<(String
         pack.len() > 33 << 20,
         "suite bug: the pack fits two windows"
     );
-    commit_pack(ctx, pack, head).await
+    commit_pack(ctx, pack, head, false).await
 }
 
-async fn commit_pack(ctx: &Ctx, pack: &[u8], head: Hash) -> Result<(String, u32), Failure> {
-    let (repository, advance) = ticketed_advance(ctx, pack, head, "async").await?;
+async fn commit_pack(
+    ctx: &Ctx,
+    pack: &[u8],
+    head: Hash,
+    canonical: bool,
+) -> Result<(String, u32), Failure> {
+    let (repository, advance) = ticketed_pair(ctx, pack, head, "async", canonical).await?;
     let mut pending = 0;
     for _ in 0..240 {
         match ctx.send::<AdvanceRefsResponse>(&advance).await? {
@@ -315,18 +320,25 @@ async fn ticketed_advance(
     head: Hash,
     leaf: &str,
 ) -> Result<(String, Signed), Failure> {
-    let (repository, _) = super::repository::identities(ctx, "async-verify", "unused")?;
+    ticketed_pair(ctx, pack, head, leaf, false).await
+}
+
+async fn upload_ticket(
+    ctx: &Ctx,
+    pack: &[u8],
+    repository: &str,
+    branch: &str,
+) -> Result<Vec<u8>, Failure> {
     let signer = ctx.v2_signer("repository-a")?;
     let pack_id = hash(pack);
-    let branch = ctx.head(leaf);
     let begin = BeginUploadRequest {
-        r#ref: Some(branch.clone()),
+        r#ref: Some(branch.to_owned()),
         pack_id: Some(pack_id.to_vec()),
         bytes: Some(pack.len() as u64),
         ..Default::default()
     };
     let signed_begin = sign_unary(&signer, Rpc::BeginUpload, &begin, |env| {
-        repository.clone_into(&mut env.repository);
+        env.repository = repository.to_owned();
     });
     let opened: BeginUploadResponse = want_ok(ctx.send(&signed_begin).await?, "BeginUpload")?;
     let Some(BeginResult::Ticket(ticket)) = opened.result else {
@@ -341,18 +353,41 @@ async fn ticketed_advance(
         Rpc::UploadPack.procedure(),
         pack_commitment(&pack_id, pack.len() as u64),
     );
-    repository.clone_into(&mut envelope.repository);
+    envelope.repository = repository.to_owned();
     let headers = signer.sign(&envelope).headers;
     ensure!(
         ctx.upload_with(&messages, &headers).await?.is_none(),
         "ticketed UploadPack failed"
     );
 
+    Ok(id)
+}
+
+async fn ticketed_pair(
+    ctx: &Ctx,
+    pack: &[u8],
+    head: Hash,
+    leaf: &str,
+    canonical: bool,
+) -> Result<(String, Signed), Failure> {
+    let (repository, _) = super::repository::identities(ctx, "async-verify", "unused")?;
+    let signer = ctx.v2_signer("repository-a")?;
+    let pack_id = hash(pack);
+    let branch = ctx.head(leaf);
+    let mut ids = vec![upload_ticket(ctx, pack, &repository, &branch).await?];
+    let packmap = if canonical {
+        let node = mkit_core::transfer::encode_packlist(None, &[pack_id])
+            .map_err(|e| format!("packlist: {e}"))?;
+        ids.push(upload_ticket(ctx, &node, &repository, &branch).await?);
+        hash(&node)
+    } else {
+        pack_id
+    };
     let mut request = advance_req(
         (&branch, Exp::Missing, &head),
-        (&ctx.packmap(leaf), Exp::Missing, &pack_id),
+        (&ctx.packmap(leaf), Exp::Missing, &packmap),
     );
-    request.ticket_ids = vec![id];
+    request.ticket_ids = ids;
     let advance = sign_unary(&signer, Rpc::AdvanceRefs, &request, |env| {
         repository.clone_into(&mut env.repository);
     });
@@ -476,10 +511,18 @@ async fn launch_verified_fixture(ctx: Ctx, large: bool) -> CaseResult {
         verification_pack_entries(Some(&data), 0)?
     };
     let pack_id = hash(&pack);
+    let published_packmap = if large {
+        pack_id
+    } else {
+        hash(
+            &mkit_core::transfer::encode_packlist(None, &[pack_id])
+                .map_err(|e| format!("packlist: {e}"))?,
+        )
+    };
     let (repository, pending) = if large {
         commit_large_pack(&ctx, &pack, head).await?
     } else {
-        commit_pack(&ctx, &pack, head).await?
+        commit_pack(&ctx, &pack, head, true).await?
     };
     super::visibility::set_envelope(&ctx, &ctx.v2_signer("repository-a")?, &repository, false)
         .await?;
@@ -494,7 +537,7 @@ async fn launch_verified_fixture(ctx: Ctx, large: bool) -> CaseResult {
         },
         |pair| {
             pair.0.as_deref() == Some(head.as_slice())
-                && pair.1.as_deref() == Some(pack_id.as_slice())
+                && pair.1.as_deref() == Some(published_packmap.as_slice())
         },
     )
     .await?;
