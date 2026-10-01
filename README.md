@@ -95,6 +95,7 @@ cargo run -p mkit-benches --bin render-charts
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Crate layout and design notes |
 | [`docs/SSH-SECURITY.md`](docs/SSH-SECURITY.md) · [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) | Trust model and security assumptions |
 | [Self-hosting the repo server](apps/repo-worker/README.md#run-your-own-instance-self-hosting) | Running your own instance |
+| [Workers operations](docs/operations/workers.md) | Paid launch profile, deployment, key rotation and incidents |
 | [`docs/RELEASE.md`](docs/RELEASE.md) | Cutting a release |
 
 Want the library instead of the CLI? Run `cargo add mkit-core` ([docs.rs](https://docs.rs/mkit-core)).
