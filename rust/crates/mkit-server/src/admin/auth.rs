@@ -199,6 +199,8 @@ impl Config {
             || key
                 .after
                 .is_some_and(|a| i128::from(created_ms) > i128::from(a))
+            || path == super::READ_PRESERVED_PATH
+                && (key.before.is_some_and(|b| now < b) || key.after.is_some_and(|a| now > a))
             || digest != body.digest()
         {
             return Err(unauth("invalid admin envelope"));
