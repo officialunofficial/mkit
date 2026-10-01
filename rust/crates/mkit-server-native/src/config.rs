@@ -1695,6 +1695,17 @@ pub fn resolve(
     #[cfg(feature = "hooks")]
     {
         if let Some(settings) = &hooks {
+            let mut role_keys = pipeline
+                .authority_fence
+                .as_ref()
+                .map_or_else(Vec::new, |fence| fence.public_keys().collect());
+            if let Some(admin) = &admin {
+                role_keys.extend(admin.config.public_keys());
+                if let Some(takedown) = &admin.takedown {
+                    role_keys.extend_from_slice(takedown.publication.public_keys());
+                }
+            }
+            settings.check_role_keys(&role_keys)?;
             if admin
                 .as_ref()
                 .and_then(|a| a.takedown.as_ref())
@@ -1730,6 +1741,51 @@ pub fn resolve(
         crate::admin::validate_mount(settings, &pipeline)?;
     }
     crate::scanner_retrieval::resolve(args, &mut pipeline, env)?;
+    let mut published_role_keys = pipeline
+        .authority_fence
+        .as_ref()
+        .map_or_else(Vec::new, |fence| fence.public_keys().collect());
+    if let Some(admin) = &admin {
+        published_role_keys.extend(admin.config.public_keys());
+        if let Some(takedown) = &admin.takedown {
+            published_role_keys.extend_from_slice(takedown.publication.public_keys());
+        }
+    }
+    if let Some(retrieval) = &pipeline.scanner_retrieval {
+        published_role_keys.extend(retrieval.scanner_keys());
+    }
+    #[cfg(feature = "hooks")]
+    if let Some(settings) = &hooks {
+        published_role_keys.push(settings.public_key()?);
+    }
+    #[cfg(feature = "http-objects")]
+    if let Some(tokens) = &pipeline.url_tokens {
+        published_role_keys.extend(tokens.keys().public_keys());
+        if published_role_keys
+            .iter()
+            .any(|key| tokens.keys().contains_secret(key))
+        {
+            return Err(usage(
+                "URL token signing seed must differ from published role keys",
+            ));
+        }
+    }
+    if let Some(path) = &args.admin.receipt_key_file {
+        let text = read_secret_file(path, "--receipt-key-file", "receipt-and-notice key")?;
+        let seed = zeroize::Zeroizing::new(
+            mkit_core::hash::from_hex(text.trim()).map_err(|_| usage("invalid receipt key"))?,
+        );
+        if published_role_keys.contains(&*seed)
+            || pipeline
+                .ticket_keys
+                .as_ref()
+                .is_some_and(|tickets| tickets.contains_secret(&seed))
+        {
+            return Err(usage(
+                "receipt signing seed must differ from configured role keys",
+            ));
+        }
+    }
     mkit_server::scanner_retrieval::validate_config(&pipeline)
         .map_err(|e| ConfigError::new(exit::CONFIG_ERROR, e.public_message()))?;
     let router = RouterOptions {

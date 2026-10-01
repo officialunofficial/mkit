@@ -209,15 +209,17 @@ impl TicketKeys {
             .any(|key| bool::from(key.secret.ct_eq(secret)))
     }
 
-    /// Whether any ticket secret is the seed of this Ed25519 public key.
-    /// Used to keep every active or retained URL-token key dedicated.
+    /// Whether a public role key equals a ticket secret or its derived public key.
+    /// Publishing raw ticket MAC material would disclose it; deriving the same
+    /// public key also identifies a shared signing seed. Both are forbidden.
     #[must_use]
     pub fn contains_ed25519_public(&self, public: &[u8; 32]) -> bool {
         self.keys.iter().any(|key| {
-            ed25519_dalek::SigningKey::from_bytes(&key.secret)
-                .verifying_key()
-                .as_bytes()
-                == public
+            bool::from(key.secret.ct_eq(public))
+                || ed25519_dalek::SigningKey::from_bytes(&key.secret)
+                    .verifying_key()
+                    .as_bytes()
+                    == public
         })
     }
 

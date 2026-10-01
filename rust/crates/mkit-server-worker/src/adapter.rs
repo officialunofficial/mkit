@@ -457,6 +457,9 @@ impl WorkerConfig {
     #[cfg(target_arch = "wasm32")]
     fn validate_runtime(&self, env: &worker::Env) -> Result<(), ConfigError> {
         self.validate()?;
+        crate::launch::validate_runtime_key_material(self, &|name| {
+            env.secret(name).ok().map(|secret| secret.to_string())
+        })?;
         self.validate_for_plan(env.var(PLAN_VAR).ok().map(|v| v.to_string()).as_deref())?;
         crate::hooks::build::hooks_from_env(env, self)?;
         if self.launch.is_some() {
@@ -2421,7 +2424,7 @@ mod glue {
         }
     }
 
-    /// Explicit Stage 2 fetch entry point. No environment variable enables snapshots.
+    /// Explicit published-view fetch entry point. Environment variables never enable snapshots.
     #[cfg(feature = "published-view")]
     pub async fn fetch_configured(
         req: Request,
@@ -2526,11 +2529,22 @@ mod glue {
         F: FnOnce(&Env, &WorkerConfig) -> Result<H, ConfigError>,
     {
         if let Err(error) = cfg.validate_runtime(&env) {
-            let response = json_response(unavailable_json(&error.0), 503);
+            let response = json_response(unavailable_json(&error.0), 503)?;
+            #[cfg(feature = "http-objects")]
+            if let Some(mount) = &cfg.http_mount
+                && crate::http_mount::glue::mounted_request(&req, cfg)
+            {
+                return crate::http_mount::glue::finish(
+                    response,
+                    req.method().as_ref(),
+                    req.headers().get("Origin")?.as_deref(),
+                    &mount.options,
+                );
+            }
             return if req.path().starts_with(mkit_server::admin::PREFIX) {
-                crate::admin::no_store(response)
+                crate::admin::no_store(Ok(response))
             } else {
-                response
+                Ok(response)
             };
         }
         #[cfg(feature = "http-objects")]
@@ -2763,7 +2777,7 @@ mod glue {
             .build_with(make_sink)
     }
 
-    /// Explicit Stage 2 DO construction, paired with `fetch_configured`.
+    /// Explicit published-view DO construction, paired with `fetch_configured`.
     #[cfg(feature = "published-view")]
     #[must_use]
     pub fn ns_object_configured(
@@ -3627,6 +3641,17 @@ mod tests {
         assert!(config.pipeline_config().is_err());
         config.indexed = Some(mkit_server::indexed::IndexedConfig::scheduled(
             config.max_pack_bytes,
+        ));
+        let scanner_public =
+            mkit_server::hooks::HookSigner::new("scanner", zeroize::Zeroizing::new([0x33; 32]))
+                .unwrap()
+                .public_key();
+        config.scanner_retrieval = Some(Arc::new(
+            mkit_server::scanner_retrieval::RetrievalConfig::parse(
+                &format!("active retrieval {}", "66".repeat(32)),
+                &mkit_core::hash::to_hex(&scanner_public),
+            )
+            .unwrap(),
         ));
         assert_eq!(
             config

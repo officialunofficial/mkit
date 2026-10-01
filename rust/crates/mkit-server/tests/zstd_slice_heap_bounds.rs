@@ -127,7 +127,7 @@ fn raw_entry(pack: &mut Vec<u8>, tag: u8) -> usize {
 
 /// Every block is a legal 128 KiB RLE block, with an admitted 8 MiB window
 /// and no declared frame content size. Total regenerated history exceeds the
-/// entry's claim just below 1 MiB. StreamingDecoder must retain history before the first
+/// entry's claim just below 1 MiB. `StreamingDecoder` must retain history before the first
 /// output read, so the claim alone does not bound that working allocation.
 fn rle_history_entry(pack: &mut Vec<u8>) {
     let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0, 0x68];
@@ -170,6 +170,7 @@ fn fixture() -> (Vec<u8>, usize) {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One isolated allocator window covers the complete slice.
 #[ignore = "run explicitly in an isolated pure-Rust decoder graph; all-features enables C"]
 fn scheduled_ruzstd_slice_retains_at_most_48_mib_requested_heap() {
     // A C-enabled writer compresses this highly compressible object. Refuse

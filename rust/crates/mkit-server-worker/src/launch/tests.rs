@@ -229,6 +229,166 @@ fn launch_http_requires_tokens_and_preserves_role_separation() {
     );
 }
 
+#[cfg(feature = "http-objects")]
+#[test]
+fn launch_refuses_ticket_secrets_exposed_as_active_or_retired_token_public_keys() {
+    let mut v = vars();
+    v.insert("HTTP_OBJECTS".into(), "true".into());
+    v.insert(
+        "URL_TOKEN_KEYS".into(),
+        format!("active {}", "22".repeat(32)),
+    );
+    let cfg = check(&v).unwrap();
+    let public = cfg.url_tokens.unwrap().keys().public_keys().next().unwrap();
+    v.insert(
+        "TICKET_KEYS".into(),
+        format!("ticket {}", mkit_core::hash::to_hex(&public)),
+    );
+    assert!(
+        check(&v).is_err(),
+        "published active public bytes must never be accepted ticket MAC material"
+    );
+    v.insert(
+        "URL_TOKEN_KEYS".into(),
+        format!(
+            "active {}\nretired {} 0",
+            "33".repeat(32),
+            mkit_core::hash::to_hex(&public)
+        ),
+    );
+    assert!(
+        check(&v).is_err(),
+        "retained public bytes must never be accepted ticket MAC material"
+    );
+}
+
+#[test]
+fn programmatic_admin_public_bytes_cannot_be_ticket_secret_material() {
+    let mut cfg = check(&vars()).unwrap();
+    let public = mkit_server::hooks::HookSigner::new("operator", zeroize::Zeroizing::new([34; 32]))
+        .unwrap()
+        .public_key();
+    cfg.ticket_keys =
+        Some(mkit_server::upload::token::TicketKeys::new(vec![("ticket".into(), public)]).unwrap());
+    cfg.admin = Some(mkit_server::admin::Config::parse(&cfg.audience, &serde_json::json!({"version":1,"keys":[{
+        "keyId":"operator", "alg":"ed25519", "publicKey":mkit_core::hash::to_hex(&public), "roles":["audit"]
+    }]}).to_string()).unwrap());
+    assert!(
+        cfg.validate().is_err(),
+        "programmatic role guards must refuse public ticket secrets"
+    );
+}
+
+#[cfg(feature = "http-objects")]
+#[test]
+fn programmatic_token_seed_cannot_be_a_published_admin_key() {
+    let mut v = vars();
+    v.insert("HTTP_OBJECTS".into(), "true".into());
+    v.insert(
+        "URL_TOKEN_KEYS".into(),
+        format!("active {}", "22".repeat(32)),
+    );
+    let mut cfg = check(&v).unwrap();
+    cfg.admin = Some(
+        mkit_server::admin::Config::parse(
+            &cfg.audience,
+            &serde_json::json!({"version":1,"keys":[{
+                "keyId":"operator", "alg":"ed25519", "publicKey":"22".repeat(32), "roles":["audit"]
+            }]})
+            .to_string(),
+        )
+        .unwrap(),
+    );
+    assert!(
+        cfg.validate().is_err(),
+        "public admin material must never disclose the active URL signing seed"
+    );
+}
+
+#[cfg(feature = "signed-http-hooks")]
+#[test]
+fn launch_hook_public_bytes_cannot_be_ticket_secret_material() {
+    let mut v = vars();
+    v.insert("HOOK_ROLES".into(), "admit".into());
+    v.insert("HOOK_URL".into(), "https://hooks.example".into());
+    v.insert("MKIT_HOOK_KEY".into(), format!("hook {}", "55".repeat(32)));
+    let public = mkit_server::hooks::HookSigner::new("hook", zeroize::Zeroizing::new([0x55; 32]))
+        .unwrap()
+        .public_key();
+    v.insert(
+        "TICKET_KEYS".into(),
+        format!("ticket {}", mkit_core::hash::to_hex(&public)),
+    );
+    assert!(check(&v).unwrap_err().0.contains("hook public key"));
+}
+
+#[cfg(all(feature = "http-objects", feature = "signed-http-hooks"))]
+#[test]
+fn mutated_programmatic_token_seed_is_checked_against_environment_hook_public() {
+    let mut v = vars();
+    v.insert("HOOK_ROLES".into(), "admit".into());
+    v.insert("HOOK_URL".into(), "https://hooks.example".into());
+    v.insert("MKIT_HOOK_KEY".into(), format!("hook {}", "55".repeat(32)));
+    v.insert("HTTP_OBJECTS".into(), "true".into());
+    v.insert(
+        "URL_TOKEN_KEYS".into(),
+        format!("active {}", "22".repeat(32)),
+    );
+    let mut cfg = check(&v).unwrap();
+    assert!(validate_runtime_key_material(&cfg, &|name| v.get(name).cloned()).is_ok());
+    let public = mkit_server::hooks::HookSigner::new("hook", zeroize::Zeroizing::new([0x55; 32]))
+        .unwrap()
+        .public_key();
+    cfg.url_tokens = Some(mkit_server::url_token::UrlTokenConfig::new(
+        mkit_server::url_token::UrlTokenKeys::new(zeroize::Zeroizing::new(public), vec![]).unwrap(),
+    ));
+    assert!(
+        cfg.validate().is_ok(),
+        "environment hook key is only available at runtime"
+    );
+    assert!(
+        validate_runtime_key_material(&cfg, &|name| v.get(name).cloned())
+            .unwrap_err()
+            .0
+            .contains("signing seed")
+    );
+}
+
+#[cfg(feature = "http-objects")]
+#[test]
+fn mutated_programmatic_token_public_rechecks_environment_receipt_seed() {
+    let mut v = vars();
+    v.insert("HTTP_OBJECTS".into(), "true".into());
+    v.insert(
+        "URL_TOKEN_KEYS".into(),
+        format!("active {}", "22".repeat(32)),
+    );
+    let mut cfg = check(&v).unwrap();
+    let future =
+        mkit_server::url_token::UrlTokenKeys::new(zeroize::Zeroizing::new([0x33; 32]), vec![])
+            .unwrap();
+    let public = future.public_keys().next().unwrap();
+    let receipt = mkit_server::hooks::HookSigner::new("receipt", zeroize::Zeroizing::new(public))
+        .unwrap()
+        .public_key();
+    let seed = mkit_core::hash::to_hex(&public);
+    cfg.takedown = Some(crate::admin::TakedownSettings {
+        retention_ms: 60000,
+        publication: mkit_server::takedown::PublicationConfig::parse(&seed,
+            &serde_json::json!({"version":1,"keys":[{"keyId":mkit_core::hash::to_hex(&mkit_core::hash::hash(&receipt)),
+            "alg":"ed25519","publicKey":mkit_core::hash::to_hex(&receipt)}]}).to_string()).unwrap(),
+    });
+    v.insert("RECEIPT_NOTICE_KEY".into(), seed);
+    assert!(validate_runtime_key_material(&cfg, &|name| v.get(name).cloned()).is_ok());
+    cfg.url_tokens = Some(mkit_server::url_token::UrlTokenConfig::new(future));
+    assert!(
+        validate_runtime_key_material(&cfg, &|name| v.get(name).cloned())
+            .unwrap_err()
+            .0
+            .contains("receipt signing seed")
+    );
+}
+
 #[cfg(feature = "signed-http-hooks")]
 #[test]
 fn launch_signed_hooks_are_validated_at_startup_and_redact_keys() {

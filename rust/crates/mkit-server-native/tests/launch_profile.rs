@@ -175,6 +175,146 @@ fn http_launch_requires_dedicated_tokens_and_mounts_native_proofs() {
     );
 }
 
+#[cfg(feature = "http-objects")]
+#[test]
+fn published_token_keys_cannot_disclose_ticket_mac_material() {
+    let root = common::repo_root();
+    let mut launch = flags(root.path());
+    let tokens = root.path().join("url.keys");
+    common::secret_file(&tokens, format!("active {}\n", "22".repeat(32)).as_bytes());
+    launch.extend([
+        "--http-objects".into(),
+        "--url-token-key-file".into(),
+        common::s(&tokens).into(),
+    ]);
+    let config = resolve(&launch).unwrap();
+    let public = config
+        .pipeline
+        .url_tokens
+        .unwrap()
+        .keys()
+        .public_keys()
+        .next()
+        .unwrap();
+    let ticket = root.path().join("ticket.keys");
+    common::secret_file(
+        &ticket,
+        format!("tickets {}\n", mkit_core::hash::to_hex(&public)).as_bytes(),
+    );
+    assert!(
+        resolve(&launch)
+            .unwrap_err()
+            .message
+            .contains("key separation")
+    );
+    common::secret_file(
+        &tokens,
+        format!(
+            "active {}\nretired {} 0\n",
+            "33".repeat(32),
+            mkit_core::hash::to_hex(&public)
+        )
+        .as_bytes(),
+    );
+    assert!(
+        resolve(&launch)
+            .unwrap_err()
+            .message
+            .contains("key separation")
+    );
+}
+
+#[cfg(feature = "http-objects")]
+#[test]
+fn native_token_seed_cannot_be_a_published_admin_key() {
+    let root = common::repo_root();
+    let mut launch = flags(root.path());
+    let tokens = root.path().join("url.keys");
+    common::secret_file(&tokens, format!("active {}\n", "22".repeat(32)).as_bytes());
+    let admin = root.path().join("admin.json");
+    common::secret_file(
+        &admin,
+        serde_json::json!({"version":1,"keys":[{
+            "keyId":"operator", "alg":"ed25519", "publicKey":"22".repeat(32), "roles":["all"]
+        }]})
+        .to_string()
+        .as_bytes(),
+    );
+    launch.extend([
+        "--http-objects".into(),
+        "--url-token-key-file".into(),
+        common::s(&tokens).into(),
+        "--admin-keys-file".into(),
+        common::s(&admin).into(),
+    ]);
+    assert!(
+        resolve(&launch)
+            .unwrap_err()
+            .message
+            .contains("signing seed")
+    );
+}
+
+#[cfg(feature = "hooks")]
+#[test]
+fn native_hook_public_bytes_cannot_be_ticket_secret_material() {
+    let root = common::repo_root();
+    let mut launch = flags(root.path());
+    let hook = root.path().join("hook.key");
+    common::secret_file(&hook, format!("hook {}\n", "55".repeat(32)).as_bytes());
+    let public = mkit_server::hooks::HookSigner::new("hook", zeroize::Zeroizing::new([0x55; 32]))
+        .unwrap()
+        .public_key();
+    common::secret_file(
+        &root.path().join("ticket.keys"),
+        format!("ticket {}\n", mkit_core::hash::to_hex(&public)).as_bytes(),
+    );
+    launch.extend([
+        "--hook-admit-url".into(),
+        "https://hooks.example".into(),
+        "--hook-key-file".into(),
+        common::s(&hook).into(),
+    ]);
+    assert!(
+        resolve(&launch)
+            .unwrap_err()
+            .message
+            .contains("hook public key")
+    );
+}
+
+#[cfg(feature = "hooks")]
+#[test]
+fn native_hook_seed_cannot_be_a_published_admin_key() {
+    let root = common::repo_root();
+    let mut launch = flags(root.path());
+    let hook = root.path().join("hook.key");
+    common::secret_file(&hook, format!("hook {}\n", "33".repeat(32)).as_bytes());
+    let admin = root.path().join("admin.json");
+    common::secret_file(
+        &admin,
+        serde_json::json!({"version":1,"keys":[{
+            "keyId":"operator", "alg":"ed25519", "publicKey":"33".repeat(32), "roles":["all"]
+        }]})
+        .to_string()
+        .as_bytes(),
+    );
+    launch.extend([
+        "--hook-admit-url".into(),
+        "https://hooks.example".into(),
+        "--hook-key-file".into(),
+        common::s(&hook).into(),
+        "--admin-keys-file".into(),
+        common::s(&admin).into(),
+    ]);
+    assert!(
+        resolve(&launch)
+            .unwrap_err()
+            .message
+            .contains("hook key must differ")
+    );
+}
+
 #[cfg(feature = "hooks")]
 #[test]
 fn launch_inspection_requires_complete_separate_retrieval_and_sync_inspectors() {

@@ -51,8 +51,10 @@ pub(crate) fn takedown(
         .ok_or_else(|| {
             ConfigError("explicit positive PRESERVATION_RETENTION_MS required".into())
         })?;
-    let seed = var(RECEIPT_SECRET)
-        .ok_or_else(|| ConfigError("RECEIPT_NOTICE_KEY secret required".into()))?;
+    let seed = zeroize::Zeroizing::new(
+        var(RECEIPT_SECRET)
+            .ok_or_else(|| ConfigError("RECEIPT_NOTICE_KEY secret required".into()))?,
+    );
     let list = var("RECEIPT_KEYS")
         .ok_or_else(|| ConfigError("RECEIPT_KEYS publication required".into()))?;
     let publication = mkit_server::takedown::PublicationConfig::parse(seed.trim(), &list)

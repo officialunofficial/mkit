@@ -207,6 +207,30 @@ mod tests {
         assert!(cfg.validate().is_ok());
     }
 
+    fn assert_receipt_seed_is_not_public(v: &BTreeMap<String, String>) {
+        let mut exposed = v.clone();
+        let receipt =
+            mkit_server::hooks::HookSigner::new("receipt", zeroize::Zeroizing::new([0x22; 32]))
+                .unwrap()
+                .public_key();
+        exposed.insert("RECEIPT_NOTICE_KEY".into(), "22".repeat(32));
+        exposed.insert(
+            "RECEIPT_KEYS".into(),
+            serde_json::json!({"version":1,"keys":[{
+                "keyId":mkit_core::hash::to_hex(&mkit_core::hash::hash(&receipt)),
+                "alg":"ed25519", "publicKey":mkit_core::hash::to_hex(&receipt)
+            }]})
+            .to_string(),
+        );
+        assert!(
+            WorkerConfig::from_vars_with_purge(|key| exposed.get(key).cloned(), purge())
+                .unwrap_err()
+                .0
+                .contains("receipt signing seed"),
+            "published admin bytes must never disclose the receipt signing seed"
+        );
+    }
+
     #[test]
     fn custom_purge_does_not_waive_admin_or_preservation_configuration() {
         let mut v = vars();
@@ -233,7 +257,7 @@ mod tests {
         v.insert(
             "ADMIN_KEYS".into(),
             serde_json::json!({"version":1,"keys":[{
-                "keyId":"operator", "alg":"ed25519", "publicKey":"11".repeat(32),
+                "keyId":"operator", "alg":"ed25519", "publicKey":"22".repeat(32),
                 "roles":["audit","moderation"]
             }]})
             .to_string(),
@@ -267,6 +291,7 @@ mod tests {
             parse(&v).is_ok(),
             "custom sink with complete preservation must parse"
         );
+        assert_receipt_seed_is_not_public(&v);
         let mut cfg = parse(&v).unwrap();
         let admin = cfg.admin.take();
         cfg.admin = Some(

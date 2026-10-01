@@ -87,7 +87,7 @@ pub(crate) fn validate_programmatic(cfg: &WorkerConfig) -> Result<(), ConfigErro
 }
 
 #[allow(unused_mut)] // HTTP builds append the URL-token group.
-fn validate_key_roles(cfg: &WorkerConfig) -> Result<(), ConfigError> {
+fn role_groups(cfg: &WorkerConfig) -> Vec<Vec<[u8; 32]>> {
     let mut groups = vec![
         cfg.admin
             .as_ref()
@@ -105,8 +105,12 @@ fn validate_key_roles(cfg: &WorkerConfig) -> Result<(), ConfigError> {
             .as_ref()
             .map_or_else(Vec::new, |t| t.keys().public_keys().collect()),
     );
+    groups
+}
+
+fn validate_key_roles(cfg: &WorkerConfig) -> Result<(), ConfigError> {
     let mut public = Vec::new();
-    for group in groups {
+    for group in role_groups(cfg) {
         if group.iter().any(|key| {
             public.contains(key)
                 || cfg
@@ -124,8 +128,64 @@ fn validate_key_roles(cfg: &WorkerConfig) -> Result<(), ConfigError> {
         retrieval.check_role_keys(&public, &[]).map_err(|_| {
             error("scanner retrieval keys must differ from every configured key role")
         })?;
+        public.extend(retrieval.scanner_keys());
+    }
+    validate_signing_seeds(cfg, &public, &|_| None)
+}
+
+fn validate_signing_seeds(
+    cfg: &WorkerConfig,
+    public: &[[u8; 32]],
+    var: &impl Fn(&str) -> Option<String>,
+) -> Result<(), ConfigError> {
+    #[cfg(feature = "http-objects")]
+    if cfg
+        .url_tokens
+        .as_ref()
+        .is_some_and(|tokens| public.iter().any(|key| tokens.keys().contains_secret(key)))
+    {
+        return Err(error(
+            "URL token signing seed must differ from published role keys",
+        ));
+    }
+    if let Some(text) = var(crate::admin::RECEIPT_SECRET) {
+        let text = zeroize::Zeroizing::new(text);
+        let seed = zeroize::Zeroizing::new(
+            mkit_core::hash::from_hex(text.trim()).map_err(|_| error("invalid receipt key"))?,
+        );
+        if public.contains(&*seed)
+            || cfg
+                .ticket_keys
+                .as_ref()
+                .is_some_and(|tickets| tickets.contains_secret(&seed))
+        {
+            return Err(error(
+                "receipt signing seed must differ from configured role keys",
+            ));
+        }
     }
     Ok(())
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn validate_runtime_key_material(
+    cfg: &WorkerConfig,
+    var: &impl Fn(&str) -> Option<String>,
+) -> Result<(), ConfigError> {
+    let mut public = role_groups(cfg).concat();
+    if let Some(retrieval) = &cfg.scanner_retrieval {
+        public.extend(retrieval.scanner_keys());
+    }
+    if let Some(http) = cfg.hooks.as_ref().and_then(|hooks| hooks.http.as_ref()) {
+        let signer = crate::hooks::config::http_signer(
+            var("MKIT_HOOK_KEY"),
+            http,
+            cfg.ticket_keys.as_ref(),
+            &public,
+        )?;
+        public.push(signer.public_key());
+    }
+    validate_signing_seeds(cfg, &public, var)
 }
 
 fn boolean(var: &impl Fn(&str) -> Option<String>, name: &str) -> Result<bool, ConfigError> {
@@ -235,7 +295,9 @@ pub(crate) fn validate(
             error("scanner retrieval keys must differ from every configured key role")
         })?;
         crate::scanner_retrieval::check_hook_seed(config, key.as_ref().map(String::as_str))?;
+        public.extend(config.scanner_keys());
     }
+    validate_signing_seeds(cfg, &public, var)?;
     if cfg.launch.is_none() {
         // Missing foundations must never silently turn these options off.
         if [

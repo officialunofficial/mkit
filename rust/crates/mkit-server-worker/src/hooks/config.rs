@@ -372,9 +372,19 @@ pub fn http_signer(
             "hook key must differ from every accepted ticket secret",
         ));
     }
+    if other_keys.contains(&*seed) {
+        return Err(config(
+            "hook key must differ from other configured role keys",
+        ));
+    }
     let signer = HookSigner::new(id, seed)
         .and_then(|s| s.with_validity(vars.validity))
         .map_err(|_| bad())?;
+    if tickets.is_some_and(|keys| keys.contains_ed25519_public(&signer.public_key())) {
+        return Err(config(
+            "hook public key must differ from ticket secret material",
+        ));
+    }
     if other_keys.contains(&signer.public_key()) {
         return Err(config(
             "hook key must differ from other configured role keys",
@@ -454,6 +464,19 @@ mod http_tests {
         verifier.verify(procedure, &headers, body).unwrap();
         assert!(verifier.verify(procedure, &headers, body).is_err());
         assert!(verifier.verify(procedure, &headers, b"{}").is_err());
+    }
+
+    #[test]
+    fn hook_seed_cannot_be_another_roles_published_public_key() {
+        let public =
+            mkit_server::hooks::HookSigner::new("token", zeroize::Zeroizing::new([34; 32]))
+                .unwrap()
+                .public_key();
+        let text = format!("hook {}", mkit_core::hash::to_hex(&public));
+        assert!(
+            http_signer(Some(text), &vars(), None, &[public]).is_err(),
+            "published role bytes would disclose the hook signing seed"
+        );
     }
     #[test]
     fn http_configuration_is_complete_and_validity_bounded() {
