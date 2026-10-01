@@ -42,7 +42,9 @@ mod http_tokens;
 #[cfg(feature = "http-objects")]
 mod object_reader;
 #[cfg(feature = "http-objects")]
-pub use object_reader::{OBJECT_READER_BATCH, OBJECT_READER_CALLS, ObjectReader, ReaderView};
+pub use object_reader::{
+    IssuedUrl, OBJECT_READER_BATCH, OBJECT_READER_CALLS, ObjectReader, ReaderView,
+};
 mod implicit;
 mod info;
 #[cfg(feature = "remote-hooks")]
@@ -70,6 +72,7 @@ use core::future::Future;
 use core::time::Duration;
 use std::sync::Arc;
 
+pub use mkit_attest::grant::Visibility as RepoVisibility;
 use mkit_attest::grant::{Visibility, verify_visibility_statement};
 use mkit_core::hash::{Hash, to_hex, to_hex_bytes};
 use mkit_core::protocol::{AdvanceOutcome, PackKey};
@@ -252,6 +255,8 @@ pub struct PipelineConfig {
     pub authority_fence: Option<crate::authority::AuthorityFence>,
     /// Write authorization policy; Open for Single, Owner for Multi.
     pub write_policy: WritePolicy,
+    /// Visibility of repositories without an explicit stored setting (default public).
+    pub default_repo_visibility: RepoVisibility,
     /// Role of the authorizer hook, defaulting to an additional check.
     pub authorizer_role: AuthorizerRole,
     /// Upload caps, supplied by the binding (used by M0-05b).
@@ -349,6 +354,7 @@ impl PipelineConfig {
         };
         Self {
             write_policy,
+            default_repo_visibility: RepoVisibility::Public,
             authorizer_role: AuthorizerRole::Check,
             addressing,
             sharding: Sharding::Single,
@@ -550,6 +556,15 @@ fn replay_answer(decision: ReplayDecision) -> Result<Option<StoredResult>, Serve
 
 fn ms(ms: i64) -> u64 {
     u64::try_from(ms).unwrap_or(0)
+}
+
+/// Resolve visibility for reads and snapshot publication. Explicit rows always
+/// override the deployment default; callers strongly read the row, never cache it.
+#[must_use]
+pub fn repo_is_private(stored: Option<&codec::RepoVisibilityV1>, default: RepoVisibility) -> bool {
+    stored.map_or(default == RepoVisibility::Private, |row| {
+        row.visibility == codec::StoredVisibility::Private
+    })
 }
 
 /// The `rv` codec's visibility for a statement/envelope [`Visibility`].
@@ -1578,9 +1593,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         ttl_seconds: u32,
     ) -> Result<MintedToken, ServerError> {
         self.observe(a, async {
-            let Some(tokens) = &self.cfg.url_tokens else {
+            if self.cfg.url_tokens.is_none() {
                 return Err(ServerError::unimplemented("URL tokens not configured"));
-            };
+            }
             let op = self.identify(
                 a,
                 OpKind::IssueObjectUrl {
@@ -1588,26 +1603,47 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     ttl_seconds,
                 },
             )?;
-            let read = self.authorize_read(&op).await?;
-            let epoch = match read.epoch {
-                Some(epoch) => epoch,
-                None => self.stored_grant_epoch(&op.repo.namespace).await?,
-            };
-            let audience = match &self.cfg.auth {
-                AuthMode::AuthV2(cfg) => cfg.audience(),
-                // `Pipeline::new` refuses `url_tokens` without auth v2.
-                _ => return Err(internal("URL tokens without auth v2")),
-            };
-            tokens.mint(
-                audience,
+            self.issue_url(
+                &op,
                 &a.repo().identity,
                 &target,
-                epoch,
-                a.business_now_ms,
                 ttl_seconds,
+                a.business_now_ms,
             )
+            .await
         })
         .await
+    }
+
+    // Shared below the wire envelope boundary: embedders transfer only verified
+    // reader authority, while the RPC still requires its own signed envelope.
+    async fn issue_url(
+        &self,
+        op: &Operation,
+        repository: &str,
+        target: &UrlTarget,
+        ttl_seconds: u32,
+        now_ms: i64,
+    ) -> Result<MintedToken, ServerError> {
+        let Some(tokens) = &self.cfg.url_tokens else {
+            return Err(ServerError::unimplemented("URL tokens not configured"));
+        };
+        let read = self.authorize_read(op).await?;
+        let epoch = match read.epoch {
+            Some(epoch) => epoch,
+            None => self.stored_grant_epoch(&op.repo.namespace).await?,
+        };
+        let AuthMode::AuthV2(auth) = &self.cfg.auth else {
+            return Err(internal("URL tokens without auth v2"));
+        };
+        tokens.mint(
+            auth.audience(),
+            repository,
+            target,
+            epoch,
+            now_ms,
+            ttl_seconds,
+        )
     }
 
     /// `SetRepoVisibility` (SPEC-WRITE-GRANTS §9.1): the envelope mode is a
@@ -2821,10 +2857,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .map_err(meta_error)?
             .unwrap_or(0);
         Ok(Some((
-            matches!(
-                stored.map(|v| v.visibility),
-                Some(codec::StoredVisibility::Private)
-            ),
+            repo_is_private(stored.as_ref(), self.cfg.default_repo_visibility),
             epoch,
         )))
     }
