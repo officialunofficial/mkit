@@ -8,7 +8,7 @@ const als = new AsyncLocalStorage();
 let serial = 0;
 const originalFetch = globalThis.fetch.bind(globalThis);
 const PREFIX = 'MKIT_LAUNCH_BUDGET ';
-const isolate = {id: crypto.randomUUID(), outgoing: 0, outgoingPeak: 0,
+const isolate = {id: null, outgoing: 0, outgoingPeak: 0,
   active: 0, activePeak: 0, cacheCalls: 0, unattributedCache: 0, cacheObserved: false};
 const counters = () => ({doFetch: 0, r2: 0, hookFetch: 0, bindingFetch: 0, cache: 0,
   sqlStatements: 0, sqlPending: 0, sqlRowsRead: 0, sqlRowsWritten: 0,
@@ -17,6 +17,7 @@ const counters = () => ({doFetch: 0, r2: 0, hookFetch: 0, bindingFetch: 0, cache
 const owner = () => ({active: 0, group: null});
 
 function begin(holder, kind, name, path = '') {
+  isolate.id ||= crypto.randomUUID();
   if (!holder.active) holder.group = {id: ++serial, counters: counters(), alarms: 0,
     invocations: 0, requests: 0, overlap: false, failed: false};
   const group = holder.group;
