@@ -77,6 +77,17 @@ false positive that actually commits, and an actually oversized single apply
 that still rolls back. Generic Invalid hook errors remain terminal without
 shrinking. Cache-failure activation retains durable purge/audit responsibility.
 
+D48 separately triages manually replacing a committed head with sequence zero
+and a large nonzero hash after real receipts exist. That corrupt-history state
+cannot originate the atomic audit writers and violates the retained checkpoint
+and gapless-head contract in SPEC-SERVER §16.6. Its raw failed progress premise,
+source, and pins remain retained. The aligned test instead requires unchanged
+head/receipts, no watermark or partial target writes, queued source rows, and at
+most two target calls per fire. Production performs no history repair or new
+parser restriction. Preflight progress applies to valid audit history; it is
+not a universal capacity theorem for every parser-accepted corrupt state.
+Authoritative SQL limits and atomic rollback continue to govern those states.
+
 These tests do not certify full 4,096-shard workerd coverage, all 28 profile
 combinations, 128-MB isolate capacity, or cloud staging. The unchanged canonical
 admin replay at the merge checkpoint failed with an unclassified connection

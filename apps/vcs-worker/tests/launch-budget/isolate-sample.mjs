@@ -66,10 +66,11 @@ try {
         try {
           const heap = await active.rpc('Runtime.getHeapUsage');
           const memory = await active.rpc('Runtime.evaluate', {expression:
-            'globalThis.__mkitLaunchMemory ? globalThis.__mkitLaunchMemory() : null',
+            '({wasm:globalThis.__mkitLaunchMemory ? globalThis.__mkitLaunchMemory() : null,budget:globalThis.__mkitLaunchBudget ? globalThis.__mkitLaunchBudget() : null})',
             returnByValue: true, timeout: 1000});
           samples.push({started, finished: Date.now(), isolate: active.isolate,
-            target: active.target, heap, wasm: memory.result?.value ?? null});
+            target: active.target, heap, wasm: memory.result?.value?.wasm ?? null,
+            budget: memory.result?.value?.budget ?? null});
         } catch (error) {
           gaps.push({at: Date.now(), target: active.target, error: String(error)});
           active.close();clients.delete(target.id);

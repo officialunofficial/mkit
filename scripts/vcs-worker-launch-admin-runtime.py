@@ -62,7 +62,7 @@ def get_json(url):
         return json.loads(response.read(1048577))
 
 
-def run_fixture(namespace, port, folder, artifact, runner, env, evidence):
+def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observed=False):
     folder.mkdir()
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", port))
@@ -74,6 +74,8 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence):
         receiver = subprocess.Popen(["node", str(FIXTURE)], env=dict(env, ADMIN_READY_FILE=str(ready)),
             stdout=receiver_log, stderr=subprocess.STDOUT, start_new_session=True)
         worker = None
+        sampler = None
+        sampler_log = None
         transcript = []
         try:
             deadline = time.monotonic() + 15
@@ -82,7 +84,12 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence):
                 time.sleep(.1)
             receiver_origin = json.loads(ready.read_text())["origin"]
             keys = json.loads(subprocess.check_output(["node", str(FIXTURE), "keys"], env=env, text=True))
-            wrapper = (ROOT / "apps/vcs-worker/tests/launch-inspection/wrapper.mjs").read_text()
+            wrapper_fixture = ROOT / "apps/vcs-worker/tests" / ("launch-budget" if observed else "launch-inspection")
+            wrapper = (wrapper_fixture / "wrapper.mjs").read_text()
+            if observed:
+                shutil.copyfile(wrapper_fixture / "memory.mjs", folder / "memory.mjs")
+                result["memory_observer_sha256"] = runtime.digest(folder / "memory.mjs")
+                result["sampler_sha256"] = runtime.digest(wrapper_fixture / "isolate-sample.mjs")
             wrapper = wrapper.replace("__RELEASE_SHIM__", str(artifact / "worker/shim.mjs"))
             wrapper = wrapper.replace("__RECEIVER_ORIGIN__", receiver_origin).replace(
                 "https://inspection.launch.invalid", "https://purge.launch.invalid")
@@ -112,6 +119,8 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence):
                                for binding in ("STORAGE", "BACKUPS", "PRESERVATION")],
                 "durable_objects": {"bindings": [{"name": binding, "class_name": cls} for binding, cls in classes]},
                 "migrations": [{"tag": "v1", "new_sqlite_classes": [cls for _, cls in classes]}]}
+            if observed:
+                config["compatibility_flags"] = ["nodejs_als"]
             config_path = folder / "wrangler.json"
             config_path.write_text(json.dumps(config, indent=2) + "\n")
             result["config_sha256"] = runtime.digest(config_path)
@@ -119,10 +128,27 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence):
             command = ["npx", "--yes", "wrangler@" + runtime.WRANGLER, "dev", "--local", "--config", str(config_path),
                 "--ip", "127.0.0.1", "--port", str(port), "--persist-to", str(folder / "state"),
                 "--show-interactive-dev-session=false"]
+            if observed:
+                inspector = env.get("MKIT_LAUNCH_INSPECTOR_PORT", "")
+                check(inspector.isdecimal() and 1024 <= int(inspector) <= 65535, "set owned inspector port")
+                with socket.socket() as listener:
+                    listener.bind(("127.0.0.1", int(inspector)))
+                command += ["--inspector-port", inspector]
+            evidence["commands"].append({"argv": command, "cwd": str(ROOT / "apps/vcs-worker"),
+                "log": str((folder / "wrangler.log").relative_to(evidence["directory"]))})
             with (folder / "wrangler.log").open("w") as worker_log:
                 worker = subprocess.Popen(command, cwd=ROOT / "apps/vcs-worker", env=env, stdout=worker_log,
                     stderr=subprocess.STDOUT, start_new_session=True)
                 result["owned_pids"] = [receiver.pid, worker.pid]
+                if observed:
+                    sampler_log = (folder / "isolate-sampler.log").open("w")
+                    sampler_command = ["node", str(wrapper_fixture / "isolate-sample.mjs"), inspector,
+                        str(folder / "isolate-samples.json"), str(folder / "sampler-stop")]
+                    evidence["commands"].append({"argv": sampler_command, "cwd": str(ROOT),
+                        "log": str((folder / "isolate-sampler.log").relative_to(evidence["directory"]))})
+                    sampler = subprocess.Popen(sampler_command, env=env, stdout=sampler_log,
+                        stderr=subprocess.STDOUT, start_new_session=True)
+                    result["owned_pids"].append(sampler.pid)
                 deadline = time.monotonic() + 120
                 while True:
                     check(worker.poll() is None and time.monotonic() < deadline, "release admin startup failed")
@@ -250,15 +276,67 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence):
             raise
         finally:
             (folder / "admin-transcript.json").write_text(json.dumps(transcript, indent=2) + "\n")
+            if sampler is not None:
+                (folder / "sampler-stop").touch()
+                try:
+                    sampler.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    runtime.stop(sampler)
+            if sampler_log is not None:
+                sampler_log.close()
             if worker is not None:
                 runtime.stop(worker)
             runtime.stop(receiver)
+            if observed:
+                collect_observation(folder, result, sampler)
+
+
+def collect_observation(folder, result, sampler):
+    """Retain partial/failing evidence without masking the canonical workload error."""
+    observation = {"scope": "local full-profile trace observation", "memory_certificate": False,
+        "result": "INCOMPLETE", "sampler_exit": sampler.returncode if sampler else None}
+    try:
+        spec = importlib.util.spec_from_file_location("budget_runtime", ROOT / "scripts/vcs-worker-launch-budget-runtime.py")
+        budget = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(budget)
+        found = budget.records(folder / "wrangler.log")
+        (folder / "budget-records.json").write_text(json.dumps(found, indent=2) + "\n")
+        observation["record_count"] = len(found)
+        observation["module_ids"] = sorted({r["isolate"]["id"] for r in found})
+        final_requests = [r for r in found if r["kind"] == "request" and r["groupFinal"]]
+        observation["backend_request_calls_peak"] = max((r["doFetch"] + r["r2"] + r["bindingFetch"] for r in final_requests), default=0)
+        observation["hook_calls_peak"] = max((r["hookFetch"] for r in final_requests), default=0)
+        observation["cache_calls_peak"] = max((r["cache"] for r in final_requests), default=0)
+        sampled = json.loads((folder / "isolate-samples.json").read_text())
+        observation["samples"] = len(sampled["samples"])
+        observation["gaps"] = len(sampled["gaps"])
+        observation["isolate_ids"] = sorted({sample["isolate"] for sample in sampled["samples"]})
+        observation["module_isolate_pairs"] = sorted({(sample["budget"]["id"], sample["isolate"])
+            for sample in sampled["samples"] if sample.get("budget") and sample["budget"].get("id")})
+        observation["heap_fields"] = sorted({field for sample in sampled["samples"] for field in sample["heap"]})
+        observation["full_heap_fields_present"] = bool(sampled["samples"]) and all(
+            all(field in sample["heap"] for field in ("usedSize", "totalSize", "embedderHeapUsedSize", "backingStorageSize"))
+            for sample in sampled["samples"])
+        observation["wasm_instances"] = sorted({sample["wasm"]["instances"] for sample in sampled["samples"] if sample.get("wasm")})
+        check(not any(n > 1 for n in observation["wasm_instances"]), "Wasm reinitialization observation gap")
+        check(observation["module_isolate_pairs"], "module to actual isolate correlation absent")
+        check(sampled["samples"] and not sampled["deadlineExceeded"] and sampler.returncode == 0,
+              "nonempty completed inspector observation required")
+        observation["physical"] = budget.assess(found)
+        check(observation["backend_request_calls_peak"] <= 9000, "observed backend exceeds 9000")
+        observation["result"] = "OBSERVED"
+    except Exception as error:
+        observation["error"] = str(error)
+    result["observation"] = observation
+    (folder / "observation.json").write_text(json.dumps(observation, indent=2) + "\n")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sha", required=True)
     parser.add_argument("--namespace", choices=("both", "allowlist", "any"), default="both")
+    parser.add_argument("--observe-resources", action="store_true", help="observe the unchanged local workload")
+    parser.add_argument("--artifact-from", type=Path, help="reuse the same owned clean-SHA artifact and runner")
     args = parser.parse_args()
     check(args.sha == runtime.git("rev-parse", "HEAD") and not runtime.git("status", "--porcelain"), "use clean current SHA")
     check("CARGO_TARGET_DIR" not in os.environ, "CARGO_TARGET_DIR must be unset")
@@ -276,20 +354,33 @@ def main():
         "fixtures": [], "result": "RUNNING", "launch_matrix_result": "UNRUN", "limitations": [
             "Local synthetic HTTPS hook mapping; no deployment or TLS sink certification",
             "Single live raw Blob producer; no concurrent purge CAS, retention expiry/corrupt copy or failure injection",
-            "No whole-dispatch physical counter or isolate CPU/memory certificate",
+            "No full-isolate CPU/memory certificate; optional identified local samples retain gaps and incomplete fields",
             "No writer-reuse/snapshot/scanner intersection or durable signing rotation claim"]}
     print("Evidence directory:", run, flush=True)
     try:
-        runtime.invoke(["cargo", "build", "--locked", "-p", "mkit-server-conformance", "--bin", "mkit-server-conformance"],
-                       ROOT / "rust", run / "runner-build.log", env, evidence)
-        runtime.invoke(["worker-build", "--release", "--features", "launch"], ROOT / "apps/vcs-worker", run / "build.log", env, evidence)
         artifact = run / "artifact"
-        shutil.copytree(ROOT / "apps/vcs-worker/build", artifact)
-        evidence["artifacts"] = {str(p.relative_to(artifact)): runtime.digest(p) for p in artifact.rglob("*") if p.is_file()}
         runner = ROOT / "rust/target/debug/mkit-server-conformance"
+        if args.artifact_from:
+            prior = args.artifact_from
+            check(prior.is_absolute() and prior.is_relative_to(scratch) and prior.resolve() == prior,
+                  "reuse only an owned nonsymlink artifact run")
+            prior_evidence = json.loads((prior / "evidence.json").read_text())
+            check(prior_evidence["candidate_sha"] == args.sha, "reused artifact source SHA differs")
+            check(prior_evidence["runner_sha256"] == runtime.digest(runner), "reused runner differs")
+            for path, digest in prior_evidence["artifacts"].items():
+                check(runtime.digest(prior / "artifact" / path) == digest, "reused artifact bytes differ")
+            shutil.copytree(prior / "artifact", artifact)
+            evidence["artifact_reused_from"] = str(prior)
+        else:
+            runtime.invoke(["cargo", "build", "--locked", "-p", "mkit-server-conformance", "--bin", "mkit-server-conformance"],
+                           ROOT / "rust", run / "runner-build.log", env, evidence)
+            runtime.invoke(["worker-build", "--release", "--features", "launch"], ROOT / "apps/vcs-worker", run / "build.log", env, evidence)
+            shutil.copytree(ROOT / "apps/vcs-worker/build", artifact)
+        evidence["artifacts"] = {str(p.relative_to(artifact)): runtime.digest(p) for p in artifact.rglob("*") if p.is_file()}
         evidence["runner_sha256"] = runtime.digest(runner)
+        evidence["observation_enabled"] = args.observe_resources
         for namespace in ("allowlist", "any") if args.namespace == "both" else (args.namespace,):
-            run_fixture(namespace, int(port), run / namespace, artifact, runner, env, evidence)
+            run_fixture(namespace, int(port), run / namespace, artifact, runner, env, evidence, args.observe_resources)
         check(runtime.git("rev-parse", "HEAD") == args.sha and not runtime.git("status", "--porcelain"), "candidate changed")
         evidence["result"] = "PASS"
     except Exception as error:

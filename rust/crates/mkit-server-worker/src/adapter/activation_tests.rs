@@ -968,3 +968,122 @@ fn audit_single_actual_oversize_still_rolls_back_atomically() {
         assert!(target.get(&root, &row.puts[1].0).await.unwrap().is_none());
     });
 }
+
+#[test]
+fn audit_corrupt_zero_head_fails_closed_without_history_repair() {
+    block_on(async {
+        let clock = Arc::new(ManualClock::new(10));
+        let source = MemoryKv::with_clock(clock.clone());
+        let target = target(false, &clock);
+        let root = root(false);
+        let partition = mkit_server::store::content_shard(&[13; 32]);
+        let audit = SystemAudit::new(target.clone(), root.clone());
+        let mut rows = (0..5)
+            .map(|i| {
+                audit
+                    .relay_row(&partition, &request(i), &format!("activation:{i}"), 10)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut receipts = Batch::new();
+        for row in &rows {
+            for (key, value) in &row.puts {
+                receipts = receipts.put(key.clone(), value.clone());
+            }
+        }
+        assert_eq!(
+            target.apply(&root, receipts).await.unwrap(),
+            BatchOutcome::Committed
+        );
+        let head = Key::new(b"ah\0".to_vec());
+        let old = Value::new(
+            serde_json::to_vec(&serde_json::json!({"seq":0,"hash":"a".repeat(300*1024)})).unwrap(),
+        );
+        assert_eq!(
+            target
+                .apply(&root, Batch::new().put(head.clone(), old.clone()))
+                .await
+                .unwrap(),
+            BatchOutcome::Committed
+        );
+        for (i, row) in rows.iter_mut().enumerate() {
+            row.puts.push((
+                Key::new(vec![b'x', u8::try_from(i).unwrap()]),
+                Value::new(vec![1; 100 * 1024]),
+            ));
+            codec::encode_relay(row).unwrap();
+        }
+        let rh = keys::relay_high_water(&partition).unwrap();
+        let batch = unobserved_audit_batch(&partition, &rows);
+        batch
+            .validate(&mkit_server::StoreCapabilities::full())
+            .unwrap();
+        assert!(
+            target
+                .apply(&root, batch)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("extended batch exceeds limits")
+        );
+        assert_eq!(target.get(&root, &head).await.unwrap(), Some(old.clone()));
+        assert!(target.get(&root, &rh).await.unwrap().is_none());
+        enqueue(&source, &partition, &rows, 10).await;
+        let allowance = mkit_server::purge::SliceBudget::new(crate::purge::LAUNCH_ALARM_OPERATIONS);
+        for now in [10, 5010, 10010, 15010, 20010] {
+            clock.set(now);
+            let registry = timer_registry_budgeted::<MemoryKv, _>(
+                crate::classes::ShardClass::ContentIndexShard,
+                Ok(target.clone()),
+                Some("paid"),
+                Some(&allowance),
+                None,
+                Some(&root),
+                None,
+            );
+            let before = allowance.used();
+            run_due(
+                &source,
+                &partition,
+                &registry,
+                clock.as_ref(),
+                u64::try_from(now).unwrap(),
+                &TickBudget::default(),
+            )
+            .await
+            .unwrap();
+            assert!(allowance.used() - before <= 2);
+        }
+        // D48: a manually replaced zero head after real receipts is corrupt history,
+        // not an admitted progress case. Preserve it without repairing or normalizing.
+        assert!(target.get(&root, &rh).await.unwrap().is_none());
+        assert_eq!(target.get(&root, &head).await.unwrap(), Some(old));
+        for row in &rows {
+            assert_eq!(
+                target.get(&root, &row.puts[0].0).await.unwrap(),
+                Some(row.puts[0].1.clone())
+            );
+            assert!(target.get(&root, &row.puts[1].0).await.unwrap().is_none());
+        }
+        assert!(
+            source
+                .get(&partition, &keys::relay(5))
+                .await
+                .unwrap()
+                .is_some()
+        );
+    });
+}
+
+fn unobserved_audit_batch(partition: &Partition, rows: &[codec::RelayV1]) -> Batch {
+    let rh = keys::relay_high_water(partition).unwrap();
+    let mut batch = Batch::new()
+        .require(mkit_server::Precondition::Absent(rh.clone()))
+        .put(rh, codec::encode_u64(u64::try_from(rows.len()).unwrap()));
+    for row in rows {
+        for (key, value) in &row.puts {
+            batch = batch.put(key.clone(), value.clone());
+        }
+    }
+    batch
+}

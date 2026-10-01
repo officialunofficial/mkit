@@ -7,9 +7,14 @@ import Release, * as classes from '__RELEASE_SHIM__';
 const als = new AsyncLocalStorage();
 let serial = 0;
 const originalFetch = globalThis.fetch.bind(globalThis);
+// Optional fixture-only signed HTTPS receiver mapping. Ordinary budget runs
+// leave this literal unchanged and do not configure a signed receiver.
+const receiver = '__RECEIVER_ORIGIN__';
 const PREFIX = 'MKIT_LAUNCH_BUDGET ';
 const isolate = {id: null, outgoing: 0, outgoingPeak: 0,
   active: 0, activePeak: 0, cacheCalls: 0, unattributedCache: 0, cacheObserved: false};
+Object.defineProperty(globalThis, '__mkitLaunchBudget', {value: () => ({
+  at: Date.now(), ...isolate, wasmMemory: memorySnapshot()})});
 const counters = () => ({doFetch: 0, r2: 0, hookFetch: 0, bindingFetch: 0, cache: 0,
   sqlStatements: 0, sqlPending: 0, sqlRowsRead: 0, sqlRowsWritten: 0,
   timerWindows: 0, timerWindowRows: 0, timerWindowRowsMax: 0,
@@ -358,7 +363,15 @@ if (globalThis.caches) {
 globalThis.fetch = (...args) => {
   const scope = als.getStore();
   if (!scope) throw new Error('Fetch outside observed invocation');
-  return outgoing(scope.group, 'hookFetch', () => originalFetch(...args));
+  return outgoing(scope.group, 'hookFetch', () => {
+    if (receiver.startsWith('__')) return originalFetch(...args);
+    const [input, init] = args;
+    const request = input instanceof Request ? input : new Request(input, init);
+    const url = new URL(request.url);
+    if (url.origin !== 'https://inspection.launch.invalid') return originalFetch(...args);
+    if (request.redirect !== 'manual') throw new Error('signed hook must refuse redirects');
+    return originalFetch(new Request(receiver + url.pathname, request), init);
+  });
 };
 
 export default class extends WorkerEntrypoint {
