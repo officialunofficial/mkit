@@ -154,6 +154,7 @@ ci-scripts:
     just ci-proto
     python3 scripts/golden/url_token_ref.py rust/tests/golden/url-token --no-b3sum
     bash scripts/check-wasm-dep-graph.sh
+    python3 scripts/check-launch-feature-graph.py
     bash scripts/check-cli-baseline.sh
     if ! rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$'; then
       echo "error: wasm32-unknown-unknown target not installed. Run: rustup target add wasm32-unknown-unknown" >&2
