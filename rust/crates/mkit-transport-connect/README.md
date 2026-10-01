@@ -24,22 +24,17 @@ Connect-code mapping (the client direction is `src/error.rs`), and the
 
 ## Codegen
 
-`build.rs` compiles directly against the CANONICAL proto
-(`<repo-root>/proto/mkit/transport/v1/transport.proto`, referenced by a
-workspace-relative path) &mdash; there is no second copy, so this crate and any
-future consumer of the same proto cannot drift. Mirrors `mkit-repo-client`'s
-"zero-duplication" approach.
+`mkit-rpc` owns the generated messages and Connect bindings behind its opt-in
+`transport` feature. This client re-exports the shared types at `proto` and
+`generated`; its native runtime features stay here. Both the client and server
+use the canonical `<repo-root>/proto/mkit/transport/v1/transport.proto`.
 
-- **Default path**: `build.rs` stages the pre-generated sources committed
-  under `generated/` into `$OUT_DIR` &mdash; no `protoc` required. This keeps
-  Cloudflare Workers Builds, CI, and docs.rs (whose images lack a `protoc`
-  new enough for the `edition = "2023"` proto) building with zero system
-  dependencies.
-- **Regeneration path**: set `MKIT_REPO_CODEGEN=1` to run `connectrpc-build`
-  against the canonical proto instead (requires `protoc >= 27` on `PATH`, or
-  via `PROTOC`). After editing `transport.proto`, run
-  `scripts/regen-transport-proto.sh` from the repo root and commit the
-  refreshed `generated/`.
+- **Default path**: `mkit-rpc` stages committed sources from
+  `generated/transport/` into `$OUT_DIR`; consumers and docs.rs need no `protoc`.
+- **Regeneration path**: run `scripts/regen-transport-proto.sh` from the repo
+  root (requires `protoc >= 27` on `PATH`, or via `PROTOC`). It enables
+  `MKIT_TRANSPORT_CODEGEN=1` for the owning crate and refreshes the single
+  shared tree. Commit that output after editing the canonical proto.
 
 ## Native vs. wasm
 

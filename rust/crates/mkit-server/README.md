@@ -42,7 +42,7 @@ and `wasm32-unknown-unknown`:
   that runs stage 0 on the exact unary request bytes. It uses connectrpc
   without its `server` and `zstd` features, so it stays wasm-clean; the
   native and Workers adapters mount it unchanged. The generated code is
-  vendored under `generated/` (refresh it with
+  owned by `mkit-rpc` under `generated/transport/` (refresh it with
   `scripts/regen-transport-proto.sh`), so building needs no `protoc`.
   Build with `default-features = false` to leave the binding and its
   dependencies out.
@@ -59,7 +59,7 @@ and `wasm32-unknown-unknown`:
   exact body (`HookSigner`), only an isolated service binding may go unsigned,
   and every Authorize or Admit failure answers retryable `unavailable` with no
   state written. It uses buffa messages with the JSON codec only, so it stays
-  wasm-clean; the generated code is vendored under `generated/hooks/` (refresh
+  wasm-clean; the generated code is owned by `mkit-rpc` under `generated/hooks/` (refresh
   it with `scripts/regen-hooks-proto.sh`). A `Sleep` timeout seam, like
   `Clock`, keeps deadlines runtime-agnostic.
 

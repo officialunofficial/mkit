@@ -63,7 +63,7 @@ fencing under Multi addressing and an Authority hook. Each key line is
 `<key-id> <64 lowercase hex public key> <namespace[,namespace...]>`; keys must be
 dedicated and differ from owner, hook, ticket and active/retired URL-token keys.
 Every write allowance must include `authority_generation`. Fencing is off by
-default; launch activation belongs to WP-4.18. The getter/setter and canonical
+default; the Uno launch validates its activation (WP-4.18). The getter/setter and canonical
 signed statement contract are SPEC-SERVER §6.2.1.
 
 Once a namespace has persisted authority fencing, disabling the executor setting
