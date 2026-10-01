@@ -627,6 +627,11 @@ impl<S: NamespaceStore> Engine<S> {
         {
             return Ok(response);
         }
+        if replayed && verified.path == super::TAKEDOWN_PATH {
+            // The accepted timer owns recovery; a completed nonce replays its
+            // stored result without depending on runtime operations.
+            return Ok(response);
+        }
         let Some(service) = &self.operations else {
             return Err(ServerError::unavailable("takedown service unavailable"));
         };

@@ -1228,9 +1228,14 @@ async fn completed_takedown_replay_does_not_require_runtime_operations() {
         .await
         .unwrap();
     for engine in [failing, unavailable] {
-        let replay = engine.handle(admin::TAKEDOWN_PATH, &headers, &body, 100).await;
-        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0,
-            "stored replay never invokes the transient-failing runtime GET");
+        let replay = engine
+            .handle(admin::TAKEDOWN_PATH, &headers, &body, 100)
+            .await;
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "stored replay never invokes the transient-failing runtime GET"
+        );
         assert_eq!(replay, accepted);
         assert_eq!(f.head().await, head, "stored replay never appends audit");
         assert_eq!(
