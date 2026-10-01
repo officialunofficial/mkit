@@ -344,6 +344,10 @@ async fn upload_ticket(
     let Some(BeginResult::Ticket(ticket)) = opened.result else {
         return Err(Failure::Fail("BeginUpload did not issue a ticket".into()));
     };
+    if ctx.case == "uno.public_fixture" {
+        return super::multipart::complete_uno_ticket(ctx, &signer, repository, &ticket, pack)
+            .await;
+    }
     let id = ticket.id.ok_or("ticket has no id")?;
     let mut messages = upload_msgs(pack, 48);
     if let Some(UploadBody::Header(header)) = &mut messages[0].body {
@@ -503,6 +507,63 @@ pub(super) async fn uno_public_fixture(ctx: Ctx) -> CaseResult {
     launch_verified_fixture(ctx, false, false).await
 }
 
+async fn uno_payment_challenge(ctx: &Ctx) -> CaseResult {
+    let (repository, _) = super::repository::identities(ctx, "async-verify", "unused")?;
+    let begin = BeginUploadRequest {
+        r#ref: Some(ctx.head("payment-probe")),
+        pack_id: Some(hash(b"thirteen-byte").to_vec()),
+        bytes: Some(13),
+        ..Default::default()
+    };
+    let signed = sign_unary(
+        &ctx.v2_signer("repository-a")?,
+        Rpc::BeginUpload,
+        &begin,
+        |env| {
+            repository.clone_into(&mut env.repository);
+        },
+    );
+    let reply = ctx.send::<BeginUploadResponse>(&signed).await?;
+    let error = reply.err().ok_or("Uno admission did not challenge")?;
+    ensure!(
+        error.http_status == 402 && error.code == "permission_denied",
+        "Uno challenge was {error}"
+    );
+    ensure!(
+        error.details.len() == 1,
+        "Uno challenge omitted typed detail"
+    );
+    Ok(())
+}
+
+async fn uno_already_present(
+    ctx: &Ctx,
+    repository: &str,
+    pack_id: Hash,
+    bytes: usize,
+) -> CaseResult {
+    let begin = BeginUploadRequest {
+        r#ref: Some(ctx.head("async")),
+        pack_id: Some(pack_id.to_vec()),
+        bytes: Some(bytes as u64),
+        ..Default::default()
+    };
+    let signed = sign_unary(
+        &ctx.v2_signer("repository-a")?,
+        Rpc::BeginUpload,
+        &begin,
+        |env| {
+            repository.clone_into(&mut env.repository);
+        },
+    );
+    let opened: BeginUploadResponse = want_ok(ctx.send(&signed).await?, "Uno AlreadyPresent")?;
+    ensure!(
+        matches!(opened.result, Some(BeginResult::AlreadyPresent(_))),
+        "verified Uno pack was not AlreadyPresent"
+    );
+    Ok(())
+}
+
 async fn launch_verified_fixture(ctx: Ctx, large: bool, set_visibility: bool) -> CaseResult {
     let data: Vec<_> = (0..131_072_u32)
         .map(|i| u8::try_from((i.wrapping_mul(17) ^ (i >> 9)) & 0xff).unwrap_or(0))
@@ -517,31 +578,7 @@ async fn launch_verified_fixture(ctx: Ctx, large: bool, set_visibility: bool) ->
     };
     let pack_id = hash(&pack);
     if !set_visibility {
-        let (repository, _) = super::repository::identities(&ctx, "async-verify", "unused")?;
-        let begin = BeginUploadRequest {
-            r#ref: Some(ctx.head("payment-probe")),
-            pack_id: Some(hash(b"thirteen-byte").to_vec()),
-            bytes: Some(13),
-            ..Default::default()
-        };
-        let signed = sign_unary(
-            &ctx.v2_signer("repository-a")?,
-            Rpc::BeginUpload,
-            &begin,
-            |env| {
-                repository.clone_into(&mut env.repository);
-            },
-        );
-        let reply = ctx.send::<BeginUploadResponse>(&signed).await?;
-        let error = reply.err().ok_or("Uno admission did not challenge")?;
-        ensure!(
-            error.http_status == 402 && error.code == "permission_denied",
-            "Uno challenge was {error}"
-        );
-        ensure!(
-            error.details.len() == 1,
-            "Uno challenge omitted typed detail"
-        );
+        uno_payment_challenge(&ctx).await?;
     }
     let published_packmap = if large {
         pack_id
@@ -598,25 +635,7 @@ async fn launch_verified_fixture(ctx: Ctx, large: bool, set_visibility: bool) ->
         check_extracted_http(&ctx, &repository, &extracted, &data).await?;
     }
     if !set_visibility {
-        let begin = BeginUploadRequest {
-            r#ref: Some(ctx.head("async")),
-            pack_id: Some(pack_id.to_vec()),
-            bytes: Some(pack.len() as u64),
-            ..Default::default()
-        };
-        let signed = sign_unary(
-            &ctx.v2_signer("repository-a")?,
-            Rpc::BeginUpload,
-            &begin,
-            |env| {
-                repository.clone_into(&mut env.repository);
-            },
-        );
-        let opened: BeginUploadResponse = want_ok(ctx.send(&signed).await?, "Uno AlreadyPresent")?;
-        ensure!(
-            matches!(opened.result, Some(BeginResult::AlreadyPresent(_))),
-            "verified Uno pack was not AlreadyPresent"
-        );
+        uno_already_present(&ctx, &repository, pack_id, pack.len()).await?;
     }
     ctx.set_note(format!(
         "repository={repository} head_ref={} packmap_ref={} pack_bytes={} pending_polls={pending} extracted_blob={} extracted_blob_bytes={} http={}",
