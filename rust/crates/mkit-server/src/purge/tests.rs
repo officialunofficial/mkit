@@ -147,16 +147,7 @@ async fn cold_slices_resume_local_cursor_and_reserve_budget_before_global_delive
             (report.fired, report.unknown, report.scanned),
             if now == 10 { (1, 1, 2) } else { (1, 0, 1) }
         );
-        assert_eq!(
-            budget.used(),
-            if now == 10 {
-                2
-            } else if now == 11 {
-                2
-            } else {
-                1
-            }
-        );
+        assert_eq!(budget.used(), if now < 12 { 2 } else { 1 });
         if now < 12 {
             assert_eq!(
                 attempts.lock().unwrap().len(),
@@ -310,12 +301,9 @@ impl crate::pipeline::OutcomeSink for OutcomeCapture {
     }
 }
 
-#[tokio::test]
-async fn purge_first_outcome_survives_purge_completion_reconcile_and_restart() {
+async fn purge_first_paid_terminal() -> (MemoryKv, Partition, Request, crate::ManualClock) {
     use crate::store::codec::{PendingOp, ReservationV1};
     use crate::store::outbox::{OutboxBuilder, Terminal};
-    use crate::timers::{TickBudget, TimerRegistry, run_due};
-    use std::sync::{Arc, Mutex};
     let clock = crate::ManualClock::new(10);
     let store = MemoryKv::default();
     // Visibility purge and paid HTTP read both use the namespace coordinator.
@@ -379,6 +367,15 @@ async fn purge_first_outcome_survives_purge_completion_reconcile_and_restart() {
         .unwrap();
     batch.validate(&store.capabilities()).unwrap();
     store.apply(&p, batch).await.unwrap();
+    (store, p, purge, clock)
+}
+
+#[tokio::test]
+async fn purge_first_outcome_survives_purge_completion_reconcile_and_restart() {
+    use crate::store::codec::ReservationV1;
+    use crate::timers::{TickBudget, TimerRegistry, run_due};
+    use std::sync::{Arc, Mutex};
+    let (store, p, purge, clock) = purge_first_paid_terminal().await;
     let attempts = Arc::new(Mutex::new(Vec::new()));
     for now in [20, 2020, 60010] {
         clock.set(now);
@@ -544,9 +541,25 @@ fn purge_and_outcomes(
             SliceBudget::new(16),
         ))
 }
+async fn single_tick(
+    store: &MemoryKv,
+    p: &Partition,
+    registry: &crate::timers::TimerRegistry<'_, MemoryKv>,
+    now: u64,
+) -> crate::timers::RunReport {
+    crate::timers::run_due(
+        store,
+        p,
+        registry,
+        &crate::ManualClock::new(i64::try_from(now).unwrap()),
+        now,
+        &crate::timers::TickBudget::new(1, 1, 16, 1000),
+    )
+    .await
+    .unwrap()
+}
 #[tokio::test]
 async fn repeated_purge_cycles_reuse_one_delayed_outcome_wake() {
-    use crate::timers::{TickBudget, run_due};
     let store = MemoryKv::default();
     let p = Partition::Namespace(NamespaceKey::deployment_default());
     let sink = std::sync::Arc::new(OutcomeCapture::default());
@@ -556,16 +569,7 @@ async fn repeated_purge_cycles_reuse_one_delayed_outcome_wake() {
         .apply(&p, plan_enqueue(&request, 10, None, None).unwrap())
         .await
         .unwrap();
-    let report = run_due(
-        &store,
-        &p,
-        &registry,
-        &crate::ManualClock::new(10),
-        10,
-        &TickBudget::new(1, 1, 16, 1000),
-    )
-    .await
-    .unwrap();
+    let report = single_tick(&store, &p, &registry, 10).await;
     assert_eq!((report.fired, report.unknown, report.scanned), (1, 0, 1));
     let wake = timer_rows(&store, &p)
         .await
@@ -585,16 +589,7 @@ async fn repeated_purge_cycles_reuse_one_delayed_outcome_wake() {
     };
     assert!(wake_at > 25);
     for now in 20..=25 {
-        let report = run_due(
-            &store,
-            &p,
-            &registry,
-            &crate::ManualClock::new(now),
-            u64::try_from(now).unwrap(),
-            &TickBudget::new(1, 1, 16, 1000),
-        )
-        .await
-        .unwrap();
+        let report = single_tick(&store, &p, &registry, u64::try_from(now).unwrap()).await;
         assert_eq!((report.fired, report.unknown, report.scanned), (1, 0, 1));
         let oc = store
             .get(&p, &keys::outcome_backlog())
@@ -605,7 +600,10 @@ async fn repeated_purge_cycles_reuse_one_delayed_outcome_wake() {
             codec::decode_backlog(&oc).unwrap(),
             codec::Backlog::default()
         );
-        assert_eq!(timer_rows(&store, &p).await, [wake.clone()]);
+        assert_eq!(
+            timer_rows(&store, &p).await.as_slice(),
+            std::slice::from_ref(&wake)
+        );
         if now < 25 {
             request.purge_id = format!("cycle-{now}");
             let generation = store
@@ -635,16 +633,7 @@ async fn repeated_purge_cycles_reuse_one_delayed_outcome_wake() {
             );
         }
     }
-    let report = run_due(
-        &store,
-        &p,
-        &registry,
-        &crate::ManualClock::new(i64::try_from(wake_at).unwrap()),
-        wake_at,
-        &TickBudget::new(1, 1, 16, 1000),
-    )
-    .await
-    .unwrap();
+    let report = single_tick(&store, &p, &registry, wake_at).await;
     assert_eq!(report.fired, 1);
     assert!(timer_rows(&store, &p).await.is_empty());
     assert!(

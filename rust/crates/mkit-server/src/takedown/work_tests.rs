@@ -1710,6 +1710,14 @@ async fn purges(store: &Arc<MemoryKv>, partition: &Partition) -> Vec<crate::purg
         .map(|(_, v)| serde_json::from_slice(v.as_bytes()).unwrap())
         .collect()
 }
+fn purge_service(f: &Fixture) -> Service<Arc<MemoryKv>> {
+    Service::new(
+        f.work.metadata.clone(),
+        f.work.root.clone(),
+        f.work.shards.clone(),
+    )
+    .with_purge(f.work.purge.clone())
+}
 #[tokio::test]
 async fn accepting_takedown_owns_automatic_cache_purge() {
     use crate::timers::{TickBudget, TimerRegistry, run_due};
@@ -1721,12 +1729,7 @@ async fn accepting_takedown_owns_automatic_cache_purge() {
     f.work.purge = Some(cache_config(&f, probe.clone()));
     let object = f.canonical[0].0;
     let input = json!({"repository":format!("{}/{}", f.repo.namespace.as_str(), f.repo.name.as_str()), "objectIds":[STANDARD.encode(object)], "operationId":"automatic-cache", "reason":"review"});
-    let service = Service::new(
-        f.work.metadata.clone(),
-        f.work.root.clone(),
-        f.work.shards.clone(),
-    )
-    .with_purge(f.work.purge.clone());
+    let service = purge_service(&f);
     let prepared = service
         .plan(
             TAKEDOWN_PATH,
@@ -1737,10 +1740,8 @@ async fn accepting_takedown_owns_automatic_cache_purge() {
         )
         .await
         .unwrap();
-    prepared
-        .batch
-        .validate(&f.work.metadata.capabilities())
-        .unwrap();
+    let capabilities = f.work.metadata.capabilities();
+    prepared.batch.validate(&capabilities).unwrap();
     assert!(
         prepared
             .batch
@@ -1781,12 +1782,7 @@ async fn accepting_takedown_owns_automatic_cache_purge() {
     assert!(accepted[0].object_ids.is_empty()); // whole repository includes all denied objects
     assert_eq!(accepted[0].trigger, crate::purge::Trigger::Takedown);
     // Reconstruct request-side service after acceptance, before activation.
-    let cold = Service::new(
-        f.work.metadata.clone(),
-        f.work.root.clone(),
-        f.work.shards.clone(),
-    )
-    .with_purge(f.work.purge.clone());
+    let cold = purge_service(&f);
     cold.after_commit(
         TAKEDOWN_PATH,
         &input,

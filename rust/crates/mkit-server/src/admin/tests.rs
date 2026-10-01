@@ -89,6 +89,19 @@ async fn purge_timers(store: &MemoryKv) -> Vec<(crate::Key, Value)> {
         .collect()
 }
 
+async fn timer_kinds(store: &MemoryKv) -> Vec<u8> {
+    all_timers(store)
+        .await
+        .iter()
+        .map(|(key, _)| {
+            let Some(keys::ParsedKey::Timer { kind, .. }) = keys::parse(key) else {
+                panic!("timer key expected");
+            };
+            kind
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn manual_purge_acceptance_is_durable_and_operation_replay_cannot_duplicate_work() {
     use crate::store::{codec, keys};
@@ -107,16 +120,7 @@ async fn manual_purge_acceptance_is_durable_and_operation_replay_cannot_duplicat
         .unwrap();
     assert_eq!(pending.repository, "root/repo");
     assert_eq!(pending.trigger, crate::purge::Trigger::Manual);
-    let kinds: Vec<_> = all_timers(&store)
-        .await
-        .iter()
-        .map(|(key, _)| {
-            let Some(keys::ParsedKey::Timer { kind, .. }) = keys::parse(key) else {
-                panic!("timer key expected");
-            };
-            kind
-        })
-        .collect();
+    let kinds = timer_kinds(&store).await;
     assert_eq!(
         kinds,
         [8, 11],
