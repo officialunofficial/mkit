@@ -108,13 +108,13 @@ if ! cargo geiger --version >/dev/null 2>&1; then
     exit 1
 fi
 
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$rust_dir/target}/geiger"
+export CARGO_BUILD_TARGET_DIR="${CARGO_TARGET_DIR:-$rust_dir/target}/geiger"
 stderr_file="$(mktemp "${TMPDIR:-/tmp}/geiger-stderr.XXXXXX")"
 trap 'rm -f "$stderr_file"' EXIT
 
 cd "$rust_dir/crates/mkit-cli"
 geiger_status=0
-OUTPUT=$(cargo geiger --quiet --features enc-transport,git-bridge 2>"$stderr_file") ||
+OUTPUT=$(cargo geiger --quiet --color never --features enc-transport,git-bridge 2>"$stderr_file") ||
     geiger_status=$?
 
 geiger_failed() {
