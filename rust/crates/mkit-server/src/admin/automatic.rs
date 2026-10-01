@@ -13,10 +13,7 @@ use crate::{
     Batch, BoxFuture, Key, NamespaceStore, Partition, Precondition, StoreError, Value, Write,
     purge,
     relay::{RelayEnqueueSnapshot, RelayHook, enqueue_relay_rows},
-    store::{
-        codec::{self, RelayV1},
-        keys,
-    },
+    store::codec::RelayV1,
 };
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
@@ -52,13 +49,16 @@ fn events(writes: &[Write]) -> Vec<(Key, Value)> {
 /// Source-local audit enqueue planner. No target effect happens before commit.
 #[derive(Clone, Debug)]
 pub struct SystemAudit<S> {
-    store: S,
+    _store: S,
     root: Partition,
 }
 impl<S> SystemAudit<S> {
     /// Use the same root as the deployment admin engine and relay audit hook.
     pub fn new(store: S, root: Partition) -> Self {
-        Self { store, root }
+        Self {
+            _store: store,
+            root,
+        }
     }
     /// Produce an event for callers already allocating source relay sequences.
     /// Add this row to the same `OutboxBuilder`/`enqueue_relay_rows` allocation as
@@ -100,33 +100,10 @@ impl<S: NamespaceStore> purge::AutomaticAudit for SystemAudit<S> {
         request: &'a purge::Request,
         operation_id: &'a str,
         now_ms: u64,
+        snapshot: RelayEnqueueSnapshot,
     ) -> BoxFuture<'a, Result<Batch, StoreError>> {
         Box::pin(async move {
             let row = self.relay_row(partition, request, operation_id, now_ms)?;
-            let values = self
-                .store
-                .get_many(partition, &[keys::outbox_sequence(), keys::epoch_lease()])
-                .await?;
-            if values.len() != 2 {
-                return Err(invalid("invalid audit source read count"));
-            }
-            let lease = values[1]
-                .clone()
-                .filter(|_| matches!(partition, Partition::Ref { .. }));
-            let deadline = lease
-                .as_ref()
-                .map(codec::decode_epoch_lease)
-                .transpose()?
-                .map_or(now_ms.saturating_add(30_000), |l| {
-                    now_ms
-                        .saturating_add(30_000)
-                        .min(l.expires_at_ms.saturating_sub(1))
-                });
-            let snapshot = RelayEnqueueSnapshot {
-                sequence: values[0].clone(),
-                source_lease: lease,
-                deadline_ms: deadline,
-            };
             enqueue_relay_rows(&snapshot, partition, &[row], now_ms)?
                 .pop()
                 .ok_or_else(|| invalid("missing automatic audit relay"))

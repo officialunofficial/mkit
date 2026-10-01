@@ -65,6 +65,7 @@ impl<N: NamespaceStore> LateAcceptance for LateOwner<N> {
         budget: &'a SliceBudget,
     ) -> BoxFuture<'a, Result<(), StoreError>> {
         Box::pin(async move {
+            let local_budget = crate::purge::SliceBudget::with_parent(64, budget.clone());
             let source = request.encode()?;
             ContentTakedownV1::decode(&source)?;
             if content_shard(&request.identity.object) != *partition
@@ -213,6 +214,7 @@ impl<N: NamespaceStore> LateAcceptance for LateOwner<N> {
                 &repo,
                 crate::purge::Trigger::Takedown,
                 &record.operation,
+                &local_budget,
             )
             .await;
             let operation = format!("activation:{}", to_hex(&staged.action.id));
@@ -235,6 +237,7 @@ impl<N: NamespaceStore> LateAcceptance for LateOwner<N> {
                 &repo,
                 crate::purge::Trigger::Takedown,
                 &operation,
+                &local_budget,
             )
             .await;
             Ok(())

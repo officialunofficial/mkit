@@ -37,12 +37,15 @@ impl core::fmt::Debug for PurgeConfig {
 pub trait AutomaticAudit: crate::MaybeSend + crate::MaybeSync {
     /// Returned effects belong to `partition`; the caller atomically commits
     /// these source-local relay rows alongside the automatic purge intent.
+    /// Use the caller's charged source snapshot; planning must not read a
+    /// captured source store or issue a Durable Object self-call.
     fn plan<'a>(
         &'a self,
         partition: &'a crate::Partition,
         request: &'a Request,
         operation_id: &'a str,
         now_ms: u64,
+        snapshot: crate::relay::RelayEnqueueSnapshot,
     ) -> crate::BoxFuture<'a, Result<Batch, StoreError>>;
 }
 impl PurgeConfig {
@@ -291,9 +294,10 @@ pub fn plan_enqueue(
             ),
             Value::default(),
         );
-    if count.rows == 1 {
+    if backlog.is_none() {
         // Purges and terminal outcomes share oc: its first producer owns
-        // the kind-8 wake, even when no outcome exists yet.
+        // the kind-8 wake, even when no outcome exists yet. A present
+        // zero backlog owns a delayed wake and must reuse it.
         batch = batch.put(
             keys::timer(
                 now_ms,

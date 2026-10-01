@@ -247,6 +247,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
         object: &Hash,
         repo: &RepoId,
         now: u64,
+        local_budget: &crate::purge::SliceBudget,
     ) -> Result<Batch, StoreError> {
         if self.purge.is_none() {
             return Ok(Batch::new());
@@ -279,6 +280,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
             repo,
             crate::purge::Trigger::Takedown,
             &operation,
+            local_budget,
         )
         .await;
         Ok(batch
@@ -300,6 +302,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
         now: u64,
         budget: &SliceBudget,
     ) -> Result<Fired, StoreError> {
+        let local_budget = crate::purge::SliceBudget::with_parent(64, budget.clone());
         let service = Service::new(
             LocalStore::new(store, &self.root, store),
             self.root.clone(),
@@ -307,7 +310,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
         )
         .with_purge(self.purge.clone());
         service
-            .resume(id, now, budget)
+            .resume_with_local_budget(id, now, budget, &local_budget)
             .await
             .map_err(|_| StoreError::unavailable("denial activation pending"))?;
         let (record, _) = service
@@ -732,7 +735,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
                         .await?;
                         if let Some(repo) = &next.repository {
                             let purge = self
-                                .plan_cache_purge(store, &id, &object, repo, now)
+                                .plan_cache_purge(store, &id, &object, repo, now, &local_budget)
                                 .await?;
                             batch.preconditions.extend(purge.preconditions);
                             batch.writes.extend(purge.writes);
@@ -765,7 +768,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
                             name: holder.repo,
                         };
                         let purge = self
-                            .plan_cache_purge(store, &id, &object, &repo, now)
+                            .plan_cache_purge(store, &id, &object, &repo, now, &local_budget)
                             .await?;
                         batch.preconditions.extend(purge.preconditions);
                         batch.writes.extend(purge.writes);

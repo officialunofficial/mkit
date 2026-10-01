@@ -888,12 +888,17 @@ mod tests {
             expected
         );
         assert_eq!(*delivered.lock().unwrap(), [work]);
-        assert!(
-            store
-                .get(&partition, &keys::outcome_backlog())
-                .await
-                .unwrap()
-                .is_none()
+        assert_eq!(
+            mkit_server::store::codec::decode_backlog(
+                &store
+                    .get(&partition, &keys::outcome_backlog())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap(),
+            mkit_server::store::codec::Backlog::default(),
+            "purge has fully drained; kind8 still owns its delayed wake"
         );
     }
     impl<S: NamespaceStore> TimerHandler<S> for HandlerCalls {

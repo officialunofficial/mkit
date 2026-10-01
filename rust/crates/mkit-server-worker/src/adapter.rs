@@ -1204,7 +1204,10 @@ fn with_outcome_timers_budgeted<
     use crate::classes::ShardClass;
     if !matches!(
         class,
-        ShardClass::RefStore | ShardClass::NsCoordinator | ShardClass::RefShard
+        ShardClass::RefStore
+            | ShardClass::NsCoordinator
+            | ShardClass::RefShard
+            | ShardClass::ContentIndexShard
     ) {
         return registry;
     }

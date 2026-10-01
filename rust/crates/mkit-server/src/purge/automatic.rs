@@ -62,19 +62,39 @@ pub(crate) async fn plan_repository<S: NamespaceStore>(
         .audit
         .as_ref()
         .ok_or_else(|| StoreError::Invalid("automatic purge requires durable audit".into()))?;
-    let mut batch = audit.plan(partition, &request, operation_id, now).await?;
     let values = store
         .get_many(
             partition,
             &[
                 keys::outcome_backlog(),
                 keys::cache_purge_generation(request.scope()),
+                keys::outbox_sequence(),
+                keys::epoch_lease(),
             ],
         )
         .await?;
-    if values.len() != 2 {
+    if values.len() != 4 {
         return Err(StoreError::Corrupt("short automatic purge read".into()));
     }
+    let lease = values[3]
+        .clone()
+        .filter(|_| matches!(partition, Partition::Ref { .. }));
+    let deadline = lease
+        .as_ref()
+        .map(crate::store::codec::decode_epoch_lease)
+        .transpose()?
+        .map_or(now.saturating_add(30_000), |l| {
+            now.saturating_add(30_000)
+                .min(l.expires_at_ms.saturating_sub(1))
+        });
+    let snapshot = crate::relay::RelayEnqueueSnapshot {
+        sequence: values[2].clone(),
+        source_lease: lease,
+        deadline_ms: deadline,
+    };
+    let mut batch = audit
+        .plan(partition, &request, operation_id, now, snapshot)
+        .await?;
     let work = plan_enqueue(&request, now, values[0].as_ref(), values[1].as_ref())?;
     batch.preconditions.extend(work.preconditions);
     batch.writes.extend(work.writes);
@@ -88,13 +108,12 @@ pub(crate) async fn invalidate_repository(
     repo: &RepoId,
     trigger: Trigger,
     operation_id: &str,
+    budget: &super::SliceBudget,
 ) {
     if let Some(config) = config
         && let Some(local) = &config.local
         && let Ok(request) = repository_request(config, partition, repo, trigger, operation_id)
     {
-        let _ = local
-            .invalidate(&request, 0, &super::SliceBudget::new(64))
-            .await;
+        let _ = local.invalidate(&request, 0, budget).await;
     }
 }

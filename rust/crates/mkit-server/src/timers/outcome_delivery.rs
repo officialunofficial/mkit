@@ -195,7 +195,9 @@ impl<O: OutcomeSink> OutcomeDelivery<O> {
         );
         if backlog.rows == 0 {
             return Ok(Fired::Done(
-                Batch::new().require(guard(oc_key, oc.as_ref())),
+                Batch::new()
+                    .require(guard(oc_key.clone(), oc.as_ref()))
+                    .delete(oc_key),
             ));
         }
         let (attempt, cursor) = decode_timer(&timer.value)?;

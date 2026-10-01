@@ -1399,7 +1399,10 @@ the exact stored key/value byte count. Shared counters and sequence/backlog
 values are guarded once per batch. A zero-to-positive backlog transition, including
 one first created by a cache purge, atomically adds one kind-8 delivery kick;
 delivery may repeat but never drops an unacked row.
-A positive backlog keeps exactly one kind-8 row. Delivery decides completion
+A positive backlog keeps exactly one kind-8 row. Purge acknowledgement retains
+an encoded zero backlog while that wake remains; producers reuse a present
+backlog row, including zero, rather than insert another wake. Kind-8 atomically
+deletes the zero row and its timer under the same backlog guard. Delivery decides completion
 from the same backlog snapshot its acknowledgment batch guards; concurrent
 appends either retain a rescheduled timer or fail that guard for re-planning.
 

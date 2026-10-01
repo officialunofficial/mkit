@@ -12,7 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Server: a purge that creates positive shared backlog also schedules the
   existing outcome-delivery wake, so later paid read outcomes survive purge
-  completion, reconciliation and restart (launch review 3-1).
+  completion, reconciliation and restart (launch review 3-1). Zero backlog
+  retains wake ownership until the guarded kind-8 drain, preventing duplicate
+  wakes across repeated purge cycles; content shards register the same driver.
 
 - Server: completed identical Takedown retries replay their stored response
   after role changes. ReadPreserved retains fresh role and retention checks
@@ -21,7 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Server: automatically enqueue audited cache purges with takedown acceptance,
   denial activation and late-holder ownership. Checkpoint newly discovered
   repository purges with timer-15 progress and immediately invalidate configured
-  local caches (launch review 7a-2, existing R-190).
+  local caches (launch review 7a-2, existing R-190). Audit source snapshots and
+  immediate invalidation share the enclosing request or slice call allowance.
 
 - Server: keep relay progress continuations after the current wake when retry
   metadata retains an older due time. Update timer, verification-job and

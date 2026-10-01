@@ -364,13 +364,23 @@ async fn manual_purge_completion_is_audited_only_after_durable_global_acknowledg
             .unwrap()
             .is_none()
     );
-    assert!(
-        store
-            .get(&partition(), &crate::store::keys::outcome_backlog())
-            .await
-            .unwrap()
-            .is_none()
+    assert_eq!(
+        crate::store::codec::decode_backlog(
+            &store
+                .get(&partition(), &crate::store::keys::outcome_backlog())
+                .await
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap(),
+        crate::store::codec::Backlog::default()
     );
+    let wakes = all_timers(&store).await;
+    assert_eq!(wakes.len(), 1);
+    assert!(matches!(
+        crate::store::keys::parse(&wakes[0].0),
+        Some(crate::store::keys::ParsedKey::Timer { kind: 8, .. })
+    ));
     // A fresh signed retry after completion replays acceptance without resurrecting work.
     let (headers, body) = request(PURGE_PATH, &purge_body(), 89);
     assert_eq!(
@@ -689,7 +699,17 @@ async fn automatic_audit_does_not_commit_when_trigger_apply_loses() {
     )));
     let audit = SystemAudit::new(store.clone(), partition());
     let mut batch = audit
-        .plan(&partition(), &automatic_request(), "automatic-op", 1)
+        .plan(
+            &partition(),
+            &automatic_request(),
+            "automatic-op",
+            1,
+            crate::relay::RelayEnqueueSnapshot {
+                sequence: None,
+                source_lease: None,
+                deadline_ms: 1 + 30_000,
+            },
+        )
         .await
         .unwrap();
     let work = crate::purge::plan_enqueue(&automatic_request(), 1, None, None).unwrap();
@@ -942,7 +962,17 @@ async fn committed_automatic_purge_recovers_relay_and_target_checkpoint_crash() 
     let audit = SystemAudit::new(store.clone(), root_partition());
     let request = automatic_request();
     let mut batch = audit
-        .plan(&source, &request, "stable-op", 100)
+        .plan(
+            &source,
+            &request,
+            "stable-op",
+            100,
+            crate::relay::RelayEnqueueSnapshot {
+                sequence: None,
+                source_lease: None,
+                deadline_ms: 100 + 30_000,
+            },
+        )
         .await
         .unwrap();
     let purge = crate::purge::plan_enqueue(&request, 100, None, None).unwrap();
@@ -1030,7 +1060,17 @@ async fn automatic_relay_duplicate_reordered_sources_keep_gapless_chain() {
         let mut request = automatic_request();
         request.purge_id = format!("automatic-{prefix}");
         let batch = audit
-            .plan(&source, &request, "same-op-different-source", now)
+            .plan(
+                &source,
+                &request,
+                "same-op-different-source",
+                now,
+                crate::relay::RelayEnqueueSnapshot {
+                    sequence: None,
+                    source_lease: None,
+                    deadline_ms: now + 30_000,
+                },
+            )
             .await
             .unwrap();
         store.apply(&source, batch).await.unwrap();

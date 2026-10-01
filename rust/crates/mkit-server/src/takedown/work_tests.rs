@@ -1895,3 +1895,126 @@ async fn discovery_checkpoints_purge_for_holders_and_namespace_members() {
             .discovery_complete
     );
 }
+
+struct ParentChargedLocal {
+    parent: SliceBudget,
+    effects: std::sync::atomic::AtomicU32,
+    attempts: std::sync::atomic::AtomicU32,
+}
+impl crate::purge::LocalInvalidation for ParentChargedLocal {
+    fn invalidate<'a>(
+        &'a self,
+        _: &'a crate::purge::Request,
+        cursor: u32,
+        budget: &'a crate::purge::SliceBudget,
+    ) -> crate::BoxFuture<'a, Result<Option<u32>, StoreError>> {
+        Box::pin(async move {
+            use std::sync::atomic::Ordering;
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            let before = self.parent.used();
+            let mut effects = 0;
+            for index in cursor..16 {
+                if !budget.charge(2) {
+                    assert_eq!(self.parent.used() - before, effects * 2);
+                    return Ok(Some(index));
+                }
+                self.effects.fetch_add(1, Ordering::SeqCst);
+                effects += 1;
+            }
+            assert_eq!(
+                self.parent.used() - before,
+                effects * 2,
+                "cache enumeration/deletes are charged before effects"
+            );
+            Ok(None)
+        })
+    }
+}
+#[tokio::test]
+async fn multi_action_activation_shares_one_immediate_allowance_with_parent_calls() {
+    use std::sync::atomic::Ordering;
+    let mut f = fixture(
+        &[
+            Object::Blob(Blob { data: vec![1; 32] }),
+            Object::Blob(Blob { data: vec![2; 32] }),
+            Object::Blob(Blob { data: vec![3; 32] }),
+        ],
+        false,
+    )
+    .await;
+    let parent = SliceBudget::new(4000);
+    let local = Arc::new(ParentChargedLocal {
+        parent: parent.clone(),
+        effects: 0.into(),
+        attempts: 0.into(),
+    });
+    f.work.purge = Some(
+        crate::purge::PurgeConfig::new("https://server.example".into(), false, false)
+            .with_audit(Arc::new(crate::admin::SystemAudit::new(
+                f.work.metadata.clone(),
+                f.work.root.clone(),
+            )))
+            .with_local(local.clone()),
+    );
+    let ids: Vec<_> = f
+        .canonical
+        .iter()
+        .map(|(id, _)| STANDARD.encode(id))
+        .collect();
+    let input = json!({"repository":format!("{}/{}", f.repo.namespace.as_str(), f.repo.name.as_str()), "objectIds":ids, "operationId":"shared-cache-budget", "reason":"review"});
+    let service = Service::new(
+        f.work.metadata.clone(),
+        f.work.root.clone(),
+        f.work.shards.clone(),
+    )
+    .with_purge(f.work.purge.clone());
+    let prepared = service
+        .plan(
+            TAKEDOWN_PATH,
+            &input,
+            "shared-cache-budget",
+            10,
+            &SliceBudget::new(9000),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        f.work
+            .metadata
+            .apply(&f.work.root, prepared.batch)
+            .await
+            .unwrap(),
+        BatchOutcome::Committed
+    );
+    service
+        .after_commit(
+            TAKEDOWN_PATH,
+            &input,
+            prepared.response.clone(),
+            10,
+            &parent,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        local.attempts.load(Ordering::SeqCst),
+        4,
+        "acceptance plus every activation attempts local invalidation"
+    );
+    assert_eq!(
+        local.effects.load(Ordering::SeqCst),
+        32,
+        "one shared 64-operation enumeration/deletion allowance"
+    );
+    assert!(parent.used() >= 64 && parent.used() <= 4000);
+    assert_eq!(purges(&f.work.metadata, &f.work.root).await.len(), 1);
+    for (object, _) in &f.canonical {
+        assert_eq!(
+            purges(&f.work.metadata, &crate::store::content_shard(object))
+                .await
+                .len(),
+            1,
+            "exhausted immediate work remains durably owned by timer11"
+        );
+    }
+}

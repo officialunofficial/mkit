@@ -273,6 +273,17 @@ impl<N: NamespaceStore + Clone> Service<N> {
         now: u64,
         request_budget: &SliceBudget,
     ) -> Result<(), ServerError> {
+        let local = crate::purge::SliceBudget::with_parent(64, request_budget.clone());
+        self.resume_with_local_budget(id, now, request_budget, &local)
+            .await
+    }
+    pub(crate) async fn resume_with_local_budget(
+        &self,
+        id: Hash,
+        now: u64,
+        request_budget: &SliceBudget,
+        local_budget: &crate::purge::SliceBudget,
+    ) -> Result<(), ServerError> {
         let phase_budget = SliceBudget::new(CALLS);
         let request_store = Budgeted::new(&self.store, request_budget);
         let store = Budgeted::new(&request_store, &phase_budget);
@@ -324,6 +335,7 @@ impl<N: NamespaceStore + Clone> Service<N> {
                 &repo,
                 crate::purge::Trigger::Takedown,
                 &operation,
+                local_budget,
             )
             .await;
             let mut next = record.clone();
@@ -529,6 +541,8 @@ impl<N: NamespaceStore + Clone> AdminOperations for Service<N> {
     ) -> crate::BoxFuture<'a, Result<Response, ServerError>> {
         Box::pin(async move {
             if path == crate::admin::TAKEDOWN_PATH && response.status == 200 {
+                let local_budget =
+                    crate::purge::SliceBudget::with_parent(64, request_budget.clone());
                 let reply: Json =
                     serde_json::from_slice(&response.body).map_err(|_| unavailable())?;
                 let id = mkit_core::hash::from_hex(
@@ -546,10 +560,12 @@ impl<N: NamespaceStore + Clone> AdminOperations for Service<N> {
                         &repository(&record.repository)?,
                         crate::purge::Trigger::Takedown,
                         &format!("acceptance:{}", to_hex(&id)),
+                        &local_budget,
                     )
                     .await;
                 }
-                self.resume(id, now, request_budget).await?;
+                self.resume_with_local_budget(id, now, request_budget, &local_budget)
+                    .await?;
             }
             Ok(response)
         })
