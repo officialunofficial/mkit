@@ -292,3 +292,22 @@ unmeasured; no total resident ceiling is claimed from source arithmetic.
 | `base-control-r203/four-timer-base-tests.log` | `c564dcbf878ccf5420449a807c2c8826aefc20ae1d7e7d3371d2f86da4f5562f` |
 | `automatic-takedown-purge-red.log` | `7e96125e85a05c0d24a65f69b466c7c533aa0efff1e561eb9cedcf940f634ecf` |
 | `phase2-r203-worker-wasm-clippy.log` | `7a8186c59ff0467732bd6d47c67b8432aeabf59d1afba26c7f219aa7b4a02e12` |
+
+## Decoder scratch ruling checkpoint
+
+The real pure-Rust `VerifyTimer` allocator probe reaches eight decoded objects
+and the legal-block malformed zstd frame, commits one terminal rejection, and
+records 51,418,822 additional live requested bytes against the unchanged
+50,331,648-byte allowance. The strict 48 MiB assertion fails. This is requested
+heap above a seeded fixture baseline, not process RSS. The standalone regression
+requires explicit execution in a pure-Rust graph; the all-feature graph also
+enables C and cannot substitute for it.
+
+Log: `phase2-r203-slice-heap.log`, SHA-256
+`ff2025188682565c59d099a6590d1a350dd76f7d42c6e6963d97f84672054411`.
+
+The user ruled both automatic takedown purge and decoder scratch accounting
+will be repaired in separate prerequisite PRs. The decoder PR reserves derived
+scratch without increasing 48 MiB, preserves the 1 MiB entry/pack limits, and
+must retain bounded-call progress, 50-deep deltas and extraction parity.
+Neither newly identified launch intersection is certified.
