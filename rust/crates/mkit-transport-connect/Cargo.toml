@@ -24,11 +24,9 @@ repository.workspace = true
 authors.workspace = true
 
 [lints.clippy]
-# Shared generated types inherit docstrings from transport.proto; client
-# implementation modules keep this crate's existing lint policy.
-# and trips pedantic/nursery lints hundreds of times. Keep `clippy::all`
-# (correctness + style baseline); our own hand-written src/ code stays
-# under it.
+# Shared generated types inherit transport.proto docstrings that trip
+# pedantic/nursery lints. Keep `clippy::all` (correctness + style baseline)
+# and this crate's existing lint policy for handwritten client modules.
 all = { level = "warn", priority = -1 }
 
 [dependencies]
