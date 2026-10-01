@@ -105,11 +105,12 @@ where
             let stream =
                 tokio::time::timeout(connectrpc::client::DEFAULT_ESTABLISHMENT_TIMEOUT, future)
                     .await
-                    .map_err(|_| {
-                        io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            "connection establishment timed out",
-                        )
+                    .map_err(|elapsed| {
+                        ConnectError::unavailable(format!(
+                            "connection establishment did not complete within {:?}",
+                            connectrpc::client::DEFAULT_ESTABLISHMENT_TIMEOUT,
+                        ))
+                        .with_source(elapsed)
                     })?
                     .map_err(Into::into)?;
             let meter = Arc::new(Meter::default());
@@ -311,17 +312,25 @@ impl ClientTransport for PooledHttpClient {
     ) -> BoxFuture<'static, Result<Response<Self::ResponseBody>, ConnectError>> {
         let client = self.clone();
         Box::pin(async move {
-            if request.uri().scheme_str()
-                != Some(if client.tls.is_some() {
-                    "https"
-                } else {
-                    "http"
-                })
-            {
-                return Err(ConnectError::invalid_argument(
-                    "HTTP transport scheme does not match its configured mode",
-                ));
+            let tls = client.tls.is_some();
+            match (tls, request.uri().scheme_str()) {
+                (false, Some("https")) => {
+                    return Err(ConnectError::invalid_argument(
+                        "HttpClient::plaintext() received https:// URI; use HttpClient::with_tls for TLS",
+                    ));
+                }
+                (true, Some("http")) => {
+                    return Err(ConnectError::invalid_argument(
+                        "HttpClient::with_tls() received http:// URI; use HttpClient::plaintext for cleartext",
+                    ));
+                }
+                _ => {}
             }
+            let context = if tls {
+                "HTTPS request failed"
+            } else {
+                "HTTP request failed"
+            };
             if request
                 .headers()
                 .get(http::header::CONTENT_TYPE)
@@ -333,14 +342,13 @@ impl ClientTransport for PooledHttpClient {
                 return Self::new(client.tls.clone())
                     .exchange(request)
                     .await
-                    .map_err(|e| {
-                        ConnectError::unavailable_from_transport("HTTP request failed", e)
-                    });
+                    .map_err(|e| ConnectError::unavailable_from_transport(context, e));
             }
             if !replay_safe(&request) {
-                return client.exchange(request).await.map_err(|e| {
-                    ConnectError::unavailable_from_transport("HTTP request failed", e)
-                });
+                return client
+                    .exchange(request)
+                    .await
+                    .map_err(|e| ConnectError::unavailable_from_transport(context, e));
             }
             let (parts, body) = request.into_parts();
             let bytes = body.collect().await?.to_bytes();
@@ -356,7 +364,7 @@ impl ClientTransport for PooledHttpClient {
                 }
                 result => result,
             }
-            .map_err(|e| ConnectError::unavailable_from_transport("HTTP request failed", e))
+            .map_err(|e| ConnectError::unavailable_from_transport(context, e))
         })
     }
 }

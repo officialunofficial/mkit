@@ -306,3 +306,69 @@ async fn partial_body_and_http_500_are_not_retried() {
         server.await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn preserves_stock_transport_error_mapping() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let config = std::sync::Arc::new(
+        rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth(),
+    );
+    for tls in [false, true] {
+        let (stock, pooled) = if tls {
+            (
+                HttpClient::with_tls(config.clone()),
+                PooledHttpClient::with_tls(config.clone()),
+            )
+        } else {
+            (HttpClient::plaintext(), PooledHttpClient::plaintext())
+        };
+        for scheme in ["http", "https"] {
+            let origin = format!("{scheme}://127.0.0.1:{port}");
+            let original = stock
+                .send(request(&origin, "ReadRef", "application/proto", false))
+                .await
+                .unwrap_err();
+            let replacement = pooled
+                .send(request(&origin, "ReadRef", "application/proto", false))
+                .await
+                .unwrap_err();
+            assert_eq!(replacement.code, original.code);
+            assert_eq!(replacement.message, original.message);
+        }
+    }
+}
+
+#[tokio::test]
+async fn preserves_establishment_timeout_message_and_source() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("https://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let first = listener.accept().await.unwrap();
+        let second = listener.accept().await.unwrap();
+        std::future::pending::<()>().await;
+        drop((first, second));
+    });
+    let config = mkit_transport_connect::tls::client_config(None).unwrap();
+    let stock = HttpClient::with_tls(config.clone());
+    let pooled = PooledHttpClient::with_tls(config);
+    let (original, replacement) = tokio::join!(
+        stock.send(request(&origin, "ReadRef", "application/proto", false)),
+        pooled.send(request(&origin, "ReadRef", "application/proto", false)),
+    );
+    let (original, replacement) = (original.unwrap_err(), replacement.unwrap_err());
+    assert_eq!(replacement.code, original.code);
+    assert_eq!(replacement.message, original.message);
+    let mut source: &(dyn std::error::Error + 'static) = &replacement;
+    while let Some(next) = source.source() {
+        source = next;
+    }
+    assert!(source.is::<tokio::time::error::Elapsed>());
+    server.abort();
+}
