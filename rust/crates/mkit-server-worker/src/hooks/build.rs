@@ -178,6 +178,9 @@ mod glue {
             if let Some(fence) = &cfg.authority_fence {
                 other_keys.extend(fence.public_keys());
             }
+            if let Some(settings) = &cfg.takedown {
+                other_keys.extend_from_slice(settings.publication.public_keys());
+            }
             if let Some(retrieval) = &cfg.scanner_retrieval {
                 other_keys.extend(retrieval.scanner_keys());
                 crate::scanner_retrieval::check_hook_seed(retrieval, key.as_deref())?;
@@ -188,6 +191,16 @@ mod glue {
                 cfg.ticket_keys.as_ref(),
                 &other_keys,
             )?;
+            #[cfg(feature = "http-objects")]
+            if cfg
+                .url_tokens
+                .as_ref()
+                .is_some_and(|tokens| tokens.keys().contains_secret(&signer.public_key()))
+            {
+                return Err(ConfigError(
+                    "URL token seed must differ from hook public key".into(),
+                ));
+            }
             if let Some(retrieval) = &cfg.scanner_retrieval {
                 retrieval
                     .check_role_keys(&[signer.public_key()], &[])

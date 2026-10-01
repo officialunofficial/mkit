@@ -168,6 +168,17 @@ impl HookSettings {
         Ok(self.signer()?.public_key())
     }
 
+    /// Refuse role public keys that equal this signing seed or public key.
+    pub(crate) fn check_role_keys(&self, public: &[[u8; 32]]) -> Result<(), ConfigError> {
+        if public.contains(&*self.seed) || public.contains(&self.public_key()?) {
+            return Err(ConfigError::new(
+                exit::CONFIG_ERROR,
+                "hook key must differ from other configured role keys",
+            ));
+        }
+        Ok(())
+    }
+
     /// Refuse scanner role reuse without exposing the hook seed.
     pub(crate) fn check_scanner_keys(
         &self,
@@ -332,6 +343,43 @@ fn resolve_inspection(args: &HookArgs, pipeline: &mut PipelineConfig) -> Result<
     Ok(())
 }
 
+fn check_role_material(
+    key_id: &str,
+    seed: &Zeroizing<[u8; 32]>,
+    pipeline: &PipelineConfig,
+) -> Result<(), ConfigError> {
+    let config =
+        |message: &str| ConfigError::new(exit::CONFIG_ERROR, format!("{PREFIX}: {message}"));
+    if pipeline
+        .ticket_keys
+        .as_ref()
+        .is_some_and(|keys| keys.contains_secret(seed))
+    {
+        return Err(config(
+            "the hook key is also an upload ticket key; SPEC-SERVER §7.1 requires a dedicated \
+             hook key",
+        ));
+    }
+    let public = HookSigner::new(key_id, seed.clone())
+        .map_err(|_| key_error())?
+        .public_key();
+    if pipeline
+        .ticket_keys
+        .as_ref()
+        .is_some_and(|tickets| tickets.contains_ed25519_public(&public))
+    {
+        return Err(config(
+            "hook public key must differ from ticket secret material",
+        ));
+    }
+    #[cfg(feature = "http-objects")]
+    {
+        let material = Zeroizing::new([public, **seed]);
+        crate::http_mount::check_other_keys(pipeline.url_tokens.as_ref(), &*material)?;
+    }
+    Ok(())
+}
+
 /// Resolve the hook flags. Sets `pipeline.authorizer_role` from
 /// `--authorizer-role`.
 ///
@@ -412,23 +460,7 @@ pub fn resolve(
         return Err(usage("--hook-signature-validity-secs must be 1 to 300"));
     }
     let (key_id, seed) = read_key(args.hook_key_file.as_deref(), env)?;
-    if pipeline
-        .ticket_keys
-        .as_ref()
-        .is_some_and(|keys| keys.contains_secret(&seed))
-    {
-        return Err(config(
-            "the hook key is also an upload ticket key; SPEC-SERVER §7.1 requires a dedicated \
-             hook key",
-        ));
-    }
-    #[cfg(feature = "http-objects")]
-    {
-        let public = HookSigner::new(key_id.clone(), seed.clone())
-            .map_err(|_| key_error())?
-            .public_key();
-        crate::http_mount::check_other_keys(pipeline.url_tokens.as_ref(), &[public])?;
-    }
+    check_role_material(&key_id, &seed, pipeline)?;
     if let Some(role) = args.authorizer_role {
         pipeline.authorizer_role = match role {
             AuthorizerRoleArg::Check => AuthorizerRole::Check,

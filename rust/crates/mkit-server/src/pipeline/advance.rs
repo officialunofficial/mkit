@@ -110,6 +110,41 @@ enum Proof {
     PackMissing,
 }
 
+async fn ticket_proofs<B: crate::BlobStore>(
+    blobs: &B,
+    ids: &[Hash],
+    pending: Vec<(usize, &TicketV1)>,
+) -> Vec<(usize, TicketV1, Result<Proof, ServerError>)> {
+    // A ticket holds only one backend response at a time: its marker HEAD
+    // completes before the pack HEAD starts. Seven tickets share six slots.
+    let mut proofs = Vec::with_capacity(pending.len());
+    for group in pending.chunks(6) {
+        proofs.extend(
+            join_all(group.iter().map(|&(i, t)| async move {
+                let (marker_key, _) = upload_marker(&ids[i], &t.pack_id);
+                let proof = match blobs.head(&marker_key).await {
+                    Err(e) => Err(store_error(StorageOp::BlobHead, e)),
+                    Ok(None) => Ok(Proof::MarkerMissing),
+                    Ok(Some(_)) => blobs
+                        .head(&BlobKey::pack(t.pack_id))
+                        .await
+                        .map(|pack| {
+                            if pack.is_some() {
+                                Proof::Ready
+                            } else {
+                                Proof::PackMissing
+                            }
+                        })
+                        .map_err(|e| store_error(StorageOp::BlobHead, e)),
+                };
+                (i, t.clone(), proof)
+            }))
+            .await,
+        );
+    }
+    proofs
+}
+
 fn reservation<'a>(snap: &'a Snapshot, id: &Hash, t: &TicketV1) -> Result<&'a Value, ServerError> {
     let key = keys::reservation(&t.reservation_id).map_err(meta_error)?;
     let raw = snap
@@ -252,7 +287,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             // Indexed verification is invoked by write() after this ticket
             // decision succeeds, before the advance planner can commit.
             // One future per valid ticket preserves marker-before-pack order,
-            // while all eligible tickets run concurrently (at most 2n heads).
+            // while at most six eligible tickets await a backend response.
             let pending = rows
                 .iter()
                 .enumerate()
@@ -265,28 +300,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     }
                 })
                 .collect::<Vec<_>>();
-            for (i, t, proof) in join_all(pending.into_iter().map(|(i, t)| async move {
-                let (marker_key, _) = upload_marker(&ids[i], &t.pack_id);
-                let proof = match self.blobs.head(&marker_key).await {
-                    Err(e) => Err(store_error(StorageOp::BlobHead, e)),
-                    Ok(None) => Ok(Proof::MarkerMissing),
-                    Ok(Some(_)) => self
-                        .blobs
-                        .head(&BlobKey::pack(t.pack_id))
-                        .await
-                        .map(|pack| {
-                            if pack.is_some() {
-                                Proof::Ready
-                            } else {
-                                Proof::PackMissing
-                            }
-                        })
-                        .map_err(|e| store_error(StorageOp::BlobHead, e)),
-                };
-                (i, t.clone(), proof)
-            }))
-            .await
-            {
+            for (i, t, proof) in ticket_proofs(&self.blobs, ids, pending).await {
                 proofs[i] = Some((t, proof));
             }
             let first_failure = (0..ids.len()).find_map(|i| {
@@ -394,5 +408,116 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
         }
         Err(ServerError::aborted_retryable("upload ticket race"))
+    }
+}
+
+#[cfg(test)]
+mod concurrency_tests {
+    use super::*;
+    use crate::{BlobBody, BlobMeta, BlobStore, ByteRange, MemoryBlobStore, StoreError};
+    use futures::{FutureExt, executor::block_on};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    #[derive(Default)]
+    struct PendingHeads {
+        release: AtomicBool,
+        active: AtomicUsize,
+        peak: AtomicUsize,
+        starts: Mutex<Vec<BlobKey>>,
+    }
+    impl BlobStore for PendingHeads {
+        type Sink = <MemoryBlobStore as BlobStore>::Sink;
+        async fn begin(&self, _: BlobKey, _: u64) -> Result<Self::Sink, StoreError> {
+            unreachable!("ticket decisions cannot write payloads")
+        }
+        async fn get(
+            &self,
+            _: &BlobKey,
+            _: Option<ByteRange>,
+        ) -> Result<Option<BlobBody>, StoreError> {
+            unreachable!("ticket decisions cannot read payloads")
+        }
+        async fn head(&self, key: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
+            self.starts.lock().unwrap().push(*key);
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(active, Ordering::SeqCst);
+            futures::future::poll_fn(|cx| {
+                if self.release.load(Ordering::SeqCst) {
+                    std::task::Poll::Ready(())
+                } else {
+                    cx.waker().wake_by_ref();
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(Some(BlobMeta { len: 32 }))
+        }
+        async fn probe(&self) -> Result<(), StoreError> {
+            unreachable!()
+        }
+        async fn delete(&self, _: &BlobKey) -> Result<bool, StoreError> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn seven_ticket_proofs_keep_at_most_six_backend_requests_active() {
+        let blobs = PendingHeads::default();
+        let tickets: Vec<_> = (0..crate::store::outbox::MAX_TICKETS_PER_ADVANCE)
+            .map(|i| TicketV1 {
+                authority_generation: None,
+                repo: crate::RepoName::new("repo").unwrap(),
+                ref_name: "refs/heads/main".into(),
+                signer: [1; 32],
+                pack_id: [u8::try_from(i).unwrap(); 32],
+                bytes: 32,
+                part_size: 8 << 20,
+                created_at_ms: 0,
+                expires_at_ms: 60_000,
+                reservation_id: format!("ticket-{i}"),
+                upload_session: None,
+            })
+            .collect();
+        let ids: Vec<_> = tickets
+            .iter()
+            .map(|t| tickets::ticket_id(&t.reservation_id))
+            .collect();
+        let mut proofs = Box::pin(ticket_proofs(
+            &blobs,
+            &ids,
+            tickets.iter().enumerate().collect(),
+        ));
+        assert!((&mut proofs).now_or_never().is_none());
+        assert_eq!(blobs.active.load(Ordering::SeqCst), 6);
+        assert_eq!(blobs.peak.load(Ordering::SeqCst), 6);
+        blobs.release.store(true, Ordering::SeqCst);
+        let result = block_on(proofs);
+        assert_eq!(result.len(), 7);
+        assert!(
+            result
+                .iter()
+                .all(|(_, _, proof)| matches!(proof, Ok(Proof::Ready)))
+        );
+        let starts = blobs.starts.lock().unwrap();
+        assert_eq!(starts.len(), 14);
+        for (i, ticket, _) in result {
+            assert_eq!(ticket, tickets[i]);
+            let marker = upload_marker(&ids[i], &ticket.pack_id).0;
+            let marker_at = starts.iter().position(|key| *key == marker).unwrap();
+            let pack_at = starts
+                .iter()
+                .position(|key| *key == BlobKey::pack(ticket.pack_id))
+                .unwrap();
+            assert!(
+                marker_at < pack_at,
+                "each marker must precede its pack HEAD"
+            );
+        }
+        assert!(blobs.peak.load(Ordering::SeqCst) <= 6);
+        assert_eq!(blobs.active.load(Ordering::SeqCst), 0);
     }
 }

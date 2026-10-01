@@ -1,6 +1,6 @@
 //! Deployment ref policy (SPEC-SERVER §9.7): per-ref allowed operation
-//! signers and fast-forward-only rules. Programmatic only and Stage 2
-//! (R-148, R-154): no adapter exposes it.
+//! signers and fast-forward-only rules. Programmatic only; native and Worker
+//! embedders validate rules before constructing their pipelines.
 
 use std::collections::BTreeSet;
 
@@ -35,6 +35,18 @@ fn rule_name(ref_name: &str) -> String {
 }
 
 impl RefPolicy {
+    /// Validate patterns and the required indexed fast-forward capability.
+    /// # Errors
+    /// A malformed pattern or a fast-forward rule without indexed mode.
+    pub fn validate_for_indexed(&self, indexed: bool) -> Result<(), ServerError> {
+        self.validate()?;
+        if self.has_fast_forward_rule() && !indexed {
+            return Err(ServerError::invalid_argument(
+                "fast-forward-only ref rules require indexed mode",
+            ));
+        }
+        Ok(())
+    }
     /// A policy of `rules`.
     #[must_use]
     pub fn new(rules: Vec<RefRule>) -> Self {

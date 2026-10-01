@@ -28,10 +28,10 @@ pub(crate) fn resolve(
         }
         return Ok(());
     }
-    if !cfg!(feature = "test-faults") {
+    if !cfg!(feature = "test-faults") && args.launch_profile.is_none() {
         return Err(ConfigError::new(
             crate::exit::CONFIG_ERROR,
-            "scanner retrieval activation requires the 4.18 gate",
+            "scanner retrieval requires --launch-profile uno in release builds",
         ));
     }
     #[cfg(feature = "hooks")]
@@ -90,7 +90,7 @@ where
     N: NamespaceStore + Clone + 'static,
     H: HookSet + 'static,
 {
-    if !cfg!(feature = "test-faults") || !pipeline.scanner_retrieval_enabled() {
+    if !pipeline.scanner_retrieval_enabled() {
         return rpc;
     }
     let timeout = opts.unary_timeout;

@@ -2,6 +2,7 @@
 
 #[path = "tests_begin_parts.rs"]
 mod begin_parts;
+mod denial_planning;
 mod grants;
 #[cfg(feature = "http-objects")]
 mod http_objects;
@@ -576,6 +577,8 @@ impl Future for YieldOnce {
 type AfterApplyHook = Box<dyn Fn(&MemoryKv, &Partition, &Batch, &BatchOutcome) + Send + Sync>;
 
 type ApplyHook = Box<dyn Fn(&MemoryKv, &Partition, &Batch) + Send + Sync>;
+type ScanHook = Box<dyn Fn(&MemoryKv, &Partition) + Send + Sync>;
+type ReadManyHook = Box<dyn Fn(&MemoryKv, &Partition, &[Key]) + Send + Sync>;
 
 /// A `MemoryKv` that records every key it sees and batch it applies, can
 /// run a hook before each apply, can yield at every call and can fail
@@ -584,6 +587,8 @@ struct Spy {
     inner: Arc<MemoryKv>,
     hook: Option<ApplyHook>,
     after_hook: Option<AfterApplyHook>,
+    scan_hook: Option<ScanHook>,
+    read_many_hook: Option<ReadManyHook>,
     yields: bool,
     fail_reads: bool,
     seen: Mutex<Vec<Key>>,
@@ -599,6 +604,8 @@ impl Spy {
             inner: Arc::new(inner),
             hook: None,
             after_hook: None,
+            scan_hook: None,
+            read_many_hook: None,
             yields: false,
             fail_reads: false,
             seen: Mutex::default(),
@@ -676,6 +683,9 @@ impl NamespaceStore for Spy {
         keys: &[Key],
     ) -> Result<Vec<Option<Value>>, StoreError> {
         self.pause("get_many").await;
+        if let Some(hook) = &self.read_many_hook {
+            hook(&self.inner, p, keys);
+        }
         self.maybe_fail_read()?;
         for k in keys {
             self.saw(k);
@@ -692,6 +702,9 @@ impl NamespaceStore for Spy {
         limit: u32,
     ) -> Result<ScanPage, StoreError> {
         self.pause("scan").await;
+        if let Some(hook) = &self.scan_hook {
+            hook(&self.inner, p);
+        }
         self.maybe_fail_read()?;
         self.saw(start);
         self.inner.scan(p, start, end, after, limit).await

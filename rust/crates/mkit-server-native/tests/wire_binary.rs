@@ -256,7 +256,7 @@ async fn binary_fs_sqlite_auth_v2_d34_timers() {
 
 #[cfg(not(feature = "test-faults"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn default_binary_does_not_expose_indexed_mode() {
+async fn default_binary_does_not_activate_indexed_mode() {
     use mkit_server_conformance::wire::client::{Client, UNARY_PROTO, decode_unary};
     use mkit_transport_connect::generated::GetServerInfoResponse;
 
@@ -266,7 +266,8 @@ async fn default_binary_does_not_expose_indexed_mode() {
         .unwrap();
     assert!(help.status.success());
     let help = std::str::from_utf8(&help.stdout).unwrap();
-    assert!(!help.contains("--indexed"), "{help}");
+    assert!(help.contains("--launch-profile"), "{help}");
+    assert!(help.contains("--http-objects"), "{help}");
 
     let root = common::repo_root();
     let token_file = root.path().join("token");
@@ -298,6 +299,8 @@ async fn default_binary_does_not_expose_indexed_mode() {
         .unwrap();
     assert_eq!(info.indexed_mode, Some(false));
     assert_eq!(info.max_delta_chain_depth, Some(0));
+    assert_eq!(info.leases, Some(false));
+    assert_eq!(info.async_inspection, Some(false));
     assert!(server.stop().success());
 }
 

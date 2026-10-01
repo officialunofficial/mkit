@@ -1,0 +1,30 @@
+// LOCAL EXAMPLE ONLY. scripts/embedded-worker-conformance.sh starts both Workers.
+{
+  "name": "mkit-embedded-worker",
+  "main": "build/worker/shim.mjs",
+  "compatibility_date": "2026-09-09",
+  "build": { "command": "true" },
+  "vars": {
+    "AUTH_AUDIENCE": "http://127.0.0.1:8795",
+    "AUTH_REPOSITORY": "default",
+    "WORKERS_PLAN": "free",
+    "SHARDING": "single",
+    "HOOK_ROLES": "admit,outcome",
+    "TICKET_KEYS": "fake-dev 1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "services": [{ "binding": "ADMISSION_HOOK", "service": "mkit-embedded-hook" }],
+  "r2_buckets": [
+    { "binding": "STORAGE", "bucket_name": "mkit-embedded-objects" },
+    { "binding": "BACKUPS", "bucket_name": "mkit-embedded-backups" }
+  ],
+  "durable_objects": { "bindings": [
+    { "name": "REFSTORE", "class_name": "RefStore" },
+    { "name": "NS_COORD", "class_name": "NsCoordinator" },
+    { "name": "REF_SHARD", "class_name": "RefShard" },
+    { "name": "REPO_INDEX", "class_name": "RepoIndexShard" },
+    { "name": "CONTENT_INDEX", "class_name": "ContentIndexShard" }
+  ] },
+  "migrations": [{ "tag": "example", "new_sqlite_classes": [
+    "RefStore", "NsCoordinator", "RefShard", "RepoIndexShard", "ContentIndexShard"
+  ] }]
+}

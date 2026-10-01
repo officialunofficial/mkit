@@ -712,12 +712,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .min(indexed.max_pack_bytes);
         }
         if let Some(policy) = &cfg.ref_policy {
-            policy.validate()?;
-            if policy.has_fast_forward_rule() && cfg.indexed.is_none() {
-                return Err(ServerError::invalid_argument(
-                    "fast-forward-only ref rules require indexed mode",
-                ));
-            }
+            policy.validate_for_indexed(cfg.indexed.is_some())?;
         }
         #[cfg(feature = "http-objects")]
         if let Some(http) = &cfg.http_objects {
@@ -3825,7 +3820,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     /// The bounded optimistic loop: read, plan, apply. The first attempt
-    /// plans on `ahead`, reading only what it lacks. A guard another
+    /// retains read-ahead only when no global denial proof is required.
+    /// Each attempt fixes its plan time before proof; fresh rows, a usable
+    /// lease and current business time follow it. A guard another
     /// writer broke re-plans up to [`MAX_REPLAN`] times, then `aborted`; a
     /// lost prune race retries once without the prune, uncounted. A missed
     /// deadline re-plans once while the envelope is still valid at the
@@ -3851,18 +3848,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let mut first_attempt = true;
         let denial_budget = crate::indexed::budget::SliceBudget::new(9000);
         loop {
-            let mut clock = self.plan_clock(skew_ms, &req);
-            let base = ahead.take().unwrap_or_default();
-            let snap = self.read_snapshot(p, &req, &clock, base, prune_ok).await?;
-            // Every retry re-reads el. Only the initial attempt uses a grant
-            // already committed after admission; later attempts renew if needed.
-            if req.lease.is_some() && !first_attempt {
-                let observed = self.observe_lease(op, p, Some(&snap)).await?;
-                let (_, renewed) = self.admit_lease(op, p, observed, skew_ms).await?;
-                req.lease = Some(renewed);
-                clock = self.plan_clock(skew_ms, &req);
-            }
-            first_attempt = false;
             let denial_packs: Vec<_> = req
                 .denial_packs
                 .iter()
@@ -3874,10 +3859,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 )
                 .copied()
                 .collect();
-            if let Some(ids) = req.denial_ids
-                && self.cfg.takedown_denial
-                && (!ids.is_empty() || !denial_packs.is_empty())
-            {
+            let prove = self.cfg.takedown_denial
+                && req
+                    .denial_ids
+                    .is_some_and(|ids| !ids.is_empty() || !denial_packs.is_empty());
+            // Every gating denial read is at/after this attempt's plan time
+            // (SPEC-SERVER §14.2). Slow proof cannot borrow a new commit window.
+            let proof_plan_time = prove.then(|| ms(self.clock.now_ms()));
+            if let Some(ids) = req.denial_ids.filter(|_| prove) {
                 crate::takedown::denial::require_repo_clear_budgeted(
                     &self.meta,
                     self.shards.as_ref(),
@@ -3887,6 +3876,40 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     &denial_budget,
                 )
                 .await?;
+            }
+            // A complete proof can outlive both the commit window and the
+            // initial lease. Only fixed admission quota facts survive it;
+            // every mutable source row is read again before planning.
+            let base = ahead.take().unwrap_or_default();
+            let base = if prove {
+                let mut fresh = Snapshot::default();
+                fresh.namespace_window = base.namespace_window;
+                fresh.namespace_seed = base.namespace_seed;
+                fresh
+            } else {
+                base
+            };
+            let clock = self.plan_clock(skew_ms, &req);
+            let snap = self.read_snapshot(p, &req, &clock, base, prune_ok).await?;
+            if let Some(lease) = req.lease
+                && (prove
+                    || !first_attempt
+                    || lease
+                        .value
+                        .expires_at_ms
+                        .saturating_sub(self.cfg.lease_margin_ms)
+                        < ms(self.clock.now_ms()).saturating_add(self.cfg.min_lease_budget_ms))
+            {
+                let observed = self.observe_lease(op, p, Some(&snap)).await?;
+                let (_, renewed) = self.admit_lease(op, p, observed, skew_ms).await?;
+                req.lease = Some(renewed);
+            }
+            first_attempt = false;
+            let mut clock = self.plan_clock(skew_ms, &req);
+            if let Some(plan_time) = proof_plan_time {
+                // Keep fresh business time and current lease/replay caps; only
+                // the denial attempt's original plan time remains immutable.
+                clock.plan_time_ms = plan_time;
             }
             let plan = match plan_write(&req, &snap, &clock)? {
                 Planned::Done(result) => return Ok(result),

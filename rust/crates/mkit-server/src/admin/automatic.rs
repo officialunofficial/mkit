@@ -7,7 +7,7 @@ use serde_json::json;
 
 use super::{
     Response, auth,
-    ledger::{audit_entry, decode_head, encode, guarded, head_key},
+    ledger::{Head, audit_entry, decode_head, encode, guarded, head_key},
 };
 use crate::{
     Batch, BoxFuture, Key, NamespaceStore, Partition, Precondition, StoreError, Value, Write,
@@ -295,11 +295,85 @@ impl RelayHook for AuditReserveHook {
     }
     fn before_apply<'a>(
         &'a self,
-        _target: &'a Partition,
-        _rows: &'a [(u64, RelayV1)],
-        _pre: &'a mut Vec<Precondition>,
-        _writes: &'a mut Vec<Write>,
+        target: &'a Partition,
+        rows: &'a [(u64, RelayV1)],
+        pre: &'a mut Vec<Precondition>,
+        writes: &'a mut Vec<Write>,
     ) -> BoxFuture<'a, Result<(), StoreError>> {
-        Box::pin(async { Ok(()) })
+        Box::pin(async move {
+            if target != &self.root {
+                return Ok(());
+            }
+            if writes
+                .iter()
+                .filter(|write| {
+                    matches!(write,
+                Write::Put(key, _) if key.as_bytes().starts_with(b"ai\0"))
+                })
+                .take(crate::MAX_BATCH_OPS + 1)
+                .count()
+                > crate::MAX_BATCH_OPS
+            {
+                return Err(invalid("invalid automatic audit entry count"));
+            }
+            let receipts: BTreeMap<_, _> = events(writes).into_iter().collect();
+            if receipts.is_empty() {
+                return Ok(());
+            }
+            let count = u64::try_from(receipts.len())
+                .map_err(|_| invalid("invalid automatic audit entry count"))?;
+            let synthetic = encode(&Head {
+                seq: u64::MAX
+                    .checked_sub(count)
+                    .ok_or_else(|| invalid("invalid automatic audit entry count"))?,
+                hash: "0".repeat(64),
+            })
+            .map_err(|_| invalid("invalid audit head"))?;
+            let mut estimate = Batch {
+                preconditions: pre.clone(),
+                writes: writes.clone(),
+            };
+            // Validate identities with the existing extension, using only owned local data.
+            // Missing receipts maximize appends; existing receipts add Equals values instead.
+            extend_audit_batch(target, &mut estimate, |key| {
+                Ok((key == &head_key()).then(|| synthetic.clone()))
+            })?;
+            let bytes = estimate
+                .preconditions
+                .iter()
+                .map(|pre| match pre {
+                    Precondition::Absent(k) | Precondition::Present(k) => k.as_bytes().len(),
+                    Precondition::Equals(k, v) => k.as_bytes().len() + v.as_bytes().len(),
+                    Precondition::NotAfter(_) => 0,
+                })
+                .chain(estimate.writes.iter().map(|write| match write {
+                    Write::Put(k, v) => k.as_bytes().len() + v.as_bytes().len(),
+                    Write::Delete(k) => k.as_bytes().len(),
+                }))
+                .sum::<usize>()
+                // Accepted heads need not have canonical JSON spelling. Reserve their raw
+                // storage bound numerically, without allocating a maximum-sized dummy.
+                .saturating_add(crate::MAX_VALUE_BYTES - synthetic.as_bytes().len())
+                .saturating_add(receipts.values().map(|v| v.as_bytes().len()).sum::<usize>());
+            let validation = estimate.validate(&crate::StoreCapabilities::full());
+            let capacity = match validation {
+                Ok(()) => bytes > crate::MAX_BATCH_BYTES,
+                Err(StoreError::Invalid(message))
+                    if matches!(
+                        message.as_ref(),
+                        "batch exceeds MAX_BATCH_OPS" | "batch exceeds MAX_BATCH_BYTES"
+                    ) =>
+                {
+                    true
+                }
+                Err(error) => return Err(error),
+            };
+            // Conservative estimates only shrink groups. A single row reaches unchanged
+            // target SQL validation, which knows the actual head and receipt state.
+            if capacity && rows.len() > 1 {
+                return Err(invalid(crate::relay::AUDIT_CAPACITY));
+            }
+            Ok(())
+        })
     }
 }

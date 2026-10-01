@@ -38,6 +38,7 @@ mod health;
 mod indexed;
 mod info;
 mod lag;
+mod launch_reads;
 mod leases;
 mod list;
 mod multipart;
@@ -324,6 +325,12 @@ cases! {
     "tickets.advance_expired_ticket" => tickets::advance_expired_ticket, M1, [Tickets, AuthV2, TestFaults], [];
     "indexed.pending_verification_unavailable" => indexed::pending_verification_unavailable, M4, [IndexedMode, MultiRepo, Tickets, AuthV2, TestFaults], [];
     "indexed.async_verification_commits" => indexed::async_verification_commits, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2, TestFaults], [];
+    "launch.indexed_verification_commits" => indexed::launch_verification_commits, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
+    "launch.admin_fixture" => indexed::launch_admin_fixture, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
+    "uno.public_fixture" => indexed::uno_public_fixture, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
+    "launch.inspection_rejects_advance" => indexed::inspection_rejects_advance, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2, SyncInspection], [TestFaults];
+    "launch.read_fixture_public" => launch_reads::public, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2, HttpObjects, LaunchReadFixture], [TestFaults];
+    "launch.read_fixture_private" => launch_reads::private, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2, HttpObjects, LaunchReadFixture], [TestFaults];
     "leases.bump_completes_and_writes_continue" => leases::bump_completes_and_writes_continue, M1, [EpochLeases, TestFaults], [MultiRepo];
     "leases.idle_shard_renews_at_new_epoch" => leases::idle_shard_renews_at_new_epoch, M2, [EpochLeases, Grants, MultiRepo, AuthV2, TestFaults], [];
     "leases.lease_expires_before_revocation_completes" => leases::lease_expires_before_revocation_completes, M2, [EpochLeases, Grants, MultiRepo, AuthV2, TestFaults], [];
@@ -982,6 +989,14 @@ impl Ctx {
     /// one, the declared total. Returns the bytes.
     pub(crate) async fn fetch(&self, id: &[u8]) -> Result<Vec<u8>, Failure> {
         let reply = self.download(id).await?;
+        Self::downloaded_bytes(id, reply)
+    }
+
+    /// Validate the complete stream from an explicitly addressed public read.
+    pub(crate) fn downloaded_bytes(
+        id: &[u8],
+        reply: StreamReply<DownloadPackResponse>,
+    ) -> Result<Vec<u8>, Failure> {
         if let Some(e) = reply.error {
             return Err(Failure::Fail(format!("DownloadPack: expected ok, got {e}")));
         }

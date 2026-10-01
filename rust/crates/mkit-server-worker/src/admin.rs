@@ -51,8 +51,10 @@ pub(crate) fn takedown(
         .ok_or_else(|| {
             ConfigError("explicit positive PRESERVATION_RETENTION_MS required".into())
         })?;
-    let seed = var(RECEIPT_SECRET)
-        .ok_or_else(|| ConfigError("RECEIPT_NOTICE_KEY secret required".into()))?;
+    let seed = zeroize::Zeroizing::new(
+        var(RECEIPT_SECRET)
+            .ok_or_else(|| ConfigError("RECEIPT_NOTICE_KEY secret required".into()))?,
+    );
     let list = var("RECEIPT_KEYS")
         .ok_or_else(|| ConfigError("RECEIPT_KEYS publication required".into()))?;
     let publication = mkit_server::takedown::PublicationConfig::parse(seed.trim(), &list)
@@ -113,18 +115,55 @@ pub(crate) fn shards(
     }
 }
 #[cfg(target_arch = "wasm32")]
+type WorkerWork = mkit_server::takedown::work::Work<
+    crate::ns_client::DoNamespaceStore<crate::ns_client::StubTransport>,
+    crate::r2::WorkerBlobStore,
+    crate::r2::WorkerBlobStore,
+>;
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::arc_with_non_send_sync)] // Worker shares core callbacks on a single thread.
+pub(crate) fn purge_config<S: mkit_server::NamespaceStore + 'static>(
+    cfg: &crate::adapter::WorkerConfig,
+    metadata: S,
+    request: Option<&mkit_server::indexed::budget::SliceBudget>,
+) -> Result<Option<mkit_server::purge::PurgeConfig>, ConfigError> {
+    use std::sync::{Arc, atomic::AtomicBool};
+    let Some(purge) = cfg.pipeline_config()?.purge else {
+        return Ok(None);
+    };
+    let local = cfg.custom_purge.as_ref().map_or_else(
+        || {
+            Arc::new(crate::purge::local_cache(cfg))
+                as Arc<dyn mkit_server::purge::LocalInvalidation>
+        },
+        |custom| custom.local.clone(),
+    );
+    let local = request.map_or(local.clone(), |budget| {
+        Arc::new(crate::purge::RequestLocal {
+            local,
+            budget: budget.clone(),
+            reserved: AtomicBool::new(false),
+        }) as Arc<dyn mkit_server::purge::LocalInvalidation>
+    });
+    Ok(Some(purge.with_local(local).with_audit(Arc::new(
+        mkit_server::admin::SystemAudit::new(metadata, cfg.probe_partition()),
+    ))))
+}
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn work(
     env: &worker::Env,
     cfg: &crate::adapter::WorkerConfig,
     budget: &mkit_server::purge::SliceBudget,
-) -> Result<
-    mkit_server::takedown::work::Work<
-        crate::ns_client::DoNamespaceStore<crate::ns_client::StubTransport>,
-        crate::r2::WorkerBlobStore,
-        crate::r2::WorkerBlobStore,
-    >,
-    ConfigError,
-> {
+) -> Result<WorkerWork, ConfigError> {
+    build_work(env, cfg, None, Some(budget))
+}
+#[cfg(target_arch = "wasm32")]
+fn build_work(
+    env: &worker::Env,
+    cfg: &crate::adapter::WorkerConfig,
+    request: Option<&mkit_server::indexed::budget::SliceBudget>,
+    alarm: Option<&mkit_server::purge::SliceBudget>,
+) -> Result<WorkerWork, ConfigError> {
     let settings = cfg
         .takedown
         .as_ref()
@@ -134,18 +173,28 @@ pub(crate) fn work(
         .as_ref()
         .ok_or_else(|| ConfigError("preservation requires indexed storage".into()))?;
     let blob = |binding, keyspace| {
-        crate::r2::R2BlobStore::new(
-            crate::r2::EnvBucket::new(env.clone(), binding).with_alarm_budget(budget.clone()),
-            keyspace,
-        )
+        let mut bucket = crate::r2::EnvBucket::new(env.clone(), binding);
+        if let Some(budget) = request {
+            bucket = bucket.with_budget(budget.clone());
+        }
+        if let Some(budget) = alarm {
+            bucket = bucket.with_alarm_budget(budget.clone());
+        }
+        crate::r2::R2BlobStore::new(bucket, keyspace)
     };
+    let mut metadata = crate::ns_client::DoNamespaceStore::new(
+        crate::ns_client::StubTransport::new(env.clone(), cfg.placement.clone()),
+        cfg.probe_partition(),
+    );
+    if let Some(budget) = request {
+        metadata = metadata.with_budget(budget.clone());
+    }
+    if let Some(budget) = alarm {
+        metadata = metadata.with_alarm_budget(budget.clone());
+    }
     Ok(mkit_server::takedown::work::Work {
-        purge: None,
-        metadata: crate::ns_client::DoNamespaceStore::new(
-            crate::ns_client::StubTransport::new(env.clone(), cfg.placement.clone()),
-            cfg.probe_partition(),
-        )
-        .with_alarm_budget(budget.clone()),
+        purge: purge_config(cfg, metadata.clone(), request)?,
+        metadata,
         serving: blob(cfg.blob_binding, crate::r2::PACKS_KEYSPACE),
         preserved: blob(PRESERVATION_BINDING, "preserved"),
         root: cfg.probe_partition(),
@@ -158,16 +207,34 @@ pub(crate) fn work(
     })
 }
 #[cfg(any(target_arch = "wasm32", test))]
-fn supported_path(path: &str, enabled: bool) -> bool {
-    path == mkit_server::admin::AUDIT_PATH
-        || path == mkit_server::admin::PURGE_PATH
-        || enabled && path == mkit_server::admin::TAKEDOWN_PATH
+fn supported_path(path: &str, cfg: &crate::adapter::WorkerConfig) -> bool {
+    cfg.admin.as_ref().is_some_and(Config::enabled)
+        && cfg.takedown.is_some()
+        && cfg.takedown_denial
+        && cfg.indexed.is_some()
+        && purge_enabled(cfg)
+        && path
+            .strip_prefix(mkit_server::admin::PREFIX)
+            .is_some_and(|operation| {
+                matches!(
+                    operation,
+                    "Takedown"
+                        | "GetTakedown"
+                        | "ListTakedowns"
+                        | "ReadPreserved"
+                        | "SetLegalHold"
+                        | "PurgeCache"
+                        | "ReadAuditLog"
+                )
+            })
 }
 #[cfg(any(target_arch = "wasm32", test))]
 fn purge_enabled(cfg: &crate::adapter::WorkerConfig) -> bool {
-    cfg.hooks
-        .as_ref()
-        .is_some_and(|hooks| hooks.roles.cache_purge && hooks.http.is_some())
+    cfg.custom_purge.is_some()
+        || cfg
+            .hooks
+            .as_ref()
+            .is_some_and(|hooks| hooks.roles.cache_purge && hooks.http.is_some())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -175,22 +242,23 @@ pub(crate) async fn serve(
     mut req: worker::Request,
     env: worker::Env,
     cfg: &crate::adapter::WorkerConfig,
+    budget: &mkit_server::indexed::budget::SliceBudget,
 ) -> worker::Result<worker::Response> {
     use futures::StreamExt;
-    use mkit_server::admin::{BodyCapture, Engine, Response};
+    use mkit_server::admin::{BodyCapture, Engine, Reply, Response};
     let Some(config) = &cfg.admin else {
-        return worker::Response::error("admin disabled", 404);
+        return no_store(worker::Response::error("admin disabled", 404));
     };
-    let enabled = mkit_server::takedown::ACTIVATED && cfg.takedown.is_some();
-    if !supported_path(&req.path(), enabled) {
-        return worker::Response::error("admin operation unavailable", 404);
+    let enabled = cfg.takedown.is_some() && cfg.takedown_denial;
+    if !supported_path(&req.path(), cfg) {
+        return no_store(worker::Response::error("admin operation unavailable", 404));
     }
     if req.method() != worker::Method::Post {
-        return worker::Response::error("POST required", 405);
+        return no_store(worker::Response::error("POST required", 405));
     }
     let headers = req.headers().entries().collect();
     let reply = if let Err(reply) = mkit_server::admin::precheck(&headers) {
-        reply
+        Reply::Unary(reply)
     } else {
         let url = req.url()?;
         let path = format!(
@@ -206,35 +274,61 @@ pub(crate) async fn serve(
         let store = crate::ns_client::DoNamespaceStore::new(
             crate::ns_client::StubTransport::new(env.clone(), cfg.placement.clone()),
             cfg.probe_partition(),
-        );
+        )
+        .with_budget(budget.clone());
         let mut engine = Engine::new(store.clone(), cfg.probe_partition(), config.clone())
             .with_purge(purge_enabled(cfg));
         if enabled {
             // Workers run on one thread; the shared core operations interface uses Arc.
             #[allow(clippy::arc_with_non_send_sync)]
-            let operations = std::sync::Arc::new(mkit_server::takedown::Service::new(
-                store,
-                cfg.probe_partition(),
-                shards(cfg.sharding),
-            ));
+            let operations = std::sync::Arc::new(
+                build_work(&env, cfg, Some(budget), None)
+                    .map_err(|error| worker::Error::RustError(error.to_string()))?,
+            );
             engine = engine.with_operations(operations);
         }
+        #[allow(clippy::arc_with_non_send_sync)]
+        let engine = std::sync::Arc::new(engine);
         engine
-            .handle(
+            .handle_streamed(
                 &path,
                 &headers,
                 &capture,
+                None,
                 mkit_server::Clock::now_ms(&crate::clock::WorkerClock),
             )
             .await
     };
-    let Response {
-        status,
-        content_type,
-        body,
-    } = reply;
-    let mut response = worker::Response::from_bytes(body)?.with_status(status);
-    response.headers_mut().set("content-type", &content_type)?;
+    let response = match reply {
+        Reply::Unary(Response {
+            status,
+            content_type,
+            body,
+        }) => {
+            let mut response = worker::Response::from_bytes(body)?.with_status(status);
+            response.headers_mut().set("content-type", &content_type)?;
+            response
+        }
+        Reply::Stream(stream) => {
+            let stream = stream.map(|result| {
+                result
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(|error| worker::Error::RustError(error.to_string()))
+            });
+            let mut response = worker::Response::from_stream(stream)?;
+            response
+                .headers_mut()
+                .set("content-type", "application/connect+json")?;
+            response
+        }
+    };
+    no_store(Ok(response))
+}
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn no_store(
+    response: worker::Result<worker::Response>,
+) -> worker::Result<worker::Response> {
+    let mut response = response?;
     response.headers_mut().set("cache-control", "no-store")?;
     Ok(response)
 }
@@ -365,13 +459,68 @@ mod tests {
         );
     }
     #[test]
-    fn manual_purge_is_exposed_and_takedown_stays_unexposed() {
-        assert!(supported_path(mkit_server::admin::AUDIT_PATH, false));
-        assert!(supported_path(mkit_server::admin::PURGE_PATH, false));
-        assert!(!supported_path(
-            "/mkit.server.admin.v1.AdminService/Takedown",
-            false
-        ));
+    fn lean_catalog_requires_admin_and_takedown_and_never_exposes_hold_ops() {
+        let mut cfg = crate::adapter::WorkerConfig::from_vars(|name| match name {
+            "AUTH_AUDIENCE" => Some("https://server.example".into()),
+            "AUTH_REPOSITORY" => Some("repo".into()),
+            "ADMIN_KEYS" => Some(
+                serde_json::json!({"version":1,"keys":[{
+                    "keyId":"operator", "alg":"ed25519", "publicKey":"11".repeat(32),
+                    "roles":["audit","moderation"]
+                }]})
+                .to_string(),
+            ),
+            _ => None,
+        })
+        .unwrap();
+        let fixture = PreservationFixture::new();
+        for op in [
+            "Takedown",
+            "GetTakedown",
+            "ListTakedowns",
+            "ReadPreserved",
+            "SetLegalHold",
+            "PurgeCache",
+            "ReadAuditLog",
+        ] {
+            let path = format!("{}{op}", mkit_server::admin::PREFIX);
+            assert!(!supported_path(&path, &cfg), "unconfigured {op}");
+            cfg.launch = Some(crate::launch::LaunchConfig { takedown: true });
+            assert!(!supported_path(&path, &cfg), "selection alone {op}");
+            cfg.takedown = fixture.settings(true, true).unwrap();
+            cfg.takedown_denial = true;
+            cfg.indexed = Some(mkit_server::indexed::IndexedConfig::default());
+            cfg.hooks = crate::hooks::config::HookVars::parse(&|name| match name {
+                "HOOK_ROLES" => Some("cache-purge".into()),
+                "HOOK_URL" => Some("https://hooks.example".into()),
+                _ => None,
+            })
+            .unwrap();
+            assert!(supported_path(&path, &cfg), "configured {op}");
+            cfg.takedown_denial = false;
+            assert!(!supported_path(&path, &cfg), "no global denial {op}");
+            cfg.takedown_denial = true;
+            let admin = cfg.admin.take();
+            assert!(!supported_path(&path, &cfg), "no admin {op}");
+            cfg.admin = admin;
+            cfg.launch = None;
+            cfg.takedown = None;
+        }
+        assert!(!supported_path(mkit_server::admin::AUDIT_PATH, &cfg));
+        assert!(!supported_path(mkit_server::admin::PURGE_PATH, &cfg));
+        cfg.launch = Some(crate::launch::LaunchConfig { takedown: true });
+        for op in [
+            "Reinstate",
+            "GetHold",
+            "ListHolds",
+            "ReleaseHold",
+            "RejectHold",
+        ] {
+            assert!(!supported_path(
+                &format!("{}{op}", mkit_server::admin::PREFIX),
+                &cfg
+            ));
+        }
     }
 
     #[test]
@@ -454,13 +603,20 @@ mod tests {
     #[test]
     fn configured_storage_cannot_enable_takedown_intake() {
         let fixture = PreservationFixture::new();
-        let configured = fixture.settings(true, true).unwrap().is_some();
-        assert!(configured);
-        assert!(!supported_path(
-            mkit_server::admin::TAKEDOWN_PATH,
-            mkit_server::takedown::ACTIVATED && configured
-        ));
-        assert!(supported_path(mkit_server::admin::TAKEDOWN_PATH, true));
+        let mut cfg = crate::adapter::WorkerConfig::from_vars(|name| match name {
+            "AUTH_AUDIENCE" => Some("https://server.example".into()),
+            "AUTH_REPOSITORY" => Some("repo".into()),
+            _ => None,
+        })
+        .unwrap();
+        cfg.takedown = fixture.settings(true, true).unwrap();
+        assert!(cfg.takedown.is_some());
+        assert!(!supported_path(mkit_server::admin::TAKEDOWN_PATH, &cfg));
+        cfg.takedown_denial = true;
+        assert!(
+            cfg.validate().is_err(),
+            "denial requires complete indexed configuration"
+        );
         let _shards = shards(mkit_server::pipeline::Sharding::Single);
     }
 }

@@ -1,4 +1,4 @@
-//! Explicit Stage 2 HTTP mounting. Environment configuration never opts in.
+//! Explicit HTTP object mounting, including the optional Paid launch mount.
 
 use mkit_server::http_objects::HttpObjectsConfig;
 use mkit_server::http_objects::mount::HttpMountOptions;
@@ -10,7 +10,7 @@ use crate::adapter::ConfigError;
 /// A programmatic indexed deployment with an explicit HTTP mount.
 #[derive(Clone, Debug)]
 pub struct WorkerHttpMountConfig {
-    /// Explicit indexed configuration; the environment's `INDEXED_MODE` remains refused.
+    /// Indexed configuration selected by the mount or Paid launch profile.
     pub indexed: IndexedConfig,
     /// Explicit HTTP configuration, including optional read admission.
     pub http_objects: HttpObjectsConfig,
@@ -18,6 +18,29 @@ pub struct WorkerHttpMountConfig {
     pub options: HttpMountOptions,
     /// Retains paid-read settlement using the request lifetime (normally `wait_until`).
     pub read_runtime: Option<mkit_server::http_objects::HttpReadRuntime>,
+}
+
+impl WorkerHttpMountConfig {
+    /// Retain read settlement in this fetch event, including body cancellation.
+    #[cfg(target_arch = "wasm32")]
+    #[must_use]
+    pub fn with_context(mut self, context: worker::Context) -> Self {
+        self.read_runtime = Some(mkit_server::http_objects::HttpReadRuntime {
+            sleep: std::sync::Arc::new(crate::sleep::WorkerSleep),
+            spawner: std::sync::Arc::new(ReadSettlement(context)),
+        });
+        self
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct ReadSettlement(worker::Context);
+
+#[cfg(target_arch = "wasm32")]
+impl mkit_server::Spawner for ReadSettlement {
+    fn spawn(&self, future: mkit_server::BoxFuture<'static, ()>) {
+        self.0.wait_until(future);
+    }
 }
 
 /// Parse the feature-gated token secrets without enabling routes or indexed mode.
@@ -168,9 +191,23 @@ pub(crate) mod glue {
     use crate::ns_client::WorkerNamespaceStore;
     use crate::r2::WorkerBlobStore;
 
-    /// Only an explicit programmatic mount can select this dispatcher.
+    /// Only a configured HTTP mount can select this dispatcher.
     pub(crate) fn mounted_request(req: &Request, cfg: &WorkerConfig) -> bool {
         cfg.http_mount.is_some()
+            && raw_path_query(&req.inner().url())
+                .is_ok_and(|(path, _)| path == KEY_PATH || is_http_object_path(path))
+    }
+
+    /// A selected environment mount retains its HTTP error contract even if
+    /// another setting prevents the full configuration from being parsed.
+    pub(crate) fn env_mounted_request(req: &Request, env: &worker::Env) -> bool {
+        let selected = env
+            .secret("HTTP_OBJECTS")
+            .ok()
+            .map(|value| value.to_string())
+            .or_else(|| env.var("HTTP_OBJECTS").ok().map(|value| value.to_string()))
+            .is_some_and(|value| value == "true");
+        selected
             && raw_path_query(&req.inner().url())
                 .is_ok_and(|(path, _)| path == KEY_PATH || is_http_object_path(path))
     }

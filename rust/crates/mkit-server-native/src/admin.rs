@@ -120,6 +120,7 @@ pub fn resolve(
     pipeline.admin_keys = config.public_keys();
     let takedown = preservation_settings(args, pipeline, &config, auth.audience())?;
     pipeline.receipt_publication = takedown.as_ref().map(|s| s.publication.clone());
+    pipeline.takedown_denial = takedown.is_some();
     if let Some(settings) = &takedown {
         pipeline
             .admin_keys
@@ -279,29 +280,71 @@ where
         Ok(registry)
     }
 }
-/// Build the audit export procedure on the separate operator router.
-pub fn router<S: NamespaceStore + Clone + 'static>(
+/// Build the restricted operator router over the actual serving and preservation stores.
+/// # Errors
+/// Refuses inconsistent activation or an invalid preservation acquisition profile.
+pub fn router<B: mkit_server::BlobStore + 'static, S: NamespaceStore + Clone + 'static>(
+    serving: B,
     store: S,
     settings: &Settings,
     pipeline: &PipelineConfig,
-) -> Router {
-    let enabled = mkit_server::takedown::ACTIVATED && settings.takedown.is_some();
+) -> Result<Router, ConfigError> {
+    validate_mount(settings, pipeline)?;
+    let enabled = settings.takedown.is_some();
     let mut engine = Engine::new(
         store.clone(),
         partition(pipeline.sharding),
         settings.config.clone(),
     )
     .with_purge(pipeline.purge.is_some());
-    if enabled {
-        engine = engine.with_operations(Arc::new(
-            mkit_server::takedown::Service::new(
-                store,
-                partition(pipeline.sharding),
-                shards(pipeline.sharding),
-            )
-            .with_purge(pipeline.purge.clone()),
+    if let Some(settings) = &settings.takedown {
+        engine = engine.with_operations(Arc::new(work(serving, store, settings, pipeline)?));
+    }
+    Ok(engine_router(engine, enabled))
+}
+pub(crate) fn validate_mount(
+    settings: &Settings,
+    pipeline: &PipelineConfig,
+) -> Result<(), ConfigError> {
+    if settings.takedown.is_some() != pipeline.takedown_denial {
+        return Err(invalid(
+            "preservation and takedown denial activation must match",
         ));
     }
+    if settings.takedown.is_some() {
+        if !settings.config.enabled() || pipeline.indexed.is_none() {
+            return Err(invalid(
+                "preservation requires nonempty admin keys and indexed limits",
+            ));
+        }
+        let purge = pipeline
+            .purge
+            .as_ref()
+            .filter(|purge| purge.remote_sink)
+            .ok_or_else(|| invalid("preservation requires signed HTTPS cache-purge delivery"))?;
+        purge.validate().map_err(invalid)?;
+        if purge.audience != settings.config.audience() {
+            return Err(invalid(
+                "preservation cache-purge audience must match the admin audience",
+            ));
+        }
+    }
+    Ok(())
+}
+pub(crate) fn optional_router<
+    B: mkit_server::BlobStore + 'static,
+    S: NamespaceStore + Clone + 'static,
+>(
+    serving: B,
+    store: S,
+    settings: Option<&Settings>,
+    pipeline: &PipelineConfig,
+) -> Result<Option<Router>, ConfigError> {
+    settings
+        .map(|settings| router(serving, store, settings, pipeline))
+        .transpose()
+}
+fn engine_router<S: NamespaceStore + 'static>(engine: Engine<S>, enabled: bool) -> Router {
     let engine = Arc::new(engine);
     let dispatch = move |req: Request| {
         let engine = Arc::clone(&engine);
@@ -331,7 +374,11 @@ pub fn router<S: NamespaceStore + Clone + 'static>(
                 capture.push(&chunk);
             }
             let now = mkit_server::Clock::now_ms(&mkit_server::SystemClock);
-            response(engine.handle(&path, &headers, &capture, now).await)
+            streamed_response(
+                engine
+                    .handle_streamed(&path, &headers, &capture, None, now)
+                    .await,
+            )
         }
     };
     let router = Router::new()
@@ -343,13 +390,38 @@ pub fn router<S: NamespaceStore + Clone + 'static>(
             mkit_server::admin::PURGE_PATH,
             axum::routing::post(dispatch.clone()),
         );
-    if enabled {
-        router.route(
+    let router = if enabled {
+        [
             mkit_server::admin::TAKEDOWN_PATH,
-            axum::routing::post(dispatch),
-        )
+            mkit_server::admin::GET_TAKEDOWN_PATH,
+            mkit_server::admin::LIST_TAKEDOWNS_PATH,
+            mkit_server::admin::READ_PRESERVED_PATH,
+            mkit_server::admin::SET_LEGAL_HOLD_PATH,
+        ]
+        .into_iter()
+        .fold(router, |router, path| {
+            router.route(path, axum::routing::post(dispatch.clone()))
+        })
     } else {
         router
+    };
+    router.layer(axum::middleware::map_response(no_store))
+}
+async fn no_store(mut reply: Response) -> Response {
+    reply.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    reply
+}
+fn streamed_response(reply: mkit_server::admin::Reply) -> Response {
+    match reply {
+        mkit_server::admin::Reply::Unary(reply) => response(reply),
+        mkit_server::admin::Reply::Stream(stream) => Response::builder()
+            .header("content-type", "application/connect+json")
+            .header("cache-control", "no-store")
+            .body(Body::from_stream(stream))
+            .unwrap_or_default(),
     }
 }
 fn response(reply: mkit_server::admin::Response) -> Response {
@@ -388,6 +460,325 @@ mod tests {
     use mkit_server::MemoryKv;
     use tower::ServiceExt;
 
+    fn launch_fixture(configured: bool) -> (tempfile::TempDir, Settings, PipelineConfig) {
+        let root = tempfile::tempdir().unwrap();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[71; 32]);
+        let config = Config::parse("https://server.example", &serde_json::json!({"version":1,"keys":[{"keyId":"operator","alg":"ed25519","publicKey":mkit_core::hash::to_hex(signer.verifying_key().as_bytes()),"roles":["all"]}]}).to_string()).unwrap();
+        let receipt = ed25519_dalek::SigningKey::from_bytes(&[17; 32]);
+        let public = receipt.verifying_key().to_bytes();
+        let keys = serde_json::json!({"version":1,"keys":[{"keyId":mkit_core::hash::to_hex(&mkit_core::hash::hash(&public)),"alg":"ed25519","publicKey":mkit_core::hash::to_hex(&public)}]}).to_string();
+        let settings = Settings {
+            listen: SocketAddr::from(([127, 0, 0, 1], 19191)),
+            config,
+            takedown: configured.then(|| TakedownSettings {
+                root: root.path().to_owned(),
+                retention_ms: 60_000,
+                publication: mkit_server::takedown::PublicationConfig::parse(
+                    &mkit_core::hash::to_hex(&[17; 32]),
+                    &keys,
+                )
+                .unwrap(),
+            }),
+        };
+        let mut pipeline = PipelineConfig::new(
+            mkit_server::Addressing::Single {
+                repo: mkit_server::RepoId {
+                    namespace: NamespaceKey::deployment_default(),
+                    name: mkit_server::RepoName::new("repo").unwrap(),
+                },
+            },
+            AuthMode::TransportIdentity,
+            mkit_server::upload::UploadLimits {
+                max_total_bytes: 1024,
+                max_chunks: 1,
+            },
+        );
+        pipeline.indexed = Some(mkit_server::indexed::IndexedConfig::default());
+        pipeline.takedown_denial = configured;
+        pipeline.purge = configured.then(|| {
+            mkit_server::purge::PurgeConfig::new("https://server.example".into(), true, true)
+        });
+        (root, settings, pipeline)
+    }
+
+    #[tokio::test]
+    async fn restricted_catalog_routes_require_launch_preservation() {
+        use mkit_server::admin::{
+            GET_TAKEDOWN_PATH, LIST_TAKEDOWNS_PATH, READ_PRESERVED_PATH, SET_LEGAL_HOLD_PATH,
+            TAKEDOWN_PATH,
+        };
+        for configured in [false, true] {
+            let (_root, settings, pipeline) = launch_fixture(configured);
+            let routes = router(
+                mkit_server::MemoryBlobStore::default(),
+                Arc::new(MemoryKv::default()),
+                &settings,
+                &pipeline,
+            )
+            .unwrap();
+            for path in [
+                TAKEDOWN_PATH,
+                GET_TAKEDOWN_PATH,
+                LIST_TAKEDOWNS_PATH,
+                READ_PRESERVED_PATH,
+                SET_LEGAL_HOLD_PATH,
+            ] {
+                let result = routes
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(path)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    result.status().as_u16(),
+                    if configured { 401 } else { 404 },
+                    "{path}, configured={configured}"
+                );
+                assert_eq!(result.headers()["cache-control"], "no-store");
+            }
+            for operation in ["ListHolds", "ApproveHold", "RejectHold", "Reinstate"] {
+                let result = routes
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(format!("{}{operation}", mkit_server::admin::PREFIX))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(result.status(), 404);
+                assert_eq!(result.headers()["cache-control"], "no-store");
+            }
+        }
+    }
+
+    struct ObservedPieces {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        fail_second: bool,
+    }
+    impl mkit_server::admin::AdminOperations for ObservedPieces {
+        fn preserved_now_ms(&self) -> Result<i64, mkit_server::ServerError> {
+            Ok(mkit_server::Clock::now_ms(&mkit_server::SystemClock))
+        }
+        fn preserved_piece<'a>(
+            &'a self,
+            descriptor: &'a serde_json::Value,
+        ) -> mkit_server::BoxFuture<
+            'a,
+            Result<mkit_server::admin::PreservedPiece, mkit_server::ServerError>,
+        > {
+            Box::pin(async move {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let offset: u64 = descriptor["offset"].as_str().unwrap().parse().unwrap();
+                if self.fail_second && offset > 0 {
+                    return Err(mkit_server::ServerError::new(
+                        mkit_server::Code::DataLoss,
+                        "preserved piece changed",
+                    ));
+                }
+                Ok(mkit_server::admin::PreservedPiece {
+                    data: bytes::Bytes::from_static(if offset == 0 { b"first" } else { b"second" }),
+                    offset,
+                    last: offset > 0,
+                })
+            })
+        }
+        fn plan<'a>(
+            &'a self,
+            _path: &'a str,
+            input: &'a serde_json::Value,
+            _digest: &'a str,
+            _now: u64,
+            _budget: &'a mkit_server::indexed::budget::SliceBudget,
+        ) -> mkit_server::BoxFuture<
+            'a,
+            Result<mkit_server::admin::Prepared, mkit_server::ServerError>,
+        > {
+            Box::pin(async move {
+                Ok(mkit_server::admin::Prepared {
+                    batch: mkit_server::Batch::new(),
+                    response: mkit_server::admin::Response::json(input),
+                    operation_id: String::new(),
+                    label: String::new(),
+                    targets: Vec::new(),
+                    details: String::new(),
+                })
+            })
+        }
+        fn after_commit<'a>(
+            &'a self,
+            _path: &'a str,
+            _input: &'a serde_json::Value,
+            response: mkit_server::admin::Response,
+            _now: u64,
+            _budget: &'a mkit_server::indexed::budget::SliceBudget,
+        ) -> mkit_server::BoxFuture<
+            'a,
+            Result<mkit_server::admin::Response, mkit_server::ServerError>,
+        > {
+            Box::pin(async move { Ok(response) })
+        }
+    }
+    fn signed_preserved_request() -> Request {
+        use ed25519_dalek::Signer as _;
+        let path = mkit_server::admin::READ_PRESERVED_PATH;
+        let json = br#"{"offset":"0"}"#;
+        let mut bytes = vec![0];
+        bytes.extend_from_slice(&u32::try_from(json.len()).unwrap().to_be_bytes());
+        bytes.extend_from_slice(json);
+        let mut capture = BodyCapture::default();
+        capture.push(&bytes);
+        let now = mkit_server::Clock::now_ms(&mkit_server::SystemClock);
+        let expiry = now + 60_000;
+        let nonce = mkit_core::hash::to_hex(&[97; 32]);
+        let digest = capture.digest();
+        let canonical = format!(
+            "mkit-admin:v1\noperator\nhttps://server.example\n{path}\n{digest}\n{now}\n{expiry}\n{nonce}"
+        );
+        let signature = ed25519_dalek::SigningKey::from_bytes(&[71; 32])
+            .sign(&mkit_core::hash::hash(canonical.as_bytes()));
+        let values = [
+            "1".into(),
+            "operator".into(),
+            "https://server.example".into(),
+            now.to_string(),
+            expiry.to_string(),
+            nonce,
+            digest,
+            mkit_core::hash::to_hex_bytes(&signature.to_bytes()),
+        ];
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/connect+json");
+        for (name, value) in mkit_server::admin::HEADER_NAMES.into_iter().zip(values) {
+            request = request.header(name, value);
+        }
+        request.body(Body::from(bytes)).unwrap()
+    }
+    fn connect_frame(bytes: &bytes::Bytes) -> (u8, serde_json::Value) {
+        let length = u32::from_be_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        assert_eq!(bytes.len(), 5 + length);
+        (bytes[0], serde_json::from_slice(&bytes[5..]).unwrap())
+    }
+
+    #[tokio::test]
+    async fn preserved_body_is_lazy_and_ends_with_a_connect_result() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for fail_second in [false, true] {
+            let (_root, settings, _pipeline) = launch_fixture(true);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let engine = Engine::new(
+                Arc::new(MemoryKv::default()),
+                partition(Sharding::Single),
+                settings.config,
+            )
+            .with_operations(Arc::new(ObservedPieces {
+                calls: calls.clone(),
+                fail_second,
+            }));
+            let result = engine_router(engine, true)
+                .oneshot(signed_preserved_request())
+                .await
+                .unwrap();
+            assert_eq!(result.status(), 200);
+            assert_eq!(result.headers()["content-type"], "application/connect+json");
+            assert_eq!(result.headers()["cache-control"], "no-store");
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "body must not be collected before return"
+            );
+            let mut stream = result.into_body().into_data_stream();
+            let (flags, first) = connect_frame(&stream.next().await.unwrap().unwrap());
+            assert_eq!(flags, 0);
+            assert_eq!(first["offset"], "0");
+            assert_eq!(first["last"], false);
+            assert_eq!(first["data"], "Zmlyc3Q=");
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            let (flags, second) = connect_frame(&stream.next().await.unwrap().unwrap());
+            if fail_second {
+                assert_eq!(flags, 2);
+                assert_eq!(second["error"]["code"], "data_loss");
+                assert!(second.get("last").is_none());
+            } else {
+                assert_eq!(flags, 0);
+                assert_eq!(second["offset"], "5");
+                assert_eq!(second["last"], true);
+                assert_eq!(second["data"], "c2Vjb25k");
+                let (flags, end) = connect_frame(&stream.next().await.unwrap().unwrap());
+                assert_eq!(flags, 2);
+                assert!(end.get("error").is_none());
+            }
+            assert!(stream.next().await.is_none());
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    #[test]
+    fn preservation_mount_refuses_incomplete_programmatic_configuration() {
+        let (_root, settings, mut pipeline) = launch_fixture(true);
+        pipeline.takedown_denial = false;
+        assert!(
+            router(
+                mkit_server::MemoryBlobStore::default(),
+                Arc::new(MemoryKv::default()),
+                &settings,
+                &pipeline
+            )
+            .is_err()
+        );
+        pipeline.takedown_denial = true;
+        pipeline.indexed = None;
+        assert!(
+            router(
+                mkit_server::MemoryBlobStore::default(),
+                Arc::new(MemoryKv::default()),
+                &settings,
+                &pipeline
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn preservation_mount_requires_actual_purge_delivery() {
+        let (_root, settings, mut pipeline) = launch_fixture(true);
+        for purge in [
+            None,
+            Some(mkit_server::purge::PurgeConfig::new(
+                "https://server.example".into(),
+                false,
+                false,
+            )),
+            Some(mkit_server::purge::PurgeConfig::new(
+                "https://other.example".into(),
+                true,
+                true,
+            )),
+        ] {
+            pipeline.purge = purge;
+            assert!(validate_mount(&settings, &pipeline).is_err());
+            assert!(
+                router(
+                    mkit_server::MemoryBlobStore::default(),
+                    Arc::new(MemoryKv::default()),
+                    &settings,
+                    &pipeline,
+                )
+                .is_err(),
+                "preservation must refuse startup without matching signed cache-purge delivery"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn manual_purge_is_routed_and_takedown_stays_unexposed() {
         let mut public = [0x66; 32];
@@ -412,10 +803,12 @@ mod tests {
             },
         );
         let routes = router(
+            mkit_server::MemoryBlobStore::default(),
             std::sync::Arc::new(MemoryKv::default()),
             &settings,
             &pipeline,
-        );
+        )
+        .unwrap();
         let takedown = routes
             .clone()
             .oneshot(
@@ -503,10 +896,16 @@ mod tests {
                 .header("x-mkit-admin-signature", signature)
                 .body(Body::from(bytes))
                 .unwrap();
-            let response = router(store.clone(), &settings, &pipeline)
-                .oneshot(request)
-                .await
-                .unwrap();
+            let response = router(
+                mkit_server::MemoryBlobStore::default(),
+                store.clone(),
+                &settings,
+                &pipeline,
+            )
+            .unwrap()
+            .oneshot(request)
+            .await
+            .unwrap();
             assert_eq!(response.status(), if enabled { 200 } else { 400 });
             let body = axum::body::to_bytes(response.into_body(), 4096)
                 .await

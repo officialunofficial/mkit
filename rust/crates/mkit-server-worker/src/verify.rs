@@ -14,10 +14,9 @@
 //! registered there. Raise `limits.cpu_ms` on a Paid deployment that verifies
 //! large packs; a slice the runtime kills is counted and shrinks its own work.
 //!
-//! **Stage 1.** No release build reads `INDEXED_MODE` as anything but a
-//! refusal (`WorkerConfig::from_vars`), so `WorkerConfig::indexed` is `None`
-//! and this registration never happens: kind 7 stays unregistered and no `vc`
-//! row or kind-7 timer is ever written.
+//! **Launch.** The explicit Paid indexed Uno profile selects this handler
+//! with the real R2 extraction driver. Without the opt-in, indexed mode stays
+//! off and no verification job or kind-7 timer is created.
 
 use crate::classes::ShardClass;
 use crate::log_failure;
@@ -306,16 +305,27 @@ pub(crate) fn register_from_env_budgeted<S: NamespaceStore>(
     plan: Option<&str>,
     alarm_budget: Option<mkit_server::purge::SliceBudget>,
 ) -> TimerRegistry<'static, S> {
-    use crate::adapter::WorkerConfig;
-    use crate::clock::WorkerClock;
-    use crate::ns_client::{StubTransport, WorkerNamespaceStore};
-    use crate::r2::{EnvBucket, R2BlobStore, STORAGE_BINDING};
-    use crate::telemetry::ConsoleMetrics;
-
-    let Ok(cfg) = WorkerConfig::from_env(env) else {
+    let Ok(cfg) = crate::adapter::WorkerConfig::from_env(env) else {
         return registry;
     };
-    let bucket = || EnvBucket::new(env.clone(), STORAGE_BINDING);
+    register_configured_budgeted(registry, env, class, plan, alarm_budget, &cfg)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn register_configured_budgeted<S: NamespaceStore>(
+    registry: TimerRegistry<'static, S>,
+    env: &worker::Env,
+    class: ShardClass,
+    plan: Option<&str>,
+    alarm_budget: Option<mkit_server::purge::SliceBudget>,
+    cfg: &crate::adapter::WorkerConfig,
+) -> TimerRegistry<'static, S> {
+    use crate::clock::WorkerClock;
+    use crate::ns_client::{StubTransport, WorkerNamespaceStore};
+    use crate::r2::{EnvBucket, R2BlobStore};
+    use crate::telemetry::ConsoleMetrics;
+
+    let bucket = || EnvBucket::new(env.clone(), cfg.blob_binding);
     let probe = cfg.probe_partition();
     #[cfg(feature = "test-faults")]
     let windows = MidPackCrash(R2Windows(bucket()));
@@ -335,7 +345,7 @@ pub(crate) fn register_from_env_budgeted<S: NamespaceStore>(
     registry.register(crate::purge::Budgeted {
         handler: VerifyTimer {
             remote: WorkerNamespaceStore::new(
-                StubTransport::new(env.clone(), cfg.placement),
+                StubTransport::new(env.clone(), cfg.placement.clone()),
                 probe,
             ),
             extension: R2Extraction(blobs.clone()),

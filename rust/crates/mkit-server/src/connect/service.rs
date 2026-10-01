@@ -767,7 +767,7 @@ impl From<ServerInfo> for GetServerInfoResponse {
             namespace_policy: Some(info.namespace_policy.into()),
             index_fanout: Some(info.index_fanout),
             max_delta_chain_depth: Some(info.max_delta_chain_depth),
-            leases: None, // Storage-lease enforcement lands in WP-5.2.
+            leases: Some(false), // Launch retains content permanently; no storage leases.
             // Launch inspection is synchronous only (SPEC-SERVER §18).
             async_inspection: Some(false),
             inspection_max_objects: info.inspection_max_objects,
@@ -782,6 +782,7 @@ mod proto_roundtrip {
         begin_upload_response::Result as BeginResult, upload_part_request::Msg as PartMsg,
     };
     use super::super::proto::mkit::transport::v1::*;
+    use super::ServerInfo;
     use buffa::Message;
 
     fn roundtrip<M: Message + PartialEq + core::fmt::Debug>(message: &M) {
@@ -848,6 +849,38 @@ mod proto_roundtrip {
             inspection_max_objects: Some(10_000),
             ..Default::default()
         });
+    }
+
+    #[test]
+    fn discovery_explicitly_denies_unimplemented_lease_and_async_capabilities() {
+        for indexed_mode in [false, true] {
+            let response = GetServerInfoResponse::from(ServerInfo {
+                protocol: "mkit.transport.v1",
+                spec_version: 2,
+                max_pack_bytes: 1 << 30,
+                part_size: 8 << 20,
+                max_parts: 128,
+                max_list_refs_page_size: 512,
+                begin_upload_threshold_bytes: 0,
+                atomic_advance: false,
+                indexed_mode,
+                admission: false,
+                receipt_public_key: Vec::new(),
+                receipt_key_id: String::new(),
+                grant_schemes: Vec::new(),
+                namespace_policy: "allowlist",
+                index_fanout: 4096,
+                max_delta_chain_depth: if indexed_mode { 50 } else { 0 },
+                inspection_max_objects: None,
+            });
+            roundtrip(&response);
+            let json = serde_json::to_value(&response).unwrap();
+            assert_eq!(json["leases"], false);
+            assert_eq!(json["asyncInspection"], false);
+            assert_eq!(json["indexedMode"], indexed_mode);
+            assert!(response.receipt_public_key.unwrap().is_empty());
+            assert!(response.receipt_key_id.unwrap().is_empty());
+        }
     }
 
     #[test]

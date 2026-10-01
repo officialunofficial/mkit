@@ -184,6 +184,23 @@ async fn complete(
     Ok(ctx.send(&signed_request).await?)
 }
 
+/// Complete the Uno canonical fixture using the existing streamed multipart path.
+pub(super) async fn complete_uno_ticket(
+    ctx: &Ctx,
+    signer: &Signer,
+    repository: &str,
+    ticket: &UploadTicket,
+    bytes: &[u8],
+) -> Result<Vec<u8>, Failure> {
+    let id = ticket.id.clone().ok_or("ticket has no id")?;
+    let receipts = parts(ctx, signer, Some(repository), ticket, bytes).await?;
+    want_ok(
+        complete(ctx, signer, Some(repository), ticket, receipts).await?,
+        "Uno CompleteUpload",
+    )?;
+    Ok(id)
+}
+
 pub(super) async fn three_parts(ctx: Ctx) -> CaseResult {
     let bytes = pack(&ctx);
     let id = hash(&bytes);

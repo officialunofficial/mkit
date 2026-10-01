@@ -38,6 +38,8 @@ test-faults = ["mkit-server/test-faults"]
 signed-http-hooks = []
 published-view = ["mkit-server/published-view"]
 http-objects = ["mkit-server/http-objects"]
+# The launch profile opts into R-203's bounded pure-Rust decoder.
+pack-ruzstd = ["mkit-core/pack-ruzstd"]
 
 [dependencies]
 # `connect` (on by default) for M0-17's fetch adapter; `sql` for the shared
@@ -73,6 +75,7 @@ worker = { version = "0.8", features = ["http"] }
 mkit-worker-common = { path = "../../../apps/mkit-worker-common" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+mkit-attest = { path = "../mkit-attest" }
 mkit-server = { version = "0.4", path = "../mkit-server", features = ["memory"] }
 mkit-server-conformance = { path = "../mkit-server-conformance" }
 # `RusqliteConn` under the simulated Durable Object connection.

@@ -8,6 +8,10 @@ use mkit_server::{BoxFuture, MaybeSend, MaybeSync, NamespaceStore, StoreError};
 /// Maximum external operations in one Paid Durable Object alarm.
 pub const ALARM_OPERATIONS: u32 = 1000;
 
+/// Launch work reserves headroom for alarm dispatch and response settlement.
+/// The project envelope stays 1,000; all launch handlers share the remainder.
+pub(crate) const LAUNCH_ALARM_OPERATIONS: u32 = ALARM_OPERATIONS - 40;
+
 /// Reserve a handler's worst-case external calls before any effect.
 pub(crate) struct Budgeted<H> {
     pub handler: H,
@@ -35,6 +39,33 @@ impl<S: NamespaceStore, H: TimerHandler<S>> TimerHandler<S> for Budgeted<H> {
         } else {
             self.handler.fire(ctx, timer)
         }
+    }
+}
+
+/// One conservative immediate-cache reservation on the outer signed request.
+/// The core's shared local/indexed budget still charges each actual operation.
+pub(crate) struct RequestLocal {
+    pub local: std::sync::Arc<dyn LocalInvalidation>,
+    pub budget: mkit_server::indexed::budget::SliceBudget,
+    pub reserved: std::sync::atomic::AtomicBool,
+}
+impl LocalInvalidation for RequestLocal {
+    fn invalidate<'a>(
+        &'a self,
+        request: &'a Request,
+        cursor: u32,
+        budget: &'a SliceBudget,
+    ) -> BoxFuture<'a, Result<Option<u32>, StoreError>> {
+        Box::pin(async move {
+            // Worker callbacks are sequential within this invocation. Mark only
+            // successful reservation, before entering even an opaque custom hook.
+            if !self.reserved.load(std::sync::atomic::Ordering::SeqCst) {
+                self.budget.charge_many(64)?;
+                self.reserved
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.local.invalidate(request, cursor, budget).await
+        })
     }
 }
 
@@ -896,6 +927,146 @@ mod tests {
             "purge has fully drained; kind8 still owns its delayed wake"
         );
     }
+    #[test]
+    fn signed_immediate_reservation_is_once_per_invocation_and_refuses_before_custom_effects() {
+        futures::executor::block_on(async {
+            struct Custom(
+                std::sync::Arc<AtomicU32>,
+                mkit_server::indexed::budget::SliceBudget,
+            );
+            impl LocalInvalidation for Custom {
+                fn invalidate<'a>(
+                    &'a self,
+                    _: &'a Request,
+                    _: u32,
+                    local: &'a SliceBudget,
+                ) -> BoxFuture<'a, Result<Option<u32>, StoreError>> {
+                    Box::pin(async move {
+                        assert!(
+                            self.1.used() >= 64,
+                            "outer reservation precedes opaque effects"
+                        );
+                        if local.charge(40) {
+                            self.0.fetch_add(1, Ordering::SeqCst);
+                        }
+                        Ok(None)
+                    })
+                }
+            }
+            let calls = Arc::new(AtomicU32::new(0));
+            let outer = mkit_server::indexed::budget::SliceBudget::new(9000);
+            let indexed = mkit_server::indexed::budget::SliceBudget::new(9000);
+            let local = SliceBudget::with_parent(64, indexed.clone());
+            let wrapper = RequestLocal {
+                local: Arc::new(Custom(calls.clone(), outer.clone())),
+                budget: outer.clone(),
+                reserved: std::sync::atomic::AtomicBool::new(false),
+            };
+            for action in ["acceptance", "resume"] {
+                wrapper
+                    .invalidate(&request(action), 0, &local)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                (
+                    outer.used(),
+                    indexed.used(),
+                    local.used(),
+                    calls.load(Ordering::SeqCst)
+                ),
+                (64, 40, 40, 1)
+            );
+            let fresh = RequestLocal {
+                local: wrapper.local.clone(),
+                budget: outer.clone(),
+                reserved: std::sync::atomic::AtomicBool::new(false),
+            };
+            fresh
+                .invalidate(&request("next invocation"), 0, &SliceBudget::new(64))
+                .await
+                .unwrap();
+            assert_eq!((outer.used(), calls.load(Ordering::SeqCst)), (128, 2));
+            let spent = mkit_server::indexed::budget::SliceBudget::new(9000);
+            spent.charge_many(8937).unwrap();
+            let refused = RequestLocal {
+                local: wrapper.local.clone(),
+                budget: spent.clone(),
+                reserved: std::sync::atomic::AtomicBool::new(false),
+            };
+            for _ in 0..2 {
+                assert!(
+                    refused
+                        .invalidate(&request("refused"), 0, &SliceBudget::new(64))
+                        .await
+                        .is_err()
+                );
+                assert!(!refused.reserved.load(Ordering::SeqCst));
+            }
+            assert_eq!((spent.used(), calls.load(Ordering::SeqCst)), (8937, 2));
+        });
+    }
+
+    #[test]
+    fn ordinary_pipeline_invalidation_reserves_outer_request_before_cache_and_refuses_when_spent() {
+        futures::executor::block_on(async {
+            use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig};
+            use mkit_server::{Addressing, MemoryBlobStore, NoopMetrics, RepoId};
+            for remaining in [64, 63] {
+                let outer = mkit_server::indexed::budget::SliceBudget::new(9000);
+                outer.charge_many(9000 - remaining).unwrap();
+                let cache = Cache::default();
+                let wrapper = Arc::new(RequestLocal {
+                    local: Arc::new(LocalCache {
+                        cache: cache.clone(),
+                        snapshot_deployment: Some("deployment".into()),
+                    }),
+                    budget: outer.clone(),
+                    reserved: std::sync::atomic::AtomicBool::new(false),
+                });
+                let repo = RepoId {
+                    namespace: NamespaceKey::deployment_default(),
+                    name: RepoName::new("repo").unwrap(),
+                };
+                let mut cfg = PipelineConfig::new(
+                    Addressing::Single { repo: repo.clone() },
+                    AuthMode::Open,
+                    mkit_server::upload::UploadLimits {
+                        max_total_bytes: 1024,
+                        max_chunks: 4,
+                    },
+                );
+                cfg.purge = Some(
+                    mkit_server::purge::PurgeConfig::new(
+                        "https://server.example".into(),
+                        true,
+                        true,
+                    )
+                    .with_local(wrapper.clone()),
+                );
+                let pipeline = Pipeline::new(
+                    MemoryBlobStore::default(),
+                    MemoryKv::default(),
+                    Hooks::new(),
+                    cfg,
+                    Arc::new(ManualClock::new(10)),
+                    Arc::new(NoopMetrics),
+                )
+                .unwrap();
+                pipeline.invalidate_local_cache(&repo).await;
+                assert_eq!(wrapper.reserved.load(Ordering::SeqCst), remaining == 64);
+                assert_eq!(outer.used(), if remaining == 64 { 9000 } else { 8937 });
+                #[cfg(feature = "published-view")]
+                assert_eq!(
+                    cache.0.lock().unwrap().len(),
+                    if remaining == 64 { 16 } else { 0 }
+                );
+                #[cfg(not(feature = "published-view"))]
+                assert!(cache.0.lock().unwrap().is_empty());
+            }
+        });
+    }
+
     impl<S: NamespaceStore> TimerHandler<S> for HandlerCalls {
         fn kind(&self) -> TimerKind {
             TimerKind::new(self.kind)
@@ -920,11 +1091,20 @@ mod tests {
     async fn sixteen_heads_share_one_whole_alarm_budget_and_keep_unfinished_purges() {
         let store = MemoryKv::default();
         let clock = ManualClock::new(10);
-        let budget = SliceBudget::new(ALARM_OPERATIONS);
+        let budget = SliceBudget::new(LAUNCH_ALARM_OPERATIONS);
         let recorded = Arc::new(AtomicU32::new(0));
         let cache = Cache::default();
         let mut registry = TimerRegistry::new();
-        for (kind, calls) in [(3, 64), (7, 256), (8, 16), (10, 3), (4, 1)] {
+        for (kind, calls) in [
+            (1, 64),
+            (3, 64),
+            (7, 256),
+            (8, 16),
+            (10, 3),
+            (4, 1),
+            (13, 64),
+            (15, 64),
+        ] {
             registry = registry.register(Budgeted {
                 handler: HandlerCalls {
                     kind,
@@ -952,7 +1132,7 @@ mod tests {
             };
             let request = request(&format!("purge:{bucket}"));
             let mut batch = plan_enqueue(&request, 10, None, None).unwrap();
-            for kind in [3, 7, 8, 10, 4] {
+            for kind in [1, 3, 7, 8, 10, 4, 13, 15] {
                 batch = batch.put(
                     mkit_server::store::keys::timer(10, kind, b""),
                     mkit_server::Value::default(),
@@ -978,7 +1158,7 @@ mod tests {
         let actual =
             recorded.load(Ordering::SeqCst) + u32::try_from(cache.0.lock().unwrap().len()).unwrap();
         assert!(actual <= budget.used());
-        assert!(budget.used() <= ALARM_OPERATIONS);
+        assert!(budget.used() <= LAUNCH_ALARM_OPERATIONS);
         let mut pending = 0;
         for (partition, id) in &partitions {
             pending += u32::from(read_request(&store, partition, id).await.unwrap().is_some());

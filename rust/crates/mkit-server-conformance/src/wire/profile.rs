@@ -156,6 +156,12 @@ pub enum Feature {
     IndexedAsync,
     /// Plain-HTTP object serving (M4).
     HttpObjects,
+    /// Fixture explicitly configured with synchronous inspection refusal.
+    /// A runner selection flag; not a wire capability.
+    SyncInspection,
+    /// Explicit local paid-read fixture with an owned token output file.
+    /// A runner selection flag; never inferred from HTTP support.
+    LaunchReadFixture,
     /// Lifecycle leases and GC (M5).
     Leases,
     /// Takedown (M5).
@@ -166,7 +172,7 @@ pub enum Feature {
     Admin,
 }
 
-const FEATURE_NAMES: [(Feature, &str); 28] = [
+const FEATURE_NAMES: [(Feature, &str); 30] = [
     (Feature::Bearer, "bearer"),
     (Feature::AuthV2, "auth-v2"),
     (Feature::AtomicAdvance, "atomic-advance"),
@@ -194,6 +200,8 @@ const FEATURE_NAMES: [(Feature, &str); 28] = [
     (Feature::IndexedMode, "indexed-mode"),
     (Feature::IndexedAsync, "indexed-async"),
     (Feature::HttpObjects, "http-objects"),
+    (Feature::SyncInspection, "sync-inspection"),
+    (Feature::LaunchReadFixture, "launch-read-fixture"),
     (Feature::Leases, "leases"),
     (Feature::Takedown, "takedown"),
     (Feature::Receipts, "receipts"),

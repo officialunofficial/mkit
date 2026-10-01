@@ -3710,13 +3710,14 @@ permanently and disabling GC. It MUST refuse lease terms and issue no storage
 receipts. Receipt key fields MUST follow §15.5: empty without a configured
 receipt-and-notice key; populated when takedown requires that key. The lease, GC
 and receipt-issuance requirements of §§12–13 and §15 do not apply to this profile;
-§15.5 key publication still applies when takedown is enabled. Configured Event
-sinks still obey §12.4, including publication transitions. Inspection and
+§15.5 key publication still applies when takedown is enabled. Publication
+Event sinks are excluded at launch. Inspection and
 serving stops remain governed by §§10–11, subject to the launch amendments:
 only sync/fail-closed inspectors, at most four, one complete batch each, and a
 whole-advance input bound of `inspect_batch_max_objects` (positive and at most
 10,000; default 10,000), advertised as optional `inspection_max_objects`.
-Optional scanner byte retrieval follows §11.4: a dedicated capability and
+Inspection is optional; configured inspection MUST enable scanner byte
+retrieval following §11.4: a dedicated capability and
 scanner-signed request, checked against current open upload tickets and
 global denial, with no inline bytes or durable attempt-lifetime state.
 The inspected set is every `Blob` and `ChunkedBlob` entry of the added packs,
@@ -3728,7 +3729,7 @@ over existing, unscanned content is unsupported: inspection deployments MUST
 start from an empty store. Enumeration reads frame/checkpoint pages of at most
 1,000 rows, without an inspection tree walk, reference pages or object-store reads.
 PRE_RECEIVE quarantine rejects with 403 and commits nothing. Startup MUST
-refuse async or unavailable-publish inspectors and a fifth inspector.
+refuse async or unavailable-publish inspectors, clear deadlines and a fifth inspector.
 The server MUST NOT create durable inspection continuations, outstanding
 inspection obligations or inspection holds at launch. No durable inspection-mode marker is required:
 disabling inspection stops only future scanning. Async inspection, holds,
@@ -3741,6 +3742,20 @@ not waive takedown
 or admin requirements applicable to its configuration. The profile and its
 permanent-retention/disabled-GC policy MUST be documented in deployment
 capabilities. It MUST NOT claim full-profile conformance.
+
+The Worker launch is explicitly selected on the Paid plan with indexed Multi
+addressing, D34 sharding and ticketed uploads at threshold zero. Namespace
+policy is `allowlist`, or `any` with explicit unsafe-open acknowledgment;
+under `any`, takedown discovery is incomplete. HTTP serving/URL tokens,
+signed hooks or the isolated service binding, inspection/retrieval, and
+admin/takedown are independent opt-ins. Each MUST validate its complete
+configuration and key-role separation at startup. Takedown MUST refuse
+activation without §14.7's preservation bucket, explicit retention and
+preservation signing key, and a configured purge sink. The environment
+configuration requires signed HTTPS cache-purge; an embedder MAY provide a
+custom purge sink and local invalidation. Worker proof serving remains
+unsupported and MUST NOT be advertised; native proof serving is documented
+only when its HTTP mount is enabled. No new profile/proof wire field is implied.
 
 **Full profile.** The server implements every section that applies to its
 configuration, including §9–§16. An indexed deployment MUST support per-ref

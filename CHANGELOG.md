@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server (WP-4.18, phase 1, R-194): explicit Paid indexed Uno launch selection
+  and startup validation for optional HTTP/URL tokens, signed hooks/binding,
+  synchronous inspection and private scanner retrieval. Native serves proofs;
+  Worker proofs stay unsupported. Leases/GC remain off with permanent retention.
+  Complete preservation configuration activates its core and restricted admin
+  catalog; the launch build enables R-203’s bounded pure-Rust zstd decoder.
+  Worker HTTP mounts retain read settlement in the fetch context; ticket and
+  implicit packmap checks use at most six simultaneous backend responses.
+  Added local conformance/evidence skeleton; complete runtime evidence and
+  preservation integration remains pending phase 2.
+- Worker embedding (supported, 0.x): combine programmatic configuration,
+  published snapshots, custom Outcome and purge sinks in `NsObjectBuilder`;
+  generate the five DO classes with `durable_objects!`. Host-routed admin
+  dispatch retains ADMIN_KEYS authentication, and programmatic ref policies
+  validate before serving. Add a service-binding streamed-upload example and
+  its wasm check. These APIs are unpublished, consumed at a pinned git tag.
 - Native Connect transport: retry unary reads and replay-safe auth-v2 writes
   once on a fresh connection when a reused HTTP/1 socket fails before any
   response bytes; preserve the signed envelope and deadline. Streaming RPCs
