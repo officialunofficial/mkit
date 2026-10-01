@@ -467,18 +467,46 @@ fn etag_conflict_crash_and_relay_during_upload_preserve_dirty_work() {
     *bucket.interleave.lock().unwrap() = Some(Box::new(move || {
         delivery(&changed, 2, 1, true);
     }));
-    assert_eq!(tick(&store, &registry, &clock).raced, 1);
+    let raced = tick(&store, &registry, &clock);
+    assert_eq!(raced.raced, 1);
+    assert_eq!(raced.next_wake_ms, Some(9000));
     assert_eq!(state(&store).generation, 2);
     assert!(state(&store).dirty);
+    let original = keys::timer(4000, 10, b"");
+    let retained = keys::timer_retry(9000, 10, b"", 4000, 1);
+    assert!(
+        block_on(store.get(&partition(), &original))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        block_on(store.get(&partition(), &retained)).unwrap(),
+        Some(Value::default())
+    );
     clock.set(5000);
     alarm.reset();
-    tick(&store, &registry, &clock);
+    assert_eq!(tick(&store, &registry, &clock).fired, 0);
+    assert!(state(&store).dirty);
+    assert_eq!(state(&store).generation, 2);
+    assert_eq!(
+        block_on(store.get(&partition(), &retained)).unwrap(),
+        Some(Value::default())
+    );
+    clock.set(i64::try_from(raced.next_wake_ms.unwrap()).unwrap());
+    alarm.reset();
+    assert_eq!(tick(&store, &registry, &clock).fired, 1);
     assert!(!state(&store).dirty);
+    assert_eq!(state(&store).generation, 2);
+    assert!(
+        block_on(store.get(&partition(), &retained))
+            .unwrap()
+            .is_none()
+    );
     assert!(
         Envelope::decode(
             &bucket.object.lock().unwrap().as_ref().unwrap().bytes,
             &partition(),
-            5000
+            9000
         )
         .unwrap()
         .rows

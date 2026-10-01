@@ -387,6 +387,22 @@ mod tests {
         })
     }
 
+    #[test]
+    fn path_names_after_the_delimiter_obey_entry_name_rules() {
+        for reserved in ["con", "nul", "prn", "aux"] {
+            let url = format!("/-/refs/heads/a/-/{reserved}");
+            assert_eq!(parse(&url, None, RepoPrefix::Omitted), Err(BadUrl));
+        }
+        let parsed = parse("/-/refs/heads/con/-/a/-/b", None, RepoPrefix::Omitted).unwrap();
+        assert_eq!(
+            parsed.target,
+            Target::Ref {
+                name: "refs/heads/con".into(),
+                path: vec![b"a".to_vec(), b"-".to_vec(), b"b".to_vec()],
+            }
+        );
+    }
+
     proptest! {
         /// Every name is percent-decoded exactly once, whatever it holds.
         #[test]
@@ -410,10 +426,15 @@ mod tests {
         ) {
             let file = rest.join("/");
             let url = format!("/-/refs/heads/{branch}/-/{file}");
-            let parsed = parse(&url, None, RepoPrefix::Omitted).unwrap();
-            let Target::Ref { name, path } = parsed.target else { panic!() };
-            prop_assert_eq!(name, format!("refs/heads/{branch}"));
-            prop_assert_eq!(path.len(), rest.len());
+            let parsed = parse(&url, None, RepoPrefix::Omitted);
+            if rest.iter().all(|segment| TreeEntry::validate_name(segment.as_bytes())) {
+                let Target::Ref { name, path } = parsed.unwrap().target else { panic!() };
+                prop_assert_eq!(name, format!("refs/heads/{branch}"));
+                let expected: Vec<_> = rest.iter().map(|segment| segment.as_bytes().to_vec()).collect();
+                prop_assert_eq!(path, expected);
+            } else {
+                prop_assert_eq!(parsed, Err(BadUrl));
+            }
         }
 
         /// A 400 depends on the URL text alone: parsing twice agrees, and no

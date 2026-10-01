@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{DoConfig, Loopback};
+use common::{DoConfig, Loopback, retained_timer_backoff};
 use futures::executor::block_on;
 use mkit_server::pipeline::{D34Shards, ShardMap};
 use mkit_server::sql::SqlKvStore;
@@ -302,9 +302,35 @@ fn relay_is_registered_only_on_ref_shards() {
                 assert_eq!(source.get(&partition, &timer).await.unwrap(), None);
             } else {
                 assert_eq!(report.unknown, 1);
-                assert_eq!(
-                    source.get(&partition, &timer).await.unwrap(),
-                    Some(Value::default())
+                let wake = retained_timer_backoff(
+                    &source,
+                    &partition,
+                    &registry,
+                    &timer,
+                    &Value::default(),
+                    true,
+                )
+                .await;
+                let recovered = timer_registry(ShardClass::RefShard, Ok(target.clone()), None);
+                let report = run_due(
+                    &source,
+                    &partition,
+                    &recovered,
+                    &ManualClock::new(i64::try_from(wake).unwrap()),
+                    wake,
+                    &TickBudget::default(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(report.fired, 1);
+                let (start, end) = keys::class_range(keys::TAG_TIMER);
+                assert!(
+                    source
+                        .scan(&partition, &start, &end, None, 1)
+                        .await
+                        .unwrap()
+                        .entries
+                        .is_empty()
                 );
             }
         }
@@ -341,9 +367,37 @@ fn relay_config_failure_retries_the_stored_timer() {
         assert_eq!(report.failed, 1);
         assert_eq!(report.unknown, 0);
         assert_eq!(report.next_wake_ms, Some(5_100));
-        assert_eq!(
-            source.get(&partition, &timer).await.unwrap(),
-            Some(Value::default())
+        let wake = retained_timer_backoff(
+            &source,
+            &partition,
+            &registry,
+            &timer,
+            &Value::default(),
+            false,
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let target = Loopback::store(dir.path().to_path_buf(), DoConfig::default());
+        let recovered = timer_registry(ShardClass::RefShard, Ok(target), Some("free"));
+        let report = run_due(
+            &source,
+            &partition,
+            &recovered,
+            &ManualClock::new(i64::try_from(wake).unwrap()),
+            wake,
+            &TickBudget::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.fired, 1);
+        let (start, end) = keys::class_range(keys::TAG_TIMER);
+        assert!(
+            source
+                .scan(&partition, &start, &end, None, 1)
+                .await
+                .unwrap()
+                .entries
+                .is_empty()
         );
     });
 }
