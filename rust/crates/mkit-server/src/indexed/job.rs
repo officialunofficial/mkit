@@ -85,8 +85,21 @@ impl Default for SliceLimits {
     }
 }
 
-/// Most recently decoded in-pack objects kept as delta bases, in bytes.
-const CACHE_BYTES: u64 = 8 << 20;
+/// Original admission allowance. Keep entry limits independent of retention:
+/// a smaller cache must not admit or reject a different frame.
+const ENTRY_CACHE_ALLOWANCE: u64 = 8 << 20;
+/// R-203: old/new ring growth is at most three 8 MiB windows; four MiB
+/// covers bounded blocks and decoder tables. Decoder and object parsing do
+/// not overlap. Reserve this scratch while retaining one reader window.
+#[cfg(feature = "pack-ruzstd")]
+const DECODER_SCRATCH_BYTES: u64 = 3 * (8 << 20) + (4 << 20);
+/// Default decoder phase: 16 MiB source window, 28 MiB decoder scratch,
+/// two 1 MiB entry buffers and 1 MiB metadata headroom leave a 1 MiB LRU.
+/// Larger configured entries still retain their one required newest base.
+#[cfg(feature = "pack-ruzstd")]
+const CACHE_BYTES: u64 = (48 << 20) - WINDOW_BYTES - DECODER_SCRATCH_BYTES - 3 * (1 << 20);
+#[cfg(not(feature = "pack-ruzstd"))]
+const CACHE_BYTES: u64 = ENTRY_CACHE_ALLOWANCE;
 /// Slice failures on one cursor before its entry cap halves.
 const ATTEMPTS_PER_CAP: u32 = 3;
 /// Subrequests kept back when a slice decides to fetch its next entry.
@@ -375,15 +388,17 @@ where
     W: PackWindows,
     X: SliceExtension,
 {
-    /// Reserve two window buffers, the LRU, and eight entry-sized scratch
-    /// regions for carries, decoding, object parsing and retained member bases.
+    /// Preserve the original entry admission allowance. Two windows overlap
+    /// only in `feed`; decoder scratch runs after the acquired window drops.
+    /// Delta resolution releases the idle reader before decoding another frame.
+    /// Cache retention separately reserves R-203's decoder working memory.
     fn decode_limits(&self) -> DecodeLimits {
         let limits = self.h.limits;
         DecodeLimits::default().with_max_decoded_bytes(
             limits
                 .resident_bytes
                 .saturating_sub(limits.window_bytes.saturating_mul(2))
-                .saturating_sub(CACHE_BYTES)
+                .saturating_sub(ENTRY_CACHE_ALLOWANCE)
                 / 8,
         )
     }
@@ -1020,6 +1035,21 @@ where
                     let frame = reader
                         .last_frame()
                         .ok_or_else(|| unavailable("window reader lost its frame"))?;
+                    // Nested base decoding must not retain an idle pack window
+                    // alongside the acquired source frame and decoder scratch.
+                    // Save the same post-entry boundary; this slice commits only
+                    // after `entry` succeeds, as on every other checkpoint.
+                    #[cfg(feature = "pack-ruzstd")]
+                    if matches!(entry, PackEntry::Delta { .. }) {
+                        let cursor = reader
+                            .checkpoint()
+                            .ok_or_else(|| unavailable("delta entry lost its boundary"))?;
+                        drop(reader);
+                        self.entry(st, job, frame, entry).await?;
+                        job.cursor = cursor.to_bytes();
+                        job.attempts = 0;
+                        return Ok(0);
+                    }
                     self.entry(st, job, frame, entry).await?;
                     processed += 1;
                     // One window of progress per slice: the resumed window
@@ -1229,7 +1259,7 @@ where
                 job.extract_needed = true;
             }
         }
-        if size <= CACHE_BYTES {
+        if size <= ENTRY_CACHE_ALLOWANCE {
             st.cache.insert(id, Arc::from(bytes));
         }
         job.entries += 1;
@@ -1360,7 +1390,12 @@ where
             },
         })?;
         st.cache.insert(base, Arc::from(canonical.to_vec()));
-        self.charge_bases(st, job).await
+        self.charge_bases(st, job).await?;
+        // Dependencies and byte charges are staged for the enclosing flush. The LRU owns
+        // the needed base; release the duplicate member chain before an outer
+        // in-pack frame can start its decoder.
+        st.memo = MemberCache::default();
+        Ok(())
     }
 
     /// Charge each newly retained member object once: the row records the

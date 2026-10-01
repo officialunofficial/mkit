@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local caches (launch review 7a-2, existing R-190). Audit source snapshots and
   immediate invalidation share the enclosing request or slice call allowance.
 
+- Scheduled indexed verification reserves R-203 decoder scratch within the
+  existing 48 MiB slice allowance, preserving window geometry and frame
+  admission. Delta slices release the idle reader before source reconstruction;
+  allocator regressions cover corruption, nested decode and valid custom limits.
+
 - Server: cap aggregate object-index candidate retention at a charged 4 MiB,
   bound membership joins and Worker request allocation, and enforce the current
   indexed pack-byte limit before Scheduled job claims/reuse and timer decoding.
