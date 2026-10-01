@@ -31,7 +31,7 @@ if(process.argv[2]==='keys') {
     'x-mkit-admin-version':'1','x-mkit-admin-key-id':role,'x-mkit-admin-audience':audience,
     'x-mkit-admin-created-at':now,'x-mkit-admin-expires-at':expiry,'x-mkit-admin-nonce':nonce,
     'x-mkit-admin-digest':digest,'x-mkit-admin-signature':sign(null,Buffer.from(hash(Buffer.from(canonical)),'hex'),role==='operator'?operator:audit).toString('hex')};
-  const response=await fetch(origin+path,{method:'POST',headers,body,signal:AbortSignal.timeout(60000)});
+  const response=await fetch(origin+(process.env.ADMIN_PATH_PREFIX??'')+path,{method:'POST',headers,body,signal:AbortSignal.timeout(60000)});
   const bytes=Buffer.from(await response.arrayBuffer());assert.ok(bytes.length<=8*1024*1024);
   console.log(JSON.stringify({status:response.status,headers:Object.fromEntries(response.headers),body:bytes.toString('base64'),request_digest:digest,nonce}));
 } else {

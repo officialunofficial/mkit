@@ -62,8 +62,10 @@ def get_json(url):
         return json.loads(response.read(1048577))
 
 
-def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observed=False):
+def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observed=False, uno=False):
     folder.mkdir()
+    if uno:
+        env = dict(env, ADMIN_PATH_PREFIX="/_uno/operator")
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", port))
     origin = f"http://127.0.0.1:{port}"
@@ -106,6 +108,10 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observ
                 "ADMIN_KEYS": json.dumps(keys["admin"]), "TAKEDOWN_ENABLED": "true",
                 "PRESERVATION_RETENTION_MS": "3600000", "RECEIPT_NOTICE_KEY": "79" * 32,
                 "RECEIPT_KEYS": json.dumps(keys["receipt"])}
+            if uno:
+                for key in ("HOOK_ROLES", "HOOK_URL", "MKIT_HOOK_KEY"):
+                    variables.pop(key)
+                variables.update(DEFAULT_REPO_VISIBILITY="public", UNO_FIXTURE_OUTCOME_FAIL="true")
             if namespace == "any":
                 variables["UNSAFE_OPEN_NAMESPACES"] = "true"
             else:
@@ -119,6 +125,8 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observ
                                for binding in ("STORAGE", "BACKUPS", "PRESERVATION")],
                 "durable_objects": {"bindings": [{"name": binding, "class_name": cls} for binding, cls in classes]},
                 "migrations": [{"tag": "v1", "new_sqlite_classes": [cls for _, cls in classes]}]}
+            if uno:
+                config["limits"] = {"cpu_ms": 60000}
             if observed:
                 config["compatibility_flags"] = ["nodejs_als"]
             config_path = folder / "wrangler.json"
@@ -134,6 +142,9 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observ
                 with socket.socket() as listener:
                     listener.bind(("127.0.0.1", int(inspector)))
                 command += ["--inspector-port", inspector]
+            if uno:
+                command = ["node", str(ROOT / "apps/vcs-worker/tests/launch-budget/direct.mjs"),
+                    str(config_path), str(artifact), str(port), str(folder / "ready.json")]
             evidence["commands"].append({"argv": command, "cwd": str(ROOT / "apps/vcs-worker"),
                 "log": str((folder / "wrangler.log").relative_to(evidence["directory"]))})
             with (folder / "wrangler.log").open("w") as worker_log:
@@ -164,12 +175,14 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observ
                 check(info.get("receiptPublicKey") and info.get("indexedMode"), "receipt/indexed discovery absent")
                 check(runtime.request(origin, "/__mkit_test/stats")[0] != 200, "release test-fault route exposed")
                 tap = folder / "producer.tap"
+                fixture_name = "uno.public_fixture" if uno else "launch.admin_fixture"
                 runtime.invoke([str(runner), "wire", "--base-url", origin, *auth, "--atomic-advance", "--fresh-target",
                     "--milestone", "M4", "--sharding", "d34", "--max-pack-bytes", "1073741824", "--features",
-                    "indexed-async,indexed-mode,multi-repo,tickets,timers,http-objects", "--filter", "launch.admin_fixture"],
+                    "indexed-async,indexed-mode,multi-repo,tickets,timers,http-objects", "--filter", fixture_name],
                     ROOT, tap, env, evidence)
-                check(re.findall(r"^(ok|not ok) \d+ - ([^\n]+)", tap.read_text(), re.MULTILINE) ==
-                      [("ok", "launch.admin_fixture")], "release producer failed/skipped")
+                check([(status, name.split(" #", 1)[0]) for status, name in
+                       re.findall(r"^(ok|not ok) \d+ - ([^\n]+)", tap.read_text(), re.MULTILINE)] ==
+                      [("ok", fixture_name)], "release producer failed/skipped")
                 note = dict(re.findall(r"([a-z_]+)=([^\s]+)", tap.read_text()))
                 object_id = base64.b64encode(bytes.fromhex(note["extracted_blob"])).decode()
                 object_path = f"/{note['repository']}/-/objects/{note['extracted_blob']}"
@@ -181,6 +194,32 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observ
                 canonical = b"\x01MKT1\x01" + len(original).to_bytes(4, "little") + original
                 canonical_hash = subprocess.check_output(["b3sum", "--no-names"], input=canonical).decode().strip()
                 check(canonical_hash == note["extracted_blob"], "independent canonical Blob hash differs")
+                if uno:
+                    before = (folder / "wrangler.log").read_text()
+                    pending = set(re.findall(r"MKIT_UNO_OUTCOME_RETRY committed ([^\s]+)", before))
+                    check(pending, "no failed committed Outcome to persist")
+                    runtime.stop(worker)
+                    # Same persisted stores and signer, new process and recovered host sink.
+                    config["vars"]["UNO_FIXTURE_OUTCOME_FAIL"] = "false"
+                    config_path.write_text(json.dumps(config, indent=2) + "\n")
+                    result["restart_config_sha256"] = runtime.digest(config_path)
+                    log_offset = (folder / "wrangler.log").stat().st_size
+                    worker = subprocess.Popen(command, cwd=ROOT / "apps/vcs-worker", env=env,
+                        stdout=worker_log, stderr=subprocess.STDOUT, start_new_session=True)
+                    result["owned_pids"].append(worker.pid)
+                    deadline = time.monotonic() + 120
+                    while True:
+                        check(worker.poll() is None and time.monotonic() < deadline,
+                              "cold alarm did not deliver persisted Outcome")
+                        after = (folder / "wrangler.log").read_text()[log_offset:]
+                        delivered = set(re.findall(r"MKIT_UNO_OUTCOME committed ([^\s]+)", after))
+                        if pending <= delivered:
+                            break
+                        time.sleep(.5)
+                    result["cold_alarm_outcome_ids"] = sorted(pending)
+                    with opener.open(origin + object_path, timeout=30) as response:
+                        check(response.status == 200 and response.read(1048577) == original,
+                              "cold public object differs")
                 taken = admin(origin, "Takedown", {"operationId": "launch-admin-1", "repository": note["repository"],
                     "objectIds": [object_id], "reason": "local conformance", "reasonToken": "manual"}, env, transcript)
                 takedown_id = taken["takedownId"]
@@ -217,35 +256,36 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observ
                 end = admin(origin, "ReadPreserved", {"takedownId": takedown_id, "objectId": object_id,
                     "offset": str(offset)}, env, transcript, streamed=True)
                 check(len(end) == 1 and end[0].get("last") and not end[0].get("data"), "empty terminal offset differs")
-                purge = admin(origin, "PurgeCache", {"operationId": "launch-purge-1", "repository": note["repository"],
-                    "objectIds": [object_id], "reason": "local manual purge"}, env, transcript)
-                deadline = time.monotonic() + 90
-                while True:
-                    sink = get_json(receiver_origin + "/state")
-                    delivered = [item for item in sink["requests"] if item["body"]["purgeId"] == purge["purgeId"]]
-                    if delivered:
-                        break
-                    check(time.monotonic() < deadline, "signed purge sink not reached")
-                    time.sleep(1)
-                check(not sink["failures"], "independent purge authentication failed")
-                check(all(item["body"]["repository"] == note["repository"] and
-                          item["body"]["audience"] == runtime.AUDIENCE and
-                          item["body"]["objectIds"] == [object_id] and
-                          item["body"]["trigger"] == "CACHE_PURGE_TRIGGER_MANUAL" for item in delivered),
-                      "manual purge scope/selectors/trigger differs")
-                deadline = time.monotonic() + 90
-                completion_start = 1
-                while True:
-                    completion = admin(origin, "ReadAuditLog", {"fromSeq": str(completion_start), "pageSize": 100},
-                                       env, transcript, streamed=True)
-                    if any(entry["procedure"] == "system:timer/PurgeCacheComplete" and
-                           entry.get("targets") == [purge["purgeId"]] for entry in completion[0]["entries"]):
-                        break
-                    next_completion = int(completion[0]["nextSeq"])
-                    check(next_completion > completion_start, "completion audit page failed to progress")
-                    completion_start = next_completion
-                    check(time.monotonic() < deadline, "manual purge completion audit absent")
-                    time.sleep(1)
+                if not uno:
+                    purge = admin(origin, "PurgeCache", {"operationId": "launch-purge-1", "repository": note["repository"],
+                        "objectIds": [object_id], "reason": "local manual purge"}, env, transcript)
+                    deadline = time.monotonic() + 90
+                    while True:
+                        sink = get_json(receiver_origin + "/state")
+                        delivered = [item for item in sink["requests"] if item["body"]["purgeId"] == purge["purgeId"]]
+                        if delivered:
+                            break
+                        check(time.monotonic() < deadline, "signed purge sink not reached")
+                        time.sleep(1)
+                    check(not sink["failures"], "independent purge authentication failed")
+                    check(all(item["body"]["repository"] == note["repository"] and
+                              item["body"]["audience"] == runtime.AUDIENCE and
+                              item["body"]["objectIds"] == [object_id] and
+                              item["body"]["trigger"] == "CACHE_PURGE_TRIGGER_MANUAL" for item in delivered),
+                          "manual purge scope/selectors/trigger differs")
+                    deadline = time.monotonic() + 90
+                    completion_start = 1
+                    while True:
+                        completion = admin(origin, "ReadAuditLog", {"fromSeq": str(completion_start), "pageSize": 100},
+                                           env, transcript, streamed=True)
+                        if any(entry["procedure"] == "system:timer/PurgeCacheComplete" and
+                               entry.get("targets") == [purge["purgeId"]] for entry in completion[0]["entries"]):
+                            break
+                        next_completion = int(completion[0]["nextSeq"])
+                        check(next_completion > completion_start, "completion audit page failed to progress")
+                        completion_start = next_completion
+                        check(time.monotonic() < deadline, "manual purge completion audit absent")
+                        time.sleep(1)
                 entries, start, frozen_head = [], 1, None
                 while frozen_head is None or start <= frozen_head:
                     audit = admin(origin, "ReadAuditLog", {"fromSeq": str(start), "pageSize": 100},
@@ -261,7 +301,10 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observ
                     start = next_seq
                 check(len(entries) == frozen_head and entries and [int(e["seq"]) for e in entries] == list(range(1, len(entries) + 1)), "audit has gaps")
                 methods = {entry["procedure"].rsplit("/", 1)[-1] for entry in entries}
-                check({"Takedown", "GetTakedown", "ListTakedowns", "SetLegalHold", "ReadPreserved", "PurgeCache"} <= methods,
+                expected_methods = {"Takedown", "GetTakedown", "ListTakedowns", "SetLegalHold", "ReadPreserved"}
+                if not uno:
+                    expected_methods.add("PurgeCache")
+                check(expected_methods <= methods,
                       "audit omitted accepted operations")
                 for method in ("Reinstate", "ReleaseHold", "Reinspect"):
                     check(runtime.request(origin, "/mkit.server.admin.v1.AdminService/" + method, b"{}")[0] == 404,
@@ -270,6 +313,10 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observ
                     "global public denial after acceptance", "verified private preservation stream and exact final offsets",
                     "hold set/clear status", "bounded List null/empty/repository scopes and invalid size",
                     "signed HTTPS purge transport mapping and correlated completion audit", "gapless accepted audit", "deferred catalog absent"]
+                if uno:
+                    result["checks"][0] = "embedded multipart push, AlreadyPresent, Admit 402 and public reads"
+                    result["checks"][6] = "custom paired LocalCache purge acknowledgement"
+                    result["checks"].append("all failed committed Outcomes delivered by alarms after cold restart")
                 result["result"] = "PASS"
         except Exception:
             result["result"] = "FAIL"
@@ -335,6 +382,7 @@ def collect_observation(folder, result, sampler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sha", required=True)
+    parser.add_argument("--uno", action="store_true", help="run the embedded Uno host directly in Miniflare")
     parser.add_argument("--namespace", choices=("both", "allowlist", "any"), default="both")
     parser.add_argument("--observe-resources", action="store_true", help="observe the unchanged local workload")
     parser.add_argument("--artifact-from", type=Path, help="reuse the same owned clean-SHA artifact and runner")
@@ -375,13 +423,18 @@ def main():
         else:
             runtime.invoke(["cargo", "build", "--locked", "-p", "mkit-server-conformance", "--bin", "mkit-server-conformance"],
                            ROOT / "rust", run / "runner-build.log", env, evidence)
-            runtime.invoke(["worker-build", "--release", "--features", "launch"], ROOT / "apps/vcs-worker", run / "build.log", env, evidence)
-            shutil.copytree(ROOT / "apps/vcs-worker/build", artifact)
+            worker_app = ROOT / ("apps/embedded-worker/tests/uno-launch" if args.uno else "apps/vcs-worker")
+            build_command = ["worker-build", "--release"] + ([] if args.uno else ["--features", "launch"])
+            runtime.invoke(build_command, worker_app, run / "build.log", env, evidence)
+            shutil.copytree(worker_app / "build", artifact)
         evidence["artifacts"] = {str(p.relative_to(artifact)): runtime.digest(p) for p in artifact.rglob("*") if p.is_file()}
         evidence["runner_sha256"] = runtime.digest(runner)
         evidence["observation_enabled"] = args.observe_resources
+        evidence["uno"] = args.uno
+        if args.uno:
+            evidence["limitations"][0] = "Local Miniflare HTTP/DO/R2 runtime; no cloud or deployed CDN purge certification"
         for namespace in ("allowlist", "any") if args.namespace == "both" else (args.namespace,):
-            run_fixture(namespace, int(port), run / namespace, artifact, runner, env, evidence, args.observe_resources)
+            run_fixture(namespace, int(port), run / namespace, artifact, runner, env, evidence, args.observe_resources, args.uno)
         check(runtime.git("rev-parse", "HEAD") == args.sha and not runtime.git("status", "--porcelain"), "candidate changed")
         evidence["result"] = "PASS"
     except Exception as error:

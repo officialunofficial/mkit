@@ -26,7 +26,7 @@ Staging data has no retention promise and may be reset by the user.
 | Origin | `AUTH_AUDIENCE=https://staging-vcs.mkit.sh`; exact canonical origin | Existing adapter grammar; routes and origin verification finalized in 4.18 |
 | Addressing / sharding | `ADDRESSING=multi`, `SHARDING=d34` | Existing deployment markers; never change them over existing state |
 | Namespace admission | `allowlist` with a nonempty `NAMESPACE_ALLOWLIST`, or `any` with `UNSAFE_OPEN_NAMESPACES=true`; Uno Kit demo selects `any` | Under `any`, takedown works but holder discovery is incomplete; report that limitation (5.6a-2) |
-| Account plan | `WORKERS_PLAN=paid`, actual Workers Paid account | Paid-only launch; 4.18 validates profile. CPU allowance remains user-owned and unfilled |
+| Account plan | `WORKERS_PLAN=paid`, actual Workers Paid account | Paid-only launch; 4.18 validates profile. Provisional `limits.cpu_ms=60000`; validate per-invocation CPU in staging |
 | Indexed serving | Scheduled verification and extraction; optional HTTP objects; native/core proofs (Worker proofs 4.14b-2 are a post-launch follow-up, R-200) | 4.10b-2 and 4.14b-1; `LAUNCH_PROFILE=uno`, `INDEXED_MODE=true`. Extraction #1244 is merged and 4.18 wires its actual release driver; test builds are separate evidence |
 | Storage leases | Off | 5.4 launch spec amendment; 4.18 config and discovery. Existing epoch leases and authority fencing remain separate |
 | Serving retention | Permanent | 5.4 / 4.18; no lifecycle deletion of packs or extracted `objects/` |
@@ -161,3 +161,17 @@ The [local launch harness](../../../scripts/vcs-worker-launch.sh) records exact
 SHAs and isolated runtime logs. Phase 2 is required before activation evidence
 can pass. [Evidence slots](launch-evidence.md) remain unrun until executed;
 local wrangler supplies no deployed CPU, cost or multicolo result.
+
+## Explicit CPU allowance
+
+Set `limits.cpu_ms = 60000` on the launch Worker and its staging environment.
+A local workerd inspector profile of the exact Uno two-part upload recorded
+28.224 seconds of active V8 samples across the complete upload/verification/
+publication sequence (30.502 seconds profiled wall time); the final AdvanceRefs
+response took 17.290 seconds of wall time. This whole-sequence figure is a
+conservative sampled upper bound for any one invocation in that run, rather
+than a claim that AdvanceRefs consumed 28 seconds of CPU. The 60-second setting
+provides more than twice that measured headroom. Verification remains alarm
+sliced; no slice, call, memory, or pack limit changes. Local development does
+not enforce deployed CPU limits; record per-invocation CPU on staging before
+launch, as required by the [Cloudflare CPU documentation](https://developers.cloudflare.com/workers/observability/dev-tools/cpu-usage/).

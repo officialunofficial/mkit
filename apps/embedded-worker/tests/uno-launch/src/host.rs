@@ -50,7 +50,9 @@ impl Admission for HostAdmit {
     }
 }
 #[derive(Clone)]
-struct HostOutcome;
+struct HostOutcome {
+    fail_committed: bool,
+}
 impl OutcomeSink for HostOutcome {
     async fn deliver(&self, outcome: &Outcome) -> core::result::Result<(), DeliveryError> {
         // The host callback records bounded metadata, never body or auth bytes.
@@ -61,6 +63,13 @@ impl OutcomeSink for HostOutcome {
             OutcomeKind::ReadServed { .. } => "read",
             _ => "other",
         };
+        if self.fail_committed && matches!(outcome.kind, OutcomeKind::Committed { .. }) {
+            worker::console_log!("MKIT_UNO_OUTCOME_RETRY {} {}", kind, outcome.reservation_id);
+            return Err(DeliveryError::new(
+                "local fixture sink unavailable",
+                Some(std::time::Duration::from_secs(60)),
+            ));
+        }
         worker::console_log!("MKIT_UNO_OUTCOME {} {}", kind, outcome.reservation_id);
         Ok(())
     }
@@ -95,22 +104,29 @@ fn config(env: &Env) -> core::result::Result<WorkerConfig, ConfigError> {
     Ok(cfg)
 }
 type HostHooks = Hooks<HostAuthorize, HostAdmit, NoPreReceive, NoReceipts, HostOutcome>;
-fn hooks(_: &Env, _: &WorkerConfig) -> core::result::Result<HostHooks, ConfigError> {
+fn hooks(env: &Env, cfg: &WorkerConfig) -> core::result::Result<HostHooks, ConfigError> {
     Ok(Hooks {
         authorizer: HostAuthorize,
         admission: HostAdmit,
         pre_receive: NoPreReceive,
         receipts: NoReceipts,
-        outcomes: HostOutcome,
+        outcomes: sink(env, cfg)?,
     })
 }
-fn sink(_: &Env, _: &WorkerConfig) -> core::result::Result<HostOutcome, ConfigError> {
-    Ok(HostOutcome)
+fn sink(env: &Env, _: &WorkerConfig) -> core::result::Result<HostOutcome, ConfigError> {
+    Ok(HostOutcome {
+        fail_committed: env
+            .var("UNO_FIXTURE_OUTCOME_FAIL")
+            .is_ok_and(|v| v.to_string() == "true"),
+    })
 }
 mkit_server_worker::durable_objects!(config, sink);
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
+    std::panic::set_hook(Box::new(|info| {
+        worker::console_error!("MKIT_UNO_PANIC {info}")
+    }));
     let mut cfg = config(&env)
         .map_err(|_| worker::Error::RustError("Uno fixture configuration refused".into()))?;
     cfg.http_mount = cfg.http_mount.take().map(|mount| mount.with_context(ctx));

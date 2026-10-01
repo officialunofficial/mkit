@@ -10,7 +10,8 @@ use std::{fs::File, io::Write as _, path::PathBuf};
 
 use buffa::Message;
 use bytes::Bytes;
-use connectrpc::client::{ClientTransport as _, HttpClient, full_body};
+use mkit_transport_connect::pooled_http::PooledHttpClient as HttpClient;
+use connectrpc::client::{ClientTransport as _, full_body};
 use http_body_util::BodyExt as _;
 use url::Url;
 
@@ -446,7 +447,8 @@ impl Client {
         let req = http::Request::get(format!("{}{path}", self.base))
             .body(Bytes::new())
             .map_err(|e| format!("building the request failed: {e}"))?;
-        self.send(req).await
+        // HTTP object reads use a fresh connection; only unary RPCs are replayed.
+        self.reconnect()?.send(req).await
     }
 
     /// A unary call with the exact encoded `body`: the decoded response, or
