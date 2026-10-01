@@ -1506,3 +1506,73 @@ fn issue_urls_capped_preflight_hides_unreachable_and_denied_membership() {
         }
     }
 }
+
+#[test]
+fn repeated_orphan_url_issuance_and_reads_expire_at_the_original_proof_deadline() {
+    for delete in [false, true] {
+        for surface in ["urls", "reader", "http"] {
+            let fx = fixture_tweaked(Hooks::new(), http_cfg(), |c| {
+                c.url_tokens = Some(super::private_tokens::tokens());
+            });
+            let d = data();
+            let pack = fx.push("room", &d.refs(), d.head(), None);
+            let object = id(&d.small);
+            let target = UrlTarget::Object(object);
+            let token = public_urls(&fx, &[target.clone()], 300).unwrap()[0]
+                .clone()
+                .unwrap();
+            assert!(
+                token.expires_at_ms > T0 + i64::try_from(http_cfg().reachability_lag_ms).unwrap()
+            );
+            let url = fx.object_url("room", &object);
+            let etag = fx.get(&url).header("ETag").unwrap().to_owned();
+            let repo = fx.repo_id("room");
+            let partition = fx.pipe.shards.ref_shard(&repo, HEAD);
+            let batch = if delete {
+                Batch::new().delete(keys::published_ref(&repo.name, HEAD))
+            } else {
+                let (objects, _, head) = rewound();
+                let refs: Vec<_> = objects.iter().collect();
+                fx.push("room", &refs, id(&head), Some((d.head(), pack)));
+                Batch::new().put(
+                    keys::published_ref(&repo.name, HEAD),
+                    codec::encode_ref_id(&id(&head)),
+                )
+            };
+            block_on(fx.pipe.meta.inner.apply(&partition, batch)).unwrap();
+            let half_lag = i64::try_from(http_cfg().reachability_lag_ms / 2).unwrap();
+            for step in 1..=4 {
+                fx.clock.advance(half_lag);
+                let reachable = step < 2;
+                match surface {
+                    "urls" => assert_eq!(
+                        public_urls(&fx, &[target.clone()], 300).unwrap()[0].is_some(),
+                        reachable,
+                        "{surface}, delete={delete}, step={step}"
+                    ),
+                    "reader" => assert_eq!(
+                        public_read(&fx, "room", &[object])[0].is_some(),
+                        reachable,
+                        "{surface}, delete={delete}, step={step}"
+                    ),
+                    _ => assert_eq!(fx.get(&url).status, if reachable { 200 } else { 404 }),
+                }
+                if !reachable {
+                    assert_uniform_404(&fx.get(&url));
+                    assert_uniform_404(&read(fx.request(
+                        "GET",
+                        &url,
+                        None,
+                        &[("If-None-Match", &etag)],
+                    )));
+                    assert_uniform_404(&read(fx.request(
+                        "GET",
+                        &url,
+                        Some(&format!("token={}", token.expose())),
+                        &[],
+                    )));
+                }
+            }
+        }
+    }
+}
