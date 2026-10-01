@@ -47,7 +47,11 @@ fn root_store(ca_file: Option<&Path>) -> TransportResult<RootCertStore> {
 // handing certificate decoding and DER validation to the existing parser.
 fn matched_pem_sections(bytes: &[u8]) -> bool {
     let mut section = None;
-    for line in bytes.split(|byte| *byte == b'\n').map(<[u8]>::trim_ascii) {
+    // Match the dependency parser's LF, CR and CRLF line delimiters.
+    for line in bytes
+        .split(|byte| *byte == b'\n' || *byte == b'\r')
+        .map(<[u8]>::trim_ascii)
+    {
         if line.starts_with(b"-----BEGIN") {
             let Some(label) = line
                 .strip_prefix(b"-----BEGIN ")
@@ -117,17 +121,21 @@ mod tests {
     #[test]
     fn unmatched_certificate_frame_cannot_be_hidden_by_a_valid_certificate() {
         let file = tempfile::NamedTempFile::new().unwrap();
-        for prefix in [
-            b"-----BEGIN CERTIFICATE-----\n".as_slice(),
-            b"-----END CERTIFICATE-----\n",
-        ] {
-            let mut bytes = prefix.to_vec();
-            bytes.extend(std::fs::read(ca()).unwrap());
-            std::fs::write(file.path(), bytes).unwrap();
-            assert!(
-                root_store(Some(file.path())).is_err(),
-                "invalid framing must fail even when a later certificate is valid"
-            );
+        let certificate = std::fs::read(ca()).unwrap();
+        for newline in ["\n", "\r", "\r\n"] {
+            let certificate = String::from_utf8(certificate.clone())
+                .unwrap()
+                .replace('\n', newline);
+            std::fs::write(file.path(), &certificate).unwrap();
+            assert!(root_store(Some(file.path())).is_ok());
+            for prefix in ["-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----"] {
+                let bytes = format!("comment{newline}{prefix}{newline}{certificate}");
+                std::fs::write(file.path(), bytes).unwrap();
+                assert!(
+                    root_store(Some(file.path())).is_err(),
+                    "invalid framing must fail for {newline:?} line endings"
+                );
+            }
         }
     }
     #[test]
