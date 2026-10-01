@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server conformance: add a debug-only memory-backed in-process HTTP host for
+  contract tests, with origin-bound auth-v2, signed loopback hook support, and
+  an explicitly advanced manual clock.
+
 - Worker embedding: supplied Admission, Authorizer/Authority and OutcomeSink
   capabilities satisfy launch validation without an unused external hook channel.
   `fetch_with` now takes explicit `HookCapabilities`; shared config factories use

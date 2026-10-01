@@ -29,6 +29,7 @@ workspace = true
 # (the clock-skew directive, plus the baseline's `GET /__mkit_test/stats`)
 # so the `TestFaults` wire cases run. The wire suite itself never needs it.
 test-faults = ["mkit-server/test-faults"]
+http-objects = ["mkit-server/http-objects"]
 # `fake_s3`: a strict in-memory S3 server (path-style objects, SigV4
 # verification, conditional puts, ranges) for testing S3 blob stores in
 # normal CI without Docker. A test utility: never in a release binary.
@@ -38,7 +39,24 @@ fake-s3 = ["dep:axum", "dep:hmac", "tokio/net"]
 # SPEC-SERVER §7.1 signed request (with mkit-server's `HookVerifier`), answers from a script and records calls
 # (WP-3.8; WP-3.12 builds its payment stub on it). A test utility: never in a
 # release binary.
-stubs = ["dep:axum", "dep:hmac", "tokio/net", "mkit-server/remote-hooks", "mkit-rpc/hooks"]
+stubs = [
+    "dep:axum",
+    "dep:hmac",
+    "tokio/net",
+    "mkit-server/remote-hooks",
+    "mkit-rpc/hooks",
+]
+# Test-only in-process server for contract consumers. It is deliberately
+# opt-in, and the API refuses to compile in release builds.
+test-host = [
+    "test-faults",
+    "http-objects",
+    "stubs",
+    "dep:axum",
+    "dep:reqwest",
+    "tokio/io-util",
+    "tokio/net",
+]
 
 [dependencies]
 mkit-rpc = { version = "0.4", path = "../mkit-rpc" }
@@ -74,11 +92,20 @@ serde_json = "1"
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 # `fake-s3`: the server, and an independent SigV4 verifier (not
 # `mkit-transport-s3`'s signer, so a signing bug cannot verify itself).
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio"], optional = true }
+axum = { version = "0.8", default-features = false, features = [
+    "http1",
+    "tokio",
+    "json",
+], optional = true }
 hmac = { version = "0.13", optional = true }
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+    "stream",
+], optional = true }
 
 [dev-dependencies]
 base64 = "0.22"
+mkit-cli = { path = "../mkit-cli" }
 # tests/fs_backends.rs: the `.mkit`-layout stores (native only, like this
 # crate).
 mkit-server = { version = "0.4", path = "../mkit-server", features = ["fs"] }
