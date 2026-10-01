@@ -304,7 +304,7 @@ async fn manual_purge_completion_is_audited_only_after_durable_global_acknowledg
         ))
     };
     let clock = crate::ManualClock::new(100);
-    run_due(
+    let first_tick = run_due(
         &store,
         &partition(),
         &registry(),
@@ -314,6 +314,14 @@ async fn manual_purge_completion_is_audited_only_after_durable_global_acknowledg
     )
     .await
     .unwrap();
+    assert_eq!(
+        (first_tick.fired, first_tick.unknown, first_tick.scanned),
+        (1, 1, 2)
+    );
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        std::slice::from_ref(&work)
+    );
     assert_eq!(
         head(&store).await,
         1,
@@ -333,7 +341,7 @@ async fn manual_purge_completion_is_audited_only_after_durable_global_acknowledg
         panic!("retry timer expected");
     };
     clock.set(i64::try_from(due_at_ms).unwrap());
-    run_due(
+    let retry_tick = run_due(
         &store,
         &partition(),
         &registry(),
@@ -343,6 +351,10 @@ async fn manual_purge_completion_is_audited_only_after_durable_global_acknowledg
     )
     .await
     .unwrap();
+    assert_eq!(
+        (retry_tick.fired, retry_tick.unknown, retry_tick.scanned),
+        (1, 0, 1)
+    );
     assert_eq!(*calls.lock().unwrap(), [work.clone(), work]);
     assert_eq!(head(&store).await, 2);
     assert!(purge_timers(&store).await.is_empty());
