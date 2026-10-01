@@ -10,7 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Server: cap aggregate object-index candidate retention at a charged 4 MiB,
   bound membership joins and Worker request allocation, and enforce the current
   indexed pack-byte limit before Scheduled job claims/reuse and timer decoding.
-  Native Verified reuse returns the exact advertised pack-size error.
+  Native Verified reuse returns the exact advertised pack-size error. Scanner
+  retrieval supports ticketless ref writes with an empty Inspect batch and a
+  capability granting no access to previously published packs.
 
 - Server (R-205): `DEFAULT_REPO_VISIBILITY=public|private` on Workers and
   native `--default-repo-visibility` select visibility for repositories without

@@ -3508,6 +3508,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let prepared = match self
             .prepare_publication(
                 op,
+                &a.repo().identity,
                 p,
                 &req,
                 &mut ahead,
@@ -3597,9 +3598,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     /// Prepare inspection against the complete resulting pair before any write.
+    #[allow(clippy::too_many_arguments)] // Carry the authenticated wire identity for empty retrieval scope.
     async fn prepare_publication(
         &self,
         op: &Operation,
+        repository: &str,
         p: &Partition,
         req: &WriteRequest<'_>,
         ahead: &mut Option<Snapshot>,
@@ -3607,6 +3610,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         external_bases: &std::collections::BTreeSet<Hash>,
         inspected: Option<&mut crate::indexed::inspection::InspectionSet>,
     ) -> Result<Option<crate::store::publication::Advance>, ServerError> {
+        #[cfg(not(feature = "remote-hooks"))]
+        let _ = repository;
         // Deletions establish an immediate boundary without consulting inspection
         // or verifying the surviving pair; older membership obligations remain retained.
         let policy = self.publication_policy.as_deref().or_else(|| {
@@ -3679,11 +3684,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             #[cfg(feature = "remote-hooks")]
             if let Some(set) = inspected {
                 let assignment = if self.cfg.scanner_retrieval.is_some() {
-                    let advance = req
-                        .advance
-                        .as_ref()
-                        .ok_or_else(|| internal("retrieval requires tickets"))?;
-                    Some(Self::retrieval_assignment(op, advance, snapshot, set)?)
+                    Some(Self::retrieval_assignment(
+                        op,
+                        req.advance.as_ref(),
+                        repository,
+                        snapshot,
+                        set,
+                    )?)
                 } else {
                     None
                 };
