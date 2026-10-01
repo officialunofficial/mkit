@@ -288,13 +288,13 @@ function instrumentState(state, holder) {
   });
 }
 
-async function invoke(scope, call) {
+async function invoke(scope, call, exposeBody = true) {
   return als.run(scope, async () => {
     try {
       const result = await call();
       if (result instanceof Response) scope.status = result.status;
       requestMarker(scope, 'resolved');
-      if (result instanceof Response && result.body) {
+      if (exposeBody && result instanceof Response && result.body) {
         scope.body++;
         return new Response(trackedStream(result.body, (error) => {
           scope.error ||= error; scope.body--; finish(scope);
@@ -322,7 +322,10 @@ function durable(Base, name) {
         () => super.fetch(request));
     }
     alarm(...args) {
-      return invoke(begin(this.budgetOwner, 'alarm', name), () => super.alarm(...args));
+      // Alarm return values are ignored by workerd. The Rust SDK returns a
+      // Response here, but there is no incoming HTTP consumer for its body.
+      // Outgoing bodies, SQL cursors and waitUntil remain tracked normally.
+      return invoke(begin(this.budgetOwner, 'alarm', name), () => super.alarm(...args), false);
     }
   };
 }
