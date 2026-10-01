@@ -59,9 +59,9 @@ pub fn pending(retry_after_ms: u64) -> ServerError {
 
 /// Limits for opt-in indexed mode. A deployment cannot switch an existing
 /// opaque repository to indexed mode: its member packs have no `i` rows.
-/// Programmatic only; not exposed by adapters until Stage 2 (R-154):
-/// SPEC-SERVER §12.1 requires per-ref storage leases in indexed deployments.
-/// `test-faults` builds expose flags for the wire case only.
+/// Native embedders configure it programmatically; Workers enable it through
+/// the Paid Uno launch profile with scheduled verification, permanent retention
+/// and GC disabled. Async inspection and holds remain post-launch features.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct IndexedConfig {

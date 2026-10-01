@@ -14,6 +14,8 @@
 use std::path::PathBuf;
 
 fn main() {
+    #[cfg(feature = "transport")]
+    transport::stage();
     #[cfg(feature = "hooks")]
     hooks::stage();
     let proto_dir = PathBuf::from("proto");
@@ -131,6 +133,74 @@ mod hooks {
         assert!(
             staged > 0,
             "generated/hooks/ contains no .rs modules: run scripts/regen-hooks-proto.sh"
+        );
+    }
+}
+
+#[cfg(feature = "transport")]
+mod transport {
+    use std::path::{Path, PathBuf};
+
+    /// Written next to real codegen output, so the regen script can tell it
+    /// from a staged copy of `generated/` (both fill `OUT_DIR` with the same
+    /// file set).
+    const MARKER: &str = ".mkit-rpc-transport-codegen";
+
+    pub(crate) fn stage() {
+        let out_dir =
+            PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR")).join("transport");
+        std::fs::create_dir_all(&out_dir).expect("create transport OUT_DIR");
+        println!("cargo:rerun-if-changed=generated/transport");
+        println!("cargo:rerun-if-env-changed=PROTOC");
+        println!("cargo:rerun-if-env-changed=MKIT_TRANSPORT_CODEGEN");
+        let marker = out_dir.join(MARKER);
+
+        if std::env::var_os("MKIT_TRANSPORT_CODEGEN").is_some() {
+            // The repo-root canonical proto module, three hops up
+            // (rust/crates/mkit-rpc -> repo root).
+            let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../proto")
+                .canonicalize()
+                .expect("canonical proto root not found: expected proto/ at repo root");
+            let transport = root.join("mkit/transport/v1/transport.proto");
+            let health = root.join("grpc/health/v1/health.proto");
+            println!("cargo:rerun-if-changed={}", transport.display());
+            println!("cargo:rerun-if-changed={}", health.display());
+            connectrpc_build::Config::new()
+                .files(&[
+                    transport.to_str().expect("proto path is valid UTF-8"),
+                    health.to_str().expect("proto path is valid UTF-8"),
+                ])
+                .includes(&[root.to_str().expect("proto root is valid UTF-8")])
+                .out_dir(&out_dir)
+                .include_file("_connectrpc.rs")
+                .compile()
+                .expect("connectrpc-build codegen failed for the canonical protos");
+            std::fs::write(&marker, b"").expect("write codegen marker");
+        } else {
+            let _ = std::fs::remove_file(&marker);
+        }
+        // Generated includes use OUT_DIR, so stage these distinct transport/health
+        // filenames at its root alongside the RPC schemas. Keep codegen output
+        // in its own subdirectory for the regeneration script.
+        let source = if std::env::var_os("MKIT_TRANSPORT_CODEGEN").is_some() {
+            out_dir.clone()
+        } else {
+            PathBuf::from("generated/transport")
+        };
+        let stage_dir = out_dir.parent().expect("transport OUT_DIR parent");
+        let mut staged = 0usize;
+        for entry in std::fs::read_dir(&source).expect("read generated/transport/") {
+            let path = entry.expect("read generated/transport/ entry").path();
+            if path.extension().is_some_and(|e| e == "rs") {
+                let name = path.file_name().expect("file name");
+                std::fs::copy(&path, stage_dir.join(name)).expect("stage generated module");
+                staged += 1;
+            }
+        }
+        assert!(
+            staged > 0,
+            "generated/transport/ contains no .rs modules: run scripts/regen-transport-proto.sh"
         );
     }
 }

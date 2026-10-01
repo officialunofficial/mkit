@@ -46,16 +46,8 @@ pub use service::ConnectTransport;
 use crate::pipeline::{Authenticated, HookSet, Pipeline};
 use crate::store::{MultipartBlobStore, NamespaceStore};
 
-/// The generated `mkit.transport.v1` and `grpc.health.v1` messages and
-/// service traits, vendored under `generated/` (refresh with
-/// `scripts/regen-transport-proto.sh`).
-// Generated code: the workspace's pedantic and Debug lints do not apply.
-#[allow(missing_debug_implementations, clippy::all, clippy::pedantic)]
-pub mod proto {
-    // `::connectrpc`: the generated code declares its own `connectrpc`
-    // module, which would shadow a relative path.
-    ::connectrpc::include_generated!();
-}
+/// Shared generated transport and health messages and service traits.
+pub use mkit_rpc::transport as proto;
 
 /// `TransportService` and `Health` over `pipeline`, without the
 /// interceptor: every authenticated transport RPC then fails

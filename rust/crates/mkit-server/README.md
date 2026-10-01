@@ -75,10 +75,10 @@ and `wasm32-unknown-unknown`:
 Not yet published to crates.io: the first release ships with mkit 0.5.
 
 HTTP object serving is a default-off `http-objects` feature, requiring
-programmatic indexed and HTTP configuration. Native and Workers adapters
-have their own default-off forwarding feature and explicit mount opt-in;
-Stage 1 defaults, app features and release builds mount no HTTP object or
-URL-token key routes. See the native and Worker adapter READMEs for CORS,
+explicit indexed and HTTP configuration. Native and Workers adapters
+have their own default-off forwarding feature and mount opt-in. The Paid
+Uno Worker launch enables these routes when configured; native defaults
+continue to omit HTTP object and URL-token key routes. See the native and Worker adapter READMEs for CORS,
 streaming, retained paid-read settlement and dedicated token keys.
 
 ## Launch purge and operator foundations

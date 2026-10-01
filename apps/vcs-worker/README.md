@@ -271,7 +271,8 @@ addressing retains its auth-v2 write policy.
   it answers HTTP 400 `resource_exhausted`. `UploadPack` and `DownloadPack`
   stream, with download chunks of at most 800 KiB.
 - **Unary replies are one frame**: a `ListRefs` reply is held whole, about
-  45 bytes per ref (1.2 MB for 30,000 refs), until WP-1.27 pages it. The
+  45 bytes per ref, bounded by the configured page size (128 refs for the
+  Uno launch). The
   conformance script's 1 MiB body-buffer bound covers the streaming RPCs
   only.
 - **Client deadlines are not enforced**: `connect-timeout-ms` and

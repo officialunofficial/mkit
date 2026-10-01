@@ -22,7 +22,7 @@
 //! ([`connect::service`]); the `remote-hooks` feature adds the `hooks` module,
 //! the `mkit.server.hooks.v1` adapter over a transport-agnostic channel; the
 //! `http-objects` feature adds the `http_objects` module and
-//! `Pipeline::serve_http_object` (Stage 2, inert in Stage 1).
+//! `Pipeline::serve_http_object` (explicit indexed HTTP opt-in).
 
 pub mod admin;
 pub mod auth_v2;

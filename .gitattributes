@@ -18,6 +18,25 @@ Cargo.lock -diff
 rust/tests/golden/redaction/*.bin -diff -text
 rust/tests/golden/transport/*.bin -diff -text
 
+# Collapse committed generated bindings and vendored sources in GitHub review.
+rust/crates/*/generated/** linguist-generated=true
+apps/repo-worker/generated/** linguist-generated=true
+apps/web/vendor/mkit-repo-proto/generated/** linguist-generated=true
+rust/vendor/** linguist-vendored=true
+
+# Hide binary golden payload diffs without changing their text/eol attributes.
+rust/tests/golden/**/*.bin -diff
+# These wire/object vectors are emitted by the golden generators.
+rust/tests/golden/objects/**/*.json linguist-generated=true
+rust/tests/golden/grants/**/*.json linguist-generated=true
+rust/tests/golden/http-objects/*.json linguist-generated=true
+rust/tests/golden/url-token/tokens.json linguist-generated=true
+rust/tests/golden/proofs/**/*.json linguist-generated=true
+rust/tests/golden/disclosure/**/*.json linguist-generated=true
+rust/tests/golden/closure/**/*.json linguist-generated=true
+rust/tests/golden/uploads/**/*.json linguist-generated=true
+rust/tests/golden/refs-index/**/*.json linguist-generated=true
+
 # Files excluded from `git archive` tarballs. Release tarballs ship
 # only the buildable source tree; CI config, test fixtures, fuzz
 # harnesses, the web demo site, contributor scripts, and release-only

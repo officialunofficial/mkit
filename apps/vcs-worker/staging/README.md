@@ -1,9 +1,10 @@
-# Stage 2 staging activation (WP-1.19)
+# Explicit snapshot staging configuration (WP-1.19)
 
 This directory is an inert template and runbook. Nothing provisions, deploys,
-mounts routes, enables snapshots or modifies the Stage 1 app. Perform the
-following operations **after REL-1**, on an approved Stage 2 deployment change.
-The normal `wrangler.jsonc` and app entrypoints remain the Stage 1 defaults.
+mounts routes, enables snapshots or modifies the application. The single launch
+(R-185) supersedes the original two-stage rollout; the Paid Uno launch is
+configured separately. Snapshot staging still requires explicit deployment
+configuration and resource measurements.
 
 ## Prepare the deployment
 
@@ -38,8 +39,8 @@ The normal `wrangler.jsonc` and app entrypoints remain the Stage 1 defaults.
 
 ## Activate the explicit snapshot entrypoints
 
-The `PUBLISHED_SNAPSHOTS` binding alone cannot enable snapshots. In the Stage 2
-app change, add the dependency feature `mkit-server-worker/published-view` and
+The `PUBLISHED_SNAPSHOTS` binding alone cannot enable snapshots. In the explicit
+app configuration, add the dependency feature `mkit-server-worker/published-view` and
 call `adapter::fetch_configured(req, env, published_config)` from the fetch
 entrypoint. Each DO constructor uses
 `adapter::ns_object_configured(state, &env, class, published_config)` instead
@@ -54,8 +55,9 @@ Use a fresh identity when changing deployments, and dedicated snapshot storage
 when changing DO identity/jurisdiction. There is no enabling environment var.
 Unsigned ReadRef stays off (`unsigned_read_ref=false`); signed reads go live.
 If inspection is configured, set `inspection_configured=true`: snapshot
-publication is disabled and reader values fail closed until WP-5.4/5.5 supplies
-published sources. Never substitute live rows under inspection.
+publication is disabled and reader values fail closed without an explicit
+published source. Never substitute live rows under inspection. Async inspection
+and holds remain deferred to the post-launch follow-up.
 
 Run the feature-on/off wasm gates and local conformance before the deployment
 change. R-175 records the local optimized workerd/V8 probe: 42.45 ms sampled
@@ -93,7 +95,7 @@ CI wiring; nothing here adds a feature-branch trigger or deploy job.
   Retained snapshot bodies cap at 512 KiB; row/decode/merge retention is tested
   below 2 MiB. Local timings cannot validate R2/DO placement or PITR.
 - To disable snapshots, revert to the unconfigured fetch/DO entrypoints and
-  remove the Stage 2 feature/binding in the reviewed deployment change.
+  remove the snapshot feature/binding in the reviewed deployment change.
   Authorization remains authoritative. Previously seeded kind-10 timers are
   retained with backoff by unknown-kind handling; arrange reviewed offline
   administrative cleanup rather than assuming they are deleted. Do not mutate

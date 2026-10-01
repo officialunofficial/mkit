@@ -101,3 +101,10 @@ mod tests {
 /// Public server-hook wire types and authentication (feature `hooks`).
 #[cfg(feature = "hooks")]
 pub mod hooks;
+
+/// Shared transport and health wire types and Connect service traits.
+#[cfg(feature = "transport")]
+#[allow(missing_debug_implementations, clippy::all, clippy::pedantic)]
+pub mod transport {
+    include!(concat!(env!("OUT_DIR"), "/_connectrpc.rs"));
+}

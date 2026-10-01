@@ -13,9 +13,8 @@
 //! API were removed with `mkit serve --http`.
 //!
 //! The client is generated from the canonical
-//! `<repo-root>/proto/mkit/transport/v1/transport.proto` (see `build.rs` —
-//! no duplicated proto, matching `mkit-repo-client`'s pattern for
-//! `mkit.repo.v1`).
+//! `<repo-root>/proto/mkit/transport/v1/transport.proto` by `mkit-rpc`
+//! (refresh with `scripts/regen-transport-proto.sh`).
 //!
 //! See [`docs/specs/SPEC-TRANSPORT-CONNECT.md`][spec] for the full wire
 //! contract (verb mapping, CAS semantics, error-code mapping, streaming
@@ -35,15 +34,9 @@ mod receipt;
 mod status;
 pub mod tls;
 
-/// Generated `mkit.transport.v1` message + Connect service types, compiled
-/// directly from the canonical `<repo-root>/proto/mkit/transport/v1/transport.proto`
-/// (see `build.rs` — no duplicated proto, matching `mkit-repo-client`'s
-/// pattern for `mkit.repo.v1`).
+/// Shared generated `mkit.transport.v1` messages and Connect service types.
 pub mod proto {
-    // `::connectrpc` required: the generated file declares `pub mod
-    // connectrpc` inside this module, which would shadow the crate name if
-    // relative.
-    ::connectrpc::include_generated!();
+    pub use mkit_rpc::transport::mkit;
 }
 
 pub use client::{

@@ -38,3 +38,13 @@ Both protocols use the same length-prefixed framing:
 
 Generated code is vendored (not built fresh from `.proto` on every build);
 regenerate it with `scripts/regen-rpc-proto.sh` after editing a schema.
+
+## Shared Connect transport bindings
+
+The opt-in `transport` feature owns the canonical `mkit.transport.v1` and
+`grpc.health.v1` messages and Connect service traits in `mkit_rpc::transport`.
+Both `mkit-server` and `mkit-transport-connect` re-export these shared types at
+their existing public paths. The feature uses ConnectRPC without its native
+client or server runtime features and builds for wasm32. Default RPC consumers
+do not enable it. Refresh `generated/transport/` with
+`scripts/regen-transport-proto.sh`; ordinary builds require no protoc.
