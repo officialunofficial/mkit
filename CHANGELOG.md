@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server (R-204): embedders can issue batches of up to 16 URL tokens through
+  `ObjectReader::issue_urls`, sharing RPC authorization, epochs and minting,
+  with bounded published-view reachability and denial preflight.
+
 - Core/server (WP-4.16c, R-202): in-process canonical object prefetch for
   embedders, including ChunkedBlob manifests and indexed content sizes;
   verified public/owner views share bounded reachability and global-denial

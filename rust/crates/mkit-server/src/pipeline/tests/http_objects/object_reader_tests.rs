@@ -1029,3 +1029,370 @@ fn blocked_ancestor_keeps_earlier_proven_batch_targets() {
     assert_eq!(fx.get(&fx.object_url("room", &id(&clear))).status, 200);
     assert_uniform_404(&fx.get(&fx.object_url("room", &id(&hidden))));
 }
+
+fn url_fixture() -> (Fx, Data) {
+    let fx = fixture_tweaked(Hooks::new(), http_cfg(), |c| {
+        c.url_tokens = Some(super::private_tokens::tokens());
+    });
+    let d = data();
+    fx.push("room", &d.refs(), d.head(), None);
+    (fx, d)
+}
+
+fn public_urls(
+    fx: &Fx,
+    targets: &[UrlTarget],
+    ttl: u32,
+) -> Result<Vec<Option<crate::pipeline::IssuedUrl>>, ServerError> {
+    block_on(async {
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Public)
+            .await?
+            .issue_urls(targets, ttl)
+            .await
+    })
+}
+
+#[test]
+fn issue_urls_matches_individual_rpc_claims_and_validity() {
+    let (fx, d) = url_fixture();
+    let repo = fx.repo_id("room");
+    block_on(fx.pipe.meta.inner.apply(
+        &fx.pipe.shards.coordinator(&repo.namespace),
+        Batch::new().put(keys::grant_epoch(), codec::encode_u64(7)),
+    ))
+    .unwrap();
+    let targets = [
+        UrlTarget::Object(id(&d.small)),
+        UrlTarget::path(HEAD, "small.txt").unwrap(),
+        UrlTarget::path(HEAD, "").unwrap(),
+        UrlTarget::Object(id(&d.small)),
+    ];
+    for ttl in [0, 2, u32::MAX] {
+        let batch = public_urls(&fx, &targets, ttl).unwrap();
+        for (target, issued) in targets.iter().zip(batch) {
+            let issued = issued.unwrap();
+            let req = signed(
+                &fx.owner,
+                &fx.identity("room"),
+                Procedure::IssueObjectUrl,
+                fx.number(),
+            );
+            let rpc = block_on(
+                fx.pipe
+                    .issue_object_url(&fx.auth(&req), target.clone(), ttl),
+            )
+            .unwrap();
+            // The fixed business clock makes even timestamps identical.
+            assert_eq!(issued.expose(), rpc.expose());
+            assert_eq!(issued.expires_at_ms, rpc.expires_at_ms);
+            let bound = super::private_tokens::tokens()
+                .precheck(issued.expose(), T0)
+                .unwrap()
+                .check_binding(
+                    &crate::url_token::Binding {
+                        audience: AUDIENCE,
+                        repository: &fx.identity("room"),
+                        target,
+                    },
+                    T0,
+                    super::private_tokens::tokens().ttl_ms(),
+                )
+                .unwrap();
+            assert_eq!(bound.epoch(), 7);
+            assert!(bound.check_epoch(8).is_err());
+            assert!(
+                super::private_tokens::tokens()
+                    .precheck(issued.expose(), T0)
+                    .unwrap()
+                    .check_binding(
+                        &crate::url_token::Binding {
+                            audience: AUDIENCE,
+                            repository: &fx.identity("room"),
+                            target
+                        },
+                        issued.expires_at_ms,
+                        super::private_tokens::tokens().ttl_ms()
+                    )
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn issue_urls_filters_denied_unreachable_and_private_public_view() {
+    let fx = fixture_tweaked(Hooks::new(), http_cfg(), |c| {
+        c.url_tokens = Some(super::private_tokens::tokens());
+    });
+    let d = data();
+    let orphan = blob(b"unreachable member");
+    let mut objects = d.refs();
+    objects.push(&orphan);
+    fx.push("room", &objects, d.head(), None);
+    let targets = [
+        UrlTarget::Object(id(&d.small)),
+        UrlTarget::Object(id(&orphan)),
+        UrlTarget::Object([91; 32]),
+        UrlTarget::path(HEAD, "missing").unwrap(),
+    ];
+    assert_eq!(
+        public_urls(&fx, &targets, 0)
+            .unwrap()
+            .iter()
+            .map(Option::is_some)
+            .collect::<Vec<_>>(),
+        vec![true, false, false, false]
+    );
+    block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+        &id(&d.small),
+        &crate::store::BlockEntry::new("manual", T0 as u64),
+        T0 as u64,
+    ))
+    .unwrap();
+    assert!(
+        public_urls(&fx, &targets, 0)
+            .unwrap()
+            .iter()
+            .all(Option::is_none)
+    );
+    fx.make_private("room");
+    assert!(
+        public_urls(&fx, &targets, 0)
+            .unwrap()
+            .iter()
+            .all(Option::is_none)
+    );
+}
+
+#[test]
+fn issue_urls_bounds_and_missing_keys_precede_storage() {
+    let (mut fx, d) = url_fixture();
+    let before = fx.pipe.meta.calls();
+    assert_eq!(
+        public_urls(
+            &fx,
+            &vec![UrlTarget::Object(d.head()); OBJECT_READER_BATCH + 1],
+            0
+        )
+        .unwrap_err()
+        .code(),
+        Code::InvalidArgument
+    );
+    assert_eq!(fx.pipe.meta.calls(), before);
+    assert!(public_urls(&fx, &[], 0).unwrap().is_empty());
+    assert!(
+        public_urls(
+            &fx,
+            &vec![UrlTarget::Object(d.head()); OBJECT_READER_BATCH],
+            0
+        )
+        .unwrap()
+        .iter()
+        .all(Option::is_some)
+    );
+    fx.pipe.cfg.url_tokens = None;
+    let before = fx.pipe.meta.calls();
+    assert_eq!(
+        public_urls(&fx, &[UrlTarget::Object(d.head())], 0)
+            .unwrap_err()
+            .code(),
+        Code::Unimplemented
+    );
+    assert_eq!(fx.pipe.meta.calls(), before);
+}
+
+fn owner_urls(
+    fx: &Fx,
+    targets: &[UrlTarget],
+) -> Result<Vec<Option<crate::pipeline::IssuedUrl>>, ServerError> {
+    let req = signed(
+        &fx.owner,
+        &fx.identity("room"),
+        Procedure::ListRefs,
+        fx.number(),
+    );
+    let lookup = |name: &str| {
+        req.headers
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.clone())
+    };
+    let meta = RequestMeta {
+        procedure: req.procedure,
+        header: &lookup,
+        header_values: None,
+        unary_body: Some(&req.body),
+        transport_principal: None,
+    };
+    block_on(async {
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Owner(&meta))
+            .await?
+            .issue_urls(targets, 0)
+            .await
+    })
+}
+
+#[test]
+fn issue_urls_owner_is_verified_private_and_still_published_only() {
+    let (fx, d) = url_fixture();
+    fx.make_private("room");
+    let targets = [
+        UrlTarget::Object(id(&d.small)),
+        UrlTarget::path(HEAD, "small.txt").unwrap(),
+    ];
+    assert!(
+        public_urls(&fx, &targets, 0)
+            .unwrap()
+            .iter()
+            .all(Option::is_none)
+    );
+    assert!(
+        owner_urls(&fx, &targets)
+            .unwrap()
+            .iter()
+            .all(Option::is_some)
+    );
+    block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+        &id(&d.small),
+        &crate::store::BlockEntry::new("manual", T0 as u64),
+        T0 as u64,
+    ))
+    .unwrap();
+    assert!(
+        owner_urls(&fx, &targets)
+            .unwrap()
+            .iter()
+            .all(Option::is_none)
+    );
+
+    let mut pending = fixture_tweaked(Hooks::new(), http_cfg(), |c| {
+        c.url_tokens = Some(super::private_tokens::tokens());
+        c.takedown_denial = true;
+    });
+    pending.pipe = pending
+        .pipe
+        .with_publication_policy(Arc::new(super::super::indexed::InspectionPolicy(
+            crate::store::publication::Clearance::Pending,
+        )))
+        .unwrap();
+    pending.push("room", &d.refs(), d.head(), None);
+    assert!(
+        owner_urls(&pending, &targets)
+            .unwrap()
+            .iter()
+            .all(Option::is_none)
+    );
+}
+
+struct SelectiveUrlHook {
+    denied: Hash,
+    code: Code,
+}
+impl Authorizer for SelectiveUrlHook {
+    async fn authorize(&self, op: &Operation) -> Result<AuthzFacts, ServerError> {
+        if matches!(&op.kind, OpKind::IssueObjectUrl { target: UrlTarget::Object(id), .. } if *id == self.denied)
+        {
+            Err(ServerError::new(self.code, "target refused"))
+        } else {
+            Ok(AuthzFacts::default())
+        }
+    }
+}
+
+#[test]
+fn issue_urls_target_hook_denials_are_absent_but_store_failures_abort() {
+    let d = data();
+    for code in [
+        Code::NotFound,
+        Code::PermissionDenied,
+        Code::Unauthenticated,
+        Code::Unavailable,
+    ] {
+        let defaults = Hooks::new();
+        let hooks = Hooks {
+            authorizer: SelectiveUrlHook {
+                denied: id(&d.small),
+                code,
+            },
+            admission: defaults.admission,
+            pre_receive: defaults.pre_receive,
+            receipts: defaults.receipts,
+            outcomes: defaults.outcomes,
+        };
+        let fx = fixture_tweaked(hooks, http_cfg(), |c| {
+            c.url_tokens = Some(super::private_tokens::tokens());
+        });
+        fx.push("room", &d.refs(), d.head(), None);
+        let reader = block_on(
+            fx.pipe
+                .object_reader(fx.repo_id("room"), ReaderView::Public),
+        )
+        .unwrap();
+        let batch = block_on(reader.issue_urls(
+            &[
+                UrlTarget::Object(id(&d.small)),
+                UrlTarget::Object(id(&d.big)),
+            ],
+            0,
+        ));
+        if code == Code::Unavailable {
+            assert_eq!(batch.unwrap_err().code(), code);
+        } else {
+            assert_eq!(
+                batch
+                    .unwrap()
+                    .iter()
+                    .map(Option::is_some)
+                    .collect::<Vec<_>>(),
+                vec![false, true]
+            );
+        }
+    }
+}
+
+#[test]
+fn issue_urls_paths_and_reachability_share_one_decode_budget() {
+    let leaf = blob(b"payload");
+    let names = (0..40).map(|n| format!("file-{n:02}")).collect::<Vec<_>>();
+    let root = tree(
+        &names
+            .iter()
+            .map(|name| (name.as_str(), EntryMode::Blob, &leaf))
+            .collect::<Vec<_>>(),
+    );
+    let head = commit(&root, &[], "path budget");
+    // Allow either traversal, including the packmap tip and frame headers,
+    // while keeping their combined canonical bytes above the single-pass cap.
+    let one_pass =
+        (serialize(&root).unwrap().len() + serialize(&head).unwrap().len()) as u64 * 3 / 2;
+    for multiplier in [1, 2] {
+        let fx = fixture_tweaked(
+            Hooks::new(),
+            HttpObjectsConfig {
+                http_decode_budget: one_pass * multiplier,
+                max_inline_object_bytes: one_pass,
+                ..http_cfg()
+            },
+            |c| c.url_tokens = Some(super::private_tokens::tokens()),
+        );
+        fx.push("room", &[&leaf, &root, &head], id(&head), None);
+        let result = public_urls(&fx, &[UrlTarget::path(HEAD, "file-00").unwrap()], 0);
+        if multiplier == 1 {
+            assert_eq!(result.unwrap_err().code(), Code::Unavailable);
+        } else {
+            assert!(result.unwrap()[0].is_some());
+        }
+        // Run the independent traversal after issuance so it cannot warm its cache.
+        let reader = block_on(
+            fx.pipe
+                .object_reader(fx.repo_id("room"), ReaderView::Public),
+        )
+        .unwrap();
+        assert_eq!(
+            block_on(reader.object_sizes(&[id(&leaf)])).unwrap(),
+            vec![Some(7)]
+        );
+    }
+}

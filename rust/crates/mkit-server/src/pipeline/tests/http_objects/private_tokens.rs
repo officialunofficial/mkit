@@ -4,7 +4,7 @@ use crate::http_objects::TokenGate;
 use crate::url_token::{Prechecked, TokenRejected, UrlTarget, UrlTokenConfig, UrlTokenKeys};
 use zeroize::Zeroizing;
 
-fn tokens() -> UrlTokenConfig {
+pub(super) fn tokens() -> UrlTokenConfig {
     UrlTokenConfig::new(UrlTokenKeys::new(Zeroizing::new([13; 32]), vec![]).unwrap())
 }
 fn setup() -> (Fx<Scripts>, Data, Arc<Scripted>, UrlTokenConfig) {

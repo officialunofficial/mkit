@@ -42,7 +42,9 @@ mod http_tokens;
 #[cfg(feature = "http-objects")]
 mod object_reader;
 #[cfg(feature = "http-objects")]
-pub use object_reader::{OBJECT_READER_BATCH, OBJECT_READER_CALLS, ObjectReader, ReaderView};
+pub use object_reader::{
+    IssuedUrl, OBJECT_READER_BATCH, OBJECT_READER_CALLS, ObjectReader, ReaderView,
+};
 mod implicit;
 mod info;
 #[cfg(feature = "remote-hooks")]
@@ -1578,9 +1580,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         ttl_seconds: u32,
     ) -> Result<MintedToken, ServerError> {
         self.observe(a, async {
-            let Some(tokens) = &self.cfg.url_tokens else {
+            if self.cfg.url_tokens.is_none() {
                 return Err(ServerError::unimplemented("URL tokens not configured"));
-            };
+            }
             let op = self.identify(
                 a,
                 OpKind::IssueObjectUrl {
@@ -1588,26 +1590,47 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     ttl_seconds,
                 },
             )?;
-            let read = self.authorize_read(&op).await?;
-            let epoch = match read.epoch {
-                Some(epoch) => epoch,
-                None => self.stored_grant_epoch(&op.repo.namespace).await?,
-            };
-            let audience = match &self.cfg.auth {
-                AuthMode::AuthV2(cfg) => cfg.audience(),
-                // `Pipeline::new` refuses `url_tokens` without auth v2.
-                _ => return Err(internal("URL tokens without auth v2")),
-            };
-            tokens.mint(
-                audience,
+            self.issue_url(
+                &op,
                 &a.repo().identity,
                 &target,
-                epoch,
-                a.business_now_ms,
                 ttl_seconds,
+                a.business_now_ms,
             )
+            .await
         })
         .await
+    }
+
+    // Shared below the wire envelope boundary: embedders transfer only verified
+    // reader authority, while the RPC still requires its own signed envelope.
+    async fn issue_url(
+        &self,
+        op: &Operation,
+        repository: &str,
+        target: &UrlTarget,
+        ttl_seconds: u32,
+        now_ms: i64,
+    ) -> Result<MintedToken, ServerError> {
+        let Some(tokens) = &self.cfg.url_tokens else {
+            return Err(ServerError::unimplemented("URL tokens not configured"));
+        };
+        let read = self.authorize_read(op).await?;
+        let epoch = match read.epoch {
+            Some(epoch) => epoch,
+            None => self.stored_grant_epoch(&op.repo.namespace).await?,
+        };
+        let AuthMode::AuthV2(auth) = &self.cfg.auth else {
+            return Err(internal("URL tokens without auth v2"));
+        };
+        tokens.mint(
+            auth.audience(),
+            repository,
+            target,
+            epoch,
+            now_ms,
+            ttl_seconds,
+        )
     }
 
     /// `SetRepoVisibility` (SPEC-WRITE-GRANTS §9.1): the envelope mode is a

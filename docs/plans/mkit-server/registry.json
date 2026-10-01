@@ -2204,6 +2204,25 @@
     ]
   },
   {
+    "id": "uno-urls",
+    "title": "Embedder batch URL issuance (R-204)",
+    "milestone": "M4",
+    "track": "core",
+    "depends_on": [
+      "4.16c"
+    ],
+    "size": "S",
+    "summary": "R-204: batches of 16 share RPC authorization and URL-token minting plus bounded published-view reachability and global-denial preflight; no wire change.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
     "id": "4.17",
     "title": "Pre-receive policy hooks: allowed signers per ref, fast-forward-only grants",
     "milestone": "M4",

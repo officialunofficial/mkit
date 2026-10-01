@@ -2290,3 +2290,14 @@ an obligation or generation change.
 and the publication recheck regressions. No tag, timer kind, public protocol,
 packmap limit or whole-alarm budget changes. Pre-launch timer codecs are reset,
 not migrated (R-198 B1).
+
+### Embedder URL token issuance (R-204)
+
+- **Always:** reader URL batches share RPC read authorization, stored epoch,
+  audience and TTL minting, and return tokens only for accessible published targets.
+- **Because:** a verified reader envelope delegates in-process authority without
+  creating a second token policy; HTTP URL tokens serve only the published view.
+- **If violated:** an embedder could issue credentials under stale grant authority
+  or reveal inaccessible content through batch presence.
+- **Enforced:** `Pipeline::issue_url`, `ObjectReader::issue_urls` and its shared
+  bounded reader preflight; parity, private, denial and pending-publication tests.

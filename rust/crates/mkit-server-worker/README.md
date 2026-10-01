@@ -101,6 +101,11 @@ The optional final `snapshot_warm` argument exists with `published-view`; use
 `Pipeline::object_reader`; native and Worker adapters re-export `ReaderView`
 and `ObjectReader`. This API uses the shared core and adds no HTTP mount or wire.
 
+`reader.issue_urls(&targets, ttl_s)` returns up to 16 optional signed tokens
+(`IssuedUrl`), requiring `URL_TOKEN_KEYS`; denied or unreachable targets are absent.
+It shares RPC minting and checks the published view even for Owner readers.
+A TTL of 0 selects the configured default; larger requests are clamped.
+
 `Public` is anonymous: public repositories, published refs and membership.
 `Owner(&request_meta)` requires a verified auth-v2 `ListRefs` envelope for this
 repository's owner or valid write grant. It uses the existing auth stage at

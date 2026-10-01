@@ -1966,7 +1966,7 @@ mod faults {
 }
 
 #[cfg(feature = "http-objects")]
-pub use mkit_server::pipeline::{ObjectReader, ReaderView};
+pub use mkit_server::pipeline::{IssuedUrl, ObjectReader, ReaderView};
 
 #[cfg(target_arch = "wasm32")]
 pub use glue::{
