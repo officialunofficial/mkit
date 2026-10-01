@@ -6,12 +6,17 @@ const [port, output, stop] = process.argv.slice(2);
 if (!/^\d+$/.test(port || '') || !output || !stop) throw Error('three arguments required');
 const {default: WebSocket} = await import(process.env.MKIT_PROBE_WS_MODULE ?? 'ws');
 const deadline = Date.now() + 30 * 60 * 1000;
-const clients = new Map(), samples = [], gaps = [];
+const clients = new Map(), samples = [], gaps = [], contextEvents = [];
 async function client(target) {
   const socket = new WebSocket(target.webSocketDebuggerUrl,
     {headers: {Origin: 'https://devtools.devprod.cloudflare.dev'}});
   let serial = 0;
-  const pending = new Map();
+  let generation = 0;
+  const pending = new Map(), contexts = new Map();
+  const contextEvent = (kind, context = {}) => {
+    if (contextEvents.length < 100000) contextEvents.push({at: Date.now(),
+      target: target.id, kind, generation, ...context});
+  };
   const rejectPending = error => {
     for (const waiter of pending.values()) {
       clearTimeout(waiter.timer);waiter.reject(error);
@@ -29,6 +34,29 @@ async function client(target) {
     });
     socket.on('message', raw => {
       const message = JSON.parse(raw.toString());
+      if (message.method === 'Runtime.executionContextCreated') {
+        const context = message.params.context;
+        generation++;
+        if (!contexts.has(context.id) && contexts.size >= 16) {
+          gaps.push({at: Date.now(), target: target.id, error: 'live context bound exceeded'});
+        } else {
+          if (contexts.has(context.id)) contextEvent('replaced', {
+            id: context.id, created: contexts.get(context.id).created});
+          const observed = {id: context.id, generation, created: Date.now(),
+            name: String(context.name ?? '').slice(0, 180),
+            origin: String(context.origin ?? '').slice(0, 180),
+            default: context.auxData?.isDefault ?? null};
+          contexts.set(context.id, observed);
+          contextEvent('created', observed);
+        }
+      } else if (message.method === 'Runtime.executionContextDestroyed') {
+        const id = message.params.executionContextId;
+        const observed = contexts.get(id);
+        contexts.delete(id);generation++;
+        contextEvent('destroyed', {id, created: observed?.created ?? null});
+      } else if (message.method === 'Runtime.executionContextsCleared') {
+        contexts.clear();generation++;contextEvent('cleared');
+      }
       const waiter = pending.get(message.id);
       if (waiter) {pending.delete(message.id);clearTimeout(waiter.timer);
         message.error ? waiter.reject(Error(JSON.stringify(message.error))) : waiter.resolve(message.result);}
@@ -40,8 +68,10 @@ async function client(target) {
     });
     await rpc('Runtime.enable');
     const isolate = await rpc('Runtime.getIsolateId');
-    const close = () => {rejectPending(Error('inspector client retired'));socket.terminate();};
-    return {socket, rpc, close, url: target.webSocketDebuggerUrl, isolate: isolate.id, target: target.id};
+    const close = () => {contextEvent('retired');contexts.clear();
+      rejectPending(Error('inspector client retired'));socket.terminate();};
+    return {socket, rpc, close, contexts, generation: () => generation,
+      url: target.webSocketDebuggerUrl, isolate: isolate.id, target: target.id};
   } catch (error) {
     rejectPending(error);socket.terminate();throw error;
   }
@@ -65,23 +95,42 @@ try {
         const started = Date.now();
         try {
           const heap = await active.rpc('Runtime.getHeapUsage');
-          const memory = await active.rpc('Runtime.evaluate', {expression:
-            '({wasm:globalThis.__mkitLaunchMemory ? globalThis.__mkitLaunchMemory() : null,budget:globalThis.__mkitLaunchBudget ? globalThis.__mkitLaunchBudget() : null})',
-            returnByValue: true, timeout: 1000});
+          const observed = [...active.contexts.values()];
+          const memories = [], memoryErrors = [];
+          for (const context of observed) {
+            if (active.contexts.get(context.id) !== context) continue;
+            try {
+              const memory = await active.rpc('Runtime.evaluate', {contextId: context.id, expression:
+                '({wasm:globalThis.__mkitLaunchMemory ? globalThis.__mkitLaunchMemory() : null,budget:globalThis.__mkitLaunchBudget ? globalThis.__mkitLaunchBudget() : null})',
+                returnByValue: true, timeout: 1000});
+              if (memory.exceptionDetails) throw Error('numeric getter evaluation exception');
+              if (active.contexts.get(context.id) !== context) throw Error('context retired during evaluation');
+              memories.push({context, wasm: memory.result?.value?.wasm ?? null,
+                budget: memory.result?.value?.budget ?? null});
+            } catch (error) {
+              memoryErrors.push({context: context.id, generation: context.generation, error: String(error)});
+            }
+          }
+          // Heap usage belongs to the actual inspector isolate independently of
+          // whether its live contexts expose the fixture's numeric getters.
+          const modules = memories.filter(memory => memory.budget?.id);
+          const module = modules.length === 1 ? modules[0] : null;
           samples.push({started, finished: Date.now(), isolate: active.isolate,
-            target: active.target, heap, wasm: memory.result?.value?.wasm ?? null,
-            budget: memory.result?.value?.budget ?? null});
+            target: active.target, heap, contexts: observed, generation: active.generation(),
+            memories, memoryErrors, memoryUnknown: !module,
+            wasm: module?.wasm ?? null, budget: module?.budget ?? null});
         } catch (error) {
           gaps.push({at: Date.now(), target: active.target, error: String(error)});
           active.close();clients.delete(target.id);
         }
       }
     } catch (error) {gaps.push({at: Date.now(), error: String(error)});}
-    if (samples.length + gaps.length > 100000) throw Error('observation bound exceeded');
+    if (samples.length + gaps.length + contextEvents.length > 100000) throw Error('observation bound exceeded');
     await delay(250);
   }
 } finally {
   for (const active of clients.values()) active.close();
   await writeFile(output, JSON.stringify({scope: 'sampled local CDP isolate retention',
-    completePeakCertificate: false, deadlineExceeded: Date.now() >= deadline, samples, gaps}, null, 2));
+    completePeakCertificate: false, deadlineExceeded: Date.now() >= deadline,
+    samples, gaps, contextEvents}, null, 2));
 }
