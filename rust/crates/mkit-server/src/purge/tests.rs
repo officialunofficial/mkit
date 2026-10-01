@@ -133,17 +133,30 @@ async fn cold_slices_resume_local_cursor_and_reserve_budget_before_global_delive
             Some(Arc::new(RetrySink(attempts.clone()))),
             budget.clone(),
         ));
-        run_due(
+        let report = run_due(
             &store,
             &p,
             &registry,
             &clock,
             u64::try_from(now).unwrap(),
-            &TickBudget::new(1, 1, 16, 1000),
+            &TickBudget::new(2, 2, 32, 1000),
         )
         .await
         .unwrap();
-        assert!(budget.used() <= 2);
+        assert_eq!(
+            (report.fired, report.unknown, report.scanned),
+            if now == 10 { (1, 1, 2) } else { (1, 0, 1) }
+        );
+        assert_eq!(
+            budget.used(),
+            if now == 10 {
+                2
+            } else if now == 11 {
+                0
+            } else {
+                1
+            }
+        );
         if now < 12 {
             assert_eq!(
                 attempts.lock().unwrap().len(),
@@ -200,16 +213,24 @@ async fn failed_global_delivery_remains_durable_and_restarts_with_identical_requ
         Some(Arc::new(RetrySink(attempts.clone()))),
         SliceBudget::new(2),
     ));
-    run_due(
+    let first_tick = run_due(
         &store,
         &p,
         &registry,
         &clock,
         10,
-        &TickBudget::new(1, 1, 16, 1000),
+        &TickBudget::new(2, 2, 32, 1000),
     )
     .await
     .unwrap();
+    assert_eq!(
+        (first_tick.fired, first_tick.unknown, first_tick.scanned),
+        (1, 1, 2)
+    );
+    assert_eq!(
+        attempts.lock().unwrap().as_slice(),
+        std::slice::from_ref(&request)
+    );
     assert_eq!(
         read_request(&store, &p, &request.purge_id).await.unwrap(),
         Some(request.clone())
@@ -228,16 +249,20 @@ async fn failed_global_delivery_remains_durable_and_restarts_with_identical_requ
         SliceBudget::new(2),
     ));
     clock.set(2010);
-    run_due(
+    let retry_tick = run_due(
         &store,
         &p,
         &registry,
         &clock,
         2010,
-        &TickBudget::new(1, 1, 16, 1000),
+        &TickBudget::new(2, 2, 32, 1000),
     )
     .await
     .unwrap();
+    assert_eq!(
+        (retry_tick.fired, retry_tick.unknown, retry_tick.scanned),
+        (1, 0, 1)
+    );
     assert_eq!(
         read_request(&store, &p, &request.purge_id).await.unwrap(),
         None
@@ -439,17 +464,13 @@ async fn purge_first_outcome_survives_purge_completion_reconcile_and_restart() {
         "purge-first backlog must not strand the paid terminal outcome after restart"
     );
     assert_eq!(sink.0.lock().unwrap()[0].reservation_id, "paid-read");
-    assert_eq!(
-        codec::decode_backlog(
-            &store
-                .get(&p, &keys::outcome_backlog())
-                .await
-                .unwrap()
-                .unwrap()
-        )
-        .unwrap()
-        .rows,
-        0
+    assert!(
+        store
+            .get(&p, &keys::outcome_backlog())
+            .await
+            .unwrap()
+            .is_none(),
+        "acknowledging the last outcome deletes the zero backlog row"
     );
 }
 
