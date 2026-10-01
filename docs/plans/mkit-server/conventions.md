@@ -18,7 +18,7 @@ wins. The PRD snapshot is [`prd-snapshot.md`](prd-snapshot.md); Linear is canoni
 - Every WP branches from and targets **`feat/mkit-server`**.
 - Start from a fresh fetch: `git fetch origin && git switch -c <branch> origin/feat/mkit-server`.
 - Stacked spec PRs (S2 on S1, S3 on S2) retarget to `feat/mkit-server` once their parent merges.
-- Nothing is released from `feat/mkit-server`. Crates publish and the workspace version moves only at a REL: 0.5.0 at WP-REL-1, the next minor at WP-REL-2 (R-154). Both merge with a merge commit, never a squash.
+- Latest user launch ruling: REL-1 merges the rebuilt `release/mkit-server-launch` (#1261) into `main` with a merge commit, never squash. No version bump, tag or publication at Workers launch. Those need a later separate user decision; older R-154/R-185 release timing is superseded. Planning stays on feat; `docs/operations/**` stays on main.
 
 ## Branch naming
 
