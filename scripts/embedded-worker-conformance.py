@@ -39,13 +39,13 @@ def request_json(url, body=None):
         return json.load(response)
 
 
-def wait_ready(url, process, timeout=120):
+def wait_ready(url, process, timeout=120, body=b"{}"):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError("local wrangler exited before readiness")
         try:
-            return request_json(url, b"{}")
+            return request_json(url, body)
         except (urllib.error.URLError, TimeoutError):
             time.sleep(0.25)
     raise RuntimeError("local wrangler did not become ready")
@@ -90,6 +90,8 @@ def main():
     runner = ROOT / "rust/target/debug/mkit-server-conformance"
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     dirty = subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True)
+    if dirty:
+        raise RuntimeError("commit the candidate first; embedding evidence requires a clean worktree")
     with (work / "build.log").open("w") as log:
         if not args.no_build:
             subprocess.run(["cargo", "build", "--locked", "--manifest-path", str(ROOT / "rust/Cargo.toml"),
@@ -109,14 +111,26 @@ def main():
             config["vars"]["AUTH_AUDIENCE"] = origin
         target = work / f"{config['name']}.json"
         target.write_text(json.dumps(config))
-        configs.extend(["--config", str(target)])
-    command = ["npx", "--yes", f"wrangler@{WRANGLER}", "dev", "--local", *configs, "--ip", "127.0.0.1",
-               "--port", str(args.port), "--persist-to", str(work / "state"),
-               "--show-interactive-dev-session=false"]
+        configs.append(target)
+
+    def command(config, port, state):
+        return ["npx", "--yes", f"wrangler@{WRANGLER}", "dev", "--local",
+                "--config", str(config), "--ip", "127.0.0.1", "--port", str(port),
+                "--persist-to", str(work / state), "--show-interactive-dev-session=false"]
+
     process = None
+    hook_process = None
     try:
-        with (work / "wrangler.log").open("w") as log:
-            process = subprocess.Popen(command, cwd=APP, env=env, stdout=log, stderr=log, start_new_session=True)
+        with (work / "wrangler.log").open("w") as log, (work / "hook.log").open("w") as hook_log:
+            # Multi-config dev gives auxiliary Workers no public listener.
+            # Two owned processes share only this run's private registry.
+            hook_process = subprocess.Popen(command(configs[1], args.port + 1, "hook-state"),
+                                            cwd=APP, env=env, stdout=hook_log,
+                                            stderr=hook_log, start_new_session=True)
+            wait_ready(f"{hook}/calls", hook_process, body=None)
+            process = subprocess.Popen(command(configs[0], args.port, "state"),
+                                       cwd=APP, env=env, stdout=log, stderr=log,
+                                       start_new_session=True)
             wait_ready(f"{base}/grpc.health.v1.Health/Check", process)
             common = [str(runner), "wire", "--base-url", base, "--auth", "auth-v2", "--audience", origin,
                       "--repository", "default", "--random-signer", "--milestone", "M1", "--sharding", "single",
@@ -154,6 +168,9 @@ def main():
             (work / "hook-calls.json").write_text(json.dumps(calls, indent=2))
             if artifact_hashes() != artifacts:
                 raise RuntimeError("embedded release artifacts changed during the conformance run")
+            if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip() != sha \
+                    or subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True):
+                raise RuntimeError("embedding source changed during the conformance run")
             evidence = {"source_sha": sha, "dirty_worktree": dirty.splitlines(), "wrangler": WRANGLER,
                         "features": "default (no test-faults)", "origin": origin,
                         "artifacts": artifacts,
@@ -165,7 +182,10 @@ def main():
             (work / "evidence.json").write_text(json.dumps(evidence, indent=2))
             print("PASS custom binding hooks, DO outcome sink and public audience isolation")
     finally:
-        stop(process)
+        try:
+            stop(process)
+        finally:
+            stop(hook_process)
         print(f"Embedding evidence: {work}")
 
 
