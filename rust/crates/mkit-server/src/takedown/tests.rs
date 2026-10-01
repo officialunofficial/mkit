@@ -608,6 +608,80 @@ mod accounting {
             );
             (response, calls, charged)
         }
+        async fn snapshot(&self) -> ScanPage {
+            let rows = self
+                .store()
+                .inner
+                .scan(
+                    &root(),
+                    &Key::new(Vec::new()),
+                    &Key::new(vec![255]),
+                    None,
+                    1000,
+                )
+                .await
+                .unwrap();
+            assert!(
+                rows.next.is_none(),
+                "snapshot covers every durable root row"
+            );
+            rows
+        }
+        async fn replay(&self, nonce: u8) -> (Response, usize, u32) {
+            let before = self.snapshot().await;
+            let replay_key = to_hex(&hash(
+                format!("https://server.example\noperator\n{}", to_hex(&[nonce; 32])).as_bytes(),
+            ));
+            let key = Key::new([b"an\0".as_slice(), replay_key.as_bytes()].concat());
+            let raw = &before.entries.iter().find(|(k, _)| k == &key).unwrap().1;
+            let stored: serde_json::Value = serde_json::from_slice(raw.as_bytes()).unwrap();
+            let expected: Response = serde_json::from_value(stored["result"].clone()).unwrap();
+            assert_eq!(expected.status, 200);
+            self.store().calls.store(0, Ordering::SeqCst);
+            self.observed.phases.lock().unwrap().clear();
+            let (headers, body) = signed(&self.input, nonce);
+            let response = self.engine.handle(TAKEDOWN_PATH, &headers, &body, 10).await;
+            let calls = self.store().total();
+            assert_eq!(
+                calls, 1,
+                "one failed conditional nonce apply returns stored result"
+            );
+            assert!(
+                self.observed.phases.lock().unwrap().is_empty(),
+                "completed replay has no runtime phases"
+            );
+            assert_eq!(
+                response, expected,
+                "replay returns the exact stored response"
+            );
+            assert_eq!(
+                self.snapshot().await,
+                before,
+                "replay commits no writes to audit, cursor, timer or nonce"
+            );
+            (response, calls, 0)
+        }
+        async fn resume_activation(&self) -> Result<(), crate::ServerError> {
+            self.store().calls.store(0, Ordering::SeqCst);
+            let budget = SliceBudget::new(4000);
+            let id = hash(&[b"mkit-takedown:v1\0".as_slice(), b"counted"].concat());
+            let service = Service::new(self.store().clone(), root(), Arc::new(SinglePartition));
+            let resumed = service.resume(id, 10, &budget).await;
+            assert_eq!(
+                self.store().total(),
+                budget.used() as usize,
+                "every recovery call charges the shared purse"
+            );
+            assert!(budget.used() <= 4000);
+            eprintln!(
+                "activation recovery: objects={}, actual={}, charged={}, complete={}",
+                self.objects.len(),
+                self.store().total(),
+                budget.used(),
+                resumed.is_ok(),
+            );
+            resumed
+        }
         async fn record(&self) -> serde_json::Value {
             let id = hash(&[b"mkit-takedown:v1\0".as_slice(), b"counted"].concat());
             let raw = self
@@ -628,10 +702,10 @@ mod accounting {
         assert!(charged > 3000);
         assert!(calls < 9000);
         assert_eq!(fixture.record().await["activation_cursor"], 256);
-        let (nonce, calls, charged) = fixture.dispatch(1).await;
+        let (nonce, calls, charged) = fixture.replay(1).await;
         assert_eq!(nonce, first);
-        assert_eq!(calls, 2);
-        assert_eq!(charged, 1);
+        assert_eq!(calls, 1);
+        assert_eq!(charged, 0);
         let (operation, calls, charged) = fixture.dispatch(2).await;
         assert_eq!(operation, first);
         assert_eq!(calls, 6);
@@ -673,7 +747,7 @@ mod accounting {
         assert_eq!(fixture.record().await["activation_cursor"], 256);
     }
     #[tokio::test]
-    async fn per_object_header_races_bound_activation_and_nonce_replay_resumes() {
+    async fn per_object_header_races_bound_activation_and_stored_replay_leaves_recovery() {
         let fixture = Fixture::new(256, false).await;
         fixture.store().faults.lock().unwrap().header_per_object = 7;
         let (failed, calls, charged) = fixture.dispatch(5).await;
@@ -684,22 +758,27 @@ mod accounting {
         assert!(record["activation_cursor"].as_u64().unwrap() > 0);
         assert!(record["activation_cursor"].as_u64().unwrap() < 256);
         assert_eq!(record["preservation_pending"], true);
+        assert_eq!(fixture.replay(5).await.0.status, 200);
+        assert_eq!(
+            fixture.record().await,
+            record,
+            "stored replay cannot advance activation"
+        );
         let mut cursor = record["activation_cursor"].as_u64().unwrap();
         for _ in 0..4 {
-            let (resumed, _, charged) = fixture.dispatch(5).await;
-            assert!(charged <= 4000);
+            let resumed = fixture.resume_activation().await;
             let next = fixture.record().await["activation_cursor"]
                 .as_u64()
                 .unwrap();
             assert!(
                 next > cursor,
-                "each bounded replay must advance durable activation"
+                "each bounded recovery slice must advance durable activation"
             );
             cursor = next;
-            if resumed.status == 200 {
+            if resumed.is_ok() {
                 break;
             }
-            assert_eq!(resumed.status, 503);
+            assert_eq!(resumed.unwrap_err().code(), crate::Code::Unavailable);
         }
         assert_eq!(cursor, 256);
     }
@@ -725,8 +804,10 @@ mod accounting {
                 .unwrap()
                 .is_some()
         );
+        assert_eq!(fixture.replay(6).await.0.status, 200);
+        assert_eq!(fixture.record().await["activation_cursor"], 0);
         fixture.store().faults.lock().unwrap().activation = 0;
-        assert_eq!(fixture.dispatch(6).await.0.status, 200);
+        fixture.resume_activation().await.unwrap();
         assert_eq!(fixture.record().await["activation_cursor"], 1);
     }
     #[tokio::test]
@@ -742,7 +823,7 @@ mod accounting {
         assert_eq!(record["actions"].as_array().unwrap().len(), 1);
         assert_eq!(record["actions"][0]["object"], json!(fixture.pack));
         assert_eq!(record["activation_cursor"], 1);
-        assert_eq!(fixture.dispatch(7).await.0, first);
+        assert_eq!(fixture.replay(7).await.0, first);
         assert_eq!(fixture.dispatch(8).await.0, first);
     }
 }
