@@ -74,9 +74,9 @@ struct Read {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct List {
     #[serde(default)]
-    scope: Scope,
+    scope: Option<Scope>,
     #[serde(alias = "page_size")]
-    page_size: u32,
+    page_size: Json,
     #[serde(default, alias = "page_token")]
     page_token: String,
 }
@@ -177,8 +177,10 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
         input: &Json,
     ) -> Result<Prepared, ServerError> {
         let input: List = serde_json::from_value(input.clone()).map_err(|_| invalid())?;
-        input.scope.validate()?;
-        if !(1..=100).contains(&input.page_size) || input.page_token.len() > 2048 {
+        let scope = input.scope.unwrap_or_default();
+        scope.validate()?;
+        let page_size = u32::try_from(number(&input.page_size)?).map_err(|_| invalid())?;
+        if !(1..=100).contains(&page_size) || input.page_token.len() > 2048 {
             return Err(invalid());
         }
         let cursor = if input.page_token.is_empty() {
@@ -189,7 +191,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
                 return Err(invalid());
             }
             let token: PageToken = serde_json::from_slice(&raw).map_err(|_| invalid())?;
-            if token.scope != input.scope {
+            if token.scope != scope {
                 return Err(invalid());
             }
             Some(Cursor::new(
@@ -205,7 +207,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
                 &start,
                 &Key::new(end),
                 cursor.as_ref(),
-                input.page_size,
+                page_size,
             )
             .await
             .map_err(storage)?;
@@ -224,7 +226,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
             if record.id != action {
                 return Err(corrupt());
             }
-            if input.scope.matches(&record.repository) {
+            if scope.matches(&record.repository) {
                 let status = self.status(store, &action).await?;
                 let size = serde_json::to_vec(&status).map_err(|_| corrupt())?.len();
                 if bytes + size > PAGE_BYTES {
@@ -238,7 +240,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
         }
         let token = if more {
             let token = PageToken {
-                scope: input.scope,
+                scope,
                 after: to_hex(&after.ok_or_else(corrupt)?),
             };
             STANDARD.encode(serde_json::to_vec(&token).map_err(|_| corrupt())?)
@@ -326,8 +328,8 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> AdminOperations for 
                     let input: Hold =
                         serde_json::from_value(input.clone()).map_err(|_| invalid())?;
                     if input.reason.is_empty()
-                        || input.reason.len() > 4096
-                        || input.operator_label.len() > 256
+                        || input.reason.len() > 512
+                        || input.operator_label.len() > 128
                         || input
                             .reason
                             .chars()

@@ -1,8 +1,8 @@
 # WP-5.6a-3 restricted administration contract (R-190)
 
-Status: implemented and independently source-reviewed; runtime gates and PR
-publication are blocked by the managed permission profile introduced during
-execution. This does not claim launch readiness or completed runtime tests.
+Status: implemented and independently source-reviewed; runtime gates are
+running after restoration of the unrestricted executor profile. The fifteen
+restricted admin regressions pass. This does not yet claim launch readiness.
 Activation remains false. The assigned branch is
 `mkit-server/wp-5-6a-3-admin-reads`, based on PR #1249 head `c8bae135`.
 Do not open its PR until #1249 merges; then merge `origin/feat/mkit-server`.
@@ -76,8 +76,10 @@ request/R2/DO call budgets; exhausting them terminates the stream with error.
 
 Production Rust delta against c8bae135: 705 added and nine deleted physical
 lines (714 conservatively counting test-module declarations); below 1,500.
-Thirteen focused regression tests are implemented and compile/lint checked,
-but have not executed under the restricted profile.
+Fifteen focused regression tests are implemented and pass: roles/replay/audit
+continuity, separate status, current-role/key/retention/ownership retry checks,
+byte-free nonce storage, offsets and last-message rules, midstream failures,
+actual hold-blocked purge, all/scoped pagination, stale hold CAS and audit failure.
 
 ## Verification evidence (2026-09-30)
 
@@ -94,7 +96,7 @@ TMPDIR environment:
 - buf lint; buf breaking against origin/feat/mkit-server;
 - new GetTakedownResponse golden v1 JSON round-trip and all admin manifest hashes.
 
-Blocked, not passed:
+Initial restricted-profile attempts (historical; unrestricted reruns follow):
 
 - Focused nextest: linker cannot create temporary files in the mandatory
   ~/.cache/mkit-test-tmp/wp-5-6a-3 directory (Operation not permitted).
@@ -124,3 +126,24 @@ it is fixed and has a pagination regression. Payload Debug was hardened, Any
 status was defended, buffered read replay rejects descriptor exposure, and
 invalid descriptor/offset errors receive audits. The final reviewers reported
 no remaining actionable source defects. They did not execute runtime gates.
+
+## Restored-profile gate progress
+
+The orchestrator saved and pushed checkpoint 4f8bf232 while Git writes were
+restricted. On resumption, scratch writes and GitHub access succeeded. The
+focused 13-test nextest suite passed (0.479 seconds). Workspace all-target/all-
+feature clippy passed (2m20s), and just ci-security passed. Remaining gates are
+in progress. PR #1249 is still open at the latest checked state; final base
+integration and publication await its merge. Scratch logs are under
+~/.cache/mkit-test-tmp/wp-5-6a-3/. No prior permission-failed gate is counted as
+passing merely because permissions were restored.
+
+A final spec pass also tightened SetLegalHold's UTF-8 byte bounds to the existing
+§16.5 limits (512-byte reason, 128-byte label) and aligned List parsing with
+ProtoJSON null scope/quoted page sizes. Both new regressions failed before the
+fix; all fifteen admin tests and native server clippy pass after it.
+The first broad CLI run timed out in the unchanged pack-count property test;
+its isolated nextest rerun passes in 12.186 seconds. An unchanged-parent check
+is compiling. The first Worker run passed cold health 30/30 but failed
+refs.many_refs_one_repository with a local Miniflare Network connection lost
+HTTP 500. Final integrated-base reruns and isolation are required.

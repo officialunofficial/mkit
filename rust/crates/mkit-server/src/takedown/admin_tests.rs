@@ -966,3 +966,43 @@ async fn audit_failure_cannot_commit_a_hold_or_release_bytes() {
     }
     f.audit().await;
 }
+
+#[tokio::test]
+async fn legal_hold_reason_and_label_follow_existing_utf8_byte_bounds() {
+    let f = fixture(64).await;
+    let engine = f.engine("moderation");
+    for (nonce, reason, label, expected) in [
+        (1, "x".repeat(513), "label".into(), 400),
+        (2, "court order".into(), "x".repeat(129), 400),
+        (3, "é".repeat(257), "label".into(), 400),
+        (4, "é".repeat(256), "x".repeat(128), 200),
+    ] {
+        let mut input = f.hold(true);
+        input["reason"] = json!(reason);
+        input["operatorLabel"] = json!(label);
+        let (h, b) = request(admin::SET_LEGAL_HOLD_PATH, &input, nonce);
+        assert_eq!(
+            engine
+                .handle(admin::SET_LEGAL_HOLD_PATH, &h, &b, 100)
+                .await
+                .status,
+            expected
+        );
+        assert_eq!(f.state().await.hold, expected == 200);
+    }
+    f.audit().await;
+}
+#[tokio::test]
+async fn list_accepts_protojson_null_scope_and_quoted_page_size() {
+    let f = fixture(64).await;
+    let input = json!({"scope":null,"pageSize":"10"});
+    let (h, b) = request(admin::LIST_TAKEDOWNS_PATH, &input, 1);
+    let response = f
+        .engine("moderation")
+        .handle(admin::LIST_TAKEDOWNS_PATH, &h, &b, 100)
+        .await;
+    assert_eq!(response.status, 200);
+    let response: Json = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(response["takedowns"].as_array().unwrap().len(), 1);
+    f.audit().await;
+}
