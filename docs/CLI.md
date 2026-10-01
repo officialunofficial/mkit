@@ -1543,7 +1543,7 @@ Config / keys / version:
     `core.fsmonitor`) are **rejected** rather than stored. Names match
     case-insensitively and canonicalize to lowercase, like git.
 - `mkit self update [--version <tag>] [--check] [--allow-downgrade]
-  [--format human|json]` &mdash; update this binary in place from a signed
+  [--format human|json]` &mdash; update this binary in place from a
   GitHub Release. The downloaded archive is checked against its sha256
   sidecar asset when the release publishes one; this runs entirely
   in-process, no `cosign` and no GitHub attestation API are involved.
@@ -1761,10 +1761,9 @@ or malformed selected file is a hard error. Keep private keys out of the
 CA file; it contains certificates only.
 
 These settings apply only to native mkit remotes over the Connect transport:
-HTTPS RPCs, pack uploads and downloads. The self-updater deliberately ignores
-both settings: release downloads retain OS certificate trust and the existing
-optional SHA-256 sidecar checksum checks. This does not pin Mozilla-only roots
-or provide release-signature verification. S3 remotes do not yet honor either
+HTTPS RPCs, pack uploads and downloads. The self-updater uses the OS trust
+store and the release checksum when present; it does not read
+`MKIT_SSL_CA_FILE` / `http.sslCAInfo`. S3 remotes do not yet honor either
 setting; private-CA S3 endpoints are a post-launch follow-up. Wasm/browser
 certificate trust is unchanged.
 The key shares its spelling with [Git's CA-file setting](https://git-scm.com/docs/git-config#Documentation/git-config.txt-httpsslCAInfo);
