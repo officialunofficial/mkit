@@ -168,10 +168,9 @@ Set `limits.cpu_ms = 60000` on the launch Worker and its staging environment.
 A local workerd inspector profile of the exact Uno two-part upload recorded
 28.224 seconds of active V8 samples across the complete upload/verification/
 publication sequence (30.502 seconds profiled wall time); the final AdvanceRefs
-response took 17.290 seconds of wall time. This whole-sequence figure is a
-conservative sampled upper bound for any one invocation in that run, rather
-than a claim that AdvanceRefs consumed 28 seconds of CPU. The 60-second setting
-provides more than twice that measured headroom. Verification remains alarm
+response took 17.290 seconds of wall time. The whole-sequence samples guide
+provisional headroom; they do not establish a per-invocation CPU upper bound.
+The 60-second setting provides more than twice that sampled active time. Verification remains alarm
 sliced; no slice, call, memory, or pack limit changes. Local development does
 not enforce deployed CPU limits; record per-invocation CPU on staging before
 launch, as required by the [Cloudflare CPU documentation](https://developers.cloudflare.com/workers/observability/dev-tools/cpu-usage/).
