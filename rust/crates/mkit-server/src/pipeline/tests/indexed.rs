@@ -1733,3 +1733,61 @@ mod inspection;
 
 #[cfg(feature = "remote-hooks")]
 mod scanner_retrieval;
+
+#[test]
+fn lower_pack_cap_after_restart_preserves_exact_error_for_verified_native_pack() {
+    let (env, owner, identity) = environment();
+    let (bytes, head) = pack();
+    let pack_id = hash(&bytes);
+    let ticket = begin_and_upload(&env, &owner, &identity, &bytes, 194_020);
+    let request = signed(&owner, &identity, Procedure::AdvanceRefs, 194_021);
+    let auth = env.auth(&request).unwrap();
+    let repo = auth.repo().repo.clone();
+    let source = env.pipe.shards.ref_shard(&repo, HEAD);
+    assert_eq!(
+        block_on(env.pipe.advance_refs_with_tickets(
+            &auth,
+            upd(HEAD, Match([0x5a; 32]), head),
+            upd(PACKMAP, Missing, pack_id),
+            vec![ticket]
+        ))
+        .unwrap(),
+        AdvanceOutcome::HeadConflict
+    );
+    let raw = block_on(
+        env.pipe
+            .meta
+            .get(&source, &keys::verification(&repo.name, &pack_id)),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        crate::indexed::state::decode(&raw).unwrap(),
+        crate::indexed::state::VerificationV1::Verified { .. }
+    ));
+    let mut config = env.pipe.cfg.clone();
+    config.indexed.as_mut().unwrap().max_pack_bytes = bytes.len() as u64 - 1;
+    let restarted = Pipeline::new(
+        env.pipe.blobs.clone(),
+        env.pipe.meta.inner.clone(),
+        Hooks::new(),
+        config,
+        env.clock.clone(),
+        env.metrics.clone(),
+    )
+    .unwrap();
+    let request = signed(&owner, &identity, Procedure::AdvanceRefs, 194_022);
+    let error = block_on(restarted.advance_refs_with_tickets(
+        &env.auth(&request).unwrap(),
+        upd(HEAD, Missing, head),
+        upd(PACKMAP, Missing, pack_id),
+        vec![ticket],
+    ))
+    .unwrap_err();
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert_eq!(
+        error.public_message(),
+        "pack exceeds indexed max_pack_bytes"
+    );
+    assert_advance_unmoved(&env, &repo, &[pack_id]);
+}

@@ -933,6 +933,11 @@ where
         state: Option<&(VerificationV1, Value)>,
         held: &mut Option<Value>,
     ) -> Result<u64, Stop> {
+        // Timer slices also use the current configuration, independently of
+        // the consuming advance's guard.
+        if job.pack_len > self.h.cfg.max_pack_bytes {
+            return Err(Stop::Reject(super::PACK_CAP_MESSAGE));
+        }
         // A fresh job or source restart must discard provisional rows first.
         // Delete one page with the guarded checkpoint, then try again.
         if job.kind == Kind::Unknown {

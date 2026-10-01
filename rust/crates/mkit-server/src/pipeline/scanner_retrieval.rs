@@ -8,13 +8,26 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     #[cfg(feature = "remote-hooks")]
     pub(super) fn retrieval_assignment(
         op: &crate::op::Operation,
-        advance: &super::advance::AdvanceWrite<'_>,
+        advance: Option<&super::advance::AdvanceWrite<'_>>,
+        repository: &str,
         snapshot: &super::Snapshot,
         set: &crate::indexed::inspection::InspectionSet,
     ) -> Result<crate::scanner_retrieval::Assignment, ServerError> {
         use super::{codec, internal, keys, meta_error};
+        let auth = op
+            .auth
+            .as_ref()
+            .ok_or_else(|| internal("retrieval requires authenticated write"))?;
+        let ref_name = match &op.kind {
+            crate::op::OpKind::UpdateRef(update) => &update.name,
+            crate::op::OpKind::AdvanceRefs { head, .. } => &head.name,
+            _ => return Err(internal("retrieval requires ref write")),
+        };
+        if advance.is_none() && !set.raw_packs().is_empty() {
+            return Err(internal("retrieval additions require tickets"));
+        }
         let mut packs: Vec<crate::scanner_retrieval::PackGrant> = Vec::new();
-        for id in advance.ids {
+        for id in advance.map_or(&[][..], |advance| advance.ids) {
             let raw = snapshot
                 .get(&keys::ticket(id))
                 .ok_or_else(|| internal("retrieval ticket missing"))?;
@@ -38,9 +51,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         Ok(crate::scanner_retrieval::Assignment {
             namespace: op.repo.namespace.as_str().to_owned(),
             repo_name: op.repo.name.as_str().to_owned(),
-            repository: advance.repository.to_owned(),
-            ref_name: advance.head_ref.to_owned(),
-            signer: advance.signer,
+            // The signed operation provides the empty-scope binding too. Do
+            // not infer scope from the resulting pair or existing membership.
+            repository: repository.to_owned(),
+            ref_name: ref_name.to_owned(),
+            signer: auth.signer,
             packs,
         })
     }

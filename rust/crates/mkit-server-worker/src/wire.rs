@@ -24,6 +24,28 @@ use mkit_server::{
     StoreError, Value, Write,
 };
 
+/// Client `get_many` key payload and serialized request ceiling, in bytes.
+/// Checked before cloning keys or allocating the base64/JSON request.
+pub const MAX_GET_MANY_REQUEST_BYTES: usize = 1024 * 1024;
+
+/// Conservative JSON size bound (base64 never needs JSON escaping).
+pub fn get_many_request_bytes(p: &Partition, keys: &[Key]) -> Result<usize, StoreError> {
+    let encoded_len = |n: usize| n.saturating_add(2).saturating_div(3).saturating_mul(4);
+    // Covers all fixed JSON syntax, and the bounded partition encoding.
+    let base = 256_usize.saturating_add(encoded_len(p.encode()?.len()));
+    let bytes = keys.iter().fold(base, |total, key| {
+        total.saturating_add(encoded_len(key.as_bytes().len()).saturating_add(3))
+    });
+    let key_bytes = keys.iter().fold(
+        keys.len().saturating_mul(core::mem::size_of::<Blob>()),
+        |total, key| total.saturating_add(key.as_bytes().len()),
+    );
+    if bytes > MAX_GET_MANY_REQUEST_BYTES || key_bytes > MAX_GET_MANY_REQUEST_BYTES {
+        return Err(StoreError::Invalid("get_many request too large".into()));
+    }
+    Ok(bytes)
+}
+
 /// Bytes as a base64 string.
 #[derive(Clone, PartialEq, Eq, Default)]
 pub struct Blob(pub Vec<u8>);
