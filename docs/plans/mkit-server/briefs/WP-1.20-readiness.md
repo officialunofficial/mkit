@@ -15,7 +15,7 @@ stores; no migration, backfill or old-row transformation. R-196 and R-197 are
 withdrawn and retired. No new R-row, key tag, timer kind or protocol is allocated
 here. The requested R-195 entry records preparation, not launch readiness.
 
-Source: `~/.cache/mkit-orch/scratchpad/prompts/WP-1.20-readiness-codex.md`,
+Source: `<local notes>`,
 Purpose onward, retained below for the later readiness pass.
 
 ## Purpose

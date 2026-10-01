@@ -1,18 +1,18 @@
 # Executor prompt: chore, repair the inherited base test and conformance failures (after #1247/#1248)
 
-Run locally in `/Users/vitormarthendalnunes/Documents/21.Uno/04.Mkit/mkit`.
+Run locally in `<repo>`.
 
 **Definition of done:** an open PR into `feat/mkit-server`. Don't merge it.
 
 **Read first:**
-- `~/.cache/mkit-orch/scratchpad/prompts/executor-common-external.md`;
+- `<local notes>`;
 - **the failure list:** `~/.cache/mkit-test-tmp/wp-zstd-bound-review/baseline-findings.md`, with 14 named tests,
   their failure sites, a classification for each and the parent logs, plus the inherited Worker conformance failure
   `refs.many_refs_one_repository` (logs `vcs-*many-refs*.log` in `~/.cache/mkit-test-tmp/wp-zstd-bound/`);
 - the PRs that likely caused them: #1247 (bounded timer alarm scan with persisted backoff: failing and unknown rows
   move their due time), #1248 (deterministic timer and growth conformance) and #1246 (content headers: the missing
   `content-headers.bin` golden);
-- the ruling text for #1247, "RULING 4.18 cold alarm", in `~/.cache/mkit-orch/scratchpad/plan/orchestrator-notes.md`.
+- the ruling text for #1247, "RULING 4.18 cold alarm", in `<local notes>`.
 
 **Setup:**
 - **Worktree:** `.claude/worktrees/chore-post-1247`, from a fresh `origin/feat/mkit-server`.

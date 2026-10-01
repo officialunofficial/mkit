@@ -1,15 +1,15 @@
 # Executor prompt: WP-5.6a (launch scope), lean takedown (R-190, R-198, R-200). Can start now.
 
-Run locally in `/Users/vitormarthendalnunes/Documents/21.Uno/04.Mkit/mkit`.
+Run locally in `<repo>`.
 
 **Definition of done:** an open PR into `feat/mkit-server`. Don't merge it.
 
 **Read first:**
-- `~/.cache/mkit-orch/scratchpad/prompts/executor-common-external.md`, including the R-198 section;
-- `~/.cache/mkit-orch/scratchpad/plan/R-198-restart-ruling.md`, including R-200;
-- the base brief, `~/.cache/mkit-orch/scratchpad/prompts/WP-5.6a-lean-codex.md`: sections A, B1–B7, C, D, the tests
+- `<local notes>`, including the R-198 section;
+- `<local notes>`, including R-200;
+- the base brief, `<local notes>`: sections A, B1–B7, C, D, the tests
   and the ct handoff contract;
-- `~/.cache/mkit-orch/scratchpad/research/WP-5.6-5.10-5.11s-research.md`, for mechanisms only.
+- `<local notes>`, for mechanisms only.
 
 **This prompt wins over the base brief where they differ.** Ignore the base brief's "QUEUED" line and its
 HANDOFF/gpt/root wording.
