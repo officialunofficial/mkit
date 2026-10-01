@@ -198,6 +198,7 @@ pub struct WorkerConfig {
     /// policy's namespaces.
     pub addressing: mkit_server::Addressing,
     /// `DEFAULT_REPO_VISIBILITY`: public (default) or private for missing visibility rows.
+    /// Read gating applies to Multi deployments with Owner write policy.
     pub default_repo_visibility: mkit_server::pipeline::RepoVisibility,
     /// Upload MAC keys; missing keys disable `BeginUpload` (and refuse a
     /// multi deployment outright).

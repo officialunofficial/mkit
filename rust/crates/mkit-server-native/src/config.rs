@@ -315,7 +315,7 @@ pub struct ServeArgs {
     /// `--meta sqlite:<PATH>`).
     #[arg(long, value_enum, default_value = "single")]
     pub addressing: AddressingArg,
-    /// Visibility for repositories without a stored setting. Explicit visibility wins.
+    /// Multi/Owner visibility without a stored setting. Explicit visibility wins.
     #[arg(long, value_name = "public|private", default_value = "public", value_parser = parse_repo_visibility)]
     pub default_repo_visibility: RepoVisibility,
     /// Multi only: `allowlist` admits the `--namespace-allowlist` file's

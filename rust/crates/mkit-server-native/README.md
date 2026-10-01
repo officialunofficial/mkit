@@ -183,7 +183,9 @@ Under `--addressing multi`, `--listen-enc` requires `--enc-repository
 refused: an enc session needs the repository its peer is authorized for.
 
 `--default-repo-visibility public|private` defaults to `public` for repositories
-without an explicit visibility. `SetRepoVisibility` always wins. Changing this
+without an explicit visibility in Multi deployments with Owner write policy.
+Single/Open deployments do not gate reads by repository visibility.
+`SetRepoVisibility` always wins. Changing this
 setting changes every repository without an explicit setting; configure it when
 creating the deployment.
 

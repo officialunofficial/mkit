@@ -14,6 +14,8 @@ cannot activate the mount. Production activation belongs to WP-4.18/5.2.
 
 `DEFAULT_REPO_VISIBILITY=public|private` defaults to `public` and supplies
 `WorkerConfig::default_repo_visibility` when no explicit visibility is stored.
+Visibility applies to Multi deployments with Owner write policy; Single/Open
+deployments do not gate reads by repository visibility.
 An explicit `SetRepoVisibility` wins. Changing the default changes every repository
 without an explicit setting; set it when creating the deployment.
 

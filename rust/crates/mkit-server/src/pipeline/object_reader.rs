@@ -157,6 +157,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     /// after a bounded published-view preflight, including for Owner readers.
     /// # Errors
     /// As [`Self::read_canonical`], plus `unimplemented` without URL-token keys.
+    /// Targets whose reachability cannot be proved within decode/walk limits are absent.
     #[allow(clippy::too_many_lines)] // One shared-budget preflight and credential issuance pass.
     pub async fn issue_urls(
         &self,
@@ -275,7 +276,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                         };
                         match resolve::resolve_ref(&env, tip, &path, &mut decode).await {
                             Ok(resolved) => Some(resolved.leaf),
-                            Err(resolve::Miss::NotFound) => None,
+                            Err(resolve::Miss::NotFound | resolve::Miss::Capped) => None,
                             Err(miss) => return Err(failure(miss)),
                         }
                     } else {
@@ -287,7 +288,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         }
         let leaves = ids.iter().flatten().copied().collect::<Vec<_>>();
         let (_, sizes) = self
-            .batch_with_budget(&leaves, true, &calls, false, &BTreeSet::new(), &mut decode)
+            .batch_with_budget(
+                &leaves,
+                true,
+                &calls,
+                false,
+                &BTreeSet::new(),
+                &mut decode,
+                true,
+            )
             .await?;
         Ok(ids
             .into_iter()
@@ -317,6 +326,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 BTreeSet::new()
             },
             &mut Budget(self.cfg.http_decode_budget),
+            false,
         )
         .await
     }
@@ -329,6 +339,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         writer: bool,
         forbidden: &BTreeSet<Hash>,
         decode: &mut Budget,
+        capped_as_absent: bool,
     ) -> Result<Prefetched, ServerError> {
         let pipe = self.pipe;
         let (cfg, indexed, seams) = (self.cfg, self.indexed, self.seams);
@@ -350,8 +361,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             cfg,
             metrics: pipe.metrics.as_ref(),
         };
-        let located = resolve::locate_many(&env, ids).await.map_err(failure)?;
-        let mut targets = located.iter().map(|(id, _)| *id).collect::<BTreeSet<_>>();
+        let mut located = if capped_as_absent {
+            Vec::new()
+        } else {
+            resolve::locate_many(&env, ids).await.map_err(failure)?
+        };
+        // Issuance proves missing IDs too: proof cost must not expose membership.
+        let mut targets = if capped_as_absent {
+            ids.iter().copied().collect::<BTreeSet<_>>()
+        } else {
+            located.iter().map(|(id, _)| *id).collect::<BTreeSet<_>>()
+        };
         let mut reached = BTreeSet::new();
         if !writer && !pipe.cfg.takedown_denial {
             for id in &targets {
@@ -371,7 +391,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .reader_tips(&meta, &self.repo, cfg.max_walk_objects, writer)
                 .await
                 .map_err(|e| http_failure(&e))?;
-            if truncated && sizes_only {
+            if truncated && sizes_only && !capped_as_absent {
                 return Err(failure(resolve::Miss::Capped));
             }
             if !truncated {
@@ -379,11 +399,25 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     reach::walk_many(&env, seams.takedown.as_ref(), &tips, &targets, decode)
                         .await
                         .map_err(failure)?;
-                if sizes_only && incomplete == Some(resolve::Miss::Capped) {
+                if sizes_only && !capped_as_absent && incomplete == Some(resolve::Miss::Capped) {
                     return Err(failure(resolve::Miss::Capped));
                 }
                 reached.extend(found);
             }
+        }
+        if capped_as_absent {
+            // Do not locate inaccessible targets: membership-dependent work can
+            // distinguish a stored orphan from a missing ID near the call cap.
+            let mut accessible = Vec::new();
+            for id in &reached {
+                if !denied(&meta, id).await.map_err(failure)? {
+                    accessible.push(*id);
+                }
+            }
+            reached = accessible.iter().copied().collect();
+            located = resolve::locate_many(&env, &accessible)
+                .await
+                .map_err(failure)?;
         }
         let blocked = if pipe.cfg.takedown_denial && !reached.is_empty() {
             object_denials(&view, pipe.shards.as_ref(), &self.repo, &reached, indexed).await?

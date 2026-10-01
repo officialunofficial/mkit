@@ -1355,7 +1355,7 @@ fn issue_urls_target_hook_denials_are_absent_but_store_failures_abort() {
 #[test]
 fn issue_urls_paths_and_reachability_share_one_decode_budget() {
     let leaf = blob(b"payload");
-    let names = (0..40).map(|n| format!("file-{n:02}")).collect::<Vec<_>>();
+    let names = (0..60).map(|n| format!("file-{n:02}")).collect::<Vec<_>>();
     let root = tree(
         &names
             .iter()
@@ -1363,24 +1363,23 @@ fn issue_urls_paths_and_reachability_share_one_decode_budget() {
             .collect::<Vec<_>>(),
     );
     let head = commit(&root, &[], "path budget");
-    // Allow either traversal, including the packmap tip and frame headers,
-    // while keeping their combined canonical bytes above the single-pass cap.
-    let one_pass =
-        (serialize(&root).unwrap().len() + serialize(&head).unwrap().len()) as u64 * 3 / 2;
-    for multiplier in [1, 2] {
+    // Exercise path-only and cumulative proof caps, then a successful larger budget.
+    let traversal_bytes =
+        (serialize(&root).unwrap().len() + serialize(&head).unwrap().len()) as u64;
+    for numerator in [1, 3, 6] {
         let fx = fixture_tweaked(
             Hooks::new(),
             HttpObjectsConfig {
-                http_decode_budget: one_pass * multiplier,
-                max_inline_object_bytes: one_pass,
+                http_decode_budget: traversal_bytes * numerator / 2,
+                max_inline_object_bytes: EXTRACT_MIN + 10,
                 ..http_cfg()
             },
             |c| c.url_tokens = Some(super::private_tokens::tokens()),
         );
         fx.push("room", &[&leaf, &root, &head], id(&head), None);
         let result = public_urls(&fx, &[UrlTarget::path(HEAD, "file-00").unwrap()], 0);
-        if multiplier == 1 {
-            assert_eq!(result.unwrap_err().code(), Code::Unavailable);
+        if numerator < 6 {
+            assert!(result.unwrap()[0].is_none());
         } else {
             assert!(result.unwrap()[0].is_some());
         }
@@ -1390,10 +1389,19 @@ fn issue_urls_paths_and_reachability_share_one_decode_budget() {
                 .object_reader(fx.repo_id("room"), ReaderView::Public),
         )
         .unwrap();
-        assert_eq!(
-            block_on(reader.object_sizes(&[id(&leaf)])).unwrap(),
-            vec![Some(7)]
-        );
+        if numerator == 1 {
+            assert_eq!(
+                block_on(reader.object_sizes(&[id(&leaf)]))
+                    .unwrap_err()
+                    .code(),
+                Code::Unavailable
+            );
+        } else {
+            assert_eq!(
+                block_on(reader.object_sizes(&[id(&leaf)])).unwrap(),
+                vec![Some(7)]
+            );
+        }
     }
 }
 
@@ -1446,4 +1454,55 @@ fn private_default_fresh_repo_requires_explicit_public_for_connect_http_and_read
     assert_eq!(fx.get(&fx.ref_url("room", "main", "small.txt")).status, 200);
     assert!(public_read(&fx, "room", &[id(&d.small)])[0].is_some());
     assert!(public_urls(&fx, &[UrlTarget::Object(id(&d.small))], 0).unwrap()[0].is_some());
+}
+
+#[test]
+fn issue_urls_capped_preflight_hides_unreachable_and_denied_membership() {
+    // One row truncates enumeration; two rows allow enumeration but cap the walk.
+    for cap in [1, 2] {
+        for blocked in [false, true] {
+            let fx = fixture_tweaked(
+                Hooks::new(),
+                HttpObjectsConfig {
+                    max_walk_objects: cap,
+                    ..http_cfg()
+                },
+                |c| c.url_tokens = Some(super::private_tokens::tokens()),
+            );
+            let d = data();
+            let orphan = blob(b"hidden unreachable member");
+            let mut objects = d.refs();
+            objects.push(&orphan);
+            fx.push("room", &objects, d.head(), None);
+            if blocked {
+                block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+                    &id(&orphan),
+                    &crate::store::BlockEntry::new("manual", T0 as u64),
+                    T0 as u64,
+                ))
+                .unwrap();
+            }
+            let proof_calls =
+                [UrlTarget::Object([91; 32]), UrlTarget::Object(id(&orphan))].map(|target| {
+                    let before = fx.pipe.meta.calls();
+                    assert!(public_urls(&fx, &[target], 0).unwrap()[0].is_none());
+                    fx.pipe.meta.calls() - before
+                });
+            assert_eq!(
+                proof_calls[0], proof_calls[1],
+                "membership must not change proof work"
+            );
+            let reader = block_on(
+                fx.pipe
+                    .object_reader(fx.repo_id("room"), ReaderView::Public),
+            )
+            .unwrap();
+            assert_eq!(
+                block_on(reader.object_sizes(&[id(&orphan)]))
+                    .unwrap_err()
+                    .code(),
+                Code::Unavailable
+            );
+        }
+    }
 }
