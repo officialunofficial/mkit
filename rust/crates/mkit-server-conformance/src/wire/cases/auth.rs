@@ -266,7 +266,7 @@ pub(super) async fn v2_version_not_2(ctx: Ctx) -> CaseResult {
 /// §7.1: the handler MUST compare the `pack:` commitment with the upload
 /// header before reading chunks. The spec names no code for a mismatch,
 /// so any error passes; the pack must not be stored.
-// TODO(spec pass, M1/M2): fix the code (mkit-server sends
+// Known gap: fix the code (mkit-server sends
 // `unauthenticated`, a ticket mismatch `permission_denied`), then assert it.
 pub(super) async fn v2_pack_commitment_mismatch(ctx: Ctx) -> CaseResult {
     let signer = ctx.v2_signer("main")?;

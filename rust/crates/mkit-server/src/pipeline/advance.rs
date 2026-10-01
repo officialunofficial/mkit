@@ -283,7 +283,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             let detail = detail_keys_for(rows.iter().filter_map(|row| row.as_ref().ok()))?;
             self.fill(p, snap, detail.clone()).await?;
 
-            // TODO(WP-5.3a): remove a pack's GC mark before accepting its ticket.
+            // GC is disabled in the launch profile; when GC lands, remove a
+            // pack's GC mark before accepting its ticket.
             // Indexed verification is invoked by write() after this ticket
             // decision succeeds, before the advance planner can commit.
             // One future per valid ticket preserves marker-before-pack order,

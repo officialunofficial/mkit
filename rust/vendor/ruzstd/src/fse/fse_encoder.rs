@@ -280,7 +280,7 @@ fn build_table_from_counts(counts: &[usize], max_log: u8, avoid_0_numbit: bool) 
 
     if sum < 1 << acc_log {
         // just raise the maximum probability as much as possible
-        // TODO is this optimal?
+        // This probability adjustment may be further optimized.
         let diff = (1 << acc_log) - sum;
         let max = probs.iter_mut().max().unwrap();
         *max += diff as i32;

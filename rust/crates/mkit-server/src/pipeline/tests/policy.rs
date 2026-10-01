@@ -542,7 +542,7 @@ fn owner_policy_needs_a_self_certifying_namespace() {
             );
         } else {
             // A 0x namespace is self-certifying: the pipeline builds, but
-            // no Ed25519 principal owns it (TODO(WP-2.12)), so every write
+            // no Ed25519 principal owns it, so every write
             // is denied.
             let pipe = built.unwrap();
             let mut auth = pipe

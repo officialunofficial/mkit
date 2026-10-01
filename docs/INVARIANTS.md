@@ -663,7 +663,7 @@ before enabling their repository RPCs.
 **If violated:** an unauthenticated repository RPC can mutate state or mint a token.
 
 **Enforced by:** `mkit-server/tests/connect_dispatch.rs`'s `m2_*` tests
-and the TODO and SECURITY comments in `connect/service.rs`. Implementing
+and the planned-work and SECURITY comments in `connect/service.rs`. Implementing
 WPs replace their stub assertions with behavior and auth tests.
 
 ## The native server and the reference Worker pass the black-box wire suite

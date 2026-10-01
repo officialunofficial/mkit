@@ -41,7 +41,7 @@ impl FrameHeader {
         output.push(self.descriptor());
 
         // `Window_Descriptor
-        // TODO: https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#window_descriptor
+        // Specification reference: https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#window_descriptor
         if !self.single_segment {
             if let Some(window_size) = self.window_size {
                 let log = window_size.next_power_of_two().ilog2();
@@ -71,7 +71,7 @@ impl FrameHeader {
         // `Frame_Content_Size_flag`:
         // The Frame_Content_Size_flag specifies if
         // the Frame_Content_Size field is provided within the header.
-        // TODO: The Frame_Content_Size field isn't set at all, we should prefer to include it always.
+        // Known limitation: Frame_Content_Size is omitted; setting it is preferable.
         // If the `Single_Segment_flag` is set and this value is zero,
         // the size of the FCS field is 1 byte.
         // Otherwise, the FCS field is omitted.

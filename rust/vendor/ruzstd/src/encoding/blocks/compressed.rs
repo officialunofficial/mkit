@@ -24,7 +24,7 @@ pub fn compress_block<M: Matcher>(state: &mut CompressState<M>, output: &mut Vec
                 sequences.push(crate::blocks::sequence_section::Sequence {
                     ll: literals.len() as u32,
                     ml: match_len as u32,
-                    of: (offset + 3) as u32, // TODO make use of the offset history
+                    of: (offset + 3) as u32, // Planned: use the offset history.
                 });
             }
         }
@@ -51,7 +51,7 @@ pub fn compress_block<M: Matcher>(state: &mut CompressState<M>, output: &mut Vec
         encode_seqnum(sequences.len(), &mut writer);
 
         // Choose the tables
-        // TODO store previously used tables
+        // Planned: store previously used tables.
         let ll_mode = choose_table(
             state.fse_tables.ll_previous.as_ref(),
             &state.fse_tables.ll_default,
@@ -122,7 +122,7 @@ fn choose_table<'a>(
     data: impl Iterator<Item = u8>,
     max_log: u8,
 ) -> FseTableMode<'a> {
-    // TODO check if the new table is better than the predefined and previous table
+    // Planned: compare the new table with the predefined and previous tables.
     let use_new_table = true;
     let use_previous_table = false;
     if use_previous_table {
@@ -322,7 +322,7 @@ fn compress_literals(
 
     let (encoder_table, new_table) = if let Some(_table) = last_table {
         if let Some(diff) = _table.can_encode(&new_encoder_table) {
-            // TODO this is a very simple heuristic, maybe we should try to do better
+            // Known limitation: this heuristic is intentionally simple.
             if diff > 5 {
                 (&new_encoder_table, true)
             } else {

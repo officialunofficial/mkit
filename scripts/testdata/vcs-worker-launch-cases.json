@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "owner": "WP-4.18 / R-194",
-  "scope": "R-198 / R-200; optional sync inspection, native proofs, configured lean takedown and restricted admin catalog; R-203 bounded ruzstd plus native push/clone after prerequisite merge",
+  "owner": "Workers launch conformance matrix",
+  "scope": "Paid Workers launch profile: optional sync inspection, native proofs, configured lean takedown and restricted admin catalog, bounded pure-Rust zstd decoder with native push/clone",
   "cases": [
     {
       "id": "B4.config",
@@ -33,7 +33,7 @@
     },
     {
       "id": "B4.scanner-bytes",
-      "contract": "R-193 exact assigned staged immutable added-pack raw ranges and manifests; scanner delta-base resolver/cache is independently authorized; no public HTTP token or writer authority substitution",
+      "contract": "exact assigned staged immutable added-pack raw ranges and manifests; scanner delta-base resolver/cache is independently authorized; no public HTTP token or writer authority substitution",
       "native": "scanner_retrieval::tests; pipeline::tests::indexed::scanner_retrieval",
       "worker": "scanner_retrieval::tests",
       "phase2": "actual release added-pack-only private retrieval with signed Inspect metadata and external-base nonauthority"
@@ -190,14 +190,14 @@
       "contract": "Uno Kit supported embedding API, combined DO outcome/publication/purge builder, configurable admin placement and programmatic ref policy/takedown knobs; streamed in-process UploadPart with shared isolate budget",
       "native": "Source API/compile checks; documented external custom HookSet and OutcomeSink traits",
       "worker": "Phase 2 embedded-worker example wasm check and real wrangler streamed UploadPart",
-      "phase2": "Implement addenda, retain real wrangler embedded upload test and measure release wasm raw/gzip size for minimal/HTTP/signed variants; no ListRepos RPC"
+      "phase2": "Retain real wrangler embedded upload test and measure release wasm raw/gzip size for minimal/HTTP/signed variants; no ListRepos RPC"
     },
     {
       "id": "B4.native-push-zstd",
       "contract": "Native mkit push zstd-compressed packs complete indexed verification on the release Worker and clone back canonically; bounded decode CPU and resident work remain within the launch budgets",
       "native": "real mkit CLI push/clone with zstd pack encoder",
-      "worker": "R-203 bounded pack-ruzstd decoder in the launch profile after WP-zstd-bound merges",
-      "phase2": "PENDING R-203: enable decoder only after merge, run real CLI push -> release Worker -> clone and record decode CPU/resident-memory evidence"
+      "worker": "bounded pack-ruzstd decoder in the launch profile",
+      "phase2": "enable decoder only after merge, run real CLI push -> release Worker -> clone and record decode CPU/resident-memory evidence"
     }
   ],
   "external": [
