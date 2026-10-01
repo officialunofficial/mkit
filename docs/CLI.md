@@ -1719,6 +1719,7 @@ which routes them to the user scope automatically.
 | `remote_bucket` | name | empty | For s3 remotes |
 | `remote_type` | `file` / `http` / `s3` / `ssh` / `memory` | auto | |
 | `transport_auth` | `bearer` / `envelope` | `bearer` | Write-auth mode for `mkit+https://`/`mkit+http://`; `envelope` additionally Ed25519-signs writes with the commit-signing key (see `signer`/`signing_key`/`key.ed25519_ref`) |
+| `http.sslCAInfo` | PEM certificate file path | unset | Additional trust certificates for native Connect HTTPS; normal user/repository/`-c` configuration scopes apply. `MKIT_SSL_CA_FILE` takes precedence. See [HTTPS certificate trust](#https-certificate-trust). |
 | `admission_helper` | absolute executable path | unset | User-scoped; invoked once for a 402 on a trusted remote. Its stdin includes untrusted server challenge content. The helper decides whether and how much to spend. |
 | `remote.<name>.admission_headers` | comma-separated HTTP header names | empty | User-scoped additions to the admission helper's request allowlist; hard-reserved names are refused. |
 | `ssh.strict_host_key_checking` | `yes` / `no` / `accept-new` | inherit | User-scoped only |
@@ -1738,6 +1739,31 @@ Keystore backend names include `software`, `software-raw`, `macos-keychain`,
 when the target build enables the corresponding backend feature. Security-
 sensitive selector keys are ignored from repo-local config; set them in
 `$XDG_CONFIG_HOME/mkit/config` or with explicit command flags.
+
+### HTTPS certificate trust
+
+For a private or local HTTPS server, supply a PEM file containing the CA
+certificates you trust:
+
+```sh
+mkit config http.sslCAInfo /absolute/path/to/local-ca.pem
+# Override the configured file for one command:
+MKIT_SSL_CA_FILE=/absolute/path/to/other-ca.pem mkit fetch origin
+```
+
+`http.sslCAInfo` follows the normal user, repository, and command-line `-c`
+configuration precedence. `MKIT_SSL_CA_FILE` overrides the resulting value.
+Configured relative paths start at the repository root; `~/` expands against
+`HOME`. An environment file path is used as supplied.
+The selected file adds certificates to the bundled Mozilla roots; certificate-chain
+and hostname verification remain enabled. A missing, unreadable, empty,
+or malformed selected file is a hard error. Keep private keys out of the
+CA file; it contains certificates only.
+
+This setting applies to every native Connect HTTPS RPC, including pack
+uploads and downloads. It does not change wasm/browser certificate trust.
+The key shares its spelling with [Git's CA-file setting](https://git-scm.com/docs/git-config#Documentation/git-config.txt-httpsslCAInfo);
+mkit uses its own `MKIT_SSL_CA_FILE` environment variable.
 
 ### Admission helper
 
@@ -1861,6 +1887,11 @@ parsing stderr.
   `NO_COLOR` overrides this.
 - **`SSH_AUTH_SOCK`** &mdash; standard OpenSSH agent socket, used by
   `mkit+ssh://` transports.
+- **`MKIT_SSL_CA_FILE`** &mdash; PEM certificate file for additional native
+  Connect HTTPS trust, overriding `http.sslCAInfo`. Certificates are added
+  to the Mozilla roots, with chain and hostname verification enabled.
+  Missing, unreadable, empty, or malformed files are hard errors. See
+  [HTTPS certificate trust](#https-certificate-trust).
 - **`XDG_CONFIG_HOME`**, **`XDG_DATA_HOME`**, **`XDG_CACHE_HOME`**,
   **`XDG_STATE_HOME`** &mdash; XDG Base Directory roots for user-level config,
   keystore, cache, and state respectively. Defaults per the freedesktop

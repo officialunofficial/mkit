@@ -1035,13 +1035,22 @@ canonical `proto/mkit/transport/v1/transport.proto` via a
 workspace-relative path in `build.rs`, never a hand-copied proto or a
 hand-rolled URL builder. It differs from `mkit-repo-client` only in
 target: native (Tokio, `connectrpc`'s HTTP/native-TLS client
-transport, TLS trust via `webpki-roots`) rather than wasm (Fetch API,
+transport, TLS trust via Mozilla `webpki-roots`) rather than wasm (Fetch API,
 `wasm-bindgen`), so it drops the wasm-only dependencies
 (`wasm-bindgen`, `web-sys`, `send_wrapper`) and enables `connectrpc`'s
 native client features instead. `ConnectTransport` bridges the
 synchronous `Transport` trait to the async generated client via
 `mkit_core::protocol::async_shim::Executor` (a dedicated tokio runtime
 per instance), mirroring `mkit-transport-enc`'s `TokioExecutor`.
+
+The native CLI accepts additional trusted PEM certificates from
+`http.sslCAInfo`; `MKIT_SSL_CA_FILE` takes precedence over that configuration
+key. The selected file augments the Mozilla roots for all Connect HTTPS RPCs,
+including streaming uploads and downloads. Certificate-chain and hostname
+verification remain enabled. A missing, unreadable, empty, or malformed
+selected file is a hard error. The CA file contains certificates only, not
+private keys. Wasm/browser clients retain browser-managed certificate trust;
+these native settings do not affect them. This changes no wire contract.
 
 This crate is now the implementation `mkit-cli`'s `remote_dispatch`
 constructs for the `mkit+https://` scheme (and loopback-only

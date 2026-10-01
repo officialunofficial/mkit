@@ -239,6 +239,11 @@ export const categories: ParityCategory[] = [
         note: 'An inert subset is stored; dangerous keys (sshCommand, pager, editor, hooksPath, fsmonitor) are rejected.',
       },
       {
+        cmd: 'config http.sslCAInfo',
+        status: 'divergent',
+        note: 'Supports Git\'s CA-file key for native Connect HTTPS, including upload and download streams. MKIT_SSL_CA_FILE overrides it (Git uses GIT_SSL_CAINFO). PEM certificates augment Mozilla roots; chain and hostname verification stay enabled. Invalid files are hard errors; browser trust is unchanged.',
+      },
+      {
         cmd: '.gitignore',
         status: 'parity',
         note: 'Reads .gitignore and .mkitignore. Supports **, anchors, negation, and char classes (root-level only; nested ignore files are not yet supported).',

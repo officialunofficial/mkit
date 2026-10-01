@@ -32,6 +32,7 @@ pub mod grant;
 mod part_receipts;
 mod receipt;
 mod status;
+pub mod tls;
 
 /// Generated `mkit.transport.v1` message + Connect service types, compiled
 /// directly from the canonical `<repo-root>/proto/mkit/transport/v1/transport.proto`

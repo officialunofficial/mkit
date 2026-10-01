@@ -48,6 +48,9 @@ pub enum TransportError {
     /// User admission configuration or helper headers were rejected.
     #[error("admission configuration: {0}")]
     AdmissionConfiguration(String),
+    /// Local HTTPS trust configuration could not be loaded or validated.
+    #[error("HTTPS trust configuration: {0}")]
+    TlsConfiguration(String),
     /// The configured admission helper failed.
     #[error("admission helper failed: {0}")]
     AdmissionHelperFailed(String),
@@ -309,6 +312,7 @@ pub fn pack_key_from_hex(s: &str) -> Result<PackKey, FromHexError> {
 /// - [`TransportError::InvalidRef`]
 /// - [`TransportError::InvalidResponse`] / [`TransportError::ProtocolError`]
 /// - [`TransportError::PayloadTooLarge`]
+/// - [`TransportError::TlsConfiguration`] — local trust setup failed.
 /// - [`TransportError::RemoteError`] — the remote chose not to be specific;
 ///   we do not guess.
 /// - [`TransportError::ServerError`] with any 4xx status.
@@ -947,6 +951,9 @@ mod tests {
         assert!(!is_retryable(&TransportError::ServerError { status: 401 }));
         assert!(!is_retryable(&TransportError::PackNotFound));
         assert!(!is_retryable(&TransportError::AccessDenied));
+        assert!(!is_retryable(&TransportError::TlsConfiguration(
+            "bad CA file".into()
+        )));
         assert!(!is_retryable(&TransportError::RefConflict));
     }
 

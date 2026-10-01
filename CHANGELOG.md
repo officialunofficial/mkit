@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- CLI (`mkit-cli`, additive): add `http.sslCAInfo` and overriding
+  `MKIT_SSL_CA_FILE` for extra PEM trust certificates on all native Connect
+  HTTPS RPCs and pack streams. Keep Mozilla roots and chain/hostname
+  verification; invalid CA files fail closed. Browser trust is unchanged.
+
 - Server (WP-5.6a-3, R-190): add signed moderation GetTakedown/ListTakedowns,
   atomic audited SetLegalHold and freshly verified ReadPreserved streaming.
   Replay stores byte-free read descriptors; each attempt rechecks authority and
