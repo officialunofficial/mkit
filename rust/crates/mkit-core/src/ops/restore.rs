@@ -690,7 +690,7 @@ where
             // `restore_tree_to_worktree_with`'s docs.
             let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
             let mut written: u64 = 0;
-            for batch in cb.chunks.chunks(batch_size) {
+            let read_batch = |batch: &[Hash]| -> RestoreResult<Vec<Vec<u8>>> {
                 let bufs = read_chunks(store, batch)?;
                 if bufs.len() != batch.len() {
                     return Err(RestoreError::ChunkBatchLengthMismatch {
@@ -698,9 +698,39 @@ where
                         actual: bufs.len(),
                     });
                 }
-                for buf in &bufs {
-                    tmp.write_all(buf)?;
-                    written += buf.len() as u64;
+                Ok(bufs)
+            };
+            let mut batches = cb.chunks.chunks(batch_size);
+            let mut cur = batches.next().map(&read_batch).transpose()?;
+            // Pipeline: read batch N+1 on a helper thread while batch N
+            // is written, overlapping read/verify with write syscalls.
+            // Peak memory is two batches. With batch_size 1 (sequential
+            // default) there is nothing to overlap, so stay inline.
+            let overlap = batch_size > 1;
+            while let Some(bufs) = cur.take() {
+                let next_batch = batches.next();
+                let write_all_bufs = |tmp: &mut fs::File| -> io::Result<u64> {
+                    let mut n = 0u64;
+                    for buf in &bufs {
+                        tmp.write_all(buf)?;
+                        n += buf.len() as u64;
+                    }
+                    Ok(n)
+                };
+                match next_batch {
+                    Some(nb) if overlap => {
+                        let (w, r) = std::thread::scope(|sc| {
+                            let h = sc.spawn(|| read_batch(nb));
+                            let w = write_all_bufs(&mut tmp);
+                            (w, h.join().expect("restore prefetch thread panicked"))
+                        });
+                        written += w?;
+                        cur = Some(r?);
+                    }
+                    other => {
+                        written += write_all_bufs(&mut tmp)?;
+                        cur = other.map(&read_batch).transpose()?;
+                    }
                 }
             }
             cb.check_reassembled_size(usize::try_from(written).unwrap_or(usize::MAX))?;
