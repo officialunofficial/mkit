@@ -238,6 +238,8 @@ pub struct WorkerConfig {
     /// call the hook Worker over the `ADMISSION_HOOK` service binding. `None`
     /// runs the built-in hooks (WP-3.9).
     pub hooks: Option<crate::hooks::config::HookVars>,
+    /// Roles actually supplied by the embedding factories, independent of transport.
+    pub supplied_hooks: crate::embedding::HookCapabilities,
     /// Explicit indexed HTTP configuration and route opt-in.
     #[cfg(feature = "http-objects")]
     pub http_mount: Option<crate::http_mount::WorkerHttpMountConfig>,
@@ -277,6 +279,35 @@ impl core::fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 impl WorkerConfig {
+    /// Roles still using the configured external transport.
+    pub(crate) fn remote_hooks(&self) -> Option<crate::hooks::config::HookVars> {
+        let mut hooks = self.hooks.clone()?;
+        hooks.roles.authorize &= self.supplied_hooks.authorizer.is_none();
+        hooks.roles.admit &= !self.supplied_hooks.admission;
+        hooks.roles.outcome &= !self.supplied_hooks.outcomes;
+        (hooks.roles.authorize
+            || hooks.roles.admit
+            || hooks.roles.outcome
+            || hooks.roles.inspect
+            || hooks.roles.cache_purge)
+            .then_some(hooks)
+    }
+
+    pub(crate) fn has_admission(&self) -> bool {
+        self.supplied_hooks.admission || self.hooks.as_ref().is_some_and(|v| v.roles.admit)
+    }
+
+    /// Parse optional mounts with the actual embedding capabilities available.
+    /// # Errors
+    /// Invalid configuration, incomplete remote channels or conflicting key roles.
+    pub fn from_vars_with_hooks(
+        var: impl Fn(&str) -> Option<String>,
+        supplied: crate::embedding::HookCapabilities,
+        purge: Option<crate::embedding::PurgeHooks>,
+    ) -> Result<Self, ConfigError> {
+        Self::parse_vars_with_supplied(&var, purge, supplied)
+    }
+
     /// The store Health probes for this deployment mode.
     #[must_use]
     pub fn probe_partition(&self) -> mkit_server::Partition {
@@ -392,7 +423,7 @@ impl WorkerConfig {
         &self,
         config: &mut mkit_server::pipeline::PipelineConfig,
     ) -> Result<(), ConfigError> {
-        if let Some(hooks) = &self.hooks {
+        if let Some(hooks) = &self.remote_hooks() {
             config.authorizer_role = hooks.authorizer_role;
             if hooks.roles.inspect {
                 if config.indexed.is_none()
@@ -410,6 +441,9 @@ impl WorkerConfig {
                     true,
                 ));
             }
+        }
+        if let Some(role) = self.supplied_hooks.authorizer {
+            config.authorizer_role = role;
         }
         if let Some(purge) = &self.custom_purge {
             config.purge = Some(
@@ -485,7 +519,11 @@ impl WorkerConfig {
                     "preservation binding must differ from serving storage".into(),
                 ));
             }
-            if let Some(http) = self.hooks.as_ref().and_then(|hooks| hooks.http.as_ref()) {
+            if let Some(http) = self
+                .remote_hooks()
+                .as_ref()
+                .and_then(|hooks| hooks.http.as_ref())
+            {
                 crate::hooks::config::http_signer(
                     env.secret("MKIT_HOOK_KEY").ok().map(|s| s.to_string()),
                     http,
@@ -520,10 +558,22 @@ impl WorkerConfig {
         Self::parse_vars_with_purge(var, None)
     }
 
-    #[allow(clippy::too_many_lines)]
     fn parse_vars_with_purge(
         var: &impl Fn(&str) -> Option<String>,
         custom_purge: Option<crate::embedding::PurgeHooks>,
+    ) -> Result<Self, ConfigError> {
+        Self::parse_vars_with_supplied(
+            var,
+            custom_purge,
+            crate::embedding::HookCapabilities::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn parse_vars_with_supplied(
+        var: &impl Fn(&str) -> Option<String>,
+        custom_purge: Option<crate::embedding::PurgeHooks>,
+        supplied_hooks: crate::embedding::HookCapabilities,
     ) -> Result<Self, ConfigError> {
         let indexed_requested = var(INDEXED_MODE_VAR).is_some_and(|value| {
             !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
@@ -637,7 +687,14 @@ impl WorkerConfig {
             indexed.is_some(),
             hooks.as_ref().is_some_and(|h| h.roles.inspect),
         )?;
-        let authority_fence = resolve_authority_fence(&var, multi, hooks.as_ref())?;
+        let authorizer_role = supplied_hooks.authorizer.unwrap_or_else(|| {
+            hooks
+                .as_ref()
+                .map_or(mkit_server::policy::AuthorizerRole::Check, |h| {
+                    h.authorizer_role
+                })
+        });
+        let authority_fence = resolve_authority_fence(&var, multi, authorizer_role)?;
         if let Some(fence) = &authority_fence
             && fence.public_keys().any(|key| {
                 ticket_keys
@@ -714,6 +771,7 @@ impl WorkerConfig {
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             blob_binding: crate::r2::STORAGE_BINDING,
             hooks,
+            supplied_hooks,
             #[cfg(feature = "http-objects")]
             http_mount: None,
             #[cfg(feature = "http-objects")]
@@ -740,7 +798,7 @@ impl WorkerConfig {
     /// As [`Self::from_vars`].
     #[cfg(target_arch = "wasm32")]
     pub fn from_env(env: &worker::Env) -> Result<Self, ConfigError> {
-        Self::from_env_using_purge(env, None)
+        Self::from_env_using_purge(env, None, crate::embedding::HookCapabilities::default())
     }
 
     /// Parse bindings and opt-ins with a custom purger configured at startup.
@@ -751,15 +809,32 @@ impl WorkerConfig {
         env: &worker::Env,
         purge: crate::embedding::PurgeHooks,
     ) -> Result<Self, ConfigError> {
-        Self::from_env_using_purge(env, Some(purge))
+        Self::from_env_using_purge(
+            env,
+            Some(purge),
+            crate::embedding::HookCapabilities::default(),
+        )
+    }
+
+    /// Parse mounts and bindings for the supplied fetch hooks and DO sink.
+    /// # Errors
+    /// As `from_env`; scanner, inspector and purge transports remain enforced.
+    #[cfg(target_arch = "wasm32")]
+    pub fn from_env_with_hooks(
+        env: &worker::Env,
+        supplied: crate::embedding::HookCapabilities,
+        purge: Option<crate::embedding::PurgeHooks>,
+    ) -> Result<Self, ConfigError> {
+        Self::from_env_using_purge(env, purge, supplied)
     }
 
     #[cfg(target_arch = "wasm32")]
     fn from_env_using_purge(
         env: &worker::Env,
         purge: Option<crate::embedding::PurgeHooks>,
+        supplied: crate::embedding::HookCapabilities,
     ) -> Result<Self, ConfigError> {
-        let cfg = Self::parse_vars_with_purge(
+        let cfg = Self::parse_vars_with_supplied(
             &|name| {
                 if name == crate::admin::RECEIPT_SECRET {
                     return env.secret(name).ok().map(|secret| secret.to_string());
@@ -770,11 +845,15 @@ impl WorkerConfig {
                     .or_else(|| env.var(name).ok().map(|value| value.to_string()))
             },
             purge,
+            supplied,
         )?;
-        crate::hooks::config::HookVars::check_binding(
-            cfg.hooks.as_ref(),
-            env.service(crate::hooks::config::BINDING).is_ok(),
-        )?;
+        let remote = cfg.remote_hooks();
+        if remote.is_some() || supplied == crate::embedding::HookCapabilities::default() {
+            crate::hooks::config::HookVars::check_binding(
+                remote.as_ref(),
+                env.service(crate::hooks::config::BINDING).is_ok(),
+            )?;
+        }
         if cfg.launch.is_some() {
             if env.bucket(cfg.blob_binding).is_err() {
                 return Err(ConfigError("launch requires STORAGE R2 binding".into()));
@@ -794,7 +873,11 @@ impl WorkerConfig {
             }
         }
         if let Some(settings) = &cfg.takedown {
-            if let Some(http) = cfg.hooks.as_ref().and_then(|hooks| hooks.http.as_ref()) {
+            if let Some(http) = cfg
+                .remote_hooks()
+                .as_ref()
+                .and_then(|hooks| hooks.http.as_ref())
+            {
                 crate::hooks::config::http_signer(
                     env.secret("MKIT_HOOK_KEY").ok().map(|s| s.to_string()),
                     http,
@@ -817,7 +900,7 @@ impl WorkerConfig {
 fn resolve_authority_fence(
     var: &impl Fn(&str) -> Option<String>,
     multi: bool,
-    hooks: Option<&crate::hooks::config::HookVars>,
+    authorizer_role: mkit_server::policy::AuthorizerRole,
 ) -> Result<Option<mkit_server::authority::AuthorityFence>, ConfigError> {
     let enabled = match var("AUTHORITY_FENCE").as_deref() {
         None | Some("false") => false,
@@ -836,13 +919,7 @@ fn resolve_authority_fence(
                 .map_err(|_| ConfigError("AUTHORITY_KEYS is invalid".into()))
         })
         .transpose()?;
-    if enabled
-        && (!multi
-            || hooks.is_none_or(|hooks| {
-                !hooks.roles.authorize
-                    || hooks.authorizer_role != mkit_server::policy::AuthorizerRole::Authority
-            }))
-    {
+    if enabled && (!multi || authorizer_role != mkit_server::policy::AuthorizerRole::Authority) {
         return Err(ConfigError(
             "authority fencing requires Multi and an Authority hook".into(),
         ));
@@ -2404,7 +2481,13 @@ mod glue {
     /// # Errors
     /// Only when the runtime fails to build a response.
     pub async fn fetch(req: Request, env: Env) -> worker::Result<Response> {
-        fetch_with(req, env, hooks_from_env).await
+        fetch_with(
+            req,
+            env,
+            crate::embedding::HookCapabilities::default(),
+            hooks_from_env,
+        )
+        .await
     }
 
     /// Serve the optional launch HTTP mount with settlement retained by the fetch event.
@@ -2454,13 +2537,18 @@ mod glue {
     ///
     /// # Errors
     /// Only when the runtime fails to build a response.
-    pub async fn fetch_with<H, F>(req: Request, env: Env, make_hooks: F) -> worker::Result<Response>
+    pub async fn fetch_with<H, F>(
+        req: Request,
+        env: Env,
+        supplied: crate::embedding::HookCapabilities,
+        make_hooks: F,
+    ) -> worker::Result<Response>
     where
         H: HookSet + 'static,
         F: FnOnce(&Env, &WorkerConfig) -> Result<H, ConfigError>,
     {
         install();
-        match WorkerConfig::from_env(&env) {
+        match WorkerConfig::from_env_with_hooks(&env, supplied, None) {
             Ok(cfg) => serve_with(req, env, &cfg, make_hooks).await,
             Err(error) => env_config_error(&req, &env, &error, true),
         }
@@ -3105,7 +3193,13 @@ mod glue {
     async fn own_hooks_and_sink_compile(req: Request, env: Env, state: State) {
         use mkit_server::pipeline::{Hooks, NoOutcomes};
 
-        let _ = fetch_with(req, env.clone(), |_env, _cfg| Ok(Hooks::new())).await;
+        let _ = fetch_with(
+            req,
+            env.clone(),
+            crate::embedding::HookCapabilities::default(),
+            |_env, _cfg| Ok(Hooks::new()),
+        )
+        .await;
         let _ = ns_object_with(
             state,
             &env,

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Worker embedding: supplied Admission, Authorizer/Authority and OutcomeSink
+  capabilities satisfy launch validation without an unused external hook channel.
+  `fetch_with` now takes explicit `HookCapabilities`; shared config factories use
+  `from_env_with_hooks`/`from_vars_with_hooks` (delta review 8b-1).
+- Launch builds forward the Worker pure-Rust decoder to the server feature;
+  mandatory PR gates run the isolated 48 MiB allocator regression (4-1, 12-3).
+- Object reader and URL batches retain the expiry of cached reachability proofs.
+  Only fresh published walks renew them after rewind/deletion (6-1).
+
 - Server: retain retryable Takedown acceptance with its stable id until every
   denial is active. Exact retries resume bounded activation; timer-15 recovery
   finalizes the original nonce and operation result (delta review 7-1).

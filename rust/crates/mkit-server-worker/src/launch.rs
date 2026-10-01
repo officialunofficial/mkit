@@ -89,7 +89,7 @@ pub(crate) fn validate_programmatic(cfg: &WorkerConfig) -> Result<(), ConfigErro
                     "launch HTTP and verification must use the same indexed configuration",
                 ));
             }
-            if mount.http_objects.admit_reads && cfg.hooks.as_ref().is_none_or(|v| !v.roles.admit) {
+            if mount.http_objects.admit_reads && !cfg.has_admission() {
                 return Err(error("HTTP_ADMIT_READS requires the admit hook role"));
             }
         }
@@ -187,7 +187,11 @@ pub(crate) fn validate_runtime_key_material(
     if let Some(retrieval) = &cfg.scanner_retrieval {
         public.extend(retrieval.scanner_keys());
     }
-    if let Some(http) = cfg.hooks.as_ref().and_then(|hooks| hooks.http.as_ref()) {
+    if let Some(http) = cfg
+        .remote_hooks()
+        .as_ref()
+        .and_then(|hooks| hooks.http.as_ref())
+    {
         let signer = crate::hooks::config::http_signer(
             var("MKIT_HOOK_KEY"),
             http,
@@ -281,7 +285,7 @@ pub(crate) fn validate(
         return Err(error("launch refuses inspection clear deadlines"));
     }
     let key = zeroize::Zeroizing::new(var("MKIT_HOOK_KEY"));
-    if let Some(http) = cfg.hooks.as_ref().and_then(|v| v.http.as_ref()) {
+    if let Some(http) = cfg.remote_hooks().as_ref().and_then(|v| v.http.as_ref()) {
         let signer = crate::hooks::config::http_signer(
             key.as_ref().cloned(),
             http,
@@ -289,7 +293,10 @@ pub(crate) fn validate(
             &public,
         )?;
         public.push(signer.public_key());
-    } else if key.is_some() {
+    } else if key.is_some()
+        && (cfg.remote_hooks().is_some()
+            || cfg.supplied_hooks == crate::embedding::HookCapabilities::default())
+    {
         return Err(error("MKIT_HOOK_KEY requires signed HTTPS HOOK_URL"));
     }
     #[cfg(not(feature = "http-objects"))]
@@ -357,7 +364,7 @@ fn validate_http(
 ) -> Result<(), ConfigError> {
     let http = boolean(var, "HTTP_OBJECTS")?;
     let reads = boolean(var, "HTTP_ADMIT_READS")?;
-    if reads && (!http || cfg.hooks.as_ref().is_none_or(|v| !v.roles.admit)) {
+    if reads && (!http || !cfg.has_admission()) {
         return Err(error(
             "HTTP_ADMIT_READS requires HTTP_OBJECTS and the admit hook role",
         ));

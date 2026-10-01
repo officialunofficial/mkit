@@ -7,17 +7,23 @@ use mkit_server::purge::{PurgeSink, Request as PurgeRequest};
 use mkit_server::{AuthzFacts, Operation, Procedure};
 use mkit_server::{BoxFuture, ServerError, StoreError};
 use mkit_server_worker::adapter::{self, ConfigError, WorkerConfig};
-use mkit_server_worker::embedding::PurgeHooks;
+use mkit_server_worker::embedding::{HookCapabilities, PurgeHooks};
 use mkit_server_worker::purge::{LocalCache, WorkerCache};
 use std::sync::Arc;
 use worker::{Context, Env, Request, RequestInit, Response, Result, event};
 
-struct HostAuthorize;
+struct HostAuthorize {
+    fenced: bool,
+}
 impl Authorizer for HostAuthorize {
     async fn authorize(&self, op: &Operation) -> core::result::Result<AuthzFacts, ServerError> {
         // Multi owner/grant enforcement already established these facts.
         worker::console_log!("MKIT_UNO_STAGE authorize {}", op.procedure().connect_path());
-        Ok(op.authz.clone())
+        let mut facts = op.authz.clone();
+        if self.fenced {
+            facts.authority_generation = Some(0);
+        }
+        Ok(facts)
     }
 }
 struct HostAdmit;
@@ -39,6 +45,31 @@ impl Admission for HostAdmit {
                 }],
                 "local acceptance payment challenge",
             ));
+        }
+        if matches!(input.op.procedure(), Procedure::HttpGetObject) {
+            let paid = input.credential_headers.iter().any(|h| {
+                h.name.eq_ignore_ascii_case("authorization")
+                    && h.value.expose() == "Payment uno-fixture"
+            });
+            if !paid {
+                return Ok(AdmissionDecision::challenge(
+                    vec![Challenge {
+                        scheme: "uno-local".into(),
+                        value: "uno-fixture".into(),
+                    }],
+                    "local read payment challenge",
+                ));
+            }
+            thread_local! { static SERIAL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+            let serial = SERIAL.with(|counter| {
+                let next = counter.get() + 1;
+                counter.set(next);
+                next
+            });
+            let reservation = format!("uno-read:{serial}");
+            return Ok(AdmissionDecision::allow(Vec::new())
+                .with_reservation(&reservation)
+                .with_response_header("Payment-Receipt", reservation));
         }
         let mut decision = DefaultAdmission.admit(input).await?;
         if input.op.procedure().is_write()
@@ -70,7 +101,16 @@ impl OutcomeSink for HostOutcome {
                 Some(std::time::Duration::from_secs(60)),
             ));
         }
-        worker::console_log!("MKIT_UNO_OUTCOME {} {}", kind, outcome.reservation_id);
+        let bytes = match outcome.kind {
+            OutcomeKind::ReadServed { bytes_served, .. } => bytes_served,
+            _ => 0,
+        };
+        worker::console_log!(
+            "MKIT_UNO_OUTCOME {} {} {}",
+            kind,
+            outcome.reservation_id,
+            bytes
+        );
         Ok(())
     }
 }
@@ -98,7 +138,21 @@ fn config(env: &Env) -> core::result::Result<WorkerConfig, ConfigError> {
             snapshot_deployment: None,
         }),
     );
-    let mut cfg = WorkerConfig::from_env_with_purge(env, purge)?;
+    let capabilities = HookCapabilities {
+        authorizer: Some(
+            if env
+                .var("AUTHORITY_FENCE")
+                .is_ok_and(|v| v.to_string() == "true")
+            {
+                mkit_server::policy::AuthorizerRole::Authority
+            } else {
+                mkit_server::policy::AuthorizerRole::Check
+            },
+        ),
+        admission: true,
+        outcomes: true,
+    };
+    let mut cfg = WorkerConfig::from_env_with_hooks(env, capabilities, Some(purge))?;
     cfg.admin_on_public_path = false;
     cfg.validate()?;
     Ok(cfg)
@@ -106,7 +160,9 @@ fn config(env: &Env) -> core::result::Result<WorkerConfig, ConfigError> {
 type HostHooks = Hooks<HostAuthorize, HostAdmit, NoPreReceive, NoReceipts, HostOutcome>;
 fn hooks(env: &Env, cfg: &WorkerConfig) -> core::result::Result<HostHooks, ConfigError> {
     Ok(Hooks {
-        authorizer: HostAuthorize,
+        authorizer: HostAuthorize {
+            fenced: cfg.authority_fence.is_some(),
+        },
         admission: HostAdmit,
         pre_receive: NoPreReceive,
         receipts: NoReceipts,

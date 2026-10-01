@@ -116,6 +116,7 @@ release tag; breaking 0.x changes are called out in CHANGELOG.
 | `adapter::serve_with` / `fetch_with` | Constructed request or environment-parsed fetch with a custom `HookSet` |
 | `adapter::ns_object_with` | Environment-configured DO with custom `OutcomeSink` |
 | `embedding::NsObjectBuilder` | Combine explicit config, published snapshots, outcome factory and custom purge/local invalidation |
+| `embedding::HookCapabilities`, `WorkerConfig::from_env_with_hooks` | Declare the supplied Admission, Authorizer role and OutcomeSink without a remote binding |
 | `embedding::PurgeHooks`, `WorkerConfig::from_env_with_purge` | Supply an actual Paid in-process `PurgeSink` as the signed HTTPS alternative; complete preservation/admin still required |
 | `durable_objects!(config_factory, sink_factory)` | Generate all five standard DO exports from the same config/sink factories |
 | `adapter::WorkerConfig` | Programmatic `ref_policy`, `takedown_denial`, HTTP mount and `admin_on_public_path`; call `validate` after changes |
@@ -124,7 +125,17 @@ release tag; breaking 0.x changes are called out in CHANGELOG.
 | `ns_object::NsObject`, `classes::ShardClass` | Low-level DO request and alarm delegation |
 | `mkit_server::pipeline::{HookSet, Authorizer, Admission, OutcomeSink}` | Custom admission/authorization and durable outcome contracts |
 
-Use the same config factory on fetch and DO construction. Its signed audience
+Use the same config factory on fetch and DO construction. For in-process hooks,
+pass `HookCapabilities` to `from_env_with_hooks` (or `from_vars_with_hooks`) and
+build the matching `HookSet` in `serve_with` and matching sink in `NsObjectBuilder`.
+`fetch_with(req, env, capabilities, make_hooks)` accepts these capabilities before
+parsing opt-ins. Use `serve_with` and a mount with `with_context` for paid HTTP
+settlement. The supplied role metadata controls policy; actual pipeline construction
+still refuses a default Admission for paid reads or an open Authority. Remote
+inspection, scanner retrieval and cache-purge signing remain enforced for roles
+that use those channels.
+
+The shared config factory’s signed audience
 is `WorkerConfig::audience`, the exact public origin, regardless of the URL of a
 constructed request. Dispatch shares the caller isolate's CPU, memory and
 subrequest limits. The [embedded example](../../../apps/embedded-worker/README.md)

@@ -146,8 +146,12 @@ mod glue {
     use crate::sleep::WorkerSleep;
 
     fn from_env(env: &Env, cfg: &WorkerConfig) -> Result<Built<WorkerChannel>, ConfigError> {
+        let vars = cfg.remote_hooks();
+        if vars.is_none() && cfg.supplied_hooks != crate::embedding::HookCapabilities::default() {
+            return Ok(local());
+        }
         let binding = env.service(BINDING).is_ok();
-        let http = cfg.hooks.as_ref().and_then(|v| v.http.as_ref());
+        let http = vars.as_ref().and_then(|v| v.http.as_ref());
         if http.is_some() && binding {
             return Err(ConfigError(
                 "HOOK_URL and ADMISSION_HOOK are mutually exclusive".into(),
@@ -158,9 +162,9 @@ mod glue {
             return Err(ConfigError("MKIT_HOOK_KEY needs HOOK_URL".into()));
         }
         if http.is_none() {
-            HookVars::check_binding(cfg.hooks.as_ref(), binding)?;
+            HookVars::check_binding(vars.as_ref(), binding)?;
         }
-        if cfg.hooks.is_none() {
+        if vars.is_none() {
             return Ok(local());
         }
         let (channel, signer) = if let Some(http) = http {
@@ -216,7 +220,7 @@ mod glue {
             (WorkerChannel::Binding(BindingChannel::from_env(env)?), None)
         };
         build_signed(
-            cfg.hooks.as_ref(),
+            vars.as_ref(),
             channel,
             &outcome_audience(cfg),
             signer,
