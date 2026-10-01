@@ -298,35 +298,39 @@ async fn corrupt_compressed_claim_is_terminal_before_decode_budget_check() {
     assert_terminal_source_corruption(3).await;
 }
 
+// Model a historically verified compressed member, then corrupt its stored
+// outer claim while leaving this immutable metadata intact.
+async fn mark_source_as_verified_zstd(f: &Fixture, object: Hash) {
+    let partition = f.work.shards.object_index(&f.repo, &object);
+    let index = keys::object_index(&f.repo.name, &object, &f.pack);
+    let raw = f
+        .work
+        .metadata
+        .get(&partition, &index)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut located = codec::decode_object_index(&object, &raw).unwrap();
+    located.wire_type = 0x03;
+    f.work
+        .metadata
+        .apply(
+            &partition,
+            Batch::new().put(
+                index,
+                codec::encode_object_index(&object, &located).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+}
+
 async fn assert_terminal_source_corruption(mode: u8) {
     use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::SeqCst};
     let f = fixture(&[small()], false).await;
     let object = f.canonical[0].0;
     if mode == 3 {
-        // Model a historically verified compressed member, then corrupt its
-        // stored outer claim while leaving that verified metadata intact.
-        let partition = f.work.shards.object_index(&f.repo, &object);
-        let index = keys::object_index(&f.repo.name, &object, &f.pack);
-        let raw = f
-            .work
-            .metadata
-            .get(&partition, &index)
-            .await
-            .unwrap()
-            .unwrap();
-        let mut located = codec::decode_object_index(&object, &raw).unwrap();
-        located.wire_type = 0x03;
-        f.work
-            .metadata
-            .apply(
-                &partition,
-                Batch::new().put(
-                    index,
-                    codec::encode_object_index(&object, &located).unwrap(),
-                ),
-            )
-            .await
-            .unwrap();
+        mark_source_as_verified_zstd(&f, object).await;
     }
     let id = accept(&f, "corrupt-source", None, &[object]).await;
     f.clock.set(20_000);
@@ -358,16 +362,14 @@ async fn assert_terminal_source_corruption(mode: u8) {
             .unwrap()
             .is_none()
     );
+    let source_frame = key(
+        b"source-frame",
+        &id,
+        &[object.as_slice(), &0u32.to_be_bytes()].concat(),
+    );
     assert!(
         work.metadata
-            .get(
-                &work.root,
-                &key(
-                    b"source-frame",
-                    &id,
-                    &[object.as_slice(), &0u32.to_be_bytes()].concat()
-                )
-            )
+            .get(&work.root, &source_frame)
             .await
             .unwrap()
             .is_some()
