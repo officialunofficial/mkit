@@ -1049,8 +1049,10 @@ key. The selected file augments the Mozilla roots for all Connect HTTPS RPCs,
 including streaming uploads and downloads. Certificate-chain and hostname
 verification remain enabled. A missing, unreadable, empty, or malformed
 selected file is a hard error. The CA file contains certificates only, not
-private keys. Wasm/browser clients retain browser-managed certificate trust;
-these native settings do not affect them. This changes no wire contract.
+private keys. These settings cover Connect remotes only; the self-updater is
+excluded by design and S3 remotes are not yet covered. Wasm/browser clients
+retain browser-managed certificate trust; these native settings do not affect
+them. This changes no wire contract.
 
 This crate is now the implementation `mkit-cli`'s `remote_dispatch`
 constructs for the `mkit+https://` scheme (and loopback-only

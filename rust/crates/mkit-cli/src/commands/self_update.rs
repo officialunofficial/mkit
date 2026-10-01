@@ -580,6 +580,7 @@ fn http_client(env: &UpdateEnv) -> Result<reqwest::blocking::Client, (String, u8
         }
         attempt.follow()
     });
+    // Deliberately ignore MKIT_SSL_CA_FILE/http.sslCAInfo for release downloads.
     reqwest::blocking::Client::builder()
         .user_agent(format!("mkit/{} (self-update)", env.current_version))
         .redirect(policy)

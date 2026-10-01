@@ -56,8 +56,9 @@ The native CLI can add trusted certificates with `http.sslCAInfo`, or with
 the Mozilla roots for every Connect HTTPS RPC, including upload and download
 streams. Certificate-chain and hostname verification remain enabled.
 Missing, unreadable, empty, or malformed files are hard errors. Supply
-certificates only; keep private keys out of the CA file. These native settings
-do not affect wasm/browser Fetch trust. See the
+certificates only; keep private keys out of the CA file. These settings cover
+Connect remotes only: the self-updater is excluded by design, S3 remotes are
+not yet covered, and wasm/browser Fetch trust is unaffected. See the
 [CLI certificate trust reference](../../../docs/CLI.md#https-certificate-trust).
 
 ## Sync `Transport`, async client

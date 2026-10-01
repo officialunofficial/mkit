@@ -113,3 +113,10 @@ notices, reinstatement, full admin/CLI, optional Queue outcomes and owner-approv
 bridge. Preservation retention/legal-hold purge is separate and required.
 Native remains the maintained reference/test server. Unresolved requests stay
 unresolved; this skeleton grants no waiver of serving denial or preservation.
+
+## Post-launch transport follow-up
+
+Private-CA S3 endpoints: extend additional CA-file support to `mkit+s3://`
+remotes after launch. `MKIT_SSL_CA_FILE` and `http.sslCAInfo` currently cover
+Connect HTTPS remotes only (RPCs, uploads and downloads); S3 retains its current
+HTTPS trust policy. Keep release downloads outside these custom-CA settings.
