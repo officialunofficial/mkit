@@ -992,6 +992,53 @@ async fn legal_hold_reason_and_label_follow_existing_utf8_byte_bounds() {
     }
     f.audit().await;
 }
+
+#[tokio::test]
+async fn every_restricted_in_flight_retry_is_audited_without_replacing_nonce() {
+    let f = fixture(64).await;
+    let blocked = Arc::new(
+        Engine::new(
+            RejectAcceptance {
+                store: f.work.metadata.clone(),
+                blocked: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            },
+            f.work.root.clone(),
+            config("moderation"),
+        )
+        .with_operations(f.work.clone()),
+    );
+    let operations = [
+        (admin::GET_TAKEDOWN_PATH, f.get()),
+        (admin::LIST_TAKEDOWNS_PATH, json!({"pageSize":10})),
+        (admin::SET_LEGAL_HOLD_PATH, f.hold(true)),
+        (admin::READ_PRESERVED_PATH, f.read(0)),
+    ];
+    for (i, (path, input)) in operations.into_iter().enumerate() {
+        let (h, b) = request(path, &input, u8::try_from(i).unwrap() + 1);
+        assert!(matches!(
+            blocked
+                .clone()
+                .handle_streamed(path, &h, &b, None, 100)
+                .await,
+            Reply::Unary(Response { status: 503, .. })
+        ));
+        for _ in 0..2 {
+            assert!(matches!(
+                f.engine("moderation")
+                    .handle_streamed(path, &h, &b, None, 100)
+                    .await,
+                Reply::Unary(Response { status: 409, .. })
+            ));
+        }
+        let entries = f.audit().await;
+        assert_eq!(entries.len(), (i + 1) * 2);
+        for entry in &entries[i * 2..] {
+            assert_eq!(entry["procedure"], path);
+            assert_eq!(entry["result"]["code"], "aborted");
+        }
+    }
+    assert!(!f.state().await.hold);
+}
 #[tokio::test]
 async fn list_accepts_protojson_null_scope_and_quoted_page_size() {
     let f = fixture(64).await;

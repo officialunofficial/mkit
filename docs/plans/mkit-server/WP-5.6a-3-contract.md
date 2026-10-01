@@ -77,10 +77,10 @@ accumulation or piece-count-sized collection is used. These are source-derived
 bounds, not allocator/RSS measurements. Adapters retain their actual Worker
 request/R2/DO call budgets; exhausting them terminates the stream with error.
 
-Production Rust delta against integrated target 1edfc306: 707 added and nine
-deleted physical lines (716 conservatively counting test-module declarations);
-below 1,500. The separate test file adds 1,008 lines.
-Fifteen focused regression tests are implemented and pass: roles/replay/audit
+Production Rust delta against integrated target 1edfc306 after review: 719 added
+and twelve deleted physical lines (731 counting test-module declarations);
+below 1,500. The separate test file adds 1,055 lines.
+Sixteen focused regression tests are implemented and pass: roles/replay/audit
 continuity, separate status, current-role/key/retention/ownership retry checks,
 byte-free nonce storage, offsets and last-message rules, midstream failures,
 actual hold-blocked purge, all/scoped pagination, stale hold CAS and audit failure.
@@ -188,3 +188,23 @@ wasm32 all-feature server clippy, warning-denied server rustdoc, touched/reverse
 doctests, ci-scripts and ci-security all pass. ci-scripts also reruns protocol
 checks, admin golden vectors, CLI baseline, wasm feature checks and default
 Worker build. Results are retained in the corresponding *-latest-base.log files.
+
+## Reviewer fix and targeted verification (2026-09-30)
+
+Independent security and A/B conformance passes reviewed head 2f4677be.
+A signed in-flight nonce retry returned aborted without auditing that result.
+The shared ledger now appends that failure through record_result without
+replacing the in-flight nonce or repeating workflow effects. A regression for
+all four restricted operations failed before the fix (zero audit entries,
+expected two), then passed with two audited retries per operation and verified
+chain continuity. Both reviewers concurred with this small correction.
+
+All 37 admin/restricted-takedown tests pass, including the sixteen restricted
+regressions. Native all-target/all-feature and wasm32 all-feature mkit-server
+clippy pass with -D warnings; formatting and diff checks pass. Both existing
+transport bindings were regenerated from canonical protos and remain unchanged;
+AdminService uses handwritten Connect JSON and dynamic proto golden validation.
+Review logs are retained under ~/.cache/mkit-test-tmp/wp-5-6a-3-review.
+Full gates were not rerun; the measured parent controls and timeout/Worker
+limitations above remain exceptions, not green suites. Activation remains off
+until WP-4.18 and R-203; no additional launch capability is enabled here.

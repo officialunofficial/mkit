@@ -335,9 +335,18 @@ impl<S: NamespaceStore> Engine<S> {
                         )
                         .await;
                 }
-                let result = old
-                    .result
-                    .ok_or_else(|| ServerError::new(Code::Aborted, "admin request is in flight"))?;
+                let Some(result) = old.result else {
+                    return self
+                        .record_result(
+                            &verified,
+                            now,
+                            Response::error(&ServerError::new(
+                                Code::Aborted,
+                                "admin request is in flight",
+                            )),
+                        )
+                        .await;
+                };
                 return self
                     .finish_extension(
                         &verified,
