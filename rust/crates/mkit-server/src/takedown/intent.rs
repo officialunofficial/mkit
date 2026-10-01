@@ -290,7 +290,23 @@ impl<N: NamespaceStore + Clone> Service<N> {
         for _ in 0..(256 + 16) {
             let (record, old) = self.record(&store, &id).await?.ok_or_else(unavailable)?;
             let Some(reference) = record.actions.get(record.activation_cursor) else {
-                return Ok(());
+                let batch = crate::admin::plan_takedown_completion(
+                    &store,
+                    &self.root,
+                    &record.operation,
+                    &record.digest,
+                )
+                .await?
+                .require(Precondition::Equals(request_key(&id), old));
+                if store
+                    .apply(&self.root, batch)
+                    .await
+                    .map_err(|_| unavailable())?
+                    == BatchOutcome::Committed
+                {
+                    return Ok(());
+                }
+                continue;
             };
             let raw = store
                 .get(
@@ -540,7 +556,7 @@ impl<N: NamespaceStore + Clone> AdminOperations for Service<N> {
         request_budget: &'a SliceBudget,
     ) -> crate::BoxFuture<'a, Result<Response, ServerError>> {
         Box::pin(async move {
-            if path == crate::admin::TAKEDOWN_PATH && response.status == 200 {
+            if path == crate::admin::TAKEDOWN_PATH && matches!(response.status, 200 | 503) {
                 let local_budget =
                     crate::purge::SliceBudget::with_parent(64, request_budget.clone());
                 let reply: Json =
@@ -566,6 +582,9 @@ impl<N: NamespaceStore + Clone> AdminOperations for Service<N> {
                 }
                 self.resume_with_local_budget(id, now, request_budget, &local_budget)
                     .await?;
+                return Ok(Response::json(
+                    &json!({"takedownId":to_hex(&id),"complete":false}),
+                ));
             }
             Ok(response)
         })

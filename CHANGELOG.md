@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: retain retryable Takedown acceptance with its stable id until every
+  denial is active. Exact retries resume bounded activation; timer-15 recovery
+  finalizes the original nonce and operation result (delta review 7-1).
+
 - Server (WP-4.18, phase 1, R-194): explicit Paid indexed Uno launch selection
   and startup validation for optional HTTP/URL tokens, signed hooks/binding,
   synchronous inspection and private scanner retrieval. Native serves proofs;

@@ -21,6 +21,7 @@ use crate::{Code, NamespaceStore, Partition, ServerError};
 
 pub use auth::{Config, HEADER_NAMES};
 pub use automatic::{AuditRelayHook, AuditReserveHook, SystemAudit, extend_audit_batch};
+pub(crate) use ledger::plan_takedown_completion;
 pub use ledger::{OperationReplay, plan_operation, plan_system};
 
 /// Canonical admin path prefix; never rewrite paths before verification.

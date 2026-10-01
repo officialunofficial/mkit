@@ -34,6 +34,7 @@ struct Operation {
     digest: String,
     path: String,
     result: Response,
+    nonce: Option<String>,
 }
 
 /// A durable operation replay or an acceptance batch for a new operation.
@@ -79,12 +80,91 @@ pub async fn plan_operation<S: NamespaceStore>(
         digest: digest.into(),
         path: path.into(),
         result,
+        nonce: None,
     })?;
     Ok(OperationReplay::New(
         Batch::new()
             .require(Precondition::Absent(key.clone()))
             .put(key, value),
     ))
+}
+
+/// Retryable acceptance, carrying the stable identity while denial activation runs.
+pub(crate) fn takedown_pending(response: &Response) -> Result<Response, ServerError> {
+    let mut body: Json = serde_json::from_slice(&response.body)
+        .map_err(|_| ServerError::unavailable("invalid takedown response"))?;
+    if body["takedownId"]
+        .as_str()
+        .and_then(auth::hex::<32>)
+        .is_none()
+    {
+        return Err(ServerError::unavailable("invalid takedown identity"));
+    }
+    body["code"] = json!("unavailable");
+    body["message"] = json!("takedown denial activation is in flight");
+    let mut pending = Response::json(&body);
+    pending.status = 503;
+    Ok(pending)
+}
+
+fn pending_takedown(response: &Response) -> bool {
+    response.status == 503
+        && serde_json::from_slice::<Json>(&response.body).is_ok_and(|body| {
+            body["takedownId"]
+                .as_str()
+                .and_then(auth::hex::<32>)
+                .is_some()
+        })
+}
+
+/// Complete existing replay rows in the same guarded apply as the activation proof.
+pub(crate) async fn plan_takedown_completion<S: NamespaceStore>(
+    store: &S,
+    partition: &Partition,
+    operation_id: &str,
+    digest: &str,
+) -> Result<Batch, ServerError> {
+    let operation_key = key("ao", operation_id.as_bytes());
+    let Some(old) = store
+        .get(partition, &operation_key)
+        .await
+        .map_err(store_error)?
+    else {
+        // The intent service can also be exercised without the signed admin engine.
+        return Ok(Batch::new());
+    };
+    let mut operation: Operation = decode(&old)?;
+    if operation.path != super::TAKEDOWN_PATH || operation.digest != digest {
+        return Err(ServerError::unavailable("invalid takedown replay binding"));
+    }
+    if operation.result.status == 200 {
+        return Ok(Batch::new());
+    }
+    if !pending_takedown(&operation.result) {
+        return Err(ServerError::unavailable("invalid takedown pending result"));
+    }
+    let body: Json = serde_json::from_slice(&operation.result.body)
+        .map_err(|_| ServerError::unavailable("invalid takedown result"))?;
+    operation.result = Response::json(&json!({"takedownId":body["takedownId"],"complete":false}));
+    let mut batch = guarded(Batch::new(), operation_key.clone(), Some(old));
+    if let Some(nonce) = &operation.nonce {
+        let nonce_key = key("an", nonce.as_bytes());
+        let raw = store
+            .get(partition, &nonce_key)
+            .await
+            .map_err(store_error)?
+            .ok_or_else(|| ServerError::unavailable("missing takedown nonce"))?;
+        let mut nonce: Nonce = decode(&raw)?;
+        if nonce.digest != digest
+            || nonce.path != super::TAKEDOWN_PATH
+            || !nonce.result.as_ref().is_some_and(pending_takedown)
+        {
+            return Err(ServerError::unavailable("invalid takedown nonce binding"));
+        }
+        nonce.result = Some(operation.result.clone());
+        batch = guarded(batch, nonce_key.clone(), Some(raw)).put(nonce_key, encode(&nonce)?);
+    }
+    Ok(batch.put(operation_key, encode(&operation)?))
 }
 
 fn key(tag: &str, suffix: &[u8]) -> Key {
@@ -335,7 +415,7 @@ impl<S: NamespaceStore> Engine<S> {
                         )
                         .await;
                 }
-                let Some(result) = old.result else {
+                let Some(mut result) = old.result else {
                     return self
                         .record_result(
                             &verified,
@@ -347,6 +427,29 @@ impl<S: NamespaceStore> Engine<S> {
                         )
                         .await;
                 };
+                if path == super::TAKEDOWN_PATH && pending_takedown(&result) {
+                    let bytes = decoded.as_ref().map_or(Ok(wire.bytes.as_slice()), |d| {
+                        d.as_ref().map(Vec::as_slice).map_err(Clone::clone)
+                    })?;
+                    let input: Json = serde_json::from_slice(payload(path, bytes)?)
+                        .map_err(|_| auth::invalid("invalid admin JSON"))?;
+                    let operation = input["operationId"]
+                        .as_str()
+                        .or_else(|| input["operation_id"].as_str())
+                        .ok_or_else(|| auth::invalid("invalid operation id"))?;
+                    if let OperationReplay::Existing(stored) = plan_operation(
+                        &self.store,
+                        &self.partition,
+                        operation,
+                        path,
+                        &verified.digest,
+                        result.clone(),
+                    )
+                    .await?
+                    {
+                        result = stored;
+                    }
+                }
                 return self
                     .finish_extension(
                         &verified,
@@ -534,7 +637,12 @@ impl<S: NamespaceStore> Engine<S> {
                     };
                     match planned {
                         Err(error) => Response::error(&error),
-                        Ok(prepared) => {
+                        Ok(mut prepared) => {
+                            if verified.path == super::TAKEDOWN_PATH
+                                && prepared.response.status == 200
+                            {
+                                prepared.response = takedown_pending(&prepared.response)?;
+                            }
                             metadata = (
                                 prepared.operation_id,
                                 prepared.label,
@@ -556,7 +664,18 @@ impl<S: NamespaceStore> Engine<S> {
                             };
                             match replay {
                                 Ok(OperationReplay::Existing(result)) => result,
-                                Ok(OperationReplay::New(replay)) => {
+                                Ok(OperationReplay::New(mut replay)) => {
+                                    if verified.path == super::TAKEDOWN_PATH
+                                        && pending_takedown(&prepared.response)
+                                    {
+                                        for write in &mut replay.writes {
+                                            if let crate::store::Write::Put(_, value) = write {
+                                                let mut operation: Operation = decode(value)?;
+                                                operation.nonce = Some(verified.replay_key.clone());
+                                                *value = encode(&operation)?;
+                                            }
+                                        }
+                                    }
                                     batch.preconditions.extend(prepared.batch.preconditions);
                                     batch.writes.extend(prepared.batch.writes);
                                     batch.preconditions.extend(replay.preconditions);
@@ -619,7 +738,8 @@ impl<S: NamespaceStore> Engine<S> {
         budget: &crate::indexed::budget::SliceBudget,
         replayed: bool,
     ) -> Result<Response, ServerError> {
-        if response.status != 200
+        let pending = verified.path == super::TAKEDOWN_PATH && pending_takedown(&response);
+        if (response.status != 200 && !pending)
             || !matches!(
                 verified.path.as_str(),
                 super::TAKEDOWN_PATH | super::READ_PRESERVED_PATH
@@ -627,9 +747,9 @@ impl<S: NamespaceStore> Engine<S> {
         {
             return Ok(response);
         }
-        if replayed && verified.path == super::TAKEDOWN_PATH {
-            // The accepted timer owns recovery; a completed nonce replays its
-            // stored result without depending on runtime operations.
+        if !pending && verified.path == super::TAKEDOWN_PATH {
+            // Success is stored only after activation. Completed replay does
+            // not depend on current roles or runtime operations.
             return Ok(response);
         }
         let Some(service) = &self.operations else {
@@ -679,6 +799,7 @@ impl<S: NamespaceStore> Engine<S> {
                 Ok(result)
             };
         }
+        let pending_response = response.clone();
         match service
             .after_commit(
                 &verified.path,
@@ -691,8 +812,16 @@ impl<S: NamespaceStore> Engine<S> {
         {
             Ok(response) => Ok(response),
             Err(error) => {
-                self.record_result(verified, now, Response::error(&error))
-                    .await
+                self.record_result(
+                    verified,
+                    now,
+                    if pending {
+                        pending_response
+                    } else {
+                        Response::error(&error)
+                    },
+                )
+                .await
             }
         }
     }

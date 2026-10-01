@@ -708,8 +708,8 @@ mod accounting {
         assert_eq!(charged, 0);
         let (operation, calls, charged) = fixture.dispatch(2).await;
         assert_eq!(operation, first);
-        assert_eq!(calls, 6);
-        assert_eq!(charged, 2);
+        assert_eq!(calls, 5);
+        assert_eq!(charged, 1);
         assert_eq!(fixture.record().await["preservation_pending"], true);
     }
     #[tokio::test]
@@ -758,11 +758,28 @@ mod accounting {
         assert!(record["activation_cursor"].as_u64().unwrap() > 0);
         assert!(record["activation_cursor"].as_u64().unwrap() < 256);
         assert_eq!(record["preservation_pending"], true);
-        assert_eq!(fixture.replay(5).await.0.status, 200);
+        let (headers, body) = signed(&fixture.input, 5);
+        let retry = fixture
+            .engine
+            .handle(TAKEDOWN_PATH, &headers, &body, 10)
+            .await;
         assert_eq!(
-            fixture.record().await,
-            record,
-            "stored replay cannot advance activation"
+            retry.status, 503,
+            "partial activation cannot replay success"
+        );
+        let reply: serde_json::Value = serde_json::from_slice(&retry.body).unwrap();
+        assert_eq!(reply["code"], "unavailable");
+        assert_eq!(
+            reply["takedownId"],
+            to_hex(&hash(
+                &[b"mkit-takedown:v1\0".as_slice(), b"counted"].concat()
+            ))
+        );
+        assert!(
+            fixture.record().await["activation_cursor"]
+                .as_u64()
+                .unwrap()
+                > record["activation_cursor"].as_u64().unwrap()
         );
         let mut cursor = record["activation_cursor"].as_u64().unwrap();
         for _ in 0..4 {
@@ -781,6 +798,7 @@ mod accounting {
             assert_eq!(resumed.unwrap_err().code(), crate::Code::Unavailable);
         }
         assert_eq!(cursor, 256);
+        assert_eq!(fixture.replay(5).await.0.status, 200);
     }
     #[tokio::test]
     async fn root_activation_cursor_races_use_same_request_budget_and_preserve_denial() {
@@ -804,11 +822,20 @@ mod accounting {
                 .unwrap()
                 .is_some()
         );
-        assert_eq!(fixture.replay(6).await.0.status, 200);
+        let (headers, body) = signed(&fixture.input, 6);
+        assert_eq!(
+            fixture
+                .engine
+                .handle(TAKEDOWN_PATH, &headers, &body, 10)
+                .await
+                .status,
+            503
+        );
         assert_eq!(fixture.record().await["activation_cursor"], 0);
         fixture.store().faults.lock().unwrap().activation = 0;
         fixture.resume_activation().await.unwrap();
         assert_eq!(fixture.record().await["activation_cursor"], 1);
+        assert_eq!(fixture.replay(6).await.0.status, 200);
     }
     #[tokio::test]
     async fn whole_pack_geometry_and_draft_header_retries_stay_bounded() {
