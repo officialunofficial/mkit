@@ -2351,3 +2351,17 @@ verification is mistaken for real takedown completion. **Enforced by:**
 `admin::Engine::handle_streamed`, `takedown::work::Work`'s admin operations,
 PR2's legal-hold planner and the signed catalog/streaming regression tests.
 Production activation remains false; 4.18 mounts the catalog.
+
+## Native HTTPS extra trust
+
+**Always:** Native Connect HTTPS retains the compiled Mozilla roots and verifies
+both the certificate chain and hostname. `MKIT_SSL_CA_FILE` overrides the merged
+`http.sslCAInfo` path; selected invalid files fail before any request dispatch.
+**Because:** Extra local trust must authorize certificates explicitly without
+silently downgrading verification or losing the normal public trust store.
+**If violated:** A local trust option could admit an impersonated remote, or a
+bad file could silently use another trust configuration.
+**Enforcement:** `mkit-transport-connect::tls::client_config` builds rustls with
+augmented roots and its standard verifier. Real TLS Connect/streaming tests
+cover trusted CA, hostname mismatch and default refusal; subprocess tests cover
+selection and CLI config layering. Browser clients keep browser-managed trust.
