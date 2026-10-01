@@ -2417,10 +2417,7 @@ mod glue {
                     .map(|mount| mount.with_context(context));
                 serve_with(req, env, &cfg, hooks_from_env).await
             }
-            Err(_) if is_options_preflight(&req) => {
-                cors_preflight_response(&cors_allow_headers(), CORS_ALLOW_METHODS)
-            }
-            Err(error) => Ok(cors(json_response(unavailable_json(&error.0), 503)?)),
+            Err(error) => env_config_error(&req, &env, &error, true),
         }
     }
 
@@ -2436,7 +2433,7 @@ mod glue {
                 cfg.published_view = Some(config);
                 serve_with(req, env, &cfg, hooks_from_env).await
             }
-            Err(e) => Ok(cors(json_response(unavailable_json(&e.0), 503)?)),
+            Err(error) => env_config_error(&req, &env, &error, false),
         }
     }
 
@@ -2457,11 +2454,36 @@ mod glue {
         install();
         match WorkerConfig::from_env(&env) {
             Ok(cfg) => serve_with(req, env, &cfg, make_hooks).await,
-            Err(_) if is_options_preflight(&req) => {
-                cors_preflight_response(&cors_allow_headers(), CORS_ALLOW_METHODS)
-            }
-            Err(e) => Ok(cors(json_response(unavailable_json(&e.0), 503)?)),
+            Err(error) => env_config_error(&req, &env, &error, true),
         }
+    }
+
+    fn env_config_error(
+        req: &Request,
+        env: &Env,
+        error: &ConfigError,
+        connect_preflight: bool,
+    ) -> worker::Result<Response> {
+        #[cfg(feature = "http-objects")]
+        if crate::http_mount::glue::env_mounted_request(req, env) {
+            let response = if req.method() == worker::Method::Options {
+                let mut response = Response::empty()?.with_status(204);
+                response.headers_mut().set("Allow", "GET, HEAD, OPTIONS")?;
+                response
+            } else {
+                json_response(unavailable_json(&error.0), 503)?
+            };
+            return crate::http_mount::glue::finish(
+                response,
+                req.method().as_ref(),
+                req.headers().get("Origin")?.as_deref(),
+                &mkit_server::http_objects::mount::HttpMountOptions::default(),
+            );
+        }
+        if connect_preflight && is_options_preflight(req) {
+            return cors_preflight_response(&cors_allow_headers(), CORS_ALLOW_METHODS);
+        }
+        Ok(cors(json_response(unavailable_json(&error.0), 503)?))
     }
 
     /// Answer one request of a deployment (see the module docs), with the

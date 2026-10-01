@@ -198,6 +198,20 @@ pub(crate) mod glue {
                 .is_ok_and(|(path, _)| path == KEY_PATH || is_http_object_path(path))
     }
 
+    /// A selected environment mount retains its HTTP error contract even if
+    /// another setting prevents the full configuration from being parsed.
+    pub(crate) fn env_mounted_request(req: &Request, env: &worker::Env) -> bool {
+        let selected = env
+            .secret("HTTP_OBJECTS")
+            .ok()
+            .map(|value| value.to_string())
+            .or_else(|| env.var("HTTP_OBJECTS").ok().map(|value| value.to_string()))
+            .is_some_and(|value| value == "true");
+        selected
+            && raw_path_query(&req.inner().url())
+                .is_ok_and(|(path, _)| path == KEY_PATH || is_http_object_path(path))
+    }
+
     /// CORS and body suppression apply even to adapter/configuration errors.
     pub(crate) fn finish(
         mut response: Response,
