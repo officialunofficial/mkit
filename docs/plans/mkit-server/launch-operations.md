@@ -23,7 +23,7 @@ user-owned main merge sequence. No version bump or tag at Workers launch.
 | Main merge / separate production deployment authorization | UNRUN / user |
 
 Local Uno push/clone/takedown/Outcome evidence does not fill these slots.
-FIX-preservation-memory is in flight and required before candidate/main; the
-current 96 MiB Rust allowance targets <=48 MiB, with whole-isolate staging
-measurement still required. many_refs remains unclassified. No operation here
+FIX-preservation-memory (#1263) bounds scheduled Rust acquisition to 48 MiB;
+whole-isolate staging measurement remains required before candidate/main.
+many_refs remains unclassified. No operation here
 has been executed; no scope or resource waiver is granted.

@@ -326,8 +326,8 @@ decoder scratch reservation and idle-reader release. Correct those actual
 deployment graphs and run their focused allocator regressions before candidate
 selection; bounded core decoding alone does not establish the verification
 allowance. This defect is separate from preservation's acquisition allowance.
-The current preservation Rust allowance is 96 MiB; its reduction to at most
-48 MiB is required before selecting the launch candidate. Neither value certifies
+Scheduled preservation's Rust allowance is 48 MiB after #1263's latest-base
+retention change. This per-acquisition bound does not certify
 fit in a 128 MB isolate once JS, transport and overlap are counted. Measure
 cold/warm near-1-MiB canonical delta members through 50 hops, largest admitted
 source/compressed frames, acquisition alarms and slow ReadPreserved streams,
