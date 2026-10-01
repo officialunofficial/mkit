@@ -11,7 +11,9 @@ use crate::telemetry::{METRIC_INDEX_LOOKUP_CAPPED, Metrics};
 use crate::{BlobBody, BlobKey, BlobStore, BoxFuture, ByteRange, NamespaceStore, ServerError};
 use futures::StreamExt as _;
 use mkit_core::hash::Hash;
-use mkit_core::pack::{DecodeLimits, DeltaBaseSource, PackError, decode_frame_with};
+use mkit_core::pack::{
+    DecodeLimits, DeltaBaseSource, PackError, decode_frame_with, peek_delta_header,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -32,6 +34,8 @@ fn budget_exceeded() -> ServerError {
 pub enum ResolveFailure {
     Missing,
     Capped,
+    /// A selected member frame failed decoding or canonical id verification.
+    Corrupt(ServerError),
     Other(ServerError),
 }
 
@@ -49,7 +53,7 @@ impl ResolveFailure {
             Self::Capped => {
                 ServerError::failed_precondition("delta base not available in this repository")
             }
-            Self::Other(error) => error,
+            Self::Other(error) | Self::Corrupt(error) => error,
         }
     }
 }
@@ -482,7 +486,9 @@ pub(crate) async fn member_dependencies_clear<S: NamespaceStore>(
         located = match member_base(store, shards, repo, base, located, metrics, None).await {
             Ok(next) => next,
             Err(ResolveFailure::Missing | ResolveFailure::Capped) => return Ok(false),
-            Err(ResolveFailure::Other(error)) => return Err(error),
+            Err(ResolveFailure::Other(error) | ResolveFailure::Corrupt(error)) => {
+                return Err(error);
+            }
         };
         id = base;
     }
@@ -607,6 +613,37 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
                 source_limits.map_or(available, |limits| limits.max_frame_bytes),
             )
             .await?;
+            if source_limits.is_some() {
+                // A selected member's verified metadata is immutable. A changed
+                // object claim is corruption, even when it now exceeds the budget.
+                // Raw deltas carry their reconstructed size in the delta header;
+                // compressed delta outer claims instead describe stream size.
+                let claim = match frame.first() {
+                    Some(0x00) => Some(frame.len().saturating_sub(5) as u64),
+                    Some(0x03) => frame.get(5..9).and_then(|bytes| {
+                        bytes.try_into().ok().map(u32::from_le_bytes).map(u64::from)
+                    }),
+                    Some(0x02) => frame.get(42..46).and_then(|bytes| {
+                        bytes.try_into().ok().map(u32::from_le_bytes).map(u64::from)
+                    }),
+                    // The outer claim is a stream size. Inspect just the inner
+                    // delta header before a corrupted result can hit the budget.
+                    // An unsuccessful peek proves no mismatch: let normal decode
+                    // retain its existing corruption/resource error separation.
+                    Some(0x04) => frame
+                        .get(41..)
+                        .and_then(|bytes| peek_delta_header(bytes).ok())
+                        .map(|(_, result)| u64::from(result)),
+                    _ => None,
+                };
+                if frame.first().copied() != Some(located.value.wire_type)
+                    || claim.is_some_and(|size| size != located.value.decoded_size)
+                {
+                    return Err(ResolveFailure::Corrupt(ServerError::invalid_argument(
+                        "verified source frame metadata mismatch",
+                    )));
+                }
+            }
             let mut source = CachedBase(base_bytes);
             let (actual, bytes) = decode_frame_with(
                 &frame,
@@ -618,14 +655,16 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
                 ),
             )
             .map_err(|error| {
-                ResolveFailure::Other(if matches!(error, PackError::PackfileTooLarge) {
-                    budget_exceeded()
+                if matches!(error, PackError::PackfileTooLarge) {
+                    ResolveFailure::Other(budget_exceeded())
                 } else {
-                    ServerError::invalid_argument("object hash mismatch")
-                })
+                    ResolveFailure::Corrupt(ServerError::invalid_argument("object hash mismatch"))
+                }
             })?;
             if actual != id {
-                return Err(ServerError::invalid_argument("object hash mismatch").into());
+                return Err(ResolveFailure::Corrupt(ServerError::invalid_argument(
+                    "object hash mismatch",
+                )));
             }
             Ok((Arc::from(bytes), depth))
         }

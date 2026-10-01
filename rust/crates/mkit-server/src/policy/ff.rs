@@ -99,6 +99,9 @@ impl<B: BlobStore, S: NamespaceStore> Walk<'_, B, S> {
             Err(resolve::ResolveFailure::Capped) => {
                 return Ok(Step::Stop(self.unchecked("base")));
             }
+            Err(resolve::ResolveFailure::Corrupt(_)) => {
+                return Ok(Step::Stop(self.unchecked("member")));
+            }
             Err(resolve::ResolveFailure::Other(error))
                 if error.code() == crate::Code::Unavailable =>
             {
