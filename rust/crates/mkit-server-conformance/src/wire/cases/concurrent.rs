@@ -173,35 +173,39 @@ async fn many_ref_update(
 ) -> Result<Result<UpdateRefResponse, RpcError>, String> {
     let body = req.encode_to_vec();
     let headers = ctx.auth_headers_as(label, Rpc::UpdateRef, super::Commit::Body(&body));
-    let mut attempt = 0u32;
-    loop {
+    let replay_safe = headers
+        .iter()
+        .any(|(name, value)| name == "x-envelope-version" && value == "2")
+        && headers
+            .iter()
+            .any(|(name, value)| name == "idempotency-key" && !value.is_empty())
+        && headers.iter().any(|(name, _)| name == "x-signature");
+    for attempt in 0..=1 {
         let failed = match ctx
             .client()
             .unary(Rpc::UpdateRef, body.clone(), &headers)
             .await
         {
             Ok(Ok(value)) => return Ok(Ok(value)),
-            Ok(Err(error)) if proxy_blip(&error.message) => error.to_string(),
-            Ok(Err(error)) if attempt > 0 && error.code == "aborted" => error.to_string(),
+            Ok(Err(error))
+                if attempt == 0
+                    && replay_safe
+                    && error.http_status == 500
+                    && proxy_blip(&error.message) =>
+            {
+                error.to_string()
+            }
             Ok(Err(error)) => return Ok(Err(error)),
-            Err(error) if proxy_blip(&error) => error,
             Err(error) => return Err(error),
         };
-        if attempt >= 8 {
-            return Err(failed);
-        }
-        attempt += 1;
-        eprintln!("many_refs fixture: proxy blip for {label}, retry {attempt}: {failed}");
-        tokio::time::sleep(std::time::Duration::from_millis(
-            (200 * u64::from(attempt)).min(1_000),
-        ))
-        .await;
+        eprintln!("many_refs fixture: proxy blip for {label}, retry once: {failed}");
     }
+    unreachable!("the second attempt always returns")
 }
 
 /// miniflare's dev proxy, not a server answer. The dev server keeps running.
 fn proxy_blip(message: &str) -> bool {
-    message.contains("Network connection lost") || message.contains("client error (Connect)")
+    message.contains("Network connection lost")
 }
 
 /// Correctness under a wide repository (throughput is measured elsewhere):
