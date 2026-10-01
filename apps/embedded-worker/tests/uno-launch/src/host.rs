@@ -3,7 +3,7 @@ use mkit_server::pipeline::{
     Admission, AdmissionDecision, AdmissionInput, Authorizer, Challenge, DefaultAdmission,
     DeliveryError, Hooks, NoPreReceive, NoReceipts, Outcome, OutcomeKind, OutcomeSink,
 };
-use mkit_server::purge::{LocalInvalidation, PurgeSink, Request as PurgeRequest, SliceBudget};
+use mkit_server::purge::{PurgeSink, Request as PurgeRequest};
 use mkit_server::{AuthzFacts, Operation, Procedure};
 use mkit_server::{BoxFuture, ServerError, StoreError};
 use mkit_server_worker::adapter::{self, ConfigError, WorkerConfig};
@@ -72,18 +72,10 @@ impl PurgeSink for HostPurge {
         request: &'a PurgeRequest,
     ) -> BoxFuture<'a, core::result::Result<(), StoreError>> {
         Box::pin(async move {
-            // A real cache invalidator for this single local cache fixture.
-            // This is not a claim of global deployed CDN purge coverage.
-            let local = LocalCache {
-                cache: WorkerCache,
-                snapshot_deployment: None,
-            };
-            let budget = SliceBudget::new(64);
-            if local.invalidate(request, 0, &budget).await?.is_some() {
-                return Err(StoreError::Unavailable(
-                    "local fixture purge incomplete".into(),
-                ));
-            }
+            // Core delivery has completed paired LocalCache under the shared purse.
+            // This callback acknowledges only that local work, not deployed CDN purge.
+            // It performs no additional physical cache/API calls.
+            request.validate()?;
             worker::console_log!("MKIT_UNO_PURGE delivered");
             Ok(())
         })
@@ -132,7 +124,14 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     init.with_method(req.method())
         .with_headers(req.headers().clone())
         .with_body(req.inner().body().map(Into::into));
-    let request = Request::new_with_init(&format!("https://uno.internal.invalid{target}"), &init)?;
+    let query = req
+        .url()?
+        .query()
+        .map_or_else(String::new, |raw| format!("?{raw}"));
+    let request = Request::new_with_init(
+        &format!("https://uno.internal.invalid{target}{query}"),
+        &init,
+    )?;
     if internal_admin.is_some() {
         adapter::serve_admin_with(request, env, &cfg).await
     } else {
