@@ -713,7 +713,14 @@ claim. Vendored ruzstd checks `min(Window_Size, 128 KiB)` before raw/RLE
 materialization and before executing any compressed sequences. Its separate
 ring and block scratch have a fixed 28 MiB working allowance, including
 transient old/new ring allocations during growth, outside the owned-payload
-resident cap and the window reader's carry/output budget. The pure-Rust path also
+resident cap and the window reader's carry/output budget. Scheduled verification
+reserves that scratch within its unchanged 48 MiB allowance by retaining a
+1 MiB LRU (or one newest admitted larger base) and releasing the idle reader
+window before nested delta-base decode. The physical window geometry and
+entry admission formula remain unchanged. A post-entry cursor commits only
+after delta verification succeeds; the next alarm resumes with the same hash
+and etag checks. Member-chain copies drop after their dependency/byte charges
+are staged. The pure-Rust path also
 checks what `ruzstd` skips and the C decoder enforces: the declared
 content size against the claim and the decoded length, the content
 checksum, the reserved descriptor and sequence-mode bits, and the
