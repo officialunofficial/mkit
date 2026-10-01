@@ -302,8 +302,9 @@ pub(crate) async fn serve(
                 }
                 #[allow(clippy::arc_with_non_send_sync)]
                 let engine = std::sync::Arc::new(engine);
+                let verified_at = mkit_server::Clock::now_ms(&crate::clock::WorkerClock);
                 engine
-                    .handle_streamed(&path, &headers, &capture, None, now)
+                    .handle_streamed(&path, &headers, &capture, None, verified_at)
                     .await
             }
             Ok(Err(error)) => return Err(error),

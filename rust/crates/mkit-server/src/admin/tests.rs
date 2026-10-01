@@ -20,12 +20,21 @@ fn request(path: &str, value: &serde_json::Value, nonce: u8) -> (Headers, BodyCa
     signed_bytes(path, &bytes, nonce)
 }
 fn signed_bytes(path: &str, bytes: &[u8], nonce: u8) -> (Headers, BodyCapture) {
+    signed_bytes_with_times(path, bytes, nonce, 0, 60_000)
+}
+fn signed_bytes_with_times(
+    path: &str,
+    bytes: &[u8],
+    nonce: u8,
+    created_ms: u64,
+    expiry_ms: u64,
+) -> (Headers, BodyCapture) {
     let mut capture = BodyCapture::default();
     capture.push(bytes);
     let nonce = to_hex(&[nonce; 32]);
     let digest = capture.digest();
     let canonical = format!(
-        "mkit-admin:v1\noperator\nhttps://server.example\n{path}\n{digest}\n0\n60000\n{nonce}"
+        "mkit-admin:v1\noperator\nhttps://server.example\n{path}\n{digest}\n{created_ms}\n{expiry_ms}\n{nonce}"
     );
     let signature = SigningKey::from_bytes(&[71; 32])
         .sign(&hash(canonical.as_bytes()))
@@ -40,8 +49,8 @@ fn signed_bytes(path: &str, bytes: &[u8], nonce: u8) -> (Headers, BodyCapture) {
         "1".to_owned(),
         "operator".into(),
         "https://server.example".into(),
-        "0".into(),
-        "60000".into(),
+        created_ms.to_string(),
+        expiry_ms.to_string(),
         nonce,
         digest,
         signature,
@@ -657,6 +666,21 @@ async fn envelope_precheck_does_not_replace_exact_body_digest_verification() {
             .status,
         401
     );
+    assert_eq!(head(&store).await, 0);
+}
+
+#[tokio::test]
+async fn envelope_must_still_be_live_when_body_verification_finishes() {
+    let store = std::sync::Arc::new(MemoryKv::default());
+    let config = config(&["audit"]);
+    let engine = std::sync::Arc::new(Engine::new(store.clone(), partition(), config.clone()));
+    let (headers, body) = signed_bytes_with_times(AUDIT_PATH, b"{}", 44, 0, 105);
+
+    assert!(precheck_envelope(&config, AUDIT_PATH, &headers, 100).is_ok());
+    let reply = engine
+        .handle_streamed(AUDIT_PATH, &headers, &body, None, 106)
+        .await;
+    assert!(matches!(reply, Reply::Unary(response) if response.status == 401));
     assert_eq!(head(&store).await, 0);
 }
 
