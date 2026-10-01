@@ -1543,7 +1543,7 @@ Config / keys / version:
     `core.fsmonitor`) are **rejected** rather than stored. Names match
     case-insensitively and canonicalize to lowercase, like git.
 - `mkit self update [--version <tag>] [--check] [--allow-downgrade]
-  [--format human|json]` &mdash; update this binary in place from a signed
+  [--format human|json]` &mdash; update this binary in place from a
   GitHub Release. The downloaded archive is checked against its sha256
   sidecar asset when the release publishes one; this runs entirely
   in-process, no `cosign` and no GitHub attestation API are involved.
@@ -1719,6 +1719,7 @@ which routes them to the user scope automatically.
 | `remote_bucket` | name | empty | For s3 remotes |
 | `remote_type` | `file` / `http` / `s3` / `ssh` / `memory` | auto | |
 | `transport_auth` | `bearer` / `envelope` | `bearer` | Write-auth mode for `mkit+https://`/`mkit+http://`; `envelope` additionally Ed25519-signs writes with the commit-signing key (see `signer`/`signing_key`/`key.ed25519_ref`) |
+| `http.sslCAInfo` | PEM certificate file path | unset | Additional trust certificates for native Connect HTTPS remotes only; normal user/repository/`-c` configuration scopes apply. `MKIT_SSL_CA_FILE` takes precedence. See [HTTPS certificate trust](#https-certificate-trust). |
 | `admission_helper` | absolute executable path | unset | User-scoped; invoked once for a 402 on a trusted remote. Its stdin includes untrusted server challenge content. The helper decides whether and how much to spend. |
 | `remote.<name>.admission_headers` | comma-separated HTTP header names | empty | User-scoped additions to the admission helper's request allowlist; hard-reserved names are refused. |
 | `ssh.strict_host_key_checking` | `yes` / `no` / `accept-new` | inherit | User-scoped only |
@@ -1738,6 +1739,35 @@ Keystore backend names include `software`, `software-raw`, `macos-keychain`,
 when the target build enables the corresponding backend feature. Security-
 sensitive selector keys are ignored from repo-local config; set them in
 `$XDG_CONFIG_HOME/mkit/config` or with explicit command flags.
+
+### HTTPS certificate trust
+
+For a private or local mkit remote over Connect HTTPS (`mkit+https://`),
+supply a PEM file containing the CA certificates you trust:
+
+```sh
+mkit config http.sslCAInfo /absolute/path/to/local-ca.pem
+# Override the configured file for one command:
+MKIT_SSL_CA_FILE=/absolute/path/to/other-ca.pem mkit fetch origin
+```
+
+`http.sslCAInfo` follows the normal user, repository, and command-line `-c`
+configuration precedence. `MKIT_SSL_CA_FILE` overrides the resulting value.
+Configured relative paths start at the repository root; `~/` expands against
+`HOME`. An environment file path is used as supplied.
+The selected file adds certificates to the bundled Mozilla roots; certificate-chain
+and hostname verification remain enabled. A missing, unreadable, empty,
+or malformed selected file is a hard error. Keep private keys out of the
+CA file; it contains certificates only.
+
+These settings apply only to native mkit remotes over the Connect transport:
+HTTPS RPCs, pack uploads and downloads. The self-updater uses the OS trust
+store and the release checksum when present; it does not read
+`MKIT_SSL_CA_FILE` / `http.sslCAInfo`. S3 remotes do not yet honor either
+setting; private-CA S3 endpoints are a post-launch follow-up. Wasm/browser
+certificate trust is unchanged.
+The key shares its spelling with [Git's CA-file setting](https://git-scm.com/docs/git-config#Documentation/git-config.txt-httpsslCAInfo);
+mkit uses its own `MKIT_SSL_CA_FILE` environment variable.
 
 ### Admission helper
 
@@ -1861,6 +1891,12 @@ parsing stderr.
   `NO_COLOR` overrides this.
 - **`SSH_AUTH_SOCK`** &mdash; standard OpenSSH agent socket, used by
   `mkit+ssh://` transports.
+- **`MKIT_SSL_CA_FILE`** &mdash; PEM certificate file for additional native
+  Connect HTTPS remote trust only, overriding `http.sslCAInfo`. The
+  self-updater is excluded by design; S3 remotes are not yet covered.
+  Certificates are added to the Mozilla roots, with chain and hostname verification enabled.
+  Missing, unreadable, empty, or malformed files are hard errors. See
+  [HTTPS certificate trust](#https-certificate-trust).
 - **`XDG_CONFIG_HOME`**, **`XDG_DATA_HOME`**, **`XDG_CACHE_HOME`**,
   **`XDG_STATE_HOME`** &mdash; XDG Base Directory roots for user-level config,
   keystore, cache, and state respectively. Defaults per the freedesktop

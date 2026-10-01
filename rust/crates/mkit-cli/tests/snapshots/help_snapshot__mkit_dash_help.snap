@@ -320,9 +320,9 @@ commands:
                     Manage the trust-roots registry `verify --trusted` and
                     `verify-attest` read from
   self update [--version <tag>] [--check] [--allow-downgrade] [--format human|json]
-                    Update this binary in place from a signed GitHub
-                    Release, verifying the mkit-native release
-                    attestation against keys embedded at build time.
+                    Update this binary in place from a GitHub Release.
+                    Use OS certificate trust and check the release
+                    checksum when present; ignore custom remote CAs.
                     Only for installer-managed binaries (curl mkit.sh |
                     sh); refuses with guidance under brew/cargo.
                     --check only reports; `latest` never downgrades

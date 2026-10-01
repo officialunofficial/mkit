@@ -23,6 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repository purges with timer-15 progress and immediately invalidate configured
   local caches (launch review 7a-2, existing R-190).
 
+- Server: keep relay progress continuations after the current wake when retry
+  metadata retains an older due time. Update timer, verification-job and
+  published-view tests to assert retained capped retries and recovery;
+  recognize the HTTP content-header golden as a JSON table in the wasm verifier,
+  and correct the route property's reserved-name fixture expectations.
+
+- CLI (`mkit-cli`, additive): add `http.sslCAInfo` and overriding
+  `MKIT_SSL_CA_FILE` for extra PEM trust certificates on all native Connect
+  HTTPS remote RPCs and pack streams only. Keep Mozilla roots and
+  chain/hostname verification; invalid CA files fail closed. The self-updater
+  keeps OS trust and release checksums when present, ignoring both settings.
+  S3 remotes are not yet covered. Browser trust is unchanged.
+
 - Server (R-205): `DEFAULT_REPO_VISIBILITY=public|private` on Workers and
   native `--default-repo-visibility` select visibility for repositories without
   a stored setting. The default remains public; explicit visibility wins.

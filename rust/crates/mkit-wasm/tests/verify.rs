@@ -163,6 +163,7 @@ fn golden_http_object_spans_via_wasm() {
         if [
             "url-parse",
             "response-cases",
+            "content-headers",
             "object_shallow",
             "object_root",
             "chunk",

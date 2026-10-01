@@ -1470,6 +1470,11 @@ any relay-row deletions, or a guarded kind-3 relay timer reschedule may use
 the reserved space; ordinary puts still fail. The timer exception preserves
 immediate rescheduling after progress on a full shard; without it the runner
 would wait for the 5-second retry backoff.
+After progress, the persisted relay continuation is strictly after the current
+physical wake even when retry metadata retains an earlier handler due time.
+The shared tick budget may request an earlier conservative alarm, but cannot
+delay that continuation. The retry-progress and full-source relay tests enforce
+this rule without changing tick allowances.
 
 **Because:** target delivery and source cleanup cannot share a transaction.
 A crash, overlapping timer fires, or a concurrent writer can occur between them.
@@ -2364,3 +2369,17 @@ verification is mistaken for real takedown completion. **Enforced by:**
 `admin::Engine::handle_streamed`, `takedown::work::Work`'s admin operations,
 PR2's legal-hold planner and the signed catalog/streaming regression tests.
 Production activation remains false; 4.18 mounts the catalog.
+
+## Native HTTPS extra trust
+
+**Always:** Native Connect HTTPS retains the compiled Mozilla roots and verifies
+both the certificate chain and hostname. `MKIT_SSL_CA_FILE` overrides the merged
+`http.sslCAInfo` path; selected invalid files fail before any request dispatch.
+**Because:** Extra local trust must authorize certificates explicitly without
+silently downgrading verification or losing the normal public trust store.
+**If violated:** A local trust option could admit an impersonated remote, or a
+bad file could silently use another trust configuration.
+**Enforcement:** `mkit-transport-connect::tls::client_config` builds rustls with
+augmented roots and its standard verifier. Real TLS Connect/streaming tests
+cover trusted CA, hostname mismatch and default refusal; subprocess tests cover
+selection and CLI config layering. Browser clients keep browser-managed trust.

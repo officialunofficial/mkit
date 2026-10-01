@@ -149,6 +149,9 @@ pub struct Config {
     pub ssh_strict_host_key_checking: String,
     pub ssh_user_known_hosts_file: String,
     pub ssh_identity_file: String,
+    /// Extra PEM certificate authorities for native HTTPS remote connections.
+    /// `MKIT_SSL_CA_FILE` overrides this normally layered `http.sslCAInfo` key.
+    pub http_ssl_ca_info: String,
     /// Write-auth scheme for `mkit+https://` / `mkit+http://` remotes
     /// (`mkit-transport-connect::ConnectTransport`). Empty/`"bearer"`
     /// (default) sends `MKIT_API_TOKEN` as a Bearer token, unchanged from
@@ -421,6 +424,8 @@ pub enum ConfigError {
     UnknownKey(String),
     #[error("invalid user.identity: {0}")]
     InvalidUserIdentity(&'static str),
+    #[error("invalid http.sslCAInfo path: {0}")]
+    InvalidHttpCaPath(&'static str),
     #[error(
         "key path must not contain `..`; relative paths must stay under `.mkit/keys/` and absolute paths must stay under `$HOME`: {0}"
     )]
@@ -431,6 +436,42 @@ pub enum ConfigError {
 /// `ssh.*_file`) cannot escape via `..` traversal. Empty strings pass
 /// — callers fall back to the documented default.
 impl Config {
+    /// Resolve `http.sslCAInfo` for a native HTTPS connection. Relative paths
+    /// start at the worktree root; `~` and `~/` use the process's home directory.
+    /// The stored config value remains unchanged for normal config roundtrips.
+    ///
+    /// # Errors
+    /// A tilde path without a home directory, or unsupported `~user` syntax.
+    pub fn ssl_ca_file_path(&self, layout: &RepoLayout) -> Result<Option<PathBuf>, ConfigError> {
+        let value = self.http_ssl_ca_info.as_str();
+        if value.is_empty() {
+            return Ok(None);
+        }
+        let path = if value == "~" || value.starts_with("~/") {
+            let home = std::env::var_os("HOME")
+                .filter(|directory| !directory.is_empty())
+                .ok_or(ConfigError::InvalidHttpCaPath(
+                    "HOME is unavailable for a tilde path",
+                ))?;
+            let mut path = PathBuf::from(home);
+            if let Some(rest) = value.strip_prefix("~/") {
+                path.push(rest);
+            }
+            path
+        } else if value.starts_with('~') {
+            return Err(ConfigError::InvalidHttpCaPath(
+                "use ~/ or an absolute path, not ~user",
+            ));
+        } else {
+            PathBuf::from(value)
+        };
+        Ok(Some(if path.is_absolute() {
+            path
+        } else {
+            layout.worktree_root().join(path)
+        }))
+    }
+
     /// Map `durability.objects` onto the object-store sync policy.
     /// Unknown values fall back to the batched default rather than
     /// erroring — config load must not brick the repo.
@@ -807,6 +848,7 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
         "ssh.strict_host_key_checking" => val.clone_into(&mut cfg.ssh_strict_host_key_checking),
         "ssh.user_known_hosts_file" => val.clone_into(&mut cfg.ssh_user_known_hosts_file),
         "ssh.identity_file" => val.clone_into(&mut cfg.ssh_identity_file),
+        "http.sslcainfo" => val.clone_into(&mut cfg.http_ssl_ca_info),
         "transport_auth" => val.clone_into(&mut cfg.transport_auth),
         "grant.webauthn_rp" => cfg
             .grant_webauthn_rp
@@ -987,6 +1029,7 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
         ("user.email", cfg.user_email.as_str()),
         ("default_branch", cfg.default_branch.as_str()),
         ("durability.objects", cfg.durability_objects.as_str()),
+        ("http.sslcainfo", cfg.http_ssl_ca_info.as_str()),
         ("remote_endpoint", cfg.remote_endpoint.as_str()),
         ("remote_bucket", cfg.remote_bucket.as_str()),
         ("remote_type", cfg.remote_type.as_str()),

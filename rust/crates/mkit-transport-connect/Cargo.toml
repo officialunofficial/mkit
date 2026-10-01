@@ -93,7 +93,7 @@ webpki-roots = "1"
 # this crate can deterministically install a `ring`-backed default
 # `CryptoProvider` regardless of what crypto backend(s) a consuming
 # workspace's OTHER dependencies pull in for the same `rustls` version
-# (`aws-lc-rs`, `ring`, or both) — see `client::ensure_crypto_provider`.
+# (`aws-lc-rs`, `ring`, or both) — see `tls::client_config`.
 # `ring` needs no `cmake` (unlike `aws-lc-rs`), matching this crate's
 # minimal-system-dependency posture.
 rustls = { version = "0.23", features = ["ring"] }
@@ -124,3 +124,8 @@ connectrpc = { version = "0.9.0", default-features = false, features = [
     "zstd",
     "json",
 ] }
+
+# Native TLS trust and streaming RPC regression fixture only.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+tempfile = "3"
+tokio = { version = "1", features = ["io-util"] }
