@@ -3,6 +3,8 @@
 use crate::rt::{BoxFuture, MaybeSend, MaybeSync};
 use crate::store::{Key, Partition, Precondition, StoreError, Value, Write, codec::RelayV1};
 
+pub(crate) const AUDIT_CAPACITY: &str = "automatic audit combined batch capacity";
+
 /// Runs before each target apply attempt, including retries on contention or
 /// shrinking a combined group to fit hook additions within the store limits.
 /// Added effects must fit the batch limits and tolerate repeated delivery.

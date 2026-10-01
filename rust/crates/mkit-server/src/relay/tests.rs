@@ -3447,3 +3447,36 @@ async fn absent_pending_marker_proof_rejects_concurrent_holder_state_or_marker_c
         assert!(remote.get(&destination, &rh).await.unwrap().is_none());
     }
 }
+
+struct InvalidHook(AtomicUsize);
+impl RelayHook for InvalidHook {
+    fn before_apply<'a>(
+        &'a self,
+        _: &'a Partition,
+        _: &'a [(u64, RelayV1)],
+        _: &'a mut Vec<Precondition>,
+        _: &'a mut Vec<Write>,
+    ) -> BoxFuture<'a, Result<(), StoreError>> {
+        Box::pin(async move {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(StoreError::Invalid("batch exceeds MAX_BATCH_BYTES".into()))
+        })
+    }
+}
+
+#[tokio::test]
+async fn ordinary_invalid_hook_error_is_terminal_without_group_shrinking() {
+    let s = memory();
+    for _ in 0..2 {
+        append(&s, &target(0), vec![(key(), Value::default())], 50).await;
+    }
+    let h = RelayHandler {
+        target: memory(),
+        hook: InvalidHook(AtomicUsize::new(0)),
+        budget: RelayBudget::default(),
+    };
+    fire(&h, &s).await.unwrap();
+    assert_eq!(h.hook.0.load(Ordering::SeqCst), 1);
+    assert_eq!(queued(&s).await.len(), 2);
+    assert!(h.target.get(&target(0), &key()).await.unwrap().is_none());
+}

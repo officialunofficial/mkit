@@ -460,6 +460,12 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                 )
                 .await
             {
+                if matches!(&error, StoreError::Invalid(message) if message.as_ref() == super::AUDIT_CAPACITY)
+                    && end > start + 1
+                {
+                    end = start + (end - start) / 2;
+                    continue;
+                }
                 tracing::warn!(?target, %error, "relay hook failed");
                 return None;
             }

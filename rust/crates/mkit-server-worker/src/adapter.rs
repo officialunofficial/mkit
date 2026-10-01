@@ -1112,7 +1112,7 @@ where
     S: mkit_server::NamespaceStore,
     T: mkit_server::NamespaceStore + 'static,
 {
-    timer_registry_budgeted(class, target, plan, None, None)
+    timer_registry_budgeted(class, target, plan, None, None, None, None)
 }
 
 #[allow(
@@ -1127,7 +1127,9 @@ fn timer_registry_budgeted<
     target: Result<T, ConfigError>,
     plan: Option<&str>,
     alarm_budget: Option<&mkit_server::purge::SliceBudget>,
-    takedown_root: Option<mkit_server::Partition>,
+    takedown_root: Option<&mkit_server::Partition>,
+    relay_root: Option<&mkit_server::Partition>,
+    purge: Option<&mkit_server::purge::PurgeConfig>,
 ) -> mkit_server::timers::TimerRegistry<'static, S> {
     use crate::classes::ShardClass;
     use mkit_server::relay::{RelayBudget, RelayHandler};
@@ -1159,9 +1161,17 @@ fn timer_registry_budgeted<
             })
         }
         ShardClass::ContentIndexShard => match (takedown_root, target.clone()) {
-            (Some(root), Ok(store)) => registry.register(mkit_server::takedown::late::LateTimer {
-                acceptance: mkit_server::takedown::late_owner::LateOwner::new(store, root),
-                max_subrequests: 700,
+            (Some(root), Ok(store)) => registry.register(crate::purge::Budgeted {
+                handler: mkit_server::takedown::late::LateTimer {
+                    acceptance: mkit_server::takedown::late_owner::LateOwner::new(
+                        store,
+                        root.clone(),
+                    )
+                    .with_purge(purge.cloned()),
+                    max_subrequests: 700,
+                },
+                budget: alarm_budget.cloned(),
+                calls: if purge.is_some() { 64 } else { 0 },
             }),
             _ => registry.register(mkit_server::relay::TakedownRequestTimer),
         },
@@ -1171,7 +1181,10 @@ fn timer_registry_budgeted<
         || alarm_budget.is_some()
             && matches!(
                 class,
-                ShardClass::NsCoordinator | ShardClass::RefStore | ShardClass::RepoIndexShard
+                ShardClass::NsCoordinator
+                    | ShardClass::RefStore
+                    | ShardClass::RepoIndexShard
+                    | ShardClass::ContentIndexShard
             ) {
         let paid = plan.is_some_and(|p| p.trim().eq_ignore_ascii_case("paid"));
         let max_per_tick = if paid {
@@ -1194,7 +1207,17 @@ fn timer_registry_budgeted<
         let relay = match target.clone() {
             Ok(target) => Some(RelayHandler {
                 target,
-                hook: WorkerRelayHook::new(class),
+                hook: WorkerRelayHook::new(relay_root.cloned().unwrap_or_else(|| {
+                    if class == ShardClass::RefStore {
+                        mkit_server::Partition::Namespace(
+                            mkit_server::NamespaceKey::deployment_default(),
+                        )
+                    } else {
+                        mkit_server::Partition::Coordinator(
+                            mkit_server::NamespaceKey::deployment_default(),
+                        )
+                    }
+                })),
                 budget,
             }),
             Err(error) => {
@@ -1716,7 +1739,7 @@ struct WorkerRelayHook {
 }
 
 impl WorkerRelayHook {
-    fn new(class: crate::classes::ShardClass) -> Self {
+    fn new(root: mkit_server::Partition) -> Self {
         Self {
             content: mkit_server::relay::HolderRelayHook {
                 #[cfg(target_arch = "wasm32")]
@@ -1724,17 +1747,7 @@ impl WorkerRelayHook {
                 #[cfg(not(target_arch = "wasm32"))]
                 clock: Arc::new(mkit_server::SystemClock),
             },
-            audit: mkit_server::admin::AuditReserveHook::new(
-                if class == crate::classes::ShardClass::RefStore {
-                    mkit_server::Partition::Namespace(
-                        mkit_server::NamespaceKey::deployment_default(),
-                    )
-                } else {
-                    mkit_server::Partition::Coordinator(
-                        mkit_server::NamespaceKey::deployment_default(),
-                    )
-                },
-            ),
+            audit: mkit_server::admin::AuditReserveHook::new(root),
         }
     }
 }
@@ -1763,7 +1776,10 @@ impl mkit_server::relay::RelayHook for WorkerRelayHook {
         pre: &'a mut Vec<mkit_server::Precondition>,
         writes: &'a mut Vec<mkit_server::Write>,
     ) -> mkit_server::BoxFuture<'a, Result<(), mkit_server::StoreError>> {
-        self.content.before_apply(target, rows, pre, writes)
+        Box::pin(async move {
+            self.content.before_apply(target, rows, pre, writes).await?;
+            self.audit.before_apply(target, rows, pre, writes).await
+        })
     }
 
     fn before_apply_observed<'a>(
@@ -1774,8 +1790,12 @@ impl mkit_server::relay::RelayHook for WorkerRelayHook {
         pre: &'a mut Vec<mkit_server::Precondition>,
         writes: &'a mut Vec<mkit_server::Write>,
     ) -> mkit_server::BoxFuture<'a, Result<(), mkit_server::StoreError>> {
-        self.content
-            .before_apply_observed(target, rows, observed, pre, writes)
+        Box::pin(async move {
+            self.content
+                .before_apply_observed(target, rows, observed, pre, writes)
+                .await?;
+            self.audit.before_apply(target, rows, pre, writes).await
+        })
     }
 }
 
@@ -2283,22 +2303,7 @@ mod glue {
         } else {
             meta
         };
-        if let Some(purge) = config.purge.take() {
-            config.purge = Some(
-                purge
-                    .with_audit(Arc::new(mkit_server::admin::SystemAudit::new(
-                        meta.clone(),
-                        cfg.probe_partition(),
-                    )))
-                    .with_local(cfg.custom_purge.as_ref().map_or_else(
-                        || {
-                            Arc::new(crate::purge::local_cache(cfg))
-                                as Arc<dyn mkit_server::purge::LocalInvalidation>
-                        },
-                        |custom| custom.local.clone(),
-                    )),
-            );
-        }
+        config.purge = crate::admin::purge_config(cfg, meta.clone(), Some(request_budget))?;
         #[cfg(feature = "published-view")]
         let snapshot_fence = config.purge.as_ref().map(|_| meta.clone());
         #[cfg(feature = "test-faults")]
@@ -2883,12 +2888,25 @@ mod glue {
             .ok()
             .filter(|cfg| cfg.takedown.is_some())
             .map(WorkerConfig::probe_partition);
+        let (purge, takedown_root) = match (&cfg, &target) {
+            (Ok(cfg), Ok(target)) => match crate::admin::purge_config(cfg, target.clone(), None) {
+                Ok(purge) => (purge, takedown_root),
+                Err(error) => {
+                    crate::log_failure(&error.to_string());
+                    (None, None)
+                }
+            },
+            _ => (None, None),
+        };
+        let relay_root = cfg.as_ref().ok().map(WorkerConfig::probe_partition);
         let registry = super::timer_registry_budgeted(
             class,
             target,
             plan.as_deref(),
             alarm_budget.as_ref(),
-            takedown_root,
+            takedown_root.as_ref(),
+            relay_root.as_ref(),
+            purge.as_ref(),
         );
         let registry = if let (Ok(cfg), Some(budget)) = (&cfg, &alarm_budget)
             && cfg.takedown.is_some()
@@ -2898,7 +2916,11 @@ mod glue {
                     _ => crate::classes::ShardClass::NsCoordinator,
                 } {
             match crate::admin::work(env, cfg, budget) {
-                Ok(work) => registry.register(work),
+                Ok(work) => registry.register(crate::purge::Budgeted {
+                    calls: if work.purge.is_some() { 64 } else { 0 },
+                    handler: work,
+                    budget: Some(budget.clone()),
+                }),
                 Err(error) => {
                     crate::log_failure(&error.to_string());
                     registry
@@ -3317,6 +3339,10 @@ mod glue {
 }
 
 #[cfg(test)]
+#[path = "adapter/activation_tests.rs"]
+mod activation_tests;
+
+#[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
@@ -3419,6 +3445,8 @@ mod tests {
                 Ok(kv.clone()),
                 Some("paid"),
                 Some(&budget),
+                None,
+                None,
                 None,
             );
             let report = run_due(
@@ -5097,7 +5125,7 @@ mod tests {
         }
     }
 
-    async fn late_holder_fixture() -> (
+    pub(super) async fn late_holder_fixture() -> (
         Arc<mkit_server::ManualClock>,
         Arc<mkit_server::MemoryKv>,
         mkit_server::Partition,
@@ -5188,7 +5216,9 @@ mod tests {
                 Ok(store.clone()),
                 Some("paid"),
                 Some(&budget),
-                Some(root.clone()),
+                Some(&root),
+                Some(&root),
+                None,
             );
             run_due(
                 store.as_ref(),

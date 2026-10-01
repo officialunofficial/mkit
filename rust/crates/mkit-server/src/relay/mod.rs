@@ -33,6 +33,7 @@ pub use deliver::RelayHandler;
 pub use enqueue::{
     RelayEnqueueSnapshot, commit_relay_rows, enqueue_relay_rows, relay_delivered_through,
 };
+pub(crate) use hook::AUDIT_CAPACITY;
 pub use hook::{NoHook, RelayHook};
 
 use crate::store::{NamespaceStore, Partition, StoreError, codec, keys};

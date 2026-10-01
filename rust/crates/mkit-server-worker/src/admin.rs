@@ -121,6 +121,35 @@ type WorkerWork = mkit_server::takedown::work::Work<
     crate::r2::WorkerBlobStore,
 >;
 #[cfg(target_arch = "wasm32")]
+#[allow(clippy::arc_with_non_send_sync)] // Worker shares core callbacks on a single thread.
+pub(crate) fn purge_config<S: mkit_server::NamespaceStore + 'static>(
+    cfg: &crate::adapter::WorkerConfig,
+    metadata: S,
+    request: Option<&mkit_server::indexed::budget::SliceBudget>,
+) -> Result<Option<mkit_server::purge::PurgeConfig>, ConfigError> {
+    use std::sync::{Arc, atomic::AtomicBool};
+    let Some(purge) = cfg.pipeline_config()?.purge else {
+        return Ok(None);
+    };
+    let local = cfg.custom_purge.as_ref().map_or_else(
+        || {
+            Arc::new(crate::purge::local_cache(cfg))
+                as Arc<dyn mkit_server::purge::LocalInvalidation>
+        },
+        |custom| custom.local.clone(),
+    );
+    let local = request.map_or(local.clone(), |budget| {
+        Arc::new(crate::purge::RequestLocal {
+            local,
+            budget: budget.clone(),
+            reserved: AtomicBool::new(false),
+        }) as Arc<dyn mkit_server::purge::LocalInvalidation>
+    });
+    Ok(Some(purge.with_local(local).with_audit(Arc::new(
+        mkit_server::admin::SystemAudit::new(metadata, cfg.probe_partition()),
+    ))))
+}
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn work(
     env: &worker::Env,
     cfg: &crate::adapter::WorkerConfig,
@@ -164,7 +193,7 @@ fn build_work(
         metadata = metadata.with_alarm_budget(budget.clone());
     }
     Ok(mkit_server::takedown::work::Work {
-        purge: None,
+        purge: purge_config(cfg, metadata.clone(), request)?,
         metadata,
         serving: blob(cfg.blob_binding, crate::r2::PACKS_KEYSPACE),
         preserved: blob(PRESERVATION_BINDING, "preserved"),
