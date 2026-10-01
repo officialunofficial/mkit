@@ -9,6 +9,8 @@
 pub(crate) mod auth;
 mod automatic;
 mod ledger;
+mod stream;
+pub use stream::{PreservedPiece, Reply};
 #[cfg(test)]
 mod tests;
 
@@ -29,6 +31,25 @@ pub const PURGE_PATH: &str = "/mkit.server.admin.v1.AdminService/PurgeCache";
 pub const AUDIT_PATH: &str = "/mkit.server.admin.v1.AdminService/ReadAuditLog";
 /// Procedures in the lean takedown catalog.
 pub const TAKEDOWN_PATH: &str = "/mkit.server.admin.v1.AdminService/Takedown";
+/// Restricted status lookup.
+pub const GET_TAKEDOWN_PATH: &str = "/mkit.server.admin.v1.AdminService/GetTakedown";
+/// Restricted paginated status lookup.
+pub const LIST_TAKEDOWNS_PATH: &str = "/mkit.server.admin.v1.AdminService/ListTakedowns";
+/// Restricted streaming canonical copy read.
+pub const READ_PRESERVED_PATH: &str = "/mkit.server.admin.v1.AdminService/ReadPreserved";
+/// Audited preservation legal-hold change.
+pub const SET_LEGAL_HOLD_PATH: &str = "/mkit.server.admin.v1.AdminService/SetLegalHold";
+
+pub(crate) fn extension_path(path: &str) -> bool {
+    matches!(
+        path,
+        TAKEDOWN_PATH
+            | GET_TAKEDOWN_PATH
+            | LIST_TAKEDOWNS_PATH
+            | READ_PRESERVED_PATH
+            | SET_LEGAL_HOLD_PATH
+    )
+}
 
 /// A prepared operation committed together with its audit and replay result.
 #[derive(Debug)]
@@ -49,6 +70,23 @@ pub struct Prepared {
 
 /// Internal extension of the signed, audited operator lifecycle.
 pub trait AdminOperations: crate::MaybeSend + crate::MaybeSync {
+    /// Backend time for terminal preserved-stream failure audits.
+    fn preserved_now_ms(&self) -> Result<i64, ServerError> {
+        Err(ServerError::unavailable("preservation clock unavailable"))
+    }
+    /// Read one bounded, freshly authorized and verified preservation piece.
+    /// The input is a byte-free descriptor; implementations recheck live retention.
+    fn preserved_piece<'a>(
+        &'a self,
+        _descriptor: &'a serde_json::Value,
+    ) -> crate::BoxFuture<'a, Result<PreservedPiece, ServerError>> {
+        Box::pin(async {
+            Err(ServerError::new(
+                Code::Unimplemented,
+                "preserved reads unavailable",
+            ))
+        })
+    }
     /// Prepare root effects after staging immutable action metadata; no denial is activated here.
     fn plan<'a>(
         &'a self,
@@ -224,7 +262,10 @@ impl<S: NamespaceStore> Engine<S> {
         decoded: Option<Result<Vec<u8>, ServerError>>,
         now_ms: i64,
     ) -> Response {
-        match self.dispatch(path, headers, wire, decoded, now_ms).await {
+        match self
+            .dispatch(path, headers, wire, decoded, now_ms, false)
+            .await
+        {
             Ok(response) => response,
             Err(error) => Response::error(&error),
         }
@@ -232,7 +273,7 @@ impl<S: NamespaceStore> Engine<S> {
 }
 
 fn payload<'a>(path: &str, bytes: &'a [u8]) -> Result<&'a [u8], ServerError> {
-    if path != AUDIT_PATH {
+    if path != AUDIT_PATH && path != READ_PRESERVED_PATH {
         return Ok(bytes);
     }
     if bytes.len() < 5 || bytes[0] != 0 {

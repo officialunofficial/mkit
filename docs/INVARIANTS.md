@@ -2307,3 +2307,21 @@ retrying the same bad bytes cannot repair them and can monopolize Worker alarms.
 
 **Enforced by:** preservation work corruption/restart and transient-I/O regressions;
 `zstd_heap_bounds` measures the actual decoder on native and wasm32.
+
+## Restricted preserved reads and atomic operator holds (WP-5.6a-3)
+
+**Always:** Get/List keep acquisition, verified preservation, discovery, legal
+hold, purge and real completion separate. Any discovery never claims complete.
+A signed hold change commits its core arbitration batch with the operator audit
+and nonce result. ReadPreserved stores only a bounded action/object/offset
+nonce descriptor. Every byte-reading retry checks current key and role and
+commits an acceptance audit; every emitted piece freshly checks retention,
+hold and purge ownership and verifies its immutable owner header and hash.
+Only successful streams emit one last message; streaming failures append an
+audit result before the Connect error. **Because:** replayed bytes, stale
+retention checks or an unaudited hold can expose or destroy evidence.
+**If violated:** a restricted copy leaks, legal hold loses arbitration or
+verification is mistaken for real takedown completion. **Enforced by:**
+`admin::Engine::handle_streamed`, `takedown::work::Work`'s admin operations,
+PR2's legal-hold planner and the signed catalog/streaming regression tests.
+Production activation remains false; 4.18 mounts the catalog.

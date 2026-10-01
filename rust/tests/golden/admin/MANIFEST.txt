@@ -1,5 +1,6 @@
 # BLAKE3 hashes of admin golden files
 audit-chain.json 6574c4df0e925e0aa698b2dfc668117bb0fa365cc22d3d62cf1071d361b1354f
+get-takedown.response.json c058484cd68ee8d820bafc1039a14a31b0f1b7ff60d0da9008dd2392a62d8bce
 key-list.json 1f1c2e985f3f49fb08b123576e68da11d9af773c3414207c6fa3c6031bc90fe3
 read-audit-log.request.json 6150afd7c4b65b9bbe750c2ab669b9fd117a4a465e6b1968780a9bdef75f2712
 read-audit-log.response.json 0175f71bcd050bd3a83cb7f95493898c99b357e4b51d27c29a72e7637060a42e

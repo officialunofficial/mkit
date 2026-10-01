@@ -286,6 +286,7 @@ impl<S: NamespaceStore> Engine<S> {
         wire: &BodyCapture,
         decoded: Option<Result<Vec<u8>, ServerError>>,
         now: i64,
+        streaming: bool,
     ) -> Result<Response, ServerError> {
         let verified = self.config.verify(path, headers, wire, now)?;
         let budget = crate::indexed::budget::SliceBudget::new(9_000);
@@ -323,11 +324,39 @@ impl<S: NamespaceStore> Engine<S> {
                         )
                         .await;
                 }
-                let result = old
-                    .result
-                    .ok_or_else(|| ServerError::new(Code::Aborted, "admin request is in flight"))?;
+                if path == super::READ_PRESERVED_PATH && !streaming {
+                    return self
+                        .record_result(
+                            &verified,
+                            now,
+                            Response::error(&ServerError::failed_precondition(
+                                "streaming admin adapter required",
+                            )),
+                        )
+                        .await;
+                }
+                let Some(result) = old.result else {
+                    return self
+                        .record_result(
+                            &verified,
+                            now,
+                            Response::error(&ServerError::new(
+                                Code::Aborted,
+                                "admin request is in flight",
+                            )),
+                        )
+                        .await;
+                };
                 return self
-                    .finish_extension(&verified, wire, decoded.as_ref(), result, now, &budget)
+                    .finish_extension(
+                        &verified,
+                        wire,
+                        decoded.as_ref(),
+                        result,
+                        now,
+                        &budget,
+                        true,
+                    )
                     .await;
             }
             _ => {
@@ -346,6 +375,10 @@ impl<S: NamespaceStore> Engine<S> {
             }) {
             Action::Failure(ServerError::permission_denied(
                 "admin key lacks required role",
+            ))
+        } else if path == super::READ_PRESERVED_PATH && !streaming {
+            Action::Failure(ServerError::failed_precondition(
+                "streaming admin adapter required",
             ))
         } else if wire.oversized {
             Action::Failure(auth::invalid("admin request exceeds 1 MiB"))
@@ -376,7 +409,7 @@ impl<S: NamespaceStore> Engine<S> {
                             .map_err(|_| auth::invalid("invalid audit page size"))?,
                     ))
                 } else if path == super::PURGE_PATH
-                    || path == super::TAKEDOWN_PATH && self.operations.is_some()
+                    || super::extension_path(path) && self.operations.is_some()
                 {
                     let input = serde_json::from_slice(body)
                         .map_err(|_| auth::invalid("invalid admin JSON"))?;
@@ -402,6 +435,7 @@ impl<S: NamespaceStore> Engine<S> {
             response,
             now,
             &budget,
+            false,
         )
         .await
     }
@@ -416,7 +450,7 @@ impl<S: NamespaceStore> Engine<S> {
             .await
     }
 
-    async fn record_result(
+    pub(super) async fn record_result(
         &self,
         verified: &Verified,
         now: i64,
@@ -583,8 +617,14 @@ impl<S: NamespaceStore> Engine<S> {
         response: Response,
         now: i64,
         budget: &crate::indexed::budget::SliceBudget,
+        replayed: bool,
     ) -> Result<Response, ServerError> {
-        if response.status != 200 || verified.path != super::TAKEDOWN_PATH {
+        if response.status != 200
+            || !matches!(
+                verified.path.as_str(),
+                super::TAKEDOWN_PATH | super::READ_PRESERVED_PATH
+            )
+        {
             return Ok(response);
         }
         let Some(service) = &self.operations else {
@@ -612,6 +652,25 @@ impl<S: NamespaceStore> Engine<S> {
         };
         let input = serde_json::from_slice(payload(&verified.path, bytes)?)
             .map_err(|_| auth::invalid("invalid admin JSON"))?;
+        if verified.path == super::READ_PRESERVED_PATH {
+            // The stored descriptor carries no bytes. Every retry performs fresh
+            // policy/ownership checks and commits its own acceptance audit.
+            let result = service
+                .plan(
+                    &verified.path,
+                    &input,
+                    &verified.digest,
+                    u64::try_from(now).map_err(|_| auth::invalid("invalid clock"))?,
+                    budget,
+                )
+                .await
+                .map_or_else(|e| Response::error(&e), |p| p.response);
+            return if replayed || result.status != 200 {
+                self.record_result(verified, now, result).await
+            } else {
+                Ok(result)
+            };
+        }
         match service
             .after_commit(
                 &verified.path,

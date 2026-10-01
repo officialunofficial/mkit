@@ -167,7 +167,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
                 Value::default(),
             ))
     }
-    async fn state<S: NamespaceStore>(
+    pub(super) async fn state<S: NamespaceStore>(
         &self,
         store: &S,
         id: &Hash,
@@ -206,7 +206,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
         }
         Ok((state, raw))
     }
-    async fn info<S: NamespaceStore>(
+    pub(super) async fn info<S: NamespaceStore>(
         &self,
         store: &S,
         id: &Hash,
@@ -227,7 +227,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
         batch.put(row, Value::new(vec![kind]))
     }
     #[allow(clippy::too_many_lines)] // Each branch performs one bounded checkpoint transition.
-    async fn step<S: NamespaceStore>(
+    pub(super) async fn step<S: NamespaceStore>(
         &self,
         store: &S,
         id: Hash,

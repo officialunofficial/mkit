@@ -18,6 +18,7 @@ root = Path('rust/tests/golden/admin')
 types = {
     'takedown.request.json': 'TakedownRequest',
     'takedown.response.json': 'TakedownResponse',
+    'get-takedown.response.json': 'GetTakedownResponse',
     'set-lease.request.json': 'SetLeaseRequest',
     'set-lease.response.json': 'SetLeaseResponse',
     'set-suspension.request.json': 'SetSuspensionRequest',
