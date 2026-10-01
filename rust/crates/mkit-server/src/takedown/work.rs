@@ -63,6 +63,7 @@ pub(super) enum Phase {
 pub(super) enum Verification {
     CanonicalPending,
     ManifestClosurePending,
+    SourceCorrupt,
     Verified,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +97,7 @@ pub(super) struct ObjectInfo {
     pub copied: u64,
     pub chunks: u32,
     pub verified: bool,
+    pub source_failed: bool,
     pub holders: Option<Vec<u8>>,
     pub holders_done: bool,
     pub namespace_after: Option<Vec<u8>>,
@@ -254,6 +256,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
         let preserved = Budgeted::new(&self.preserved, budget);
         let mut batch = Batch::new();
         let mut event = "PreservationCheckpoint";
+        let mut audit_targets = vec![to_hex(&id)];
         if !state.hold
             && state.phase != Phase::Purging
             && (now >= state.retain_until && !state.purged
@@ -342,7 +345,10 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
                     .transpose()?
                     .unwrap_or_else(|| source::Checkpoint::new(object));
                 let prefix = key(b"source-frame", &id, &object);
-                if checkpoint.next.is_some() {
+                if info.source_failed {
+                    // A later manifest may reference the same failed member.
+                    batch = batch.delete(todo.clone());
+                } else if checkpoint.next.is_some() {
                     let next = source::step(
                         store,
                         self.shards.as_ref(),
@@ -374,146 +380,179 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
                         &self.root,
                         &prefix,
                     )
-                    .await
-                    .map_err(|_| StoreError::unavailable("preservation source unavailable"))?;
-                    if expected.as_bytes().len() != 1
-                        || expected.as_bytes()[0] != 0 && expected.as_bytes()[0] != source.kind
-                        || record.pack.is_none() && !matches!(source.kind, 1 | 5)
-                    {
-                        return Err(bad());
-                    }
-                    let size = u64::try_from(source.canonical.len()).map_err(|_| bad())?;
-                    if info.copied > size
-                        || info.kind != 0 && (info.kind != source.kind || info.size != size)
-                    {
-                        return Err(bad());
-                    }
-                    // Reassembly validation runs over preserved bytes after every child is acquired.
-                    if source.kind == 5 {
-                        state.verification = Verification::ManifestClosurePending;
-                    }
-                    info.kind = source.kind;
-                    info.size = size;
-                    for _ in 0..8 {
-                        let offset = usize::try_from(info.copied).map_err(|_| bad())?;
-                        if offset == source.canonical.len() {
-                            break;
+                    .await;
+                    let source = match source {
+                        Ok(source) => Some(source),
+                        Err(error) if error.code() == crate::Code::DataLoss => {
+                            let row = Key::new([prefix.as_bytes(), &0u32.to_be_bytes()].concat());
+                            let raw = store.get(&self.root, &row).await?.ok_or_else(bad)?;
+                            let (_, selected) = source::decode_frame(&raw)?;
+                            audit_targets.extend([to_hex(&object), to_hex(&selected.pack)]);
+                            info.source_failed = true;
+                            info.verified = false;
+                            state.verification = Verification::SourceCorrupt;
+                            // Keep selected source rows as provenance; remove only its pending work.
+                            batch = batch
+                                .require(Precondition::Equals(
+                                    checkpoint_key,
+                                    old_checkpoint.ok_or_else(bad)?,
+                                ))
+                                .require(Precondition::Equals(row, raw))
+                                .delete(todo.clone())
+                                .put(key(b"object", &id, &object), value(&info)?)
+                                .put(key(b"discover", &id, &object), Value::default());
+                            event = "PreservationSourceCorrupt";
+                            None
                         }
-                        let end = source
-                            .canonical
-                            .len()
-                            .min(offset.saturating_add(copy::PIECE_BYTES));
-                        // Reserve PUT and its immutable-existence HEAD before the sink runs.
-                        budget.charge()?;
-                        budget.charge()?;
-                        let piece =
-                            copy::plan(&id, &object, info.copied, &source.canonical[offset..end])?;
-                        let piece_key = key(
-                            b"piece",
-                            &id,
-                            &[object.as_slice(), &info.copied.to_be_bytes()].concat(),
-                        );
-                        let mut intent = crate::admin::plan_system(
-                            store,
-                            &self.root,
-                            "system:timer",
-                            "system:timer/PreservationPieceIntent",
-                            &[to_hex(&id)],
-                            now,
-                        )
-                        .await
-                        .map_err(|_| bad())?;
-                        intent = intent
-                            .require(Precondition::Equals(
-                                key(b"state", &id, &[]),
-                                old.clone().ok_or_else(bad)?,
-                            ))
-                            .require(Precondition::NotAfter(if state.hold {
-                                u64::try_from(self.clock.now_ms())
-                                    .map_err(|_| bad())?
-                                    .saturating_add(crate::store::CONTENT_APPLY_WINDOW_MS)
-                            } else {
-                                state.retain_until
-                            }))
-                            .put(piece_key, value(&piece)?);
-                        if store.apply(&self.root, intent).await? != crate::BatchOutcome::Committed
+                        Err(_) => {
+                            return Err(StoreError::unavailable("preservation source unavailable"));
+                        }
+                    };
+                    if let Some(source) = source {
+                        if expected.as_bytes().len() != 1
+                            || expected.as_bytes()[0] != 0 && expected.as_bytes()[0] != source.kind
+                            || record.pack.is_none() && !matches!(source.kind, 1 | 5)
                         {
-                            return Err(StoreError::unavailable("preservation intent raced"));
-                        }
-                        copy::write(
-                            &preserved,
-                            &id,
-                            &object,
-                            info.copied,
-                            &source.canonical[offset..end],
-                        )
-                        .await?;
-                        info.copied = u64::try_from(end).map_err(|_| bad())?;
-                    }
-                    if info.copied == size {
-                        let count = if source.kind == 5 {
-                            u32::from_le_bytes(
-                                source
-                                    .canonical
-                                    .get(18..22)
-                                    .ok_or_else(bad)?
-                                    .try_into()
-                                    .map_err(|_| bad())?,
-                            )
-                        } else {
-                            0
-                        };
-                        if info.chunks > count {
                             return Err(bad());
                         }
-                        for index in info.chunks..count.min(info.chunks.saturating_add(64)) {
-                            let offset = 22 + usize::try_from(index).map_err(|_| bad())? * 32;
-                            let chunk: Hash = source
+                        let size = u64::try_from(source.canonical.len()).map_err(|_| bad())?;
+                        if info.copied > size
+                            || info.kind != 0 && (info.kind != source.kind || info.size != size)
+                        {
+                            return Err(bad());
+                        }
+                        // Reassembly validation runs over preserved bytes after every child is acquired.
+                        if source.kind == 5 && state.verification != Verification::SourceCorrupt {
+                            state.verification = Verification::ManifestClosurePending;
+                        }
+                        info.kind = source.kind;
+                        info.size = size;
+                        for _ in 0..8 {
+                            let offset = usize::try_from(info.copied).map_err(|_| bad())?;
+                            if offset == source.canonical.len() {
+                                break;
+                            }
+                            let end = source
                                 .canonical
-                                .get(offset..offset + 32)
-                                .ok_or_else(bad)?
-                                .try_into()
-                                .map_err(|_| bad())?;
-                            let child = self.info(store, &id, &chunk).await?;
-                            if child.kind != 0 && child.kind != 1 {
+                                .len()
+                                .min(offset.saturating_add(copy::PIECE_BYTES));
+                            // Reserve PUT and its immutable-existence HEAD before the sink runs.
+                            budget.charge()?;
+                            budget.charge()?;
+                            let piece = copy::plan(
+                                &id,
+                                &object,
+                                info.copied,
+                                &source.canonical[offset..end],
+                            )?;
+                            let piece_key = key(
+                                b"piece",
+                                &id,
+                                &[object.as_slice(), &info.copied.to_be_bytes()].concat(),
+                            );
+                            let mut intent = crate::admin::plan_system(
+                                store,
+                                &self.root,
+                                "system:timer",
+                                "system:timer/PreservationPieceIntent",
+                                &[to_hex(&id)],
+                                now,
+                            )
+                            .await
+                            .map_err(|_| bad())?;
+                            intent = intent
+                                .require(Precondition::Equals(
+                                    key(b"state", &id, &[]),
+                                    old.clone().ok_or_else(bad)?,
+                                ))
+                                .require(Precondition::NotAfter(if state.hold {
+                                    u64::try_from(self.clock.now_ms())
+                                        .map_err(|_| bad())?
+                                        .saturating_add(crate::store::CONTENT_APPLY_WINDOW_MS)
+                                } else {
+                                    state.retain_until
+                                }))
+                                .put(piece_key, value(&piece)?);
+                            if store.apply(&self.root, intent).await?
+                                != crate::BatchOutcome::Committed
+                            {
+                                return Err(StoreError::unavailable("preservation intent raced"));
+                            }
+                            copy::write(
+                                &preserved,
+                                &id,
+                                &object,
+                                info.copied,
+                                &source.canonical[offset..end],
+                            )
+                            .await?;
+                            info.copied = u64::try_from(end).map_err(|_| bad())?;
+                        }
+                        if info.copied == size {
+                            let count = if source.kind == 5 {
+                                u32::from_le_bytes(
+                                    source
+                                        .canonical
+                                        .get(18..22)
+                                        .ok_or_else(bad)?
+                                        .try_into()
+                                        .map_err(|_| bad())?,
+                                )
+                            } else {
+                                0
+                            };
+                            if info.chunks > count {
                                 return Err(bad());
                             }
-                            let done = child.verified;
-                            if !done {
-                                batch = Self::enqueue(batch, &id, &chunk, 1);
+                            for index in info.chunks..count.min(info.chunks.saturating_add(64)) {
+                                let offset = 22 + usize::try_from(index).map_err(|_| bad())? * 32;
+                                let chunk: Hash = source
+                                    .canonical
+                                    .get(offset..offset + 32)
+                                    .ok_or_else(bad)?
+                                    .try_into()
+                                    .map_err(|_| bad())?;
+                                let child = self.info(store, &id, &chunk).await?;
+                                if child.kind != 0 && child.kind != 1 {
+                                    return Err(bad());
+                                }
+                                let done = child.verified || child.source_failed;
+                                if !done {
+                                    batch = Self::enqueue(batch, &id, &chunk, 1);
+                                }
+                                info.chunks += 1;
                             }
-                            info.chunks += 1;
-                        }
-                        if info.chunks == count {
-                            info.verified = true;
-                            state.verified_objects =
-                                state.verified_objects.checked_add(1).ok_or_else(bad)?;
-                            batch = batch
-                                .delete(todo.clone())
-                                .put(key(b"discover", &id, &object), Value::default());
-                            if source.kind == 5 {
-                                batch = batch.put(
-                                    key(b"closure", &id, &object),
-                                    value(&closure::Checkpoint::default())?,
-                                );
+                            if info.chunks == count {
+                                info.verified = true;
+                                state.verified_objects =
+                                    state.verified_objects.checked_add(1).ok_or_else(bad)?;
+                                batch = batch
+                                    .delete(todo.clone())
+                                    .put(key(b"discover", &id, &object), Value::default());
+                                if source.kind == 5 {
+                                    batch = batch.put(
+                                        key(b"closure", &id, &object),
+                                        value(&closure::Checkpoint::default())?,
+                                    );
+                                }
                             }
                         }
+                        batch = batch.put(key(b"object", &id, &object), value(&info)?);
                     }
-                    batch = batch.put(key(b"object", &id, &object), value(&info)?);
                 }
             } else {
                 if state.verification == Verification::CanonicalPending {
                     state.verification = Verification::Verified;
                 }
-                state.phase = if state.acquisition_complete() {
-                    Phase::Discover
-                } else {
+                state.phase = if state.verification == Verification::ManifestClosurePending {
                     Phase::Closure
-                };
-                event = if state.acquisition_complete() {
-                    "PreservationVerified"
                 } else {
-                    "PreservationClosurePending"
+                    Phase::Discover
+                };
+                event = match state.verification {
+                    Verification::Verified => "PreservationVerified",
+                    Verification::SourceCorrupt => "PreservationAcquisitionIncomplete",
+                    _ => "PreservationClosurePending",
                 };
             }
         } else if state.phase == Phase::Closure && state.purged {
@@ -718,7 +757,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
             &self.root,
             "system:timer",
             &format!("system:timer/{event}"),
-            &[to_hex(&id)],
+            &audit_targets,
             now,
         )
         .await

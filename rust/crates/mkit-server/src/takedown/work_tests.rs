@@ -198,6 +198,355 @@ fn small() -> Object {
     })
 }
 
+#[derive(Clone, Debug)]
+struct FaultBlobs {
+    inner: MemoryBlobStore,
+    mode: Arc<std::sync::atomic::AtomicU8>,
+    reads: Arc<std::sync::atomic::AtomicUsize>,
+    corrupt_offset: Option<u64>,
+}
+impl BlobStore for FaultBlobs {
+    type Sink = <MemoryBlobStore as BlobStore>::Sink;
+    async fn begin(&self, key: BlobKey, len: u64) -> Result<Self::Sink, StoreError> {
+        self.inner.begin(key, len).await
+    }
+    async fn get(
+        &self,
+        key: &BlobKey,
+        range: Option<crate::ByteRange>,
+    ) -> Result<Option<crate::BlobBody>, StoreError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.reads.fetch_add(1, SeqCst);
+        if self.mode.load(SeqCst) == 1 {
+            return Err(StoreError::unavailable("transient injected I/O"));
+        }
+        let body = self.inner.get(key, range).await?;
+        if self.mode.load(SeqCst) >= 2
+            && range.is_some_and(|r| {
+                self.corrupt_offset
+                    .map_or(r.start >= 12, |offset| r.start == offset)
+            })
+        {
+            let Some(crate::BlobBody::Bytes(bytes)) = body else {
+                panic!("small test frame")
+            };
+            let mut bytes = bytes.to_vec();
+            if self.mode.load(SeqCst) == 3 {
+                // Corrupted raw entry becomes compressed, with a claim above the
+                // scheduled decode cap but the same immutable index and frame length.
+                bytes[0] = 0x03;
+                bytes[5..9].copy_from_slice(&(2u32 << 20).to_le_bytes());
+            } else {
+                bytes[0] = 255;
+            }
+            return Ok(Some(crate::BlobBody::Bytes(Bytes::from(bytes))));
+        }
+        Ok(body)
+    }
+    async fn head(&self, key: &BlobKey) -> Result<Option<crate::BlobMeta>, StoreError> {
+        self.inner.head(key).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.inner.probe().await
+    }
+    async fn delete(&self, key: &BlobKey) -> Result<bool, StoreError> {
+        self.inner.delete(key).await
+    }
+}
+fn fault_work(
+    f: &Fixture,
+    serving: FaultBlobs,
+) -> Work<Arc<MemoryKv>, FaultBlobs, MemoryBlobStore> {
+    Work {
+        metadata: f.work.metadata.clone(),
+        serving,
+        preserved: f.work.preserved.clone(),
+        root: f.work.root.clone(),
+        shards: f.work.shards.clone(),
+        addressing: f.work.addressing.clone(),
+        retention_ms: f.work.retention_ms,
+        discovery_margin_ms: f.work.discovery_margin_ms,
+        profile: f.work.profile,
+        clock: f.work.clock.clone(),
+    }
+}
+async fn fault_advance(
+    work: &Work<Arc<MemoryKv>, FaultBlobs, MemoryBlobStore>,
+    id: Hash,
+) -> Result<State, StoreError> {
+    let budget = SliceBudget::new(700);
+    let Fired::Reschedule { batch, .. } = work
+        .step(&Budgeted::new(&work.metadata, &budget), id, 20_000, &budget)
+        .await?
+    else {
+        panic!("pending timer")
+    };
+    assert_eq!(
+        work.metadata.apply(&work.root, batch).await?,
+        BatchOutcome::Committed
+    );
+    Ok(work.state(&work.metadata, &id, 10).await?.0)
+}
+
+#[tokio::test]
+async fn corrupt_member_source_is_terminal_audited_and_denied_after_restart() {
+    assert_terminal_source_corruption(2).await;
+}
+
+#[tokio::test]
+async fn corrupt_compressed_claim_is_terminal_before_decode_budget_check() {
+    assert_terminal_source_corruption(3).await;
+}
+
+async fn assert_terminal_source_corruption(mode: u8) {
+    use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::SeqCst};
+    let f = fixture(&[small()], false).await;
+    let object = f.canonical[0].0;
+    if mode == 3 {
+        // Model a historically verified compressed member, then corrupt its
+        // stored outer claim while leaving that verified metadata intact.
+        let partition = f.work.shards.object_index(&f.repo, &object);
+        let index = keys::object_index(&f.repo.name, &object, &f.pack);
+        let raw = f
+            .work
+            .metadata
+            .get(&partition, &index)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut located = codec::decode_object_index(&object, &raw).unwrap();
+        located.wire_type = 0x03;
+        f.work
+            .metadata
+            .apply(
+                &partition,
+                Batch::new().put(
+                    index,
+                    codec::encode_object_index(&object, &located).unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    let id = accept(&f, "corrupt-source", None, &[object]).await;
+    f.clock.set(20_000);
+    advance(&f, id, 20_000).await;
+    advance(&f, id, 20_000).await;
+    let blobs = FaultBlobs {
+        inner: f.work.serving.clone(),
+        mode: Arc::new(AtomicU8::new(mode)),
+        reads: Arc::new(AtomicUsize::new(0)),
+        corrupt_offset: None,
+    };
+    let work = fault_work(&f, blobs.clone());
+    let state = fault_advance(&work, id)
+        .await
+        .expect("corruption commits a terminal checkpoint");
+    assert!(!state.acquisition_complete());
+    assert!(!state.discovery_complete);
+    assert_eq!(state.verification, Verification::SourceCorrupt);
+    assert!(
+        work.info(&work.metadata, &id, &object)
+            .await
+            .unwrap()
+            .source_failed
+    );
+    assert!(
+        work.metadata
+            .get(&work.root, &key(b"todo", &id, &object))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        work.metadata
+            .get(
+                &work.root,
+                &key(
+                    b"source-frame",
+                    &id,
+                    &[object.as_slice(), &0u32.to_be_bytes()].concat()
+                )
+            )
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let page = work
+        .metadata
+        .scan(
+            &work.root,
+            &Key::new(b"ae\0".to_vec()),
+            &Key::new(b"af".to_vec()),
+            None,
+            100,
+        )
+        .await
+        .unwrap();
+    let audits: Vec<serde_json::Value> = page
+        .entries
+        .iter()
+        .map(|(_, v)| serde_json::from_slice(v.as_bytes()).unwrap())
+        .filter(|a: &serde_json::Value| a["procedure"] == "system:timer/PreservationSourceCorrupt")
+        .collect();
+    assert_eq!(audits.len(), 1);
+    for target in [to_hex(&id), to_hex(&object), to_hex(&f.pack)] {
+        assert!(
+            audits[0]["targets"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(target))
+        );
+    }
+    let before = blobs.reads.load(SeqCst);
+    // Reconstruct the runtime, then run acquisition, discovery and retention ticks.
+    let restarted = fault_work(&f, blobs.clone());
+    let mut state = state;
+    for _ in 0..40 {
+        state = fault_advance(&restarted, id).await.unwrap();
+        assert!(!state.acquisition_complete() && !state.discovery_complete);
+        if state.phase == Phase::Retain {
+            break;
+        }
+    }
+    assert_eq!(state.phase, Phase::Retain);
+    assert_eq!(
+        blobs.reads.load(SeqCst),
+        before,
+        "terminal source must never be decoded again"
+    );
+    assert!(
+        ContentIndex::new(BorrowedStore(&work.metadata))
+            .blocked(&object)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn transient_member_source_io_retries_and_can_complete() {
+    use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::SeqCst};
+    let f = fixture(&[small()], false).await;
+    let object = f.canonical[0].0;
+    let id = accept(&f, "transient-source", None, &[object]).await;
+    f.clock.set(20_000);
+    advance(&f, id, 20_000).await;
+    advance(&f, id, 20_000).await;
+    let blobs = FaultBlobs {
+        inner: f.work.serving.clone(),
+        mode: Arc::new(AtomicU8::new(1)),
+        reads: Arc::new(AtomicUsize::new(0)),
+        corrupt_offset: None,
+    };
+    let work = fault_work(&f, blobs.clone());
+    let old = work
+        .metadata
+        .get(&work.root, &key(b"state", &id, &[]))
+        .await
+        .unwrap();
+    assert!(fault_advance(&work, id).await.is_err());
+    assert_eq!(
+        work.metadata
+            .get(&work.root, &key(b"state", &id, &[]))
+            .await
+            .unwrap(),
+        old
+    );
+    assert!(
+        work.metadata
+            .get(&work.root, &key(b"todo", &id, &object))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        ContentIndex::new(BorrowedStore(&work.metadata))
+            .blocked(&object)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    blobs.mode.store(0, SeqCst);
+    let mut complete = false;
+    for _ in 0..40 {
+        if fault_advance(&work, id)
+            .await
+            .unwrap()
+            .acquisition_complete()
+        {
+            complete = true;
+            break;
+        }
+    }
+    assert!(complete);
+}
+
+#[tokio::test]
+async fn corrupt_manifest_child_is_not_reenqueued_and_other_sources_finish() {
+    use std::sync::atomic::{AtomicU8, AtomicUsize};
+    let chunk = small();
+    let chunk_id = hash(&serialize(&chunk).unwrap());
+    // Make the child sort first, so it fails between the manifest's bounded passes.
+    let manifest = (65..130)
+        .map(|count| {
+            Object::ChunkedBlob(ChunkedBlob {
+                total_size: 14 * count,
+                chunk_size: 14,
+                chunks: vec![chunk_id; usize::try_from(count).unwrap()],
+            })
+        })
+        .find(|object| {
+            let Object::ChunkedBlob(cb) = object else {
+                unreachable!()
+            };
+            chunk_id < mkit_core::merkle::compute_chunked_id(cb)
+        })
+        .unwrap();
+    let healthy = Object::Blob(Blob {
+        data: b"independent source".to_vec(),
+    });
+    let f = fixture(&[manifest, chunk, healthy], false).await;
+    let manifest_id = f.canonical[0].0;
+    let id = accept(&f, "corrupt-child", None, &[manifest_id, f.canonical[2].0]).await;
+    f.clock.set(20_000);
+    let blobs = FaultBlobs {
+        inner: f.work.serving.clone(),
+        mode: Arc::new(AtomicU8::new(2)),
+        reads: Arc::new(AtomicUsize::new(0)),
+        corrupt_offset: Some(12 + 5 + f.canonical[0].1.len() as u64),
+    };
+    let work = fault_work(&f, blobs);
+    let mut last = None;
+    for _ in 0..80 {
+        let state = fault_advance(&work, id).await.unwrap();
+        last = Some(state.clone());
+        if state.phase == Phase::Retain {
+            break;
+        }
+    }
+    let state = last.unwrap();
+    assert_eq!(state.phase, Phase::Retain);
+    assert_eq!(state.verification, Verification::SourceCorrupt);
+    assert!(!state.acquisition_complete() && !state.discovery_complete);
+    assert!(
+        work.info(&work.metadata, &id, &chunk_id)
+            .await
+            .unwrap()
+            .source_failed
+    );
+    assert!(
+        work.info(&work.metadata, &id, &f.canonical[2].0)
+            .await
+            .unwrap()
+            .verified
+    );
+    assert_eq!(
+        state.verified_objects, 2,
+        "manifest and independent source copied, failed child excluded"
+    );
+}
+
 #[tokio::test]
 async fn any_denies_immediately_preserves_named_repository_and_never_claims_discovery_complete() {
     let f = fixture(&[small()], true).await;

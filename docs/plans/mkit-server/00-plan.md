@@ -693,3 +693,12 @@ periods), P-21 (`MAX_APPLY_WINDOW` = 10 s), P-22 (config-cache TTL 10 s), and th
   backend (D2).
 - **Scope.** 124 WPs; mitigated by the serial foundation, three tracks after M1, per-milestone exits and the rolling-wave
   brief refresh.
+
+### R-203: bounded corrupt zstd decoding
+
+R-203 uses Option B: ruzstd 0.9.0 vendored with RFC 8878 block preflight and a
+fixed 8 MiB caller window cap. Native/wasm allocator regressions cover later
+source corruption. Preservation records audited terminal corruption checkpoints
+without clearing denial or reporting verification success. Worker admission is
+unchanged; default indexed verification rejects zstd without a codec. Decoder
+activation belongs to WP-4.18. The 500-line cap excludes pristine vendor code.

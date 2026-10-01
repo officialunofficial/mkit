@@ -44,3 +44,7 @@ lto = true
 # `GET /__mkit_test/stats`, `TEST_QUOTA_*`); omitted from production builds.
 signed-http-hooks = ["mkit-server-worker/signed-http-hooks"]
 test-faults = ["mkit-server-worker/test-faults"]
+
+# Bound pure-Rust decoding in this independent workspace too.
+[patch.crates-io]
+ruzstd = { path = "../../rust/vendor/ruzstd" }

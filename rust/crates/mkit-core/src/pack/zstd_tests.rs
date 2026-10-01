@@ -288,7 +288,7 @@ mod ruzstd_backend {
     }
 
     /// A 2 GiB window over 1 KiB of content is rejected from the header
-    /// (window limit `max(claim, 8 MiB)`), never allocated; an 8 MiB
+    /// (fixed window limit 8 MiB), never allocated; an 8 MiB
     /// window still decodes.
     #[test]
     fn ruzstd_rejects_huge_window_frame() {
@@ -521,12 +521,9 @@ mod differential {
         assert!(hits >= 1, "the frame's sequences section was never hit");
     }
 
-    /// Known, documented fail-closed divergences on window size. The C
-    /// one-shot decoder accepts both frames; the pure-Rust decoder refuses
-    /// a declared window above `max(claim, 8 MiB)` rather than buffer it,
-    /// and output past a sub-128 KiB window because it cannot see
-    /// per-block sizes (the C decoder rejects such blocks when they are
-    /// compressed, but not when they are raw).
+    /// Fail-closed window divergences: the C one-shot decoder accepts
+    /// huge windows and oversized raw blocks; the pure-Rust decoder applies
+    /// a fixed 8 MiB window cap and the RFC per-block maximum for every type.
     #[test]
     fn window_divergences_are_fail_closed() {
         for (content, window_log) in [(vec![5u8; 1024], 31), (vec![4u8; 5000], 10)] {

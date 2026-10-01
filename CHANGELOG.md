@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proofs. Add wasm-clean `store::MemorySource` for synchronous disclosures
   and diffs, with native and Worker embedding entry points. No wire change.
 
+- Bound pure-Rust zstd block expansion before allocation, with a fixed 8 MiB
+  window cap, and checkpoint corrupt preservation sources as terminal audited
+  failures. Worker admission and native C decoding are unchanged (R-203).
+
 - Server/Worker: bound raw timer-alarm enumeration and share tick limits across
   logical heads. Persist capped exponential backoff in the existing timer row
   for cold fairness, preserving payloads and original handler due times. The

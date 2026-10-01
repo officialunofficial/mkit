@@ -828,18 +828,12 @@ fn zstd_decompress_into(
     ))
 }
 
-/// Smallest window the pure-Rust decoder accepts regardless of the
-/// claim: 8 MiB (`windowLog` 23) covers every non-ultra zstd level's
-/// default window, so a frame written by a streaming encoder with no
-/// pledged size still decodes. Frames declaring a window above
-/// `max(claim, this)` are rejected (fail-closed; the C one-shot decoder
-/// would accept them). Bounding the window bounds the decoder's own
-/// buffer: it keeps up to one window of not-yet-emitted output (see
-/// [`ruzstd_decompress_capped`]: the peak is the claim plus that ring
-/// buffer, rounded up to a power of two).
+/// Fixed pure-Rust decode window cap: 8 MiB (`windowLog` 23).
+/// This covers the default windows of non-ultra zstd levels. Larger windows
+/// fail closed even if the output claim is larger; native C keeps its policy.
 #[cfg(feature = "pack-ruzstd")]
 #[cfg_attr(all(feature = "pack-zstd", not(test)), allow(dead_code))]
-const RUZSTD_MIN_WINDOW_LIMIT: u64 = 8 << 20;
+const RUZSTD_WINDOW_LIMIT: u64 = 8 << 20;
 
 /// Pure-Rust (`ruzstd`) decode of exactly one Zstandard frame, bounded
 /// to `capacity` output bytes. Compiled whenever `pack-ruzstd` is on,
@@ -854,8 +848,10 @@ const RUZSTD_MIN_WINDOW_LIMIT: u64 = 8 << 20;
 ///
 /// Memory: the output is reserved fallibly to the claim without zero-filling.
 /// Unpack charges that reservation before allocation. The pure-Rust decoder's
-/// ring buffer is separate working memory (up to a power-of-two-rounded window),
-/// outside the owned-payload resident cap, just as for the window reader's
+/// ring buffer is separate working memory. With the fixed 8 MiB window and
+/// vendored RFC block preflight, working allocations stay below 28 MiB,
+/// including old/new ring allocations during growth and bounded block scratch.
+/// This fixed allowance is outside the owned-payload resident cap, as for the window reader's
 /// carry/output budget. No output allocation grows past the admitted claim.
 ///
 /// Allocating adapter for differential tests. Production decode supplies its
@@ -892,7 +888,7 @@ fn ruzstd_decompress_into(
     require_zstd_frame_magic(frame)?;
     let cap = u64::try_from(capacity).unwrap_or(u64::MAX);
     let mut decoder = FrameDecoder::new();
-    decoder.set_max_window_size(cap.max(RUZSTD_MIN_WINDOW_LIMIT));
+    decoder.set_max_window_size(RUZSTD_WINDOW_LIMIT);
     let mut src = frame;
     let mut stream = StreamingDecoder::new_with_decoder(&mut src, decoder).map_err(fail)?;
 
@@ -937,24 +933,6 @@ fn ruzstd_decompress_into(
     let decoder = &stream.decoder;
     if !decoder.is_finished() {
         return Err(fail("zstd frame ended before its last block"));
-    }
-    // RFC 8878 §3.1.1.2.4: no block may decode to more than
-    // `min(Window_Size, 128 KiB)`. ruzstd does not check it; the C
-    // decoder does for compressed blocks. Per-block sizes are not
-    // observable here, so a windowed frame whose window is under 128 KiB
-    // may not decode past its window at all (fail-closed for raw-block
-    // and multi-block tiny-window frames, which no default encoder
-    // setting produces).
-    if descriptor & 0x20 == 0 {
-        let window_descriptor = frame[ZSTD_FRAME_MAGIC.len() + 1];
-        let base = 1u64 << (10 + (window_descriptor >> 3));
-        let window = base + (base >> 3) * u64::from(window_descriptor & 7);
-        if window < 128 * 1024 && out.len() as u64 > window {
-            return Err(fail(format_args!(
-                "zstd frame decodes {} bytes through a {window}-byte window",
-                out.len()
-            )));
-        }
     }
     if let Some(n) = declared
         && n != out.len() as u64
