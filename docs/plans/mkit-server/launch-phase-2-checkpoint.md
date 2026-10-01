@@ -442,8 +442,9 @@ failing `night2/denial-order-epoch-red.log`; unconditional per-proof lease
 observation corrects that race. These focused results cover proof delays over
 10/30 seconds, fresh rows, initial/retry lease renewal, revoked epoch and
 authority, ticket/signed expiry, pending cap, CAS reproof and shared exhaustion.
-The independent source review found no remaining defect in this targeted
-scope. The broader all-feature pipeline run passed 435 tests (two existing
+The initial independent source review found no remaining defect in this
+targeted scope; its clearance was later withdrawn for the temporal finding
+recorded below. The broader all-feature pipeline run passed 435 tests (two existing
 ignored), and all-target/all-feature mkit-server clippy passed with warnings
 denied (`denial-order-pipeline-all-features.log`, `denial-order-clippy.log`).
 The unchanged 120-second actual release profile and final immutable
@@ -470,11 +471,42 @@ SetRepoVisibility. Wrangler and receiver were still alive before owned
 cleanup; all groups were stopped. Thus the repeat proves a remaining runtime
 blocker, not reproduction or classification of the later HTTP 500. No admin
 operation ran; all seven-operation and whole-profile matrix slots remain
-UNRUN. The independent D26 audit cleared the source ordering correction;
-`many_refs` remains Medium/unclassified.
+UNRUN. The independent D26 audit initially cleared the source ordering correction;
+that clearance is withdrawn below. `many_refs` remains Medium/unclassified.
 
 Separate fixture repairs close inspector sockets on initialization failure
 and avoid retaining every old Wasm memory after module reinitialization.
 Multiple instances still invalidate budget assessment; current-capacity
 sampling remains incomplete peak evidence. These defects cannot explain the
 unobserved repeat and do not certify or change the production runtime.
+
+
+The independent correctness and conformance preaudits then identified a
+SPEC-SERVER §14.2 temporal conflict: the proof finishes before the new write
+plan time. A precise test on unchanged production at `93d2d974` runs all
+4096 scans and the final direct target check, then uses the first source
+snapshot read to install a real block at T0+10,001 ms and advance time to
+T0+11,000 ms. The write commits C with NotAfter=T0+21,000 ms, beyond the
+original ten-second cut. `night2/denial-temporal-red-evidence.log` and
+`denial-temporal-red-manifest.json` retain the result, source/log hashes and
+exact command. The test-only change is retained in
+`denial-temporal-test.patch`; it is not a green regression or a protocol
+waiver. Root withdrew the scoped source clearance. A compliant temporal
+correction and unchanged actual-profile evidence remain required.
+
+D33's separate minimal environment-error finisher is pushed at `50932ac8`.
+It selects raw HTTP_OBJECTS=true and existing object/key paths before generic
+Connect OPTIONS handling, uses the existing default HTTP mount options, and
+preserves configured custom options. Actual ordinary release evidence at
+`night2/env-error-probe-3/evidence.json` passes 33 checks across malformed URL
+keys, missing STORAGE and a ticket/token role collision, verifying the exact
+intended configuration errors. Selected GET/HEAD return 503 with no-store and
+HTTP CORS; HEAD is empty. Selected OPTIONS with or without Origin returns
+204 empty with Allow and HTTP CORS. Generic RPC controls retain their prior
+503 and OPTIONS 204 behavior. All owned groups stopped. Strict all-feature
+Wasm clippy passes in `env-error-wasm-clippy-corrected.log`.
+The first probe used an incorrect generic OPTIONS expectation; the second
+only reached an earlier namespace error. Neither is counted as the three
+intended error variants. The third corrects those fixture mistakes on the
+same production pin and release artifact. This is targeted error-wrapper
+evidence, not a completed admin/resource matrix.
