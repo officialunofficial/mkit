@@ -211,7 +211,9 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observ
                     while True:
                         check(worker.poll() is None and time.monotonic() < deadline,
                               "cold alarm did not deliver persisted Outcome")
-                        after = (folder / "wrangler.log").read_text()[log_offset:]
+                        with (folder / "wrangler.log").open("rb") as restarted_log:
+                            restarted_log.seek(log_offset)
+                            after = restarted_log.read().decode("utf-8", errors="replace")
                         delivered = set(re.findall(r"MKIT_UNO_OUTCOME committed ([^\s]+)", after))
                         if pending <= delivered:
                             break
@@ -306,8 +308,14 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observ
                     expected_methods.add("PurgeCache")
                 check(expected_methods <= methods,
                       "audit omitted accepted operations")
+                if uno:
+                    deadline = time.monotonic() + 90
+                    while "MKIT_UNO_PURGE delivered" not in (folder / "wrangler.log").read_text():
+                        check(time.monotonic() < deadline, "custom paired LocalCache purge not acknowledged")
+                        time.sleep(.5)
                 for method in ("Reinstate", "ReleaseHold", "Reinspect"):
-                    check(runtime.request(origin, "/mkit.server.admin.v1.AdminService/" + method, b"{}")[0] == 404,
+                    admin_prefix = "/_uno/operator" if uno else ""
+                    check(runtime.request(origin, admin_prefix + "/mkit.server.admin.v1.AdminService/" + method, b"{}")[0] == 404,
                           "deferred operation exposed")
                 result["checks"] = ["seven independently signed release operations", "moderation/audit role separation",
                     "global public denial after acceptance", "verified private preservation stream and exact final offsets",
