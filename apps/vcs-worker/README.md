@@ -417,7 +417,7 @@ configuration before activation:
 
 Extraction (WP-4.10b-2 / #1244) and scanner retrieval (R-193 / #1243) are
 merged; this activation wires their release paths. Phase 1 keeps takedown
-fail-closed until verified preservation (WP-5.6a-2) lands. Phase 2 requires
+fail-closed until the restricted admin catalog (WP-5.6a-3) lands. Phase 2 requires
 the complete native and actual release Worker matrix before opening the PR.
 See the [conformance plan](../../docs/plans/mkit-server/launch-conformance.md)
 and [itemized evidence](../../docs/plans/mkit-server/launch-evidence.md).
@@ -485,7 +485,7 @@ retries. Keep fetch and DO factories on the same configuration. For a takedown
 environment, use `WorkerConfig::from_env_with_purge(env, PurgeHooks::new(sink,
 local))` so the custom sink participates in startup validation and replaces the
 signed HTTPS `cache-purge` requirement. Admin keys and complete preservation
-remain mandatory; preservation activation still refuses until WP-5.6a-2.
+remain mandatory; preservation activation still refuses until WP-5.6a-3.
 Custom purge delivery requires `WORKERS_PLAN=paid`; Free alarm calls are
 already reserved. The custom sink must acknowledge all selected global cache variants; local
 invalidation must charge the provided budget and return a resumable checkpoint.

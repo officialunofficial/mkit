@@ -97,13 +97,13 @@ impl LaunchConfig {
         Ok(Some(Self { takedown }))
     }
 
-    /// Refuse takedown activation until verified preservation has merged.
+    /// Refuse takedown activation until the restricted admin catalog has merged.
     /// # Errors
-    /// Verified preservation is the remaining unavailable launch prerequisite.
+    /// The restricted admin catalog is the remaining takedown prerequisite.
     pub fn check_prerequisites(&self) -> Result<(), ConfigError> {
         if self.takedown {
             return Err(error(
-                "launch takedown requires WP-5.6a-2 verified preservation",
+                "launch takedown requires WP-5.6a-3 complete admin catalog",
             ));
         }
         Ok(())
@@ -169,9 +169,9 @@ pub(crate) fn validate(
     if cfg.launch.is_none() {
         // Missing foundations must never silently turn these options off.
         if [
-            "PRESERVATION_BUCKET",
-            "PRESERVATION_RETENTION_SECS",
-            "PRESERVATION_KEY",
+            "PRESERVATION_RETENTION_MS",
+            crate::admin::RECEIPT_SECRET,
+            "RECEIPT_KEYS",
         ]
         .iter()
         .any(|name| var(name).is_some())
@@ -250,13 +250,15 @@ fn validate_preservation(
     var: &impl Fn(&str) -> Option<String>,
 ) -> Result<(), ConfigError> {
     let preservation = [
-        "PRESERVATION_BUCKET",
-        "PRESERVATION_RETENTION_SECS",
-        "PRESERVATION_KEY",
+        "PRESERVATION_RETENTION_MS",
+        crate::admin::RECEIPT_SECRET,
+        "RECEIPT_KEYS",
     ];
     if cfg.launch.as_ref().is_some_and(|v| v.takedown) {
-        if cfg.admin.is_none() {
-            return Err(error("TAKEDOWN_ENABLED requires nonempty ADMIN_KEYS"));
+        if cfg.admin.is_none() || cfg.takedown.is_none() {
+            return Err(error(
+                "TAKEDOWN_ENABLED requires ADMIN_KEYS and complete preservation",
+            ));
         }
         if cfg.custom_purge.is_none()
             && cfg
@@ -266,25 +268,11 @@ fn validate_preservation(
         {
             return Err(error("TAKEDOWN_ENABLED requires signed HTTPS cache-purge"));
         }
-        for name in preservation {
-            if var(name).is_none_or(|s| s.trim().is_empty()) {
-                return Err(error(format!("TAKEDOWN_ENABLED requires {name}")));
-            }
-        }
-        let retention = var("PRESERVATION_RETENTION_SECS").unwrap_or_default();
-        if !retention
-            .parse::<u64>()
-            .ok()
-            .is_some_and(|n| n > 0 && n.to_string() == retention)
-        {
-            return Err(error(
-                "PRESERVATION_RETENTION_SECS must be a positive canonical integer",
-            ));
-        }
-        // The preservation implementation owns signing/key-list grammar and
-        // actual bucket isolation. Phase 1 must refuse without that contract.
+        // The merged preservation parser validates explicit retention and
+        // signing/publication separation; from_env checks the dedicated bucket.
+        // Activation still waits for audited, freshly verified admin reads.
         return Err(error(
-            "launch takedown requires WP-5.6a-2 verified preservation",
+            "launch takedown requires WP-5.6a-3 complete admin catalog",
         ));
     }
     if preservation.iter().any(|name| var(name).is_some()) {

@@ -189,6 +189,8 @@ pub struct WorkerConfig {
     pub takedown_denial: bool,
     /// An embedder's actual purge sink and local invalidation, instead of HTTPS.
     pub custom_purge: Option<crate::embedding::PurgeHooks>,
+    /// Default-off restricted preservation configuration.
+    pub takedown: Option<crate::admin::TakedownSettings>,
     /// Default-off private scanner retrieval, available only to Paid inspection.
     pub scanner_retrieval: Option<Arc<mkit_server::scanner_retrieval::RetrievalConfig>>,
     /// Optional dedicated deployment-authority keys (`AUTHORITY_FENCE`, `AUTHORITY_KEYS`).
@@ -327,6 +329,12 @@ impl WorkerConfig {
             .admin
             .as_ref()
             .map_or_else(Vec::new, mkit_server::admin::Config::public_keys);
+        config.receipt_publication = self.takedown.as_ref().map(|s| s.publication.clone());
+        if let Some(settings) = &self.takedown {
+            config
+                .admin_keys
+                .extend_from_slice(settings.publication.public_keys());
+        }
         config.indexed = self.indexed;
         config.ref_policy.clone_from(&self.ref_policy);
         config.takedown_denial = self.takedown_denial;
@@ -461,7 +469,7 @@ impl WorkerConfig {
     fn check_launch_readiness(&self) -> Result<(), ConfigError> {
         if self.takedown_denial {
             return Err(ConfigError(
-                "launch takedown requires WP-5.6a-2 verified preservation".into(),
+                "launch takedown requires WP-5.6a-3 complete admin catalog".into(),
             ));
         }
         if let Some(launch) = &self.launch {
@@ -556,6 +564,14 @@ impl WorkerConfig {
         let url_tokens = crate::http_mount::token_config_for_tickets(&var, ticket_keys.as_ref())?;
         let admin = crate::admin::parse(&var, &audience, ticket_keys.as_ref())?;
         let hooks = crate::hooks::config::HookVars::parse(&var)?;
+        let takedown = crate::admin::takedown(
+            &var,
+            admin.as_ref(),
+            indexed.is_some(),
+            &addressing,
+            var(PLAN_VAR).is_some_and(|p| p.trim().eq_ignore_ascii_case("paid")),
+            ticket_keys.as_ref(),
+        )?;
         if hooks.as_ref().is_some_and(|hooks| hooks.roles.cache_purge)
             && !var(PLAN_VAR).is_some_and(|plan| plan.trim().eq_ignore_ascii_case("paid"))
         {
@@ -612,12 +628,32 @@ impl WorkerConfig {
                 .check_separation(&tokens.keys().public_keys().collect::<Vec<_>>())
                 .map_err(|_| ConfigError("ADMIN_KEYS must differ from URL-token keys".into()))?;
         }
+        if let Some(settings) = &takedown {
+            let published = settings.publication.public_keys();
+            if audience.len() > 2048
+                || authority_fence
+                    .as_ref()
+                    .is_some_and(|f| f.public_keys().any(|key| published.contains(&key)))
+            {
+                return Err(ConfigError(
+                    "invalid receipt origin or overlapping authority key".into(),
+                ));
+            }
+            #[cfg(feature = "http-objects")]
+            if url_tokens
+                .as_ref()
+                .is_some_and(|t| t.keys().public_keys().any(|key| published.contains(&key)))
+            {
+                return Err(ConfigError("receipt key repeats URL-token key".into()));
+            }
+        }
         let mut cfg = Self {
             admin_on_public_path: true,
             ref_policy: None,
             takedown_denial: launch.as_ref().is_some_and(|cfg| cfg.takedown),
             custom_purge,
             launch,
+            takedown,
             admin,
             scanner_retrieval,
             authority_fence,
@@ -680,6 +716,9 @@ impl WorkerConfig {
     ) -> Result<Self, ConfigError> {
         let cfg = Self::parse_vars_with_purge(
             &|name| {
+                if name == crate::admin::RECEIPT_SECRET {
+                    return env.secret(name).ok().map(|secret| secret.to_string());
+                }
                 env.secret(name)
                     .ok()
                     .map(|secret| secret.to_string())
@@ -707,6 +746,23 @@ impl WorkerConfig {
                         "launch requires {binding} Durable Object binding"
                     )));
                 }
+            }
+        }
+        if let Some(settings) = &cfg.takedown {
+            if let Some(http) = cfg.hooks.as_ref().and_then(|hooks| hooks.http.as_ref()) {
+                crate::hooks::config::http_signer(
+                    env.secret("MKIT_HOOK_KEY").ok().map(|s| s.to_string()),
+                    http,
+                    cfg.ticket_keys.as_ref(),
+                    settings.publication.public_keys(),
+                )?;
+            }
+            env.bucket(crate::admin::PRESERVATION_BINDING)
+                .map_err(|_| ConfigError("PRESERVATION binding required".into()))?;
+            if cfg.blob_binding == crate::admin::PRESERVATION_BINDING {
+                return Err(ConfigError(
+                    "preservation binding must differ from serving storage".into(),
+                ));
             }
         }
         cfg.check_launch_readiness()?;
@@ -1012,9 +1068,13 @@ where
     S: mkit_server::NamespaceStore,
     T: mkit_server::NamespaceStore + 'static,
 {
-    timer_registry_budgeted(class, target, plan, None)
+    timer_registry_budgeted(class, target, plan, None, None)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep allocated timer ownership together"
+)]
 fn timer_registry_budgeted<
     S: mkit_server::NamespaceStore,
     T: mkit_server::NamespaceStore + 'static,
@@ -1023,6 +1083,7 @@ fn timer_registry_budgeted<
     target: Result<T, ConfigError>,
     plan: Option<&str>,
     alarm_budget: Option<&mkit_server::purge::SliceBudget>,
+    takedown_root: Option<mkit_server::Partition>,
 ) -> mkit_server::timers::TimerRegistry<'static, S> {
     use crate::classes::ShardClass;
     use mkit_server::relay::{RelayBudget, RelayHandler};
@@ -1053,9 +1114,13 @@ fn timer_registry_budgeted<
                 max_per_tick,
             })
         }
-        ShardClass::ContentIndexShard => {
-            registry.register(mkit_server::relay::TakedownRequestTimer)
-        }
+        ShardClass::ContentIndexShard => match (takedown_root, target.clone()) {
+            (Some(root), Ok(store)) => registry.register(mkit_server::takedown::late::LateTimer {
+                acceptance: mkit_server::takedown::late_owner::LateOwner::new(store, root),
+                max_subrequests: 700,
+            }),
+            _ => registry.register(mkit_server::relay::TakedownRequestTimer),
+        },
         _ => registry,
     };
     let registry = if class == ShardClass::RefShard
@@ -2115,12 +2180,33 @@ mod glue {
         Ok(response)
     }
 
+    fn receipt_keys(req: &Request, cfg: &WorkerConfig) -> worker::Result<Option<Response>> {
+        if req.path() == "/.well-known/mkit-receipt-keys.json"
+            && req.method() == worker::Method::Get
+            && let Some(settings) = &cfg.takedown
+        {
+            let mut response =
+                Response::from_bytes(settings.publication.key_list.as_bytes().to_vec())?;
+            response
+                .headers_mut()
+                .set("content-type", "application/json")?;
+            response
+                .headers_mut()
+                .set("cache-control", "public, max-age=300")?;
+            response
+                .headers_mut()
+                .set("access-control-allow-origin", "*")?;
+            return Ok(Some(response));
+        }
+        Ok(None)
+    }
+
     /// The pipeline for `cfg` over `env`'s bindings and `hooks`.
     fn pipeline<H: HookSet + 'static>(
         env: &Env,
         cfg: &WorkerConfig,
         hooks: H,
-        request_budget: mkit_server::indexed::budget::SliceBudget,
+        request_budget: &mkit_server::indexed::budget::SliceBudget,
         #[cfg(feature = "published-view")] snapshot_warm: bool,
     ) -> Result<WorkerPipeline<H>, ConfigError> {
         let bad = |e: &dyn core::fmt::Display| ConfigError(e.to_string());
@@ -2203,7 +2289,7 @@ mod glue {
                     env.clone(),
                     Some(request_budget.clone()),
                 ),
-                crate::published_view::WorkerCache(Some(request_budget)),
+                crate::published_view::WorkerCache(Some(request_budget.clone())),
                 config,
                 Arc::new(WorkerClock),
             );
@@ -2429,6 +2515,9 @@ mod glue {
         #[cfg(feature = "test-faults")]
         let mut req = req;
         install();
+        if let Some(response) = receipt_keys(&req, cfg)? {
+            return Ok(response);
+        }
         let scanner_request = crate::scanner_retrieval::mounted(&req.path(), cfg);
         if !scanner_request && is_options_preflight(&req) {
             return cors_preflight_response(&cors_allow_headers(), CORS_ALLOW_METHODS);
@@ -2503,7 +2592,7 @@ mod glue {
                 &env,
                 cfg,
                 hooks,
-                request_budget,
+                &request_budget,
                 #[cfg(feature = "published-view")]
                 snapshot_warm,
             )
@@ -2692,8 +2781,36 @@ mod glue {
                 };
                 mkit_server::purge::SliceBudget::new(allowance)
             });
-        let registry =
-            super::timer_registry_budgeted(class, target, plan.as_deref(), alarm_budget.as_ref());
+        let takedown_root = cfg
+            .as_ref()
+            .ok()
+            .filter(|cfg| mkit_server::takedown::ACTIVATED && cfg.takedown.is_some())
+            .map(WorkerConfig::probe_partition);
+        let registry = super::timer_registry_budgeted(
+            class,
+            target,
+            plan.as_deref(),
+            alarm_budget.as_ref(),
+            takedown_root,
+        );
+        let registry = if mkit_server::takedown::ACTIVATED
+            && let (Ok(cfg), Some(budget)) = (&cfg, &alarm_budget)
+            && cfg.takedown.is_some()
+            && class
+                == match cfg.sharding {
+                    mkit_server::pipeline::Sharding::Single => crate::classes::ShardClass::RefStore,
+                    _ => crate::classes::ShardClass::NsCoordinator,
+                } {
+            match crate::admin::work(env, cfg, budget) {
+                Ok(work) => registry.register(work),
+                Err(error) => {
+                    crate::log_failure(&error.to_string());
+                    registry
+                }
+            }
+        } else {
+            registry
+        };
         let registry = if matches!(
             class,
             crate::classes::ShardClass::RefStore | crate::classes::ShardClass::RefShard
@@ -3203,6 +3320,7 @@ mod tests {
                 Ok(kv.clone()),
                 Some("paid"),
                 Some(&budget),
+                None,
             );
             let report = run_due(
                 &kv,
@@ -4826,5 +4944,126 @@ mod tests {
         ] {
             assert!(!out.contains(secret), "{secret} leaked: {out}");
         }
+    }
+
+    async fn late_holder_fixture() -> (
+        Arc<mkit_server::ManualClock>,
+        Arc<mkit_server::MemoryKv>,
+        mkit_server::Partition,
+        mkit_server::Partition,
+        mkit_server::Key,
+    ) {
+        use mkit_server::store::{BlockEntry, ContentIndex, Holder, PendingHolderV1, keys};
+        use mkit_server::{
+            Batch, ManualClock, MemoryKv, NamespaceKey, NamespaceStore, Partition, RepoName, Value,
+        };
+        let clock = Arc::new(ManualClock::new(1000));
+        let store = Arc::new(MemoryKv::with_clock(clock.clone()));
+        let root = Partition::Namespace(NamespaceKey::deployment_default());
+        let request = mkit_server::relay::ContentTakedownV1 {
+            identity: PendingHolderV1::new(
+                Holder::new(
+                    NamespaceKey::deployment_default(),
+                    RepoName::new("late").unwrap(),
+                ),
+                root.clone(),
+                [3; 32],
+                [1; 32],
+                [2; 32],
+                [4; 32],
+            )
+            .unwrap(),
+            blocked: BlockEntry::new("private reason", 998),
+            queued_at_ms: 999,
+            ready_at_ms: Some(1000),
+        };
+        let partition = mkit_server::store::content_shard(&request.identity.object);
+        ContentIndex::new(store.clone())
+            .block(&request.identity.object, &request.blocked, 1000)
+            .await
+            .unwrap();
+        let row = keys::content_takedown(&request.identity.object, &request.identity.intent);
+        let reference = [
+            request.identity.object.as_slice(),
+            request.identity.intent.as_slice(),
+        ]
+        .concat();
+        store
+            .apply(
+                &partition,
+                Batch::new()
+                    .put(row.clone(), request.encode().unwrap())
+                    .put(keys::timer(1000, 13, &reference), Value::default()),
+            )
+            .await
+            .unwrap();
+        (clock, store, root, partition, row)
+    }
+
+    #[test]
+    fn real_late_holder_registration_takes_ownership_only_when_selected() {
+        use mkit_server::store::keys;
+        use mkit_server::timers::{TickBudget, run_due};
+        use mkit_server::{MemoryKv, NamespaceStore};
+        block_on(async {
+            let (clock, store, root, partition, row) = late_holder_fixture().await;
+            let off = timer_registry::<MemoryKv, _>(
+                crate::classes::ShardClass::ContentIndexShard,
+                Ok(store.clone()),
+                Some("paid"),
+            );
+            run_due(
+                store.as_ref(),
+                &partition,
+                &off,
+                clock.as_ref(),
+                1000,
+                &TickBudget::default(),
+            )
+            .await
+            .unwrap();
+            assert!(store.get(&partition, &row).await.unwrap().is_some());
+            assert!(
+                store
+                    .get(&root, &mkit_server::Key::new(b"ah\0".to_vec()))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            clock.set(3_601_000);
+            let budget = mkit_server::purge::SliceBudget::new(1000);
+            let on = timer_registry_budgeted::<MemoryKv, _>(
+                crate::classes::ShardClass::ContentIndexShard,
+                Ok(store.clone()),
+                Some("paid"),
+                Some(&budget),
+                Some(root.clone()),
+            );
+            run_due(
+                store.as_ref(),
+                &partition,
+                &on,
+                clock.as_ref(),
+                3_601_000,
+                &TickBudget::default(),
+            )
+            .await
+            .unwrap();
+            assert!(store.get(&partition, &row).await.unwrap().is_none());
+            assert!(
+                store
+                    .get(&root, &mkit_server::Key::new(b"ah\0".to_vec()))
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            let (start, end) = keys::class_range(keys::TAG_TIMER);
+            let timers = store.scan(&root, &start, &end, None, 16).await.unwrap();
+            assert!(timers.entries.iter().any(|(key, _)| matches!(
+                keys::parse(key),
+                Some(keys::ParsedKey::Timer { kind: 15, .. })
+            )));
+            assert!(budget.used() > 0 && budget.used() < 1000);
+        });
     }
 }

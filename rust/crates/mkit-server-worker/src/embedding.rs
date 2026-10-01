@@ -181,7 +181,7 @@ mod tests {
         );
         cfg.ref_policy = None;
         cfg.takedown_denial = true;
-        assert!(cfg.validate().unwrap_err().0.contains("WP-5.6a-2"));
+        assert!(cfg.validate().unwrap_err().0.contains("WP-5.6a-3"));
     }
 
     #[test]
@@ -233,21 +233,38 @@ mod tests {
             }]})
             .to_string(),
         );
-        assert!(parse(&v).unwrap_err().0.contains("PRESERVATION_BUCKET"));
-        for (key, value) in [
-            ("PRESERVATION_BUCKET", "preserved"),
-            ("PRESERVATION_RETENTION_SECS", "60"),
-            ("PRESERVATION_KEY", "configured"),
-        ] {
-            v.insert(key.into(), value.into());
-        }
-        assert!(parse(&v).unwrap_err().0.contains("WP-5.6a-2"));
-        v.insert("PRESERVATION_RETENTION_SECS".into(), "0".into());
         assert!(
             parse(&v)
                 .unwrap_err()
                 .0
-                .contains("positive canonical integer")
+                .contains("PRESERVATION_RETENTION_MS")
+        );
+        let receipt =
+            mkit_server::hooks::HookSigner::new("receipt", zeroize::Zeroizing::new([17; 32]))
+                .unwrap()
+                .public_key();
+        v.insert("PRESERVATION_RETENTION_MS".into(), "60000".into());
+        assert!(parse(&v).unwrap_err().0.contains("RECEIPT_NOTICE_KEY"));
+        v.insert(
+            "RECEIPT_NOTICE_KEY".into(),
+            mkit_core::hash::to_hex(&[17; 32]),
+        );
+        assert!(parse(&v).unwrap_err().0.contains("RECEIPT_KEYS"));
+        v.insert(
+            "RECEIPT_KEYS".into(),
+            serde_json::json!({"version":1,"keys":[{
+                "keyId":mkit_core::hash::to_hex(&mkit_core::hash::hash(&receipt)),
+                "alg":"ed25519", "publicKey":mkit_core::hash::to_hex(&receipt)
+            }]})
+            .to_string(),
+        );
+        assert!(parse(&v).unwrap_err().0.contains("WP-5.6a-3"));
+        v.insert("PRESERVATION_RETENTION_MS".into(), "0".into());
+        assert!(
+            parse(&v)
+                .unwrap_err()
+                .0
+                .contains("positive PRESERVATION_RETENTION_MS")
         );
     }
 

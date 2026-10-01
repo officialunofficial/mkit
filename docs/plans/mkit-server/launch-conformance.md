@@ -2,7 +2,8 @@
 
 Status: **phase 2 authorized; complete matrix UNRUN**.
 Available prerequisite integration can proceed. Preservation/admin/takedown
-runtime activation waits for 5.6a-2 preservation to merge. Extraction
+runtime activation waits for the 5.6a-3 admin catalog. Preservation core
+#1249 is merged; the user ruled to retain refusal until the catalog lands. Extraction
 #1244 and private scanner retrieval #1243 have merged; their release wiring
 is wired here. Bounded publication recheck timer 12 progress repair #1245 has
 merged. Physical alarm bounds/backoff #1247 and deterministic native timer
@@ -36,7 +37,7 @@ and component coverage landmarks. `phase2` states the required integrated
 probe, not an assertion that the probe already exists. Its matching evidence
 slots are [launch-evidence.md](launch-evidence.md).
 The [runtime coverage plan](launch-runtime-coverage.md) distinguishes existing
-component checks from the proposed actual release probes for all 23 cases.
+component checks from the proposed actual release probes for all 24 cases after R-203.
 
 From a clean, committed candidate in this worktree:
 

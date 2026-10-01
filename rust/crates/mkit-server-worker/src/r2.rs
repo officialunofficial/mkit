@@ -730,6 +730,7 @@ pub struct EnvBucket {
     env: worker::Env,
     binding: &'static str,
     request_budget: Option<mkit_server::indexed::budget::SliceBudget>,
+    alarm_budget: Option<mkit_server::purge::SliceBudget>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -741,6 +742,7 @@ impl EnvBucket {
             env,
             binding,
             request_budget: None,
+            alarm_budget: None,
         }
     }
 
@@ -751,9 +753,17 @@ impl EnvBucket {
         self
     }
 
+    /// Share the existing alarm allowance; each R2 operation charges at dispatch.
+    #[must_use]
+    pub fn with_alarm_budget(mut self, budget: mkit_server::purge::SliceBudget) -> Self {
+        self.alarm_budget = Some(budget);
+        self
+    }
+
     fn bucket(&self) -> Result<worker::Bucket, String> {
         crate::ns_client::charge_request(self.request_budget.as_ref())
             .map_err(|e| e.to_string())?;
+        crate::ns_client::charge_alarm(self.alarm_budget.as_ref()).map_err(|e| e.to_string())?;
         self.env.bucket(self.binding).map_err(|e| e.to_string())
     }
 }

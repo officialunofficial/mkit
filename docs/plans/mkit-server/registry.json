@@ -2225,6 +2225,7 @@
       "5.11a",
       "5.6a-1",
       "5.6a-2",
+      "5.6a-3",
       "R-193"
     ],
     "size": "L",
@@ -2530,10 +2531,10 @@
     "milestone": "M5",
     "track": "core",
     "depends_on": [
-      "5.6a-2"
+      "5.6a-3"
     ],
     "size": "L",
-    "summary": "R-190 launch implementation is split into 5.6a-1 denial/pending intent and 5.6a-2 verified preservation. Launch requests remain unresolved; rewrite, notices, reinstatement and full-profile completion remain follow-ups. No production takedown activation before both parts and launch gates.",
+    "summary": "R-190 launch requires 5.6a-1 denial/pending intent, 5.6a-2 preservation/retention core and 5.6a-3 restricted admin. Launch requests remain unresolved; rewrite, notices, reinstatement and full-profile completion remain follow-ups. No production takedown activation before all three parts and launch gates.",
     "human_action": true,
     "area_gates": [
       "rust",
@@ -2553,7 +2554,7 @@
       "5.11a"
     ],
     "size": "L",
-    "summary": "R-190 part 1: V2 actions preserve current V1 producer denial, verified immutable pack inventory, fresh every-surface denial, signed replay-safe Takedown intent and asynchronous manual PurgeCache. Preservation pending; production takedown activation refused until part 2. User-ruling cap: 2,800 production Rust lines; tests, docs, proto and generated code excluded.",
+    "summary": "R-190 part 1: V2 actions preserve current V1 producer denial, verified immutable pack inventory, fresh every-surface denial, signed replay-safe Takedown intent and asynchronous manual PurgeCache. Preservation pending; production takedown activation refused until parts 2/3 and launch gates. User-ruling cap: 2,800 production Rust lines; tests, docs, proto and generated code excluded.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -2565,7 +2566,7 @@
   },
   {
     "id": "5.6a-2",
-    "title": "Verified takedown preservation and restricted administration",
+    "title": "Verified takedown preservation and retention core",
     "milestone": "M5",
     "track": "core",
     "depends_on": [
@@ -2573,12 +2574,30 @@
       "4.10b-1"
     ],
     "size": "L",
-    "summary": "R-190 part 2: verified canonical preservation, checkpointed discovery and retention, legal holds, restricted audited streaming reads and native/Worker configuration/templates. Timer 15 TAKEDOWN_WORK and existing b subkeys only. User provisions storage. Merged 4.10b-1 supplies the actual ct/timer-13 codec; its owning consumer is required here, with durable acceptance before acknowledgment. Cap 2,600 non-test lines including docs.",
+    "summary": "R-190 part 2: bounded canonical acquisition and manifest closure, checkpointed discovery, retention/legal-hold arbitration, audited per-action purge and native/Worker configuration/templates. Runtime wiring must remain gated off: activation fixed false and ReadPreserved unexposed. Part 3 owns the admin catalog. Timer 15 TAKEDOWN_WORK and existing b subkeys only. User provisions storage. Merged 4.10b-1 supplies the actual ct/timer-13 codec; its owning consumer is required here, with durable acceptance before acknowledgment. Launch finite roots are the configured allowlist or sole Root; Any supports denial/preservation and provable named/known-holder namespace sweeps without discovery/takedown completion pending the post-launch nl catalog. Latest cap 3,300 non-test Rust production lines; docs excluded.",
     "human_action": true,
     "area_gates": [
       "rust",
       "wasm",
       "proto",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "5.6a-3",
+    "title": "Restricted takedown administration and verified streaming",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "5.6a-2"
+    ],
+    "size": "M",
+    "summary": "R-190 approved launch split: signed Get/List/ReadPreserved/SetLegalHold catalog, byte-free replay and fresh audited verified streaming using PR2's retention/hold arbiter. All three parts and launch gates precede activation; no new schema/catalog/protocol.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
       "conf-native",
       "conf-wrangler"
     ]

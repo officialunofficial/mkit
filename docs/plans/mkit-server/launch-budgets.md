@@ -123,7 +123,9 @@ checks do not certify the integrated launch matrix.
    reduces this to six and retains measured cancellation/late-block/budget
    regressions. Nested descriptor proofs are serial while other prefetched
    responses remain pending. Release retrieval config and mount still require
-   WP-4.18's profile activation. 5.6a-2 preservation remains unavailable.
+   WP-4.18's profile activation. 5.6a-2 preservation core #1249 is merged. Its 700-call acquisition
+   allowance shares the existing physical-alarm counter; the launch keeps
+   activation refused until the 5.6a-3 admin catalog lands.
    Full R2/body-lifetime dispatcher evidence remains phase 2 work.
 
 ## Required retained regressions and integrated runs

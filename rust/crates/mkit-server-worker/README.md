@@ -71,7 +71,7 @@ authority mode and generation, then declare real lease-table recovery.
 `ADMIN_KEYS` contains the SPEC-SERVER §16.3 public-key list as a Worker secret.
 It defaults off. `ReadAuditLog` and configured `PurgeCache` use the operator
 mount; takedown/catalog/retention operations await complete verified preservation
-(WP-5.6a-2). Admin requests use a separate signed envelope and cannot authenticate
+(WP-5.6a-3). Preservation core is merged. Admin requests use a separate signed envelope and cannot authenticate
 client writes. Operator keys must differ from ticket, token, hook and authority
 keys. Persisted sharding/addressing checks run before operator dispatch.
 

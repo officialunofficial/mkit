@@ -6,15 +6,16 @@ inputs, not evidence of their opted-in release integration. Fill actual
 results after executing at the pinned candidate, using the
 [local harness](launch-conformance.md). A component harness PASS records
 only that component lane; it leaves per-case integrated slots UNRUN.
-Preservation-dependent cases await 5.6a-2. Native zstd push/clone awaits the
+Preservation core #1249 is merged; activation and preservation-dependent
+cases await the 5.6a-3 admin catalog, per the user ruling. Native zstd push/clone awaits the
 R-203 bounded ruzstd prerequisite; the decoder stays off until it merges. The resolved #1246 header ruling
 adopts its extension allowlist and safe filenames; it records no runtime PASS.
 See [launch-runtime-coverage.md](launch-runtime-coverage.md) for current
 coverage boundaries and the concrete remaining release probes.
 The [phase 2 implementation checkpoint](launch-phase-2-checkpoint.md) records
-targeted compilation checks and the sandbox denial that prevented native
-timer execution and committing the current edits. No timer flake exception
-or integrated PASS is inferred from that checkpoint.
+targeted compilation checks, completed native timer reruns and the
+base-owned snapshot fixture failure. No timer flake exception or integrated
+PASS is inferred from that checkpoint.
 
 ## Immutable pins
 
@@ -98,7 +99,7 @@ separate. Native proofs and Worker proof refusal are deliberately distinct.
 
 | Gate | Result / exact command / log |
 |---|---|
-| Harness schema validation and dry plan | PASS: `bash scripts/vcs-worker-launch.sh validate` (23 cases), `plan` JSON parse and shell/Python syntax; working-tree validation only, candidate pin supplied after commit |
+| Harness schema validation and dry plan | PASS: `bash scripts/vcs-worker-launch.sh validate` (24 cases after R-203), `plan` JSON parse and shell/Python syntax; working-tree validation only, candidate pin supplied after commit |
 | fmt / workspace clippy / wasm clippy | UNRUN |
 | Touched crates + reverse dependency nextest / doctests / rustdoc | UNRUN |
 | Full just ci / area server and script/security/proto/vector gates | UNRUN |

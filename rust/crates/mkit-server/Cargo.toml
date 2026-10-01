@@ -88,6 +88,7 @@ connect = [
 # In-memory reference backends (`MemoryKv`, `MemoryBlobStore`): the template
 # for third-party backends. Always compiled for this crate's own unit tests.
 memory = []
+pack-ruzstd = ["mkit-core/pack-ruzstd"]
 # The pipeline's test seam: `FaultHooks` at five points and per-request
 # `TestDirectives` (`x-mkit-test-fault`, `x-mkit-test-clock-skew-ms`).
 # Never enabled by a release build or any binary's default features.

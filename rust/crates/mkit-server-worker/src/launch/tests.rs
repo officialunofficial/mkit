@@ -104,7 +104,7 @@ fn launch_partial_inspection_and_preservation_refuse_before_activation() {
     v.insert("TAKEDOWN_ENABLED".into(), "true".into());
     assert!(check(&v).unwrap_err().0.contains("ADMIN_KEYS"));
     let mut v = vars();
-    v.insert("PRESERVATION_BUCKET".into(), "preserved".into());
+    v.insert("PRESERVATION_RETENTION_MS".into(), "60000".into());
     assert!(check(&v).unwrap_err().0.contains("TAKEDOWN_ENABLED=true"));
 }
 

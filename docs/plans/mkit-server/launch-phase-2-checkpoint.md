@@ -139,3 +139,14 @@ R-203 is an additional pending prerequisite: the decoder remains off until
 bounded ruzstd merges. Native CLI push/clone and decode CPU/resident-memory
 evidence are mandatory after that merge. No integrated row is marked PASS
 from these focused host checks alone.
+
+## Preservation core merge and catalog ruling
+
+Preservation core #1249 merged at
+`a3966d84d05449d164d0ba4365eb30181a1c7ce7`. Its contract records a required
+5.6a-3 admin-catalog split. The user ruled to wait for that part and retain
+takedown refusal. Integration uses the actual `PRESERVATION` binding, explicit
+`PRESERVATION_RETENTION_MS`, secret `RECEIPT_NOTICE_KEY` and `RECEIPT_KEYS`
+publication grammar; obsolete phase-1 placeholder names are removed. Receipt
+key publication remains required with takedown, while launch publication
+Events remain excluded. The merged core handlers retain their activation gate.

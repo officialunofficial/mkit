@@ -57,6 +57,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     ///
     /// # Errors
     /// Uniform `not_found`, including storage errors and exhausted budgets.
+    // Preserve the async interface when the feature containing its awaits is disabled.
+    #[cfg_attr(not(feature = "remote-hooks"), allow(clippy::unused_async))]
     pub async fn retrieve_scanner_pack(
         &self,
         body: &[u8],

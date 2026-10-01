@@ -1634,6 +1634,46 @@ pub fn resolve(
     }
     let (redactor, cors_extra_allow_headers) = credential_router_parts(&pipeline)?;
     let admin = crate::admin::resolve(&args.admin, &mut pipeline, &meta)?;
+    if let Some(settings) = admin.as_ref().and_then(|a| a.takedown.as_ref()) {
+        let preserved = settings
+            .root
+            .canonicalize()
+            .map_err(|_| usage("preservation root must be provisioned before startup"))?;
+        let serving = repo_root
+            .canonicalize()
+            .map_err(|_| usage("cannot resolve serving root"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if preserved
+                .metadata()
+                .map_err(|_| usage("cannot inspect preservation root"))?
+                .permissions()
+                .mode()
+                & 0o077
+                != 0
+            {
+                return Err(usage(
+                    "preservation root must exclude group and other access",
+                ));
+            }
+        }
+        if !preserved.is_dir() {
+            return Err(usage("preservation root must be a directory"));
+        }
+        if preserved.starts_with(&serving) || serving.starts_with(&preserved) {
+            return Err(usage(
+                "preservation root must be disjoint from serving root",
+            ));
+        }
+        if pipeline.authority_fence.as_ref().is_some_and(|fence| {
+            fence
+                .public_keys()
+                .any(|key| settings.publication.public_keys().contains(&key))
+        }) {
+            return Err(usage("receipt key repeats authority key"));
+        }
+    }
     if admin
         .as_ref()
         .is_some_and(|a| Some(a.listen) == args.listen)
@@ -1643,6 +1683,17 @@ pub fn resolve(
     #[cfg(feature = "hooks")]
     {
         if let Some(settings) = &hooks {
+            if admin
+                .as_ref()
+                .and_then(|a| a.takedown.as_ref())
+                .is_some_and(|a| {
+                    settings
+                        .public_key()
+                        .is_ok_and(|key| a.publication.public_keys().contains(&key))
+                })
+            {
+                return Err(usage("receipt key repeats hook key"));
+            }
             if let Some(admin) = &admin {
                 admin
                     .config
