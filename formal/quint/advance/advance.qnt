@@ -1,5 +1,5 @@
 // -*- mode: Bluespec; -*-
-// advance_refs model for mkit (Linear MKIT-27, epic MKIT-17, PR #1082).
+// advance_refs model for mkit (remote-advance model, epic verification toolchain, PR #1082).
 //
 // What is modelled (branch claude/kind-brahmagupta-esqhc0; spec text as
 // reconciled on this branch is normative):

@@ -1,7 +1,7 @@
 import MkitFormal.MerkleModel
 
 /-!
-# SPEC-MERKLE-OBJECTS theorems (Linear MKIT-24)
+# SPEC-MERKLE-OBJECTS theorems (Merkle proof model)
 
 For every leaf count `n` and position `i < n` (no bound on `n`):
 

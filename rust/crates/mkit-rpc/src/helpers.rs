@@ -242,9 +242,8 @@ pub fn ref_entry_to_ref(e: RefEntry) -> TransportResult<Ref> {
 /// such names: a server from before SPEC-REFS §3's bound may still hold
 /// one, and the client could never read or write it.
 ///
-/// TODO: the CLI fetch path does not warn about skipped names yet; that
-/// needs the skipped count carried through `Transport::list_refs`, which
-/// returns only the refs.
+/// The CLI fetch path does not currently report how many names were skipped;
+/// `Transport::list_refs` returns only the refs.
 ///
 /// # Errors
 /// [`ref_entry_to_ref`]'s, for any entry that is not skipped.

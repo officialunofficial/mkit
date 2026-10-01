@@ -1,7 +1,7 @@
 import MkitFormal.DeltaRunning
 
 /-!
-# Non-vacuity witnesses for the SPEC-DELTA theorems (MKIT-25)
+# Non-vacuity witnesses for the SPEC-DELTA theorems (delta model)
 
 Each check of §2/§4 is dropped in turn from a mutant of `run`/`apply`
 (`Mut`); for every mutant a concrete stream makes the corresponding theorem

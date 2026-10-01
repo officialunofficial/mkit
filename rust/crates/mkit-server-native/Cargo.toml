@@ -1,5 +1,5 @@
 # mkit-server-native — the native (tokio) adapter of the mkit server (PRD
-# MKIT-29 §5.1): the SQLite metadata backend (the rusqlite `SqlConn` under
+# production server work §5.1): the SQLite metadata backend (the rusqlite `SqlConn` under
 # `mkit-server`'s shared `SqlKvStore`), the `Blocking` adapter that runs
 # sync-bodied stores on tokio's blocking pool, the embeddable axum router
 # with its production tower layers, and the `mkit-server` binary (FS blobs,

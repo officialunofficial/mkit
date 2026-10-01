@@ -246,7 +246,7 @@ no deployments, so this is acceptable.
 - `NAMESPACE_POLICY=any` admits every self-certifying namespace, requires
   `NAMESPACE_ALLOWLIST` to be absent and requires `UNSAFE_OPEN_NAMESPACES=true`: without non-default admission (M3) any
   fresh key resets its namespace's quota, so the open policy is an explicit
-  unsafe opt-in. The Uno Kit demo (UNO-420) selects it deliberately. Under
+  unsafe opt-in. The Uno Kit demo selects it deliberately. Under
   `any`, takedown discovery is incomplete; configured global denial and
   preservation still apply, and completion must report that limitation.
 

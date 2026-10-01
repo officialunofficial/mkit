@@ -18,7 +18,7 @@ acceptance; no version bump or tag is part of the Workers launch.
 D35 selects `staging-vcs.mkit.sh` on the `mkit.sh` zone, in the same account as
 the other mkit workers, using `env.staging` of `vcs-worker`. Use a distinct
 staging Worker identity and DO namespaces, private staging buckets and one
-dedicated CI Ed25519 signer. The Uno Kit demo (UNO-420) uses
+dedicated CI Ed25519 signer. The Uno Kit demo uses
 `NAMESPACE_POLICY=any` with `UNSAFE_OPEN_NAMESPACES=true`. An isolated CI
 deployment may instead allowlist that signer's namespace.
 Staging data has no retention promise and may be reset by the user.

@@ -1,6 +1,6 @@
 // -*- mode: Bluespec; -*-
-// t-of-n release-threshold aggregation and share rotation (Linear MKIT-26,
-// epic MKIT-17, workstream quint-transport).
+// t-of-n release-threshold aggregation and share rotation (transport model,
+// epic verification toolchain, workstream quint-transport).
 //
 // SPEC-RELEASE-THRESHOLD (draft-normative) §2 trust model, §4 verifier, §5.2
 // per-release ceremony, §5.3 rotation (resharing that keeps the cohort public
@@ -8,7 +8,7 @@
 // verify, threshold_for}` over commonware-cryptography 2026.9.0
 // (`threshold::recover` = `prepare_evaluations` + Lagrange interpolation).
 //
-// Target properties (MKIT-26 (c)):
+// Target properties (transport model (c)):
 //   - an aggregate verifies IFF it was built from at least t distinct valid
 //     partials of the current share set (soundness: `NoForgery`,
 //     `AggregateFromOneShareSet`; completeness: `AggregateCompleteness`);

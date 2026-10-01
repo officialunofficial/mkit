@@ -1,5 +1,5 @@
 /-!
-# SPEC-DELTA model (Linear MKIT-25)
+# SPEC-DELTA model (delta model)
 
 An executable model of `docs/specs/SPEC-DELTA.md` (version 1):
 

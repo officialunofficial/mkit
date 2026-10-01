@@ -1,7 +1,7 @@
 # quint-advance: `advance_refs`, the retry ladder and the #521 gate
 
-A Quint model of how mkit advances a branch on a remote (Linear MKIT-27, epic
-MKIT-17, PR #1082). The advance writes the packmap with a CAS, then the head
+A Quint model of how mkit advances a branch on a remote (formal verification
+effort, PR #1082). The advance writes the packmap with a CAS, then the head
 with a CAS. The model covers crashes and connection loss between and after
 those writes, lost responses, the transport retry ladder, the `read_ref`
 disambiguation, concurrent pushers, and the re-baseline gate from PR #521.
@@ -309,7 +309,7 @@ TLC3=0 ./check.sh        # skip the 3-pusher TLC runs (the longest ones)
 APALACHE=1 ./check.sh    # add the bounded apalache-mc runs
 ```
 
-Pins, the same as `formal/quint/refs` (from the MKIT-17 review):
+Pins, the same as `formal/quint/refs` (from the verification toolchain review):
 
 - quint 0.32.0.
 - Apalache 0.62.2, run directly on the TLA+ that

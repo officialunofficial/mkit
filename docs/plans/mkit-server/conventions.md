@@ -1,6 +1,6 @@
 # mkit-server executor conventions
 
-Shared rules for every work package (WP) of the mkit-server epic ([Linear MKIT-29](https://linear.app/officialunofficial/issue/MKIT-29)).
+Shared rules for every work package (WP) of the mkit-server epic (production server work).
 Your brief (`briefs/WP-<id>.md`) is the spec for your WP. Where a brief and [`00-plan.md`](00-plan.md) disagree, `00-plan.md`
 wins. The PRD snapshot is [`prd-snapshot.md`](prd-snapshot.md); Linear is canonical.
 

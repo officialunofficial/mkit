@@ -1,6 +1,6 @@
 # mkit-server: prep, spec PRs, and Milestone M0 work-package plan
 
-Source of truth: Linear MKIT-29 (PRD, decisions D1–D36 settled; D21 superseded by D34; D32–D36 recorded in `00-plan.md`).
+Source of truth: production server work (PRD, decisions D1–D36 settled; D21 superseded by D34; D32–D36 recorded in `00-plan.md`).
 Review 01 (`00-plan.md` §5.6, R-61…R-84) split M0-02 and M0-05, added edges and the `NotAfter` commit deadline; the
 tables below are updated.
 Snapshot: `docs/plans/mkit-server/prd-snapshot.md`. **`00-plan.md` is the consolidated plan**: its registry, Defaults adopted

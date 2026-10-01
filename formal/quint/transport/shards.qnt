@@ -1,6 +1,6 @@
 // -*- mode: Bluespec; -*-
-// Shard quorum collection under the process-wide worker bound (Linear MKIT-26,
-// epic MKIT-17, workstream quint-transport).
+// Shard quorum collection under the process-wide worker bound (transport model,
+// epic verification toolchain, workstream quint-transport).
 //
 // Models `mkit_core::pack_shard::download::download_shards` as called by the
 // HTTP (`HttpTransport::download_pack_via_shards`) and S3

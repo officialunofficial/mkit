@@ -1,4 +1,4 @@
-# Garbage collection, the recovery log and the server GC primitive (MKIT-21, MKIT-17)
+# Garbage collection, the recovery log and the server GC primitive (formal verification effort)
 
 Two Quint models.
 
@@ -28,7 +28,7 @@ Two Quint models.
 | `contentIndex.qnt` | `ciCore` is the state machine. `ciHoldFirst` and `ciShortTtlGrace` are safe orderings; `ciBytesFirst`, `ciShortTtl` are unsafe caller orderings; `ciMut*` are mutants of the primitive. |
 | `check.sh` | Reruns every check with its expected outcome. `APALACHE=1` adds the bounded Apalache runs, `TLC=1` the exhaustive TLC runs. `ONLY=gc`/`ONLY=ci` picks a model, `SEL=regex` picks checks. |
 
-## Tool pins (MKIT-17)
+## Tool pins (verification toolchain)
 
 | Tool | Version | Use |
 |---|---|---|

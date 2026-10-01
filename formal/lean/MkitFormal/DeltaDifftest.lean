@@ -1,7 +1,7 @@
 import MkitFormal.DeltaCanaries
 
 /-!
-# Differential test: `delta.rs` vs the SPEC-DELTA model (MKIT-25)
+# Differential test: `delta.rs` vs the SPEC-DELTA model (delta model)
 
 Replays the vectors written by
 `rust/crates/mkit-core/tests/formal_delta_vectors.rs` (see

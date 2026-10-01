@@ -30,7 +30,7 @@ Co-authored-by: Christopher Wallace <362387+christopherwxyz@users.noreply.github
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 ```
 
-PR body: "Rebuilt from #1087 (§5.1 admission challenges) by @christopherwxyz, redesigned per MKIT-29 §6.3 / D8 / D9 / D10 / D30."
+PR body: "Rebuilt from #1087 (§5.1 admission challenges) by @christopherwxyz, redesigned per production server work §6.3 / D8 / D9 / D10 / D30."
 
 ## PRD refs
 

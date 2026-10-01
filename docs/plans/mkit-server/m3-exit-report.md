@@ -329,7 +329,7 @@ change is proposed. Gates are not waived by this review.
 | B0.4 | Default-based additive message construction documented |
 | B0.5 | Public integration test for every golden request/response/signature vector |
 | B0.6 | RPC semver passes against merged base; wasm graph/build/clippy pass |
-| B0.7 | Registry 3.7b, Stage 1/M3/deps 3.7 and 3.8; R-174/Linear MKIT-67 |
+| B0.7 | Registry 3.7b, Stage 1/M3/deps 3.7 and 3.8; R-174/authentication re-exports |
 | B0.8 | MPP uses public RPC types and shared verifier |
 | B1 | stubs/mpp.rs, loopback controls and stub-hook command |
 | B2 | Actual native binary and trusted Config/public CLI transport entry with POSIX sh helper |
