@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: automatically enqueue audited cache purges with takedown acceptance,
+  denial activation and late-holder ownership. Checkpoint newly discovered
+  repository purges with timer-15 progress and immediately invalidate configured
+  local caches (launch review 7a-2, existing R-190).
+
 - Server (R-205): `DEFAULT_REPO_VISIBILITY=public|private` on Workers and
   native `--default-repo-visibility` select visibility for repositories without
   a stored setting. The default remains public; explicit visibility wins.

@@ -244,6 +244,7 @@ struct Seen {
 enum Step<T> {
     Commit(Vec<Write>, T),
     Stop(T),
+    CommitBatch(Batch, T),
 }
 
 fn refuse_while_deleting(state: &ObjectState) -> Result<(), StoreError> {
@@ -682,6 +683,18 @@ impl<S: NamespaceStore> ContentIndex<S> {
         staged: &crate::takedown::denial::StoredAction,
         now_ms: u64,
     ) -> Result<(), StoreError> {
+        self.install_stored_block_action_with_batch(object, staged, now_ms, Batch::new())
+            .await
+    }
+
+    /// Commit source-local safety effects atomically with a new denial action.
+    pub(crate) async fn install_stored_block_action_with_batch(
+        &self,
+        object: &Hash,
+        staged: &crate::takedown::denial::StoredAction,
+        now_ms: u64,
+        effects: Batch,
+    ) -> Result<(), StoreError> {
         use crate::takedown::denial::{action_key, decode_actions, encode_actions};
         let key = action_key(object);
         self.mutate(object, now_ms, Some(&key), None, false, |seen, _| {
@@ -692,13 +705,12 @@ impl<S: NamespaceStore> ContentIndex<S> {
                 Err(i) => actions.insert(i, staged.clone()),
             }
             let value = encode_actions(actions)?;
-            Ok(Step::Commit(
-                vec![
-                    Write::Put(key.clone(), value.clone()),
-                    Write::Put(crate::takedown::denial::descriptor_key(object), value),
-                ],
-                (),
-            ))
+            let mut batch = effects.clone();
+            batch.writes.extend([
+                Write::Put(key.clone(), value.clone()),
+                Write::Put(crate::takedown::denial::descriptor_key(object), value),
+            ]);
+            Ok(Step::CommitBatch(batch, ()))
         })
         .await
     }
@@ -904,11 +916,17 @@ impl<S: NamespaceStore> ContentIndex<S> {
                 .map(codec::decode_object_state)
                 .transpose()?
                 .unwrap_or_default();
-            let (writes, out) = match plan(&seen, &mut state)? {
+            let (mut batch, out) = match plan(&seen, &mut state)? {
                 Step::Stop(out) => return Ok(out),
-                Step::Commit(writes, out) => (writes, out),
+                Step::Commit(writes, out) => (
+                    Batch {
+                        preconditions: Vec::new(),
+                        writes,
+                    },
+                    out,
+                ),
+                Step::CommitBatch(batch, out) => (batch, out),
             };
-            let mut batch = Batch::new();
             if deadline {
                 let by = now_ms.saturating_add(CONTENT_APPLY_WINDOW_MS);
                 batch = batch.require(Precondition::NotAfter(by));
@@ -920,7 +938,6 @@ impl<S: NamespaceStore> ContentIndex<S> {
                     batch = batch.delete(key);
                 }
             }
-            batch.writes.extend(writes);
             let batch = batch.put(
                 state_key.clone(),
                 codec::encode_object_state(&bumped(state, now_ms)),

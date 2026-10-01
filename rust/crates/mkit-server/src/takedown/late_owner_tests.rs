@@ -345,3 +345,44 @@ fn actual_owner_uses_one_budget_and_rejects_missing_provenance_on_replay() {
         );
     });
 }
+
+#[tokio::test]
+async fn late_owner_commits_automatic_cache_purge_with_ownership() {
+    let store = memory();
+    let req = request();
+    let partition = content_shard(&req.identity.object);
+    let config =
+        crate::purge::PurgeConfig::new("https://server.example".into(), true, true).with_audit(
+            Arc::new(crate::admin::SystemAudit::new(store.clone(), root())),
+        );
+    let owner = LateOwner::new(store.clone(), root()).with_purge(Some(config));
+    owner
+        .accept(
+            store.as_ref(),
+            &partition,
+            &req,
+            104,
+            &SliceBudget::new(700),
+        )
+        .await
+        .unwrap();
+    let page = store
+        .scan(
+            &root(),
+            &Key::new(b"cp\0".to_vec()),
+            &Key::new(b"cp\x01".to_vec()),
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        page.entries.len(),
+        1,
+        "late ownership must include automatic purge responsibility"
+    );
+    let purge: crate::purge::Request =
+        serde_json::from_slice(page.entries[0].1.as_bytes()).unwrap();
+    assert_eq!(purge.repository, "root/late");
+    assert_eq!(purge.trigger, crate::purge::Trigger::Takedown);
+}

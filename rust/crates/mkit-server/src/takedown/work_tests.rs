@@ -163,6 +163,7 @@ async fn fixture_delta_encoding(
         ]))
     };
     let work = Work {
+        purge: None,
         metadata,
         serving,
         preserved: MemoryBlobStore::default(),
@@ -194,7 +195,8 @@ async fn accept(f: &Fixture, operation: &str, pack: Option<Hash>, objects: &[Has
         f.work.metadata.clone(),
         f.work.root.clone(),
         f.work.shards.clone(),
-    );
+    )
+    .with_purge(f.work.purge.clone());
     let budget = SliceBudget::new(9000);
     let prepared = service
         .plan(TAKEDOWN_PATH, &input, operation, 10, &budget)
@@ -311,6 +313,7 @@ fn fault_work(
     serving: FaultBlobs,
 ) -> Work<Arc<MemoryKv>, FaultBlobs, MemoryBlobStore> {
     Work {
+        purge: None,
         metadata: f.work.metadata.clone(),
         serving,
         preserved: f.work.preserved.clone(),
@@ -866,7 +869,8 @@ async fn any_denies_immediately_preserves_named_repository_and_never_claims_disc
         f.work.metadata.clone(),
         f.work.root.clone(),
         f.work.shards.clone(),
-    );
+    )
+    .with_purge(f.work.purge.clone());
     assert!(
         service
             .record(&f.work.metadata, &id)
@@ -1311,6 +1315,7 @@ async fn timer15_uses_firing_local_store_for_owner_and_durable_copy_intents() {
     let id = accept(&f, "local-timer", None, &[f.canonical[0].0]).await;
     f.clock.set(20_000);
     let work = Work {
+        purge: None,
         metadata: RemoteOnly(f.work.metadata.clone(), f.work.root.clone()),
         serving: f.work.serving.clone(),
         preserved: f.work.preserved.clone(),
@@ -1641,5 +1646,252 @@ async fn stale_source_cursor_cannot_overwrite_progress_with_a_fresh_audit_head()
             .await
             .unwrap(),
         Some(ready)
+    );
+}
+
+#[derive(Default)]
+struct CacheProbe {
+    local: std::sync::Mutex<Vec<crate::purge::Request>>,
+    remote: std::sync::Mutex<Vec<crate::purge::Request>>,
+    fail_once: std::sync::atomic::AtomicBool,
+}
+impl crate::purge::LocalInvalidation for CacheProbe {
+    fn invalidate<'a>(
+        &'a self,
+        request: &'a crate::purge::Request,
+        _: u32,
+        _: &'a crate::purge::SliceBudget,
+    ) -> crate::BoxFuture<'a, Result<Option<u32>, StoreError>> {
+        Box::pin(async move {
+            self.local.lock().unwrap().push(request.clone());
+            Ok(None)
+        })
+    }
+}
+impl crate::purge::PurgeSink for CacheProbe {
+    fn deliver<'a>(
+        &'a self,
+        request: &'a crate::purge::Request,
+    ) -> crate::BoxFuture<'a, Result<(), StoreError>> {
+        Box::pin(async move {
+            self.remote.lock().unwrap().push(request.clone());
+            if self
+                .fail_once
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                Err(StoreError::unavailable("purger unavailable"))
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+fn cache_config(f: &Fixture, probe: Arc<CacheProbe>) -> crate::purge::PurgeConfig {
+    crate::purge::PurgeConfig::new("https://server.example".into(), true, true)
+        .with_audit(Arc::new(crate::admin::SystemAudit::new(
+            f.work.metadata.clone(),
+            f.work.root.clone(),
+        )))
+        .with_local(probe)
+}
+async fn purges(store: &Arc<MemoryKv>, partition: &Partition) -> Vec<crate::purge::Request> {
+    store
+        .scan(
+            partition,
+            &Key::new(b"cp\0".to_vec()),
+            &Key::new(b"cp\x01".to_vec()),
+            None,
+            100,
+        )
+        .await
+        .unwrap()
+        .entries
+        .iter()
+        .map(|(_, v)| serde_json::from_slice(v.as_bytes()).unwrap())
+        .collect()
+}
+#[tokio::test]
+async fn accepting_takedown_owns_automatic_cache_purge() {
+    use crate::timers::{TickBudget, TimerRegistry, run_due};
+    let mut f = fixture(&[Object::Blob(Blob { data: vec![9; 32] })], false).await;
+    let probe = Arc::new(CacheProbe::default());
+    probe
+        .fail_once
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    f.work.purge = Some(cache_config(&f, probe.clone()));
+    let object = f.canonical[0].0;
+    let input = json!({"repository":format!("{}/{}", f.repo.namespace.as_str(), f.repo.name.as_str()), "objectIds":[STANDARD.encode(object)], "operationId":"automatic-cache", "reason":"review"});
+    let service = Service::new(
+        f.work.metadata.clone(),
+        f.work.root.clone(),
+        f.work.shards.clone(),
+    )
+    .with_purge(f.work.purge.clone());
+    let prepared = service
+        .plan(
+            TAKEDOWN_PATH,
+            &input,
+            "automatic-cache",
+            10,
+            &SliceBudget::new(9000),
+        )
+        .await
+        .unwrap();
+    prepared
+        .batch
+        .validate(&f.work.metadata.capabilities())
+        .unwrap();
+    assert!(
+        prepared
+            .batch
+            .writes
+            .iter()
+            .any(|w| matches!(w, crate::Write::Put(k, _) if k.as_bytes().starts_with(b"cp\0")))
+    );
+    assert!(
+        prepared
+            .batch
+            .writes
+            .iter()
+            .any(|w| matches!(w, crate::Write::Put(k, _) if k.as_bytes().starts_with(b"or\0")))
+    );
+    let denied = prepared.batch.clone().require(Precondition::Equals(
+        Key::new(b"missing".to_vec()),
+        Value::default(),
+    ));
+    assert!(matches!(
+        f.work.metadata.apply(&f.work.root, denied).await.unwrap(),
+        BatchOutcome::PreconditionFailed { .. }
+    ));
+    assert!(purges(&f.work.metadata, &f.work.root).await.is_empty());
+    assert_eq!(
+        f.work
+            .metadata
+            .apply(&f.work.root, prepared.batch)
+            .await
+            .unwrap(),
+        BatchOutcome::Committed
+    );
+    let accepted = purges(&f.work.metadata, &f.work.root).await;
+    assert_eq!(
+        accepted.len(),
+        1,
+        "acceptance must durably own a cache purge"
+    );
+    assert!(accepted[0].object_ids.is_empty()); // whole repository includes all denied objects
+    assert_eq!(accepted[0].trigger, crate::purge::Trigger::Takedown);
+    // Reconstruct request-side service after acceptance, before activation.
+    let cold = Service::new(
+        f.work.metadata.clone(),
+        f.work.root.clone(),
+        f.work.shards.clone(),
+    )
+    .with_purge(f.work.purge.clone());
+    cold.after_commit(
+        TAKEDOWN_PATH,
+        &input,
+        prepared.response.clone(),
+        10,
+        &SliceBudget::new(9000),
+    )
+    .await
+    .unwrap();
+    let activated = purges(&f.work.metadata, &crate::store::content_shard(&object)).await;
+    assert_eq!(activated.len(), 1);
+    assert_ne!(activated[0].purge_id, accepted[0].purge_id);
+    assert_eq!(probe.local.lock().unwrap().len(), 2);
+    for now in [10, 2010] {
+        f.clock.set(now);
+        // A new delivery registry is created on each fire, as after restart.
+        let registry = TimerRegistry::new().register(crate::purge::PurgeDelivery::new(
+            probe.clone(),
+            Some(probe.clone()),
+            crate::purge::SliceBudget::new(16),
+        ));
+        run_due(
+            &f.work.metadata,
+            &f.work.root,
+            &registry,
+            f.clock.as_ref(),
+            u64::try_from(now).unwrap(),
+            &TickBudget::new(32, 32, 128, 1000),
+        )
+        .await
+        .unwrap();
+        if now == 10 {
+            assert_eq!(purges(&f.work.metadata, &f.work.root).await, accepted);
+        }
+    }
+    assert!(purges(&f.work.metadata, &f.work.root).await.is_empty());
+    assert_eq!(
+        *probe.remote.lock().unwrap(),
+        [accepted[0].clone(), accepted[0].clone()]
+    );
+}
+
+#[tokio::test]
+async fn discovery_checkpoints_purge_for_holders_and_namespace_members() {
+    let mut f = fixture(&[small()], false).await;
+    let probe = Arc::new(CacheProbe::default());
+    f.work.purge = Some(cache_config(&f, probe.clone()));
+    let object = f.canonical[0].0;
+    let holder =
+        crate::store::Holder::new(f.repo.namespace.clone(), RepoName::new("holder").unwrap());
+    ContentIndex::new(BorrowedStore(&f.work.metadata))
+        .add_holder(&object, &holder, &[9; 32], None, 10)
+        .await
+        .unwrap();
+    let hidden = RepoId {
+        namespace: f.repo.namespace.clone(),
+        name: RepoName::new("hidden").unwrap(),
+    };
+    let index = f
+        .work
+        .metadata
+        .get(
+            &SinglePartition.object_index(&f.repo, &object),
+            &keys::object_index(&f.repo.name, &object, &f.pack),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    f.work
+        .metadata
+        .apply(
+            &Partition::Namespace(hidden.namespace.clone()),
+            Batch::new()
+                .put(
+                    keys::repo_record(&hidden.name),
+                    codec::encode_repo_record(&codec::RepoRecord { created_at_ms: 10 }),
+                )
+                .put(keys::membership(&hidden.name, &f.pack), Value::default())
+                .put(keys::object_index(&hidden.name, &object, &f.pack), index),
+        )
+        .await
+        .unwrap();
+    let id = accept(&f, "cache-discovery", None, &[object]).await;
+    for _ in 0..150 {
+        let (state, calls) = advance(&f, id, 50_000).await;
+        assert!(calls <= 700);
+        if state.phase == Phase::Retain {
+            break;
+        }
+    }
+    let requests = purges(&f.work.metadata, &f.work.root).await;
+    for name in ["holder", "hidden"] {
+        assert!(
+            requests
+                .iter()
+                .any(|r| r.repository == format!("{}/{name}", f.repo.namespace.as_str())),
+            "missing purge for {name}"
+        );
+    }
+    assert!(
+        f.work
+            .state(&f.work.metadata, &id, 10)
+            .await
+            .unwrap()
+            .0
+            .discovery_complete
     );
 }

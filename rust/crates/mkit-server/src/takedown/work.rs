@@ -39,6 +39,24 @@ pub(super) fn range(tag: &[u8], action: &Hash) -> (Key, Key) {
     let end = prefix_end(&start);
     (start, end)
 }
+fn known_holder_key(id: &Hash, object: &Hash, repo: &RepoId) -> Key {
+    key(
+        b"known-holder",
+        id,
+        &[
+            object.as_slice(),
+            repo.namespace.as_str().as_bytes(),
+            b"\0",
+            repo.name.as_str().as_bytes(),
+        ]
+        .concat(),
+    )
+}
+fn holder_context() -> Result<Value, StoreError> {
+    value(
+        &serde_json::json!({"contextComplete":false,"signerMetadata":"unavailable_in_existing_source"}),
+    )
+}
 fn prefix_end(start: &Key) -> Key {
     let mut bytes = start.as_bytes().to_vec();
     while bytes.last() == Some(&255) {
@@ -105,6 +123,8 @@ pub(super) struct ObjectInfo {
 /// All runtime dependencies; preservation is a separately provisioned blob store.
 pub struct Work<N, B, P> {
     pub metadata: N,
+    /// Automatic cache purge settings shared with signed and late intake.
+    pub purge: Option<crate::purge::PurgeConfig>,
     pub serving: B,
     pub preserved: P,
     pub root: Partition,
@@ -139,7 +159,8 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
             LocalStore::new(store, &self.root, store),
             self.root.clone(),
             self.shards.clone(),
-        );
+        )
+        .with_purge(self.purge.clone());
         let (record, _) = service
             .record(store, &id)
             .await
@@ -219,6 +240,51 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
             .transpose()
             .map(Option::unwrap_or_default)
     }
+    async fn plan_cache_purge<S: NamespaceStore>(
+        &self,
+        store: &S,
+        id: &Hash,
+        object: &Hash,
+        repo: &RepoId,
+        now: u64,
+    ) -> Result<Batch, StoreError> {
+        if self.purge.is_none() {
+            return Ok(Batch::new());
+        }
+        let marker = known_holder_key(id, object, repo);
+        if store.get(&self.root, &marker).await?.is_some() {
+            return Ok(Batch::new());
+        }
+        let operation = format!(
+            "discovery:{}",
+            to_hex(&mkit_core::hash::hash(
+                &[id.as_slice(), object.as_slice()].concat()
+            ))
+        );
+        let batch = crate::purge::automatic::plan_repository(
+            self.purge.as_ref(),
+            store,
+            &self.root,
+            repo,
+            crate::purge::Trigger::Takedown,
+            &operation,
+            now,
+        )
+        .await?;
+        // Invalidating early is safe on a failed checkpoint; the returned
+        // durable responsibility is committed with the holder/discovery cursor.
+        crate::purge::automatic::invalidate_repository(
+            self.purge.as_ref(),
+            &self.root,
+            repo,
+            crate::purge::Trigger::Takedown,
+            &operation,
+        )
+        .await;
+        Ok(batch
+            .require(Precondition::Absent(marker.clone()))
+            .put(marker, holder_context()?))
+    }
     fn enqueue(mut batch: Batch, id: &Hash, object: &Hash, kind: u8) -> Batch {
         let row = key(b"todo", id, object);
         batch.writes.retain(|write| match write {
@@ -238,7 +304,8 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
             LocalStore::new(store, &self.root, store),
             self.root.clone(),
             self.shards.clone(),
-        );
+        )
+        .with_purge(self.purge.clone());
         service
             .resume(id, now, budget)
             .await
@@ -663,6 +730,13 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
                             checkpoint,
                         )
                         .await?;
+                        if let Some(repo) = &next.repository {
+                            let purge = self
+                                .plan_cache_purge(store, &id, &object, repo, now)
+                                .await?;
+                            batch.preconditions.extend(purge.preconditions);
+                            batch.writes.extend(purge.writes);
+                        }
                         batch.preconditions.extend(next.batch.preconditions);
                         batch.writes.extend(next.batch.writes);
                         if next.complete {
@@ -690,7 +764,15 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> Work<N, B, P> {
                             namespace: holder.ns,
                             name: holder.repo,
                         };
-                        batch=batch.put(key(b"known-holder",&id,&[object.as_slice(),repo.namespace.as_str().as_bytes(),b"\0",repo.name.as_str().as_bytes()].concat()),value(&serde_json::json!({"contextComplete":false,"signerMetadata":"unavailable_in_existing_source"}))?);
+                        let purge = self
+                            .plan_cache_purge(store, &id, &object, &repo, now)
+                            .await?;
+                        batch.preconditions.extend(purge.preconditions);
+                        batch.writes.extend(purge.writes);
+                        if self.purge.is_none() {
+                            batch =
+                                batch.put(known_holder_key(&id, &object, &repo), holder_context()?);
+                        }
                     }
                     info.holders = holders.next.map(|c| c.as_bytes().to_vec());
                     info.holders_done = info.holders.is_none();

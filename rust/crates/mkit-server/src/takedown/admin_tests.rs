@@ -183,6 +183,7 @@ async fn fixture(size: usize) -> Fixture {
     let metadata = Arc::new(MemoryKv::with_clock(clock.clone()));
     let root = Partition::Namespace(NamespaceKey::deployment_default());
     let work = Arc::new(Work {
+        purge: None,
         metadata: metadata.clone(),
         serving: MemoryBlobStore::default(),
         preserved: MemoryBlobStore::default(),

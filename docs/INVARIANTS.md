@@ -2080,6 +2080,18 @@ and bounded namespace purge, with source tests and independent reviews. Gate
 exceptions are recorded in the implementation contract; production takedown
 activation remains gated on WP-5.6a-2/3 and launch gates.
 
+With purge configured, acceptance and late ownership commit timer-11 purge work
+and its automatic audit relay in the same apply as the owning request. Each
+content action activation commits equivalent source-local responsibility with
+its denial descriptor. Whole-repository selectors cover the denied objects,
+proofs and snapshots; timer-15 holder and namespace discovery atomically add
+new repository responsibility with their existing holder-context checkpoint.
+Immediate local invalidation follows acceptance/activation; failed delivery is
+still owned by timer 11. Stable source/action identities and the existing
+holder-context row prevent duplicate discovery purges after acknowledgment.
+Core regression coverage lives in takedown work/late-owner tests; Worker
+configuration is attached by the separate activation lane.
+
 ## Lean preservation cannot imply completed takedown (WP-5.6a-2 contract)
 
 **Always:** accepted requests retain denial and durable acquisition/discovery

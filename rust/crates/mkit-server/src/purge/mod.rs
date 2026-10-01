@@ -1,4 +1,5 @@
 //! Durable cache purge work and deployment-independent selectors (§16.7).
+pub(crate) mod automatic;
 mod delivery;
 #[cfg(test)]
 mod tests;
