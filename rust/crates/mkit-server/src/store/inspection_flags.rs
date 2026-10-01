@@ -198,8 +198,8 @@ impl<'a, S: NamespaceStore + ?Sized> InspectionFlags<'a, S> {
         self.store.get_many(&self.partition, &keys).await
     }
 
-    fn record(id: &Hash, value: &Option<Value>) -> Result<Option<FlagV1>, StoreError> {
-        let record = value.as_ref().map(decode_flag).transpose()?;
+    fn record(id: &Hash, value: Option<&Value>) -> Result<Option<FlagV1>, StoreError> {
+        let record = value.map(decode_flag).transpose()?;
         if record.as_ref().is_some_and(|r| r.id != *id) {
             return Err(StoreError::Corrupt(
                 "inspection flag key binding mismatch".into(),
@@ -303,7 +303,7 @@ impl<'a, S: NamespaceStore + ?Sized> InspectionFlags<'a, S> {
             }
             let mut batch = Batch::new().require(guard(version_key.clone(), version_raw.as_ref()));
             for (index, (id, value)) in ids.iter().zip(&values).enumerate() {
-                let record = Self::record(id, value)?;
+                let record = Self::record(id, value.as_ref())?;
                 let key = keys::inspection_flag(&self.repo.name, id);
                 batch.preconditions.push(guard(key.clone(), value.as_ref()));
                 if let Some(next) = replacement(index, record.as_ref())? {
@@ -324,7 +324,7 @@ impl<'a, S: NamespaceStore + ?Sized> InspectionFlags<'a, S> {
     }
 
     /// Read at most 48 distinct ids with a coherent version. Sequential
-    /// get_many reads are validated by the atomic version guard, never
+    /// `get_many` reads are validated by the atomic version guard, never
     /// assumed to be a snapshot. A concurrent mutation causes a retry.
     ///
     /// # Errors
@@ -338,7 +338,7 @@ impl<'a, S: NamespaceStore + ?Sized> InspectionFlags<'a, S> {
             let mut flagged = Vec::new();
             for (id, value) in ids.iter().zip(&values) {
                 if let Some(record) =
-                    Self::record(id, value)?.filter(|r| r.state == FlagState::Flagged)
+                    Self::record(id, value.as_ref())?.filter(|r| r.state == FlagState::Flagged)
                 {
                     flagged.push(record);
                 }

@@ -389,7 +389,13 @@ async fn unseen_verdict_while_flagged_is_remembered_across_release() {
         let a = install(1);
         let mut b = a.clone();
         b.source.inspection_id = "independent-b".into();
-        assert_eq!(registry.install_flags(&[a.clone()]).await.unwrap(), 1);
+        assert_eq!(
+            registry
+                .install_flags(std::slice::from_ref(&a))
+                .await
+                .unwrap(),
+            1
+        );
         assert_eq!(registry.install_flags(&[b.clone()]).await.unwrap(), 2);
         let before = registry.lookup(&[a.id]).await.unwrap();
         assert_eq!(
@@ -411,7 +417,13 @@ async fn old_verdict_cannot_reflag_after_two_released_inspections() {
     let a = install(1);
     let mut b = a.clone();
     b.source.inspection_id = "deliberate-b".into();
-    assert_eq!(registry.install_flags(&[a.clone()]).await.unwrap(), 1);
+    assert_eq!(
+        registry
+            .install_flags(std::slice::from_ref(&a))
+            .await
+            .unwrap(),
+        1
+    );
     assert_eq!(registry.release_flag(&a.id).await.unwrap(), 2);
     assert_eq!(registry.install_flags(&[b.clone()]).await.unwrap(), 3);
     assert_eq!(registry.release_flag(&b.id).await.unwrap(), 4);

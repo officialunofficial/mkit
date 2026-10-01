@@ -136,20 +136,23 @@ fn release_pages_and_limits_remain_within_the_portable_budget() {
     let seven_ticket_ops = crate::store::outbox::ADVANCE_SHARED_OPS
         + crate::store::outbox::MAX_TICKETS_PER_ADVANCE * 9;
     assert_eq!(seven_ticket_ops, 94);
-    assert_eq!(seven_ticket_ops + ops, 103);
-    assert!(seven_ticket_ops + ops > MAX_BATCH_OPS);
-    let combined = InspectionHolds::new(&store, &D34Shards, &repo, "refs/heads/main")
-        .with_reserved_ops(seven_ticket_ops);
-    assert!(matches!(
-        block_on(combined.plan_holds(&[3; 32], &ids[..7])),
-        Err(StoreError::Invalid(_))
-    ));
-    let bounded = block_on(combined.plan_holds(&[3; 32], &ids[..4])).unwrap();
-    assert_eq!(bounded.preconditions.len() + bounded.writes.len(), 6);
-    assert_eq!(
-        seven_ticket_ops + bounded.preconditions.len() + bounded.writes.len(),
-        100
-    );
+    let max_ids_alongside_advance =
+        (MAX_BATCH_OPS - seven_ticket_ops - HOLD_SHARED_OPS) / HOLD_OPS_PER_ID;
+    assert_eq!(max_ids_alongside_advance, 4);
+
+    // A plan pays two shared manifest ops, then one guarded put per new id.
+    let one_id = block_on(holds.plan_holds(&[3; 32], &ids[..1])).unwrap();
+    let two_ids = block_on(holds.plan_holds(&[3; 32], &ids[..2])).unwrap();
+    let one_id_ops = one_id.preconditions.len() + one_id.writes.len();
+    let two_id_ops = two_ids.preconditions.len() + two_ids.writes.len();
+    assert_eq!(one_id_ops, HOLD_SHARED_OPS + HOLD_OPS_PER_ID);
+    assert_eq!(two_id_ops - one_id_ops, HOLD_OPS_PER_ID);
+
+    let advance_hold = block_on(holds.plan_advance_hold(&[3; 32])).unwrap();
+    let advance_hold_ops = advance_hold.preconditions.len() + advance_hold.writes.len();
+    assert_eq!(advance_hold_ops, ADVANCE_HOLD_MARKER_OPS);
+    assert!(seven_ticket_ops + advance_hold_ops <= MAX_BATCH_OPS);
+    assert_eq!(seven_ticket_ops + advance_hold_ops, 96);
     let page = block_on(holds.plan_release(&[1; 32])).unwrap();
     assert_eq!(page.preconditions.len() + page.writes.len(), MAX_BATCH_OPS);
     commit(&holds, page);
@@ -160,6 +163,94 @@ fn release_pages_and_limits_remain_within_the_portable_budget() {
         block_on(holds.is_held(&vec![[0; 32]; MAX_SCAN_RANGES + 1])),
         Err(StoreError::Invalid(_))
     ));
+}
+
+#[test]
+fn constant_cost_advance_hold_materializes_and_releases_content_rows() {
+    let store = MemoryKv::default();
+    let repo = repo();
+    let holds = InspectionHolds::new(&store, &D34Shards, &repo, "refs/heads/main");
+    let advance = [4; 32];
+    let marker = block_on(holds.plan_advance_hold(&advance)).unwrap();
+    assert_eq!(marker.preconditions.len() + marker.writes.len(), 2);
+    commit(&holds, marker);
+    let key = keys::inspection_hold_index(&repo.name, &advance);
+    assert_eq!(
+        block_on(store.get(holds.partition(), &key)).unwrap(),
+        Some(Value::new(vec![PENDING_HOLD_MARKER]))
+    );
+    assert!(
+        block_on(holds.plan_advance_hold(&advance))
+            .unwrap()
+            .writes
+            .is_empty()
+    );
+    let cancel_advance = [5; 32];
+    commit(
+        &holds,
+        block_on(holds.plan_advance_hold(&cancel_advance)).unwrap(),
+    );
+    commit(
+        &holds,
+        block_on(holds.plan_release(&cancel_advance)).unwrap(),
+    );
+    assert!(
+        block_on(store.get(
+            holds.partition(),
+            &keys::inspection_hold_index(&repo.name, &cancel_advance)
+        ))
+        .unwrap()
+        .is_none()
+    );
+
+    let materialized = block_on(holds.plan_holds(&advance, &[[6; 32], [7; 32]])).unwrap();
+    assert_eq!(
+        materialized.preconditions.len() + materialized.writes.len(),
+        4
+    );
+    commit(&holds, materialized);
+    let in_progress = block_on(store.get(holds.partition(), &key))
+        .unwrap()
+        .unwrap();
+    assert_eq!(&in_progress.as_bytes()[..2], &[2, PENDING_HOLD_MARKER]);
+    assert_eq!(
+        block_on(holds.is_held(&[[6; 32], [7; 32]])).unwrap(),
+        vec![[6; 32], [7; 32]]
+    );
+    commit(&holds, block_on(holds.plan_complete(&advance)).unwrap());
+    let complete = block_on(store.get(holds.partition(), &key))
+        .unwrap()
+        .unwrap();
+    assert_eq!(complete.as_bytes()[0], 1);
+    commit(&holds, block_on(holds.plan_release(&advance)).unwrap());
+    assert!(
+        block_on(holds.is_held(&[[6; 32], [7; 32]]))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn completing_an_empty_materialization_clears_pending_fallback() {
+    let store = MemoryKv::default();
+    let repo = repo();
+    let holds = InspectionHolds::new(&store, &D34Shards, &repo, "refs/heads/main");
+    let advance = [8; 32];
+    commit(&holds, block_on(holds.plan_advance_hold(&advance)).unwrap());
+    let complete = block_on(holds.plan_complete(&advance)).unwrap();
+    assert_eq!(complete.preconditions.len() + complete.writes.len(), 2);
+    commit(&holds, complete);
+    let key = keys::inspection_hold_index(&repo.name, &advance);
+    assert_eq!(
+        block_on(store.get(holds.partition(), &key)).unwrap(),
+        Some(Value::new(vec![1]))
+    );
+    commit(&holds, block_on(holds.plan_release(&advance)).unwrap());
+    assert!(
+        block_on(store.get(holds.partition(), &key))
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[derive(Default)]
@@ -224,7 +315,6 @@ fn corrupt_manifests_and_forward_rows_fail_closed() {
     let values = [
         Value::default(),
         Value::new(vec![2]),
-        Value::new(vec![1]),
         Value::new(vec![1, 0]),
         Value::new([vec![1], vec![0; 64]].concat()),
     ];

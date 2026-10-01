@@ -2521,7 +2521,7 @@
       "5.4"
     ],
     "size": "S",
-    "summary": "R-206 / R-198 B3: tested default-off core marker and Worker guard, guarded repository flag registry and bounded per-advance hold plans. Pipeline and serving integration remains 5.5c; sync-only launch inspection is unchanged. Carry-forward: the 94-op seven-ticket D34 advance plus seven new hold effects (9 ops) is 103, over the 100-op cap; resolve before integration.",
+      "summary": "R-206 / R-198 B3: tested default-off core marker and Worker guard, guarded repository flag registry and bounded per-advance hold plans. No advance or serving wiring in this WP; sync-only launch inspection is unchanged. 5.5c writes one constant-cost advance-level hold record in the advance apply, materializes per-content rows in bounded pages through kind-14 inspection work, and explicitly completes the manifest (including empty results). Content belonging to that advance is held while the manifest is incomplete. Do not call per-id hold plans inside the advance apply. Per-id plans cost one put plus two shared manifest ops; at most four new ids fit beside a maximal 94-op seven-ticket D34 advance under the 100-op cap.",
     "human_action": false,
     "area_gates": [
       "rust",

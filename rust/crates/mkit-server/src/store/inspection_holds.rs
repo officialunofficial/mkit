@@ -1,5 +1,6 @@
-//! Inspection holds in the advance's ref partition. Plans must be folded
-//! into the caller's guarded advance apply; reads are not atomic snapshots.
+//! Inspection holds in the advance's ref partition. A single advance-level
+//! pending marker can be folded into the caller's guarded apply; kind-14 work
+//! later materializes per-content rows. Reads are not atomic snapshots.
 
 use std::collections::BTreeSet;
 
@@ -17,9 +18,12 @@ use super::{
 pub const HOLD_OPS_PER_ID: usize = 1;
 /// One manifest CAS and one manifest write, shared by a plan.
 pub const HOLD_SHARED_OPS: usize = 2;
+/// One advance-level hold marker: one absence guard and one put.
+pub const ADVANCE_HOLD_MARKER_OPS: usize = 2;
+const PENDING_HOLD_MARKER: u8 = 0;
 /// Most input ids for an install plan, before deduplication.
 pub const MAX_HOLD_BATCH_IDS: usize = MAX_BATCH_OPS - HOLD_SHARED_OPS;
-/// Most distinct ids held by one advance. The manifest is at most 320,001
+/// Most distinct ids held by one advance. The manifest is at most 320,002
 /// bytes; its guard and replacement fit the one MiB limit together.
 /// This bounds storage resources, not the inspected set: callers can hold
 /// whole added packs and record flagged object ids in the separate registry.
@@ -60,10 +64,29 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
         &self.partition
     }
 
-    /// Plan idempotent additions. The manifest CAS serializes additions and
-    /// releases for this advance; existing ids need no forward-row write.
-    /// The caller also guards its advance state in the combined apply and
-    /// re-plans after any CAS loss. Seven new ids cost nine operations.
+    /// Plan the constant-cost hold record to include in the advance apply.
+    /// Per-content hold rows are materialized later by inspection work.
+    /// Repeated calls are idempotent and guard the existing record.
+    ///
+    /// # Errors
+    /// Storage failures propagate; corrupt records and unsupported batches fail closed.
+    pub async fn plan_advance_hold(&self, advance: &Hash) -> Result<Batch, StoreError> {
+        let key = keys::inspection_hold_index(&self.repo.name, advance);
+        let prior = self.store.get(&self.partition, &key).await?;
+        let mut batch = Batch::new().require(manifest_guard(key.clone(), prior.as_ref()));
+        if let Some(value) = &prior {
+            decode_manifest(Some(value))?;
+        } else {
+            batch = batch.put(key, encode_pending_hold());
+        }
+        batch.validate(&self.store.capabilities())?;
+        Ok(batch)
+    }
+
+    /// Plan one bounded kind-14 materialization page. The manifest CAS
+    /// serializes additions and releases for this advance; while materializing,
+    /// the manifest remains pending until `plan_complete` commits. Existing
+    /// ids need no forward-row write. Re-plan after any CAS loss.
     ///
     /// # Errors
     /// Invalid for an oversized input, manifest, or batch; corrupt for an
@@ -76,7 +99,11 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
         }
         let key = keys::inspection_hold_index(&self.repo.name, advance);
         let prior = self.store.get(&self.partition, &key).await?;
-        let mut held = decode_manifest(prior.as_ref())?;
+        let manifest = decode_manifest(prior.as_ref())?;
+        let (mut held, materializing) = match manifest {
+            HoldManifest::Materializing(ids) => (ids, true),
+            HoldManifest::Materialized(ids) => (ids, false),
+        };
         let mut added = Vec::new();
         for id in ids {
             if held.insert(*id) {
@@ -95,7 +122,14 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
         }
         let mut batch = Batch::new()
             .require(manifest_guard(key.clone(), prior.as_ref()))
-            .put(key, encode_manifest(&held));
+            .put(
+                key,
+                if materializing {
+                    encode_materializing(&held)
+                } else {
+                    encode_manifest(&held)
+                },
+            );
         for id in added {
             batch = batch.put(
                 keys::inspection_hold(&self.repo.name, &id, advance),
@@ -106,10 +140,30 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
         Ok(batch)
     }
 
-    /// Plan a bounded release page belonging only to this advance. Repeat
-    /// after each committed page until a plan with no writes is returned. A partial
-    /// page rewrites the manifest with the remaining ids. Re-plan on CAS
-    /// loss, and guard the caller's advance transition in the combined apply.
+    /// Complete kind-14 materialization after every content page is committed.
+    /// Until this transition, serving must treat content belonging to this
+    /// advance as held, including content not yet present in a forward row.
+    /// Completing an empty materialization is valid and removes that fallback.
+    pub async fn plan_complete(&self, advance: &Hash) -> Result<Batch, StoreError> {
+        let key = keys::inspection_hold_index(&self.repo.name, advance);
+        let prior = self.store.get(&self.partition, &key).await?;
+        let manifest = decode_manifest(prior.as_ref())?;
+        let mut batch = Batch::new().require(manifest_guard(key.clone(), prior.as_ref()));
+        if prior.is_some()
+            && let HoldManifest::Materializing(ids) = manifest
+        {
+            batch = batch.put(key, encode_manifest(&ids));
+        }
+        batch.validate(&self.store.capabilities())?;
+        Ok(batch)
+    }
+
+    /// Plan a bounded release page belonging only to this advance, after the
+    /// advance obligation has ended. The caller must atomically guard the
+    /// terminal advance transition on the first page so no later kind-14 page
+    /// can apply. Repeat after each committed page until a plan with no writes
+    /// is returned. A partial page rewrites the manifest with remaining ids;
+    /// re-plan after CAS loss.
     ///
     /// # Errors
     /// Invalid for unusable backend limits; corrupt for a bad manifest;
@@ -118,9 +172,14 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
         let limit = self.batch_limit()?;
         let key = keys::inspection_hold_index(&self.repo.name, advance);
         let prior = self.store.get(&self.partition, &key).await?;
-        let mut held = decode_manifest(prior.as_ref())?;
+        let mut held = match decode_manifest(prior.as_ref())? {
+            HoldManifest::Materializing(ids) | HoldManifest::Materialized(ids) => ids,
+        };
         if held.is_empty() {
-            let batch = Batch::new().require(manifest_guard(key, prior.as_ref()));
+            let mut batch = Batch::new().require(manifest_guard(key.clone(), prior.as_ref()));
+            if prior.is_some() {
+                batch = batch.delete(key);
+            }
             batch.validate(&self.store.capabilities())?;
             return Ok(batch);
         }
@@ -141,9 +200,12 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
         Ok(batch)
     }
 
-    /// Return the held subset in sorted, deduplicated order. Every content
-    /// id needs only a prefix probe with limit one, regardless of how many
-    /// advances hold it. The probes are sequential and are not a snapshot.
+    /// Return the subset with materialized per-content rows in sorted,
+    /// deduplicated order. During a pending advance marker, serving must also
+    /// check whether the requested content belongs to that held advance while
+    /// the manifest is still materializing.
+    /// Every materialized id needs one prefix probe with limit one. The
+    /// probes are sequential and are not a snapshot.
     ///
     /// # Errors
     /// Invalid for more than 256 inputs, corrupt for malformed hold rows;
@@ -191,6 +253,25 @@ fn manifest_guard(key: super::Key, prior: Option<&Value>) -> Precondition {
     }
 }
 
+#[derive(Debug)]
+enum HoldManifest {
+    Materializing(BTreeSet<Hash>),
+    Materialized(BTreeSet<Hash>),
+}
+
+fn encode_pending_hold() -> Value {
+    Value::new(vec![PENDING_HOLD_MARKER])
+}
+
+fn encode_materializing(ids: &BTreeSet<Hash>) -> Value {
+    let mut bytes = Vec::with_capacity(2 + ids.len() * 32);
+    bytes.extend_from_slice(&[2, PENDING_HOLD_MARKER]);
+    for id in ids {
+        bytes.extend_from_slice(id);
+    }
+    Value::new(bytes)
+}
+
 fn encode_manifest(ids: &BTreeSet<Hash>) -> Value {
     let mut bytes = Vec::with_capacity(1 + ids.len() * 32);
     bytes.push(1);
@@ -204,23 +285,34 @@ pub(crate) fn validate_manifest(value: &Value) -> Result<(), StoreError> {
     decode_manifest(Some(value)).map(|_| ())
 }
 
-fn decode_manifest(value: Option<&Value>) -> Result<BTreeSet<Hash>, StoreError> {
+fn decode_manifest(value: Option<&Value>) -> Result<HoldManifest, StoreError> {
     let Some(value) = value else {
-        return Ok(BTreeSet::new());
+        return Ok(HoldManifest::Materializing(BTreeSet::new()));
     };
     let bytes = value.as_bytes();
-    if bytes.first() != Some(&1)
-        || bytes.len() <= 1
-        || !(bytes.len() - 1).is_multiple_of(32)
-        || (bytes.len() - 1) / 32 > MAX_HOLD_IDS_PER_ADVANCE
-    {
+    if bytes == [PENDING_HOLD_MARKER] {
+        return Ok(HoldManifest::Materializing(BTreeSet::new()));
+    }
+    if bytes == [1] {
+        return Ok(HoldManifest::Materialized(BTreeSet::new()));
+    }
+    let (version, encoded_ids) = match bytes.first() {
+        Some(1) => (1, &bytes[1..]),
+        Some(2) if bytes.get(1) == Some(&PENDING_HOLD_MARKER) => (2, &bytes[2..]),
+        _ => {
+            return Err(StoreError::Corrupt(
+                "invalid inspection hold manifest".into(),
+            ));
+        }
+    };
+    if !encoded_ids.len().is_multiple_of(32) || encoded_ids.len() / 32 > MAX_HOLD_IDS_PER_ADVANCE {
         return Err(StoreError::Corrupt(
             "invalid inspection hold manifest".into(),
         ));
     }
     let mut ids = BTreeSet::new();
     let mut last = None;
-    for chunk in bytes[1..].chunks_exact(32) {
+    for chunk in encoded_ids.chunks_exact(32) {
         let mut id = [0; 32];
         id.copy_from_slice(chunk);
         if last.is_some_and(|last| last >= id) {
@@ -231,7 +323,11 @@ fn decode_manifest(value: Option<&Value>) -> Result<BTreeSet<Hash>, StoreError> 
         ids.insert(id);
         last = Some(id);
     }
-    Ok(ids)
+    Ok(if version == 2 {
+        HoldManifest::Materializing(ids)
+    } else {
+        HoldManifest::Materialized(ids)
+    })
 }
 
 #[cfg(test)]

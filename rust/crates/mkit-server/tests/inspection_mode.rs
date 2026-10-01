@@ -154,6 +154,27 @@ fn restore_retains_registry_and_per_advance_hold_rows_in_single_and_d34() {
     }
 }
 
+#[test]
+fn restore_retains_pending_advance_hold_marker() {
+    let source = MemoryKv::default();
+    let repo = mkit_server::RepoName::new("project").unwrap();
+    let advance = [3; 32];
+    assert_eq!(block_on(check_mode(&source, true)).unwrap(), Outcome::Ok);
+    put(&source, keys::sharding_marker(), b"single");
+    put(&source, keys::inspection_hold_index(&repo, &advance), &[0]);
+    let restored = MemoryKv::default();
+    block_on(restore(
+        &[archive(&source)],
+        &restored,
+        RestoreOptions::default(),
+    ))
+    .unwrap();
+    assert_eq!(
+        block_on(restored.get(&root(), &keys::inspection_hold_index(&repo, &advance))).unwrap(),
+        Some(Value::new(vec![0]))
+    );
+}
+
 /// A competing first ordinary write installs the logical layout row between
 /// the empty scan and activation's apply; the second CAS must refuse it.
 struct LateWrite(MemoryKv);

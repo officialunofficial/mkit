@@ -142,6 +142,7 @@ fn inspect(
             authority_fence |=
                 codec::decode_lease_recovery(&record.value)?.authority_fence == Some(true);
         }
+        validate_inspection_record(&record)?;
         match keys::parse(&record.key) {
             Some(ParsedKey::Ticket(_)) => {
                 let ticket = codec::decode_ticket(&record.value)?;
@@ -174,34 +175,7 @@ fn inspect(
                 *prior = (*prior).max(rh);
             }
             Some(ParsedKey::ShardingMarker) => sharding_marker = Some(record),
-            Some(ParsedKey::InspectionMarker) => {
-                if record.value.as_bytes() != b"on" {
-                    return Err(corrupt("invalid inspection marker"));
-                }
-                inspection_marker = Some(record);
-            }
-            Some(ParsedKey::InspectionFlag { repo, id }) => {
-                inspection_partition(&record.partition, &repo, true)?;
-                if super::inspection_flags::decode_flag(&record.value)?.id != id {
-                    return Err(corrupt("inspection flag id disagrees with key"));
-                }
-            }
-            Some(ParsedKey::InspectionVersion(repo)) => {
-                inspection_partition(&record.partition, &repo, true)?;
-                if codec::decode_u64(&record.value)? == 0 {
-                    return Err(corrupt("inspection registry version is zero"));
-                }
-            }
-            Some(ParsedKey::InspectionHold { repo, .. }) => {
-                inspection_partition(&record.partition, &repo, false)?;
-                if !record.value.as_bytes().is_empty() {
-                    return Err(corrupt("invalid inspection hold row"));
-                }
-            }
-            Some(ParsedKey::InspectionHoldIndex { repo, .. }) => {
-                inspection_partition(&record.partition, &repo, false)?;
-                super::inspection_holds::validate_manifest(&record.value)?;
-            }
+            Some(ParsedKey::InspectionMarker) => inspection_marker = Some(record),
             _ => {}
         }
     }
@@ -209,15 +183,7 @@ fn inspect(
     if !seen.insert(partition.clone()) {
         return Err(invalid("duplicate partition snapshot"));
     }
-    if max_relay_sequence > outbox_sequence {
-        return Err(corrupt("relay sequence exceeds outbox sequence"));
-    }
-    if max_relay_sequence > 0 && outbox_sequence == 0 {
-        return Err(corrupt("relay rows require an outbox sequence"));
-    }
-    if has_outbox_sequence && outbox_sequence == 0 {
-        return Err(corrupt("outbox sequence is zero"));
-    }
+    validate_sequences(max_relay_sequence, outbox_sequence, has_outbox_sequence)?;
     if sharding_marker.is_some()
         && partition != Partition::Namespace(NamespaceKey::deployment_default())
     {
@@ -244,6 +210,57 @@ fn inspect(
         authority_fence,
         authority_generation,
     })
+}
+
+fn validate_sequences(
+    max_relay_sequence: u64,
+    outbox_sequence: u64,
+    has_outbox_sequence: bool,
+) -> Result<(), StoreError> {
+    if max_relay_sequence > outbox_sequence {
+        return Err(corrupt("relay sequence exceeds outbox sequence"));
+    }
+    if max_relay_sequence > 0 && outbox_sequence == 0 {
+        return Err(corrupt("relay rows require an outbox sequence"));
+    }
+    if has_outbox_sequence && outbox_sequence == 0 {
+        return Err(corrupt("outbox sequence is zero"));
+    }
+    Ok(())
+}
+
+fn validate_inspection_record(record: &ExportRecord) -> Result<(), StoreError> {
+    match keys::parse(&record.key) {
+        Some(ParsedKey::InspectionMarker) if record.value.as_bytes() != b"on" => {
+            Err(corrupt("invalid inspection marker"))
+        }
+        Some(ParsedKey::InspectionFlag { repo, id }) => {
+            inspection_partition(&record.partition, &repo, true)?;
+            if super::inspection_flags::decode_flag(&record.value)?.id != id {
+                return Err(corrupt("inspection flag id disagrees with key"));
+            }
+            Ok(())
+        }
+        Some(ParsedKey::InspectionVersion(repo)) => {
+            inspection_partition(&record.partition, &repo, true)?;
+            if codec::decode_u64(&record.value)? == 0 {
+                return Err(corrupt("inspection registry version is zero"));
+            }
+            Ok(())
+        }
+        Some(ParsedKey::InspectionHold { repo, .. }) => {
+            inspection_partition(&record.partition, &repo, false)?;
+            if !record.value.as_bytes().is_empty() {
+                return Err(corrupt("invalid inspection hold row"));
+            }
+            Ok(())
+        }
+        Some(ParsedKey::InspectionHoldIndex { repo, .. }) => {
+            inspection_partition(&record.partition, &repo, false)?;
+            super::inspection_holds::validate_manifest(&record.value)
+        }
+        _ => Ok(()),
+    }
 }
 
 fn inspection_partition(

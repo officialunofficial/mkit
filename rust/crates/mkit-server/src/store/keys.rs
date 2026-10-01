@@ -14,10 +14,10 @@
 //! | deployment sharding marker (root `Namespace` only) | `sm 00` | UTF-8 `single` or `d34` |
 //! | deployment addressing marker (root `Namespace` only) | `am 00` | UTF-8 `single` or `multi` |
 //! | durable inspection mode (root `Namespace` only) | `im 00` | UTF-8 `on`; absence means off |
-//! | repository inspection flag (canonical RepoIndex prefix 0 / Single Namespace) | `if 00 <repo> 00 <id:32>` | strict versioned flag |
+//! | repository inspection flag (canonical `RepoIndex` prefix 0 / Single Namespace) | `if 00 <repo> 00 <id:32>` | strict versioned flag |
 //! | inspection registry version (same partition) | `iv 00 <repo>` | be64 |
 //! | per-advance inspection hold (ref shard) | `ih 00 <repo> 00 <content:32> <advance:32>` | empty |
-//! | advance hold manifest (ref shard) | `ia 00 <repo> 00 <advance:32>` | versioned sorted content ids |
+//! | advance hold record/manifest (ref shard) | `ia 00 <repo> 00 <advance:32>` | v0 pending, v2 materializing ids, or v1 sorted content ids |
 //! | layout version | `v 00` | be32 [`LAYOUT_VERSION`]; never on `RefsOnly` stores |
 //! | publication sequence and boundary | `pp 00 <repo> 00 <canonical ref>` | v1 `Publication` |
 //! | retained advance | `av 00 <repo> 00 <canonical ref> 00 <seq:be64>` | v1 `Advance` |

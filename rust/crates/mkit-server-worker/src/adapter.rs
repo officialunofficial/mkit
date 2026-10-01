@@ -2304,21 +2304,24 @@ mod glue {
         meta: &WorkerNamespaceStore,
         cfg: &WorkerConfig,
     ) -> Result<(), crate::inspection_guard::GuardError> {
-        if !cfg.inspection_mode {
-            return Ok(());
-        }
         let multi = matches!(cfg.addressing, mkit_server::Addressing::Multi(_));
         let jurisdiction = cfg.placement.jurisdiction.as_deref();
         if let Some(outcome) = INSPECTION_GUARD.with(|cache| {
-            crate::inspection_guard::Settled::cached(cache, true, cfg.sharding, multi, jurisdiction)
+            crate::inspection_guard::Settled::cached(
+                cache,
+                cfg.inspection_mode,
+                cfg.sharding,
+                multi,
+                jurisdiction,
+            )
         }) {
             return crate::inspection_guard::into_result(outcome);
         }
-        let result = crate::inspection_guard::check_mode(meta, true).await;
+        let result = crate::inspection_guard::check_mode(meta, cfg.inspection_mode).await;
         INSPECTION_GUARD.with(|cache| {
             crate::inspection_guard::Settled::finish(
                 cache,
-                true,
+                cfg.inspection_mode,
                 cfg.sharding,
                 multi,
                 jurisdiction,
@@ -2751,8 +2754,7 @@ mod glue {
         if !scanner_request && is_options_preflight(&req) {
             return cors_preflight_response(&cors_allow_headers(), CORS_ALLOW_METHODS);
         }
-        // One invocation owns all backend phases and lazy upload/proof clones.
-        // Reserve 1000 calls for bounded remote hooks and response settlement.
+        // The budget covers all backend phases and reserves 1000 calls for hooks and settlement.
         let request_budget = mkit_server::indexed::budget::SliceBudget::new(9000);
         let meta = WorkerNamespaceStore::new(
             StubTransport::new(env.clone(), cfg.placement.clone()),
@@ -2762,13 +2764,7 @@ mod glue {
         let jurisdiction = cfg.placement.jurisdiction.as_deref();
         let multi = matches!(cfg.addressing, mkit_server::Addressing::Multi(_));
         if let Err(error) = check_inspection_mode(&meta, cfg).await {
-            if scanner_request {
-                return crate::scanner_retrieval::not_found();
-            }
-            return Ok(cors(json_response(
-                unavailable_json(error.public_message()),
-                503,
-            )?));
+            return inspection_unavailable_response(&error, scanner_request);
         }
         let cached =
             SHARDING_GUARD.with(|cache| Settled::cached(cache, cfg.sharding, multi, jurisdiction));
@@ -2823,8 +2819,6 @@ mod glue {
             let body = body_too_large_json(cfg.max_body_bytes);
             return Ok(cors(json_response(body, 400)?));
         }
-        // Cold guard discovery spends additional DO calls: attach no snapshot
-        // reader then, retaining the configured page cap and inspection refusal.
         let pipe = match make_hooks(&env, cfg).and_then(|hooks| {
             pipeline(
                 &env,
@@ -2847,6 +2841,19 @@ mod glue {
             return crate::scanner_retrieval::serve(&pipe, req).await;
         }
         serve_connect(&req, cfg, pipe).await
+    }
+
+    fn inspection_unavailable_response(
+        error: &crate::inspection_guard::GuardError,
+        scanner_request: bool,
+    ) -> worker::Result<Response> {
+        if scanner_request {
+            return crate::scanner_retrieval::not_found();
+        }
+        Ok(cors(json_response(
+            unavailable_json(error.public_message()),
+            503,
+        )?))
     }
 
     fn exceeds_body_cap(req: &Request, cfg: &WorkerConfig) -> bool {
