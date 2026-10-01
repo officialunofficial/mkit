@@ -140,6 +140,7 @@ pub(crate) fn work(
         )
     };
     Ok(mkit_server::takedown::work::Work {
+        purge: None,
         metadata: crate::ns_client::DoNamespaceStore::new(
             crate::ns_client::StubTransport::new(env.clone(), cfg.placement.clone()),
             cfg.probe_partition(),

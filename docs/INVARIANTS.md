@@ -1403,9 +1403,13 @@ marker records `Aborted(PACK_MISSING)` in a separate guarded batch before the
 advance fails. A missing marker leaves the ticket open. Terminal outcomes stay
 durable until acknowledgement, which deletes their delivery index and subtracts
 the exact stored key/value byte count. Shared counters and sequence/backlog
-values are guarded once per batch. A zero-to-positive backlog transition adds
-one kind-8 delivery kick; delivery may repeat but never drops an unacked row.
-A positive backlog keeps exactly one kind-8 row. Delivery decides completion
+values are guarded once per batch. A zero-to-positive backlog transition, including
+one first created by a cache purge, atomically adds one kind-8 delivery kick;
+delivery may repeat but never drops an unacked row.
+A positive backlog keeps exactly one kind-8 row. Purge acknowledgement retains
+an encoded zero backlog while that wake remains; producers reuse a present
+backlog row, including zero, rather than insert another wake. Kind-8 atomically
+deletes the zero row and its timer under the same backlog guard. Delivery decides completion
 from the same backlog snapshot its acknowledgment batch guards; concurrent
 appends either retain a rescheduled timer or fail that guard for re-planning.
 
@@ -2091,6 +2095,18 @@ intent activation, including contextual HTTP manifest checks, ticketless closure
 and bounded namespace purge, with source tests and independent reviews. Gate
 exceptions are recorded in the implementation contract; production takedown
 activation remains gated on WP-5.6a-2/3 and launch gates.
+
+With purge configured, acceptance and late ownership commit timer-11 purge work
+and its automatic audit relay in the same apply as the owning request. Each
+content action activation commits equivalent source-local responsibility with
+its denial descriptor. Whole-repository selectors cover the denied objects,
+proofs and snapshots; timer-15 holder and namespace discovery atomically add
+new repository responsibility with their existing holder-context checkpoint.
+Immediate local invalidation follows acceptance/activation; failed delivery is
+still owned by timer 11. Stable source/action identities and the existing
+holder-context row prevent duplicate discovery purges after acknowledgment.
+Core regression coverage lives in takedown work/late-owner tests; Worker
+configuration is attached by the separate activation lane.
 
 ## Lean preservation cannot imply completed takedown (WP-5.6a-2 contract)
 

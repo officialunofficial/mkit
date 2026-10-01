@@ -165,6 +165,7 @@ pub struct Service<N> {
     pub(super) store: N,
     root: Partition,
     shards: Arc<dyn ShardMap>,
+    purge: Option<crate::purge::PurgeConfig>,
 }
 impl<N> std::fmt::Debug for Service<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -180,7 +181,14 @@ impl<N: NamespaceStore + Clone> Service<N> {
             store,
             root,
             shards,
+            purge: None,
         }
+    }
+    /// Attach configured automatic cache invalidation for accepted actions.
+    #[must_use]
+    pub fn with_purge(mut self, purge: Option<crate::purge::PurgeConfig>) -> Self {
+        self.purge = purge;
+        self
     }
     pub(super) async fn draft<S: NamespaceStore>(
         &self,
@@ -265,6 +273,17 @@ impl<N: NamespaceStore + Clone> Service<N> {
         now: u64,
         request_budget: &SliceBudget,
     ) -> Result<(), ServerError> {
+        let local = crate::purge::SliceBudget::with_parent(64, request_budget.clone());
+        self.resume_with_local_budget(id, now, request_budget, &local)
+            .await
+    }
+    pub(crate) async fn resume_with_local_budget(
+        &self,
+        id: Hash,
+        now: u64,
+        request_budget: &SliceBudget,
+        local_budget: &crate::purge::SliceBudget,
+    ) -> Result<(), ServerError> {
         let phase_budget = SliceBudget::new(CALLS);
         let request_store = Budgeted::new(&self.store, request_budget);
         let store = Budgeted::new(&request_store, &phase_budget);
@@ -292,10 +311,33 @@ impl<N: NamespaceStore + Clone> Service<N> {
             {
                 return Err(unavailable());
             }
+            let repo = repository(&record.repository)?;
+            let partition = content_shard(&reference.object);
+            let operation = format!("activation:{}", to_hex(&staged.action.id));
+            let purge = crate::purge::automatic::plan_repository(
+                self.purge.as_ref(),
+                &store,
+                &partition,
+                &repo,
+                crate::purge::Trigger::Takedown,
+                &operation,
+                now,
+            )
+            .await
+            .map_err(|_| unavailable())?;
             ContentIndex::new(BorrowedStore(&store))
-                .install_stored_block_action(&reference.object, &staged, now)
+                .install_stored_block_action_with_batch(&reference.object, &staged, now, purge)
                 .await
                 .map_err(|_| unavailable())?;
+            crate::purge::automatic::invalidate_repository(
+                self.purge.as_ref(),
+                &partition,
+                &repo,
+                crate::purge::Trigger::Takedown,
+                &operation,
+                local_budget,
+            )
+            .await;
             let mut next = record.clone();
             next.activation_cursor += 1;
             let mut batch = crate::admin::plan_system(
@@ -473,6 +515,19 @@ impl<N: NamespaceStore + Clone> AdminOperations for Service<N> {
                     ),
                     Value::default(),
                 );
+            let purge = crate::purge::automatic::plan_repository(
+                self.purge.as_ref(),
+                &store,
+                &self.root,
+                &repo,
+                crate::purge::Trigger::Takedown,
+                &format!("acceptance:{}", to_hex(&id)),
+                now,
+            )
+            .await
+            .map_err(|_| unavailable())?;
+            prepared.batch.preconditions.extend(purge.preconditions);
+            prepared.batch.writes.extend(purge.writes);
             Ok(prepared)
         })
     }
@@ -486,13 +541,31 @@ impl<N: NamespaceStore + Clone> AdminOperations for Service<N> {
     ) -> crate::BoxFuture<'a, Result<Response, ServerError>> {
         Box::pin(async move {
             if path == crate::admin::TAKEDOWN_PATH && response.status == 200 {
+                let local_budget =
+                    crate::purge::SliceBudget::with_parent(64, request_budget.clone());
                 let reply: Json =
                     serde_json::from_slice(&response.body).map_err(|_| unavailable())?;
                 let id = mkit_core::hash::from_hex(
                     reply["takedownId"].as_str().ok_or_else(unavailable)?,
                 )
                 .map_err(|_| unavailable())?;
-                self.resume(id, now, request_budget).await?;
+                if self.purge.is_some() {
+                    let (record, _) = self
+                        .record(&Budgeted::new(&self.store, request_budget), &id)
+                        .await?
+                        .ok_or_else(unavailable)?;
+                    crate::purge::automatic::invalidate_repository(
+                        self.purge.as_ref(),
+                        &self.root,
+                        &repository(&record.repository)?,
+                        crate::purge::Trigger::Takedown,
+                        &format!("acceptance:{}", to_hex(&id)),
+                        &local_budget,
+                    )
+                    .await;
+                }
+                self.resume_with_local_budget(id, now, request_budget, &local_budget)
+                    .await?;
             }
             Ok(response)
         })

@@ -1,4 +1,5 @@
 //! Durable cache purge work and deployment-independent selectors (§16.7).
+pub(crate) mod automatic;
 mod delivery;
 #[cfg(test)]
 mod tests;
@@ -36,12 +37,15 @@ impl core::fmt::Debug for PurgeConfig {
 pub trait AutomaticAudit: crate::MaybeSend + crate::MaybeSync {
     /// Returned effects belong to `partition`; the caller atomically commits
     /// these source-local relay rows alongside the automatic purge intent.
+    /// Use the caller's charged source snapshot; planning must not read a
+    /// captured source store or issue a Durable Object self-call.
     fn plan<'a>(
         &'a self,
         partition: &'a crate::Partition,
         request: &'a Request,
         operation_id: &'a str,
         now_ms: u64,
+        snapshot: crate::relay::RelayEnqueueSnapshot,
     ) -> crate::BoxFuture<'a, Result<Batch, StoreError>>;
 }
 impl PurgeConfig {
@@ -275,7 +279,7 @@ pub fn plan_enqueue(
         .checked_add(1)
         .ok_or_else(|| invalid("purge generation overflow"))?
         .max(now_ms);
-    Ok(Batch::new()
+    let mut batch = Batch::new()
         .require(Precondition::Absent(key.clone()))
         .require(guard(keys::outcome_backlog(), backlog))
         .require(guard(fence_key.clone(), prior_generation))
@@ -289,7 +293,21 @@ pub fn plan_enqueue(
                 request.purge_id.as_bytes(),
             ),
             Value::default(),
-        ))
+        );
+    if backlog.is_none() {
+        // Purges and terminal outcomes share oc: its first producer owns
+        // the kind-8 wake, even when no outcome exists yet. A present
+        // zero backlog owns a delayed wake and must reuse it.
+        batch = batch.put(
+            keys::timer(
+                now_ms,
+                crate::timers::registry::kinds::OUTCOME_DELIVERY.get(),
+                b"",
+            ),
+            Value::default(),
+        );
+    }
+    Ok(batch)
 }
 /// Read accepted work for immediate request-side local invalidation.
 pub async fn read_request<S: crate::NamespaceStore>(

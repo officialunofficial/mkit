@@ -142,6 +142,8 @@ pub struct DiscoveryStep {
     pub state: DiscoveryState,
     /// Context writes for `root`; this function performs no storage mutations.
     pub batch: Batch,
+    /// Repository with confirmed membership in this bounded step.
+    pub repository: Option<RepoId>,
     /// All exhaustive roots passed watermarks and applicable configured-repository
     /// or registry/active-shard enumeration.
     /// Any always returns false; this never claims verified preservation completion.
@@ -180,6 +182,7 @@ pub async fn step<S: NamespaceStore>(
     }
     state.binding = Some((*action, *object, is_pack));
     let mut batch = Batch::new();
+    let mut repository = None;
     if state.namespace < state.namespaces.len() && now > state.safety_cut {
         let ns = NamespaceKey::from_stored(state.namespaces[state.namespace].clone());
         let coordinator = shards.coordinator(&ns);
@@ -212,6 +215,7 @@ pub async fn step<S: NamespaceStore>(
             return Ok(DiscoveryStep {
                 state,
                 batch,
+                repository,
                 complete: false,
                 traversed: false,
             });
@@ -227,6 +231,7 @@ pub async fn step<S: NamespaceStore>(
                     member_context(store, shards, &repo, action, object, object).await?
                 {
                     batch = batch.put(key, value);
+                    repository = Some(repo.clone());
                 }
                 state.repo = None;
             } else {
@@ -258,6 +263,7 @@ pub async fn step<S: NamespaceStore>(
                         member_context(store, shards, &repo, action, object, &pack_id).await?
                     {
                         batch = batch.put(key, value);
+                        repository = Some(repo.clone());
                     }
                 }
                 state.object_cursor = page.next.map(|c| c.as_bytes().to_vec());
@@ -343,6 +349,7 @@ pub async fn step<S: NamespaceStore>(
     Ok(DiscoveryStep {
         state,
         batch,
+        repository,
         complete,
         traversed,
     })

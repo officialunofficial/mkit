@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: align the receipt-golden test SHA-256 dependency with the repository
+  sha2 0.11 crypto channel (launch review 12-2).
+
+- Server: a purge that creates positive shared backlog also schedules the
+  existing outcome-delivery wake, so later paid read outcomes survive purge
+  completion, reconciliation and restart (launch review 3-1). Zero backlog
+  retains wake ownership until the guarded kind-8 drain, preventing duplicate
+  wakes across repeated purge cycles; content shards register the same driver.
+
+- Server: completed identical Takedown retries replay their stored response
+  after role changes and without runtime operations. ReadPreserved retains fresh
+  role and retention checks on every retry (launch review 7b-1).
+
+- Server: automatically enqueue audited cache purges with takedown acceptance,
+  denial activation and late-holder ownership. Checkpoint newly discovered
+  repository purges with timer-15 progress and immediately invalidate configured
+  local caches (launch review 7a-2, existing R-190). Audit source snapshots and
+  immediate invalidation share the enclosing request or slice call allowance.
+
 - Scheduled indexed verification reserves R-203 decoder scratch within the
   existing 48 MiB slice allowance, preserving window geometry and frame
   admission. Delta slices release the idle reader before source reconstruction;

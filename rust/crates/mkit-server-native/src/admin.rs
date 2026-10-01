@@ -234,6 +234,7 @@ pub(crate) fn work<B: mkit_server::BlobStore, N: NamespaceStore + Clone>(
         .indexed
         .ok_or_else(|| invalid("preservation requires indexed limits"))?;
     Ok(mkit_server::takedown::work::Work {
+        purge: pipeline.purge.clone(),
         metadata,
         serving,
         preserved: crate::Blocking::new(mkit_server::fs::FsBlobStore::new(&settings.root)),
@@ -270,7 +271,8 @@ where
                 acceptance: mkit_server::takedown::late_owner::LateOwner::new(
                     metadata,
                     partition(pipeline.sharding),
-                ),
+                )
+                .with_purge(pipeline.purge.clone()),
                 max_subrequests: 700,
             }))
     } else {
@@ -291,11 +293,14 @@ pub fn router<S: NamespaceStore + Clone + 'static>(
     )
     .with_purge(pipeline.purge.is_some());
     if enabled {
-        engine = engine.with_operations(Arc::new(mkit_server::takedown::Service::new(
-            store,
-            partition(pipeline.sharding),
-            shards(pipeline.sharding),
-        )));
+        engine = engine.with_operations(Arc::new(
+            mkit_server::takedown::Service::new(
+                store,
+                partition(pipeline.sharding),
+                shards(pipeline.sharding),
+            )
+            .with_purge(pipeline.purge.clone()),
+        ));
     }
     let engine = Arc::new(engine);
     let dispatch = move |req: Request| {

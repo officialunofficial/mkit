@@ -227,3 +227,85 @@ fn repeated_www_authenticate_is_appended_not_replaced() {
         .unwrap();
     assert!(!ct.2);
 }
+
+#[tokio::test]
+async fn content_shard_purge_drains_shared_wake_without_unknown_timer() {
+    let store = MemoryKv::default();
+    let p = mkit_server::store::content_shard(&[9; 32]);
+    let request = mkit_server::purge::Request {
+        purge_id: "content-purge".into(),
+        audience: "https://server.example".into(),
+        repository: "root/repo".into(),
+        namespace: String::new(),
+        trigger: mkit_server::purge::Trigger::Takedown,
+        url_paths: Vec::new(),
+        object_ids: Vec::new(),
+        refs: Vec::new(),
+    };
+    store
+        .apply(
+            &p,
+            mkit_server::purge::plan_enqueue(&request, 10, None, None).unwrap(),
+        )
+        .await
+        .unwrap();
+    let sink = Sink::default();
+    let registry = with_outcome_timers(
+        TimerRegistry::new(),
+        ShardClass::ContentIndexShard,
+        Ok("https://server.example".into()),
+        Some("paid"),
+        sink.clone(),
+        Arc::new(ManualSleep::new()),
+        Arc::new(ManualClock::new(10)),
+    )
+    .register(mkit_server::purge::PurgeDelivery::new(
+        Arc::new(mkit_server::purge::NoLocalCache),
+        None,
+        mkit_server::purge::SliceBudget::new(16),
+    ));
+    let first = run_due(
+        &store,
+        &p,
+        &registry,
+        &ManualClock::new(10),
+        10,
+        &TickBudget::new(4, 4, 64, 1000),
+    )
+    .await
+    .unwrap();
+    assert_eq!((first.fired, first.unknown, first.scanned), (2, 0, 2));
+    let second = run_due(
+        &store,
+        &p,
+        &registry,
+        &ManualClock::new(10000),
+        10000,
+        &TickBudget::new(4, 4, 64, 1000),
+    )
+    .await
+    .unwrap();
+    assert_eq!((second.fired, second.unknown, second.scanned), (1, 0, 1));
+    assert!(
+        store
+            .get(&p, &keys::outcome_backlog())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .scan(
+                &p,
+                &mkit_server::Key::new(b"w\0".to_vec()),
+                &mkit_server::Key::new(b"w\x01".to_vec()),
+                None,
+                100
+            )
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    assert!(sink.calls.lock().unwrap().is_empty());
+}

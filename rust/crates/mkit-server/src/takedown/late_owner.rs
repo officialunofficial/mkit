@@ -29,6 +29,7 @@ fn unavailable() -> StoreError {
 pub struct LateOwner<N> {
     store: N,
     root: Partition,
+    purge: Option<crate::purge::PurgeConfig>,
 }
 impl<N> std::fmt::Debug for LateOwner<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -40,7 +41,17 @@ impl<N> std::fmt::Debug for LateOwner<N> {
 impl<N> LateOwner<N> {
     /// Construct the real callback over local-aware metadata and the owning root.
     pub fn new(store: N, root: Partition) -> Self {
-        Self { store, root }
+        Self {
+            store,
+            root,
+            purge: None,
+        }
+    }
+    /// Attach automatic invalidation for durable late-holder ownership.
+    #[must_use]
+    pub fn with_purge(mut self, purge: Option<crate::purge::PurgeConfig>) -> Self {
+        self.purge = purge;
+        self
     }
 }
 impl<N: NamespaceStore> LateAcceptance for LateOwner<N> {
@@ -54,6 +65,7 @@ impl<N: NamespaceStore> LateAcceptance for LateOwner<N> {
         budget: &'a SliceBudget,
     ) -> BoxFuture<'a, Result<(), StoreError>> {
         Box::pin(async move {
+            let local_budget = crate::purge::SliceBudget::with_parent(64, budget.clone());
             let source = request.encode()?;
             ContentTakedownV1::decode(&source)?;
             if content_shard(&request.identity.object) != *partition
@@ -154,7 +166,7 @@ impl<N: NamespaceStore> LateAcceptance for LateOwner<N> {
                     accepted = true;
                     break;
                 }
-                let batch = crate::admin::plan_system(
+                let mut batch = crate::admin::plan_system(
                     &store,
                     &self.root,
                     "system:timer",
@@ -175,6 +187,18 @@ impl<N: NamespaceStore> LateAcceptance for LateOwner<N> {
                     ),
                     Value::default(),
                 );
+                let purge = crate::purge::automatic::plan_repository(
+                    self.purge.as_ref(),
+                    &store,
+                    &self.root,
+                    &intent::repository(&record.repository).map_err(|_| corrupt())?,
+                    crate::purge::Trigger::Takedown,
+                    &record.operation,
+                    now,
+                )
+                .await?;
+                batch.preconditions.extend(purge.preconditions);
+                batch.writes.extend(purge.writes);
                 if store.apply(&self.root, batch).await? == BatchOutcome::Committed {
                     accepted = true;
                     break;
@@ -183,9 +207,40 @@ impl<N: NamespaceStore> LateAcceptance for LateOwner<N> {
             if !accepted {
                 return Err(unavailable());
             }
+            let repo = intent::repository(&record.repository).map_err(|_| corrupt())?;
+            crate::purge::automatic::invalidate_repository(
+                self.purge.as_ref(),
+                &self.root,
+                &repo,
+                crate::purge::Trigger::Takedown,
+                &record.operation,
+                &local_budget,
+            )
+            .await;
+            let operation = format!("activation:{}", to_hex(&staged.action.id));
+            let purge = crate::purge::automatic::plan_repository(
+                self.purge.as_ref(),
+                &store,
+                partition,
+                &repo,
+                crate::purge::Trigger::Takedown,
+                &operation,
+                now,
+            )
+            .await?;
             ContentIndex::new(BorrowedStore(&store))
-                .install_stored_block_action(&object, &staged, now)
-                .await
+                .install_stored_block_action_with_batch(&object, &staged, now, purge)
+                .await?;
+            crate::purge::automatic::invalidate_repository(
+                self.purge.as_ref(),
+                partition,
+                &repo,
+                crate::purge::Trigger::Takedown,
+                &operation,
+                &local_budget,
+            )
+            .await;
+            Ok(())
         })
     }
 }

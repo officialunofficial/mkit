@@ -50,9 +50,16 @@ impl SliceBudget {
     /// # Errors
     /// `StoreError::Unavailable`: a spent budget is not a CAS race.
     pub fn charge(&self) -> Result<(), StoreError> {
+        self.charge_many(1)
+    }
+
+    /// Reserve a combined operation before any external effect.
+    /// # Errors
+    /// Exhausted shared allowance, without partially charging the reservation.
+    pub fn charge_many(&self, calls: u32) -> Result<(), StoreError> {
         self.used
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
-                (used < self.limit).then(|| used + 1)
+                used.checked_add(calls).filter(|total| *total <= self.limit)
             })
             .map(|_| ())
             .map_err(|_| {

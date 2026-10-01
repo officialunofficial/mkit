@@ -310,6 +310,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> AdminOperations for 
                         self.root.clone(),
                         self.shards.clone(),
                     )
+                    .with_purge(self.purge.clone())
                     .plan(path, input, digest, now, budget)
                     .await
                 }
@@ -386,6 +387,7 @@ impl<N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> AdminOperations for 
                 self.root.clone(),
                 self.shards.clone(),
             )
+            .with_purge(self.purge.clone())
             .after_commit(path, input, response, now, budget)
             .await
         })
