@@ -182,7 +182,30 @@ fn verification_pack_entries(
     extracted: Option<&[u8]>,
     count: u32,
 ) -> Result<(Vec<u8>, Hash), Failure> {
+    verification_fixture_pack(extracted, count, false)
+}
+
+fn verification_fixture_pack(
+    extracted: Option<&[u8]>,
+    count: u32,
+    multipart: bool,
+) -> Result<(Vec<u8>, Hash), Failure> {
     let mut writer = PackWriter::new_raw_only();
+    if multipart {
+        // Surplus canonical objects are verified too; the published tree stays unchanged.
+        for byte in 0_u8..17 {
+            let surplus = Object::Blob(mkit_core::object::Blob {
+                data: vec![byte; 500_000],
+            });
+            let id = surplus.id().map_err(|e| format!("surplus id: {e}"))?;
+            writer
+                .push_raw(
+                    id,
+                    &serialize(&surplus).map_err(|e| format!("surplus bytes: {e}"))?,
+                )
+                .map_err(|e| format!("surplus frame: {e}"))?;
+        }
+    }
     let mut entries = Vec::new();
     for n in 0..count {
         let data: Vec<u8> = (0..50_000_u32)
@@ -344,7 +367,7 @@ async fn upload_ticket(
     let Some(BeginResult::Ticket(ticket)) = opened.result else {
         return Err(Failure::Fail("BeginUpload did not issue a ticket".into()));
     };
-    if ctx.case == "uno.public_fixture" {
+    if ctx.case == "uno.public_fixture" && pack.len() > 8 * 1024 * 1024 {
         return super::multipart::complete_uno_ticket(ctx, &signer, repository, &ticket, pack)
             .await;
     }
@@ -574,7 +597,7 @@ async fn launch_verified_fixture(ctx: Ctx, large: bool, set_visibility: bool) ->
     let (pack, head) = if large {
         verification_pack(Some(&data))?
     } else {
-        verification_pack_entries(Some(&data), 0)?
+        verification_fixture_pack(Some(&data), 0, !set_visibility)?
     };
     let pack_id = hash(&pack);
     if !set_visibility {
@@ -747,4 +770,34 @@ async fn check_extracted_http(
         proof.status
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod uno_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_uno_pack_has_two_parts_and_unchanged_published_head() {
+        use mkit_core::pack::{DecodeLimits, NoExternalBases, decode_entries_with};
+        use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan};
+        let data = vec![9; 131_072];
+        let (_, expected_head) = verification_pack_entries(Some(&data), 0).unwrap();
+        let (pack, head) = verification_fixture_pack(Some(&data), 0, true).unwrap();
+        assert_eq!(head, expected_head);
+        assert_eq!(
+            PartPlan::new(pack.len() as u64, MIN_PART_SIZE, 2)
+                .unwrap()
+                .count(),
+            2
+        );
+        let decoded =
+            decode_entries_with(&pack, &mut NoExternalBases, DecodeLimits::default(), |entry| {
+                assert!(entry.bytes.len() <= 512 * 1024);
+                Ok(())
+            })
+            .unwrap();
+        println!("Uno canonical pack bytes={} raw_entries={}", pack.len(), decoded.raw_count);
+        assert_eq!(decoded.raw_count, 20);
+        assert!(decoded.ids.contains(&head));
+    }
 }
