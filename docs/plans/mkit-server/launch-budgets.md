@@ -48,7 +48,7 @@ whole-dispatch evidence or resolve the progress risks described below.
 | Reservation reconcile kind 9 | Local store work only | Pending response completion races and durable terminal arbiter |
 | Snapshot kind 10 | One snapshot claim per physical alarm; reserve 3 external calls (coordinator read, R2 get, R2 put; removal uses fewer) | Sixteen heads, private/ineligible snapshot deletion, response/backup overlap |
 | Backup kind 4 | Reserve 1 R2 put; snapshot alarm coordinator also limits overlap | All relevant head combinations and cold backup size |
-| Publication dependency recheck kind 12 | One fire per logical partition tick; every routed witness page shares alarm counter | Must resolve starvation finding below before activation |
+| Publication dependency recheck kind 12 | One fire per logical partition tick; every routed witness page shares alarm counter | Merged #1245 progress repair; measure the complete release handler mix |
 | Cache purge kind 11 | Enumeration, cache deletion, and signed sink delivery share allowance and existing checkpoints | Namespace catalog cold slices, repeated cursors, hooks failure, exact audit/preservation boundaries |
 | Sync inspection request | Up to 4 inspectors; sequential calls; verification 300, ancestry 256, pair/enumeration/dependencies 256, hooks 4, other stages 144 = 960 declared units | Entire request including retries, physical transports, cancellation, R-193 retrieval |
 | Atomic write | 100 preconditions+writes maximum; seven tickets; current D34 retained-publication batch 94 operations, ordinary publication 93 | Snapshot target-local additions reserve 3, pruning remains within cap, takedown/inspection guards together |
@@ -125,8 +125,31 @@ checks do not certify the integrated launch matrix.
    responses remain pending. Release retrieval config and mount still require
    WP-4.18's profile activation. 5.6a-2 preservation core #1249 is merged. Its 700-call acquisition
    allowance shares the existing physical-alarm counter. Configured core work
-   is wired; only endpoint exposure waits for the 5.6a-3 admin catalog.
+   is wired; the merged 5.6a-3 restricted admin catalog is authorized for
+   configured activation. Its adapter and runtime accounting remain UNRUN.
    Full R2/body-lifetime dispatcher evidence remains phase 2 work.
+
+## Restricted admin request bounds
+
+The [5.6a-3 contract](WP-5.6a-3-contract.md) bounds ListTakedowns to 100 root
+rows and 256 KiB scanned record JSON per request, with page size 1–100 and
+scope-bound continuation tokens at most 2 KiB. Each returned status adds two
+metadata reads; 100 matching records use at most 201 logical calls before
+the existing admin ledger and retry work. Charge physical dispatches against
+the retained 9,000-call request budget; a logical call estimate is no measured
+transport maximum.
+
+ReadPreserved uses a byte-free replay descriptor and verifies one owner-framed
+piece at a time: at most 1 MiB including its 72-byte owner header. Account for
+the payload, base64/JSON framing and bridge response lifetime together. The
+contract has eight logical calls per nonempty piece and six for the empty
+final piece, reserving 16 per poll. Fresh acceptance, current-key/role checks,
+retention/ownership rechecks, audit writes, errors and cancellation all belong
+to the same request measurement. Do not collect the complete copy or pieces.
+Source bounds and component tests do not replace actual release resident-work
+and connection measurements. SetLegalHold's guarded effects, audit and nonce
+share one existing capped atomic batch; failed application releases no bytes
+and commits no hold mutation. These four matrix rows remain UNRUN.
 
 ## Required retained regressions and integrated runs
 

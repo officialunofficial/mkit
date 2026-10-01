@@ -22,8 +22,9 @@ row requires a full merged SHA, PR and independent review outcome in
 [launch-evidence.md](launch-evidence.md). A registry status is no passing gate.
 Extraction 4.10b-2 and retrieval R-193 have merged (#1244 / #1243).
 The user authorized phase 2 for the available prerequisites. Preservation core
-5.6a-2 (#1249) is merged and configured core work is wired; operator endpoints
-and their runtime evidence wait for 5.6a-3. The Worker zstd decoder stays off
+5.6a-2 (#1249) and the restricted admin catalog 5.6a-3 (#1251) are merged.
+Configured operator endpoint activation is authorized; adapter integration
+and runtime evidence remain UNRUN. The Worker zstd decoder stays off
 until bounded ruzstd (R-203) merges.
 #1245 publication recheck timer 12 progress repair is merged. Physical alarm
 bounds/backoff #1247 and native conformance #1248 are also merged. Timer/alarm
@@ -48,6 +49,7 @@ specified separately. Actual release header evidence is UNRUN.
 | R-193 | Optional private assigned added-pack raw retrieval, dedicated allowlist/key and no-oracle contract | UNRUN |
 | 5.10 / 5.11a | Automatic purge delivery, signed admin framework and audit, without reverse activation dependency; R-188 / R-189 | UNRUN |
 | 5.6a-1 / 5.6a-2 | Lean takedown, verified preservation/retention/legal holds, incomplete discovery under any, manual asynchronous PurgeCache; R-190 | UNRUN |
+| 5.6a-3 | Configured restricted GetTakedown/ListTakedowns/ReadPreserved/SetLegalHold with fresh signed authority, replay/audit, bounded scans/pieces and atomic hold ownership; [contract](WP-5.6a-3-contract.md), merged `e8164870170ac0dcedd1512fde25d3c0063ee6d0` | UNRUN |
 | 4.18 | Paid profile, startup opt-ins, capability honesty and complete local launch matrix; R-194 | UNRUN |
 | 1.20 final | Staging definition/templates, evidence consolidation and user gates; R-195 | UNRUN |
 

@@ -1714,6 +1714,9 @@ pub fn resolve(
             }
         }
     }
+    if let Some(settings) = &admin {
+        crate::admin::validate_mount(settings, &pipeline)?;
+    }
     crate::scanner_retrieval::resolve(args, &mut pipeline, env)?;
     mkit_server::scanner_retrieval::validate_config(&pipeline)
         .map_err(|e| ConfigError::new(exit::CONFIG_ERROR, e.public_message()))?;

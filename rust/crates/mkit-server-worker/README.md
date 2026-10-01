@@ -70,8 +70,10 @@ authority mode and generation, then declare real lease-table recovery.
 
 `ADMIN_KEYS` contains the SPEC-SERVER §16.3 public-key list as a Worker secret.
 It defaults off. `ReadAuditLog` and configured `PurgeCache` use the operator
-mount; takedown/catalog/retention endpoints await WP-5.6a-3. Configured
-preservation core is wired. Admin requests use a separate signed envelope and cannot authenticate
+mount. Complete takedown configuration adds `Takedown`, `GetTakedown`,
+`ListTakedowns`, streamed `ReadPreserved` and audited `SetLegalHold`.
+Every admin response uses `Cache-Control: no-store`; preserved bytes are
+freshly verified and never buffered into replay. Admin requests use a separate signed envelope and cannot authenticate
 client writes. Operator keys must differ from ticket, token, hook and authority
 keys. Persisted sharding/addressing checks run before operator dispatch.
 
@@ -124,8 +126,8 @@ service-binding hooks; its local conformance remains a distinct runtime gate.
 Set `admin_on_public_path=false` and route canonical admin requests through
 `serve_admin_with` to keep the public mount off. Operator authentication and
 canonical signed paths are unchanged. `RefPolicy`/`RefRule` support signer and
-fast-forward rules; no separate general no-delete knob exists. Preservation configuration validates at startup; the admin catalog remains
-unavailable until WP-5.6a-3.
+fast-forward rules; no separate general no-delete knob exists. Preservation configuration validates at startup; the configured restricted
+admin catalog uses the merged WP-5.6a-3 runtime. Global denial must stay enabled.
 
 Reserved prefixes are `/mkit.transport.v1.TransportService/`,
 `/mkit.server.admin.v1.AdminService/`, any mounted HTTP path containing `/-/`,

@@ -417,7 +417,7 @@ configuration before activation:
 
 Extraction (WP-4.10b-2 / #1244) and scanner retrieval (R-193 / #1243) are
 merged; this activation wires their release paths. Configured preservation
-core is wired; admin endpoint exposure waits for WP-5.6a-3. Phase 2 requires
+core and the WP-5.6a-3 restricted admin catalog are wired. Phase 2 requires
 the complete native and actual release Worker matrix before opening the PR.
 See the [conformance plan](../../docs/plans/mkit-server/launch-conformance.md)
 and [itemized evidence](../../docs/plans/mkit-server/launch-evidence.md).
@@ -438,10 +438,12 @@ HTTP `?proof=1`
 remains unsupported on the Worker, which advertises no proof capability;
 the native reference server advertises and serves proofs.
 
-After 5.6a-3 merges, the configured Worker admin subset will be `Takedown`,
+With admin plus complete takedown configuration, the Worker admin subset is `Takedown`,
 `GetTakedown`, `ListTakedowns`, `ReadPreserved`, `SetLegalHold`, `PurgeCache`
-and `ReadAuditLog`. Until then only the existing audit and configured purge
-endpoints are exposed. Hold review operations and `Reinstate` remain unexposed.
+and `ReadAuditLog`. Without takedown, only audit and configured purge
+endpoints are exposed. `ReadPreserved` streams freshly verified bounded pieces
+with `Cache-Control: no-store`; retries retain byte-free descriptors and recheck
+authority, retention and ownership. Hold review operations and `Reinstate` remain unexposed.
 The launch creates no inspection holds or publication Events; async inspection,
 hold review, Events and Worker proofs are post-launch work (R-200).
 
@@ -487,7 +489,7 @@ retries. Keep fetch and DO factories on the same configuration. For a takedown
 environment, use `WorkerConfig::from_env_with_purge(env, PurgeHooks::new(sink,
 local))` so the custom sink participates in startup validation and replaces the
 signed HTTPS `cache-purge` requirement. Admin keys and complete preservation
-remain mandatory. Preservation core is wired; admin endpoint exposure waits for WP-5.6a-3.
+remain mandatory. Preservation core and the WP-5.6a-3 restricted admin catalog are wired.
 Custom purge delivery requires `WORKERS_PLAN=paid`; Free alarm calls are
 already reserved. The custom sink must acknowledge all selected global cache variants; local
 invalidation must charge the provided budget and return a resumable checkpoint.
@@ -509,7 +511,7 @@ remain required. No keys means disabled in both modes. Programmatic
 for signer restrictions and fast-forward rules. A fast-forward-only
 `refs/tags/*` rule requires indexed mode; it is not a separate no-delete policy.
 There is no general no-delete knob. Programmatic `takedown_denial` requires the
-same preservation foundation. `WorkerConfig::validate()` checks these changes
+same preservation foundation; configured takedown cannot disable global denial. `WorkerConfig::validate()` checks these changes
 before store access; fetch and DO construction call it automatically.
 
 The example transfers the incoming ReadableStream to a constructed request for

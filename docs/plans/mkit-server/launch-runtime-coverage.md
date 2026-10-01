@@ -7,15 +7,16 @@ later merges require a fresh candidate pin before execution. No command in
 this document has been run as part of this coverage audit.
 
 The user authorized phase 2 work on available prerequisites. Preservation
-core 5.6a-2 is merged and wired; takedown/admin endpoint exposure waits for
-5.6a-3. Optional sync
+core 5.6a-2 and the restricted admin catalog 5.6a-3 (#1251) are merged.
+Configured operator endpoint activation is authorized; adapter integration
+and actual runtime evidence remain UNRUN. Optional sync
 inspection, native proofs, and release Worker proof refusal remain in scope.
 Async inspection, holds/review, publication Events, and Worker proofs are
 excluded. The resolved header ruling adopts merged #1246.
 
 ## Existing harness boundaries
 
-The [24-case inventory](launch-cases.json) names contracts, not complete
+The [28-case inventory](launch-cases.json) names contracts, not complete
 executable runtime probes. Keep the native, actual release Worker, and
 fault-build results separate in [launch-evidence.md](launch-evidence.md).
 
@@ -54,7 +55,7 @@ the output. HTTP/key/scanner/hook role fixtures use distinct public test seeds.
 | R2 | R1 plus HTTP objects/tokens; publish pack fixtures containing Blob, ChunkedBlob, manifest/chunks, small/surplus objects, delta sources, and #1246 filenames; exercise public/private/token object and ref paths |
 | R3 | R2 plus isolated unsigned binding Authorize/Admit/Outcome; receiver records procedure/body, controls allow/challenge/deny/failure, and verifies durable read settlement after stream close |
 | R4 | R2 plus signed HTTPS hooks and optional one through four sync fail-closed inspectors with R-193; receiver verifies signatures, audience, body, nonce, and independently decodes assigned raw ranges |
-| R5 | After 5.6a-3: preservation/admin/takedown and signed purge; also test the expressly authorized embedded custom `PurgeSink` alternative, with both admin placement modes |
+| R5 | Configured preservation/admin/takedown and signed purge, including the four restricted operator methods; also test the expressly authorized embedded custom `PurgeSink` alternative, with both admin placement modes |
 | R6 | Embedded example release: custom hooks, combined DO construction, programmatic policy, host admin routing, constructed streamed `UploadPart`, publication and optional cache configuration |
 
 For local signed-channel testing, the existing synthetic-origin fetch wrapper
@@ -73,11 +74,13 @@ fixture pass. Use an isolated service-binding fixture for its separate channel.
 Native entries below are existing meaningful test modules or named tests.
 They still require execution and full case counts at the final candidate.
 The last column is proposed work, not a claim that a retained executable probe
-already implements it. All integrated result pairs remain UNRUN; the R-203 addition expands the inventory to 24 cases.
+already implements it. All integrated result pairs remain UNRUN. The inventory
+has 28 cases, including four restricted operator methods and the pending
+R-203 native push round trip.
 
 | Case | Existing meaningful native/host coverage | Existing workerd coverage | Proposed actual release assertion |
 |---|---|---|---|
-| B4.config | Native `tests/launch_profile.rs`, `hook_config.rs`, `http_inert.rs`; Worker `launch`, hook and scanner configuration tests | R0 discovery and release-launch HTTP configuration | Launch R0/R1/R2/R3/R4 invalid/partial grammar, bindings, absent compiled features, key collisions, off-profile opt-ins, leases/GC/retention refusal; validate configured preservation while retaining the 5.6a-3 endpoint gate |
+| B4.config | Native `tests/launch_profile.rs`, `hook_config.rs`, `http_inert.rs`; Worker `launch`, hook and scanner configuration tests | R0 discovery and release-launch HTTP configuration | Launch R0–R5 invalid/partial grammar, bindings, absent compiled features, key collisions, off-profile opt-ins, leases/GC/retention refusal; configured admin activation requires preservation, denial, indexed work and signed purge |
 | B4.discovery | Native config and Connect server-info tests, `wire_multi`; HTTP proof mount | Existing `info.shape_and_policy`, `info.ignores_repository_header`, release-launch | Query every R1–R5 opt-in combination; verify zero threshold, leases/async false, active inspector bound only when present, no proof/receipt/rewrite overclaim; native proof advertisement separately |
 | B4.inspected-set | Core indexed inspection and inspection-budget tests | RemoteInspector runtime wrapper checks a synthetic one-object request | R4 uploads packs with surplus/small/file/manifest/chunk/deduplicated entries, extracted copies, Verified reuse and pending prior membership; receiver records each inspector's exact independent complete set |
 | B4.inspection-bound | Core indexed inspection, whole-advance budget tests | Inspect pass/quarantine/defer wrapper outcomes | R4 tests object counts at the configured bound and one beyond; preflight prevents Inspect and mutation on excess, each of up to four inspectors gets one complete batch, reject dominates and unavailable leaves no committed refs |
@@ -89,10 +92,15 @@ already implements it. All integrated result pairs remain UNRUN; the R-203 addit
 | B4.writer-reuse | Core indexed/ticket/takedown tests; native `ticketed_upload`, `begin_upload` | Existing raw/multipart/ticket wire cases; indexed mode is fault-only | R1/R2 raw and multipart upload, dedup/AlreadyPresent, consumed and reused Verified tickets, implicit membership/external delta chains; R5 repeats every bypass path after global denial |
 | B4.authority-races | Core authority/write-gate tests; native `write_gate`, `epoch_leases` | `authority_worker` ignored test through actual release D34 binding fixture | Move its setup into R1/R4; interleave generation/revocation with upload/backend/marker/apply, delayed receiver reply, retry, signer rotation and restart; do not count the default-off script alone as the launch intersection |
 | B4.extraction | Core extraction/group/job tests; host Worker `bounded_object_multipart.rs` covers restart, CVS, roots and completion | Fault-build indexed scheduled verifier; local R2 multipart fixture | R1 creates A+B/B+C overlap with immutable delta sources and repeated/deduplicated packs; advance polls real scheduled completion, verifies extracted object bytes, cancels open work and restarts same-format state without fault routes |
-| B4.takedown | Core takedown and HTTP-denial tests | Configured preservation startup and gated Worker mount catalog only | R5 after 5.6a-3 merges: acceptance denies before success, private verified preservation, retention/legal hold, late/unresolved holders, every read/reuse path; `any` reports discovery incomplete and `allowlist` records its explicit scope |
+| B4.takedown | Core takedown and HTTP-denial tests | Configured preservation startup and Worker mount catalog component tests | R5 acceptance denies before success, private verified preservation, retention/legal hold, late/unresolved holders, every read/reuse path; `any` reports discovery incomplete and `allowlist` records its explicit scope |
 | B4.admin | Core admin replay/audit/roles; takedown tests | Worker configured/unconfigured route unit tests | R5/R6 public versus host-only mounting; authenticated Takedown/Get/List/ReadPreserved/SetLegalHold/PurgeCache/ReadAuditLog, distinct role denial, durable replay/gapless audit; Reinstate and hold review remain absent |
+| B4.admin-get-takedown | Core `takedown::admin_tests` signed-operation checks and `status_keeps_acquisition_verification_discovery_hold_and_completion_separate` | Configured catalog/Work delegation component coverage; actual release status UNRUN | R5 pending/verified/held/purged/unknown status, allowlist/any discovery honesty, no payload leakage, fresh role/key/replay/in-flight audit checks |
+| B4.admin-list-takedowns | Core `list_pagination_rejects_foreign_scope_token_and_reports_missing_state_pending`, all-scope and protojson scope/page tests | Catalog delegation only; no retained release page probe | R5 absent/null/empty/all and normalized repository/namespace scopes; page sizes 1/100 and invalid sizes, empty continued pages, malformed/foreign/oversized tokens, 100-row/256 KiB scan bounds and confidentiality; measure physical calls |
+| B4.admin-read-preserved | Core fresh-retry authority/ownership, exact offsets/final rules, corrupt-second-piece, expiry-between-pieces, key-expiry and audit-failure regressions | Streamed admin adapter component coverage; real release byte stream UNRUN | R5 production Connect stream verifies bounded pieces, post-I/O ownership/retention, exact offsets and final piece; retry with current key/role checks, missing/corrupt piece, audit failure and cancellation; no-store, no payload replay/logging, measured poll calls/resident work |
+| B4.admin-set-legal-hold | Core signed-hold/audit/nonce/purge regression, stale ownership race and UTF-8 reason/label bounds | Work delegation/atomic-batch component coverage; actual release mutation UNRUN | R5 set/clear and replay/in-flight requests, 512/128-byte reason/label boundaries, retention deadline and purge ownership races, hold blocks purge; failed audit/CAS commits no hold mutation |
 | B4.purge | Core/Worker purge retry/invalidation and admin tests | No retained actual release signed purge-outage probe | R5 signed receiver outage/lost acknowledgement/duplicate delivery, authoritative denial and local invalidation throughout, async manual acceptance then audited completion; R6 custom sink plus local invalidation |
 | B4.recovery | Core timers/publication/outcomes; native `export_restore`, hook restart/drain tests | Fault-only snapshot/import/relay/retry checks | Restart R1–R5 against the same current-format persist directory during extraction/publication/Outcome/purge/takedown; client deliberately loses replies and retries identical signed requests. Fresh-store activation/reset is separate from unsupported old-store migration |
+| B4.native-push-zstd | Native encoder/CLI round-trip coverage; bounded decoder prerequisite still pending | Launch Worker decoder remains off until R-203; no release round trip yet | After R-203, actual native zstd push to R1/R2, clone and compare canonical refs/content; measure decode CPU, window/scratch/resident work and adversarial compressed inputs |
 | B5.admission | Core paid HTTP reads; native `native_proofs_share_payment_length_head_and_validator_cache_policy`, HTTP mount and admission E2E | M3 binding wire admission on fault build | R3/R4 `HTTP_ADMIT_READS=true`: raw/token GET, HEAD, range, early 304/416/challenge/deny; receiver sees exact admitted bytes and no payload generation on early decisions. Native proof encoded size has its separate assertion |
 | B5.settlement | Core paid-read completion/reconcile tests; native HTTP/admission E2E | Synthetic streamed bridge timing; fault-build M3 Outcome tests | R3/R4 read full/partial body, HEAD zero, abort before first byte and after bytes, disconnect fetch, lose delivery reply and restart; receiver proves actual-byte ReadServed, one durable terminal decision, waitUntil retention and reconcile recovery |
 | B5.runtime | Native `hook_channel.rs` signed Inspect, redirects, oversized/endless bodies and timeout/cancel; `hook_e2e.rs` retry nonces | Signed Fetch/Delay wrapper under fault build | R4 ordinary signed production Admit/Inspect/Outcome calls encounter stalled headers/body, cancel, redirect, oversized response and retry; receiver verifies exact signatures/body/audience and fresh nonce. Keep mapped local transport limitations explicit |
@@ -121,8 +129,8 @@ already implements it. All integrated result pairs remain UNRUN; the R-203 addit
    real request helpers; keep binding requests unsigned and enforce isolated
    receiver routing. R-193's cold/warm cost can expose a real deterministic
    gap; record failure and fix within scope rather than skipping the case.
-5. Compile and run R6 after the addenda land. R5 stays gated on 5.6a-3,
-   and R1–R4 results cannot fill its rows. Any branch/config change invalidates
+5. Compile and run R6 after the addenda land, and run configured R5 against
+   the merged restricted catalog. R1–R4 results cannot fill its rows. Any branch/config change invalidates
    affected evidence before the final candidate pin.
 6. Every result records SHA/tree/base, build features/artifact hash, config
    digest, command, named checks/pass/fail/skip counts, timestamps, receiver
@@ -137,7 +145,7 @@ remain outside production artifact routes.
 ## R-203 addition
 
 After bounded ruzstd (WP-zstd-bound) merges, enable `mkit-core/pack-ruzstd` in
-the launch build. Add `B4.native-push-zstd`: run native `mkit push` against the
+the launch build. Execute `B4.native-push-zstd`: run native `mkit push` against the
 actual release Worker, clone from it and compare canonical refs/content. The
 native encoder must actually emit zstd; a hand-built raw-pack fixture does
 not cover this case. Include zstd decode CPU and resident memory in the budget

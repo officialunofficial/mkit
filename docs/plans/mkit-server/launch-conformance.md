@@ -1,10 +1,13 @@
 # Paid launch conformance (WP-4.18 / R-194)
 
 Status: **phase 2 authorized; complete matrix UNRUN**.
-Available prerequisite integration can proceed. Takedown and preservation
-admin endpoint exposure waits for 5.6a-3. Preservation core #1249 is merged
-and configured core work is wired without its old startup refusal, per the
-latest user ruling. Extraction
+Available prerequisite integration can proceed. Preservation core #1249 and
+the restricted admin catalog 5.6a-3 (#1251) are merged. The user authorized
+configured Takedown/GetTakedown/ListTakedowns/ReadPreserved/SetLegalHold plus
+PurgeCache/ReadAuditLog. Activation requires admin, preservation, denial,
+indexed work and signed purge configuration; the core catalog's default
+activation flag remains false. Adapter wiring and actual runtime results
+require separate verification. Extraction
 #1244 and private scanner retrieval #1243 have merged; their release wiring
 is wired here. Bounded publication recheck timer 12 progress repair #1245 has
 merged. Physical alarm bounds/backoff #1247 and deterministic native timer
@@ -38,7 +41,8 @@ and component coverage landmarks. `phase2` states the required integrated
 probe, not an assertion that the probe already exists. Its matching evidence
 slots are [launch-evidence.md](launch-evidence.md).
 The [runtime coverage plan](launch-runtime-coverage.md) distinguishes existing
-component checks from the proposed actual release probes for all 24 cases after R-203.
+component checks from the proposed actual release probes for all 28 cases,
+including the pending R-203 round trip and four separate restricted admin cases.
 
 From a clean, committed candidate in this worktree:
 
@@ -75,7 +79,7 @@ stops only processes it starts.
 | `hooks` | Component smoke: existing real `vcs-worker-conformance.sh --hooks -- --filter info.` plus M3 service-binding hook suite and actual wasm Fetch/Delay probes. Its signed runtime wrapper uses **test-faults**; full opted-in release signed exchanges remain phase 2 work |
 | `authority` | Existing `vcs-worker-authority.sh --authority` against an actual release Worker and isolated binding fixture |
 | `release-launch` | Builds `worker-build --release --features launch`, runs local pinned wrangler with `LAUNCH_PROFILE=uno`, Paid indexed Multi/D34, `any` unsafe flag and HTTP/token opt-in. Verifies discovery, token key mount and absence of the test-faults route. Inspection and admin/takedown are off in this lane |
-| `full` | Refused until 5.6a-3, R-203 and the complete per-case actual release probes. Configured preservation core is wired. A component suite exit zero cannot pass the integrated matrix |
+| `full` | Refused until R-203 and the complete per-case actual release probes. The configured restricted admin catalog is available. A component suite exit zero cannot pass the integrated matrix |
 
 The release-launch discovery lane verifies threshold zero, leases/async false,
 no inspector-bound field when inspection is off, and no proof claim. It does
@@ -88,8 +92,8 @@ Worker proof requests must remain unsupported.
 ## Phase 2 execution
 
 1. Merge the exact prerequisite versions and record every full SHA, PR and
-   independent review outcome. Configured preservation core is wired; enable
-   the admin endpoints after 5.6a-3 and the decoder after R-203. The branch includes #1247 and #1248; rerun
+   independent review outcome. Integrate configured preservation and the
+   merged 5.6a-3 admin catalog; enable the decoder only after R-203. The branch includes #1247 and #1248; rerun
    timer/alarm checks without the prior native flake exceptions and report any
    failure. A new flake classification still needs unchanged-base evidence.
 2. Complete the itemized release probes in [launch-cases.json](launch-cases.json):
@@ -126,6 +130,25 @@ initial failure log and up to three isolated reruns, with their actual results.
 Do not fix an unrelated native timer flake in this activation lane or turn
 an unexecuted test into an accepted skip. Phase 1 remains a committed checkpoint;
 the PR opens only after phase 2's prerequisites and gates complete.
+
+## Restricted admin runtime cases
+
+The [5.6a-3 contract](WP-5.6a-3-contract.md) supplies four distinct cases in
+addition to Takedown and the shared admin authentication/replay/audit case.
+Run them on configured native and actual release Worker mounts; all remain
+UNRUN until their command, named assertions and log hashes are retained.
+
+| Case | Required runtime assertions |
+|---|---|
+| `B4.admin-get-takedown` | Status separates acquisition pending, historical verification, discovery, legal hold and purged copies; unknown ids and role denials leak no preserved bytes. `any` never claims complete discovery or real completion |
+| `B4.admin-list-takedowns` | Absent/null/empty scope lists all; repository and namespace scopes are normalized and token-bound. Page size is 1–100, scans inspect at most 100 root rows and 256 KiB record JSON, and tokens are at most 2 KiB. Empty filtered pages may continue; foreign/malformed tokens are refused |
+| `B4.admin-read-preserved` | Each retry rechecks current key/role, retention and ownership and audits acceptance; no replayed payload. Verify each bounded owner-framed piece before release and recheck after I/O. Exact ordered offsets, one final piece, empty final piece at size, and errors without a success final piece are observable on the Connect stream. Audit failure and cancellation release no unauthorized bytes; responses are no-store |
+| `B4.admin-set-legal-hold` | Set/clear uses current ownership/state/deadline guards and commits hold effects, audit and terminal nonce atomically. Reason/operator-label bounds are 512/128 UTF-8 bytes. Replay is audited, stale holds cannot seize purge-owned work, and held copies cannot be purged; failed apply leaves no mutation |
+
+Exercise both public and host-only admin placement, every configured role and
+fresh/replayed/in-flight signed requests. Keep Reinstate and inspection hold
+review operations unexposed. Count paged status reads and each preserved-piece
+poll in the same request allowance; contract bounds are not memory measurements.
 
 ## Phase 2 embedding addenda
 

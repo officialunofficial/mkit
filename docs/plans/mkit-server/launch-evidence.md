@@ -6,8 +6,9 @@ inputs, not evidence of their opted-in release integration. Fill actual
 results after executing at the pinned candidate, using the
 [local harness](launch-conformance.md). A component harness PASS records
 only that component lane; it leaves per-case integrated slots UNRUN.
-Preservation core #1249 is merged and configured core work is wired. Operator
-endpoint exposure and its runtime cases await the 5.6a-3 admin catalog. Native zstd push/clone awaits the
+Preservation core #1249 and the restricted admin catalog #1251 are merged.
+Configured operator endpoints are authorized; adapter integration and all
+operator runtime cases remain UNRUN. Native zstd push/clone awaits the
 R-203 bounded ruzstd prerequisite; the decoder stays off until it merges. The resolved #1246 header ruling
 adopts its extension allowlist and safe filenames; it records no runtime PASS.
 See [launch-runtime-coverage.md](launch-runtime-coverage.md) for current
@@ -51,7 +52,8 @@ foundations to activation and no dependence on withdrawn R-196/R-197.
 | 5.5a-sync | `233f51afb9acad3e79e89790ee4940dacfc58152` | [#1240](https://github.com/officialunofficial/mkit/pull/1240); review record UNRUN |
 | R-193 private scanner pack retrieval | `ade6179e973fd05e63c2853fdc33a507ca0fa9be` | [#1243](https://github.com/officialunofficial/mkit/pull/1243) merged; integrated gate UNRUN |
 | 5.10 / 5.11a purge/admin/audit | `e99e2b241959932150febb8a3bc4957b08134864` | [#1236](https://github.com/officialunofficial/mkit/pull/1236); reviews UNRUN |
-| 5.6a-1 acceptance / 5.6a-2 preservation | `bc114103f438a43a5785ab9dc92bf765a46b3807` / `a3966d84d05449d164d0ba4365eb30181a1c7ce7` | Core wired; admin exposure waits for 5.6a-3 |
+| 5.6a-1 acceptance / 5.6a-2 preservation | `bc114103f438a43a5785ab9dc92bf765a46b3807` / `a3966d84d05449d164d0ba4365eb30181a1c7ce7` | Core wired; configured runtime evidence UNRUN |
+| 5.6a-3 restricted admin catalog | `e8164870170ac0dcedd1512fde25d3c0063ee6d0` | [#1251](https://github.com/officialunofficial/mkit/pull/1251) merged; configured activation authorized; adapter/runtime checks and independent review record UNRUN |
 | Publication recheck timer 12 progress repair | `d89c37fb968d39c180228678bc09c77a12002fc9` | [#1245](https://github.com/officialunofficial/mkit/pull/1245) merged; integrated gate UNRUN |
 | Physical alarm bounds and cold fairness repair | `e45def2fe1855a531d0149727bf6678fc8145c3c` | [#1247](https://github.com/officialunofficial/mkit/pull/1247) merged; integrated rerun UNRUN |
 | Deterministic native timer conformance | `12e4ce4998145a959c4fc400e02b6ad546812090` | [#1248](https://github.com/officialunofficial/mkit/pull/1248) merged; old timer flake exceptions removed |
@@ -85,6 +87,10 @@ separate. Native proofs and Worker proof refusal are deliberately distinct.
 | B4.extraction | UNRUN | UNRUN | A+B/B+C groups, immutable sources, gp renewal, scheduled completion |
 | B4.takedown | UNRUN | UNRUN | Verified preservation/retention/legal hold/global denial; any incomplete discovery |
 | B4.admin | UNRUN | UNRUN | Configured subset, unconfigured refusal, distinct roles/replay/gapless audit |
+| B4.admin-get-takedown | UNRUN | UNRUN | Separate acquisition/verification/discovery/hold/purge status; any incomplete; signed role/replay/audit and no payload leakage |
+| B4.admin-list-takedowns | UNRUN | UNRUN | All/normalized scopes, 1–100 pages, 100-row/256 KiB scan bounds, scope-bound 2 KiB tokens, empty continued pages and confidentiality |
+| B4.admin-read-preserved | UNRUN | UNRUN | Fresh retry authority/retention/ownership and audit; bounded verified pieces, exact offsets/final rules, stream errors/cancellation/no-store and resident/call measurements |
+| B4.admin-set-legal-hold | UNRUN | UNRUN | Atomic hold/audit/nonce, 512/128 UTF-8 bounds, deadline/purge ownership races, replay and failed apply leaves no mutation |
 | B4.purge | UNRUN | UNRUN | Signed sink/retry/outage, stale cache/snapshots, manual acceptance and audited completion |
 | B4.recovery | UNRUN | UNRUN | Same-format restart/lost reply/duplicate timers; unsupported store reset |
 | B4.native-push-zstd | UNRUN | UNRUN | After R-203: native CLI push -> release Worker -> clone, with zstd decode CPU/resident-memory audit |
@@ -100,7 +106,7 @@ separate. Native proofs and Worker proof refusal are deliberately distinct.
 
 | Gate | Result / exact command / log |
 |---|---|
-| Harness schema validation and dry plan | PASS: `bash scripts/vcs-worker-launch.sh validate` (24 cases after R-203), `plan` JSON parse and shell/Python syntax; working-tree validation only, candidate pin supplied after commit |
+| Harness schema validation and dry plan | PASS: `bash scripts/vcs-worker-launch.sh validate` (28 cases), `plan` JSON parse, Python AST and shell syntax; evidence/coverage ids match all 28 cases and diff whitespace check passes. Working-tree validation only; no runtime PASS, candidate pin supplied after commit |
 | fmt / workspace clippy / wasm clippy | UNRUN |
 | Touched crates + reverse dependency nextest / doctests / rustdoc | UNRUN |
 | Full just ci / area server and script/security/proto/vector gates | UNRUN |

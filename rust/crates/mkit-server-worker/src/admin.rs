@@ -113,18 +113,26 @@ pub(crate) fn shards(
     }
 }
 #[cfg(target_arch = "wasm32")]
+type WorkerWork = mkit_server::takedown::work::Work<
+    crate::ns_client::DoNamespaceStore<crate::ns_client::StubTransport>,
+    crate::r2::WorkerBlobStore,
+    crate::r2::WorkerBlobStore,
+>;
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn work(
     env: &worker::Env,
     cfg: &crate::adapter::WorkerConfig,
     budget: &mkit_server::purge::SliceBudget,
-) -> Result<
-    mkit_server::takedown::work::Work<
-        crate::ns_client::DoNamespaceStore<crate::ns_client::StubTransport>,
-        crate::r2::WorkerBlobStore,
-        crate::r2::WorkerBlobStore,
-    >,
-    ConfigError,
-> {
+) -> Result<WorkerWork, ConfigError> {
+    build_work(env, cfg, None, Some(budget))
+}
+#[cfg(target_arch = "wasm32")]
+fn build_work(
+    env: &worker::Env,
+    cfg: &crate::adapter::WorkerConfig,
+    request: Option<&mkit_server::indexed::budget::SliceBudget>,
+    alarm: Option<&mkit_server::purge::SliceBudget>,
+) -> Result<WorkerWork, ConfigError> {
     let settings = cfg
         .takedown
         .as_ref()
@@ -134,17 +142,27 @@ pub(crate) fn work(
         .as_ref()
         .ok_or_else(|| ConfigError("preservation requires indexed storage".into()))?;
     let blob = |binding, keyspace| {
-        crate::r2::R2BlobStore::new(
-            crate::r2::EnvBucket::new(env.clone(), binding).with_alarm_budget(budget.clone()),
-            keyspace,
-        )
+        let mut bucket = crate::r2::EnvBucket::new(env.clone(), binding);
+        if let Some(budget) = request {
+            bucket = bucket.with_budget(budget.clone());
+        }
+        if let Some(budget) = alarm {
+            bucket = bucket.with_alarm_budget(budget.clone());
+        }
+        crate::r2::R2BlobStore::new(bucket, keyspace)
     };
+    let mut metadata = crate::ns_client::DoNamespaceStore::new(
+        crate::ns_client::StubTransport::new(env.clone(), cfg.placement.clone()),
+        cfg.probe_partition(),
+    );
+    if let Some(budget) = request {
+        metadata = metadata.with_budget(budget.clone());
+    }
+    if let Some(budget) = alarm {
+        metadata = metadata.with_alarm_budget(budget.clone());
+    }
     Ok(mkit_server::takedown::work::Work {
-        metadata: crate::ns_client::DoNamespaceStore::new(
-            crate::ns_client::StubTransport::new(env.clone(), cfg.placement.clone()),
-            cfg.probe_partition(),
-        )
-        .with_alarm_budget(budget.clone()),
+        metadata,
         serving: blob(cfg.blob_binding, crate::r2::PACKS_KEYSPACE),
         preserved: blob(PRESERVATION_BINDING, "preserved"),
         root: cfg.probe_partition(),
@@ -161,9 +179,11 @@ fn supported_path(path: &str, cfg: &crate::adapter::WorkerConfig) -> bool {
     if path == mkit_server::admin::AUDIT_PATH || path == mkit_server::admin::PURGE_PATH {
         return true;
     }
-    mkit_server::takedown::ACTIVATED
-        && cfg.admin.is_some()
-        && cfg.launch.as_ref().is_some_and(|launch| launch.takedown)
+    cfg.admin.as_ref().is_some_and(Config::enabled)
+        && cfg.takedown.is_some()
+        && cfg.takedown_denial
+        && cfg.indexed.is_some()
+        && purge_enabled(cfg)
         && path
             .strip_prefix(mkit_server::admin::PREFIX)
             .is_some_and(|operation| {
@@ -190,20 +210,20 @@ pub(crate) async fn serve(
     budget: &mkit_server::indexed::budget::SliceBudget,
 ) -> worker::Result<worker::Response> {
     use futures::StreamExt;
-    use mkit_server::admin::{BodyCapture, Engine, Response};
+    use mkit_server::admin::{BodyCapture, Engine, Reply, Response};
     let Some(config) = &cfg.admin else {
-        return worker::Response::error("admin disabled", 404);
+        return no_store(worker::Response::error("admin disabled", 404));
     };
-    let enabled = mkit_server::takedown::ACTIVATED && cfg.takedown.is_some();
+    let enabled = cfg.takedown.is_some() && cfg.takedown_denial;
     if !supported_path(&req.path(), cfg) {
-        return worker::Response::error("admin operation unavailable", 404);
+        return no_store(worker::Response::error("admin operation unavailable", 404));
     }
     if req.method() != worker::Method::Post {
-        return worker::Response::error("POST required", 405);
+        return no_store(worker::Response::error("POST required", 405));
     }
     let headers = req.headers().entries().collect();
     let reply = if let Err(reply) = mkit_server::admin::precheck(&headers) {
-        reply
+        Reply::Unary(reply)
     } else {
         let url = req.url()?;
         let path = format!(
@@ -226,29 +246,54 @@ pub(crate) async fn serve(
         if enabled {
             // Workers run on one thread; the shared core operations interface uses Arc.
             #[allow(clippy::arc_with_non_send_sync)]
-            let operations = std::sync::Arc::new(mkit_server::takedown::Service::new(
-                store,
-                cfg.probe_partition(),
-                shards(cfg.sharding),
-            ));
+            let operations = std::sync::Arc::new(
+                build_work(&env, cfg, Some(budget), None)
+                    .map_err(|error| worker::Error::RustError(error.to_string()))?,
+            );
             engine = engine.with_operations(operations);
         }
+        #[allow(clippy::arc_with_non_send_sync)]
+        let engine = std::sync::Arc::new(engine);
         engine
-            .handle(
+            .handle_streamed(
                 &path,
                 &headers,
                 &capture,
+                None,
                 mkit_server::Clock::now_ms(&crate::clock::WorkerClock),
             )
             .await
     };
-    let Response {
-        status,
-        content_type,
-        body,
-    } = reply;
-    let mut response = worker::Response::from_bytes(body)?.with_status(status);
-    response.headers_mut().set("content-type", &content_type)?;
+    let response = match reply {
+        Reply::Unary(Response {
+            status,
+            content_type,
+            body,
+        }) => {
+            let mut response = worker::Response::from_bytes(body)?.with_status(status);
+            response.headers_mut().set("content-type", &content_type)?;
+            response
+        }
+        Reply::Stream(stream) => {
+            let stream = stream.map(|result| {
+                result
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(|error| worker::Error::RustError(error.to_string()))
+            });
+            let mut response = worker::Response::from_stream(stream)?;
+            response
+                .headers_mut()
+                .set("content-type", "application/connect+json")?;
+            response
+        }
+    };
+    no_store(Ok(response))
+}
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn no_store(
+    response: worker::Result<worker::Response>,
+) -> worker::Result<worker::Response> {
+    let mut response = response?;
     response.headers_mut().set("cache-control", "no-store")?;
     Ok(response)
 }
@@ -393,6 +438,7 @@ mod tests {
             _ => None,
         })
         .unwrap();
+        let fixture = PreservationFixture::new();
         for op in [
             "Takedown",
             "GetTakedown",
@@ -403,15 +449,25 @@ mod tests {
             let path = format!("{}{op}", mkit_server::admin::PREFIX);
             assert!(!supported_path(&path, &cfg), "unconfigured {op}");
             cfg.launch = Some(crate::launch::LaunchConfig { takedown: true });
-            assert_eq!(
-                supported_path(&path, &cfg),
-                mkit_server::takedown::ACTIVATED,
-                "configured {op}"
-            );
+            assert!(!supported_path(&path, &cfg), "selection alone {op}");
+            cfg.takedown = fixture.settings(true, true).unwrap();
+            cfg.takedown_denial = true;
+            cfg.indexed = Some(mkit_server::indexed::IndexedConfig::default());
+            cfg.hooks = crate::hooks::config::HookVars::parse(&|name| match name {
+                "HOOK_ROLES" => Some("cache-purge".into()),
+                "HOOK_URL" => Some("https://hooks.example".into()),
+                _ => None,
+            })
+            .unwrap();
+            assert!(supported_path(&path, &cfg), "configured {op}");
+            cfg.takedown_denial = false;
+            assert!(!supported_path(&path, &cfg), "no global denial {op}");
+            cfg.takedown_denial = true;
             let admin = cfg.admin.take();
             assert!(!supported_path(&path, &cfg), "no admin {op}");
             cfg.admin = admin;
             cfg.launch = None;
+            cfg.takedown = None;
         }
         assert!(supported_path(mkit_server::admin::AUDIT_PATH, &cfg));
         assert!(supported_path(mkit_server::admin::PURGE_PATH, &cfg));

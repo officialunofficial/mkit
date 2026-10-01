@@ -483,7 +483,7 @@ where
     }
     let pipeline_config = audited_pipeline_config(cfg, &meta);
     let pipeline = Pipeline::new(
-        blobs,
+        blobs.clone(),
         meta.clone(),
         hooks,
         pipeline_config.clone(),
@@ -562,10 +562,7 @@ where
         None => None,
     };
     Ok(Services {
-        admin: cfg
-            .admin
-            .as_ref()
-            .map(|settings| crate::admin::router(meta, settings, &pipeline_config)),
+        admin: crate::admin::optional_router(blobs, meta, cfg.admin.as_ref(), &pipeline_config)?,
         router: crate::admin::publish(
             build_router(Arc::new(pipeline), &cfg.router),
             cfg.admin.as_ref(),

@@ -2465,7 +2465,7 @@ mod glue {
         cfg: &WorkerConfig,
     ) -> worker::Result<Response> {
         if let Err(error) = cfg.validate_runtime(&env) {
-            return json_response(unavailable_json(&error.0), 503);
+            return crate::admin::no_store(json_response(unavailable_json(&error.0), 503));
         }
         let request_budget = mkit_server::indexed::budget::SliceBudget::new(9000);
         let meta = WorkerNamespaceStore::new(
@@ -2487,7 +2487,10 @@ mod glue {
             .map_err(crate::sharding_guard::GuardError::Storage)
             .and_then(Outcome::into_result)
         {
-            return json_response(unavailable_json(error.public_message()), 503);
+            return crate::admin::no_store(json_response(
+                unavailable_json(error.public_message()),
+                503,
+            ));
         }
         crate::admin::serve(req, env, cfg, &request_budget).await
     }
@@ -2507,7 +2510,12 @@ mod glue {
         F: FnOnce(&Env, &WorkerConfig) -> Result<H, ConfigError>,
     {
         if let Err(error) = cfg.validate_runtime(&env) {
-            return json_response(unavailable_json(&error.0), 503);
+            let response = json_response(unavailable_json(&error.0), 503);
+            return if req.path().starts_with(mkit_server::admin::PREFIX) {
+                crate::admin::no_store(response)
+            } else {
+                response
+            };
         }
         #[cfg(feature = "http-objects")]
         if crate::http_mount::glue::mounted_request(&req, cfg) {

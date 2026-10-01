@@ -30,7 +30,7 @@ integration and wire rerun passed all 22 tests.
   The size table remains unmeasured. The current platform limit is linked
   to official Cloudflare documentation; gzip is informational.
 
-Preservation core is wired; admin catalog exposure waits for 5.6a-3. Complete preservation/admin/takedown
+Preservation core and the configured 5.6a-3 admin catalog are wired. Complete preservation/admin/takedown
 integration, the integrated native/release runtime matrix, measured wasm/bundle
 sizes, final full gates and two independent final reviews remain required.
 
@@ -188,3 +188,49 @@ The paid-read wrapper class-entrypoint regression was reproduced with a mock
 class export before correction and then passed ordinary/zero/partial cancellation
 paths. This checks fixture interface only, not actual workerd behavior. The
 root-owned release runs still must execute before any corresponding matrix PASS.
+
+## Restricted admin integration and CA prerequisite checkpoint (2026-09-30)
+
+Merged #1251 (`e8164870170ac0dcedd1512fde25d3c0063ee6d0`) in
+`d5beb551`. Native and Worker adapters attach the complete preservation Work
+runtime and dispatch through `Arc<Engine>::handle_streamed`. The five
+restricted operations require configured preservation, enabled admin keys,
+indexed storage, global denial and purge delivery. Hold review and Reinstate
+remain absent. Preserved reads stream bounded freshly verified pieces without
+buffering replay bytes; Worker metadata and both R2 stores share the retained
+request allowance. Responses, including admin startup failures, use no-store.
+The inventory adds distinct GetTakedown, ListTakedowns, ReadPreserved and
+SetLegalHold cases (28 total), all integrated runtime slots still UNRUN.
+
+Regression RED logs demonstrate the former fixed 404 catalog gate, denial
+being disabled while preservation remains selected, empty admin keys being
+accepted, and missing native purge delivery. These are targeted source fixes,
+not launch runtime PASS claims. Logs remain under the mandated WP scratch
+path as `phase2-{admin-denial,admin-empty-keys,native-admin-catalog,native-admin-purge}-red.log`.
+
+The native CLI HTTPS round trip additionally needs an explicit local CA trust
+option. The user ruled that `MKIT_SSL_CA_FILE` and git-parity `http.sslCAInfo`
+will be implemented in a separate prerequisite PR, adding certificates to the
+compiled Mozilla roots with certificate and hostname verification intact.
+Worker zstd decoding remains disabled until #1252 / R-203 merges.
+
+Actual release probes remain incomplete. Minimal R1 allowlist runs at
+`be09f81d` and `4e936489` hit Miniflare proxy `Network connection lost` before
+publication; an intervening `25e96a79` run committed, then exposed an unsigned
+fixture repository-header bug fixed in `4e936489`. No whole-case PASS or
+platform-resource claim follows. The embedded example at `4e936489` verifies
+multipart transfer and audience rejection, then fails its Outcome assertion:
+persisted reservation is still Ticketed, with no kind-8 obligation. The fixture
+must consume a ticket through AdvanceRefs before expecting Committed; this
+requires a fixture correction and rerun. Neither failure is waived.
+
+Targeted checkpoint checks pass: 33/33 Worker/native admin, embedding and launch
+regressions; strict host all-target/all-feature clippy for both adapters;
+Worker wasm32 HTTP/signed-hooks/published-view clippy; formatting, whitespace
+and the 28-case inventory validator. These do not replace final workspace gates.
+
+| Log (WP scratch) | SHA-256 |
+|---|---|
+| `phase2-admin-activation-final-tests.log` | `a93639a6a81f40024f28401416a6f8cc1879f711962ef4873a6a2c84ec105e56` |
+| `phase2-admin-activation-final-host-clippy.log` | `9725bd4965783e5589355b689386850d3d91d508cb5cb9f846508a6e750a7955` |
+| `phase2-admin-activation-final-wasm-clippy.log` | `450ebead2af05f97c1005bc6e6839988a30864caee2886dbf4152c7a9ab4ea1b` |

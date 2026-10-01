@@ -57,7 +57,10 @@ pub(crate) fn validate_programmatic(cfg: &WorkerConfig) -> Result<(), ConfigErro
     {
         return Err(error("scanner retrieval requires an inspector"));
     }
-    if cfg.takedown_denial || cfg.takedown.is_some() {
+    if cfg.takedown_denial
+        || cfg.takedown.is_some()
+        || cfg.launch.as_ref().is_some_and(|v| v.takedown)
+    {
         validate_preservation(cfg, &|_| None)?;
     }
     #[cfg(feature = "http-objects")]
@@ -325,10 +328,16 @@ fn validate_preservation(
         || cfg.takedown_denial
         || cfg.launch.as_ref().is_some_and(|v| v.takedown)
     {
-        if cfg.admin.is_none() || cfg.takedown.is_none() || cfg.indexed.is_none() {
+        if cfg.admin.as_ref().is_none_or(|admin| !admin.enabled())
+            || cfg.takedown.is_none()
+            || cfg.indexed.is_none()
+        {
             return Err(error(
                 "TAKEDOWN_ENABLED requires ADMIN_KEYS and complete preservation",
             ));
+        }
+        if !cfg.takedown_denial {
+            return Err(error("configured takedown requires global denial"));
         }
         if cfg.custom_purge.is_none()
             && cfg

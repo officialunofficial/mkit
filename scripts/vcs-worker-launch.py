@@ -178,10 +178,10 @@ def main():
     if args.lane == "plan":
         print(json.dumps({"cases": matrix["cases"], "lanes": LANES,
                           "release-launch": "actual release launch+HTTP discovery, isolated wrangler",
-                          "full": "BLOCKED: phase 2 per-case release matrix, 5.6a-3 catalog and R-203 required"}, indent=2))
+                          "full": "BLOCKED: complete per-case release matrix and R-203 bounded decoder required; configured admin catalog is available"}, indent=2))
         return 0
     if args.lane == "full":
-        raise RuntimeError("full launch matrix is pending phase 2: WP-5.6a-3 admin catalog, R-203 bounded ruzstd, "
+        raise RuntimeError("full launch matrix is pending phase 2: R-203 bounded ruzstd, "
                            "and itemized actual release probes; component suite success is insufficient")
     head = git("rev-parse", "HEAD")
     if args.sha != head:

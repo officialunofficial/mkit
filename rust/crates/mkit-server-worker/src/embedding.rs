@@ -268,7 +268,21 @@ mod tests {
             "custom sink with complete preservation must parse"
         );
         let mut cfg = parse(&v).unwrap();
+        let admin = cfg.admin.take();
+        cfg.admin = Some(
+            mkit_server::admin::Config::parse(&cfg.audience, r#"{"version":1,"keys":[]}"#).unwrap(),
+        );
+        assert!(
+            cfg.validate().is_err(),
+            "takedown requires enabled admin keys"
+        );
+        cfg.admin = admin;
         cfg.takedown_denial = false;
+        assert!(
+            cfg.validate().is_err(),
+            "configured takedown cannot disable global denial"
+        );
+        cfg.takedown_denial = true;
         cfg.launch.as_mut().unwrap().takedown = false;
         cfg.takedown.as_mut().unwrap().retention_ms = 0;
         assert!(

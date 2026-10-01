@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "owner": "WP-4.18 / R-194",
-  "scope": "R-198 / R-200; optional sync inspection, native proofs, lean takedown; R-203 bounded ruzstd plus native push/clone after prerequisite merge",
+  "scope": "R-198 / R-200; optional sync inspection, native proofs, configured lean takedown and restricted admin catalog; R-203 bounded ruzstd plus native push/clone after prerequisite merge",
   "cases": [
     {
       "id": "B4.config",
@@ -91,8 +91,8 @@
       "id": "B4.takedown",
       "contract": "Acceptance globally denies before success; verified private preservation, retention/legal hold, late holders and unresolved requests; any reports discovery incomplete",
       "native": "takedown::tests; pipeline::tests::http_objects::takedown_denial",
-      "worker": "admin::tests; configured preservation with gated takedown endpoints",
-      "phase2": "WP-5.6a-2 core merged; WP-5.6a-3 catalog required: actual release preservation and all read/reuse denial paths under allowlist and any"
+      "worker": "admin::tests; configured preservation and activated Worker takedown mount",
+      "phase2": "actual release Takedown acceptance, preservation and all read/reuse denial paths under allowlist and any; merged core/catalog are inputs, not runtime evidence"
     },
     {
       "id": "B4.admin",
@@ -100,6 +100,34 @@
       "native": "admin::tests; takedown::tests",
       "worker": "admin::tests",
       "phase2": "actual release configured and unconfigured admin mount/role matrix"
+    },
+    {
+      "id": "B4.admin-get-takedown",
+      "contract": "Signed moderation-role GetTakedown reports acquisition pending, historical verification, discovery, legal hold and purged copies separately without preserved bytes; any never reports complete discovery or real completion",
+      "native": "takedown::admin_tests::every_operation_is_signed_role_checked_replayed_and_audited; status_keeps_acquisition_verification_discovery_hold_and_completion_separate",
+      "worker": "admin::tests configured mount; production streamed Engine dispatch to Work catalog",
+      "phase2": "actual release configured GetTakedown pending/verified/held/purged status and unknown-id cases under allowlist and any, signed role/replay/audit checks and no payload leakage"
+    },
+    {
+      "id": "B4.admin-list-takedowns",
+      "contract": "Signed moderation-role ListTakedowns supports absent/null/empty all scope and repository/namespace scope, page size 1..100, bounded 100-row root scans and 256KiB record JSON; continuation binds normalized scope and last key, and empty filtered pages can continue",
+      "native": "takedown::admin_tests::list_pagination_rejects_foreign_scope_token_and_reports_missing_state_pending; absent_and_empty_list_scopes_list_all_and_tokens_bind_all_scope; list_accepts_protojson_null_scope_and_quoted_page_size",
+      "worker": "admin::tests configured mount; real DO root scan and shared request counter",
+      "phase2": "actual release all/scoped pagination including empty filtered pages, 1/100 and invalid sizes, malformed/foreign 2KiB-bounded tokens, status confidentiality and bounded calls/retained records"
+    },
+    {
+      "id": "B4.admin-read-preserved",
+      "contract": "Signed moderation-role ReadPreserved persists only byte-free replay descriptors; every retry checks current key/role/retention/ownership and audits acceptance; verify each bounded owner-framed piece before release and after I/O, exact ordered offsets, one success last or empty last at size, audited Connect error without last on failure, no caching/log/replay payload",
+      "native": "takedown::admin_tests::fresh_retry_roles_retention_and_ownership_never_replay_bytes; offsets_final_rules_and_empty_at_size_are_exact; corrupt_second_piece_is_audited_connect_error_without_last; expiry_between_pieces_ends_with_error_and_no_success_last; read_retry_rechecks_current_key_expiry_and_buffered_adapter_cannot_return_descriptor; audit_failure_cannot_commit_a_hold_or_release_bytes",
+      "worker": "admin::serve handle_streamed Reply::Stream bridge; shared DO/R2 counter across acceptance and polling",
+      "phase2": "actual release application/connect+json stream with no-store, incremental verified bytes, fresh signed retry after key/role/retention/ownership changes, size and above-size offsets, corrupt/missing second piece and audit failure, cancellation and retained-piece/call measurements"
+    },
+    {
+      "id": "B4.admin-set-legal-hold",
+      "contract": "Signed moderation-role SetLegalHold uses existing preservation ownership/state/deadline CAS; hold effects, signed audit and terminal nonce commit atomically; reason/operator label follow 512/128 UTF-8 byte bounds; stale hold cannot seize purge-owned state and a committed hold blocks actual purge",
+      "native": "takedown::admin_tests::signed_hold_commits_with_audit_and_nonce_and_blocks_actual_purge; hold_planned_before_purge_cannot_take_ownership_after_purge_commits; legal_hold_reason_and_label_follow_existing_utf8_byte_bounds; audit_failure_cannot_commit_a_hold_or_release_bytes",
+      "worker": "admin::tests configured mount; Work plan_legal_hold through existing ledger batch",
+      "phase2": "actual release hold/set/clear and replay with audit chain, UTF-8 byte limits, retention deadline, concurrent purge CAS and audit failure; no hold or nonce mutation on denied/failed atomic apply"
     },
     {
       "id": "B4.purge",
@@ -155,7 +183,7 @@
       "contract": "Whole physical alarm shared limits/headroom, verification/extraction 256 calls and 48MiB, due-kind retries/frozen clock, bounded cold heads/local scans/fair progress",
       "native": "timers::tests; indexed::extraction_budget_tests; purge::tests",
       "worker": "ns_object::tests; sql::kv::tests; published_view::tests",
-      "phase2": "merge publication recheck timer 12 progress repair PR #1245, then actual release multiple due kinds/cold heads and resident-work measurements"
+      "phase2": "with merged publication/timer/alarm repairs, actual release multiple due kinds/cold heads and resident-work measurements"
     },
     {
       "id": "B4.embedding",
