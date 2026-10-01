@@ -413,3 +413,38 @@ owned scratch `embedding-example/runtime-s_xmmj2o/evidence.json`; wasm
 All fixture-owned groups stopped. This Single/default core embedding result
 does not certify the complete Uno launch configuration or whole-isolate
 budgets. The final integrated source will be revalidated separately.
+
+
+### Global denial proof and fresh planning (D26)
+
+The retained complete-profile observer reached all 4096 content actors and
+7012 successful scans across repeated proof attempts. Its first final apply
+arrived 104,454 ms after the sampled deadline; the subsequent attempt started
+another full proof. The matched takedown-off control passed the same canonical
+producer without changing its headers or connections. These are diagnostic
+controls, not launch matrix exceptions or isolate-memory evidence.
+
+The authorized correction completes each global proof before refreshing
+mutable source rows, observing/admitting a usable epoch lease, and sampling
+the final plan clock. It preserves the existing 10-second window, signed
+expiry cap, fixed pending deadline, ticket/authority checks, retry count and
+single 9000-call proof purse. Failed guards repeat proof; no denial cache or
+scan/concurrency shortcut is introduced. Fixed admission quota window/seed
+facts retain their existing guarded/freshness checks. An initial epoch push
+cannot be guarded while stale initial lease material commits.
+
+Ten real 4096-scan regressions passed on the patched source with Rust 1.95:
+`night2/denial-order-green-5.log`. The corrected harness against source
+`845a28759d0ab1d606939f1fa4ad4e202473bc81` failed nine of ten cases in
+`night2/denial-order-red-corrected.log`. A separate reproduction of the
+interim expiry-only lease predicate committed the revoked initial epoch,
+failing `night2/denial-order-epoch-red.log`; unconditional per-proof lease
+observation corrects that race. These focused results cover proof delays over
+10/30 seconds, fresh rows, initial/retry lease renewal, revoked epoch and
+authority, ticket/signed expiry, pending cap, CAS reproof and shared exhaustion.
+The independent source review found no remaining defect in this targeted
+scope. The broader all-feature pipeline run passed 435 tests (two existing
+ignored), and all-target/all-feature mkit-server clippy passed with warnings
+denied (`denial-order-pipeline-all-features.log`, `denial-order-clippy.log`).
+The unchanged 120-second actual release profile and final immutable
+integration review remain pending; no complete-profile PASS follows here.

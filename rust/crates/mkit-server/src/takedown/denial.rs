@@ -386,8 +386,8 @@ async fn held<S: NamespaceStore>(
         .map_err(|_| unavailable())?
         .map_err(|_| unavailable())
 }
-/// One authoritative 4096-shard scan per invocation; continuation reads share
-/// the caller's counter. Never reset it across optimistic apply retries.
+/// One authoritative 4096-shard scan per proof attempt; continuation reads
+/// share the caller's counter, retained across optimistic apply retries.
 async fn prove<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
