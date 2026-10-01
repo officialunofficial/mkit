@@ -578,6 +578,7 @@ type AfterApplyHook = Box<dyn Fn(&MemoryKv, &Partition, &Batch, &BatchOutcome) +
 
 type ApplyHook = Box<dyn Fn(&MemoryKv, &Partition, &Batch) + Send + Sync>;
 type ScanHook = Box<dyn Fn(&MemoryKv, &Partition) + Send + Sync>;
+type ReadManyHook = Box<dyn Fn(&MemoryKv, &Partition, &[Key]) + Send + Sync>;
 
 /// A `MemoryKv` that records every key it sees and batch it applies, can
 /// run a hook before each apply, can yield at every call and can fail
@@ -587,6 +588,7 @@ struct Spy {
     hook: Option<ApplyHook>,
     after_hook: Option<AfterApplyHook>,
     scan_hook: Option<ScanHook>,
+    read_many_hook: Option<ReadManyHook>,
     yields: bool,
     fail_reads: bool,
     seen: Mutex<Vec<Key>>,
@@ -603,6 +605,7 @@ impl Spy {
             hook: None,
             after_hook: None,
             scan_hook: None,
+            read_many_hook: None,
             yields: false,
             fail_reads: false,
             seen: Mutex::default(),
@@ -680,6 +683,9 @@ impl NamespaceStore for Spy {
         keys: &[Key],
     ) -> Result<Vec<Option<Value>>, StoreError> {
         self.pause("get_many").await;
+        if let Some(hook) = &self.read_many_hook {
+            hook(&self.inner, p, keys);
+        }
         self.maybe_fail_read()?;
         for k in keys {
             self.saw(k);

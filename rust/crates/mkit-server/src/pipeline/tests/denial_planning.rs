@@ -1,4 +1,4 @@
-//! Slow global proof precedes every fresh bounded write plan.
+//! Denial proof retains its original attempt window with fresh business guards.
 use super::*;
 use crate::pipeline::reservation::PendingGuard;
 use std::collections::BTreeSet;
@@ -9,6 +9,7 @@ fn proof_env(delay: i64, mutate: bool, d34: bool) -> (Env, Arc<AtomicU32>) {
     let scans = Arc::new(AtomicU32::new(0));
     let count = scans.clone();
     let time = clock.clone();
+    let delayed = AtomicBool::new(false);
     let source = if d34 {
         D34Shards.ref_shard(&repo(), HEAD)
     } else {
@@ -19,7 +20,9 @@ fn proof_env(delay: i64, mutate: bool, d34: bool) -> (Env, Arc<AtomicU32>) {
             count.fetch_add(1, Ordering::SeqCst);
         }
         if *p == Partition::ContentShard(0) {
-            time.set(time.now_ms() + delay);
+            if !delayed.swap(true, Ordering::SeqCst) {
+                time.set(time.now_ms() + delay);
+            }
             if mutate {
                 now(store.apply(
                     &source,
@@ -146,15 +149,19 @@ fn run_proved_ticket(
 }
 
 #[test]
-fn proof_crossing_initial_window_uses_fresh_ten_second_deadline() {
+fn cold_proof_expires_original_window_then_warm_reproof_uses_new_attempt() {
     for delay in [11_000, 31_000] {
         let (env, scans) = proof_env(delay, false, false);
         run_proved(&env, None, false).unwrap();
-        assert_eq!(scans.load(Ordering::SeqCst), 4096);
+        assert_eq!(scans.load(Ordering::SeqCst), 8192);
         let batches = env.batches();
-        assert_eq!(batches.len(), 1);
+        assert_eq!(batches.len(), 2);
         assert_eq!(
             batches[0].preconditions[0],
+            Precondition::NotAfter(ms(T0) + 10_000)
+        );
+        assert_eq!(
+            batches[1].preconditions[0],
             Precondition::NotAfter(ms(T0 + delay) + 10_000)
         );
     }
@@ -175,7 +182,7 @@ fn proof_refreshes_ahead_rows_before_guarded_plan() {
 fn proof_crossing_initial_lease_renews_before_plan() {
     let (env, scans) = proof_env(31_000, false, true);
     run_proved(&env, None, true).unwrap();
-    assert_eq!(scans.load(Ordering::SeqCst), 4096);
+    assert_eq!(scans.load(Ordering::SeqCst), 8192);
     let source = D34Shards.ref_shard(&repo(), HEAD);
     let value = now(env.pipe.meta.inner.get(&source, &keys::epoch_lease()))
         .unwrap()
@@ -315,7 +322,7 @@ fn proof_keeps_signed_expiry_deadline_cap() {
     assert_eq!(scans.load(Ordering::SeqCst), 4096);
     assert_eq!(
         env.batches()[0].preconditions[0],
-        Precondition::NotAfter(ms(expiry + MAX_CLOCK_LEAD_MS))
+        Precondition::NotAfter(ms(T0) + 10_000)
     );
     assert!(
         now(env
@@ -330,7 +337,8 @@ fn proof_keeps_signed_expiry_deadline_cap() {
 
 #[test]
 fn failed_cas_reproves_and_renews_the_retry_lease() {
-    let (mut env, scans) = proof_env(31_000, false, true);
+    let (mut env, scans) = proof_env(0, false, true);
+    let time = env.clock.clone();
     let fired = AtomicBool::new(false);
     env.pipe.meta.hook = Some(Box::new(move |store, p, batch| {
         if matches!(p, Partition::Ref { .. }) && !fired.swap(true, Ordering::SeqCst) {
@@ -345,6 +353,14 @@ fn failed_cas_reproves_and_renews_the_retry_lease() {
             now(store.apply(p, Batch::new().put(keys::epoch_lease(), value.clone()))).unwrap();
         }
     }));
+    env.pipe.meta.after_hook = Some(Box::new(move |_, p, _, outcome| {
+        if matches!(p, Partition::Ref { .. })
+            && matches!(outcome, BatchOutcome::PreconditionFailed { .. })
+        {
+            // Age the lease between attempts, after a genuinely failed CAS.
+            time.set(T0 + 31_000);
+        }
+    }));
     run_proved(&env, None, true).unwrap();
     assert_eq!(scans.load(Ordering::SeqCst), 8192);
     let source = D34Shards.ref_shard(&repo(), HEAD);
@@ -353,11 +369,57 @@ fn failed_cas_reproves_and_renews_the_retry_lease() {
         .unwrap();
     assert_eq!(
         codec::decode_epoch_lease(&value).unwrap().expires_at_ms,
-        ms(T0 + 62_000) + 30_000
+        ms(T0 + 31_000) + 30_000
     );
     assert_eq!(
         env.batches().last().unwrap().preconditions[0],
-        Precondition::NotAfter(ms(T0 + 62_000) + 10_000)
+        Precondition::NotAfter(ms(T0 + 31_000) + 10_000)
+    );
+}
+
+#[test]
+fn repeated_slow_proof_cannot_refresh_either_attempt_window() {
+    let (mut env, scans) = proof_env(0, false, true);
+    let previous = env.pipe.meta.scan_hook.take().unwrap();
+    let time = env.clock.clone();
+    env.pipe.meta.scan_hook = Some(Box::new(move |store, p| {
+        previous(store, p);
+        if *p == Partition::ContentShard(0) {
+            time.set(time.now_ms() + 31_000);
+        }
+    }));
+    assert_eq!(
+        run_proved(&env, None, true).unwrap_err().code(),
+        Code::Unavailable
+    );
+    assert_eq!(scans.load(Ordering::SeqCst), 8192);
+    let all = env.batches();
+    let ref_key = keys::ref_key(&repo_name(), HEAD);
+    let batches: Vec<_> = all
+        .iter()
+        .filter(|batch| {
+            batch
+                .writes
+                .iter()
+                .any(|write| matches!(write, Write::Put(key, _) if *key == ref_key))
+        })
+        .collect();
+    assert_eq!(batches.len(), 2);
+    assert_eq!(
+        batches[0].preconditions[0],
+        Precondition::NotAfter(ms(T0) + 10_000)
+    );
+    assert_eq!(
+        batches[1].preconditions[0],
+        Precondition::NotAfter(ms(T0 + 31_000) + 10_000)
+    );
+    assert!(
+        now(env.pipe.meta.inner.get(
+            &D34Shards.ref_shard(&repo(), HEAD),
+            &keys::ref_key(&repo_name(), HEAD)
+        ))
+        .unwrap()
+        .is_none()
     );
 }
 
@@ -412,4 +474,280 @@ fn proof_cannot_guard_new_epoch_while_committing_initial_lease() {
             Some(codec::encode_epoch_lease(&pushed))
         );
     }
+}
+
+#[test]
+fn action_after_final_clear_cannot_borrow_a_new_commit_window() {
+    let (mut env, scans) = proof_env(0, false, false);
+    let fired = Arc::new(AtomicBool::new(false));
+    let installed = fired.clone();
+    let time = env.clock.clone();
+    env.pipe.meta.read_many_hook = Some(Box::new(move |store, p, _| {
+        // apply_loop's fresh source snapshot is after ALL descriptor pages and
+        // final direct target checks. No earlier proof read uses this source.
+        if *p == ns() && !installed.swap(true, Ordering::SeqCst) {
+            time.set(T0 + 11_000);
+            now(
+                crate::store::ContentIndex::new(crate::store::BorrowedStore(store)).block(
+                    &A,
+                    &crate::store::BlockEntry::new("after proof", ms(T0 + 10_001)),
+                    ms(T0 + 10_001),
+                ),
+            )
+            .unwrap();
+        }
+    }));
+    let result = run_proved(&env, None, false);
+    assert!(fired.load(Ordering::SeqCst));
+    assert!(scans.load(Ordering::SeqCst) >= 4096);
+    assert!(
+        now(crate::takedown::denial::denied(
+            env.pipe.meta.inner.as_ref(),
+            &A
+        ))
+        .unwrap()
+    );
+    eprintln!(
+        "after-final-clear evidence: result={result:?} scans={} now={} deadlines={:?} ref={:?}",
+        scans.load(Ordering::SeqCst),
+        env.clock.now_ms(),
+        env.batches()
+            .iter()
+            .map(|batch| &batch.preconditions[0])
+            .collect::<Vec<_>>(),
+        now(env
+            .pipe
+            .meta
+            .inner
+            .get(&ns(), &keys::ref_key(&repo_name(), HEAD)))
+        .unwrap()
+    );
+    assert_eq!(result.unwrap_err().code(), Code::PermissionDenied);
+    assert!(
+        now(env
+            .pipe
+            .meta
+            .inner
+            .get(&ns(), &keys::ref_key(&repo_name(), HEAD)))
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep the canonical signed writer, relay, operator and barrier setup together."
+)]
+fn signed_takedown_after_proof_cannot_publish_a_reused_canonical_pair() {
+    use crate::admin::{BodyCapture, Config, Engine, TAKEDOWN_PATH};
+    use base64::Engine as _;
+    use mkit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+    use mkit_core::sign::{KeyPair, sign_commit};
+    use serde_json::json;
+
+    let (mut env, owner, identity) = super::indexed::environment_with(
+        Sharding::Single,
+        crate::indexed::IndexedConfig::default(),
+    );
+    let file = Object::Blob(Blob {
+        data: b"post-proof file".to_vec(),
+    });
+    let file_id = file.id().unwrap();
+    let tree = Object::Tree(Tree {
+        entries: vec![TreeEntry {
+            name: b"file.txt".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: file_id,
+        }],
+    });
+    let signer = KeyPair::from_seed([9; 32]);
+    let mut commit = Commit::new_unannotated(
+        tree.id().unwrap(),
+        vec![],
+        Identity::ed25519(signer.public.0),
+        signer.public.0,
+        b"post-proof pair".to_vec(),
+        42,
+        [0; 64],
+    );
+    commit.signature = sign_commit(&commit, &signer).unwrap().0;
+    let commit = Object::Commit(commit);
+    let head = commit.id().unwrap();
+    let mut writer = mkit_core::pack::PackWriter::new_raw_only();
+    for object in [&file, &tree, &commit] {
+        writer
+            .push_raw(
+                object.id().unwrap(),
+                &mkit_core::serialize::serialize(object).unwrap(),
+            )
+            .unwrap();
+    }
+    let bytes = writer.finish().unwrap();
+    let map_bytes = mkit_core::transfer::encode_packlist(None, &[hash(&bytes)]).unwrap();
+    let map = hash(&map_bytes);
+    let tickets = vec![
+        super::indexed::begin_and_upload(&env, &owner, &identity, &bytes, 9900),
+        super::indexed::begin_and_upload(&env, &owner, &identity, &map_bytes, 9901),
+    ];
+    let first = env
+        .auth(&super::indexed::signed(
+            &owner,
+            &identity,
+            Procedure::AdvanceRefs,
+            9902,
+        ))
+        .unwrap();
+    assert_eq!(
+        now(env.pipe.advance_refs_with_tickets(
+            &first,
+            upd(HEAD, Missing, head),
+            upd(PACKMAP, Missing, map),
+            tickets,
+        ))
+        .unwrap(),
+        AdvanceOutcome::Committed
+    );
+    let repo = first.repo().repo.clone();
+    let relay = crate::timers::TimerRegistry::new().register(crate::relay::RelayHandler {
+        target: crate::store::BorrowedStore(&env.pipe.meta),
+        hook: crate::relay::NoHook,
+        budget: crate::relay::RelayBudget::default(),
+    });
+    for _ in 0..8 {
+        now(crate::timers::run_due(
+            &env.pipe.meta,
+            &env.pipe.shards.ref_shard(&repo, HEAD),
+            &relay,
+            env.clock.as_ref(),
+            ms(T0),
+            &crate::timers::TickBudget::default(),
+        ))
+        .unwrap();
+    }
+    drop(relay);
+    assert!(
+        now(crate::store::index::holds_any(
+            &env.pipe.meta,
+            env.pipe.shards.as_ref(),
+            &repo,
+            &[file_id]
+        ))
+        .unwrap()
+        .unwrap()
+    );
+    let root = env.pipe.shards.coordinator(&repo.namespace);
+    let operator = SigningKey::from_bytes(&[71; 32]);
+    let config = Config::parse(AUDIENCE, &json!({"version":1,"keys":[{
+        "keyId":"operator", "alg":"ed25519", "publicKey":to_hex(operator.verifying_key().as_bytes()),
+        "roles":["moderation"]
+    }]}).to_string()).unwrap();
+    let engine = Arc::new(
+        Engine::new(env.pipe.meta.inner.clone(), root.clone(), config).with_operations(Arc::new(
+            crate::takedown::Service::new(
+                env.pipe.meta.inner.clone(),
+                root,
+                env.pipe.shards.clone(),
+            ),
+        )),
+    );
+    let input = json!({"repository":identity,"operationId":"post-proof-pair",
+        "objectIds":[base64::engine::general_purpose::STANDARD.encode(file_id)],
+        "reason":"policy review","reasonToken":"policy"});
+    let mut body = BodyCapture::default();
+    body.push(input.to_string().as_bytes());
+    let nonce = to_hex(&[91; 32]);
+    let digest = body.digest();
+    let canonical = format!(
+        "mkit-admin:v1\noperator\n{AUDIENCE}\n{TAKEDOWN_PATH}\n{digest}\n{T0}\n{}\n{nonce}",
+        T0 + 60_000
+    );
+    let signature = to_hex_bytes(&operator.sign(&hash(canonical.as_bytes())).to_bytes());
+    let headers = crate::admin::HEADER_NAMES
+        .into_iter()
+        .zip([
+            "1".into(),
+            "operator".into(),
+            AUDIENCE.into(),
+            T0.to_string(),
+            (T0 + 60_000).to_string(),
+            nonce,
+            digest,
+            signature,
+        ])
+        .map(|(name, value)| (name.into(), value))
+        .collect();
+    let scans = Arc::new(AtomicU32::new(0));
+    let count = scans.clone();
+    env.pipe.meta.scan_hook = Some(Box::new(move |_, p| {
+        if matches!(p, Partition::ContentShard(_)) {
+            count.fetch_add(1, Ordering::SeqCst);
+        }
+    }));
+    let fired = Arc::new(AtomicBool::new(false));
+    let activated = fired.clone();
+    let count = scans.clone();
+    let source = env.pipe.shards.ref_shard(&repo, "refs/heads/reuse");
+    let barrier_source = source.clone();
+    let time = env.clock.clone();
+    env.pipe.meta.read_many_hook = Some(Box::new(move |_, p, _| {
+        if *p == barrier_source
+            && count.load(Ordering::SeqCst) >= 4096
+            && !activated.swap(true, Ordering::SeqCst)
+        {
+            time.set(T0 + 10_001);
+            let response = now(engine.handle(TAKEDOWN_PATH, &headers, &body, T0 + 10_001));
+            assert_eq!(
+                response.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&response.body)
+            );
+            time.set(T0 + 11_000);
+        }
+    }));
+    env.pipe.cfg.takedown_denial = true;
+    let request = env
+        .auth(&super::indexed::signed(
+            &owner,
+            &identity,
+            Procedure::AdvanceRefs,
+            9903,
+        ))
+        .unwrap();
+    let result = now(env.pipe.advance_refs(
+        &request,
+        upd("refs/heads/reuse", Missing, head),
+        upd("refs/mkit/packmap/reuse", Missing, map),
+    ));
+    assert!(fired.load(Ordering::SeqCst));
+    assert!(
+        now(crate::takedown::denial::denied(
+            env.pipe.meta.inner.as_ref(),
+            &file_id
+        ))
+        .unwrap()
+    );
+    assert_eq!(result.unwrap_err().code(), Code::PermissionDenied);
+    for name in ["refs/heads/reuse", "refs/mkit/packmap/reuse"] {
+        for key in [
+            keys::ref_key(&repo.name, name),
+            keys::published_ref(&repo.name, name),
+        ] {
+            assert!(
+                now(env.pipe.meta.inner.get(&source, &key))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+    assert_eq!(
+        now(env
+            .pipe
+            .meta
+            .inner
+            .get(&source, &keys::ref_key(&repo.name, HEAD)))
+        .unwrap(),
+        Some(codec::encode_ref_id(&head))
+    );
 }

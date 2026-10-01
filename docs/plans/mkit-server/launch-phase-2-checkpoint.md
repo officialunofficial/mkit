@@ -510,3 +510,31 @@ only reached an earlier namespace error. Neither is counted as the three
 intended error variants. The third corrects those fixture mistakes on the
 same production pin and release artifact. This is targeted error-wrapper
 evidence, not a completed admin/resource matrix.
+
+
+D36's local correction fixes each proof attempt's plan_time before the proof,
+then reads fresh rows, observes or renews the usable initial/retry lease, and
+refreshes business_now/current lease and replay caps. Only plan_time is
+restored afterward. A slow first proof expires its original NotAfter and
+retries with a new pre-proof attempt time; repeated 31-second proofs cannot
+commit. PendingGuard, signed/ticket expiry, authority/quota checks and the
+shared 9000 purse remain fixed. This supersedes the earlier post-proof
+plan-time refresh; the runtime matrix remains blocked pending measured
+unchanged-profile completion.
+
+The precise direct-target safety-cut test is now green with original
+NotAfter=T0+10,000 and no ref write. A second valid fixture builds a real
+Blob→Tree→signedCommit pack, canonical PackList, signed ticketed initial
+publication, source relay and actual held-file state. At the writer's
+post-proof source-read barrier, a real signed Engine/Service Takedown activates
+against that file. Signed AdvanceRefs reuse cannot create the new raw or
+published pair. The same final fixture commits under prior production, as
+recorded in `night2/denial-temporal-signed-red.log`; its corrected result is
+`denial-temporal-signed-green-4.log`. `D36-signed-red-provenance.json` labels
+the retained source swap as executor-attested. Earlier fixture attempts used
+an invalid commit selector or failed to compile; they are not green evidence.
+The final combined thirteen regressions pass (`denial-temporal-final-green.log`),
+and the broader all-feature pipeline run passes 438 tests with two existing
+ignored (`denial-temporal-pipeline.log`). Strict all-target/all-feature core
+clippy passes (`denial-temporal-clippy-corrected.log`). This is native source
+and lifecycle evidence, not a complete Worker/preservation/resource matrix.
