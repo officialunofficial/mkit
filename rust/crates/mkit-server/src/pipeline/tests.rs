@@ -2737,6 +2737,91 @@ fn authority_fence_requires_capable_store_at_startup() {
     }
 }
 
+#[tokio::test]
+async fn any_policy_allows_address_authority_generation_lookup_for_served_namespace() {
+    use crate::repo::MultiAddressing;
+    use crate::store::codec::{NamespaceRecord, encode_namespace_record};
+    use mkit_core::repo_identity::Namespace;
+
+    let clock = clock();
+    let meta = Spy::new(store(&clock));
+    let namespace = Namespace::Address([0x11; 20]);
+    let namespace_key = NamespaceKey::from_namespace(&namespace);
+    let mut config = cfg(authv2());
+    config.addressing = Addressing::Multi(MultiAddressing::new().with_namespace_policy(
+        crate::policy::NamespacePolicy::Any {
+            unsafe_without_admission: true,
+        },
+    ));
+    config.authorizer_role = AuthorizerRole::Authority;
+    config.write_policy = WritePolicy::Owner;
+    config.authority_fence = Some(
+        crate::authority::AuthorityFence::parse(&format!(
+            "deployment {} {}",
+            to_hex(&key(8).verifying_key().to_bytes()),
+            namespace,
+        ))
+        .unwrap(),
+    );
+    let defaults = Hooks::new();
+    let hooks = Hooks {
+        authorizer: Granting,
+        admission: defaults.admission,
+        pre_receive: defaults.pre_receive,
+        receipts: defaults.receipts,
+        outcomes: defaults.outcomes,
+    };
+    let env = build(config, meta, hooks, clock);
+    let coordinator = env.pipe.shards.coordinator(&namespace_key);
+    env.pipe
+        .meta
+        .apply(
+            &coordinator,
+            Batch::new().put(
+                keys::namespace_record(),
+                encode_namespace_record(&NamespaceRecord {
+                    created_at_ms: 1,
+                    config_version: 1,
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let created = u64::try_from(T0).unwrap();
+    let fields = [
+        "mkit-authority-generation:v1".to_owned(),
+        "deployment".to_owned(),
+        namespace.to_string(),
+        "1".to_owned(),
+        AUDIENCE.to_owned(),
+        created.to_string(),
+        (created + 60_000).to_string(),
+        "ab".repeat(32),
+    ];
+    let statement = fields.join("\n");
+    let signature = key(8).sign(&hash(statement.as_bytes()));
+    let wire = format!(
+        "{}.{}",
+        base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            statement.as_bytes()
+        ),
+        base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            signature.to_bytes()
+        )
+    );
+    assert_eq!(env.pipe.set_authority_generation(&wire).await.unwrap(), 1);
+    assert_eq!(
+        env.pipe
+            .get_authority_generation(&namespace.to_string())
+            .await
+            .unwrap(),
+        1
+    );
+}
+
 #[test]
 fn refs_only_store_never_sees_layout_version_key() {
     for auth in [AuthMode::Open, AuthMode::TransportIdentity] {

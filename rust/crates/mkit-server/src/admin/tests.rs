@@ -20,12 +20,21 @@ fn request(path: &str, value: &serde_json::Value, nonce: u8) -> (Headers, BodyCa
     signed_bytes(path, &bytes, nonce)
 }
 fn signed_bytes(path: &str, bytes: &[u8], nonce: u8) -> (Headers, BodyCapture) {
+    signed_bytes_with_times(path, bytes, nonce, 0, 60_000)
+}
+fn signed_bytes_with_times(
+    path: &str,
+    bytes: &[u8],
+    nonce: u8,
+    created_ms: u64,
+    expiry_ms: u64,
+) -> (Headers, BodyCapture) {
     let mut capture = BodyCapture::default();
     capture.push(bytes);
     let nonce = to_hex(&[nonce; 32]);
     let digest = capture.digest();
     let canonical = format!(
-        "mkit-admin:v1\noperator\nhttps://server.example\n{path}\n{digest}\n0\n60000\n{nonce}"
+        "mkit-admin:v1\noperator\nhttps://server.example\n{path}\n{digest}\n{created_ms}\n{expiry_ms}\n{nonce}"
     );
     let signature = SigningKey::from_bytes(&[71; 32])
         .sign(&hash(canonical.as_bytes()))
@@ -40,8 +49,8 @@ fn signed_bytes(path: &str, bytes: &[u8], nonce: u8) -> (Headers, BodyCapture) {
         "1".to_owned(),
         "operator".into(),
         "https://server.example".into(),
-        "0".into(),
-        "60000".into(),
+        created_ms.to_string(),
+        expiry_ms.to_string(),
         nonce,
         digest,
         signature,
@@ -627,6 +636,82 @@ async fn authenticated_oversize_failure_is_audited_and_replayed() {
     assert_eq!(first.status, 400);
     assert_eq!(engine.handle(AUDIT_PATH, &headers, &body, 2).await, first);
     assert_eq!(head(&store).await, 1);
+}
+
+#[test]
+fn unknown_admin_key_is_rejected_before_body_capture() {
+    let (mut headers, _) = signed_bytes(PURGE_PATH, b"{}", 42);
+    headers
+        .iter_mut()
+        .find(|(name, _)| name == "x-mkit-admin-key-id")
+        .unwrap()
+        .1 = "unknown".into();
+
+    assert!(precheck_envelope(&config(&["moderation"]), PURGE_PATH, &headers, 1).is_err());
+}
+
+#[tokio::test]
+async fn envelope_precheck_does_not_replace_exact_body_digest_verification() {
+    let store = std::sync::Arc::new(MemoryKv::default());
+    let config = config(&["audit"]);
+    let engine = Engine::new(store.clone(), partition(), config.clone());
+    let (headers, _) = request(AUDIT_PATH, &json!({"fromSeq":"1","pageSize":1}), 43);
+    assert!(precheck_envelope(&config, AUDIT_PATH, &headers, 1).is_ok());
+    let (_, changed_body) = request(AUDIT_PATH, &json!({"fromSeq":"1","pageSize":2}), 44);
+
+    assert_eq!(
+        engine
+            .handle(AUDIT_PATH, &headers, &changed_body, 1)
+            .await
+            .status,
+        401
+    );
+    assert_eq!(head(&store).await, 0);
+}
+
+#[tokio::test]
+async fn envelope_must_still_be_live_when_body_verification_finishes() {
+    let store = std::sync::Arc::new(MemoryKv::default());
+    let config = config(&["audit"]);
+    let engine = std::sync::Arc::new(Engine::new(store.clone(), partition(), config.clone()));
+    let (headers, body) = signed_bytes_with_times(AUDIT_PATH, b"{}", 44, 0, 105);
+
+    assert!(precheck_envelope(&config, AUDIT_PATH, &headers, 100).is_ok());
+    let reply = engine
+        .handle_streamed(AUDIT_PATH, &headers, &body, None, 106)
+        .await;
+    assert!(matches!(reply, Reply::Unary(response) if response.status == 401));
+    assert_eq!(head(&store).await, 0);
+}
+
+#[tokio::test]
+async fn manual_purge_enforces_spec_reason_and_label_byte_bounds() {
+    for (reason, label, expected_status) in [
+        ("r".repeat(512), "l".repeat(128), 200),
+        ("r".repeat(513), "l".repeat(128), 400),
+        ("r".repeat(512), "l".repeat(129), 400),
+        ("é".repeat(257), "l".repeat(128), 400),
+        ("r".repeat(512), "é".repeat(65), 400),
+    ] {
+        let store = std::sync::Arc::new(MemoryKv::default());
+        let engine =
+            Engine::new(store.clone(), partition(), config(&["moderation"])).with_purge(true);
+        let mut input = purge_body();
+        input["reason"] = json!(reason);
+        input["operatorLabel"] = json!(label);
+        let (headers, body) = request(PURGE_PATH, &input, 41);
+
+        assert_eq!(
+            engine.handle(PURGE_PATH, &headers, &body, 1).await.status,
+            expected_status,
+            "reason bytes={}, label bytes={}",
+            reason.len(),
+            label.len()
+        );
+        if expected_status != 200 {
+            assert!(purge_timers(&store).await.is_empty());
+        }
+    }
 }
 
 #[tokio::test]

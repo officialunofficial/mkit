@@ -883,8 +883,8 @@ impl<S: NamespaceStore> Engine<S> {
             .map_err(|_| auth::invalid("invalid PurgeCache JSON"))?;
         if !auth::identifier(&input.operation_id, 128, true)
             || input.reason.is_empty()
-            || input.reason.len() > 4096
-            || input.operator_label.len() > 256
+            || input.reason.len() > 512
+            || input.operator_label.len() > 128
             || input
                 .reason
                 .chars()
