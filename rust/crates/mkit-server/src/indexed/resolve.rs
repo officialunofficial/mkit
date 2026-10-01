@@ -613,11 +613,15 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
             .await?;
             if source_limits.is_some() {
                 // A selected member's verified metadata is immutable. A changed
-                // raw claim is corruption, even when it now exceeds the budget.
-                // Delta claims describe stream size, not reconstructed size.
+                // object claim is corruption, even when it now exceeds the budget.
+                // Raw deltas carry their reconstructed size in the delta header;
+                // compressed delta outer claims instead describe stream size.
                 let claim = match frame.first() {
                     Some(0x00) => Some(frame.len().saturating_sub(5) as u64),
                     Some(0x03) => frame.get(5..9).and_then(|bytes| {
+                        bytes.try_into().ok().map(u32::from_le_bytes).map(u64::from)
+                    }),
+                    Some(0x02) => frame.get(42..46).and_then(|bytes| {
                         bytes.try_into().ok().map(u32::from_le_bytes).map(u64::from)
                     }),
                     _ => None,
