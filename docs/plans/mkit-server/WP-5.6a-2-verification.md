@@ -114,7 +114,8 @@ rechecks. Timer 13 and timer 15 remain behind the fixed activation guard.
 
 The [core contract](WP-5.6a-2-contract.md) records asserted operation counts,
 copy/closure geometry and the distinction between historical acquisition
-verification and fresh streaming verification required in PR3. The 96 MiB
-Worker allowance and allocator fixtures do not prove whole-Worker RSS or an
-arbitrary corrupt-zstd bound. External cloud/staging readiness was not run;
+verification and fresh streaming verification required in PR3. The original
+96 MiB allowance was superseded by FIX-preservation-memory's 48 MiB scheduled
+acquisition bound and latest-base retention. Per-phase allocator fixtures do
+not prove whole-Worker RSS; R-203 supplies the bounded corrupt-zstd decoder. External cloud/staging readiness was not run;
 preservation storage is user-provisioned.

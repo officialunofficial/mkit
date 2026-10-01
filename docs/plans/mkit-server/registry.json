@@ -1085,21 +1085,22 @@
   },
   {
     "id": "1.20",
-    "title": "CI: conformance and e2e against deployed staging (M1 exit)",
+    "title": "Final launch readiness and standalone Workers operator guide",
     "milestone": "M1",
     "track": "conformance",
     "depends_on": [
       "1.19",
       "1.27",
       "1.13",
-      "1.15"
+      "1.15",
+      "4.18"
     ],
     "size": "S",
-    "summary": "Adds a staging workflow that runs the full M0+M1 wire suite (including throughput and lag windows) and a real mkit push/clone round trip against deployed staging. The human adds the GitHub secrets and variables. R-185: run locally from the orchestrator’s machine against real Cloudflare before launch, including the Workers launch profile and measured CPU, subrequests and cost. The workflow remains main-only and is not dispatched against feat/mkit-server.",
+    "summary": "R-195: consolidate as-built c3921b06 provenance, scoped local matrix/budget/size evidence, known open findings and DRAFT user-only REL-1 main-merge prompt; ship docs/operations/workers.md. Real staging, deployed CPU/memory/calls/cost, multicolo checks and all sign-offs remain UNRUN/user-owned. No workflow/deploy added; any later staging automation remains main-only against an already deployed server.",
     "human_action": true,
     "area_gates": [
-      "ci-yaml",
-      "staging"
+      "docs",
+      "scripts"
     ]
   },
   {
@@ -1981,24 +1982,24 @@
     "status": "merged"
   },
   {
-    "id": "4.10b",
-    "title": "Worker: extraction slices and content relay hook",
+    "id": "4.10b-2",
+    "title": "Bounded Worker extraction driver (merged #1244)",
     "milestone": "M4",
     "track": "worker",
     "depends_on": [
-      "4.8",
-      "4.10",
+      "4.10b-1",
       "4.10b-multipart"
     ],
     "size": "L",
-    "summary": "Runs 4.10's extraction as checkpointed alarm slices before the Worker's Verified write, with R2 multipart for large objects, a content RelayHook that rewrites `h` puts into HolderV1 with a `c` guard, the relay blocklist check (SPEC-SERVER §14.2) and hold lifetime across relay lag (R-163). Stage 2.",
+    "summary": "Merged #1244: scheduled bounded canonical acquisition, group freeze/extract/reconstruct/reassemble and protection renewal under permanent retention; indexed serving GC stays refused.",
     "human_action": false,
     "area_gates": [
       "rust",
       "wasm",
       "workers",
       "conf-wrangler"
-    ]
+    ],
+    "status": "merged"
   },
   {
     "id": "4.11",
@@ -2116,7 +2117,7 @@
     "track": "worker",
     "depends_on": [
       "4.14b-1",
-      "4.10b",
+      "4.10b-2",
       "5.15"
     ],
     "size": "M",
@@ -2181,7 +2182,8 @@
       "wasm",
       "conf-native",
       "conf-wrangler"
-    ]
+    ],
+    "status": "merged"
   },
   {
     "id": "4.16c",
@@ -2201,7 +2203,8 @@
       "wasm",
       "workers",
       "conf-native"
-    ]
+    ],
+    "status": "merged"
   },
   {
     "id": "uno-urls",
@@ -2220,7 +2223,8 @@
       "workers",
       "conf-native",
       "conf-wrangler"
-    ]
+    ],
+    "status": "merged"
   },
   {
     "id": "uno-visibility",
@@ -2241,7 +2245,8 @@
       "conf-native",
       "conf-wrangler",
       "docs"
-    ]
+    ],
+    "status": "merged"
   },
   {
     "id": "4.17",
@@ -2260,6 +2265,24 @@
       "rust",
       "conf-native"
     ]
+  },
+  {
+    "id": "zstd-bound",
+    "title": "Bounded corrupt zstd decoder (R-203, merged #1252)",
+    "milestone": "M4",
+    "track": "core",
+    "depends_on": [
+      "4.8a"
+    ],
+    "size": "S",
+    "summary": "Bounded vendored ruzstd allocation/preflight and corrupt-delta size checks; launch pack-ruzstd feature. Follow-up decoder scratch fix #1257 remains required input to #1259.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers"
+    ],
+    "status": "merged"
   },
   {
     "id": "4.18",
@@ -2286,17 +2309,23 @@
       "5.6a-1",
       "5.6a-2",
       "5.6a-3",
-      "R-193"
+      "R-193",
+      "4.16b",
+      "4.16c",
+      "uno-urls",
+      "uno-visibility",
+      "zstd-bound"
     ],
     "size": "L",
-    "summary": "R-194/R-200: explicit Paid indexed Uno profile; permanent retention, leases and GC off. Optional HTTP/URL tokens, signed HTTPS or isolated binding hooks, at most four sync/fail-closed inspectors with private R-193 retrieval, and complete preservation-backed lean takedown/admin. Native proofs only; Worker proof requests remain unsupported. Native and actual opted-in release wrangler integrated evidence pinned to exact SHAs; external review/staging and measurements stay user-owned, unrun until their gates. Phase 1 startup/config/budget/harness checkpoint; phase 2 preservation integration, supported 0.x embedding/example/wasm sizes, full matrix and PR. No Events, async holds/review, Reinstate or ListRepos.",
+    "summary": "Merged #1259 at c3921b06 after stale-connection prerequisite #1260 and launch review fixes #1255–#1258. Paid indexed Multi/D34 Uno, permanent retention, leases/GC off; optional HTTP/tokens, signed or isolated binding hooks, sync inspection/private scanner retrieval, complete preservation-backed restricted admin. Requested embedded Uno matrix passes locally; broader historical matrix and staging remain UNRUN. Open whole-isolate preservation memory finding is accepted for this merge only; FIX-preservation-memory must land before candidate/main. Events, async holds, Worker proofs and ListRepos excluded.",
     "human_action": true,
     "area_gates": [
       "rust",
       "conf-native",
       "conf-wrangler",
       "staging"
-    ]
+    ],
+    "status": "merged"
   },
   {
     "id": "5.1a-1",
@@ -2503,7 +2532,8 @@
       "workers",
       "conf-native",
       "conf-wrangler"
-    ]
+    ],
+    "status": "merged"
   },
   {
     "id": "R-193",
@@ -2525,7 +2555,8 @@
       "conf-native",
       "conf-wrangler",
       "docs"
-    ]
+    ],
+    "status": "merged"
   },
   {
     "id": "5.5a-0",
@@ -2622,7 +2653,8 @@
       "proto",
       "conf-native",
       "conf-wrangler"
-    ]
+    ],
+    "status": "merged"
   },
   {
     "id": "5.6a-2",
@@ -2642,7 +2674,8 @@
       "proto",
       "conf-native",
       "conf-wrangler"
-    ]
+    ],
+    "status": "merged"
   },
   {
     "id": "5.6a-3",
@@ -2660,7 +2693,8 @@
       "wasm",
       "conf-native",
       "conf-wrangler"
-    ]
+    ],
+    "status": "merged"
   },
   {
     "id": "5.7a",
@@ -2762,7 +2796,8 @@
     "human_action": false,
     "area_gates": [
       "rust"
-    ]
+    ],
+    "status": "merged"
   },
   {
     "id": "5.11a",
@@ -2784,7 +2819,8 @@
       "rust",
       "proto",
       "conf-native"
-    ]
+    ],
+    "status": "merged"
   },
   {
     "id": "5.11b",
@@ -2888,8 +2924,26 @@
     "status": "deferred"
   },
   {
+    "id": "FIX-preservation-memory",
+    "title": "Required preservation memory reduction before launch candidate",
+    "milestone": "M4",
+    "track": "worker",
+    "depends_on": [
+      "4.18"
+    ],
+    "size": "S",
+    "summary": "In flight under the existing follow-up prompt: reduce Worker preservation acquisition from 96 MiB to <=48 MiB with bounded chain memo retention; independent review and whole-isolate staging measurement still required. No memory certificate from #1259 samples.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers"
+    ],
+    "status": "in-flight"
+  },
+  {
     "id": "REL-1",
-    "title": "Single Workers launch for Uno: 0.5.0 bump, publish crates, release and merge to main",
+    "title": "Workers launch: rebuilt release branch merge into main, no bump or tag",
     "milestone": "M3",
     "track": "release",
     "depends_on": [
@@ -2902,17 +2956,27 @@
       "2.16",
       "5.4",
       "5.5a",
-      "4.18",
-      "5.11a",
-      "1.20",
-      "5.6a-2",
       "R-193",
+      "4.10b-multipart",
+      "4.10b-1",
       "4.10b-2",
       "4.14b-1",
-      "5.10"
+      "4.16b",
+      "4.16c",
+      "uno-urls",
+      "uno-visibility",
+      "zstd-bound",
+      "5.10",
+      "5.11a",
+      "5.6a-1",
+      "5.6a-2",
+      "5.6a-3",
+      "4.18",
+      "1.20",
+      "FIX-preservation-memory"
     ],
     "size": "S",
-    "summary": "R-200 amends R-185: one launch of everything merged so far plus the Workers-critical path for the Uno monorepo (UNO-403/UNO-404), at the full quality bar. Worker proofs, publication Events, async inspection and hold review are post-launch; native proofs and R-193 retrieval are concrete launch prerequisites. Retain the former Stage 1 terminal set and add signed HTTP hooks/authority fencing, published view, sync-only inspection/remote Inspect, Worker serving production opt-in/activation, lean preservation-backed takedown/admin (hold review excluded) and real Cloudflare staging. Gate on an external full-code-and-spec review of the whole launch scope, validation of findings and adversarial review of fixes. The 5.4 spec amendment defines indexed serving/inspection without storage leases, permanent retention and GC disabled; do not claim the existing full profile. Bump to 0.5.0, publish mkit-server/-native/-conformance (-worker stays unpublished), cut the signed release and merge feat/mkit-server to main with a merge commit, never squash. Native remains the maintained reference/test server; all other work follows launch in plan order.",
+    "summary": "Latest user ruling: rebuild release/mkit-server-launch (#1261) from the final reviewed feature SHA with the outside-git archive rebuild-release-branch.sh, preserving feature history and docs/operations/**, then user merges into main with a merge commit. No version bump, tag or publishing at Workers launch; those require a later separate user decision. FIX-preservation-memory (96 MiB to <=48 MiB), PR-size cleanup, operator/readiness docs, delta/full review closure and real isolated staging resource/conformance acceptance precede candidate selection/main merge. Deferred Events/holds/Worker proofs are outside dependency closure. DRAFT prompt is preparation only.",
     "human_action": true,
     "area_gates": [
       "full",

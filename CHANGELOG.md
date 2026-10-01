@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Server: retain retryable Takedown acceptance with its stable id until every
   denial is active. Exact retries resume bounded activation; timer-15 recovery
   finalizes the original nonce and operation result (delta review 7-1).
+- Worker preservation acquisition: bound scheduled reconstruction to 48 MiB
+  by evicting previous delta intermediates and retaining only the current base.
+  Preserve 50-hop, 1 MiB canonical chains, existing frame admission, corruption
+  checkpoints and the 700-call slice budget; inline profiles are unchanged.
 
 - Server (WP-4.18, phase 1, R-194): explicit Paid indexed Uno launch selection
   and startup validation for optional HTTP/URL tokens, signed hooks/binding,
