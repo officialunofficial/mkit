@@ -888,16 +888,11 @@ mod tests {
             expected
         );
         assert_eq!(*delivered.lock().unwrap(), [work]);
+        let key = keys::outcome_backlog();
+        let backlog = store.get(&partition, &key).await.unwrap().unwrap();
         assert_eq!(
-            mkit_server::store::codec::decode_backlog(
-                &store
-                    .get(&partition, &keys::outcome_backlog())
-                    .await
-                    .unwrap()
-                    .unwrap()
-            )
-            .unwrap(),
-            mkit_server::store::codec::Backlog::default(),
+            codec::decode_backlog(&backlog).unwrap(),
+            codec::Backlog::default(),
             "purge has fully drained; kind8 still owns its delayed wake"
         );
     }
