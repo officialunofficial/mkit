@@ -260,6 +260,9 @@
 //! | `indexed.pending_verification_unavailable` | `indexed-mode`, `multi-repo`, `tickets`, `auth-v2`, `test-faults` | HTTP 503, `Retry-After: 5`, one golden `PendingVerification` detail, and a successful same-nonce retry without replay |
 //! | `indexed.async_verification_commits` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`, `test-faults` | a push of three 16 MiB windows answers `PendingVerification` until its scheduled slices finish (the Worker fails one mid-pack slice on purpose), then the same signed advance commits |
 //! | `launch.indexed_verification_commits` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`; excludes `test-faults` | production-only >33 MiB ticketed push answers pending, then commits and publishes both refs with exact public pack bytes; the HTTP opt-in checks a 128 KiB extracted Blob, filename media policy and unsupported Worker proofs |
+//! | `launch.inspection_rejects_advance` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`, `sync-inspection`; excludes `test-faults` | configured sync inspector rejects or fails closed after real ticketed Blob verification; no success and both public/signed writer refs remain absent |
+//! | `launch.read_fixture_public` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`, `http-objects`, `launch-read-fixture`; excludes `test-faults` | seeds a raw-only indexed pack, verifies publication/extraction and mints a token to an owned scratch fixture outside TAP |
+//! | `launch.read_fixture_private` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`, `http-objects`, `launch-read-fixture`; excludes `test-faults` | revisits the public fixture with the same signer, changes real visibility and mints a private token without reseeding |
 //! | `multipart.three_parts` | `multipart`, `auth-v2`; excludes `multi-repo` | a roughly 17 MiB three-part pack at the minimum part size completes and becomes visible |
 //! | `multipart.resume_receipts` | `multipart`, `auth-v2`; excludes `multi-repo` | a client reconnects after partial upload, re-sends a part, and completes using old and new receipts |
 //! | `multipart.root_mismatch_invisible` | `multipart`, `auth-v2`; excludes `multi-repo` | a wrong completion root never makes the pack visible |
@@ -547,14 +550,22 @@ mod tests {
             seed: [0x5e; 32],
         });
         profile.milestone = Milestone::M4;
-        profile
-            .features
-            .extend([Feature::IndexedAsync, Feature::MultiRepo, Feature::Tickets]);
+        profile.features.extend([
+            Feature::IndexedAsync,
+            Feature::MultiRepo,
+            Feature::Tickets,
+            Feature::SyncInspection,
+        ]);
         let release = CASES
             .iter()
             .find(|case| case.name == "launch.indexed_verification_commits")
             .expect("release indexed verification case must exist");
         assert!(release.skip_reason(&profile).is_none());
+        let rejection = CASES
+            .iter()
+            .find(|case| case.name == "launch.inspection_rejects_advance")
+            .expect("release inspection refusal case must exist");
+        assert!(rejection.skip_reason(&profile).is_none());
         let faults = CASES
             .iter()
             .find(|case| case.name == "indexed.async_verification_commits")
@@ -566,6 +577,12 @@ mod tests {
                 .contains("test-faults")
         );
         profile.features.insert(Feature::TestFaults);
+        assert!(
+            rejection
+                .skip_reason(&profile)
+                .unwrap()
+                .contains("test-faults")
+        );
         assert!(
             release
                 .skip_reason(&profile)

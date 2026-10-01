@@ -9,10 +9,11 @@ use mkit_transport_connect::generated::__buffa::oneof::begin_upload_response::Re
 use mkit_transport_connect::generated::__buffa::oneof::upload_pack_request::Body as UploadBody;
 use mkit_transport_connect::generated::{
     AdvanceOutcome, AdvanceRefsResponse, BeginUploadRequest, BeginUploadResponse,
+    GetServerInfoResponse, ReadRefRequest, ReadRefResponse,
 };
 
 use super::{
-    CaseResult, Commit as WireCommit, Ctx, Exp, Failure, Feature, advance_req, ensure,
+    CaseResult, Commit as WireCommit, Ctx, Exp, Failure, Feature, Signed, advance_req, ensure,
     eventually_listed, sign_unary, upload_msgs, want_ok, want_outcome,
 };
 use crate::wire::client::{Rpc, UNARY_PROTO, decode_unary};
@@ -20,9 +21,30 @@ use crate::wire::profile::WireAuth;
 use crate::wire::sign::pack_commitment;
 
 fn pack() -> Result<(Vec<u8>, Hash), Failure> {
-    let tree = Object::Tree(Tree {
-        entries: Vec::new(),
-    });
+    pack_with_blob(None)
+}
+
+fn pack_with_blob(data: Option<&[u8]>) -> Result<(Vec<u8>, Hash), Failure> {
+    let mut writer = PackWriter::new_raw_only();
+    let mut entries = Vec::new();
+    if let Some(data) = data {
+        let blob = Object::Blob(mkit_core::object::Blob {
+            data: data.to_vec(),
+        });
+        let id = blob.id().map_err(|e| format!("blob id: {e}"))?;
+        writer
+            .push_raw(
+                id,
+                &serialize(&blob).map_err(|e| format!("blob bytes: {e}"))?,
+            )
+            .map_err(|e| format!("blob frame: {e}"))?;
+        entries.push(mkit_core::object::TreeEntry {
+            name: b"inspected.txt".to_vec(),
+            mode: mkit_core::object::EntryMode::Blob,
+            object_hash: id,
+        });
+    }
+    let tree = Object::Tree(Tree { entries });
     let tree_id = tree.id().map_err(|e| format!("tree id: {e}"))?;
     let signer = KeyPair::from_seed([9; 32]);
     let mut commit = Commit::new_unannotated(
@@ -39,7 +61,6 @@ fn pack() -> Result<(Vec<u8>, Hash), Failure> {
         .0;
     let commit = Object::Commit(commit);
     let head = commit.id().map_err(|e| format!("commit id: {e}"))?;
-    let mut writer = PackWriter::new_raw_only();
     writer
         .push_raw(
             tree_id,
@@ -241,47 +262,7 @@ async fn commit_large_pack(ctx: &Ctx, pack: &[u8], head: Hash) -> Result<(String
         pack.len() > 33 << 20,
         "suite bug: the pack fits two windows"
     );
-    let (repository, _) = super::repository::identities(ctx, "async-verify", "unused")?;
-    let signer = ctx.v2_signer("repository-a")?;
-    let pack_id = hash(pack);
-    let branch = ctx.head("async");
-    let begin = BeginUploadRequest {
-        r#ref: Some(branch.clone()),
-        pack_id: Some(pack_id.to_vec()),
-        bytes: Some(pack.len() as u64),
-        ..Default::default()
-    };
-    let signed_begin = sign_unary(&signer, Rpc::BeginUpload, &begin, |env| {
-        repository.clone_into(&mut env.repository);
-    });
-    let opened: BeginUploadResponse = want_ok(ctx.send(&signed_begin).await?, "BeginUpload")?;
-    let Some(BeginResult::Ticket(ticket)) = opened.result else {
-        return Err(Failure::Fail("BeginUpload did not issue a ticket".into()));
-    };
-    let id = ticket.id.ok_or("ticket has no id")?;
-    let mut messages = upload_msgs(pack, 48);
-    if let Some(UploadBody::Header(header)) = &mut messages[0].body {
-        header.ticket_token = ticket.token;
-    }
-    let mut envelope = signer.envelope(
-        Rpc::UploadPack.procedure(),
-        pack_commitment(&pack_id, pack.len() as u64),
-    );
-    repository.clone_into(&mut envelope.repository);
-    let headers = signer.sign(&envelope).headers;
-    ensure!(
-        ctx.upload_with(&messages, &headers).await?.is_none(),
-        "ticketed UploadPack failed"
-    );
-
-    let mut request = advance_req(
-        (&branch, Exp::Missing, &head),
-        (&ctx.packmap("async"), Exp::Missing, &pack_id),
-    );
-    request.ticket_ids = vec![id];
-    let advance = sign_unary(&signer, Rpc::AdvanceRefs, &request, |env| {
-        repository.clone_into(&mut env.repository);
-    });
+    let (repository, advance) = ticketed_advance(ctx, pack, head, "async").await?;
     let mut pending = 0;
     for _ in 0..240 {
         match ctx.send::<AdvanceRefsResponse>(&advance).await? {
@@ -314,6 +295,148 @@ async fn commit_large_pack(ctx: &Ctx, pack: &[u8], head: Hash) -> Result<(String
     Err(Failure::Fail(format!(
         "the advance was still pending after {pending} polls"
     )))
+}
+
+async fn ticketed_advance(
+    ctx: &Ctx,
+    pack: &[u8],
+    head: Hash,
+    leaf: &str,
+) -> Result<(String, Signed), Failure> {
+    let (repository, _) = super::repository::identities(ctx, "async-verify", "unused")?;
+    let signer = ctx.v2_signer("repository-a")?;
+    let pack_id = hash(pack);
+    let branch = ctx.head(leaf);
+    let begin = BeginUploadRequest {
+        r#ref: Some(branch.clone()),
+        pack_id: Some(pack_id.to_vec()),
+        bytes: Some(pack.len() as u64),
+        ..Default::default()
+    };
+    let signed_begin = sign_unary(&signer, Rpc::BeginUpload, &begin, |env| {
+        repository.clone_into(&mut env.repository);
+    });
+    let opened: BeginUploadResponse = want_ok(ctx.send(&signed_begin).await?, "BeginUpload")?;
+    let Some(BeginResult::Ticket(ticket)) = opened.result else {
+        return Err(Failure::Fail("BeginUpload did not issue a ticket".into()));
+    };
+    let id = ticket.id.ok_or("ticket has no id")?;
+    let mut messages = upload_msgs(pack, 48);
+    if let Some(UploadBody::Header(header)) = &mut messages[0].body {
+        header.ticket_token = ticket.token;
+    }
+    let mut envelope = signer.envelope(
+        Rpc::UploadPack.procedure(),
+        pack_commitment(&pack_id, pack.len() as u64),
+    );
+    repository.clone_into(&mut envelope.repository);
+    let headers = signer.sign(&envelope).headers;
+    ensure!(
+        ctx.upload_with(&messages, &headers).await?.is_none(),
+        "ticketed UploadPack failed"
+    );
+
+    let mut request = advance_req(
+        (&branch, Exp::Missing, &head),
+        (&ctx.packmap(leaf), Exp::Missing, &pack_id),
+    );
+    request.ticket_ids = vec![id];
+    let advance = sign_unary(&signer, Rpc::AdvanceRefs, &request, |env| {
+        repository.clone_into(&mut env.repository);
+    });
+    Ok((repository, advance))
+}
+
+/// A real sync inspector must refuse this fixture's advance. The receiver
+/// chooses reject or fail-closed failure; verification pending is not success.
+pub(super) async fn inspection_rejects_advance(ctx: Ctx) -> CaseResult {
+    let reply = ctx
+        .client()
+        .post(
+            "/mkit.transport.v1.TransportService/GetServerInfo",
+            UNARY_PROTO,
+            &[],
+            Vec::new(),
+        )
+        .await?;
+    let info = want_ok(
+        decode_unary::<GetServerInfoResponse>(&reply)?,
+        "GetServerInfo",
+    )?;
+    ensure!(
+        info.indexed_mode == Some(true)
+            && info.async_inspection == Some(false)
+            && info.inspection_max_objects.is_some_and(|bound| bound > 0),
+        "rejection fixture has no active sync inspector"
+    );
+    let (pack, head) = pack_with_blob(Some(b"launch inspected content"))?;
+    let (repository, advance) = ticketed_advance(&ctx, &pack, head, "reject").await?;
+    let owner = ctx.v2_signer("repository-a")?;
+    // Make public absence a real reader check rather than private denial.
+    super::visibility::set_envelope(&ctx, &owner, &repository, false).await?;
+    let mut pending = 0;
+    let mut terminal = None;
+    for _ in 0..240 {
+        match ctx.send::<AdvanceRefsResponse>(&advance).await? {
+            Ok(response) => {
+                return Err(Failure::Fail(format!(
+                    "inspection refusal unexpectedly succeeded: {:?}",
+                    response.outcome
+                )));
+            }
+            Err(error)
+                if error.code == "unavailable" && error.message == "pack verification pending" =>
+            {
+                ensure!(
+                    error.details.len() == 1,
+                    "pending details {:?}",
+                    error.details
+                );
+                pending += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            Err(error) => {
+                ensure!(
+                    error.code == "permission_denied"
+                        || (error.code == "unavailable"
+                            && error.message == "inspection unavailable; retry"),
+                    "advance answered {error}, not an inspection refusal"
+                );
+                terminal = Some(error);
+                break;
+            }
+        }
+    }
+    let error = terminal.ok_or_else(|| {
+        Failure::Fail(format!(
+            "no inspection refusal after {pending} verification polls"
+        ))
+    })?;
+    for name in [ctx.head("reject"), ctx.packmap("reject")] {
+        let request = ReadRefRequest {
+            name: Some(name.clone()),
+            ..Default::default()
+        };
+        for signed in [true, false] {
+            let read = if signed {
+                super::reads::signed_for(&owner, &repository, Rpc::ReadRef, &request)
+            } else {
+                super::reads::unsigned(&repository, Rpc::ReadRef, &request)
+            };
+            let response: ReadRefResponse =
+                want_ok(ctx.send(&read).await?, "ReadRef after refusal")?;
+            ensure!(
+                response.exists != Some(true)
+                    && response.object_id.as_deref().unwrap_or_default().is_empty(),
+                "inspection refusal moved {name} for signed={signed}"
+            );
+        }
+    }
+    ctx.set_note(format!(
+        "repository={repository} head_ref={} packmap_ref={} pack_id={} pack_bytes={} pending_polls={pending} refusal={}",
+        ctx.head("reject"), ctx.packmap("reject"), to_hex(&hash(&pack)), pack.len(), error.code
+    ));
+    Ok(())
 }
 
 /// The production-only intersection: no test directives, ticketed upload,
@@ -363,7 +486,9 @@ pub(super) async fn launch_verification_commits(ctx: Ctx) -> CaseResult {
         check_extracted_http(&ctx, &repository, &extracted, &data).await?;
     }
     ctx.set_note(format!(
-        "pack_bytes={} pending_polls={pending} extracted_blob={} extracted_blob_bytes={} http={}",
+        "repository={repository} head_ref={} packmap_ref={} pack_bytes={} pending_polls={pending} extracted_blob={} extracted_blob_bytes={} http={}",
+        ctx.head("async"),
+        ctx.packmap("async"),
         pack.len(),
         to_hex(&extracted),
         data.len(),
