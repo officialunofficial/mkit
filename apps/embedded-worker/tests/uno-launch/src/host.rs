@@ -41,10 +41,10 @@ impl Admission for HostAdmit {
             ));
         }
         let mut decision = DefaultAdmission.admit(input).await?;
-        if input.op.procedure().is_write() {
-            if let Some(nonce) = input.idempotency_key {
-                decision = decision.with_reservation(nonce);
-            }
+        if input.op.procedure().is_write()
+            && let Some(nonce) = input.idempotency_key
+        {
+            decision = decision.with_reservation(nonce);
         }
         Ok(decision)
     }

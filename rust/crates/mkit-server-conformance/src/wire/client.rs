@@ -10,9 +10,9 @@ use std::{fs::File, io::Write as _, path::PathBuf};
 
 use buffa::Message;
 use bytes::Bytes;
-use mkit_transport_connect::pooled_http::PooledHttpClient as HttpClient;
 use connectrpc::client::{ClientTransport as _, full_body};
 use http_body_util::BodyExt as _;
+use mkit_transport_connect::pooled_http::PooledHttpClient as HttpClient;
 use url::Url;
 
 /// Per-request bound: generous, so a slow staging server fails a case
