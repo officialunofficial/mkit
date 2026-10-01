@@ -40,7 +40,7 @@ id-route serving. It is in-process only: **no wire, HTTP or spec change.**
    embedding section of the Worker README. 4.18 is writing that section in parallel, so add a short subsection and
    keep it merge-friendly.
 5. **Docs:**
-   - R-202 row in `00-plan.md` ("WP-4.16c: in-process canonical object reader for embedders, for UNO-420");
+   - R-202 row in `00-plan.md` ("WP-4.16c: in-process canonical object reader for embedders, for Uno Kit demo");
    - a registry row;
    - CHANGELOG.
 

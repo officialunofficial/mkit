@@ -1,7 +1,7 @@
-# mkit-server implementation plan (MKIT-29)
+# mkit-server implementation plan (production server work)
 
 The implementation plan for the production mkit server epic. The canonical PRD is
-[Linear MKIT-29](https://linear.app/officialunofficial/issue/MKIT-29); [`prd-snapshot.md`](prd-snapshot.md) is a dated copy of it.
+production server work; [`prd-snapshot.md`](prd-snapshot.md) is a dated copy of it.
 
 ## Files
 
@@ -29,7 +29,7 @@ The implementation plan for the production mkit server epic. The canonical PRD i
 
 ## Linear tracking
 
-Linear tracks the epic as **26 work groups (G01–G26)**, the sub-issues of MKIT-29. Each group lists its WPs;
+Linear tracks the epic as **26 work groups (G01–G26)**, the sub-issues of production server work. Each group lists its WPs;
 [`linear-groups.json`](linear-groups.json) is the mapping. The **WP id stays the unit of execution**: one brief, one branch
 and one PR per WP. A group is done when all of its WPs have merged.
 

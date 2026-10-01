@@ -9,7 +9,7 @@ is, what it assumes, and what it found. The per-model READMEs under
 [`formal/`](../formal/README.md) hold the full detail: every invariant,
 mutant, bound, state count and run time.
 
-The work is tracked in Linear epic MKIT-17 (integration: MKIT-18) and was
+The formal verification effort integrates the Quint and Lean models and was
 done against the specs on the `feat/mkit-server` line (PR #1082). The spec
 text is normative. Where a model found the spec wrong, the spec was fixed;
 where it found the code wrong, the code was fixed with a regression test,
@@ -76,7 +76,7 @@ tests) also run on every row. Bounds are the defaults in each
 `check.sh`. The linked READMEs list every property; this table lists the
 ones a spec reader is most likely to look for.
 
-### Refs, locks and servers ([`formal/quint/refs`](../formal/quint/refs/README.md), MKIT-19)
+### Refs, locks and servers ([`formal/quint/refs`](../formal/quint/refs/README.md), ref concurrency model)
 
 | Spec clause | Property | Status | Non-vacuity |
 |---|---|---|---|
@@ -86,9 +86,9 @@ ones a spec reader is most likely to look for.
 | SPEC-CONCURRENCY §2, §3.1 (`serve.lock`, `server.lock`, startup sweep) | `SweepAlone`, `NoLiveUploadSwept`, `OneMkitServer`, `UpServersHoldServeShared`, `NoMissedDetection` | exhaustive (`serve2` 18,812 states, `serve3` 152,012) | `serve2_sweepUnlocked`, `serve2_sweepUnderShared`, `serve2_serverSkipsServe`, `serve2_serverLockShared` |
 | SPEC-REFS v3 §2, §3 (served names, 512-byte bound) | `RefuseBeforeStorage`, `ExplicitRefusal`, `RefusedWritesNothing`, `ListingServedOnly` | exhaustive (`served`, 66,064 states) | `served_checkAfterRead`, `served_headCheckedLate`, `served_listNoSkip` |
 | SPEC-CONCURRENCY §3.1 (documented cross-domain gap) | `WitnessCrossDomainGap`, `WitnessUndetectedLateServer` | reached, as documented | - |
-| SPEC-REFS §5 (implementation conformance, MKIT-22) | 5 `refs_mbt.qnt` traces (300 steps, 41 commits) agree with the code after every step | tested | 5 injected adapter faults and 2 tampered traces are each caught; an independent adapter mutant was caught in review |
+| SPEC-REFS §5 (implementation conformance, ref conformance model) | 5 `refs_mbt.qnt` traces (300 steps, 41 commits) agree with the code after every step | tested | 5 injected adapter faults and 2 tampered traces are each caught; an independent adapter mutant was caught in review |
 
-### Garbage collection ([`formal/quint/gc`](../formal/quint/gc/README.md), MKIT-21)
+### Garbage collection ([`formal/quint/gc`](../formal/quint/gc/README.md), garbage-collection model)
 
 | Spec clause | Property | Status | Non-vacuity |
 |---|---|---|---|
@@ -110,7 +110,7 @@ ones a spec reader is most likely to look for.
 | SPEC-HISTORY-PROOF §4.5 (scrub lap at most 65 publishes, 7-day bound, invalid state forces a full walk) | `ActualPublishBound`, `TimeBound`, `InvalidForcesFull` | exhaustive on scaled constants (1,904 states); bounded (length 8); `realLapBoundTest` checks the real constants for every `verified_through` up to 1,000,000 | `mutWrapWithoutFull`, `mutIgnoreAge`, `mutTrustInvalid`, `scrubLossy`, `scrubClockBack` |
 | SPEC-HISTORY-PROOF §4.5 ("fewer than 604800 s", MKIT-57) | `WindowOnlyWhenFresh` | bounded (Apalache length 8) and simulated only; the TLC VIEW omits the elapsed time | `mutAgeInclusive` (the pre-fix comparison) |
 
-### Remote advance ([`formal/quint/advance`](../formal/quint/advance/README.md), MKIT-27)
+### Remote advance ([`formal/quint/advance`](../formal/quint/advance/README.md), remote-advance model)
 
 | Spec clause | Property | Status | Non-vacuity |
 |---|---|---|---|
@@ -119,7 +119,7 @@ ones a spec reader is most likely to look for.
 | SPEC-REFS §5 (no lost update, CAS and user level) | `NoLostUpdate`, `NoLostSuccess` | as above | `noop2_splitCas`, `ordered2_splitCas` |
 | Progress of a push | `NoStuckPusher`, `BoundedRetries`; `Termination` (liveness, weak fairness) | exhaustive; `Termination` on the 2-pusher instances and `http1` only | `ordered2_noTimeout`, `ordered2_noLadderBound` |
 
-### Transport identity, shards, threshold ([`formal/quint/transport`](../formal/quint/transport/README.md), MKIT-26)
+### Transport identity, shards, threshold ([`formal/quint/transport`](../formal/quint/transport/README.md), transport model)
 
 | Spec clause | Property | Status | Non-vacuity |
 |---|---|---|---|
@@ -127,7 +127,7 @@ ones a spec reader is most likely to look for.
 | INVARIANTS.md "Shard worker bounds do not delay an available quorum"; SPEC-PACK-SHARDS §5 | `SlotBound`, `OkHasQuorum`, `NotFoundPastThreshold`, `NoFalseNotFound`, `NoDisconnect`, `NoAttemptAfterDecision`, `QuorumNotBlockedByAdmission`; liveness P1, P2 | exhaustive at N/K/slots 2/1/2, 1/2/2, 3/2/3; bounded (length 14) | `shards_noSlotCheck`, `shards_earlyQuorum`, `shards_offByOne`, `shards_noFailureThreshold`, `shards_noCancel`, `shards_noGroupCancel`, `shards_blocking`, `shards_recvBlocking` |
 | SPEC-RELEASE-THRESHOLD §5.3, §8 (t-of-n, rotation) | `NoForgery`, `AggregateFromOneShareSet`, `AggregateCompleteness`, `AcceptedOnlyFromShareSetQuorum` | exhaustive at n=3, t=2, one rotation (477,344 states); bounded (length 8; n=4, t=3 at length 6) | `thr_noRefresh`, `thr_verifierIgnoresMsg`, `thr_t1`, `thr_filterAnyEpoch` |
 
-### Merkle objects and delta ([`formal/lean`](../formal/lean/README.md), MKIT-24, MKIT-25)
+### Merkle objects and delta ([`formal/lean`](../formal/lean/README.md), Merkle proof model, delta model)
 
 | Spec clause | Property | Status | Non-vacuity |
 |---|---|---|---|
@@ -180,8 +180,8 @@ model or harness that relies on them.
   functions, named in its README, and abstracts I/O: a durable write is
   one step, a lock is a set membership. A mismatch between a model step
   and the code it names is a modelling error these checks cannot catch;
-  the reviews on MKIT-19 through MKIT-27 compared each model with the code
-  by hand, and MKIT-22 replays one model against the code.
+  the reviews on ref concurrency model through remote-advance model compared each model with the code
+  by hand, and ref conformance model replays one model against the code.
 - **Lean to Rust.** The Lean models are executable specifications. Their
   agreement with `merkle.rs` and `delta.rs` rests on the differential
   tests (sampled vectors), not on a proof.
@@ -222,15 +222,15 @@ issue whose model found it.
 | MKIT-55 | spec gap | gc reads an object's mtime, then unlinks it later (`ops/gc.rs` `run_gc`), so a refresh landing between the two still loses the object. The model's `GcSweep` does both in one step and does not cover this window. The operator rule against running gc during a git import stays. | code reading; SPEC-GC and the gc README now say so |
 | MKIT-55 | spec gap | git import skips objects its map cache already translated, so their mtime is not refreshed | `mkit-git-bridge` `Importer::object`; same operator rule |
 | MKIT-55 | bug (pre-existing) | `BulkWriter::commit` opens every reused object file for writing to fsync it and fails with `EACCES` on a read-only object | probe during the MKIT-55 fix |
-| MKIT-27 | bug (latent) | F1: an HTTP force push that falls back to the ordered `Any` path can be stranded by a concurrent atomic re-baseline | `gapHttpAny2::DeltaTransfer`; latent because the CLI builds only `ConnectTransport` |
-| MKIT-27 | spec gap (latent) | F2: a force push, head-only or appending, can be stranded by a concurrent atomic re-baseline; checking the packmap before a head-only write is not enough | `gapNoopAny2`, `gapTwoAny3`, `gapAppendAny2`, `gapAppendTwoAny3`; latent until a Connect server opts in to atomic advance |
-| MKIT-27 | spec ambiguity | The §7 `read_ref` rule cannot tell "never landed" from "landed, then built on"; such a push is reported NonFastForward although its commit is in the remote history | `WitnessLandedThenNff` |
-| MKIT-26 | spec gap (liveness) | One corrupted shard among the first `minimum_shards` responses fails the download although a valid quorum is available | `shards_bad::DecodeFailsOnlyWithoutHonestQuorum`, `P2Corrupt` |
-| MKIT-26 | spec gap | `aggregate` does not verify partials, so one low-index garbage partial blocks aggregation unless a coordinator verifies first | `thr_asImpl::AggregateCompleteness` |
-| MKIT-26 | spec gap | Nothing binds a share-set epoch: rotation is safe only if old shares are erased, and a rotated-out set's posted partials still verify | `thr_retainOld::NoForgery`, `CanaryNoStaleAggregate` |
-| MKIT-26 | doc drift | SPEC-PACK-SHARDS §5 still describes one thread per shard URL; SPEC-RELEASE-THRESHOLD's `ceil(2n/3)` differs from the code's N3f1 quorum for n = 3k | code reading; `quorumTableTest` |
-| MKIT-26 | hypothesis | The shard byte budget (`MAX_BUFFERED_SHARD_BYTES`) could turn valid shards into failures for packs near the size limit; not modelled or tested | code reading |
-| MKIT-22 | coverage | The conformance fixtures reach no successful `amend` commit and no memory-transport `Any` write | fixture tally |
+| remote-advance model | bug (latent) | F1: an HTTP force push that falls back to the ordered `Any` path can be stranded by a concurrent atomic re-baseline | `gapHttpAny2::DeltaTransfer`; latent because the CLI builds only `ConnectTransport` |
+| remote-advance model | spec gap (latent) | F2: a force push, head-only or appending, can be stranded by a concurrent atomic re-baseline; checking the packmap before a head-only write is not enough | `gapNoopAny2`, `gapTwoAny3`, `gapAppendAny2`, `gapAppendTwoAny3`; latent until a Connect server opts in to atomic advance |
+| remote-advance model | spec ambiguity | The §7 `read_ref` rule cannot tell "never landed" from "landed, then built on"; such a push is reported NonFastForward although its commit is in the remote history | `WitnessLandedThenNff` |
+| transport model | spec gap (liveness) | One corrupted shard among the first `minimum_shards` responses fails the download although a valid quorum is available | `shards_bad::DecodeFailsOnlyWithoutHonestQuorum`, `P2Corrupt` |
+| transport model | spec gap | `aggregate` does not verify partials, so one low-index garbage partial blocks aggregation unless a coordinator verifies first | `thr_asImpl::AggregateCompleteness` |
+| transport model | spec gap | Nothing binds a share-set epoch: rotation is safe only if old shares are erased, and a rotated-out set's posted partials still verify | `thr_retainOld::NoForgery`, `CanaryNoStaleAggregate` |
+| transport model | doc drift | SPEC-PACK-SHARDS §5 still describes one thread per shard URL; SPEC-RELEASE-THRESHOLD's `ceil(2n/3)` differs from the code's N3f1 quorum for n = 3k | code reading; `quorumTableTest` |
+| transport model | hypothesis | The shard byte budget (`MAX_BUFFERED_SHARD_BYTES`) could turn valid shards into failures for packs near the size limit; not modelled or tested | code reading |
+| ref conformance model | coverage | The conformance fixtures reach no successful `amend` commit and no memory-transport `Any` write | fixture tally |
 | MKIT-58 | doc drift | `AdvanceOutcome::HeadConflict`'s rustdoc still says callers treat it as NonFastForward | `mkit-core/src/protocol.rs` |
 
 ## Limitations
@@ -245,7 +245,7 @@ issue whose model found it.
   pushers), and some mutants only by `quint run` and TLC. The per-model
   READMEs say which.
 - **Models follow the code by hand.** Only the refs model is replayed
-  against the implementation (MKIT-22), and only for 5 sampled traces.
+  against the implementation (ref conformance model), and only for 5 sampled traces.
   Lock steps, the `history-mmr` ancestry path and age-based recovery
   pruning are not compared.
 - **Not modelled.** Among others: pack GC, ledger expiry, `MAX_REACHABLE`

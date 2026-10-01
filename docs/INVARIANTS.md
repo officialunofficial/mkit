@@ -56,7 +56,8 @@ bounded key, cursor and collection overhead; continuations and
 nested inventory/chunk/action proofs remain sequential with their existing
 bounds, and existing callers remain serial; core,
 native and Worker scanner retrieval regression suites. The native and Worker
-mounts are default-off; Worker release activation awaits WP-4.18.
+mounts are default-off; configured Worker launch activation requires the Uno
+profile and each facility's complete validated configuration.
 
 ## Ticketed pushes bind uploaded bytes to one paired advance
 
@@ -564,7 +565,7 @@ its graph must not contain `ruzstd` either until it opts in.
 **Because:** none of those crates build for `wasm32-unknown-unknown`.
 `mkit-wasm` ships to browsers, `apps/repo-worker` runs on Cloudflare
 Workers, and `mkit-server` is the runtime-agnostic core that the Workers
-server adapter builds on (PRD MKIT-29 §5.1). Cargo unifies features per
+server adapter builds on (production server work §5.1). Cargo unifies features per
 dependency graph, so one manifest line that re-enables a default feature
 silently pulls a C library into every wasm build downstream.
 
@@ -596,7 +597,7 @@ tokio itself is allowed: it is the runtime of the Connect and reqwest
 **Because:** the CLI is what every user installs (`cargo install
 mkit-cli`, the release archives). The HTTP and `mkit+enc://` servers, the
 `SQLite` metadata store and their dependencies belong to the separate
-`mkit-server` binary (PRD MKIT-29, decision Q1). A server stack in the CLI
+`mkit-server` binary (production server work, decision Q1). A server stack in the CLI
 graph grows the published crate's supply chain, its build time and its
 binary, and invites serving code paths the CLI was never reviewed for.
 
@@ -623,7 +624,7 @@ an in-memory `SQLite` database cannot do). A declared skip that starts
 passing, or an undeclared one, fails the run.
 
 **Because:** `mkit-server`'s pipeline is written once against the storage
-traits (PRD MKIT-29 §5.1) and trusts their contract: an atomic batch, a
+traits (production server work §5.1) and trusts their contract: an atomic batch, a
 missed deadline that writes nothing, a crash that leaves either the old or
 the new state. A backend that bends one of these on a single path
 (a partial batch on `SQLITE_FULL`, a blob visible before its final chunk)
@@ -679,7 +680,7 @@ it checks the wire, not mkit's client library.
 **Because:** the servers share one pipeline, but each binding (axum,
 Workers fetch, the storage adapters) can still change status codes,
 compression, streaming or limits on its own. "Nothing changes on the wire"
-(PRD MKIT-29 §8, M0 exit) is only checkable against a fixed, black-box
+(production server work §8, M0 exit) is only checkable against a fixed, black-box
 suite; a client that happens to tolerate a change would hide it.
 
 **If violated:** a deployment answers with a different error code, drops a
@@ -694,7 +695,7 @@ spawned binary), and `rust/crates/mkit-server-conformance/tests/baseline_pipelin
 in the workspace nextest (`just ci`, `just ci-server`, cloudbuild/ci.yaml);
 `scripts/vcs-worker-conformance.sh` for `apps/vcs-worker`, run by
 `.github/workflows/workers.yml`'s `vcs-worker-conformance` job (main and
-PRs to main only; during the MKIT-29 epic it runs locally at each
+PRs to main only; during the production server work epic it runs locally at each
 milestone boundary).
 
 ## Both zstd backends accept exactly one frame per entry
@@ -2198,7 +2199,10 @@ exact pending-row release, and the watermark. A late blocked holder retains a
 durable takedown request for WP-5.6a. No permissive release API is exposed.
 
 WP-4.10b-1 keeps Extract fail-closed. WP-4.10b-2 supplies source verification,
-holder enqueue/renewal and the opt-in driver; release exposure waits for WP-4.18.
+holder enqueue/renewal and the opt-in driver; takedown exposure requires admin
+keys, `LAUNCH_PROFILE=uno`, `TAKEDOWN_ENABLED=true`, indexed Paid mode and
+complete §14.7 preservation configuration, with partial configuration refused
+at startup.
 
 
 ### Scheduled extraction freezes closure and protects source lifetimes (WP-4.10b-2)
@@ -2445,8 +2449,10 @@ retention checks or an unaudited hold can expose or destroy evidence.
 **If violated:** a restricted copy leaks, legal hold loses arbitration or
 verification is mistaken for real takedown completion. **Enforced by:**
 `admin::Engine::handle_streamed`, `takedown::work::Work`'s admin operations,
-PR2's legal-hold planner and the signed catalog/streaming regression tests.
-Production activation remains false; 4.18 mounts the catalog.
+the legal-hold planner and the signed catalog/streaming regression tests.
+Production takedown activation requires admin keys, `LAUNCH_PROFILE=uno`,
+`TAKEDOWN_ENABLED=true`, indexed Paid mode and complete §14.7 preservation
+configuration; startup refuses partial configuration.
 
 ## Native HTTPS extra trust
 

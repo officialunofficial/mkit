@@ -4,7 +4,7 @@ import MkitFormal.DeltaRunning
 import MkitFormal.DeltaCanaries
 
 /-!
-# SPEC-DELTA (Linear MKIT-25)
+# SPEC-DELTA (delta model)
 
 * `MkitFormal.DeltaModel` — executable model of `docs/specs/SPEC-DELTA.md`
   (§2 header, §3 COPY/INSERT encoding, §4 `apply`, §5 writer model).

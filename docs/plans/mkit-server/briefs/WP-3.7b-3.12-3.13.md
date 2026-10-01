@@ -25,7 +25,7 @@ The admission and outcome wire behaviour, CORS and backpressure are pinned in co
 
 ## B. Decided (do not change)
 
-### Part 0: WP-3.7b, a public Rust surface for hook implementers (Linear MKIT-67). Do this first.
+### Part 0: WP-3.7b, a public Rust surface for hook implementers (authentication re-exports). Do this first.
 
 **Why:** external Rust hook implementers (uno-api) need the `mkit.server.hooks.v1` message types and a
 `mkit-hook:v1` request verifier without depending on the server runtime.
@@ -56,7 +56,7 @@ The admission and outcome wire behaviour, CORS and backpressure are pinned in co
 - **B0.6** `scripts/check-wasm-dep-graph.sh` and the wasm build stay clean for `mkit-rpc --features hooks` and
   `mkit-server --features remote-hooks`. `cargo semver-checks` is additive for `mkit-rpc`.
 - **B0.7** Add a registry row **3.7b** ("Public hooks.v1 types and mkit-hook:v1 verifier in mkit-rpc", M3, Stage 1,
-  deps 3.7, 3.8). R-174 references Linear MKIT-67.
+  deps 3.7, 3.8). R-174 references authentication re-exports.
 - **B0.8** The MPP stub (B1) uses these public types and `HookVerifier`, with no hand-written proto JSON.
 
 ### Parts 1–2: WP-3.12 + WP-3.13

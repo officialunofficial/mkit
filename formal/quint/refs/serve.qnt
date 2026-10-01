@@ -1,5 +1,5 @@
 // -*- mode: Bluespec; -*-
-// Server-era root locks and the served-name rule (Linear MKIT-17 / MKIT-19,
+// Server-era root locks and the served-name rule (verification toolchain / ref concurrency model,
 // workstream quint-refs). Companion of refs.qnt, which keeps the ref CAS and
 // lock-order model; the ref writes a server makes are refs.qnt's `file` ops.
 //

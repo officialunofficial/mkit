@@ -1,6 +1,6 @@
 # WP-1.15 + WP-1.30 (bundle `1-15-1-30`): multi-repository serving on every transport
 
-Bundle of two WPs of the MKIT-29 mkit-server epic, delivered as one PR:
+Bundle of two WPs of the production server work mkit-server epic, delivered as one PR:
 - **Part 1, WP-1.30:** adapters serve Multi addressing, with the policy configuration (native and Worker). R-96.
 - **Part 2, WP-1.15:** ssh and enc multi-repository addressing, `--principal`, and implicit session tickets.
 

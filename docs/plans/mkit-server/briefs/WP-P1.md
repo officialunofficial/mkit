@@ -16,7 +16,7 @@ its worktree.
 
 1. `git fetch origin && git switch -c feat/mkit-server origin/main` (after P0 is merged).
 2. Create `docs/plans/mkit-server/` containing the files below.
-3. Commit with the message `docs(plans): mkit-server epic plan and work-package briefs (MKIT-29)` and the trailer
+3. Commit with the message `docs(plans): mkit-server epic plan and work-package briefs (production server work)` and the trailer
    `Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>`.
 4. `git push -u origin feat/mkit-server`.
 5. Confirm the GitHub ruleset and Cloud Build trigger changes from WP-P0's "User actions" are applied. Open a
@@ -27,8 +27,8 @@ its worktree.
 
 | File | Content |
 |---|---|
-| `README.md` | Index: link to Linear MKIT-29 (canonical PRD), the branch and PR conventions, and a status table of WPs (id, title, PR link, state), with the orchestrator updating it as WPs merge |
-| `prd-snapshot.md` | Verbatim copy of the approved PRD (Linear MKIT-29, as held in the orchestrator's working copy), headed "Snapshot of Linear MKIT-29 taken <date>. Linear is canonical; decisions D1–D36 are settled (D21 superseded by D34; D35 staging; D36 `X-Mkit-Ref`)." |
+| `README.md` | Index: link to production server work (canonical PRD), the branch and PR conventions, and a status table of WPs (id, title, PR link, state), with the orchestrator updating it as WPs merge |
+| `prd-snapshot.md` | Verbatim copy of the approved PRD (production server work, as held in the orchestrator's working copy), headed "Snapshot of production server work taken <date>. Linear is canonical; decisions D1–D36 are settled (D21 superseded by D34; D35 staging; D36 `X-Mkit-Ref`)." |
 | `00-plan.md` | `docs/plans/mkit-server/00-plan.md` (pipeline, registry, DAG, defaults, reconciliation log) |
 | `registry.json` | `docs/plans/mkit-server/registry.json` (the WP registry used for Linear sub-issues) |
 | `m0-overview.md` | `docs/plans/mkit-server/m0-overview.md` |

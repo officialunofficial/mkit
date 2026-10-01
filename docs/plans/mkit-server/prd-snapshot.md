@@ -1,6 +1,6 @@
-# Production mkit server (Linear MKIT-29): PRD snapshot
+# Production mkit server (production server work): PRD snapshot
 
-> Snapshot of Linear MKIT-29 taken 2026-09-25. Linear is canonical; decisions D1–D36 are settled (D21 superseded by D34; D35 staging; D36 `X-Mkit-Ref`).
+> Snapshot of production server work taken 2026-09-25. Linear is canonical; decisions D1–D36 are settled (D21 superseded by D34; D35 staging; D36 `X-Mkit-Ref`).
 
 **Status:** Approved by peer review. Three adversarial reviews applied: two of the PRD and one of the implementation plan. Decisions D1–D36. The implementation plan is tracked as sub-issues of this epic.
 **Type:** Epic

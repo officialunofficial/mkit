@@ -1,5 +1,5 @@
 // -*- mode: Bluespec; -*-
-// Ref CAS and lock-order model for mkit (Linear MKIT-19, workstream quint-refs).
+// Ref CAS and lock-order model for mkit (ref concurrency model, workstream quint-refs).
 //
 // Models (specs on branch claude/kind-brahmagupta-esqhc0, server era;
 // SPEC-REFS v3, SPEC-CONCURRENCY as of this branch):

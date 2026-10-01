@@ -1,6 +1,6 @@
 # M0 exit report (WP-M0-20)
 
-The M0 exit gate of [MKIT-29](https://linear.app/officialunofficial/issue/MKIT-29): PRD §8, "M0 Exit", all four bullets,
+The M0 exit gate of production server work: PRD §8, "M0 Exit", all four bullets,
 run on `feat/mkit-server` at `75fdaa22` plus this WP's changes, on 2026-09-26. The machine was **quiet**: no other executor
 or build ran; the only other load came from macOS services, with a load average of about 5 at rest. It is a 10-core Apple M1 Pro on macOS 26.3, with Rust 1.95.0 (`rust/rust-toolchain.toml`), cargo-nextest 0.9.133
 and Node 24.13.0. Unless a step says otherwise, every command ran from the repo root with
