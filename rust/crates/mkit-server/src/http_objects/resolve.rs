@@ -36,6 +36,7 @@ const MAX_PEEL: usize = 16;
 
 /// The stores and limits one request resolves against.
 pub(crate) struct Env<'a, B, N> {
+    pub no_reads: &'a BTreeSet<Hash>,
     pub blobs: &'a B,
     pub meta: &'a N,
     pub shards: &'a dyn ShardMap,
@@ -127,6 +128,7 @@ pub(crate) async fn load<B: BlobStore, N: NamespaceStore>(
         return Err(Miss::Capped);
     }
     let mut memo = MemberCache::default();
+    memo.forbid_reads(env.no_reads);
     let mut visiting = BTreeSet::new();
     let result = resolve::member_object(
         env.blobs,

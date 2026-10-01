@@ -3,7 +3,7 @@ use super::*;
 use crate::store::{BorrowedStore, ContentIndex};
 use crate::takedown::denial::BlockAction;
 
-fn shared_chunk_stop(proofs: Arc<Proofs>) -> (Fx, Hash, Hash, Hash, String) {
+pub(super) fn shared_chunk_stop(proofs: Arc<Proofs>) -> (Fx, Hash, Hash, Hash, String) {
     let tokens = crate::url_token::UrlTokenConfig::new(
         crate::url_token::UrlTokenKeys::new(zeroize::Zeroizing::new([13; 32]), vec![]).unwrap(),
     );

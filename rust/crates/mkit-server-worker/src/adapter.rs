@@ -1965,8 +1965,14 @@ mod faults {
     }
 }
 
+#[cfg(feature = "http-objects")]
+pub use mkit_server::pipeline::{ObjectReader, ReaderView};
+
 #[cfg(target_arch = "wasm32")]
-pub use glue::{fetch, fetch_with, ns_object, ns_object_with, serve, serve_with};
+pub use glue::{
+    WorkerPipeline, fetch, fetch_with, ns_object, ns_object_with, pipeline as embedding_pipeline,
+    serve, serve_with,
+};
 #[cfg(all(target_arch = "wasm32", feature = "published-view"))]
 pub use glue::{fetch_configured, ns_object_configured};
 
@@ -2006,7 +2012,7 @@ mod glue {
     static BACKUPS_INVALID_LOG: Once = Once::new();
 
     /// The pipeline a request runs on, over the hooks `H`.
-    type WorkerPipeline<H> = Pipeline<WorkerBlobStore, WorkerNamespaceStore, H>;
+    pub type WorkerPipeline<H> = Pipeline<WorkerBlobStore, WorkerNamespaceStore, H>;
 
     /// `Access-Control-Allow-Origin` and the admission `Expose-Headers` on
     /// every response, so a browser reads a challenge or a receipt.
@@ -2059,8 +2065,10 @@ mod glue {
         Ok(None)
     }
 
-    /// The pipeline for `cfg` over `env`'s bindings and `hooks`.
-    fn pipeline<H: HookSet + 'static>(
+    /// The request-budgeted embedding pipeline for configured bindings/hooks.
+    /// # Errors
+    /// Invalid configuration or unavailable bindings.
+    pub fn pipeline<H: HookSet + 'static>(
         env: &Env,
         cfg: &WorkerConfig,
         hooks: H,

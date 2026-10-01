@@ -1726,6 +1726,47 @@ impl HttpAdmission for GoldenAdmission {
     }
 }
 
+#[tokio::test]
+async fn canonical_prefetch_builds_the_native_http_disclosure_bytes() {
+    use mkit_core::store::MemorySource;
+    use mkit_core::verify::{Selector, build_disclosure_from};
+    use mkit_server_native::ReaderView;
+
+    let fx = fixture(false, false).await;
+    let url = pinned_proof(&fx, fx.manifest, "chunked.bin");
+    let Object::ChunkedBlob(manifest) =
+        mkit_core::serialize::deserialize(&fx.canonical_manifest).unwrap()
+    else {
+        panic!("expected a canonical manifest");
+    };
+    let ids: Vec<_> = [fx.commit, fx.root, fx.manifest]
+        .into_iter()
+        .chain(manifest.chunks)
+        .collect();
+    let repo = mkit_server::RepoId {
+        namespace: NamespaceKey::from_namespace(&fx.namespace),
+        name: RepoName::new("room").unwrap(),
+    };
+    let pipe = Arc::new(fx.pipe);
+    let reader = pipe.object_reader(repo, ReaderView::Public).await.unwrap();
+    let canonical = reader.read_canonical(&ids).await.unwrap();
+    assert_eq!(canonical[1].as_ref(), Some(&fx.canonical_root));
+    assert_eq!(canonical[2].as_ref(), Some(&fx.canonical_manifest));
+    let mut source = MemorySource::default();
+    for (id, bytes) in ids.into_iter().zip(canonical) {
+        source.insert(id, bytes.unwrap()).unwrap();
+    }
+    let disclosure =
+        build_disclosure_from(&source, &fx.commit, &[b"chunked.bin"], Selector::Object).unwrap();
+    let verified = verify_disclosure(&fx.commit, &disclosure).unwrap();
+    assert!(verified.signature_valid);
+    assert_eq!(verified.leaf_id, fx.manifest);
+    let router = build_router(pipe, &options(&[]));
+    let response = request(&router, "GET", &url, &[]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await.as_ref(), disclosure.as_slice());
+}
+
 #[path = "../../../tests/fixtures/http_content_headers.rs"]
 mod content_headers_fixture;
 
