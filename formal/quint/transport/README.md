@@ -1,6 +1,6 @@
 # quint-transport: requested identities, shard quorum, release threshold
 
-Quint models for MKIT-26 (epic MKIT-17, PR #1082), checked against the
+Quint transport models (formal verification effort, PR #1082), checked against the
 specs on this branch. The spec text is normative. Each model says which Rust
 code it follows. Where the code and the spec disagree, the model follows the
 code and the difference is listed under "Findings".
@@ -17,7 +17,7 @@ code and the difference is listed under "Findings".
 
 ## Properties
 
-### identity.qnt (MKIT-26 a)
+### identity.qnt (transport model a)
 
 The adversary answers each request with any valid object in the universe:
 - another branch's packlist node;
@@ -47,7 +47,7 @@ substitution that gets rejected. A substituted fetch never publishes
 anything, because a fetch that sees `InvalidResponse` does not retry. That is
 why no canary asks for a publish after a substitution.
 
-### shards.qnt (MKIT-26 b)
+### shards.qnt (transport model b)
 
 Each shard index has a fixed behaviour:
 - `ok`: valid and prompt;
@@ -93,7 +93,7 @@ Progress is checked by TLC only. The fairness assumptions are stated in
   2 slots). It fails for `shards_tight` (N=1, K=2, 2 slots, two stalled
   shards). This documents a bound (see Findings).
 
-### threshold.qnt (MKIT-26 c)
+### threshold.qnt (transport model c)
 
 A partial is `(holder, share-set epoch, message, valid)`.
 

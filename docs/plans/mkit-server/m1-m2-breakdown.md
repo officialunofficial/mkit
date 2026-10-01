@@ -1,4 +1,4 @@
-# mkit-server epic (MKIT-29): M1 + M2 work-package breakdown
+# mkit-server epic (production server work): M1 + M2 work-package breakdown
 
 Status: coarse rolling-wave plan, **consolidated** (see `00-plan.md`: registry, Defaults adopted, Reconciliation
 log R-xx). Detailed executor briefs are written when each milestone starts. Where this file and `00-plan.md` differ,

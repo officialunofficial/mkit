@@ -1,5 +1,5 @@
 import MkitFormal.Delta
--- Axiom audit for the MKIT-25 theorems (run by scripts/difftest-delta.sh, not
+-- Axiom audit for the delta model theorems (run by scripts/difftest-delta.sh, not
 -- part of the library): only Lean's standard axioms may appear, never
 -- `sorryAx` or `ofReduceBool`.
 open MkitFormal.Delta MkitFormal.Delta.Canaries

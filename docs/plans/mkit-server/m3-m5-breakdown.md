@@ -1,6 +1,6 @@
 # mkit-server M3–M5: coarse work-package breakdown (rolling wave)
 
-Source of truth: Linear MKIT-29 PRD (`docs/plans/mkit-server/prd-snapshot.md`). Decisions D1–D36 are settled and not reopened here
+Source of truth: production server work PRD (`docs/plans/mkit-server/prd-snapshot.md`). Decisions D1–D36 are settled and not reopened here
 (D21 superseded by D34; D36 approves `X-Mkit-Ref`). Review 01 fixes: `00-plan.md` §5.6 (R-61…R-84). References to M0-02 / M0-05 mean the split WPs
 (M0-02a/02b, M0-05a/05b).
 

@@ -1,6 +1,6 @@
 # quint-refs: ref CAS, lock order, server locks, served names
 
-Quint models of mkit's ref concurrency (Linear MKIT-19, epic MKIT-17, PR
+Quint models of mkit's ref concurrency (formal verification effort, PR
 #1082), updated to the server-era specs on this branch: SPEC-REFS v3 and
 SPEC-CONCURRENCY with `mkit-server`.
 
@@ -61,7 +61,7 @@ TLC=0 ./check.sh         # skip TLC
 APALACHE=1 ./check.sh    # add the bounded apalache-mc runs
 ```
 
-Pins (Polychrome review on MKIT-17): quint 0.32.0; Apalache 0.62.2 run
+Pins (Polychrome review on verification toolchain): quint 0.32.0; Apalache 0.62.2 run
 directly on the TLA+ that `quint compile --target tlaplus` produces (quint
 uses its bundled Apalache only to transpile; `quint verify` is not used);
 TLC is `tlc2.TLC` from the Apalache 0.62.2 jar; Java 21.
@@ -153,7 +153,7 @@ cover the whole space to their bounds.
 - The git bridge locks (`git-<remote>.lock`, `git-import-key.lock`) that
   another track is adding to SPEC-CONCURRENCY §2/§4 are not in this model.
 
-## Model-based conformance (MKIT-22)
+## Model-based conformance (ref conformance model)
 
 `refs_mbt.qnt` (additive; `refs.qnt` is unchanged) instantiates `refs.qnt`
 with `NO_FAULTS` for 2 (`refs_mbt2`) and 3 (`refs_mbt3`) processes and adds

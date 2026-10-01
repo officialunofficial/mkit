@@ -1,6 +1,6 @@
 # M1 exit report (WP-1.27)
 
-Local Stage 1 evidence for [MKIT-29](https://linear.app/officialunofficial/issue/MKIT-29),
+Local Stage 1 evidence for production server work,
 SPEC-SERVER §18 and PRD §8, on 2026-09-29. Initial evidence used `feat/mkit-server` at `85c4adf3`
 plus WP-1.27; the final integration rerun includes `b0bbbba2` (#1225).
 Full gate summaries below are from the executor; the targeted post-review

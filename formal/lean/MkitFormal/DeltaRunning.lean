@@ -1,7 +1,7 @@
 import MkitFormal.DeltaProofs
 
 /-!
-# SPEC-DELTA running-count theorems (MKIT-25)
+# SPEC-DELTA running-count theorems (delta model)
 
 §2 / §10: "The running emitted-byte count NEVER exceeds `result_len` (the v1
 reader enforces this per-opcode, not only at end-of-stream)".

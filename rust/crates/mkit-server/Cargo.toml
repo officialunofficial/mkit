@@ -1,5 +1,5 @@
 # mkit-server — the runtime-agnostic core of the production mkit server
-# (PRD MKIT-29 §5.1). It owns the vocabulary every adapter shares: repo and
+# (production server work §5.1). It owns the vocabulary every adapter shares: repo and
 # namespace identifiers, principals, the typed `Operation` model, the
 # transport-neutral `ServerError`, the async/runtime model (`MaybeSend`,
 # `Clock`, `Spawner`, `send_wrap`) and the metrics facade. Native

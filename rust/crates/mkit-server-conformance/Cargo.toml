@@ -1,4 +1,4 @@
-# mkit-server-conformance (PRD MKIT-29 §5.1, §5.3), in two parts:
+# mkit-server-conformance (production server work §5.1, §5.3), in two parts:
 #   (a) the storage-trait suite: every `NamespaceStore` / `BlobStore`
 #       backend, in this workspace or a third party's, runs it with one
 #       `storage_suite!` invocation;

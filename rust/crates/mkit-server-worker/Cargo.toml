@@ -1,5 +1,5 @@
 # mkit-server-worker — the Cloudflare Workers adapter of the mkit server
-# (PRD MKIT-29 §5.1), storage half: a streaming R2 `BlobStore`, a Durable
+# (production server work §5.1), storage half: a streaming R2 `BlobStore`, a Durable
 # Object `SqlConn` under `mkit-server`'s shared `SqlKvStore`, the Durable
 # Object request handler, the Worker-side `NamespaceStore` client that
 # routes each partition to its own Durable Object, and the fetch adapter

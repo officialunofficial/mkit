@@ -2,7 +2,7 @@ import MkitFormal.MerkleModel
 import Std.Data.HashMap
 
 /-!
-# Differential test: Lean BMT model vs `merkle.rs` (MKIT-24)
+# Differential test: Lean BMT model vs `merkle.rs` (Merkle proof model)
 
 Reads the vectors written by
 `rust/crates/mkit-core/tests/formal_merkle_vectors.rs` and, for every tree,
