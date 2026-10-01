@@ -123,6 +123,46 @@ fn multi_allowlist_resolves() {
 }
 
 #[test]
+fn default_repo_visibility_is_public_or_explicitly_configured() {
+    use mkit_server::pipeline::RepoVisibility;
+    let f = fixture(&namespace(1));
+    assert_eq!(
+        resolve(&multi(&f))
+            .unwrap()
+            .pipeline
+            .default_repo_visibility,
+        RepoVisibility::Public
+    );
+    for (value, expected) in [
+        ("public", RepoVisibility::Public),
+        ("private", RepoVisibility::Private),
+    ] {
+        let flags = extra(&multi(&f), &["--default-repo-visibility", value]);
+        assert_eq!(
+            resolve(&flags).unwrap().pipeline.default_repo_visibility,
+            expected
+        );
+    }
+    let mut args = common::args(&multi(&f).iter().map(String::as_str).collect::<Vec<_>>());
+    args.default_repo_visibility = RepoVisibility::Private;
+    assert_eq!(
+        mkit_server_native::config::resolve(&args, &|_| None)
+            .unwrap()
+            .pipeline
+            .default_repo_visibility,
+        RepoVisibility::Private
+    );
+    for value in ["", "PRIVATE", "friends", " public"] {
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_mkit-server"))
+            .args(["serve", "--default-repo-visibility", value])
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("expected public or private"));
+    }
+}
+
+#[test]
 fn multi_policy_any_needs_the_unsafe_opt_in() {
     let f = fixture(&namespace(1));
     let any = drop_flag(&multi(&f), "--namespace-allowlist", true);

@@ -415,41 +415,6 @@ fn validate_http_scheme(url: &Url) -> TransportResult<()> {
     }
 }
 
-/// Install a process-wide default `rustls` `CryptoProvider` if one isn't
-/// already installed.
-///
-/// rustls 0.23 requires exactly one crypto backend to be the installed
-/// default before `ClientConfig::builder()` can run; it does NOT
-/// auto-select one when a consuming binary's dependency graph links more
-/// than one backend crate (which `mkit-cli`'s does: `ring` arrives via
-/// this crate's own explicit dependency below, `aws-lc-rs` via `rustls`'s
-/// own default feature pulled in transitively by `connectrpc`/other
-/// dependents) — calling `ClientConfig::builder()` in that situation
-/// panics with "Could not automatically determine the process-level
-/// CryptoProvider" rather than picking one silently. We therefore install
-/// one explicitly. `install_default` returns `Err` if a provider (ours or
-/// another crate's, e.g. an AWS SDK client's) is already installed
-/// process-wide; either outcome is fine here — we only need SOME provider
-/// installed before building a `ClientConfig`, not specifically ours.
-fn ensure_crypto_provider() {
-    let _ = connectrpc::rustls::crypto::ring::default_provider().install_default();
-}
-
-/// Build a default `rustls::ClientConfig` trusting the Mozilla root
-/// program via `webpki-roots` — pure-Rust, no OS trust-store dependency
-/// (portable across CI images and minimal containers, matching this
-/// crate's zero-system-dependency posture for the vendored codegen path).
-fn default_tls_config() -> Arc<connectrpc::rustls::ClientConfig> {
-    ensure_crypto_provider();
-    let mut roots = connectrpc::rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    Arc::new(
-        connectrpc::rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth(),
-    )
-}
-
 impl ConnectTransport {
     /// Parse `mkit+https://host/project` (or loopback-only
     /// `mkit+http://…`), strip the `mkit+` prefix, and build the transport.
@@ -470,6 +435,8 @@ impl ConnectTransport {
     ///   [`repository_identity_from_url`] reports which.
     /// - [`TransportError::InsecureScheme`] — plain `http://` to a
     ///   non-loopback host.
+    /// - [`TransportError::TlsConfiguration`] — a selected HTTPS CA file
+    ///   could not be read or validated.
     /// - [`TransportError::ConnectionFailed`] — the local tokio runtime
     ///   could not be constructed (resource exhaustion).
     pub fn connect(url: &str) -> TransportResult<Self> {
@@ -492,6 +459,20 @@ impl ConnectTransport {
     pub fn connect_with_signer(
         url: &str,
         signer: Option<Arc<dyn EnvelopeSigner>>,
+    ) -> TransportResult<Self> {
+        Self::connect_with_signer_and_ca_file(url, signer, None)
+    }
+
+    /// Construct a native client with an optional extra PEM trust file.
+    /// `MKIT_SSL_CA_FILE` takes precedence over `ca_file`. Certificates add to
+    /// the Mozilla roots; chain and hostname verification remain enabled.
+    /// The same HTTP client serves every unary and streaming RPC.
+    /// # Errors
+    /// The errors from [`Self::connect`], plus invalid HTTPS trust configuration.
+    pub fn connect_with_signer_and_ca_file(
+        url: &str,
+        signer: Option<Arc<dyn EnvelopeSigner>>,
+        ca_file: Option<&std::path::Path>,
     ) -> TransportResult<Self> {
         let stripped = url
             .strip_prefix("mkit+")
@@ -520,7 +501,7 @@ impl ConnectTransport {
 
         let token = env::var(TOKEN_ENV).ok().filter(|s| !s.is_empty());
         let transport = if parsed.scheme() == "https" {
-            HttpClient::with_tls(default_tls_config())
+            HttpClient::with_tls(crate::tls::client_config(ca_file)?)
         } else {
             HttpClient::plaintext()
         };

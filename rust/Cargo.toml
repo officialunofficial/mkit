@@ -1,5 +1,6 @@
 [workspace]
 resolver = "3"
+exclude = ["vendor/ruzstd"]
 # `fuzz` is the cargo-fuzz crate. It's a workspace member so
 # `cargo test -p mkit-fuzz` runs its plain-unit-test fallback path
 # (without libfuzzer / nightly). The libfuzzer-driven binaries under
@@ -147,3 +148,6 @@ strip = "symbols"
 inherits = "release"
 debug = true
 strip = false
+
+[patch.crates-io]
+ruzstd = { path = "vendor/ruzstd" }

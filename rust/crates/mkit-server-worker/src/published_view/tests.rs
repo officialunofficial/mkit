@@ -1,7 +1,7 @@
 use super::*;
 use futures::FutureExt as _;
 use futures::executor::block_on;
-use mkit_server::pipeline::{D34Shards, ShardMap};
+use mkit_server::pipeline::{D34Shards, RepoVisibility, ShardMap};
 use mkit_server::sql::SqlKvStore;
 use mkit_server::store::{codec, keys};
 use mkit_server::timers::{TickBudget, TimerRegistry, run_due};
@@ -396,6 +396,7 @@ fn bursts_refresh_quiet_buckets_and_never_replace_twice_per_second() {
     let bucket = Bucket::new(clock.clone());
     let alarm = SnapshotAlarm::default();
     let registry = TimerRegistry::new().register(SnapshotHandler {
+        default_repo_visibility: RepoVisibility::Public,
         bucket: bucket.clone(),
         coordinator: meta,
         clock: clock.clone(),
@@ -441,6 +442,7 @@ fn etag_conflict_crash_and_relay_during_upload_preserve_dirty_work() {
     let bucket = Bucket::new(clock.clone());
     let alarm = SnapshotAlarm::default();
     let registry = TimerRegistry::new().register(SnapshotHandler {
+        default_repo_visibility: RepoVisibility::Public,
         bucket: bucket.clone(),
         coordinator: meta,
         clock: clock.clone(),
@@ -526,6 +528,7 @@ fn private_missing_and_oversized_buckets_remove_public_data_without_upload() {
     });
     let alarm = SnapshotAlarm::default();
     let registry = TimerRegistry::new().register(SnapshotHandler {
+        default_repo_visibility: RepoVisibility::Public,
         bucket: bucket.clone(),
         coordinator: meta.clone(),
         clock: clock.clone(),
@@ -560,6 +563,56 @@ fn private_missing_and_oversized_buckets_remove_public_data_without_upload() {
     tick(&store, &registry, &clock);
     assert_eq!(bucket.puts.load(Ordering::SeqCst), 0);
     assert!(bucket.object.lock().unwrap().is_none());
+}
+
+#[test]
+fn deployment_default_change_removes_snapshot_and_explicit_public_wins() {
+    let clock = Arc::new(ManualClock::new(1000));
+    let store = local(&clock);
+    let meta = CountStore::new(MemoryKv::default());
+    public(&meta, false);
+    block_on(meta.apply(
+        &Partition::Coordinator(repo().namespace),
+        Batch::new().delete(keys::repo_visibility(&repo().name)),
+    ))
+    .unwrap();
+    let bucket = Bucket::new(clock.clone());
+    let alarm = SnapshotAlarm::default();
+    let registry = TimerRegistry::new().register(SnapshotHandler {
+        default_repo_visibility: RepoVisibility::Public,
+        bucket: bucket.clone(),
+        coordinator: meta.clone(),
+        clock: clock.clone(),
+        alarm: alarm.clone(),
+    });
+    delivery(&store, 1, 1, false);
+    clock.set(2000);
+    tick(&store, &registry, &clock);
+    assert!(bucket.object.lock().unwrap().is_some());
+    assert_eq!(bucket.puts.load(Ordering::SeqCst), 1);
+
+    let registry = TimerRegistry::new().register(SnapshotHandler {
+        default_repo_visibility: RepoVisibility::Private,
+        bucket: bucket.clone(),
+        coordinator: meta.clone(),
+        clock: clock.clone(),
+        alarm: alarm.clone(),
+    });
+    clock.set(32000);
+    alarm.reset();
+    tick(&store, &registry, &clock);
+    assert!(bucket.object.lock().unwrap().is_none());
+    assert_eq!(bucket.puts.load(Ordering::SeqCst), 1);
+    assert!(!state(&store).dirty);
+
+    public(&meta, false);
+    clock.set(33000);
+    delivery(&store, 1, 2, false);
+    clock.set(34000);
+    alarm.reset();
+    tick(&store, &registry, &clock);
+    assert!(bucket.object.lock().unwrap().is_some());
+    assert_eq!(bucket.puts.load(Ordering::SeqCst), 2);
 }
 
 #[test]
@@ -720,6 +773,7 @@ fn all_partition_heads_share_one_snapshot_fire_and_eight_calls_including_backup(
     let alarm = SnapshotAlarm::default();
     let registry = TimerRegistry::new()
         .register(SnapshotHandler {
+            default_repo_visibility: RepoVisibility::Public,
             bucket: bucket.clone(),
             coordinator: meta.clone(),
             clock: clock.clone(),
@@ -914,6 +968,7 @@ fn conditional_replacement_never_regresses_generation_or_capture_time() {
         });
         let alarm = SnapshotAlarm::default();
         let registry = TimerRegistry::new().register(SnapshotHandler {
+            default_repo_visibility: RepoVisibility::Public,
             bucket: bucket.clone(),
             coordinator: meta,
             clock: clock.clone(),
@@ -941,6 +996,7 @@ fn privacy_change_during_upload_is_cleaned_on_refresh_without_a_retry() {
     *bucket.interleave.lock().unwrap() = Some(Box::new(move || public(changed.as_ref(), true)));
     let alarm = SnapshotAlarm::default();
     let registry = TimerRegistry::new().register(SnapshotHandler {
+        default_repo_visibility: RepoVisibility::Public,
         bucket: bucket.clone(),
         coordinator: meta.clone(),
         clock: clock.clone(),

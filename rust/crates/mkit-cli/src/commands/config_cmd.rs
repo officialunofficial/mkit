@@ -260,6 +260,7 @@ fn unset_repo_key(cfg: &mut Config, key: &str) -> Result<bool, u8> {
         "remote_bucket" => Ok(take_nonempty(&mut cfg.remote_bucket)),
         "remote_type" => Ok(take_nonempty(&mut cfg.remote_type)),
         "transport_auth" => Ok(take_nonempty(&mut cfg.transport_auth)),
+        "http.sslcainfo" => Ok(take_nonempty(&mut cfg.http_ssl_ca_info)),
         k if config::is_core_section(k) => match config::core_allowed_suffix(k) {
             Some(suffix) => Ok(cfg.core.remove(&suffix).is_some()),
             None => Err(emit_err(
@@ -380,6 +381,7 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
         "remote_endpoint" => value.clone_into(&mut cfg.remote_endpoint),
         "remote_bucket" => value.clone_into(&mut cfg.remote_bucket),
         "remote_type" => value.clone_into(&mut cfg.remote_type),
+        "http.sslcainfo" => value.clone_into(&mut cfg.http_ssl_ca_info),
         // Write-auth mode for `mkit+https://`/`mkit+http://` remotes — see
         // `Config::transport_auth`'s doc comment. Validated here (unlike
         // the lenient config-load fallback in `config::apply_kv`, which
@@ -453,6 +455,7 @@ const CONFIG_KEYS: &[&str] = &[
     "default_branch",
     "durability.objects",
     "grant.webauthn_rp",
+    "http.sslcainfo",
     "key.backend",
     "key.default_ref",
     "key.ed25519_ref",
@@ -493,6 +496,7 @@ fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
         "remote_endpoint" => Some(Cow::Borrowed(&cfg.remote_endpoint)),
         "remote_bucket" => Some(Cow::Borrowed(&cfg.remote_bucket)),
         "remote_type" => Some(Cow::Borrowed(&cfg.remote_type)),
+        "http.sslcainfo" => Some(Cow::Borrowed(&cfg.http_ssl_ca_info)),
         "transport_auth" => Some(Cow::Borrowed(&cfg.transport_auth)),
         "grant.webauthn_rp" => Some(Cow::Owned(cfg.grant_webauthn_rp.join("|"))),
         "ssh.strict_host_key_checking" => Some(Cow::Borrowed(&cfg.ssh_strict_host_key_checking)),

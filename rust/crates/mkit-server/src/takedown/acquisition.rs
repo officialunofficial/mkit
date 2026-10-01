@@ -38,7 +38,7 @@ impl Profile {
             slice_calls: ((chain_depth + 1) * 8 + 256).max(700),
         })
     }
-    /// Current Worker admission: 1 MiB entries, 16 MiB windows, 50 delta hops.
+    /// Current Worker admission: 1 MiB entries, 16 MiB frame/read windows, 50 delta hops.
     /// The 51 MiB retained chain, one exact 16 MiB frame, bounded scratch and
     /// transport pieces fit the conservative 96 MiB acquisition allowance.
     #[must_use]
@@ -167,7 +167,12 @@ async fn decode<B: BlobStore, S: NamespaceStore>(
         profile.limits,
     )
     .await
-    .map_err(|_| ServerError::unavailable("canonical member source unavailable"))?;
+    .map_err(|failure| match failure {
+        resolve::ResolveFailure::Corrupt(_) => {
+            ServerError::new(crate::Code::DataLoss, "canonical member source corrupt")
+        }
+        _ => ServerError::unavailable("canonical member source unavailable"),
+    })?;
     let kind = canonical.first().copied().unwrap_or(0);
     if !matches!(kind, 1 | 2 | 3 | 4 | 5 | 7) {
         return Err(ServerError::invalid_argument(

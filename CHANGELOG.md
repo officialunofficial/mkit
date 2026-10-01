@@ -13,6 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recognize the HTTP content-header golden as a JSON table in the wasm verifier,
   and correct the route property's reserved-name fixture expectations.
 
+- CLI (`mkit-cli`, additive): add `http.sslCAInfo` and overriding
+  `MKIT_SSL_CA_FILE` for extra PEM trust certificates on all native Connect
+  HTTPS remote RPCs and pack streams only. Keep Mozilla roots and
+  chain/hostname verification; invalid CA files fail closed. The self-updater
+  keeps OS trust and release checksums when present, ignoring both settings.
+  S3 remotes are not yet covered. Browser trust is unchanged.
+
+- Server (R-205): `DEFAULT_REPO_VISIBILITY=public|private` on Workers and
+  native `--default-repo-visibility` select visibility for repositories without
+  a stored setting. The default remains public; explicit visibility wins.
+  Set it at deployment creation: changing it affects all unset repositories.
+
+- Server (R-204): embedders can issue batches of up to 16 URL tokens through
+  `ObjectReader::issue_urls`, sharing RPC authorization, epochs and minting,
+  with bounded published-view reachability and denial preflight.
+
 - Server (WP-5.6a-3, R-190): add signed moderation GetTakedown/ListTakedowns,
   atomic audited SetLegalHold and freshly verified ReadPreserved streaming.
   Replay stores byte-free read descriptors; each attempt rechecks authority and
@@ -24,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verified public/owner views share bounded reachability and global-denial
   proofs. Add wasm-clean `store::MemorySource` for synchronous disclosures
   and diffs, with native and Worker embedding entry points. No wire change.
+
+- Bound pure-Rust zstd block expansion before allocation, with a fixed 8 MiB
+  window cap, and checkpoint corrupt preservation sources as terminal audited
+  failures. Preflight compressed delta result headers against verified metadata
+  before decode budgeting; genuine resource failures remain retryable. Worker
+  admission and native C decoding are unchanged (R-203).
 
 - Server/Worker: bound raw timer-alarm enumeration and share tick limits across
   logical heads. Persist capped exponential backoff in the existing timer row

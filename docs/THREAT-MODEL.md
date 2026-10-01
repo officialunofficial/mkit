@@ -190,8 +190,10 @@ Attacker is on the network path between the client and the remote.
 
 mkit defends:
 
-- HTTPS &mdash; via the system rustls trust store and TLS as configured
-  by the user.
+- HTTPS &mdash; native Connect uses bundled Mozilla roots, augmented by
+  certificates explicitly selected through `MKIT_SSL_CA_FILE` or
+  `http.sslCAInfo`. Certificate-chain and hostname verification stay enabled.
+  Browser clients use browser-managed trust.
 - SSH &mdash; via the user's `ssh(1)` configuration (see
   `SSH-SECURITY.md`). mkit does not implement its own SSH. A
   per-repo `ssh.user_known_hosts_file` and `ssh.identity_file`

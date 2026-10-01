@@ -12,7 +12,10 @@ use crate::takedown::{
     denial::{denied, object_denials},
     inventory,
 };
+use crate::url_token::UrlTarget;
 use crate::{Code, RepoId, ServerError};
+/// A signed token and expiry; its credential is redacted from Debug.
+pub type IssuedUrl = crate::url_token::MintedToken;
 use mkit_core::{hash::Hash, object::ObjectType, repo_identity::Namespace};
 use std::collections::{BTreeMap, BTreeSet};
 type Prefetched = (BTreeMap<Hash, Vec<u8>>, BTreeMap<Hash, u64>);
@@ -148,7 +151,159 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         let (_, sizes) = self.batch(ids, true).await?;
         Ok(ids.iter().map(|id| sizes.get(id).copied()).collect())
     }
-    #[allow(clippy::too_many_lines)] // One bounded authorization/resolution pass, in precedence order.
+    /// Issue at most 16 URL tokens, preserving order and duplicates.
+    /// Requires configured URL-token keys. Inaccessible targets are uniformly
+    /// absent. Tokens bind unresolved targets exactly as `IssueObjectUrl` does,
+    /// after a bounded published-view preflight, including for Owner readers.
+    /// # Errors
+    /// As [`Self::read_canonical`], plus `unimplemented` without URL-token keys.
+    /// Targets whose reachability cannot be proved within decode/walk limits are absent.
+    #[allow(clippy::too_many_lines)] // One shared-budget preflight and credential issuance pass.
+    pub async fn issue_urls(
+        &self,
+        targets: &[UrlTarget],
+        ttl_s: u32,
+    ) -> Result<Vec<Option<IssuedUrl>>, ServerError> {
+        if targets.len() > OBJECT_READER_BATCH {
+            return Err(ServerError::invalid_argument("batch exceeds 16 targets"));
+        }
+        if self.pipe.cfg.url_tokens.is_none() {
+            return Err(ServerError::unimplemented("URL tokens not configured"));
+        }
+        let calls = SliceBudget::new(OBJECT_READER_CALLS);
+        match self.authorize(&calls).await {
+            Err(e) if e.code() == Code::NotFound && matches!(self.view, ReaderView::Public) => {
+                return Ok(vec![None; targets.len()]);
+            }
+            other => {
+                other?;
+            }
+        }
+        let mut op = match &self.view {
+            ReaderView::Owner(meta) => {
+                let a = self.pipe.authenticate(meta)?;
+                self.pipe.identify(
+                    &a,
+                    OpKind::ListRefs {
+                        prefix: "refs/".into(),
+                    },
+                )?
+            }
+            ReaderView::Public => Operation::new(
+                self.repo.clone(),
+                Principal::Anonymous,
+                None,
+                OpKind::ListRefs {
+                    prefix: "refs/".into(),
+                },
+            ),
+        };
+        let repository = if self.repo.namespace == crate::NamespaceKey::deployment_default() {
+            self.repo.name.as_str().to_owned()
+        } else {
+            format!(
+                "{}/{}",
+                self.repo.namespace.as_str(),
+                self.repo.name.as_str()
+            )
+        };
+        let now = self.pipe.clock.now_ms();
+        let mut issued = Vec::with_capacity(targets.len());
+        for target in targets {
+            calls.charge().map_err(failure)?;
+            calls.charge().map_err(failure)?;
+            op.kind = OpKind::IssueObjectUrl {
+                target: target.clone(),
+                ttl_seconds: ttl_s,
+            };
+            issued.push(
+                match self
+                    .pipe
+                    .issue_url(&op, &repository, target, ttl_s, now)
+                    .await
+                {
+                    Ok(token) => Some(token),
+                    Err(e)
+                        if matches!(
+                            e.code(),
+                            Code::NotFound | Code::PermissionDenied | Code::Unauthenticated
+                        ) =>
+                    {
+                        None
+                    }
+                    Err(e) => return Err(e),
+                },
+            );
+        }
+        let meta = Budgeted::new(&self.pipe.meta, &calls);
+        let blobs = Budgeted::new(&self.pipe.blobs, &calls);
+        let view = ViewStore {
+            store: &meta,
+            repo: &self.repo,
+            writer: false,
+            policy: self.pipe.publication_policy.as_deref(),
+        };
+        let env = Env {
+            no_reads: &BTreeSet::new(),
+            blobs: &blobs,
+            meta: &view,
+            shards: self.pipe.shards.as_ref(),
+            repo: &self.repo,
+            indexed: self.indexed,
+            cfg: self.cfg,
+            metrics: self.pipe.metrics.as_ref(),
+        };
+        let mut decode = Budget(self.cfg.http_decode_budget);
+        let mut ids = Vec::with_capacity(targets.len());
+        for (target, token) in targets.iter().zip(&issued) {
+            if token.is_none() {
+                ids.push(None);
+                continue;
+            }
+            let id = match target {
+                UrlTarget::Object(id) => Some(*id),
+                UrlTarget::Path { reference, path } => {
+                    let shard = self.pipe.shards.ref_shard(&self.repo, reference);
+                    let tip =
+                        crate::store::read::read_ref(&view, &shard, &self.repo.name, reference)
+                            .await
+                            .map_err(failure)?;
+                    if let Some(tip) = tip {
+                        let path = if path.is_empty() {
+                            Vec::new()
+                        } else {
+                            path.split('/').map(|p| p.as_bytes().to_vec()).collect()
+                        };
+                        match resolve::resolve_ref(&env, tip, &path, &mut decode).await {
+                            Ok(resolved) => Some(resolved.leaf),
+                            Err(resolve::Miss::NotFound | resolve::Miss::Capped) => None,
+                            Err(miss) => return Err(failure(miss)),
+                        }
+                    } else {
+                        None
+                    }
+                }
+            };
+            ids.push(id);
+        }
+        let leaves = ids.iter().flatten().copied().collect::<Vec<_>>();
+        let (_, sizes) = self
+            .batch_with_budget(
+                &leaves,
+                true,
+                &calls,
+                false,
+                &BTreeSet::new(),
+                &mut decode,
+                true,
+            )
+            .await?;
+        Ok(ids
+            .into_iter()
+            .zip(issued)
+            .map(|(id, token)| id.filter(|id| sizes.contains_key(id)).and(token))
+            .collect())
+    }
     async fn batch(&self, ids: &[Hash], sizes_only: bool) -> Result<Prefetched, ServerError> {
         if ids.len() > OBJECT_READER_BATCH {
             return Err(ServerError::invalid_argument("batch exceeds 16 ids"));
@@ -160,15 +315,36 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             }
             other => other?,
         };
+        self.batch_with_budget(
+            ids,
+            sizes_only,
+            &calls,
+            writer,
+            &if sizes_only {
+                ids.iter().copied().collect()
+            } else {
+                BTreeSet::new()
+            },
+            &mut Budget(self.cfg.http_decode_budget),
+            false,
+        )
+        .await
+    }
+    #[allow(clippy::too_many_lines)] // One bounded authorization/resolution pass, in precedence order.
+    async fn batch_with_budget(
+        &self,
+        ids: &[Hash],
+        sizes_only: bool,
+        calls: &SliceBudget,
+        writer: bool,
+        forbidden: &BTreeSet<Hash>,
+        decode: &mut Budget,
+        capped_as_absent: bool,
+    ) -> Result<Prefetched, ServerError> {
         let pipe = self.pipe;
         let (cfg, indexed, seams) = (self.cfg, self.indexed, self.seams);
-        let meta = Budgeted::new(&pipe.meta, &calls);
-        let blobs = Budgeted::new(&pipe.blobs, &calls);
-        let forbidden = if sizes_only {
-            ids.iter().copied().collect()
-        } else {
-            BTreeSet::new()
-        };
+        let meta = Budgeted::new(&pipe.meta, calls);
+        let blobs = Budgeted::new(&pipe.blobs, calls);
         let view = ViewStore {
             store: &meta,
             repo: &self.repo,
@@ -176,7 +352,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             policy: pipe.publication_policy.as_deref(),
         };
         let env = Env {
-            no_reads: &forbidden,
+            no_reads: forbidden,
             blobs: &blobs,
             meta: &view,
             shards: pipe.shards.as_ref(),
@@ -185,9 +361,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             cfg,
             metrics: pipe.metrics.as_ref(),
         };
-        let mut decode = Budget(cfg.http_decode_budget);
-        let located = resolve::locate_many(&env, ids).await.map_err(failure)?;
-        let mut targets = located.iter().map(|(id, _)| *id).collect::<BTreeSet<_>>();
+        let mut located = if capped_as_absent {
+            Vec::new()
+        } else {
+            resolve::locate_many(&env, ids).await.map_err(failure)?
+        };
+        // Issuance proves missing IDs too: proof cost must not expose membership.
+        let mut targets = if capped_as_absent {
+            ids.iter().copied().collect::<BTreeSet<_>>()
+        } else {
+            located.iter().map(|(id, _)| *id).collect::<BTreeSet<_>>()
+        };
         let mut reached = BTreeSet::new();
         if !writer && !pipe.cfg.takedown_denial {
             for id in &targets {
@@ -207,19 +391,33 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .reader_tips(&meta, &self.repo, cfg.max_walk_objects, writer)
                 .await
                 .map_err(|e| http_failure(&e))?;
-            if truncated && sizes_only {
+            if truncated && sizes_only && !capped_as_absent {
                 return Err(failure(resolve::Miss::Capped));
             }
             if !truncated {
                 let (found, incomplete) =
-                    reach::walk_many(&env, seams.takedown.as_ref(), &tips, &targets, &mut decode)
+                    reach::walk_many(&env, seams.takedown.as_ref(), &tips, &targets, decode)
                         .await
                         .map_err(failure)?;
-                if sizes_only && incomplete == Some(resolve::Miss::Capped) {
+                if sizes_only && !capped_as_absent && incomplete == Some(resolve::Miss::Capped) {
                     return Err(failure(resolve::Miss::Capped));
                 }
                 reached.extend(found);
             }
+        }
+        if capped_as_absent {
+            // Do not locate inaccessible targets: membership-dependent work can
+            // distinguish a stored orphan from a missing ID near the call cap.
+            let mut accessible = Vec::new();
+            for id in &reached {
+                if !denied(&meta, id).await.map_err(failure)? {
+                    accessible.push(*id);
+                }
+            }
+            reached = accessible.iter().copied().collect();
+            located = resolve::locate_many(&env, &accessible)
+                .await
+                .map_err(failure)?;
         }
         let blocked = if pipe.cfg.takedown_denial && !reached.is_empty() {
             object_denials(&view, pipe.shards.as_ref(), &self.repo, &reached, indexed).await?
@@ -277,7 +475,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     .ok_or_else(|| failure(resolve::Miss::Unavailable))?;
                 sizes.insert(id, size);
             } else {
-                match resolve::load(&env, id, located, &mut decode).await {
+                match resolve::load(&env, id, located, decode).await {
                     Ok(canonical) if resolve::type_of(&canonical) != Some(ObjectType::Delta) => {
                         bytes.insert(id, canonical.to_vec());
                     }

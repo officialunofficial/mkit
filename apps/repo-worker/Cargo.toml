@@ -104,3 +104,7 @@ tokio = { version = "1", features = ["macros", "rt"] }
 [profile.release]
 opt-level = "s"
 lto = true
+
+# Bound pure-Rust decoding in this independent workspace too.
+[patch.crates-io]
+ruzstd = { path = "../../rust/vendor/ruzstd" }
