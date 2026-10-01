@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{DoConfig, Loopback};
+use common::{DoConfig, Loopback, retained_timer_backoff};
 use futures::executor::block_on;
 use mkit_server::pipeline::{D34Shards, ShardMap};
 use mkit_server::sql::SqlKvStore;
@@ -88,10 +88,23 @@ fn rollup_is_registered_on_the_classes_that_hold_quota_rows_only() {
                 assert_eq!(report.unknown, 0, "{class:?}");
             } else {
                 assert_eq!(report.unknown, 1, "{class:?}");
+                let wake =
+                    retained_timer_backoff(&source, &partition, &registry, &key, &value, true)
+                        .await;
+                let recovered = timer_registry(ShardClass::RefShard, Ok(target.clone()), None);
+                let report = run_due(
+                    &source,
+                    &partition,
+                    &recovered,
+                    &ManualClock::new(i64::try_from(wake).unwrap()),
+                    wake,
+                    &TickBudget::default(),
+                )
+                .await
+                .unwrap();
                 assert_eq!(
-                    source.get(&partition, &key).await.unwrap(),
-                    Some(value),
-                    "{class:?} must keep the row it cannot fire"
+                    report.fired, 1,
+                    "{class:?} retained work must fire once registered"
                 );
             }
         }
@@ -129,10 +142,25 @@ fn rollup_config_failure_retries_the_stored_timer() {
             // Retained with backoff, not dropped and not "unknown".
             assert_eq!(report.failed, 1, "{class:?}");
             assert_eq!(report.unknown, 0, "{class:?}");
+            assert_eq!(report.next_wake_ms, Some(5_100));
+            let wake =
+                retained_timer_backoff(&source, &partition, &registry, &key, &value, false).await;
+            let dir = tempfile::tempdir().unwrap();
+            let target = Loopback::store(dir.path().to_path_buf(), DoConfig::default());
+            let recovered = timer_registry(class, Ok(target), Some("free"));
+            let report = run_due(
+                &source,
+                &partition,
+                &recovered,
+                &ManualClock::new(i64::try_from(wake).unwrap()),
+                wake,
+                &TickBudget::default(),
+            )
+            .await
+            .unwrap();
             assert_eq!(
-                source.get(&partition, &key).await.unwrap(),
-                Some(value),
-                "{class:?}"
+                report.fired, 1,
+                "{class:?} retained work must fire after repair"
             );
         }
     });

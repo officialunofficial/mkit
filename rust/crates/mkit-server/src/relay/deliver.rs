@@ -207,7 +207,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                 .saturating_add(if dispatch.delivered.is_empty() {
                     RETRY_BACKOFF_MS
                 } else {
-                    0
+                    1
                 })
                 .max(timer.due_at_ms.saturating_add(1));
             Ok(Fired::Reschedule {

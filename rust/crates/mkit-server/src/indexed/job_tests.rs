@@ -430,14 +430,16 @@ impl Rig {
         self.tick_on(self.store.as_ref())
     }
 
-    /// Alarms, one second apart, until `done` holds.
+    /// Follow the driver's wakes, including persisted failure backoff.
     fn drive_on<S: NamespaceStore>(&self, store: &S, mut done: impl FnMut(&Self) -> bool) -> u32 {
         for tick in 0..3_000 {
             if done(self) {
                 return tick;
             }
-            self.tick_on(store);
-            self.clock.advance(1_000);
+            let now = u64::try_from(self.clock.now_ms()).unwrap();
+            let report = self.tick_on(store);
+            let next = report.next_wake_ms.unwrap_or(now + 1_000).max(now + 1);
+            self.clock.set(i64::try_from(next).unwrap());
         }
         panic!("job did not finish");
     }
@@ -535,6 +537,44 @@ impl Rig {
         block_on(self.store.scan(&self.source(), &start, &end, None, 10_000))
             .unwrap()
             .entries
+    }
+
+    fn verification_timer(&self, pack: &Hash) -> (Key, Value) {
+        let (start, end) = keys::class_range(keys::TAG_TIMER);
+        let reference = checkpoint::timer_reference(&self.repo.name, pack);
+        let page = block_on(self.store.scan(&self.source(), &start, &end, None, 10_000)).unwrap();
+        let mut timers = page.entries.into_iter().filter(|(key, _)| {
+            matches!(keys::parse(key), Some(keys::ParsedKey::Timer {
+                kind: 7, reference: observed, ..
+            }) if observed.as_ref() == reference.as_slice())
+        });
+        let timer = timers.next().expect("verification work retains its timer");
+        assert!(
+            timers.next().is_none(),
+            "verification timer is never duplicated"
+        );
+        timer
+    }
+
+    fn assert_verification_backoff(&self, pack: &Hash, previous: (Key, Value), now: u64) {
+        let (old_key, payload) = previous;
+        let (original_due, attempt) = keys::timer_retry_state(&old_key).unwrap();
+        let next_attempt = (attempt + 1).min(keys::MAX_TIMER_RETRY_ATTEMPT);
+        let delay = (crate::timers::RETRY_BACKOFF_MS * (1_u64 << (next_attempt - 1)))
+            .min(crate::timers::MAX_RETRY_BACKOFF_MS);
+        let expected = keys::timer_retry(
+            now + delay,
+            7,
+            &checkpoint::timer_reference(&self.repo.name, pack),
+            original_due,
+            next_attempt,
+        );
+        assert_eq!(self.verification_timer(pack), (expected, payload));
+        assert!(
+            block_on(self.store.get(&self.source(), &old_key))
+                .unwrap()
+                .is_none()
+        );
     }
 }
 
@@ -813,9 +853,11 @@ fn killed_slices_shrink_the_entry_cap_and_end_in_a_terminal_outcome_not_a_reject
     let (ticket, id) = rig.add(&pack);
     rig.create(&ticket, id);
     *rig.windows.fail.lock().unwrap() = true;
+    let payload = rig.verification_timer(&ticket.pack_id).1;
     let caps = Mutex::new(Vec::new());
     rig.drive(|rig| {
         let job = rig.job(&ticket.pack_id).unwrap();
+        assert_eq!(rig.verification_timer(&ticket.pack_id).1, payload);
         caps.lock().unwrap().push((job.entry_cap, job.attempts));
         job.outcome.is_some()
     });
@@ -2301,13 +2343,23 @@ fn interrupted_closure_and_recheck_slices_shrink_then_end_terminal() {
             inventory_guard: None,
         };
         let mut caps = BTreeSet::new();
+        let (first_key, _) = rig.verification_timer(&ticket.pack_id);
+        let Some(keys::ParsedKey::Timer { due_at_ms, .. }) = keys::parse(&first_key) else {
+            panic!("verification timer key");
+        };
+        rig.clock.set(i64::try_from(due_at_ms).unwrap());
         for _ in 0..12 {
             // Commit the attempt marker, then interrupt before progress commits.
             faulty
                 .fail_at
                 .store(faulty.applies.load(Ordering::SeqCst) + 2, Ordering::SeqCst);
-            rig.tick_on(&faulty);
-            rig.clock.advance(5_000);
+            let now = u64::try_from(rig.clock.now_ms()).unwrap();
+            let previous = rig.verification_timer(&ticket.pack_id);
+            let report = rig.tick_on(&faulty);
+            assert_eq!((report.failed, report.fired), (1, 0));
+            rig.assert_verification_backoff(&ticket.pack_id, previous, now);
+            let next = report.next_wake_ms.unwrap().max(now + 1);
+            rig.clock.set(i64::try_from(next).unwrap());
             let job = rig.job(&ticket.pack_id).unwrap();
             caps.insert(job.closure_cap);
             if job.outcome.is_some() {
