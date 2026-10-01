@@ -46,8 +46,10 @@ repair carried forward by the orchestrator from PR #1249.
 
 ## Adapter handoff to 4.18
 
-Attach the configured Work runtime to Engine::with_operations (it delegates
-Takedown acceptance/resume to the existing Service). On the protected Worker
+Delegate Takedown and the restricted catalog to the configured Work runtime
+within the existing Engine::with_operations dispatcher, preserving its other
+operations (including PurgeCache). Forward preserved_piece/preserved_now_ms to
+Work as well; Work delegates Takedown acceptance/resume to Service. On the protected Worker
 admin mount, invoke Arc<Engine>::handle_streamed, supplying separately decoded
 bytes when appropriate while signing the exact wire body. Reply::Unary uses the
 existing response adapter. Reply::Stream is an application/connect+json HTTP 200
