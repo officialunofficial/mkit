@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use ed25519_dalek::{Signature, VerifyingKey};
 use mkit_core::hash::{hash, to_hex};
 use serde::Deserialize;
+use subtle::ConstantTimeEq;
 
 use crate::{ServerError, auth_v2};
 
@@ -157,7 +158,8 @@ impl Config {
         now: i64,
     ) -> Result<Verified, ServerError> {
         let verified = self.verify_envelope(path, headers, now)?;
-        if verified.digest != body.digest() {
+        let body_digest = body.digest();
+        if !bool::from(verified.digest.as_bytes().ct_eq(body_digest.as_bytes())) {
             return Err(unauth("invalid admin envelope"));
         }
         Ok(verified)
