@@ -3040,3 +3040,41 @@ mod scheduled_reclaim_tests;
 
 #[path = "header_tests.rs"]
 mod header_tests;
+
+#[cfg(feature = "pack-ruzstd")]
+#[test]
+fn fifty_in_pack_deltas_keep_cold_slice_progress_and_call_budget() {
+    let mut rig = Rig::new();
+    rig.limits = SliceLimits::default();
+    rig.cfg.max_delta_chain_depth = 50;
+    rig.cfg.extract_min_bytes = 8 << 20;
+    let mut object = Object::Blob(Blob {
+        data: vec![7; (1 << 20) - 64],
+    });
+    let mut canonical = serialize(&object).unwrap();
+    let mut id = hash(&canonical);
+    let mut writer = PackWriter::new();
+    writer.push_raw(id, &canonical).unwrap();
+    for tag in 1..=50 {
+        let Object::Blob(blob) = &mut object else {
+            unreachable!()
+        };
+        blob.data[0] = tag;
+        let next = serialize(&object).unwrap();
+        writer
+            .push_delta(&id, &mkit_core::delta::encode(&canonical, &next).unwrap())
+            .unwrap();
+        canonical = next;
+        id = hash(&canonical);
+    }
+    let pack = writer.finish().unwrap();
+    let (ticket, ticket_id) = rig.add(&pack);
+    rig.create(&ticket, ticket_id);
+    rig.drive(|rig| rig.finished(&ticket.pack_id));
+    let job = rig.job(&ticket.pack_id).unwrap();
+    assert_eq!(job.entries, 51);
+    assert_eq!(job.outcome, None);
+    assert!(job.usable());
+    let spent = rig.recorder.slices.lock().unwrap().clone();
+    assert!(spent.iter().all(|used| *used <= 256.0), "{spent:?}");
+}
