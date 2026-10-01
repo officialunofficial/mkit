@@ -218,14 +218,14 @@ def main():
                         "mkit-server-conformance"], ROOT / "rust", run / "runner-build.log", env, evidence)
         runner = ROOT / "rust/target/debug/mkit-server-conformance"
         evidence["runner_sha256"] = runtime.digest(runner)
-        runtime.invoke(["worker-build", "--release", "--features", "http-objects,signed-http-hooks"],
+        runtime.invoke(["worker-build", "--release", "--features", "http-objects,signed-http-hooks,pack-ruzstd"],
                        APP, run / "worker-build.log", env, evidence)
         artifact = run / "artifact"
         shutil.copytree(APP / "build", artifact)
         for name in ["index.js", "index_bg.wasm", "worker/shim.mjs"]:
             if not (artifact / name).is_file():
                 raise RuntimeError("incomplete release artifact: " + name)
-        evidence["artifact"] = {"features": ["http-objects", "signed-http-hooks"],
+        evidence["artifact"] = {"features": ["http-objects", "signed-http-hooks", "pack-ruzstd"],
             "sha256": {str(path.relative_to(artifact)): runtime.digest(path)
                        for path in artifact.rglob("*") if path.is_file()},
             "wasm_raw_bytes": (artifact / "index_bg.wasm").stat().st_size}

@@ -260,9 +260,9 @@ def main():
         modes = ["minimal", "http"] if args.mode == "both" else [args.mode]
         namespaces = ["allowlist", "any"] if args.namespace == "both" else [args.namespace]
         for mode in modes:
-            build = ["worker-build", "--release"]
+            build = ["worker-build", "--release", "--features", "pack-ruzstd"]
             if mode == "http":
-                build += ["--features", "http-objects"]
+                build[-1] += ",http-objects"
             invoke(build, APP, run / (mode + "-build.log"), env, evidence)
             artifact = run / (mode + "-artifact")
             # The shim imports ../index.js, which loads ../index_bg.wasm.
@@ -278,7 +278,7 @@ def main():
             if not wasm_bytes.startswith(b"\0asm"):
                 raise RuntimeError("worker-build emitted an invalid wasm artifact")
             evidence.setdefault("artifacts", {})[mode] = {
-                "features": [] if mode == "minimal" else ["http-objects"], "sha256": hashes,
+                "features": ["pack-ruzstd"] if mode == "minimal" else ["http-objects", "pack-ruzstd"], "sha256": hashes,
                 "wasm_raw_bytes": len(wasm_bytes),
                 "wasm_gzip_bytes": len(gzip.compress(wasm_bytes, compresslevel=9, mtime=0))}
             for namespace in namespaces:

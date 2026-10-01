@@ -268,7 +268,7 @@ def main():
     runner = ROOT / 'rust/target/debug/mkit-server-conformance'
     evidence = {'candidate_sha': head, 'tree_sha': git('rev-parse', 'HEAD^{tree}'),
                 'base_sha': git('rev-parse', 'origin/feat/mkit-server'), 'wrangler': WRANGLER,
-                'features': ['http-objects'], 'commands': [], 'checks': [], 'result': 'RUNNING',
+                'features': ['http-objects', 'pack-ruzstd'], 'commands': [], 'checks': [], 'result': 'RUNNING',
                 'limitations': ['Controlled bridge cancellation is distinct from TCP disconnect',
                                 'No internal operation counters or arbitrary storage-failure injection',
                                 'Reconcile timeout race remains separate from completed read retry/restart']}
@@ -288,7 +288,7 @@ def main():
         if not args.no_build:
             invoke(['cargo', 'build', '--locked', '-p', 'mkit-server-conformance', '--bin',
                     'mkit-server-conformance'], run / 'runner-build.log')
-            invoke(['worker-build', '--release', '--features', 'http-objects'],
+            invoke(['worker-build', '--release', '--features', 'http-objects,pack-ruzstd'],
                    run / 'worker-build.log', APP)
         check(runner.is_file(), 'build the conformance runner first')
         evidence['runner_sha256'] = digest(runner)

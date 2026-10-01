@@ -140,10 +140,10 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence):
                 tap = folder / "producer.tap"
                 runtime.invoke([str(runner), "wire", "--base-url", origin, *auth, "--atomic-advance", "--fresh-target",
                     "--milestone", "M4", "--sharding", "d34", "--max-pack-bytes", "1073741824", "--features",
-                    "indexed-async,indexed-mode,multi-repo,tickets,timers,http-objects", "--filter", runtime.REQUIRED_CASE],
+                    "indexed-async,indexed-mode,multi-repo,tickets,timers,http-objects", "--filter", "launch.admin_fixture"],
                     ROOT, tap, env, evidence)
                 check(re.findall(r"^(ok|not ok) \d+ - ([^\n]+)", tap.read_text(), re.MULTILINE) ==
-                      [("ok", runtime.REQUIRED_CASE)], "release producer failed/skipped")
+                      [("ok", "launch.admin_fixture")], "release producer failed/skipped")
                 note = dict(re.findall(r"([a-z_]+)=([^\s]+)", tap.read_text()))
                 object_id = base64.b64encode(bytes.fromhex(note["extracted_blob"])).decode()
                 object_path = f"/{note['repository']}/-/objects/{note['extracted_blob']}"
@@ -207,6 +207,15 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence):
                           item["body"]["objectIds"] == [object_id] and
                           item["body"]["trigger"] == "CACHE_PURGE_TRIGGER_MANUAL" for item in delivered),
                       "manual purge scope/selectors/trigger differs")
+                deadline = time.monotonic() + 90
+                while True:
+                    completion = admin(origin, "ReadAuditLog", {"fromSeq": "1", "pageSize": 100},
+                                       env, transcript, streamed=True)
+                    if any(entry["procedure"] == "system:timer/PurgeCacheComplete" and
+                           entry.get("targets") == [purge["purgeId"]] for entry in completion[0]["entries"]):
+                        break
+                    check(time.monotonic() < deadline, "manual purge completion audit absent")
+                    time.sleep(1)
                 entries, start, frozen_head = [], 1, None
                 while frozen_head is None or start <= frozen_head:
                     audit = admin(origin, "ReadAuditLog", {"fromSeq": str(start), "pageSize": 100},
@@ -230,7 +239,7 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence):
                 result["checks"] = ["seven independently signed release operations", "moderation/audit role separation",
                     "global public denial after acceptance", "verified private preservation stream and exact final offsets",
                     "hold set/clear status", "bounded List null/empty/repository scopes and invalid size",
-                    "signed HTTPS purge transport mapping", "gapless accepted audit", "deferred catalog absent"]
+                    "signed HTTPS purge transport mapping and correlated completion audit", "gapless accepted audit", "deferred catalog absent"]
                 result["result"] = "PASS"
         finally:
             (folder / "admin-transcript.json").write_text(json.dumps(transcript, indent=2) + "\n")

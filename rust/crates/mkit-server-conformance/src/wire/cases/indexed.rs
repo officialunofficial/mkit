@@ -175,9 +175,16 @@ fn large_pack() -> Result<(Vec<u8>, Hash), Failure> {
 }
 
 fn verification_pack(extracted: Option<&[u8]>) -> Result<(Vec<u8>, Hash), Failure> {
+    verification_pack_entries(extracted, 720)
+}
+
+fn verification_pack_entries(
+    extracted: Option<&[u8]>,
+    count: u32,
+) -> Result<(Vec<u8>, Hash), Failure> {
     let mut writer = PackWriter::new_raw_only();
     let mut entries = Vec::new();
-    for n in 0..720_u32 {
+    for n in 0..count {
         let data: Vec<u8> = (0..50_000_u32)
             .map(|i| {
                 u8::try_from((i.wrapping_mul(31) ^ n.wrapping_mul(2_654_435_761)) & 0xff)
@@ -263,6 +270,10 @@ async fn commit_large_pack(ctx: &Ctx, pack: &[u8], head: Hash) -> Result<(String
         pack.len() > 33 << 20,
         "suite bug: the pack fits two windows"
     );
+    commit_pack(ctx, pack, head).await
+}
+
+async fn commit_pack(ctx: &Ctx, pack: &[u8], head: Hash) -> Result<(String, u32), Failure> {
     let (repository, advance) = ticketed_advance(ctx, pack, head, "async").await?;
     let mut pending = 0;
     for _ in 0..240 {
@@ -444,15 +455,32 @@ pub(super) async fn inspection_rejects_advance(ctx: Ctx) -> CaseResult {
 /// scheduled verification/extraction, public paired refs and exact pack bytes.
 /// The HTTP opt-in additionally proves the extracted bytes and proof refusal.
 pub(super) async fn launch_verification_commits(ctx: Ctx) -> CaseResult {
+    launch_verified_fixture(ctx, true).await
+}
+
+/// Bounded setup for preservation/admin checks; the large-pack case stays separate.
+pub(super) async fn launch_admin_fixture(ctx: Ctx) -> CaseResult {
+    launch_verified_fixture(ctx, false).await
+}
+
+async fn launch_verified_fixture(ctx: Ctx, large: bool) -> CaseResult {
     let data: Vec<_> = (0..131_072_u32)
         .map(|i| u8::try_from((i.wrapping_mul(17) ^ (i >> 9)) & 0xff).unwrap_or(0))
         .collect();
     let extracted = Object::Blob(mkit_core::object::Blob { data: data.clone() })
         .id()
         .map_err(|e| format!("extracted id: {e}"))?;
-    let (pack, head) = verification_pack(Some(&data))?;
+    let (pack, head) = if large {
+        verification_pack(Some(&data))?
+    } else {
+        verification_pack_entries(Some(&data), 0)?
+    };
     let pack_id = hash(&pack);
-    let (repository, pending) = commit_large_pack(&ctx, &pack, head).await?;
+    let (repository, pending) = if large {
+        commit_large_pack(&ctx, &pack, head).await?
+    } else {
+        commit_pack(&ctx, &pack, head).await?
+    };
     super::visibility::set_envelope(&ctx, &ctx.v2_signer("repository-a")?, &repository, false)
         .await?;
 

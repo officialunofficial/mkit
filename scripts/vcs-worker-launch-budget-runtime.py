@@ -245,7 +245,7 @@ def main():
             "mkit-server-conformance"], ROOT / "rust", run / "runner-build.log", env, evidence)
         runner = ROOT / "rust/target/debug/mkit-server-conformance"
         evidence["runner_sha256"] = runtime.digest(runner)
-        runtime.invoke(["worker-build", "--release", "--features", "http-objects"],
+        runtime.invoke(["worker-build", "--release", "--features", "http-objects,pack-ruzstd"],
             runtime.APP, run / "worker-build.log", env, evidence)
         artifact = run / "artifact"
         shutil.copytree(runtime.APP / "build", artifact)
