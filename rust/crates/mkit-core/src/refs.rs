@@ -1245,8 +1245,30 @@ fn sequential_read_batch(candidates: &[RefCandidate]) -> Vec<RefReadOutcome> {
 /// can't drift between a sequential and a parallel caller.
 #[must_use]
 pub fn read_ref_candidate(candidate: &RefCandidate) -> RefReadOutcome {
-    match fs::read(&candidate.path) {
-        Ok(bytes) => RefReadOutcome::Decoded(decode_ref_wire(&bytes)),
+    use std::io::Read;
+
+    // A valid ref is HEX_LEN bytes plus optional trailing whitespace, and
+    // ref files are written whole and renamed into place (never appended
+    // to), so one `read` into a stack buffer sees the entire file. This is
+    // open+read+close, versus `fs::read`'s extra size-hint `statx` and
+    // EOF-probe `read` — the dominant per-ref cost when listing thousands.
+    // A file that fills the buffer is oversized and falls back to the
+    // unbounded `fs::read`, so the malformed-content policy is unchanged.
+    let mut buf = [0u8; 256];
+    let read = fs::File::open(&candidate.path).and_then(|mut f| {
+        loop {
+            match f.read(&mut buf) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                r => break r,
+            }
+        }
+    });
+    match read {
+        Ok(n) if n < buf.len() => RefReadOutcome::Decoded(decode_ref_wire(&buf[..n])),
+        Ok(_) => match fs::read(&candidate.path) {
+            Ok(bytes) => RefReadOutcome::Decoded(decode_ref_wire(&bytes)),
+            Err(_) => RefReadOutcome::Unreadable,
+        },
         Err(_) => RefReadOutcome::Unreadable,
     }
 }
