@@ -276,7 +276,7 @@ pub fn plan_enqueue(
         .checked_add(1)
         .ok_or_else(|| invalid("purge generation overflow"))?
         .max(now_ms);
-    Ok(Batch::new()
+    let mut batch = Batch::new()
         .require(Precondition::Absent(key.clone()))
         .require(guard(keys::outcome_backlog(), backlog))
         .require(guard(fence_key.clone(), prior_generation))
@@ -290,7 +290,20 @@ pub fn plan_enqueue(
                 request.purge_id.as_bytes(),
             ),
             Value::default(),
-        ))
+        );
+    if count.rows == 1 {
+        // Purges and terminal outcomes share oc: its first producer owns
+        // the kind-8 wake, even when no outcome exists yet.
+        batch = batch.put(
+            keys::timer(
+                now_ms,
+                crate::timers::registry::kinds::OUTCOME_DELIVERY.get(),
+                b"",
+            ),
+            Value::default(),
+        );
+    }
+    Ok(batch)
 }
 /// Read accepted work for immediate request-side local invalidation.
 pub async fn read_request<S: crate::NamespaceStore>(

@@ -62,7 +62,7 @@ fn purge_body() -> serde_json::Value {
     json!({"operationId":"operation-1","repository":"root/repo","reason":"manual","operatorLabel":"on-call"})
 }
 
-async fn purge_timers(store: &MemoryKv) -> Vec<(crate::Key, Value)> {
+async fn all_timers(store: &MemoryKv) -> Vec<(crate::Key, Value)> {
     store
         .scan(
             &partition(),
@@ -74,6 +74,19 @@ async fn purge_timers(store: &MemoryKv) -> Vec<(crate::Key, Value)> {
         .await
         .unwrap()
         .entries
+}
+
+async fn purge_timers(store: &MemoryKv) -> Vec<(crate::Key, Value)> {
+    all_timers(store)
+        .await
+        .into_iter()
+        .filter(|(key, _)| {
+            matches!(
+                crate::store::keys::parse(key),
+                Some(crate::store::keys::ParsedKey::Timer { kind: 11, .. })
+            )
+        })
+        .collect()
 }
 
 #[tokio::test]
@@ -94,6 +107,21 @@ async fn manual_purge_acceptance_is_durable_and_operation_replay_cannot_duplicat
         .unwrap();
     assert_eq!(pending.repository, "root/repo");
     assert_eq!(pending.trigger, crate::purge::Trigger::Manual);
+    let kinds: Vec<_> = all_timers(&store)
+        .await
+        .iter()
+        .map(|(key, _)| {
+            let Some(keys::ParsedKey::Timer { kind, .. }) = keys::parse(key) else {
+                panic!("timer key expected");
+            };
+            kind
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [8, 11],
+        "shared backlog wake and purge delivery are both durable"
+    );
     let timers = purge_timers(&store).await;
     assert_eq!(timers.len(), 1);
     assert!(
@@ -282,7 +310,7 @@ async fn manual_purge_completion_is_audited_only_after_durable_global_acknowledg
         &registry(),
         &clock,
         100,
-        &TickBudget::new(1, 1, 16, 1000),
+        &TickBudget::new(2, 2, 32, 1000),
     )
     .await
     .unwrap();
@@ -311,7 +339,7 @@ async fn manual_purge_completion_is_audited_only_after_durable_global_acknowledg
         &registry(),
         &clock,
         due_at_ms,
-        &TickBudget::new(1, 1, 16, 1000),
+        &TickBudget::new(2, 2, 32, 1000),
     )
     .await
     .unwrap();
@@ -374,7 +402,7 @@ async fn manual_purge_completion_is_audited_only_after_durable_global_acknowledg
         &registry(),
         &clock,
         due_at_ms,
-        &TickBudget::new(1, 1, 16, 1000),
+        &TickBudget::new(2, 2, 32, 1000),
     )
     .await
     .unwrap();

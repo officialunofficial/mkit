@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: align the receipt-golden test SHA-256 dependency with the repository
+  sha2 0.11 crypto channel (launch review 12-2).
+
+- Server: a purge that creates positive shared backlog also schedules the
+  existing outcome-delivery wake, so later paid read outcomes survive purge
+  completion, reconciliation and restart (launch review 3-1).
+
 - Server: completed identical Takedown retries replay their stored response
   after role changes. ReadPreserved retains fresh role and retention checks
   on every retry (launch review 7b-1).

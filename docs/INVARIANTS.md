@@ -1396,8 +1396,9 @@ marker records `Aborted(PACK_MISSING)` in a separate guarded batch before the
 advance fails. A missing marker leaves the ticket open. Terminal outcomes stay
 durable until acknowledgement, which deletes their delivery index and subtracts
 the exact stored key/value byte count. Shared counters and sequence/backlog
-values are guarded once per batch. A zero-to-positive backlog transition adds
-one kind-8 delivery kick; delivery may repeat but never drops an unacked row.
+values are guarded once per batch. A zero-to-positive backlog transition, including
+one first created by a cache purge, atomically adds one kind-8 delivery kick;
+delivery may repeat but never drops an unacked row.
 A positive backlog keeps exactly one kind-8 row. Delivery decides completion
 from the same backlog snapshot its acknowledgment batch guards; concurrent
 appends either retain a rescheduled timer or fail that guard for re-planning.

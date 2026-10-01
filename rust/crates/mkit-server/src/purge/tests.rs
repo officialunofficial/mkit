@@ -262,3 +262,219 @@ async fn failed_global_delivery_remains_durable_and_restarts_with_identical_requ
         10
     );
 }
+
+#[derive(Default)]
+struct OutcomeCapture(std::sync::Mutex<Vec<crate::pipeline::Outcome>>);
+impl crate::pipeline::OutcomeSink for OutcomeCapture {
+    async fn deliver(
+        &self,
+        outcome: &crate::pipeline::Outcome,
+    ) -> Result<(), crate::pipeline::DeliveryError> {
+        self.0.lock().unwrap().push(outcome.clone());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn purge_first_outcome_survives_purge_completion_reconcile_and_restart() {
+    use crate::store::codec::{PendingOp, ReservationV1};
+    use crate::store::outbox::{OutboxBuilder, Terminal};
+    use crate::timers::{TickBudget, TimerRegistry, run_due};
+    use std::sync::{Arc, Mutex};
+    let clock = crate::ManualClock::new(10);
+    let store = MemoryKv::default();
+    // Visibility purge and paid HTTP read both use the namespace coordinator.
+    let ns = NamespaceKey::from_stored("0x1111111111111111111111111111111111111111".into());
+    let repository = format!("{}/repo", ns.as_str());
+    let p = Partition::Coordinator(ns);
+    let mut purge = request();
+    purge.repository.clone_from(&repository);
+    store
+        .apply(&p, plan_enqueue(&purge, 10, None, None).unwrap())
+        .await
+        .unwrap();
+    let prior = codec::encode_reservation(&ReservationV1::Pending {
+        repository: repository.clone(),
+        created_at_ms: 10,
+        reconcile_at_ms: 60010,
+        op: PendingOp::Read,
+    });
+    let mut batch = Batch::new();
+    let mut pending = OutboxBuilder::new(
+        None,
+        store
+            .get(&p, &keys::outcome_backlog())
+            .await
+            .unwrap()
+            .as_ref(),
+    )
+    .unwrap();
+    pending.pending(
+        "paid-read",
+        None,
+        &codec::decode_reservation(&prior).unwrap(),
+    );
+    pending
+        .try_finish(&mut batch.preconditions, &mut batch.writes)
+        .unwrap();
+    store.apply(&p, batch).await.unwrap();
+    let mut terminal = OutboxBuilder::new(
+        None,
+        store
+            .get(&p, &keys::outcome_backlog())
+            .await
+            .unwrap()
+            .as_ref(),
+    )
+    .unwrap();
+    terminal.outcome(
+        "paid-read",
+        &prior,
+        Terminal::new(ReservationV1::ReadServed {
+            repository: repository.clone(),
+            occurred_at_ms: 20,
+            object: [7; 32],
+            bytes_served: 123,
+        })
+        .unwrap(),
+    );
+    let mut batch = Batch::new();
+    terminal
+        .try_finish(&mut batch.preconditions, &mut batch.writes)
+        .unwrap();
+    batch.validate(&store.capabilities()).unwrap();
+    store.apply(&p, batch).await.unwrap();
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    for now in [20, 2020, 60010] {
+        clock.set(now);
+        // No outcome driver is alive before the final cold registry restart.
+        let registry = TimerRegistry::new()
+            .register(PurgeDelivery::new(
+                Arc::new(NoLocalCache),
+                Some(Arc::new(RetrySink(attempts.clone()))),
+                SliceBudget::new(16),
+            ))
+            .register(crate::timers::reservation_reconcile::ReservationReconcile);
+        run_due(
+            &store,
+            &p,
+            &registry,
+            &clock,
+            u64::try_from(now).unwrap(),
+            &TickBudget::new(32, 32, 128, 1000),
+        )
+        .await
+        .unwrap();
+    }
+    assert!(
+        read_request(&store, &p, &purge.purge_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        codec::decode_backlog(
+            &store
+                .get(&p, &keys::outcome_backlog())
+                .await
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap()
+        .rows,
+        1
+    );
+    assert!(matches!(
+        codec::decode_reservation(
+            &store
+                .get(&p, &keys::reservation("paid-read").unwrap())
+                .await
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap(),
+        ReservationV1::ReadServed {
+            bytes_served: 123,
+            ..
+        }
+    ));
+    let timers = store
+        .scan(
+            &p,
+            &crate::Key::new(b"w\0".to_vec()),
+            &crate::Key::new(b"w\x01".to_vec()),
+            None,
+            100,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !timers
+            .entries
+            .iter()
+            .any(|(k, _)| matches!(keys::parse(k), Some(keys::ParsedKey::Timer { kind: 9, .. })))
+    );
+    let sink = Arc::new(OutcomeCapture::default());
+    let registry =
+        TimerRegistry::new().register(crate::timers::outcome_delivery::OutcomeDelivery::new(
+            sink.clone(),
+            "https://server.example".into(),
+            Arc::new(crate::NoopMetrics),
+            Arc::new(crate::rt::ManualSleep::new()),
+        ));
+    clock.set(70010);
+    run_due(
+        &store,
+        &p,
+        &registry,
+        &clock,
+        70010,
+        &TickBudget::new(32, 32, 128, 1000),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        sink.0.lock().unwrap().len(),
+        1,
+        "purge-first backlog must not strand the paid terminal outcome after restart"
+    );
+    assert_eq!(sink.0.lock().unwrap()[0].reservation_id, "paid-read");
+    assert_eq!(
+        codec::decode_backlog(
+            &store
+                .get(&p, &keys::outcome_backlog())
+                .await
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap()
+        .rows,
+        0
+    );
+}
+
+#[test]
+fn zero_to_positive_purge_adds_one_outcome_kick_within_batch_budget() {
+    let first = plan_enqueue(&request(), 10, None, None).unwrap();
+    first.validate(&crate::StoreCapabilities::full()).unwrap();
+    let count = |batch: &Batch, kind| {
+        batch.writes.iter().filter(|w| matches!(w, crate::Write::Put(k, _) if matches!(keys::parse(k), Some(keys::ParsedKey::Timer { kind:k, .. }) if k == kind))).count()
+    };
+    assert_eq!(count(&first, 11), 1);
+    assert_eq!(
+        count(&first, 8),
+        1,
+        "purge owns the shared zero-to-positive delivery wake"
+    );
+    assert_eq!(first.preconditions.len() + first.writes.len(), 8);
+    let backlog = codec::encode_backlog(&codec::Backlog {
+        rows: 1,
+        bytes: 512,
+    });
+    let next = plan_enqueue(&request(), 11, Some(&backlog), None).unwrap();
+    assert_eq!(
+        count(&next, 8),
+        0,
+        "a positive backlog retains its existing kick"
+    );
+}
