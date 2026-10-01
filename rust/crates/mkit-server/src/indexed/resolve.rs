@@ -228,6 +228,7 @@ pub struct MemberCache {
     no_reads: BTreeSet<Hash>,
     rows: BTreeMap<Location, ResolvedMember>,
     retained_bytes: u64,
+    retain_latest: bool,
     remaining_work: Option<u32>,
     selection: Option<(crate::Partition, crate::Key)>,
 }
@@ -247,6 +248,23 @@ impl MemberCache {
         Self {
             remaining_work: Some(limit),
             ..Self::default()
+        }
+    }
+
+    /// A linear reconstruction only needs its newest canonical base. Keep
+    /// retention separate from decode admission so eviction cannot exhaust
+    /// the next frame's entry allowance.
+    pub(crate) fn retain_latest(&mut self) {
+        self.retain_latest = true;
+    }
+
+    fn available(&self, budget: u64) -> Result<u64, ServerError> {
+        if self.retain_latest {
+            Ok(budget)
+        } else {
+            budget
+                .checked_sub(self.retained_bytes)
+                .ok_or_else(budget_exceeded)
         }
     }
 
@@ -287,6 +305,12 @@ impl MemberCache {
         value: ResolvedMember,
         budget: u64,
     ) -> Result<(), ResolveFailure> {
+        if self.retain_latest {
+            // The caller still owns the current base until this decode ends;
+            // older intermediates have no remaining consumer in this chain.
+            self.rows.clear();
+            self.retained_bytes = 0;
+        }
         let used = self
             .retained_bytes
             .checked_add(value.0.len() as u64)
@@ -542,9 +566,7 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
                 return Err(ResolveFailure::Missing);
             }
         }
-        let available = budget
-            .checked_sub(memo.retained_bytes)
-            .ok_or_else(budget_exceeded)?;
+        let available = memo.available(budget)?;
         if let Some(value) = memo.rows.get(&location) {
             if value.1 > cap {
                 return Err(ServerError::invalid_argument("delta chain too deep").into());
@@ -602,9 +624,7 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
                     return Err(ServerError::invalid_argument("delta chain too deep").into());
                 }
             }
-            let available = budget
-                .checked_sub(memo.retained_bytes)
-                .ok_or_else(budget_exceeded)?;
+            let available = memo.available(budget)?;
             let frame = frame_bytes(
                 blobs,
                 located.pack,

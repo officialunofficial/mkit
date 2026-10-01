@@ -61,10 +61,14 @@ verified acquisition of every child payload and freshly verified preserved
 header pieces; it does not reread every child payload during closure. PR3 MUST
 freshly verify every piece actually emitted by ReadPreserved.
 
-The Worker allowance is conservative arithmetic for valid admitted geometry:
-1 MiB decoded entries, 16 MiB frame/read windows, 50 hops, 51 MiB retained chain and a
-96 MiB acquisition allowance. Allocator fixture measurements are separate from
-that arithmetic and do not establish whole-Worker RSS. R-203 bounds pure-Rust decoding with an 8 MiB zstd window and RFC per-block
+The Worker acquisition allowance is 48 MiB: a 16 MiB encoded payload +
+28 MiB R-203 decoder scratch + 1 MiB latest canonical base/memo + 1 MiB decoded
+stream + 2 MiB metadata headroom. The five-byte frame header fits that margin.
+The 50-hop chain retains only its latest intermediate; eviction does not reduce
+1 MiB per-entry admission. Range collection drops before decode, and decoder
+scratch drops before base copies, reconstruction, parsing and Arc conversion.
+Allocator fixture measurements are separate from that arithmetic and do not
+establish whole-Worker RSS. R-203 bounds pure-Rust decoding with an 8 MiB zstd window and RFC per-block
 preflight before materialization. Allocator regressions enforce output claim
 plus a fixed 28 MiB working allowance, including transient ring growth.
 Decoded corruption of a selected member is terminal and audited, with source

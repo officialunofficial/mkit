@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Worker preservation acquisition: bound scheduled reconstruction to 48 MiB
+  by evicting previous delta intermediates and retaining only the current base.
+  Preserve 50-hop, 1 MiB canonical chains, existing frame admission, corruption
+  checkpoints and the 700-call slice budget; inline profiles are unchanged.
+
 - Server (WP-4.18, phase 1, R-194): explicit Paid indexed Uno launch selection
   and startup validation for optional HTTP/URL tokens, signed hooks/binding,
   synchronous inspection and private scanner retrieval. Native serves proofs;
