@@ -9,9 +9,12 @@
 //! times, on a fresh ref each round, so a narrow race window has several
 //! chances to show.
 
+use buffa::Message as _;
 use futures::future::join_all;
 use mkit_core::hash::hash;
-use mkit_transport_connect::generated::{AdvanceOutcome, AdvanceRefsResponse, UpdateRefResponse};
+use mkit_transport_connect::generated::{
+    AdvanceOutcome, AdvanceRefsResponse, UpdateRefRequest, UpdateRefResponse,
+};
 
 use super::{
     A, CaseResult, Ctx, Exp, Failure, advance_req, ensure, eventually_listed, update_req, want_ok,
@@ -159,6 +162,52 @@ async fn advance_round(ctx: &Ctx, round: usize) -> CaseResult {
 /// Refs one repository holds in [`many_refs`].
 const MANY: usize = 64;
 
+/// Retry the local Wrangler proxy's dropped response with the same signed
+/// request. Auth-v2 replay makes this safe if the Worker committed before the
+/// proxy lost the response; production errors and Connect statuses pass
+/// through unchanged.
+async fn many_ref_update(
+    ctx: &Ctx,
+    label: &str,
+    req: &UpdateRefRequest,
+) -> Result<Result<UpdateRefResponse, RpcError>, String> {
+    let body = req.encode_to_vec();
+    let headers = ctx.auth_headers_as(label, Rpc::UpdateRef, super::Commit::Body(&body));
+    let replay_safe = headers
+        .iter()
+        .any(|(name, value)| name == "x-envelope-version" && value == "2")
+        && headers
+            .iter()
+            .any(|(name, value)| name == "idempotency-key" && !value.is_empty())
+        && headers.iter().any(|(name, _)| name == "x-signature");
+    for attempt in 0..=1 {
+        let failed = match ctx
+            .client()
+            .unary(Rpc::UpdateRef, body.clone(), &headers)
+            .await
+        {
+            Ok(Ok(value)) => return Ok(Ok(value)),
+            Ok(Err(error))
+                if attempt == 0
+                    && replay_safe
+                    && error.http_status == 500
+                    && proxy_blip(&error.message) =>
+            {
+                error.to_string()
+            }
+            Ok(Err(error)) => return Ok(Err(error)),
+            Err(error) => return Err(error),
+        };
+        eprintln!("many_refs fixture: proxy blip for {label}, retry once: {failed}");
+    }
+    unreachable!("the second attempt always returns")
+}
+
+/// miniflare's dev proxy, not a server answer. The dev server keeps running.
+fn proxy_blip(message: &str) -> bool {
+    message.contains("Network connection lost")
+}
+
 /// Correctness under a wide repository (throughput is measured elsewhere):
 /// [`MANY`] refs of one repository are created at once, each reads back its
 /// own id, the listing holds exactly them in order, and all move on at once
@@ -177,10 +226,7 @@ pub(super) async fn many_refs(ctx: Ctx) -> CaseResult {
             let req = update_req(&ctx.head(&leaf(i)), exp, &id(i, step));
             let label = format!("many{i}");
             let ctx = &ctx;
-            async move {
-                ctx.call_as::<UpdateRefResponse>(&label, Rpc::UpdateRef, &req)
-                    .await
-            }
+            async move { many_ref_update(ctx, &label, &req).await }
         });
         for (i, result) in join_all(writes).await.into_iter().enumerate() {
             want_ok(result?, &format!("step {step}, ref {i}"))?;
