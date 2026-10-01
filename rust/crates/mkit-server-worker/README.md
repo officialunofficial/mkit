@@ -124,9 +124,12 @@ and other objects' canonical serialized length. It performs **no requested-objec
 byte reads**. Authorization may read canonical commit/tree/tag/manifest
 ancestors; one manifest authorizes all requested chunks, without a read per
 chunk. The restriction also covers delta bases used to reconstruct ancestors.
+Sizes check reconstruction base objects and packs through metadata only, using
+the same earlier in-pack frame preference, fallback and bounds as canonical reads.
 If a requested ancestor would need expansion to prove another requested ID,
 request their sizes in separate batches; an incomplete proof returns
 `unavailable` rather than reading the requested ancestor or claiming absence.
+Blocked ancestor packs leave unproven IDs absent and preserve earlier proven IDs.
 
 Prefetch the commit, trees, manifests and selected chunks asynchronously, then
 insert the returned bytes into the wasm-clean synchronous source:

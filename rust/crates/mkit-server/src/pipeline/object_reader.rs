@@ -215,7 +215,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     reach::walk_many(&env, seams.takedown.as_ref(), &tips, &targets, &mut decode)
                         .await
                         .map_err(failure)?;
-                if sizes_only && incomplete {
+                if sizes_only && incomplete == Some(resolve::Miss::Capped) {
                     return Err(failure(resolve::Miss::Capped));
                 }
                 reached.extend(found);
@@ -249,6 +249,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     .record(&self.repo, &id, ms(pipe.clock.now_ms()));
             }
             if sizes_only {
+                if !crate::indexed::resolve::member_dependencies_clear(
+                    &view,
+                    pipe.shards.as_ref(),
+                    &self.repo,
+                    id,
+                    located,
+                    indexed.max_delta_chain_depth,
+                    pipe.metrics.as_ref(),
+                )
+                .await?
+                {
+                    continue;
+                }
                 let row = inventory::entry(&meta, &located.pack, &id)
                     .await
                     .map_err(failure)?

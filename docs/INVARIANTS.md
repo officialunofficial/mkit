@@ -13,7 +13,10 @@ current auth-v2 owner or write-grant envelope and writer authorization. Each
 16-ID batch shares one bounded reachability walk and one authoritative global
 denial descriptor pass, inside the 8,500-call core share. Indexed size queries
 never load a requested object's bytes, including as a delta reconstruction base;
-canonical ancestor reads may prove reachability. MemorySource verifies integrity
+canonical ancestor reads may prove reachability. Size reads check each reconstruction
+base object and selected pack using canonical resolution’s metadata selection and
+depth/cycle bounds. Blocked ancestry retains prior proofs and leaves unproven IDs
+absent. MemorySource verifies integrity
 on every synchronous read, including Merkle object identities.
 
 **Because:** embedders need manifests and proof inputs with HTTP's privacy and

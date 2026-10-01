@@ -708,3 +708,324 @@ fn duplicate_canonical_outputs_share_the_existing_decode_byte_limit() {
         vec![Some(70_000); OBJECT_READER_BATCH]
     );
 }
+
+fn assert_unresolvable_size_bases_absent(fx: &Fx, derived: &Object, derived_pack: Hash) {
+    let reader = block_on(
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Public),
+    )
+    .unwrap();
+    let repo = fx.repo_id("room");
+    let partition = fx.pipe.shards.object_index(&repo, &id(derived));
+    let index_key = keys::object_index(&repo.name, &id(derived), &derived_pack);
+    let original = block_on(fx.pipe.meta.inner.get(&partition, &index_key))
+        .unwrap()
+        .unwrap();
+    let indexed = codec::decode_object_index(&id(derived), &original).unwrap();
+    assert!(
+        !block_on(crate::indexed::resolve::member_dependencies_clear(
+            &fx.pipe.meta,
+            fx.pipe.shards.as_ref(),
+            &repo,
+            id(derived),
+            crate::store::index::LocatedObject {
+                pack: derived_pack,
+                value: indexed
+            },
+            0,
+            fx.pipe.metrics.as_ref(),
+        ))
+        .unwrap(),
+        "a delta root exceeds a zero-hop bound"
+    );
+    let unresolved = [92; 32];
+    let mut row = indexed;
+    row.delta_base = Some(unresolved);
+    block_on(fx.pipe.meta.inner.apply(
+        &partition,
+        Batch::new().put(
+            index_key.clone(),
+            codec::encode_object_index(&id(derived), &row).unwrap(),
+        ),
+    ))
+    .unwrap();
+    fx.clear_calls();
+    assert_eq!(
+        block_on(reader.object_sizes(&[id(derived)])).unwrap(),
+        vec![None]
+    );
+    assert!(
+        fx.calls.lock().unwrap().is_empty(),
+        "missing bases use metadata only"
+    );
+    block_on(
+        fx.pipe
+            .meta
+            .inner
+            .apply(&partition, Batch::new().put(index_key, original)),
+    )
+    .unwrap();
+}
+
+fn assert_cyclic_size_bases_absent(fx: &Fx, derived: &Object, base: Hash, base_pack: Hash) {
+    let repo = fx.repo_id("room");
+    let partition = fx.pipe.shards.object_index(&repo, &base);
+    let key = keys::object_index(&repo.name, &base, &base_pack);
+    let original = block_on(fx.pipe.meta.inner.get(&partition, &key))
+        .unwrap()
+        .unwrap();
+    let mut row = codec::decode_object_index(&base, &original).unwrap();
+    row.wire_type = 2;
+    row.chain_depth = 1;
+    row.delta_base = Some(id(derived));
+    block_on(fx.pipe.meta.inner.apply(
+        &partition,
+        Batch::new().put(
+            key.clone(),
+            codec::encode_object_index(&base, &row).unwrap(),
+        ),
+    ))
+    .unwrap();
+    let reader = block_on(fx.pipe.object_reader(repo, ReaderView::Public)).unwrap();
+    fx.clear_calls();
+    assert_eq!(
+        block_on(reader.object_sizes(&[id(derived)])).unwrap(),
+        vec![None]
+    );
+    assert!(
+        fx.calls.lock().unwrap().is_empty(),
+        "cyclic bases use metadata only"
+    );
+    block_on(
+        fx.pipe
+            .meta
+            .inner
+            .apply(&partition, Batch::new().put(key, original)),
+    )
+    .unwrap();
+}
+
+#[test]
+fn sizes_respect_denied_delta_bases_with_global_scan_disabled() {
+    for block_pack in [false, true] {
+        let fx = fixture();
+        let base = blob(b"base object payload");
+        let old_root = tree(&[("base", EntryMode::Blob, &base)]);
+        let old_head = commit(&old_root, &[], "old");
+        let old_pack = fx.push("room", &[&base, &old_root, &old_head], id(&old_head), None);
+        let derived = blob(b"derived object payload");
+        let root = tree(&[("derived", EntryMode::Blob, &derived)]);
+        let head = commit(&root, &[], "derived");
+        let mut writer = PackWriter::new();
+        writer
+            .push_delta(
+                &id(&base),
+                &mkit_core::delta::encode(
+                    &serialize(&base).unwrap(),
+                    &serialize(&derived).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        for object in [&root, &head] {
+            writer
+                .push_raw(id(object), &serialize(object).unwrap())
+                .unwrap();
+        }
+        let (outcome, derived_pack) = fx.push_pack(
+            "room",
+            &writer.finish().unwrap(),
+            (HEAD, PACKMAP),
+            id(&head),
+            (Match(id(&old_head)), Match(old_pack)),
+        );
+        assert_eq!(outcome, AdvanceOutcome::Committed);
+        let reader = block_on(
+            fx.pipe
+                .object_reader(fx.repo_id("room"), ReaderView::Public),
+        )
+        .unwrap();
+        assert_eq!(
+            block_on(reader.read_canonical(&[id(&derived)])).unwrap(),
+            vec![Some(serialize(&derived).unwrap())]
+        );
+        assert_unresolvable_size_bases_absent(&fx, &derived, derived_pack);
+        assert_cyclic_size_bases_absent(&fx, &derived, id(&base), old_pack);
+        block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+            &if block_pack { old_pack } else { id(&base) },
+            &crate::store::BlockEntry::new("manual", T0 as u64),
+            T0 as u64,
+        ))
+        .unwrap();
+        assert_uniform_404(&fx.get(&fx.object_url("room", &id(&derived))));
+        assert_eq!(
+            block_on(reader.read_canonical(&[id(&derived)])).unwrap(),
+            vec![None]
+        );
+        fx.clear_calls();
+        assert_eq!(
+            block_on(reader.object_sizes(&[id(&derived)])).unwrap(),
+            vec![None]
+        );
+        assert!(
+            fx.calls.lock().unwrap().is_empty(),
+            "denied sizes use no object bytes"
+        );
+    }
+}
+
+#[test]
+fn blocked_ancestor_pack_matches_http_absence() {
+    let fx = fixture();
+    let d = data();
+    let old_pack = fx.push("room", &d.refs(), d.head(), None);
+    let root = tree(&[("clear", EntryMode::Blob, &d.small)]);
+    let head = commit(&root, &[], "new root pack");
+    let mut writer = PackWriter::new_raw_only();
+    for object in [&root, &head] {
+        writer
+            .push_raw(id(object), &serialize(object).unwrap())
+            .unwrap();
+    }
+    let (outcome, pack) = fx.push_pack(
+        "room",
+        &writer.finish().unwrap(),
+        (HEAD, PACKMAP),
+        id(&head),
+        (Match(d.head()), Match(old_pack)),
+    );
+    assert_eq!(outcome, AdvanceOutcome::Committed);
+    block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+        &pack,
+        &crate::store::BlockEntry::new("manual", T0 as u64),
+        T0 as u64,
+    ))
+    .unwrap();
+    assert_uniform_404(&fx.get(&fx.object_url("room", &id(&d.small))));
+    let reader = block_on(
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Public),
+    )
+    .unwrap();
+    assert_eq!(
+        block_on(reader.read_canonical(&[id(&d.small)])).unwrap(),
+        vec![None]
+    );
+    assert_eq!(
+        block_on(reader.object_sizes(&[id(&d.small)])).unwrap(),
+        vec![None]
+    );
+}
+
+#[test]
+fn sizes_use_the_same_clear_in_pack_delta_base_as_canonical_reads() {
+    let fx = fixture();
+    let base = blob(b"base object payload");
+    let old_root = tree(&[("base", EntryMode::Blob, &base)]);
+    let old_head = commit(&old_root, &[], "old duplicate base");
+    let old_pack = fx.push("room", &[&base, &old_root, &old_head], id(&old_head), None);
+    let derived = blob(b"derived object payload");
+    let root = tree(&[("derived", EntryMode::Blob, &derived)]);
+    // The generic member lookup picks the earlier blocked pack, while
+    // canonical delta resolution correctly prefers its earlier in-pack base.
+    let (pack_bytes, head) = (0..128)
+        .find_map(|i| {
+            let head = commit(&root, &[], &format!("clear duplicate-base pack {i}"));
+            let mut writer = PackWriter::new();
+            writer
+                .push_raw(id(&base), &serialize(&base).unwrap())
+                .unwrap();
+            writer
+                .push_delta(
+                    &id(&base),
+                    &mkit_core::delta::encode(
+                        &serialize(&base).unwrap(),
+                        &serialize(&derived).unwrap(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            for object in [&root, &head] {
+                writer
+                    .push_raw(id(object), &serialize(object).unwrap())
+                    .unwrap();
+            }
+            let bytes = writer.finish().unwrap();
+            (hash(&bytes) > old_pack).then_some((bytes, head))
+        })
+        .unwrap();
+    let (outcome, _) = fx.push_pack(
+        "room",
+        &pack_bytes,
+        (HEAD, PACKMAP),
+        id(&head),
+        (Match(id(&old_head)), Match(old_pack)),
+    );
+    assert_eq!(outcome, AdvanceOutcome::Committed);
+    block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+        &old_pack,
+        &crate::store::BlockEntry::new("manual", T0 as u64),
+        T0 as u64,
+    ))
+    .unwrap();
+    assert_eq!(fx.get(&fx.object_url("room", &id(&derived))).status, 200);
+    let reader = block_on(
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Public),
+    )
+    .unwrap();
+    assert_eq!(
+        block_on(reader.read_canonical(&[id(&derived)])).unwrap(),
+        vec![Some(serialize(&derived).unwrap())]
+    );
+    assert_eq!(
+        block_on(reader.object_sizes(&[id(&derived)])).unwrap(),
+        vec![Some(22)]
+    );
+}
+
+#[test]
+fn blocked_ancestor_keeps_earlier_proven_batch_targets() {
+    let fx = fixture();
+    let clear_tree = tree(&[]);
+    let clear = commit(&clear_tree, &[], "directly published clear tip");
+    let hidden = blob(b"hidden behind a blocked ancestor pack");
+    let root = tree(&[("hidden", EntryMode::Blob, &hidden)]);
+    let head = commit(&root, &[], "blocked ancestry");
+    fx.push_ref(
+        "room",
+        &[&clear_tree, &clear, &hidden],
+        ("refs/heads/a-clear", "refs/mkit/packmap/a-clear"),
+        id(&clear),
+        (Missing, Missing),
+    );
+    let (_, pack) = fx.push_ref(
+        "room",
+        &[&root, &head],
+        ("refs/heads/z-blocked", "refs/mkit/packmap/z-blocked"),
+        id(&head),
+        (Missing, Missing),
+    );
+    block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+        &pack,
+        &crate::store::BlockEntry::new("manual", T0 as u64),
+        T0 as u64,
+    ))
+    .unwrap();
+    let reader = block_on(
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Public),
+    )
+    .unwrap();
+    let ids = [id(&clear), id(&hidden), [91; 32]];
+    assert_eq!(
+        block_on(reader.object_sizes(&ids)).unwrap(),
+        vec![Some(serialize(&clear).unwrap().len() as u64), None, None]
+    );
+    assert_eq!(
+        block_on(reader.read_canonical(&ids)).unwrap(),
+        vec![Some(serialize(&clear).unwrap()), None, None]
+    );
+    assert_eq!(fx.get(&fx.object_url("room", &id(&clear))).status, 200);
+    assert_uniform_404(&fx.get(&fx.object_url("room", &id(&hidden))));
+}

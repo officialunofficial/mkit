@@ -408,6 +408,86 @@ async fn selected_frame<S: NamespaceStore>(
     Ok(Some(selected))
 }
 
+/// Select exactly the base location used by canonical reconstruction, without bytes.
+async fn member_base<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    base: Hash,
+    located: LocatedObject,
+    metrics: &dyn Metrics,
+    selected: Option<LocatedObject>,
+) -> Result<LocatedObject, ResolveFailure> {
+    if let Some(selected) = selected {
+        return Ok(selected);
+    }
+    let partition = shards.object_index(repo, &base);
+    let key = keys::object_index(&repo.name, &base, &located.pack);
+    let same = store
+        .get_many(&partition, &[key])
+        .await
+        .map_err(|_| unavailable())?;
+    if same.len() != 1 {
+        return Err(unavailable().into());
+    }
+    let same = same.into_iter().next().flatten();
+    let next = if let Some(value) = same {
+        let value = codec::decode_object_index(&base, &value).map_err(|_| unavailable())?;
+        (value.frame_offset < located.value.frame_offset).then_some(LocatedObject {
+            pack: located.pack,
+            value,
+        })
+    } else {
+        None
+    };
+    Ok(match next {
+        Some(next) => next,
+        None => match locate_split(store, shards, repo, &[base], metrics)
+            .await?
+            .remove(&base)
+        {
+            Some(Ok(Some(next))) => next,
+            Some(Err(_)) => return Err(ResolveFailure::Capped),
+            _ => return Err(ResolveFailure::Missing),
+        },
+    })
+}
+
+/// Prove the reconstruction chain clear using metadata only, with the same
+/// location-cycle and delta-hop limits as `member_object`.
+#[cfg(feature = "http-objects")]
+pub(crate) async fn member_dependencies_clear<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    mut id: Hash,
+    mut located: LocatedObject,
+    cap: u32,
+    metrics: &dyn Metrics,
+) -> Result<bool, ServerError> {
+    let mut visiting = BTreeSet::new();
+    loop {
+        if crate::takedown::denial::denied(store, &id).await?
+            || crate::takedown::denial::denied(store, &located.pack).await?
+            || !visiting.insert((id, located.pack, located.value.frame_offset))
+        {
+            return Ok(false);
+        }
+        let Some(base) = located.value.delta_base else {
+            return Ok(true);
+        };
+        if visiting.len() > usize::try_from(cap).unwrap_or(usize::MAX) {
+            return Ok(false);
+        }
+        located = match member_base(store, shards, repo, base, located, metrics, None).await {
+            Ok(next) => next,
+            Err(ResolveFailure::Missing | ResolveFailure::Capped) => return Ok(false),
+            Err(ResolveFailure::Other(error)) => return Err(error),
+        };
+        id = base;
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
     blobs: &'a B,
@@ -473,7 +553,7 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
         if !visiting.insert(location) {
             return Err(ServerError::invalid_argument("delta chain too deep").into());
         }
-        let result = async {
+        let result: Result<ResolvedMember, ResolveFailure> = async {
             let IndexValue {
                 frame_offset,
                 frame_length,
@@ -492,41 +572,8 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
                 }
                 let selected =
                     selected_frame(store, memo.selection.as_ref(), visiting.len(), base).await?;
-                let partition = shards.object_index(repo, &base);
-                let key = keys::object_index(&repo.name, &base, &located.pack);
-                let same = if selected.is_some() {
-                    vec![None]
-                } else {
-                    store
-                        .get_many(&partition, &[key])
-                        .await
-                        .map_err(|_| unavailable())?
-                };
-                if same.len() != 1 {
-                    return Err(unavailable().into());
-                }
-                let same = same.into_iter().next().flatten();
-                let next = if let Some(value) = same {
-                    let value =
-                        codec::decode_object_index(&base, &value).map_err(|_| unavailable())?;
-                    (value.frame_offset < frame_offset).then_some(LocatedObject {
-                        pack: located.pack,
-                        value,
-                    })
-                } else {
-                    None
-                };
-                let next = match selected.or(next) {
-                    Some(next) => next,
-                    None => match locate_split(store, shards, repo, &[base], metrics)
-                        .await?
-                        .remove(&base)
-                    {
-                        Some(Ok(Some(next))) => next,
-                        Some(Err(_)) => return Err(ResolveFailure::Capped),
-                        _ => return Err(ResolveFailure::Missing),
-                    },
-                };
+                let next =
+                    member_base(store, shards, repo, base, located, metrics, selected).await?;
                 let (canonical, base_depth) = member_object_inner(
                     blobs,
                     store,

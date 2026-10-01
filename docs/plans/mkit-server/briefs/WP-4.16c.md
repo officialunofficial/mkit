@@ -85,3 +85,10 @@ uses the same data and descriptor scan, adds no state, and is allowed under
 R-198. Bound and assert batch calls within the existing 9,000-call Worker
 physical allowance and 8,500-call core share; stop and report numbers if even
 one shared pass plus walk cannot fit. read_canonical shares the same proofs.
+
+## Denial-parity repair ruling (orchestrator, 2026-09-30)
+
+The production Rust cap is raised to 800 only for the two reviewed denial-parity
+fixes. Blocked ancestor loads retain earlier reachability proofs and leave
+unproven IDs absent, while size reads use metadata-only reconstruction dependency
+checks with canonical base selection and depth/cycle bounds. No new state or wire.

@@ -171,7 +171,7 @@ struct Frontier {
     work: VecDeque<(Hash, Kind)>,
     /// A reference was not queued because of `cap`, or an object was skipped
     /// because of the decode budget: the walk is incomplete.
-    incomplete: bool,
+    incomplete: Option<Miss>,
 }
 
 impl Frontier {
@@ -180,7 +180,7 @@ impl Frontier {
             return;
         }
         if self.seen.len() >= self.cap {
-            self.incomplete = true;
+            self.incomplete = Some(Miss::Capped);
             return;
         }
         self.seen.insert(id);
@@ -264,10 +264,10 @@ pub(crate) async fn walk<B: BlobStore, N: NamespaceStore>(
     budget: &mut Budget,
 ) -> Result<Reach, Miss> {
     let targets = BTreeSet::from([target]);
-    let (reached, capped) = walk_many(env, takedown, tips, &targets, budget).await?;
+    let (reached, incomplete) = walk_many(env, takedown, tips, &targets, budget).await?;
     Ok(if reached.contains(&target) {
         Reach::Reachable
-    } else if capped {
+    } else if incomplete == Some(Miss::Capped) {
         Reach::Capped
     } else {
         Reach::Unreachable
@@ -276,20 +276,21 @@ pub(crate) async fn walk<B: BlobStore, N: NamespaceStore>(
 
 /// One walk for a batch. `Env::no_reads` forbids loading selected objects, including
 /// as ancestors; unresolved descendants then report an incomplete proof.
+/// The residual miss distinguishes a budget cap from blocked ancestry.
 pub(crate) async fn walk_many<B: BlobStore, N: NamespaceStore>(
     env: &Env<'_, B, N>,
     takedown: &dyn TakedownGate,
     tips: &[Hash],
     targets: &BTreeSet<Hash>,
     budget: &mut Budget,
-) -> Result<(BTreeSet<Hash>, bool), Miss> {
+) -> Result<(BTreeSet<Hash>, Option<Miss>), Miss> {
     let mut reached = BTreeSet::new();
     let mut frontier = Frontier {
         cap: env.cfg.max_walk_objects,
         seen: BTreeSet::new(),
         nodes: VecDeque::new(),
         work: VecDeque::new(),
-        incomplete: false,
+        incomplete: None,
     };
     let mut record = |id| {
         if targets.contains(&id) {
@@ -302,7 +303,7 @@ pub(crate) async fn walk_many<B: BlobStore, N: NamespaceStore>(
     }
     loop {
         if reached.len() == targets.len() {
-            return Ok((reached, false));
+            return Ok((reached, None));
         }
         let batch = frontier.batch();
         if batch.is_empty() {
@@ -322,14 +323,18 @@ pub(crate) async fn walk_many<B: BlobStore, N: NamespaceStore>(
                 continue;
             }
             if env.no_reads.contains(&id) {
-                frontier.incomplete = true;
+                frontier.incomplete = Some(Miss::Capped);
                 continue;
             }
             let bytes = match resolve::load(env, id, located, budget).await {
                 Ok(bytes) => bytes,
                 Err(Miss::Capped) => {
-                    frontier.incomplete = true;
+                    frontier.incomplete = Some(Miss::Capped);
                     continue;
+                }
+                Err(Miss::NotFound) => {
+                    frontier.incomplete = Some(Miss::NotFound);
+                    return Ok((reached, frontier.incomplete));
                 }
                 Err(other) => return Err(other),
             };
@@ -341,7 +346,7 @@ pub(crate) async fn walk_many<B: BlobStore, N: NamespaceStore>(
                 }
             });
             if reached.len() == targets.len() {
-                return Ok((reached, false));
+                return Ok((reached, None));
             }
         }
     }
