@@ -1,12 +1,12 @@
 # Executor prompt: launch review fixes A — takedown purge, admin replay, outcome wake, crypto pin
 
-Run locally in `/Users/vitormarthendalnunes/Documents/21.Uno/04.Mkit/mkit`.
+Run locally in `<repo>`.
 
 **Definition of done:** an open PR into `feat/mkit-server`. Don't merge it.
 
 **Read first:**
-- `~/.cache/mkit-orch/scratchpad/prompts/executor-common-external.md`;
-- the external review, `/Users/vitormarthendalnunes/.cache/mkit-orch/scratchpad/research/FULL-REVIEW-e8164870.md`. Read the full entries for **7a-2, 7b-1, 3-1 and 12-2**: claim, scenario, evidence,
+- `<local notes>`;
+- the external review, `<local evidence>`. Read the full entries for **7a-2, 7b-1, 3-1 and 12-2**: claim, scenario, evidence,
   suggested fix. The review was pinned at `e8164870`; the base has moved since, so re-locate every line.
 
 **Setup:**

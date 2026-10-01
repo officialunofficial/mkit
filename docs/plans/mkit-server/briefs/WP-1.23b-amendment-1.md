@@ -8,7 +8,7 @@ You are the WP-1.23b executor, continuing the stopped work.
 - Your commit: `0db295f3`
 
 **Before continuing,** read the original prompt again,
-`/private/tmp/claude-501/-Users-vitormarthendalnunes-Documents-21-Uno-04-Mkit-mkit/cdfd3c8e-a2c7-4777-b325-7d29f4530525/scratchpad/prompts/WP-1.23b.md`,
+`<local path>`,
 and the common rules file it names.
 
 **The decision is option A, with a bounded blocked set.** Narrowing R-103 (option B) is rejected: a single
