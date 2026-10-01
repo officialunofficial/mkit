@@ -2,7 +2,8 @@
 
 Status: implemented and independently source-reviewed. PR #1249 merged as
 `a3966d84`; the assigned branch `mkit-server/wp-5-6a-3-admin-reads` integrates
-that base in `19ffce76`. Activation remains false. Worker mounting and launch
+that base in `19ffce76`, then integrates the subsequently merged WP-4.16c
+target `1edfc306` in `b4a80a34`. Activation remains false. Worker mounting and launch
 activation belong to WP-4.18, which also depends on the R-203 bounded decoder
 repair carried forward by the orchestrator from PR #1249.
 
@@ -74,7 +75,7 @@ accumulation or piece-count-sized collection is used. These are source-derived
 bounds, not allocator/RSS measurements. Adapters retain their actual Worker
 request/R2/DO call budgets; exhausting them terminates the stream with error.
 
-Production Rust delta against integrated target a3966d84: 707 added and nine
+Production Rust delta against integrated target 1edfc306: 707 added and nine
 deleted physical lines (716 conservatively counting test-module declarations);
 below 1,500. The separate test file adds 1,008 lines.
 Fifteen focused regression tests are implemented and pass: roles/replay/audit
@@ -105,7 +106,7 @@ the remaining results; these inherited assertions are not changed by this WP.
 ## Independent self-review
 
 Two independent read-only reviewers checked correctness/security and spec/brief
-conformance against the final integrated diff `a3966d84..19ffce76`, finding no
+conformance against the preservation-base diff `a3966d84..19ffce76`, finding no
 remaining actionable source defects. They did not independently execute gates.
 
 Self-review fixed all-scope List support and pagination, hardened payload Debug,
@@ -115,7 +116,7 @@ SetLegalHold to the existing UTF-8 byte limits and aligned List with ProtoJSON
 null scope and quoted page sizes. Both new regressions failed before the fix;
 all fifteen admin tests and native server clippy then passed.
 
-## Final gate results
+## Full gate results on preservation base a3966d84 (head 19ffce76)
 
 - PASS: formatting/diff checks, workspace all-target/all-feature clippy,
   mkit-server wasm32 all-feature clippy, warning-denied server rustdoc,
@@ -167,3 +168,21 @@ timeouts-parent.log, *-parent.log and worker-conformance-{final,parent}.log.
 | `mkit-server-worker::quota_rollup` | `rollup_is_registered_on_the_classes_that_hold_quota_rows_only` |
 | `mkit-server-worker::relay` | `relay_config_failure_retries_the_stored_timer` |
 | `mkit-server-worker::relay` | `relay_is_registered_only_on_ref_shards` |
+
+## Canonical-reader base integration (target 1edfc306, head b4a80a34)
+
+Both independent reviewers rechecked this merge. Restricted admin implementation
+and wire fields are unchanged. The resolver refactor retains selected-source
+semantics; its new read-denial cache defaults empty for preservation. ObjectReader
+uses serving storage rather than Work.preserved and exposes no preserved reads.
+
+All 38 affected admin/object-reader/denial tests pass (8.460 s), including all
+fifteen admin tests. Exact just ci-server is rerun on this base and again stops
+at the same two parent-confirmed indexed assertions (292 pass, two fail, twelve
+skipped; 2,536 not run). Earlier full-suite, CLI and Worker controls above refer
+to a3966d84; no complete green latest-base server or Worker suite is claimed.
+Latest-base formatting/diff checks, workspace all-target/all-feature clippy,
+wasm32 all-feature server clippy, warning-denied server rustdoc, touched/reverse
+doctests, ci-scripts and ci-security all pass. ci-scripts also reruns protocol
+checks, admin golden vectors, CLI baseline, wasm feature checks and default
+Worker build. Results are retained in the corresponding *-latest-base.log files.
