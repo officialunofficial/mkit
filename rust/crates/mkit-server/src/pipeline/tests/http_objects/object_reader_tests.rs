@@ -1518,7 +1518,7 @@ fn repeated_orphan_url_issuance_and_reads_expire_at_the_original_proof_deadline(
             let pack = fx.push("room", &d.refs(), d.head(), None);
             let object = id(&d.small);
             let target = UrlTarget::Object(object);
-            let token = public_urls(&fx, &[target.clone()], 300).unwrap()[0]
+            let token = public_urls(&fx, std::slice::from_ref(&target), 300).unwrap()[0]
                 .clone()
                 .unwrap();
             assert!(
@@ -1546,7 +1546,7 @@ fn repeated_orphan_url_issuance_and_reads_expire_at_the_original_proof_deadline(
                 let reachable = step < 2;
                 match surface {
                     "urls" => assert_eq!(
-                        public_urls(&fx, &[target.clone()], 300).unwrap()[0].is_some(),
+                        public_urls(&fx, std::slice::from_ref(&target), 300).unwrap()[0].is_some(),
                         reachable,
                         "{surface}, delete={delete}, step={step}"
                     ),
