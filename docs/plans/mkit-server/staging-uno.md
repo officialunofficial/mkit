@@ -174,3 +174,12 @@ The 60-second setting provides more than twice that sampled active time. Verific
 sliced; no slice, call, memory, or pack limit changes. Local development does
 not enforce deployed CPU limits; record per-invocation CPU on staging before
 launch, as required by the [Cloudflare CPU documentation](https://developers.cloudflare.com/workers/observability/dev-tools/cpu-usage/).
+
+A subsequent direct-runtime run bracketed the final heavy AdvanceRefs fetch
+with OS-accounted workerd process CPU: **17.17 seconds CPU versus 18.03 seconds
+elapsed**, sampled every 50 ms with 10 ms CPU resolution. This includes all
+workerd threads, internal storage isolates and concurrent alarms; it is not
+deployed per-isolate accounting. The earlier pending polls each used 0.01–0.10
+seconds of bracketed process CPU. These measurements support the provisional
+60-second allowance without changing alarm slicing. See the
+[completed local Uno matrix](launch-read-failure-evidence.md) for pins and limits.

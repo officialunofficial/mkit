@@ -1,5 +1,11 @@
 # Launch evidence record (WP-4.18 / R-194)
 
+The requested Uno Kit matrix now passes locally; its exact source, artifact,
+transport diagnosis, CPU/call/memory measurements and retained failures are in
+[launch-read-failure-evidence.md](launch-read-failure-evidence.md). The older
+full-profile slots below retain their original scope and status; the Uno result
+does not certify the other variants or user-owned staging gates.
+
 Status: **phase 2 authorized; complete local matrix UNRUN; external gates UNRUN**.
 No integrated case below is a PASS claim. Extraction #1244 and retrieval #1243 are merged
 inputs, not evidence of their opted-in release integration. Fill actual
