@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "owner": "WP-4.18 / R-194",
-  "scope": "R-198 / R-200; optional sync inspection, native proofs, lean takedown",
+  "scope": "R-198 / R-200; optional sync inspection, native proofs, lean takedown; R-203 bounded ruzstd plus native push/clone after prerequisite merge",
   "cases": [
     {
       "id": "B4.config",
@@ -163,6 +163,13 @@
       "native": "Source API/compile checks; documented external custom HookSet and OutcomeSink traits",
       "worker": "Phase 2 embedded-worker example wasm check and real wrangler streamed UploadPart",
       "phase2": "Implement addenda, retain real wrangler embedded upload test and measure release wasm raw/gzip size for minimal/HTTP/signed variants; no ListRepos RPC"
+    },
+    {
+      "id": "B4.native-push-zstd",
+      "contract": "Native mkit push zstd-compressed packs complete indexed verification on the release Worker and clone back canonically; bounded decode CPU and resident work remain within the launch budgets",
+      "native": "real mkit CLI push/clone with zstd pack encoder",
+      "worker": "R-203 bounded pack-ruzstd decoder in the launch profile after WP-zstd-bound merges",
+      "phase2": "PENDING R-203: enable decoder only after merge, run real CLI push -> release Worker -> clone and record decode CPU/resident-memory evidence"
     }
   ],
   "external": [

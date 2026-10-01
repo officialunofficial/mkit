@@ -72,7 +72,7 @@ fixture pass. Use an isolated service-binding fixture for its separate channel.
 Native entries below are existing meaningful test modules or named tests.
 They still require execution and full case counts at the final candidate.
 The last column is proposed work, not a claim that a retained executable probe
-already implements it. All 23 integrated result pairs remain UNRUN.
+already implements it. All integrated result pairs remain UNRUN; the R-203 addition expands the inventory to 24 cases.
 
 | Case | Existing meaningful native/host coverage | Existing workerd coverage | Proposed actual release assertion |
 |---|---|---|---|
@@ -132,3 +132,12 @@ already implements it. All 23 integrated result pairs remain UNRUN.
 No cloud call, deployment, staging operation, new RPC, or new production
 durable state is authorized by this plan. Local wrapper/receiver diagnostics must
 remain outside production artifact routes.
+
+## R-203 addition
+
+After bounded ruzstd (WP-zstd-bound) merges, enable `mkit-core/pack-ruzstd` in
+the launch build. Add `B4.native-push-zstd`: run native `mkit push` against the
+actual release Worker, clone from it and compare canonical refs/content. The
+native encoder must actually emit zstd; a hand-built raw-pack fixture does
+not cover this case. Include zstd decode CPU and resident memory in the budget
+audit. Until the prerequisite merges, leave the decoder off and this row UNRUN.

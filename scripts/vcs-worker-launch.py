@@ -62,13 +62,16 @@ def release_launch(run, env, evidence):
     """Actual release opt-in, with HTTP tokens; inspection and takedown stay off."""
     invoke(["worker-build", "--release", "--features", "launch"], run / "build.log", env,
            cwd=ROOT / "apps/vcs-worker", evidence=evidence)
-    artifact_root = ROOT / "apps/vcs-worker/build/worker"
+    artifact_root = ROOT / "apps/vcs-worker/build"
     evidence["artifact_sha256"] = {
         str(path.relative_to(artifact_root)): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in artifact_root.rglob("*") if path.is_file()
     }
-    if not evidence["artifact_sha256"]:
-        raise RuntimeError("release build emitted no files under build/worker")
+    required = ("index_bg.wasm", "index.js", "worker/shim.mjs", "package.json")
+    if any(name not in evidence["artifact_sha256"] for name in required):
+        raise RuntimeError("release build is missing optimized wasm or JavaScript artifacts")
+    if not (artifact_root / "index_bg.wasm").read_bytes().startswith(b"\0asm"):
+        raise RuntimeError("release build did not emit a valid wasm artifact")
     evidence["build_features"] = ["launch"]
     evidence["compatibility_date"] = "2026-09-09"
     evidence["wrangler_version"] = WRANGLER

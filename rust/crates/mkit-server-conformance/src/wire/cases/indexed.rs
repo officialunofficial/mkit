@@ -1,6 +1,6 @@
 //! Indexed-mode responses over the real Connect wire.
 
-use mkit_core::hash::{Hash, hash};
+use mkit_core::hash::{Hash, hash, to_hex};
 use mkit_core::object::{Commit, Identity, Object, Tree};
 use mkit_core::pack::PackWriter;
 use mkit_core::serialize::serialize;
@@ -12,10 +12,11 @@ use mkit_transport_connect::generated::{
 };
 
 use super::{
-    CaseResult, Commit as WireCommit, Ctx, Exp, Failure, advance_req, ensure, sign_unary,
-    upload_msgs, want_ok, want_outcome,
+    CaseResult, Commit as WireCommit, Ctx, Exp, Failure, Feature, advance_req, ensure,
+    eventually_listed, sign_unary, upload_msgs, want_ok, want_outcome,
 };
 use crate::wire::client::{Rpc, UNARY_PROTO, decode_unary};
+use crate::wire::profile::WireAuth;
 use crate::wire::sign::pack_commitment;
 
 fn pack() -> Result<(Vec<u8>, Hash), Failure> {
@@ -148,6 +149,10 @@ pub(super) async fn pending_verification_unavailable(ctx: Ctx) -> CaseResult {
 /// A pack of more than two 16 MiB windows: 720 blobs just under the 64 KiB
 /// extraction size, a tree naming them and a signed commit.
 fn large_pack() -> Result<(Vec<u8>, Hash), Failure> {
+    verification_pack(None)
+}
+
+fn verification_pack(extracted: Option<&[u8]>) -> Result<(Vec<u8>, Hash), Failure> {
     let mut writer = PackWriter::new_raw_only();
     let mut entries = Vec::new();
     for n in 0..720_u32 {
@@ -170,6 +175,24 @@ fn large_pack() -> Result<(Vec<u8>, Hash), Failure> {
             mode: mkit_core::object::EntryMode::Blob,
             object_hash: id,
         });
+    }
+    if let Some(data) = extracted {
+        let blob = Object::Blob(mkit_core::object::Blob {
+            data: data.to_vec(),
+        });
+        let id = blob.id().map_err(|e| format!("extracted blob id: {e}"))?;
+        writer
+            .push_raw(
+                id,
+                &serialize(&blob).map_err(|e| format!("extracted blob bytes: {e}"))?,
+            )
+            .map_err(|e| format!("extracted blob frame: {e}"))?;
+        entries.push(mkit_core::object::TreeEntry {
+            name: b"extracted.txt".to_vec(),
+            mode: mkit_core::object::EntryMode::Blob,
+            object_hash: id,
+        });
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
     }
     let tree = Object::Tree(Tree { entries });
     let tree_id = tree.id().map_err(|e| format!("tree id: {e}"))?;
@@ -209,13 +232,18 @@ fn large_pack() -> Result<(Vec<u8>, Hash), Failure> {
 /// the same signed request then commits.
 pub(super) async fn async_verification_commits(ctx: Ctx) -> CaseResult {
     let (pack, head) = large_pack()?;
+    commit_large_pack(&ctx, &pack, head).await?;
+    Ok(())
+}
+
+async fn commit_large_pack(ctx: &Ctx, pack: &[u8], head: Hash) -> Result<(String, u32), Failure> {
     ensure!(
         pack.len() > 33 << 20,
         "suite bug: the pack fits two windows"
     );
-    let (repository, _) = super::repository::identities(&ctx, "async-verify", "unused")?;
+    let (repository, _) = super::repository::identities(ctx, "async-verify", "unused")?;
     let signer = ctx.v2_signer("repository-a")?;
-    let pack_id = hash(&pack);
+    let pack_id = hash(pack);
     let branch = ctx.head("async");
     let begin = BeginUploadRequest {
         r#ref: Some(branch.clone()),
@@ -231,7 +259,7 @@ pub(super) async fn async_verification_commits(ctx: Ctx) -> CaseResult {
         return Err(Failure::Fail("BeginUpload did not issue a ticket".into()));
     };
     let id = ticket.id.ok_or("ticket has no id")?;
-    let mut messages = upload_msgs(&pack, 48);
+    let mut messages = upload_msgs(pack, 48);
     if let Some(UploadBody::Header(header)) = &mut messages[0].body {
         header.ticket_token = ticket.token;
     }
@@ -262,10 +290,11 @@ pub(super) async fn async_verification_commits(ctx: Ctx) -> CaseResult {
                     pending > 0,
                     "the first advance committed before any slice ran"
                 );
-                return want_outcome(
+                want_outcome(
                     Ok(response.outcome.map_or(0, |outcome| outcome.to_i32())),
                     AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
-                );
+                )?;
+                return Ok((repository, pending));
             }
             Err(error) => {
                 ensure!(
@@ -285,4 +314,131 @@ pub(super) async fn async_verification_commits(ctx: Ctx) -> CaseResult {
     Err(Failure::Fail(format!(
         "the advance was still pending after {pending} polls"
     )))
+}
+
+/// The production-only intersection: no test directives, ticketed upload,
+/// scheduled verification/extraction, public paired refs and exact pack bytes.
+/// The HTTP opt-in additionally proves the extracted bytes and proof refusal.
+pub(super) async fn launch_verification_commits(ctx: Ctx) -> CaseResult {
+    let data: Vec<_> = (0..131_072_u32)
+        .map(|i| u8::try_from((i.wrapping_mul(17) ^ (i >> 9)) & 0xff).unwrap_or(0))
+        .collect();
+    let extracted = Object::Blob(mkit_core::object::Blob { data: data.clone() })
+        .id()
+        .map_err(|e| format!("extracted id: {e}"))?;
+    let (pack, head) = verification_pack(Some(&data))?;
+    let pack_id = hash(&pack);
+    let (repository, pending) = commit_large_pack(&ctx, &pack, head).await?;
+    super::visibility::set_envelope(&ctx, &ctx.v2_signer("repository-a")?, &repository, false)
+        .await?;
+
+    let mut profile = ctx.profile().clone();
+    if let WireAuth::AuthV2 {
+        repository: selected,
+        ..
+    } = &mut profile.auth
+    {
+        repository.clone_into(selected);
+    }
+    let reader = Ctx::new(ctx.client().clone(), std::sync::Arc::new(profile), ctx.case);
+    eventually_listed(
+        "published head and packmap",
+        || async {
+            Ok((
+                reader.read(&reader.head("async")).await?,
+                reader.read(&reader.packmap("async")).await?,
+            ))
+        },
+        |pair| {
+            pair.0.as_deref() == Some(head.as_slice())
+                && pair.1.as_deref() == Some(pack_id.as_slice())
+        },
+    )
+    .await?;
+    ensure!(
+        reader.fetch(&pack_id).await? == pack,
+        "public DownloadPack bytes differ"
+    );
+    if ctx.profile().has(Feature::HttpObjects) {
+        check_extracted_http(&ctx, &repository, &extracted, &data).await?;
+    }
+    ctx.set_note(format!(
+        "pack_bytes={} pending_polls={pending} extracted_blob={} extracted_blob_bytes={} http={}",
+        pack.len(),
+        to_hex(&extracted),
+        data.len(),
+        ctx.profile().has(Feature::HttpObjects)
+    ));
+    Ok(())
+}
+
+async fn check_extracted_http(
+    ctx: &Ctx,
+    repository: &str,
+    extracted: &Hash,
+    data: &[u8],
+) -> CaseResult {
+    let object = format!("/{repository}/-/objects/{}", to_hex(extracted));
+    let reply = ctx.client().get(&object).await?;
+    ensure!(
+        reply.status == 200,
+        "extracted object HTTP {}: {:?}",
+        reply.status,
+        reply.body
+    );
+    ensure!(reply.body.as_ref() == data, "extracted object bytes differ");
+    ensure!(
+        reply
+            .headers
+            .get("content-type")
+            .and_then(|h| h.to_str().ok())
+            == Some("application/octet-stream"),
+        "object-id media type differs"
+    );
+    let file = format!("/{repository}/-/{}/-/extracted.txt", ctx.head("async"));
+    let reply = ctx.client().get(&file).await?;
+    ensure!(
+        reply.status == 200 && reply.body.as_ref() == data,
+        "published ref file bytes differ: HTTP {}",
+        reply.status
+    );
+    ensure!(
+        reply
+            .headers
+            .get("content-type")
+            .and_then(|h| h.to_str().ok())
+            == Some("text/plain; charset=utf-8"),
+        "ref-file media type ignores extension"
+    );
+    ensure!(
+        reply
+            .headers
+            .get("content-disposition")
+            .and_then(|h| h.to_str().ok())
+            .is_some_and(|h| h.starts_with("inline;") && h.contains("extracted.txt")),
+        "ref-file filename/disposition missing"
+    );
+    ensure!(
+        reply
+            .headers
+            .get("x-content-type-options")
+            .and_then(|h| h.to_str().ok())
+            == Some("nosniff"),
+        "ref-file nosniff missing"
+    );
+    ensure!(
+        reply
+            .headers
+            .get("content-security-policy")
+            .and_then(|h| h.to_str().ok())
+            == Some("sandbox; default-src 'none'"),
+        "ref-file sandbox CSP missing"
+    );
+    let proof = ctx.client().get(&format!("{file}?proof=1")).await?;
+    ensure!(
+        proof.status == 416,
+        "release Worker proof request HTTP {}, expected unsupported 416",
+        proof.status
+    );
+    Ok(())
 }

@@ -6,7 +6,8 @@ inputs, not evidence of their opted-in release integration. Fill actual
 results after executing at the pinned candidate, using the
 [local harness](launch-conformance.md). A component harness PASS records
 only that component lane; it leaves per-case integrated slots UNRUN.
-Preservation-dependent cases await 5.6a-2. The resolved #1246 header ruling
+Preservation-dependent cases await 5.6a-2. Native zstd push/clone awaits the
+R-203 bounded ruzstd prerequisite; the decoder stays off until it merges. The resolved #1246 header ruling
 adopts its extension allowlist and safe filenames; it records no runtime PASS.
 See [launch-runtime-coverage.md](launch-runtime-coverage.md) for current
 coverage boundaries and the concrete remaining release probes.
@@ -53,6 +54,7 @@ foundations to activation and no dependence on withdrawn R-196/R-197.
 | Publication recheck timer 12 progress repair | `d89c37fb968d39c180228678bc09c77a12002fc9` | [#1245](https://github.com/officialunofficial/mkit/pull/1245) merged; integrated gate UNRUN |
 | Physical alarm bounds and cold fairness repair | `e45def2fe1855a531d0149727bf6678fc8145c3c` | [#1247](https://github.com/officialunofficial/mkit/pull/1247) merged; integrated rerun UNRUN |
 | Deterministic native timer conformance | `12e4ce4998145a959c4fc400e02b6ad546812090` | [#1248](https://github.com/officialunofficial/mkit/pull/1248) merged; old timer flake exceptions removed |
+| R-203 bounded ruzstd (WP-zstd-bound) | PENDING | Decoder stays off; enable pack-ruzstd in launch only after merge |
 | WP-4.18 self-reviews, correctness/security and spec/crypto | UNRUN | UNRUN |
 | WP-4.18 adversarial PR review | UNRUN | UNRUN |
 
@@ -83,6 +85,7 @@ separate. Native proofs and Worker proof refusal are deliberately distinct.
 | B4.admin | UNRUN | UNRUN | Configured subset, unconfigured refusal, distinct roles/replay/gapless audit |
 | B4.purge | UNRUN | UNRUN | Signed sink/retry/outage, stale cache/snapshots, manual acceptance and audited completion |
 | B4.recovery | UNRUN | UNRUN | Same-format restart/lost reply/duplicate timers; unsupported store reset |
+| B4.native-push-zstd | UNRUN | UNRUN | After R-203: native CLI push -> release Worker -> clone, with zstd decode CPU/resident-memory audit |
 | B4.embedding | UNRUN | UNRUN | Phase 2 addenda API/builders/admin/policy, real streamed embedded UploadPart and feature/wasm sizes |
 | B5.admission | UNRUN | UNRUN | Raw/token HTTP, native exact proof size, early no-read decisions |
 | B5.settlement | UNRUN | UNRUN | HEAD zero, actual partial bytes, abort/disconnect, retained/durable arbiter |

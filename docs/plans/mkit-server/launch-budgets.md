@@ -137,3 +137,20 @@ retained purge cursors, R-193 scanner scope, preservation and signed purge.
 Pin commands/logs and measured outgoing peak, whole alarm calls, local examined
 rows and resident work to exact SHAs in the launch evidence matrix. External
 staging and platform measurements remain user-owned unrun evidence slots.
+
+## R-203 compressed native push prerequisite
+
+The default release Worker currently has no zstd decoder. Native `mkit push`
+produces zstd-compressed packs, so its indexed verification is terminally
+rejected until bounded ruzstd (WP-zstd-bound / R-203) merges. Keep the decoder
+off before that prerequisite. After merging it, enable `mkit-core/pack-ruzstd`
+in the launch Worker build and retain a real native push -> release Worker ->
+clone round trip in the integrated matrix.
+
+Audit zstd decode CPU and resident memory against the bounded decoder's actual
+contract, including its window/scratch allocation, streaming extraction and
+adversarial compressed inputs. Preserve the existing project allowances;
+platform maxima are not budget increases. Record local workerd/native CPU and
+resident-work evidence at exact source/artifact/config pins, separately from
+user-owned deployed CPU/RSS/staging measurements. This row remains UNRUN and
+requires the merged implementation before thresholds or measurements are claimed.

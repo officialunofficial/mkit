@@ -17,6 +17,21 @@ APP = ROOT / "apps/embedded-worker"
 WRANGLER = "4.134.0"
 
 
+def artifact_hashes(app=APP):
+    artifacts = {}
+    for name in ["build/index_bg.wasm", "build/index.js", "build/worker/shim.mjs", "build/package.json"]:
+        path = app / name
+        if not path.is_file():
+            raise RuntimeError(f"missing embedded release artifact: {path}")
+        data = path.read_bytes()
+        if not data:
+            raise RuntimeError(f"empty embedded release artifact: {path}")
+        if name.endswith(".wasm") and not data.startswith(b"\0asm\x01\0\0\0"):
+            raise RuntimeError(f"invalid embedded release wasm: {path}")
+        artifacts[name] = {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+    return artifacts
+
+
 def request_json(url, body=None):
     headers = {"content-type": "application/json", "connect-protocol-version": "1"}
     request = urllib.request.Request(url, data=body, headers=headers)
@@ -81,6 +96,7 @@ def main():
                             "-p", "mkit-server-conformance", "--bin", "mkit-server-conformance"],
                            cwd=ROOT / "rust", env=env, stdout=log, stderr=log, check=True)
             subprocess.run(["worker-build", "--release"], cwd=APP, env=env, stdout=log, stderr=log, check=True)
+    artifacts = artifact_hashes()
     # Copy the example's config into this run's private directory with absolute
     # module paths. Different ports, registry and state keep other WPs isolated.
     configs = []
@@ -136,13 +152,16 @@ def main():
             assert all(outcome["audience"] == origin for outcome in calls["outcomes"])
             assert any("committed" in outcome for outcome in calls["outcomes"]), "missing committed outcome"
             (work / "hook-calls.json").write_text(json.dumps(calls, indent=2))
-            bundle = APP / "build/worker/index.wasm"
+            if artifact_hashes() != artifacts:
+                raise RuntimeError("embedded release artifacts changed during the conformance run")
             evidence = {"source_sha": sha, "dirty_worktree": dirty.splitlines(), "wrangler": WRANGLER,
                         "features": "default (no test-faults)", "origin": origin,
+                        "artifacts": artifacts,
+                        "wasm_sha256": artifacts["build/index_bg.wasm"]["sha256"],
+                        "js_sha256": artifacts["build/index.js"]["sha256"],
+                        "shim_sha256": artifacts["build/worker/shim.mjs"]["sha256"],
                         "cases": ["multipart.three_parts", "auth.v2_wrong_audience", "internal_audience_rejected",
                                   "custom_outcome_sink"]}
-            if bundle.exists():
-                evidence["wasm_sha256"] = hashlib.sha256(bundle.read_bytes()).hexdigest()
             (work / "evidence.json").write_text(json.dumps(evidence, indent=2))
             print("PASS custom binding hooks, DO outcome sink and public audience isolation")
     finally:
