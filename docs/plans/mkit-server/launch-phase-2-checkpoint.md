@@ -1,5 +1,54 @@
 # WP-4.18 phase 2 implementation checkpoint
 
+## October 1 continuation
+
+The branch incorporates #1254 extra native CA trust at
+`b90f74a3725467c827b554e8ac20c4d0a29bee90` and #1255 inherited fixture/timer
+repair at `acd179233aad12d841e2ea09938ab31ec0e4b1b9`. The four previously
+reported deterministic timer failures now pass together, with 865 unrelated
+tests skipped. No timer exemption is used.
+
+D-N2-010 applies the existing dedicated-role requirements in SPEC-SERVER
+§§7.1, 14.7 and 16.3 and SPEC-HTTP-OBJECTS §3.1. Reproduction sets ticket MAC
+material to the public bytes of an otherwise distinct active/retired URL key,
+or to configured admin/hook public bytes. The prior derived-public-only test
+accepted that exposed MAC material. The common predicate now rejects both raw
+secret/public equality and derived-public equality. Worker/native startup also
+reject token, hook and receipt seeds published under another configured role;
+runtime embedding checks revalidate the final programmatic configuration
+against zeroized environment hook/receipt secrets. Default-off profiles and
+distinct active/retained role keys remain accepted. No key type or wire format
+is introduced. Mounted HTTP startup errors pass through the existing
+no-store/CORS/HEAD response wrapper.
+
+Focused checks on this continuation source: Worker library 179/179 PASS,
+native launch profile 9/9 PASS, the four timer regressions 4/4 PASS, and host
+clippy for core/native/Worker all-targets/all-features with warnings denied
+PASS. These are component checks on the dirty implementation before its
+checkpoint; final integrated gates must use the eventual immutable candidate.
+The source currently has a conservative 3,154 added Rust line upper bound
+against the merged base after excluding explicit test files. It includes inline
+tests and the conformance harness, and is below the 3,500 production-line cap.
+
+| Owned `night2/` log | SHA-256 |
+|---|---|
+| `key-material-red.log` | `1d3a155149ae3edb24ca250aecf9e88a019ea9139ee12f9ff3569c59da06add3` |
+| `token-seed-material-red.log` | `0d7356a945f5b23619665dadea9c6d89898a7060ec4e0d6812bc69de76a8475f` |
+| `worker-role-final-targeted-2.log` | `ebada47cc5d700d7ae540adaaf6c23175139c7a13a4ffcb3a6e8e64f9abd2e52` |
+| `native-role-final-targeted.log` | `0dc416a64b0999c1f51c3558a87ccfea60ce0c43937f81618fe4c5db8e08267f` |
+| `four-timers-1255-2.log` | `daa3142d631a039b1f1f90bd0afe810bf2d280c96be017a395b9e9f0194b9160` |
+| `role-clippy-4.log` | `55d3bfd067aaf7d2de3fd81a9e026aa6afc318bf45bacb503b124077d00349cc` |
+
+The decoder-enabled five-variant size runner and independently signed
+seven-operation release admin/preservation probe are implemented. Their
+runtime result remains UNRUN until execution; the full 28-case matrix remains
+UNRUN. Fix A/B/decoder merge notifications are still prerequisites to final
+integrated gates and PR. D-N2-012 and D16 require activation wiring to charge
+immediate local invalidation against the same physical alarm purse and to
+register/drain existing audit relay kind 1 on ContentIndexShard. Automatic
+purge source work belongs to Fix A. The `many_refs` Medium diagnosis remains
+part of matrix diagnosis and is not waived.
+
 Status: **implementation checkpoint; sandbox access restored;
 complete launch matrix UNRUN; no PR opened**. This is a retained work record,
 not a passing gate or permission waiver.

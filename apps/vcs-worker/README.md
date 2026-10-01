@@ -526,7 +526,7 @@ is mounted, `/.well-known/mkit-*`, `/_mkit/`, and `/__mkit_test/` in test builds
 A host can choose another prefix such as `/_uno/`. Namespaces and repository
 names cannot begin with `_`.
 
-The minimal profile uses the default build without optional features.
+The minimal launch profile enables `pack-ruzstd` to accept native compressed pushes.
 Core publication semantics are mandatory; `published-view` adds optional
 snapshot/cache optimization. The phase 2 feature/size audit verifies each
 variant against the final implementation. All raw/gzip sizes, script-limit comparisons and acceptance
@@ -536,13 +536,13 @@ artifact, and record the wasm file's raw byte count and deterministic gzip
 
 | Variant | Exact release build command | Raw wasm bytes | gzip bytes | Limit/acceptance |
 |---|---|---|---|---|
-| Profile without optional HTTP or signed HTTPS | `worker-build --release` | UNRUN | UNRUN | UNRUN |
-| HTTP objects / tokens | `worker-build --release --features http-objects` | UNRUN | UNRUN | UNRUN |
-| Signed HTTPS hooks | `worker-build --release --features signed-http-hooks` | UNRUN | UNRUN | UNRUN |
-| HTTP plus signed HTTPS | `worker-build --release --features http-objects,signed-http-hooks` | UNRUN | UNRUN | UNRUN |
+| Profile without optional HTTP or signed HTTPS | `worker-build --release --features pack-ruzstd` | UNRUN | UNRUN | UNRUN |
+| HTTP objects / tokens | `worker-build --release --features pack-ruzstd,http-objects` | UNRUN | UNRUN | UNRUN |
+| Signed HTTPS hooks | `worker-build --release --features pack-ruzstd,signed-http-hooks` | UNRUN | UNRUN | UNRUN |
+| HTTP plus signed HTTPS | `worker-build --release --features pack-ruzstd,http-objects,signed-http-hooks` | UNRUN | UNRUN | UNRUN |
 | HTTP plus signed HTTPS and published snapshots | `worker-build --release --features launch` | UNRUN | UNRUN | UNRUN |
 
-The aggregate `launch` build enables `http-objects`, `signed-http-hooks` and
+The aggregate `launch` build enables `pack-ruzstd`, `http-objects`, `signed-http-hooks` and
 `published-view`; runtime features remain configuration opt-ins. Add the
 example's independent wasm32 build and actual release wrangler evidence to
 [B4.embedding](../../docs/plans/mkit-server/launch-evidence.md).
@@ -552,6 +552,15 @@ sets a 64 MiB uncompressed bundle limit on Free and Paid plans. The bundle
 includes the wasm and JavaScript shim, so the table's wasm size alone is not
 full bundle acceptance. gzip is informational; there is no compressed-size
 limit. No deploy or cloud-account call is required for these local measurements.
+
+`python3 scripts/vcs-worker-launch-size.py --sha <40-character-HEAD>` runs all
+five commands sequentially from the repository root and preserves each emitted
+bundle plus its raw/gzip counts and file hashes in the owned `TMPDIR`.
+`python3 scripts/vcs-worker-launch-admin-runtime.py --sha <40-character-HEAD>`
+exercises the configured seven-operation release catalog, private preservation,
+role checks and independent signed purge receiver for allowlist and any. Both
+require a clean committed candidate; the admin probe also requires a private
+`VCS_CONFORMANCE_PORT`. Their component results leave the full matrix unrun.
 
 The explicit `launch` Cargo feature enables R-203’s bounded pure-Rust zstd
 decoder for compressed native pushes. The default build keeps decoding off.
