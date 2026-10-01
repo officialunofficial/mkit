@@ -202,6 +202,7 @@ impl<T: NsTransport> NamespaceStore for DoNamespaceStore<T> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
+        wire::get_many_request_bytes(p, keys)?;
         let call = NsCall::GetMany {
             keys: keys.iter().map(|k| blob(k.as_bytes())).collect(),
         };

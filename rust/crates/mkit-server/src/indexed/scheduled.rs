@@ -721,6 +721,11 @@ async fn check_inner<B: BlobStore, N: NamespaceStore>(
     metrics: &dyn Metrics,
     inspection_limit: Option<usize>,
 ) -> Result<StagedCommits, ServerError> {
+    // A same-build restart may lower the advertised cap. Refuse before any
+    // job read, claim, extraction group or usable-result reuse.
+    for ticket in tickets {
+        super::check_pack_cap(ticket.bytes, cfg.max_pack_bytes)?;
+    }
     let now = u64::try_from(clock.now_ms()).unwrap_or(0);
     let bound = cfg.relay_lag_bound_ms;
     let wanted: Vec<_> = tickets
