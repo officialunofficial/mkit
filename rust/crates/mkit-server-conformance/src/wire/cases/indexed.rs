@@ -490,15 +490,20 @@ pub(super) async fn inspection_rejects_advance(ctx: Ctx) -> CaseResult {
 /// scheduled verification/extraction, public paired refs and exact pack bytes.
 /// The HTTP opt-in additionally proves the extracted bytes and proof refusal.
 pub(super) async fn launch_verification_commits(ctx: Ctx) -> CaseResult {
-    launch_verified_fixture(ctx, true).await
+    launch_verified_fixture(ctx, true, true).await
 }
 
 /// Bounded setup for preservation/admin checks; the large-pack case stays separate.
 pub(super) async fn launch_admin_fixture(ctx: Ctx) -> CaseResult {
-    launch_verified_fixture(ctx, false).await
+    launch_verified_fixture(ctx, false, true).await
 }
 
-async fn launch_verified_fixture(ctx: Ctx, large: bool) -> CaseResult {
+/// Separate Uno gate: public-by-default repositories, retaining the original Set fixture.
+pub(super) async fn uno_public_fixture(ctx: Ctx) -> CaseResult {
+    launch_verified_fixture(ctx, false, false).await
+}
+
+async fn launch_verified_fixture(ctx: Ctx, large: bool, set_visibility: bool) -> CaseResult {
     let data: Vec<_> = (0..131_072_u32)
         .map(|i| u8::try_from((i.wrapping_mul(17) ^ (i >> 9)) & 0xff).unwrap_or(0))
         .collect();
@@ -511,6 +516,33 @@ async fn launch_verified_fixture(ctx: Ctx, large: bool) -> CaseResult {
         verification_pack_entries(Some(&data), 0)?
     };
     let pack_id = hash(&pack);
+    if !set_visibility {
+        let (repository, _) = super::repository::identities(&ctx, "async-verify", "unused")?;
+        let begin = BeginUploadRequest {
+            r#ref: Some(ctx.head("payment-probe")),
+            pack_id: Some(hash(b"thirteen-byte").to_vec()),
+            bytes: Some(13),
+            ..Default::default()
+        };
+        let signed = sign_unary(
+            &ctx.v2_signer("repository-a")?,
+            Rpc::BeginUpload,
+            &begin,
+            |env| {
+                repository.clone_into(&mut env.repository);
+            },
+        );
+        let reply = ctx.send::<BeginUploadResponse>(&signed).await?;
+        let error = reply.err().ok_or("Uno admission did not challenge")?;
+        ensure!(
+            error.http_status == 402 && error.code == "permission_denied",
+            "Uno challenge was {error}"
+        );
+        ensure!(
+            error.details.len() == 1,
+            "Uno challenge omitted typed detail"
+        );
+    }
     let published_packmap = if large {
         pack_id
     } else {
@@ -524,8 +556,10 @@ async fn launch_verified_fixture(ctx: Ctx, large: bool) -> CaseResult {
     } else {
         commit_pack(&ctx, &pack, head, true).await?
     };
-    super::visibility::set_envelope(&ctx, &ctx.v2_signer("repository-a")?, &repository, false)
-        .await?;
+    if set_visibility {
+        super::visibility::set_envelope(&ctx, &ctx.v2_signer("repository-a")?, &repository, false)
+            .await?;
+    }
 
     eventually_listed(
         "published head and packmap",
@@ -562,6 +596,27 @@ async fn launch_verified_fixture(ctx: Ctx, large: bool) -> CaseResult {
     );
     if ctx.profile().has(Feature::HttpObjects) {
         check_extracted_http(&ctx, &repository, &extracted, &data).await?;
+    }
+    if !set_visibility {
+        let begin = BeginUploadRequest {
+            r#ref: Some(ctx.head("async")),
+            pack_id: Some(pack_id.to_vec()),
+            bytes: Some(pack.len() as u64),
+            ..Default::default()
+        };
+        let signed = sign_unary(
+            &ctx.v2_signer("repository-a")?,
+            Rpc::BeginUpload,
+            &begin,
+            |env| {
+                repository.clone_into(&mut env.repository);
+            },
+        );
+        let opened: BeginUploadResponse = want_ok(ctx.send(&signed).await?, "Uno AlreadyPresent")?;
+        ensure!(
+            matches!(opened.result, Some(BeginResult::AlreadyPresent(_))),
+            "verified Uno pack was not AlreadyPresent"
+        );
     }
     ctx.set_note(format!(
         "repository={repository} head_ref={} packmap_ref={} pack_bytes={} pending_polls={pending} extracted_blob={} extracted_blob_bytes={} http={}",
