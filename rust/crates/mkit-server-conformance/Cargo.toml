@@ -62,6 +62,7 @@ connectrpc = { version = "0.9.1", default-features = false, features = ["client"
 buffa = "0.9.1"
 http = "1"
 http-body-util = "0.1"
+hyper-util = { version = "=0.1.20", default-features = false, features = ["client-legacy", "tokio"] }
 webpki-roots = "1"
 flate2 = "1"
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }

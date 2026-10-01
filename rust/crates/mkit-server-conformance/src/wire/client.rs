@@ -5,7 +5,8 @@
 //! signature, a reused nonce), and it keeps the HTTP status of an error.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::{fs::File, io::Write as _, path::PathBuf};
 
 use buffa::Message;
 use bytes::Bytes;
@@ -145,6 +146,70 @@ pub struct StreamReply<M> {
 pub struct Client {
     http: HttpClient,
     base: Arc<str>,
+    http_trace: Option<Arc<File>>,
+}
+
+// Default-off response metadata only; no IO occurs inside the exchange timeout.
+fn http_trace_file() -> Option<Arc<File>> {
+    let root = PathBuf::from(std::env::var_os("TMPDIR")?);
+    let path = PathBuf::from(std::env::var_os("MKIT_CONFORMANCE_HTTP_TRACE")?);
+    if !root.is_absolute()
+        || root.canonicalize().ok()? != root
+        || !path.starts_with(&root)
+        || path.parent()?.canonicalize().ok()? != path.parent()?
+        || path.symlink_metadata().is_ok_and(|meta| !meta.is_file())
+    {
+        return None;
+    }
+    std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)
+        .ok()
+        .map(Arc::new)
+}
+
+fn observe_response(
+    observed: &mut Option<(Instant, serde_json::Value)>,
+    parts: &http::response::Parts,
+) {
+    if let Some((_, fields)) = observed {
+        let headers = [
+            "content-length",
+            "transfer-encoding",
+            "content-type",
+            "content-encoding",
+        ]
+        .map(|name| {
+            (name, parts.headers.get(name).map(|value| serde_json::json!({
+                "value": value.to_str().ok().map(|text| text.chars().take(128).collect::<String>()),
+                "truncated": value.as_bytes().len() > 128
+            })))
+        });
+        let socket = parts
+            .extensions
+            .get::<hyper_util::client::legacy::connect::HttpInfo>()
+            .map(|info| {
+                [
+                    info.local_addr().to_string(),
+                    info.remote_addr().to_string(),
+                ]
+            });
+        fields["response"] = serde_json::json!({"status": parts.status.as_u16(),
+            "version": format!("{:?}", parts.version), "headers": headers, "outer_tcp": socket});
+    }
+    observe_step(observed, "response_arrival", None);
+}
+
+fn observe_step(
+    observed: &mut Option<(Instant, serde_json::Value)>,
+    phase: &str,
+    len: Option<usize>,
+) {
+    if let Some((started, fields)) = observed {
+        fields[phase] = serde_json::json!({"ms": started.elapsed().as_millis(), "bytes": len});
+        fields["phase"] = phase.into();
+    }
 }
 
 impl std::fmt::Debug for Client {
@@ -262,6 +327,7 @@ impl Client {
         Ok(Self {
             http,
             base: Arc::from(base),
+            http_trace: http_trace_file(),
         })
     }
 
@@ -273,6 +339,10 @@ impl Client {
     async fn send(&self, req: http::Request<Bytes>) -> Result<Reply, String> {
         let (parts, body) = req.into_parts();
         let req = http::Request::from_parts(parts, full_body(body));
+        let mut observed = self.http_trace.as_ref().map(|_| (Instant::now(), serde_json::json!({
+            "started_unix_ms": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|time| time.as_millis()),
+            "phase": "send"
+        })));
         let exchange = async {
             let resp = self
                 .http
@@ -280,11 +350,13 @@ impl Client {
                 .await
                 .map_err(|e| format!("request failed: {e}"))?;
             let (mut parts, body) = resp.into_parts();
+            observe_response(&mut observed, &parts);
             let mut body = body
                 .collect()
                 .await
                 .map_err(|e| format!("reading the response failed: {e}"))?
                 .to_bytes();
+            observe_step(&mut observed, "collect_eof_upper_bound", Some(body.len()));
             // A unary body compressed as the request allowed.
             match parts.headers.remove("content-encoding") {
                 None => {}
@@ -292,15 +364,28 @@ impl Client {
                 Some(v) if v == "gzip" => body = gunzip(&body)?.into(),
                 Some(v) => return Err(format!("unrequested Content-Encoding {v:?}")),
             }
+            observe_step(&mut observed, "decode_complete", Some(body.len()));
             Ok(Reply {
                 status: parts.status.as_u16(),
                 headers: parts.headers,
                 body,
             })
         };
-        tokio::time::timeout(REQUEST_TIMEOUT, exchange)
-            .await
-            .map_err(|_| format!("no response within {REQUEST_TIMEOUT:?}"))?
+        let result = tokio::time::timeout(REQUEST_TIMEOUT, exchange).await;
+        if let (Some((started, mut fields)), Some(file)) = (observed, &self.http_trace) {
+            fields["outcome"] = match &result {
+                Err(_) => "timeout",
+                Ok(Err(_)) => "error",
+                Ok(Ok(_)) => "reply",
+            }
+            .into();
+            fields["result_ms"] = serde_json::json!(started.elapsed().as_millis());
+            if let Ok(mut line) = serde_json::to_vec(&fields) {
+                line.push(b'\n');
+                let _ = (&**file).write_all(&line);
+            }
+        }
+        result.map_err(|_| format!("no response within {REQUEST_TIMEOUT:?}"))?
     }
 
     /// `POST {base}{path}` with `body` as sent, plus
@@ -473,6 +558,10 @@ pub fn decode_stream<M: Message>(reply: &Reply) -> Result<StreamReply<M>, String
     }
     Err("stream ended without an end-of-stream message".to_owned())
 }
+
+#[cfg(test)]
+#[path = "client_observer_tests.rs"]
+mod observer_tests;
 
 #[cfg(test)]
 mod tests {

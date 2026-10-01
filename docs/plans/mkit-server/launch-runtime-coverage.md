@@ -157,3 +157,30 @@ local HTTPS listener and a scratch CA through `MKIT_SSL_CA_FILE`, and checks
 an initial compressed push/clone. It requires real zstd frames in local R2
 source packs and exact cloned refs/content. It does not measure CPU, heap or
 physical calls, and does not replace the other launch intersections.
+
+## D58 passive conformance response trace
+
+The conformance client's response observer is off by default. To enable it,
+set `MKIT_CONFORMANCE_HTTP_TRACE` to an absolute file beneath the owned,
+absolute, nonsymlink `TMPDIR`. Its existing parent must also be canonical;
+an existing target must be a regular file. Invalid paths or failed writes
+produce a measurement gap and preserve the client's original result.
+
+Each exchange records response status/version, the optional outer TCP tuple,
+and only Content-Length, Transfer-Encoding, Content-Type and Content-Encoding.
+Header copies retain at most 128 ASCII bytes, with truncation and missing or
+undecodable values indicated. No request, authentication, arbitrary response
+header, body bytes or arbitrary error text enters the trace. Collection records
+the encoded entity length before the unchanged content decoding, then its
+decoded length. Monotonic arrival/collection/decode/result timings accompany
+the initial wall-clock correlation. One sanitized JSON line is written after
+the original 120-second timeout/result resolves; logging overhead is a separate
+diagnostic variation, and sink failure cannot replace the original result.
+
+Collection completion is a logical-body EOF upper bound, not raw socket EOF.
+The response's `HttpInfo` tuple describes the client-to-outer-server connection;
+it does not identify an inner proxy socket or certify connection lifetime or
+reuse. Local TCP tests cover signed request/reply byte equivalence, fixed and
+chunked framing, gzip, HTTP 500, incomplete bodies, filtering, missing metadata
+and sink failure. They do not classify the retained release visibility failure
+or establish a resource certificate. A real D58 release probe remains UNRUN.
