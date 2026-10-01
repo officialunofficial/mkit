@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and startup validation for optional HTTP/URL tokens, signed hooks/binding,
   synchronous inspection and private scanner retrieval. Native serves proofs;
   Worker proofs stay unsupported. Leases/GC remain off with permanent retention.
-  Complete preservation configuration activates its core; admin catalog
-  exposure waits for WP-5.6a-3 and Worker zstd decoding for R-203.
+  Complete preservation configuration activates its core and restricted admin
+  catalog; Worker zstd decoding waits for R-203.
   Worker HTTP mounts retain read settlement in the fetch context; ticket and
   implicit packmap checks use at most six simultaneous backend responses.
   Added local conformance/evidence skeleton; complete runtime evidence and
@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dispatch retains ADMIN_KEYS authentication, and programmatic ref policies
   validate before serving. Add a service-binding streamed-upload example and
   its wasm check. These APIs are unpublished, consumed at a pinned git tag.
+- Server (WP-5.6a-3, R-190): add signed moderation GetTakedown/ListTakedowns,
+  atomic audited SetLegalHold and freshly verified ReadPreserved streaming.
+  Replay stores byte-free read descriptors; each attempt rechecks authority and
+  retention. Add separate v1 status fields for acquisition, verification,
+  discovery, legal hold and purged copies. Activation remains off until 4.18.
 
 - Core/server (WP-4.16c, R-202): in-process canonical object prefetch for
   embedders, including ChunkedBlob manifests and indexed content sizes;

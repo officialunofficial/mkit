@@ -2358,3 +2358,21 @@ an obligation or generation change.
 and the publication recheck regressions. No tag, timer kind, public protocol,
 packmap limit or whole-alarm budget changes. Pre-launch timer codecs are reset,
 not migrated (R-198 B1).
+
+## Restricted preserved reads and atomic operator holds (WP-5.6a-3)
+
+**Always:** Get/List keep acquisition, verified preservation, discovery, legal
+hold, purge and real completion separate. Any discovery never claims complete.
+A signed hold change commits its core arbitration batch with the operator audit
+and nonce result. ReadPreserved stores only a bounded action/object/offset
+nonce descriptor. Every byte-reading retry checks current key and role and
+commits an acceptance audit; every emitted piece freshly checks retention,
+hold and purge ownership and verifies its immutable owner header and hash.
+Only successful streams emit one last message; streaming failures append an
+audit result before the Connect error. **Because:** replayed bytes, stale
+retention checks or an unaudited hold can expose or destroy evidence.
+**If violated:** a restricted copy leaks, legal hold loses arbitration or
+verification is mistaken for real takedown completion. **Enforced by:**
+`admin::Engine::handle_streamed`, `takedown::work::Work`'s admin operations,
+PR2's legal-hold planner and the signed catalog/streaming regression tests.
+Production activation remains false; 4.18 mounts the catalog.

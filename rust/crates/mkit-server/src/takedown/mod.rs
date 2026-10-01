@@ -1,5 +1,6 @@
 //! Inert lean denial and durable, unresolved takedown intent foundation.
 pub mod acquisition;
+mod admin;
 mod closure;
 mod copy;
 pub mod denial;
