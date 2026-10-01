@@ -23,6 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dispatch retains ADMIN_KEYS authentication, and programmatic ref policies
   validate before serving. Add a service-binding streamed-upload example and
   its wasm check. These APIs are unpublished, consumed at a pinned git tag.
+
+- CLI (`mkit-cli`, additive): add `http.sslCAInfo` and overriding
+  `MKIT_SSL_CA_FILE` for extra PEM trust certificates on all native Connect
+  HTTPS remote RPCs and pack streams only. Keep Mozilla roots and
+  chain/hostname verification; invalid CA files fail closed. The self-updater
+  keeps OS trust and release checksums when present, ignoring both settings.
+  S3 remotes are not yet covered. Browser trust is unchanged.
+
 - Server (R-205): `DEFAULT_REPO_VISIBILITY=public|private` on Workers and
   native `--default-repo-visibility` select visibility for repositories without
   a stored setting. The default remains public; explicit visibility wins.

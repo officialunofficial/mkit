@@ -586,3 +586,6 @@ fn full_roundtrip_through_real_connect_server() {
     let _ = shutdown.send(());
     handle.join().expect("server thread joins cleanly");
 }
+
+#[path = "support/tls.rs"]
+mod tls_tests;

@@ -126,3 +126,10 @@ refusal evidence from phase 2 native and opted-in release runtime PASS. HTTP,
 inspection and admin/takedown are opt-ins, each with complete startup validation.
 The Uno Kit demo uses `any` plus its unsafe flag; takedown must report incomplete
 discovery. Worker discovery never advertises proofs; native discovery does.
+
+## Post-launch transport follow-up
+
+Private-CA S3 endpoints: extend additional CA-file support to `mkit+s3://`
+remotes after launch. `MKIT_SSL_CA_FILE` and `http.sslCAInfo` currently cover
+Connect HTTPS remotes only (RPCs, uploads and downloads); S3 retains its current
+HTTPS trust policy. Keep release downloads outside these custom-CA settings.

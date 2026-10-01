@@ -548,29 +548,44 @@ fn open_connect_parts(
     let signer_key = envelope_signer
         .as_ref()
         .map(|signer| signer.public_key_hex());
-    let mut tx = ConnectTransport::connect_with_signer(url, envelope_signer)?
-        .with_receipt_store(Arc::new(upload_receipts::FilePartReceiptStore::new(
-            layout.upload_parts_dir(),
-        )))
-        .with_pending_observer(|event| {
-            crate::progress::pending_event(event);
-            !crate::signal::is_shutdown()
-        })
-        .with_upload_observer(|event| {
-            crate::progress::upload_event(event);
-            !crate::signal::is_shutdown()
-        })
-        .with_admission_receipt_observer(|receipt| {
-            eprintln!(
-                "note: remote returned a {} receipt for {}",
-                receipt.header,
-                receipt
-                    .procedure
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(receipt.procedure)
-            );
-        });
+    // Resolve only the selected config fallback: an authoritative environment
+    // path must not be defeated by an ignored fallback's tilde/HOME error.
+    let ca_file = if url.starts_with("mkit+https://")
+        && std::env::var_os(mkit_transport_connect::tls::CA_FILE_ENV).is_none()
+    {
+        cfg.ssl_ca_file_path(layout).map_err(|error| {
+            DispatchError::Transport(TransportError::TlsConfiguration(error.to_string()))
+        })?
+    } else {
+        None
+    };
+    let mut tx = ConnectTransport::connect_with_signer_and_ca_file(
+        url,
+        envelope_signer,
+        ca_file.as_deref(),
+    )?
+    .with_receipt_store(Arc::new(upload_receipts::FilePartReceiptStore::new(
+        layout.upload_parts_dir(),
+    )))
+    .with_pending_observer(|event| {
+        crate::progress::pending_event(event);
+        !crate::signal::is_shutdown()
+    })
+    .with_upload_observer(|event| {
+        crate::progress::upload_event(event);
+        !crate::signal::is_shutdown()
+    })
+    .with_admission_receipt_observer(|receipt| {
+        eprintln!(
+            "note: remote returned a {} receipt for {}",
+            receipt.header,
+            receipt
+                .procedure
+                .rsplit('/')
+                .next()
+                .unwrap_or(receipt.procedure)
+        );
+    });
     // Grants ride only on signed requests (SPEC-WRITE-GRANTS §4.2), so the
     // store is read only when there is a signer to present them with.
     let grants = signed.then(|| Arc::new(grants::LocalGrants::from_stored(load_user_grants(cfg))));
