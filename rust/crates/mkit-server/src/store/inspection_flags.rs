@@ -1,6 +1,4 @@
-//! Repository inspection authority. Every flag and the monotonic version
-//! share the canonical zero-id object-index partition; object-id fanout
-//! would make an atomic repository version impossible.
+//! Repository flags and their monotonic version share the canonical zero-id object-index partition.
 
 use std::collections::BTreeSet;
 
@@ -12,14 +10,13 @@ use super::{Batch, BatchOutcome, NamespaceStore, Partition, StoreError, Value, c
 use crate::pipeline::ShardMap;
 use crate::repo::RepoId;
 
-/// Maximum ids per call: 48 record CAS/put pairs and one version CAS/put
-/// cost 98 operations, leaving two backend-reserved operations.
+/// Maximum ids per call: 48 record and one version CAS/put pair use 98 of 100 operations.
 pub const MAX_FLAG_IDS: usize = 48;
 /// Maximum distinct inspection sources retained per object; history is never pruned.
 pub const MAX_FLAG_SOURCES: usize = 1024;
 const MAX_ATTEMPTS: usize = 16;
 
-/// Stable origin of a verdict, preserved across delivery retries.
+/// Stable verdict origin, preserved across delivery retries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlagSource {
@@ -60,10 +57,8 @@ pub struct FlagV1 {
 }
 
 impl FlagV1 {
-    /// Construct the first flagged record with its durable replay history.
-    ///
-    /// # Errors
-    /// Returns [`StoreError::Invalid`] for invalid reason or source fields.
+    /// Construct the first flagged record with durable replay history.
+    /// # Errors Returns [`StoreError::Invalid`] for invalid reason or source fields.
     pub fn new(request: FlagInstall) -> Result<Self, StoreError> {
         if !valid(&request.reason, &request.source) {
             return Err(StoreError::Invalid("invalid inspection flag".into()));
@@ -102,11 +97,8 @@ fn valid(reason: &str, source: &FlagSource) -> bool {
         && source.sequence > 0
 }
 
-/// Encode a validated flag with the shared version-one JSON envelope.
-///
-/// # Errors
-/// Returns [`StoreError::Invalid`] for an empty or oversized reason or
-/// identity, invalid ref, or zero advance sequence.
+/// Encode a validated flag in the version-one JSON envelope.
+/// # Errors Returns [`StoreError::Invalid`] for invalid reason, identity, ref, or sequence.
 pub fn encode_flag(record: &FlagV1) -> Result<Value, StoreError> {
     if !valid(&record.reason, &record.source) || !valid_history(record) {
         return Err(StoreError::Invalid("invalid inspection flag".into()));
@@ -117,10 +109,8 @@ pub fn encode_flag(record: &FlagV1) -> Result<Value, StoreError> {
     Ok(Value::new(bytes))
 }
 
-/// Decode strictly; unknown versions, fields, states and invalid origins fail closed.
-///
-/// # Errors
-/// Returns [`StoreError::Corrupt`] for a malformed or invalid stored record.
+/// Decode strictly; unknown versions, fields, states, and origins fail closed.
+/// # Errors Returns [`StoreError::Corrupt`] for malformed or invalid records.
 pub fn decode_flag(value: &Value) -> Result<FlagV1, StoreError> {
     let corrupt = || StoreError::Corrupt("invalid inspection flag".into());
     let Some((&codec::CODEC_V1, body)) = value.as_bytes().split_first() else {
@@ -144,7 +134,7 @@ pub struct FlagInstall {
     pub source: FlagSource,
 }
 
-/// A coherent bounded lookup, linearized by a version-only checked apply.
+/// Coherent bounded lookup, linearized by a version-only checked apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlagLookup {
     /// Flagged subset in the requested order; released records are excluded.
@@ -153,7 +143,7 @@ pub struct FlagLookup {
     pub version: u64,
 }
 
-/// Storage authority; not connected to pipeline or serving policy yet.
+/// Storage authority, not connected to pipeline or serving policy.
 #[derive(Debug)]
 pub struct InspectionFlags<'a, S: ?Sized> {
     store: &'a S,
@@ -162,7 +152,7 @@ pub struct InspectionFlags<'a, S: ?Sized> {
 }
 
 impl<'a, S: NamespaceStore + ?Sized> InspectionFlags<'a, S> {
-    /// Resolve the canonical repository-index partition through the existing map.
+    /// Resolve the canonical repository-index partition.
     #[must_use]
     pub fn new(store: &'a S, shards: &dyn ShardMap, repo: &'a RepoId) -> Self {
         Self {
@@ -219,15 +209,9 @@ impl<'a, S: NamespaceStore + ?Sized> InspectionFlags<'a, S> {
         }
     }
 
-    /// Install at most 48 distinct flags atomically. Each unseen source adds
-    /// one to the version, including on an already flagged id. Every source
-    /// replay is a no-op, even after intervening releases or inspections.
-    /// History retains at most 1024 sources per object; exhaustion refuses
-    /// the complete batch without forgetting earlier sources.
-    ///
-    /// # Errors
-    /// Returns storage errors, invalid bounds/input or batch limits, corrupt
-    /// records/counter overflow, or unavailable after 16 failed CAS attempts.
+    /// Atomically install at most 48 distinct flags; unseen sources advance the version.
+    /// Replays remain no-ops across releases; history is bounded at 1024 and never pruned.
+    /// # Errors Returns storage, input, corruption, overflow, or CAS contention errors.
     pub async fn install_flags(&self, flags: &[FlagInstall]) -> Result<u64, StoreError> {
         if flags.len() > MAX_FLAG_IDS || flags.iter().any(|f| !valid(&f.reason, &f.source)) {
             return Err(StoreError::Invalid(
@@ -262,12 +246,8 @@ impl<'a, S: NamespaceStore + ?Sized> InspectionFlags<'a, S> {
         .await
     }
 
-    /// Release only this object's flag, retaining its stable origin so a
-    /// delayed redelivery cannot reinstall it. The audited caller is WP-5.5a.
-    ///
-    /// # Errors
-    /// Returns storage errors, corrupt records/counter overflow, or unavailable
-    /// after 16 failed CAS attempts.
+    /// Release this flag while retaining its origin, so delayed redelivery cannot reinstall it.
+    /// # Errors Returns storage, corruption, overflow, or CAS contention errors.
     pub async fn release_flag(&self, id: &Hash) -> Result<u64, StoreError> {
         self.mutate(&[*id], |_, prior| {
             let Some(record) = prior.filter(|r| r.state == FlagState::Flagged) else {
@@ -323,13 +303,8 @@ impl<'a, S: NamespaceStore + ?Sized> InspectionFlags<'a, S> {
         Err(contended())
     }
 
-    /// Read at most 48 distinct ids with a coherent version. Sequential
-    /// `get_many` reads are validated by the atomic version guard, never
-    /// assumed to be a snapshot. A concurrent mutation causes a retry.
-    ///
-    /// # Errors
-    /// Returns invalid bounds, storage/corruption errors, or unavailable after
-    /// 16 failed version validation attempts.
+    /// Read at most 48 distinct ids; a version guard validates sequential reads and retries races.
+    /// # Errors Returns invalid bounds, storage, corruption, or CAS contention errors.
     pub async fn lookup(&self, ids: &[Hash]) -> Result<FlagLookup, StoreError> {
         bounded(ids)?;
         for _ in 0..MAX_ATTEMPTS {
@@ -360,9 +335,7 @@ impl<'a, S: NamespaceStore + ?Sized> InspectionFlags<'a, S> {
     }
 
     /// Current version; an untouched repository is version zero.
-    ///
-    /// # Errors
-    /// Returns storage errors or corrupt zero/malformed stored versions.
+    /// # Errors Returns storage or corrupt-version errors.
     pub async fn version(&self) -> Result<u64, StoreError> {
         self.read_version().await.map(|(_, version)| version)
     }

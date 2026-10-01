@@ -1,6 +1,4 @@
-//! Inspection holds in the advance's ref partition. A single advance-level
-//! pending marker can be folded into the caller's guarded apply; kind-14 work
-//! later materializes per-content rows. Reads are not atomic snapshots.
+//! Inspection holds share the advance's ref partition; kind-14 work materializes per-content rows.
 
 use std::collections::BTreeSet;
 
@@ -16,17 +14,14 @@ use super::{
 
 /// Forward-row writes per content id, on install and release.
 pub const HOLD_OPS_PER_ID: usize = 1;
-/// One manifest CAS and one manifest write, shared by a plan.
+/// Shared manifest CAS and write cost per plan.
 pub const HOLD_SHARED_OPS: usize = 2;
-/// One advance-level hold marker: one absence guard and one put.
+/// Advance-level marker cost: one absence guard and one put.
 pub const ADVANCE_HOLD_MARKER_OPS: usize = 2;
 const PENDING_HOLD_MARKER: u8 = 0;
 /// Most input ids for an install plan, before deduplication.
 pub const MAX_HOLD_BATCH_IDS: usize = MAX_BATCH_OPS - HOLD_SHARED_OPS;
-/// Most distinct ids held by one advance. The manifest is at most 320,002
-/// bytes; its guard and replacement fit the one MiB limit together.
-/// This bounds storage resources, not the inspected set: callers can hold
-/// whole added packs and record flagged object ids in the separate registry.
+/// Maximum distinct ids per advance; the 320,002-byte manifest fits twice under the one MiB limit.
 pub const MAX_HOLD_IDS_PER_ADVANCE: usize = 10_000;
 
 /// Per-advance holds, routed beside the advance via the existing shard map.
@@ -39,7 +34,7 @@ pub struct InspectionHolds<'a, S> {
 }
 
 impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
-    /// Resolve the advance's ref partition once; never infer a partition.
+    /// Resolve the advance's ref partition.
     #[must_use]
     pub fn new(store: &'a S, shards: &dyn ShardMap, repo: &'a RepoId, ref_name: &str) -> Self {
         Self {
@@ -50,8 +45,7 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
         }
     }
 
-    /// Reserve operations for the caller's advance guards and state writes.
-    /// This is additional to the backend's reserved operations.
+    /// Reserve operations for caller guards and state writes, in addition to backend reservations.
     #[must_use]
     pub const fn with_reserved_ops(mut self, ops: usize) -> Self {
         self.reserved_ops = ops;
@@ -64,12 +58,9 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
         &self.partition
     }
 
-    /// Plan the constant-cost hold record to include in the advance apply.
-    /// Per-content hold rows are materialized later by inspection work.
-    /// Repeated calls are idempotent and guard the existing record.
-    ///
-    /// # Errors
-    /// Storage failures propagate; corrupt records and unsupported batches fail closed.
+    /// Plan the constant-cost advance hold record; kind-14 work later materializes per-content rows.
+    /// Repeated calls guard the existing record.
+    /// # Errors Storage failures propagate; corrupt records and unsupported batches fail closed.
     pub async fn plan_advance_hold(&self, advance: &Hash) -> Result<Batch, StoreError> {
         let key = keys::inspection_hold_index(&self.repo.name, advance);
         let prior = self.store.get(&self.partition, &key).await?;
@@ -83,14 +74,9 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
         Ok(batch)
     }
 
-    /// Plan one bounded kind-14 materialization page. The manifest CAS
-    /// serializes additions and releases for this advance; while materializing,
-    /// the manifest remains pending until `plan_complete` commits. Existing
-    /// ids need no forward-row write. Re-plan after any CAS loss.
-    ///
-    /// # Errors
-    /// Invalid for an oversized input, manifest, or batch; corrupt for an
-    /// invalid stored manifest. Storage read failures propagate.
+    /// Plan one bounded kind-14 page. The manifest CAS serializes updates and stays pending until complete.
+    /// Existing ids need no forward-row write; re-plan after CAS loss.
+    /// # Errors Invalid for oversized input/batch; corrupt for invalid manifests; storage errors propagate.
     pub async fn plan_holds(&self, advance: &Hash, ids: &[Hash]) -> Result<Batch, StoreError> {
         if ids.len() > self.batch_limit()? {
             return Err(StoreError::Invalid(
@@ -140,10 +126,8 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
         Ok(batch)
     }
 
-    /// Complete kind-14 materialization after every content page is committed.
-    /// Until this transition, serving must treat content belonging to this
-    /// advance as held, including content not yet present in a forward row.
-    /// Completing an empty materialization is valid and removes that fallback.
+    /// Complete kind-14 after all pages commit; until then serving treats all advance content as held.
+    /// Completing an empty materialization is valid.
     pub async fn plan_complete(&self, advance: &Hash) -> Result<Batch, StoreError> {
         let key = keys::inspection_hold_index(&self.repo.name, advance);
         let prior = self.store.get(&self.partition, &key).await?;
@@ -158,16 +142,9 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
         Ok(batch)
     }
 
-    /// Plan a bounded release page belonging only to this advance, after the
-    /// advance obligation has ended. The caller must atomically guard the
-    /// terminal advance transition on the first page so no later kind-14 page
-    /// can apply. Repeat after each committed page until a plan with no writes
-    /// is returned. A partial page rewrites the manifest with remaining ids;
-    /// re-plan after CAS loss.
-    ///
-    /// # Errors
-    /// Invalid for unusable backend limits; corrupt for a bad manifest;
-    /// storage failures propagate. No writes happen while planning.
+    /// Plan a bounded release after the obligation ends; guard its terminal transition on the first page.
+    /// Repeat after commits until there are no writes; re-plan after CAS loss.
+    /// # Errors Invalid for unusable limits; corrupt for bad manifests; storage failures propagate.
     pub async fn plan_release(&self, advance: &Hash) -> Result<Batch, StoreError> {
         let limit = self.batch_limit()?;
         let key = keys::inspection_hold_index(&self.repo.name, advance);
@@ -200,16 +177,9 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
         Ok(batch)
     }
 
-    /// Return the subset with materialized per-content rows in sorted,
-    /// deduplicated order. During a pending advance marker, serving must also
-    /// check whether the requested content belongs to that held advance while
-    /// the manifest is still materializing.
-    /// Every materialized id needs one prefix probe with limit one. The
-    /// probes are sequential and are not a snapshot.
-    ///
-    /// # Errors
-    /// Invalid for more than 256 inputs, corrupt for malformed hold rows;
-    /// storage failures propagate.
+    /// Return sorted, deduplicated ids with forward rows; serving also checks pending advances.
+    /// Each id uses a sequential one-result prefix probe; reads are not a snapshot.
+    /// # Errors Invalid above 256 ids; corrupt for malformed rows; storage failures propagate.
     pub async fn is_held(&self, ids: &[Hash]) -> Result<Vec<Hash>, StoreError> {
         if ids.len() > MAX_SCAN_RANGES {
             return Err(StoreError::Invalid(
