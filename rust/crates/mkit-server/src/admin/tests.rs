@@ -629,6 +629,67 @@ async fn authenticated_oversize_failure_is_audited_and_replayed() {
     assert_eq!(head(&store).await, 1);
 }
 
+#[test]
+fn unknown_admin_key_is_rejected_before_body_capture() {
+    let (mut headers, _) = signed_bytes(PURGE_PATH, b"{}", 42);
+    headers
+        .iter_mut()
+        .find(|(name, _)| name == "x-mkit-admin-key-id")
+        .unwrap()
+        .1 = "unknown".into();
+
+    assert!(precheck_envelope(&config(&["moderation"]), PURGE_PATH, &headers, 1).is_err());
+}
+
+#[tokio::test]
+async fn envelope_precheck_does_not_replace_exact_body_digest_verification() {
+    let store = std::sync::Arc::new(MemoryKv::default());
+    let config = config(&["audit"]);
+    let engine = Engine::new(store.clone(), partition(), config.clone());
+    let (headers, _) = request(AUDIT_PATH, &json!({"fromSeq":"1","pageSize":1}), 43);
+    assert!(precheck_envelope(&config, AUDIT_PATH, &headers, 1).is_ok());
+    let (_, changed_body) = request(AUDIT_PATH, &json!({"fromSeq":"1","pageSize":2}), 44);
+
+    assert_eq!(
+        engine
+            .handle(AUDIT_PATH, &headers, &changed_body, 1)
+            .await
+            .status,
+        401
+    );
+    assert_eq!(head(&store).await, 0);
+}
+
+#[tokio::test]
+async fn manual_purge_enforces_spec_reason_and_label_byte_bounds() {
+    for (reason, label, expected_status) in [
+        ("r".repeat(512), "l".repeat(128), 200),
+        ("r".repeat(513), "l".repeat(128), 400),
+        ("r".repeat(512), "l".repeat(129), 400),
+        ("é".repeat(257), "l".repeat(128), 400),
+        ("r".repeat(512), "é".repeat(65), 400),
+    ] {
+        let store = std::sync::Arc::new(MemoryKv::default());
+        let engine =
+            Engine::new(store.clone(), partition(), config(&["moderation"])).with_purge(true);
+        let mut input = purge_body();
+        input["reason"] = json!(reason);
+        input["operatorLabel"] = json!(label);
+        let (headers, body) = request(PURGE_PATH, &input, 41);
+
+        assert_eq!(
+            engine.handle(PURGE_PATH, &headers, &body, 1).await.status,
+            expected_status,
+            "reason bytes={}, label bytes={}",
+            reason.len(),
+            label.len()
+        );
+        if expected_status != 200 {
+            assert!(purge_timers(&store).await.is_empty());
+        }
+    }
+}
+
 #[tokio::test]
 async fn nonce_request_conflict_cannot_replace_original_read_result() {
     let store = std::sync::Arc::new(MemoryKv::default());

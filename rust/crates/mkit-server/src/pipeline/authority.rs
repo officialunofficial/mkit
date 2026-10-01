@@ -195,7 +195,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         };
         match &multi.namespace_policy {
             NamespacePolicy::Allowlist(allowed) if allowed.contains(ns) => Ok(()),
-            NamespacePolicy::Any { .. } if matches!(ns, Namespace::Ed25519(_)) => {
+            NamespacePolicy::Any { .. } => {
                 let key = NamespaceKey::from_namespace(ns);
                 if self
                     .meta

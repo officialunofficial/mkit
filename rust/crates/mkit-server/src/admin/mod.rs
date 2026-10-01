@@ -1,7 +1,8 @@
 //! Signed operator API (§16), durable replay and a gapless audit chain.
 //!
-//! Adapters call [`precheck`] before reading a body, hash wire bytes with
-//! [`BodyCapture`], then dispatch through [`Engine`]. No keys means no routes.
+//! Adapters precheck headers and the signed envelope before reading a body,
+//! hash wire bytes with [`BodyCapture`], then dispatch through [`Engine`] for
+//! exact-body verification. No keys means no routes.
 //! Operator replay and audit share the deployment root and commit before success.
 //! Automatic state, purge work and outbox events commit in their source partition;
 //! the existing relay atomically appends the root audit and advances its watermark.
@@ -209,6 +210,23 @@ impl Response {
 /// A ready-to-send Connect response for invalid or unauthenticated headers.
 pub fn precheck(headers: &Headers) -> Result<(), Response> {
     auth::check_headers(headers).map_err(|e| Response::error(&e))
+}
+
+/// Authenticate the signed envelope before an adapter reads or hashes its body.
+/// The exact body digest is still checked by [`Engine`] after bounded capture.
+///
+/// # Errors
+/// A ready-to-send Connect response for an invalid or unauthenticated envelope.
+pub fn precheck_envelope(
+    config: &Config,
+    path: &str,
+    headers: &Headers,
+    now_ms: i64,
+) -> Result<(), Response> {
+    config
+        .verify_envelope(path, headers, now_ms)
+        .map(|_| ())
+        .map_err(|error| Response::error(&error))
 }
 
 /// Durable admin service over one deployment-wide metadata partition.

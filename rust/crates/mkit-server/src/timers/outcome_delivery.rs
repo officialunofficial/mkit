@@ -15,7 +15,10 @@ use crate::timers::{DueTimer, Fired, TimerCtx, TimerHandler, TimerKind, registry
 pub const DEFAULT_MAX_ROWS: usize = 16;
 /// Default bound on one sink call.
 pub const DEFAULT_SINK_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_ROWS_CEILING: usize = 1_024;
+// Acknowledgments can cost four operations per row, plus timer completion or
+// reschedule and the shared backlog guard/write. At 23 rows the worst case is
+// 4 * 23 + 2 + 4 = 98 operations, below the shared 100-op transaction cap.
+const MAX_ROWS_CEILING: usize = 23;
 const MAX_CURSOR_BYTES: usize = 4_096;
 const MAX_BACKOFF_MS: u64 = 900_000;
 
@@ -84,7 +87,7 @@ impl<O> OutcomeDelivery<O> {
         self
     }
 
-    /// Override the rows per fire (clamped to 1..=1024).
+    /// Override the rows per fire (clamped to 1..=23 to fit atomic acknowledgments).
     #[must_use]
     pub fn with_max_rows(mut self, rows: usize) -> Self {
         self.max_rows = rows.clamp(1, MAX_ROWS_CEILING);
@@ -1125,6 +1128,45 @@ mod tests {
         fire_with(&store, &clock, mk(sink.clone()), 102).await;
         assert_eq!(sink.seen.lock().unwrap().len(), 5);
         assert_eq!(backlog_rows(&store).await, 0);
+    }
+
+    #[tokio::test]
+    async fn configured_max_rows_24_or_25_drains_without_exceeding_atomic_batch_limit() {
+        for configured in [24, 25] {
+            let clock = Arc::new(ManualClock::new(100));
+            let store = MemoryKv::with_clock(clock.clone());
+            let ids: Vec<_> = (0..25).map(|i| format!("row-{i}")).collect();
+            let ids: Vec<_> = ids.iter().map(String::as_str).collect();
+            seed(&store, &ids).await;
+            let sink = Arc::new(Capture::default());
+            for tick in 0..3 {
+                let now = 100 + tick * 1_000_000;
+                clock.set(i64::try_from(now).unwrap());
+                fire_with(
+                    &store,
+                    &clock,
+                    OutcomeDelivery::new(
+                        sink.clone(),
+                        "https://example.test".into(),
+                        Arc::new(NoopMetrics),
+                        Arc::new(ManualSleep::new()),
+                    )
+                    .with_max_rows(configured),
+                    now,
+                )
+                .await;
+            }
+            assert_eq!(
+                sink.seen.lock().unwrap().len(),
+                25,
+                "configured row bound {configured}"
+            );
+            assert_eq!(
+                backlog_rows(&store).await,
+                0,
+                "configured row bound {configured}"
+            );
+        }
     }
 
     #[cfg(feature = "remote-hooks")]
