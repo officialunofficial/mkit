@@ -70,6 +70,11 @@ tokio = { version = "1", default-features = false, features = [
     "time",
 ] }
 
+hyper = { version = "1", features = ["client", "http1", "http2"] }
+hyper-util = { version = "=0.1.20", features = ["client-legacy", "http1", "http2", "tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12", "ring"] }
+pin-project-lite = "0.2"
+tower-service = "0.3"
 http = "1"
 http-body-util = "0.1"
 bytes = "1.6"

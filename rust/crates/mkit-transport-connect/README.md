@@ -93,3 +93,12 @@ a real server, not a mock standing in for one. `tests/retry.rs` and
 End to end against the real server, `mkit-server-native`'s
 `tests/client_e2e.rs` drives `ConnectTransport` against `mkit-server serve`
 over FS blobs and `.mkit`-layout refs.
+
+Unary reads and auth-v2 writes retry once on a fresh HTTP/1 connection when a
+previously used pooled socket closes or resets before receiving any response
+bytes. Socket accounting includes partial headers. Writes replay the same
+signed envelope and nonce, allowing the server's stored result to answer a
+lost response. Streaming RPCs start their sole attempt on a fresh connection, so a stale
+pooled socket cannot interrupt an unreplayable body. Unsigned writes, HTTP
+error responses and body read failures are not replayed. Both attempts share the caller's RPC deadline;
+TLS trust and client credentials remain the same on the fresh connection.
