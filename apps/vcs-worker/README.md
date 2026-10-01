@@ -528,19 +528,28 @@ names cannot begin with `_`.
 
 The minimal launch profile enables `pack-ruzstd` to accept native compressed pushes.
 Core publication semantics are mandatory; `published-view` adds optional
-snapshot/cache optimization. The phase 2 feature/size audit verifies each
-variant against the final implementation. All raw/gzip sizes, script-limit comparisons and acceptance
-remain **UNRUN**. Run each exact command from `apps/vcs-worker`, pin SHA and
-artifact, and record the wasm file's raw byte count and deterministic gzip
-(`gzip -n`) byte count before another variant overwrites the build output.
+snapshot/cache optimization. These historical measurements are pinned to
+`43256803446f7f29a7fbf45d794afcfb78cea181`, before the final review fixes.
+The [retained size manifest](../../docs/plans/mkit-server/launch-feature-sizes.json)
+records artifact hashes, full emitted sizes, commands and deterministic gzip
+counts (mtime zero). Its SHA-256 is
+`ef1d92a85fce5c665131d2a5616d6d358ffec26e7c9ba5061d340a7f8fd71375`.
+Run each command from `apps/vcs-worker`. Final-head variant measurements and
+remote packaging acceptance remain UNRUN; these rows certify only that
+historical emitted files fit the recorded local 64 MiB guard.
 
 | Variant | Exact release build command | Raw wasm bytes | gzip bytes | Limit/acceptance |
 |---|---|---|---|---|
-| Profile without optional HTTP or signed HTTPS | `worker-build --release --features pack-ruzstd` | UNRUN | UNRUN | UNRUN |
-| HTTP objects / tokens | `worker-build --release --features pack-ruzstd,http-objects` | UNRUN | UNRUN | UNRUN |
-| Signed HTTPS hooks | `worker-build --release --features pack-ruzstd,signed-http-hooks` | UNRUN | UNRUN | UNRUN |
-| HTTP plus signed HTTPS | `worker-build --release --features pack-ruzstd,http-objects,signed-http-hooks` | UNRUN | UNRUN | UNRUN |
-| HTTP plus signed HTTPS and published snapshots | `worker-build --release --features launch` | UNRUN | UNRUN | UNRUN |
+| Profile without optional HTTP or signed HTTPS | `worker-build --release --features pack-ruzstd` | 6,661,292 | 2,279,944 | 6,701,318 emitted bytes; local PASS |
+| HTTP objects / tokens | `worker-build --release --features pack-ruzstd,http-objects` | 6,990,192 | 2,380,916 | 7,030,420 emitted bytes; local PASS |
+| Signed HTTPS hooks | `worker-build --release --features pack-ruzstd,signed-http-hooks` | 6,665,414 | 2,282,338 | 6,705,440 emitted bytes; local PASS |
+| HTTP plus signed HTTPS | `worker-build --release --features pack-ruzstd,http-objects,signed-http-hooks` | 6,993,827 | 2,383,298 | 7,034,055 emitted bytes; local PASS |
+| HTTP plus signed HTTPS and published snapshots | `worker-build --release --features launch` | 7,029,471 | 2,397,658 | 7,070,032 emitted bytes; local PASS |
+
+The distinct Uno acceptance host at `7527556d09c7753462f0449622d86ade0fb3b70e`
+measured 6,934,119 raw / 2,370,989 gzip bytes (6,974,355 emitted bytes).
+Its [matrix evidence](../../docs/plans/mkit-server/launch-read-failure-evidence.md)
+pins the host artifact and measured runtime scope separately.
 
 The aggregate `launch` build enables `pack-ruzstd`, `http-objects`, `signed-http-hooks` and
 `published-view`; runtime features remain configuration opt-ins. Add the
