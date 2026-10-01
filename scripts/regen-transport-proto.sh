@@ -31,7 +31,10 @@ refresh() {
     out="${out%/$marker}"
     rm -f "$gen_dir"/*.rs
     mkdir -p "$gen_dir"
-    cp "$out"/*.rs "$gen_dir/"
+    # The owning crate also stages RPC schemas at OUT_DIR's root. Select
+    # only this Connect generation's transport/health files and wrapper.
+    cp "$out"/_connectrpc.rs "$out"/mkit.transport.*.rs \
+        "$out"/grpc.health.*.rs "$gen_dir/"
     echo "refreshed $gen_dir from $out:"
     ls "$gen_dir"
 }
@@ -41,7 +44,7 @@ MKIT_TRANSPORT_CODEGEN=1 cargo build --manifest-path rust/Cargo.toml -p mkit-rpc
     --features transport --target wasm32-unknown-unknown
 refresh "mkit-rpc transport" \
     "rust/crates/mkit-rpc/generated/transport" \
-    "rust/target/wasm32-unknown-unknown/debug/build/mkit-rpc-*/out/transport" \
+    "rust/target/wasm32-unknown-unknown/debug/build/mkit-rpc-*/out" \
     ".mkit-rpc-transport-codegen"
 
 generated_dirs=(rust/crates/mkit-rpc/generated/transport)

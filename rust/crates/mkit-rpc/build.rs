@@ -147,9 +147,7 @@ mod transport {
     const MARKER: &str = ".mkit-rpc-transport-codegen";
 
     pub(crate) fn stage() {
-        let out_dir =
-            PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR")).join("transport");
-        std::fs::create_dir_all(&out_dir).expect("create transport OUT_DIR");
+        let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
         println!("cargo:rerun-if-changed=generated/transport");
         println!("cargo:rerun-if-env-changed=PROTOC");
         println!("cargo:rerun-if-env-changed=MKIT_TRANSPORT_CODEGEN");
@@ -172,29 +170,22 @@ mod transport {
                     health.to_str().expect("proto path is valid UTF-8"),
                 ])
                 .includes(&[root.to_str().expect("proto root is valid UTF-8")])
-                .out_dir(&out_dir)
                 .include_file("_connectrpc.rs")
                 .compile()
                 .expect("connectrpc-build codegen failed for the canonical protos");
             std::fs::write(&marker, b"").expect("write codegen marker");
-        } else {
-            let _ = std::fs::remove_file(&marker);
+            return;
         }
-        // Generated includes use OUT_DIR, so stage these distinct transport/health
-        // filenames at its root alongside the RPC schemas. Keep codegen output
-        // in its own subdirectory for the regeneration script.
-        let source = if std::env::var_os("MKIT_TRANSPORT_CODEGEN").is_some() {
-            out_dir.clone()
-        } else {
-            PathBuf::from("generated/transport")
-        };
-        let stage_dir = out_dir.parent().expect("transport OUT_DIR parent");
+
+        let _ = std::fs::remove_file(&marker);
         let mut staged = 0usize;
-        for entry in std::fs::read_dir(&source).expect("read generated/transport/") {
+        for entry in
+            std::fs::read_dir(Path::new("generated/transport")).expect("read generated/transport/")
+        {
             let path = entry.expect("read generated/transport/ entry").path();
             if path.extension().is_some_and(|e| e == "rs") {
                 let name = path.file_name().expect("file name");
-                std::fs::copy(&path, stage_dir.join(name)).expect("stage generated module");
+                std::fs::copy(&path, out_dir.join(name)).expect("stage generated module");
                 staged += 1;
             }
         }
