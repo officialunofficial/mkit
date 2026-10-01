@@ -208,12 +208,16 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence):
                           item["body"]["trigger"] == "CACHE_PURGE_TRIGGER_MANUAL" for item in delivered),
                       "manual purge scope/selectors/trigger differs")
                 deadline = time.monotonic() + 90
+                completion_start = 1
                 while True:
-                    completion = admin(origin, "ReadAuditLog", {"fromSeq": "1", "pageSize": 100},
+                    completion = admin(origin, "ReadAuditLog", {"fromSeq": str(completion_start), "pageSize": 100},
                                        env, transcript, streamed=True)
                     if any(entry["procedure"] == "system:timer/PurgeCacheComplete" and
                            entry.get("targets") == [purge["purgeId"]] for entry in completion[0]["entries"]):
                         break
+                    next_completion = int(completion[0]["nextSeq"])
+                    check(next_completion > completion_start, "completion audit page failed to progress")
+                    completion_start = next_completion
                     check(time.monotonic() < deadline, "manual purge completion audit absent")
                     time.sleep(1)
                 entries, start, frozen_head = [], 1, None

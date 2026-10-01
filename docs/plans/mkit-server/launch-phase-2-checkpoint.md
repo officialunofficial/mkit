@@ -360,3 +360,41 @@ will be repaired in separate prerequisite PRs. The decoder PR reserves derived
 scratch without increasing 48 MiB, preserves the 1 MiB entry/pack limits, and
 must retain bounded-call progress, 50-deep deltas and extraction parity.
 Neither newly identified launch intersection is certified.
+
+### October 1: admin setup diagnosis (integration still pending)
+
+The separate raw large-pack release case remains unchanged: 720 entries,
+>33 MiB source assertion and its exact published-ref checks. With takedown
+enabled, its `ticketed_advance` helper places the raw pack identity in the
+packmap ref. That is not a canonical MKPL graph. The two observed refusals
+(`object index limit exceeded`, then `open closure` with a smaller raw setup)
+are invalid-fixture evidence; they cannot establish a valid-graph closure-cap
+exception or a green admin-enabled profile. The earlier provisional closure
+budget explanation is not a ruling.
+
+A separate `launch.admin_fixture` now uploads the 131,072-byte Blob, tree and
+signed commit plus a canonical `MKPL(None, [pack_id])` node under a second
+ticket. Both tickets are consumed together and public packmap identity is
+checked against the node hash. Its first actual release run at clean
+`6a293f0c96c4128d98a2d1f1692baffd4c18f8ef` / tree
+`dbd55a27f3c302b2599f6a9a76549eba1ca18453` stalled after expected pending
+AdvanceRefs responses, then the conformance client's unchanged 120-second
+watchdog failed. A separate five-second GetServerInfo diagnostic also timed
+out. Evidence: owned scratch `night2/launch-admin-kdxtphyq/evidence.json`,
+`allowlist/producer.tap`, `allowlist/wrangler.log`, and
+`night2/admin-probe-4-workerd.sample`. The sampled process was the Wrangler
+proxy workerd, so its footprint is not a Worker-isolate memory certificate.
+The fixture stopped all its owned process groups. No admin operation ran,
+and this result is FAIL, distinct from the prior HTTPS-only native CLI PASS.
+A valid native CLI run under the complete admin/takedown configuration is
+still UNRUN. Runtime-pressure / inherited `many_refs` correlation and an
+unchanged profile comparison remain diagnosis work, with no transport
+workaround accepted as green evidence.
+
+The independent probe review confirmed the canonical setup and identified
+a first-page-only completion-audit poll. The driver now advances the audit
+cursor until the exact manual purge identity appears in
+`system:timer/PurgeCacheComplete`, before freezing and enumerating the full
+gapless audit chain. Decoder-capable release component commands explicitly
+select `pack-ruzstd`; their new runtime results are not implied by source
+validation.
