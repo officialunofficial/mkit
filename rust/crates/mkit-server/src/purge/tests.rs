@@ -447,13 +447,7 @@ async fn purge_first_outcome_survives_purge_completion_reconcile_and_restart() {
             .any(|(k, _)| matches!(keys::parse(k), Some(keys::ParsedKey::Timer { kind: 9, .. })))
     );
     let sink = Arc::new(OutcomeCapture::default());
-    let registry =
-        TimerRegistry::new().register(crate::timers::outcome_delivery::OutcomeDelivery::new(
-            sink.clone(),
-            "https://server.example".into(),
-            Arc::new(crate::NoopMetrics),
-            Arc::new(crate::rt::ManualSleep::new()),
-        ));
+    let registry = TimerRegistry::new().register(delivery(sink.clone()));
     clock.set(70010);
     run_due(
         &store,

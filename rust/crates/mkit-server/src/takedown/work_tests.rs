@@ -1721,11 +1721,10 @@ fn purge_service(f: &Fixture) -> Service<Arc<MemoryKv>> {
 #[tokio::test]
 async fn accepting_takedown_owns_automatic_cache_purge() {
     use crate::timers::{TickBudget, TimerRegistry, run_due};
+    use std::sync::atomic::Ordering;
     let mut f = fixture(&[Object::Blob(Blob { data: vec![9; 32] })], false).await;
     let probe = Arc::new(CacheProbe::default());
-    probe
-        .fail_once
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    probe.fail_once.store(true, Ordering::SeqCst);
     f.work.purge = Some(cache_config(&f, probe.clone()));
     let object = f.canonical[0].0;
     let input = json!({"repository":format!("{}/{}", f.repo.namespace.as_str(), f.repo.name.as_str()), "objectIds":[STANDARD.encode(object)], "operationId":"automatic-cache", "reason":"review"});

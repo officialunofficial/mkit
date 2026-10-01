@@ -927,6 +927,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
                 ),
                 Step::CommitBatch(batch, out) => (batch, out),
             };
+            let writes = std::mem::take(&mut batch.writes);
             if deadline {
                 let by = now_ms.saturating_add(CONTENT_APPLY_WINDOW_MS);
                 batch = batch.require(Precondition::NotAfter(by));
@@ -938,6 +939,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
                     batch = batch.delete(key);
                 }
             }
+            batch.writes.extend(writes);
             let batch = batch.put(
                 state_key.clone(),
                 codec::encode_object_state(&bumped(state, now_ms)),
@@ -990,6 +992,28 @@ mod tests {
         block_on(idx.collectable(object, now, GRACE))
             .unwrap()
             .is_some()
+    }
+
+    #[test]
+    fn expired_hold_readded_keeps_its_fresh_expiry_after_pruning() {
+        let idx = ContentIndex::new(kv());
+        let object = [0x53; 32];
+        let hold = [0x35; 32];
+        held(block_on(idx.add_hold(&object, &hold, 5, 0)));
+        held(block_on(idx.add_hold(&object, &hold, 10_000, 6)));
+        let key = keys::hold(&object, &hold);
+        assert_eq!(
+            block_on(idx.store().get(&content_shard(&object), &key)).unwrap(),
+            Some(codec::encode_hold(10_000)),
+            "pruning the expired snapshot must precede the fresh hold write"
+        );
+        assert!(!collectable(&idx, &object, GRACE + 10));
+        held(block_on(idx.extend_hold(&object, &hold, 12_000, 7)));
+        assert_eq!(
+            block_on(idx.store().get(&content_shard(&object), &key)).unwrap(),
+            Some(codec::encode_hold(12_000))
+        );
+        assert_eq!(state(&idx, &object).seq, 3);
     }
 
     #[test]
