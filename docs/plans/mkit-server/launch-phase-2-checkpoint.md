@@ -398,3 +398,18 @@ cursor until the exact manual purge identity appears in
 gapless audit chain. Decoder-capable release component commands explicitly
 select `pack-ruzstd`; their new runtime results are not implied by source
 validation.
+
+### Actual streamed embedding component
+
+At clean `e503679f05108b207f74a78120c2ce847894c0fb`, the optimized default
+embedding example passed `multipart.three_parts`,
+`auth.v2_wrong_audience`, and `tickets.advance_marker_then_upload` on actual
+local Wrangler 4.134.0. Custom service-binding hooks, Durable Object outcome
+delivery and rejection of the internal audience also passed. The streamed
+UploadPart body crosses the in-process `serve_with` host mount. Evidence is
+owned scratch `embedding-example/runtime-s_xmmj2o/evidence.json`; wasm
+6,475,839 bytes, SHA256
+`e0c0a260b527b5eb65a1de89082c8adb104e960a0df9506f9789214f7b7bc594`.
+All fixture-owned groups stopped. This Single/default core embedding result
+does not certify the complete Uno launch configuration or whole-isolate
+budgets. The final integrated source will be revalidated separately.

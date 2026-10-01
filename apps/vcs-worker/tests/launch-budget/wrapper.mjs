@@ -1,4 +1,5 @@
 // Fixture only: observe the unchanged release module's host calls and bodies.
+import memorySnapshot from './memory.mjs';
 import {WorkerEntrypoint} from 'cloudflare:workers';
 import {AsyncLocalStorage} from 'node:async_hooks';
 import Release, * as classes from '__RELEASE_SHIM__';
@@ -7,7 +8,9 @@ const als = new AsyncLocalStorage();
 let serial = 0;
 const originalFetch = globalThis.fetch.bind(globalThis);
 const PREFIX = 'MKIT_LAUNCH_BUDGET ';
-const counters = () => ({doFetch: 0, r2: 0, hookFetch: 0, bindingFetch: 0,
+const isolate = {id: crypto.randomUUID(), outgoing: 0, outgoingPeak: 0,
+  active: 0, activePeak: 0, cacheCalls: 0, unattributedCache: 0, cacheObserved: false};
+const counters = () => ({doFetch: 0, r2: 0, hookFetch: 0, bindingFetch: 0, cache: 0,
   sqlStatements: 0, sqlPending: 0, sqlRowsRead: 0, sqlRowsWritten: 0,
   timerWindows: 0, timerWindowRows: 0, timerWindowRowsMax: 0,
   outgoing: 0, outgoingPeak: 0, cancelled: 0, streamBytes: 0, errors: 0});
@@ -19,6 +22,8 @@ function begin(holder, kind, name, path = '') {
   const group = holder.group;
   group.overlap ||= holder.active > 0;
   holder.active++;
+  isolate.active++;
+  isolate.activePeak = Math.max(isolate.activePeak, isolate.active);
   group.invocations++;
   group.alarms += Number(kind === 'alarm');
   group.requests += Number(kind === 'request' || kind === 'fetch');
@@ -31,6 +36,7 @@ function finish(scope) {
   if (scope.emitted || !scope.returned || scope.waits || scope.body) return;
   scope.emitted = true;
   scope.holder.active--;
+  isolate.active--;
   const final = scope.holder.active === 0;
   const c = scope.group.counters;
   scope.group.failed ||= scope.error;
@@ -45,6 +51,7 @@ function finish(scope) {
     attribution: scope.kind === 'request' ? 'request-env' : 'conservative-do-group',
     exactRustOverlapAttribution: false,
     complete: final && c.outgoing === 0 && c.sqlPending === 0,
+    isolate: {...isolate}, wasmMemory: memorySnapshot(),
     handlerError: scope.group.failed, ...c}));
 }
 
@@ -83,12 +90,15 @@ function token(group, category) {
   const c = group.counters;
   c[category]++;
   c.outgoing++;
+  isolate.outgoing++;
+  isolate.outgoingPeak = Math.max(isolate.outgoingPeak, isolate.outgoing);
   c.outgoingPeak = Math.max(c.outgoingPeak, c.outgoing);
   let ended = false;
   return {group, close(error = false, cancelled = false) {
     if (ended) return;
     ended = true;
     c.outgoing--;
+    isolate.outgoing--;
     c.errors += Number(error);
     c.cancelled += Number(cancelled);
   }};
@@ -130,7 +140,10 @@ async function outgoing(group, category, call, type = 'response') {
   const held = token(group, category);
   try {
     const result = await call();
-    if (type === 'response') return response(result, held);
+    if (type === 'response') {
+      if (!result) {held.close(); return result;}
+      return response(result, held);
+    }
     if (type !== 'r2-get' || !result || !result.body) { held.close(); return result; }
     let stream;
     return hostProxy(result, (target, key) => {
@@ -300,6 +313,46 @@ export const NsCoordinator = durable(classes.NsCoordinator, 'NsCoordinator');
 export const RefShard = durable(classes.RefShard, 'RefShard');
 export const RepoIndexShard = durable(classes.RepoIndexShard, 'RepoIndexShard');
 export const ContentIndexShard = durable(classes.ContentIndexShard, 'ContentIndexShard');
+
+// Cache bodies and promises join the same isolate-wide outgoing lifetime.
+// Task ALS attribution remains explicitly approximate; missed scopes are counted.
+if (globalThis.caches) {
+  const nativeCaches = globalThis.caches;
+  const observed = new WeakMap();
+  const cache = value => {
+    if (!observed.has(value)) observed.set(value, hostProxy(value, (target, key) => {
+      if (!['match', 'put', 'delete'].includes(key)) return undefined;
+      return (...args) => {
+        isolate.cacheCalls++;
+        const scope = als.getStore();
+        if (scope) return outgoing(scope.group, 'cache', () => target[key](...args),
+          key === 'match' ? 'response' : 'value');
+        isolate.unattributedCache++;
+        isolate.outgoing++;
+        isolate.outgoingPeak = Math.max(isolate.outgoingPeak, isolate.outgoing);
+        let ended = false;
+        const close = () => {if (!ended) {ended = true; isolate.outgoing--;}};
+        return Promise.resolve().then(() => target[key](...args)).then(result => {
+          if (key === 'match' && result?.body) return new Response(
+            trackedStream(result.body, close, {counters: counters()}), result);
+          close(); return result;
+        }, error => {close(); throw error;});
+      };
+    }));
+    return observed.get(value);
+  };
+  const wrapped = hostProxy(nativeCaches, (target, key) => {
+    if (key === 'default') return cache(target.default);
+    if (key === 'open') return async (...args) => cache(await target.open(...args));
+    return undefined;
+  });
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'caches');
+  if (!descriptor || descriptor.configurable || descriptor.writable) {
+    Object.defineProperty(globalThis, 'caches', descriptor?.configurable === false
+      ? {value: wrapped} : {value: wrapped, configurable: true});
+    isolate.cacheObserved = true;
+  }
+}
 
 globalThis.fetch = (...args) => {
   const scope = als.getStore();

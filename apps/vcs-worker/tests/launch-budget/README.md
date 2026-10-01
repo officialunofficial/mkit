@@ -15,13 +15,13 @@ unset CARGO_TARGET_DIR
 bash scripts/vcs-worker-launch-budget-runtime.sh --sha "$(git rev-parse HEAD)"
 ```
 
-The runner builds the ordinary release with `http-objects`, copies and hashes
+The runner builds the ordinary release with `http-objects,pack-ruzstd`, copies and hashes
 its full artifact, runs the two discovery cases and the real scheduled
 verification/extraction producer, then reads its extracted Blob with GET,
 HEAD and Range. Both namespace policies use isolated local state. Only the
 runner's own process groups are stopped. No deployment or cloud call occurs.
 
-Counters increment at actual DO, R2 and Fetch dispatch. A response retains its
+Counters increment at actual DO, R2, Fetch and Cache API dispatch. A response retains its
 outgoing token until EOF, cancellation or error; headers alone do not close it.
 R2 stream getters and buffered `arrayBuffer`/text/JSON readers are observed.
 Upload handles count `uploadPart`/complete/abort rather than the synchronous
@@ -40,13 +40,22 @@ the checker refuses unfinished observed groups and missing completion records
 for the replay's HTTP object/file reads and their paid-read settlement. It
 requires at least one actual alarm
 with R2 work, at most 960 observed external calls per alarm-containing group,
-at most 10,000 per incoming request group, at most six outstanding outgoing lifetimes,
+at most 10,000 per incoming request group, at most six outstanding outgoing lifetimes per group and across the observed
+module isolate (including distinct request/DO owners),
 and raw indexed timer windows of at most 64 returned rows.
 
 This component cannot fill the complete launch matrix. It does not exercise
 signed hooks, service-binding hooks, snapshots/Cache API, scanner retrieval,
 preservation/admin, cold seeded heads, restart, maximal dependency fanout or
-resident-memory bounds. Those require separate evidence. `streamBytes` counts
+resident-memory bounds. The prelude captures exported Wasm linear-memory
+capacity at observation boundaries. That includes retained pages and is not a
+live Rust heap counter; if multiple Wasm instances are created, observer-held
+references must be accounted for. It excludes JavaScript and embedder heap.
+A separate CDP sampler records isolate identity, sampled JavaScript heap,
+embedder heap and backing storage alongside the linear-memory observation.
+Missing fields/time intervals remain gaps; these samples are not a complete
+128 MB peak theorem. The CDP fields follow the primary
+[Runtime protocol definition](https://raw.githubusercontent.com/ChromeDevTools/devtools-protocol/master/json/js_protocol.json). Those require separate evidence. `streamBytes` counts
 observed stream flow (including overlapping stream layers), not buffered readers
 or retained memory. Workerd observations do not certify Cloudflare CPU,
 memory, cost, multicolo behavior or internal connection accounting.

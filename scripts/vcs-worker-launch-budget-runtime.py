@@ -55,7 +55,12 @@ def assess(found):
               "body lifetime or SQL cursor still open at group completion")
         check(not record["handlerError"] and record["errors"] == 0,
               f"observed handler or host operation failed: {record}")
-        calls = sum(record[name] for name in ["doFetch", "r2", "hookFetch", "bindingFetch"])
+        calls = sum(record[name] for name in ["doFetch", "r2", "hookFetch", "bindingFetch", "cache"])
+        check(record["isolate"]["cacheObserved"] and not record["isolate"]["unattributedCache"],
+              "Cache API observation unavailable or task attribution incomplete")
+        check(record["wasmMemory"]["instances"] == 1 and record["wasmMemory"]["linearBytes"] > 0,
+              "Wasm retained-capacity observation absent or multiple instances retained")
+        check(record["isolate"]["outgoingPeak"] <= 6, "combined observed isolate outgoing peak exceeds six")
         check(record["outgoingPeak"] <= 6, f"outgoing lifetime peak exceeds six: {record}")
         check(record["timerWindowRowsMax"] <= 64, f"raw timer window exceeds 64: {record}")
         if record["groupAlarms"]:
@@ -72,10 +77,13 @@ def assess(found):
           "no actual indexed timer-window SQL observation")
     return {"alarm_groups": len(alarms), "request_groups": len(requests),
             "max_alarm_external_calls": max(sum(r[n] for n in
-                ["doFetch", "r2", "hookFetch", "bindingFetch"]) for r in alarms),
+                ["doFetch", "r2", "hookFetch", "bindingFetch", "cache"]) for r in alarms),
             "max_request_external_calls": max(sum(r[n] for n in
-                ["doFetch", "r2", "hookFetch", "bindingFetch"]) for r in requests),
+                ["doFetch", "r2", "hookFetch", "bindingFetch", "cache"]) for r in requests),
             "outgoing_peak": max(r["outgoingPeak"] for r in final.values()),
+            "combined_isolate_outgoing_peak": max(r["isolate"]["outgoingPeak"] for r in final.values()),
+            "linear_memory_capacity_peak": max(r["wasmMemory"]["linearBytes"] for r in final.values()),
+            "memory_certificate": False,
             "sql_rows_read": sum(r["sqlRowsRead"] for r in final.values()),
             "sql_rows_written": sum(r["sqlRowsWritten"] for r in final.values()),
             "timer_window_rows_max": max(r["timerWindowRowsMax"] for r in final.values()),
@@ -118,6 +126,7 @@ def fixture(namespace, port, run, artifact, runner, env, evidence):
     wrapper = folder / "wrapper.mjs"
     wrapper.write_text((FIXTURE / "wrapper.mjs").read_text().replace(
         "__RELEASE_SHIM__", str(artifact / "worker/shim.mjs")))
+    shutil.copyfile(FIXTURE / "memory.mjs", folder / "memory.mjs")
     auth = ["--auth", "auth-v2", "--audience", runtime.AUDIENCE, "--repository", "default",
             "--signer-seed-hex", runtime.SEED, "--run-id", runtime.RUN_ID]
     variables = {"AUTH_AUDIENCE": runtime.AUDIENCE, "LAUNCH_PROFILE": "uno",
@@ -144,11 +153,20 @@ def fixture(namespace, port, run, artifact, runner, env, evidence):
     config_path = folder / "wrangler.json"
     config_path.write_text(json.dumps(config, indent=2) + "\n")
     result = {"namespace_policy": namespace, "result": "RUNNING",
-              "config_sha256": runtime.digest(config_path), "wrapper_sha256": runtime.digest(wrapper)}
+              "config_sha256": runtime.digest(config_path), "wrapper_sha256": runtime.digest(wrapper),
+              "memory_observer_sha256": runtime.digest(folder / "memory.mjs")}
     evidence["fixtures"].append(result)
     command = ["npx", "--yes", "wrangler@" + runtime.WRANGLER, "dev", "--local",
         "--config", str(config_path), "--ip", "127.0.0.1", "--port", str(port),
         "--persist-to", str(folder / "state"), "--show-interactive-dev-session=false"]
+    inspector = env.get("MKIT_LAUNCH_INSPECTOR_PORT")
+    if inspector:
+        check(inspector.isdecimal() and 1024 <= int(inspector) <= 65535, "invalid owned inspector port")
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", int(inspector)))
+        command += ["--inspector-port", inspector]
+    sampler = None
+    sampler_log = None
     log_path = folder / "wrangler.log"
     evidence["commands"].append({"argv": command, "cwd": str(runtime.APP),
                                  "log": str(log_path.relative_to(run))})
@@ -156,6 +174,11 @@ def fixture(namespace, port, run, artifact, runner, env, evidence):
         process = subprocess.Popen(command, cwd=runtime.APP, env=env, stdout=output,
                                    stderr=subprocess.STDOUT, start_new_session=True)
         try:
+            if inspector:
+                sampler_log = (folder / "isolate-sampler.log").open("w")
+                sampler = subprocess.Popen(["node", str(FIXTURE / "isolate-sample.mjs"), inspector,
+                    str(folder / "isolate-samples.json"), str(folder / "sampler-stop")],
+                    env=env, stdout=sampler_log, stderr=subprocess.STDOUT, start_new_session=True)
             deadline = time.monotonic() + 120
             while True:
                 check(process.poll() is None, "wrangler exited; see " + str(log_path))
@@ -208,6 +231,19 @@ def fixture(namespace, port, run, artifact, runner, env, evidence):
             result["result"] = "FAIL"
             raise
         finally:
+            if sampler is not None:
+                (folder / "sampler-stop").touch()
+                try:
+                    sampler.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    runtime.stop(sampler)
+                if sampler_log is not None:
+                    sampler_log.close()
+                samples = folder / "isolate-samples.json"
+                result["isolate_sampling"] = {"result": "SAMPLED" if samples.exists() else "UNRUN",
+                    "memory_certificate": False, "sampler_exit": sampler.returncode}
+                if samples.exists():
+                    result["isolate_sampling"]["sha256"] = runtime.digest(samples)
             runtime.stop(process)
 
 
