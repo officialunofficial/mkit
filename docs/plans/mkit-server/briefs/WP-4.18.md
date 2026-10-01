@@ -1,14 +1,14 @@
 # Executor prompt: WP-4.18 (launch), Paid Workers activation and integrated conformance (R-194). Starts now, in two phases.
 
-Run locally in `/Users/vitormarthendalnunes/Documents/21.Uno/04.Mkit/mkit`.
+Run locally in `<repo>`.
 
 **Definition of done:** an open PR into `feat/mkit-server`, after phase 2. Don't merge it.
 
 **Read first:**
-- `~/.cache/mkit-orch/scratchpad/prompts/executor-common-external.md`, including the R-198 section;
-- `~/.cache/mkit-orch/scratchpad/plan/R-198-restart-ruling.md`, including R-200;
-- the base brief, `~/.cache/mkit-orch/scratchpad/prompts/WP-4.18-codex.md`, sections A, B1–B7, C, D and Verification;
-- `~/.cache/mkit-orch/scratchpad/research/WP-4.18-codex-research.md`;
+- `<local notes>`, including the R-198 section;
+- `<local notes>`, including R-200;
+- the base brief, `<local notes>`, sections A, B1–B7, C, D and Verification;
+- `<local notes>`;
 - `docs/plans/mkit-server/staging-uno.md`, `launch-operations.md` and `launch-readiness.md`;
 - SPEC-SERVER §18 (the launch profile) and SPEC-HTTP-OBJECTS.
 

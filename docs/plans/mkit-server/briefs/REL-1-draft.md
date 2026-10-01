@@ -61,7 +61,7 @@ PR-size cleanup, readiness/operator docs and delta review remain prerequisites.
 
 1. Fetch and record the final reviewed feature SHA and current main. Re-read
    the archive's `rebuild-release-branch.sh` and its guarded policy before use:
-   `/Users/vitormarthendalnunes/Documents/21.Uno/04.Mkit/mkit-planning-archive/2026-10-01-dd0c875c/`.
+   `<repo>-planning-archive/2026-10-01-dd0c875c/`.
    The script rebuilds the release branch from an explicit feature SHA, archives
    planning, reapplies reference cleanup and merges `origin/main`. It never
    pushes, tags, publishes or deploys. There are already 12 planning paths added since the archive pin, including

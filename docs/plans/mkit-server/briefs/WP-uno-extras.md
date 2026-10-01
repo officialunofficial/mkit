@@ -1,11 +1,11 @@
 # Executor prompt: two small launch extras for embedders (R-204, R-205), one PR
 
-Run locally in `/Users/vitormarthendalnunes/Documents/21.Uno/04.Mkit/mkit`.
+Run locally in `<repo>`.
 
 **Definition of done:** an open PR into `feat/mkit-server`. Don't merge it.
 
 **Read first:**
-- `~/.cache/mkit-orch/scratchpad/prompts/executor-common-external.md`;
+- `<local notes>`;
 - SPEC-WRITE-GRANTS §9.1 (visibility) and §9.4 (URL tokens);
 - `rust/crates/mkit-server/src/url_token/mod.rs` (`UrlTokenConfig::mint`);
 - the merged 4.16c reader, `rust/crates/mkit-server/src/pipeline/object_reader.rs`, and its embedding constructor;

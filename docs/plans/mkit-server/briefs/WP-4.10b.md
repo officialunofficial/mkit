@@ -98,7 +98,7 @@ The fact sheet's §8 extraction list, in full.
 
 ## Executor checkpoint: design, not implementation (2026-09-30)
 
-The root ruling is `~/.cache/mkit-orch/scratchpad/prompts/RULING-4.10b-group-protection-codex.md`.
+The root ruling is `<local notes>`.
 It reserves content pending-protection tag `gp` and optional timer kind 13
 `CONTENT_TAKEDOWN_REQUEST`; R-186 remains this package's row. These reservations
 do not describe implemented behavior.
