@@ -269,6 +269,7 @@ mod accounting {
         acceptance: usize,
         activation: usize,
         audit: usize,
+        reject_operations: bool,
         header_per_object: usize,
         header_attempts: std::collections::BTreeMap<Key, usize>,
     }
@@ -292,6 +293,11 @@ mod accounting {
         }
         async fn get(&self, p: &Partition, k: &Key) -> Result<Option<Value>, StoreError> {
             self.count();
+            if self.faults.lock().unwrap().reject_operations && k.as_bytes().starts_with(b"ao\0") {
+                return Err(StoreError::unavailable(
+                    "injected operation replay read failure",
+                ));
+            }
             self.inner.get(p, k).await
         }
         async fn has(&self, p: &Partition, k: &Key) -> Result<bool, StoreError> {
@@ -708,8 +714,8 @@ mod accounting {
         assert_eq!(charged, 0);
         let (operation, calls, charged) = fixture.dispatch(2).await;
         assert_eq!(operation, first);
-        assert_eq!(calls, 6);
-        assert_eq!(charged, 2);
+        assert_eq!(calls, 5);
+        assert_eq!(charged, 1);
         assert_eq!(fixture.record().await["preservation_pending"], true);
     }
     #[tokio::test]
@@ -758,11 +764,28 @@ mod accounting {
         assert!(record["activation_cursor"].as_u64().unwrap() > 0);
         assert!(record["activation_cursor"].as_u64().unwrap() < 256);
         assert_eq!(record["preservation_pending"], true);
-        assert_eq!(fixture.replay(5).await.0.status, 200);
+        let (headers, body) = signed(&fixture.input, 5);
+        let retry = fixture
+            .engine
+            .handle(TAKEDOWN_PATH, &headers, &body, 10)
+            .await;
         assert_eq!(
-            fixture.record().await,
-            record,
-            "stored replay cannot advance activation"
+            retry.status, 503,
+            "partial activation cannot replay success"
+        );
+        let reply: serde_json::Value = serde_json::from_slice(&retry.body).unwrap();
+        assert_eq!(reply["code"], "unavailable");
+        assert_eq!(
+            reply["takedownId"],
+            to_hex(&hash(
+                &[b"mkit-takedown:v1\0".as_slice(), b"counted"].concat()
+            ))
+        );
+        assert!(
+            fixture.record().await["activation_cursor"]
+                .as_u64()
+                .unwrap()
+                > record["activation_cursor"].as_u64().unwrap()
         );
         let mut cursor = record["activation_cursor"].as_u64().unwrap();
         for _ in 0..4 {
@@ -781,6 +804,7 @@ mod accounting {
             assert_eq!(resumed.unwrap_err().code(), crate::Code::Unavailable);
         }
         assert_eq!(cursor, 256);
+        assert_eq!(fixture.replay(5).await.0.status, 200);
     }
     #[tokio::test]
     async fn root_activation_cursor_races_use_same_request_budget_and_preserve_denial() {
@@ -804,11 +828,94 @@ mod accounting {
                 .unwrap()
                 .is_some()
         );
-        assert_eq!(fixture.replay(6).await.0.status, 200);
+        let (headers, body) = signed(&fixture.input, 6);
+        assert_eq!(
+            fixture
+                .engine
+                .handle(TAKEDOWN_PATH, &headers, &body, 10)
+                .await
+                .status,
+            503
+        );
         assert_eq!(fixture.record().await["activation_cursor"], 0);
         fixture.store().faults.lock().unwrap().activation = 0;
         fixture.resume_activation().await.unwrap();
         assert_eq!(fixture.record().await["activation_cursor"], 1);
+        assert_eq!(fixture.replay(6).await.0.status, 200);
+    }
+    #[tokio::test]
+    async fn alternate_nonce_completion_stores_success_before_returning() {
+        let fixture = Fixture::new(1, false).await;
+        fixture.store().faults.lock().unwrap().activation = usize::MAX;
+        assert_eq!(fixture.dispatch(20).await.0.status, 503);
+        fixture.store().faults.lock().unwrap().activation = 0;
+        assert_eq!(fixture.dispatch(21).await.0.status, 200);
+        fixture.store().faults.lock().unwrap().reject_operations = true;
+        assert_eq!(fixture.replay(21).await.0.status, 200);
+        assert_eq!(fixture.replay(20).await.0.status, 200);
+    }
+    #[tokio::test]
+    async fn timer15_restart_finalizes_interrupted_signed_acceptance() {
+        let fixture = Fixture::new(1, false).await;
+        fixture.store().faults.lock().unwrap().activation = usize::MAX;
+        assert_eq!(fixture.dispatch(22).await.0.status, 503);
+        assert_eq!(fixture.record().await["activation_cursor"], 0);
+        fixture.store().faults.lock().unwrap().activation = 0;
+        let clock = Arc::new(crate::ManualClock::new(10));
+        let work = super::super::work::Work {
+            purge: None,
+            metadata: fixture.store().clone(),
+            serving: crate::MemoryBlobStore::default(),
+            preserved: crate::MemoryBlobStore::default(),
+            root: root(),
+            shards: Arc::new(SinglePartition),
+            addressing: crate::Addressing::Single {
+                repo: crate::RepoId {
+                    namespace: NamespaceKey::deployment_default(),
+                    name: crate::RepoName::new("repo").unwrap(),
+                },
+            },
+            retention_ms: 1000,
+            discovery_margin_ms: 5000,
+            profile: crate::takedown::acquisition::Profile::scheduled(),
+            clock: clock.clone(),
+        };
+        let registry = crate::timers::TimerRegistry::new().register(work);
+        let fired = crate::timers::run_due(
+            fixture.store(),
+            &root(),
+            &registry,
+            clock.as_ref(),
+            10,
+            &crate::timers::TickBudget::new(1, 1, 16, 1000),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fired.fired, 1);
+        assert_eq!(fixture.record().await["activation_cursor"], 1);
+        let key = SigningKey::from_bytes(&[71; 32]);
+        let config = Config::parse("https://server.example", &json!({"version":1,"keys":[{"keyId":"operator","alg":"ed25519","publicKey":to_hex(key.verifying_key().as_bytes()),"roles":["audit"]}]}).to_string()).unwrap();
+        let engine = Engine::new(fixture.store().clone(), root(), config);
+        let (headers, body) = signed(&fixture.input, 22);
+        assert_eq!(
+            engine
+                .handle(TAKEDOWN_PATH, &headers, &body, 10)
+                .await
+                .status,
+            200
+        );
+        let operation = fixture
+            .store()
+            .inner
+            .get(&root(), &Key::new(b"ao\0counted".to_vec()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(operation.as_bytes()).unwrap()["result"]["status"],
+            200
+        );
+        assert_eq!(fixture.replay(22).await.0.status, 200);
     }
     #[tokio::test]
     async fn whole_pack_geometry_and_draft_header_retries_stay_bounded() {

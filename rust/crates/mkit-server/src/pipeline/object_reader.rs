@@ -373,6 +373,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             located.iter().map(|(id, _)| *id).collect::<BTreeSet<_>>()
         };
         let mut reached = BTreeSet::new();
+        let mut fresh = BTreeSet::new();
         if !writer && !pipe.cfg.takedown_denial {
             for id in &targets {
                 calls.charge().map_err(failure)?;
@@ -402,6 +403,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 if sizes_only && !capped_as_absent && incomplete == Some(resolve::Miss::Capped) {
                     return Err(failure(resolve::Miss::Capped));
                 }
+                fresh.extend(found.iter().copied());
                 reached.extend(found);
             }
         }
@@ -441,7 +443,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             ) {
                 continue;
             }
-            if !writer {
+            if !writer && fresh.contains(&id) {
                 seams
                     .reachability
                     .record(&self.repo, &id, ms(pipe.clock.now_ms()));

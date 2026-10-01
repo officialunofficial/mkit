@@ -1117,6 +1117,14 @@ async fn accepted_replay() -> (Fixture, Json, Headers, BodyCapture, Response) {
 #[tokio::test]
 async fn completed_takedown_replays_stored_success_after_moderation_role_removed() {
     let (f, input, headers, body, accepted) = accepted_replay().await;
+    assert_eq!(
+        f.audit()
+            .await
+            .iter()
+            .rfind(|entry| entry["nonce"] == to_hex(&[52; 32]))
+            .unwrap()["result"]["code"],
+        "ok"
+    );
     let head = f.head().await;
     let audit_only = f.engine("audit");
     let retry = audit_only

@@ -3,6 +3,19 @@
 use mkit_server::purge::{LocalInvalidation, PurgeSink};
 use std::sync::Arc;
 
+/// Capabilities provided by the fetch `HookSet` and the DO outcome factory.
+/// These roles do not require a remote hook transport. Inspector, scanner and
+/// cache-purge channels retain their independent configuration checks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HookCapabilities {
+    /// The supplied Authorizer's policy role; absent uses the configured remote role.
+    pub authorizer: Option<mkit_server::policy::AuthorizerRole>,
+    /// A supplied Admission, including paid HTTP reads.
+    pub admission: bool,
+    /// A supplied `OutcomeSink` on fetch and on the DO builder.
+    pub outcomes: bool,
+}
+
 /// Explicit in-process purge delivery and its local cache invalidation.
 /// The sink acknowledges global invalidation; local work must charge the
 /// supplied budget and persist resumable checkpoints through the existing API.
@@ -379,5 +392,123 @@ mod tests {
                     .is_none()
             );
         });
+    }
+    #[cfg(feature = "http-objects")]
+    #[test]
+    fn supplied_admission_and_authority_validate_without_remote_transport() {
+        let mut v = vars();
+        v.remove("AUTH_REPOSITORY");
+        for (key, value) in [
+            ("LAUNCH_PROFILE", "uno"),
+            ("INDEXED_MODE", "true"),
+            ("WORKERS_PLAN", "paid"),
+            ("ADDRESSING", "multi"),
+            ("NAMESPACE_POLICY", "any"),
+            ("UNSAFE_OPEN_NAMESPACES", "true"),
+            (
+                "TICKET_KEYS",
+                "ticket 1111111111111111111111111111111111111111111111111111111111111111",
+            ),
+            ("HTTP_OBJECTS", "true"),
+            (
+                "URL_TOKEN_KEYS",
+                "active 3333333333333333333333333333333333333333333333333333333333333333",
+            ),
+        ] {
+            v.insert(key.into(), value.into());
+        }
+        let mut cfg = WorkerConfig::from_vars(|key| v.get(key).cloned()).unwrap();
+        cfg.http_mount.as_mut().unwrap().http_objects.admit_reads = true;
+        cfg.supplied_hooks = super::HookCapabilities {
+            authorizer: Some(mkit_server::policy::AuthorizerRole::Authority),
+            admission: true,
+            outcomes: true,
+        };
+        assert!(cfg.hooks.is_none());
+        cfg.validate().unwrap();
+        assert_eq!(
+            cfg.pipeline_config().unwrap().authorizer_role,
+            mkit_server::policy::AuthorizerRole::Authority
+        );
+        let mut pipeline = cfg.pipeline_config().unwrap();
+        pipeline.authorizer_role = mkit_server::policy::AuthorizerRole::Check;
+        let constructed = mkit_server::pipeline::Pipeline::new(
+            mkit_server::MemoryBlobStore::default(),
+            mkit_server::MemoryKv::default(),
+            mkit_server::pipeline::Hooks::new(),
+            pipeline,
+            Arc::new(mkit_server::ManualClock::new(10)),
+            Arc::new(mkit_server::NoopMetrics),
+        );
+        assert!(
+            constructed
+                .err()
+                .is_some_and(|error| error.to_string().contains("real Admission")),
+            "declared supplied Admission must not permit DefaultAdmission paid reads"
+        );
+        v.insert("HTTP_ADMIT_READS".into(), "true".into());
+        v.insert("AUTHORITY_FENCE".into(), "true".into());
+        let key =
+            mkit_server::hooks::HookSigner::new("authority", zeroize::Zeroizing::new([43; 32]))
+                .unwrap()
+                .public_key();
+        let owner = mkit_server::hooks::HookSigner::new("owner", zeroize::Zeroizing::new([42; 32]))
+            .unwrap()
+            .public_key();
+        v.insert(
+            "AUTHORITY_KEYS".into(),
+            format!(
+                "authority {} {}",
+                mkit_core::hash::to_hex(&key),
+                mkit_core::repo_identity::Namespace::Ed25519(owner)
+            ),
+        );
+        let parsed =
+            WorkerConfig::from_vars_with_hooks(|key| v.get(key).cloned(), cfg.supplied_hooks, None)
+                .unwrap();
+        assert!(parsed.hooks.is_none() && parsed.authority_fence.is_some());
+        parsed.validate().unwrap();
+        assert!(
+            WorkerConfig::from_vars_with_hooks(
+                |key| v.get(key).cloned(),
+                super::HookCapabilities {
+                    authorizer: Some(mkit_server::policy::AuthorizerRole::Check),
+                    ..cfg.supplied_hooks
+                },
+                None
+            )
+            .is_err()
+        );
+    }
+    #[cfg(feature = "http-objects")]
+    #[test]
+    fn supplied_roles_leave_inspection_and_purge_transports_required() {
+        let v = vars();
+        let mut cfg = WorkerConfig::from_vars(|key| v.get(key).cloned()).unwrap();
+        cfg.supplied_hooks = super::HookCapabilities {
+            authorizer: Some(mkit_server::policy::AuthorizerRole::Check),
+            admission: true,
+            outcomes: true,
+        };
+        cfg.hooks = crate::hooks::config::HookVars::parse(&|key| match key {
+            "HOOK_ROLES" => Some("authorize,admit,outcome".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert!(cfg.remote_hooks().is_none());
+        cfg.hooks.as_mut().unwrap().roles.inspect = true;
+        assert!(cfg.remote_hooks().unwrap().roles.inspect);
+        assert!(cfg.validate().unwrap_err().0.contains("SCANNER"));
+        cfg.hooks.as_mut().unwrap().roles.inspect = false;
+        cfg.hooks.as_mut().unwrap().roles.cache_purge = true;
+        let remote = cfg.remote_hooks().unwrap();
+        assert!(remote.roles.cache_purge);
+        assert!(!remote.roles.authorize && !remote.roles.admit && !remote.roles.outcome);
+        assert!(crate::hooks::config::HookVars::check_binding(Some(&remote), false).is_err());
+        // Supplied admission does not invent an Authority capability for a fence.
+        assert_eq!(
+            cfg.pipeline_config().unwrap().authorizer_role,
+            mkit_server::policy::AuthorizerRole::Check
+        );
     }
 }

@@ -474,7 +474,7 @@ an approved immutable commit until a release tag exists.
 | Current API | Purpose and boundary |
 |---|---|
 | `adapter::serve_with(req, env, &cfg, make_hooks)` | Dispatch a constructed Worker request with an explicit `WorkerConfig` and custom hooks |
-| `adapter::fetch_with(req, env, make_hooks)` | Parse environment configuration before dispatching with custom hooks |
+| `adapter::fetch_with(req, env, capabilities, make_hooks)` | Parse environment configuration before dispatching with custom hooks |
 | `adapter::fetch_with_context(req, env, context)` | Retain the request context for configured paid HTTP response settlement; requires `http-objects` |
 | `WorkerConfig` | Audience, addressing, sharding, keys, launch selection, and optional mounts; parsing validates complete environment configuration |
 | `http_mount::WorkerHttpMountConfig::with_context(context)` | Attach the host fetch context to programmatic HTTP serving and settlement |

@@ -722,6 +722,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ));
             };
             http.validate(indexed.extract_min_bytes)?;
+            if http.admit_reads && hooks.admission().is_default() {
+                return Err(ServerError::invalid_argument(
+                    "paid HTTP reads require a real Admission hook",
+                ));
+            }
         }
         cfg.validate_server_info_limits()?;
         let mut credential_names = std::collections::BTreeSet::new();

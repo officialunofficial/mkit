@@ -3466,7 +3466,13 @@ audit it once. The stored result MUST survive restart. A retry cannot
 substitute a later signature to change the original actor or label.
 
 The launch `ReadPreserved` subset has the byte-free replay exception specified
-in §18. All other procedures and the full profile retain the rule above.
+in §18. An accepted `Takedown` whose durable denial activation is unfinished
+returns retryable `unavailable` with the same takedown id while resuming its
+cursor. Its nonce and operation results become completed only after every
+requested denial is active, including recovery through timer 15. Completed
+results retain the stored-response and role-independent replay rule above.
+A nonce reservation that has not durably accepted an action still returns
+`aborted`. All other procedures retain the rule above.
 
 `Takedown`, `Reinstate`, `AddBlock`, `PurgeCache`, and a takedown-flagged
 `SetSuspension` additionally require a client
