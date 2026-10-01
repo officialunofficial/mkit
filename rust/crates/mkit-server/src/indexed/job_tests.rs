@@ -2498,7 +2498,9 @@ fn hot_closure_candidates_checkpoint_progress_instead_of_livelock() {
     assert!(rejected(&rig, &ticket.pack_id).is_none());
     let error = rig.check(&[(&ticket, id)], [1; 32]).unwrap_err();
     assert_eq!(error.code(), crate::error::Code::InvalidArgument);
-    assert_eq!(error.public_message(), "open closure");
+    // Per-id slices finish without livelock, while the final aggregate lookup
+    // exceeds the retained-candidate budget and asks for a smaller batch.
+    assert_eq!(error.public_message(), "object index limit exceeded");
     assert!(
         rig.recorder
             .slices
