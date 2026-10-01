@@ -1,4 +1,4 @@
-//! Stage 2 published ref snapshots. Nothing is constructed by Stage 1 entrypoints.
+//! Opt-in published ref snapshots, configured through the Worker entrypoints.
 mod codec;
 mod fence;
 pub use fence::fenced_reader;
@@ -110,7 +110,7 @@ pub struct SnapshotReader<B, C> {
     pub bucket: B,
     /// Internal deployment-scoped cache.
     pub cache: C,
-    /// Explicit Stage 2 settings.
+    /// Explicit published-view settings.
     pub config: PublishedViewConfig,
     /// Refresh time after storage awaits so a slow lookup cannot serve expired data.
     pub clock: Arc<dyn mkit_server::Clock>,

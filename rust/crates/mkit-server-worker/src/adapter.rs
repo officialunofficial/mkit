@@ -21,8 +21,8 @@
 //! - The response body streams frame by frame
 //!   (`mkit_worker_common::adapter::respond_streamed`): a `DownloadPack`
 //!   chunk is at most 800 KiB. A unary response is one frame, so a large
-//!   `ListRefs` reply is held whole (about 45 bytes per ref: 1.2 MB for
-//!   30,000 refs) until WP-1.27 pages it. A unary response connectrpc compressed
+//!   `ListRefs` page is held whole (about 45 bytes per ref, with a
+//!   128-ref page cap for the Uno launch). A unary response connectrpc compressed
 //!   itself (`Content-Encoding: gzip`, for a client that accepts it) is
 //!   passed through with `encodeBody: "manual"`, so the runtime does not
 //!   compress it a second time.
@@ -33,8 +33,9 @@
 //! deadline is therefore not enforced.
 //!
 //! **Pipeline.** Auth v2 with the default write quota, one repository
-//! (`AUTH_REPOSITORY`) in the deployment-default namespace, a 64 MiB pack
-//! cap (the M1 stopgap; resumable parts replace it) and the Worker clock.
+//! (`AUTH_REPOSITORY`) in the deployment-default namespace and the Worker clock.
+//! `MAX_PACK_BYTES` defaults to 1 GiB; resumable parts carry larger packs.
+//! The Paid Uno launch selects Multi/D34 and scheduled indexed verification.
 //! It is built per request from the request's `Env`: building it costs no
 //! I/O.
 //!
@@ -3328,7 +3329,7 @@ mod glue {
         /// leak across requests shows as a climb toward the 128 MB isolate
         /// limit.
         /// The script bounds the streaming RPCs' lines only: a unary body is
-        /// one frame (a whole `ListRefs` reply until WP-1.27's paging).
+        /// one frame (a whole bounded `ListRefs` page).
         pub(super) fn report_peak(path: &str, bytes: usize) {
             let memory = core::arch::wasm32::memory_size::<0>() * 65_536;
             worker::console_log!(

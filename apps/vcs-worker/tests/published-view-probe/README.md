@@ -23,7 +23,7 @@ from wall time. Fixture generation and cold guard calls precede profiling.
 The JSON page must have a continuation token and remain below 2 MiB.
 R2 cache misses may occur as the one-second TTL expires during the run.
 Local samples do not certify Cloudflare production hardware or account limits;
-repeat the measurement after REL-1 before enabling Stage 2 staging.
+repeat the measurement before enabling snapshot staging.
 
 Measurement on the executor's shared Mac (2026-09-29, optimized Wasm,
 Wrangler 4.134.0, 30 sequential requests): 928 refs in 496,422 encoded
@@ -33,5 +33,5 @@ The larger initial probe (256 rows/128 KiB per bucket, 1,000 refs/page)
 measured 59.90 ms active / 31.88 ms Wasm. These profiler samples include
 local JS/runtime overhead and host scheduling; Free CPU is not certified.
 The smaller limits bound retained bodies to 512 KiB; the allocator test
-bounds body/decode/merge retention below 2 MiB. Stage 2 activation requires
+bounds body/decode/merge retention below 2 MiB. Snapshot activation requires
 production CPU measurement and an appropriate account CPU allowance.

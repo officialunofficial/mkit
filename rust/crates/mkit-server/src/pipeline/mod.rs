@@ -316,14 +316,14 @@ pub struct PipelineConfig {
     pub outbox_backlog_cap: Option<OutboxBacklogCap>,
     /// Indexed ingestion and pre-receive verification, off by default.
     pub indexed: Option<crate::indexed::IndexedConfig>,
-    /// Global takedown proofs. Programmatic only until preservation is integrated.
+    /// Global takedown proofs; the Worker launch enables them with preservation.
     pub takedown_denial: bool,
     /// Per-ref allowed signers and fast-forward-only rules (SPEC-SERVER
-    /// §9.7). Programmatic only and Stage 2: no adapter exposes it. A
+    /// §9.7). Native embedders and the Worker launch can configure them. A
     /// fast-forward-only rule needs `indexed`.
     pub ref_policy: Option<crate::policy::RefPolicy>,
     /// HTTP object serving (SPEC-HTTP-OBJECTS), off by default and
-    /// programmatic only. Requires [`Self::indexed`]. Stage 2 (R-154, R-169).
+    /// explicitly configured by the adapter. Requires [`Self::indexed`].
     #[cfg(feature = "http-objects")]
     pub http_objects: Option<crate::http_objects::HttpObjectsConfig>,
 }
@@ -1299,7 +1299,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         .await
     }
 
-    /// Attach an explicit published reader source (Stage 2 only).
+    /// Attach an explicit published reader source (snapshot opt-in).
     #[cfg(feature = "published-view")]
     #[must_use]
     pub fn with_published_source(mut self, source: Arc<dyn published::PublishedSource>) -> Self {

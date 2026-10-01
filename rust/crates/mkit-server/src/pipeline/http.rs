@@ -2,8 +2,9 @@
 //! this pipeline's stores. It lives here because it needs the pipeline's
 //! private stage functions; everything reusable is in `http_objects`.
 //!
-//! Stage 2, inert in Stage 1 (R-154, R-169): reachable only when a
-//! deployment sets `PipelineConfig::http_objects` programmatically.
+//! Reachable only when a deployment opts into indexed HTTP serving through
+//! `PipelineConfig::http_objects`; native embedders and the Uno Worker launch
+//! configure this through their adapters.
 
 use mkit_core::hash::{Hash, to_hex};
 use mkit_core::object::ObjectType;

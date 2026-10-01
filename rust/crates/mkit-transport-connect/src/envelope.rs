@@ -697,7 +697,9 @@ mod tests {
 
         #[test]
         fn generated_procedures_are_all_classified() {
-            let generated = include_str!("../generated/mkit.transport.v1.transport.__connect.rs");
+            let generated = include_str!(
+                "../../mkit-rpc/generated/transport/mkit.transport.v1.transport.__connect.rs"
+            );
             let procedures: std::collections::HashSet<_> = generated
                 .lines()
                 .filter_map(|line| line.trim().strip_prefix('"')?.strip_suffix("\","))

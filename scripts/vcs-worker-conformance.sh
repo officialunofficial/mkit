@@ -20,9 +20,9 @@
 #                  It then checks that the adapter never held more than 1 MiB
 #                  of an `UploadPack` or `DownloadPack` body at once. The
 #                  bound covers the streaming RPCs only: a unary response is
-#                  one frame, so a `ListRefs` of N refs is about 45*N bytes
-#                  held whole (1.2 MB at 30,000; the default 10,000-ref case
-#                  stays under) until WP-1.27 pages it.
+#                  one frame: each bounded `ListRefs` page is held whole,
+#                  about 45 bytes per ref for this fixture, subject to the
+#                  configured page-size limit and the 2 MiB reply cap.
 #   --sharding d34  the default (WP-1.28c; `--sharding single` pins the old
 #                   routing). D34 quota cases spend one branch (quota is per
 #                   (signer, branch) under Single addressing); the growth
@@ -562,7 +562,7 @@ if [ "${multi}" -eq 1 ]; then
 fi
 if [ "${indexed}" -eq 1 ]; then
     # The indexed phase (WP-4.8): the Multi allowlist of the run's fixed seed,
-    # INDEXED_MODE (accepted only by a test-faults build) and a Paid plan, so
+    # INDEXED_MODE enabled in this test-faults profile and a Paid plan, so
     # the RefShard registers the kind-7 verifier. The Worker fails the fourth
     # pack read once (`MidPackCrash`), the second slice of a three-window pack.
     indexed_seed="5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e"

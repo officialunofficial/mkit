@@ -272,8 +272,9 @@ addressing retains its auth-v2 write policy.
   cap remains 65 MiB, enforced with or without `Content-Length`; exceeding
   it answers HTTP 400 `resource_exhausted`. `UploadPack` and `DownloadPack`
   stream, with download chunks of at most 800 KiB.
-- **Unary replies are one frame**: each paged `ListRefs` reply is held whole, about
-  45 bytes per ref (1.2 MB for 30,000 refs), per page (at most 2 MiB). The
+- **Unary replies are one frame**: each paged `ListRefs` reply is held whole,
+  about 45 bytes per ref, bounded by the configured page size (128 refs for
+  the Uno launch) and the 2 MiB reply cap. The
   conformance script's 1 MiB body-buffer bound covers the streaming RPCs
   only.
 - **Client deadlines are not enforced**: `connect-timeout-ms` and
