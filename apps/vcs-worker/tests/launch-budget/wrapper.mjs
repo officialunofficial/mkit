@@ -21,6 +21,18 @@ const counters = () => ({doFetch: 0, r2: 0, hookFetch: 0, bindingFetch: 0, cache
   outgoing: 0, outgoingPeak: 0, cancelled: 0, streamBytes: 0, errors: 0});
 const owner = () => ({active: 0, group: null});
 
+function requestMarker(scope, phase) {
+  if (scope.kind !== 'request') return;
+  const prefix = '/mkit.transport.v1.TransportService/';
+  const rpc = scope.path.startsWith(prefix) ? scope.path.slice(prefix.length) : '';
+  const path = ['GetServerInfo', 'BeginUpload', 'UploadPack', 'AdvanceRefs', 'SetRepoVisibility'].includes(rpc)
+    ? prefix + rpc : null;
+  const method = ['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'CONNECT', 'OPTIONS', 'TRACE', 'PATCH'].includes(scope.method)
+    ? scope.method : null;
+  try { console.log('MKIT_LAUNCH_INGRESS ' + JSON.stringify({phase, scope: scope.id,
+    group: scope.group.id, at: Date.now(), method, path, status: scope.status})); } catch {}
+}
+
 function begin(holder, kind, name, path = '') {
   isolate.id ||= crypto.randomUUID();
   if (!holder.active) holder.group = {id: ++serial, counters: counters(), alarms: 0,
@@ -281,6 +293,7 @@ async function invoke(scope, call) {
     try {
       const result = await call();
       if (result instanceof Response) scope.status = result.status;
+      requestMarker(scope, 'resolved');
       if (result instanceof Response && result.body) {
         scope.body++;
         return new Response(trackedStream(result.body, (error) => {
@@ -288,7 +301,7 @@ async function invoke(scope, call) {
         }, scope.group), result);
       }
       return result;
-    } catch (error) { scope.error = true; throw error; }
+    } catch (error) { requestMarker(scope, 'rejected'); scope.error = true; throw error; }
     finally { scope.returned = true; finish(scope); }
   });
 }
@@ -378,6 +391,7 @@ export default class extends WorkerEntrypoint {
   fetch(request) {
     const scope = begin(owner(), 'request', 'Entrypoint', new URL(request.url).pathname);
     scope.method = request.method;
+    requestMarker(scope, 'entry');
     return invoke(scope, () => new Release(waitContext(this.ctx, scope),
       instrumentEnv(this.env, scope.holder, scope)).fetch(request));
   }

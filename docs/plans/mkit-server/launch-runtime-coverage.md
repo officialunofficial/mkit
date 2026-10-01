@@ -184,3 +184,13 @@ reuse. Local TCP tests cover signed request/reply byte equivalence, fixed and
 chunked framing, gzip, HTTP 500, incomplete bodies, filtering, missing metadata
 and sink failure. They do not classify the retained release visibility failure
 or establish a resource certificate. A real D58 release probe remains UNRUN.
+
+The observed fixture also emits separate `MKIT_LAUNCH_INGRESS` entry and handler
+resolved/rejected markers for outer requests. These retain only phase, opaque
+scope/group numbers, time, a validated standard method, status, and an allowlist
+of five builtin RPC paths. Unknown methods/paths are null; queries, bodies,
+headers and exception text are excluded. Resolution precedes body EOF and
+`waitUntil` completion. Existing budget records still require full completion.
+Marker absence requires a complete logging channel before drawing conclusions;
+the extra logging and scheduling are a diagnostic variation. D56 failures remain
+unchanged, and D45's separate Miniflare onset collector retains its own limits.
