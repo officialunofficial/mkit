@@ -9,7 +9,7 @@ You are the WP-1.9a executor, continuing the stopped work.
 - Your status file: `docs/plans/mkit-server/briefs/WP-1.9a-status.md`
 
 **Before continuing,** read the original prompt again,
-`/private/tmp/claude-501/-Users-vitormarthendalnunes-Documents-21-Uno-04-Mkit-mkit/cdfd3c8e-a2c7-4777-b325-7d29f4530525/scratchpad/prompts/WP-1.9a.md`,
+`<local path>`,
 and the common rules file it names.
 
 The escalation is valid. B.7 intended the carve-out to apply wherever STC §5 classifies `failed_precondition`, and it

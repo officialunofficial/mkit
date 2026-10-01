@@ -1,11 +1,11 @@
 # Executor prompt: bounded memory on corrupt zstd frames (R-203, launch blocker)
 
-Run locally in `/Users/vitormarthendalnunes/Documents/21.Uno/04.Mkit/mkit`.
+Run locally in `<repo>`.
 
 **Definition of done:** an open PR into `feat/mkit-server`. Don't merge it.
 
 **Read first:**
-- `~/.cache/mkit-orch/scratchpad/prompts/executor-common-external.md`;
+- `<local notes>`;
 - the finding and reproducer, `~/.cache/mkit-test-tmp/wp-5-6a-2-review/review.md` ("High, open: corrupted zstd
   acquisition exceeds the Worker resident allowance", plus `corrupt-zstd.rs` in that directory);
 - `rust/crates/mkit-core/src/pack.rs` (the `decode_frame_with` / ruzstd path, around lines 741–960);

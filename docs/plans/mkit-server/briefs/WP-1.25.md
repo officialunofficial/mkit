@@ -361,7 +361,7 @@ startup and denies non-owners. Move them to `WritePolicy::Owner` with signers th
 ## 1. Regression test for the ack guard (should-fix 1)
 
 Add the reviewer's schedule as a pipeline test over memory and SQLite, D34. The scratch patch is at
-`/private/tmp/claude-501/-Users-vitormarthendalnunes-Documents-21-Uno-04-Mkit-mkit/cdfd3c8e-a2c7-4777-b325-7d29f4530525/scratchpad/review-1150-scratch-test.patch`.
+`<local path>`.
 The schedule:
 1. Bump to 1, and pause `revoke_step` after its push commits but before the ack.
 2. A write renews at 24_500, so `ls` and `el` become `{1, 54_500}`.
@@ -494,7 +494,7 @@ retain the assertion and its skew bound.
 Port the reviewer's probe to memory and SQLite regressions: write at 0, delete
 `ls`, call `mark_lease_table_recovered`, then write at 24,500. Renewal must commit
 without panic. Probe source:
-`/private/tmp/claude-501/-Users-vitormarthendalnunes-Documents-21-Uno-04-Mkit-mkit/cdfd3c8e-a2c7-4777-b325-7d29f4530525/scratchpad/review-1150b-recovery-assert-probe.patch`.
+`<local path>`.
 
 ### 2. Default model lane: 10,000 cases
 

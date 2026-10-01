@@ -1,12 +1,12 @@
 # Executor prompt: launch review fixes B — index aggregation memory, pack cap, scanner retrieval on ticketless writes
 
-Run locally in `/Users/vitormarthendalnunes/Documents/21.Uno/04.Mkit/mkit`.
+Run locally in `<repo>`.
 
 **Definition of done:** an open PR into `feat/mkit-server`. Don't merge it.
 
 **Read first:**
-- `~/.cache/mkit-orch/scratchpad/prompts/executor-common-external.md`;
-- the external review, `/Users/vitormarthendalnunes/.cache/mkit-orch/scratchpad/research/FULL-REVIEW-e8164870.md`. Read the full entries for **1b-1, 4a-1 and 5-1**. It was pinned at `e8164870`;
+- `<local notes>`;
+- the external review, `<local evidence>`. Read the full entries for **1b-1, 4a-1 and 5-1**. It was pinned at `e8164870`;
   re-locate every line on the current base.
 
 **Setup:**
