@@ -65,6 +65,7 @@ ci-linux:
     ( cd contrib/signers && cargo build --locked --all-features )
     ( cd contrib/signers && cargo nextest run --locked --all-features )
     ( cd rust && cargo nextest run --locked --workspace --all-features )
+    just ci-server-allocator
     # --all-features decodes through C zstd; this is the pure-Rust path.
     ( cd rust && cargo nextest run --locked -p mkit-core --no-default-features --features pack-ruzstd )
     ( cd rust && cargo nextest run --locked --workspace --all-features \
@@ -94,6 +95,7 @@ ci-macos:
     # git-dependent tests fail loudly instead of silently skipping if it's
     # missing here too. See rust.yml's "Test (nextest)" step comment.
     ( cd rust && MKIT_TEST_STRICT=1 cargo nextest run --locked --workspace --all-features )
+    just ci-server-allocator
     # --all-features decodes through C zstd; this is the pure-Rust path.
     ( cd rust && cargo nextest run --locked -p mkit-core --no-default-features --features pack-ruzstd )
     ( cd rust && cargo nextest run --locked --workspace --all-features \
@@ -155,6 +157,7 @@ ci-scripts:
     python3 scripts/golden/url_token_ref.py rust/tests/golden/url-token --no-b3sum
     bash scripts/check-wasm-dep-graph.sh
     python3 scripts/check-launch-feature-graph.py
+    python3 scripts/test-server-gates.py
     bash scripts/check-cli-baseline.sh
     if ! rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$'; then
       echo "error: wasm32-unknown-unknown target not installed. Run: rustup target add wasm32-unknown-unknown" >&2
@@ -176,9 +179,14 @@ ci-scripts:
 # workspace run; the rest is in ci-scripts), so `ci` does not call this
 # recipe and run the server suites twice. In CI: cloudbuild/ci.yaml's
 # workspace nextest and its mkit-server block (main and PRs to main only).
+# Pure-Rust Scheduled decoder allocations require an isolated feature graph.
+ci-server-allocator:
+    ( cd rust && cargo test --locked -p mkit-server --no-default-features --features memory,pack-ruzstd --test zstd_slice_heap_bounds -- --ignored --test-threads=1 --nocapture )
+
 ci-server:
     #!/usr/bin/env bash
     set -euo pipefail
+    just ci-server-allocator
     ( cd rust && cargo nextest run --locked -p mkit-server -p mkit-server-native \
         -p mkit-server-conformance -p mkit-server-worker --all-features )
     ( cd rust && cargo check --locked -p mkit-server --target wasm32-unknown-unknown \
