@@ -1386,7 +1386,7 @@ where
         })?;
         st.cache.insert(base, Arc::from(canonical.to_vec()));
         self.charge_bases(st, job).await?;
-        // Dependencies and byte charges are now durable writes. The LRU owns
+        // Dependencies and byte charges are staged for the enclosing flush. The LRU owns
         // the needed base; release the duplicate member chain before an outer
         // in-pack frame can start its decoder.
         st.memo = MemberCache::default();

@@ -53,7 +53,10 @@ Counting-allocator evidence meters actual `run_due`/VerifyTimer calls,
 including range acquisition and allocations freed during rejection. It covers
 the original overrun, valid custom 64 KiB geometry, valid five-MiB compressed
 wire with a small claim, and later corruption while reacquiring a wide-wire
-in-pack base. It is requested Rust allocation evidence, not isolate RSS or
+in-pack base, including a near-five-MiB custom nested decode with real preceding
+frame metadata. Cold 50-hop in-pack and mixed member/in-pack regressions check
+final usability, per-slice calls and once-only external charging. It is requested
+Rust allocation evidence, not isolate RSS or
 JavaScript backing-array measurement. WP-4.18 still owns release-Worker and
 whole-isolate evidence.
 
