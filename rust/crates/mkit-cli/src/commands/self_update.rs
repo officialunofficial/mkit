@@ -79,7 +79,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug, Parser)]
 #[command(
     name = "mkit self update",
-    about = "Update the mkit binary in place from a signed release."
+    about = "Update the mkit binary in place from a release."
 )]
 pub struct Opts {
     /// Pin to a specific release tag (e.g. v0.4.0). Default: latest.
@@ -580,6 +580,7 @@ fn http_client(env: &UpdateEnv) -> Result<reqwest::blocking::Client, (String, u8
         }
         attempt.follow()
     });
+    // The self-updater uses the OS trust store and the release checksum when present; it does not read MKIT_SSL_CA_FILE / http.sslCAInfo.
     reqwest::blocking::Client::builder()
         .user_agent(format!("mkit/{} (self-update)", env.current_version))
         .redirect(policy)

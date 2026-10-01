@@ -51,6 +51,16 @@ client-TLS feature instead. TLS trust uses `webpki-roots` (the Mozilla root
 program, a pure-Rust dependency) rather than the OS trust store, so this
 crate has no system dependency beyond a working TLS/TCP stack.
 
+The native CLI can add trusted certificates with `http.sslCAInfo`, or with
+`MKIT_SSL_CA_FILE`, which takes precedence. The selected PEM file augments
+the Mozilla roots for every Connect HTTPS RPC, including upload and download
+streams. Certificate-chain and hostname verification remain enabled.
+Missing, unreadable, empty, or malformed files are hard errors. Supply
+certificates only; keep private keys out of the CA file. These settings cover
+Connect remotes only: the self-updater is excluded by design, S3 remotes are
+not yet covered, and wasm/browser Fetch trust is unaffected. See the
+[CLI certificate trust reference](../../../docs/CLI.md#https-certificate-trust).
+
 ## Sync `Transport`, async client
 
 `Transport` is a synchronous, object-safe trait (`&self` methods, no
