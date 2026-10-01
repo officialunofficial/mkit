@@ -835,6 +835,77 @@ fn zstd_decompress_into(
 #[cfg_attr(all(feature = "pack-zstd", not(test)), allow(dead_code))]
 const RUZSTD_WINDOW_LIMIT: u64 = 8 << 20;
 
+/// Read the base and result lengths from a zstd-compressed SPEC-DELTA v1 header.
+///
+/// `frame` is the zstd frame alone, without the pack frame, base hash or
+/// uncompressed-length prefix. Only the nine-byte delta header is read out;
+/// no allocation is sized from the delta stream's claim or result length.
+/// The pure-Rust backend uses the patched block bound and fixed 8 MiB window.
+/// Its working memory remains within the existing 28 MiB allowance, even when
+/// it retains window history before emitting the prefix. C-only builds use a
+/// streaming decoder with the same window cap. The decoder is dropped here,
+/// before the caller performs its ordinary budgeted decode.
+///
+/// This is a prefix inspection, not full frame or delta validation. Callers
+/// must still decode and verify the complete object after checking metadata.
+///
+/// # Errors
+/// Unsupported compression, malformed/truncated compression or delta header.
+pub fn peek_delta_header(frame: &[u8]) -> Result<(u32, u32), PackError> {
+    let mut header = [0; delta::HEADER_LEN];
+    read_delta_header_prefix(frame, &mut header)?;
+    if header[0] != delta::STREAM_VERSION {
+        return Err(PackError::DeltaApply(MkitError::UnsupportedObjectVersion));
+    }
+    Ok((
+        u32::from_le_bytes([header[1], header[2], header[3], header[4]]),
+        u32::from_le_bytes([header[5], header[6], header[7], header[8]]),
+    ))
+}
+
+#[cfg(feature = "pack-ruzstd")]
+fn read_delta_header_prefix(
+    frame: &[u8],
+    header: &mut [u8; delta::HEADER_LEN],
+) -> Result<(), PackError> {
+    use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
+    use std::io::Read as _;
+    require_zstd_frame_magic(frame)?;
+    let mut decoder = FrameDecoder::new();
+    decoder.set_max_window_size(RUZSTD_WINDOW_LIMIT);
+    let mut stream = StreamingDecoder::new_with_decoder(frame, decoder)
+        .map_err(|error| PackError::ZstdDecompress(error.to_string()))?;
+    stream
+        .read_exact(header)
+        .map_err(|error| PackError::ZstdDecompress(error.to_string()))
+}
+
+#[cfg(all(feature = "pack-zstd", not(feature = "pack-ruzstd")))]
+fn read_delta_header_prefix(
+    frame: &[u8],
+    header: &mut [u8; delta::HEADER_LEN],
+) -> Result<(), PackError> {
+    use std::io::Read as _;
+    require_zstd_frame_magic(frame)?;
+    let mut stream = zstd::stream::read::Decoder::with_buffer(frame)
+        .map_err(|error| PackError::ZstdDecompress(error.to_string()))?
+        .single_frame();
+    stream
+        .window_log_max(23)
+        .map_err(|error| PackError::ZstdDecompress(error.to_string()))?;
+    stream
+        .read_exact(header)
+        .map_err(|error| PackError::ZstdDecompress(error.to_string()))
+}
+
+#[cfg(not(any(feature = "pack-zstd", feature = "pack-ruzstd")))]
+fn read_delta_header_prefix(
+    frame: &[u8],
+    _header: &mut [u8; delta::HEADER_LEN],
+) -> Result<(), PackError> {
+    zstd_decompress_into(frame, 0, &mut Vec::new())
+}
+
 /// Pure-Rust (`ruzstd`) decode of exactly one Zstandard frame, bounded
 /// to `capacity` output bytes. Compiled whenever `pack-ruzstd` is on,
 /// including alongside `pack-zstd`, so the differential tests can run

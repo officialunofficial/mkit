@@ -21,7 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Bound pure-Rust zstd block expansion before allocation, with a fixed 8 MiB
   window cap, and checkpoint corrupt preservation sources as terminal audited
-  failures. Worker admission and native C decoding are unchanged (R-203).
+  failures. Preflight compressed delta result headers against verified metadata
+  before decode budgeting; genuine resource failures remain retryable. Worker
+  admission and native C decoding are unchanged (R-203).
 
 - Server/Worker: bound raw timer-alarm enumeration and share tick limits across
   logical heads. Persist capped exponential backoff in the existing timer row

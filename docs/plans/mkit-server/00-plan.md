@@ -701,4 +701,6 @@ fixed 8 MiB caller window cap. Native/wasm allocator regressions cover later
 source corruption. Preservation records audited terminal corruption checkpoints
 without clearing denial or reporting verification success. Worker admission is
 unchanged; default indexed verification rejects zstd without a codec. Decoder
-activation belongs to WP-4.18. The 500-line cap excludes pristine vendor code.
+activation belongs to WP-4.18. The review repair's 560-line authored cap excludes
+pristine vendor code. Preservation peeks the compressed delta result header
+before decode budgeting; only a proven metadata mismatch changes error handling.

@@ -11,7 +11,9 @@ use crate::telemetry::{METRIC_INDEX_LOOKUP_CAPPED, Metrics};
 use crate::{BlobBody, BlobKey, BlobStore, BoxFuture, ByteRange, NamespaceStore, ServerError};
 use futures::StreamExt as _;
 use mkit_core::hash::Hash;
-use mkit_core::pack::{DecodeLimits, DeltaBaseSource, PackError, decode_frame_with};
+use mkit_core::pack::{
+    DecodeLimits, DeltaBaseSource, PackError, decode_frame_with, peek_delta_header,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -624,6 +626,14 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
                     Some(0x02) => frame.get(42..46).and_then(|bytes| {
                         bytes.try_into().ok().map(u32::from_le_bytes).map(u64::from)
                     }),
+                    // The outer claim is a stream size. Inspect just the inner
+                    // delta header before a corrupted result can hit the budget.
+                    // An unsuccessful peek proves no mismatch: let normal decode
+                    // retain its existing corruption/resource error separation.
+                    Some(0x04) => frame
+                        .get(41..)
+                        .and_then(|bytes| peek_delta_header(bytes).ok())
+                        .map(|(_, result)| u64::from(result)),
                     _ => None,
                 };
                 if frame.first().copied() != Some(located.value.wire_type)

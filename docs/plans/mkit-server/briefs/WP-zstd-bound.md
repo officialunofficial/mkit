@@ -83,3 +83,18 @@ Corruption during acquisition of a verified member must produce a terminal,
 audited source checkpoint while keeping denial in force. Keep admission unchanged;
 decoder enablement on the launch Worker belongs to WP-4.18.
 After #1249 merged, rebase onto `origin/feat/mkit-server` before opening the PR.
+
+## Approved review repair
+
+The orchestrator raised the authored production cap to 560 lines for this repair.
+Before preservation's budgeted compressed-delta decode, inspect the bounded
+delta-header prefix and compare its result length with immutable verified
+metadata. SPEC-DELTA v1's existing prefix is nine bytes: a version byte and two
+little-endian u32 lengths. A proven mismatch is terminal and audited; unsuccessful
+prefix inspection leaves normal decode's resource/corruption classification intact.
+Keep genuine budget failures retryable, the 96 MiB acquisition allowance unchanged,
+and admission unchanged. The additive core helper uses the fixed decoder window;
+native/wasm allocator tests also cover prefix working memory. Regressions cover
+valid compressed sources, one terminal audit, no rereads after restart, and a
+valid delta stream exceeding a decode budget. The 14 inherited base failures are
+deferred to a separate chore.

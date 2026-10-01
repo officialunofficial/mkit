@@ -2299,6 +2299,10 @@ not migrated (R-198 B1).
 source records a terminal source failure and an audit entry atomically. Denial
 stays in force, the request remains unresolved, and a restart does not decode
 that source again. Storage unavailability and resource exhaustion remain retryable.
+Raw and compressed delta result headers are compared with immutable verified
+decoded sizes before ordinary decode budgeting. Compressed prefix inspection
+reads nine output bytes under the fixed window/block bounds, releases its decoder
+before full decode, and does not reserve the advertised stream or result size.
 
 **Because:** later storage corruption can invalidate historical verification;
 retrying the same bad bytes cannot repair them and can monopolize Worker alarms.

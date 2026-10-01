@@ -9,7 +9,7 @@
 use super::*;
 
 /// The RFC 8878 frame magic, for hand-built frames.
-#[cfg(feature = "pack-ruzstd")]
+#[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
 const MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 /// A skippable frame (magic `0x184D2A50`) with an empty body.
 #[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
@@ -31,7 +31,7 @@ fn cat(parts: &[&[u8]]) -> Vec<u8> {
 /// A frame of raw (stored) blocks. `fcs` writes a 4-byte
 /// `Frame_Content_Size`; `window_log: None` sets `Single_Segment`
 /// (which requires `fcs`), `Some(log)` writes a window descriptor.
-#[cfg(feature = "pack-ruzstd")]
+#[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
 fn raw_block_frame(content: &[u8], fcs: Option<u32>, window_log: Option<u8>) -> Vec<u8> {
     let mut f = MAGIC.to_vec();
     let fcs_flag = if fcs.is_some() { 0b10 << 6 } else { 0 };
@@ -54,6 +54,37 @@ fn raw_block_frame(content: &[u8], fcs: Option<u32>, window_log: Option<u8>) -> 
         f.extend_from_slice(block);
     }
     f
+}
+
+#[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
+#[test]
+fn peek_delta_header_reads_lengths_without_applying_instructions() {
+    let mut header = vec![delta::STREAM_VERSION];
+    header.extend_from_slice(&512u32.to_le_bytes());
+    header.extend_from_slice(&u32::MAX.to_le_bytes());
+    header.push(0); // Invalid instruction: header inspection must not apply it.
+    assert_eq!(
+        peek_delta_header(&raw_block_frame(&header, None, Some(23))).unwrap(),
+        (512, u32::MAX)
+    );
+    let mut split = MAGIC.to_vec();
+    split.extend_from_slice(&[0, 0]);
+    for (index, byte) in header[..delta::HEADER_LEN].iter().enumerate() {
+        split.extend_from_slice(&(8u32 | u32::from(index == 8)).to_le_bytes()[..3]);
+        split.push(*byte);
+    }
+    assert_eq!(peek_delta_header(&split).unwrap(), (512, u32::MAX));
+    for length in 0..delta::HEADER_LEN {
+        assert!(peek_delta_header(&raw_block_frame(&header[..length], None, Some(23))).is_err());
+    }
+    header[0] = 2;
+    assert!(matches!(
+        peek_delta_header(&raw_block_frame(&header, None, Some(23))),
+        Err(PackError::DeltaApply(MkitError::UnsupportedObjectVersion))
+    ));
+    assert!(peek_delta_header(&[]).is_err());
+    header[0] = delta::STREAM_VERSION;
+    assert!(peek_delta_header(&raw_block_frame(&header, None, Some(24))).is_err());
 }
 
 /// The committed C-encoded v2 fixtures (`rust/tests/golden/pack-v2/`).

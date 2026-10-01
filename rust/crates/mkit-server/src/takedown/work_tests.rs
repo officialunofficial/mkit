@@ -24,13 +24,21 @@ struct Fixture {
     pack: Hash,
 }
 async fn fixture(objects: &[Object], any: bool) -> Fixture {
-    fixture_with_delta(objects, any, false).await
+    fixture_with_delta(objects, any, 0).await
+}
+async fn fixture_with_delta(objects: &[Object], any: bool, delta_wire: u8) -> Fixture {
+    fixture_delta_encoding(objects, any, delta_wire, false).await
 }
 #[allow(
     clippy::too_many_lines,
-    reason = "Build the complete verified multi-object source and owning runtime."
+    reason = "Build verified raw and compressed delta sources."
 )]
-async fn fixture_with_delta(objects: &[Object], any: bool, delta_second: bool) -> Fixture {
+async fn fixture_delta_encoding(
+    objects: &[Object],
+    any: bool,
+    delta_wire: u8,
+    literal_delta: bool,
+) -> Fixture {
     let clock = Arc::new(ManualClock::new(10));
     let metadata = Arc::new(MemoryKv::with_clock(clock.clone()));
     let serving = MemoryBlobStore::default();
@@ -39,6 +47,9 @@ async fn fixture_with_delta(objects: &[Object], any: bool, delta_second: bool) -
         name: RepoName::new("repo").unwrap(),
     };
     let mut packed = b"MKIT\x01\0\0\0\0\0\0\0".to_vec();
+    if delta_wire == 4 {
+        packed[4] = 2;
+    }
     let mut canonical = vec![];
     let mut frames = Vec::new();
     for (index, object) in objects.iter().enumerate() {
@@ -47,10 +58,33 @@ async fn fixture_with_delta(objects: &[Object], any: bool, delta_second: bool) -
             Object::ChunkedBlob(cb) => mkit_core::merkle::compute_chunked_id(cb),
             _ => hash(&bytes),
         };
-        let (wire, payload, base) = if delta_second && index == 1 {
+        let (wire, payload, base) = if delta_wire != 0 && index == 1 {
             let (base, canonical): &(Hash, Vec<u8>) = &canonical[0];
-            let delta = mkit_core::delta::encode(canonical, &bytes).unwrap();
-            (2, [base.as_slice(), &delta].concat(), Some(*base))
+            let delta = if literal_delta {
+                let mut stream = vec![mkit_core::delta::STREAM_VERSION];
+                stream.extend_from_slice(&u32::try_from(canonical.len()).unwrap().to_le_bytes());
+                stream.extend_from_slice(&u32::try_from(bytes.len()).unwrap().to_le_bytes());
+                for byte in &bytes {
+                    stream.extend_from_slice(&[1, *byte]);
+                }
+                stream
+            } else {
+                mkit_core::delta::encode(canonical, &bytes).unwrap()
+            };
+            let delta = if delta_wire == 4 {
+                let mut zstd = vec![0x28, 0xb5, 0x2f, 0xfd, 0, 0x68];
+                let block = (u32::try_from(delta.len()).unwrap() << 3) | 1;
+                zstd.extend_from_slice(&block.to_le_bytes()[..3]);
+                zstd.extend_from_slice(&delta);
+                [
+                    u32::try_from(delta.len()).unwrap().to_le_bytes().as_slice(),
+                    &zstd,
+                ]
+                .concat()
+            } else {
+                delta
+            };
+            (delta_wire, [base.as_slice(), &delta].concat(), Some(*base))
         } else {
             (0, bytes.clone(), None)
         };
@@ -245,7 +279,9 @@ impl BlobStore for FaultBlobs {
                 panic!("small test frame")
             };
             let mut bytes = bytes.to_vec();
-            if self.mode.load(SeqCst) == 4 {
+            if self.mode.load(SeqCst) == 5 {
+                bytes[55..59].copy_from_slice(&(2u32 << 20).to_le_bytes());
+            } else if self.mode.load(SeqCst) == 4 {
                 // Only the historically verified delta result claim changes.
                 bytes[42..46].copy_from_slice(&(2u32 << 20).to_le_bytes());
             } else if self.mode.load(SeqCst) == 3 {
@@ -317,6 +353,19 @@ async fn corrupt_compressed_claim_is_terminal_before_decode_budget_check() {
 
 #[tokio::test]
 async fn corrupt_delta_result_claim_is_terminal_before_decode_budget_check() {
+    assert_delta_claim_terminal(2, 4).await;
+}
+
+#[tokio::test]
+async fn corrupt_zstd_delta_result_claim_is_terminal_before_decode_budget_check() {
+    assert_delta_claim_terminal(4, 5).await;
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "Verify canonical control, one audit and terminal state across restart."
+)]
+async fn assert_delta_claim_terminal(delta_wire: u8, fault: u8) {
     use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::SeqCst};
     let base = Object::Blob(Blob {
         data: vec![b'A'; 512],
@@ -324,7 +373,7 @@ async fn corrupt_delta_result_claim_is_terminal_before_decode_budget_check() {
     let mut target_data = vec![b'A'; 512];
     target_data[256] = b'B';
     let target = Object::Blob(Blob { data: target_data });
-    let f = fixture_with_delta(&[base, target], false, true).await;
+    let f = fixture_with_delta(&[base, target], false, delta_wire).await;
     let object = f.canonical[1].0;
     // A fully valid selected delta completes before source corruption.
     let verified = acquisition::resolve(
@@ -346,7 +395,7 @@ async fn corrupt_delta_result_claim_is_terminal_before_decode_budget_check() {
     }
     let blobs = FaultBlobs {
         inner: f.work.serving.clone(),
-        mode: Arc::new(AtomicU8::new(4)),
+        mode: Arc::new(AtomicU8::new(fault)),
         reads: Arc::new(AtomicUsize::new(0)),
         corrupt_offset: Some(12 + 5 + f.canonical[0].1.len() as u64),
     };
@@ -369,6 +418,34 @@ async fn corrupt_delta_result_claim_is_terminal_before_decode_budget_check() {
             .unwrap()
             .is_none()
     );
+    let page = work
+        .metadata
+        .scan(
+            &work.root,
+            &Key::new(b"ae\0".to_vec()),
+            &Key::new(b"af".to_vec()),
+            None,
+            100,
+        )
+        .await
+        .unwrap();
+    let audits: Vec<serde_json::Value> = page
+        .entries
+        .iter()
+        .map(|(_, value)| serde_json::from_slice(value.as_bytes()).unwrap())
+        .filter(|audit: &serde_json::Value| {
+            audit["procedure"] == "system:timer/PreservationSourceCorrupt"
+        })
+        .collect();
+    assert_eq!(audits.len(), 1);
+    for target in [to_hex(&id), to_hex(&object), to_hex(&f.pack)] {
+        assert!(
+            audits[0]["targets"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(target))
+        );
+    }
     let reads = blobs.reads.load(SeqCst);
     let restarted = fault_work(&f, blobs.clone());
     for _ in 0..40 {
@@ -379,12 +456,111 @@ async fn corrupt_delta_result_claim_is_terminal_before_decode_budget_check() {
         }
     }
     assert_eq!(blobs.reads.load(SeqCst), reads);
+    let page = restarted
+        .metadata
+        .scan(
+            &restarted.root,
+            &Key::new(b"ae\0".to_vec()),
+            &Key::new(b"af".to_vec()),
+            None,
+            100,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        page.entries
+            .iter()
+            .filter(|(_, value)| {
+                let audit: serde_json::Value = serde_json::from_slice(value.as_bytes()).unwrap();
+                audit["procedure"] == "system:timer/PreservationSourceCorrupt"
+            })
+            .count(),
+        1
+    );
     assert!(
         ContentIndex::new(BorrowedStore(&work.metadata))
             .blocked(&object)
             .await
             .unwrap()
             .is_some()
+    );
+}
+
+#[tokio::test]
+async fn valid_compressed_delta_stream_budget_failure_remains_retryable() {
+    let base = Object::Blob(Blob {
+        data: vec![b'A'; 512],
+    });
+    let target = Object::Blob(Blob {
+        data: vec![b'B'; 512],
+    });
+    // One-byte INSERTs are valid: the stream is 1053 bytes while its result is 522.
+    let f = fixture_delta_encoding(&[base, target], false, 4, true).await;
+    let object = f.canonical[1].0;
+    let valid = acquisition::resolve(
+        &f.work.serving,
+        &f.work.metadata,
+        f.work.shards.as_ref(),
+        &f.repo,
+        object,
+        &f.work.profile,
+        &crate::NoopMetrics,
+    )
+    .await
+    .unwrap();
+    assert_eq!(valid.canonical.as_ref(), f.canonical[1].1);
+    let id = accept(&f, "delta-stream-budget", None, &[object]).await;
+    f.clock.set(20_000);
+    for _ in 0..3 {
+        advance(&f, id, 20_000).await;
+    }
+    let blobs = FaultBlobs {
+        inner: f.work.serving.clone(),
+        mode: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+        reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        corrupt_offset: None,
+    };
+    let mut work = fault_work(&f, blobs.clone());
+    work.profile.limits.max_decoded_bytes = 1024;
+    let old = work
+        .metadata
+        .get(&work.root, &key(b"state", &id, &[]))
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let mut restarted = fault_work(&f, blobs.clone());
+        restarted.profile = work.profile;
+        assert!(fault_advance(&restarted, id).await.is_err());
+        assert_eq!(
+            old,
+            work.metadata
+                .get(&work.root, &key(b"state", &id, &[]))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !work
+                .info(&work.metadata, &id, &object)
+                .await
+                .unwrap()
+                .source_failed
+        );
+        assert!(
+            work.metadata
+                .get(&work.root, &key(b"todo", &id, &object))
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    work.profile = acquisition::Profile::scheduled();
+    let state = fault_advance(&work, id).await.unwrap();
+    assert_ne!(state.verification, Verification::SourceCorrupt);
+    assert!(
+        work.info(&work.metadata, &id, &object)
+            .await
+            .unwrap()
+            .verified
     );
 }
 

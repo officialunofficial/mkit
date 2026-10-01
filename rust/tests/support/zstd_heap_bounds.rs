@@ -3,7 +3,9 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use mkit_core::pack::{DecodeLimits, NoExternalBases, PackError, decode_frame_with};
+use mkit_core::pack::{
+    DecodeLimits, NoExternalBases, PackError, decode_frame_with, peek_delta_header,
+};
 use mkit_core::{Blob, Object, hash, serialize};
 
 struct CountingAllocator;
@@ -119,6 +121,12 @@ fn reject_with_bounded_heap(name: &str, zstd: &[u8], claim: usize) {
 pub(crate) fn corrupt_zstd_frames_bound_heap() {
     let reviewer = sequence_flood(2000);
     assert_eq!(reviewer.len(), 4524);
+    let baseline = LIVE.load(Ordering::SeqCst);
+    PEAK.store(baseline, Ordering::SeqCst);
+    assert!(peek_delta_header(&reviewer).is_err());
+    let peak = PEAK.load(Ordering::SeqCst).saturating_sub(baseline);
+    println!("reviewer header peek: peak_decode_alloc_bytes={peak}");
+    assert!(peak <= WORKING_ALLOWANCE);
     reject_with_bounded_heap("reviewer sequence flood", &reviewer, SMALL_CAP);
     reject_with_bounded_heap("reviewer at scheduled 1 MiB cap", &reviewer, 1 << 20);
     reject_with_bounded_heap("larger sequence flood", &sequence_flood(4096), SMALL_CAP);
@@ -222,4 +230,22 @@ pub(crate) fn corrupt_zstd_frames_bound_heap() {
     );
     assert!(peak <= long_object.len() + WORKING_ALLOWANCE);
     assert_eq!(decoded, (hash::hash(&long_object), long_object));
+
+    // A prefix peek allocates no stream/result reservation, even with >8 MiB
+    // of history before ruzstd emits the first nine bytes.
+    let mut delta_stream = vec![0; 9 << 20];
+    delta_stream[0] = 1;
+    delta_stream[1..5].copy_from_slice(&512u32.to_le_bytes());
+    delta_stream[5..9].copy_from_slice(&u32::MAX.to_le_bytes());
+    let mut zstd = windowed_frame(0x68);
+    let count = delta_stream.chunks(BLOCK_MAXIMUM).len();
+    for (index, chunk) in delta_stream.chunks(BLOCK_MAXIMUM).enumerate() {
+        block(&mut zstd, 0, chunk.len(), index + 1 == count, chunk);
+    }
+    let baseline = LIVE.load(Ordering::SeqCst);
+    PEAK.store(baseline, Ordering::SeqCst);
+    assert_eq!(peek_delta_header(&zstd).unwrap(), (512, u32::MAX));
+    let peak = PEAK.load(Ordering::SeqCst).saturating_sub(baseline);
+    println!("8 MiB window header peek: peak_decode_alloc_bytes={peak}");
+    assert!(peak <= WORKING_ALLOWANCE);
 }
