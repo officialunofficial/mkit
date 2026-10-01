@@ -3,7 +3,7 @@
 A Lean 4 package (`mkit_formal`, library `MkitFormal`) of mkit's formal
 models. Core Lean only (no Mathlib, no Lake dependencies). The root
 `MkitFormal.lean` imports every model. `lean-toolchain` pins
-`leanprover/lean4:v4.34.0` (the MKIT-17 tool pin).
+`leanprover/lean4:v4.34.0` (the pinned toolchain).
 
 ## Install and build
 
@@ -28,7 +28,7 @@ theorems that need them); `#print axioms` of every theorem shows only
 `propext`, `Classical.choice` and `Quot.sound` (`scripts/merkle_axioms.lean`,
 `MkitFormal/DeltaAxioms.lean`; the difftest scripts enforce both).
 
-## Merkle objects (MKIT-24)
+## Merkle objects (Merkle proof model)
 
 This part models [SPEC-MERKLE-OBJECTS](../../docs/specs/SPEC-MERKLE-OBJECTS.md)
 v2 and is aligned with `rust/crates/mkit-core/src/merkle.rs`.
@@ -140,7 +140,7 @@ too (MKIT-56): SPEC-MERKLE-OBJECTS §5.4 requires builders to refuse it, and
 `merkle.rs`'s range builder now returns `PositionOutOfRange` for every range
 of the empty Tree (Kani harness `merkle_builder_empty_tree_refuses` passes).
 
-## Delta (MKIT-25)
+## Delta (delta model)
 
 This part models [SPEC-DELTA](../../docs/specs/SPEC-DELTA.md) v1 and is
 aligned with `rust/crates/mkit-core/src/delta.rs`.

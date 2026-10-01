@@ -2,7 +2,7 @@
 
 Bounded model checking of mkit's untrusted-input decoders with
 [Kani](https://github.com/model-checking/kani) (pin: **Kani 0.68.0**,
-CBMC 6.11.0, MKIT-17). The harnesses live next to the code they check,
+CBMC 6.11.0). The harnesses live next to the code they check,
 in `#[cfg(kani)] mod kani_proofs` blocks:
 
 | File | Spec |

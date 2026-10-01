@@ -1,5 +1,5 @@
 // -*- mode: Bluespec; -*-
-// Garbage collection, retention roots and the recovery log (Linear MKIT-21).
+// Garbage collection, retention roots and the recovery log (garbage-collection model).
 //
 // Models docs/specs/SPEC-GC.md ("Retention roots", "Fail-closed requirement",
 // "Recovery log (Part 2)", "Invariants") under the lock sets of

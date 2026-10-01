@@ -31,7 +31,7 @@ Co-authored-by: Christopher Wallace <362387+christopherwxyz@users.noreply.github
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 ```
 
-PR body: "Rebuilt from #1087 (SPEC-WRITE-GRANTS) by @christopherwxyz, revised per MKIT-29 §6.4 / D5 / D6 / D19."
+PR body: "Rebuilt from #1087 (SPEC-WRITE-GRANTS) by @christopherwxyz, revised per production server work §6.4 / D5 / D6 / D19."
 
 ## PRD refs
 

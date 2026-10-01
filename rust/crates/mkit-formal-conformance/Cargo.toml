@@ -1,5 +1,5 @@
 # Model-based conformance of the formal models against the real code
-# (Linear MKIT-22, epic MKIT-17). Test-only: the crate's library is empty
+# (ref conformance model, epic verification toolchain). Test-only: the crate's library is empty
 # and everything lives in `tests/`. A separate crate, not a `mkit-core`
 # integration test, because the refs model's lock domains include the
 # file transport (`mkit-transport-file`) and the memory transport

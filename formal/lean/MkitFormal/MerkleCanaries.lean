@@ -1,7 +1,7 @@
 import MkitFormal.MerkleProofs
 
 /-!
-# Non-vacuity witnesses for the SPEC-MERKLE-OBJECTS theorems (MKIT-24)
+# Non-vacuity witnesses for the SPEC-MERKLE-OBJECTS theorems (Merkle proof model)
 
 * `termHasher` is a free term algebra: it satisfies every injectivity
   hypothesis, so `sound` / `sound_id` / `cross_kind_rejected` are not

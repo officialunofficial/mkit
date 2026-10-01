@@ -33,7 +33,7 @@ Your first commit copies this prompt plus the base brief, from "Purpose" on, to
     from the matrix and the budgets.
 - **Proofs are native-only at launch.** Worker proofs (4.14b-2) are post-launch. The release Worker keeps HTTP
   `?proof=1` unsupported and must **not** advertise proof capability. Native advertises and serves proofs.
-- **Namespace policy:** `allowlist`, or `any` with `UNSAFE_OPEN_NAMESPACES=true`. The Uno Kit demo (UNO-420) runs
+- **Namespace policy:** `allowlist`, or `any` with `UNSAFE_OPEN_NAMESPACES=true`. The Uno Kit demo runs
   `any`. Under `any`, takedown works but reports discovery as incomplete (the 5.6a-2 ruling). Update `staging-uno.md`
   accordingly: it currently says "allowlist" only.
 - **Features are opt-ins inside the Paid indexed launch profile.** Each opt-in validates its complete configuration at
@@ -146,7 +146,7 @@ Any prerequisite remains default-inert/partial; fail-closed isolation/no-oracle 
 Run all current common/full/area local gates at final immutable head, plus complete native and wrangler launch matrix. Gates include release/default-off regression and opted-in release Worker runtime, not test-faults alone. Count whole-alarm calls/ops/resident work and concurrent response lifetimes with adversarial inputs. Keep per-worktree ports/processes isolated; serialize known high-memory models appropriately. Two independent self-reviews including security/spec/crypto audit, followed by independent adversarial PR review. Open PR with exact commands/logs, measured limits and remaining user-owned staging/external review slots. No cloud/CI polling.
 
 
-## Addendum (2026-09-30): embedding support for Uno Kit (UNO-420), in scope for 4.18
+## Addendum (2026-09-30): embedding support for Uno Kit, in scope for 4.18
 
 - Budget: up to about 350 extra production lines; the cap becomes 3,350.
 - Phase: 1 or 2.

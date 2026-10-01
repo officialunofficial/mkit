@@ -1559,7 +1559,7 @@
       "3.8"
     ],
     "size": "M",
-    "summary": "Existing MKIT-67 prerequisite (R-174, bundled with 3.12/3.13): move the public hooks.v1 messages, HookSigner and HookVerifier into mkit-rpc with mkit-server re-exports, so Uno and the signed Worker channel can share the hook protocol without server-runtime dependencies.",
+    "summary": "Existing authentication re-exports prerequisite (R-174, bundled with 3.12/3.13): move the public hooks.v1 messages, HookSigner and HookVerifier into mkit-rpc with mkit-server re-exports, so Uno and the signed Worker channel can share the hook protocol without server-runtime dependencies.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -2168,7 +2168,7 @@
   },
   {
     "id": "4.16b",
-    "title": "Ref-path file Content-Type allowlist and filename (UNO-420, R-201)",
+    "title": "Ref-path file Content-Type allowlist and filename (Uno Kit demo, R-201)",
     "milestone": "M4",
     "track": "core",
     "depends_on": [
@@ -2187,7 +2187,7 @@
   },
   {
     "id": "4.16c",
-    "title": "In-process canonical object reader for embedders (UNO-420)",
+    "title": "In-process canonical object reader for embedders (Uno Kit demo)",
     "milestone": "M4",
     "track": "core",
     "depends_on": [

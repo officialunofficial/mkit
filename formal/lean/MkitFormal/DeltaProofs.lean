@@ -1,7 +1,7 @@
 import MkitFormal.DeltaModel
 
 /-!
-# SPEC-DELTA theorems (MKIT-25)
+# SPEC-DELTA theorems (delta model)
 
 * `topBit_iff`, `reservedBits_iff`: the model's `128 ≤ op` / `op ≠ 128` tests
   are exactly `op & 0x80 != 0` / `op & 0x7F != 0` of §3 and `delta.rs`.

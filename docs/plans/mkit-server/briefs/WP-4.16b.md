@@ -1,7 +1,7 @@
 ## Purpose
 
 Today every file response is `application/octet-stream` with no filename. Browsers can't preview images at a direct
-URL, and downloads have no name. Uno (UNO-420) needs both. The information is already in the URL for ref-path routes.
+URL, and downloads have no name. Uno needs both. The information is already in the URL for ref-path routes.
 
 ## A. Fixed
 
@@ -47,7 +47,7 @@ URL, and downloads have no name. Uno (UNO-420) needs both. The information is al
    - add a version-history row;
    - update or add conformance vectors (native and Worker wire cases).
 6. **Docs:**
-   - R-201 row in `00-plan.md` ("WP-4.16b: ref-path file Content-Type allowlist and filename, for UNO-420");
+   - R-201 row in `00-plan.md` ("WP-4.16b: ref-path file Content-Type allowlist and filename, for Uno Kit demo");
    - a registry row with deps on 4.16;
    - CHANGELOG;
    - update the `apps/vcs-worker/README.md` HTTP note if it mentions octet-stream only. **4.18 is editing that README

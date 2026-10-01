@@ -1747,7 +1747,7 @@ Explicitly deferred to sibling issues:
 | `2` | draft | Additive `GetServerInfoResponse.async_inspection = 18` (§2.1); published-view and quarantine rules in SPEC-SERVER §§10–11; §7.1 never stores a sync inspector `unavailable` for replay; §7.6 `AlreadyPresent` is never answered for a pack with hidden content. |
 | `2` | draft | Additive `GetServerInfoResponse.inspection_max_objects = 19` (§2.1) advertises the configured synchronous-inspection advance cap, absent without inspectors (WP-5.5a). |
 | `2` | draft | Additive `GetReceipt` signed writer-view read (§2.2), storage-receipt fields on `UpdateRefResponse` and `AdvanceRefsResponse` (§§3–4), and current receipt-and-notice key semantics in `GetServerInfo` (§2.1); SPEC-SERVER §15. |
-| `2` | draft | Editorial: §3 and §7.3 retry obligations for `UpdateRef`/`AdvanceRefs` reconciled with SPEC-TRANSPORT §7 (MKIT-17). |
+| `2` | draft | Editorial: §3 and §7.3 retry obligations for `UpdateRef`/`AdvanceRefs` reconciled with SPEC-TRANSPORT §7 (verification toolchain). |
 | `1` | draft | Initial `mkit.transport.v1` proto: 7 wire RPCs covering every `Transport` trait verb (§2), `PackChunk` reused byte-for-byte from `ssh.proto`, `RefExpectation`/`RefEntry` duplicated with pinned wire numbers pending mkit#679's shared-proto extraction. |
 
 ---

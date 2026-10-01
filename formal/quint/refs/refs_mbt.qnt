@@ -1,6 +1,6 @@
 // -*- mode: Bluespec; -*-
-// Trace generation for model-based conformance (Linear MKIT-22, epic
-// MKIT-17): `formal/scripts/gen-refs-traces.sh` runs
+// Trace generation for model-based conformance (ref conformance model, epic
+// verification toolchain): `formal/scripts/gen-refs-traces.sh` runs
 //   quint run refs_mbt.qnt --main refs_mbt2 --init initLin --step stepLin --mbt --out-itf ...
 // and the Rust harness
 //   rust/crates/mkit-formal-conformance/tests/formal_refs_conformance.rs

@@ -1,6 +1,6 @@
 // -*- mode: Bluespec; -*-
-// Requested transport identities are checked before effects (Linear MKIT-26,
-// epic MKIT-17, workstream quint-transport).
+// Requested transport identities are checked before effects (transport model,
+// epic verification toolchain, workstream quint-transport).
 //
 // INVARIANTS.md "Requested transport identities are checked before effects":
 // fetched packs and metadata match their requested keys; shard manifests name

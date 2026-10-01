@@ -1,5 +1,5 @@
 import MkitFormal.Merkle
--- Axiom audit for the MKIT-24 theorems (run by scripts/difftest-merkle.sh):
+-- Axiom audit for the Merkle proof model theorems (run by scripts/difftest-merkle.sh):
 -- only Lean's standard axioms may appear, never `sorryAx` or `ofReduceBool`.
 open MkitFormal.Merkle MkitFormal.Merkle.Canaries
 #print axioms prove_eq_sibsAux

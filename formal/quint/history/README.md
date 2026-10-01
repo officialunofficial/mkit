@@ -1,6 +1,6 @@
 # History publication and recovery (MKIT-20)
 
-Tool pins (MKIT-17): quint 0.32.0, Java 21, Apalache 0.62.2 run directly on
+Tool pins (verification toolchain): quint 0.32.0, Java 21, Apalache 0.62.2 run directly on
 the TLA+ that `quint compile` emits, and TLC from the `tlc2.TLC` class in that
 Apalache jar (sha256 `079b6c23…6efaa8`). `quint compile` itself uses quint's
 bundled Apalache (0.56.1) only to translate to TLA+; `quint verify` is not

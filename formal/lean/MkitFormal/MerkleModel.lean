@@ -1,5 +1,5 @@
 /-!
-# SPEC-MERKLE-OBJECTS model (Linear MKIT-24)
+# SPEC-MERKLE-OBJECTS model (Merkle proof model)
 
 An executable model of `docs/specs/SPEC-MERKLE-OBJECTS.md` (version 2):
 

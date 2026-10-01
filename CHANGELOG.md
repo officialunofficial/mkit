@@ -218,7 +218,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - RPC: public `mkit-rpc::hooks` message types with JSON support and runtime-free
   `HookSigner` and `HookVerifier`, enabled by the `hooks` feature. The server
-  re-exports its authentication surface (WP-3.7b, Linear MKIT-67).
+  re-exports its authentication surface for external hook implementers (WP-3.7b).
 
 - Server (Stage 2, inert): default-off `http-objects` adapter features mount
   raw escaped HTTP object routes with streaming Range/HEAD, read CORS on
@@ -902,7 +902,7 @@ train).
   `docs/INVARIANTS.md`.
 
 - *(server)* `mkit-server` crate (internal foundation for the production
-  server, MKIT-29): repo and namespace identifiers, principals, the typed
+  server, production server work): repo and namespace identifiers, principals, the typed
   `Operation` model, a transport-neutral `ServerError` with redaction and
   response shaping, the `MaybeSend`/`Clock`/`Spawner`/`send_wrap` runtime
   model and a `Metrics` facade. Builds for native and `wasm32`; first
