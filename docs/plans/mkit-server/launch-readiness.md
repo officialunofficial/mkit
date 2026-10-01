@@ -3,8 +3,9 @@
 Status: **FINAL PREPARATION — NOT READY FOR LAUNCH; EXTERNAL GATES UNRUN**
 (WP-1.20 / R-195). As-built feature checkpoint:
 `c3921b06effc0f38e2cdbe6f25b4e5a309018136` (merged 4.18, #1259).
-This is not the launch candidate. FIX-preservation-memory, PR-size cleanup,
-this docs PR and the delta review remain candidate prerequisites.
+This is not the launch candidate. The operator guide (#1262) and scheduled
+preservation memory reduction (#1263) follow this checkpoint; PR-size cleanup
+and the delta review remain candidate prerequisites.
 Every real staging, resource/cost/multicolo and sign-off slot is **UNRUN and
 user-owned**. No local result completes one of those gates.
 
@@ -50,8 +51,8 @@ Merged provenance does not mean a local or staging case passed.
 | Launch review repair | Inherited timers/jobs/goldens, memory/pack cap/scanner writes, decoder scratch, purge/admin/outcomes/sha2 | #1255 / `acd17923`; #1256 / `e1533a9c`; #1257 / `86c04dfd`; #1258 / `dd0c875c` |
 | Stale-connection retry | Replay-safe unary retry once, same envelope/deadline; streams never replayed | #1260 / `849d83cb` |
 | 4.18 | Paid indexed Multi/D34 activation, embedding, requested Uno local matrix, R-194 | #1259 / `c3921b06` |
-| FIX-preservation-memory | Required <=48 MiB Worker preservation allowance before candidate/main | IN FLIGHT; no merged SHA |
-| 1.20 final | This preparation and standalone operator guide, R-195 | THIS PR; no staging claim |
+| FIX-preservation-memory | 48 MiB scheduled allowance; latest-base retention, 50-hop canonical/restart regressions | #1263; no whole-isolate staging claim |
+| 1.20 final | This preparation and standalone operator guide, R-195 | #1262 / `28bd8f7e`; no staging claim |
 
 Full merged SHAs resolve from these PRs and the pinned feature Git history;
 prior implementation pins are also retained in [launch-evidence.md](launch-evidence.md).
@@ -143,11 +144,12 @@ informational. Size does not establish runtime/resource acceptance.
 
 ## Known open items and review disposition
 
-- **FIX-preservation-memory, in flight and required before candidate/main:**
-  reduce 96 MiB Worker Rust acquisition allowance to at most 48 MiB with bounded
-  chain memo retention. Keep the original whole-isolate Medium open until fixed,
-  independently reviewed and measured; the ~105 MB sample supplies no headroom
-  certificate. Exercise the [whole-isolate memory gate](staging-uno.md#whole-isolate-memory-gate).
+- **Whole-isolate preservation memory remains open:** #1263 reduces scheduled
+  Rust acquisition from 96 MiB to 48 MiB with latest-base retention. The valid
+  50-hop, near-16-MiB-frame allocator fixture measures 22,025,641 bytes, with
+  canonical output and restart checks passing. This component evidence and the
+  ~105 MB sample do not certify isolate headroom. Exercise the
+  [whole-isolate memory gate](staging-uno.md#whole-isolate-memory-gate).
 - **many_refs connection reuse:** inherited Worker conformance failure remains
   Medium/unclassified. #1260 and the requested Uno matrix do not constitute a
   rerun/closure of many_refs. Diagnose at its original geometry and preserve

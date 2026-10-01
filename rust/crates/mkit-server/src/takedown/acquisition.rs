@@ -11,6 +11,7 @@ pub struct Profile {
     pub(super) limits: MemberSourceLimits,
     pub(super) chain_depth: u32,
     retained: u64,
+    retain_latest: bool,
     resident: u64,
     slice_calls: u32,
 }
@@ -34,13 +35,20 @@ impl Profile {
             },
             chain_depth,
             retained: decode_budget,
+            retain_latest: false,
             resident,
             slice_calls: ((chain_depth + 1) * 8 + 256).max(700),
         })
     }
     /// Current Worker admission: 1 MiB entries, 16 MiB frame/read windows, 50 delta hops.
-    /// The 51 MiB retained chain, one exact 16 MiB frame, bounded scratch and
-    /// transport pieces fit the conservative 96 MiB acquisition allowance.
+    /// Resident bound: 16 MiB encoded payload + 28 MiB R-203 decoder scratch
+    /// + 1 MiB latest base/memo + 1 MiB decoded stream + 2 MiB headroom = 48 MiB.
+    /// Decoder scratch drops before base copies, delta output, object parsing
+    /// and Arc conversion. That later phase fits eight 1 MiB entry regions
+    /// alongside the frame, below 25 MiB including metadata. Range collection
+    /// and its transport copies drop before decoding; even two full-frame
+    /// copies plus the base fit below 34 MiB. The five-byte header fits headroom.
+    /// Source-selection descriptors are checkpointed separately across slices.
     #[must_use]
     pub const fn scheduled() -> Self {
         Self {
@@ -49,8 +57,9 @@ impl Profile {
                 max_decoded_bytes: 1 << 20,
             },
             chain_depth: 50,
-            retained: 51 << 20,
-            resident: 96 << 20,
+            retained: 1 << 20,
+            retain_latest: true,
+            resident: 48 << 20,
             slice_calls: 700,
         }
     }
@@ -152,6 +161,9 @@ async fn decode<B: BlobStore, S: NamespaceStore>(
     metrics: &dyn Metrics,
     memo: &mut MemberCache,
 ) -> Result<Verified, ServerError> {
+    if profile.retain_latest {
+        memo.retain_latest();
+    }
     let (canonical, _) = resolve::member_object_for_preservation_bounded(
         blobs,
         store,

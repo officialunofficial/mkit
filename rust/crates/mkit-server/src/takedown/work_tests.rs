@@ -27,7 +27,7 @@ async fn fixture(objects: &[Object], any: bool) -> Fixture {
     fixture_with_delta(objects, any, 0).await
 }
 async fn fixture_with_delta(objects: &[Object], any: bool, delta_wire: u8) -> Fixture {
-    fixture_delta_encoding(objects, any, delta_wire, false).await
+    fixture_delta_encoding(objects, any, delta_wire, false, false).await
 }
 #[allow(
     clippy::too_many_lines,
@@ -38,6 +38,7 @@ async fn fixture_delta_encoding(
     any: bool,
     delta_wire: u8,
     literal_delta: bool,
+    chain: bool,
 ) -> Fixture {
     let clock = Arc::new(ManualClock::new(10));
     let metadata = Arc::new(MemoryKv::with_clock(clock.clone()));
@@ -58,8 +59,8 @@ async fn fixture_delta_encoding(
             Object::ChunkedBlob(cb) => mkit_core::merkle::compute_chunked_id(cb),
             _ => hash(&bytes),
         };
-        let (wire, payload, base) = if delta_wire != 0 && index == 1 {
-            let (base, canonical): &(Hash, Vec<u8>) = &canonical[0];
+        let (wire, payload, base) = if delta_wire != 0 && (index == 1 || chain && index > 0) {
+            let (base, canonical): &(Hash, Vec<u8>) = &canonical[if chain { index - 1 } else { 0 }];
             let delta = if literal_delta {
                 let mut stream = vec![mkit_core::delta::STREAM_VERSION];
                 stream.extend_from_slice(&u32::try_from(canonical.len()).unwrap().to_le_bytes());
@@ -109,15 +110,19 @@ async fn fixture_delta_encoding(
     sink.commit().await.unwrap();
     let mut offset = 12u64;
     let mut batch = Batch::new().put(keys::membership(&repo.name, &pack), Value::default());
-    for (((id, canonical), object), (wire, length, base)) in
-        canonical.iter().zip(objects).zip(frames)
+    for (depth, (((id, canonical), object), (wire, length, base))) in
+        canonical.iter().zip(objects).zip(frames).enumerate()
     {
         let value = IndexValue {
             frame_offset: offset,
             frame_length: length,
             wire_type: wire,
             decoded_size: canonical.len() as u64,
-            chain_depth: u32::from(base.is_some()),
+            chain_depth: if chain {
+                u32::try_from(depth).unwrap()
+            } else {
+                u32::from(base.is_some())
+            },
             delta_base: base,
         };
         batch = batch.put(
@@ -498,7 +503,7 @@ async fn valid_compressed_delta_stream_budget_failure_remains_retryable() {
         data: vec![b'B'; 512],
     });
     // One-byte INSERTs are valid: the stream is 1053 bytes while its result is 522.
-    let f = fixture_delta_encoding(&[base, target], false, 4, true).await;
+    let f = fixture_delta_encoding(&[base, target], false, 4, true, false).await;
     let object = f.canonical[1].0;
     let valid = acquisition::resolve(
         &f.work.serving,
@@ -2012,4 +2017,73 @@ async fn multi_action_activation_shares_one_immediate_allowance_with_parent_call
             "exhausted immediate work remains durably owned by timer11"
         );
     }
+}
+
+#[tokio::test]
+async fn fifty_hop_acquisition_preserves_identical_bytes_across_cold_restart() {
+    let objects: Vec<_> = (0u32..=50)
+        .map(|sequence| {
+            let mut data = vec![b'A'; (1 << 20) - 10];
+            let tail = data.len() - 4;
+            data[tail..].copy_from_slice(&sequence.to_le_bytes());
+            Object::Blob(Blob { data })
+        })
+        .collect();
+    let mut f = fixture_delta_encoding(&objects, false, 2, false, true).await;
+    let target = f.canonical[50].0;
+    let id = accept(&f, "fifty-hop-restart", None, &[target]).await;
+    let mut calls = 0;
+    let mut restarted_mid_source = false;
+    for _ in 0..150 {
+        // Rebuild the runtime on every alarm; all continuation is persisted.
+        f.work = Work {
+            metadata: f.work.metadata.clone(),
+            serving: f.work.serving.clone(),
+            preserved: f.work.preserved.clone(),
+            root: f.work.root.clone(),
+            shards: f.work.shards.clone(),
+            addressing: f.work.addressing.clone(),
+            purge: f.work.purge.clone(),
+            retention_ms: f.work.retention_ms,
+            discovery_margin_ms: f.work.discovery_margin_ms,
+            profile: acquisition::Profile::scheduled(),
+            clock: f.clock.clone(),
+        };
+        let (state, used) = advance(&f, id, 20_000).await;
+        calls = calls.max(used);
+        if let Some(raw) = f
+            .work
+            .metadata
+            .get(&f.work.root, &key(b"source", &id, &target))
+            .await
+            .unwrap()
+        {
+            let checkpoint: source::Checkpoint = decode(&raw).unwrap();
+            restarted_mid_source |= checkpoint.next.is_some() && checkpoint.level > 0;
+        }
+        if state.acquisition_complete() {
+            assert!(restarted_mid_source, "restart during source selection");
+            assert!(calls <= 700, "shared preservation slice calls: {calls}");
+            let (start, end) = range(b"piece", &id);
+            let pieces = f
+                .work
+                .metadata
+                .scan(&f.work.root, &start, &end, None, 8)
+                .await
+                .unwrap();
+            let mut canonical = Vec::new();
+            for (_, raw) in pieces.entries {
+                let piece: copy::Piece = decode(&raw).unwrap();
+                canonical.extend_from_slice(
+                    &copy::read(&f.work.preserved, &id, &piece)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                );
+            }
+            assert_eq!(canonical, f.canonical[50].1);
+            return;
+        }
+    }
+    panic!("fifty-hop preservation failed to finish");
 }

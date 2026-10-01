@@ -137,7 +137,10 @@ async fn fixture(
     store.apply(&p, batch).await.unwrap();
     (blobs, store, repo)
 }
-fn admitted(mut pack: &[u8], expected: usize) {
+fn admitted(pack: &[u8], expected: usize) {
+    admitted_with_pinned(pack, expected, None);
+}
+fn admitted_with_pinned(mut pack: &[u8], expected: usize, pinned: Option<Hash>) {
     let mut latest = Latest(vec![]);
     let mut count = 0;
     let limits = DecodeLimits::default().with_max_decoded_bytes(1 << 20);
@@ -147,7 +150,8 @@ fn admitted(mut pack: &[u8], expected: usize) {
         let (id, bytes) = pack::decode_entry_with(entry, &mut latest, limits)?;
         latest.0.push((id, bytes));
         if latest.0.len() > 2 {
-            latest.0.remove(0);
+            let evict = usize::from(pinned == Some(latest.0[0].0));
+            latest.0.remove(evict);
         }
         count += 1;
         Ok(())
@@ -476,6 +480,50 @@ async fn scheduled_acquires_fifty_hop_chain_after_independent_lookup() {
 #[cfg(feature = "pack-ruzstd")]
 #[tokio::test]
 async fn scheduled_bounds_fifty_compressed_delta_instruction_streams() {
+    compressed_chain(false).await;
+}
+
+#[cfg(feature = "pack-ruzstd")]
+#[tokio::test]
+async fn scheduled_bounds_fifty_hops_with_maximum_wire_frame() {
+    compressed_chain(true).await;
+}
+
+#[cfg(feature = "pack-ruzstd")]
+fn widen_delta_frame(pack: &mut Vec<u8>, payload: &mut Vec<u8>, count: &mut u32) {
+    let size = 1 << 20;
+    // An admitted full-window compressed payload starts just after a
+    // header at the preceding window's end. Fill with admitted blobs.
+    let boundary = (pack.len() / (16 << 20) + 1) * (16 << 20) - 5;
+    while pack.len() < boundary {
+        let gap = boundary - pack.len();
+        let mut frame_len = gap.min(size + 5);
+        if gap > frame_len && gap - frame_len < 19 {
+            frame_len -= 19;
+        }
+        append(pack, 0, &blob(frame_len - 5, 999));
+        *count += 1;
+    }
+    // Extend the single zstd frame with legal empty blocks. Preserve
+    // the near-1-MiB instruction stream and the 8-MiB decoder window.
+    let mut header = 32 + 4 + 6;
+    loop {
+        let word =
+            u32::from_le_bytes([payload[header], payload[header + 1], payload[header + 2], 0]);
+        if word & 1 != 0 {
+            payload[header] &= !1;
+            break;
+        }
+        header += 3 + usize::try_from(word >> 3).unwrap();
+    }
+    let padded = payload.len() + ((16 << 20) - payload.len()) / 3 * 3;
+    payload.resize(padded, 0);
+    payload[padded - 3] = 1;
+    assert!(payload.len() >= (16 << 20) - 2);
+}
+
+#[cfg(feature = "pack-ruzstd")]
+async fn compressed_chain(wide: bool) {
     let size = 1 << 20;
     let mut pack = b"MKIT\x02\0\0\0\0\0\0\0".to_vec();
     let canonical = blob(size, 0);
@@ -497,8 +545,11 @@ async fn scheduled_bounds_fifty_compressed_delta_instruction_streams() {
         let id = hash(&blob(size, sequence));
         let mut payload = previous.to_vec();
         payload.extend_from_slice(&zstd_raw_blocks(&large_delta(size, sequence)));
+        if wide && sequence == 50 {
+            widen_delta_frame(&mut pack, &mut payload, &mut count);
+        }
         let remaining = (16 << 20) - pack.len() % (16 << 20);
-        if payload.len() + 5 > remaining {
+        if !(wide && sequence == 50) && payload.len() + 5 > remaining {
             // Keep this near-1 MiB payload in one admission window: a carried
             // compressed payload and its output together would exceed 1 MiB.
             append(&mut pack, 0, &blob(remaining - 5, 999));
@@ -520,7 +571,11 @@ async fn scheduled_bounds_fifty_compressed_delta_instruction_streams() {
         previous = id;
     }
     let pack = finish(pack, count);
-    admitted(&pack, usize::try_from(count).unwrap());
+    admitted_with_pinned(
+        &pack,
+        usize::try_from(count).unwrap(),
+        wide.then(|| hash(&blob(size, 49))),
+    );
     let (blobs, store, repo) = fixture(&pack, &entries).await;
     let budget = SliceBudget::new(700);
     start_allocations();
@@ -540,7 +595,10 @@ async fn scheduled_bounds_fifty_compressed_delta_instruction_streams() {
         "compressed acquisition peak={peak}, charged={}",
         budget.used()
     );
-    assert!(peak + mkit_server::store::MAX_BLOB_PIECE_BYTES < 96 << 20);
+    assert!(
+        peak + mkit_server::store::MAX_BLOB_PIECE_BYTES <= 48 << 20,
+        "acquisition peak: {peak}"
+    );
     assert_eq!(result.canonical.as_ref(), blob(size, 50));
     assert!(budget.used() <= 256);
 }
