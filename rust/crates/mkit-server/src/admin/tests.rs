@@ -62,7 +62,7 @@ fn purge_body() -> serde_json::Value {
     json!({"operationId":"operation-1","repository":"root/repo","reason":"manual","operatorLabel":"on-call"})
 }
 
-async fn purge_timers(store: &MemoryKv) -> Vec<(crate::Key, Value)> {
+async fn all_timers(store: &MemoryKv) -> Vec<(crate::Key, Value)> {
     store
         .scan(
             &partition(),
@@ -74,6 +74,33 @@ async fn purge_timers(store: &MemoryKv) -> Vec<(crate::Key, Value)> {
         .await
         .unwrap()
         .entries
+}
+
+async fn purge_timers(store: &MemoryKv) -> Vec<(crate::Key, Value)> {
+    all_timers(store)
+        .await
+        .into_iter()
+        .filter(|(key, _)| {
+            matches!(
+                crate::store::keys::parse(key),
+                Some(crate::store::keys::ParsedKey::Timer { kind: 11, .. })
+            )
+        })
+        .collect()
+}
+
+async fn timer_kinds(store: &MemoryKv) -> Vec<u8> {
+    use crate::store::keys;
+    all_timers(store)
+        .await
+        .iter()
+        .map(|(key, _)| {
+            let Some(keys::ParsedKey::Timer { kind, .. }) = keys::parse(key) else {
+                panic!("timer key expected");
+            };
+            kind
+        })
+        .collect()
 }
 
 #[tokio::test]
@@ -94,6 +121,12 @@ async fn manual_purge_acceptance_is_durable_and_operation_replay_cannot_duplicat
         .unwrap();
     assert_eq!(pending.repository, "root/repo");
     assert_eq!(pending.trigger, crate::purge::Trigger::Manual);
+    let kinds = timer_kinds(&store).await;
+    assert_eq!(
+        kinds,
+        [8, 11],
+        "shared backlog wake and purge delivery are both durable"
+    );
     let timers = purge_timers(&store).await;
     assert_eq!(timers.len(), 1);
     assert!(
@@ -276,16 +309,24 @@ async fn manual_purge_completion_is_audited_only_after_durable_global_acknowledg
         ))
     };
     let clock = crate::ManualClock::new(100);
-    run_due(
+    let first_tick = run_due(
         &store,
         &partition(),
         &registry(),
         &clock,
         100,
-        &TickBudget::new(1, 1, 16, 1000),
+        &TickBudget::new(2, 2, 32, 1000),
     )
     .await
     .unwrap();
+    assert_eq!(
+        (first_tick.fired, first_tick.unknown, first_tick.scanned),
+        (1, 1, 2)
+    );
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        std::slice::from_ref(&work)
+    );
     assert_eq!(
         head(&store).await,
         1,
@@ -305,16 +346,20 @@ async fn manual_purge_completion_is_audited_only_after_durable_global_acknowledg
         panic!("retry timer expected");
     };
     clock.set(i64::try_from(due_at_ms).unwrap());
-    run_due(
+    let retry_tick = run_due(
         &store,
         &partition(),
         &registry(),
         &clock,
         due_at_ms,
-        &TickBudget::new(1, 1, 16, 1000),
+        &TickBudget::new(2, 2, 32, 1000),
     )
     .await
     .unwrap();
+    assert_eq!(
+        (retry_tick.fired, retry_tick.unknown, retry_tick.scanned),
+        (1, 0, 1)
+    );
     assert_eq!(*calls.lock().unwrap(), [work.clone(), work]);
     assert_eq!(head(&store).await, 2);
     assert!(purge_timers(&store).await.is_empty());
@@ -324,13 +369,23 @@ async fn manual_purge_completion_is_audited_only_after_durable_global_acknowledg
             .unwrap()
             .is_none()
     );
-    assert!(
-        store
-            .get(&partition(), &crate::store::keys::outcome_backlog())
-            .await
-            .unwrap()
-            .is_none()
+    assert_eq!(
+        crate::store::codec::decode_backlog(
+            &store
+                .get(&partition(), &crate::store::keys::outcome_backlog())
+                .await
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap(),
+        crate::store::codec::Backlog::default()
     );
+    let wakes = all_timers(&store).await;
+    assert_eq!(wakes.len(), 1);
+    assert!(matches!(
+        crate::store::keys::parse(&wakes[0].0),
+        Some(crate::store::keys::ParsedKey::Timer { kind: 8, .. })
+    ));
     // A fresh signed retry after completion replays acceptance without resurrecting work.
     let (headers, body) = request(PURGE_PATH, &purge_body(), 89);
     assert_eq!(
@@ -374,7 +429,7 @@ async fn manual_purge_completion_is_audited_only_after_durable_global_acknowledg
         &registry(),
         &clock,
         due_at_ms,
-        &TickBudget::new(1, 1, 16, 1000),
+        &TickBudget::new(2, 2, 32, 1000),
     )
     .await
     .unwrap();
@@ -649,7 +704,17 @@ async fn automatic_audit_does_not_commit_when_trigger_apply_loses() {
     )));
     let audit = SystemAudit::new(store.clone(), partition());
     let mut batch = audit
-        .plan(&partition(), &automatic_request(), "automatic-op", 1)
+        .plan(
+            &partition(),
+            &automatic_request(),
+            "automatic-op",
+            1,
+            crate::relay::RelayEnqueueSnapshot {
+                sequence: None,
+                source_lease: None,
+                deadline_ms: 1 + 30_000,
+            },
+        )
         .await
         .unwrap();
     let work = crate::purge::plan_enqueue(&automatic_request(), 1, None, None).unwrap();
@@ -902,7 +967,17 @@ async fn committed_automatic_purge_recovers_relay_and_target_checkpoint_crash() 
     let audit = SystemAudit::new(store.clone(), root_partition());
     let request = automatic_request();
     let mut batch = audit
-        .plan(&source, &request, "stable-op", 100)
+        .plan(
+            &source,
+            &request,
+            "stable-op",
+            100,
+            crate::relay::RelayEnqueueSnapshot {
+                sequence: None,
+                source_lease: None,
+                deadline_ms: 100 + 30_000,
+            },
+        )
         .await
         .unwrap();
     let purge = crate::purge::plan_enqueue(&request, 100, None, None).unwrap();
@@ -990,7 +1065,17 @@ async fn automatic_relay_duplicate_reordered_sources_keep_gapless_chain() {
         let mut request = automatic_request();
         request.purge_id = format!("automatic-{prefix}");
         let batch = audit
-            .plan(&source, &request, "same-op-different-source", now)
+            .plan(
+                &source,
+                &request,
+                "same-op-different-source",
+                now,
+                crate::relay::RelayEnqueueSnapshot {
+                    sequence: None,
+                    source_lease: None,
+                    deadline_ms: now + 30_000,
+                },
+            )
             .await
             .unwrap();
         store.apply(&source, batch).await.unwrap();

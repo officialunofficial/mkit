@@ -627,10 +627,18 @@ impl<S: NamespaceStore> Engine<S> {
         {
             return Ok(response);
         }
+        if replayed && verified.path == super::TAKEDOWN_PATH {
+            // The accepted timer owns recovery; a completed nonce replays its
+            // stored result without depending on runtime operations.
+            return Ok(response);
+        }
         let Some(service) = &self.operations else {
             return Err(ServerError::unavailable("takedown service unavailable"));
         };
-        if !verified.roles.contains("moderation") && !verified.roles.contains("all") {
+        if verified.path == super::READ_PRESERVED_PATH
+            && !verified.roles.contains("moderation")
+            && !verified.roles.contains("all")
+        {
             return self
                 .record_result(
                     verified,

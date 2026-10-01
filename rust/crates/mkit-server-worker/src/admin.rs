@@ -164,6 +164,7 @@ fn build_work(
         metadata = metadata.with_alarm_budget(budget.clone());
     }
     Ok(mkit_server::takedown::work::Work {
+        purge: None,
         metadata,
         serving: blob(cfg.blob_binding, crate::r2::PACKS_KEYSPACE),
         preserved: blob(PRESERVATION_BINDING, "preserved"),

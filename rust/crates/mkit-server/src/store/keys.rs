@@ -55,7 +55,7 @@
 //! | relay queue | `or 00 <seq:be64>` | codec `RelayV1` |
 //! | relay scan progress (source shard) | `rs 00` | codec `RelayScanV1`; one per source, never pruned |
 //! | outbox sequence | `os 00` | be64; last allocated, starts at 1, never deleted |
-//! | outcome backlog | `oc 00` | codec `Backlog`; absent means zero |
+//! | outcome backlog | `oc 00` | codec `Backlog`; absent means zero; present zero retains kind-8 wake ownership |
 //! | pending cache purge | `cp 00 <purge_id>` | immutable protobuf JSON `purge::Request` |
 //! | durable snapshot refill fence | `cg 00 <scope>` | be64 invalidation time; never pruned |
 //! | admin audit head | `ah 00` | audit sequence and hash |

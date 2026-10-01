@@ -183,6 +183,7 @@ async fn fixture(size: usize) -> Fixture {
     let metadata = Arc::new(MemoryKv::with_clock(clock.clone()));
     let root = Partition::Namespace(NamespaceKey::deployment_default());
     let work = Arc::new(Work {
+        purge: None,
         metadata: metadata.clone(),
         serving: MemoryBlobStore::default(),
         preserved: MemoryBlobStore::default(),
@@ -1052,4 +1053,269 @@ async fn list_accepts_protojson_null_scope_and_quoted_page_size() {
     let response: Json = serde_json::from_slice(&response.body).unwrap();
     assert_eq!(response["takedowns"].as_array().unwrap().len(), 1);
     f.audit().await;
+}
+
+async fn accepted_replay() -> (Fixture, Json, Headers, BodyCapture, Response) {
+    let f = fixture(64).await;
+    // A verified named Blob source makes this a real accepted takedown.
+    let object = mkit_core::object::Object::Blob(mkit_core::object::Blob { data: vec![8; 32] });
+    let canonical = mkit_core::serialize::serialize(&object).unwrap();
+    let object_id = hash(&canonical);
+    let mut writer = mkit_core::pack::PackWriter::new_raw_only();
+    writer.push_raw(object_id, &canonical).unwrap();
+    let bytes = writer.finish().unwrap();
+    let pack = hash(&bytes);
+    super::super::inventory::stage(
+        &f.work.metadata,
+        &pack,
+        bytes.len() as u64,
+        &object_id,
+        &object,
+        None,
+        100,
+    )
+    .await
+    .unwrap();
+    super::super::inventory::complete(&f.work.metadata, &pack, bytes.len() as u64, 100)
+        .await
+        .unwrap();
+    let repo = crate::RepoName::new("repo").unwrap();
+    let index = crate::store::index::IndexValue {
+        frame_offset: 12,
+        frame_length: canonical.len() as u64 + 5,
+        wire_type: 0,
+        decoded_size: canonical.len() as u64,
+        chain_depth: 0,
+        delta_base: None,
+    };
+    f.work
+        .metadata
+        .apply(
+            &f.work.root,
+            Batch::new()
+                .put(
+                    crate::store::keys::membership(&repo, &pack),
+                    crate::Value::default(),
+                )
+                .put(
+                    crate::store::keys::object_index(&repo, &object_id, &pack),
+                    crate::store::codec::encode_object_index(&object_id, &index).unwrap(),
+                ),
+        )
+        .await
+        .unwrap();
+    let input = json!({"repository":"root/repo", "objectIds":[STANDARD.encode(object_id)], "operationId":"role-replay", "reason":"review"});
+    let (headers, body) = request(admin::TAKEDOWN_PATH, &input, 52);
+    let accepted = f
+        .engine("moderation")
+        .handle(admin::TAKEDOWN_PATH, &headers, &body, 100)
+        .await;
+    assert_eq!(accepted.status, 200);
+    (f, input, headers, body, accepted)
+}
+
+#[tokio::test]
+async fn completed_takedown_replays_stored_success_after_moderation_role_removed() {
+    let (f, input, headers, body, accepted) = accepted_replay().await;
+    let head = f.head().await;
+    let audit_only = f.engine("audit");
+    let retry = audit_only
+        .handle(admin::TAKEDOWN_PATH, &headers, &body, 100)
+        .await;
+    assert_eq!(
+        retry, accepted,
+        "completed identical takedown must retain its stored result after role removal"
+    );
+    assert_eq!(
+        f.head().await,
+        head,
+        "retry must not append a wrong-role audit or new activation"
+    );
+    let (fresh_headers, fresh_body) = request(admin::TAKEDOWN_PATH, &input, 53);
+    assert_eq!(
+        audit_only
+            .handle(admin::TAKEDOWN_PATH, &fresh_headers, &fresh_body, 100)
+            .await
+            .status,
+        403
+    );
+}
+
+#[derive(Clone, Debug)]
+struct RejectReplayRead {
+    store: Arc<MemoryKv>,
+    reads: Arc<std::sync::atomic::AtomicU32>,
+}
+impl NamespaceStore for RejectReplayRead {
+    fn capabilities(&self) -> crate::StoreCapabilities {
+        self.store.capabilities()
+    }
+    async fn get(&self, p: &Partition, k: &Key) -> Result<Option<crate::Value>, crate::StoreError> {
+        if k.as_bytes().starts_with(b"b\0\xffrequest\0") {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return Err(crate::StoreError::unavailable(
+                "injected replay request read failure",
+            ));
+        }
+        self.store.get(p, k).await
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&Cursor>,
+        limit: u32,
+    ) -> Result<crate::ScanPage, crate::StoreError> {
+        self.store.scan(p, start, end, after, limit).await
+    }
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, crate::StoreError> {
+        self.store.apply(p, batch).await
+    }
+    async fn stats(&self, p: &Partition) -> Result<crate::PartitionStats, crate::StoreError> {
+        self.store.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), crate::StoreError> {
+        self.store.probe().await
+    }
+}
+fn restart_work<N: NamespaceStore + Clone>(
+    f: &Fixture,
+    metadata: N,
+) -> Work<N, MemoryBlobStore, MemoryBlobStore> {
+    Work {
+        purge: f.work.purge.clone(),
+        metadata,
+        serving: f.work.serving.clone(),
+        preserved: f.work.preserved.clone(),
+        root: f.work.root.clone(),
+        shards: f.work.shards.clone(),
+        addressing: f.work.addressing.clone(),
+        retention_ms: f.work.retention_ms,
+        discovery_margin_ms: f.work.discovery_margin_ms,
+        profile: f.work.profile,
+        clock: f.clock.clone(),
+    }
+}
+#[tokio::test]
+async fn completed_takedown_replay_does_not_require_runtime_operations() {
+    let (f, _, headers, body, accepted) = accepted_replay().await;
+    let head = f.head().await;
+    let reads = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let unavailable = Engine::new(
+        f.work.metadata.clone(),
+        f.work.root.clone(),
+        config("audit"),
+    );
+    let failing = Engine::new(
+        f.work.metadata.clone(),
+        f.work.root.clone(),
+        config("audit"),
+    )
+    .with_operations(Arc::new(restart_work(
+        &f,
+        RejectReplayRead {
+            store: f.work.metadata.clone(),
+            reads: reads.clone(),
+        },
+    )));
+    let start = Key::new(Vec::new());
+    let end = Key::new(vec![255]);
+    let before = f
+        .work
+        .metadata
+        .scan(&f.work.root, &start, &end, None, 100)
+        .await
+        .unwrap();
+    for engine in [failing, unavailable] {
+        let replay = engine
+            .handle(admin::TAKEDOWN_PATH, &headers, &body, 100)
+            .await;
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "stored replay never invokes the transient-failing runtime GET"
+        );
+        assert_eq!(replay, accepted);
+        assert_eq!(f.head().await, head, "stored replay never appends audit");
+        assert_eq!(
+            f.work
+                .metadata
+                .scan(&f.work.root, &start, &end, None, 100)
+                .await
+                .unwrap(),
+            before,
+            "stored replay has no state side effects"
+        );
+    }
+    assert_eq!(
+        reads.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "stored replay never calls runtime request GET"
+    );
+}
+#[tokio::test]
+async fn completed_takedown_replay_leaves_timer15_progress_for_restart() {
+    let (f, _, headers, body, accepted) = accepted_replay().await;
+    let response: Json = serde_json::from_slice(&accepted.body).unwrap();
+    let action = id(response["takedownId"].as_str().unwrap()).unwrap();
+    let timer = crate::store::keys::timer(100, 15, &action);
+    let before = f
+        .work
+        .metadata
+        .get(&f.work.root, &timer)
+        .await
+        .unwrap()
+        .unwrap();
+    let engine = Engine::new(
+        f.work.metadata.clone(),
+        f.work.root.clone(),
+        config("audit"),
+    );
+    assert_eq!(
+        engine
+            .handle(admin::TAKEDOWN_PATH, &headers, &body, 100)
+            .await,
+        accepted
+    );
+    assert_eq!(
+        f.work.metadata.get(&f.work.root, &timer).await.unwrap(),
+        Some(before)
+    );
+    let state_key = work::key(b"state", &action, &[]);
+    assert!(
+        f.work
+            .metadata
+            .get(&f.work.root, &state_key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let registry =
+        crate::timers::TimerRegistry::new().register(restart_work(&f, f.work.metadata.clone()));
+    let fired = crate::timers::run_due(
+        &f.work.metadata,
+        &f.work.root,
+        &registry,
+        f.clock.as_ref(),
+        100,
+        &crate::timers::TickBudget::new(1, 1, 16, 1000),
+    )
+    .await
+    .unwrap();
+    assert_eq!((fired.fired, fired.unknown, fired.scanned), (1, 0, 1));
+    let state: State = intent::decode(
+        &f.work
+            .metadata
+            .get(&f.work.root, &state_key)
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        (state.phase, state.seed),
+        (Phase::Acquire, 1),
+        "reconstructed timer handler advances the durable action"
+    );
 }

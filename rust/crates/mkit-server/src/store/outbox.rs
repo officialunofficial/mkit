@@ -275,7 +275,7 @@ impl OutboxBuilder {
                 .checked_add(size)
                 .ok_or_else(|| corrupt("backlog bytes overflow"))?;
             let seq = self.allocate()?;
-            if self.backlog.rows == 1 {
+            if self.oc.is_none() && self.kick_at_ms.is_none() {
                 self.kick_at_ms = Some(occurred_at_ms);
             }
             self.backlog_touched = true;
@@ -316,7 +316,7 @@ impl OutboxBuilder {
                 .checked_add(size)
                 .ok_or_else(|| corrupt("backlog bytes overflow"))?;
             let seq = self.allocate()?;
-            if self.backlog.rows == 1 {
+            if self.oc.is_none() && self.kick_at_ms.is_none() {
                 self.kick_at_ms = Some(occurred_at_ms);
             }
             self.backlog_touched = true;

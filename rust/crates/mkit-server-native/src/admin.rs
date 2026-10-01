@@ -235,6 +235,7 @@ pub(crate) fn work<B: mkit_server::BlobStore, N: NamespaceStore + Clone>(
         .indexed
         .ok_or_else(|| invalid("preservation requires indexed limits"))?;
     Ok(mkit_server::takedown::work::Work {
+        purge: pipeline.purge.clone(),
         metadata,
         serving,
         preserved: crate::Blocking::new(mkit_server::fs::FsBlobStore::new(&settings.root)),
@@ -271,7 +272,8 @@ where
                 acceptance: mkit_server::takedown::late_owner::LateOwner::new(
                     metadata,
                     partition(pipeline.sharding),
-                ),
+                )
+                .with_purge(pipeline.purge.clone()),
                 max_subrequests: 700,
             }))
     } else {

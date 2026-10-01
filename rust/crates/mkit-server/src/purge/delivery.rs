@@ -15,6 +15,7 @@ use std::sync::{
 pub struct SliceBudget {
     used: Arc<AtomicU32>,
     limit: u32,
+    parent: Option<crate::indexed::budget::SliceBudget>,
 }
 impl SliceBudget {
     /// Share the limit between all partition heads in a Worker alarm.
@@ -23,6 +24,15 @@ impl SliceBudget {
         Self {
             used: Arc::new(AtomicU32::new(0)),
             limit,
+            parent: None,
+        }
+    }
+    /// Share immediate cache operations with the caller's metadata/blob allowance.
+    #[must_use]
+    pub fn with_parent(limit: u32, parent: crate::indexed::budget::SliceBudget) -> Self {
+        Self {
+            parent: Some(parent),
+            ..Self::new(limit)
         }
     }
     /// Reset once at alarm entry, never once per head or per purge.
@@ -32,12 +42,18 @@ impl SliceBudget {
     /// Reserve before an operation. Exhaustion produces a durable checkpoint.
     #[must_use]
     pub fn charge(&self, operations: u32) -> bool {
-        self.used
+        let reserved = self
+            .used
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
                 used.checked_add(operations)
                     .filter(|total| *total <= self.limit)
             })
-            .is_ok()
+            .is_ok();
+        reserved
+            && self
+                .parent
+                .as_ref()
+                .is_none_or(|parent| parent.charge_many(operations).is_ok())
     }
     /// Consumed operations, for tests and metrics.
     #[must_use]
@@ -261,11 +277,9 @@ impl PurgeDelivery {
                 batch.preconditions.extend(audit.preconditions);
                 batch.writes.extend(audit.writes);
             }
-            batch = if backlog.rows == 0 {
-                batch.delete(keys::outcome_backlog())
-            } else {
-                batch.put(keys::outcome_backlog(), codec::encode_backlog(&backlog))
-            };
+            // Keep wake ownership until kind 8 atomically retires its timer.
+            // A new producer reuses that pending wake even when rows are zero.
+            batch = batch.put(keys::outcome_backlog(), codec::encode_backlog(&backlog));
             Ok(Fired::Done(batch))
         })
     }
