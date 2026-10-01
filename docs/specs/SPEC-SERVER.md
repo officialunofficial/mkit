@@ -3878,8 +3878,6 @@ without preserved bytes in audit, logs or errors. An error MUST NOT emit `last`.
 Manual `PurgeCache` MAY be supported independently: acceptance MUST atomically
 commit its audit, replay result and timer-11 purge intent, return the purge id,
 and expose completion through the audit log rather than synchronous delivery.
-The [R-190 implementation layout](../plans/mkit-server/WP-5.6a-1-contract.md)
-records the staged metadata and follow-up intake seams; it is not activation evidence.
 
 Automatic purge audit delivery MAY use the existing outbox relay. The triggering
 state apply MUST atomically record the purge intent, its delivery timer and the

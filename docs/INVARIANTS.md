@@ -1251,7 +1251,7 @@ can remain permanently hidden behind failing or unknown rows.
 **Enforced by:** `timers::TickState`, `timers::run_due_with_state`,
 `mkit-server-worker::alarm::run_physical_alarm`, SQL indexed window/VM-step tests,
 and timer/alarm regressions for aggregate bounds, cold restarts and retained rows.
-See [the implementation contract](plans/mkit-server/timer-alarm-bounds.md).
+The bounds above are enforced across the complete physical alarm invocation.
 
 ## Worker shard classes reject foreign partition kinds
 
@@ -2281,9 +2281,9 @@ acceptance tests cover verdict dominance, unavailable replay exclusion and
 inspection-disabled identity. Budget assertion: 960 calls (300 verification,
 256 ancestry, 256 shared pair closure/enumeration/dependencies, four Inspect,
 144 other); <=16 frame pages plus two batched verification-snapshot reads
-fit inside the pair allocation. The revised R-200
-set removes the role-reconstruction cost recorded in
-[the historical WP-5.5a escalation](plans/mkit-server/wp-5-5a-escalation.md#resolved-by-the-revised-r-200-added-pack-ruling).
+fit inside the pair allocation. The added-pack inspection set removes
+the earlier role-reconstruction cost; see
+[SPEC-SERVER §18](specs/SPEC-SERVER.md#18-conformance-scope).
 Full classification, async holds and unrestricted multi-batch inspection remain
 deferred to WP-5.5c; the durable marker belongs to WP-5.5a-0.
 
