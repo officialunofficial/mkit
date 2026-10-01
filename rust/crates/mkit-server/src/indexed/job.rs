@@ -1346,6 +1346,7 @@ where
         .map_err(|failure| match failure {
             ResolveFailure::Missing => self.missing(job),
             ResolveFailure::Capped => Stop::Outcome(Outcome::BaseCapped),
+            ResolveFailure::Corrupt(_) => unavailable("member content unavailable"),
             ResolveFailure::Other(error) => match error.public_message() {
                 "pack exceeds indexed decode budget" => Stop::Outcome(Outcome::DecodeBudget),
                 "delta chain too deep" => Stop::Outcome(Outcome::ExternalTooDeep),

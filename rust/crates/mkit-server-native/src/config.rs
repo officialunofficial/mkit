@@ -11,7 +11,7 @@ use clap::{Args, ValueEnum};
 use http::{HeaderName, HeaderValue};
 use mkit_server::auth_v2::AuthV2Config;
 use mkit_server::indexed::IndexedConfig;
-use mkit_server::pipeline::{AuthMode, PipelineConfig, Sharding};
+use mkit_server::pipeline::{AuthMode, PipelineConfig, RepoVisibility, Sharding};
 use mkit_server::policy::{
     GrantSettings, NamespacePolicy, parse_grant_schemes, parse_namespace_allowlist,
     parse_relying_party,
@@ -142,6 +142,14 @@ pub enum AddressingArg {
     /// §7.4). Requires `--listen` with `--auth auth-v2`, ticket keys and
     /// `--meta sqlite:<PATH>`; the write policy is owner-only.
     Multi,
+}
+
+fn parse_repo_visibility(value: &str) -> Result<RepoVisibility, String> {
+    match value {
+        "public" => Ok(RepoVisibility::Public),
+        "private" => Ok(RepoVisibility::Private),
+        _ => Err("expected public or private".into()),
+    }
 }
 
 /// `--namespace-policy` (`--addressing multi` only).
@@ -319,6 +327,9 @@ pub struct ServeArgs {
     /// `--meta sqlite:<PATH>`).
     #[arg(long, value_enum, default_value = "single")]
     pub addressing: AddressingArg,
+    /// Multi/Owner visibility without a stored setting. Explicit visibility wins.
+    #[arg(long, value_name = "public|private", default_value = "public", value_parser = parse_repo_visibility)]
+    pub default_repo_visibility: RepoVisibility,
     /// Multi only: `allowlist` admits the `--namespace-allowlist` file's
     /// namespaces (the default), `any` admits every self-certifying
     /// namespace and requires `--unsafe-open-namespaces`.
@@ -1518,6 +1529,7 @@ pub fn resolve(
     // `new` sets the default write quota for auth v2 only.
     let mut pipeline = PipelineConfig::new(addressing, auth, limits);
     pipeline.sharding = sharding;
+    pipeline.default_repo_visibility = args.default_repo_visibility;
     pipeline.ticket_keys = ticket_keys;
     pipeline.grants = grants;
     #[cfg(feature = "http-objects")]

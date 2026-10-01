@@ -23,6 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dispatch retains ADMIN_KEYS authentication, and programmatic ref policies
   validate before serving. Add a service-binding streamed-upload example and
   its wasm check. These APIs are unpublished, consumed at a pinned git tag.
+- Server (R-205): `DEFAULT_REPO_VISIBILITY=public|private` on Workers and
+  native `--default-repo-visibility` select visibility for repositories without
+  a stored setting. The default remains public; explicit visibility wins.
+  Set it at deployment creation: changing it affects all unset repositories.
+
+- Server (R-204): embedders can issue batches of up to 16 URL tokens through
+  `ObjectReader::issue_urls`, sharing RPC authorization, epochs and minting,
+  with bounded published-view reachability and denial preflight.
+
 - Server (WP-5.6a-3, R-190): add signed moderation GetTakedown/ListTakedowns,
   atomic audited SetLegalHold and freshly verified ReadPreserved streaming.
   Replay stores byte-free read descriptors; each attempt rechecks authority and
@@ -34,6 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verified public/owner views share bounded reachability and global-denial
   proofs. Add wasm-clean `store::MemorySource` for synchronous disclosures
   and diffs, with native and Worker embedding entry points. No wire change.
+
+- Bound pure-Rust zstd block expansion before allocation, with a fixed 8 MiB
+  window cap, and checkpoint corrupt preservation sources as terminal audited
+  failures. Preflight compressed delta result headers against verified metadata
+  before decode budgeting; genuine resource failures remain retryable. Worker
+  admission and native C decoding are unchanged (R-203).
 
 - Server/Worker: bound raw timer-alarm enumeration and share tick limits across
   logical heads. Persist capped exponential backoff in the existing timer row

@@ -62,12 +62,15 @@ header pieces; it does not reread every child payload during closure. PR3 MUST
 freshly verify every piece actually emitted by ReadPreserved.
 
 The Worker allowance is conservative arithmetic for valid admitted geometry:
-1 MiB decoded entries, 16 MiB windows, 50 hops, 51 MiB retained chain and a
+1 MiB decoded entries, 16 MiB frame/read windows, 50 hops, 51 MiB retained chain and a
 96 MiB acquisition allowance. Allocator fixture measurements are separate from
-that arithmetic and do not establish whole-Worker RSS. The inherited decoder's
-post-block output check for later-corrupted zstd is a known limitation, not a
-memory-bound theorem. Exhausted budgets or corrupt sources keep denial and
-checkpoint responsibility; they never create verified-preservation success.
+that arithmetic and do not establish whole-Worker RSS. R-203 bounds pure-Rust decoding with an 8 MiB zstd window and RFC per-block
+preflight before materialization. Allocator regressions enforce output claim
+plus a fixed 28 MiB working allowance, including transient ring growth.
+Decoded corruption of a selected member is terminal and audited, with source
+provenance retained and discovery/preservation completeness left unresolved.
+Resource exhaustion and unavailable storage remain retryable. Denial stays in
+force in every case.
 
 Native profiles retain at most the configured decode budget and validate
 configured chain-depth caps through 65,535. Their checked resident allowance

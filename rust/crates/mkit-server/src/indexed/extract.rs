@@ -778,7 +778,9 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
             .saturating_add(cache.retained_bytes());
         self.resolved.store(total, Ordering::Relaxed);
         let (canonical, _) = resolved.map_err(|failure| match failure {
-            resolve::ResolveFailure::Other(error) => ExtractError::Server(error),
+            resolve::ResolveFailure::Other(error) | resolve::ResolveFailure::Corrupt(error) => {
+                ExtractError::Server(error)
+            }
             _ => inconsistent().into(),
         })?;
         if total > limit {
