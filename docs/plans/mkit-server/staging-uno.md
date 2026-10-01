@@ -188,11 +188,14 @@ seconds of bracketed process CPU. These measurements support the provisional
 
 The local 104,604,962-byte sampled allocated-capacity maximum is not a peak
 certificate: only 154 of 1,667 samples identify the user module, with 27 gaps.
-The admitted preservation profile permits 51 MiB of retained canonical delta
-chain plus a 16 MiB source frame and bounded decoder scratch inside its 96 MiB
-Rust allowance. That phase and concurrent request buffers can plausibly exceed
-the shared 128 MB isolate limit once JS, transport and allocator capacity count.
-The 48 MiB verification allowance and 96 MiB acquisition allowance remain fixed.
+Scheduled preservation now retains only its latest 1 MiB canonical base.
+Its 48 MiB allowance reserves a 16 MiB encoded payload, 28 MiB R-203 decoder
+scratch, a 1 MiB latest base, a 1 MiB decoded stream and 2 MiB headroom. The five-byte
+frame header fits that margin. Range collection/transport drops before decode;
+base copies, object parsing and Arc conversion occur after decoder scratch drops.
+Verification and acquisition each keep a 48 MiB allowance. These per-phase
+bounds do not certify whole-isolate headroom with concurrent request buffers,
+JS backing storage and retained Wasm capacity. The staging gate below remains.
 
 Before accepting memory headroom, stage the exact final Uno artifact/config and
 record its source, Wasm, configuration and runtime pins. Preserve a valid

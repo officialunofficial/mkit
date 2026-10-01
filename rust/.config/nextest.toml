@@ -230,11 +230,11 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 heap-bounds = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'test(/multipart_(bounded|buffered)_heap$/) | test(=sixteen_maximum_bodies_and_rows_fit_in_two_mib_of_heap) | test(=corrupt_zstd_frames_bound_heap) | test(=scheduled_ruzstd_slice_retains_at_most_48_mib_requested_heap) | test(=aggregate_index_lookup_has_bounded_peak_and_smaller_batches_work)'
+filter = 'test(/multipart_(bounded|buffered)_heap$/) | test(=sixteen_maximum_bodies_and_rows_fit_in_two_mib_of_heap) | test(=corrupt_zstd_frames_bound_heap) | test(=scheduled_ruzstd_slice_retains_at_most_48_mib_requested_heap) | test(=aggregate_index_lookup_has_bounded_peak_and_smaller_batches_work) | binary(=takedown_acquisition_bounds)'
 test-group = 'heap-bounds'
 
 [[profile.ci.overrides]]
-filter = 'test(/multipart_(bounded|buffered)_heap$/) | test(=sixteen_maximum_bodies_and_rows_fit_in_two_mib_of_heap) | test(=corrupt_zstd_frames_bound_heap) | test(=scheduled_ruzstd_slice_retains_at_most_48_mib_requested_heap) | test(=aggregate_index_lookup_has_bounded_peak_and_smaller_batches_work)'
+filter = 'test(/multipart_(bounded|buffered)_heap$/) | test(=sixteen_maximum_bodies_and_rows_fit_in_two_mib_of_heap) | test(=corrupt_zstd_frames_bound_heap) | test(=scheduled_ruzstd_slice_retains_at_most_48_mib_requested_heap) | test(=aggregate_index_lookup_has_bounded_peak_and_smaller_batches_work) | binary(=takedown_acquisition_bounds)'
 test-group = 'heap-bounds'
 
 [profile.ignored-lane]
@@ -274,6 +274,17 @@ test-threads = 1
 [[profile.ignored-lane.overrides]]
 filter = 'test(=pack::tests::large_mixed_pack_decodes_under_production_resident_cap)'
 slow-timeout = { period = "300s", terminate-after = 1 }
+
+# The admitted maximum-wire chain includes roughly five million legal empty
+# zstd blocks. Pure-Rust admission plus acquisition takes ~42 s locally;
+# allow shared-machine headroom while retaining all heap/canonical assertions.
+[[profile.default.overrides]]
+filter = 'test(=scheduled_bounds_fifty_hops_with_maximum_wire_frame)'
+slow-timeout = { period = "120s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'test(=scheduled_bounds_fifty_hops_with_maximum_wire_frame)'
+slow-timeout = { period = "120s", terminate-after = 1 }
 
 [profile.state-machine]
 # Nightly deep run of the stateful invariant suite
