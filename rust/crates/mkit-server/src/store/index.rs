@@ -29,7 +29,16 @@ pub const MAX_LOOKUP_PAGES: usize = 512;
 /// At most 487 partition-scoped membership reads accompany 512 scan pages:
 /// the whole call uses at most 999 Worker subrequests.
 pub const MAX_LOOKUP_MEMBERSHIP_READS: usize = 487;
+// A 4 MiB admission budget includes payloads and a conservative 512-byte
+// charge per candidate for Vec capacity and membership BTree nodes. Together
+// with <=1,000 transient scan rows, <=256 scan states and 128-key membership
+// RPCs, a lookup retains less than 16 MiB of index state, leaving headroom in
+// the Worker's 128 MB isolate for decoding, runtime and JS transport copies.
+const CANDIDATE_BYTES: usize = 4 * 1024 * 1024;
+const CANDIDATE_OVERHEAD: usize = 512;
+const MEMBERSHIP_CHUNK: usize = 128;
 const SCAN_PAGE_ROWS: u32 = 128;
+const SCAN_CALL_ROWS: u32 = 1_000;
 const _: () = assert!(MAX_LOOKUP_PAGES + MAX_LOOKUP_MEMBERSHIP_READS < 1000);
 
 /// The immutable location and decoded metadata of one pack entry.
@@ -299,6 +308,7 @@ async fn scan_all<S: NamespaceStore>(
         order.push(*id);
     }
     let mut calls = 0;
+    let mut retained_bytes = 0;
     let mut rotations: BTreeMap<Partition, usize> = BTreeMap::new();
     loop {
         let mut groups: BTreeMap<Partition, Vec<Hash>> = BTreeMap::new();
@@ -332,18 +342,24 @@ async fn scan_all<S: NamespaceStore>(
             }
             let n = ids.len();
             ids.rotate_left(rotations.get(&partition).copied().unwrap_or(0) % n);
+            let mut remaining_rows = SCAN_CALL_ROWS;
             let ranges: Vec<_> = ids
                 .iter()
-                .map(|id| {
+                .scan(&mut remaining_rows, |remaining, id| {
+                    if **remaining == 0 {
+                        return None;
+                    }
                     let scan = &scans[id];
-                    RangeScan {
+                    let limit = SCAN_PAGE_ROWS
+                        .min(**remaining)
+                        .min(u32::try_from(MAX_LOOKUP_ROWS - scan.rows.len()).unwrap_or(u32::MAX));
+                    **remaining -= limit;
+                    Some(RangeScan {
                         start: scan.start.clone(),
                         end: scan.end.clone(),
                         after: scan.after.clone(),
-                        limit: SCAN_PAGE_ROWS.min(
-                            u32::try_from(MAX_LOOKUP_ROWS - scan.rows.len()).unwrap_or(u32::MAX),
-                        ),
-                    }
+                        limit,
+                    })
                 })
                 .collect();
             let pages = store.scan_many(&partition, &ranges).await?;
@@ -371,6 +387,17 @@ async fn scan_all<S: NamespaceStore>(
                             object,
                             pack_id,
                         }) if found == repo.name && object == *id => {
+                            let size = CANDIDATE_OVERHEAD.saturating_add(value.as_bytes().len());
+                            if size > CANDIDATE_BYTES - retained_bytes {
+                                // Keep only the proven pack-order prefix. The
+                                // existing page cap asks callers for smaller batches.
+                                for scan in scans.values_mut().filter(|s| !s.done) {
+                                    scan.done = true;
+                                    scan.reason = Some(LookupError::TooManyPages);
+                                }
+                                return Ok(scans);
+                            }
+                            retained_bytes += size;
                             scan.rows.push((pack_id, value));
                         }
                         _ => return Err(StoreError::Corrupt("malformed object index key".into())),
@@ -393,8 +420,10 @@ async fn scan_all<S: NamespaceStore>(
 /// call-wide caps. A capped miss affects only its id. Each id's candidates are
 /// admitted to the membership reads as a pack-id-order prefix that fits the
 /// remaining budget, so a member early in pack order is always found.
-/// Membership keys are deduplicated, then read once per membership partition
-/// (the store's `get_many` is partition-scoped).
+/// Candidate retention has a call-wide 4 MiB admission budget; reaching it
+/// uses the existing smaller-batch page-cap error. Membership keys are
+/// deduplicated and joined in 128-key chunks. Every chunk counts against the
+/// membership-read cap, including multiple chunks of one partition.
 pub async fn locate_many<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
@@ -415,13 +444,20 @@ pub async fn locate_many<S: NamespaceStore>(
     order.sort_by_key(|id| (scans[id].rows.len(), *id));
     let mut packs: BTreeMap<Partition, BTreeSet<Hash>> = BTreeMap::new();
     let mut admitted: BTreeMap<Hash, usize> = BTreeMap::new();
+    let mut membership_reads = 0;
     for id in order {
         let rows = &scans[&id].rows;
         let mut count = 0;
         for (pack, _) in rows {
             let partition = shards.membership(repo, &BlobKey::pack(*pack));
-            if !packs.contains_key(&partition) && packs.len() == MAX_LOOKUP_MEMBERSHIP_READS {
-                break;
+            let group = packs.get(&partition);
+            let new_chunk =
+                group.is_none_or(|g| !g.contains(pack) && g.len() % MEMBERSHIP_CHUNK == 0);
+            if new_chunk {
+                if membership_reads == MAX_LOOKUP_MEMBERSHIP_READS {
+                    break;
+                }
+                membership_reads += 1;
             }
             packs.entry(partition).or_default().insert(*pack);
             count += 1;
@@ -436,17 +472,21 @@ pub async fn locate_many<S: NamespaceStore>(
     let mut members = BTreeSet::new();
     for (partition, ids) in packs {
         let ids: Vec<_> = ids.into_iter().collect();
-        let keys: Vec<_> = ids
-            .iter()
-            .map(|pack| keys::membership(&repo.name, pack))
-            .collect();
-        let values = store.get_many(&partition, &keys).await?;
-        if values.len() != ids.len() {
-            return Err(StoreError::Corrupt("short membership get_many".into()));
-        }
-        for (pack, value) in ids.into_iter().zip(values) {
-            if value.is_some() {
-                members.insert(pack);
+        for chunk in ids.chunks(MEMBERSHIP_CHUNK) {
+            // Key and Worker base64/JSON allocations are bounded before creating
+            // any key; repository names are bounded by RepoName.
+            let keys: Vec<_> = chunk
+                .iter()
+                .map(|pack| keys::membership(&repo.name, pack))
+                .collect();
+            let values = store.get_many(&partition, &keys).await?;
+            if values.len() != chunk.len() {
+                return Err(StoreError::Corrupt("short membership get_many".into()));
+            }
+            for (pack, value) in chunk.iter().zip(values) {
+                if value.is_some() {
+                    members.insert(*pack);
+                }
             }
         }
     }

@@ -26,6 +26,16 @@ mod tests;
 
 use crate::{ErrorDetail, ServerError};
 
+/// Exact advertised pack-size refusal, including cached verification.
+pub(crate) const PACK_CAP_MESSAGE: &str = "pack exceeds indexed max_pack_bytes";
+
+pub(crate) fn check_pack_cap(bytes: u64, cap: u64) -> Result<(), ServerError> {
+    if bytes > cap {
+        return Err(ServerError::invalid_argument(PACK_CAP_MESSAGE));
+    }
+    Ok(())
+}
+
 /// The canonical pending response: one protobuf detail, HTTP 503 and
 /// `Retry-After` rounded up to whole seconds.
 #[must_use]

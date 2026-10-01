@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: cap aggregate object-index candidate retention at a charged 4 MiB,
+  bound membership joins and Worker request allocation, and enforce the current
+  indexed pack-byte limit before Scheduled job claims/reuse and timer decoding.
+  Native Verified reuse returns the exact advertised pack-size error. Scanner
+  retrieval supports ticketless ref writes with an empty Inspect batch and a
+  capability granting no access to previously published packs.
+
 - Server: keep relay progress continuations after the current wake when retry
   metadata retains an older due time. Update timer, verification-job and
   published-view tests to assert retained capped retries and recovery;
