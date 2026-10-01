@@ -25,6 +25,11 @@ The baseline wire/grant/admission terminal set is 1.27, 1.30b, 2.14, 3.13,
 prerequisites stay in the registry. Extraction's historical `4.10b` entry is
 reconciled to merged `4.10b-2`, resolving two dangling edges. There is no
 activation-to-foundation reverse edge, nor a dependency on withdrawn R-196/197.
+This resolves delta-review finding **10-1** at `c3921b06`: both `4.18` and
+`REL-1` explicitly depend on registered merged `4.10b-1` and `4.10b-2`;
+`4.10b-2` in turn depends on protection `4.10b-1` and the multipart prerequisite.
+Strict traversal rejects missing nodes and cycles, so neither requirement can
+be silently omitted. The matching plan rows use the same canonical ids.
 Merged provenance does not mean a local or staging case passed.
 
 | Input | Governing obligation | Merged PR / SHA prefix |
