@@ -230,11 +230,11 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 heap-bounds = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'test(/multipart_(bounded|buffered)_heap$/) | test(=sixteen_maximum_bodies_and_rows_fit_in_two_mib_of_heap) | test(=corrupt_zstd_frames_bound_heap)'
+filter = 'test(/multipart_(bounded|buffered)_heap$/) | test(=sixteen_maximum_bodies_and_rows_fit_in_two_mib_of_heap) | test(=corrupt_zstd_frames_bound_heap) | test(=aggregate_index_lookup_has_bounded_peak_and_smaller_batches_work)'
 test-group = 'heap-bounds'
 
 [[profile.ci.overrides]]
-filter = 'test(/multipart_(bounded|buffered)_heap$/) | test(=sixteen_maximum_bodies_and_rows_fit_in_two_mib_of_heap) | test(=corrupt_zstd_frames_bound_heap)'
+filter = 'test(/multipart_(bounded|buffered)_heap$/) | test(=sixteen_maximum_bodies_and_rows_fit_in_two_mib_of_heap) | test(=corrupt_zstd_frames_bound_heap) | test(=aggregate_index_lookup_has_bounded_peak_and_smaller_batches_work)'
 test-group = 'heap-bounds'
 
 [profile.ignored-lane]
