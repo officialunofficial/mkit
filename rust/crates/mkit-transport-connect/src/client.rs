@@ -300,12 +300,13 @@ pub const TOKEN_ENV: &str = "MKIT_API_TOKEN";
 /// `UpdateRef`, `AdvanceRefs`, `PackExists`. These touch only ref/metadata
 /// storage (no pack body on the wire), so a hung peer should fail fast
 /// rather than tie up a caller for the multi-minute budget a pack transfer
-/// needs. 20s is generous relative to any real ref-store round trip while
-/// still bounding a stuck request to a duration a human retry loop can
-/// tolerate; override via [`ConnectTransport::with_unary_timeout`] if a
-/// deployment's ref store is reachable only over a slower path.
+/// needs. Cold indexed advances can scan denial metadata before committing.
+/// The 30s caller default gives that bounded proof work more time without
+/// changing the server's proof validity or physical request budgets. A stuck
+/// unary request still fails independently of the pack-transfer deadline;
+/// override via [`ConnectTransport::with_unary_timeout`] for a slower path.
 #[allow(clippy::duration_suboptimal_units)]
-pub const UNARY_TIMEOUT: Duration = Duration::from_secs(20);
+pub const UNARY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Default timeout for pack-transfer RPCs — `UploadPack`, `DownloadPack`.
 /// Matches `mkit-transport-http::DEFAULT_TIMEOUT` — generous enough for a
