@@ -2291,6 +2291,28 @@ and the publication recheck regressions. No tag, timer kind, public protocol,
 packmap limit or whole-alarm budget changes. Pre-launch timer codecs are reset,
 not migrated (R-198 B1).
 
+### Embedder URL token issuance (R-204)
+
+- **Always:** reader URL batches share RPC read authorization, stored epoch,
+  audience and TTL minting, and return tokens only for accessible published targets.
+- **Because:** a verified reader envelope delegates in-process authority without
+  creating a second token policy; HTTP URL tokens serve only the published view.
+- **If violated:** an embedder could issue credentials under stale grant authority
+  or reveal inaccessible content through batch presence.
+- **Enforced:** `Pipeline::issue_url`, `ObjectReader::issue_urls` and its shared
+  bounded reader preflight; parity, private, denial and pending-publication tests.
+
+### Deployment default visibility (R-205)
+
+- **Always:** every visibility read uses a stored visibility when present, and
+  otherwise the deployment default, which is public unless configured.
+- **Because:** first writes must honor private defaults, and an explicit owner
+  setting must have identical precedence on every serving surface.
+- **If violated:** an unset repository could leak through a path with a hard-coded
+  public fallback, or a deployment change could override an owner's explicit setting.
+- **Enforced:** `pipeline::repo_is_private` in the three strong visibility lookups; Connect,
+  HTTP, URL issuance, readers and snapshots use those paths. No visibility cache.
+
 ## Restricted preserved reads and atomic operator holds (WP-5.6a-3)
 
 **Always:** Get/List keep acquisition, verified preservation, discovery, legal

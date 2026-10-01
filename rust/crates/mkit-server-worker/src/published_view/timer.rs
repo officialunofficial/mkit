@@ -1,5 +1,6 @@
 use super::{DEBOUNCE_MS, Envelope, MAX_ROWS, REFRESH_MS, SnapshotBucket, VALIDITY_MS, object_key};
 use mkit_server::pipeline::list::{BucketSource, IndexBucket};
+use mkit_server::pipeline::{RepoVisibility, repo_is_private};
 use mkit_server::sql::SqlError;
 use mkit_server::store::{Key, codec, keys};
 use mkit_server::timers::{DueTimer, Fired, TimerCtx, TimerHandler, TimerKind, registry::kinds};
@@ -143,6 +144,8 @@ pub struct SnapshotHandler<B, N> {
     pub bucket: B,
     /// Coordinator-only remote visibility reads.
     pub coordinator: N,
+    /// Deployment visibility for repositories without an explicit stored setting.
+    pub default_repo_visibility: RepoVisibility,
     /// Clock read again after external awaits for replacement spacing.
     pub clock: Arc<dyn Clock>,
     /// Alarm-wide fire cap.
@@ -301,12 +304,12 @@ impl<B: SnapshotBucket, N: NamespaceStore> SnapshotHandler<B, N> {
             .map(codec::decode_repo_record)
             .transpose()?
             .is_some();
-        let private = rows
+        let visibility = rows
             .get(1)
             .and_then(Option::as_ref)
             .map(codec::decode_repo_visibility)
-            .transpose()?
-            .is_some_and(|v| v.visibility == codec::StoredVisibility::Private);
+            .transpose()?;
+        let private = repo_is_private(visibility.as_ref(), self.default_repo_visibility);
         let key = object_key(ctx.partition)?;
         if !present || private || encoded.is_none() {
             self.bucket.delete(&key).await?;

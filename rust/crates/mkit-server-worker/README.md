@@ -12,6 +12,13 @@ provides indexed configuration, HTTP configuration and read-CORS options;
 call `adapter::serve_with` with that configuration. Environment variables
 cannot activate the mount. Production activation belongs to WP-4.18/5.2.
 
+`DEFAULT_REPO_VISIBILITY=public|private` defaults to `public` and supplies
+`WorkerConfig::default_repo_visibility` when no explicit visibility is stored.
+Visibility applies to Multi deployments with Owner write policy; Single/Open
+deployments do not gate reads by repository visibility.
+An explicit `SetRepoVisibility` wins. Changing the default changes every repository
+without an explicit setting; set it when creating the deployment.
+
 The feature-gated secret `URL_TOKEN_KEYS` uses the key-file grammar:
 `active <64 hex seed>` and `retired <64 hex public key> <retired_at_ms>`.
 `URL_TOKEN_TTL` is seconds, defaults to 900 and accepts 1–86400. Parsed keys
@@ -100,6 +107,11 @@ The optional final `snapshot_warm` argument exists with `published-view`; use
 `SliceBudget` with the constructor. The native equivalent is
 `Pipeline::object_reader`; native and Worker adapters re-export `ReaderView`
 and `ObjectReader`. This API uses the shared core and adds no HTTP mount or wire.
+
+`reader.issue_urls(&targets, ttl_s)` returns up to 16 optional signed tokens
+(`IssuedUrl`), requiring `URL_TOKEN_KEYS`; denied or unreachable targets are absent.
+It shares RPC minting and checks the published view even for Owner readers.
+A TTL of 0 selects the configured default; larger requests are clamped.
 
 `Public` is anonymous: public repositories, published refs and membership.
 `Owner(&request_meta)` requires a verified auth-v2 `ListRefs` envelope for this

@@ -31,7 +31,7 @@
 //! | coordinator namespace total | `qt 00 <window:be64>` | codec `NamespaceUsage` |
 //! | namespace record (`Coordinator`) | `nr 00` | codec `NamespaceRecord` |
 //! | repo record (`Coordinator`) | `rr 00 <repo>` | codec `RepoRecord` |
-//! | repository visibility (`Coordinator`) | `rv 00 <repo>` | codec `RepoVisibilityV1`; absent means public |
+//! | repository visibility (`Coordinator`) | `rv 00 <repo>` | codec `RepoVisibilityV1`; absent uses the deployment default |
 //! | repo-known marker (ref shard) | `rk 00 <repo>` | empty |
 //! | grant epoch | `e 00` | be64; absent means 0, never written as 0 |
 //! | epoch lease (ref shard) | `el 00` | codec `EpochLease` |
@@ -168,7 +168,7 @@ pub const TAG_REPO_KNOWN: &str = "rk";
 /// Repo registry tag: one row per repo of the namespace, in its
 /// coordinator partition. Bounded by repos, not refs.
 pub const TAG_REPO_REGISTRY: &str = "rr";
-/// Repository visibility tag (`Coordinator`): absent means public; the
+/// Repository visibility tag (`Coordinator`): absent uses the deployment default; the
 /// row may exist without `rr` (SPEC-WRITE-GRANTS §9.1).
 pub const TAG_REPO_VISIBILITY: &str = "rv";
 /// Namespace list tag, reserved until namespace enumeration under
