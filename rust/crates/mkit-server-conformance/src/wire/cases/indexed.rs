@@ -790,13 +790,21 @@ mod uno_geometry_tests {
                 .count(),
             2
         );
-        let decoded =
-            decode_entries_with(&pack, &mut NoExternalBases, DecodeLimits::default(), |entry| {
+        let decoded = decode_entries_with(
+            &pack,
+            &mut NoExternalBases,
+            DecodeLimits::default(),
+            |entry| {
                 assert!(entry.bytes.len() <= 512 * 1024);
                 Ok(())
-            })
-            .unwrap();
-        println!("Uno canonical pack bytes={} raw_entries={}", pack.len(), decoded.raw_count);
+            },
+        )
+        .unwrap();
+        println!(
+            "Uno canonical pack bytes={} raw_entries={}",
+            pack.len(),
+            decoded.raw_count
+        );
         assert_eq!(decoded.raw_count, 20);
         assert!(decoded.ids.contains(&head));
     }
