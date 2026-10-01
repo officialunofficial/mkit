@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Core/server (WP-4.16c, R-202): in-process canonical object prefetch for
+  embedders, including ChunkedBlob manifests and indexed content sizes;
+  verified public/owner views share bounded reachability and global-denial
+  proofs. Add wasm-clean `store::MemorySource` for synchronous disclosures
+  and diffs, with native and Worker embedding entry points. No wire change.
+
 - Server/Worker: bound raw timer-alarm enumeration and share tick limits across
   logical heads. Persist capped exponential backoff in the existing timer row
   for cold fairness, preserving payloads and original handler due times. The

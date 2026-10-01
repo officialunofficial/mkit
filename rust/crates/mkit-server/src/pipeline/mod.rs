@@ -39,6 +39,10 @@ mod http;
 mod http_admission;
 #[cfg(feature = "http-objects")]
 mod http_tokens;
+#[cfg(feature = "http-objects")]
+mod object_reader;
+#[cfg(feature = "http-objects")]
+pub use object_reader::{OBJECT_READER_BATCH, OBJECT_READER_CALLS, ObjectReader, ReaderView};
 mod implicit;
 mod info;
 #[cfg(feature = "remote-hooks")]
