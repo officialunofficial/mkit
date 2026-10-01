@@ -26,6 +26,40 @@ pub(crate) fn validate_programmatic(cfg: &WorkerConfig) -> Result<(), ConfigErro
             "launch requires scheduled indexed Multi, D34 and TICKET_KEYS",
         ));
     }
+    validate_key_roles(cfg)?;
+    if cfg.launch.is_some() && !cfg.audience.starts_with("https://") {
+        return Err(error("launch requires a canonical HTTPS AUTH_AUDIENCE"));
+    }
+    if cfg
+        .admin
+        .as_ref()
+        .is_some_and(|admin| admin.audience() != cfg.audience)
+    {
+        return Err(error("ADMIN_KEYS audience must match AUTH_AUDIENCE"));
+    }
+    if let Some(hooks) = &cfg.hooks {
+        if hooks.roles.inspect && cfg.scanner_retrieval.is_none() {
+            return Err(error(
+                "inspection requires complete SCANNER_RETRIEVAL_KEYS and SCANNER_KEYS",
+            ));
+        }
+        if hooks.roles.inspect && !(1..=10000).contains(&hooks.inspect_batch_max_objects) {
+            return Err(error("INSPECT_BATCH_MAX_OBJECTS must be 1..=10000"));
+        }
+        if hooks.timeout.is_zero()
+            || hooks.timeout.as_millis() > u128::from(crate::hooks::config::MAX_TIMEOUT_MS)
+        {
+            return Err(error("HOOK_TIMEOUT_MS must be 1..=30000"));
+        }
+    }
+    if cfg.scanner_retrieval.is_some()
+        && cfg.hooks.as_ref().is_none_or(|hooks| !hooks.roles.inspect)
+    {
+        return Err(error("scanner retrieval requires an inspector"));
+    }
+    if cfg.takedown_denial || cfg.takedown.is_some() {
+        validate_preservation(cfg, &|_| None)?;
+    }
     #[cfg(feature = "http-objects")]
     if let Some(mount) = &cfg.http_mount {
         mount
@@ -45,6 +79,48 @@ pub(crate) fn validate_programmatic(cfg: &WorkerConfig) -> Result<(), ConfigErro
                 return Err(error("HTTP_ADMIT_READS requires the admit hook role"));
             }
         }
+    }
+    Ok(())
+}
+
+#[allow(unused_mut)] // HTTP builds append the URL-token group.
+fn validate_key_roles(cfg: &WorkerConfig) -> Result<(), ConfigError> {
+    let mut groups = vec![
+        cfg.admin
+            .as_ref()
+            .map_or_else(Vec::new, mkit_server::admin::Config::public_keys),
+        cfg.authority_fence
+            .as_ref()
+            .map_or_else(Vec::new, |f| f.public_keys().collect()),
+        cfg.takedown
+            .as_ref()
+            .map_or_else(Vec::new, |s| s.publication.public_keys().to_vec()),
+    ];
+    #[cfg(feature = "http-objects")]
+    groups.push(
+        cfg.url_tokens
+            .as_ref()
+            .map_or_else(Vec::new, |t| t.keys().public_keys().collect()),
+    );
+    let mut public = Vec::new();
+    for group in groups {
+        if group.iter().any(|key| {
+            public.contains(key)
+                || cfg
+                    .ticket_keys
+                    .as_ref()
+                    .is_some_and(|tickets| tickets.contains_ed25519_public(key))
+        }) {
+            return Err(error(
+                "ADMIN_KEYS, authority, receipt, URL_TOKEN_KEYS and TICKET_KEYS must use distinct key roles",
+            ));
+        }
+        public.extend(group);
+    }
+    if let Some(retrieval) = &cfg.scanner_retrieval {
+        retrieval.check_role_keys(&public, &[]).map_err(|_| {
+            error("scanner retrieval keys must differ from every configured key role")
+        })?;
     }
     Ok(())
 }
@@ -96,18 +172,6 @@ impl LaunchConfig {
         }
         Ok(Some(Self { takedown }))
     }
-
-    /// Refuse takedown activation until the restricted admin catalog has merged.
-    /// # Errors
-    /// The restricted admin catalog is the remaining takedown prerequisite.
-    pub fn check_prerequisites(&self) -> Result<(), ConfigError> {
-        if self.takedown {
-            return Err(error(
-                "launch takedown requires WP-5.6a-3 complete admin catalog",
-            ));
-        }
-        Ok(())
-    }
 }
 
 /// Validate every selected option, including signing keys, before readiness.
@@ -119,6 +183,9 @@ pub(crate) fn validate(
 ) -> Result<(), ConfigError> {
     // Signed hooks are complete at startup, not deferred until an operation.
     let mut public = Vec::new();
+    if let Some(settings) = &cfg.takedown {
+        public.extend_from_slice(settings.publication.public_keys());
+    }
     if let Some(admin) = &cfg.admin {
         public.extend(admin.public_keys());
     }
@@ -254,8 +321,11 @@ fn validate_preservation(
         crate::admin::RECEIPT_SECRET,
         "RECEIPT_KEYS",
     ];
-    if cfg.launch.as_ref().is_some_and(|v| v.takedown) {
-        if cfg.admin.is_none() || cfg.takedown.is_none() {
+    if cfg.takedown.is_some()
+        || cfg.takedown_denial
+        || cfg.launch.as_ref().is_some_and(|v| v.takedown)
+    {
+        if cfg.admin.is_none() || cfg.takedown.is_none() || cfg.indexed.is_none() {
             return Err(error(
                 "TAKEDOWN_ENABLED requires ADMIN_KEYS and complete preservation",
             ));
@@ -268,12 +338,12 @@ fn validate_preservation(
         {
             return Err(error("TAKEDOWN_ENABLED requires signed HTTPS cache-purge"));
         }
+        if cfg.takedown.as_ref().is_some_and(|s| s.retention_ms == 0) {
+            return Err(error("PRESERVATION_RETENTION_MS must be positive"));
+        }
         // The merged preservation parser validates explicit retention and
         // signing/publication separation; from_env checks the dedicated bucket.
-        // Activation still waits for audited, freshly verified admin reads.
-        return Err(error(
-            "launch takedown requires WP-5.6a-3 complete admin catalog",
-        ));
+        return Ok(());
     }
     if preservation.iter().any(|name| var(name).is_some()) {
         return Err(error("preservation settings require TAKEDOWN_ENABLED=true"));

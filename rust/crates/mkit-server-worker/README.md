@@ -70,8 +70,8 @@ authority mode and generation, then declare real lease-table recovery.
 
 `ADMIN_KEYS` contains the SPEC-SERVER §16.3 public-key list as a Worker secret.
 It defaults off. `ReadAuditLog` and configured `PurgeCache` use the operator
-mount; takedown/catalog/retention operations await complete verified preservation
-(WP-5.6a-3). Preservation core is merged. Admin requests use a separate signed envelope and cannot authenticate
+mount; takedown/catalog/retention endpoints await WP-5.6a-3. Configured
+preservation core is wired. Admin requests use a separate signed envelope and cannot authenticate
 client writes. Operator keys must differ from ticket, token, hook and authority
 keys. Persisted sharding/addressing checks run before operator dispatch.
 
@@ -124,8 +124,8 @@ service-binding hooks; its local conformance remains a distinct runtime gate.
 Set `admin_on_public_path=false` and route canonical admin requests through
 `serve_admin_with` to keep the public mount off. Operator authentication and
 canonical signed paths are unchanged. `RefPolicy`/`RefRule` support signer and
-fast-forward rules; no separate general no-delete knob exists. Takedown denial
-still refuses startup until the preservation prerequisite is wired.
+fast-forward rules; no separate general no-delete knob exists. Preservation configuration validates at startup; the admin catalog remains
+unavailable until WP-5.6a-3.
 
 Reserved prefixes are `/mkit.transport.v1.TransportService/`,
 `/mkit.server.admin.v1.AdminService/`, any mounted HTTP path containing `/-/`,
@@ -133,3 +133,64 @@ Reserved prefixes are `/mkit.transport.v1.TransportService/`,
 use another prefix such as `/_uno/`; namespaces and repos cannot start with `_`.
 The [feature and measured-size table](../../../apps/vcs-worker/README.md#embedding-api-supported-0x)
 records exact release commands and keeps unexecuted measurements explicit.
+
+## In-process canonical object prefetch (WP-4.16c)
+
+With `http-objects` and explicit indexed/HTTP configuration, construct the
+request's pipeline using `adapter::embedding_pipeline(env, cfg, hooks,
+&request_budget, ...)`, then call `pipeline.object_reader(repo, ReaderView::Public)`.
+The optional final `snapshot_warm` argument exists with `published-view`; use
+`false` for an ordinary request. Share the request's existing 9,000-call physical
+`SliceBudget` with the constructor. The native equivalent is
+`Pipeline::object_reader`; native and Worker adapters re-export `ReaderView`
+and `ObjectReader`. This API uses the shared core and adds no HTTP mount or wire.
+
+`Public` is anonymous: public repositories, published refs and membership.
+`Owner(&request_meta)` requires a verified auth-v2 `ListRefs` envelope for this
+repository's owner or valid write grant. It uses the existing auth stage at
+construction and again per batch, including grant-epoch checks. Passing the view
+variant alone confers no authority. Owners use live refs and membership;
+publication holds and global denial still filter objects. Blocked IDs, anonymous reads of private repositories
+and unreachable IDs return `None`, matching id-route absence.
+
+Each call accepts at most **16 IDs**, preserves order and duplicates, and caps
+core work at **8,500 calls** inside the request's physical allowance. It shares
+one bounded reachability walk (with eligible positive-cache proofs) and one
+set-based global-denial descriptor pass. Every store operation is charged;
+authorization and external seams reserve calls conservatively. Exhausted call,
+decode or denial-context budgets fail closed with `unavailable`. Canonical
+response bytes, including duplicate IDs, also fit `http_decode_budget`.
+
+`read_canonical` returns serialized Blob, Tree, Commit, Remix, Tag and
+**ChunkedBlob manifest** bytes, never pack-only Delta encodings.
+`object_sizes` returns indexed uncompressed content sizes: Blob payload length
+and other objects' canonical serialized length. It performs **no requested-object
+byte reads**. Authorization may read canonical commit/tree/tag/manifest
+ancestors; one manifest authorizes all requested chunks, without a read per
+chunk. The restriction also covers delta bases used to reconstruct ancestors.
+Sizes check reconstruction base objects and packs through metadata only, using
+the same earlier in-pack frame preference, fallback and bounds as canonical reads.
+If a requested ancestor would need expansion to prove another requested ID,
+request their sizes in separate batches; an incomplete proof returns
+`unavailable` rather than reading the requested ancestor or claiming absence.
+Blocked ancestor packs leave unproven IDs absent and preserve earlier proven IDs.
+
+Prefetch the commit, trees, manifests and selected chunks asynchronously, then
+insert the returned bytes into the wasm-clean synchronous source:
+
+```rust,ignore
+let reader = pipeline.object_reader(repo, ReaderView::Public).await?;
+let mut source = mkit_core::store::MemorySource::default();
+for (id, bytes) in ids.iter().zip(reader.read_canonical(&ids).await?) {
+    if let Some(bytes) = bytes { source.insert(*id, bytes)?; }
+}
+let bundle = mkit_core::verify::build_disclosure_from(
+    &source, &commit, &[b"file.bin"], mkit_core::verify::Selector::Object,
+)?;
+let verified = mkit_core::verify::verify_disclosure(&commit, &bundle)?;
+```
+
+`MemorySource` verifies each read, including Merkle object identities. Core
+`diff_trees` and related builders use the same source synchronously. Hosts bound
+aggregate prefetched memory and retain request authorization; there is no
+blocking or `block_on` bridge inside the async reader.

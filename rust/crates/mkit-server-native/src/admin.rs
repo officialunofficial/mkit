@@ -120,6 +120,7 @@ pub fn resolve(
     pipeline.admin_keys = config.public_keys();
     let takedown = preservation_settings(args, pipeline, &config, auth.audience())?;
     pipeline.receipt_publication = takedown.as_ref().map(|s| s.publication.clone());
+    pipeline.takedown_denial = takedown.is_some();
     if let Some(settings) = &takedown {
         pipeline
             .admin_keys

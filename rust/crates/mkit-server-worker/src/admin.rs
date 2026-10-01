@@ -161,7 +161,8 @@ fn supported_path(path: &str, cfg: &crate::adapter::WorkerConfig) -> bool {
     if path == mkit_server::admin::AUDIT_PATH || path == mkit_server::admin::PURGE_PATH {
         return true;
     }
-    cfg.admin.is_some()
+    mkit_server::takedown::ACTIVATED
+        && cfg.admin.is_some()
         && cfg.launch.as_ref().is_some_and(|launch| launch.takedown)
         && path
             .strip_prefix(mkit_server::admin::PREFIX)
@@ -186,12 +187,14 @@ pub(crate) async fn serve(
     mut req: worker::Request,
     env: worker::Env,
     cfg: &crate::adapter::WorkerConfig,
+    budget: &mkit_server::indexed::budget::SliceBudget,
 ) -> worker::Result<worker::Response> {
     use futures::StreamExt;
     use mkit_server::admin::{BodyCapture, Engine, Response};
     let Some(config) = &cfg.admin else {
         return worker::Response::error("admin disabled", 404);
     };
+    let enabled = mkit_server::takedown::ACTIVATED && cfg.takedown.is_some();
     if !supported_path(&req.path(), cfg) {
         return worker::Response::error("admin operation unavailable", 404);
     }
@@ -216,7 +219,8 @@ pub(crate) async fn serve(
         let store = crate::ns_client::DoNamespaceStore::new(
             crate::ns_client::StubTransport::new(env.clone(), cfg.placement.clone()),
             cfg.probe_partition(),
-        );
+        )
+        .with_budget(budget.clone());
         let mut engine = Engine::new(store.clone(), cfg.probe_partition(), config.clone())
             .with_purge(purge_enabled(cfg));
         if enabled {
@@ -399,7 +403,11 @@ mod tests {
             let path = format!("{}{op}", mkit_server::admin::PREFIX);
             assert!(!supported_path(&path, &cfg), "unconfigured {op}");
             cfg.launch = Some(crate::launch::LaunchConfig { takedown: true });
-            assert!(supported_path(&path, &cfg), "configured {op}");
+            assert_eq!(
+                supported_path(&path, &cfg),
+                mkit_server::takedown::ACTIVATED,
+                "configured {op}"
+            );
             let admin = cfg.admin.take();
             assert!(!supported_path(&path, &cfg), "no admin {op}");
             cfg.admin = admin;
@@ -512,7 +520,10 @@ mod tests {
         assert!(cfg.takedown.is_some());
         assert!(!supported_path(mkit_server::admin::TAKEDOWN_PATH, &cfg));
         cfg.takedown_denial = true;
-        assert!(cfg.validate().unwrap_err().0.contains("WP-5.6a-3"));
+        assert!(
+            cfg.validate().is_err(),
+            "denial requires complete indexed configuration"
+        );
         let _shards = shards(mkit_server::pipeline::Sharding::Single);
     }
 }

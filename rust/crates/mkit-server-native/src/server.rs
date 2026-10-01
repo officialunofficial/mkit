@@ -880,7 +880,9 @@ where
                 meta.clone(),
                 cfg.admin.as_ref().and_then(|a| a.takedown.as_ref()),
                 &cfg.pipeline,
-                mkit_server::takedown::ACTIVATED,
+                cfg.admin
+                    .as_ref()
+                    .is_some_and(|admin| admin.takedown.is_some()),
             )?;
             let driver = TimerDriver::new(meta.clone(), registry, Arc::new(SystemClock));
             #[cfg(feature = "test-faults")]

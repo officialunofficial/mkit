@@ -21,8 +21,10 @@ Reconcile this list with the final [registry](registry.json) at phase 2. Each
 row requires a full merged SHA, PR and independent review outcome in
 [launch-evidence.md](launch-evidence.md). A registry status is no passing gate.
 Extraction 4.10b-2 and retrieval R-193 have merged (#1244 / #1243).
-The user authorized phase 2 for the available prerequisites; preservation-dependent
-activation and runtime evidence wait for 5.6a-2 preservation.
+The user authorized phase 2 for the available prerequisites. Preservation core
+5.6a-2 (#1249) is merged and configured core work is wired; operator endpoints
+and their runtime evidence wait for 5.6a-3. The Worker zstd decoder stays off
+until bounded ruzstd (R-203) merges.
 #1245 publication recheck timer 12 progress repair is merged. Physical alarm
 bounds/backoff #1247 and native conformance #1248 are also merged. Timer/alarm
 reruns require fresh results; previous native timer flake exceptions no longer

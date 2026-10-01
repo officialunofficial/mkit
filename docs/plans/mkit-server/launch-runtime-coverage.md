@@ -7,14 +7,15 @@ later merges require a fresh candidate pin before execution. No command in
 this document has been run as part of this coverage audit.
 
 The user authorized phase 2 work on available prerequisites. Preservation
-and its takedown/admin integration remain gated on 5.6a-2. Optional sync
+core 5.6a-2 is merged and wired; takedown/admin endpoint exposure waits for
+5.6a-3. Optional sync
 inspection, native proofs, and release Worker proof refusal remain in scope.
 Async inspection, holds/review, publication Events, and Worker proofs are
 excluded. The resolved header ruling adopts merged #1246.
 
 ## Existing harness boundaries
 
-The [23-case inventory](launch-cases.json) names contracts, not complete
+The [24-case inventory](launch-cases.json) names contracts, not complete
 executable runtime probes. Keep the native, actual release Worker, and
 fault-build results separate in [launch-evidence.md](launch-evidence.md).
 
@@ -53,7 +54,7 @@ the output. HTTP/key/scanner/hook role fixtures use distinct public test seeds.
 | R2 | R1 plus HTTP objects/tokens; publish pack fixtures containing Blob, ChunkedBlob, manifest/chunks, small/surplus objects, delta sources, and #1246 filenames; exercise public/private/token object and ref paths |
 | R3 | R2 plus isolated unsigned binding Authorize/Admit/Outcome; receiver records procedure/body, controls allow/challenge/deny/failure, and verifies durable read settlement after stream close |
 | R4 | R2 plus signed HTTPS hooks and optional one through four sync fail-closed inspectors with R-193; receiver verifies signatures, audience, body, nonce, and independently decodes assigned raw ranges |
-| R5 | After 5.6a-2: preservation/admin/takedown and signed purge; also test the expressly authorized embedded custom `PurgeSink` alternative, with both admin placement modes |
+| R5 | After 5.6a-3: preservation/admin/takedown and signed purge; also test the expressly authorized embedded custom `PurgeSink` alternative, with both admin placement modes |
 | R6 | Embedded example release: custom hooks, combined DO construction, programmatic policy, host admin routing, constructed streamed `UploadPart`, publication and optional cache configuration |
 
 For local signed-channel testing, the existing synthetic-origin fetch wrapper
@@ -76,7 +77,7 @@ already implements it. All integrated result pairs remain UNRUN; the R-203 addit
 
 | Case | Existing meaningful native/host coverage | Existing workerd coverage | Proposed actual release assertion |
 |---|---|---|---|
-| B4.config | Native `tests/launch_profile.rs`, `hook_config.rs`, `http_inert.rs`; Worker `launch`, hook and scanner configuration tests | R0 discovery and release-launch HTTP configuration | Launch R0/R1/R2/R3/R4 invalid/partial grammar, bindings, absent compiled features, key collisions, off-profile opt-ins, leases/GC/retention refusal; separately retain preservation refusal until its prerequisite lands |
+| B4.config | Native `tests/launch_profile.rs`, `hook_config.rs`, `http_inert.rs`; Worker `launch`, hook and scanner configuration tests | R0 discovery and release-launch HTTP configuration | Launch R0/R1/R2/R3/R4 invalid/partial grammar, bindings, absent compiled features, key collisions, off-profile opt-ins, leases/GC/retention refusal; validate configured preservation while retaining the 5.6a-3 endpoint gate |
 | B4.discovery | Native config and Connect server-info tests, `wire_multi`; HTTP proof mount | Existing `info.shape_and_policy`, `info.ignores_repository_header`, release-launch | Query every R1–R5 opt-in combination; verify zero threshold, leases/async false, active inspector bound only when present, no proof/receipt/rewrite overclaim; native proof advertisement separately |
 | B4.inspected-set | Core indexed inspection and inspection-budget tests | RemoteInspector runtime wrapper checks a synthetic one-object request | R4 uploads packs with surplus/small/file/manifest/chunk/deduplicated entries, extracted copies, Verified reuse and pending prior membership; receiver records each inspector's exact independent complete set |
 | B4.inspection-bound | Core indexed inspection, whole-advance budget tests | Inspect pass/quarantine/defer wrapper outcomes | R4 tests object counts at the configured bound and one beyond; preflight prevents Inspect and mutation on excess, each of up to four inspectors gets one complete batch, reject dominates and unavailable leaves no committed refs |
@@ -88,7 +89,7 @@ already implements it. All integrated result pairs remain UNRUN; the R-203 addit
 | B4.writer-reuse | Core indexed/ticket/takedown tests; native `ticketed_upload`, `begin_upload` | Existing raw/multipart/ticket wire cases; indexed mode is fault-only | R1/R2 raw and multipart upload, dedup/AlreadyPresent, consumed and reused Verified tickets, implicit membership/external delta chains; R5 repeats every bypass path after global denial |
 | B4.authority-races | Core authority/write-gate tests; native `write_gate`, `epoch_leases` | `authority_worker` ignored test through actual release D34 binding fixture | Move its setup into R1/R4; interleave generation/revocation with upload/backend/marker/apply, delayed receiver reply, retry, signer rotation and restart; do not count the default-off script alone as the launch intersection |
 | B4.extraction | Core extraction/group/job tests; host Worker `bounded_object_multipart.rs` covers restart, CVS, roots and completion | Fault-build indexed scheduled verifier; local R2 multipart fixture | R1 creates A+B/B+C overlap with immutable delta sources and repeated/deduplicated packs; advance polls real scheduled completion, verifies extracted object bytes, cancels open work and restarts same-format state without fault routes |
-| B4.takedown | Core takedown and HTTP-denial tests | Worker mount catalog and startup prerequisite refusal only | R5 after preservation merges: acceptance denies before success, private verified preservation, retention/legal hold, late/unresolved holders, every read/reuse path; `any` reports discovery incomplete and `allowlist` records its explicit scope |
+| B4.takedown | Core takedown and HTTP-denial tests | Configured preservation startup and gated Worker mount catalog only | R5 after 5.6a-3 merges: acceptance denies before success, private verified preservation, retention/legal hold, late/unresolved holders, every read/reuse path; `any` reports discovery incomplete and `allowlist` records its explicit scope |
 | B4.admin | Core admin replay/audit/roles; takedown tests | Worker configured/unconfigured route unit tests | R5/R6 public versus host-only mounting; authenticated Takedown/Get/List/ReadPreserved/SetLegalHold/PurgeCache/ReadAuditLog, distinct role denial, durable replay/gapless audit; Reinstate and hold review remain absent |
 | B4.purge | Core/Worker purge retry/invalidation and admin tests | No retained actual release signed purge-outage probe | R5 signed receiver outage/lost acknowledgement/duplicate delivery, authoritative denial and local invalidation throughout, async manual acceptance then audited completion; R6 custom sink plus local invalidation |
 | B4.recovery | Core timers/publication/outcomes; native `export_restore`, hook restart/drain tests | Fault-only snapshot/import/relay/retry checks | Restart R1–R5 against the same current-format persist directory during extraction/publication/Outcome/purge/takedown; client deliberately loses replies and retries identical signed requests. Fresh-store activation/reset is separate from unsupported old-store migration |
@@ -120,7 +121,7 @@ already implements it. All integrated result pairs remain UNRUN; the R-203 addit
    real request helpers; keep binding requests unsigned and enforce isolated
    receiver routing. R-193's cold/warm cost can expose a real deterministic
    gap; record failure and fix within scope rather than skipping the case.
-5. Compile and run R6 after the addenda land. R5 stays gated on preservation,
+5. Compile and run R6 after the addenda land. R5 stays gated on 5.6a-3,
    and R1–R4 results cannot fill its rows. Any branch/config change invalidates
    affected evidence before the final candidate pin.
 6. Every result records SHA/tree/base, build features/artifact hash, config

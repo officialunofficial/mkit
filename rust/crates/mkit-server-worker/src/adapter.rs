@@ -291,7 +291,6 @@ impl WorkerConfig {
         use mkit_server::pipeline::{AuthMode, PipelineConfig};
         use mkit_server::upload::UploadLimits;
 
-        self.check_launch_readiness()?;
         crate::launch::validate_programmatic(self)?;
         #[cfg(feature = "published-view")]
         if let Some(config) = &self.published_view {
@@ -427,7 +426,6 @@ impl WorkerConfig {
     #[allow(clippy::too_many_lines)] // Resolves the deployment fields together; authority statement grammar is factored separately.
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let cfg = Self::parse_vars(&var)?;
-        cfg.check_launch_readiness()?;
         Ok(cfg)
     }
 
@@ -453,33 +451,61 @@ impl WorkerConfig {
     #[cfg(target_arch = "wasm32")]
     fn validate_runtime(&self, env: &worker::Env) -> Result<(), ConfigError> {
         self.validate()?;
-        if self.custom_purge.is_some()
-            && !env
-                .var(PLAN_VAR)
-                .is_ok_and(|plan| plan.to_string().trim().eq_ignore_ascii_case("paid"))
+        self.validate_for_plan(env.var(PLAN_VAR).ok().map(|v| v.to_string()).as_deref())?;
+        crate::hooks::build::hooks_from_env(env, self)?;
+        if self.launch.is_some() {
+            env.bucket(self.blob_binding)
+                .map_err(|_| ConfigError("launch requires configured serving R2 binding".into()))?;
+            for binding in [
+                "REFSTORE",
+                "NS_COORD",
+                "REF_SHARD",
+                "REPO_INDEX",
+                "CONTENT_INDEX",
+            ] {
+                env.durable_object(binding).map_err(|_| {
+                    ConfigError(format!("launch requires {binding} Durable Object binding"))
+                })?;
+            }
+        }
+        if let Some(settings) = &self.takedown {
+            env.bucket(crate::admin::PRESERVATION_BINDING)
+                .map_err(|_| ConfigError("PRESERVATION binding required".into()))?;
+            if self.blob_binding == crate::admin::PRESERVATION_BINDING {
+                return Err(ConfigError(
+                    "preservation binding must differ from serving storage".into(),
+                ));
+            }
+            if let Some(http) = self.hooks.as_ref().and_then(|hooks| hooks.http.as_ref()) {
+                crate::hooks::config::http_signer(
+                    env.secret("MKIT_HOOK_KEY").ok().map(|s| s.to_string()),
+                    http,
+                    self.ticket_keys.as_ref(),
+                    settings.publication.public_keys(),
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub(crate) fn validate_for_plan(&self, plan: Option<&str>) -> Result<(), ConfigError> {
+        if (self.launch.is_some()
+            || self.indexed.is_some()
+            || self.custom_purge.is_some()
+            || self.takedown.is_some())
+            && !plan.is_some_and(|plan| plan.trim().eq_ignore_ascii_case("paid"))
         {
             return Err(ConfigError(
-                "custom purge requires WORKERS_PLAN=paid: Free alarm calls are already reserved"
+                "configured indexed launch, takedown or custom purge requires WORKERS_PLAN=paid"
                     .into(),
             ));
         }
         Ok(())
     }
 
-    fn check_launch_readiness(&self) -> Result<(), ConfigError> {
-        if self.takedown_denial {
-            return Err(ConfigError(
-                "launch takedown requires WP-5.6a-3 complete admin catalog".into(),
-            ));
-        }
-        if let Some(launch) = &self.launch {
-            launch.check_prerequisites()?;
-        }
-        Ok(())
-    }
-
-    // Pure grammar is separated from implementation readiness so all opt-ins
-    // are validated before the phase-1 prerequisite refusals.
+    // Parse deployment grammar before runtime binding checks.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn parse_vars(var: &impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         Self::parse_vars_with_purge(var, None)
@@ -700,7 +726,7 @@ impl WorkerConfig {
 
     /// Parse bindings and opt-ins with a custom purger configured at startup.
     /// # Errors
-    /// As `from_env`, including the preservation prerequisite refusal.
+    /// As `from_env`; admin catalog exposure still waits for its prerequisite.
     #[cfg(target_arch = "wasm32")]
     pub fn from_env_with_purge(
         env: &worker::Env,
@@ -765,7 +791,6 @@ impl WorkerConfig {
                 ));
             }
         }
-        cfg.check_launch_readiness()?;
         Ok(cfg)
     }
 }
@@ -2103,12 +2128,18 @@ mod faults {
     }
 }
 
+#[cfg(feature = "http-objects")]
+pub use mkit_server::pipeline::{ObjectReader, ReaderView};
+
 #[cfg(target_arch = "wasm32")]
 pub(crate) use glue::build_ns_object;
 #[cfg(all(target_arch = "wasm32", feature = "http-objects"))]
 pub use glue::fetch_with_context;
 #[cfg(target_arch = "wasm32")]
-pub use glue::{fetch, fetch_with, ns_object, ns_object_with, serve, serve_admin_with, serve_with};
+pub use glue::{
+    WorkerPipeline, fetch, fetch_with, ns_object, ns_object_with, pipeline as embedding_pipeline,
+    serve, serve_admin_with, serve_with,
+};
 #[cfg(all(target_arch = "wasm32", feature = "published-view"))]
 pub use glue::{fetch_configured, ns_object_configured};
 
@@ -2148,7 +2179,7 @@ mod glue {
     static BACKUPS_INVALID_LOG: Once = Once::new();
 
     /// The pipeline a request runs on, over the hooks `H`.
-    type WorkerPipeline<H> = Pipeline<WorkerBlobStore, WorkerNamespaceStore, H>;
+    pub type WorkerPipeline<H> = Pipeline<WorkerBlobStore, WorkerNamespaceStore, H>;
 
     /// `Access-Control-Allow-Origin` and the admission `Expose-Headers` on
     /// every response, so a browser reads a challenge or a receipt.
@@ -2201,14 +2232,17 @@ mod glue {
         Ok(None)
     }
 
-    /// The pipeline for `cfg` over `env`'s bindings and `hooks`.
-    fn pipeline<H: HookSet + 'static>(
+    /// The request-budgeted embedding pipeline for configured bindings/hooks.
+    /// # Errors
+    /// Invalid configuration or unavailable bindings.
+    pub fn pipeline<H: HookSet + 'static>(
         env: &Env,
         cfg: &WorkerConfig,
         hooks: H,
         request_budget: &mkit_server::indexed::budget::SliceBudget,
         #[cfg(feature = "published-view")] snapshot_warm: bool,
     ) -> Result<WorkerPipeline<H>, ConfigError> {
+        cfg.validate_runtime(env)?;
         let bad = |e: &dyn core::fmt::Display| ConfigError(e.to_string());
         let mut config = cfg.pipeline_config()?;
         let blobs = R2BlobStore::new(
@@ -2430,17 +2464,15 @@ mod glue {
         env: Env,
         cfg: &WorkerConfig,
     ) -> worker::Result<Response> {
-        if let Err(error) = cfg
-            .validate_runtime(&env)
-            .and_then(|()| hooks_from_env(&env, cfg).map(|_| ()))
-        {
+        if let Err(error) = cfg.validate_runtime(&env) {
             return json_response(unavailable_json(&error.0), 503);
         }
+        let request_budget = mkit_server::indexed::budget::SliceBudget::new(9000);
         let meta = WorkerNamespaceStore::new(
             StubTransport::new(env.clone(), cfg.placement.clone()),
             cfg.probe_partition(),
         )
-        .with_budget(mkit_server::indexed::budget::SliceBudget::new(9000));
+        .with_budget(request_budget.clone());
         let checked = match check_mode(&meta, cfg.sharding).await {
             Ok(Outcome::Ok) => {
                 check_addressing(
@@ -2457,7 +2489,7 @@ mod glue {
         {
             return json_response(unavailable_json(error.public_message()), 503);
         }
-        crate::admin::serve(req, env, cfg).await
+        crate::admin::serve(req, env, cfg, &request_budget).await
     }
 
     /// [`serve`] over hooks built by `make_hooks`.
@@ -2784,7 +2816,7 @@ mod glue {
         let takedown_root = cfg
             .as_ref()
             .ok()
-            .filter(|cfg| mkit_server::takedown::ACTIVATED && cfg.takedown.is_some())
+            .filter(|cfg| cfg.takedown.is_some())
             .map(WorkerConfig::probe_partition);
         let registry = super::timer_registry_budgeted(
             class,
@@ -2793,8 +2825,7 @@ mod glue {
             alarm_budget.as_ref(),
             takedown_root,
         );
-        let registry = if mkit_server::takedown::ACTIVATED
-            && let (Ok(cfg), Some(budget)) = (&cfg, &alarm_budget)
+        let registry = if let (Ok(cfg), Some(budget)) = (&cfg, &alarm_budget)
             && cfg.takedown.is_some()
             && class
                 == match cfg.sharding {

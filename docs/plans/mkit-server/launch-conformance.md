@@ -1,9 +1,10 @@
 # Paid launch conformance (WP-4.18 / R-194)
 
 Status: **phase 2 authorized; complete matrix UNRUN**.
-Available prerequisite integration can proceed. Preservation/admin/takedown
-runtime activation waits for the 5.6a-3 admin catalog. Preservation core
-#1249 is merged; the user ruled to retain refusal until the catalog lands. Extraction
+Available prerequisite integration can proceed. Takedown and preservation
+admin endpoint exposure waits for 5.6a-3. Preservation core #1249 is merged
+and configured core work is wired without its old startup refusal, per the
+latest user ruling. Extraction
 #1244 and private scanner retrieval #1243 have merged; their release wiring
 is wired here. Bounded publication recheck timer 12 progress repair #1245 has
 merged. Physical alarm bounds/backoff #1247 and deterministic native timer
@@ -74,7 +75,7 @@ stops only processes it starts.
 | `hooks` | Component smoke: existing real `vcs-worker-conformance.sh --hooks -- --filter info.` plus M3 service-binding hook suite and actual wasm Fetch/Delay probes. Its signed runtime wrapper uses **test-faults**; full opted-in release signed exchanges remain phase 2 work |
 | `authority` | Existing `vcs-worker-authority.sh --authority` against an actual release Worker and isolated binding fixture |
 | `release-launch` | Builds `worker-build --release --features launch`, runs local pinned wrangler with `LAUNCH_PROFILE=uno`, Paid indexed Multi/D34, `any` unsafe flag and HTTP/token opt-in. Verifies discovery, token key mount and absence of the test-faults route. Inspection and admin/takedown are off in this lane |
-| `full` | Refused until phase 2 supplies preservation and the complete per-case actual release probes. A component suite exit zero cannot pass the integrated matrix |
+| `full` | Refused until 5.6a-3, R-203 and the complete per-case actual release probes. Configured preservation core is wired. A component suite exit zero cannot pass the integrated matrix |
 
 The release-launch discovery lane verifies threshold zero, leases/async false,
 no inspector-bound field when inspection is off, and no proof claim. It does
@@ -87,8 +88,8 @@ Worker proof requests must remain unsupported.
 ## Phase 2 execution
 
 1. Merge the exact prerequisite versions and record every full SHA, PR and
-   independent review outcome. Complete preservation and remove only its
-   corresponding activation refusal. The branch includes #1247 and #1248; rerun
+   independent review outcome. Configured preservation core is wired; enable
+   the admin endpoints after 5.6a-3 and the decoder after R-203. The branch includes #1247 and #1248; rerun
    timer/alarm checks without the prior native flake exceptions and report any
    failure. A new flake classification still needs unchanged-base evidence.
 2. Complete the itemized release probes in [launch-cases.json](launch-cases.json):

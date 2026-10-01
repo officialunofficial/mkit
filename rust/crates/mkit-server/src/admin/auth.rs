@@ -120,6 +120,12 @@ impl Config {
         })
     }
 
+    /// Canonical signing origin used by authentication and operator intents.
+    #[must_use]
+    pub fn audience(&self) -> &str {
+        &self.audience
+    }
+
     /// Whether a nonempty key list enables the admin service.
     #[must_use]
     pub fn enabled(&self) -> bool {

@@ -6,8 +6,8 @@ inputs, not evidence of their opted-in release integration. Fill actual
 results after executing at the pinned candidate, using the
 [local harness](launch-conformance.md). A component harness PASS records
 only that component lane; it leaves per-case integrated slots UNRUN.
-Preservation core #1249 is merged; activation and preservation-dependent
-cases await the 5.6a-3 admin catalog, per the user ruling. Native zstd push/clone awaits the
+Preservation core #1249 is merged and configured core work is wired. Operator
+endpoint exposure and its runtime cases await the 5.6a-3 admin catalog. Native zstd push/clone awaits the
 R-203 bounded ruzstd prerequisite; the decoder stays off until it merges. The resolved #1246 header ruling
 adopts its extension allowlist and safe filenames; it records no runtime PASS.
 See [launch-runtime-coverage.md](launch-runtime-coverage.md) for current
@@ -51,10 +51,11 @@ foundations to activation and no dependence on withdrawn R-196/R-197.
 | 5.5a-sync | `233f51afb9acad3e79e89790ee4940dacfc58152` | [#1240](https://github.com/officialunofficial/mkit/pull/1240); review record UNRUN |
 | R-193 private scanner pack retrieval | `ade6179e973fd05e63c2853fdc33a507ca0fa9be` | [#1243](https://github.com/officialunofficial/mkit/pull/1243) merged; integrated gate UNRUN |
 | 5.10 / 5.11a purge/admin/audit | `e99e2b241959932150febb8a3bc4957b08134864` | [#1236](https://github.com/officialunofficial/mkit/pull/1236); reviews UNRUN |
-| 5.6a-1 acceptance / 5.6a-2 preservation | `bc114103f438a43a5785ab9dc92bf765a46b3807` / PENDING | 5.6a-2 pending; takedown activation fails closed |
+| 5.6a-1 acceptance / 5.6a-2 preservation | `bc114103f438a43a5785ab9dc92bf765a46b3807` / `a3966d84d05449d164d0ba4365eb30181a1c7ce7` | Core wired; admin exposure waits for 5.6a-3 |
 | Publication recheck timer 12 progress repair | `d89c37fb968d39c180228678bc09c77a12002fc9` | [#1245](https://github.com/officialunofficial/mkit/pull/1245) merged; integrated gate UNRUN |
 | Physical alarm bounds and cold fairness repair | `e45def2fe1855a531d0149727bf6678fc8145c3c` | [#1247](https://github.com/officialunofficial/mkit/pull/1247) merged; integrated rerun UNRUN |
 | Deterministic native timer conformance | `12e4ce4998145a959c4fc400e02b6ad546812090` | [#1248](https://github.com/officialunofficial/mkit/pull/1248) merged; old timer flake exceptions removed |
+| 4.16c in-process object reader | `1edfc3065e3e22c869c8b3913f2ab77fb97ef272` | [#1250](https://github.com/officialunofficial/mkit/pull/1250) merged; embedding README documents the reader |
 | R-203 bounded ruzstd (WP-zstd-bound) | PENDING | Decoder stays off; enable pack-ruzstd in launch only after merge |
 | WP-4.18 self-reviews, correctness/security and spec/crypto | UNRUN | UNRUN |
 | WP-4.18 adversarial PR review | UNRUN | UNRUN |

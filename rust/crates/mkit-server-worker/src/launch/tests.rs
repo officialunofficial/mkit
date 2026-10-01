@@ -36,6 +36,85 @@ fn programmatic_launch_changes_cannot_disable_the_extraction_driver() {
     assert!(cfg.validate().unwrap_err().0.contains("scheduled indexed"));
 }
 
+#[test]
+fn programmatic_launch_audience_requires_https() {
+    let mut cfg = check(&vars()).unwrap();
+    cfg.audience = "http://vcs.example".into();
+    assert!(
+        cfg.validate().is_err(),
+        "an embedded launch must retain the HTTPS audience required at startup"
+    );
+}
+
+#[test]
+fn programmatic_admin_audience_must_match_the_serving_origin() {
+    let mut v = vars();
+    v.insert(
+        "ADMIN_KEYS".into(),
+        serde_json::json!({"version":1,"keys":[{
+            "keyId":"operator", "alg":"ed25519", "publicKey":"22".repeat(32),
+            "roles":["audit"]
+        }]})
+        .to_string(),
+    );
+    let mut cfg = check(&v).unwrap();
+    assert!(cfg.validate().is_ok());
+    cfg.audience = "https://another.example".into();
+    assert!(
+        cfg.validate().is_err(),
+        "admin authentication and purge intents must use the serving origin"
+    );
+}
+
+#[cfg(feature = "http-objects")]
+#[test]
+fn programmatic_admin_keys_cannot_repeat_url_token_keys() {
+    let mut v = vars();
+    v.insert("HTTP_OBJECTS".into(), "true".into());
+    v.insert(
+        "URL_TOKEN_KEYS".into(),
+        format!("active {}", "22".repeat(32)),
+    );
+    let mut cfg = check(&v).unwrap();
+    let public = cfg
+        .url_tokens
+        .as_ref()
+        .unwrap()
+        .keys()
+        .public_keys()
+        .next()
+        .unwrap();
+    cfg.admin = Some(
+        mkit_server::admin::Config::parse(
+            &cfg.audience,
+            &serde_json::json!({"version":1,"keys":[{
+                "keyId":"operator", "alg":"ed25519",
+                "publicKey":mkit_core::hash::to_hex(&public), "roles":["all"]
+            }]})
+            .to_string(),
+        )
+        .unwrap(),
+    );
+    assert!(
+        cfg.validate().is_err(),
+        "programmatic admin configuration must retain dedicated URL-token keys"
+    );
+}
+
+#[test]
+fn programmatic_remote_inspection_requires_scanner_retrieval() {
+    let mut cfg = check(&vars()).unwrap();
+    cfg.hooks = crate::hooks::config::HookVars::parse(&|name| {
+        (name == "HOOK_ROLES").then(|| "inspect".into())
+    })
+    .unwrap();
+    assert!(cfg.scanner_retrieval.is_none());
+    assert!(
+        cfg.validate().is_err(),
+        "a remote launch inspector must receive its private scanner retrieval configuration"
+    );
+}
+
 #[cfg(feature = "http-objects")]
 #[test]
 fn programmatic_http_mount_validates_before_early_responses() {
@@ -199,4 +278,20 @@ fn launch_inspection_uses_the_merged_retrieval_codec_and_separate_keys() {
         format!("active scanner {}", "11".repeat(32)),
     );
     assert!(check(&v).unwrap_err().0.contains("distinct"));
+}
+
+#[test]
+fn configured_launch_cannot_run_with_a_free_runtime_plan() {
+    let cfg = check(&vars()).unwrap();
+    for plan in [None, Some("free"), Some("unknown")] {
+        assert!(cfg.validate_for_plan(plan).is_err(), "{plan:?}");
+    }
+    assert!(cfg.validate_for_plan(Some(" PaId ")).is_ok());
+    let baseline = WorkerConfig::from_vars(|name| match name {
+        "AUTH_AUDIENCE" => Some("https://vcs.example".into()),
+        "AUTH_REPOSITORY" => Some("repo".into()),
+        _ => None,
+    })
+    .unwrap();
+    assert!(baseline.validate_for_plan(Some("free")).is_ok());
 }

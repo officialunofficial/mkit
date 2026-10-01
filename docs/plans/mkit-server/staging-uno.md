@@ -64,7 +64,7 @@ Final alarm handlers and consistent configured fetch/DO entrypoints are 4.18's.
 | Serving packs and extracted objects | `STORAGE` / `mkit-vcs-objects-staging` | Private; no lifecycle deletion of `packs/` or `objects/`; extraction finalized by 4.10b |
 | Portable partition backups | `BACKUPS` / `mkit-vcs-backups-staging` | Private; existing template's 35-day lifecycle applies only to `backups/`; backups are not preservation |
 | Published ref snapshots | `PUBLISHED_SNAPSHOTS` / `mkit-vcs-published-staging` | Private; binding alone does not activate snapshots; inspected published sources finalized by 5.4 / 5.5a / 4.18 |
-| Preservation | Separate restricted staging bucket/keyspace; binding and resource name **pending 5.6a-2** | Never serving, dedup or delta input. Access only through audited ReadPreserved; explicit retention and legal holds |
+| Preservation | `PRESERVATION`; separate restricted staging bucket, resource name chosen by operator | Never serving, dedup or delta input. Access only through audited ReadPreserved after 5.6a-3; explicit retention and legal holds |
 
 Disable public bucket access. Optional jurisdiction must match across R2 and
 DOs and stay fixed; optional placement is recorded with the final config.
@@ -90,7 +90,7 @@ token does not replace mkit message authentication.
 | Admin | Dedicated public admin key list, §16.3 JSON with roles; private signing keys offline / HSM | `ADMIN_KEYS`; `audit` for ReadAuditLog, appropriate dedicated moderation/preservation roles for takedown/ReadPreserved. Never client bearer/write/hook authentication. No hold review or Reinstate mount |
 | Purge sink | CachePurge is signed with a deployment **hook** key under §7, to the sink's canonical audience; sink trusts its configured public key list | Signed HTTPS `cache-purge` hook required when takedown is enabled. Isolated binding alone cannot satisfy that opt-in. No new purge-signature domain or admin key reuse. Manual PurgeCache is **5.6a**, asynchronous with purge id and audited completion |
 | URL tokens | Dedicated `URL_TOKEN_KEYS` secret and optional `URL_TOKEN_TTL`; existing HTTP feature grammar | Separate active/retained keys; HTTP serving requires `HTTP_OBJECTS=true` and an `http-objects` build. Keys alone leave routes off. 4.18 activates |
-| Preservation signing | Explicit preservation retention, dedicated §15 receipt-and-notice signing key and published §15.5 key list | Required by §14.7 even for lean takedown; exact bindings/config **pending 5.6a-2 / 4.18**. This requirement does not enable storage receipts or notices |
+| Preservation signing | Dedicated `PRESERVATION` bucket, explicit positive `PRESERVATION_RETENTION_MS`, secret `RECEIPT_NOTICE_KEY` and published `RECEIPT_KEYS` | Required by §14.7 even for lean takedown; merged 5.6a-2 core is wired in 4.18. Operator endpoints wait for 5.6a-3. This requirement does not enable storage receipts or notices |
 
 Use [SPEC-SERVER §§7, 14.7 and 16](../../specs/SPEC-SERVER.md) and the final
 merged key matrix as authority. Missing admin/preservation contracts
@@ -154,8 +154,9 @@ authority, ticket, hook and preservation keys have distinct roles and cannot
 be substituted. See the [app grammar](../../../apps/vcs-worker/README.md#paid-uno-launch-profile-wp-418--r-194).
 
 Extraction (4.10b-2 / #1244) and retrieval (R-193 / #1243) are merged
-and receive release wiring in 4.18. Phase 1 still refuses opted-in takedown
-until verified preservation (5.6a-2), with a prerequisite-specific diagnostic.
+and receive release wiring in 4.18. Preservation core (5.6a-2 / #1249) is
+configured without the old startup refusal; operator endpoint exposure waits
+for 5.6a-3. The Worker zstd decoder stays off until R-203 merges.
 The [local launch harness](../../../scripts/vcs-worker-launch.sh) records exact
 SHAs and isolated runtime logs. Phase 2 is required before activation evidence
 can pass. [Evidence slots](launch-evidence.md) remain unrun until executed;

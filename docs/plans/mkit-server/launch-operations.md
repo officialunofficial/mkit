@@ -162,8 +162,9 @@ explicit namespace list. Do not change the policy to conceal unresolved work.
 Admin/takedown activation requires `ADMIN_KEYS`, preservation storage,
 explicit retention, dedicated signing key and published public-key list, and
 signed HTTPS `cache-purge`. A service binding does not replace that purge
-channel requirement. The supported Worker subset is `Takedown`,
+channel requirement. The final configured Worker subset after 5.6a-3 is `Takedown`,
 `GetTakedown`, `ListTakedowns`, `ReadPreserved`, `SetLegalHold`, `PurgeCache`
-and `ReadAuditLog`; `Reinstate` and hold review remain unavailable.
+and `ReadAuditLog`; `Reinstate` and hold review remain unavailable. Configured
+preservation core is wired; takedown/catalog endpoint exposure waits for 5.6a-3.
 Phase 1 prerequisite refusals are checkpoint evidence only. User staging
 operations require the completed phase 2 matrix and separate authorization.

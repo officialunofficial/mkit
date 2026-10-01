@@ -4,12 +4,15 @@ import launch from '__RELEASE_MODULE__';
 export * from '__RELEASE_MODULE__';
 export default {
   async fetch(request, env, context) {
+    // worker-build exports a WorkerEntrypoint class whose fetch is an instance
+    // method. Forward the real invocation context and bindings to that instance.
+    const entrypoint = new launch(context, env);
     const mode = request.headers.get('x-launch-read-cancel');
-    if (!mode) return launch.fetch(request, env, context);
+    if (!mode) return entrypoint.fetch(request);
     if (!['before', 'after'].includes(mode)) return new Response(null, {status: 400});
     const headers = new Headers(request.headers);
     headers.delete('x-launch-read-cancel');
-    const response = await launch.fetch(new Request(request, {headers}), env, context);
+    const response = await entrypoint.fetch(new Request(request, {headers}));
     if (response.status !== 200 || !response.body) return response;
     const reader = response.body.getReader();
     let generated = 0;

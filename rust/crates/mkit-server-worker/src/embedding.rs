@@ -181,7 +181,12 @@ mod tests {
         );
         cfg.ref_policy = None;
         cfg.takedown_denial = true;
-        assert!(cfg.validate().unwrap_err().0.contains("WP-5.6a-3"));
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .0
+                .contains("complete preservation")
+        );
     }
 
     #[test]
@@ -240,14 +245,14 @@ mod tests {
                 .contains("PRESERVATION_RETENTION_MS")
         );
         let receipt =
-            mkit_server::hooks::HookSigner::new("receipt", zeroize::Zeroizing::new([17; 32]))
+            mkit_server::hooks::HookSigner::new("receipt", zeroize::Zeroizing::new([41; 32]))
                 .unwrap()
                 .public_key();
         v.insert("PRESERVATION_RETENTION_MS".into(), "60000".into());
         assert!(parse(&v).unwrap_err().0.contains("RECEIPT_NOTICE_KEY"));
         v.insert(
             "RECEIPT_NOTICE_KEY".into(),
-            mkit_core::hash::to_hex(&[17; 32]),
+            mkit_core::hash::to_hex(&[41; 32]),
         );
         assert!(parse(&v).unwrap_err().0.contains("RECEIPT_KEYS"));
         v.insert(
@@ -258,7 +263,18 @@ mod tests {
             }]})
             .to_string(),
         );
-        assert!(parse(&v).unwrap_err().0.contains("WP-5.6a-3"));
+        assert!(
+            parse(&v).is_ok(),
+            "custom sink with complete preservation must parse"
+        );
+        let mut cfg = parse(&v).unwrap();
+        cfg.takedown_denial = false;
+        cfg.launch.as_mut().unwrap().takedown = false;
+        cfg.takedown.as_mut().unwrap().retention_ms = 0;
+        assert!(
+            cfg.validate().is_err(),
+            "configured preservation requires positive retention even when denial is disabled"
+        );
         v.insert("PRESERVATION_RETENTION_MS".into(), "0".into());
         assert!(
             parse(&v)

@@ -64,8 +64,10 @@ Refreshed phase-1 source: `fbefda7964e82a010dee68f428d47c121e79b8fa`, based on
 recheck now use their merged implementations. Only preservation remains a
 startup prerequisite refusal. Refreshed component checks are recorded below.
 
-The user has authorized phase 2 for the available prerequisites. Preservation
-and its admin/takedown integration remain blocked until 5.6a-2 merges. Phase 2 includes
+At this historical checkpoint the user had authorized phase 2 for available
+prerequisites while preservation awaited 5.6a-2. See the
+[phase 2 checkpoint](launch-phase-2-checkpoint.md) for current preservation
+wiring and the remaining 5.6a-3 endpoint gate. Phase 2 includes
 preservation/admin runtime integration, both embedding addenda, complete native
 and actual opted-in release Worker probes, final full gates and fresh reviews,
 then an open PR into feat/mkit-server. External review, Cloudflare staging,

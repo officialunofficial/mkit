@@ -91,8 +91,8 @@
       "id": "B4.takedown",
       "contract": "Acceptance globally denies before success; verified private preservation, retention/legal hold, late holders and unresolved requests; any reports discovery incomplete",
       "native": "takedown::tests; pipeline::tests::http_objects::takedown_denial",
-      "worker": "admin::tests; takedown prerequisite refusal",
-      "phase2": "WP-5.6a-2 required: actual release preservation and all read/reuse denial paths under allowlist and any"
+      "worker": "admin::tests; configured preservation with gated takedown endpoints",
+      "phase2": "WP-5.6a-2 core merged; WP-5.6a-3 catalog required: actual release preservation and all read/reuse denial paths under allowlist and any"
     },
     {
       "id": "B4.admin",

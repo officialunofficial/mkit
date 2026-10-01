@@ -171,7 +171,7 @@ struct Frontier {
     work: VecDeque<(Hash, Kind)>,
     /// A reference was not queued because of `cap`, or an object was skipped
     /// because of the decode budget: the walk is incomplete.
-    incomplete: bool,
+    incomplete: Option<Miss>,
 }
 
 impl Frontier {
@@ -180,7 +180,7 @@ impl Frontier {
             return;
         }
         if self.seen.len() >= self.cap {
-            self.incomplete = true;
+            self.incomplete = Some(Miss::Capped);
             return;
         }
         self.seen.insert(id);
@@ -214,10 +214,9 @@ impl Frontier {
 
 /// Queue the references of `object`; whether `target` is among them. The
 /// comparison happens for every reference, queued or not.
-fn expand(object: &Object, target: Hash, frontier: &mut Frontier) -> bool {
-    let mut found = false;
+fn expand(object: &Object, frontier: &mut Frontier, mut reached: impl FnMut(Hash)) {
     let mut visit = |child: Hash, kind: Option<Kind>| {
-        found |= child == target;
+        reached(child);
         if let Some(kind) = kind {
             frontier.push(child, kind);
         }
@@ -253,7 +252,6 @@ fn expand(object: &Object, target: Hash, frontier: &mut Frontier) -> bool {
         ),
         Object::Blob(_) | Object::Delta(_) => {}
     }
-    found
 }
 
 /// Search the published `tips` for `target`, queueing at most
@@ -265,27 +263,51 @@ pub(crate) async fn walk<B: BlobStore, N: NamespaceStore>(
     target: Hash,
     budget: &mut Budget,
 ) -> Result<Reach, Miss> {
+    let targets = BTreeSet::from([target]);
+    let (reached, incomplete) = walk_many(env, takedown, tips, &targets, budget).await?;
+    Ok(if reached.contains(&target) {
+        Reach::Reachable
+    } else if incomplete == Some(Miss::Capped) {
+        Reach::Capped
+    } else {
+        Reach::Unreachable
+    })
+}
+
+/// One walk for a batch. `Env::no_reads` forbids loading selected objects, including
+/// as ancestors; unresolved descendants then report an incomplete proof.
+/// The residual miss distinguishes a budget cap from blocked ancestry.
+pub(crate) async fn walk_many<B: BlobStore, N: NamespaceStore>(
+    env: &Env<'_, B, N>,
+    takedown: &dyn TakedownGate,
+    tips: &[Hash],
+    targets: &BTreeSet<Hash>,
+    budget: &mut Budget,
+) -> Result<(BTreeSet<Hash>, Option<Miss>), Miss> {
+    let mut reached = BTreeSet::new();
     let mut frontier = Frontier {
         cap: env.cfg.max_walk_objects,
         seen: BTreeSet::new(),
         nodes: VecDeque::new(),
         work: VecDeque::new(),
-        incomplete: false,
+        incomplete: None,
+    };
+    let mut record = |id| {
+        if targets.contains(&id) {
+            reached.insert(id);
+        }
     };
     for tip in tips {
-        if *tip == target {
-            return Ok(Reach::Reachable);
-        }
+        record(*tip);
         frontier.push(*tip, Kind::Node);
     }
     loop {
+        if reached.len() == targets.len() {
+            return Ok((reached, None));
+        }
         let batch = frontier.batch();
         if batch.is_empty() {
-            return Ok(if frontier.incomplete {
-                Reach::Capped
-            } else {
-                Reach::Unreachable
-            });
+            return Ok((reached, frontier.incomplete));
         }
         let ids: Vec<Hash> = batch.iter().map(|(id, _)| *id).collect();
         let kinds: BTreeMap<Hash, Kind> = batch.into_iter().collect();
@@ -300,22 +322,31 @@ pub(crate) async fn walk<B: BlobStore, N: NamespaceStore>(
             if kinds[&id] == Kind::File && !manifest_sized(located.value.decoded_size) {
                 continue;
             }
+            if env.no_reads.contains(&id) {
+                frontier.incomplete = Some(Miss::Capped);
+                continue;
+            }
             let bytes = match resolve::load(env, id, located, budget).await {
                 Ok(bytes) => bytes,
-                // The budget cannot afford this one object: skip it, keep
-                // walking, and never claim the target unreachable.
                 Err(Miss::Capped) => {
-                    frontier.incomplete = true;
+                    frontier.incomplete = Some(Miss::Capped);
                     continue;
+                }
+                Err(Miss::NotFound) => {
+                    frontier.incomplete = Some(Miss::NotFound);
+                    return Ok((reached, frontier.incomplete));
                 }
                 Err(other) => return Err(other),
             };
-            let Ok(object) = mkit_core::serialize::deserialize(&bytes) else {
-                tracing::warn!("member object failed to decode during a reachability walk");
-                return Err(Miss::Unavailable);
-            };
-            if expand(&object, target, &mut frontier) {
-                return Ok(Reach::Reachable);
+            let object =
+                mkit_core::serialize::deserialize(&bytes).map_err(|_| Miss::Unavailable)?;
+            expand(&object, &mut frontier, |child| {
+                if targets.contains(&child) {
+                    reached.insert(child);
+                }
+            });
+            if reached.len() == targets.len() {
+                return Ok((reached, None));
             }
         }
     }

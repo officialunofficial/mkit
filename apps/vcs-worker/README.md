@@ -416,8 +416,8 @@ configuration before activation:
 | Takedown | `TAKEDOWN_ENABLED=true`, admin keys, separate preservation bucket, explicit retention, dedicated preservation signer and published key list under §14.7, plus signed HTTPS `cache-purge`. Partial configuration is refused |
 
 Extraction (WP-4.10b-2 / #1244) and scanner retrieval (R-193 / #1243) are
-merged; this activation wires their release paths. Phase 1 keeps takedown
-fail-closed until the restricted admin catalog (WP-5.6a-3) lands. Phase 2 requires
+merged; this activation wires their release paths. Configured preservation
+core is wired; admin endpoint exposure waits for WP-5.6a-3. Phase 2 requires
 the complete native and actual release Worker matrix before opening the PR.
 See the [conformance plan](../../docs/plans/mkit-server/launch-conformance.md)
 and [itemized evidence](../../docs/plans/mkit-server/launch-evidence.md).
@@ -438,9 +438,10 @@ HTTP `?proof=1`
 remains unsupported on the Worker, which advertises no proof capability;
 the native reference server advertises and serves proofs.
 
-With admin and takedown configured, the Worker admin subset is `Takedown`,
+After 5.6a-3 merges, the configured Worker admin subset will be `Takedown`,
 `GetTakedown`, `ListTakedowns`, `ReadPreserved`, `SetLegalHold`, `PurgeCache`
-and `ReadAuditLog`. Hold review operations and `Reinstate` remain unexposed.
+and `ReadAuditLog`. Until then only the existing audit and configured purge
+endpoints are exposed. Hold review operations and `Reinstate` remain unexposed.
 The launch creates no inspection holds or publication Events; async inspection,
 hold review, Events and Worker proofs are post-launch work (R-200).
 
@@ -460,6 +461,7 @@ is at most six responses, with 512 KiB pages (up to 3 MiB raw data, within the
 ## Embedding API (supported, 0.x)
 
 The supported wasm embedding entrypoints below share the production adapter.
+Merged WP-4.16c also provides `adapter::embedding_pipeline` and `Pipeline::object_reader` for bounded in-process canonical prefetch.
 Breaking 0.x changes are called out in CHANGELOG. Runtime acceptance is
 recorded separately in the launch evidence matrix.
 The crate stays `publish = false`; consume it as a git dependency pinned to
@@ -485,7 +487,7 @@ retries. Keep fetch and DO factories on the same configuration. For a takedown
 environment, use `WorkerConfig::from_env_with_purge(env, PurgeHooks::new(sink,
 local))` so the custom sink participates in startup validation and replaces the
 signed HTTPS `cache-purge` requirement. Admin keys and complete preservation
-remain mandatory; preservation activation still refuses until WP-5.6a-3.
+remain mandatory. Preservation core is wired; admin endpoint exposure waits for WP-5.6a-3.
 Custom purge delivery requires `WORKERS_PLAN=paid`; Free alarm calls are
 already reserved. The custom sink must acknowledge all selected global cache variants; local
 invalidation must charge the provided budget and return a resumable checkpoint.

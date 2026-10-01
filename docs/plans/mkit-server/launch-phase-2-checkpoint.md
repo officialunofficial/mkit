@@ -30,7 +30,7 @@ integration and wire rerun passed all 22 tests.
   The size table remains unmeasured. The current platform limit is linked
   to official Cloudflare documentation; gzip is informational.
 
-Preservation startup refusal remains. Complete preservation/admin/takedown
+Preservation core is wired; admin catalog exposure waits for 5.6a-3. Complete preservation/admin/takedown
 integration, the integrated native/release runtime matrix, measured wasm/bundle
 sizes, final full gates and two independent final reviews remain required.
 
@@ -150,3 +150,41 @@ takedown refusal. Integration uses the actual `PRESERVATION` binding, explicit
 publication grammar; obsolete phase-1 placeholder names are removed. Receipt
 key publication remains required with takedown, while launch publication
 Events remain excluded. The merged core handlers retain their activation gate.
+
+## Latest integration steering and regression evidence
+
+Merged 4.16c object reader #1250 at
+`1edfc3065e3e22c869c8b3913f2ab77fb97ef272`; the embedding README now mentions
+its bounded in-process prefetch API. The latest user ruling removes the
+preservation startup refusal and wires configured preservation core work while
+keeping admin catalog exposure unavailable until 5.6a-3. The decoder remains
+off until R-203.
+
+The first real release build attempts at source
+`21ffd9d4b48c26960ccb30b71ba71154e1084def` failed before Wrangler startup: the
+preservation merge omitted a wasm-only `enabled` local in the admin mount.
+The compile diagnostic is retained in `launch-runtime-xrb77bbi/minimal-build.log`
+and `embedding-example/runtime-oubmmrgn/build.log`. It is a branch integration
+defect, not a baseline exception or runtime PASS. The fix is followed by wasm
+clippy and rebuilt release runs.
+
+Independent pre-review found programmatic startup checks could be bypassed.
+Three focused regressions failed on the pre-fix source: an HTTP launch audience,
+admin/URL-token key reuse, and remote inspection without scanner retrieval.
+`phase2-programmatic-validation-red.log` records 0 passed / 3 failed. A separate
+runtime-plan regression records 0 passed / 1 failed in
+`phase2-runtime-plan-red.log`: a parsed Paid launch configuration was accepted
+with a Free runtime. Fixes revalidate programmatic policy/key roles and actual
+runtime plan/bindings before requests or DO construction. Admin operations use
+one retained request counter through guards and engine calls.
+
+The merged 55-test focused run passed 54 and failed one fixture that reused the
+ticket seed for the new receipt role. Configuration correctly refused it; the
+fixture now uses a distinct receipt seed. The expanded focused rerun passed
+59/59 (`phase2-programmatic-validation-green.log`), covering launch, embedding,
+admin configuration and conformance inventory checks.
+
+The paid-read wrapper class-entrypoint regression was reproduced with a mock
+class export before correction and then passed ordinary/zero/partial cancellation
+paths. This checks fixture interface only, not actual workerd behavior. The
+root-owned release runs still must execute before any corresponding matrix PASS.

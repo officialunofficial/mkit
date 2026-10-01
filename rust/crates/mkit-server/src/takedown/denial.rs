@@ -289,7 +289,7 @@ fn unavailable() -> ServerError {
 const MAX_PROOF_CONTEXT_BYTES: usize = 4 * 1024 * 1024;
 struct Target<'a> {
     ids: &'a BTreeSet<Hash>,
-    manifests: Vec<StoredAction>,
+    manifests: &'a [StoredAction],
     packs: Vec<Hash>,
 }
 impl Target<'_> {
@@ -302,7 +302,7 @@ impl Target<'_> {
             return Ok(true);
         }
         let requested: BTreeSet<Hash> = ids.iter().copied().collect();
-        for manifest in &self.manifests {
+        for manifest in self.manifests {
             if chunks_intersect(store, &manifest.page_owner, manifest, &requested).await? {
                 return Ok(true);
             }
@@ -465,77 +465,88 @@ async fn prove_shard<S: NamespaceStore>(
                 .map_err(|_| unavailable())?,
         };
         for (key, raw) in scan.entries {
-            let body = key
-                .as_bytes()
-                .strip_prefix(INDEX_PREFIX)
-                .ok_or_else(unavailable)?;
-            if body.len() != 32 && !(body.len() == 33 && body[32] == 0) {
-                return Err(unavailable());
-            }
-            let object: Hash = body[..32].try_into().map_err(|_| unavailable())?;
-            if target.intersects(store, &[object]).await? {
-                return Err(blocked());
-            }
-            if body.len() == 33 {
-                crate::store::codec::decode_block_entry(&raw).map_err(|_| unavailable())?;
-                if held(store, shards, repo, &object).await? {
-                    let (_, row) = super::inventory::member(store, shards, repo, &object)
-                        .await
-                        .map_err(|_| unavailable())?;
-                    if row.kind == 5 && target.chunks(store, &row.references).await? {
-                        return Err(blocked());
-                    }
-                }
-                continue;
-            }
-            for action in decode_actions(Some(&raw)).map_err(|_| unavailable())? {
-                if let Some(pack) = action.pack_scope {
-                    if super::inventory::seal(store, &pack)
-                        .await
-                        .map_err(|_| unavailable())?
-                        != action.pack_digest.ok_or_else(unavailable)?
-                    {
-                        return Err(unavailable());
-                    }
-                    let hit = super::inventory::visit(store, &pack, false, |id, row| async move {
-                        if target
-                            .intersects(store, &[id])
-                            .await
-                            .map_err(|_| corrupt())?
-                            && super::inventory::is_file(store, &pack, &id).await?
-                        {
-                            return Ok(true);
-                        }
-                        if row.kind == 5
-                            && held(store, shards, repo, &id)
-                                .await
-                                .map_err(|_| corrupt())?
-                            && target
-                                .chunks(store, &row.references)
-                                .await
-                                .map_err(|_| corrupt())?
-                        {
-                            return Ok(true);
-                        }
-                        Ok(false)
-                    })
-                    .await
-                    .map_err(|_| unavailable())?;
-                    if hit {
-                        return Err(blocked());
-                    }
-                } else if action.chunk_count > 0
-                    && held(store, shards, repo, &object).await?
-                    && target.chunks(store, &action).await?
-                {
-                    return Err(blocked());
-                }
-            }
+            Box::pin(check_descriptor(store, shards, repo, target, &key, &raw)).await?;
         }
         match scan.next {
             Some(next) if after.as_ref() != Some(&next) => after = Some(next),
             Some(_) => return Err(unavailable()),
             None => break,
+        }
+    }
+    Ok(())
+}
+async fn check_descriptor<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    target: &Target<'_>,
+    key: &Key,
+    raw: &Value,
+) -> Result<(), ServerError> {
+    let body = key
+        .as_bytes()
+        .strip_prefix(INDEX_PREFIX)
+        .ok_or_else(unavailable)?;
+    if body.len() != 32 && !(body.len() == 33 && body[32] == 0) {
+        return Err(unavailable());
+    }
+    let object: Hash = body[..32].try_into().map_err(|_| unavailable())?;
+    if target.intersects(store, &[object]).await? {
+        return Err(blocked());
+    }
+    if body.len() == 33 {
+        crate::store::codec::decode_block_entry(raw).map_err(|_| unavailable())?;
+        if held(store, shards, repo, &object).await? {
+            let (_, row) = super::inventory::member(store, shards, repo, &object)
+                .await
+                .map_err(|_| unavailable())?;
+            if row.kind == 5 && target.chunks(store, &row.references).await? {
+                return Err(blocked());
+            }
+        }
+        return Ok(());
+    }
+    for action in decode_actions(Some(raw)).map_err(|_| unavailable())? {
+        if let Some(pack) = action.pack_scope {
+            if super::inventory::seal(store, &pack)
+                .await
+                .map_err(|_| unavailable())?
+                != action.pack_digest.ok_or_else(unavailable)?
+            {
+                return Err(unavailable());
+            }
+            let hit = super::inventory::visit(store, &pack, false, |id, row| async move {
+                if target
+                    .intersects(store, &[id])
+                    .await
+                    .map_err(|_| corrupt())?
+                    && super::inventory::is_file(store, &pack, &id).await?
+                {
+                    return Ok(true);
+                }
+                if row.kind == 5
+                    && held(store, shards, repo, &id)
+                        .await
+                        .map_err(|_| corrupt())?
+                    && target
+                        .chunks(store, &row.references)
+                        .await
+                        .map_err(|_| corrupt())?
+                {
+                    return Ok(true);
+                }
+                Ok(false)
+            })
+            .await
+            .map_err(|_| unavailable())?;
+            if hit {
+                return Err(blocked());
+            }
+        } else if action.chunk_count > 0
+            && held(store, shards, repo, &object).await?
+            && target.chunks(store, &action).await?
+        {
+            return Err(blocked());
         }
     }
     Ok(())
@@ -553,7 +564,7 @@ pub async fn require_repo_clear<S: NamespaceStore>(
         repo,
         &Target {
             ids,
-            manifests: Vec::new(),
+            manifests: &[],
             packs: Vec::new(),
         },
     )
@@ -579,7 +590,7 @@ pub async fn require_repo_clear_budgeted<S: NamespaceStore>(
         repo,
         &Target {
             ids,
-            manifests: Vec::new(),
+            manifests: &[],
             packs: packs.to_vec(),
         },
     )
@@ -594,31 +605,58 @@ pub async fn require_object_clear<S: NamespaceStore>(
     budget: &SliceBudget,
 ) -> Result<(), ServerError> {
     let remote = Budgeted::new(store, budget);
-    let mut ids = BTreeSet::from([*id]);
-    let mut manifests = Vec::new();
+    let context = object_context(&remote, shards, repo, id, cfg).await?;
+    prove(&remote, shards, repo, &context.target()).await
+}
+struct ObjectContext {
+    ids: BTreeSet<Hash>,
+    manifests: Vec<StoredAction>,
+}
+impl ObjectContext {
+    fn bytes(&self) -> usize {
+        let mut bytes = self.ids.len() * 128;
+        for m in &self.manifests {
+            bytes += std::mem::size_of::<StoredAction>()
+                + m.action.reason.capacity()
+                + m.pages.capacity() * std::mem::size_of::<ChunkPage>();
+        }
+        bytes
+    }
+    fn target(&self) -> Target<'_> {
+        Target {
+            ids: &self.ids,
+            manifests: &self.manifests,
+            packs: Vec::new(),
+        }
+    }
+}
+async fn object_context<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    id: &Hash,
+    cfg: &IndexedConfig,
+) -> Result<ObjectContext, ServerError> {
+    let mut context = ObjectContext {
+        ids: BTreeSet::from([*id]),
+        manifests: Vec::new(),
+    };
     let mut cursor = Some(*id);
     for _ in 0..=cfg.max_delta_chain_depth {
         let Some(id) = cursor else { break };
-        let (pack, row) = super::inventory::member(&remote, shards, repo, &id)
+        let (pack, row) = super::inventory::member(store, shards, repo, &id)
             .await
             .map_err(|_| unavailable())?;
-        ids.insert(pack);
+        context.ids.insert(pack);
         if row.kind == 5 {
-            let size = |m: &StoredAction| {
-                std::mem::size_of::<StoredAction>()
-                    + m.action.reason.capacity()
-                    + m.pages.capacity() * std::mem::size_of::<ChunkPage>()
-            };
-            if manifests.iter().map(size).sum::<usize>() + size(&row.references) + ids.len() * 128
-                > MAX_PROOF_CONTEXT_BYTES
-            {
+            context.manifests.push(row.references);
+            if context.bytes() > MAX_PROOF_CONTEXT_BYTES {
                 return Err(unavailable());
             }
-            manifests.push(row.references);
         }
         cursor = row.base;
         if let Some(base) = cursor
-            && !ids.insert(base)
+            && !context.ids.insert(base)
         {
             return Err(unavailable());
         }
@@ -626,18 +664,79 @@ pub async fn require_object_clear<S: NamespaceStore>(
     if cursor.is_some() {
         return Err(unavailable());
     }
-    prove(
-        &remote,
-        shards,
-        repo,
-        &Target {
-            ids: &ids,
-            manifests,
-            packs: Vec::new(),
-        },
-    )
-    .await
+    Ok(context)
 }
+#[cfg(feature = "http-objects")]
+pub(crate) async fn object_denials<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    requested: &BTreeSet<Hash>,
+    cfg: &IndexedConfig,
+) -> Result<BTreeSet<Hash>, ServerError> {
+    let mut contexts = Vec::new();
+    let mut bytes = 0;
+    for id in requested {
+        let context = object_context(store, shards, repo, id, cfg).await?;
+        bytes += context.bytes();
+        if bytes > MAX_PROOF_CONTEXT_BYTES {
+            return Err(unavailable());
+        }
+        contexts.push((*id, context));
+    }
+    let start = Key::new(INDEX_PREFIX.to_vec());
+    let mut end = INDEX_PREFIX.to_vec();
+    *end.last_mut().ok_or_else(unavailable)? = 1;
+    let end = Key::new(end);
+    let mut denied = BTreeSet::new();
+    for prefix in 0..crate::store::INDEX_FANOUT {
+        let mut after = None;
+        loop {
+            let page = store
+                .scan(
+                    &Partition::ContentShard(prefix),
+                    &start,
+                    &end,
+                    after.as_ref(),
+                    1,
+                )
+                .await
+                .map_err(|_| unavailable())?;
+            for (key, raw) in page.entries {
+                for (id, context) in &contexts {
+                    if denied.contains(id) {
+                        continue;
+                    }
+                    if let Err(error) =
+                        check_descriptor(store, shards, repo, &context.target(), &key, &raw).await
+                    {
+                        if error.public_message() != "object blocked" {
+                            return Err(error);
+                        }
+                        denied.insert(*id);
+                    }
+                }
+            }
+            match page.next {
+                Some(next) if after.as_ref() != Some(&next) => after = Some(next),
+                Some(_) => return Err(unavailable()),
+                None => break,
+            }
+        }
+    }
+    for (id, context) in contexts {
+        for dependency in &context.ids {
+            if self::denied(store, dependency)
+                .await
+                .map_err(|_| unavailable())?
+            {
+                denied.insert(id);
+            }
+        }
+    }
+    Ok(denied)
+}
+
 pub async fn require_pack_clear<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
@@ -680,7 +779,7 @@ async fn require_pack_clear_with_concurrency<S: NamespaceStore>(
     let end = Key::new(end);
     let target = Target {
         ids: &BTreeSet::from([*pack]),
-        manifests: Vec::new(),
+        manifests: &[],
         packs: vec![*pack],
     };
     prove_shards(&remote, shards, repo, &target, &start, &end, concurrency).await?;
@@ -794,7 +893,7 @@ mod tests {
             &repo("probe"),
             &Target {
                 ids,
-                manifests: Vec::new(),
+                manifests: &[],
                 packs: Vec::new(),
             },
             &Key::new(INDEX_PREFIX.to_vec()),

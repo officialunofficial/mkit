@@ -108,7 +108,7 @@ checks do not certify the integrated launch matrix.
    matrix without old native flake exceptions and measure the full handler mix
    on the integrated release Worker. Component success does not fill these slots.
 
-3. **Release extraction/retrieval/preservation accounting awaits dependencies.**
+3. **Release extraction/retrieval/preservation accounting requires runtime evidence.**
    WP-4.10b-2 (#1244) now supplies the real environment handler's
    `R2Extraction` driver (`worker/src/verify.rs::register_from_env_budgeted`).
    It reserves 8 begin, 3 part, 7 completion and 2 abort calls from the same
@@ -124,8 +124,8 @@ checks do not certify the integrated launch matrix.
    regressions. Nested descriptor proofs are serial while other prefetched
    responses remain pending. Release retrieval config and mount still require
    WP-4.18's profile activation. 5.6a-2 preservation core #1249 is merged. Its 700-call acquisition
-   allowance shares the existing physical-alarm counter; the launch keeps
-   activation refused until the 5.6a-3 admin catalog lands.
+   allowance shares the existing physical-alarm counter. Configured core work
+   is wired; only endpoint exposure waits for the 5.6a-3 admin catalog.
    Full R2/body-lifetime dispatcher evidence remains phase 2 work.
 
 ## Required retained regressions and integrated runs

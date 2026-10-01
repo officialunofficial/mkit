@@ -64,3 +64,6 @@ pub use sqlite::{RusqliteConn, SqliteKvStore};
 mod http_proofs;
 #[cfg(feature = "http-objects")]
 pub use http_proofs::NativeProofs;
+
+#[cfg(feature = "http-objects")]
+pub use mkit_server::pipeline::{ObjectReader, ReaderView};
