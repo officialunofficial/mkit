@@ -144,9 +144,16 @@ remain outside production artifact routes.
 
 ## R-203 addition
 
-After bounded ruzstd (WP-zstd-bound) merges, enable `mkit-core/pack-ruzstd` in
-the launch build. Execute `B4.native-push-zstd`: run native `mkit push` against the
+Bounded ruzstd (WP-zstd-bound) merged in #1252; the launch build enables
+`mkit-core/pack-ruzstd`. Execute `B4.native-push-zstd`: run native `mkit push` against the
 actual release Worker, clone from it and compare canonical refs/content. The
 native encoder must actually emit zstd; a hand-built raw-pack fixture does
 not cover this case. Include zstd decode CPU and resident memory in the budget
-audit. Until the prerequisite merges, leave the decoder off and this row UNRUN.
+audit. The default Worker build keeps its decoder off. This row remains UNRUN.
+
+`scripts/vcs-worker-launch-push-runtime.sh` builds the optimized launch Worker
+and a separately pinned native CLI with #1254 CA-file support, uses Wrangler's
+local HTTPS listener and a scratch CA through `MKIT_SSL_CA_FILE`, and checks
+an initial compressed push/clone. It requires real zstd frames in local R2
+source packs and exact cloned refs/content. It does not measure CPU, heap or
+physical calls, and does not replace the other launch intersections.

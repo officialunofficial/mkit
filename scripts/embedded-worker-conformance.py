@@ -135,7 +135,8 @@ def main():
             common = [str(runner), "wire", "--base-url", base, "--auth", "auth-v2", "--audience", origin,
                       "--repository", "default", "--random-signer", "--milestone", "M1", "--sharding", "single",
                       "--features", "multipart,tickets", "--list-refs", "0"]
-            for case in ["multipart.three_parts", "auth.v2_wrong_audience"]:
+            for case in ["multipart.three_parts", "auth.v2_wrong_audience",
+                         "tickets.advance_marker_then_upload"]:
                 result = subprocess.run([*common, "--filter", case], cwd=ROOT / "rust", env=env,
                                         capture_output=True, text=True, timeout=180)
                 (work / f"{case}.tap").write_text(result.stdout + result.stderr)
@@ -158,7 +159,7 @@ def main():
                 if calls["outcomes"]:
                     break
                 if time.monotonic() >= deadline:
-                    raise RuntimeError("custom DO outcome sink did not deliver after CompleteUpload")
+                    raise RuntimeError("custom DO outcome sink did not deliver after ticketed AdvanceRefs committed")
                 time.sleep(0.25)
             assert calls["admissions"], "custom binding admission was not reached"
             assert len(before["admissions"]) == len(calls["admissions"]), "bad audience reached admission"
@@ -177,7 +178,8 @@ def main():
                         "wasm_sha256": artifacts["build/index_bg.wasm"]["sha256"],
                         "js_sha256": artifacts["build/index.js"]["sha256"],
                         "shim_sha256": artifacts["build/worker/shim.mjs"]["sha256"],
-                        "cases": ["multipart.three_parts", "auth.v2_wrong_audience", "internal_audience_rejected",
+                        "cases": ["multipart.three_parts", "auth.v2_wrong_audience",
+                                  "tickets.advance_marker_then_upload", "internal_audience_rejected",
                                   "custom_outcome_sink"]}
             (work / "evidence.json").write_text(json.dumps(evidence, indent=2))
             print("PASS custom binding hooks, DO outcome sink and public audience isolation")

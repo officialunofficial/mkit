@@ -42,8 +42,9 @@ scripts/embedded-worker-conformance.sh --port 8795
 
 The script builds the release example, starts both Workers on local pinned
 Wrangler, uploads three parts (8 MiB, 8 MiB, then a final smaller part), completes
-the upload, verifies pack visibility and observes the committed outcome through
-the custom sink. It also verifies that signatures for the internal request's
+the upload and verifies pack visibility. A separate ticketed upload and
+`AdvanceRefs` commit consumes its ticket, producing the committed outcome
+observed through the custom sink. It also verifies that signatures for the internal request's
 origin fail before admission. Logs and disposable local state stay in the
 private TMPDIR. `--no-build` reuses binaries from the same worktree. Nothing is
 deployed and no cloud account is contacted. The fixed development MAC key in

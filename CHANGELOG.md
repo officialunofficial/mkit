@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   synchronous inspection and private scanner retrieval. Native serves proofs;
   Worker proofs stay unsupported. Leases/GC remain off with permanent retention.
   Complete preservation configuration activates its core and restricted admin
-  catalog; Worker zstd decoding waits for R-203.
+  catalog; the launch build enables R-203’s bounded pure-Rust zstd decoder.
   Worker HTTP mounts retain read settlement in the fetch context; ticket and
   implicit packmap checks use at most six simultaneous backend responses.
   Added local conformance/evidence skeleton; complete runtime evidence and

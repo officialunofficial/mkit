@@ -43,7 +43,7 @@ lto = true
 # `x-mkit-test-fault`/clock-skew directives, the store faults,
 # `GET /__mkit_test/stats`, `TEST_QUOTA_*`); omitted from production builds.
 # Paid launch code is compiled explicitly; routes remain configuration opt-ins.
-launch = ["http-objects", "published-view", "signed-http-hooks"]
+launch = ["http-objects", "published-view", "signed-http-hooks", "mkit-server-worker/pack-ruzstd"]
 http-objects = ["mkit-server-worker/http-objects"]
 published-view = ["mkit-server-worker/published-view"]
 signed-http-hooks = ["mkit-server-worker/signed-http-hooks"]

@@ -156,7 +156,7 @@ be substituted. See the [app grammar](../../../apps/vcs-worker/README.md#paid-un
 Extraction (4.10b-2 / #1244) and retrieval (R-193 / #1243) are merged
 and receive release wiring in 4.18. Preservation core (5.6a-2 / #1249) is
 configured without the old startup refusal; restricted operator endpoints
-use 5.6a-3 / #1251. The Worker zstd decoder stays off until R-203 merges.
+use 5.6a-3 / #1251. The launch build enables R-203’s bounded pure-Rust zstd decoder; the default build keeps it off.
 The [local launch harness](../../../scripts/vcs-worker-launch.sh) records exact
 SHAs and isolated runtime logs. Phase 2 is required before activation evidence
 can pass. [Evidence slots](launch-evidence.md) remain unrun until executed;

@@ -552,3 +552,8 @@ sets a 64 MiB uncompressed bundle limit on Free and Paid plans. The bundle
 includes the wasm and JavaScript shim, so the table's wasm size alone is not
 full bundle acceptance. gzip is informational; there is no compressed-size
 limit. No deploy or cloud-account call is required for these local measurements.
+
+The explicit `launch` Cargo feature enables R-203’s bounded pure-Rust zstd
+decoder for compressed native pushes. The default build keeps decoding off.
+Native push → launch Worker → clone runtime evidence is recorded separately in
+the launch matrix.

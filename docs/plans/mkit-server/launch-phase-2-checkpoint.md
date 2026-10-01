@@ -234,3 +234,61 @@ and the 28-case inventory validator. These do not replace final workspace gates.
 | `phase2-admin-activation-final-tests.log` | `a93639a6a81f40024f28401416a6f8cc1879f711962ef4873a6a2c84ec105e56` |
 | `phase2-admin-activation-final-host-clippy.log` | `9725bd4965783e5589355b689386850d3d91d508cb5cb9f846508a6e750a7955` |
 | `phase2-admin-activation-final-wasm-clippy.log` | `450ebead2af05f97c1005bc6e6839988a30864caee2886dbf4152c7a9ab4ea1b` |
+
+## Bounded zstd merge and renewed conformance checkpoint
+
+Merged #1252 / R-203 and #1253 into `4db831f2`. Only adjacent CHANGELOG
+entries conflicted; both intents were retained. The app's explicit `launch`
+feature now enables `mkit-core/pack-ruzstd` through the Worker adapter.
+The default Worker graph keeps decoding off. Launch locked metadata selects
+the vendored bounded decoder; the app lock adds ruzstd and twox-hash.
+Strict Worker wasm32 clippy with HTTP, signed hooks, published view and
+pure-Rust decoding passes. This is compilation evidence, not a push PASS.
+
+The CA-file prerequisite is open in [#1254](https://github.com/officialunofficial/mkit/pull/1254),
+at `66f596cc5ce001d677bd784c67bcaa7ebcc7a7eb`. Its 1,540 CLI tests,
+131 transport tests, six CA CLI cases, 16 protocol cases, workspace clippy,
+scripts/security/wasm/docs checks and two independent reviews pass. It remains
+unmerged. A new local HTTPS compressed push/clone harness accepts that separate
+CLI pin and records exact artifacts; its runtime remains UNRUN.
+
+The embedding fixture now consumes a separate ticket through the existing
+`AdvanceRefs` conformance case before checking Committed. Completing the
+multipart staging upload alone does not create that terminal outcome.
+The fixture correction is source-only until its release rerun.
+
+Renewed timer/alarm checks run 163 cases: 159 PASS, four FAIL. All four fail
+again in isolation on unchanged base `841ff1105730b2bc29fbd2147c84e370096276f4`:
+
+- Native `relay::sqlite_full_source_relay_timer_reschedules_immediately_after_progress`.
+- Native `relay_capacity::sql_soft_limit_reserves_space_for_guarded_relay_timer_reschedule`.
+- Worker `quota_rollup::rollup_config_failure_retries_the_stored_timer`.
+- Worker `relay::relay_config_failure_retries_the_stored_timer`.
+
+These are deterministic base failures; neither native failure is classified as
+a timer flake or waived. The existing published-view fixture remains owned by
+the base conformance lane.
+
+A focused signed core probe reproduces another prerequisite gap: configured
+`Engine.with_operations(Work).with_purge(true)` accepts Takedown with HTTP 200
+and `complete=false`, but creates no automatic purge generation. Manual
+PurgeCache activation is separate. SPEC-SERVER §§14.3, 14.9 and 16.7 require
+takedown cache invalidation and shared purge. Source tracing finds no producer
+of `Trigger::Takedown` in this path. A complete repair must cover both signed
+after-commit and timer-15 recovery, enqueue after denial activation, and retain
+deduplication after timer 11 removes a delivered purge. Existing purge/audit
+rows can support this without a new tag, timer or protocol; no repair is
+implemented here pending the section-D ruling. The probe is retained in private
+scratch, not left as a failing test in the launch tree.
+
+Decoder scratch is additional to owned payloads. The new budget audit records
+R-203's 28 MiB working allowance and the scheduled driver's missing debit in
+its existing 48 MiB calculation. Actual overlapping allocations and CPU remain
+unmeasured; no total resident ceiling is claimed from source arithmetic.
+
+| Log (WP scratch) | SHA-256 |
+|---|---|
+| `phase2-r203-timer-tests.log` | `2b0643aa7cd6c3181492cd5b29fce93b3b7e43334114fd445fc0eb343b04210e` |
+| `base-control-r203/four-timer-base-tests.log` | `c564dcbf878ccf5420449a807c2c8826aefc20ae1d7e7d3371d2f86da4f5562f` |
+| `automatic-takedown-purge-red.log` | `7e96125e85a05c0d24a65f69b466c7c533aa0efff1e561eb9cedcf940f634ecf` |
+| `phase2-r203-worker-wasm-clippy.log` | `7a8186c59ff0467732bd6d47c67b8432aeabf59d1afba26c7f219aa7b4a02e12` |

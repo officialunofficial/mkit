@@ -8,8 +8,8 @@ results after executing at the pinned candidate, using the
 only that component lane; it leaves per-case integrated slots UNRUN.
 Preservation core #1249 and the restricted admin catalog #1251 are merged.
 Configured operator endpoints are authorized; adapter integration and all
-operator runtime cases remain UNRUN. Native zstd push/clone awaits the
-R-203 bounded ruzstd prerequisite; the decoder stays off until it merges. The resolved #1246 header ruling
+operator runtime cases remain UNRUN. R-203 has merged and the launch build
+enables bounded ruzstd; native zstd push/clone remains UNRUN. The resolved #1246 header ruling
 adopts its extension allowlist and safe filenames; it records no runtime PASS.
 See [launch-runtime-coverage.md](launch-runtime-coverage.md) for current
 coverage boundaries and the concrete remaining release probes.
@@ -58,7 +58,8 @@ foundations to activation and no dependence on withdrawn R-196/R-197.
 | Physical alarm bounds and cold fairness repair | `e45def2fe1855a531d0149727bf6678fc8145c3c` | [#1247](https://github.com/officialunofficial/mkit/pull/1247) merged; integrated rerun UNRUN |
 | Deterministic native timer conformance | `12e4ce4998145a959c4fc400e02b6ad546812090` | [#1248](https://github.com/officialunofficial/mkit/pull/1248) merged; old timer flake exceptions removed |
 | 4.16c in-process object reader | `1edfc3065e3e22c869c8b3913f2ab77fb97ef272` | [#1250](https://github.com/officialunofficial/mkit/pull/1250) merged; embedding README documents the reader |
-| R-203 bounded ruzstd (WP-zstd-bound) | PENDING | Decoder stays off; enable pack-ruzstd in launch only after merge |
+| R-203 bounded ruzstd (WP-zstd-bound) | `841ff1105730b2bc29fbd2147c84e370096276f4` (#1252) | MERGED; launch-only decoder enabled; compressed push runtime UNRUN |
+| Native extra HTTPS CA prerequisite | `66f596cc5ce001d677bd784c67bcaa7ebcc7a7eb` | [#1254](https://github.com/officialunofficial/mkit/pull/1254) open; separate CLI pin for the local HTTPS component |
 | WP-4.18 self-reviews, correctness/security and spec/crypto | UNRUN | UNRUN |
 | WP-4.18 adversarial PR review | UNRUN | UNRUN |
 
