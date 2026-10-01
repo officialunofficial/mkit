@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
-use connectrpc::client::{CallOptions, ClientConfig, HttpClient};
+use connectrpc::client::{CallOptions, ClientConfig};
 use http::header::AUTHORIZATION;
 use http::{HeaderMap, Uri};
 use mkit_core::hash::Hash;
@@ -34,6 +34,7 @@ use crate::error::{
 use crate::executor::TokioExecutor;
 use crate::grant::{GrantCondition, GrantOperation, GrantRef, GrantRequest, GrantSource};
 use crate::part_receipts::{MemoryPartReceiptStore, PartReceiptStore, StoredPart, TicketMetadata};
+use crate::pooled_http::PooledHttpClient as HttpClient;
 use crate::proto::mkit::transport::v1::__buffa::oneof::begin_upload_response::Result as BeginWireResult;
 use crate::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::Body as DownloadBody;
 use crate::proto::mkit::transport::v1::upload_part_request::Msg as PartWireMessage;

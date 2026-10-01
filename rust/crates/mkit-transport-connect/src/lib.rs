@@ -30,6 +30,7 @@ mod error;
 mod executor;
 pub mod grant;
 mod part_receipts;
+pub mod pooled_http;
 mod receipt;
 mod status;
 pub mod tls;
