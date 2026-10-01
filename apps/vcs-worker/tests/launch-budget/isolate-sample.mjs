@@ -10,24 +10,41 @@ const clients = new Map(), samples = [], gaps = [];
 async function client(target) {
   const socket = new WebSocket(target.webSocketDebuggerUrl,
     {headers: {Origin: 'https://devtools.devprod.cloudflare.dev'}});
-  await Promise.race([new Promise((resolve, reject) => {
-    socket.once('open', resolve); socket.once('error', reject);
-  }), delay(3000).then(() => {throw Error('inspector connection timeout');})]);
   let serial = 0;
   const pending = new Map();
-  socket.on('message', raw => {
-    const message = JSON.parse(raw.toString());
-    const waiter = pending.get(message.id);
-    if (waiter) {pending.delete(message.id);clearTimeout(waiter.timer);
-      message.error ? waiter.reject(Error(JSON.stringify(message.error))) : waiter.resolve(message.result);}
-  });
-  const rpc = (method, params = {}) => new Promise((resolve, reject) => {
-    const id = ++serial;
-    const timer = setTimeout(() => {pending.delete(id);reject(Error('inspector RPC timeout'));}, 3000);
-    pending.set(id, {resolve, reject, timer});socket.send(JSON.stringify({id, method, params}));
-  });
-  const isolate = await rpc('Runtime.getIsolateId');
-  return {socket, rpc, isolate: isolate.id, target: target.id};
+  const rejectPending = error => {
+    for (const waiter of pending.values()) {
+      clearTimeout(waiter.timer);waiter.reject(error);
+    }
+    pending.clear();
+  };
+  socket.on('close', () => rejectPending(Error('inspector socket closed')));
+  socket.on('error', error => rejectPending(error));
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(Error('inspector connection timeout')), 3000);
+      socket.once('open', () => {clearTimeout(timer);resolve();});
+      socket.once('error', error => {clearTimeout(timer);reject(error);});
+      socket.once('close', () => {clearTimeout(timer);reject(Error('inspector socket closed'));});
+    });
+    socket.on('message', raw => {
+      const message = JSON.parse(raw.toString());
+      const waiter = pending.get(message.id);
+      if (waiter) {pending.delete(message.id);clearTimeout(waiter.timer);
+        message.error ? waiter.reject(Error(JSON.stringify(message.error))) : waiter.resolve(message.result);}
+    });
+    const rpc = (method, params = {}) => new Promise((resolve, reject) => {
+      const id = ++serial;
+      const timer = setTimeout(() => {pending.delete(id);reject(Error('inspector RPC timeout'));}, 3000);
+      pending.set(id, {resolve, reject, timer});socket.send(JSON.stringify({id, method, params}));
+    });
+    await rpc('Runtime.enable');
+    const isolate = await rpc('Runtime.getIsolateId');
+    const close = () => {rejectPending(Error('inspector client retired'));socket.terminate();};
+    return {socket, rpc, close, url: target.webSocketDebuggerUrl, isolate: isolate.id, target: target.id};
+  } catch (error) {
+    rejectPending(error);socket.terminate();throw error;
+  }
 }
 try {
   while (Date.now() < deadline) {
@@ -37,7 +54,12 @@ try {
         {signal: AbortSignal.timeout(3000)})).json();
       const enabled = targets.filter(t => t.webSocketDebuggerUrl);
       if (enabled.length > 16) gaps.push({at: Date.now(), error: "target bound exceeded", targets: enabled.length});
-      for (const target of enabled.slice(0, 16)) {
+      const selected = enabled.slice(0, 16);
+      const wanted = new Map(selected.map(target => [target.id, target.webSocketDebuggerUrl]));
+      for (const [id, active] of clients) {
+        if (wanted.get(id) !== active.url) {active.close();clients.delete(id);}
+      }
+      for (const target of selected) {
         let active = clients.get(target.id);
         if (!active) {active = await client(target);clients.set(target.id, active);}
         const started = Date.now();
@@ -48,14 +70,17 @@ try {
             returnByValue: true, timeout: 1000});
           samples.push({started, finished: Date.now(), isolate: active.isolate,
             target: active.target, heap, wasm: memory.result?.value ?? null});
-        } catch (error) {gaps.push({at: Date.now(), target: active.target, error: String(error)});}
+        } catch (error) {
+          gaps.push({at: Date.now(), target: active.target, error: String(error)});
+          active.close();clients.delete(target.id);
+        }
       }
     } catch (error) {gaps.push({at: Date.now(), error: String(error)});}
     if (samples.length + gaps.length > 100000) throw Error('observation bound exceeded');
     await delay(250);
   }
 } finally {
-  for (const active of clients.values()) active.socket.terminate();
+  for (const active of clients.values()) active.close();
   await writeFile(output, JSON.stringify({scope: 'sampled local CDP isolate retention',
     completePeakCertificate: false, deadlineExceeded: Date.now() >= deadline, samples, gaps}, null, 2));
 }

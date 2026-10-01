@@ -49,11 +49,17 @@ signed hooks, service-binding hooks, snapshots/Cache API, scanner retrieval,
 preservation/admin, cold seeded heads, restart, maximal dependency fanout or
 resident-memory bounds. The prelude captures exported Wasm linear-memory
 capacity at observation boundaries. That includes retained pages and is not a
-live Rust heap counter; if multiple Wasm instances are created, observer-held
-references must be accounted for. It excludes JavaScript and embedder heap.
+live Rust heap counter. The observer keeps only the current exported memories
+and counts every initialization; multiple instances invalidate assessment,
+and retired buffers are not rooted by the observer. It excludes JavaScript
+and embedder heap. Groups are keyed by module identity and local group number,
+so restart cannot overwrite another module's results.
 A separate CDP sampler records isolate identity, sampled JavaScript heap,
 embedder heap and backing storage alongside the linear-memory observation.
-Missing fields/time intervals remain gaps; these samples are not a complete
+Record sample count, covered isolate identities, gaps and missing heap/Wasm
+fields. An empty JSON file is NO_SAMPLES; incomplete observations are PARTIAL.
+The module UUID is separate from CDP's isolate ID. Missing fields/time intervals
+remain gaps; these samples are not a complete
 128 MB peak theorem. The CDP fields follow the primary
 [Runtime protocol definition](https://raw.githubusercontent.com/ChromeDevTools/devtools-protocol/master/json/js_protocol.json). Those require separate evidence. `streamBytes` counts
 observed stream flow (including overlapping stream layers), not buffered readers

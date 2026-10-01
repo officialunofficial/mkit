@@ -245,6 +245,9 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence):
                     "hold set/clear status", "bounded List null/empty/repository scopes and invalid size",
                     "signed HTTPS purge transport mapping and correlated completion audit", "gapless accepted audit", "deferred catalog absent"]
                 result["result"] = "PASS"
+        except Exception:
+            result["result"] = "FAIL"
+            raise
         finally:
             (folder / "admin-transcript.json").write_text(json.dumps(transcript, indent=2) + "\n")
             if worker is not None:

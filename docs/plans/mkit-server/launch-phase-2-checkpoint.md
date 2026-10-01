@@ -448,3 +448,33 @@ ignored), and all-target/all-feature mkit-server clippy passed with warnings
 denied (`denial-order-pipeline-all-features.log`, `denial-order-clippy.log`).
 The unchanged 120-second actual release profile and final immutable
 integration review remain pending; no complete-profile PASS follows here.
+
+
+The first actual D26 release rerun at clean
+`ccdce6c7b6e8545cb12f2c3c92a5078ae8c8d886` completed its final AdvanceRefs
+in 105,637 ms with HTTP 200 and no deadline retry. The following unchanged
+SetRepoVisibility failed with HTTP 500 `Network connection lost`; the
+producer and admin fixture remain FAIL. Owned scratch
+`night2/launch-admin-tqiwx4so/evidence.json` pins wasm
+`db00d50b878b558fc8fbbc2546434b2f17dcff78f7243b983c1bcaf6f64d3bd1`
+and runner `14c7c0c319efbb731f108af23be46a20dba5f6b0299d121f4f3d8603b14d9056`.
+The local inspector attachment returned zero samples and 151 timeout gaps.
+This admin wrapper imports neither budget nor memory observers; no linear
+memory/isolate bound was measured. Process RSS alone is not a 128 MB finding.
+
+The matched copied-artifact, same-client/profile cold repeat without any
+inspector attachment also failed: `night2/admin-proof-order-no-inspector-1`.
+After three expected pending 503 responses, the next AdvanceRefs produced
+no response within the unchanged 120-second client timeout; it never reached
+SetRepoVisibility. Wrangler and receiver were still alive before owned
+cleanup; all groups were stopped. Thus the repeat proves a remaining runtime
+blocker, not reproduction or classification of the later HTTP 500. No admin
+operation ran; all seven-operation and whole-profile matrix slots remain
+UNRUN. The independent D26 audit cleared the source ordering correction;
+`many_refs` remains Medium/unclassified.
+
+Separate fixture repairs close inspector sockets on initialization failure
+and avoid retaining every old Wasm memory after module reinitialization.
+Multiple instances still invalidate budget assessment; current-capacity
+sampling remains incomplete peak evidence. These defects cannot explain the
+unobserved repeat and do not certify or change the production runtime.

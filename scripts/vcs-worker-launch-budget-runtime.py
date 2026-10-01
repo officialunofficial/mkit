@@ -45,8 +45,12 @@ def assess(found):
     # Every group includes all its overlapping events. Each alarm's individual
     # work is bounded by this conservative total; ALS need not distinguish
     # Rust task polls inside that group. Partial groups cannot establish PASS.
-    groups = {record["group"] for record in found}
-    final = {record["group"]: record for record in found if record["groupFinal"]}
+    check(all(isinstance(record.get("isolate", {}).get("id"), str)
+              and record["isolate"]["id"] for record in found), "module identity missing")
+    def group_key(record):
+        return record["isolate"]["id"], record["group"]
+    groups = {group_key(record) for record in found}
+    final = {group_key(record): record for record in found if record["groupFinal"]}
     check(set(final) == groups, "unfinished invocation group; physical counts incomplete")
     alarms = []
     requests = []
@@ -240,10 +244,31 @@ def fixture(namespace, port, run, artifact, runner, env, evidence):
                 if sampler_log is not None:
                     sampler_log.close()
                 samples = folder / "isolate-samples.json"
-                result["isolate_sampling"] = {"result": "SAMPLED" if samples.exists() else "UNRUN",
-                    "memory_certificate": False, "sampler_exit": sampler.returncode}
+                observation = {"result": "UNRUN", "memory_certificate": False,
+                    "sampler_exit": sampler.returncode, "sample_count": 0}
+                result["isolate_sampling"] = observation
                 if samples.exists():
-                    result["isolate_sampling"]["sha256"] = runtime.digest(samples)
+                    observation["sha256"] = runtime.digest(samples)
+                    try:
+                        sampled = json.loads(samples.read_text())
+                        values, gaps = sampled["samples"], sampled["gaps"]
+                        fields = ("usedSize", "totalSize", "embedderHeapUsedSize", "backingStorageSize")
+                        missing = sum(any(field not in item.get("heap", {}) for field in fields) for item in values)
+                        missing_wasm = sum(not isinstance(item.get("wasm"), dict) or
+                            item["wasm"].get("instances") != 1 or item["wasm"].get("linearBytes", 0) <= 0
+                            for item in values)
+                        identities = sorted({item["isolate"] for item in values if item.get("isolate")})
+                        observation.update(sample_count=len(values), covered_isolate_ids=identities,
+                            gap_count=len(gaps), missing_heap_fields_samples=missing,
+                            missing_wasm_samples=missing_wasm, deadline_exceeded=sampled["deadlineExceeded"])
+                        observation["result"] = "NO_SAMPLES" if not values else "PARTIAL"
+                        if values and identities and not (gaps or missing or missing_wasm or
+                                sampled["deadlineExceeded"] or sampler.returncode):
+                            observation["result"] = "SAMPLED"
+                        if sampler.returncode:
+                            observation["result"] = "FAILED"
+                    except (ValueError, KeyError, TypeError) as error:
+                        observation.update(result="INVALID_RECORD", error=str(error))
             runtime.stop(process)
 
 
