@@ -591,6 +591,64 @@ async fn failed_target_retains_its_later_rows_while_other_targets_commit() {
 }
 
 #[tokio::test]
+async fn retried_relay_progress_reschedules_after_its_physical_wake() {
+    let s = memory();
+    let t = memory();
+    for destination in [target(0), target(1)] {
+        append(&s, &destination, vec![(key(), Value::default())], 100).await;
+    }
+    let retry = keys::timer_retry(5100, kinds::RELAY.get(), b"", 100, 1);
+    s.apply(
+        &source(),
+        Batch::new()
+            .delete(keys::timer(100, kinds::RELAY.get(), b""))
+            .put(retry.clone(), Value::default()),
+    )
+    .await
+    .unwrap();
+    let mut h = handler(t);
+    h.budget.max_targets = 1;
+    let registry = TimerRegistry::new().register(h);
+    let clock = ManualClock::new(5100);
+    let report = run_due(
+        &s,
+        &source(),
+        &registry,
+        &clock,
+        5100,
+        &TickBudget::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!((report.fired, report.failed), (1, 0));
+    assert_eq!(report.next_wake_ms, Some(5101));
+    assert_eq!(queued(&s).await.len(), 1);
+    assert_eq!(s.get(&source(), &retry).await.unwrap(), None);
+    assert_eq!(
+        s.get(&source(), &keys::timer(5101, kinds::RELAY.get(), b""))
+            .await
+            .unwrap(),
+        Some(Value::default())
+    );
+    clock.set(5101);
+    let report = run_due(
+        &s,
+        &source(),
+        &registry,
+        &clock,
+        5101,
+        &TickBudget::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (report.fired, report.failed, report.next_wake_ms),
+        (1, 0, None)
+    );
+    assert!(queued(&s).await.is_empty());
+}
+
+#[tokio::test]
 async fn same_millisecond_writer_during_fire_cannot_lose_wakeup() {
     let s = Instrumented::new();
     let t = memory();
@@ -625,13 +683,17 @@ async fn same_millisecond_writer_during_fire_cannot_lose_wakeup() {
     .unwrap();
     assert_eq!(report.raced, 1);
     assert_eq!(queued(&s).await.len(), 1);
-    assert!(
-        s.get(&source(), &keys::timer(100, 3, b""))
-            .await
-            .unwrap()
-            .is_some()
+    let retry = keys::timer_retry(5100, 3, b"", 100, 1);
+    assert_eq!(report.next_wake_ms, Some(5100));
+    assert_eq!(
+        s.get(&source(), &retry).await.unwrap(),
+        Some(Value::default())
     );
-    let report = run_due(
+    assert_eq!(
+        s.get(&source(), &keys::timer(100, 3, b"")).await.unwrap(),
+        None
+    );
+    let early = run_due(
         &s,
         &source(),
         &registry,
@@ -641,13 +703,32 @@ async fn same_millisecond_writer_during_fire_cannot_lose_wakeup() {
     )
     .await
     .unwrap();
+    assert_eq!(early.fired, 0);
+    assert_eq!(queued(&s).await.len(), 1);
+    assert_eq!(
+        s.get(&source(), &retry).await.unwrap(),
+        Some(Value::default())
+    );
+    clock.set(5100);
+    let report = run_due(
+        &s,
+        &source(),
+        &registry,
+        &clock,
+        5100,
+        &TickBudget::default(),
+    )
+    .await
+    .unwrap();
     assert_eq!(report.fired, 1);
     assert!(queued(&s).await.is_empty());
+    let (start, end) = keys::class_range(keys::TAG_TIMER);
     assert!(
-        s.get(&source(), &keys::timer(100, 3, b""))
+        s.scan(&source(), &start, &end, None, 1)
             .await
             .unwrap()
-            .is_none()
+            .entries
+            .is_empty()
     );
 }
 

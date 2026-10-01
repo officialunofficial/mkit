@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Native Verified reuse returns the exact advertised pack-size error. Scanner
   retrieval supports ticketless ref writes with an empty Inspect batch and a
   capability granting no access to previously published packs.
+
+- Server: keep relay progress continuations after the current wake when retry
+  metadata retains an older due time. Update timer, verification-job and
+  published-view tests to assert retained capped retries and recovery;
+  recognize the HTTP content-header golden as a JSON table in the wasm verifier,
+  and correct the route property's reserved-name fixture expectations.
+
 - CLI (`mkit-cli`, additive): add `http.sslCAInfo` and overriding
   `MKIT_SSL_CA_FILE` for extra PEM trust certificates on all native Connect
   HTTPS remote RPCs and pack streams only. Keep Mozilla roots and
