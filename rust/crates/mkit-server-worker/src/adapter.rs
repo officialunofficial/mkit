@@ -2464,6 +2464,8 @@ mod glue {
         error: &ConfigError,
         connect_preflight: bool,
     ) -> worker::Result<Response> {
+        #[cfg(not(feature = "http-objects"))]
+        let _ = env;
         #[cfg(feature = "http-objects")]
         if crate::http_mount::glue::env_mounted_request(req, env) {
             let response = if req.method() == worker::Method::Options {
