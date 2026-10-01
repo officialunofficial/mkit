@@ -978,6 +978,8 @@ version = "0.4.2"
 dependencies = [
  "buffa",
  "buffa-build",
+ "connectrpc",
+ "connectrpc-build",
  "ed25519-dalek",
  "mkit-core",
  "serde",
@@ -995,7 +997,6 @@ dependencies = [
  "buffa",
  "bytes",
  "connectrpc",
- "connectrpc-build",
  "ed25519-dalek",
  "futures",
  "futures-core",

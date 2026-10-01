@@ -97,7 +97,7 @@ impl<C: SqlConn> PressureStore<C> {
         }
     }
 
-    /// Enable target-local snapshot generation and dirty seeding (Stage 2 only).
+    /// Enable target-local snapshot generation and dirty seeding (explicit opt-in).
     #[cfg(feature = "published-view")]
     #[must_use]
     pub fn with_published_view(mut self) -> Self {

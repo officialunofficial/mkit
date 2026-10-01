@@ -8,13 +8,8 @@
 # `TransportServer` behind `mkit serve --http`) was removed with that flag
 # (WP-M0-15, a breaking change: the next release is 0.5).
 #
-# Mirrors `mkit-repo-client`'s "zero-duplication" codegen approach (compiled
-# directly from the canonical `proto/mkit/transport/v1/transport.proto` via a
-# workspace-relative `build.rs` path — never a hand-copied proto), but
-# targets native (Tokio, `connectrpc`'s hyper-rustls client transport)
-# instead of wasm (Fetch API). Drops the wasm-only deps (`wasm-bindgen`,
-# `web-sys`, `send_wrapper`) `mkit-repo-client` needs and enables
-# `connectrpc`'s native/TLS client features instead.
+# Shared wire types and Connect bindings are owned by mkit-rpc's opt-in
+# transport feature; this crate adds the native/TLS client runtime.
 [package]
 name = "mkit-transport-connect"
 description = "Native ConnectRPC client for mkit.transport.v1 (SPEC-TRANSPORT-CONNECT): the mkit+https:// remote transport"
@@ -29,14 +24,13 @@ repository.workspace = true
 authors.workspace = true
 
 [lints.clippy]
-# Same rationale as mkit-rpc: the buffa/connectrpc-generated code (staged
-# into $OUT_DIR from generated/) inherits docstrings from transport.proto
-# and trips pedantic/nursery lints hundreds of times. Keep `clippy::all`
-# (correctness + style baseline); our own hand-written src/ code stays
-# under it.
+# Shared generated types inherit transport.proto docstrings that trip
+# pedantic/nursery lints. Keep `clippy::all` (correctness + style baseline)
+# and this crate's existing lint policy for handwritten client modules.
 all = { level = "warn", priority = -1 }
 
 [dependencies]
+mkit-rpc = { version = "0.4", path = "../mkit-rpc", features = ["transport"] }
 # Inter-workspace deps need explicit version + path so `cargo publish`
 # accepts them.
 mkit-core = { version = "0.4", path = "../mkit-core" }
@@ -102,9 +96,6 @@ webpki-roots = "1"
 # `ring` needs no `cmake` (unlike `aws-lc-rs`), matching this crate's
 # minimal-system-dependency posture.
 rustls = { version = "0.23", features = ["ring"] }
-
-[build-dependencies]
-connectrpc-build = "0.9.0"
 
 [dev-dependencies]
 serde_json = "1"

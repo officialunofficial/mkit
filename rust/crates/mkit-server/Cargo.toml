@@ -83,7 +83,7 @@ connect = [
     "dep:connectrpc",
     "dep:buffa",
     "dep:http",
-    "dep:connectrpc-build",
+    "mkit-rpc/transport",
 ]
 # In-memory reference backends (`MemoryKv`, `MemoryBlobStore`): the template
 # for third-party backends. Always compiled for this crate's own unit tests.
@@ -118,11 +118,11 @@ remote-hooks = [
 ]
 
 # Runtime-agnostic HTTP object serving (`Pipeline::serve_http_object`,
-# SPEC-HTTP-OBJECTS; WP-4.12). No new dependencies, wasm-clean. Stage 2 and
-# inert in Stage 1 (R-154, R-169): off by default, enabled by no adapter, and
-# it needs `PipelineConfig::http_objects`, which requires indexed mode.
+# SPEC-HTTP-OBJECTS; WP-4.12). No new dependencies, wasm-clean. Off by default;
+# native embedders and the Paid Uno Worker launch opt in through their adapters.
+# Requires `PipelineConfig::http_objects` and indexed mode.
 http-objects = []
-# Stage 2 published reader source; no adapter enables it by default.
+# Published reader source; explicit adapter configuration, off by default.
 published-view = []
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -134,11 +134,6 @@ mkit-transport-file = { version = "0.4", path = "../mkit-transport-file", option
 # `send_wrap` on wasm32: lets a `!Send` handler future satisfy the `+ Send`
 # bound the generated connectrpc traits require (PRD §5.2).
 send_wrapper = { version = "0.6", features = ["futures"] }
-
-[build-dependencies]
-# Only `build.rs`'s regeneration path (MKIT_TRANSPORT_CODEGEN=1) uses it; a
-# `default-features = false` build never compiles it.
-connectrpc-build = { version = "0.9.0", optional = true }
 
 [dev-dependencies]
 futures-executor = "0.3"

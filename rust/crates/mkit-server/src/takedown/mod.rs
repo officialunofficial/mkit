@@ -1,4 +1,4 @@
-//! Inert lean denial and durable, unresolved takedown intent foundation.
+//! Lean denial and durable takedown intents; adapters control activation.
 pub mod acquisition;
 mod admin;
 mod closure;
@@ -19,7 +19,8 @@ mod tests;
 pub use intent::{Record, Service};
 pub use publication::PublicationConfig;
 
-/// Launch stays disabled until the remaining signed admin catalog is delivered.
+/// Default-off native activation. The Worker Uno launch separately enables
+/// the completed lean catalog through its validated takedown configuration.
 pub const ACTIVATED: bool = false;
 
 /// Configured namespace roots; an open policy has no exhaustive configured set.

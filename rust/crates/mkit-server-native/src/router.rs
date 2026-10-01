@@ -61,7 +61,7 @@ pub struct RouterOptions {
     /// Headers whose values never reach a trace: [`mkit_server::NEVER_LOG`]
     /// plus the deployment's extras.
     pub redactor: Redactor,
-    /// Explicit Stage 2 HTTP mount opt-in; also requires indexed HTTP configuration.
+    /// Explicit HTTP mount opt-in; also requires indexed HTTP configuration.
     #[cfg(feature = "http-objects")]
     pub http_objects: Option<mkit_server::http_objects::mount::HttpMountOptions>,
 }

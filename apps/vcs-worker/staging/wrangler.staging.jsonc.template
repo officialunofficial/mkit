@@ -1,5 +1,5 @@
-// INERT TEMPLATE (WP-1.19, Stage 2). No build/deploy job reads this file.
-// After REL-1, copy to apps/vcs-worker/wrangler.staging.jsonc and follow
+// INERT TEMPLATE (WP-1.19, explicit snapshots). No build/deploy job reads this file.
+// For snapshot staging, copy to apps/vcs-worker/wrangler.staging.jsonc and follow
 // staging/README.md. Replace every REPLACE_* value before provisioning.
 // Paths below are relative to the copied config in apps/vcs-worker/.
 {

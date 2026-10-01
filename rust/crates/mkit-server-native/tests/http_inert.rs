@@ -1,4 +1,4 @@
-//! Shipped native defaults expose neither the Stage 2 routes nor URL keys.
+//! Shipped native defaults expose neither the opt-in HTTP routes nor URL keys.
 #![cfg(feature = "http")]
 #![allow(clippy::unwrap_used)] // Invalid fixtures are test failures.
 

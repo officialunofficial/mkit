@@ -62,7 +62,7 @@ pub mod kinds {
     pub const OUTCOME_DELIVERY: super::TimerKind = super::TimerKind::new(8);
     /// Settle abandoned pending reservations.
     pub const RESERVATION_RECONCILE: super::TimerKind = super::TimerKind::new(9);
-    /// Published ref-index snapshots (Stage 2 Worker opt-in only).
+    /// Published ref-index snapshots (explicit Worker opt-in only).
     pub const PUBLISHED_VIEW: super::TimerKind = super::TimerKind::new(10);
     /// Materialize a durable late-holder takedown handoff; not takedown completion.
     pub const CONTENT_TAKEDOWN_REQUEST: super::TimerKind = super::TimerKind::new(13);

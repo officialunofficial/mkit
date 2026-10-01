@@ -1964,7 +1964,7 @@ and independent terminal writes can charge one reservation twice.
 
 **Enforced by:** `pipeline/http_admission.rs`, `http_objects/paid.rs`,
 `timers/reservation_reconcile.rs` and the focused `http_objects/paid_reads` tests.
-Stage 2 only; adapters must retain the injected spawner's tasks (WP-4.16).
+With HTTP serving enabled, adapters must retain the injected spawner's tasks (WP-4.16).
 
 ## HTTP URL tokens bind before stored epoch access
 
@@ -1981,7 +1981,7 @@ cache freshness beyond expiry extends a private authorization capability.
 remain fresh after the authorization expires.
 
 **Enforced by:** `pipeline/http_tokens.rs`, `policy/read.rs` and counted-store
-`http_objects/private_tokens` tests. Stage 2 only; shared-cache bypass belongs
+`http_objects/private_tokens` tests. With HTTP serving enabled, shared-cache bypass belongs
 to the adapters in WP-4.16.
 
 ## Published ref snapshots never authorize a read
@@ -1999,7 +1999,7 @@ or a source of lost index updates after an upload race.
 without a future alarm wake.
 
 **Enforced by:** core `pipeline/tests/published.rs` and Worker
-`published_view/tests.rs`; runtime feature/configuration are off by default (Stage 2).
+`published_view/tests.rs`; runtime feature/configuration require explicit snapshot opt-in.
 
 ## HTTP adapter mounts remain explicitly opt-in
 
@@ -2010,7 +2010,7 @@ stream without collecting bodies, suppress every HEAD body, apply read
 CORS to every response and perform no shared-cache operations. URL-token
 active and retained public keys remain distinct from other deployment roles.
 
-**Because:** Stage 1 must not expose indexed content, private content must
+**Because:** unconfigured deployments must not expose indexed content, private content must
 not enter shared caches, and URI normalization or query logging could
 reinterpret paths or disclose bearer capabilities.
 

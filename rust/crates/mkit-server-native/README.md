@@ -698,15 +698,16 @@ isolate. Info events use the log console; warning/error events use the error
 console. Debug and trace events are disabled. Pressure state is per DO instance;
 a new instance starts a new alert interval.
 
-## HTTP object serving (Stage 2, opt-in)
+## HTTP object serving (opt-in)
 
-The default build and shipped Stage 1 feature list omit `http-objects`.
+The default native build omits `http-objects`.
 With that adapter feature, an embedder must configure both
 `PipelineConfig::indexed` and `PipelineConfig::http_objects`, then set
 `RouterOptions::http_objects = Some(HttpMountOptions::default())`.
 The mount dispatches original escaped URIs by `/-/`; opaque pipelines and
 unset mount options keep their usual RPC missing-route behavior. The binary
-has no production indexed or HTTP mount flag; activation belongs to WP-4.18/5.2.
+has no production indexed or HTTP mount flag; native activation is programmatic.
+The separate Worker adapter supports the Paid Uno launch profile.
 
 `http_objects::mount::HttpMountOptions` defaults to read CORS `*`.
 Set `cors_origins` to exact origins to echo only allowed origins and emit

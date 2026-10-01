@@ -5,10 +5,10 @@
 //! complete [`HttpObjectResponse`]: no `http` crate, no runtime. A binding
 //! (WP-4.16) mounts it, adds CORS and streams the body.
 //!
-//! **Stage 2, inert in Stage 1** (R-154). The `http-objects` feature is off
-//! by default and enabled by no adapter; the handler needs
-//! `PipelineConfig::http_objects`, which requires indexed mode, itself
-//! programmatic only.
+//! The `http-objects` feature is off by default. Native embedders and the
+//! Paid Uno Worker launch can opt in through their adapter features and
+//! mount configuration. The handler requires indexed mode and
+//! `PipelineConfig::http_objects`.
 //!
 //! The pieces: [`route`] is the §2 parser, [`range`] the conditional and
 //! byte-range rules, `resolve` published resolution and the byte source
@@ -58,7 +58,7 @@ pub const METRIC_HTTP_INLINE_CAPPED: &str = "mkit_server_http_inline_capped_tota
 /// Default [`HttpObjectsConfig::max_inline_object_bytes`]: 64 MiB.
 pub const DEFAULT_MAX_INLINE_OBJECT_BYTES: u64 = 64 << 20;
 
-/// Limits of HTTP object serving. Programmatic only until Stage 2.
+/// Limits of opt-in HTTP object serving.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HttpObjectsConfig {

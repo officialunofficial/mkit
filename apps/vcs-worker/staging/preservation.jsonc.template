@@ -6,8 +6,8 @@
 {
   "r2_buckets": [{ "binding": "PRESERVATION", "bucket_name": "REPLACE_PRIVATE_PRESERVATION_BUCKET" }],
   "vars": {
-    // Validate these configured resources. Production activation remains
-    // compile-gated off until WP-5.6a-3 and WP-4.18 are complete.
+    // Activation requires the validated Paid Uno launch profile and complete
+    // preservation, admin and signed cache-purge configuration.
     "TAKEDOWN_ENABLED": "true",
     "PRESERVATION_RETENTION_MS": "REPLACE_EXPLICIT_POSITIVE_DURATION",
     "RECEIPT_KEYS": "REPLACE_VERSION_1_PUBLIC_KEY_LIST"
