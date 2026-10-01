@@ -19,6 +19,8 @@ request pipeline (auth, replay, quota, ref CAS, uploads, downloads) is
 [`mkit-server`](../../rust/crates/mkit-server)'s, the same code the native
 server runs.
 
+For deployment and incident procedures, use the [Workers operator guide](../../docs/operations/workers.md).
+
 ## Architecture
 
 ```
@@ -79,11 +81,11 @@ rows. Confirm the bucket's access policy before the first deployment.
 Keep `WORKERS_PLAN=free` on a Free account.
 
 Indexed serving selects the Paid Uno launch profile described below. Free
-Workers cannot enable indexed mode. WP-4.18 validates the profile and activates the merged extraction driver;
+Workers cannot enable indexed mode. WP-4.18 has merged, validates the profile and activates the extraction driver;
 test-faults indexed conformance is separate evidence and does not establish
 the completed launch matrix.
 The alarm budget is shared across handlers; see the
-[launch budget audit](../../docs/plans/mkit-server/launch-budgets.md).
+[Workers operator guide](../../docs/operations/workers.md).
 
 For a backend move or recovery beyond PITR, collect a complete, compatible
 set of `.kvlog` partition snapshots from R2 into the native export directory
@@ -241,8 +243,8 @@ no deployments, so this is acceptable.
   `0x<40 hex>`) separated by newlines or commas, `#` comments and blank
   entries ignored. A missing, malformed or empty allowlist refuses startup
   (every RPC answers `unavailable` naming the var).
-- `NAMESPACE_POLICY=any` admits every self-certifying namespace and requires
-  `UNSAFE_OPEN_NAMESPACES=true`: without non-default admission (M3) any
+- `NAMESPACE_POLICY=any` admits every self-certifying namespace, requires
+  `NAMESPACE_ALLOWLIST` to be absent and requires `UNSAFE_OPEN_NAMESPACES=true`: without non-default admission (M3) any
   fresh key resets its namespace's quota, so the open policy is an explicit
   unsafe opt-in. The Uno Kit demo (UNO-420) selects it deliberately. Under
   `any`, takedown discovery is incomplete; configured global denial and
@@ -270,8 +272,8 @@ addressing retains its auth-v2 write policy.
   cap remains 65 MiB, enforced with or without `Content-Length`; exceeding
   it answers HTTP 400 `resource_exhausted`. `UploadPack` and `DownloadPack`
   stream, with download chunks of at most 800 KiB.
-- **Unary replies are one frame**: a `ListRefs` reply is held whole, about
-  45 bytes per ref (1.2 MB for 30,000 refs), until WP-1.27 pages it. The
+- **Unary replies are one frame**: each paged `ListRefs` reply is held whole, about
+  45 bytes per ref (1.2 MB for 30,000 refs), per page (at most 2 MiB). The
   conformance script's 1 MiB body-buffer bound covers the streaming RPCs
   only.
 - **Client deadlines are not enforced**: `connect-timeout-ms` and
@@ -348,9 +350,8 @@ Object database for `auth_v2.mjs --corrupt-ref`.
 ## Deploy (not yet live)
 
 The historical [staging template](staging/README.md) is inert. The single Uno
-launch uses the [staging definition](../../docs/plans/mkit-server/staging-uno.md)
-and [operator runbook](../../docs/plans/mkit-server/launch-operations.md).
-Their user-owned staging and release gates remain unrun.
+launch uses the [Workers operator guide](../../docs/operations/workers.md).
+User-owned staging and launch acceptance remain unrun.
 
 1. **Provision storage** (one-time): `wrangler r2 bucket create
    mkit-vcs-objects`. The RefStore Durable Object and its `v1` SQLite
@@ -417,10 +418,10 @@ configuration before activation:
 
 Extraction (WP-4.10b-2 / #1244) and scanner retrieval (R-193 / #1243) are
 merged; this activation wires their release paths. Configured preservation
-core and the WP-5.6a-3 restricted admin catalog are wired. Phase 2 requires
-the complete native and actual release Worker matrix before opening the PR.
-See the [conformance plan](../../docs/plans/mkit-server/launch-conformance.md)
-and [itemized evidence](../../docs/plans/mkit-server/launch-evidence.md).
+core and the WP-5.6a-3 restricted admin catalog are wired. The requested Uno
+embedded matrix passes locally; broader variants and actual
+staging remain unrun. Local evidence does not certify deployed resources.
+See the [Workers operator guide](../../docs/operations/workers.md) for deployed verification requirements.
 
 Worker object-serving HTTP responses carry `X-Content-Type-Options: nosniff`
 and `Content-Security-Policy: sandbox; default-src 'none'`. Object-id file
@@ -467,7 +468,7 @@ Merged WP-4.16c also provides `adapter::embedding_pipeline` and `Pipeline::objec
 Breaking 0.x changes are called out in CHANGELOG. Runtime acceptance is
 recorded separately in the launch evidence matrix.
 The crate stays `publish = false`; consume it as a git dependency pinned to
-the release tag.
+an approved immutable commit until a release tag exists.
 
 | Current API | Purpose and boundary |
 |---|---|
@@ -500,8 +501,9 @@ fetch/alarm delegation. `config_factory(&Env)` returns
 `Result<WorkerConfig, ConfigError>`; `sink_factory(&Env, &WorkerConfig)` returns
 the Outcome sink. `durable_objects!()` uses environment configuration and hooks.
 Both the reference deployment and [embedded example](../embedded-worker/README.md)
-use this macro. Cross-crate wasm compilation and runtime acceptance are recorded
-in [launch-evidence.md](../../docs/plans/mkit-server/launch-evidence.md).
+use this macro. [#1259](https://github.com/officialunofficial/mkit/pull/1259)
+records the scoped local Uno acceptance. Use the
+[Workers operator guide](../../docs/operations/workers.md) for deployed checks.
 
 Set `WorkerConfig::admin_on_public_path = false` to keep AdminService off public
 fetch and call `adapter::serve_admin_with(req, env, &cfg)` on host-routed admin
@@ -530,9 +532,8 @@ The minimal launch profile enables `pack-ruzstd` to accept native compressed pus
 Core publication semantics are mandatory; `published-view` adds optional
 snapshot/cache optimization. These historical measurements are pinned to
 `43256803446f7f29a7fbf45d794afcfb78cea181`, before the final review fixes.
-The [retained size manifest](../../docs/plans/mkit-server/launch-feature-sizes.json)
-records artifact hashes, full emitted sizes, commands and deterministic gzip
-counts (mtime zero). Its SHA-256 is
+The historical size manifest on the feature branch records artifact hashes,
+full emitted sizes, commands and deterministic gzip counts (mtime zero). Its SHA-256 is
 `ef1d92a85fce5c665131d2a5616d6d358ffec26e7c9ba5061d340a7f8fd71375`.
 Run each command from `apps/vcs-worker`. Final-head variant measurements and
 remote packaging acceptance remain UNRUN; these rows certify only that
@@ -548,13 +549,14 @@ historical emitted files fit the recorded local 64 MiB guard.
 
 The distinct Uno acceptance host at `7527556d09c7753462f0449622d86ade0fb3b70e`
 measured 6,934,119 raw / 2,370,989 gzip bytes (6,974,355 emitted bytes).
-Its [matrix evidence](../../docs/plans/mkit-server/launch-read-failure-evidence.md)
-pins the host artifact and measured runtime scope separately.
+[#1259](https://github.com/officialunofficial/mkit/pull/1259) pins that distinct
+host artifact and measured runtime scope separately.
 
 The aggregate `launch` build enables `pack-ruzstd`, `http-objects`, `signed-http-hooks` and
-`published-view`; runtime features remain configuration opt-ins. Add the
-example's independent wasm32 build and actual release wrangler evidence to
-[B4.embedding](../../docs/plans/mkit-server/launch-evidence.md).
+`published-view`; runtime features remain configuration opt-ins. Record the
+example's independent wasm32 build and actual release runtime evidence
+separately, then follow the [operator guide](../../docs/operations/workers.md)
+for deployed validation.
 
 Cloudflare's [September 4, 2026 size-limit change](https://developers.cloudflare.com/changelog/post/2026-09-04-increased-worker-size-limit/)
 sets a 64 MiB uncompressed bundle limit on Free and Paid plans. The bundle
