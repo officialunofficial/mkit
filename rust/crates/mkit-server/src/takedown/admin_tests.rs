@@ -1054,3 +1054,84 @@ async fn list_accepts_protojson_null_scope_and_quoted_page_size() {
     assert_eq!(response["takedowns"].as_array().unwrap().len(), 1);
     f.audit().await;
 }
+
+#[tokio::test]
+async fn completed_takedown_replays_stored_success_after_moderation_role_removed() {
+    let f = fixture(64).await;
+    // A verified named Blob source makes this a real accepted takedown.
+    let object = mkit_core::object::Object::Blob(mkit_core::object::Blob { data: vec![8; 32] });
+    let canonical = mkit_core::serialize::serialize(&object).unwrap();
+    let object_id = hash(&canonical);
+    let mut writer = mkit_core::pack::PackWriter::new_raw_only();
+    writer.push_raw(object_id, &canonical).unwrap();
+    let bytes = writer.finish().unwrap();
+    let pack = hash(&bytes);
+    super::super::inventory::stage(
+        &f.work.metadata,
+        &pack,
+        bytes.len() as u64,
+        &object_id,
+        &object,
+        None,
+        100,
+    )
+    .await
+    .unwrap();
+    super::super::inventory::complete(&f.work.metadata, &pack, bytes.len() as u64, 100)
+        .await
+        .unwrap();
+    let repo = crate::RepoName::new("repo").unwrap();
+    let index = crate::store::index::IndexValue {
+        frame_offset: 12,
+        frame_length: canonical.len() as u64 + 5,
+        wire_type: 0,
+        decoded_size: canonical.len() as u64,
+        chain_depth: 0,
+        delta_base: None,
+    };
+    f.work
+        .metadata
+        .apply(
+            &f.work.root,
+            Batch::new()
+                .put(
+                    crate::store::keys::membership(&repo, &pack),
+                    crate::Value::default(),
+                )
+                .put(
+                    crate::store::keys::object_index(&repo, &object_id, &pack),
+                    crate::store::codec::encode_object_index(&object_id, &index).unwrap(),
+                ),
+        )
+        .await
+        .unwrap();
+    let input = json!({"repository":"root/repo", "objectIds":[STANDARD.encode(object_id)], "operationId":"role-replay", "reason":"review"});
+    let (headers, body) = request(admin::TAKEDOWN_PATH, &input, 52);
+    let accepted = f
+        .engine("moderation")
+        .handle(admin::TAKEDOWN_PATH, &headers, &body, 100)
+        .await;
+    assert_eq!(accepted.status, 200);
+    let head = f.head().await;
+    let audit_only = f.engine("audit");
+    let retry = audit_only
+        .handle(admin::TAKEDOWN_PATH, &headers, &body, 100)
+        .await;
+    assert_eq!(
+        retry, accepted,
+        "completed identical takedown must retain its stored result after role removal"
+    );
+    assert_eq!(
+        f.head().await,
+        head,
+        "retry must not append a wrong-role audit or new activation"
+    );
+    let (fresh_headers, fresh_body) = request(admin::TAKEDOWN_PATH, &input, 53);
+    assert_eq!(
+        audit_only
+            .handle(admin::TAKEDOWN_PATH, &fresh_headers, &fresh_body, 100)
+            .await
+            .status,
+        403
+    );
+}

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: completed identical Takedown retries replay their stored response
+  after role changes. ReadPreserved retains fresh role and retention checks
+  on every retry (launch review 7b-1).
+
 - Server: automatically enqueue audited cache purges with takedown acceptance,
   denial activation and late-holder ownership. Checkpoint newly discovered
   repository purges with timer-15 progress and immediately invalidate configured

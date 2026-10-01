@@ -630,7 +630,10 @@ impl<S: NamespaceStore> Engine<S> {
         let Some(service) = &self.operations else {
             return Err(ServerError::unavailable("takedown service unavailable"));
         };
-        if !verified.roles.contains("moderation") && !verified.roles.contains("all") {
+        if verified.path == super::READ_PRESERVED_PATH
+            && !verified.roles.contains("moderation")
+            && !verified.roles.contains("all")
+        {
             return self
                 .record_result(
                     verified,
