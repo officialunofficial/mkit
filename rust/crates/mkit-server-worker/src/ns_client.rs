@@ -5,8 +5,8 @@
 //!
 //! One Durable Object round trip per method (a Durable Object sustains
 //! roughly 200 to 500 writing requests per second): `get_many` and `apply`
-//! are one call each, and the client never has more than one call in
-//! flight. Batches are validated here as well as in the object, so an
+//! are one call each. Callers may join bounded concurrent calls; each call
+//! consumes its response to EOF before returning. Batches are validated here as well as in the object, so an
 //! oversize batch costs no round trip. Transport and decode failures are
 //! logged and returned as `Unavailable` with a fixed message; a typed
 //! [`NsReply::Err`] keeps its kind (`Full` stays `Full`).
@@ -30,7 +30,8 @@ use crate::wire::{self, Blob, NsCall, NsReply, NsRequest, WireBatch, WireRangeSc
 /// in-process loopback in tests.
 pub trait NsTransport: MaybeSend + MaybeSync {
     /// POST `body` to `target`'s `/<op>`. A failure to deliver it or a
-    /// non-success status is `Unavailable` (logged, redacted).
+    /// non-success status is `Unavailable` (logged, redacted). Dispatched
+    /// replies reach body EOF/error/cancellation before this future returns.
     fn call(
         &self,
         target: &DoTarget,
@@ -339,6 +340,17 @@ mod stub {
         }
     }
 
+    // Dropping a Rust/JsFuture alone does not cancel its backing fetch Promise.
+    // The request signal owns cancellation on early error or future drop.
+    struct AbortFetch(Option<web_sys::AbortController>);
+    impl Drop for AbortFetch {
+        fn drop(&mut self) {
+            if let Some(controller) = self.0.take() {
+                controller.abort();
+            }
+        }
+    }
+
     impl NsTransport for StubTransport {
         async fn call(
             &self,
@@ -365,23 +377,39 @@ mod stub {
             let mut init = RequestInit::new();
             init.with_method(Method::Post)
                 .with_body(Some(JsValue::from_str(&body)));
-            let request = Request::new_with_init(&format!("https://ns/{op}"), &init)
-                .map_err(|e| backend_error(StorageOp::MetaRequest, e))?;
+            let controller = web_sys::AbortController::new()
+                .map_err(|e| backend_error(StorageOp::MetaRequest, format!("{e:?}")))?;
+            let signal = controller.signal();
+            let mut abort = AbortFetch(Some(controller));
+            let inner: web_sys::RequestInit = (&init).into();
+            inner.set_signal(Some(&signal));
+            let request =
+                web_sys::Request::new_with_str_and_init(&format!("https://ns/{op}"), &inner)
+                    .map_err(|e| backend_error(StorageOp::MetaRequest, format!("{e:?}")))?;
             let mut response = stub
-                .fetch_with_request(request)
+                .fetch_with_request(Request::from(request))
                 .await
                 .map_err(|e| backend_error(StorageOp::MetaCall, e))?;
             let status = response.status_code();
+            // Error replies also own a connection until their body ends.
+            let body = response.text().await.map_err(|e| {
+                backend_error(
+                    if status == 200 {
+                        StorageOp::MetaDecode
+                    } else {
+                        StorageOp::MetaCall
+                    },
+                    e,
+                )
+            })?;
+            abort.0 = None;
             if status != 200 {
                 return Err(backend_error(
                     StorageOp::MetaCall,
                     format_args!("durable object answered {status}"),
                 ));
             }
-            response
-                .text()
-                .await
-                .map_err(|e| backend_error(StorageOp::MetaDecode, e))
+            Ok(body)
         }
     }
 }

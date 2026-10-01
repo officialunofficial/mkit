@@ -398,7 +398,16 @@ async fn prove<S: NamespaceStore>(
     let mut end = INDEX_PREFIX.to_vec();
     *end.last_mut().ok_or_else(unavailable)? = 1;
     let end = Key::new(end);
-    prove_shards(store, shards, repo, target, &start, &end, 1).await?;
+    prove_shards(
+        store,
+        shards,
+        repo,
+        target,
+        &start,
+        &end,
+        WRITE_PROOF_CONCURRENCY,
+    )
+    .await?;
     for id in target.ids {
         require_clear(store, id).await?;
     }
@@ -407,6 +416,9 @@ async fn prove<S: NamespaceStore>(
 /// Only first descriptor pages are prefetched. Each shard's continuations and
 /// nested inventory/chunk proofs retain the existing serial working set.
 const SCANNER_PROOF_CONCURRENCY: usize = 6;
+// Foreground proof leaves two connections for other request work. First-page
+// replies reach EOF before any serial nested proof or another batch starts.
+const WRITE_PROOF_CONCURRENCY: usize = 4;
 // At most 4 MiB of raw descriptor values, plus bounded key/cursor overhead;
 // nested proof allocations remain serial.
 const _: () = assert!(SCANNER_PROOF_CONCURRENCY * crate::store::MAX_VALUE_BYTES <= 4 * 1024 * 1024);
@@ -420,20 +432,23 @@ async fn prove_shards<S: NamespaceStore>(
     end: &Key,
     concurrency: usize,
 ) -> Result<(), ServerError> {
-    use futures::StreamExt as _;
-    // Ordered completion retains the serial descriptor processing order.
-    // Dropping on error cancels pending reads and dispatches no more shards.
-    let mut pages = futures::stream::iter(0..crate::store::INDEX_FANOUT)
-        .map(|prefix| async move {
-            let page = store
-                .scan(&Partition::ContentShard(prefix), start, end, None, 1)
-                .await
-                .map_err(|_| unavailable())?;
-            Ok::<_, ServerError>((prefix, page))
-        })
-        .buffered(concurrency);
-    while let Some(page) = pages.next().await {
-        prove_shard(store, shards, repo, target, page?, start, end).await?;
+    for first in (0..crate::store::INDEX_FANOUT).step_by(concurrency) {
+        let last = (usize::from(first) + concurrency).min(usize::from(crate::store::INDEX_FANOUT));
+        // Joining every dispatched transport prevents early failure/retry from
+        // abandoning live replies. Ordered nested checks start only after EOF.
+        let pages =
+            futures::future::join_all((usize::from(first)..last).map(|prefix| async move {
+                let prefix = u16::try_from(prefix).map_err(|_| unavailable())?;
+                let page = store
+                    .scan(&Partition::ContentShard(prefix), start, end, None, 1)
+                    .await
+                    .map_err(|_| unavailable())?;
+                Ok::<_, ServerError>((prefix, page))
+            }))
+            .await;
+        for page in pages {
+            prove_shard(store, shards, repo, target, page?, start, end).await?;
+        }
     }
     Ok(())
 }
@@ -808,6 +823,8 @@ mod tests {
         active: AtomicUsize,
         peak: AtomicUsize,
         scans: AtomicUsize,
+        completed: AtomicUsize,
+        nested: AtomicUsize,
         fail_prefix: Option<u16>,
         stall: bool,
     }
@@ -818,6 +835,8 @@ mod tests {
                 active: AtomicUsize::new(0),
                 peak: AtomicUsize::new(0),
                 scans: AtomicUsize::new(0),
+                completed: AtomicUsize::new(0),
+                nested: AtomicUsize::new(0),
                 fail_prefix,
                 stall,
             }
@@ -834,6 +853,12 @@ mod tests {
             self.inner.capabilities()
         }
         async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
+            assert_eq!(
+                self.active.load(Ordering::SeqCst),
+                0,
+                "nested reads await sibling EOF"
+            );
+            self.nested.fetch_add(1, Ordering::SeqCst);
             self.inner.get(p, key).await
         }
         async fn scan(
@@ -844,26 +869,47 @@ mod tests {
             after: Option<&Cursor>,
             limit: u32,
         ) -> Result<ScanPage, StoreError> {
-            assert_eq!(start.as_bytes(), INDEX_PREFIX);
+            if start.as_bytes() != INDEX_PREFIX {
+                assert_eq!(
+                    self.active.load(Ordering::SeqCst),
+                    0,
+                    "nested scan awaits sibling EOF"
+                );
+                self.nested.fetch_add(1, Ordering::SeqCst);
+                return self.inner.scan(p, start, end, after, limit).await;
+            }
             assert_eq!(limit, 1);
+            if after.is_some() {
+                assert_eq!(
+                    self.active.load(Ordering::SeqCst),
+                    0,
+                    "continuations await sibling EOF"
+                );
+            }
             self.scans.fetch_add(1, Ordering::SeqCst);
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(active, Ordering::SeqCst);
             let _guard = ActiveScan(&self.active);
-            let mut yielded = false;
+            let mut remaining = if matches!(p, Partition::ContentShard(prefix) if Some(*prefix) == self.fail_prefix)
+            {
+                1
+            } else {
+                3
+            };
             futures::future::poll_fn(|cx| {
                 if self.stall {
                     return std::task::Poll::Pending;
                 }
-                if yielded {
+                if remaining == 0 {
                     std::task::Poll::Ready(())
                 } else {
-                    yielded = true;
+                    remaining -= 1;
                     cx.waker().wake_by_ref();
                     std::task::Poll::Pending
                 }
             })
             .await;
+            self.completed.fetch_add(1, Ordering::SeqCst);
             if matches!(p, Partition::ContentShard(prefix) if Some(*prefix) == self.fail_prefix) {
                 return Err(StoreError::unavailable("probe shard failure"));
             }
@@ -906,7 +952,7 @@ mod tests {
     #[test]
     fn scanner_proof_checks_all_shards_with_measured_concurrency_and_shared_budget() {
         block_on(async {
-            for concurrency in [1, SCANNER_PROOF_CONCURRENCY] {
+            for concurrency in [1, WRITE_PROOF_CONCURRENCY, SCANNER_PROOF_CONCURRENCY] {
                 let store = ScanProbe::new(None, false);
                 let budget = SliceBudget::new(9000);
                 probe_proof(&store, &budget, &BTreeSet::new(), concurrency)
@@ -924,7 +970,7 @@ mod tests {
     #[test]
     fn scanner_proof_preserves_late_block_failure_and_continuations() {
         block_on(async {
-            for concurrency in [1, SCANNER_PROOF_CONCURRENCY] {
+            for concurrency in [1, WRITE_PROOF_CONCURRENCY, SCANNER_PROOF_CONCURRENCY] {
                 let store = ScanProbe::new(None, false);
                 let blocked_id = [255; 32];
                 ContentIndex::new(BorrowedStore(&store.inner))
@@ -992,6 +1038,60 @@ mod tests {
                 ));
                 assert_eq!(failed.scans.load(Ordering::SeqCst), 4096);
                 assert_eq!(failed.active.load(Ordering::SeqCst), 0);
+            }
+        });
+    }
+
+    #[test]
+    fn proof_nested_chunks_wait_for_sibling_eof_and_preserve_valid_results() {
+        block_on(async {
+            for concurrency in [WRITE_PROOF_CONCURRENCY, SCANNER_PROOF_CONCURRENCY] {
+                let store = ScanProbe::new(None, false);
+                let manifest = [0; 32];
+                let chunk = [8; 32];
+                let r = repo("probe");
+                ContentIndex::new(BorrowedStore(&store.inner))
+                    .install_block_action(&manifest, &action(1, vec![chunk]), 1)
+                    .await
+                    .unwrap();
+                member_row(&store.inner, &r, [9; 32], manifest).await;
+                assert!(matches!(probe_proof(&store, &SliceBudget::new(9000),
+                    &BTreeSet::from([chunk]), concurrency).await,
+                    Err(error) if error.code() == crate::Code::PermissionDenied));
+                assert_eq!(store.scans.load(Ordering::SeqCst), concurrency);
+                assert_eq!(store.completed.load(Ordering::SeqCst), concurrency);
+                assert!(store.nested.load(Ordering::SeqCst) > 0);
+                assert_eq!(store.active.load(Ordering::SeqCst), 0);
+                store.scans.store(0, Ordering::SeqCst);
+                let budget = SliceBudget::new(9000);
+                probe_proof(&store, &budget, &BTreeSet::from([[7; 32]]), concurrency)
+                    .await
+                    .unwrap();
+                assert_eq!(store.scans.load(Ordering::SeqCst), 4096);
+                assert!(budget.used() > 4096 && budget.used() < 9000);
+                assert_eq!(store.active.load(Ordering::SeqCst), 0);
+            }
+        });
+    }
+
+    #[test]
+    fn proof_error_waits_for_every_dispatched_reply_before_return_or_retry() {
+        block_on(async {
+            for concurrency in [WRITE_PROOF_CONCURRENCY, SCANNER_PROOF_CONCURRENCY] {
+                let store = ScanProbe::new(Some(0), false);
+                let budget = SliceBudget::new(9000);
+                for attempt in 1..=2 {
+                    assert!(matches!(
+                        probe_proof(&store, &budget, &BTreeSet::new(), concurrency).await,
+                        Err(error) if error.code() == crate::Code::Unavailable
+                    ));
+                    let expected = attempt * concurrency;
+                    assert_eq!(store.scans.load(Ordering::SeqCst), expected);
+                    assert_eq!(store.completed.load(Ordering::SeqCst), expected);
+                    assert_eq!(store.active.load(Ordering::SeqCst), 0);
+                    assert_eq!(budget.used(), u32::try_from(expected).unwrap());
+                }
+                assert_eq!(store.peak.load(Ordering::SeqCst), concurrency);
             }
         });
     }

@@ -338,7 +338,7 @@ async fn upload_ticket(
         ..Default::default()
     };
     let signed_begin = sign_unary(&signer, Rpc::BeginUpload, &begin, |env| {
-        env.repository = repository.to_owned();
+        repository.clone_into(&mut env.repository);
     });
     let opened: BeginUploadResponse = want_ok(ctx.send(&signed_begin).await?, "BeginUpload")?;
     let Some(BeginResult::Ticket(ticket)) = opened.result else {
