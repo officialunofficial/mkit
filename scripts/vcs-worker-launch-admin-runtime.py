@@ -310,9 +310,10 @@ def collect_observation(folder, result, sampler):
         sampled = json.loads((folder / "isolate-samples.json").read_text())
         observation["samples"] = len(sampled["samples"])
         observation["gaps"] = len(sampled["gaps"])
-        observation["isolate_ids"] = sorted({sample["isolate"] for sample in sampled["samples"]})
+        observation["unknown_samples"] = sum(bool(sample.get("memoryUnknown")) for sample in sampled["samples"])
+        observation["isolate_ids"] = sorted({sample["isolate"] for sample in sampled["samples"] if sample.get("isolate")})
         observation["module_isolate_pairs"] = sorted({(sample["budget"]["id"], sample["isolate"])
-            for sample in sampled["samples"] if sample.get("budget") and sample["budget"].get("id")})
+            for sample in sampled["samples"] if sample.get("isolate") and sample.get("budget") and sample["budget"].get("id")})
         observation["heap_fields"] = sorted({field for sample in sampled["samples"] for field in sample["heap"]})
         observation["full_heap_fields_present"] = bool(sampled["samples"]) and all(
             all(field in sample["heap"] for field in ("usedSize", "totalSize", "embedderHeapUsedSize", "backingStorageSize"))

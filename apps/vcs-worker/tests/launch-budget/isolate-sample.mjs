@@ -11,7 +11,7 @@ async function client(target) {
   const socket = new WebSocket(target.webSocketDebuggerUrl,
     {headers: {Origin: 'https://devtools.devprod.cloudflare.dev'}});
   let serial = 0;
-  let generation = 0;
+  let generation = 0, coverageUnknown = false;
   const pending = new Map(), contexts = new Map();
   const contextEvent = (kind, context = {}) => {
     if (contextEvents.length < 100000) contextEvents.push({at: Date.now(),
@@ -38,6 +38,7 @@ async function client(target) {
         const context = message.params.context;
         generation++;
         if (!contexts.has(context.id) && contexts.size >= 16) {
+          coverageUnknown = true;
           gaps.push({at: Date.now(), target: target.id, error: 'live context bound exceeded'});
         } else {
           if (contexts.has(context.id)) contextEvent('replaced', {
@@ -55,7 +56,7 @@ async function client(target) {
         contexts.delete(id);generation++;
         contextEvent('destroyed', {id, created: observed?.created ?? null});
       } else if (message.method === 'Runtime.executionContextsCleared') {
-        contexts.clear();generation++;contextEvent('cleared');
+        contexts.clear();coverageUnknown = false;generation++;contextEvent('cleared');
       }
       const waiter = pending.get(message.id);
       if (waiter) {pending.delete(message.id);clearTimeout(waiter.timer);
@@ -67,11 +68,10 @@ async function client(target) {
       pending.set(id, {resolve, reject, timer});socket.send(JSON.stringify({id, method, params}));
     });
     await rpc('Runtime.enable');
-    const isolate = await rpc('Runtime.getIsolateId');
-    const close = () => {contextEvent('retired');contexts.clear();
+    const close = () => {generation++;contextEvent('retired');contexts.clear();
       rejectPending(Error('inspector client retired'));socket.terminate();};
     return {socket, rpc, close, contexts, generation: () => generation,
-      url: target.webSocketDebuggerUrl, isolate: isolate.id, target: target.id};
+      coverageUnknown: () => coverageUnknown, url: target.webSocketDebuggerUrl, target: target.id};
   } catch (error) {
     rejectPending(error);socket.terminate();throw error;
   }
@@ -93,12 +93,19 @@ try {
         let active = clients.get(target.id);
         if (!active) {active = await client(target);clients.set(target.id, active);}
         const started = Date.now();
+        const generation = active.generation();
         try {
+          const identityErrors = [];
+          const identify = async () => {try {return (await active.rpc('Runtime.getIsolateId')).id ?? null;}
+            catch (error) {identityErrors.push(String(error));return null;}};
+          const isolateBefore = await identify();
           const heap = await active.rpc('Runtime.getHeapUsage');
           const observed = [...active.contexts.values()];
-          const memories = [], memoryErrors = [];
+          const memories = [], memoryErrors = [], skippedContexts = [];
           for (const context of observed) {
-            if (active.contexts.get(context.id) !== context) continue;
+            if (active.contexts.get(context.id) !== context) {
+              skippedContexts.push(context.id);continue;
+            }
             try {
               const memory = await active.rpc('Runtime.evaluate', {contextId: context.id, expression:
                 '({wasm:globalThis.__mkitLaunchMemory ? globalThis.__mkitLaunchMemory() : null,budget:globalThis.__mkitLaunchBudget ? globalThis.__mkitLaunchBudget() : null})',
@@ -111,13 +118,24 @@ try {
               memoryErrors.push({context: context.id, generation: context.generation, error: String(error)});
             }
           }
-          // Heap usage belongs to the actual inspector isolate independently of
-          // whether its live contexts expose the fixture's numeric getters.
+          // Retain heap even when identity or context lifetime prevents joining
+          // it to the fixture's numeric getters.
           const modules = memories.filter(memory => memory.budget?.id);
-          const module = modules.length === 1 ? modules[0] : null;
-          samples.push({started, finished: Date.now(), isolate: active.isolate,
-            target: active.target, heap, contexts: observed, generation: active.generation(),
-            memories, memoryErrors, memoryUnknown: !module,
+          const isolateAfter = await identify();
+          const isolate = isolateBefore && isolateBefore === isolateAfter ? isolateBefore : null;
+          const unknownReasons = [];
+          if (!isolate) unknownReasons.push('isolate identity changed or unavailable');
+          if (active.coverageUnknown()) unknownReasons.push('untracked live context coverage');
+          if (generation !== active.generation()) unknownReasons.push('context lifetime changed during sample');
+          if (memoryErrors.length) unknownReasons.push('getter error');
+          if (skippedContexts.length || memories.length !== observed.length)
+            unknownReasons.push('incomplete observed context coverage');
+          if (modules.length !== 1) unknownReasons.push('no unique observed module');
+          const module = unknownReasons.length === 0 ? modules[0] : null;
+          samples.push({started, finished: Date.now(), isolate, isolateBefore, isolateAfter, identityErrors,
+            target: active.target, heap, contexts: observed, generationStarted: generation,
+            generation: active.generation(), memories, memoryErrors, skippedContexts,
+            memoryUnknown: !module, unknownReasons,
             wasm: module?.wasm ?? null, budget: module?.budget ?? null});
         } catch (error) {
           gaps.push({at: Date.now(), target: active.target, error: String(error)});
