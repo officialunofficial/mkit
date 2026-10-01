@@ -435,12 +435,20 @@ async fn sqlite_crash_after_target_commit_retries_without_another_target_apply()
         Some(codec::encode_u64(1))
     );
 
+    let wake = first.next_wake_ms.unwrap();
+    assert_eq!(wake, 5100);
+    let retry = keys::timer_retry(wake, kinds::RELAY.get(), b"", 100, 1);
+    assert_eq!(
+        source.get(&partition, &retry).await.unwrap(),
+        Some(Value::default())
+    );
+    clock.set(i64::try_from(wake).unwrap());
     let second = run_due(
         &source,
         &partition,
         &registry,
         &clock,
-        101,
+        wake,
         &TickBudget::default(),
     )
     .await
@@ -997,7 +1005,23 @@ async fn sqlite_scan_state_guard_conflict_retries_without_deleting_rows() {
             .unwrap()
             .is_none()
     );
-    let now = first.next_wake_ms.unwrap();
+    // The shared commit budget was spent moving the failed timer. Its
+    // conservative immediate wake must not be mistaken for the retry due.
+    assert_eq!(first.next_wake_ms, Some(100));
+    let retry = keys::timer_retry(5100, kinds::RELAY.get(), b"", 100, 1);
+    assert_eq!(
+        source.get(&partition, &retry).await.unwrap(),
+        Some(Value::default())
+    );
+    let early = one_sql_relay_tick(&source, &partition, target.clone(), 100).await;
+    assert_eq!(early.fired, 0);
+    assert_eq!(pending(&source, &partition).await.len(), 3);
+    assert_eq!(
+        source.get(&partition, &retry).await.unwrap(),
+        Some(Value::default())
+    );
+    let now = early.next_wake_ms.unwrap();
+    assert_eq!(now, 5100);
     let second = one_sql_relay_tick(&source, &partition, target.clone(), now).await;
     assert_eq!(second.fired, 1);
     let mut now = second.next_wake_ms.unwrap_or(now + 1);
@@ -1069,10 +1093,21 @@ async fn sqlite_full_source_relay_timer_reschedules_immediately_after_progress()
         .await
         .unwrap();
         if target.get(&b, &b_key).await.unwrap().is_some() {
+            assert_eq!((report.fired, report.failed), (1, 0));
+            // Budget exhaustion can request an earlier conservative alarm;
+            // the persisted healthy continuation must still be now + 1.
+            assert!(report.next_wake_ms.is_some_and(|wake| wake <= now + 1));
+            let (start, end) = keys::class_range(keys::TAG_TIMER);
+            let timers = source
+                .scan(&partition, &start, &end, None, 2)
+                .await
+                .unwrap();
             assert_eq!(
-                report.next_wake_ms,
-                Some(now + 1),
-                "full-shard timer move must preserve the immediate next fire"
+                timers.entries,
+                vec![(
+                    keys::timer(now + 1, kinds::RELAY.get(), b""),
+                    Value::default(),
+                )]
             );
             break;
         }

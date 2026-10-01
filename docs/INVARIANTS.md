@@ -1467,6 +1467,11 @@ any relay-row deletions, or a guarded kind-3 relay timer reschedule may use
 the reserved space; ordinary puts still fail. The timer exception preserves
 immediate rescheduling after progress on a full shard; without it the runner
 would wait for the 5-second retry backoff.
+After progress, the persisted relay continuation is strictly after the current
+physical wake even when retry metadata retains an earlier handler due time.
+The shared tick budget may request an earlier conservative alarm, but cannot
+delay that continuation. The retry-progress and full-source relay tests enforce
+this rule without changing tick allowances.
 
 **Because:** target delivery and source cleanup cannot share a transaction.
 A crash, overlapping timer fires, or a concurrent writer can occur between them.

@@ -22,6 +22,67 @@
 
 pub mod multipart_allocator;
 
+/// Check retained retry identity, capped delays and payloads through cold ticks.
+pub async fn retained_timer_backoff<S: mkit_server::NamespaceStore>(
+    store: &S,
+    partition: &mkit_server::Partition,
+    registry: &mkit_server::timers::TimerRegistry<'_, S>,
+    original: &mkit_server::Key,
+    payload: &mkit_server::Value,
+    unknown: bool,
+) -> u64 {
+    use mkit_server::store::keys;
+    use mkit_server::timers::{MAX_RETRY_BACKOFF_MS, RETRY_BACKOFF_MS, TickBudget, run_due};
+    let Some(keys::ParsedKey::Timer {
+        kind,
+        reference,
+        due_at_ms,
+    }) = keys::parse(original)
+    else {
+        panic!("expected timer");
+    };
+    let mut now = 100;
+    let mut wake = now + RETRY_BACKOFF_MS;
+    for attempt in 1_u8..=10 {
+        if attempt > 1 {
+            now = wake;
+            let report = run_due(
+                store,
+                partition,
+                registry,
+                &mkit_server::ManualClock::new(i64::try_from(now).expect("test clock fits i64")),
+                now,
+                &TickBudget::default(),
+            )
+            .await
+            .expect("retry tick succeeds");
+            assert_eq!(
+                (report.fired, report.unknown, report.failed),
+                (0, u32::from(unknown), u32::from(!unknown))
+            );
+            wake = report.next_wake_ms.expect("retained timer has a wake");
+        }
+        let delay = (RETRY_BACKOFF_MS * (1_u64 << (attempt.min(8) - 1))).min(MAX_RETRY_BACKOFF_MS);
+        assert_eq!(wake, now + delay);
+        let retry = keys::timer_retry(wake, kind, &reference, due_at_ms, attempt.min(8));
+        let (start, end) = keys::class_range(keys::TAG_TIMER);
+        let rows = store
+            .scan(partition, &start, &end, None, 2)
+            .await
+            .expect("timer scan succeeds");
+        assert!(rows.next.is_none());
+        assert_eq!(rows.entries, vec![(retry, payload.clone())]);
+        assert_eq!(
+            store
+                .get(partition, original)
+                .await
+                .expect("original timer lookup succeeds"),
+            None
+        );
+    }
+    wake
+}
+
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::ops::Range;

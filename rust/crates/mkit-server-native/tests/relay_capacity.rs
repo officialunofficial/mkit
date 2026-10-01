@@ -138,6 +138,7 @@ fn sql_soft_limit_reserves_space_for_guarded_relay_timer_reschedule() {
                 &source,
                 Batch::new()
                     .require(Precondition::Equals(old_timer.clone(), Value::default()))
+                    .require(Precondition::Absent(next_timer.clone()))
                     .delete(old_timer.clone())
                     .put(next_timer.clone(), next_value.clone())
             )
@@ -156,6 +157,7 @@ fn sql_soft_limit_reserves_space_for_guarded_relay_timer_reschedule() {
                 &source,
                 Batch::new()
                     .require(Precondition::Equals(next_timer.clone(), Value::default()))
+                    .require(Precondition::Absent(keys::timer(3, 2, b"")))
                     .delete(next_timer)
                     .put(keys::timer(3, 2, b""), codec::encode_u64(2))
             )
@@ -171,6 +173,7 @@ fn sql_soft_limit_reserves_space_for_guarded_relay_timer_reschedule() {
                         legacy_timer.clone(),
                         codec::encode_u64(2)
                     ))
+                    .require(Precondition::Absent(keys::timer(5, 3, b"")))
                     .delete(legacy_timer)
                     .put(keys::timer(5, 3, b""), Value::default())
             )

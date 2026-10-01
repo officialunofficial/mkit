@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: keep relay progress continuations after the current wake when retry
+  metadata retains an older due time. Update timer, verification-job and
+  published-view tests to assert retained capped retries and recovery;
+  recognize the HTTP content-header golden as a JSON table in the wasm verifier,
+  and correct the route property's reserved-name fixture expectations.
+
 - Server (WP-5.6a-3, R-190): add signed moderation GetTakedown/ListTakedowns,
   atomic audited SetLegalHold and freshly verified ReadPreserved streaming.
   Replay stores byte-free read descriptors; each attempt rechecks authority and
