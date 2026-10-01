@@ -177,11 +177,7 @@ async fn pack_bytes<B: BlobStore>(
     ticket: &TicketV1,
     cap: u64,
 ) -> Result<Vec<u8>, ServerError> {
-    if ticket.bytes > cap {
-        return Err(ServerError::invalid_argument(
-            "pack exceeds indexed max_pack_bytes",
-        ));
-    }
+    super::check_pack_cap(ticket.bytes, cap)?;
     let body = blobs
         .get(&BlobKey::pack(ticket.pack_id), None)
         .await
@@ -436,6 +432,11 @@ async fn verify_ticketed_optional<B: MultipartBlobStore, S: NamespaceStore>(
     metrics: &dyn Metrics,
     inspection_limit: Option<usize>,
 ) -> Result<StagedCommits, ServerError> {
+    // Check before inspection preflight or verification-state handling, so a
+    // cached Verified pack returns the same cap error as a fresh pack.
+    for ticket in tickets {
+        super::check_pack_cap(ticket.bytes, cfg.max_pack_bytes)?;
+    }
     let inspection_count = if let Some(limit) = inspection_limit {
         Some(super::inspection::preflight_native(blobs, tickets, limit).await?)
     } else {

@@ -1146,3 +1146,172 @@ fn final_ticket_read_cannot_serve_bytes_after_capability_or_ticket_expiry() {
         }
     }
 }
+
+#[derive(Default)]
+struct AssignmentScanner(Mutex<Vec<(Vec<InspectObject>, InspectRetrieval)>>);
+impl ContentInspector for AssignmentScanner {
+    fn id(&self) -> &'static str {
+        "assignment-scanner"
+    }
+    fn inspect<'a>(
+        &'a self,
+        _: &'a Operation,
+        _: &'a str,
+        _: &'a [InspectObject],
+    ) -> crate::BoxFuture<'a, Result<InspectVerdict, ServerError>> {
+        Box::pin(async { panic!("retrieval metadata is required") })
+    }
+    fn inspect_with_retrieval<'a>(
+        &'a self,
+        _: &'a Operation,
+        _: &'a str,
+        objects: &'a [InspectObject],
+        retrieval: Option<InspectRetrieval>,
+    ) -> crate::BoxFuture<'a, Result<InspectVerdict, ServerError>> {
+        Box::pin(async move {
+            self.0
+                .lock()
+                .unwrap()
+                .push((objects.to_vec(), retrieval.unwrap()));
+            Ok(InspectVerdict::Pass)
+        })
+    }
+}
+
+#[allow(clippy::too_many_lines)] // Scanned publication, projection delivery and empty-scope authorization in one fixture.
+fn ticketless_scanner_write(sharding: Sharding, case: u32) {
+    let (mut env, owner, identity) = environment_with_sharding(sharding);
+    env.pipe.cfg.scanner_retrieval = Some(scanner_config());
+    env.pipe.cfg.begin_upload_threshold_bytes = 0;
+    let scanner = Arc::new(AssignmentScanner::default());
+    env.pipe = env
+        .pipe
+        .with_inspectors(vec![scanner.clone()], 10_000)
+        .unwrap();
+    let (one, two, head) = inspection_packs();
+    let list = encode_packlist(None, &[hash(&one), hash(&two)]).unwrap();
+    let map = hash(&list);
+    let tickets = [(&one, 195_000), (&two, 195_001), (&list, 195_002)]
+        .into_iter()
+        .map(|(bytes, n)| begin_and_upload(&env, &owner, &identity, bytes, n))
+        .collect();
+    let auth = env
+        .auth(&signed(&owner, &identity, Procedure::AdvanceRefs, 195_003))
+        .unwrap();
+    let repo = auth.repo().repo.clone();
+    assert_eq!(
+        block_on(env.pipe.advance_refs_with_tickets(
+            &auth,
+            upd(HEAD, Missing, head),
+            upd(PACKMAP, Missing, map),
+            tickets
+        ))
+        .unwrap(),
+        AdvanceOutcome::Committed
+    );
+    let source = env.pipe.shards.ref_shard(&repo, HEAD);
+    let relay = crate::timers::TimerRegistry::new().register(crate::relay::RelayHandler {
+        target: BorrowedStore(&env.pipe.meta),
+        hook: crate::relay::NoHook,
+        budget: crate::relay::RelayBudget::default(),
+    });
+    for _ in 0..8 {
+        block_on(crate::timers::run_due(
+            &env.pipe.meta,
+            &source,
+            &relay,
+            env.clock.as_ref(),
+            T0 as u64,
+            &crate::timers::TickBudget::default(),
+        ))
+        .unwrap();
+    }
+    let expected_ref = match case {
+        0 => "refs/tags/v1",
+        2 => PACKMAP,
+        _ => HEAD,
+    };
+    if case == 3 {
+        let auth = env
+            .auth(&signed(&owner, &identity, Procedure::AdvanceRefs, 195_004))
+            .unwrap();
+        assert_eq!(
+            block_on(env.pipe.advance_refs_with_tickets(
+                &auth,
+                upd(HEAD, Match(head), head),
+                upd(PACKMAP, Match(map), map),
+                vec![]
+            ))
+            .unwrap(),
+            AdvanceOutcome::Committed
+        );
+    } else {
+        let auth = env
+            .auth(&signed(&owner, &identity, Procedure::UpdateRef, 195_004))
+            .unwrap();
+        let (condition, id) = match case {
+            0 => (Missing, head),
+            1 => (Match(head), head),
+            _ => (Match(map), map),
+        };
+        assert_eq!(
+            block_on(env.pipe.update_ref(&auth, upd(expected_ref, condition, id))).unwrap(),
+            crate::UpdateRefResult::Committed
+        );
+    }
+    let calls = scanner.0.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        2,
+        "every advance must inspect, including empty additions"
+    );
+    assert!(
+        !calls[0].0.is_empty(),
+        "initial publication must be scanned"
+    );
+    let (objects, retrieval) = &calls[1];
+    assert!(objects.is_empty());
+    assert!(retrieval.packs.is_empty());
+    let token = retrieval.capability.as_ref().unwrap();
+    let claims = env
+        .pipe
+        .cfg
+        .scanner_retrieval
+        .as_ref()
+        .unwrap()
+        .verify(token, AUDIENCE, T0 as u64)
+        .unwrap();
+    assert!(claims.assignment.packs.is_empty());
+    assert_eq!(claims.assignment.repository, identity);
+    assert_eq!(claims.assignment.namespace, repo.namespace.as_str());
+    assert_eq!(claims.assignment.repo_name, repo.name.as_str());
+    assert_eq!(claims.assignment.signer, owner.verifying_key().to_bytes());
+    assert_eq!(claims.assignment.ref_name, expected_ref);
+    not_found(fetch(&env, &identity, token, &hash(&one), None));
+    not_found(fetch(&env, &identity, token, &hash(&two), None));
+}
+
+#[test]
+fn ticketless_scanner_tag_creation_single_and_d34() {
+    for sharding in [Sharding::Single, Sharding::D34] {
+        ticketless_scanner_write(sharding, 0);
+    }
+}
+#[test]
+fn ticketless_scanner_head_only_single_and_d34() {
+    for sharding in [Sharding::Single, Sharding::D34] {
+        ticketless_scanner_write(sharding, 1);
+    }
+}
+#[test]
+fn ticketless_scanner_packmap_only_single_and_d34() {
+    for sharding in [Sharding::Single, Sharding::D34] {
+        ticketless_scanner_write(sharding, 2);
+    }
+}
+#[test]
+fn ticketless_scanner_zero_ticket_advance_single_and_d34() {
+    for sharding in [Sharding::Single, Sharding::D34] {
+        ticketless_scanner_write(sharding, 3);
+    }
+}

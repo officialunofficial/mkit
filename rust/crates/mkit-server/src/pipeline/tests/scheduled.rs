@@ -555,3 +555,124 @@ fn update_only_grants_prove_scheduled_ancestry_after_verification() {
         Some(child_id)
     );
 }
+
+#[test]
+fn lower_pack_cap_after_restart_rejects_fresh_and_usable_jobs() {
+    for usable in [false, true] {
+        for sharding in [Sharding::Single, Sharding::D34] {
+            let (env, owner, identity) = environment_with(sharding, scheduled());
+            let (bytes, head) = pack();
+            let pack_id = hash(&bytes);
+            let ticket = begin_and_upload(&env, &owner, &identity, &bytes, 194_000);
+            let request = signed(&owner, &identity, Procedure::AdvanceRefs, 194_001);
+            let auth = env.auth(&request).unwrap();
+            let repo = auth.repo().repo.clone();
+            let source = env.pipe.shards.ref_shard(&repo, HEAD);
+            if usable {
+                assert_eq!(
+                    advance(
+                        &env,
+                        &owner,
+                        &identity,
+                        194_002,
+                        head,
+                        pack_id,
+                        vec![ticket]
+                    )
+                    .unwrap_err()
+                    .public_message(),
+                    "pack verification pending"
+                );
+                alarms(&env, &source, 12);
+                let raw = block_on(
+                    env.pipe
+                        .meta
+                        .get(&source, &keys::verify_job(&repo.name, &pack_id)),
+                )
+                .unwrap()
+                .unwrap();
+                assert!(
+                    crate::indexed::checkpoint::decode_job(&raw)
+                        .unwrap()
+                        .usable()
+                );
+            }
+            let before = block_on(
+                env.pipe
+                    .meta
+                    .get(&source, &keys::verify_job(&repo.name, &pack_id)),
+            )
+            .unwrap();
+            let mut config = env.pipe.cfg.clone();
+            config.indexed.as_mut().unwrap().max_pack_bytes = bytes.len() as u64 - 1;
+            let restarted = Pipeline::new(
+                env.pipe.blobs.clone(),
+                env.pipe.meta.inner.clone(),
+                Hooks::new(),
+                config,
+                env.clock.clone(),
+                env.metrics.clone(),
+            )
+            .unwrap();
+            let error = block_on(restarted.advance_refs_with_tickets(
+                &auth,
+                upd(HEAD, Missing, head),
+                upd(PACKMAP, Missing, pack_id),
+                vec![ticket],
+            ))
+            .unwrap_err();
+            assert_eq!(error.code(), Code::InvalidArgument);
+            assert_eq!(
+                error.public_message(),
+                "pack exceeds indexed max_pack_bytes"
+            );
+            assert_eq!(
+                block_on(
+                    env.pipe
+                        .meta
+                        .get(&source, &keys::verify_job(&repo.name, &pack_id))
+                )
+                .unwrap(),
+                before,
+                "cap rejection must not claim or replace a job"
+            );
+            assert_advance_unmoved(&env, &repo, &[pack_id]);
+        }
+    }
+}
+
+#[test]
+fn lower_pack_cap_stops_scheduled_decode_before_blob_work() {
+    let (mut env, owner, identity) = environment_with(Sharding::Single, scheduled());
+    let (bytes, head) = pack();
+    let pack_id = hash(&bytes);
+    let ticket = begin_and_upload(&env, &owner, &identity, &bytes, 194_010);
+    let auth = env
+        .auth(&signed(&owner, &identity, Procedure::AdvanceRefs, 194_011))
+        .unwrap();
+    let repo = auth.repo().repo.clone();
+    let source = env.pipe.shards.ref_shard(&repo, HEAD);
+    advance(
+        &env,
+        &owner,
+        &identity,
+        194_012,
+        head,
+        pack_id,
+        vec![ticket],
+    )
+    .unwrap_err();
+    env.pipe.cfg.indexed.as_mut().unwrap().max_pack_bytes = bytes.len() as u64 - 1;
+    alarms(&env, &source, 12);
+    let raw = block_on(
+        env.pipe
+            .meta
+            .get(&source, &keys::verification(&repo.name, &pack_id)),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(matches!(crate::indexed::state::decode(&raw).unwrap(),
+        crate::indexed::state::VerificationV1::Rejected {code, message}
+        if code == "invalid_argument" && message == "pack exceeds indexed max_pack_bytes"));
+    assert_advance_unmoved(&env, &repo, &[pack_id]);
+}

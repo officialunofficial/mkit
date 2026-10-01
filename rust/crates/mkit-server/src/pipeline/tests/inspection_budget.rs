@@ -134,6 +134,7 @@ fn inspection_pair_budget_includes_dependency_visibility_before_hooks() {
         let before = env.pipe.meta.calls();
         let result = block_on(env.pipe.prepare_publication(
             &operation,
+            REPO,
             &source,
             &write,
             &mut snapshot,
