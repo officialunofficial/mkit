@@ -72,7 +72,7 @@ fn listing<H: HookSet>(
     let a = e.auth(req)?;
     block_on(e.pipe.list_repos_page(
         &a,
-        &identity("selector").split_once('/').unwrap().0,
+        identity("selector").split_once('/').unwrap().0,
         prefix,
         Some(size),
         token,
@@ -109,7 +109,8 @@ fn visibility_views_and_atomic_creation_work_in_single_and_d34() {
             names(&public)
         );
         let read_grant = grant(&key(1), &key(2), |g| {
-            g.capabilities = mkit_attest::grant::Capabilities::Read
+            g.capabilities = mkit_attest::grant::Capabilities::Read;
+            g.ref_scopes = None;
         });
         let holder = stranger.header("x-write-grant", &read_grant);
         assert_eq!(
@@ -289,7 +290,7 @@ fn creation_retries_if_visibility_changes_before_its_apply() {
                     |write| matches!(write, Write::Put(k, _) if *k == keys::repo_record(&name)),
                 ) && !once.swap(true, Ordering::SeqCst)
                 {
-                    block_on(kv.apply(
+                    now(kv.apply(
                         p,
                         Batch::new().put(
                             keys::repo_visibility(&name),
@@ -322,17 +323,15 @@ fn visibility_retries_if_registration_changes_before_its_apply() {
                 |write| matches!(write, Write::Put(k, _) if *k == keys::repo_visibility(&name)),
             ) && !once.swap(true, Ordering::SeqCst)
             {
-                block_on(
-                    kv.apply(
-                        p,
-                        Batch::new()
-                            .put(
-                                keys::repo_record(&name),
-                                codec::encode_repo_record(&codec::RepoRecord { created_at_ms: 0 }),
-                            )
-                            .put(keys::repo_listing(&name, false), Value::default()),
-                    ),
-                )
+                now(kv.apply(
+                    p,
+                    Batch::new()
+                        .put(
+                            keys::repo_record(&name),
+                            codec::encode_repo_record(&codec::RepoRecord { created_at_ms: 0 }),
+                        )
+                        .put(keys::repo_listing(&name, false), Value::default()),
+                ))
                 .unwrap();
             }
         });
