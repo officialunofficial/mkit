@@ -852,6 +852,9 @@ mod object {
             };
             if let Err(error) = result {
                 crate::log_failure(&format!("timer alarm update failed: {error}"));
+                // A successful callback suppresses the runtime's retry even
+                // when durable timer rows still need a continuation.
+                return Err(error);
             }
             if self.alarm_dirty.replace(false)
                 && let AlarmAction::Set(next) =
@@ -859,6 +862,7 @@ mod object {
                 && let Err(error) = self.set_alarm(next).await
             {
                 crate::log_failure(&format!("timer alarm update failed: {error}"));
+                return Err(error);
             }
             Response::ok("timers processed")
         }
