@@ -1595,22 +1595,13 @@ fn caller_cap_accounts_ancestors_and_duplicate_output_with_typed_exhaustion() {
         Code::ResourceExhausted
     );
     assert_eq!(
-        block_on(
-            reader.read_canonical_with_limit(
-                &[d.head(); 2],
-                serialize(&d.commit).unwrap().len() as u64
-            )
-        )
-        .unwrap_err()
-        .code(),
+        block_on(reader.read_canonical_with_limit(&[id(&d.big); 2], 100_000))
+            .unwrap_err()
+            .code(),
         Code::ResourceExhausted
     );
     assert_eq!(
-        block_on(
-            reader
-                .read_canonical_with_limit(&[d.head()], serialize(&d.commit).unwrap().len() as u64)
-        )
-        .unwrap(),
+        block_on(reader.read_canonical_with_limit(&[d.head()], 4096)).unwrap(),
         vec![Some(serialize(&d.commit).unwrap())]
     );
     assert!(
@@ -1631,8 +1622,7 @@ fn typed_metadata_distinguishes_manifest_serialization_from_file_length() {
     .unwrap();
     fx.clear_calls();
     let m =
-        block_on(reader.object_metadata(&[id(&d.small), id(&d.manifest), d.head(), id(&d.small)]))
-            .unwrap();
+        block_on(reader.object_metadata(&[id(&d.small), id(&d.manifest), id(&d.small)])).unwrap();
     let small = m[0].unwrap();
     assert_eq!(small.kind, ObjectType::Blob);
     assert_eq!(
@@ -1647,8 +1637,12 @@ fn typed_metadata_distinguishes_manifest_serialization_from_file_length() {
         serialize(&d.manifest).unwrap().len() as u64
     );
     assert_eq!(manifest.logical_len, Some(d.whole().len() as u64));
-    assert_eq!(m[2].unwrap().logical_len, None);
-    assert_eq!(m[0], m[3]);
+    assert_eq!(m[0], m[2]);
+    // Requested ancestors cannot be decoded to authorize other targets in the
+    // same metadata batch. A root-only batch needs no ancestor reconstruction.
+    let head = block_on(reader.object_metadata(&[d.head()])).unwrap()[0].unwrap();
+    assert_eq!(head.kind, ObjectType::Commit);
+    assert_eq!(head.logical_len, None);
 }
 
 #[test]

@@ -1,6 +1,6 @@
 # Takedown publication and reader performance design
 
-Status: approved directory layout implemented; native and local Worker repros passed; final broad gates in progress.
+Status: implemented and validated; native and local Worker repros and all required gates passed.
 Initial base inspected: `feat/mkit-server-next` at `22d7907433d29d8901b94492a953c74c655ad194`; rebased onto inspection storage commit `2326d2e8acb9adc8fcc27e3c7b80ee467dd96c4e`.
 Scope: server core, Worker wiring, in-process native regressions and local Worker conformance. No changes to the native server crate.
 
@@ -66,7 +66,7 @@ Expected empty-store cost is sixteen directory page reads rather than 4,096 part
 
 Separate immutable closure work from final mutable acceptance. Extend existing verification/publication value state and timer-12 handling, without a new timer kind, to retain a frozen proposed pair before moving either ref or consuming its tickets. Merely applying an unchecked pair as Pending is disallowed by section 9.3 and the requested fail-closed behavior.
 
-Oversized checkpoint frontiers compact into a terminal typed traversal refusal, reserving guarded-batch bytes as well as the value bound. The existing repository-scoped verification row carries a binding of the proposed pair, publication generation, exact added-pack selection, byte budget and delta depth limit. A changed binding starts fresh evidence. Ref names, expected refs, ticket ids/expiry and current dependency witnesses are mutable acceptance inputs; every foreground retry still validates them before guarded acceptance. Immutable closure evidence grants neither membership nor serving authority. Missing membership is retried with cumulative counters preserved and follows the consuming root-MKPL ticket/request's relay-lag classification. Final acceptance rechecks authorization, tickets, membership witnesses and global denial at the new attempt's plan time.
+Oversized checkpoint frontiers compact into a terminal typed traversal refusal. The encoded verification state is capped at 520,192 bytes, reserving bytes for its prior-value guard, keys and timer settlement within the existing 1 MiB batch bound. The existing repository-scoped verification row carries a binding of the proposed pair, publication generation, exact added-pack selection, byte budget and delta depth limit. A changed binding starts fresh evidence. Ref names, expected refs, ticket ids/expiry and current dependency witnesses are mutable acceptance inputs; every foreground retry still validates them before guarded acceptance. Immutable closure evidence grants neither membership nor serving authority. Missing membership is retried with cumulative counters preserved and follows the consuming root-MKPL ticket/request's relay-lag classification. Final acceptance rechecks authorization, tickets, membership witnesses and global denial at the new attempt's plan time.
 
 Checkpoint the packmap cursor, allowed packs, BFS frontier, visited ids, dependency/base sets, per-base traversal cursor and cumulative counters. Bound the encoded checkpoint by the existing value limit; check frontier size before allocation. Do not retain canonical blobs across fires. Each delta-base metadata step is independently checkpointed so a maximum-depth chain spans slices without restarting its object.
 
@@ -127,11 +127,17 @@ A local release Worker with takedown on, paid Uno profile, D34/Multi and fresh s
 
 | Fixture | Raw pack bytes | Pending polls | Final Advance physical calls | Final Advance ingress wall | Whole push wall |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Ten Blob payloads of 1 MiB minus ten bytes (>9 MiB total payload) | 10,486,593 | 6 | 52 (48 DO + 4 R2) | 197 ms | 8.268 s |
-| Valid 32-chunk file, 62,500 bytes per chunk | 2,001,909 | 8 | 64 (60 DO + 4 R2) | 171 ms | 9.321 s |
+| Ten Blob payloads of 1 MiB minus ten bytes (>9 MiB total payload) | 10,486,593 | 7 | 52 (48 DO + 4 R2) | 228 ms | 9.092 s |
+| Valid 32-chunk file, 62,500 bytes per chunk | 2,001,909 | 7 | 64 (60 DO + 4 R2) | 155 ms | 8.303 s |
 
-The work-carrying pending advances used 57 and 130 physical calls and 131/187 ms respectively. Whole-push timings include upload, verification, polling sleeps and publication; they are not proof timings. Completed request observation peaked at 130 calls. Across 358 completed conservative alarm groups, the external-call high-water mark was 193, maximum outgoing lifetime concurrency four, and timer window high-water eight rows. Each alarm's work is bounded by its overlapping group total; exact Rust task overlap attribution is not claimed. The wrapper assessment passed with all invocation groups complete, no host-operation/handler errors, and settled response bodies. The separate isolate sampler was not run; retained linear capacity observation is not a memory certificate.
+The work-carrying pending advances used 57 and 130 physical calls and 133/260 ms respectively. Whole-push timings include upload, verification, polling sleeps and publication; they are not proof timings. Completed request observation peaked at 130 calls. Across 358 completed conservative alarm groups, the external-call high-water mark was 193, maximum outgoing lifetime concurrency four, and timer window high-water eight rows. Each alarm's work is bounded by its overlapping group total; exact Rust task overlap attribution is not claimed. The wrapper assessment passed with all invocation groups complete, no host-operation/handler errors, and settled response bodies. The separate isolate sampler was not run; retained linear capacity observation is not a memory certificate.
 
 The successful Worker run required no proxy retries. Earlier runs hit known dev-proxy connection loss; wire fixtures now bound replay of identical signed launch requests on that transport failure. Ordinary server responses are not hidden by this retry.
 
 No new timer or client protocol is introduced. The separate exact-1-MiB payload geometry repair remains independently owned.
+
+## Final validation
+
+The rebased tree passes all 3,019 server/core/Worker/conformance nextest tests (13 intentionally skipped), all 1,540 CLI reverse-dependency tests (nine intentionally skipped), all touched/reverse doctests, locked all-target/all-feature workspace Clippy, server/Worker wasm Clippy, strict rustdoc, formatting, script gates and security gates. Two independent static reviews completed; their checkpoint, missing-membership retry, base-cursor, binding and lag findings were fixed before the final run.
+
+Existing denial-planning tests now use the directory fan-out; 4,200 stale registrations preserve the cumulative retry-ledger exhaustion regression. Reader tests cover caller caps including ancestor/framing work and duplicate output, requested-file metadata and separate root metadata. Late-owner mocks route directory reservations through the remote store while preserving local content calls; the acquisition fixture uses a clock consistent with its timestamps. Both new wire cases have exact documented requirements/exclusions. The host Worker parent-budget regression now asserts three proofs fit under 200 calls, then exhausts the same parent through actual metadata dispatches.
