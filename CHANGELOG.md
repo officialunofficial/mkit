@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- HTTP ref-path files: serve MP4, WebM, MP3, Ogg, WAV, HEIC, Markdown and CSV
+  inline with their media types, preserving encoded filenames, security headers
+  and byte ranges. Dangerous extensions remain binary attachments.
+
 - HTTP object readback accepts streamed chunk-offset sidecar tails from R2.
 
 - Indexed verification, extraction and preservation count canonical Blob framing
