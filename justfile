@@ -13,7 +13,7 @@
 # runs its check-spec-status.sh. Still local-only until WP-REL mirrors them
 # into the CI configs: the mkit-wasm wasm32 check, scripts/wasm-ruzstd-check.sh
 # (mkit-core's pack-ruzstd decoder run on wasm32 under node via wasm-pack),
-# the `pack-ruzstd` nextest run in ci-linux / ci-macos, and `interop-enc`.
+# the `pack-ruzstd` nextest run in ci-linux / ci-macos, and the enc client tests.
 # ci-proto mirrors buf.yml's buf-action lint and breaking gates as CLI
 # commands, followed by the same server-hook JSON script. Its baseline
 # parameter reproduces the action's event-dependent comparison target.
@@ -51,7 +51,6 @@ ci:
     just ci-docs
     just ci-geiger
     just ci-scripts
-    just interop-enc
 
 # Mirrors cloudbuild/ci.yaml's rust/ + contrib/signers/ steps.
 ci-linux:
@@ -132,10 +131,7 @@ ci-security:
     }
     ( cd rust && run_audit )
     ( cd contrib/signers && run_audit )
-    ( cd contrib/interop/enc-client-0.4 && run_audit )
     cargo deny --manifest-path rust/Cargo.toml --all-features check
-    cargo deny --manifest-path contrib/interop/enc-client-0.4/Cargo.toml --all-features \
-      check --config rust/deny.toml
 
 # Mirrors .github/workflows/buf.yml: buf-action lint/breaking and its JSON step.
 # Use the event's PR base or pre-push commit as baseline to match the action;
@@ -172,8 +168,8 @@ ci-scripts:
     bash scripts/wasm-ruzstd-check.sh
 
 # The MKIT-29 M0 exit gate in one command (WP-M0-20): the mkit-server
-# crates' tests (storage suite per backend, wire suite in-process and over
-# the real binary), the wasm32 builds of the runtime-agnostic core and the
+# crates' tests (memory storage suite and wire suite over the in-process
+# conformance host), the wasm32 builds of the runtime-agnostic core and the
 # Workers adapter, and the server-free CLI check. `just ci` already covers
 # every step (the nextest run is a subset of ci-linux / ci-macos's
 # workspace run; the rest is in ci-scripts), so `ci` does not call this
@@ -187,22 +183,13 @@ ci-server:
     #!/usr/bin/env bash
     set -euo pipefail
     just ci-server-allocator
-    ( cd rust && cargo nextest run --locked -p mkit-server -p mkit-server-native \
+    ( cd rust && cargo nextest run --locked -p mkit-server \
         -p mkit-server-conformance -p mkit-server-worker --all-features )
     ( cd rust && cargo check --locked -p mkit-server --target wasm32-unknown-unknown \
         && cargo check --locked -p mkit-server --features remote-hooks --target wasm32-unknown-unknown \
         && cargo check --locked -p mkit-server --features http-objects --target wasm32-unknown-unknown \
         && cargo build --locked -p mkit-server-worker --target wasm32-unknown-unknown )
     bash scripts/check-cli-baseline.sh
-
-# The published mkit-transport-enc 0.4 client (crates.io) against this
-# tree's `mkit-server serve --listen-enc` (contrib/interop/enc-client-0.4).
-interop-enc:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    ( cd rust && cargo build --locked -p mkit-server-native --bin mkit-server )
-    target="${CARGO_TARGET_DIR:-$PWD/rust/target}"
-    ( cd contrib/interop/enc-client-0.4 && MKIT_SERVER_BIN="$target/debug/mkit-server" cargo test --locked )
 
 # Mirrors cloudbuild/docs.yaml (rustdoc -D warnings).
 ci-docs:

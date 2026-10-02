@@ -1284,7 +1284,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "457cfa540c62e1b0b05db676cc9a9129162ad94d3a3eec6f2d19706c53acae7d"
 dependencies = [
  "async-trait",
- "axum",
  "base64 0.22.1",
  "buffa",
  "bytes",
@@ -3166,16 +3165,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "metrics"
-version = "0.24.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89550ee9f79e88fef3119de263694973a8adb26c21d75322164fb8c493039fe2"
-dependencies = [
- "portable-atomic",
- "rapidhash",
-]
-
-[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3534,7 +3523,6 @@ dependencies = [
  "mkit-core",
  "mkit-rpc",
  "mkit-server",
- "mkit-server-native",
  "mkit-transport-connect",
  "p256",
  "reqwest",
@@ -3547,60 +3535,6 @@ dependencies = [
  "tower-http",
  "url",
  "webpki-roots",
-]
-
-[[package]]
-name = "mkit-server-native"
-version = "0.4.2"
-dependencies = [
- "axum",
- "base64 0.22.1",
- "buffa",
- "bytes",
- "clap",
- "commonware-codec",
- "commonware-cryptography",
- "connectrpc",
- "ed25519-dalek",
- "futures",
- "futures-executor",
- "futures-util",
- "getrandom 0.4.3",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-util",
- "libc",
- "metrics",
- "mkit-attest",
- "mkit-cli",
- "mkit-core",
- "mkit-rpc",
- "mkit-server",
- "mkit-server-conformance",
- "mkit-transport-connect",
- "mkit-transport-enc",
- "mkit-transport-file",
- "mkit-transport-s3",
- "parking_lot",
- "proptest",
- "reqwest",
- "rusqlite",
- "serde_json",
- "sha2 0.11.0",
- "subtle",
- "tempfile",
- "testcontainers",
- "testcontainers-modules",
- "tokio",
- "tokio-rustls",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "url",
- "zeroize",
 ]
 
 [[package]]
@@ -4764,15 +4698,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
 dependencies = [
  "rand_core 0.9.5",
-]
-
-[[package]]
-name = "rapidhash"
-version = "4.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5da7e78a036ce858e8d55b7e7dc8ba3a88b78350fd2155d3591bbd966b58589e"
-dependencies = [
- "rustversion",
 ]
 
 [[package]]

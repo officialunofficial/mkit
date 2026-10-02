@@ -221,14 +221,8 @@ pub fn run(args: &[String]) -> u8 {
                 eprintln!(
                     "hint: `mkit serve` no longer takes `{flag}`; it only speaks the ssh-frame \
                      protocol on stdin/stdout.\n\
-                     \x20     The HTTP and mkit+enc:// listeners are the separate `mkit-server` \
-                     binary:\n\
-                     \x20       mkit-server serve --repo-root <PATH> --listen <ADDR>      \
-                     (was: mkit serve <PATH> --http <ADDR>)\n\
-                     \x20       mkit-server serve --repo-root <PATH> --listen-enc <ADDR>  \
-                     (was: mkit serve <PATH> --listen-enc <ADDR>)\n\
-                     \x20     See \"Migrating from `mkit serve --http` and `--listen-enc`\" in \
-                     docs/CLI.md."
+                     \x20     Use SSH (`mkit serve`) or a Connect server such as vcs-worker.\n\
+                     \x20     The mkit+enc:// transport is deprecated: no maintained server."
                 );
             }
             return code;

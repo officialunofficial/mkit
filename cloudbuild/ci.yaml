@@ -215,9 +215,8 @@ steps:
         )
 
         # ── mkit-server (MKIT-29 M0 exit gate, WP-M0-20; `just ci-server`) ──
-        # The workspace nextest above already runs the storage suite per
-        # backend and the wire suite (in-process and over the real
-        # `mkit-server` binary: mkit-server-native's wire_* tests). These
+        # The workspace nextest above runs the memory storage suite and
+        # wire suite over the memory-backed in-process host. These
         # add what it cannot: the runtime-agnostic core and the Workers
         # adapter must build for wasm32 (a native-only dependency breaks the
         # Workers deployment, not the host build), the wasm32 graphs must

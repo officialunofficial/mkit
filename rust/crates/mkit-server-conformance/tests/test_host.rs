@@ -155,6 +155,11 @@ async fn ticketed_auth_v2_wire_cases_run_against_the_host() {
     .await
     .unwrap();
     let report = run(&target(&host), Some("tickets.")).await;
+    assert!(
+        !report.failed(),
+        "ticket wire suite failures:\n{}",
+        report.tap()
+    );
 
     for name in [
         "tickets.begin_upload_new",
@@ -163,6 +168,8 @@ async fn ticketed_auth_v2_wire_cases_run_against_the_host() {
         "tickets.begin_upload_packmap_refused",
         "tickets.upload_pack_ticketed",
         "tickets.upload_pack_bad_token",
+        "tickets.upload_pack_expired_token",
+        "tickets.advance_expired_ticket",
         "tickets.upload_pack_binding_denied",
         "tickets.expiry_timer_frees_cap_slot",
     ] {
