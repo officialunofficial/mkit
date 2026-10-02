@@ -285,7 +285,7 @@ fn transport_outcome(r: Result<(), TransportError>) -> Result<&'static str, Stri
 }
 
 /// The system under test: one temp repository, a `FileTransport` over its
-/// common dir (the root a `mkit serve` / `mkit-server --meta fs-layout` of
+/// common dir (the root a `mkit serve` / `mkit-server` fs-layout deployment of
 /// the same `.mkit` would use), and one `MemoryTransport`.
 struct Sut {
     _dir: tempfile::TempDir,

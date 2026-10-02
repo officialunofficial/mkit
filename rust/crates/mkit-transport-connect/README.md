@@ -9,9 +9,8 @@ The native [ConnectRPC] client of `mkit.transport.v1.TransportService`
 `mkit-cli`'s `remote_dispatch` constructs it for `mkit+https://` / loopback
 `mkit+http://`, replacing `mkit-transport-http`'s bespoke JSON dialect there.
 
-The server side is not in this crate. Self-hosted remotes run `mkit-server`
-(the `mkit-server-native` crate, over `mkit-server`'s pipeline):
-`mkit-server serve --listen <ADDR> --repo-root <DIR>`. The `server` cargo
+The server side is not in this crate. `mkit-server`'s pipeline serves
+`mkit.transport.v1` (on Workers, via `mkit-server-worker`). The `server` cargo
 feature and its `serve`/`router`/`TransportServer`/`map_transport_error` API,
 which backed the removed `mkit serve --http`, were removed in 0.5.
 
@@ -85,9 +84,8 @@ is the regression gate SPEC-TRANSPORT-CONNECT's testing decisions call for:
 a real server, not a mock standing in for one. `tests/retry.rs` and
 `tests/rpc_timeout.rs` build their own servers the same way.
 
-End to end against the real server, `mkit-server-native`'s
-`tests/client_e2e.rs` drives `ConnectTransport` against `mkit-server serve`
-over FS blobs and `.mkit`-layout refs.
+End to end, `mkit-server-conformance`'s in-process host drives
+`ConnectTransport` against `mkit-server`'s pipeline.
 
 Unary reads and auth-v2 writes retry once on a fresh HTTP/1 connection when a
 previously used pooled socket closes or resets before receiving any response

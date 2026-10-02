@@ -77,8 +77,8 @@ pub(super) fn get_many_sql(n: usize) -> String {
 /// [`StoreError::Unavailable`], never `Full`.
 ///
 /// Every method is synchronous inside: its future completes on first poll.
-/// On a native server wrap it in `mkit-server-native`'s `Blocking`, which
-/// runs each call on a blocking thread.
+/// A host that drives a blocking engine should run each call on a
+/// blocking thread.
 pub struct SqlKvStore<C> {
     conn: C,
     schema_version: AtomicU32,

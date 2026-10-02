@@ -87,25 +87,13 @@ the completed launch matrix.
 The alarm budget is shared across handlers; see the
 [Workers operator guide](../../docs/operations/workers.md).
 
-For a backend move or recovery beyond PITR, collect a complete, compatible
-set of `.kvlog` partition snapshots from R2 into the native export directory
-layout. Select exactly one object for each `<kind>/<partition-hash>/`, normally
-the newest. These snapshots are per partition and do not form one consistent
-cut. Keep the target offline, and run `mkit-server restore --meta
-sqlite:<NEW PATH> --from <DIR> --sharding single|d34`. Restore accepts only a
-new database, advances grant epochs by at least 2^32, re-keys relay rows from
-the supplied watermarks and marks coordinators recovered. A native deployment can create a
-consistent portable set directly with `mkit-server export --meta
-sqlite:<PATH> --out <DIR>`; `mkit-server backup` is the physical in-place
-recovery option. A snapshot older than auth v2's maximum 300,000 ms envelope
-validity cannot revive a replayable write envelope.
-
-Owners must re-issue grants after restore. Missing relay sources or coordinators
-are refused by default. `--allow-incomplete` reconstructs missing sources;
-missing coordinators additionally require `--epoch-at-least N` with N ≥ 2^32 (4294967296), above any epoch the lost coordinator could have issued. Review the
-printed missing list. An older target can lack membership or index rows that
-the source had already delivered and removed; index reconcile is required
-before GA (R-116).
+For a backend move or recovery beyond PITR, the `.kvlog` partition snapshots
+in R2 are the source of truth. The standalone `mkit-server` binary that
+shipped `export`, `restore` and `backup` commands for a native SQLite
+deployment was removed, so there is no supported restore tool today. A
+snapshot older than auth v2's maximum 300,000 ms envelope validity cannot
+revive a replayable write envelope, and owners must re-issue grants after
+any restore.
 
 Production Worker restore and PITR administration are deferred to WP-5.11b.
 Logical in-place/Merge restore, segmented export above 16 MiB, index

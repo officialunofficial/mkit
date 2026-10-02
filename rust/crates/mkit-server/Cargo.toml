@@ -2,8 +2,8 @@
 # (production server work §5.1). It owns the vocabulary every adapter shares: repo and
 # namespace identifiers, principals, the typed `Operation` model, the
 # transport-neutral `ServerError`, the async/runtime model (`MaybeSend`,
-# `Clock`, `Spawner`, `send_wrap`) and the metrics facade. Native
-# (`mkit-server-native`) and Workers (`mkit-server-worker`) adapters build on
+# `Clock`, `Spawner`, `send_wrap`) and the metrics facade. The
+# Workers adapter (`mkit-server-worker`) and the conformance host build on
 # it, so it must compile for both the host and `wasm32-unknown-unknown`
 # (enforced by scripts/check-wasm-dep-graph.sh and `just ci-scripts`).
 #
@@ -98,12 +98,11 @@ test-faults = []
 # them. Native only: the module and its dependency are cfg'd out on wasm32.
 fs = ["dep:mkit-transport-file"]
 # The shared SQL backend (`sql::SqlKvStore`) over the synchronous
-# `sql::SqlConn` trait. No SQL engine dependency: `mkit-server-native`
-# implements `SqlConn` with rusqlite, the Workers adapter with Durable
-# Object SQLite. Compiles for wasm32.
+# `sql::SqlConn` trait. No SQL engine dependency: The Workers adapter
+# implements `SqlConn` with Durable Object SQLite. Compiles for wasm32.
 sql = []
 # The `mkit.rpc.v1.ssh` session over the pipeline (`ssh::serve_session`),
-# shared by `mkit serve` over stdio and the enc listener. No async runtime:
+# shared by `mkit serve` over stdio and any enc listener built on it. No async runtime:
 # it runs under the CLI's blocking executor as well as under tokio.
 ssh = ["dep:mkit-rpc"]
 # The remote-hook adapter (`hooks`): `mkit.server.hooks.v1` over a

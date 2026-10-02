@@ -7,8 +7,8 @@
 //! [`mkit_core::protocol::Transport`] itself, used by `mkit-cli`'s
 //! `remote_dispatch` for `mkit+https://` / loopback `mkit+http://`.
 //!
-//! The server is not in this crate: `mkit-server` (`mkit-server-native`,
-//! over `mkit-server`'s pipeline) serves `mkit.transport.v1`. The `server`
+//! The server is not in this crate: `mkit-server`'s pipeline (on Workers,
+//! `mkit-server-worker`) serves `mkit.transport.v1`. The `server`
 //! feature and its `router`/`serve`/`TransportServer`/`map_transport_error`
 //! API were removed with `mkit serve --http`.
 //!

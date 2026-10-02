@@ -7,10 +7,9 @@
 // `serve.lock`) and §3.1 ("MKIT-11/#655 turned this from silent into
 // detected"), as of this branch:
 //   - every live server process on a root, `mkit serve` (ssh-frame) and
-//     `mkit-server serve`, holds `serve.lock` SHARED for its whole lifetime;
+//     a `mkit-server` fs-layout server, holds `serve.lock` SHARED for its whole lifetime;
 //   - `mkit-server` also holds `server.lock` EXCLUSIVELY (one per root),
-//     taken without waiting before `serve.lock` (mkit-server-native
-//     `server::lock_root`: busy -> exit CONFIG_ERROR);
+//     taken without waiting before `serve.lock` (busy -> exit CONFIG_ERROR);
 //   - a starting `mkit serve` tries `serve.lock` EXCLUSIVELY without waiting
 //     and, only while it holds it, sweeps the temp files crashed uploads left
 //     in `packs/` (`FsBlobStore::sweep_stale_uploads`, files at least
@@ -183,7 +182,7 @@ module serveLocks {
     lastAction' = { name: "drop", who: s, outcome: "" },
   }
 
-  // `mkit-server serve` start: server.lock exclusively without waiting
+  // `mkit-server` fs-layout server start: server.lock exclusively without waiting
   // (busy -> the process exits; no state change, so not a step here).
   action startServer(s: Srv): bool = all {
     spc.get(s) == "down",

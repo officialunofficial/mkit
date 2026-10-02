@@ -1,5 +1,5 @@
 //! Pure unit tests: value mapping, the migration list, and the statement
-//! texts. The engine-backed tests live in `mkit-server-native`.
+//! texts. Engine-backed tests live with the engine's host.
 
 use super::kv::{
     DELETE, GET, PROBE, PUT, SCAN_AFTER, SCAN_FROM, STATS, TIMER_WINDOW_AFTER, TIMER_WINDOW_START,

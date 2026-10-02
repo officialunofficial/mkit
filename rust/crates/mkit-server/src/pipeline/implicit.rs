@@ -74,7 +74,7 @@ fn refuse() -> ServerError {
 
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Whether transport-identity writes consume session uploads as
-    /// implicit tickets: under Multi addressing (the enc listener's bound
+    /// implicit tickets: under Multi addressing (an enc listener's bound
     /// repository) or on a namespaced Single repository under the owner
     /// policy (the ssh root mode's). Plain Single and the signed modes
     /// never do.

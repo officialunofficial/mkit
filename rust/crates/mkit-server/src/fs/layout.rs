@@ -20,7 +20,7 @@ use crate::store::{
     ScanPage, StoreCapabilities, StoreError, Value, Write, keys,
 };
 
-/// The marker a `mkit-server --meta sqlite:` deployment writes under the
+/// The marker a SQLite-metadata server deployment writes under the
 /// served root, binding it to one database: the root's refs live in `SQLite`, so
 /// [`FsLayoutStore::open`] refuses it (R-81), and so does every ref write
 /// through `FileTransport`. Never removed automatically.
@@ -115,7 +115,7 @@ impl FsLayoutStore {
     }
 
     /// [`Self::new`], refusing a root whose refs live in `SQLite` (R-81):
-    /// one carrying the [`META_MARKER`] a `mkit-server --meta sqlite:`
+    /// one carrying the [`META_MARKER`] a SQLite-metadata server
     /// deployment writes. Serving its ref files too would keep a second,
     /// diverging copy of the refs. Every server of a `.mkit` root opens
     /// its ref store through here.

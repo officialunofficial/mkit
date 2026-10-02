@@ -51,9 +51,8 @@ Reference implementation: `mkit-transport-connect` (the native CLI
 client, §7.3) against `mkit-transport-connect/tests/roundtrip.rs`'s
 in-process server &mdash; real HTTP, real protobuf framing, real Connect
 streaming, backed by `mkit-transport-memory` rather than R2/a Durable
-Object. The self-hosted server is `mkit-server` (§7.2), whose
-`mkit-server-native/tests/client_e2e.rs` drives the same client against it
-end to end; it replaced `mkit serve --http`, which the CLI no longer has.
+Object. The `mkit-server` library and its conformance host (§7.2) drive the same
+client end to end; they replaced `mkit serve --http`, which the CLI no longer has.
 [`apps/vcs-worker`](../../apps/vcs-worker) (mkit#699)
 implements the unary and client-streaming RPCs
 (`ListRefs`/`ReadRef`/`UpdateRef`/`AdvanceRefs`/`PackExists`/`UploadPack`)
@@ -69,7 +68,7 @@ including a SECOND pass driving the real `mkit` CLI (`push`/`clone`/
 `pull`) end to end against this exact server through `ConnectTransport`'s
 new envelope-signing auth mode (§7.3). `ConnectTransport` now supports
 BOTH the bearer-token scheme (SPEC-TRANSPORT §5.2, unchanged, used by
-`mkit-server serve --auth bearer`) and this server's Ed25519 write envelope (§7.1) as
+bearer-mode `mkit-server` deployments) and this server's Ed25519 write envelope (§7.1) as
 independent, additive auth modes &mdash; see §7.3. No AUTOMATED test drives
 this client/server pair yet (the `wrangler dev` verification above is
 manual, matching `apps/vcs-worker`'s existing testing posture for
@@ -1005,24 +1004,21 @@ unreachable ledger or failed quota read fails closed.
 `AUTH_AUDIENCE` must be explicitly configured for every deployment and local
 development origin.
 
-### 7.2 `mkit-server` (native)
+### 7.2 `mkit-server` (library and adapters)
 
 The same generated `TransportService` binding (`mkit-server`'s `connect`
-module over its pipeline), served over axum/hyper by the `mkit-server`
-binary ([`mkit-server-native`](../../rust/crates/mkit-server-native/))
-instead of `workers-rs`: one handler implementation for both targets, over
-different storage backends (R2 and Durable Objects on Workers; the
-`.mkit` on-disk layout or `SQLite` metadata with filesystem or S3 blobs
-natively, per [SPEC-WORKTREE](SPEC-WORKTREE.md)/[SPEC-CONCURRENCY](SPEC-CONCURRENCY.md)
-for the on-disk layout). `mkit-server serve --listen <ADDR> --repo-root
-<DIR>` is the self-hosted `mkit+https://` remote; the same process can
-also serve `mkit+enc://` (`--listen-enc`, SPEC-TRANSPORT-ENC §6). Its
-flags, authentication modes and limits are in the crate's README.
+module over its pipeline) is served on Workers by the `mkit-server-worker`
+adapter (§7.1) and in process by the conformance host
+(`mkit-server-conformance`), one handler implementation over different
+storage backends (R2 and Durable Objects on Workers; the `.mkit` on-disk
+layout, per [SPEC-WORKTREE](SPEC-WORKTREE.md)/[SPEC-CONCURRENCY](SPEC-CONCURRENCY.md),
+in process). There is no standalone self-hosted server binary: the former
+`mkit-server serve` deployment was removed.
 
 `mkit serve <path>` (the CLI) is only the `mkit+ssh://` forced-command
 server, speaking the SSH-frame protocol on stdin/stdout. Its former HTTP
-mode (`--http`, mkit#700) and encrypted listener (`--listen-enc`) moved to
-`mkit-server`, and with them the axum-hosted `TransportServer` of
+mode (`--http`, mkit#700) and encrypted listener (`--listen-enc`) are gone,
+and with them the axum-hosted `TransportServer` of
 `mkit-transport-connect`'s former `server` feature.
 
 ### 7.3 Native CLI Connect client
@@ -1071,8 +1067,8 @@ a deployment can require either, both, or neither:
 - **Bearer token** (unchanged, #700/#701): `MKIT_API_TOKEN`, read from
   the environment at `connect()` time, sent as `Authorization: Bearer
   <token>` on every call. This is `mkit-transport-http`'s scheme
-  (SPEC-TRANSPORT §5.2) and is what `mkit-server serve --auth bearer`
-  (§7.2) expects.
+  (SPEC-TRANSPORT §5.2) and is what bearer-mode `mkit-server` deployments
+  (§7.2) expect.
 - **Ed25519 envelope**: `EnvelopeTransport` signs the auth v2 contract
   in §7.1 for reads and writes, with an exact request body commitment for
   reads and unary writes, including the framed `DownloadPack` request, and
@@ -1223,12 +1219,9 @@ it always has. `mkit serve --root <DIR>` is the multi-repository form:
 the path names a `<NAMESPACE>/<NAME>` resolved to the directory
 `<DIR>/<NAMESPACE>/<NAME>`, one repository per process, and writes run
 the `ed25519-` owner rule of §7.5 against the `--principal` key the
-sshd configuration asserts (SPEC-TRANSPORT §4.1). For enc,
-`mkit-server serve --repo-root <DIR> --listen-enc <ADDR>` without
-`--enc-repository` serves the configured repository as before; under
-multi-repository addressing the listener requires
-`--enc-repository <NAMESPACE>/<NAME>` and binds every session it
-accepts to that one repository (SPEC-TRANSPORT-ENC §6). Both carry the
+sshd configuration asserts (SPEC-TRANSPORT §4.1). For enc (deprecated),
+a listener under multi-repository addressing binds every session it
+accepts to one configured repository (SPEC-TRANSPORT-ENC §6). Both carry the
 same implicit-membership rule in place of §7.6's upload tickets: packs
 uploaded and verified in a session (at most seven before a packmap
 write) may be consumed into membership by that session's packmap write
@@ -1789,8 +1782,8 @@ This document specifies the proto and its consumption pattern only.
 Explicitly deferred to sibling issues:
 
 - The reference Worker implementation (mkit#699).
-- ~~`mkit serve`'s HTTP mode (mkit#700).~~ Implemented, then moved to the
-  `mkit-server` binary &mdash; see §7.2.
+- ~~`mkit serve`'s HTTP mode (mkit#700).~~ Implemented, then removed with the
+  standalone server &mdash; see §7.2.
 - ~~The native CLI Connect client (mkit#701).~~ Implemented &mdash; see §7.3.
 - Fully deleting `mkit-transport-http` and SPEC-TRANSPORT §5 (waits on a
   `mkit.transport.v1` equivalent for its `sparse-checkout`/`pack-shards`

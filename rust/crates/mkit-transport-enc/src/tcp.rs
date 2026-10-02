@@ -467,11 +467,10 @@ fn decode_peer_pubkey(bytes: &[u8; 32]) -> Result<PublicKey, EncInitError> {
 ///
 /// - [`PeerPolicy::AllowAny`] accepts every dialer. This is the historic
 ///   v0.x behaviour and is retained ONLY for the direct-listen e2e test
-///   harness and the explicit `--unsafe-allow-any-enc-peer` operator
-///   escape. It is fail-OPEN and must never be the implicit default.
+///   harness and an explicit allow-any operator escape. It is fail-OPEN and must never be the implicit default.
 /// - [`PeerPolicy::Allowlist`] accepts only dialers whose 32-byte
 ///   ed25519 public key is in the set. This is the fail-CLOSED posture
-///   `mkit-server serve --listen-enc` uses once an authorized-peers file is
+///   a listener should use once an authorized-peers list is
 ///   configured.
 #[derive(Clone, Debug)]
 pub enum PeerPolicy {
@@ -733,8 +732,7 @@ enum AcceptMode {
 /// Serve encrypted connections on an already-bound `listener` from inside
 /// the caller's tokio runtime, until `shutdown` resolves: the async,
 /// embeddable form of [`serve_tcp_with_policy_and_bounds`] for a server
-/// that runs other listeners on the same runtime (`mkit-server serve
-/// --listen-enc`).
+/// that runs other listeners on the same runtime.
 ///
 /// Each accepted connection runs the handshake under `bounds` (its
 /// `handshake_timeout` bounds the whole exchange) with `policy` as the

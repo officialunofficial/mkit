@@ -68,7 +68,6 @@ and `wasm32-unknown-unknown`:
 | Crate | Role |
 | --- | --- |
 | `mkit-server` | This crate. The core, with no runtime dependency: operation model, identifiers, storage and policy traits, the request pipeline, upload validation, CAS and quota logic, error mapping. |
-| `mkit-server-native` | axum/tokio router, tower layers and graceful shutdown; FS and S3 blobs with `SQLite` metadata; builds the `mkit-server` binary. |
 | `mkit-server-worker` | Cloudflare Workers adapter: R2 blobs and sharded Durable Objects. |
 | `mkit-server-conformance` | Storage-trait suite for every backend, plus a black-box wire suite for any deployment. |
 

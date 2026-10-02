@@ -14,7 +14,9 @@ policy (`tcp::serve_tcp_with_policy_and_bounds`, and the async
 `tcp::serve_tcp_listener` with a connection cap and graceful shutdown for a
 server already on a tokio runtime), and `mkit+enc://` URL parsing
 (`url::parse_enc_url`). It's consumed in production by `mkit-cli`'s remote
-dispatch. The standalone native listener has been removed.
+dispatch. The crate is **deprecated**: the standalone listener was removed
+and no maintained server hosts `mkit+enc://`; use SSH (`mkit serve`) or
+Connect.
 
 ## Layering
 

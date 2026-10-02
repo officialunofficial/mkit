@@ -62,15 +62,15 @@ pub trait FrameSink: MaybeSend {
 #[non_exhaustive]
 pub struct SessionConfig {
     /// `HelloResponse.server_id`: `mkit serve/<version>` for the ssh
-    /// forced command, `mkit serve-enc/<version>` for the enc listener.
+    /// forced command, `mkit serve-enc/<version>` for an enc listener.
     pub server_id: String,
     /// End cleanly right after a successful handshake, before any verb.
     /// `mkit serve`'s `MKIT_SERVE_TEST_DIE_AFTER_HELLO` harness sets it; a
     /// production caller never does.
     pub stop_after_hello: bool,
     /// The repository every verb's request carries as `x-repository`:
-    /// only the enc listener sets it, under Multi addressing, from its
-    /// `--enc-repository`. `mkit serve` resolves its repository from the
+    /// only an enc listener sets it, under Multi addressing, from its
+    /// configured repository. `mkit serve` resolves its repository from the
     /// path, and a client can never name one over the wire.
     pub repository: Option<String>,
 }

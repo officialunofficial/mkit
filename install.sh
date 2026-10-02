@@ -57,7 +57,7 @@
 # handles auth natively:
 #   gh release download v0.4.2 --repo officialunofficial/mkit \
 #     --pattern 'mkit-[0-9]*-<target>.tar.gz' --dir .
-# (`mkit-[0-9]*`, not `mkit-*`, which also matches the mkit-server archive.)
+# (`mkit-[0-9]*`, not `mkit-*`, which would also match unrelated assets.)
 #
 # POSIX sh — runs under dash/ash/bash/zsh without bashisms.
 

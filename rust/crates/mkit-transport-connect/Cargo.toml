@@ -3,8 +3,8 @@
 # `Transport` itself: the implementation behind the `mkit+https://` /
 # loopback `mkit+http://` remote scheme in `mkit-cli`'s `remote_dispatch`.
 #
-# The server is `mkit-server` (`mkit-server-native` over `mkit-server`'s
-# pipeline). This crate's former `server` feature (the axum-hosted
+# The server is `mkit-server`'s pipeline (hosted on Workers by
+# `mkit-server-worker`). This crate's former `server` feature (the axum-hosted
 # `TransportServer` behind `mkit serve --http`) was removed with that flag
 # (WP-M0-15, a breaking change: the next release is 0.5).
 #

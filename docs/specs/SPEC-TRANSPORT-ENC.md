@@ -24,8 +24,9 @@ The transport has two forms: a deterministic in-process scaffold
 (`EncSession`/`from_session`) exercised by the in-tree round-trip
 test suite, and the real TCP transport used in production &mdash; URL
 parsing, `connect_tcp`/`serve_tcp`, the `mkit-cli/enc-transport`
-feature gate, and the `mkit-server serve --listen-enc <addr>` listener. §6
-describes the TCP transport's mechanics and its current limitations.
+feature gate, and the `serve_tcp_*` listener helpers. The transport is
+**deprecated**: no maintained server hosts a listener (use SSH `mkit serve`
+or Connect). §6 describes the TCP transport's mechanics and its current limitations.
 
 ---
 
@@ -175,7 +176,7 @@ server answers a first frame that is not `Hello` with
 `Error{INVALID_REQUEST, "first frame must be Hello"}`, and a `Hello` for
 another version with `Error{INVALID_REQUEST, "unsupported proto_version
 <n>"}`, before it closes; it serves no verb on that connection. (The
-removed `mkit serve --listen-enc` closed without replying.)
+former `mkit serve --listen-enc` closed without replying.)
 
 This Hello is layered **on top of** the encrypted channel, not inside
 the encrypted handshake. It mirrors what `mkit-transport-ssh` does and
@@ -233,55 +234,45 @@ crate.
 `remote_dispatch::open` recognizes the `mkit+enc://` scheme behind the
 `mkit-cli/enc-transport` cargo feature; default builds remain SSH-only.
 
-The listener is `mkit-server serve --listen-enc <addr> --repo-root <dir>`
-([`mkit-server-native`](../../rust/crates/mkit-server-native/README.md)).
-It runs `mkit_transport_enc::serve_tcp_listener`, the async accept loop,
-on the server's runtime beside its HTTP listener, and serves every
-session with `mkit_server::ssh::serve_session` over the server's
-pipeline, as the `TransportPeer` principal holding the key the handshake
-authenticated; its verb replies are therefore the ssh session's (§3).
-Under multi-repository addressing the listener requires
-`--enc-repository <NAMESPACE>/<NAME>` and binds every session to that
-one repository (SPEC-TRANSPORT-CONNECT §7.4): nothing in the session's
-frames can select another.
-The CLI's former `mkit serve --listen-enc <addr>` (which ran the blocking
-`serve_tcp_with_policy_and_bounds`) is removed; `mkit serve` is only the
-ssh stdin/stdout server. The listener is
-**fail-closed** (issue #178): it refuses to bind unless the operator
-supplies `--enc-authorized-peers <PATH>` (an allowlist of client public
-keys) or passes `--unsafe-allow-any-enc-peer` (a dev escape that prints
-a loud warning). The accept loop consults a `PeerPolicy` &mdash;
-`AllowAny` (dev / the explicit unsafe escape) or
-`Allowlist(HashSet<[u8;32]>)` built from the `--enc-authorized-peers`
-file (one client pubkey per line, 64-hex or 43-char url-safe base64;
-`#` comments and blank lines ignored). `serve_tcp_with_addr` retains
-`AllowAny` for the direct e2e harness only. The allowlist bouncer
-rejects any unlisted dialer at the handshake &mdash; a rejected peer never
-receives a `HelloResponse`, list-refs, packs, or update-ref.
+The standalone listener (`mkit-server serve --listen-enc`) was removed with
+the native server, and the CLI's former `mkit serve --listen-enc` before it;
+no maintained server hosts `mkit+enc://`. The library keeps the pieces a
+listener is built from: `mkit_transport_enc::serve_tcp_listener`, the async
+accept loop, runs on the embedder's runtime, and each session can be served
+with `mkit_server::ssh::serve_session` over a pipeline, as the
+`TransportPeer` principal holding the key the handshake authenticated; its
+verb replies are therefore the ssh session's (§3). Under multi-repository
+addressing such a listener binds every session to one configured
+repository (SPEC-TRANSPORT-CONNECT §7.4): nothing in the session's frames
+can select another.
 
-The listener bounds each client: the handshake deadline
-(`--enc-handshake-timeout-secs`, §2.1, default 10 s), a per-frame idle
-timeout after it (`--enc-idle-timeout-secs`, applied to every frame read
-and write), and the per-connection budgets of SPEC-TRANSPORT §4.4.
-`mkit-server` also caps the connections in the handshake
-(`--enc-max-handshakes`) apart from the sessions (`--max-connections`), so
-clients that connect and never handshake cannot hold the slots of
-authorized ones. On shutdown it
-stops accepting and ends each session at its next frame boundary (never
-inside an upload), within its grace period.
+A listener MUST be **fail-closed** (issue #178): it refuses to serve unless
+it is given an allowlist of client public keys or an explicit allow-any
+development escape. The accept loop consults a `PeerPolicy` &mdash;
+`AllowAny` (dev / the explicit unsafe escape) or
+`Allowlist(HashSet<[u8;32]>)` (one client pubkey per line in the file
+form, 64-hex or 43-char url-safe base64; `#` comments and blank lines
+ignored). `serve_tcp_with_addr` retains `AllowAny` for the direct e2e
+harness only. The allowlist bouncer rejects any unlisted dialer at the
+handshake &mdash; a rejected peer never receives a `HelloResponse`,
+list-refs, packs, or update-ref.
+
+A listener bounds each client: a handshake deadline (§2.1, default 10 s), a
+per-frame idle timeout after it (applied to every frame read and write),
+and the per-connection budgets of SPEC-TRANSPORT §4.4. A listener caps the
+connections in the handshake apart from the sessions, so clients that
+connect and never handshake cannot hold the slots of authorized ones. On
+shutdown it stops accepting and ends each session at its next frame
+boundary (never inside an upload), within its grace period.
 
 The server identity is a **stable** raw-32 key loaded, or created on
-first run, from `--enc-server-key <PATH>`, which an allowlisting server
-requires (there is no default path: the removed `mkit serve --listen-enc`
-fell back to `~/.config/mkit/enc/server.key`, `mkit-server` resolves no
-home directory), so the advertised `?pubkey=` is stable across restarts;
+first run, from an operator-supplied path (there is no default path), so the advertised `?pubkey=` is stable across restarts;
 only the unsafe allow-any mode without a key file keeps an ephemeral
 per-process key. A client can similarly pin its identity via the
 `MKIT_ENC_CLIENT_KEY` environment variable (a user-scoped or
 CLI-supplied raw-32 key file) so an allowlisting server can pin the
 client across restarts; when unset, the client derives an ephemeral
-per-process key, which only an `--unsafe-allow-any-enc-peer` server
-will accept. Peer-authorization and identity key paths are CLI-supplied
+per-process key, which only an allow-any server will accept. Peer-authorization and identity key paths are CLI-supplied
 or user-scoped and are **never** read from repo-local `.mkit/config`.
 
 `connect_tcp` lazily bootstraps a `commonware_runtime::BufferPool` by
@@ -294,11 +285,11 @@ pool; the pool is cached process-wide. This exists because
 ### 6.2 Known limitations
 
 Server and client identities are stable raw-32 key files on disk
-(`--enc-server-key`/`MKIT_ENC_CLIENT_KEY`), not yet routed through
+(a listener's server key and `MKIT_ENC_CLIENT_KEY`), not yet routed through
 `mkit-keystore` the way SSH host keys and signing keys are; keystore
 integration would also let the public `connect_tcp` signature take a
 keystore-backed key type instead of a raw one. The allowlist is a flat
-`--enc-authorized-peers` file, not a keystore partition.
+authorized-peers file, not a keystore partition.
 
 ### 6.3 Retry / reconnect
 
@@ -353,7 +344,7 @@ record layer needs a hard break that the application-level
 | No frame exceeds 1 MiB &mdash; enforced twice | `max_message_size = mkit_rpc::MAX_FRAME_BYTES` at the record layer (§2.1) and by every existing `SshFrame` consumer (§3.1) |
 | One `SshFrame` per encrypted record, no framing ambiguity | single protobuf payload per `Sender::send`; no second length prefix (§3.1) |
 | No verb exchanged before version agreement | post-handshake `Hello`/`HelloResponse` with `PROTOCOL_VERSION_1`; disagreement closes the connection (§3.2) |
-| The listener is fail-closed: an unlisted peer gets nothing | binding requires `--enc-authorized-peers` (or the loud `--unsafe-allow-any-enc-peer` escape); rejected peers never receive a `HelloResponse`, refs, or packs (§6.1) |
+| The listener is fail-closed: an unlisted peer gets nothing | binding requires an authorized-peers allowlist (or an explicit allow-any escape); rejected peers never receive a `HelloResponse`, refs, or packs (§6.1) |
 | Verb semantics never diverge from the SSH transport | same `SshFrame` message set; semantics byte-for-byte per SPEC-TRANSPORT §4 (§3) |
 | Application plaintext never appears on the wire | pinned by the byte-sniffing round-trip tests (§5) |
 | A `ConnectionFailed` never resumes writes/reads on the same (possibly desynced) session | every verb driven through `retrying`; a dead session is redialed and re-`Hello`'d before the next attempt, never reused (§6.3) |

@@ -40,7 +40,7 @@ it verifies that the tag is strict semver, annotated, GPG-signed by an
 allowlisted release fingerprint, and points at a commit reachable from
 `origin/main`. It then produces:
 
-1. **GitHub Release** with native `mkit` and `mkit-server` binaries for four
+1. **GitHub Release** with native `mkit` binaries for four
    targets:
    - `aarch64-apple-darwin`
    - `x86_64-apple-darwin`
@@ -50,109 +50,44 @@ allowlisted release fingerprint, and points at a commit reachable from
    Windows is not a supported target (MKIT-6; see `docs/INVARIANTS.md`).
    Windows users should run mkit under WSL, which uses the Linux binary.
 
-   Each target ships two archives:
-
-   - `mkit-X.Y.Z-<target>.tar.gz`: the `mkit` binary, licenses, README,
-     optional changelog, `share/man/man1/mkit.1`, and shell completions under
-     `share/completions/`.
-   - `mkit-server-X.Y.Z-<target>.tar.gz`: the `mkit-server` binary (the
-     long-running native server, PRD D31), licenses, the operator guide
-     (`rust/crates/mkit-server-native/README.md`, as `README.md`) and the
-     optional changelog. It is built with `mkit-server-native`'s
-     `enc,http,s3,sqlite` features, with `--no-default-features` (the list
-     lives in
-     [`scripts/release/mkit-server-features`](../scripts/release/mkit-server-features)):
-     the HTTP/Connect listener, `SQLite` and `.mkit`-layout metadata,
-     filesystem and S3 blobs, and the `mkit+enc://` listener. The
-     pipeline's `test-faults` seam is never enabled.
+   Each target ships one archive, `mkit-X.Y.Z-<target>.tar.gz`: the `mkit`
+   binary, licenses, README, optional changelog, `share/man/man1/mkit.1`, and
+   shell completions under `share/completions/`.
 
    Each archive is cosign-signed (keyless OIDC, Rekor logged) and ships
    alongside per-archive `.sig`/`.crt`/`.cosign.bundle`, an aggregate
    `SHA256SUMS` (also cosign-signed), a CycloneDX `sbom.cdx.json`, a
    `THIRD-PARTY-NOTICES` file, and a standards-based SLSA build provenance
    attestation (`actions/attest-build-provenance`), verifiable with `gh
-   attestation verify` or `slsa-verifier` in addition to cosign. Both
-   binaries share that trust chain. The SBOM and the notices cover the whole
-   workspace, so they cover both binaries' dependencies.
+   attestation verify` or `slsa-verifier` in addition to cosign. The SBOM
+   and the notices cover the whole workspace.
 
-   The two binaries are built by **separate cargo invocations** (`-p
-   mkit-cli --bin mkit`, then `-p mkit-server-native --bin mkit-server`).
-   Cargo unifies features across every package selected in one invocation,
-   so a combined build would compile the shipped `mkit` with the server's
-   HTTP stack and a bundled `SQLite`. After each build,
+   The `mkit` binary is built with `-p mkit-cli --bin mkit`: a bare `--bin
+   mkit` selects every workspace member, and cargo unifies features across
+   every selected package, so it would compile the shipped CLI with other
+   members' features. After the build,
    [`scripts/check-release-artifact-features.sh`](../scripts/check-release-artifact-features.sh)
    reads cargo's compiler-artifact messages and scans the stripped binary.
    `mkit` must compile only packages listed in
    [`scripts/release/mkit-packages.golden`](../scripts/release/mkit-packages.golden),
    no server-only package or feature, tower-http only with reqwest's
-   features, and no `SQLite`. `mkit-server` must have exactly the shipped
-   feature set and no test seam. A new CLI dependency fails the check until
+   features, no `SQLite`, and no test seam. A new CLI dependency fails the check until
    `scripts/check-release-artifact-features.sh --update-golden` is run and
    the golden diff is committed with the change that brought it in.
 
    [`release-artifact-check.yml`](../.github/workflows/release-artifact-check.yml)
-   runs the same two builds and checks for `x86_64-unknown-linux-gnu` on PRs
+   runs the same build and check for `x86_64-unknown-linux-gnu` on PRs
    to `main` (and pushes to it), and checks the golden list is current, so
    drift shows up before a tag rather than at it.
 
-2. **Container image** `ghcr.io/officialunofficial/mkit-server:X.Y.Z`, for
-   `linux/amd64` and `linux/arm64`, public so anyone can pull it. `:X.Y`
-   also moves to it when it is a final release and the newest of its `X.Y`
-   line (`validate-release-tag`'s `newest_of_minor`), so re-running an old
-   tag never moves `X.Y` back. There is **no `latest` tag** (Q9, pending).
-   Three jobs publish it, and a tag only ever names a signed digest:
-   - `container` (`packages: write`, no OIDC) builds it from the two Linux
-     `mkit-server` archives above, not by a second compile. It verifies
-     each archive's cosign bundle (identity: this workflow at this tag and
-     commit), checks every copied file against the archive's `.sha256` and
-     its internal `SHA256SUMS`
-     ([`scripts/stage-server-image.sh`](../scripts/stage-server-image.sh)),
-     and `COPY`s the binary into `gcr.io/distroless/cc-debian13:nonroot`
-     (pinned by digest,
-     [`contrib/docker/mkit-server/Dockerfile`](../contrib/docker/mkit-server/Dockerfile)).
-     Before pushing, it builds both platforms and runs the amd64 image
-     ([`scripts/check-server-image.sh`](../scripts/check-server-image.sh)).
-     It pushes **by digest only**, with no tag, then pulls each platform
-     back and checks it is the pinned base's layers plus exactly the two
-     `COPY` layers (holding only the binary and the licenses), with the
-     expected config (user, entrypoint, cmd, ports, the base's env), and
-     that its `/usr/local/bin/mkit-server` matches the archive's
-     `SHA256SUMS`
-     ([`scripts/verify-server-image-binaries.sh`](../scripts/verify-server-image-binaries.sh)).
-   - `container-sign` (`id-token: write`; no checkout, no build, no docker
-     action; it logs in with `cosign login`) signs the digest with cosign
-     keyless, attaches a SLSA build provenance attestation and a CycloneDX
-     SBOM attestation, and verifies both. The SBOM is also a release asset
-     (`mkit-server-image.sbom.cdx.json`, in `SHA256SUMS`).
-   - `container-tag` (`packages: write`, no OIDC) then points the tags at
-     the digest, putting the exact manifest bytes under each tag and
-     checking each resolves to the digest
-     ([`scripts/ghcr-image.sh`](../scripts/ghcr-image.sh)). It also checks
-     that an anonymous client can pull the digest, and raises a workflow
-     warning (without failing) when the package is not public.
-
-   A failed image does not block the binary release: `release` still
-   publishes, and its notes state what was published (a signed and tagged
-   image; a signed image reachable by digest only; an unsigned, untagged
-   digest not to be used; or nothing). Running the image:
-   [`docs/CONTAINER.md`](CONTAINER.md).
-
-   The base is Debian 13 (glibc 2.41), not Debian 12 (glibc 2.36): both
-   Linux release legs run on `ubuntu-24.04` (pinned, glibc 2.39), and the
-   binaries may reference any glibc symbol version up to that. Today's
-   already need 2.38 (`aws-lc-sys`, rustls's crypto provider, links
-   `__isoc23_strtol` and `__isoc23_sscanf`). The stage script refuses a
-   binary that needs a newer glibc than the base's, or any shared library
-   besides glibc and `libgcc_s`.
-
-3. **npm package** `@officialunofficial/mkit-wasm@X.Y.Z`. Built with
+2. **npm package** `@officialunofficial/mkit-wasm@X.Y.Z`. Built with
    `wasm-pack --target bundler` and published with `npm publish --access
    public`. The pkg tarball is also attached to the GitHub Release as
    `mkit-wasm-X.Y.Z-npm.tar.gz` for offline mirroring. npm provenance is
    enabled with `npm publish --provenance`; it binds the package to this
    GitHub Actions workflow run through GitHub OIDC.
 
-4. **crates.io** &mdash; every workspace crate without `publish = false`, in
+3. **crates.io** &mdash; every workspace crate without `publish = false`, in
    dependency order. See [Publishing to crates.io](#publishing-to-cratesio).
 
 ## Pre-release checklist
@@ -169,17 +104,12 @@ Run top to bottom. Do not skip steps.
 
 - [ ] `main` is green in CI (build plus test).
 - [ ] `cd rust && cargo test --workspace` passes on a fresh clone.
-- [ ] Both release builds pass for each release target, as separate
-      invocations (the commands `release.yml` runs):
-      `cargo build --release --locked -p mkit-cli --bin mkit` and
-      `cargo build --release --locked -p mkit-server-native
-      --no-default-features --features "$(../scripts/check-release-artifact-features.sh --server-features)" --bin mkit-server`:
+- [ ] The release build passes for each release target (the command
+      `release.yml` runs): `cargo build --release --locked -p mkit-cli --bin mkit`:
   - [ ] `--target=aarch64-apple-darwin`
   - [ ] `--target=x86_64-apple-darwin`
   - [ ] `--target=x86_64-unknown-linux-gnu`
   - [ ] `--target=aarch64-unknown-linux-gnu`
-- [ ] The container image builds and runs from the two Linux `mkit-server`
-      binaries (see [Container image: local check](#container-image-local-check)).
 - [ ] `[workspace.package].version` in `rust/Cargo.toml` is bumped to a version
       **not already published** (crates.io versions are immutable &mdash; a re-publish
       of an existing version fails the whole `cargo publish` run).
@@ -204,51 +134,6 @@ Run top to bottom. Do not skip steps.
       not exercised by any automatic trigger, so this is the only
       per-release check that native keystore backends still work.
 
-### Container image: local check
-
-The image is only ever pushed by `release.yml`. Before a tag, check it
-locally with the same staging and checks, and push nothing:
-[`scripts/local-server-image.sh`](../scripts/local-server-image.sh) packs two
-Linux `mkit-server` binaries into release-layout archives, runs
-`scripts/stage-server-image.sh` on them, then
-`scripts/check-server-image.sh`, which builds `linux/amd64` and
-`linux/arm64` with `docker buildx build --load` (no push), checks each
-image's config (user `65532:65532`, entrypoint `mkit-server serve`, the
-version label), and on the host's platform runs `mkit-server version`
-and `serve --help` and confirms there is no shell. With
-`MKIT_IMAGE_CHECK_RUN_ALL=1` and emulation (Docker Desktop has it) it runs
-both platforms. Last, `scripts/verify-server-image-binaries.sh` checks each
-image's layers and config and compares its binary with the archive's `SHA256SUMS`, as the
-release does on the pushed digest.
-
-The binaries must be built the way `release.yml` builds them, on a glibc
-no newer than the runners' (Ubuntu 24.04). From any Docker host, in an
-`ubuntu:24.04` container on an arm64 machine (use
-`gcc-aarch64-linux-gnu` and swap the targets on an x86_64 one):
-
-```sh
-docker run --rm -v "$PWD":/src -w /src/rust ubuntu:24.04 bash -c '
-  set -e
-  apt-get update -qq && apt-get install -y -qq build-essential curl gcc-x86-64-linux-gnu >/dev/null
-  curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.95.0 \
-    --target aarch64-unknown-linux-gnu,x86_64-unknown-linux-gnu
-  . "$HOME/.cargo/env"
-  export RUSTFLAGS="-C codegen-units=1 -C strip=symbols" \
-    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
-    CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc AR_x86_64_unknown_linux_gnu=x86_64-linux-gnu-ar
-  for T in aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
-    cargo build --release --locked --target "$T" --target-dir target/linux -p mkit-server-native \
-      --no-default-features --features "$(bash ../scripts/check-release-artifact-features.sh --server-features)" \
-      --bin mkit-server
-  done'
-scripts/local-server-image.sh "$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -n1)" \
-  rust/target/linux/x86_64-unknown-linux-gnu/release/mkit-server \
-  rust/target/linux/aarch64-unknown-linux-gnu/release/mkit-server
-```
-
-`stage-server-image.sh` needs `readelf` (binutils), or an `objdump` that
-reads foreign ELF files (llvm-objdump, the macOS default).
-
 ### Wait for the release workflows
 
 - [ ] `release.yml` succeeded through `validate-release-tag` and all four
@@ -260,8 +145,7 @@ reads foreign ELF files (llvm-objdump, the macOS default).
       `mkit-X.Y.Z-aarch64-apple-darwin.tar.gz`,
       `mkit-X.Y.Z-x86_64-apple-darwin.tar.gz`,
       `mkit-X.Y.Z-aarch64-unknown-linux-gnu.tar.gz`, and
-      `mkit-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz`, plus
-      `mkit-server-X.Y.Z-<target>.tar.gz` for the same four targets.
+      `mkit-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz`.
 - [ ] `sbom.cdx.json` present.
 - [ ] `THIRD-PARTY-NOTICES` present.
 - [ ] `SHA256SUMS`, `SHA256SUMS.sig`, `SHA256SUMS.crt`,
@@ -270,11 +154,6 @@ reads foreign ELF files (llvm-objdump, the macOS default).
 - [ ] `mkit-X.Y.Z.provenance.jsonl` (SLSA build provenance) present, and
       `gh attestation verify <archive> --repo officialunofficial/mkit`
       succeeds for at least one archive.
-- [ ] `container`, `container-sign` and `container-tag` succeeded; the
-      release notes' "Container image" section names the digest and the
-      tags, and `mkit-server-image.sbom.cdx.json` is attached.
-- [ ] `container-tag` raised no "mkit-server image is not public" warning
-      (if it did, see [ghcr.io package](#ghcrio-package-mkit-server-image)).
 
 ### Smoke test
 
@@ -308,16 +187,6 @@ disagree, fix the script:
       `share/completions/mkit.fish`.
 - [ ] Basic flow: `mkit init` → add a file → `mkit commit`.
 - [ ] `npm view @officialunofficial/mkit-wasm@X.Y.Z` and `npm audit signatures`.
-- [ ] `mkit-server-X.Y.Z-<target>.tar.gz` (the script does not cover it):
-      verify its cosign signature and `SHA256SUMS` entry as shown
-      [below](#verify-a-downloaded-archive), extract it, and check that
-      `./mkit-server-X.Y.Z-<target>/mkit-server version` prints
-      `mkit-server X.Y.Z`.
-- [ ] The container image, by the digest in the release notes: verify it
-      ([below](#verify-the-container-image)), then `docker run --rm
-      --entrypoint /usr/local/bin/mkit-server
-      ghcr.io/officialunofficial/mkit-server@<digest> version` prints
-      `mkit-server X.Y.Z`.
 
 ### Distribution and announce
 
@@ -341,14 +210,6 @@ disagree, fix the script:
 
 - [ ] Open a PR bumping `CHANGELOG.md` with a fresh `## [Unreleased]` heading at
       the top.
-- [ ] In the org's Packages, check `mkit-server`: it is **public**, so
-      users can pull it without logging in, and it is linked to
-      `officialunofficial/mkit` (the image's
-      `org.opencontainers.image.source` label links it on first push).
-      `docker logout ghcr.io && docker pull
-      ghcr.io/officialunofficial/mkit-server@<digest>` must succeed. This
-      is a human check after every release that creates or changes the
-      package.
 - [ ] File follow-up issues for anything discovered during smoke test.
 
 ## Cutting a release
@@ -375,10 +236,8 @@ disagree, fix the script:
    strict `vX.Y.Z[-prerelease]` form, and tag targets not reachable from
    `origin/main`.
 5. Watch the workflows. `release.yml` job order is:
-   `validate-release-tag` → `build` (× 4 archs, `mkit` + `mkit-server`) → `sbom` / `third-party-notices` /
-   `container` → `container-sign` → `container-tag` (parallel) → `release` →
-   `publish-wasm`. `release` waits for the container jobs but runs even if
-   they fail. `crates-publish.yml` runs `cargo
+   `validate-release-tag` → `build` (× 4 archs) → `sbom` / `third-party-notices` (parallel) →
+   `release` → `publish-wasm`. `crates-publish.yml` runs `cargo
    publish --workspace --locked` in dependency order.
 6. Run the [smoke test](#smoke-test).
 
@@ -470,15 +329,12 @@ For each of the four targets, release archives build the production
 `mkit-cli` target for that platform. The CLI enables the matching keystore
 software-protector feature so `software` keys are encrypted at rest on supported
 targets without changing the lean default feature set of the `mkit-keystore`
-library crate. Each target also ships the `mkit-server` binary, built from
-`mkit-server-native` in its own cargo invocation (see
-[What gets published](#what-gets-published)).
+library crate.
 
 | File | Purpose |
 | --- | --- |
 | `mkit-X.Y.Z-<triple>.tar.gz` | Binary, licenses, README, manpage, completions. |
-| `mkit-server-X.Y.Z-<triple>.tar.gz` | `mkit-server` binary, licenses, operator guide (`README.md`), changelog. |
-| `...sha256` | SHA256 of the archive (convenience). Every archive, of either binary, has the full set of sidecars. |
+| `...sha256` | SHA256 of the archive (convenience). Every archive has the full set of sidecars. |
 | `...sig` | Raw cosign signature (base64). |
 | `...crt` | Fulcio-issued code-signing certificate. |
 | `...cosign.bundle` | Bundle: sig plus cert plus Rekor entry. |
@@ -492,10 +348,6 @@ Plus one top-level set for the aggregate:
 | `sbom.cdx.json` | CycloneDX SBOM of the release. |
 | `THIRD-PARTY-NOTICES` | Consolidated third-party license attribution for the Rust dependency graph, generated by `cargo about generate` (see [`NOTICE`](../NOTICE)). |
 | `mkit-X.Y.Z.provenance.jsonl` | GitHub-native SLSA build provenance attestation (`actions/attest-build-provenance`) over the archives. Verified with `gh attestation verify` or `slsa-verifier`. |
-| `mkit-server-image.sbom.cdx.json` | CycloneDX SBOM of the container image (linux/amd64): the distroless packages and the binary. Also attached to the image as a signed attestation. Present only when the image was published and signed. |
-
-The container image itself lives in the registry, at the digest the release
-notes give: see [Verify the container image](#verify-the-container-image).
 
 ### Verify a downloaded archive
 
@@ -512,9 +364,6 @@ cosign verify-blob \
   --bundle "${ARCHIVE}.cosign.bundle" \
   "${ARCHIVE}"
 ```
-
-The same command verifies an `mkit-server` archive: set
-`ARCHIVE="mkit-server-${VERSION}-${TARGET}.tar.gz"`.
 
 Expected output: `Verified OK`. The `--certificate-identity-regexp` pins the
 signature to a tag build of mkit's release workflow; a signature produced by any
@@ -582,7 +431,6 @@ mkit-specific parsing:
 
 ```sh
 gh attestation verify mkit-X.Y.Z-<target>.tar.gz --repo officialunofficial/mkit
-gh attestation verify mkit-server-X.Y.Z-<target>.tar.gz --repo officialunofficial/mkit
 ```
 
 or with [`slsa-verifier`](https://github.com/slsa-framework/slsa-verifier):
@@ -596,49 +444,6 @@ slsa-verifier verify-artifact mkit-X.Y.Z-<target>.tar.gz \
 
 This is additive: it does not replace the cosign signature, which remains in
 place and is independently verified above.
-
-### Verify the container image
-
-`ghcr.io/officialunofficial/mkit-server` is signed by digest, by the same
-workflow identity as the archives. Take the digest from the release notes
-and always pull by digest; a tag can be moved, a digest cannot. The package
-is public: no login is needed. Pin the identity to the exact release tag,
-so a signature from any other release of the same workflow does not pass.
-
-```sh
-VERSION=X.Y.Z
-IMAGE=ghcr.io/officialunofficial/mkit-server
-DIGEST=sha256:...   # from the release notes
-IDENTITY="https://github.com/officialunofficial/mkit/.github/workflows/release.yml@refs/tags/v${VERSION}"
-
-# The cosign signature on the digest.
-cosign verify "${IMAGE}@${DIGEST}" \
-  --certificate-identity "${IDENTITY}" \
-  --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
-
-# SLSA build provenance (GitHub's attestation, pushed to the registry).
-gh attestation verify "oci://${IMAGE}@${DIGEST}" --repo officialunofficial/mkit
-
-# The signed CycloneDX SBOM attestation, and its predicate.
-cosign verify-attestation --type cyclonedx "${IMAGE}@${DIGEST}" \
-  --certificate-identity "${IDENTITY}" \
-  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  | jq -r '.payload | @base64d | fromjson | .predicate | .components | length'
-```
-
-The image holds exactly the binary of the matching
-`mkit-server-X.Y.Z-<target>.tar.gz`: the `container` job verified the
-archive's signature and checksums before copying it, and checked each
-pushed platform's binary against the archive's `SHA256SUMS` before
-`container-sign` signed the digest. To check it yourself (the image has no
-shell, so copy the file out):
-
-```sh
-CID=$(docker create --platform linux/amd64 "${IMAGE}@${DIGEST}")
-docker cp "${CID}:/usr/local/bin/mkit-server" ./mkit-server-from-image
-docker rm "${CID}"
-shasum -a 256 ./mkit-server-from-image   # = ./mkit-server in the archive's SHA256SUMS
-```
 
 ### macOS Gatekeeper
 
@@ -735,11 +540,7 @@ yanked crates, or denied licenses. Live OS-native keystore tests are opt-in via
 All third-party actions in `.github/workflows/` must be pinned to a major
 version tag (`@v4`) or a full SHA. No `@main`, no `@latest`. Trusted publishers:
 `actions/*`, `dtolnay/rust-toolchain`, `sigstore/cosign-installer`,
-`anchore/sbom-action`, `softprops/action-gh-release`, `ossf/scorecard-action`,
-`docker/setup-buildx-action`, `docker/login-action`,
-`docker/build-push-action` (the container image; pinned by full SHA, with
-BuildKit pinned by digest, and used only in the `container` job, which has
-no `id-token: write`).
+`anchore/sbom-action`, `softprops/action-gh-release`, `ossf/scorecard-action`.
 Any new action from an untrusted publisher needs the same two-maintainer review
 as a Rust dep.
 
@@ -785,15 +586,14 @@ byte-identical binary to the one published on GitHub Releases.
 git clone --depth 1 --branch vX.Y.Z https://github.com/officialunofficial/mkit.git
 cd mkit/rust
 # 2. rustup picks up rust-toolchain.toml on first `cargo` invocation.
-# 3. Build for your target with release.yml's commands, one package per
-#    invocation (a combined build unifies features and differs).
+# 3. Build for your target with release.yml's command (`-p mkit-cli`
+#    selects only the CLI; a bare `--bin mkit` unifies other members'
+#    features and differs).
 export RUSTFLAGS="-C codegen-units=1 -C strip=symbols"
 TARGET=x86_64-unknown-linux-gnu
 cargo build --release --locked --target "$TARGET" -p mkit-cli --bin mkit
-cargo build --release --locked --target "$TARGET" -p mkit-server-native \
-  --no-default-features --features "$(../scripts/check-release-artifact-features.sh --server-features)" --bin mkit-server
-# 4. Hash the binaries.
-shasum -a 256 "target/$TARGET/release/mkit" "target/$TARGET/release/mkit-server"
+# 4. Hash the binary.
+shasum -a 256 "target/$TARGET/release/mkit"
 # 5. Compare against the SHA256SUMS inside each release archive.
 ```
 
@@ -824,11 +624,7 @@ x86_64 build is the most reliable reproducibility target for third parties.
 | `BUF_TOKEN` | Buf Schema Registry API token (write access) &mdash; pushes the `mkit-rpc`/`mkit-repo` proto modules | `crates-publish.yml`'s `buf-push` job (see [`BUF_TOKEN`](#buf_token)) |
 
 cosign keyless and npm Trusted Publishing (auth plus provenance) both run on
-the GitHub OIDC token; no extra secrets are needed for those. The container
-jobs push to ghcr.io with the job's own `GITHUB_TOKEN` (`packages: write`),
-so the image needs no secret either; see
-[ghcr.io package](#ghcrio-package-mkit-server-image) for the org setting it
-does need.
+the GitHub OIDC token; no extra secrets are needed for those.
 
 | Variable | Purpose | Required for |
 | --- | --- | --- |
@@ -846,28 +642,6 @@ For the very first publish, ensure each crate name is available or already owned
 by the org; crates.io rejects deps on unpublished crates, so the dependency-order
 publish in `crates-publish.yml` handles a clean first release once the token and
 version are in place.
-
-### ghcr.io package (mkit-server image)
-
-The first release with the `container` job creates the
-`ghcr.io/officialunofficial/mkit-server` package. Before that tag:
-
-- In the organization's settings (Packages), allow GitHub Actions to create
-  packages; otherwise the first push fails with `permission_denied` (the
-  binary release still publishes; see the `release` job's `if:`).
-
-After the first push, in the package's settings:
-
-- Confirm it is linked to `officialunofficial/mkit` (the image's
-  `org.opencontainers.image.source` label links it) and that the repository
-  has write access under "Manage Actions access", so later releases can
-  push.
-- Make it **public** (Package settings, "Change visibility"), so users can
-  pull it without logging in. A package created from Actions starts
-  private, and this setting is manual, so `container-tag` checks an
-  anonymous pull of each release's digest and raises a workflow warning
-  when it fails. Anonymous `docker pull` of the digest must work.
-- There is no `latest` tag (Q9, decided separately).
 
 ### `CODECOV_TOKEN`
 

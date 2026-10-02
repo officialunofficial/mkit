@@ -304,7 +304,7 @@ impl FakeHook {
     }
 
     /// `http://127.0.0.1:<port>`: the audience a signature must name and a
-    /// valid `--hook-*-url` for a native server.
+    /// valid hook URL for a server.
     #[must_use]
     pub fn origin(&self) -> String {
         self.shared.origin.clone()
