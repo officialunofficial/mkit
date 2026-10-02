@@ -10,7 +10,31 @@ const TIMER_COUNT = 65;
 
 export class AlarmProbe extends RefStore {
   constructor(state, env) {
-    super(state, env);
+    const fault = {active: false, injected: 0, rejected: 0};
+    const storage = new Proxy(state.storage, {
+      get(target, key) {
+        if (key === `${env.FAIL_SCHEDULE}Alarm`) {
+          return (...args) => {
+            if (fault.active && fault.injected === 0) {
+              fault.injected++;
+              return Promise.reject(new Error('injected alarm scheduling failure'));
+            }
+            return target[key](...args);
+          };
+        }
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+    });
+    const wrapped = new Proxy(state, {
+      get(target, key) {
+        if (key === 'storage') return storage;
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+    });
+    super(wrapped, env);
+    this.fault = fault;
     this.storage = state.storage;
     this.ticks = [];
   }
@@ -26,7 +50,15 @@ export class AlarmProbe extends RefStore {
 
   async alarm() {
     const tick = {now: Date.now()};
-    await super.alarm();
+    this.fault.active = true;
+    try {
+      await super.alarm();
+    } catch (error) {
+      this.fault.rejected++;
+      throw error;
+    } finally {
+      this.fault.active = false;
+    }
     tick.next = await this.storage.getAlarm();
     this.ticks.push(tick);
     const state = await this.probeState();
@@ -73,7 +105,7 @@ export class AlarmProbe extends RefStore {
       throw new Error(`unexpected timer scan: ${JSON.stringify(result)}`);
     }
     const remaining = result.entries.filter(([key]) => atob(key).charCodeAt(10) === 255).length;
-    return {remaining, ticks: this.ticks, alarm: await this.storage.getAlarm()};
+    return {fault: this.fault, remaining, ticks: this.ticks, alarm: await this.storage.getAlarm()};
   }
 }
 
