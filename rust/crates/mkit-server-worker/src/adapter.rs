@@ -3846,6 +3846,9 @@ mod tests {
         config.indexed = Some(mkit_server::indexed::IndexedConfig::scheduled(
             config.max_pack_bytes,
         ));
+        // Indexed configuration is only valid under the explicit launch
+        // profile in release-shaped builds.
+        config.launch = Some(crate::launch::LaunchConfig { takedown: false });
         let scanner_public =
             mkit_server::hooks::HookSigner::new("scanner", zeroize::Zeroizing::new([0x33; 32]))
                 .unwrap()

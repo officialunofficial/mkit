@@ -504,12 +504,25 @@ mod tests {
             cfg.takedown = fixture.settings(true, true).unwrap();
             cfg.takedown_denial = true;
             cfg.indexed = Some(mkit_server::indexed::IndexedConfig::default());
-            cfg.hooks = crate::hooks::config::HookVars::parse(&|name| match name {
-                "HOOK_ROLES" => Some("cache-purge".into()),
-                "HOOK_URL" => Some("https://hooks.example".into()),
-                _ => None,
-            })
-            .unwrap();
+            // Built directly: HOOK_URL parsing is refused without the
+            // `signed-http-hooks` feature, but the catalog gate only needs a
+            // cache-purge role over the signed HTTP channel.
+            cfg.hooks = Some(crate::hooks::config::HookVars {
+                roles: crate::hooks::config::HookRoles {
+                    authorize: false,
+                    admit: false,
+                    outcome: false,
+                    cache_purge: true,
+                    inspect: false,
+                },
+                timeout: crate::hooks::config::DEFAULT_TIMEOUT,
+                authorizer_role: mkit_server::policy::AuthorizerRole::Check,
+                http: Some(crate::hooks::config::HttpVars {
+                    endpoint: crate::hooks::fetch::Endpoint::new("https://hooks.example").unwrap(),
+                    validity: std::time::Duration::from_mins(1),
+                }),
+                inspect_batch_max_objects: 1,
+            });
             assert!(supported_path(&path, &cfg), "configured {op}");
             cfg.takedown_denial = false;
             assert!(!supported_path(&path, &cfg), "no global denial {op}");
@@ -554,7 +567,7 @@ mod tests {
                 cache_purge: false,
                 inspect: false,
             },
-            timeout: std::time::Duration::from_secs(5),
+            timeout: crate::hooks::config::DEFAULT_TIMEOUT,
             authorizer_role: mkit_server::policy::AuthorizerRole::Check,
             http: None,
             inspect_batch_max_objects: 10_000,
