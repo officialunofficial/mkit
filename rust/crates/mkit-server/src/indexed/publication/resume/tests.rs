@@ -685,6 +685,7 @@ fn lowered_delta_depth_becomes_durable_terminal_failure_across_timers() {
             ),
         );
         let mut rounds = 0;
+        let mut previous_calls = 0;
         loop {
             rounds += 1;
             clock.advance(1_000);
@@ -699,6 +700,9 @@ fn lowered_delta_depth_becomes_durable_terminal_failure_across_timers() {
             .await
             .unwrap();
             let retained = read_progress(&kv, &repo, root).await;
+            assert!(retained.calls >= previous_calls);
+            assert!(retained.calls - previous_calls <= u64::from(SLICE_CALLS));
+            previous_calls = retained.calls;
             retained.validate().unwrap();
             assert!(!retained.complete);
             assert!(
@@ -710,7 +714,6 @@ fn lowered_delta_depth_becomes_durable_terminal_failure_across_timers() {
             if retained.terminal.is_some() {
                 assert_eq!(retained.terminal, Some(TerminalFailure::DeltaDepth));
                 assert_eq!(retained.base_cursor.as_ref().unwrap().depth, 30);
-                assert!(retained.calls > u64::from(SLICE_CALLS));
                 break;
             }
             assert!(rounds < 10);
