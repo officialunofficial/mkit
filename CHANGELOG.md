@@ -20,323 +20,33 @@ published to crates.io for the first time; `mkit-cli` depends on it.
 - `mkit serve --http` and `mkit serve --listen-enc`, with their companion
   flags, are removed. `mkit serve` keeps the `mkit+ssh://` session over
   stdio; each removed flag exits with a usage error.
+
 - `mkit-transport-connect` no longer exposes the server-side service (its
   `server` cargo feature is gone); only the client transport remains.
+
 - The standalone native `mkit-server` binary, the `mkit-server-native` crate
   and the `mkit-server` container image are removed. The release ships the
   `mkit` CLI archives only; the production deployment target is the Workers
   adapter.
-- `mkit-transport-enc` is deprecated: there is no maintained server for it.
-  Use SSH (`mkit serve`) or Connect.
+
 - The Workers launch profile selector `LAUNCH_PROFILE` value `uno` is renamed
   `paid-workers`; `uno` remains accepted as an alias.
+
 - Stores written by earlier unreleased server builds are not migrated; fresh
   stores are required for the new `ListRepos` visibility indexes and the
   takedown and inspection metadata.
 
-### Changes
+- *(client)* Remove `ConnectTransport::with_atomic_advance` for the upcoming
+  0.5.0 release. `GetServerInfo` is the sole source of atomic-advance capability
+  (WP-1.16).
 
-- Server: add `ListRepos`, with bounded namespace-name pagination and authenticated
-  continuation tokens. Atomic coordinator visibility indexes hide private names
-  from public listings; owners and approved namespace authorities list all repos.
-  Grants retain public listing rights only. Fresh stores are required.
-- Deprecated `mkit-transport-enc`: no maintained server; use SSH (`mkit serve`)
-  or Connect.
-- HTTP ref-path files: serve MP4, WebM, MP3, Ogg, WAV, HEIC, Markdown and CSV
-  inline with their media types, preserving encoded filenames, security headers
-  and byte ranges. Dangerous extensions remain binary attachments.
+- *(client)* Connect remote URLs whose path is not a repository identity now
+  fail at open with `MalformedUrl`, even against servers that ignore the path:
+  for example `/org/repo`, `/MyRepo`, percent-encoded paths, dot segments, and
+  extra or missing slashes after the scheme. Use an empty path or a lowercase
+  bare name (`mkit+https://host/myproj`) for single-repository servers, and
+  `<ed25519-… | 0x…>/<name>` for namespaced ones (STC §7.4) (WP-1.16).
 
-- HTTP object readback accepts streamed chunk-offset sidecar tails from R2.
-
-- Indexed verification, extraction and preservation count canonical Blob framing
-  around the 1 MiB payload boundary while retaining the 48 MiB slice allowance.
-
-- Server conformance: add a debug-only memory-backed in-process HTTP host for
-  contract tests, with origin-bound auth-v2, signed loopback hook support, and
-  an explicitly advanced manual clock.
-- Server: add default-off durable inspection mode, a guarded repository flag
-  registry, and bounded per-advance hold records as storage foundations for
-  post-launch asynchronous inspection (WP-5.5a-0, R-206). Content holds are
-  repository-wide under Single and D34; released manifests fence delayed writes.
-- Takedown-on publication and reader performance: sixteen-shard authoritative
-  descriptor directory, resumable timer-12 pair verification before ref acceptance,
-  caller canonical byte limits and typed object metadata. Deprecated mixed
-  `object_sizes` remains available. Unshipped metadata codecs require fresh stores.
-
-- Worker embedding: supplied Admission, Authorizer/Authority and OutcomeSink
-  capabilities satisfy launch validation without an unused external hook channel.
-  `fetch_with` now takes explicit `HookCapabilities`; shared config factories use
-  `from_env_with_hooks`/`from_vars_with_hooks` (delta review 8b-1).
-- Launch builds forward the Worker pure-Rust decoder to the server feature;
-  mandatory PR gates run the isolated 48 MiB allocator regression (4-1, 12-3).
-- Object reader and URL batches retain the expiry of cached reachability proofs.
-  Only fresh published walks renew them after rewind/deletion (6-1).
-
-- Server: retain retryable Takedown acceptance with its stable id until every
-  denial is active. Exact retries resume bounded activation; timer-15 recovery
-  finalizes the original nonce and operation result (delta review 7-1).
-- Worker preservation acquisition: bound scheduled reconstruction to 48 MiB
-  by evicting previous delta intermediates and retaining only the current base.
-  Preserve 50-hop, 1 MiB canonical chains, existing frame admission, corruption
-  checkpoints and the 700-call slice budget; inline profiles are unchanged.
-
-- Server (WP-4.18, phase 1, R-194): explicit Paid indexed Workers launch selection
-  and startup validation for optional HTTP/URL tokens, signed hooks/binding,
-  synchronous inspection and private scanner retrieval. Native serves proofs;
-  Worker proofs stay unsupported. Leases/GC remain off with permanent retention.
-  Complete preservation configuration activates its core and restricted admin
-  catalog; the launch build enables R-203’s bounded pure-Rust zstd decoder.
-  Worker HTTP mounts retain read settlement in the fetch context; ticket and
-  implicit packmap checks use at most six simultaneous backend responses.
-  Added local conformance/evidence skeleton; complete runtime evidence and
-  preservation integration remains pending phase 2.
-- Worker embedding (supported, 0.x): combine programmatic configuration,
-  published snapshots, custom Outcome and purge sinks in `NsObjectBuilder`;
-  generate the five DO classes with `durable_objects!`. Host-routed admin
-  dispatch retains ADMIN_KEYS authentication, and programmatic ref policies
-  validate before serving. Add a service-binding streamed-upload example and
-  its wasm check. These APIs are unpublished, consumed at a pinned git tag.
-- Native Connect transport: retry unary reads and replay-safe auth-v2 writes
-  once on a fresh connection when a reused HTTP/1 socket fails before any
-  response bytes; preserve the signed envelope and deadline. Streaming RPCs
-  start on fresh connections and are never replayed.
-
-- Server: align the receipt-golden test SHA-256 dependency with the repository
-  sha2 0.11 crypto channel (launch review 12-2).
-
-- Server: a purge that creates positive shared backlog also schedules the
-  existing outcome-delivery wake, so later paid read outcomes survive purge
-  completion, reconciliation and restart (launch review 3-1). Zero backlog
-  retains wake ownership until the guarded kind-8 drain, preventing duplicate
-  wakes across repeated purge cycles; content shards register the same driver.
-
-- Server: completed identical Takedown retries replay their stored response
-  after role changes and without runtime operations. ReadPreserved retains fresh
-  role and retention checks on every retry (launch review 7b-1).
-
-- Server: automatically enqueue audited cache purges with takedown acceptance,
-  denial activation and late-holder ownership. Checkpoint newly discovered
-  repository purges with timer-15 progress and immediately invalidate configured
-  local caches (launch review 7a-2, existing R-190). Audit source snapshots and
-  immediate invalidation share the enclosing request or slice call allowance.
-
-- Scheduled indexed verification reserves R-203 decoder scratch within the
-  existing 48 MiB slice allowance, preserving window geometry and frame
-  admission. Delta slices release the idle reader before source reconstruction;
-  allocator regressions cover corruption, nested decode and valid custom limits.
-
-- Server: cap aggregate object-index candidate retention at a charged 4 MiB,
-  bound membership joins and Worker request allocation, and enforce the current
-  indexed pack-byte limit before Scheduled job claims/reuse and timer decoding.
-  Native Verified reuse returns the exact advertised pack-size error. Scanner
-  retrieval supports ticketless ref writes with an empty Inspect batch and a
-  capability granting no access to previously published packs.
-
-- Server: keep relay progress continuations after the current wake when retry
-  metadata retains an older due time. Update timer, verification-job and
-  published-view tests to assert retained capped retries and recovery;
-  recognize the HTTP content-header golden as a JSON table in the wasm verifier,
-  and correct the route property's reserved-name fixture expectations.
-
-- CLI (`mkit-cli`, additive): add `http.sslCAInfo` and overriding
-  `MKIT_SSL_CA_FILE` for extra PEM trust certificates on all native Connect
-  HTTPS remote RPCs and pack streams only. Keep Mozilla roots and
-  chain/hostname verification; invalid CA files fail closed. The self-updater
-  keeps OS trust and release checksums when present, ignoring both settings.
-  S3 remotes are not yet covered. Browser trust is unchanged.
-
-- Server (R-205): `DEFAULT_REPO_VISIBILITY=public|private` on Workers and
-  native `--default-repo-visibility` select visibility for repositories without
-  a stored setting. The default remains public; explicit visibility wins.
-  Set it at deployment creation: changing it affects all unset repositories.
-
-- Server (R-204): embedders can issue batches of up to 16 URL tokens through
-  `ObjectReader::issue_urls`, sharing RPC authorization, epochs and minting,
-  with bounded published-view reachability and denial preflight.
-
-- Server (WP-5.6a-3, R-190): add signed moderation GetTakedown/ListTakedowns,
-  atomic audited SetLegalHold and freshly verified ReadPreserved streaming.
-  Replay stores byte-free read descriptors; each attempt rechecks authority and
-  retention. Add separate v1 status fields for acquisition, verification,
-  discovery, legal hold and purged copies. Activation remains off until 4.18.
-
-- Core/server (WP-4.16c, R-202): in-process canonical object prefetch for
-  embedders, including ChunkedBlob manifests and indexed content sizes;
-  verified public/owner views share bounded reachability and global-denial
-  proofs. Add wasm-clean `store::MemorySource` for synchronous disclosures
-  and diffs, with native and Worker embedding entry points. No wire change.
-
-- Bound pure-Rust zstd block expansion before allocation, with a fixed 8 MiB
-  window cap, and checkpoint corrupt preservation sources as terminal audited
-  failures. Preflight compressed delta result headers against verified metadata
-  before decode budgeting; genuine resource failures remain retryable. Worker
-  admission and native C decoding are unchanged (R-203).
-
-- Server/Worker: bound raw timer-alarm enumeration and share tick limits across
-  logical heads. Persist capped exponential backoff in the existing timer row
-  for cold fairness, preserving payloads and original handler due times. The
-  unshipped timer key codec gains retry metadata; timer payloads reserve enough
-  headroom for a guarded move within the existing batch limit.
-- Server/Worker: keep immediate alarm continuations strictly after the current
-  clock so bounded ticket, outcome and relay cleanup cannot strand an alarm
-  chain. Native test timer directives share tick exclusion with the autonomous
-  driver, making due-timer and redelivery conformance deterministic.
-
-- Server/Worker (WP-4.16b, R-201): ordinary ref-path file responses now select
-  Content-Type from a fixed extension allowlist and include inline/attachment
-  filenames with RFC 5987 encoding and a sanitized ASCII fallback. HEAD and
-  ranges share the headers; SVG/HTML remain binary attachments. Security,
-  object-id routes, proofs, caching and private-token rules are unchanged.
-
-- Server: publication timer 12 resumes bounded dependency checks across alarms
-  and restarts after guarded obligation, dependency or generation changes.
-  Valid large D34 packmaps no longer stall at the whole-alarm call limit.
-  Its internal timer-value codec changes; reset unsupported pre-launch stores.
-
-- Docs (WP-5.6a-2/3, R-190): specify finite root sweeps and support Any denial/
-  preservation with incomplete discovery pending the post-launch catalog.
-  Distinguish verified preservation from unresolved completion; require byte-free
-  admin replay and fresh audited verified streams. §14.7 signing/publication and
-  full-profile requirements remain. PR2 owns preservation/retention/hold core; PR3
-  owns the restricted admin catalog. Activation stays off; no completed gates claimed.
-
-- Server/Worker (default-off, WP-4.10b-2, R-186): complete consumed-group extraction
-  with closure before effects, native union counts, bounded job header/body guards,
-  resumable delta reconstruction and root-checked multipart uploads. Hold renewal
-  and durable holder delivery precede Verified; release activation waits for 4.18.
-
-- Server (R-193): default-off private raw-pack retrieval for synchronous
-  scanners, with separate capability MAC and scanner signing keys, bounded
-  ranges, current-ticket lifetime checks, uniform `not_found` and global
-  block enforcement on native and Worker. Inspect remains metadata-only;
-  retries keep their inspection id and mint fresh short-lived capabilities.
-  Production activation remains gated by WP-4.18.
-
-- Server (WP-5.6a-1, R-190): independent V2 denial actions, verified pack inventory
-  and signed, audited pending takedown intents; manual PurgeCache returns a purge
-  id asynchronously and audits completion. Preservation and production takedown
-  activation await WP-5.6a-2/3. Timer 15 is TAKEDOWN_WORK; no new key tag or migration.
-
-- Server (WP-5.5a, R-200): synchronous added-pack file inspection before apply,
-  fail-closed retries without replay, signed remote Inspect, and advertised
-  launch input limits (default 10,000 objects, maximum four inspectors).
-  Inspect every Blob and ChunkedBlob, surplus included, without role reads;
-  enabling inspection requires an empty store. Full classification follows in WP-5.5c.
-- Server/Worker (inert, WP-4.10b-1, R-186): pending-holder protection and atomic
-  content-holder relay delivery retain protection beyond hold expiry; late
-  blocked holders leave durable takedown requests for WP-5.6a. Add bounded
-  verification projections, opaque ETag capture and default-compatible internal
-  R2 upload callbacks. Worker Extract remains fail-closed; the driver is PR2.
-
-- HTTP proofs on the opt-in native mount: canonical Object bundles and MKDP/MKDS query ranges now share validators, caps, payment and durable settlement with ordinary reads; exact core wire-size planning constructs no proof, and native canonical reads bound prefix memory (WP-4.14b-1). Workers prefetch follows in WP-4.14b-2. Unshipped `ProofServer` now builds selected bytes through a repository-scoped `ProofSource`.
-- WP-5.10: durable timer-11 automatic cache purge intents, signed global delivery
-  with stable ids and fresh nonces, local invalidation and snapshot refill fences.
-- WP-5.11a: default-off signed admin framework with separate role keys, durable
-  replay and gapless audit export. Automatic actions join the audit through the
-  existing outbox relay; manual PurgeCache moves to WP-5.6a.
-- Server (WP-5.4, R-198): remove compatibility with unreleased publication stores;
-  reset existing stores. Hold authority belongs to post-launch WP-5.5c; timer 15 and `pv` are freed.
-
-- **WP-5.4:** add persistent paired published refs, versioned membership and durable
-  cross-ref dependency rechecks; route reader RPCs, snapshots, tokens and HTTP
-  bytes/proofs through published values while retaining writer visibility and
-  serving stops. Specify indexed permanent-retention launch without storage leases
-  or GC, and publication Events: Committed means Sent; Delivered requires the
-  contiguous published prefix.
-
-- Docs: add the early Paid Workers launch-readiness skeleton (WP-1.20, R-195 / R-198):
-  D35 environment/key roles, operator reset/rollback/rotation/drills, empty
-  user-owned evidence slots and a DRAFT user-only REL-1 prompt. Final readiness
-  waits for 4.18; no staging, measurements or release actions are claimed.
-
-- Add optional namespace authority-generation fencing with dedicated deployment-authority statements, native/Worker configuration, independent D34 lease barriers and generation-bound upload tickets (WP-2.16).
-  Ticket streams coalesce legal client frames into bounded 256 KiB storage
-  checkpoints, preserving revocation checks within Worker request budgets.
-
-- WP-3.9c: default-off signed HTTPS Worker hooks with canonical origin signing,
-  manual redirects, streamed response limits and aborting call timeouts.
-- Worker (inert): extracted-object storage can use root-pinned backend R2
-  multipart sessions with verified streamed parts and bounded finalization.
-  Internal object receipts preserve opaque backend ETags without changing pack
-  wire receipts; extraction and production activation remain separate work
-  (WP-4.10b-multipart, R-192).
-
-- Server: kind-8 completion uses the guarded fresh backlog, preserving delivery
-  after a concurrent outcome append (WP-3.13; correction to #1219).
-
-- Server conformance: M3 cases cover admission, CORS, CAS-loss and ticket expiry; the
-  orchestrator rulings preserve pipeline ordering and accept ordered combined
-  WWW-Authenticate lists on Workers (WP-3.13).
-
-- Server conformance: MPP stub, loopback controls, real native binary/exec-helper
-  push tests and a shared admission commit case; isolated Worker forwarder
-  calls the same Rust fixture (WP-3.12). Release guards reject `stubs`.
-
-- RPC: public `mkit-rpc::hooks` message types with JSON support and runtime-free
-  `HookSigner` and `HookVerifier`, enabled by the `hooks` feature. The server
-  re-exports its authentication surface for external hook implementers (WP-3.7b).
-
-- Server (Stage 2, inert): default-off `http-objects` adapter features mount
-  raw escaped HTTP object routes with streaming Range/HEAD, read CORS on
-  every response, query-free diagnostics, and public URL-token key documents.
-  Native token key-file/TTL flags and Worker token secrets use dedicated keys;
-  retained keys also cannot repeat hook or enc keys. Public ref redirects are
-  explicitly opt-in and disabled with admission (WP-4.16, R-179).
-
-- Server (Stage 2, inert): URL tokens now authorize private HTTP object
-  and ref-path reads through staged signature, stateless binding and epoch
-  checks, while preserving anonymous published access and Authorizer checks.
-  Private immutable cache lifetimes are bounded by token expiry; private ref
-  paths require revalidation. Active and retained token keys are separated
-  from ticket secrets without exposing seeds (WP-4.15, R-178).
-
-- Server (Stage 2, inert): programmatic `HttpObjectsConfig::admit_reads`
-  enables paid GET and HEAD reads, canonical JSON 402s, private admitted
-  responses, durable pending reads before transmission, deadline enforcement
-  and retained asynchronous byte accounting (WP-4.13, R-177). The shared
-  credential selector now denies comma-joined selected payment headers,
-  correcting #1212; non-Payment Authorization remains excluded. API:
-  `HttpReadRuntime` injects retained tasks and deadlines, and
-  `HttpObjectRequest::header_names` preserves credential name spelling.
-- WP-1.19: add an inert Stage 2 staging template and activation/backup runbook; provisioning, routes and CPU sizing wait until after REL-1.
-
-- **WP-1.21 (Stage 2):** default-off Worker published ref-index snapshots with bounded binary envelopes,
-  atomic debounce/generations, private R2/Cache serving after coordinator authorization, signed bypass,
-  inspection refusal and live fallback; existing Stage 1 entrypoints stay inert.
-
-
-- Server: built-in ref policy (SPEC-SERVER §9.7, programmatic, Stage 2):
-  `PipelineConfig::ref_policy` with per-ref allowed operation signers (both
-  modes) and fast-forward-only rules (indexed mode). In indexed mode a
-  `u`-only write grant now fast-forwards, proven against this repository's
-  history (`IndexedConfig::max_ancestry_commits`, default 256), and a ticketless
-  head must be a member commit, remix or tag. API: `verify_ticketed` returns
-  `StagedCommits`; `VerifiedAuth::created_at_ms` and
-  `IndexedConfig::max_ancestry_commits` are new (WP-4.17).
-- Server: authorization, admission and outcome delivery can run in a remote
-  hook service over signed HTTPS. Plain HTTP is loopback-only, redirects are
-  never followed, and a remote admission replaces the default abuse quota.
-  New in `mkit-server`: `pipeline::Choice`, `hooks::HookVerifier` (the hook
-  service's side of the signature), `HookSigner::public_key`,
-  `TicketKeys::contains_secret`.
-- Server: the Workers adapter can call a hook Worker over an unsigned
-  `ADMISSION_HOOK` service binding (`HOOK_ROLES`, `HOOK_TIMEOUT_MS`,
-  `AUTHORIZER_ROLE`), and `adapter::fetch_with` and `ns_object_with` take a
-  deployment's own `HookSet` and outcome sink (WP-3.9). The Queue outcome sink
-  and a signed Worker webhook are deferred (WP-3.9b).
-- Server (Stage 2, inert): `mkit-server` gains the default-off `http-objects`
-  feature: `Pipeline::serve_http_object` serves repository objects and ref paths
-  per SPEC-HTTP-OBJECTS (the URL grammar, published resolution, a bounded
-  reachability proof for id URLs, ordinary Range and conditional requests,
-  security headers and one uniform 404), reading extracted objects that this
-  repository holds by range and everything else from its own pack entries.
-  It needs `PipelineConfig::http_objects`, which requires indexed mode, and no
-  adapter enables the feature or mounts a route (WP-4.12, R-169). SPEC-HTTP-OBJECTS
-  §4 now says the global content store decides no membership or reachability
-  but may supply the bytes of an id this repository holds. API: new
-  `Procedure::{HttpGetObject, HttpGetRefPath}` and `OpKind::HttpGet`.
-  Request queries use `RedactedQuery`, exposed only to the parser; ref scans
-  bound all rows and pages, and ref paths peel up to 16 tags.
 - **Breaking (server):** D34 is now the default sharding for Connect
   deployments: the Worker's unset `SHARDING` means `d34` (`wrangler.jsonc`
   sets it). There is no migration: a database written `single`, or written
@@ -345,508 +55,41 @@ published to crates.io for the first time; `mkit-cli` depends on it.
   default write quota is now counted per (signer, branch). The client skips a
   listed branch that a stale `ListRefs` names after its delete (head and
   packmap both absent) instead of failing with `PackmapMissing` (WP-1.28c).
-- Server: the Worker registers the kind-5 namespace quota rollup on its ref
-  shard, coordinator and root classes; the quota conformance cases run under
-  D34 (per-branch) and a Multi + D34 case checks the namespace cap across
-  branches after a forced rollup (WP-1.26b).
-- Server: the M1 exit wire conformance suite (WP-1.27): isolation replay, target-ref ticket caps and expiry, the
-  D34 lag windows and D36 hinted reads over a held relay, idle and expired epoch-lease renewal, 64-ref writes, an
-  over-32 MiB native listing and bounded ticket growth; the `test-faults` timer directive also expires tickets and
-  the Worker stats hook is scoped to one ref's shard under D34. `mkit-server-conformance` `Profile` gains `ticket_per_ref` and
-  `merge_paging_refs` (WP-1.27).
-- Server: the Worker gains the `GRANT_SCHEMES` and
-  `WEBAUTHN_RPS` vars and a `test-faults`-only `UNSAFE_LOOPBACK_GRANTS`, to
-  configure write grants on Multi + auth v2 deployments. Any bad or partial
-  value refuses to start; unset keeps grants off (WP-1.30b).
 
-- Server: a Worker can verify a ticketed pack asynchronously in checkpointed,
-  budgeted alarm slices (timer kind 7, `IndexedConfig::verification =
-  Scheduled`) with the same answers as native inline verification: the advance
-  answers `PendingVerification` until the slices finish (Paid plan only; index
-  rows are relayed after the decode reaches `Done`, and `Verified` waits for
-  their delivery). The job lives in the new `vc` key class; kind 2 now also
-  removes an expired unconsumed pack's verification state. Indexed mode stays
-  refused on Workers until WP-4.10b (WP-4.8). `mkit-core` gains
-  `WindowReader::last_frame` and `pack::decode_entry_with` (additive).
-- Server: in indexed mode, extract every ChunkedBlob (as its reassembled content,
-  with a chunk-offset sidecar) and every file Blob of at least 64 KiB into the
-  deployment-wide object store under its object id, before a pack is marked
-  verified. Object keys are verified against a content root by a new
-  `PackSink::commit_with_root`; holder rows carry a sequence and the consuming
-  ticket; a hold protects each object until its holder is recorded. New
-  `IndexedConfig::{extract_min_bytes, max_extract_bytes}`. Workers still refuse
-  indexed mode (WP-4.10). API: `IndexedConfig::max_extract_bytes` is now
-  `Option<u64>` (default `4 * max_pack_bytes`); `verify_ticketed` takes the
-  consuming ticket ids and needs a `MultipartBlobStore`; `ContentIndex` gains
-  `extend_hold` and `add_holder_unless_blocked`, and `release_hold` is
-  deadline-guarded; `is_reserved_pack_keyspace` is exported.
-- CLI: a Connect push that needs more than six data packs per advance is now
-  split automatically along the branch's first-parent history instead of
-  failing with `PushTooLarge` after uploading six packs. Every intermediate
-  commit is a published state; the tracking ref follows each advance, so a
-  re-run resumes, and later advances always compare-and-swap on the previous
-  one. For a split push, stored write grants are checked for every advance before
-  anything is uploaded, and an unsplittable oversize commit or merge is refused before any
-  upload. `--format=json` reports `steps` (WP-1.17b).
-- Server: the native adapter delivers terminal outcomes (kind 8) to an
-  embedder's `OutcomeSink` (`server::open_with_sink`) with a 5 s bound per
-  call, stops a fire at its first failure and drains due outcomes on
-  shutdown (`--shutdown-drain-secs`, default 10). CORS allows and exposes the
-  payment headers, configured extra credential headers are redacted from
-  traces, and an ssh or enc write that needs a payment answers
-  `INVALID_REQUEST "payment required: use mkit+https"` (WP-3.4).
-- Server: the Workers adapter takes an outcome sink with the same per-call
-  timeout, budgets kind 8 by plan (Free: 8 sink calls per alarm), allows
-  and exposes the payment headers for browsers and keeps repeated
-  `WWW-Authenticate` fields (WP-3.5).
-- Server: `mkit serve --root <DIR>` serves the repositories under `<DIR>`
-  addressed by `<NAMESPACE>/<NAME>` (from the path argument or a strict
-  `SSH_ORIGINAL_COMMAND`), one repository per process, with writes
-  restricted to the namespace's Ed25519 owner asserted by
-  `--principal <hex>`. Transport-identity sessions grant
-  pack membership implicitly for packs uploaded and verified in the same
-  session — at most seven pending packs, consumed by the session's
-  packmap write — so `mkit+ssh://` pushes need no
-  upload tickets. Denied writes answer `INVALID_REQUEST "write not
-  permitted"` (WP-1.15).
-- Server: the Worker adapter can serve multi-repository deployments (the
-  `ADDRESSING`/`NAMESPACE_POLICY`/`NAMESPACE_ALLOWLIST`/
-  `UNSAFE_OPEN_NAMESPACES` vars). Multi requires auth v2 with upload ticket
-  keys — a deployment without them now refuses to start.
-- Server: add validated two-phase admission with bounded HTTP 402 challenges,
-  redacted payment credential forwarding and committed-success receipt headers
-  (WP-3.2).
-- Server: durably arbitrate admitted reservations with pending and terminal
-  outcomes, reconcile abandoned reservations, deliver through a retrying
-  outcome sink and apply per-shard outbox backpressure (WP-3.3).
-- Server (WP-3.7): add the default-off `remote-hooks` feature to `mkit-server`:
-  Authorize, Admit and Outcome over `mkit.server.hooks.v1` on a
-  transport-agnostic `HookChannel`, with Ed25519-signed requests, fail-closed
-  mapping and response bounds. Adds the `Sleep` timeout seam, and
-  `scripts/regen-hooks-proto.sh` for the vendored codegen.
+- Windows is no longer a supported build, test or release target. `mkit-keystore`
+  removes the `backend-windows-credential` feature and `BackendKind::WindowsCredentialManager`;
+  `"windows-credential"` is now an unrecognized backend name. Run mkit under WSL. See
+  Removed.
 
-- CLI: add `mkit grant create|add|list` and a user grant store under
-  `$XDG_CONFIG_HOME/mkit/grants/` (never repository-scoped). Owners sign with the
-  mkit key, a software-keystore secp256k1 key, or an imported wallet or WebAuthn
-  signature; the Connect client now presents the best stored grant, ranking the
-  higher epoch first. New user-only config key `grant.webauthn_rp`.
-  Issue grants for pushes that move a branch as `cuf`, not `cu`: while servers are
-  opaque, updating an existing ref needs the `f` flag.
-  `mkit-keystore` gains a defaulted `KeySigner::sign_prehash_recoverable_secp256k1`
-  for the software backends (WP-2.13).
-- CLI: add `mkit epoch show|bump`, `mkit grant revoke [--prune]` and
-  `mkit visibility set`, waiting out the server's `Retry-After`. Connect client:
-  new `ConnectTransport::{get_grant_epoch, set_grant_epoch, set_repo_visibility}`
-  returning `Completion`, and a per-request signed-or-unsigned classification of
-  `SetRepoVisibility` (WP-2.14).
-- Core and wasm: verify MKDS v1 multi-chunk disclosure spans against a trusted
-  commit and build boundary-aware MKDP/MKDS range proofs (WP-4.14a).
-- Server (WP-4.6): batch repository object-index range reads on Workers,
-  add bounded relay enqueue and delivery checks, increase paid relay
-  throughput, and report index pressure, lag, backlog, and lookup caps.
-- Server (WP-4.7): opt-in native indexed ingestion verifies ticketed packs
-  before ref publication, resolves member-only thin delta bases, checks all
-  consumed objects and packlists, and writes index rows before membership.
-- Core: expose decoded pack frame metadata, single-frame decoding, and an
-  additive resumable decode cursor for repository-scoped external bases.
-- Server Worker: stream verified multipart parts into CV-keyed R2 objects and
-  verify the complete pack before publishing it; raise the ticketed pack cap
-  to 1 GiB while retaining the 64 MiB single-upload limit (WP-1.12).
-- Server native: support S3 multipart with verified CV-keyed parts and
-  server-side `UploadPartCopy` assembly, plus a long CompleteUpload deadline
-  (WP-1.13).
-- Server: expire unconsumed upload tickets with one guarded `Expired` outcome
-  and best-effort upload-session cleanup (WP-1.14).
-- Server: maintain D34's 16-bucket ref-name index through relay upserts and
-  deletes, and serve eventual paged ListRefs from it (WP-1.28b).
-- Connect push: BeginUpload tickets now follow each pack into AdvanceRefs, with
-  bounded membership polling, nonce renewal, a six-data-pack advance limit,
-  and a one-time re-plan for ticket, packlist, or delta-base failures (WP-1.17).
-- Connect push: large ticketed packs stream resumable parts with locally saved
-  receipts, progress and an interruption hint; non-multipart deployments now
-  advertise a compatible pack limit (WP-1.18).
-- Server conformance: restore Single and D34 wire cases for
-  secp256k1-eip191 and webauthn-p256 owner grants (WP-2.6b).
-- Server: enforce grant ref scopes per change, including apply-time
-  presence guards for `ANY` and head/packmap pairing (WP-2.7).
-- Server: add unsigned grant-epoch RPCs with owner statements, bounded
-  epoch transitions and completion after leased shards are fenced (WP-2.8).
-- Server: verify auth v2 on every signed read, including the framed
-  `DownloadPack` request, and add private repositories:
-  `SetRepoVisibility` in envelope and owner-statement modes, a
-  coordinator `rv` row, and `not_found` for every unauthorized private
-  read, indistinguishable from a missing repository (WP-2.9). A read that
-  carries auth headers but fails verification is now `unauthenticated`
-  instead of anonymous, and a grant header on an unsigned Multi request is
-  `unauthenticated` on every procedure.
-- Server: mint short-lived `mkit-url-token:v1` object URL tokens with
-  `IssueObjectUrl`, signed by a dedicated deployment key, with a two-phase
-  verification API and a key-set renderer for HTTP object serving
-  (WP-2.11).
-- Server: enforce owner-signed write grants under Multi/Owner, including
-  `0x` namespaces, stored-epoch checks, and grant-scheme discovery.
-  Adapter grant flags follow in WP-1.30b.
-- Connect client: detect bounded 402 admission challenges and report payment receipts without exposing their values (WP-3.10). `TransportError` is now non-exhaustive, a breaking change for exhaustive downstream matches.
-- Connect client: run a trusted, user-configured admission helper once and retry admitted writes with strictly filtered headers (WP-3.11).
-- Connect client: sign repository reads with auth v2 on each attempt, including
-  the framed `DownloadPack` request. Add a grant-source API and local selection
-  logic; the user grant store follows in WP-2.13.
-- Transport: add the `GetGrantEpoch`, `SetGrantEpoch`, `SetRepoVisibility` and
-  `IssueObjectUrl` messages and RPCs; the server answers `unimplemented` until
-  WP-2.8, WP-2.9 and WP-2.11 (WP-2.2).
-- Transport: add the `AdmissionChallenge` and `Challenge` error detail messages
-  with pinned binary, protobuf JSON, and Connect error goldens (WP-3.1).
-- Specify server takedown and redaction notices: global content blocklist,
-  delta-safe ref and pack rewrites, tombstones, preservation and restore,
-  signed DSSE notices on Connect and HTTP 451, and additive transport and
-  hook fields. Runtime enforcement follows in later server work packages.
-- Specify server-signed storage receipts for committed live ref advances and
-  lease changes, with a published receipt-and-notice key list and writer-view
-  retrieval. Add receipt fields to Connect ref-write responses and an optional
-  admission `external_ref`; server signing and delivery follow in WP-5.8.
-- Server: `AdvanceRefs` consumes verified upload tickets atomically with ref
-  publication, outcomes and repository membership. Missing packs after upload
-  close their tickets with `Aborted(PACK_MISSING)`. `UpdateRef` and `AdvanceRefs`
-  now support conditional ref deletion; direct writes with admission
-  reservations fail closed until WP-3.3.
-- Server: add stateless `UploadPart` and `CompleteUpload`, authenticated part
-  receipts, and a multipart blob-store interface with a working memory backend.
-  Multipart BeginUpload tickets now carry opaque storage sessions. The blob-key
-  API separates upload markers from pack keys; FS, R2 and S3 multipart storage
-  follows in later work packages.
-- Server: default Multi-addressing quota now counts namespace-wide usage in
-  fixed windows: exact in each ref shard, reconciled every 60 seconds into the
-  coordinator and checked from an unguarded local view. Coordinator uploads
-  charge that total exactly. Single-addressing keeps its namespace cap off;
-  on D34 its signer quota is per signer and branch. With successful scheduled
-  rollups, other-shard lag is bounded by their admission rate times 3R.
-  Worker timer registration
-  and D34 quota conformance follow in WP-1.26b.
-- Server: add write-once repository object-index keys and binary values,
-  deterministic row planning, and membership-gated lookup APIs for indexed mode.
-- Connect client: poll typed pending AdvanceRefs verification replies with
-  clamped waits, nonce reuse and envelope renewal, progress and cancellation.
-  Ticket deadline threading follows in WP-1.17.
-  API separates upload markers from pack keys. FS multipart storage now stages
-  verified parts durably, completes through the verifying pack sink and sweeps
-  seven-day-old sessions; R2 and S3 follow in later work packages. The trait
-  adds `begin_multipart_for_ticket` so the FS session directory uses the ticket id.
-- Server: ticketed `UploadPack` now verifies the ticket before reading data,
-  streams the full pack without metadata writes, and leaves a content-addressed
-  upload marker for later ticket consumption. The advertised BeginUpload
-  threshold is enforced; non-default admission requires auth v2 and ticket keys.
-- Server: add periodic per-Durable-Object logical snapshots to a dedicated R2
-  `BACKUPS` bucket, plus Fresh-only portable restore with epoch advancement,
-  relay re-keying and coordinator recovery. Native `export` and `restore`
-  commands move metadata between backends. In-place logical restore is deferred
-  to the admin API; use Workers PITR or native physical `backup` for recovery
-  of the same deployment.
-  Deploying this Worker now requires the private `mkit-vcs-backups` bucket
-  bound as `BACKUPS` and a 35-day `backups/` lifecycle rule.
-- Specify the server's published view and quarantine, covering newly reachable
-  file objects and all file entries of added packs. Add inspection phase/id,
-  object kinds, deferral and flagged ids, authority writer-view classification,
-  and discovery field `async_inspection = 18`. These are additive spec/proto
-  contracts; the inspection implementation follows in later server work packages.
-- Specify storage leases, lifecycle Event webhooks, and fail-closed server GC
-  in SPEC-SERVER; add `GetServerInfoResponse.leases` and Event proto goldens
-  (WP-5.1a-1). Server enforcement follows in M5.
-- Server: implement authenticated `BeginUpload` tickets with stateless BLAKE3 MAC
-  tokens, rotation by key id, admission-free live-ticket/member results, open-ticket
-  caps, and byte-identical replay. Configure native keys with `--ticket-key-file`
-  or `MKIT_TICKET_KEYS`, and Worker keys with `TICKET_KEYS`. The internal legacy
-  UploadPack session API is now `open_upload`; ticketed uploads follow in WP-1.9b.
-- Server: Worker console JSON metrics and info/warn/error tracing, with latency
-  observations sampled at 1-in-100. Physical storage pressure alerts at 70%/90%
-  of the soft limit run after committed Worker puts and every 60 seconds for
-  native SQLite metadata. `Metrics::gauge` has a provided no-op default;
-  P-24 is now `mkit_server_partition_full_total{kind}`.
-- Worker: add Durable Object classes for D34 coordinator, ref, repository/ref-name index and content partitions, retaining RefStore for single deployments; reject foreign partition kinds and preserve alarms scheduled while a timer tick awaits I/O. Deployment vars now select `single` (default) or `d34` with a root sharding marker guard that caches settled results, retries transient storage errors and re-checks config changes; placement is deployment-wide and jurisdiction is fixed for its lifetime.
-- Server D34 ref writes now hold coordinator epoch leases, with backend commit
-  deadlines, guarded revocation pushes and kind-1 expiry sweeps. Creation and
-  renewal cost four store calls; usable leases keep steady writes at two.
-  Recovery explicitly records a lease-table holdoff before revocation completes.
-  Single sharding and M1 reads retain their existing behavior. Grant RPCs,
-  read renewal, visibility, and backup restore integration follow in later WPs.
-- Add partition timers with guarded atomic handlers, fair tick budgets, SQLite timer heads, Durable Object alarm multiplexing and a native SQLite driver (WP-1.24). Production handlers register as their work packages land.
-- The SQL store schema moves to version 2 (an index-only migration, applied on open to native databases and Durable Objects). A binary built before it refuses a migrated database, so roll back only to a version-2 binary.
+- `mkit-cli` removes its `http-transport` cargo feature (with `mkit serve --http`).
 
-**Verifier kit.** First-class commit-hash verification for an untrusted
-object set or a few-KiB disclosure bundle: CLI `mkit prove`,
-`mkit verify-proof`, `mkit closure export`, and `mkit closure verify`;
-wasm exports `verify_disclosure` / `verify_closure_*` (and related
-primitives) in `@officialunofficial/mkit-wasm`; specs
-SPEC-MERKLE-OBJECTS §5 and SPEC-DISCLOSURE; user guide
-[`docs/VERIFY.md`](docs/VERIFY.md). BMT proof bytes are
-commonware-identical (`commonware_storage::bmt::Proof` at the pinned
-train).
-
-### Breaking changes
-
-- *(client)* Remove `ConnectTransport::with_atomic_advance` for the upcoming
-  0.5.0 release. `GetServerInfo` is the sole source of atomic-advance capability
-  (WP-1.16).
-- *(client)* Connect remote URLs whose path is not a repository identity now
-  fail at open with `MalformedUrl`, even against servers that ignore the path:
-  for example `/org/repo`, `/MyRepo`, percent-encoded paths, dot segments, and
-  extra or missing slashes after the scheme. Use an empty path or a lowercase
-  bare name (`mkit+https://host/myproj`) for single-repository servers, and
-  `<ed25519-… | 0x…>/<name>` for namespaced ones (STC §7.4) (WP-1.16).
-
-### Changed
-
-- Worker launch profile is now `LAUNCH_PROFILE=paid-workers`. `uno` remains an
-  accepted deprecated alias and logs a startup warning. Takedown startup accepts
-  configured purge delivery through signed HTTPS or an embedder-supplied `PurgeSink`;
-  SPEC-SERVER §18 now describes both delivery options.
-
-- *(server)* Track a coordinator relay watermark per ref shard, retain expired
-  lease rows while their outboxes are undelivered, and expose the namespace
-  minimum and active shard table for GC and takedown (WP-1.23c). Restore
-  resets maxima and fences watermark reads pending reconciliation. The
-  unshipped `LeasedShard` V1 encoding gains watermark and sweep due fields.
-
-- *(client)* Validate the remote URL path as a repository identity and carry
-  `X-Repository` on every Connect RPC, including anonymous reads. Empty paths
-  address `default`; reads against a different configured single-repository
-  identity now fail. Repository-not-found errors name the identity and origin.
-- *(client)* Discover and cache atomic advance automatically from
-  `GetServerInfo`, with conservative defaults for legacy or unavailable servers.
-  SQLite and Durable Object pushes may now re-baseline the packmap chain.
-  Concatenate paged `ListRefs` responses with ordering and termination guards.
-- *(core)* Add defaulted `Transport::download_pack_via_ref`,
-  `download_blob_via_ref`, and `pack_exists_via_ref` methods. Connect uses their
-  validated `X-Mkit-Ref` hint for packmap-driven downloads; other transports
-  preserve their existing behavior. Add defaulted `repository_address` for
-  remote error context.
-- *(client)* Retry Connect `aborted` responses as temporary failures (503).
-  Missing ref reads return `None`; missing pack checks return `false`.
-- *(server)* Scope Multi `PackExists` and `DownloadPack` to repository membership,
-  with the optional unsigned `X-Mkit-Ref` hint resolving unrelayed additions in
-  the same repository's ref shard. Invalid hints are ignored; Single reads and
-  the Multi upload guard retain their behavior (WP-1.23b).
-- *(worker)* Register relay delivery on RefShard, with bounded target calls
-  and plan-specific alarm budgets. Coordinator relay watermarks follow in
-  WP-1.23c (R-106).
-- *(server)* Persist source relay scan progress in `rs 00`, with a cap of 32
-  failed targets per cycle. Relay fires inspect past blocked targets, pause at
-  the target budget, delete every delivered row in the guarded checkpoint,
-  and deliver the decodable prefix before corruption. Guarded scan checkpoints
-  and exact empty-value relay timer reschedules can use SQL's soft-capacity
-  reserve; the timer exception keeps the next fire immediate after progress
-  on a full shard. Ordinary puts still fail at the cap.
-
-- *(server)* Add source-side outbox relay kind 3, ordered target batches,
-  persistent per-source `rh` deduplication watermarks, atomic pre-delivery hooks,
-  bounded source cleanup and native driver registration (WP-1.23a). Relay
-  writers now call `relay_at(now_ms)` to stamp rows and commit their kick timer;
-  `RelayV1` gains mandatory `at_ms` in place before deployment. Writer chunking
-  keeps each row within target-batch limits, and the local relay watermark and
-  60-second lag warning prepare later readers. Worker registration follows in WP-1.23b;
-  the coordinator watermark follows in WP-1.23c.
-- *(server)* Implement unauthenticated `GetServerInfo` deployment discovery
-  with validated upload limits, namespace/admission policy, store capabilities
-  and private caching for 60 seconds. Repository headers never affect the
-  response; native bearer deployments also expose it without a token (WP-1.6).
-  A configured maximum pack size above the advertised resumable-upload
-  limit (8 MiB parts × 10,000 parts, about 78 GiB) is refused.
-- *(server)* Multi addressing now defaults to an empty namespace allowlist and
-  owner writes. Namespace denials and non-owner writes return `permission_denied`
-  before allocation. Authorizer hooks can be additional checks or explicit
-  authority sources, with owner facts passed to Authorize and Admit. Startup
-  refuses incompatible write policies, an open authority hook, and `any` with
-  default admission unless explicitly overridden (D27; WP-1.5). Embedders select
-  these policies in core; adapter multi-mode configuration follows in WP-1.30.
-- *(server)* Add pure ref-shard planners and strict version-1 codecs for upload
-  tickets, reservations, local pack membership and outcome/relay queues (WP-1.7).
-  Shared counters and outbox sequence/backlog edits carry snapshot guards;
-  ticket expiry kind 2 is allocated without an RPC or timer handler. Storage
-  layout version stays 1.
-
-- *(server)* Add native `--sharding single|d34` (default `single`) for SQLite
-  metadata. D34 co-locates each branch head and canonical packmap in one ref
-  shard and requires that pairing for `AdvanceRefs`, rejecting others before
-  storage access. Multi repositories now use coordinator namespace/repository
-  records and expose observed and committed creation facts to hooks. Replays
-  and quotas follow the ref shard; the default D34 quota counts per ref shard
-  until the namespace aggregate in WP-1.26. D34 `ListRefs` returns
-  `unimplemented` until WP-1.28. Fs-layout and Worker deployments stay Single.
-  Embedders select routing through `PipelineConfig::sharding`; `ShardMap` now
-  exposes a name's ref-index shard and the ordered set of ref-index partitions.
-  `Pipeline::with_shards` is removed; select
-  routing with `PipelineConfig::sharding`.
-- *(core)* Add `pack::window`: a synchronous sans-IO pack reader with bounded
-  entry buffers, 64 KiB–64 MiB range windows, and checksummed resumable cursors.
-  Entries remain provisional until the trailer and optional pack id pass at
-  `Done`. Lazy cursor commitments bind the current window prefix on resume;
-  callers keep sources immutable, and completed windows are not re-read.
-  With no requested id, the first run prefetches
-  the trailer windows and persists their digest as an anchor. Native zstd and wasm32 ruzstd share decoding
-  with `PackEntries`; allocation failures return `PackfileTooLarge`.
-
-- *(server)* Validate `X-Repository` before authentication and storage access.
-  Single deployments retain headerless reads and signed writes naming their
-  configured identity; another valid identity returns `not_found`, and a
-  malformed identity returns `invalid_argument`. Native `--repository` and
-  Worker `AUTH_REPOSITORY` now require the SPEC-TRANSPORT-CONNECT §7.4 grammar
-  (previously any printable ASCII was accepted); `default` remains valid.
-  Embedders can construct `Addressing::Multi` to route refs and replay state
-  by namespace and repository. Multi pack RPCs return `unimplemented` until
-  repository membership lands in WP-1.10. `Addressing::resolve` returns a
-  `ResolvedRepo`, stored on `Authenticated::repo()`, without changing the
-  adapter-facing authentication API.
-
-- *(cli)* `mkit serve <path>` runs on `mkit-server`: its engine is
-  `mkit_server::ssh::serve_session` over the pipeline with the `.mkit`
-  layout stores (`FsBlobStore`, `FsLayoutStore`), driven by
-  `futures::executor::block_on`, so the CLI still builds no async
-  runtime. Its own protocol code is gone. The wire is unchanged: the two
-  golden sessions captured from 0.4.2 (`rust/tests/golden/ssh-serve/`)
-  reproduce byte for byte through the binary. `mkit-cli` now depends on
-  `mkit-server` (features `ssh` and `fs` only), which is first published
-  with the 0.5 release. **Behavior changes:**
-  - **Idle timeout.** `mkit serve` ends a session after
-    `--idle-timeout-secs` (default 60; `0` disables it) without a byte
-    from the client, answering `Error{INVALID_REQUEST, "idle timeout"}`
-    and exiting 76 (SSH-SECURITY §4, §7). It bounds client silence only:
-    an upload that keeps sending never trips it; one that stops midway is
-    discarded. A new, optional `--max-session-secs` (default `0`, off)
-    caps the whole process, which also bounds a client that trickles
-    bytes or stops reading. Both flags accept at most 604800 (7 days).
-  - **Refs only under `refs/`.** A ref name outside `refs/` (`main`,
-    `heads/main`) that `mkit serve` used to store at `<root>/<name>` is
-    refused by name ("ref name must start with refs/ (… see the
-    migration notes)"). Such files are left in place and never reported
-    to clients; docs/CLI.md, "Refs outside `refs/`", gives a `find`/`mv`
-    recipe for an operator to locate and move them by hand. See the
-    `mkit-server` entry below.
-  - **Crashed uploads are swept.** At startup, when no other
-    `mkit serve` or server process holds `serve.lock`, upload temp files
-    (`packs/.<hex>.tmp.<pid>.<seq>`) at least an hour old are removed.
-  - A root marked as served from external metadata storage is refused (exit 78).
-  The default CLI graph is checked server-free by the new
-  `scripts/check-cli-baseline.sh` (in `just ci-scripts`; INVARIANTS "The
-  default `mkit` CLI is server-free").
-- *(server)* The pipeline serves only ref names under `refs/`
-  (`mkit_server::refs::is_served_ref_name`; SPEC-REFS §2), on every
-  binding: `ReadRef`, `UpdateRef` and `AdvanceRefs` refuse any other
-  grammar-valid name with `invalid_argument` "ref name must start with
-  refs/ …" (`INVALID_REQUEST` on the ssh wire), where they used to store it
-  (in `.mkit/server/rows/` on the `.mkit` layout, invisible to the CLI).
-  `ListRefs` prefixes are unrestricted; one outside `refs/` lists nothing.
-  Normative in SPEC-REFS v3 §2 (the §2 namespace list now includes
-  `refs/mkit/packmap/`), SPEC-TRANSPORT §4.2.1 and SPEC-TRANSPORT-CONNECT
-  §5; new wire-suite case `refs.non_refs_prefix_rejected`. New
-  `FsBlobStore::sweep_stale_uploads`. **SemVer:** unreleased API.
-- *(transport-file)* Every ref write through `FileTransport`
-  (`update_ref`/`write_ref`, and `LockedRefs::update_ref`, `delete_ref`,
-  `write_file`, `remove_file`) refuses a root carrying
-  `SERVER_META_MARKER` (`.mkit/server-meta`), the marker a
-  SQLite-metadata server deployment writes, with the new
-  `RefFileError::MetaElsewhere` (a `TransportError::RemoteError` on the
-  `Transport` verbs). That root's refs live in the server's `SQLite`
-  database, so a local `mkit push` to a `file://` remote or `mkit serve`
-  can no longer write a second, diverging copy. Reads and pack uploads
-  are unchanged. **SemVer:** additive (new constant and a variant of the
-  `#[non_exhaustive]` enum); **behavior change** only on marked roots.
-- *(vcs-worker)* `apps/vcs-worker` is a thin deployment of
-  `mkit-server-worker`: its fetch handler and `RefStore` Durable Object
-  call the new `mkit_server_worker::adapter`, which serves `mkit-server`'s
-  pipeline over R2 and Durable Object SQLite, streaming request and
-  response bodies (no whole-pack buffering; `DownloadPack` sends 800 KiB
-  chunks instead of one). Class `RefStore`, binding `REFSTORE` and bucket
-  `STORAGE` are unchanged, with no wrangler migration; the Durable Object
-  now keeps a `kv` table and ignores the old `refs`, `write_quota` and
-  `authenticated_operations` tables (never deployed; no migration). Wire
-  changes, all SPEC-mandated: a reused nonce for another operation is
-  `invalid_argument` (was an uncaught 500); a 33-byte `expected_id` is
-  `invalid_argument` (was `failed_precondition`); `ListRefs` matches its
-  prefix at a path-component boundary; a gzip-compressed unary response
-  (e.g. a large `ListRefs`) is no longer compressed a second time by the
-  runtime; an upload stream that runs past its declared size and past
-  64 MiB is `invalid_argument` (was `resource_exhausted`); storage
-  failures surface as `internal`/`unavailable` instead of
-  `invalid_argument` "refstore …"; a missing `AUTH_AUDIENCE` or
-  `AUTH_REPOSITORY` makes every RPC `unavailable` (was: writes only). New
-  var `WORKERS_PLAN` (`free`, the default, or `paid`) caps the Durable
-  Object store for the plan. The generated code, `build.rs` and the
-  duplicated modules are gone; `scripts/vcs-worker-conformance.sh` runs
-  the wire suite against it under `wrangler dev`.
-- *(core)* `mkit_core::refs::validate_ref_name` now also requires a name
-  of at most `MAX_REF_NAME_BYTES` (512) bytes, per SPEC-REFS v2 §3, so
-  every transport and every new local ref refuse a longer one. Creating
-  or writing a local branch, tag or remote-tracking ref over the bound
-  fails with the new `RefError::RefNameTooLong`, whose message names the
-  limit. Reading, listing, resolving and deleting a local ref that
-  already exists check only the grammar (the new
-  `validate_ref_name_grammar`), so a longer ref written earlier stays
-  visible and can be deleted or renamed with `mkit branch -d`/`-m`. New:
-  `MAX_REF_NAME_BYTES`, `check_new_ref_name`,
-  `validate_ref_name_grammar`.
-- *(core, cli)* A new local branch name is at most `MAX_BRANCH_NAME_BYTES`
-  (494) bytes and a new tag name at most `MAX_TAG_NAME_BYTES` (502), so
-  their wire names (`refs/heads/<b>` and `refs/mkit/packmap/<b>`,
-  `refs/tags/<t>`) fit the 512-byte bound; the error names the derived
-  limit and why (`RefError::RefNameTooLong` now carries a `RefNameKind`).
-  A push of an older, longer branch fails with "ref name too long",
-  naming the wire name (`check_pushable_branch`). The ssh and enc clients
-  skip a listed ref whose name is over the bound
-  (`mkit_rpc::list_response_refs`) instead of failing the listing, as the
-  file, memory, s3 and http clients do.
-- *(refs, rpc, server)* SPEC-REFS v2: a ref name is at most 512 bytes
-  (§3). `mkit_rpc::MAX_REF_NAME` drops from 4096 to 512 (it is now
-  `mkit_core::refs::MAX_REF_NAME_BYTES`), so the ssh and enc clients
-  refuse a longer name or `ListRefs` prefix before sending.
-  `mkit-server` refuses one on `ReadRef`/`UpdateRef` with
-  `invalid_argument` "ref name too long" (`INVALID_REQUEST` on the ssh
-  wire), and a `ListRefs` over the `.mkit` layout skips a longer legacy
-  ref file with a warning. `mkit serve` over ssh used to accept names of
-  any length. Pre-production policy: no migration.
-- *(server)* `mkit-server`'s `ListRefs` matches its prefix at a
-  path-component boundary and strips the prefix plus its `/`, as
-  SPEC-REFS §4 and `mkit serve` do (`refs/heads` and `refs/heads/` list
-  `main`; `refs/heads/ma` lists nothing). A listing of the `.mkit` layout
-  skips a ref file that holds no ref id, with a warning, instead of
-  failing. `FileTransport::list_refs_strict` is replaced by
-  `list_ref_files`, which reports such a file as `None`.
-- *(core)* Pack readers enforce SPEC-PACKFILE §3.3's "one zstd frame"
-  rule. A `0x03`/`0x04` payload holding two concatenated frames, a
-  skippable or legacy-magic frame, or trailing bytes after the frame now
-  fails with `PackError::ZstdDecompress`. The C path
-  (`zstd::bulk::decompress`) used to decode concatenated frames and skip
-  skippable ones. mkit's `PackWriter` never produced such payloads.
-  Pre-production policy: no compatibility path.
-- *(core)* `list_refs`/tag/remote listing read each ref with a single
-  stack-buffer `read` (open+read+close) instead of `fs::read`'s extra
-  `statx` and EOF probe: −23% at 10k refs, −25% at 100 refs
-  (`refs_ops` bench).
-- *(core)* SPEC-DISCLOSURE v2: every `Step` and chunk header carries a
-  mandatory 32-byte `inner_root` (bare BMT root of the parent Tree /
-  ChunkedBlob). Bundle version byte is `2`; version `1` is a typed
-  `UnsupportedBundleVersion(1)` with no compatibility decoder. The
-  verifier wrap-checks the field against the trusted id before use, then
-  requires the proof fold to equal the declared root. **SemVer:**
-  breaking for bundle bytes (pre-release format, no migration);
-  additive for APIs (`Disclosed.step_inner_roots` /
-  `Disclosed.chunk_inner_root`; `Step.inner_root`).
+- `mkit-core::merkle` replaces its provisional inclusion-proof API with
+  commonware-identical BMT proofs and id-based verifiers, and
+  `HistoryError::Mmr` is renamed `HistoryError::Mmb` (ancestry roots and proof
+  bytes change). See Changed.
 
 ### Added
 
 - *(spec)* Indexed-mode server contract, D32 file extraction, repository-isolated
   resolution, and additive `PendingVerification` detail and
   `max_delta_chain_depth` discovery field (WP-4.4).
+
 - *(spec)* Add bounded admission credential headers to hooks.v1 `AdmitRequest` (WP-3.6b).
+
 - *(docs)* Add an unsupported TypeScript `mppx` admission Worker reference for
   `mkit.server.hooks.v1`, with delayed settlement and optional signed hooks (WP-3.14).
+
 - *(core)* Add `pack::rewrite_excluding` and `pack::Rewritten` for budgeted
   pack rewrites: excluded objects are dropped, deltas with excluded direct
   bases become raw, and unchanged packs retain their exact bytes.
+
 - *(proto)* Add the M1 discovery and ticketed upload RPCs, upload ticket
   fields, ref deletion fields, and ref-list paging fields to
   `mkit.transport.v1` (WP-1.2). The server returns `unimplemented`
   ("not implemented yet") for these RPCs and non-default new request
   fields until their implementing WPs land. `ListRefs.page_size` is
   temporarily ignored; existing requests retain their behavior.
+
 - *(spec)* SPEC-SERVER v1 M3 pipeline/outcome guarantees and the signed
   `mkit.server.hooks.v1` contract, proto, and golden vectors (WP-3.6).
 
@@ -866,15 +109,18 @@ train).
   before anything is decompressed or applied, and every external base as
   it is fetched (credited back after its last use), so a tiny pack cannot
   pin gigabytes (`PackError::PackfileTooLarge`).
+
 - *(core)* `verify::verify_push(tips, mode, source, known)` /
   `PushReport`: incremental push verification before refs move. It walks
   every new tip's closure through the shared closure BFS, re-hashes each
   object, checks commit/remix/tag signatures, stops at a caller-supplied
   frontier of objects already verified in the repository, and reports
   missing, corrupt, badly signed objects and non-commit tips.
+
 - *(core)* `sign::verify_object_signature(&Object)`: the per-type
   signature check (`verify_commit` / `verify_remix` / `verify_tag`; Ok for
   unsigned kinds). The CLI's fetch-side signature check now calls it.
+
 - *(core)* `verify::build_disclosure_from`: builds SPEC-DISCLOSURE
   bundles through any verifying `store::ObjectSource` (a per-repository
   index or the global object CAS), not just the on-disk `ObjectStore`.
@@ -939,6 +185,7 @@ train).
   apply may see; an import into a `RefsOnly` store refuses an export whose
   layout version differs from the store's implicit one. **SemVer:**
   unreleased API.
+
 - *(attest)* SPEC-WRITE-GRANTS grant codec behind the new `grants` feature
   (not default): `mkit_attest::grant` parses and encodes the
   `mkit-write-grant:v1` statement strictly (one canonical encoding, every
@@ -1019,6 +266,7 @@ train).
   once the blob is committed, leaving its in-flight record to the pruner.
   The `test-faults` feature adds `FaultHooks` at five points and
   per-request `TestDirectives`. **SemVer:** unreleased API.
+
 - *(server)* `mkit-server` `fs` feature (native, std-only, no async
   runtime): `FsBlobStore` streams uploads into `packs/<64-hex>` and
   publishes only after BLAKE3 and length verify (temp file, fsync, rename,
@@ -1248,31 +496,1001 @@ train).
   new 1 GiB one, previously rejected on size alone, is now admitted and
   verified normally).
 
-### Security
+### Changed
 
-- *(core, security)* Fix denial of service (DoS) in pack reading by bounding
-  owned memory and checking framing arithmetic on 32-bit targets.
+- Server: add `ListRepos`, with bounded namespace-name pagination and authenticated
+  continuation tokens. Atomic coordinator visibility indexes hide private names
+  from public listings; owners and approved namespace authorities list all repos.
+  Grants retain public listing rights only. Fresh stores are required.
 
-- *(core)* Fixed a crash (`slice index out of range` panic) in `history-mmr` ancestry publish's bounded scrub-window verification, found by code review. `ScrubState` (the rolling re-verification schedule for a branch's reused ancestry prefix) carried no binding to the generation it was computed against; `advance`'s advisory `write_scrub_state` call runs strictly after `finish` has already durably committed a publish, so a crash (or a failed write) in that window left a rewrite/reset's *old* generation's scrub state — sized for its own, possibly much longer, chain — on disk paired with the *new*, possibly much shorter, one. The next ordinary fast-forward would then compute a scrub window against the old `verified_through` and slice a chain far too short for it. `ScrubState` now records and validates the generation it was computed against; a mismatch (this exact crash window, or any other cause) is treated exactly like "no prior scrub state" and falls back to a full walk, the module's existing fail-safe design for missing or corrupt state. New regression test reproduces the exact on-disk byte state without needing to inject a crash mid-`advance`, confirmed to panic without the fix and pass with it. **SemVer:** none — `ScrubState`'s on-disk format changed (magic bumped `\x01` → `\x02`); a pre-upgrade file simply fails to decode under the new layout and falls back to a full walk, the same safe behavior a missing file already gets.
+- HTTP ref-path files: serve MP4, WebM, MP3, Ogg, WAV, HEIC, Markdown and CSV
+  inline with their media types, preserving encoded filenames, security headers
+  and byte ranges. Dangerous extensions remain binary attachments.
 
-- *(core)* Closed a second, independent way to hit `verify_scrub_window`'s `slice index out of range` panic (above), found by a follow-up code review of that same fix: the `generation` binding rules out a *stale* scrub file (computed against a different, superseded generation), but not one whose `verified_through` simply exceeds the actual on-disk prefix length for a generation it genuinely does match — e.g. a snapshot file restored from an older backup paired with a newer `scrub` file. `decide_chain` now checks the scrub window's end bound against the real prefix length before calling `verify_scrub_window`, falling back to a full walk (the same fail-safe path a generation mismatch already takes) instead of handing it a range it can't satisfy; `verify_scrub_window` itself now also bounds-checks via `slice::get` and returns a typed `HistoryError::Corrupted` rather than a bare index, so a future caller with the same class of bug fails closed instead of panicking. New regression test constructs the exact mismatch directly (real production code cannot produce it, by the monotonic-append argument `decide_chain`'s own docs make) and confirms it panics without the fix, falls back to a full walk with it. **SemVer:** none.
+- HTTP object readback accepts streamed chunk-offset sidecar tails from R2.
 
-- *(core)* `read_scrub_state` (`history-mmr`) no longer propagates an I/O error reading the advisory `scrub` file — found alongside the panic fixes above while auditing the same fail-safe contract from the read side. `ScrubState`'s own docs promise "missing or corrupt scrub state is not an error", and `write_scrub_state`'s caller already treats a write failure as advisory-only (`let _ = write_scrub_state(...)`), but `read_scrub_state` still used `?` on `read_bounded`'s result — so anything that made the file briefly unreadable (a stray directory at that path, exactly the state an existing test already constructs to exercise the write-side fix; a permission change; a file that grew past the 93-byte cap) turned every subsequent fast-forward publish on that branch into a hard failure instead of degrading the verification schedule. Now maps any read failure the same way a missing file already is: `Ok(None)`, falling back to a full walk. New regression test publishes twice with a directory blocking the `scrub` path throughout and confirms the *second* publish — the first fast-forward that actually reaches `read_scrub_state` — no longer fails; the existing write-side test only ever exercises a first publish, where `read_scrub_state` isn't reached at all. **SemVer:** none.
+- Indexed verification, extraction and preservation count canonical Blob framing
+  around the 1 MiB payload boundary while retaining the 48 MiB slice allowance.
 
-- *(cli)* `mkit mcp --http <addr>` now refuses to bind without authentication, matching `mkit serve --http`'s fail-closed design. Previously it bound the given address (not restricted to loopback despite its own doc comment's claim) with no `Authorization` check at all — any network-reachable caller got unauthenticated access to the full MCP tool catalog, including mutating tools like `mkit_checkout`. It now requires a bearer token (`--http-token <TOKEN>` or the `MKIT_MCP_TOKEN` env var — a name of its own, not `serve --http`'s `MKIT_API_TOKEN`, since the two surfaces have different threat models and must not share a secret) or an explicit `--unsafe-allow-any-http-peer` opt-out that prints a loud warning, enforced on every request via a new `BearerAuthHttp` tower middleware wrapped around `StreamableHttpService`. New `mcp_v2_http.rs` `mod auth` integration tests cover: refusal with no token/flag, refusal on an empty token, refusal when both a token and the unsafe flag are given, 401 on a missing/wrong `Authorization` header, success with the right token, and the `MKIT_MCP_TOKEN` env fallback. **SemVer:** additive — new CLI flags, new env var; existing `--http` usage without them now refuses to start rather than serving unauthenticated (a deliberate behavior change gated by the same version bump the removed-Windows-support entry below already requires).
+- Server conformance: add a debug-only memory-backed in-process HTTP host for
+  contract tests, with origin-bound auth-v2, signed loopback hook support, and
+  an explicitly advanced manual clock.
+
+- Server: add default-off durable inspection mode, a guarded repository flag
+  registry, and bounded per-advance hold records as storage foundations for
+  post-launch asynchronous inspection. Content holds are
+  repository-wide under Single and D34; released manifests fence delayed writes.
+
+- Takedown-on publication and reader performance: sixteen-shard authoritative
+  descriptor directory, resumable timer-12 pair verification before ref acceptance,
+  caller canonical byte limits and typed object metadata. Deprecated mixed
+  `object_sizes` remains available. Unshipped metadata codecs require fresh stores.
+
+- Worker embedding: supplied Admission, Authorizer/Authority and OutcomeSink
+  capabilities satisfy launch validation without an unused external hook channel.
+  `fetch_with` now takes explicit `HookCapabilities`; shared config factories use
+  `from_env_with_hooks`/`from_vars_with_hooks` (delta review 8b-1).
+
+- Launch builds forward the Worker pure-Rust decoder to the server feature;
+  mandatory PR gates run the isolated 48 MiB allocator regression (4-1, 12-3).
+
+- Object reader and URL batches retain the expiry of cached reachability proofs.
+  Only fresh published walks renew them after rewind/deletion (6-1).
+
+- Server: retain retryable Takedown acceptance with its stable id until every
+  denial is active. Exact retries resume bounded activation; timer-15 recovery
+  finalizes the original nonce and operation result (delta review 7-1).
+
+- Worker preservation acquisition: bound scheduled reconstruction to 48 MiB
+  by evicting previous delta intermediates and retaining only the current base.
+  Preserve 50-hop, 1 MiB canonical chains, existing frame admission, corruption
+  checkpoints and the 700-call slice budget; inline profiles are unchanged.
+
+- Server (WP-4.18, phase 1, R-194): explicit Paid indexed Workers launch selection
+  and startup validation for optional HTTP/URL tokens, signed hooks/binding,
+  synchronous inspection and private scanner retrieval. Worker proofs stay unsupported. Leases/GC remain off with permanent retention.
+  Complete preservation configuration activates its core and restricted admin
+  catalog; the launch build enables R-203’s bounded pure-Rust zstd decoder.
+  Worker HTTP mounts retain read settlement in the fetch context; ticket and
+  implicit packmap checks use at most six simultaneous backend responses.
+  Added local conformance/evidence skeleton; complete runtime evidence and
+  preservation integration remains pending phase 2.
+
+- Worker embedding (supported, 0.x): combine programmatic configuration,
+  published snapshots, custom Outcome and purge sinks in `NsObjectBuilder`;
+  generate the five DO classes with `durable_objects!`. Host-routed admin
+  dispatch retains ADMIN_KEYS authentication, and programmatic ref policies
+  validate before serving. Add a service-binding streamed-upload example and
+  its wasm check. These APIs are unpublished, consumed at a pinned git tag.
+
+- Connect client transport: retry unary reads and replay-safe auth-v2 writes
+  once on a fresh connection when a reused HTTP/1 socket fails before any
+  response bytes; preserve the signed envelope and deadline. Streaming RPCs
+  start on fresh connections and are never replayed.
+
+- Server: align the receipt-golden test SHA-256 dependency with the repository
+  sha2 0.11 crypto channel (launch review 12-2).
+
+- Server: a purge that creates positive shared backlog also schedules the
+  existing outcome-delivery wake, so later paid read outcomes survive purge
+  completion, reconciliation and restart (launch review 3-1). Zero backlog
+  retains wake ownership until the guarded kind-8 drain, preventing duplicate
+  wakes across repeated purge cycles; content shards register the same driver.
+
+- Server: completed identical Takedown retries replay their stored response
+  after role changes and without runtime operations. ReadPreserved retains fresh
+  role and retention checks on every retry (launch review 7b-1).
+
+- Server: automatically enqueue audited cache purges with takedown acceptance,
+  denial activation and late-holder ownership. Checkpoint newly discovered
+  repository purges with timer-15 progress and immediately invalidate configured
+  local caches (launch review 7a-2, existing R-190). Audit source snapshots and
+  immediate invalidation share the enclosing request or slice call allowance.
+
+- Scheduled indexed verification reserves R-203 decoder scratch within the
+  existing 48 MiB slice allowance, preserving window geometry and frame
+  admission. Delta slices release the idle reader before source reconstruction;
+  allocator regressions cover corruption, nested decode and valid custom limits.
+
+- Server: cap aggregate object-index candidate retention at a charged 4 MiB,
+  bound membership joins and Worker request allocation, and enforce the current
+  indexed pack-byte limit before Scheduled job claims/reuse and timer decoding.
+  Verified reuse returns the exact advertised pack-size error. Scanner
+  retrieval supports ticketless ref writes with an empty Inspect batch and a
+  capability granting no access to previously published packs.
+
+- Server: keep relay progress continuations after the current wake when retry
+  metadata retains an older due time. Update timer, verification-job and
+  published-view tests to assert retained capped retries and recovery;
+  recognize the HTTP content-header golden as a JSON table in the wasm verifier,
+  and correct the route property's reserved-name fixture expectations.
+
+- CLI (`mkit-cli`, additive): add `http.sslCAInfo` and overriding
+  `MKIT_SSL_CA_FILE` for extra PEM trust certificates on all native Connect
+  HTTPS remote RPCs and pack streams only. Keep Mozilla roots and
+  chain/hostname verification; invalid CA files fail closed. The self-updater
+  keeps OS trust and release checksums when present, ignoring both settings.
+  S3 remotes are not yet covered. Browser trust is unchanged.
+
+- Server (R-205): `DEFAULT_REPO_VISIBILITY=public|private` on Workers
+  selects visibility for repositories without
+  a stored setting. The default remains public; explicit visibility wins.
+  Set it at deployment creation: changing it affects all unset repositories.
+
+- Server (R-204): embedders can issue batches of up to 16 URL tokens through
+  `ObjectReader::issue_urls`, sharing RPC authorization, epochs and minting,
+  with bounded published-view reachability and denial preflight.
+
+- Server (WP-5.6a-3, R-190): add signed moderation GetTakedown/ListTakedowns,
+  atomic audited SetLegalHold and freshly verified ReadPreserved streaming.
+  Replay stores byte-free read descriptors; each attempt rechecks authority and
+  retention. Add separate v1 status fields for acquisition, verification,
+  discovery, legal hold and purged copies. Activation remains off until 4.18.
+
+- Core/server (WP-4.16c, R-202): in-process canonical object prefetch for
+  embedders, including ChunkedBlob manifests and indexed content sizes;
+  verified public/owner views share bounded reachability and global-denial
+  proofs. Add wasm-clean `store::MemorySource` for synchronous disclosures
+  and diffs, with native and Worker embedding entry points. No wire change.
+
+- Bound pure-Rust zstd block expansion before allocation, with a fixed 8 MiB
+  window cap, and checkpoint corrupt preservation sources as terminal audited
+  failures. Preflight compressed delta result headers against verified metadata
+  before decode budgeting; genuine resource failures remain retryable. Worker
+  admission and native C decoding are unchanged (R-203).
+
+- Server/Worker: bound raw timer-alarm enumeration and share tick limits across
+  logical heads. Persist capped exponential backoff in the existing timer row
+  for cold fairness, preserving payloads and original handler due times. The
+  unshipped timer key codec gains retry metadata; timer payloads reserve enough
+  headroom for a guarded move within the existing batch limit.
+
+- Server/Worker: keep immediate alarm continuations strictly after the current
+  clock so bounded ticket, outcome and relay cleanup cannot strand an alarm
+  chain. Test timer directives share tick exclusion with the autonomous
+  driver, making due-timer and redelivery conformance deterministic.
+
+- Server/Worker (WP-4.16b, R-201): ordinary ref-path file responses now select
+  Content-Type from a fixed extension allowlist and include inline/attachment
+  filenames with RFC 5987 encoding and a sanitized ASCII fallback. HEAD and
+  ranges share the headers; SVG/HTML remain binary attachments. Security,
+  object-id routes, proofs, caching and private-token rules are unchanged.
+
+- Server: publication timer 12 resumes bounded dependency checks across alarms
+  and restarts after guarded obligation, dependency or generation changes.
+  Valid large D34 packmaps no longer stall at the whole-alarm call limit.
+  Its internal timer-value codec changes; reset unsupported pre-launch stores.
+
+- Docs (WP-5.6a-2/3, R-190): specify finite root sweeps and support Any denial/
+  preservation with incomplete discovery pending the post-launch catalog.
+  Distinguish verified preservation from unresolved completion; require byte-free
+  admin replay and fresh audited verified streams. §14.7 signing/publication and
+  full-profile requirements remain. PR2 owns preservation/retention/hold core; PR3
+  owns the restricted admin catalog. Activation stays off; no completed gates claimed.
+
+- Server/Worker (default-off, WP-4.10b-2, R-186): complete consumed-group extraction
+  with closure before effects, union counts, bounded job header/body guards,
+  resumable delta reconstruction and root-checked multipart uploads. Hold renewal
+  and durable holder delivery precede Verified; release activation waits for 4.18.
+
+- Server (R-193): default-off private raw-pack retrieval for synchronous
+  scanners, with separate capability MAC and scanner signing keys, bounded
+  ranges, current-ticket lifetime checks, uniform `not_found` and global
+  block enforcement on the Worker. Inspect remains metadata-only;
+  retries keep their inspection id and mint fresh short-lived capabilities.
+  Production activation remains gated by WP-4.18.
+
+- Server (WP-5.6a-1, R-190): independent V2 denial actions, verified pack inventory
+  and signed, audited pending takedown intents; manual PurgeCache returns a purge
+  id asynchronously and audits completion. Preservation and production takedown
+  activation await WP-5.6a-2/3. Timer 15 is TAKEDOWN_WORK; no new key tag or migration.
+
+- Server (WP-5.5a, R-200): synchronous added-pack file inspection before apply,
+  fail-closed retries without replay, signed remote Inspect, and advertised
+  launch input limits (default 10,000 objects, maximum four inspectors).
+  Inspect every Blob and ChunkedBlob, surplus included, without role reads;
+  enabling inspection requires an empty store. Full classification follows in WP-5.5c.
+
+- Server/Worker (inert, WP-4.10b-1, R-186): pending-holder protection and atomic
+  content-holder relay delivery retain protection beyond hold expiry; late
+  blocked holders leave durable takedown requests for WP-5.6a. Add bounded
+  verification projections, opaque ETag capture and default-compatible internal
+  R2 upload callbacks. Worker Extract remains fail-closed; the driver is PR2.
+
+- WP-5.10: durable timer-11 automatic cache purge intents, signed global delivery
+  with stable ids and fresh nonces, local invalidation and snapshot refill fences.
+
+- WP-5.11a: default-off signed admin framework with separate role keys, durable
+  replay and gapless audit export. Automatic actions join the audit through the
+  existing outbox relay; manual PurgeCache moves to WP-5.6a.
+
+- Server (WP-5.4, R-198): remove compatibility with unreleased publication stores;
+  reset existing stores. Hold authority belongs to post-launch WP-5.5c; timer 15 and `pv` are freed.
+
+- **WP-5.4:** add persistent paired published refs, versioned membership and durable
+  cross-ref dependency rechecks; route reader RPCs, snapshots, tokens and HTTP
+  bytes/proofs through published values while retaining writer visibility and
+  serving stops. Specify indexed permanent-retention launch without storage leases
+  or GC, and publication Events: Committed means Sent; Delivered requires the
+  contiguous published prefix.
+
+- Docs: add the early Paid Workers launch-readiness skeleton (WP-1.20, R-195 / R-198):
+  D35 environment/key roles, operator reset/rollback/rotation/drills, empty
+  user-owned evidence slots and a DRAFT user-only REL-1 prompt. Final readiness
+  waits for 4.18; no staging, measurements or release actions are claimed.
+
+- Add optional namespace authority-generation fencing with dedicated deployment-authority statements, Worker configuration, independent D34 lease barriers and generation-bound upload tickets (WP-2.16).
+  Ticket streams coalesce legal client frames into bounded 256 KiB storage
+  checkpoints, preserving revocation checks within Worker request budgets.
+
+- WP-3.9c: default-off signed HTTPS Worker hooks with canonical origin signing,
+  manual redirects, streamed response limits and aborting call timeouts.
+
+- Worker (inert): extracted-object storage can use root-pinned backend R2
+  multipart sessions with verified streamed parts and bounded finalization.
+  Internal object receipts preserve opaque backend ETags without changing pack
+  wire receipts; extraction and production activation remain separate work
+  (WP-4.10b-multipart, R-192).
+
+- Server: kind-8 completion uses the guarded fresh backlog, preserving delivery
+  after a concurrent outcome append (WP-3.13; correction to #1219).
+
+- Server conformance: M3 cases cover admission, CORS, CAS-loss and ticket expiry; the
+  orchestrator rulings preserve pipeline ordering and accept ordered combined
+  WWW-Authenticate lists on Workers (WP-3.13).
+
+- RPC: public `mkit-rpc::hooks` message types with JSON support and runtime-free
+  `HookSigner` and `HookVerifier`, enabled by the `hooks` feature. The server
+  re-exports its authentication surface for external hook implementers (WP-3.7b).
+
+- Server (Stage 2, inert): default-off `http-objects` adapter features mount
+  raw escaped HTTP object routes with streaming Range/HEAD, read CORS on
+  every response, query-free diagnostics, and public URL-token key documents.
+  Worker token secrets use dedicated keys;
+  retained keys also cannot repeat hook or enc keys. Public ref redirects are
+  explicitly opt-in and disabled with admission (WP-4.16, R-179).
+
+- Server (Stage 2, inert): URL tokens now authorize private HTTP object
+  and ref-path reads through staged signature, stateless binding and epoch
+  checks, while preserving anonymous published access and Authorizer checks.
+  Private immutable cache lifetimes are bounded by token expiry; private ref
+  paths require revalidation. Active and retained token keys are separated
+  from ticket secrets without exposing seeds (WP-4.15, R-178).
+
+- Server (Stage 2, inert): programmatic `HttpObjectsConfig::admit_reads`
+  enables paid GET and HEAD reads, canonical JSON 402s, private admitted
+  responses, durable pending reads before transmission, deadline enforcement
+  and retained asynchronous byte accounting (WP-4.13, R-177). The shared
+  credential selector now denies comma-joined selected payment headers,
+  correcting #1212; non-Payment Authorization remains excluded. API:
+  `HttpReadRuntime` injects retained tasks and deadlines, and
+  `HttpObjectRequest::header_names` preserves credential name spelling.
+
+- WP-1.19: add an inert Stage 2 staging template and activation/backup runbook; provisioning, routes and CPU sizing wait until after REL-1.
+
+- **WP-1.21 (Stage 2):** default-off Worker published ref-index snapshots with bounded binary envelopes,
+  atomic debounce/generations, private R2/Cache serving after coordinator authorization, signed bypass,
+  inspection refusal and live fallback; existing Stage 1 entrypoints stay inert.
+
+- Server: built-in ref policy (SPEC-SERVER §9.7, programmatic, Stage 2):
+  `PipelineConfig::ref_policy` with per-ref allowed operation signers (both
+  modes) and fast-forward-only rules (indexed mode). In indexed mode a
+  `u`-only write grant now fast-forwards, proven against this repository's
+  history (`IndexedConfig::max_ancestry_commits`, default 256), and a ticketless
+  head must be a member commit, remix or tag. API: `verify_ticketed` returns
+  `StagedCommits`; `VerifiedAuth::created_at_ms` and
+  `IndexedConfig::max_ancestry_commits` are new (WP-4.17).
+
+- Server: authorization, admission and outcome delivery can run in a remote
+  hook service over signed HTTPS. Plain HTTP is loopback-only, redirects are
+  never followed, and a remote admission replaces the default abuse quota.
+  New in `mkit-server`: `pipeline::Choice`, `hooks::HookVerifier` (the hook
+  service's side of the signature), `HookSigner::public_key`,
+  `TicketKeys::contains_secret`.
+
+- Server: the Workers adapter can call a hook Worker over an unsigned
+  `ADMISSION_HOOK` service binding (`HOOK_ROLES`, `HOOK_TIMEOUT_MS`,
+  `AUTHORIZER_ROLE`), and `adapter::fetch_with` and `ns_object_with` take a
+  deployment's own `HookSet` and outcome sink (WP-3.9). The Queue outcome sink
+  and a signed Worker webhook are deferred (WP-3.9b).
+
+- Server (Stage 2, inert): `mkit-server` gains the default-off `http-objects`
+  feature: `Pipeline::serve_http_object` serves repository objects and ref paths
+  per SPEC-HTTP-OBJECTS (the URL grammar, published resolution, a bounded
+  reachability proof for id URLs, ordinary Range and conditional requests,
+  security headers and one uniform 404), reading extracted objects that this
+  repository holds by range and everything else from its own pack entries.
+  It needs `PipelineConfig::http_objects`, which requires indexed mode, and no
+  adapter enables the feature or mounts a route (WP-4.12, R-169). SPEC-HTTP-OBJECTS
+  §4 now says the global content store decides no membership or reachability
+  but may supply the bytes of an id this repository holds. API: new
+  `Procedure::{HttpGetObject, HttpGetRefPath}` and `OpKind::HttpGet`.
+  Request queries use `RedactedQuery`, exposed only to the parser; ref scans
+  bound all rows and pages, and ref paths peel up to 16 tags.
+
+- Server: the Worker registers the kind-5 namespace quota rollup on its ref
+  shard, coordinator and root classes; the quota conformance cases run under
+  D34 (per-branch) and a Multi + D34 case checks the namespace cap across
+  branches after a forced rollup (WP-1.26b).
+
+- Server: the M1 exit wire conformance suite (WP-1.27): isolation replay, target-ref ticket caps and expiry, the
+  D34 lag windows and D36 hinted reads over a held relay, idle and expired epoch-lease renewal, 64-ref writes, an
+  over-32 MiB listing and bounded ticket growth; the `test-faults` timer directive also expires tickets and
+  the Worker stats hook is scoped to one ref's shard under D34. `mkit-server-conformance` `Profile` gains `ticket_per_ref` and
+  `merge_paging_refs` (WP-1.27).
+
+- Server: the Worker gains the `GRANT_SCHEMES` and
+  `WEBAUTHN_RPS` vars and a `test-faults`-only `UNSAFE_LOOPBACK_GRANTS`, to
+  configure write grants on Multi + auth v2 deployments. Any bad or partial
+  value refuses to start; unset keeps grants off (WP-1.30b).
+
+- Server: a Worker can verify a ticketed pack asynchronously in checkpointed,
+  budgeted alarm slices (timer kind 7, `IndexedConfig::verification =
+  Scheduled`) with the same answers as native inline verification: the advance
+  answers `PendingVerification` until the slices finish (Paid plan only; index
+  rows are relayed after the decode reaches `Done`, and `Verified` waits for
+  their delivery). The job lives in the new `vc` key class; kind 2 now also
+  removes an expired unconsumed pack's verification state. Indexed mode stays
+  refused on Workers until WP-4.10b (WP-4.8). `mkit-core` gains
+  `WindowReader::last_frame` and `pack::decode_entry_with` (additive).
+
+- Server: in indexed mode, extract every ChunkedBlob (as its reassembled content,
+  with a chunk-offset sidecar) and every file Blob of at least 64 KiB into the
+  deployment-wide object store under its object id, before a pack is marked
+  verified. Object keys are verified against a content root by a new
+  `PackSink::commit_with_root`; holder rows carry a sequence and the consuming
+  ticket; a hold protects each object until its holder is recorded. New
+  `IndexedConfig::{extract_min_bytes, max_extract_bytes}`. Workers still refuse
+  indexed mode (WP-4.10). API: `IndexedConfig::max_extract_bytes` is now
+  `Option<u64>` (default `4 * max_pack_bytes`); `verify_ticketed` takes the
+  consuming ticket ids and needs a `MultipartBlobStore`; `ContentIndex` gains
+  `extend_hold` and `add_holder_unless_blocked`, and `release_hold` is
+  deadline-guarded; `is_reserved_pack_keyspace` is exported.
+
+- CLI: a Connect push that needs more than six data packs per advance is now
+  split automatically along the branch's first-parent history instead of
+  failing with `PushTooLarge` after uploading six packs. Every intermediate
+  commit is a published state; the tracking ref follows each advance, so a
+  re-run resumes, and later advances always compare-and-swap on the previous
+  one. For a split push, stored write grants are checked for every advance before
+  anything is uploaded, and an unsplittable oversize commit or merge is refused before any
+  upload. `--format=json` reports `steps` (WP-1.17b).
+
+- Server: the Workers adapter takes an outcome sink with the same per-call
+  timeout, budgets kind 8 by plan (Free: 8 sink calls per alarm), allows
+  and exposes the payment headers for browsers and keeps repeated
+  `WWW-Authenticate` fields (WP-3.5).
+
+- Server: `mkit serve --root <DIR>` serves the repositories under `<DIR>`
+  addressed by `<NAMESPACE>/<NAME>` (from the path argument or a strict
+  `SSH_ORIGINAL_COMMAND`), one repository per process, with writes
+  restricted to the namespace's Ed25519 owner asserted by
+  `--principal <hex>`. Transport-identity sessions grant
+  pack membership implicitly for packs uploaded and verified in the same
+  session — at most seven pending packs, consumed by the session's
+  packmap write — so `mkit+ssh://` pushes need no
+  upload tickets. Denied writes answer `INVALID_REQUEST "write not
+  permitted"` (WP-1.15).
+
+- Server: the Worker adapter can serve multi-repository deployments (the
+  `ADDRESSING`/`NAMESPACE_POLICY`/`NAMESPACE_ALLOWLIST`/
+  `UNSAFE_OPEN_NAMESPACES` vars). Multi requires auth v2 with upload ticket
+  keys — a deployment without them now refuses to start.
+
+- Server: add validated two-phase admission with bounded HTTP 402 challenges,
+  redacted payment credential forwarding and committed-success receipt headers
+  (WP-3.2).
+
+- Server: durably arbitrate admitted reservations with pending and terminal
+  outcomes, reconcile abandoned reservations, deliver through a retrying
+  outcome sink and apply per-shard outbox backpressure (WP-3.3).
+
+- Server (WP-3.7): add the default-off `remote-hooks` feature to `mkit-server`:
+  Authorize, Admit and Outcome over `mkit.server.hooks.v1` on a
+  transport-agnostic `HookChannel`, with Ed25519-signed requests, fail-closed
+  mapping and response bounds. Adds the `Sleep` timeout seam, and
+  `scripts/regen-hooks-proto.sh` for the vendored codegen.
+
+- CLI: add `mkit grant create|add|list` and a user grant store under
+  `$XDG_CONFIG_HOME/mkit/grants/` (never repository-scoped). Owners sign with the
+  mkit key, a software-keystore secp256k1 key, or an imported wallet or WebAuthn
+  signature; the Connect client now presents the best stored grant, ranking the
+  higher epoch first. New user-only config key `grant.webauthn_rp`.
+  Issue grants for pushes that move a branch as `cuf`, not `cu`: while servers are
+  opaque, updating an existing ref needs the `f` flag.
+  `mkit-keystore` gains a defaulted `KeySigner::sign_prehash_recoverable_secp256k1`
+  for the software backends (WP-2.13).
+
+- CLI: add `mkit epoch show|bump`, `mkit grant revoke [--prune]` and
+  `mkit visibility set`, waiting out the server's `Retry-After`. Connect client:
+  new `ConnectTransport::{get_grant_epoch, set_grant_epoch, set_repo_visibility}`
+  returning `Completion`, and a per-request signed-or-unsigned classification of
+  `SetRepoVisibility` (WP-2.14).
+
+- Core and wasm: verify MKDS v1 multi-chunk disclosure spans against a trusted
+  commit and build boundary-aware MKDP/MKDS range proofs (WP-4.14a).
+
+- Server (WP-4.6): batch repository object-index range reads on Workers,
+  add bounded relay enqueue and delivery checks, increase paid relay
+  throughput, and report index pressure, lag, backlog, and lookup caps.
+
+- Core: expose decoded pack frame metadata, single-frame decoding, and an
+  additive resumable decode cursor for repository-scoped external bases.
+
+- Server Worker: stream verified multipart parts into CV-keyed R2 objects and
+  verify the complete pack before publishing it; raise the ticketed pack cap
+  to 1 GiB while retaining the 64 MiB single-upload limit (WP-1.12).
+
+- Server: expire unconsumed upload tickets with one guarded `Expired` outcome
+  and best-effort upload-session cleanup (WP-1.14).
+
+- Server: maintain D34's 16-bucket ref-name index through relay upserts and
+  deletes, and serve eventual paged ListRefs from it (WP-1.28b).
+
+- Connect push: BeginUpload tickets now follow each pack into AdvanceRefs, with
+  bounded membership polling, nonce renewal, a six-data-pack advance limit,
+  and a one-time re-plan for ticket, packlist, or delta-base failures (WP-1.17).
+
+- Connect push: large ticketed packs stream resumable parts with locally saved
+  receipts, progress and an interruption hint; non-multipart deployments now
+  advertise a compatible pack limit (WP-1.18).
+
+- Server conformance: restore Single and D34 wire cases for
+  secp256k1-eip191 and webauthn-p256 owner grants (WP-2.6b).
+
+- Server: enforce grant ref scopes per change, including apply-time
+  presence guards for `ANY` and head/packmap pairing (WP-2.7).
+
+- Server: add unsigned grant-epoch RPCs with owner statements, bounded
+  epoch transitions and completion after leased shards are fenced (WP-2.8).
+
+- Server: verify auth v2 on every signed read, including the framed
+  `DownloadPack` request, and add private repositories:
+  `SetRepoVisibility` in envelope and owner-statement modes, a
+  coordinator `rv` row, and `not_found` for every unauthorized private
+  read, indistinguishable from a missing repository (WP-2.9). A read that
+  carries auth headers but fails verification is now `unauthenticated`
+  instead of anonymous, and a grant header on an unsigned Multi request is
+  `unauthenticated` on every procedure.
+
+- Server: mint short-lived `mkit-url-token:v1` object URL tokens with
+  `IssueObjectUrl`, signed by a dedicated deployment key, with a two-phase
+  verification API and a key-set renderer for HTTP object serving
+  (WP-2.11).
+
+- Server: enforce owner-signed write grants under Multi/Owner, including
+  `0x` namespaces, stored-epoch checks, and grant-scheme discovery.
+  Adapter grant flags follow in WP-1.30b.
+
+- Connect client: detect bounded 402 admission challenges and report payment receipts without exposing their values (WP-3.10). `TransportError` is now non-exhaustive, a breaking change for exhaustive downstream matches.
+
+- Connect client: run a trusted, user-configured admission helper once and retry admitted writes with strictly filtered headers (WP-3.11).
+
+- Connect client: sign repository reads with auth v2 on each attempt, including
+  the framed `DownloadPack` request. Add a grant-source API and local selection
+  logic; the user grant store follows in WP-2.13.
+
+- Transport: add the `GetGrantEpoch`, `SetGrantEpoch`, `SetRepoVisibility` and
+  `IssueObjectUrl` messages and RPCs; the server answers `unimplemented` until
+  WP-2.8, WP-2.9 and WP-2.11 (WP-2.2).
+
+- Transport: add the `AdmissionChallenge` and `Challenge` error detail messages
+  with pinned binary, protobuf JSON, and Connect error goldens (WP-3.1).
+
+- Specify server takedown and redaction notices: global content blocklist,
+  delta-safe ref and pack rewrites, tombstones, preservation and restore,
+  signed DSSE notices on Connect and HTTP 451, and additive transport and
+  hook fields. Runtime enforcement follows in later server work packages.
+
+- Specify server-signed storage receipts for committed live ref advances and
+  lease changes, with a published receipt-and-notice key list and writer-view
+  retrieval. Add receipt fields to Connect ref-write responses and an optional
+  admission `external_ref`; server signing and delivery follow in WP-5.8.
+
+- Server: `AdvanceRefs` consumes verified upload tickets atomically with ref
+  publication, outcomes and repository membership. Missing packs after upload
+  close their tickets with `Aborted(PACK_MISSING)`. `UpdateRef` and `AdvanceRefs`
+  now support conditional ref deletion; direct writes with admission
+  reservations fail closed until WP-3.3.
+
+- Server: add stateless `UploadPart` and `CompleteUpload`, authenticated part
+  receipts, and a multipart blob-store interface with a working memory backend.
+  Multipart BeginUpload tickets now carry opaque storage sessions. The blob-key
+  API separates upload markers from pack keys; FS and R2 multipart storage
+  follows in later work packages.
+
+- Server: default Multi-addressing quota now counts namespace-wide usage in
+  fixed windows: exact in each ref shard, reconciled every 60 seconds into the
+  coordinator and checked from an unguarded local view. Coordinator uploads
+  charge that total exactly. Single-addressing keeps its namespace cap off;
+  on D34 its signer quota is per signer and branch. With successful scheduled
+  rollups, other-shard lag is bounded by their admission rate times 3R.
+  Worker timer registration
+  and D34 quota conformance follow in WP-1.26b.
+
+- Server: add write-once repository object-index keys and binary values,
+  deterministic row planning, and membership-gated lookup APIs for indexed mode.
+
+- Connect client: poll typed pending AdvanceRefs verification replies with
+  clamped waits, nonce reuse and envelope renewal, progress and cancellation.
+  Ticket deadline threading follows in WP-1.17.
+  API separates upload markers from pack keys. FS multipart storage now stages
+  verified parts durably, completes through the verifying pack sink and sweeps
+  seven-day-old sessions; R2 follows in a later work package. The trait
+  adds `begin_multipart_for_ticket` so the FS session directory uses the ticket id.
+
+- Server: ticketed `UploadPack` now verifies the ticket before reading data,
+  streams the full pack without metadata writes, and leaves a content-addressed
+  upload marker for later ticket consumption. The advertised BeginUpload
+  threshold is enforced; non-default admission requires auth v2 and ticket keys.
+
+- Server: add periodic per-Durable-Object logical snapshots to a dedicated R2
+  `BACKUPS` bucket, plus Fresh-only portable restore with epoch advancement,
+  relay re-keying and coordinator recovery. In-place logical restore is deferred
+  to the admin API; use Workers PITR for recovery
+  of the same deployment.
+  Deploying this Worker now requires the private `mkit-vcs-backups` bucket
+  bound as `BACKUPS` and a 35-day `backups/` lifecycle rule.
+
+- Specify the server's published view and quarantine, covering newly reachable
+  file objects and all file entries of added packs. Add inspection phase/id,
+  object kinds, deferral and flagged ids, authority writer-view classification,
+  and discovery field `async_inspection = 18`. These are additive spec/proto
+  contracts; the inspection implementation follows in later server work packages.
+
+- Specify storage leases, lifecycle Event webhooks, and fail-closed server GC
+  in SPEC-SERVER; add `GetServerInfoResponse.leases` and Event proto goldens
+  (WP-5.1a-1). Server enforcement follows in M5.
+
+- Server: implement authenticated `BeginUpload` tickets with stateless BLAKE3 MAC
+  tokens, rotation by key id, admission-free live-ticket/member results, open-ticket
+  caps, and byte-identical replay. Configure Worker keys with `TICKET_KEYS`. The internal legacy
+  UploadPack session API is now `open_upload`; ticketed uploads follow in WP-1.9b.
+
+- Server: Worker console JSON metrics and info/warn/error tracing, with latency
+  observations sampled at 1-in-100. Physical storage pressure alerts at 70%/90%
+  of the soft limit run after committed Worker puts and every 60 seconds. `Metrics::gauge` has a provided no-op default;
+  P-24 is now `mkit_server_partition_full_total{kind}`.
+
+- Worker: add Durable Object classes for D34 coordinator, ref, repository/ref-name index and content partitions, retaining RefStore for single deployments; reject foreign partition kinds and preserve alarms scheduled while a timer tick awaits I/O. Deployment vars now select `single` (default) or `d34` with a root sharding marker guard that caches settled results, retries transient storage errors and re-checks config changes; placement is deployment-wide and jurisdiction is fixed for its lifetime.
+
+- Server D34 ref writes now hold coordinator epoch leases, with backend commit
+  deadlines, guarded revocation pushes and kind-1 expiry sweeps. Creation and
+  renewal cost four store calls; usable leases keep steady writes at two.
+  Recovery explicitly records a lease-table holdoff before revocation completes.
+  Single sharding and M1 reads retain their existing behavior. Grant RPCs,
+  read renewal, visibility, and backup restore integration follow in later WPs.
+
+- Add partition timers with guarded atomic handlers, fair tick budgets, SQLite timer heads, and Durable Object alarm multiplexing. Production handlers register as their work packages land.
+
+- The SQL store schema moves to version 2 (an index-only migration, applied on open to Durable Objects). A binary built before it refuses a migrated database, so roll back only to a version-2 binary.
+
+**Verifier kit.** First-class commit-hash verification for an untrusted
+object set or a few-KiB disclosure bundle: CLI `mkit prove`,
+`mkit verify-proof`, `mkit closure export`, and `mkit closure verify`;
+wasm exports `verify_disclosure` / `verify_closure_*` (and related
+primitives) in `@officialunofficial/mkit-wasm`; specs
+SPEC-MERKLE-OBJECTS §5 and SPEC-DISCLOSURE; user guide
+[`docs/VERIFY.md`](docs/VERIFY.md). BMT proof bytes are
+commonware-identical (`commonware_storage::bmt::Proof` at the pinned
+train).
+
+- Worker launch profile is now `LAUNCH_PROFILE=paid-workers`. `uno` remains an
+  accepted deprecated alias and logs a startup warning. Takedown startup accepts
+  configured purge delivery through signed HTTPS or an embedder-supplied `PurgeSink`;
+  SPEC-SERVER §18 now describes both delivery options.
+
+- *(server)* Track a coordinator relay watermark per ref shard, retain expired
+  lease rows while their outboxes are undelivered, and expose the namespace
+  minimum and active shard table for GC and takedown (WP-1.23c). Restore
+  resets maxima and fences watermark reads pending reconciliation. The
+  unshipped `LeasedShard` V1 encoding gains watermark and sweep due fields.
+
+- *(client)* Validate the remote URL path as a repository identity and carry
+  `X-Repository` on every Connect RPC, including anonymous reads. Empty paths
+  address `default`; reads against a different configured single-repository
+  identity now fail. Repository-not-found errors name the identity and origin.
+
+- *(client)* Discover and cache atomic advance automatically from
+  `GetServerInfo`, with conservative defaults for legacy or unavailable servers.
+  SQLite and Durable Object pushes may now re-baseline the packmap chain.
+  Concatenate paged `ListRefs` responses with ordering and termination guards.
+
+- *(core)* Add defaulted `Transport::download_pack_via_ref`,
+  `download_blob_via_ref`, and `pack_exists_via_ref` methods. Connect uses their
+  validated `X-Mkit-Ref` hint for packmap-driven downloads; other transports
+  preserve their existing behavior. Add defaulted `repository_address` for
+  remote error context.
+
+- *(client)* Retry Connect `aborted` responses as temporary failures (503).
+  Missing ref reads return `None`; missing pack checks return `false`.
+
+- *(server)* Scope Multi `PackExists` and `DownloadPack` to repository membership,
+  with the optional unsigned `X-Mkit-Ref` hint resolving unrelayed additions in
+  the same repository's ref shard. Invalid hints are ignored; Single reads and
+  the Multi upload guard retain their behavior (WP-1.23b).
+
+- *(worker)* Register relay delivery on RefShard, with bounded target calls
+  and plan-specific alarm budgets. Coordinator relay watermarks follow in
+  WP-1.23c (R-106).
+
+- *(server)* Persist source relay scan progress in `rs 00`, with a cap of 32
+  failed targets per cycle. Relay fires inspect past blocked targets, pause at
+  the target budget, delete every delivered row in the guarded checkpoint,
+  and deliver the decodable prefix before corruption. Guarded scan checkpoints
+  and exact empty-value relay timer reschedules can use SQL's soft-capacity
+  reserve; the timer exception keeps the next fire immediate after progress
+  on a full shard. Ordinary puts still fail at the cap.
+
+- *(server)* Add source-side outbox relay kind 3, ordered target batches,
+  persistent per-source `rh` deduplication watermarks, atomic pre-delivery hooks,
+  and bounded source cleanup (WP-1.23a). Relay
+  writers now call `relay_at(now_ms)` to stamp rows and commit their kick timer;
+  `RelayV1` gains mandatory `at_ms` in place before deployment. Writer chunking
+  keeps each row within target-batch limits, and the local relay watermark and
+  60-second lag warning prepare later readers. Worker registration follows in WP-1.23b;
+  the coordinator watermark follows in WP-1.23c.
+
+- *(server)* Implement unauthenticated `GetServerInfo` deployment discovery
+  with validated upload limits, namespace/admission policy, store capabilities
+  and private caching for 60 seconds. Repository headers never affect the
+  response (WP-1.6).
+  A configured maximum pack size above the advertised resumable-upload
+  limit (8 MiB parts × 10,000 parts, about 78 GiB) is refused.
+
+- *(server)* Multi addressing now defaults to an empty namespace allowlist and
+  owner writes. Namespace denials and non-owner writes return `permission_denied`
+  before allocation. Authorizer hooks can be additional checks or explicit
+  authority sources, with owner facts passed to Authorize and Admit. Startup
+  refuses incompatible write policies, an open authority hook, and `any` with
+  default admission unless explicitly overridden (D27; WP-1.5). Embedders select
+  these policies in core; adapter multi-mode configuration follows in WP-1.30.
+
+- *(server)* Add pure ref-shard planners and strict version-1 codecs for upload
+  tickets, reservations, local pack membership and outcome/relay queues (WP-1.7).
+  Shared counters and outbox sequence/backlog edits carry snapshot guards;
+  ticket expiry kind 2 is allocated without an RPC or timer handler. Storage
+  layout version stays 1.
+
+- *(core)* Add `pack::window`: a synchronous sans-IO pack reader with bounded
+  entry buffers, 64 KiB–64 MiB range windows, and checksummed resumable cursors.
+  Entries remain provisional until the trailer and optional pack id pass at
+  `Done`. Lazy cursor commitments bind the current window prefix on resume;
+  callers keep sources immutable, and completed windows are not re-read.
+  With no requested id, the first run prefetches
+  the trailer windows and persists their digest as an anchor. Native zstd and wasm32 ruzstd share decoding
+  with `PackEntries`; allocation failures return `PackfileTooLarge`.
+
+- *(server)* Validate `X-Repository` before authentication and storage access.
+  Single deployments retain headerless reads and signed writes naming their
+  configured identity; another valid identity returns `not_found`, and a
+  malformed identity returns `invalid_argument`. Worker `AUTH_REPOSITORY` now require the SPEC-TRANSPORT-CONNECT §7.4 grammar
+  (previously any printable ASCII was accepted); `default` remains valid.
+  Embedders can construct `Addressing::Multi` to route refs and replay state
+  by namespace and repository. Multi pack RPCs return `unimplemented` until
+  repository membership lands in WP-1.10. `Addressing::resolve` returns a
+  `ResolvedRepo`, stored on `Authenticated::repo()`, without changing the
+  adapter-facing authentication API.
+
+- *(cli)* `mkit serve <path>` runs on `mkit-server`: its engine is
+  `mkit_server::ssh::serve_session` over the pipeline with the `.mkit`
+  layout stores (`FsBlobStore`, `FsLayoutStore`), driven by
+  `futures::executor::block_on`, so the CLI still builds no async
+  runtime. Its own protocol code is gone. The wire is unchanged: the two
+  golden sessions captured from 0.4.2 (`rust/tests/golden/ssh-serve/`)
+  reproduce byte for byte through the binary. `mkit-cli` now depends on
+  `mkit-server` (features `ssh` and `fs` only), which is first published
+  with the 0.5 release. **Behavior changes:**
+  - **Idle timeout.** `mkit serve` ends a session after
+    `--idle-timeout-secs` (default 60; `0` disables it) without a byte
+    from the client, answering `Error{INVALID_REQUEST, "idle timeout"}`
+    and exiting 76 (SSH-SECURITY §4, §7). It bounds client silence only:
+    an upload that keeps sending never trips it; one that stops midway is
+    discarded. A new, optional `--max-session-secs` (default `0`, off)
+    caps the whole process, which also bounds a client that trickles
+    bytes or stops reading. Both flags accept at most 604800 (7 days).
+  - **Refs only under `refs/`.** A ref name outside `refs/` (`main`,
+    `heads/main`) that `mkit serve` used to store at `<root>/<name>` is
+    refused by name ("ref name must start with refs/ (… see the
+    migration notes)"). Such files are left in place and never reported
+    to clients; docs/CLI.md, "Refs outside `refs/`", gives a `find`/`mv`
+    recipe for an operator to locate and move them by hand. See the
+    `mkit-server` entry below.
+  - **Crashed uploads are swept.** At startup, when no other
+    `mkit serve` or server process holds `serve.lock`, upload temp files
+    (`packs/.<hex>.tmp.<pid>.<seq>`) at least an hour old are removed.
+  - A root marked as served from external metadata storage is refused (exit 78).
+  The default CLI graph is checked server-free by the new
+  `scripts/check-cli-baseline.sh` (in `just ci-scripts`; INVARIANTS "The
+  default `mkit` CLI is server-free").
+
+- *(server)* The pipeline serves only ref names under `refs/`
+  (`mkit_server::refs::is_served_ref_name`; SPEC-REFS §2), on every
+  binding: `ReadRef`, `UpdateRef` and `AdvanceRefs` refuse any other
+  grammar-valid name with `invalid_argument` "ref name must start with
+  refs/ …" (`INVALID_REQUEST` on the ssh wire), where they used to store it
+  (in `.mkit/server/rows/` on the `.mkit` layout, invisible to the CLI).
+  `ListRefs` prefixes are unrestricted; one outside `refs/` lists nothing.
+  Normative in SPEC-REFS v3 §2 (the §2 namespace list now includes
+  `refs/mkit/packmap/`), SPEC-TRANSPORT §4.2.1 and SPEC-TRANSPORT-CONNECT
+  §5; new wire-suite case `refs.non_refs_prefix_rejected`. New
+  `FsBlobStore::sweep_stale_uploads`. **SemVer:** unreleased API.
+
+- *(transport-file)* Every ref write through `FileTransport`
+  (`update_ref`/`write_ref`, and `LockedRefs::update_ref`, `delete_ref`,
+  `write_file`, `remove_file`) refuses a root carrying
+  `SERVER_META_MARKER` (`.mkit/server-meta`), the marker a
+  SQLite-metadata server deployment writes, with the new
+  `RefFileError::MetaElsewhere` (a `TransportError::RemoteError` on the
+  `Transport` verbs). That root's refs live in the server's `SQLite`
+  database, so a local `mkit push` to a `file://` remote or `mkit serve`
+  can no longer write a second, diverging copy. Reads and pack uploads
+  are unchanged. **SemVer:** additive (new constant and a variant of the
+  `#[non_exhaustive]` enum); **behavior change** only on marked roots.
+
+- *(vcs-worker)* `apps/vcs-worker` is a thin deployment of
+  `mkit-server-worker`: its fetch handler and `RefStore` Durable Object
+  call the new `mkit_server_worker::adapter`, which serves `mkit-server`'s
+  pipeline over R2 and Durable Object SQLite, streaming request and
+  response bodies (no whole-pack buffering; `DownloadPack` sends 800 KiB
+  chunks instead of one). Class `RefStore`, binding `REFSTORE` and bucket
+  `STORAGE` are unchanged, with no wrangler migration; the Durable Object
+  now keeps a `kv` table and ignores the old `refs`, `write_quota` and
+  `authenticated_operations` tables (never deployed; no migration). Wire
+  changes, all SPEC-mandated: a reused nonce for another operation is
+  `invalid_argument` (was an uncaught 500); a 33-byte `expected_id` is
+  `invalid_argument` (was `failed_precondition`); `ListRefs` matches its
+  prefix at a path-component boundary; a gzip-compressed unary response
+  (e.g. a large `ListRefs`) is no longer compressed a second time by the
+  runtime; an upload stream that runs past its declared size and past
+  64 MiB is `invalid_argument` (was `resource_exhausted`); storage
+  failures surface as `internal`/`unavailable` instead of
+  `invalid_argument` "refstore …"; a missing `AUTH_AUDIENCE` or
+  `AUTH_REPOSITORY` makes every RPC `unavailable` (was: writes only). New
+  var `WORKERS_PLAN` (`free`, the default, or `paid`) caps the Durable
+  Object store for the plan. The generated code, `build.rs` and the
+  duplicated modules are gone; `scripts/vcs-worker-conformance.sh` runs
+  the wire suite against it under `wrangler dev`.
+
+- *(core)* `mkit_core::refs::validate_ref_name` now also requires a name
+  of at most `MAX_REF_NAME_BYTES` (512) bytes, per SPEC-REFS v2 §3, so
+  every transport and every new local ref refuse a longer one. Creating
+  or writing a local branch, tag or remote-tracking ref over the bound
+  fails with the new `RefError::RefNameTooLong`, whose message names the
+  limit. Reading, listing, resolving and deleting a local ref that
+  already exists check only the grammar (the new
+  `validate_ref_name_grammar`), so a longer ref written earlier stays
+  visible and can be deleted or renamed with `mkit branch -d`/`-m`. New:
+  `MAX_REF_NAME_BYTES`, `check_new_ref_name`,
+  `validate_ref_name_grammar`.
+
+- *(core, cli)* A new local branch name is at most `MAX_BRANCH_NAME_BYTES`
+  (494) bytes and a new tag name at most `MAX_TAG_NAME_BYTES` (502), so
+  their wire names (`refs/heads/<b>` and `refs/mkit/packmap/<b>`,
+  `refs/tags/<t>`) fit the 512-byte bound; the error names the derived
+  limit and why (`RefError::RefNameTooLong` now carries a `RefNameKind`).
+  A push of an older, longer branch fails with "ref name too long",
+  naming the wire name (`check_pushable_branch`). The ssh and enc clients
+  skip a listed ref whose name is over the bound
+  (`mkit_rpc::list_response_refs`) instead of failing the listing, as the
+  file, memory, s3 and http clients do.
+
+- *(refs, rpc, server)* SPEC-REFS v2: a ref name is at most 512 bytes
+  (§3). `mkit_rpc::MAX_REF_NAME` drops from 4096 to 512 (it is now
+  `mkit_core::refs::MAX_REF_NAME_BYTES`), so the ssh and enc clients
+  refuse a longer name or `ListRefs` prefix before sending.
+  `mkit-server` refuses one on `ReadRef`/`UpdateRef` with
+  `invalid_argument` "ref name too long" (`INVALID_REQUEST` on the ssh
+  wire), and a `ListRefs` over the `.mkit` layout skips a longer legacy
+  ref file with a warning. `mkit serve` over ssh used to accept names of
+  any length. Pre-production policy: no migration.
+
+- *(server)* `mkit-server`'s `ListRefs` matches its prefix at a
+  path-component boundary and strips the prefix plus its `/`, as
+  SPEC-REFS §4 and `mkit serve` do (`refs/heads` and `refs/heads/` list
+  `main`; `refs/heads/ma` lists nothing). A listing of the `.mkit` layout
+  skips a ref file that holds no ref id, with a warning, instead of
+  failing. `FileTransport::list_refs_strict` is replaced by
+  `list_ref_files`, which reports such a file as `None`.
+
+- *(core)* Pack readers enforce SPEC-PACKFILE §3.3's "one zstd frame"
+  rule. A `0x03`/`0x04` payload holding two concatenated frames, a
+  skippable or legacy-magic frame, or trailing bytes after the frame now
+  fails with `PackError::ZstdDecompress`. The C path
+  (`zstd::bulk::decompress`) used to decode concatenated frames and skip
+  skippable ones. mkit's `PackWriter` never produced such payloads.
+  Pre-production policy: no compatibility path.
+
+- *(core)* `list_refs`/tag/remote listing read each ref with a single
+  stack-buffer `read` (open+read+close) instead of `fs::read`'s extra
+  `statx` and EOF probe: −23% at 10k refs, −25% at 100 refs
+  (`refs_ops` bench).
+
+- *(core)* SPEC-DISCLOSURE v2: every `Step` and chunk header carries a
+  mandatory 32-byte `inner_root` (bare BMT root of the parent Tree /
+  ChunkedBlob). Bundle version byte is `2`; version `1` is a typed
+  `UnsupportedBundleVersion(1)` with no compatibility decoder. The
+  verifier wrap-checks the field against the trusted id before use, then
+  requires the proof fold to equal the declared root. **SemVer:**
+  breaking for bundle bytes (pre-release format, no migration);
+  additive for APIs (`Disclosed.step_inner_roots` /
+  `Disclosed.chunk_inner_root`; `Step.inner_root`).
+
+- *(core)* `ops::diff::myers_changed` (the line-level Myers edit script behind `unified_hunks`/`enumerate_hunks` — `diff`, `show`, `add -p`, and `merge_blob_3way`'s 3-way diff) now elides any common **leading** run of identical lines before running its O(ND) core on the (usually much smaller) remainder — the same "diff only the changed region" step git's `xdiff` and every other practical diff engine apply before their own O(ND) search. A real edit almost always leaves most of a file as a shared prefix (a single changed line, an appended block); the old code always sized its `v`/backtrack-`trace` state off the *whole* `old.len() + new.len()`, regardless of how small the actual edit was. New elision logic in `myers_changed` finds the shared prefix with one cheap linear scan, runs the renamed `myers_changed_core` (the previous function body, unchanged) on just the post-prefix slices, and splices the result back into full-sized change-flag vectors — this is exactly the core's own deterministic first step (at `d = 0` there is only one diagonal, `k = 0`, so no tie-break is involved; it always greedily extends this same leading run before doing anything else), so skipping straight to the subproblem is provably identical to letting the core discover it itself.
+
+  An independent review caught a real bug in the first version of this change before it merged: it also elided a common **trailing** run, matching backward from the ends of both sides. That's unsound in general — unlike the prefix, the trailing snake the core's own backtrack lands on depends on tie-breaks made throughout the *whole* search (`v[idx(k-1)] < v[idx(k+1)]`), so whenever repeated or colliding lines near the tail admit more than one equally-minimal alignment, greedily matching from the end backward can commit to a different one than the real algorithm would have — found with a concrete counterexample (`old = ["a"]`, `new = ["b", "a", "a"]`: the core matches `old[0]` to the first `new` "a"; backward-suffix-matching commits to the second) and confirmed by exhaustive brute-force diffing over small alphabets. The `apply_hunks_subset` round-trip property (`proptest_hunks_roundtrip_with_shared_affix`, kept below) could not catch this — any minimal edit script round-trips correctly regardless of which alignment it picks — so a new `proptest_myers_changed_matches_unelided_core` compares `myers_changed`'s output directly against `myers_changed_core` run un-elided on the same input over a 3-symbol alphabet chosen to maximize boundary repeats/collisions; it failed immediately against the buggy trailing-elision version (minimal counterexample `old = [0, 0]`, `new = [0, 1, 0, 0]`) and passes with suffix elision removed. Suffix elision was dropped entirely rather than patched to match the core's tie-break, since doing that correctly would mean re-deriving part of the backtrack itself — not a shortcut worth taking for one side of the win.
+
+  New `cargo bench -p mkit-benches --bench diff_edit_script` suite (single-line edit and 200-line append against 1k/10k/100k-line files, plus a `no_common_affix` control with no shared prefix at all, 4-core host, `--quick`): 10k-line append 27.87ms → 0.23ms (119x), 100k-line append 297.4ms → 2.27ms (131x) — the appended-block case is the flagship win, since the entire original file elides as a shared prefix and only the new tail ever reaches the O(ND) core; 100k-line single-line edit 9.04ms → 5.91ms (−35%, the remaining cost is `split_lines`/`compact_changes`/`script_from_flags`'s own O(n) work, plus the second (post-edit) half of the file that prefix-only elision can no longer skip). `no_common_affix` (1k/2k lines, kept small since it's `O((n+m)^2)` independent of this change — Myers' own worst case, a genuinely unrelated cost) is unaffected within run-to-run noise (40-42ms/170-172ms both before and after), confirming the extra linear scan costs nothing when there's no shared prefix to find. All 861 `mkit-core` tests pass (including both new property tests), `cargo clippy -p mkit-core -p mkit-benches --all-targets -- -D warnings` and `cargo fmt --check` are clean. **SemVer:** none — `myers_changed`/`myers_changed_core` are private to `ops::diff`; every public diff/merge API's behavior and output are unchanged.
+
+- *(core)* pipeline FastCDC chunk-cutting with chunk-hashing in `worktree::store_large_file_streaming_with` (the streaming ingest path behind `mkit add`/`status`/`diff` on any file above `CHUNK_THRESHOLD`, 1 MiB). The existing implementation was strictly phase-serial: cut a batch of up to `STREAM_HASH_BATCH` (64) chunks on the calling thread, then block waiting for the caller's `hash_chunks` callback (typically a rayon fan-out hashing/staging each chunk) to finish before cutting the next batch — cutter and hashers were never both busy at once, even though cutting batch *N+1* has no data dependency on hashing batch *N*, only on the reader position, which the cutter alone advances. Native builds (`#[cfg(not(target_arch = "wasm32"))]`; `mkit-core` stays wasm-clean, and wasm32 has no threads to pipeline across) now run the cutter on its own `std::thread::scope` worker, handing batches to the calling thread over a rendezvous (`mpsc::sync_channel(0)`) channel — a zero-capacity channel's `send` blocks until the matching `recv`, so the cutter can have at most one batch *fully built* ahead of the one currently being hashed, capping the extra memory this adds at one more `STREAM_HASH_BATCH` (matching this module's existing "independent of file size" bound) while still overlapping the two phases fully.
+
+  An early review pass caught a real deadlock in the first version of this change: if the receiving side stops calling `recv` as soon as `hash_chunks` errors (the natural `?`-propagation shape), the cutter thread's *next* `send` — for a batch it already cut, or is still cutting — has no buffer to land in and blocks forever waiting for a `recv` that will never come, hanging `std::thread::scope`'s join on that thread and the whole call with it. Fixed by having the receiving side keep draining (discarding) the channel after recording the first error instead of returning immediately, so every future cutter `send` still succeeds (or the cutter hits its own error/EOF and exits on its own) and the channel always disconnects, letting the receive loop terminate on its own. New `streaming_pipeline_errors_promptly_when_hash_chunks_fails_on_an_early_batch` pins this directly: three full batches (so the cutter still has more to send after the one that triggers the very first error), run on its own thread with a bounded `recv_timeout` so a regression fails the test instead of hanging the suite.
+
+  Verified with a controlled in-process A/B (`store_large_file_streaming_batched`, the original phase-serial loop, vs. the new pipelined path, interleaved on identical in-memory fixtures with a rayon-style scoped-thread `hash_chunks`, median of 10 runs each, to cancel this shared host's cross-process noise) at sizes spanning `chunk_hash_fanout`'s existing `file/<n>_mib` bench: 8 MiB is a wash (only ~2 batches worth of data, little to overlap), 32 MiB ~5-9% faster, 128 MiB ~5-10% faster — growing with size as expected, since more batches means more opportunity for the two phases to overlap; this is the shape of the "Add and commit one 1 GiB file" and "Re-add an unchanged 100 MiB file" rows on the [performance page](https://mkit.sh/performance). Content addresses are verified byte-identical between the two paths on every run. All 860 `mkit-core` tests (up from 859) pass, `cargo clippy --all-targets --all-features -- -D warnings` and `cargo fmt --check` are clean, and a `wasm32-unknown-unknown` build of `mkit-core` (`--no-default-features`) succeeds using the unchanged phase-serial fallback. **SemVer:** none — `store_large_file_streaming_batched`/`store_large_file_streaming_pipelined` are private; `store_large_file_streaming_with`'s public signature gains a `+ Send` bound on its `R: Read` reader type parameter (satisfied by every existing caller — `io::Take<fs::File>`, `io::Cursor<Vec<u8>>>` — so this doesn't break any in-tree usage) and its documented behavior/output are otherwise unchanged.
+
+- *(core)* `worktree::content_eq` (the "did this file's content actually change?" check behind `add`, `status`, `diff`, and `merge` once two sides' object ids already differ) gained a fast path for the `ChunkedBlob`-vs-`ChunkedBlob` case — every file above `CHUNK_THRESHOLD` (1 MiB). The old code always fully reassembled and byte-compared both sides, chunk by chunk, even when most chunks were byte-identical between versions: appending 1 MiB to a 100 MiB file — the flagship "commit a 1 MiB change to a 100 MiB file" row on the [performance page](https://mkit.sh/performance) — re-read and re-verified the whole 100 MiB on both sides just to answer "not equal". New `chunked_content_eq` walks both manifests' chunk-hash lists with two pointers, skipping any run of chunks that share a hash with no read at all — identical hash means identical bytes by construction, the same trust `content_eq`'s pre-existing `a == b` whole-object fast path already relies on, just applied per chunk. Only chunks that actually diverge are read and byte-compared, with the walk able to resync once ids match again at the same aligned offset (pinned by `chunked_fully_misaligned_but_equal_content`/`chunked_shared_prefix_then_misaligned_equal_suffix` and the pre-existing `large_inline_fixed_and_cdc_content_agree`, which compares two independently-chunked manifests — fixed 64 KiB blocks vs. real FastCDC — of the same content). An append needs zero chunk reads at all: FastCDC's cut points never depend on bytes past them, so every pre-existing chunk still lines up by hash and the walk runs straight to the new tail. `ma.total_size != mb.total_size` is also checked up front without reading anything, trusting the manifest's declared size the same way `LoadedBlob::len`'s doc comment already documents (every reassembly path enforces it via `ChunkedBlob::check_reassembled_size`, so it cannot be wrong on anything durably written through mkit's own writers) — a manifest deliberately constructed to violate that, whose entire chunk sequence still lines up by hash with its counterpart, slips through unnoticed by this fast path specifically (pinned, not just asserted, by `chunked_wrong_shared_total_size_is_not_detected_when_ids_fully_match`); one whose chunks diverge anywhere is still fully read from the first divergent chunk on, so store-level corruption or a missing chunk there still surfaces as an error, same as before.
+
+  New `cargo bench -p mkit-benches --bench content_eq` suite (append/edit-middle-byte/truncate-1MiB against an 8 MiB and a 32 MiB FastCDC-chunked base, 4-core host, `--quick`): 8 MiB append 13.78ms → 3.51ms, edit 11.05ms → 3.70ms, truncate 11.18ms → 3.35ms; 32 MiB append 44.80ms → 12.42ms, edit 43.80ms → 11.99ms, truncate 43.76ms → 10.60ms — roughly 66-76% faster wall-clock across every mutated-content case at both sizes (the `identical` series, which hits the pre-existing `a == b` fast path before ever reaching `chunked_content_eq`, is unchanged, as expected). New tests: direct coverage of `chunked_content_eq`'s merge logic against small hand-built manifests (all-ids-match, fully-misaligned-but-equal, shared-prefix-then-resync, append via total_size, same-total-size-different-content, split-differently-but-different-content, empty manifests, the documented total_size gap above), a real-`FastCDC` insertion test that confirms at the manifest level (shared first/last chunk, differing middle) that a genuine divergence-then-resync actually happens before checking `content_eq` against ground truth, and `content_eq_real_chunked_mutations_match_ground_truth`, which runs `content_eq` over real `FastCDC`-chunked append/edit/truncate mutations of a 3 MiB fixture and cross-checks every result against a direct byte comparison.
+
+  An independent code review (correctness + reuse/simplification pass) caught a real gap in the first version of this change before it merged: `chunked_content_eq` only ever compared the two manifests' declared `total_size` fields against *each other*, never against either side's own real chunk bytes, so two manifests whose chunk sequences diverged *everywhere* (no id ever matched, so nothing was ever skipped) but happened to declare the same wrong `total_size` were reported merely "unequal" instead of raising `ChunkedBlobSizeMismatch` the way the old byte-cursor walk always did. Fixed by tracking, per side, the real bytes actually read (as opposed to skipped by id) and whether that side had any chunk skipped at all: a side with zero skips has every one of its chunks read regardless, so its accumulated real length is now checked against its declared `total_size` before returning, erroring exactly as before if they disagree. This narrows the documented trust gap to only what it was always meant to cover — a side that skipped at least one chunk by id, which is the one case this fast path cannot validate without giving up the read it just avoided. New `chunked_wrong_total_size_is_detected_when_no_chunk_is_skipped` and `chunked_wrong_total_size_on_one_side_only_is_detected` pin the fix directly (both previously-missed error cases; both now assert `ChunkedBlobSizeMismatch`). The review also found three call sites in this file (`content_fingerprint`, `ContentCursor::remaining`, and `chunked_content_eq`) had each hand-rolled the identical "read a manifest chunk, require `Blob`" match; factored into one shared `read_blob_chunk` helper (`read_chunk`, the pre-existing `WorktreeError`-domain sibling with its own hash-and-type-qualified error text, is kept separate since unifying it would have changed that error's wording). No wire-format or public-behavior change beyond the bug fix itself — every other case this fast path was already correct for is unaffected, confirmed by the full pre-existing test suite passing unchanged alongside the new tests. All `mkit-core` tests (842, up from the base branch's 839) pass, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` are clean, and the `content_eq` bench numbers above are unaffected (re-measured after the fix). **SemVer:** none — `chunked_content_eq`, `read_blob_chunk`, and `ContentCursor::from_object` are private to `worktree::blob`; `content_eq`'s public signature and documented error behavior are unchanged (the fix restores documented behavior for the no-skip case rather than changing it).
+
+- *(core)* replace `delta::encode`'s block-hash index (`HashMap<u64, u32>`, `std`'s default `SipHash`-1-3 hasher) with the same map keyed by `rustc_hash::FxHasher`, seeded per `encode()` call. The index's keys are already the output of `encode`'s own FNV-1a `block_hash` over each 16-byte block of `base`, so `SipHash`'s extra per-byte cost buys little — *if* the replacement is still reseeded per call: an earlier version of this change used a bare, fixed-seed hasher (via `BuildHasherDefault`/the crate's own bare `FxBuildHasher`, both always starting from the same compile-time state), caught in review as a real regression — `block_hash` is itself unkeyed, so an attacker who controls `base`'s bytes could solve for many distinct blocks whose `block_hash` outputs collide in the same table bucket under a *known* seed, degrading the index's build from O(n) to O(n²): the exact hash-flooding attack `SipHash` exists to prevent, reopened. `encode` now seeds via `rustc_hash::FxSeededState::with_seed`, drawing a fresh random `usize` per call from `std`'s own randomized hasher (`random_seed`, avoiding a new `rand`/`getrandom` dependency for one value per call) — denying an attacker the one thing that attack needs: a bucket mapping it can predict in advance. Also switched from a hand-rolled reimplementation of the FxHash algorithm to the `rustc-hash` crate directly (already resolved transitively via `mkit-cli`'s `reqwest → quinn` chain, caught in the same review as needless duplication of an already-available, better-tested implementation) — `rustc_hash::FxSeededState` (added upstream specifically for this "seed a fast hasher yourself" use case) supplied the seeding API a bare `FxHasher`/`BuildHasherDefault` doesn't, so no hand-rolled `BuildHasher` wrapper was needed either. `cargo bench -p mkit-benches --bench delta_plan_fanout -- --quick` (sequential series, 4-core host, near-duplicate 64 KiB chunks) with the final, reseeded implementation: 32 candidates 3.25ms → ~2.9-3.0ms, 64 8.50-8.65ms → ~6.15-6.23ms, 128 14.0-17.0ms → ~12.7-12.9ms, 256 candidates 36.6-37.1ms → ~25.7-26.3ms (~29-30% faster) — smaller than the fixed-seed version's initial (unsafe) ~36-39%, since reseeding costs one `RandomState` construction per `encode()` call, but still a clear, real win. New `random_seed_differs_across_calls_and_seeds_a_usable_map` test pins this module's own contribution — `FxHasher`'s mixing quality is `rustc_hash`'s tested contract, not this module's to reverify — confirming two `random_seed()` calls differ (the load-bearing security property) and that `FxSeededState` wires a seed through consistently enough for a `HashMap` to find keys it just inserted. No wire-format or public-API change — `FxIndexMap`/`random_seed` are private to `delta.rs`, and `encode`'s output is byte-for-byte identical to before (all `mkit-core` tests, including `delta`'s roundtrip and corruption-rejection suite, pass unchanged). **SemVer:** none.
+
+- *(core,cli)* batch Ed25519 signature verification in `remote_dispatch::packmap::verify_new_object_signatures` (clone/pull/fetch's post-download check, issue #692). Every commit/remix/tag a fetch introduced was checked with a separate `verify_strict` call — one scalar-multiplication-plus-comparison per object. New `mkit_core::sign::verify_batch` (behind a new, non-default `batch-verify` feature) instead runs `ed25519_dalek::verify_batch`'s randomized-coefficient multiscalar-multiplication check over many signatures in one pass — strictly less total scalar-multiplication work than one `verify_strict` per signature — at the cost of not learning *which* entry failed on a batch rejection; `verify_new_object_signatures` falls back to the pre-existing per-object loop whenever the batch check fails (or wasn't attempted) to locate and report the exact offending hash, unchanged from before this commit. `ed25519-dalek`'s batch equation deliberately omits two of `verify_strict`'s malleability checks (see its README's "Malleability" section for the public-key half; the signature-`R` half is the same class of check, just undocumented as a batch caveat) — `verify_batch` performs both itself, per entry, before running the batch equation: `VerifyingKey::is_weak` on the public key, and a direct `curve25519-dalek` small-order check on the signature's `R`. Each is backed by a dedicated regression test constructing a genuine forgery specific to that check (a weak identity public key with an all-zero signature; and, isolating the `R` check from the public-key one, a real full-order key's own secret scalar used to solve `[s]B = R + [k]A` for `R = identity`) — both confirmed to satisfy `ed25519-dalek`'s own loose `verify` (proving the gap is real, not just theoretical) and confirmed load-bearing by deliberately disabling each precheck in turn and watching the corresponding test fail.
+
+  A single whole-slice batch call is single-threaded, so it doesn't automatically beat the existing per-object rayon fan-out at fetch sizes large enough to keep every core busy. `cargo bench -p mkit-benches --bench verify_fanout` (new `batch`/`batch_parallel` series, 4-core host): at 256 entries, one whole-slice `verify_batch` call (11.7-12.1ms) is *slower* than the pre-existing per-object rayon fan-out (8.9-9.6ms) — batching's ~2x reduction in total scalar-multiplication work doesn't make up for using only one of four cores. Splitting the batch into one sub-batch per rayon worker thread instead (new `verify_batch_parallel`, used whenever `verify_new_object_signatures` would otherwise parallelize) combines both effects and consistently beats plain rayon fan-out from 16 entries up: 16 entries 1.05-1.08ms → 0.97-1.05ms, 32 1.7-1.71ms → 1.53-1.6ms (~6-10%), 64 2.96-3.03ms → 2.47-2.48ms (~17-19%), 128 5.19-5.26ms → 4.13-4.30ms (~18-21%), 256 8.91-9.64ms → 7.08-7.42ms (~20-24%) — the gap widens with size, matching the fixed 512-entry chunk cap large fetches already use. **SemVer:** additive — `mkit-core` gains `sign::verify_batch` behind the new non-default `batch-verify` feature (`mkit-cli` enables it explicitly on its `mkit-core` dependency; wasm/Worker builds and other native consumers such as `contrib/signers/*` are unaffected since they don't request it and it isn't default). No existing public API changes.
+
+- *(core,cli)* parallelize `list_refs`'s per-ref read across rayon. `refs::collect_refs`'s directory walk read and decoded each ref file (a separate `fs::read` + `decode_ref_wire`, one small-file syscall sequence each) sequentially, one at a time — the same "independent per-file work, no fan-out" gap `add`'s worktree hashing and `remote_dispatch`'s pack/delta/signature fan-outs closed elsewhere, just never closed here (issue tracked from the same family as those). New `refs::list_refs_with(layout, read_batch)` splits the existing behavior into a sequential directory walk (cheap, metadata-only, stays sequential) that collects `RefCandidate { name, path }` entries, then hands the *whole batch* to a caller-supplied `read_batch` callback — the same "collect first, batch-callback second" shape `transfer::plan_pack_with`/`worktree::store_large_file_streaming_with` already use. `read_batch` returns one `RefReadOutcome` (`Unreadable`, dropping the entry, or `Decoded(Option<Hash>)`, keeping it — matching the old inline behavior exactly: an unreadable file was silently skipped, a readable-but-malformed one was kept with `Ref::hash: None`) per candidate, a cardinality mismatch failing closed as a new `RefError::RefBatchLengthMismatch` rather than silently desyncing names from hashes (mirroring `WorktreeError::ChunkBatchLengthMismatch`/`StoreError::DeltaBatchLengthMismatch`'s existing contract). `list_refs`/`list_remote_refs`/tag listing keep their exact old sequential behavior by default via `sequential_read_batch`, itself now just `candidates.iter().map(read_ref_candidate)` — the new `refs::read_ref_candidate` is the single read-and-decode definition shared by that default, mkit-cli's fan-out, and the fan-out bench, so the `Unreadable`-vs-`Decoded(None)` policy has exactly one place to drift from. Three new tests pin `list_refs_with`'s contract directly (sequential-batch equivalence, the `Unreadable`-vs-`Decoded(None)` distinction, the length-mismatch error).
+
+  `mkit-cli` gains `commands::list_refs_parallel`/`list_tags_parallel`/`list_remote_refs_parallel` (sharing one `fanout_read_batch` closure), wired into every CLI call site that previously read `refs::list_refs`/`list_tags`/`list_remote_refs` directly (`branch`, `tag`, `ref`, `show-ref`, `for-each-ref`, `git`'s git-export tag/branch export, `remote_dispatch`'s push and pull) — a command like `for-each-ref` or `show-ref` that lists heads, tags, and every remote's tracking refs in one call now gets the parallel win on all three namespaces, not just the one that happened to be wired up first. `cargo bench -p mkit-benches --bench refs_ops -- list_refs_fanout` (new suite): 100 refs 412us → 346us, 1k refs 4.82ms → 2.32ms (2.1x), 10k refs 58.1ms → 27.5ms (2.1x) — a real win even at the smallest tested size, not just at scale. A pre-existing, unrelated bug in this same bench file (`refs_ops.rs`'s fixtures never called `refs::init` before writing refs, so every `refs_update`/`list_refs` case failed outright) is fixed alongside it, since it blocked getting any numbers at all for this change. **SemVer:** `mkit-core` gains `refs::list_refs_with`/`list_tags_with`/`list_remote_refs_with`, `refs::read_ref_candidate`, `refs::RefCandidate`, `refs::RefReadOutcome`, and `RefError::RefBatchLengthMismatch` — new variants in public exhaustive error enums can require downstream match updates; `list_refs`/`list_remote_refs`/tag listing's signatures and behavior are unchanged.
+
+- *(core)* bound the O(N) store-read cost `advance` pays on every history-mmr fast-forward publish, instead of re-verifying the entire first-parent chain from scratch every single time. This was a known, deliberately-left-alone cost (see the `read_current_descriptor` entry below and its own predecessors) — a dedicated research pass (prior art from git's object-verification model, RFC 6962 Merkle consistency proofs, ZFS/btrfs scrub semantics, and the MMR/accumulator literature mkit's own ancestry proof already draws on) confirmed the check is real (it defends against *accidental* local corruption — bit rot, a bad GC, a torn write — between two publishes; content addressing means corruption is always eventually *detectable*, never silently wrong, so the only question is *when* it gets caught) but stronger than any of those reference systems apply by default, and that the one prior attempt to cut it (`first_parent_chain_from`'s chain-splicing fast path, prototyped and reverted in an earlier commit) failed specifically because it dropped re-verification of the reused prefix to zero rather than bounding it.
+
+  New `history::ancestry::decide_chain` replaces `advance`'s unconditional `first_parent_chain(store, target)` call. A true no-op (target already the live, already-verified tip) now short-circuits before any store read at all — previously it still paid the full walk before discovering there was nothing to do. A genuine fast-forward (found via new `first_parent_suffix_to`, which walks backward from `target` only until it hits the live tip instead of all the way to genesis) always verifies its new suffix in full, but re-verifies the *reused prefix* only in a bounded, rotating window — `max(512, verified_through / 64)` leaves — tracked per branch in a new advisory auxiliary file (`ScrubState`/`scrub`, SPEC-HISTORY-PROOF §4.5). A full walk still happens, exactly as before, whenever: it isn't actually a fast-forward (new branch, rewrite, reset, unrelated history — `first_parent_suffix_to` returns `NotFound`), the rotating window would complete a lap over the prefix, or more than 7 days have passed since the last full verification (matching ZFS's default weekly scrub cadence, more conservative than btrfs's monthly) — and a full walk started for schedule reasons while still a fast-forward correctly keeps the same generation, not a fresh one. Missing, corrupt, or unparseable `scrub` state is never treated as "already verified" — it always falls back to a full walk, the same fail-safe-toward-more-verification default as every other case. None of this changes what gets *persisted*: the published chain and root are always byte-identical to what a full `first_parent_chain` walk would produce, for any given target — only how many of an already-published prefix's objects get re-read from the store on a given publish. This bounds the worst-case staleness of any single leaf's last re-verification at 64 fast-forward publishes or 7 days, whichever comes first, instead of either "every publish" (the old, expensive default) or "never again" (the reverted fast path's actual behavior).
+
+  Six new tests exercise the scheduling directly: a fast-forward's window is provably narrower than the full prefix (`fast_forward_scrubs_a_bounded_window_not_the_whole_prefix`) yet still publishes byte-identical output; a completed rotation forces a full walk while preserving the generation (`scrub_lap_completion_forces_a_full_walk_but_keeps_the_generation`); corruption planted outside the current window doesn't fail the next fast-forward but is caught within a bounded number of publishes once the cursor reaches it, never silently forever (`corruption_outside_the_current_window_is_caught_within_a_bounded_number_of_publishes`); a stale `last_full_verify_unix` forces a full walk regardless of cursor position, via a test-only clock override mirroring this file's existing `FAIL_AFTER` fault-injection pattern (`stale_scrub_state_forces_a_full_walk_regardless_of_cursor_position`); and missing scrub state fails safe toward more verification, not less (`missing_scrub_state_forces_a_full_walk_instead_of_trusting_nothing`). All existing ancestry tests pass unchanged, including `many_sequential_publishes_keep_one_generation_until_a_real_rewrite`'s 40 sequential single-commit publishes — all below `SCRUB_MIN_WINDOW` (512), so every one of them exercises the "lap completes immediately, full walk every time, same generation" branch, the same behavior as before this commit at that scale.
+
+  `cargo bench`'s `sequential_publish` series (100-300 commits) can't show any of this — the 512-leaf minimum window covers the whole prefix in one pass at that scale, so every publish there still does a full walk exactly as before, and fsync dominates regardless (see the entries below on why that bench can't isolate cheaper mechanisms). A new `#[ignore]`d manual profiling test, `profile_scrub_window_vs_full_walk_every_publish` (not run in CI), isolates it at a chain length long enough to matter: at 20,000 leaves, 20 sequential fast-forward publishes averaged 71.8ms/publish with the scrub window against 324.7ms/publish with a full walk forced every time (both paths otherwise identical — same fsync/`sync_dir` sequence, same per-publish MMB rebuild over the full chain, which remains real, unavoidable, unrelated O(N) work this change does not touch) — a 4.5x reduction at this size, growing with N since the shared floor (fsync plus the MMB rebuild) stays roughly constant while the avoided read count grows. **SemVer:** `mkit-core` gains `RefError`-adjacent internals only — `decide_chain`, `ChainDecision`, `ScrubState`, `first_parent_suffix_to`, `SuffixWalk`, and the scrub-file read/write helpers are all private to `history::ancestry`; no public API changes.
+
+- *(core)* stop loading the previous publish's whole first-parent chain from disk on every history-mmr publish — `advance` only ever needed its small, fixed-size descriptor header (repository/full_ref/generation/tip/leaf_count/root), never the up-to-32-MiB `chain: Vec<Hash>` that follows it in the snapshot file. This follows on from `read_current_chain` (below), which already stopped rebuilding an MMB from that chain but still read and checksummed the whole file to get it.
+
+  The key realization: `advance`'s comparison logic (no-op detection, fast-forward/generation-reuse decision) only ever compares `old`'s fields against `chain = first_parent_chain(store, target)` — a fresh, full, store-re-verified walk `advance` computes unconditionally anyway (unchanged — this remains the deliberate O(N) integrity check, not something this commit touches). Because objects are immutable and content-addressed, that walk is a deterministic function of `(store, target)`: if `target == old.tip`, `chain` is byte-for-byte `old.chain` without needing to check — both are `first_parent_chain(store, old.tip)`, just computed at different times against the same unchanging objects. The same argument applied to the sub-walk ending at `old`'s length shows `chain[old.leaf_count - 1] == old.tip` is exactly equivalent to `chain.starts_with(&old.chain)`. So the byte-for-byte chain comparisons were always redundant with a single hash comparison against a value (`old.tip`) that's already a plain header field — `old.chain` itself was never actually needed.
+
+  New `read_current_descriptor` (replacing `read_current_chain`/`PriorChain`) reads only that header, via a new `read_prefix` helper bounded to `DESCRIPTOR_HEADER_MAX_LEN` (143 fixed bytes + the largest possible ref-name length) — one small bounded read regardless of chain length, instead of reading and linearly checksumming the whole file. `parse_descriptor_header` is factored out of `decode_descriptor_and_chain` (unchanged for its own callers — `AncestrySnapshot::decode`/`load`, which do need the real chain and a working MMB) to parse just that shared prefix. This narrows the same class of guarantee `read_current_chain` already narrowed, one layer further: no checksum at all is verified on this path now, not just the root rebuild-and-compare. Independently re-reviewed field-by-field: `repository`/`full_ref`/`tip` corruption only ever misses a legitimate fast-forward/no-op (fails closed, safe); `root` is parsed but never read anywhere in `advance`; `leaf_count` only indexes `chain` via `.get`, never panics on an out-of-range value; `generation` is the one field reused directly, but it's independently cross-checked against the separately-read `current` pointer file before `advance` ever sees it. No corrupted header field can make `advance` persist a chain, root, or generation that the mandatory store-verified walk didn't itself produce.
+
+  New tests: `read_current_descriptor_matches_full_snapshot_fields` (agrees field-for-field with the full decode path across several chain lengths, including the `leaf_count == 1` edge case), `read_current_descriptor_handles_a_long_branch_name` (exercises the bounded-prefix read past the fixed header), and `many_sequential_publishes_keep_one_generation_until_a_real_rewrite` (asserts generation continuity at *every* step of 40 sequential fast-forwards, not just once at the end — a weaker end-to-end-only check would pass even with an off-by-one in the index, since two independently-minted random generations are virtually certain to differ regardless of whether the fast-forwards in between were handled correctly; confirmed by deliberately introducing that exact off-by-one during review and watching this test — and only this test, of the whole suite — catch it). All 803 mkit-core tests plus mkit-cli's `history_mmr_*`/`reflog_and_amend` integration tests pass.
+
+  Isolating this mechanism from the fsync noise that swamps it in the full publish pipeline (a new `#[ignore]`d manual profiling test, `profile_read_current_descriptor_vs_full_chain_read`, not run in CI): at 50,000 leaves, reading the previous snapshot dropped from 735µs to 24.5µs per call — a 30x reduction (release build; debug showed 193x, 5.2ms → 27µs). `cargo bench`'s `sequential_publish` series couldn't show this end-to-end: it's fixed at ≤300 leaves (where the old.chain read is microseconds either way, dwarfed by ~5-6ms of fsync per publish) and reaching an N where this cost would compete with that fixed fsync overhead takes far longer to benchmark than is practical here. **SemVer:** none — `read_current_descriptor`, `read_prefix`, `parse_descriptor_header`, and `DESCRIPTOR_HEADER_MAX_LEN` are private to `history::ancestry`; `read_current_chain`/`PriorChain` (both already private, added in the previous commit) are removed.
+
+- *(core)* stop rebuilding an ancestry MMR one leaf at a time, and stop building one at all when `advance` only needs the previous chain for comparison. Two follow-ups to the double-rebuild fix below:
+  - `CommitHistory` gained `extend`, which merkleizes a whole chain in one `new_batch`/`merkleize`/`apply_batch` cycle instead of one cycle per leaf (each cycle allocates a `MerkleizedBatch` Arc, an overwrites map, and per-height dirty-bucket `Vec`s — real, if modest, per-leaf overhead for something the batch API is explicitly designed to do in bulk; verified against `commonware-storage`'s own equivalent "N adds in one batch vs. N single-item batches" tests during review). `AncestrySnapshot::build` (used by every publish, and by `decode`/`load`) now calls it once instead of looping `append`. New `mem_extend_matches_sequential_append_from_empty`/`_onto_existing_history` tests pin that batching produces a bit-identical root/leaf-count to the same hashes appended one at a time, at sizes on either side of MMR peak-merge boundaries. No change to what gets verified against `store` — purely fewer allocations for the same tree.
+  - `advance`'s `read_current` call loaded the *previous* publish's full `AncestrySnapshot` — decoding its wire bytes and rebuilding its MMR from scratch — purely to read `descriptor`/`chain` for the no-op/fast-forward/generation-reuse checks; `old.mmr` was never touched. A new `read_current_chain` (backed by `decode_descriptor_and_chain`, factored out of `AncestrySnapshot::decode`) parses the same wire bytes into just the descriptor and chain, skipping the MMR rebuild. This one is a narrower, explicitly-scoped trade rather than a pure freebie: it also skips `decode`'s rebuild-and-compare of `root` against the wire-persisted value, so a checksum-valid but internally-inconsistent snapshot file (reachable today only via a bug, or by anyone with the same local write access that already lets them edit any other mkit state directly — the checksum is a plain self-computed digest, not a MAC) now fails open on this path (a harmless spurious cache-miss/full rebuild) instead of decode's fail-closed error. Reviewed and judged safe because `advance` never persists `old`'s data as-is: every use of it is a comparison against `first_parent_chain(store, target)`, a fresh store-re-verified walk, and only that freshly-verified chain is ever written into the new snapshot; `AncestrySnapshot::load` and `finish`'s own rebuild path are untouched and keep the full check. `AncestrySnapshot::load` (which does need a working MMR, for `prove`) keeps the full decode.
+
+  Both are correctness-tested (800 mkit-core tests, including the two new ones, plus the `history_mmr_records_commits`/`history_mmr_branch_lifecycle` mkit-cli integration tests) but showed no statistically significant wall-clock change on `cargo bench -p mkit-benches --bench history_mmr --features history-mmr` even at a 40-sample run (`publish/50`/`publish/250` are dominated by this suite's ~10 fsync/`sync_dir` calls per publish, which this sandbox's I/O jitter swamps any CPU-level saving in) — kept anyway since they're strictly-less-work with essentially no practical downside, and matter more on faster storage or larger histories where the fsync floor is smaller relative to chain length. **SemVer:** additive — `mkit-core` gains `history::CommitHistory::extend`; `append`'s behavior is unchanged (now implemented in terms of `extend`). `read_current_chain`/`decode_descriptor_and_chain`/`PriorChain` are private to `history::ancestry`.
+
+- *(core)* stop rebuilding a branch's entire first-parent ancestry MMR twice on every history-mmr publish. `history::ancestry::advance` (`refs::update_ref_with_ancestry`, gated behind the `history-mmr` feature) used to call `first_parent_chain(store, target)` — one `store.read_object` + deserialize per commit from `target` all the way back to the repository's first commit — and build a full in-memory MMR from the result just to validate the target before persisting the publish intent, then unconditionally discard that snapshot and have `finish` redo the identical walk and MMR build a second time to actually write it. `advance` now keeps the snapshot it already built and hands it to `finish` (`finish` takes a new `prebuilt: Option<AncestrySnapshot>`, trusted only when its repository/full_ref/generation/tip exactly match the pending `Transaction`; crash recovery via `recover`, which only ever has a `Transaction` read back from disk, keeps passing `None` and rebuilding as before). `cargo bench -p mkit-benches --bench history_mmr --features history-mmr` (10-sample criterion A/B, this branch's host): `publish/50` 18.8ms → 7.5ms (−60%, p=0.01), `publish/250` 20.9ms → 12.5ms (−40%, p<0.01). **SemVer:** none — `finish` is private to `history::ancestry`; no public API change.
+
+  A second, more aggressive change was prototyped alongside this — a `first_parent_chain_from` fast path that, on a plain fast-forward publish, spliced the previous publish's already-verified chain onto a short newly-walked suffix instead of re-walking `target`'s entire ancestry from `store` every time (the `mkit commit` steady state would have gone from O(history depth) to O(new commits) per publish; a new `history_mmr/sequential_publish` bench added to measure it is kept). It was reverted before landing: a correctness review found it stopped re-verifying the reused prefix against `store` on every publish, silently narrowing the "validate the target from verified objects before persisting intent" guarantee `advance`'s own doc comment asserts — a chain whose objects had been locally corrupted or partially GC'd out from under a stale snapshot would no longer be caught at publish time on the fast path (still caught, but only later, the next time anything calls `AncestrySnapshot::load`, which does its own independent full re-walk). Trading that integrity check for speed is not this change's call to make silently, so it's left as a documented follow-up rather than shipped.
+
+- *(core)* eliminate per-chunk allocate-and-copy in the streaming FastCDC reader. `ChunkReader` (the only chunker used for files above `worktree::CHUNK_THRESHOLD` — `mkit add`, and `status`/`diff` on any stat-mismatched large file) copied every byte twice per chunk: `fill` read into a separate 64 KiB scratch buffer and `extend_from_slice`d it into a growing window, then `next_chunk` cut the window with `Vec::split_off` (a fresh allocation plus a memcpy of the remainder) and `mem::replace`. It now reads into a single fixed `4 * max_size` (1 MiB) buffer with `start`/`end` cursors advanced in place, compacting with `copy_within` only once the tail runs out of room (amortized over several `max_size` windows, not every chunk); a new `next_chunk_ref` returns a borrowed `&[u8]` for callers that don't need to own the bytes, and `worktree::store_large_file_streaming` uses it to avoid a further per-chunk copy. Chunk boundaries are unchanged (same `FastCdc::cut` over the same bytes) — the existing `streaming_matches_in_memory_*`/`proptest_streaming_matches_in_memory` tests all ran on inputs under the 1 MiB window and so never actually exercised `fill`'s `copy_within` compaction path; a new `streaming_matches_in_memory_iterator_across_multiple_compactions` test (6 MiB, forcing several compactions) closes that gap, checking both `next_chunk` and `next_chunk_ref` output against `ChunkIterator`. New `cargo bench -p mkit-benches --bench chunker_streaming` suite (in-memory `Cursor` source, windowing cost isolated from BLAKE3/store I/O, 10-sample criterion A/B, this branch's 4-core host): 8 MiB 5.14ms → 4.63ms (−8.99%, criterion-reported CI [−10.4%, −7.6%], p<0.01), 32 MiB 22.14ms → 18.02ms (−16.7%, criterion-reported CI [−18.9%, −14.6%], p<0.01). **SemVer:** additive — `mkit-core::chunker` gains `ChunkReader::next_chunk_ref`; `ChunkReader::new`/`next_chunk`'s signatures and behavior are unchanged. Minor version bump, not breaking.
+
+- *(core,cli)* parallelize push-plan delta encoding across rayon. `transfer::plan_pack` used to `store.read` + `delta::encode` (disk read + block-hash-table build + greedy scan, all sequential) once per delta candidate while planning a push; `transfer::plan_pack` now delegates that loop to a new `transfer::plan_pack_with(..., encode_deltas)` batch callback, and `mkit-cli`'s push path passes a rayon fan-out (`encode_delta_candidates_batch`, mirroring the existing pack-compression/signature-verification fan-outs) instead of the built-in sequential one. `cargo bench -p mkit-benches --bench delta_plan_fanout` (new suite, isolating `delta::encode` over synthetic 64 KiB near-duplicate chunks, 4-core host): 256 candidates 46.99ms → 14.79ms (3.18x); the crossover is essentially immediate (each candidate already costs ~0.17ms, well above rayon's dispatch overhead), so pushes touching more than a handful of changed blobs benefit. **SemVer:** additive — `mkit-core` gains new public items (`transfer::plan_pack_with`, `transfer::DeltaCandidate`, `transfer::encode_delta_candidate`); `transfer::plan_pack`'s signature and behavior are unchanged. Minor version bump, not breaking.
+
+- *(core,cli)* parallelize a single large file's chunk hashing across rayon. Every existing `add`/push/fetch fan-out (worktree hashing, pack compression, signature verification, delta encoding) parallelizes across independent *files or objects*, which does nothing for a worktree with one huge file — exactly the "Add + Commit One 1 GiB File" shape on the performance page. `worktree::store_large_file_streaming_with` (the new optional batched path) buffers up to 64 FastCDC-cut chunks per batch and hands each batch to a caller-supplied `hash_chunks` callback instead of hashing chunks one at a time; `hash_file_with_metadata_with` exposes that callback for file ingest; `hash_file_with_metadata` retains the borrowed sequential path. `mkit-cli`'s `add` path (`commands::add::hash_pending`) passes a rayon fan-out once a batch is large enough to amortize dispatch cost (4 chunks/thread, mirroring the existing `hash_fanout_threshold` shape) — but only when `add`'s own per-file fan-out (`hash_pending_batch`) is NOT already running in parallel: nesting a second fan-out into an already-saturated rayon pool was found (during review) to be unvalidated under worker contention, not the assumed clean scaling the original single-file benchmark showed against an idle pool, so `hash_pending_batch`'s `par_iter` branch now hashes each file's chunks sequentially instead. The original `cargo bench -p mkit-benches --bench chunk_hash_fanout` measurements (4-core host, before combining with the reader optimization above) found that per-batch crossover is a wash at 8 chunks (0.641ms vs 0.646ms) but wins clearly from 16 chunks (1.477ms → 1.256ms, ~15%) through a full 64-chunk batch (9.774ms → 8.164ms, ~16%); end-to-end streaming ingest of one real file (`hash_file_with_metadata` vs `_with`'s rayon path) is 8 MiB 107.2ms → 48.4ms (2.2x), 32 MiB 390.1ms → 230.6ms (1.7x), 128 MiB 2095.7ms → 1106.9ms (1.9x). **SemVer:** additive — `mkit-core` gains new public items (`worktree::store_large_file_streaming_with`, `worktree::hash_file_with_metadata_with`, `worktree::store_chunk_blob`); `worktree::hash_file_with_metadata`'s signature and behavior are unchanged. Minor version bump, not breaking.
+
+- *(cli)* `remote_dispatch::packmap::verify_new_object_signatures`'s parallel path (post-fetch Ed25519 signature verification, issue #692) now processes a 512-entry chunk cap decoupled from the small, pool-size-scaled crossover threshold that decides whether to parallelize at all — previously both used the same value (as few as `2 * num_threads`, e.g. 16 on an 8-core host), so a large legitimate fetch (thousands of newly-signed objects) paid one rayon dispatch per ~16 entries (roughly 625 dispatches for 10,000 objects) purely to bound how much extra work a hostile fetch's first bad signature could force. The bound itself only needs to be small relative to an unbounded fetch, not tiny relative to core count: 512 keeps a hostile remote's forced extra work small and fixed while cutting the legitimate-fetch case to ~20 dispatches. **SemVer:** none — internal constant/behavior change, no public API change.
+
+- *(core,cli)* `mkit-cli`'s parallel delta-encoding fan-out (`encode_delta_candidates_batch`, added above) now caches repeated base objects within batches of at most 64 candidates and a 64 MiB cache budget, with per-candidate reads for singleton or nonfitting bases — several chunks of one file commonly diff against the same prior chunk, and fanning that out across rayon without deduping turned what used to be redundant-but-serialized reads into concurrent redundant reads and concurrent redundant in-memory copies of the same bytes. New `transfer::encode_delta_candidate_with_base` (mkit-core) is the per-candidate unit that takes already-read base bytes instead of reading `base` itself; `transfer::encode_delta_candidate` is unchanged for the sequential default's benefit. **SemVer:** additive — new public `transfer::encode_delta_candidate_with_base`; existing behavior unchanged.
+
+- *(core)* stop decoding a `Tree`/`ChunkedBlob` twice on every `ObjectStore::read_object` call. `read_object` used to call `Self::read` (which, for a merkelized type, already `deserialize`s the bytes once to recompute the BMT-root id for the integrity check) and then call `serialize::deserialize` a *second* time on the same bytes to produce the `Object` it returns — two full tree/chunked-blob parses for every read, on one of the hottest paths in the codebase (`read_object` is the primitive every tree-walker, `diff`, `blame`, `merge`, `rebase`, `restore`, `stash`, `bisect`, and `graph` op reads commits and trees through). New `object::verified_id_and_object` decodes once and hands back both the verified id and the decoded `Object` (`None` for a byte-hashed type, or when the merkle-decode itself failed — the same fallback-to-`hash(bytes)` `object_id_from_bytes` already had, now shared by both); `read_object` reuses the decoded object directly instead of decoding again, and `object_id_from_bytes` is now a one-line wrapper around the same function so the two callers can never drift. Alongside it, `serialize::read_tree` stopped cloning every entry's name into a separate `prev: Option<Vec<u8>>` purely to compare it against the *next* entry's name for the ordering check — the just-pushed `TreeEntry` already owns that name, so `entries.last()` gives the same comparison for free.
+
+  Caught in review: the inherent-method fix alone missed the actual hot path. `store::ObjectSource` (the trait `diff::load_tree`, `worktree::blob::LoadedBlob::load`, and every other `S: ObjectSource + ?Sized`-generic caller actually call through) has its own default `read_object` (`deserialize(self.read(h)?)`) — the exact same double-decode pattern — and `impl ObjectSource for ObjectStore` only overrode `read`/`read_unverified`, not `read_object`, so Rust's static trait dispatch kept resolving every one of those generic call sites to the unoptimized default even though the concrete type was always `ObjectStore`. `impl ObjectSource for ObjectStore` now also overrides `read_object` to delegate to the fixed inherent method, so the fan-out of callers that motivated this change in the first place actually get it. Also, `read`/`read_object`'s two independent (and, after the first pass, textually duplicated) `StoreError::HashMismatch { expected: to_hex(..), actual: to_hex(..) }` constructions are now one shared private `check_hash` helper. New tests pin both fixes directly: `read_object_deserialises_tree`/`read_object_detects_tree_corruption_via_store_and_trait` call `read_object` through `&dyn ObjectSource` specifically (the same static-dispatch shape `load_tree`/`LoadedBlob::load` use) and assert it matches the inherent method on both the happy path and a corrupted-tree `HashMismatch`.
+
+  A second, broader review round (8 parallel angles against the full `origin/main...HEAD` diff) found one more sibling gap, independently flagged twice: `EphemeralSink` (the in-memory overlay `diff`/`status` read staged trees through) implements `ObjectSource` too but never overrode `read_object` either, so its store-fall-through path (a miss in the private map) also fell back to the trait's double-decoding default. `impl ObjectSource for EphemeralSink` now overrides `read_object` the same way: an overlay hit decodes the already-trusted bytes once directly, a miss delegates to `self.store.read_object`, reusing the now-fixed store-side decode. New `ephemeral_sink_read_object_tree_overlay_and_fallthrough` test covers both paths plus the store-fall-through corruption case, through `&dyn ObjectSource`. The rest of that review round's findings were all on files outside this diff (`history/ancestry.rs`, `sign.rs`, `remote_dispatch/packmap.rs` — pre-existing code from already-merged PRs) and are out of scope here; this diff's own code was independently confirmed by two review angles to reproduce prior behavior exactly, backed by direct regression tests.
+
+  New `cargo bench -p mkit-benches --bench object_read` suite (release, criterion A/B, this branch's host): `deserialize` (in-memory decode only, no store) 100 entries 6.98µs → 5.58µs (−20.0%), 1000 entries 64.9µs → 52.9µs (−18.4%); `read_object` (through the store: read + id-verify + decode) 100 entries 204.3µs → 131.0µs (−35.9%), 1000 entries 796.0µs → 573.3µs (−28.0%) — measured against the inherent method directly, so these numbers were unaffected by the trait-dispatch gaps above; they now also apply to calls made through `ObjectSource`, on both `ObjectStore` and `EphemeralSink`. All 790 mkit-core tests pass, including `read_detects_corruption`/`read_rejects_oversize_on_disk`/`rejects_unsorted_tree_entries`, which pin that a corrupt or out-of-order tree is still rejected exactly as before. **SemVer:** none — `verified_id_and_object` and `check_hash` are private; `ObjectStore`'s, `EphemeralSink`'s, and `ObjectSource`'s public signatures are unchanged, and both `impl ObjectSource` blocks gaining a `read_object` override changes behavior (faster, same results) but not the trait's documented contract.
+
+- *(core,cli)* parallelize a `ChunkedBlob`'s per-chunk read fan-out during checkout/clone/reset/restore — the read-side counterpart of the ingest-side chunk-hashing fan-out `add` already had. `ops::restore::restore_blob`'s `ChunkedBlob` arm read every chunk (open + BLAKE3-verify + decode, via `ObjectStore::read_object`) sequentially, one at a time, even though each chunk's read is independent of every other chunk in the same file — the exact "add's ingest side is 4-core, checkout's read side is 1-core" gap `chunk_hash_fanout`'s own doc already names for the write direction. New `ops::restore::restore_tree_to_worktree_with` takes an explicit `read_chunks` batch callback (mirroring `worktree::store_large_file_streaming_with`'s `hash_chunks` shape, for the same reason: `mkit-core` has no thread-pool dependency of its own, so it stays usable from wasm targets) in place of a built-in sequential loop; chunks are read in bounded batches of `RESTORE_CHUNK_BATCH` (64, matching `worktree::STREAM_HASH_BATCH`'s 16 MiB window) instead of one at a time, and a batch of raw bytes shorter or longer than its input is a new typed `RestoreError::ChunkBatchLengthMismatch` rather than a silent desync. `restore_tree_to_worktree` (unchanged signature) is now a thin wrapper passing a sequential default. `mkit-cli`'s new `restore_fanout::read_chunks_fanout` wires a rayon fan-out into every checkout/clone/reset/restore/sparse-checkout call site (`commands::{checkout, clone, reset, restore, sparse_checkout}` and `commands::restore_worktree_and_index`), using the same "sequential below a threshold, `par_iter` at or above it" crossover shape as `commands::add`'s own chunk-hashing fan-out (`crate::fanout::try_map_seq_or_par`).
+
+  New `cargo bench -p mkit-benches --bench restore_chunk_fanout` suite (4-core host): `batch/N_chunks` (isolated per-batch crossover, sequential vs rayon) — 8 chunks is a wash (0.164ms vs 0.170ms), 16 chunks already wins clearly (0.343ms vs 0.265ms, ~23%), 64 chunks (a full batch) 1.441ms vs 0.638ms (~56%); `file/N_mib` (end-to-end restore of one real FastCDC-chunked file, sequential `restore_tree_to_worktree` vs fully rayon-fanned `restore_tree_to_worktree_with`) — 8 MiB 5.893ms → 4.745ms (~19%), 32 MiB 26.458ms → 21.042ms (~20%), 128 MiB 115.293ms → 83.199ms (~28%). The end-to-end win is smaller than the isolated batch win because a restored chunk's cost also includes a sequential `write_all` into one shared tmp file (never fanned out — file writes must stay in chunk order), so parallelism only covers the read/verify/decode share of each chunk. All existing `ops::restore` unit tests (including `restore_chunked_blob_reassembled`/`restore_rejects_chunked_total_size_mismatch`) and `mkit-cli`'s checkout/clone/reset/restore/sparse-checkout integration tests pass unchanged; `cargo clippy --all-targets --all-features -- -D warnings` and `cargo fmt --check` are clean. **SemVer:** additive — `mkit-core` gains `ops::restore::restore_tree_to_worktree_with` and `RestoreError::ChunkBatchLengthMismatch` (a new variant in a public exhaustive error enum can require downstream match updates); `restore_tree_to_worktree`'s signature and behavior are unchanged.
+
+- *(core)* `mkit-core::merkle`'s BMT inclusion-proof construction is now byte-identical to `commonware_storage::bmt::Proof` at the pinned `2026.9.0` train, replacing the prior provisional format. `Proof` is a new public struct (`leaf_count: u32`, `siblings: Vec<Hash>`) encoded as `u32 BE leaf_count ‖ varint(n) ‖ n × 32-byte digest` via `commonware-codec`, decoded through `Proof::decode(bytes, max_items)` with allocation bounded to `max_items * MAX_LEVELS` (`MAX_LEVELS = 32`) before any sibling is read. Sibling selection is ported from upstream: level-major bottom-up, index-ascending, omitting a sibling that would be a node's own odd-trailing duplicate or is already covered by another proven position in the same proof — the prior format always emitted the self-duplicate. Range (`build_tree_entries_range_proof`/`build_chunks_range_proof`) and multi-leaf (`build_tree_entries_multi_proof`/`build_chunks_multi_proof`) proofs are new. `build_{chunk,tree_entry}_inclusion_proof`/`verify_{chunk,tree,}_inclusion_proof` are replaced by `build_{chunk,tree_entry}_proof` and id-based verifiers — `verify_tree_entry`, `verify_chunk`, and their range/multi counterparts — which check against the object's **id** (via the new `wrap_id(ObjectKind, inner_root)` helper) rather than the bare pre-domain-wrap inner root the old API handed callers, closing an inner-root-vs-id confusion footgun (issue #1015 §Security); `verify_chunk` and its range/multi counterparts additionally reject position 0 (the `ChunkedBlob` metadata leaf) outright. A new native-only cross-check test (`merkle::tests::proofs_match_commonware`) proves byte-identity and mutual verifier acceptance against `commonware_storage::bmt` across randomised trees and single/range/multi positions; golden vectors live under `rust/tests/golden/proofs/` (SPEC-MERKLE-OBJECTS §5.6). No change to any object id, signing byte, or existing golden vector — only the *proof* bytes and API move. **SemVer:** breaking — `mkit-core::merkle`'s proof-related public API (types and function signatures/bytes) changed; `compute_tree_id`/`compute_chunked_id` and every other object-identity function are unchanged. Sanctioned by SPEC-MERKLE-OBJECTS §5's now-removed provisional carve-out and CONTRIBUTING's pre-production policy; the crate version bump itself happens in the release-prep PR, not here.
+
+- *(core)* SPEC-HISTORY-PROOF's ancestry primitive switches from a Merkle Mountain Range (MMR) to a Merkle Mountain Belt (MMB) — `commonware-storage`'s newer structure (<https://arxiv.org/abs/2511.13582>), already available in the exact pinned version (`=2026.9.0`) mkit depends on, so this needed no dependency bump. An MMR requires strictly decreasing peak heights, so a single append can cascade up to `O(log N)` internal-node merges whenever a run of same-height peaks collapses at once (e.g. crossing a power-of-two leaf count); an MMB allows up to two same-height peaks and merges at most one pair per append, bounding the worst case to a constant instead of only the amortized average — the property that matters for `mkit commit`'s one-append-per-publish pattern. `CommitHistory` (`mkit-core::history`) now wraps `commonware_storage::merkle::mmb::mem::Mmb` instead of `merkle::mmr::mem::Mmr`; both are the same generic `Mem<Family, Digest>` machinery (`Clone`, batch API, pruning, proof verification) with only the `Family` (peak/position topology) differing, so the swap was a mechanical type-and-terminology change confined to `history.rs` — `ancestry.rs` and everywhere else in the codebase only ever used mkit's own `Position`/`InclusionProof`/`CommitHistory` wrappers, never MMR types directly. `HistoryError::Mmr` is renamed `HistoryError::Mmb`; the `history-mmr` Cargo feature and `.mkit/history*` paths keep their names (identifiers, not a structural claim) per SPEC-HISTORY-PROOF's updated preamble.
+
+  This changes on-disk roots and `InclusionProof` bytes for the same commit sequence (different forest topology), and pre-production has no back-compat requirement for it (confirmed with the maintainer) — no version bump, dual-format support, or migration path, just an in-place spec rewrite. SPEC-HISTORY-PROOF §§1–5 are updated throughout (root/proof formulas, the `digests` peak-iteration order, which is now non-increasing rather than strictly decreasing since MMB peaks can tie); mkit also does not adopt the same paper's "Pyramid" P-MMB bagging variant, since it is not yet implemented in the pinned commonware release (mkit keeps `Bagging::ForwardFold`, matching what F-MMB uses).
+
+  `cargo test -p mkit-core --features history-mmr` (800 tests, including two pre-existing MMR-generic property tests that now exercise MMB unchanged) and mkit-cli's `history_mmr_*`/`reflog_and_amend` integration tests all pass unmodified — the swap changes proof/root *bytes*, not any documented behavior. Measured effect: `cargo bench -p mkit-benches --bench history_mmr --features history-mmr`'s `publish`/`load` series (through the full fsync-heavy durable-publish pipeline) show no measurable difference — expected, since total node count differs from MMR by under 2% at these sizes and shrinks below 0.1% by a few thousand commits (computed directly: N=250, MMR 494 nodes vs MMB 493; N=10,000, 19,995 vs 19,987), so it was never going to show through multi-millisecond fsync noise. A new in-memory-only `bench_in_memory_build` (batched `extend` over the whole chain, no I/O) shows a small, consistent ~5–8% improvement across N=50..5000, matching that same node-count delta. A separate attempt to isolate the actual claimed property — worst-case single-`append` latency over a sequence of individual appends — was prototyped but removed: allocator/scheduler noise in this sandbox dominated the microsecond-scale effect being measured and produced a directionally contradictory result at one size, so it would have been misleading to ship. The structural claim itself (node-count formulas, bounded merge-per-append, and the proof-size bound for the most recent leaf) is verified directly against `commonware-storage`'s own source and test suite (`mmb::proof::test_last_element_proof_size_is_two`), not re-derived here. **SemVer:** breaking for any consumer that persisted ancestry snapshots or `InclusionProof` bytes under the prior MMR-based format, or matched on `HistoryError::Mmr`; the feature is opt-in (`history-mmr`) and the project has no production deployments of it.
+
+- Sparse proofs and caches move to v2 canonical Tree witnesses. Verification
+  requires the independently requested Tree ID and derives the exact selection;
+  recursive witnesses establish completeness. Caches use `.witness` files;
+  verification returns the derived entries directly.
+
+- The staged index accepts only checksummed v3. Unsupported or corrupt indexes
+  fail safely, including before GC; there is no migration or automatic rebuild.
+
+- History proofs now describe canonical first-parent ancestry in explicit
+  generations, with locally trusted contextual descriptors and recoverable
+  publication. Bounded complete snapshots use O(chain length) reconstruction;
+  obsolete journal backends and their runtime dependencies are removed.
+
+- The keys Worker stores authoritative names and replay records in per-key
+  SQLite Durable Objects, with no KV fallback. Repository Workers use the
+  shared transactional replay ledger without obsolete idempotency tables.
+
+- *(cli, internal)* `mkit-cli`'s six "sequential below a per-thread threshold, rayon `par_iter` at or above it" fan-outs (`commands::add`'s per-file and per-chunk hashing, `remote_dispatch`'s pack-compression and delta-encoding, `remote_dispatch::packmap`'s signature verification) each hand-duplicated the branch-and-collect boilerplate around the shared `fanout::threshold` formula. New `fanout::map_seq_or_par`/`fanout::try_map_seq_or_par` factor that shape out for the four call sites it fits exactly (by-reference, in-order, infallible or `Result`-collecting); `prepare_delta_batch` (consumes by value) and `verify_new_object_signatures` (deliberately chunks its parallel path — see the entry above) keep their own loops since forcing either into the shared shape would need extra generic machinery to claw back what a bespoke loop gets for free. No behavior change. **SemVer:** none — `pub(crate)`-only, no public API surface.
+
+- bump the commonware crate family from the `2026.7.1` release train to `2026.9.0` across every Rust workspace (`rust/`, `contrib/signers/`, `apps/repo-worker`, `apps/vcs-worker`) (MKIT-2). Notable upstream changes this required adapting to:
+  - `merkle::full::Merkle::{apply_batch, sync}` now take `self` by value; `CommitHistory`'s journaled backend handles a failed mutation by leaving the handle poisoned (`HistoryError::Poisoned`) instead of panicking, and `root()`/`len()` fall back to the last known-good value rather than requiring a `Result`.
+  - `commonware-runtime` 2026.9.0 added a per-storage-directory advisory `.hold` file lock, which deadlocked opening a second branch's history journal in the same process; `CommitHistory` now shares one bootstrapped `Context` per `<mkit_dir>/history` directory across every branch opened in-process (see `docs/INVARIANTS.md`, "One commonware storage Context per history dir per process").
+  - `threshold::recover` dropped its `Faults` generic and `sharing::Mode` lost its `Default` impl; `mkit-attest`'s BLS threshold signer names `Mode::NonZeroCounter` explicitly (same value the old default resolved to — pinned by a new golden-vector test).
+  - `commonware_parallel::Strategy` can no longer be implemented outside the `commonware-parallel` crate (`Manual::new` was removed); `pack_shard.rs`'s spy-based `CountingStrategy` test was removed accordingly (see `docs/INVARIANTS.md`).
+  - blst is now opt-in upstream (only pulled in via `commonware-cryptography`'s `std` → `bls12381` feature chain), not unconditional as the 2026.7.0-era comments said.
+  - Windows: see the Removed entry above — this is what motivated dropping Windows as a supported target.
+
+### Deprecated
+
+- `mkit-transport-enc` is deprecated: there is no maintained server for it.
+  Use SSH (`mkit serve`) or Connect.
+
+### Removed
+
+- **`mkit serve --http` and `mkit serve --listen-enc`.** `mkit serve <PATH>`
+  is now only the `mkit+ssh://` forced-command server (SSH-frame protocol on
+  stdin/stdout, unchanged). Its HTTP and encrypted listeners are gone, so the
+  CLI carries no HTTP server stack or `SQLite`. The removed flags are clap
+  usage errors (exit 64). Removed with them: `--http-token`,
+  `--unsafe-allow-any-http-peer`, `--enc-authorized-peers`,
+  `--enc-server-key`, `--unsafe-allow-any-enc-peer`,
+  `--enc-idle-timeout-secs`, `--enc-handshake-timeout-secs`, and
+  `mkit-cli`'s `http-transport` cargo feature (`enc-transport` stays: it is
+  the deprecated `mkit+enc://` client). The pre-production policy allows the
+  removal without a deprecation period.
+
+- **Standalone server binary and container image.** There is no `mkit-server`
+  binary, release archive or `ghcr.io` container image, and no native
+  SQLite/S3/filesystem server deployment. Serve repositories over SSH with
+  `mkit serve`, or on Cloudflare Workers with the `mkit-server-worker`
+  adapter. The `mkit-server` library crate and the Workers adapter remain.
+
+- **`mkit-transport-connect`'s `server` cargo feature (breaking).** The
+  axum-hosted server that backed `mkit serve --http` is gone, with its
+  public API: `serve`, `router`, `TransportServer` and
+  `map_transport_error`, and the `axum` and `connectrpc-health`
+  dependencies. The crate is now the `mkit+https://` client
+  (`ConnectTransport`) only; serve `mkit.transport.v1` with the `mkit-server`
+  library or its Workers adapter.
+  Removing a published feature and public items is semver-breaking, so the
+  next release of `mkit-transport-connect` (and, with lockstep versioning,
+  every `mkit-*` crate) is **0.5.0**, done at the release that merges the
+  `mkit-server` work to `main` (cargo-semver-checks runs at the tag,
+  `crates-publish.yml`). crates.io lists `mkit-cli` as its only published
+  dependent, and no published `mkit-cli` enables the feature by default.
+  `mkit-server-conformance`'s legacy `mkit serve --http` wire baseline is
+  removed with it.
+
+- Compatibility-only index readers/migration APIs, legacy history APIs, the
+  hash-only rename API, and redundant sparse-selection APIs. Pre-production
+  development supports the current formats without backward-compatibility shims.
+
+- **Windows is no longer a supported build, test, or release target (MKIT-6).** commonware-runtime `2026.9.0`'s non-Linux storage-sync path calls `libc::sync()`, which does not exist on `x86_64-pc-windows-msvc` — the workspace and its test suite (not just the default-feature `mkit` binary) no longer build there. Rather than ship a Windows CI/release leg that cannot actually build or test the workspace, or maintain an untested Windows-only subset, Windows was dropped: the `windows-smoke` CI job, the `x86_64-pc-windows-msvc` release leg (and its `.zip` archive), the `install.ps1` installer, the Scoop packaging manifest and `release-verify.yml`'s Scoop channel check, and the `windows-credential` leg of the `keystore-backends` CI matrix are all gone. `mkit-keystore`'s `backend-windows-credential` feature and its `BackendKind::WindowsCredentialManager` variant were removed — `"windows-credential"` is now an unrecognized backend name (`key backend: ...` / exit `CONFIG_ERROR`) rather than a compiled-in-but-platform-unavailable one (previously exit `UNAVAILABLE`, "requires Windows"). Removing a public enum variant from a published crate is semver-breaking: `mkit-keystore` (and, per the workspace's lockstep versioning, every `mkit-*` crate) needs a `0.5.0` release, not `0.4.3`, to ship this. Windows users should run mkit under WSL, which uses the Linux binary — see `docs/INVARIANTS.md`'s "Windows is not a build, test, or release target" entry.
 
 ### Fixed
 
 - *(core)* Pack writer no longer zstd-compresses a payload over `MAX_RAW_OBJECT_SIZE`, which readers reject.
+
 - *(core)* Pack framing no longer overflows a 32-bit `usize`: a
   `payload_len` near `u32::MAX` made `pos + payload_len` trap on wasm32
   (release builds keep `overflow-checks`) in `PackEntries::new`,
   `delta_base_hashes` and, through them, `verify_closure_packs` (exported
   by mkit-wasm). It is now `PackError::UnexpectedEof`; a wasm32 test in
   `mkit-core-wasm-check` pins it.
+
 - *(core)* The closure BFS queues each id once. A tree whose entries all
   name one object no longer grows the queue per reference; fetch order is
   unchanged.
+
 - *(core)* The disclosure builder no longer panics on a `ChunkedBlob`
   range whose `offset + len` overflows `u64` (e.g.
   `mkit prove --range 10:18446744073709551615`) or on a chunk shorter
@@ -1356,207 +1574,87 @@ train).
   ones no conformant builder has ever produced.
 
 - *(core)* `advance`'s advisory `write_scrub_state` call (`history-mmr`) no longer fails the whole publish if the write itself fails — `finish` has already durably committed the ref move and ancestry snapshot by that point, so a caller must not see that succeeded operation reported as a failure; losing this purely-advisory bookkeeping write only costs the next publish some extra re-verification, never correctness. Found by code review alongside the `ScrubState` panic above; regression test forces the write to fail (a directory occupies the scrub file's path) and confirms the publish still succeeds.
+
 - *(core)* `decide_chain`'s full-walk fallback (`history-mmr`, on a completed scrub lap or a stale re-verification schedule) no longer re-walks and re-reads the fast-forward suffix a second time — it splices the suffix already verified moments earlier onto a fresh walk of just the reused prefix, which `first_parent_chain(store, target) == first_parent_chain(store, d.tip) ++ suffix` makes provably identical to a full walk of the whole chain. New regression test plants corruption deep in the prefix and confirms the spliced fallback still catches it, proving the optimization didn't drop real verification along with the redundant re-read.
+
 - *(cli)* `mkit fetch`'s tracking-ref snapshot (used to report which refs moved) now uses the same parallel `list_remote_refs_parallel` fan-out every other ref-listing call site already got when that fan-out was added — this one spot was missed.
+
 - *(core)* `HistoryError` is now `#[non_exhaustive]`, matching `GcRootsError`'s existing convention in the same crate — which `commonware-storage` structure backs the ancestry proof (the `Mmb` variant's own name is already the result of one such internal rename) is an implementation detail, not part of this error type's contract, and should not force a breaking change on downstream exhaustive matches the next time it changes.
+
 - *(core)* `RefError` is now `#[non_exhaustive]` too, for the same reason and found in the same code-review pass — it gained `RefBatchLengthMismatch` in this same set of changes with no such marker, which would have made that addition a breaking change for any downstream exhaustive match.
+
 - *(core)* `decide_chain`'s two "no compatible previous generation to fast-forward from" branches (no prior publish at all, and a first-parent search that never reaches the previous tip) built an identical fresh `ChainDecision::NewGeneration` — full walk plus a fresh `ScrubState` — via separately hand-copied code; factored into one `new_generation` helper both branches call, found as duplication by code review. No behavior change.
+
 - *(core)* `decode_descriptor_and_chain`'s minimum-payload-length check and `DESCRIPTOR_HEADER_MAX_LEN` each independently hard-coded the 143-byte fixed descriptor header size (as `175` — `143 + 32` for the trailing checksum — and `143`, respectively), found as duplication by code review. Both now derive from one new `DESCRIPTOR_HEADER_LEN` constant. No behavior change.
+
 - *(core)* `read_prefix` (`history-mmr`'s bounded prefix read, used by `read_current_descriptor`) now preallocates its buffer to the caller's known `max_bytes` bound instead of letting `read_to_end` grow it via generic doubling — found as a minor inefficiency by code review; `max_bytes` is small in every call this crate makes (currently `DESCRIPTOR_HEADER_MAX_LEN`, under 64 KiB), so the bound was always cheap to preallocate outright. No behavior change.
+
 - *(cli)* `remote_dispatch::packmap::verify_slice` (post-fetch signature verification's per-chunk read step) now drops each read object immediately unless it's a Commit/Remix/Tag, instead of retaining every object in a chunk — Blob/Tree/ChunkedBlob/Delta included — for the rest of the call even though neither the batch path (`collect_batch_entries`) nor the fallback (`verify_one_object`) ever inspects them. Found by code review: a single `Blob` can be up to `worktree::CHUNK_THRESHOLD` (1 MiB — mkit chunks anything larger), so a `verify_chunk_size()`-sized chunk (up to 512 entries) dominated by such blobs could previously hold up to ~512 MiB of fully decoded, never-inspected object bytes resident at once on a fetch a hostile or simply blob-heavy remote controls the shape of. New regression test interleaves unsigned Blob entries with signed (and, separately, tampered) commits and confirms verification still correctly accepts/rejects — the filtering doesn't drop or misattribute a neighboring entry. No behavior change to what's accepted or rejected, only what's held in memory while deciding.
 
 - Shared browser login across all seven web pages, with a seven-day HttpOnly session, separate in-memory signing unlock, session-scoped workspace queries, and a repeatable navigation/refresh/sign-out verification workflow.
 
 - *(core)* `worktree::store_large_file_streaming_with`'s and `transfer::plan_pack_with`'s `hash_chunks`/`encode_deltas` batch-callback cardinality contracts (exactly one result per input item) are now enforced with a typed error (`WorktreeError::ChunkBatchLengthMismatch`, `StoreError::DeltaBatchLengthMismatch`) instead of, respectively, silently trusting the result (`store_large_file_streaming_with` had no check at all) or panicking (`plan_pack_with`'s prior `assert_eq!`) — a buggy or third-party batch callback now fails the operation cleanly rather than either corrupting a `ChunkedBlob` manifest or crashing the process mid-push. Chunk hashing contract failures return `exit::SOFTWARE` (70, sysexits `EX_SOFTWARE`); push retains its existing general-error exit code for delta callback failures. Callbacks remain responsible for preserving result order. **SemVer:** new variants in public exhaustive error enums can require downstream match updates; both functions' happy-path behavior is unchanged.
+
 - *(cli)* Closed a gap where `mkit pull`/`mkit fetch` (via `remote_dispatch`'s per-branch fast-forward and unpack/publish locks) and `mkit status`'s opportunistic stat-cache refresh took the worktree lock directly instead of through `commands::acquire_worktree_lock`, silently skipping the "this root is being served by `mkit serve`" warning that `commit`/`checkout`/`gc` already print in the same situation (SPEC-CONCURRENCY §3.1). `commands::warn_if_served` is now called at all four sites; new `serve_guard.rs` regression test (`pull_warns_when_root_is_being_served`).
+
 - Clarified docs-site copy, aligned controls and overlays with Pigment, added layout-matched loading placeholders and grouped navigation, and stabilized virtualized lobby scrolling across tab resume and row resizing. Removed the development Agentation integration. No public API or format changes.
+
 - Worker writes rejected by quotas or rate limits no longer allocate replay
   records, including chat posts and reactions. Existing operation retries still
   reuse their reservation or saved reply without a second quota charge.
-- Native authenticated transport requests send the required envelope-version
+
+- Authenticated transport requests send the required envelope-version
   header. External signing negotiates the advertised raw-byte or opaque-handle
   key form, including the bundled CTAP signer.
+
 - Restaging a regular file as a symlink preserves a valid Blob target even when
   the old file used a chunked representation.
+
 - Ref lock filenames stay bounded for valid long and nested ref names.
+
 - HTTP and S3 shard downloads process successful responses while admitting
   workers, so an available quorum is not blocked by redundant slow requests.
+
 - Git correspondence audits now derive imported fields and graph edges from
   retained source bytes, verify pinned signatures and exact provenance claims,
   and work without the import private key.
+
 - File comparisons, restaging, merge shortcuts and exact rename detection now
   recognize equal content across valid Blob and ChunkedBlob representations.
   Content-comparison and source-aware snapshot APIs propagate malformed or
   missing chunk errors. Status uses the same content-aware rename detector.
+
 - Pack and packmap consumers reject bytes or shard manifests that do not match
   the requested content key before unpacking or publishing effects.
+
 - All local ref mutations participate in the same per-ref lock, including
   unconditional writes, deletion, tags and remote refs. File-transport writes
   serialize every condition through their separate transport lock.
+
 - External signers receive a signing request only after a separate compatible
   capabilities response is validated.
+
 - Signed transport writes use destination-bound auth v2, including the content
   commitment, repository, validity and stable nonce. Worker effects, quota and
   replay results commit atomically; immutable uploads can resume without a
   second quota charge. Repository config cannot enable ambient signing. Only
   the current auth v2 contract is supported.
+
 - File-fetch staging now bounds retained pack payload, disk usage and chain
   counts; shard downloads share process-wide memory and concurrency budgets.
 
-### Performance
+### Security
 
-- *(core)* `ops::diff::myers_changed` (the line-level Myers edit script behind `unified_hunks`/`enumerate_hunks` — `diff`, `show`, `add -p`, and `merge_blob_3way`'s 3-way diff) now elides any common **leading** run of identical lines before running its O(ND) core on the (usually much smaller) remainder — the same "diff only the changed region" step git's `xdiff` and every other practical diff engine apply before their own O(ND) search. A real edit almost always leaves most of a file as a shared prefix (a single changed line, an appended block); the old code always sized its `v`/backtrack-`trace` state off the *whole* `old.len() + new.len()`, regardless of how small the actual edit was. New elision logic in `myers_changed` finds the shared prefix with one cheap linear scan, runs the renamed `myers_changed_core` (the previous function body, unchanged) on just the post-prefix slices, and splices the result back into full-sized change-flag vectors — this is exactly the core's own deterministic first step (at `d = 0` there is only one diagonal, `k = 0`, so no tie-break is involved; it always greedily extends this same leading run before doing anything else), so skipping straight to the subproblem is provably identical to letting the core discover it itself.
+- *(core, security)* Fix denial of service (DoS) in pack reading by bounding
+  owned memory and checking framing arithmetic on 32-bit targets.
 
-  An independent review caught a real bug in the first version of this change before it merged: it also elided a common **trailing** run, matching backward from the ends of both sides. That's unsound in general — unlike the prefix, the trailing snake the core's own backtrack lands on depends on tie-breaks made throughout the *whole* search (`v[idx(k-1)] < v[idx(k+1)]`), so whenever repeated or colliding lines near the tail admit more than one equally-minimal alignment, greedily matching from the end backward can commit to a different one than the real algorithm would have — found with a concrete counterexample (`old = ["a"]`, `new = ["b", "a", "a"]`: the core matches `old[0]` to the first `new` "a"; backward-suffix-matching commits to the second) and confirmed by exhaustive brute-force diffing over small alphabets. The `apply_hunks_subset` round-trip property (`proptest_hunks_roundtrip_with_shared_affix`, kept below) could not catch this — any minimal edit script round-trips correctly regardless of which alignment it picks — so a new `proptest_myers_changed_matches_unelided_core` compares `myers_changed`'s output directly against `myers_changed_core` run un-elided on the same input over a 3-symbol alphabet chosen to maximize boundary repeats/collisions; it failed immediately against the buggy trailing-elision version (minimal counterexample `old = [0, 0]`, `new = [0, 1, 0, 0]`) and passes with suffix elision removed. Suffix elision was dropped entirely rather than patched to match the core's tie-break, since doing that correctly would mean re-deriving part of the backtrack itself — not a shortcut worth taking for one side of the win.
+- *(core)* Fixed a crash (`slice index out of range` panic) in `history-mmr` ancestry publish's bounded scrub-window verification, found by code review. `ScrubState` (the rolling re-verification schedule for a branch's reused ancestry prefix) carried no binding to the generation it was computed against; `advance`'s advisory `write_scrub_state` call runs strictly after `finish` has already durably committed a publish, so a crash (or a failed write) in that window left a rewrite/reset's *old* generation's scrub state — sized for its own, possibly much longer, chain — on disk paired with the *new*, possibly much shorter, one. The next ordinary fast-forward would then compute a scrub window against the old `verified_through` and slice a chain far too short for it. `ScrubState` now records and validates the generation it was computed against; a mismatch (this exact crash window, or any other cause) is treated exactly like "no prior scrub state" and falls back to a full walk, the module's existing fail-safe design for missing or corrupt state. New regression test reproduces the exact on-disk byte state without needing to inject a crash mid-`advance`, confirmed to panic without the fix and pass with it. **SemVer:** none — `ScrubState`'s on-disk format changed (magic bumped `\x01` → `\x02`); a pre-upgrade file simply fails to decode under the new layout and falls back to a full walk, the same safe behavior a missing file already gets.
 
-  New `cargo bench -p mkit-benches --bench diff_edit_script` suite (single-line edit and 200-line append against 1k/10k/100k-line files, plus a `no_common_affix` control with no shared prefix at all, 4-core host, `--quick`): 10k-line append 27.87ms → 0.23ms (119x), 100k-line append 297.4ms → 2.27ms (131x) — the appended-block case is the flagship win, since the entire original file elides as a shared prefix and only the new tail ever reaches the O(ND) core; 100k-line single-line edit 9.04ms → 5.91ms (−35%, the remaining cost is `split_lines`/`compact_changes`/`script_from_flags`'s own O(n) work, plus the second (post-edit) half of the file that prefix-only elision can no longer skip). `no_common_affix` (1k/2k lines, kept small since it's `O((n+m)^2)` independent of this change — Myers' own worst case, a genuinely unrelated cost) is unaffected within run-to-run noise (40-42ms/170-172ms both before and after), confirming the extra linear scan costs nothing when there's no shared prefix to find. All 861 `mkit-core` tests pass (including both new property tests), `cargo clippy -p mkit-core -p mkit-benches --all-targets -- -D warnings` and `cargo fmt --check` are clean. **SemVer:** none — `myers_changed`/`myers_changed_core` are private to `ops::diff`; every public diff/merge API's behavior and output are unchanged.
-- *(core)* pipeline FastCDC chunk-cutting with chunk-hashing in `worktree::store_large_file_streaming_with` (the streaming ingest path behind `mkit add`/`status`/`diff` on any file above `CHUNK_THRESHOLD`, 1 MiB). The existing implementation was strictly phase-serial: cut a batch of up to `STREAM_HASH_BATCH` (64) chunks on the calling thread, then block waiting for the caller's `hash_chunks` callback (typically a rayon fan-out hashing/staging each chunk) to finish before cutting the next batch — cutter and hashers were never both busy at once, even though cutting batch *N+1* has no data dependency on hashing batch *N*, only on the reader position, which the cutter alone advances. Native builds (`#[cfg(not(target_arch = "wasm32"))]`; `mkit-core` stays wasm-clean, and wasm32 has no threads to pipeline across) now run the cutter on its own `std::thread::scope` worker, handing batches to the calling thread over a rendezvous (`mpsc::sync_channel(0)`) channel — a zero-capacity channel's `send` blocks until the matching `recv`, so the cutter can have at most one batch *fully built* ahead of the one currently being hashed, capping the extra memory this adds at one more `STREAM_HASH_BATCH` (matching this module's existing "independent of file size" bound) while still overlapping the two phases fully.
+- *(core)* Closed a second, independent way to hit `verify_scrub_window`'s `slice index out of range` panic (above), found by a follow-up code review of that same fix: the `generation` binding rules out a *stale* scrub file (computed against a different, superseded generation), but not one whose `verified_through` simply exceeds the actual on-disk prefix length for a generation it genuinely does match — e.g. a snapshot file restored from an older backup paired with a newer `scrub` file. `decide_chain` now checks the scrub window's end bound against the real prefix length before calling `verify_scrub_window`, falling back to a full walk (the same fail-safe path a generation mismatch already takes) instead of handing it a range it can't satisfy; `verify_scrub_window` itself now also bounds-checks via `slice::get` and returns a typed `HistoryError::Corrupted` rather than a bare index, so a future caller with the same class of bug fails closed instead of panicking. New regression test constructs the exact mismatch directly (real production code cannot produce it, by the monotonic-append argument `decide_chain`'s own docs make) and confirms it panics without the fix, falls back to a full walk with it. **SemVer:** none.
 
-  An early review pass caught a real deadlock in the first version of this change: if the receiving side stops calling `recv` as soon as `hash_chunks` errors (the natural `?`-propagation shape), the cutter thread's *next* `send` — for a batch it already cut, or is still cutting — has no buffer to land in and blocks forever waiting for a `recv` that will never come, hanging `std::thread::scope`'s join on that thread and the whole call with it. Fixed by having the receiving side keep draining (discarding) the channel after recording the first error instead of returning immediately, so every future cutter `send` still succeeds (or the cutter hits its own error/EOF and exits on its own) and the channel always disconnects, letting the receive loop terminate on its own. New `streaming_pipeline_errors_promptly_when_hash_chunks_fails_on_an_early_batch` pins this directly: three full batches (so the cutter still has more to send after the one that triggers the very first error), run on its own thread with a bounded `recv_timeout` so a regression fails the test instead of hanging the suite.
+- *(core)* `read_scrub_state` (`history-mmr`) no longer propagates an I/O error reading the advisory `scrub` file — found alongside the panic fixes above while auditing the same fail-safe contract from the read side. `ScrubState`'s own docs promise "missing or corrupt scrub state is not an error", and `write_scrub_state`'s caller already treats a write failure as advisory-only (`let _ = write_scrub_state(...)`), but `read_scrub_state` still used `?` on `read_bounded`'s result — so anything that made the file briefly unreadable (a stray directory at that path, exactly the state an existing test already constructs to exercise the write-side fix; a permission change; a file that grew past the 93-byte cap) turned every subsequent fast-forward publish on that branch into a hard failure instead of degrading the verification schedule. Now maps any read failure the same way a missing file already is: `Ok(None)`, falling back to a full walk. New regression test publishes twice with a directory blocking the `scrub` path throughout and confirms the *second* publish — the first fast-forward that actually reaches `read_scrub_state` — no longer fails; the existing write-side test only ever exercises a first publish, where `read_scrub_state` isn't reached at all. **SemVer:** none.
 
-  Verified with a controlled in-process A/B (`store_large_file_streaming_batched`, the original phase-serial loop, vs. the new pipelined path, interleaved on identical in-memory fixtures with a rayon-style scoped-thread `hash_chunks`, median of 10 runs each, to cancel this shared host's cross-process noise) at sizes spanning `chunk_hash_fanout`'s existing `file/<n>_mib` bench: 8 MiB is a wash (only ~2 batches worth of data, little to overlap), 32 MiB ~5-9% faster, 128 MiB ~5-10% faster — growing with size as expected, since more batches means more opportunity for the two phases to overlap; this is the shape of the "Add and commit one 1 GiB file" and "Re-add an unchanged 100 MiB file" rows on the [performance page](https://mkit.sh/performance). Content addresses are verified byte-identical between the two paths on every run. All 860 `mkit-core` tests (up from 859) pass, `cargo clippy --all-targets --all-features -- -D warnings` and `cargo fmt --check` are clean, and a `wasm32-unknown-unknown` build of `mkit-core` (`--no-default-features`) succeeds using the unchanged phase-serial fallback. **SemVer:** none — `store_large_file_streaming_batched`/`store_large_file_streaming_pipelined` are private; `store_large_file_streaming_with`'s public signature gains a `+ Send` bound on its `R: Read` reader type parameter (satisfied by every existing caller — `io::Take<fs::File>`, `io::Cursor<Vec<u8>>>` — so this doesn't break any in-tree usage) and its documented behavior/output are otherwise unchanged.
-- *(core)* `worktree::content_eq` (the "did this file's content actually change?" check behind `add`, `status`, `diff`, and `merge` once two sides' object ids already differ) gained a fast path for the `ChunkedBlob`-vs-`ChunkedBlob` case — every file above `CHUNK_THRESHOLD` (1 MiB). The old code always fully reassembled and byte-compared both sides, chunk by chunk, even when most chunks were byte-identical between versions: appending 1 MiB to a 100 MiB file — the flagship "commit a 1 MiB change to a 100 MiB file" row on the [performance page](https://mkit.sh/performance) — re-read and re-verified the whole 100 MiB on both sides just to answer "not equal". New `chunked_content_eq` walks both manifests' chunk-hash lists with two pointers, skipping any run of chunks that share a hash with no read at all — identical hash means identical bytes by construction, the same trust `content_eq`'s pre-existing `a == b` whole-object fast path already relies on, just applied per chunk. Only chunks that actually diverge are read and byte-compared, with the walk able to resync once ids match again at the same aligned offset (pinned by `chunked_fully_misaligned_but_equal_content`/`chunked_shared_prefix_then_misaligned_equal_suffix` and the pre-existing `large_inline_fixed_and_cdc_content_agree`, which compares two independently-chunked manifests — fixed 64 KiB blocks vs. real FastCDC — of the same content). An append needs zero chunk reads at all: FastCDC's cut points never depend on bytes past them, so every pre-existing chunk still lines up by hash and the walk runs straight to the new tail. `ma.total_size != mb.total_size` is also checked up front without reading anything, trusting the manifest's declared size the same way `LoadedBlob::len`'s doc comment already documents (every reassembly path enforces it via `ChunkedBlob::check_reassembled_size`, so it cannot be wrong on anything durably written through mkit's own writers) — a manifest deliberately constructed to violate that, whose entire chunk sequence still lines up by hash with its counterpart, slips through unnoticed by this fast path specifically (pinned, not just asserted, by `chunked_wrong_shared_total_size_is_not_detected_when_ids_fully_match`); one whose chunks diverge anywhere is still fully read from the first divergent chunk on, so store-level corruption or a missing chunk there still surfaces as an error, same as before.
-
-  New `cargo bench -p mkit-benches --bench content_eq` suite (append/edit-middle-byte/truncate-1MiB against an 8 MiB and a 32 MiB FastCDC-chunked base, 4-core host, `--quick`): 8 MiB append 13.78ms → 3.51ms, edit 11.05ms → 3.70ms, truncate 11.18ms → 3.35ms; 32 MiB append 44.80ms → 12.42ms, edit 43.80ms → 11.99ms, truncate 43.76ms → 10.60ms — roughly 66-76% faster wall-clock across every mutated-content case at both sizes (the `identical` series, which hits the pre-existing `a == b` fast path before ever reaching `chunked_content_eq`, is unchanged, as expected). New tests: direct coverage of `chunked_content_eq`'s merge logic against small hand-built manifests (all-ids-match, fully-misaligned-but-equal, shared-prefix-then-resync, append via total_size, same-total-size-different-content, split-differently-but-different-content, empty manifests, the documented total_size gap above), a real-`FastCDC` insertion test that confirms at the manifest level (shared first/last chunk, differing middle) that a genuine divergence-then-resync actually happens before checking `content_eq` against ground truth, and `content_eq_real_chunked_mutations_match_ground_truth`, which runs `content_eq` over real `FastCDC`-chunked append/edit/truncate mutations of a 3 MiB fixture and cross-checks every result against a direct byte comparison.
-
-  An independent code review (correctness + reuse/simplification pass) caught a real gap in the first version of this change before it merged: `chunked_content_eq` only ever compared the two manifests' declared `total_size` fields against *each other*, never against either side's own real chunk bytes, so two manifests whose chunk sequences diverged *everywhere* (no id ever matched, so nothing was ever skipped) but happened to declare the same wrong `total_size` were reported merely "unequal" instead of raising `ChunkedBlobSizeMismatch` the way the old byte-cursor walk always did. Fixed by tracking, per side, the real bytes actually read (as opposed to skipped by id) and whether that side had any chunk skipped at all: a side with zero skips has every one of its chunks read regardless, so its accumulated real length is now checked against its declared `total_size` before returning, erroring exactly as before if they disagree. This narrows the documented trust gap to only what it was always meant to cover — a side that skipped at least one chunk by id, which is the one case this fast path cannot validate without giving up the read it just avoided. New `chunked_wrong_total_size_is_detected_when_no_chunk_is_skipped` and `chunked_wrong_total_size_on_one_side_only_is_detected` pin the fix directly (both previously-missed error cases; both now assert `ChunkedBlobSizeMismatch`). The review also found three call sites in this file (`content_fingerprint`, `ContentCursor::remaining`, and `chunked_content_eq`) had each hand-rolled the identical "read a manifest chunk, require `Blob`" match; factored into one shared `read_blob_chunk` helper (`read_chunk`, the pre-existing `WorktreeError`-domain sibling with its own hash-and-type-qualified error text, is kept separate since unifying it would have changed that error's wording). No wire-format or public-behavior change beyond the bug fix itself — every other case this fast path was already correct for is unaffected, confirmed by the full pre-existing test suite passing unchanged alongside the new tests. All `mkit-core` tests (842, up from the base branch's 839) pass, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` are clean, and the `content_eq` bench numbers above are unaffected (re-measured after the fix). **SemVer:** none — `chunked_content_eq`, `read_blob_chunk`, and `ContentCursor::from_object` are private to `worktree::blob`; `content_eq`'s public signature and documented error behavior are unchanged (the fix restores documented behavior for the no-skip case rather than changing it).
-
-- *(core)* replace `delta::encode`'s block-hash index (`HashMap<u64, u32>`, `std`'s default `SipHash`-1-3 hasher) with the same map keyed by `rustc_hash::FxHasher`, seeded per `encode()` call. The index's keys are already the output of `encode`'s own FNV-1a `block_hash` over each 16-byte block of `base`, so `SipHash`'s extra per-byte cost buys little — *if* the replacement is still reseeded per call: an earlier version of this change used a bare, fixed-seed hasher (via `BuildHasherDefault`/the crate's own bare `FxBuildHasher`, both always starting from the same compile-time state), caught in review as a real regression — `block_hash` is itself unkeyed, so an attacker who controls `base`'s bytes could solve for many distinct blocks whose `block_hash` outputs collide in the same table bucket under a *known* seed, degrading the index's build from O(n) to O(n²): the exact hash-flooding attack `SipHash` exists to prevent, reopened. `encode` now seeds via `rustc_hash::FxSeededState::with_seed`, drawing a fresh random `usize` per call from `std`'s own randomized hasher (`random_seed`, avoiding a new `rand`/`getrandom` dependency for one value per call) — denying an attacker the one thing that attack needs: a bucket mapping it can predict in advance. Also switched from a hand-rolled reimplementation of the FxHash algorithm to the `rustc-hash` crate directly (already resolved transitively via `mkit-cli`'s `reqwest → quinn` chain, caught in the same review as needless duplication of an already-available, better-tested implementation) — `rustc_hash::FxSeededState` (added upstream specifically for this "seed a fast hasher yourself" use case) supplied the seeding API a bare `FxHasher`/`BuildHasherDefault` doesn't, so no hand-rolled `BuildHasher` wrapper was needed either. `cargo bench -p mkit-benches --bench delta_plan_fanout -- --quick` (sequential series, 4-core host, near-duplicate 64 KiB chunks) with the final, reseeded implementation: 32 candidates 3.25ms → ~2.9-3.0ms, 64 8.50-8.65ms → ~6.15-6.23ms, 128 14.0-17.0ms → ~12.7-12.9ms, 256 candidates 36.6-37.1ms → ~25.7-26.3ms (~29-30% faster) — smaller than the fixed-seed version's initial (unsafe) ~36-39%, since reseeding costs one `RandomState` construction per `encode()` call, but still a clear, real win. New `random_seed_differs_across_calls_and_seeds_a_usable_map` test pins this module's own contribution — `FxHasher`'s mixing quality is `rustc_hash`'s tested contract, not this module's to reverify — confirming two `random_seed()` calls differ (the load-bearing security property) and that `FxSeededState` wires a seed through consistently enough for a `HashMap` to find keys it just inserted. No wire-format or public-API change — `FxIndexMap`/`random_seed` are private to `delta.rs`, and `encode`'s output is byte-for-byte identical to before (all `mkit-core` tests, including `delta`'s roundtrip and corruption-rejection suite, pass unchanged). **SemVer:** none.
-
-- *(core,cli)* batch Ed25519 signature verification in `remote_dispatch::packmap::verify_new_object_signatures` (clone/pull/fetch's post-download check, issue #692). Every commit/remix/tag a fetch introduced was checked with a separate `verify_strict` call — one scalar-multiplication-plus-comparison per object. New `mkit_core::sign::verify_batch` (behind a new, non-default `batch-verify` feature) instead runs `ed25519_dalek::verify_batch`'s randomized-coefficient multiscalar-multiplication check over many signatures in one pass — strictly less total scalar-multiplication work than one `verify_strict` per signature — at the cost of not learning *which* entry failed on a batch rejection; `verify_new_object_signatures` falls back to the pre-existing per-object loop whenever the batch check fails (or wasn't attempted) to locate and report the exact offending hash, unchanged from before this commit. `ed25519-dalek`'s batch equation deliberately omits two of `verify_strict`'s malleability checks (see its README's "Malleability" section for the public-key half; the signature-`R` half is the same class of check, just undocumented as a batch caveat) — `verify_batch` performs both itself, per entry, before running the batch equation: `VerifyingKey::is_weak` on the public key, and a direct `curve25519-dalek` small-order check on the signature's `R`. Each is backed by a dedicated regression test constructing a genuine forgery specific to that check (a weak identity public key with an all-zero signature; and, isolating the `R` check from the public-key one, a real full-order key's own secret scalar used to solve `[s]B = R + [k]A` for `R = identity`) — both confirmed to satisfy `ed25519-dalek`'s own loose `verify` (proving the gap is real, not just theoretical) and confirmed load-bearing by deliberately disabling each precheck in turn and watching the corresponding test fail.
-
-  A single whole-slice batch call is single-threaded, so it doesn't automatically beat the existing per-object rayon fan-out at fetch sizes large enough to keep every core busy. `cargo bench -p mkit-benches --bench verify_fanout` (new `batch`/`batch_parallel` series, 4-core host): at 256 entries, one whole-slice `verify_batch` call (11.7-12.1ms) is *slower* than the pre-existing per-object rayon fan-out (8.9-9.6ms) — batching's ~2x reduction in total scalar-multiplication work doesn't make up for using only one of four cores. Splitting the batch into one sub-batch per rayon worker thread instead (new `verify_batch_parallel`, used whenever `verify_new_object_signatures` would otherwise parallelize) combines both effects and consistently beats plain rayon fan-out from 16 entries up: 16 entries 1.05-1.08ms → 0.97-1.05ms, 32 1.7-1.71ms → 1.53-1.6ms (~6-10%), 64 2.96-3.03ms → 2.47-2.48ms (~17-19%), 128 5.19-5.26ms → 4.13-4.30ms (~18-21%), 256 8.91-9.64ms → 7.08-7.42ms (~20-24%) — the gap widens with size, matching the fixed 512-entry chunk cap large fetches already use. **SemVer:** additive — `mkit-core` gains `sign::verify_batch` behind the new non-default `batch-verify` feature (`mkit-cli` enables it explicitly on its `mkit-core` dependency; wasm/Worker builds and other native consumers such as `contrib/signers/*` are unaffected since they don't request it and it isn't default). No existing public API changes.
-
-- *(core,cli)* parallelize `list_refs`'s per-ref read across rayon. `refs::collect_refs`'s directory walk read and decoded each ref file (a separate `fs::read` + `decode_ref_wire`, one small-file syscall sequence each) sequentially, one at a time — the same "independent per-file work, no fan-out" gap `add`'s worktree hashing and `remote_dispatch`'s pack/delta/signature fan-outs closed elsewhere, just never closed here (issue tracked from the same family as those). New `refs::list_refs_with(layout, read_batch)` splits the existing behavior into a sequential directory walk (cheap, metadata-only, stays sequential) that collects `RefCandidate { name, path }` entries, then hands the *whole batch* to a caller-supplied `read_batch` callback — the same "collect first, batch-callback second" shape `transfer::plan_pack_with`/`worktree::store_large_file_streaming_with` already use. `read_batch` returns one `RefReadOutcome` (`Unreadable`, dropping the entry, or `Decoded(Option<Hash>)`, keeping it — matching the old inline behavior exactly: an unreadable file was silently skipped, a readable-but-malformed one was kept with `Ref::hash: None`) per candidate, a cardinality mismatch failing closed as a new `RefError::RefBatchLengthMismatch` rather than silently desyncing names from hashes (mirroring `WorktreeError::ChunkBatchLengthMismatch`/`StoreError::DeltaBatchLengthMismatch`'s existing contract). `list_refs`/`list_remote_refs`/tag listing keep their exact old sequential behavior by default via `sequential_read_batch`, itself now just `candidates.iter().map(read_ref_candidate)` — the new `refs::read_ref_candidate` is the single read-and-decode definition shared by that default, mkit-cli's fan-out, and the fan-out bench, so the `Unreadable`-vs-`Decoded(None)` policy has exactly one place to drift from. Three new tests pin `list_refs_with`'s contract directly (sequential-batch equivalence, the `Unreadable`-vs-`Decoded(None)` distinction, the length-mismatch error).
-
-  `mkit-cli` gains `commands::list_refs_parallel`/`list_tags_parallel`/`list_remote_refs_parallel` (sharing one `fanout_read_batch` closure), wired into every CLI call site that previously read `refs::list_refs`/`list_tags`/`list_remote_refs` directly (`branch`, `tag`, `ref`, `show-ref`, `for-each-ref`, `git`'s git-export tag/branch export, `remote_dispatch`'s push and pull) — a command like `for-each-ref` or `show-ref` that lists heads, tags, and every remote's tracking refs in one call now gets the parallel win on all three namespaces, not just the one that happened to be wired up first. `cargo bench -p mkit-benches --bench refs_ops -- list_refs_fanout` (new suite): 100 refs 412us → 346us, 1k refs 4.82ms → 2.32ms (2.1x), 10k refs 58.1ms → 27.5ms (2.1x) — a real win even at the smallest tested size, not just at scale. A pre-existing, unrelated bug in this same bench file (`refs_ops.rs`'s fixtures never called `refs::init` before writing refs, so every `refs_update`/`list_refs` case failed outright) is fixed alongside it, since it blocked getting any numbers at all for this change. **SemVer:** `mkit-core` gains `refs::list_refs_with`/`list_tags_with`/`list_remote_refs_with`, `refs::read_ref_candidate`, `refs::RefCandidate`, `refs::RefReadOutcome`, and `RefError::RefBatchLengthMismatch` — new variants in public exhaustive error enums can require downstream match updates; `list_refs`/`list_remote_refs`/tag listing's signatures and behavior are unchanged.
-
-- *(core)* bound the O(N) store-read cost `advance` pays on every history-mmr fast-forward publish, instead of re-verifying the entire first-parent chain from scratch every single time. This was a known, deliberately-left-alone cost (see the `read_current_descriptor` entry below and its own predecessors) — a dedicated research pass (prior art from git's object-verification model, RFC 6962 Merkle consistency proofs, ZFS/btrfs scrub semantics, and the MMR/accumulator literature mkit's own ancestry proof already draws on) confirmed the check is real (it defends against *accidental* local corruption — bit rot, a bad GC, a torn write — between two publishes; content addressing means corruption is always eventually *detectable*, never silently wrong, so the only question is *when* it gets caught) but stronger than any of those reference systems apply by default, and that the one prior attempt to cut it (`first_parent_chain_from`'s chain-splicing fast path, prototyped and reverted in an earlier commit) failed specifically because it dropped re-verification of the reused prefix to zero rather than bounding it.
-
-  New `history::ancestry::decide_chain` replaces `advance`'s unconditional `first_parent_chain(store, target)` call. A true no-op (target already the live, already-verified tip) now short-circuits before any store read at all — previously it still paid the full walk before discovering there was nothing to do. A genuine fast-forward (found via new `first_parent_suffix_to`, which walks backward from `target` only until it hits the live tip instead of all the way to genesis) always verifies its new suffix in full, but re-verifies the *reused prefix* only in a bounded, rotating window — `max(512, verified_through / 64)` leaves — tracked per branch in a new advisory auxiliary file (`ScrubState`/`scrub`, SPEC-HISTORY-PROOF §4.5). A full walk still happens, exactly as before, whenever: it isn't actually a fast-forward (new branch, rewrite, reset, unrelated history — `first_parent_suffix_to` returns `NotFound`), the rotating window would complete a lap over the prefix, or more than 7 days have passed since the last full verification (matching ZFS's default weekly scrub cadence, more conservative than btrfs's monthly) — and a full walk started for schedule reasons while still a fast-forward correctly keeps the same generation, not a fresh one. Missing, corrupt, or unparseable `scrub` state is never treated as "already verified" — it always falls back to a full walk, the same fail-safe-toward-more-verification default as every other case. None of this changes what gets *persisted*: the published chain and root are always byte-identical to what a full `first_parent_chain` walk would produce, for any given target — only how many of an already-published prefix's objects get re-read from the store on a given publish. This bounds the worst-case staleness of any single leaf's last re-verification at 64 fast-forward publishes or 7 days, whichever comes first, instead of either "every publish" (the old, expensive default) or "never again" (the reverted fast path's actual behavior).
-
-  Six new tests exercise the scheduling directly: a fast-forward's window is provably narrower than the full prefix (`fast_forward_scrubs_a_bounded_window_not_the_whole_prefix`) yet still publishes byte-identical output; a completed rotation forces a full walk while preserving the generation (`scrub_lap_completion_forces_a_full_walk_but_keeps_the_generation`); corruption planted outside the current window doesn't fail the next fast-forward but is caught within a bounded number of publishes once the cursor reaches it, never silently forever (`corruption_outside_the_current_window_is_caught_within_a_bounded_number_of_publishes`); a stale `last_full_verify_unix` forces a full walk regardless of cursor position, via a test-only clock override mirroring this file's existing `FAIL_AFTER` fault-injection pattern (`stale_scrub_state_forces_a_full_walk_regardless_of_cursor_position`); and missing scrub state fails safe toward more verification, not less (`missing_scrub_state_forces_a_full_walk_instead_of_trusting_nothing`). All existing ancestry tests pass unchanged, including `many_sequential_publishes_keep_one_generation_until_a_real_rewrite`'s 40 sequential single-commit publishes — all below `SCRUB_MIN_WINDOW` (512), so every one of them exercises the "lap completes immediately, full walk every time, same generation" branch, the same behavior as before this commit at that scale.
-
-  `cargo bench`'s `sequential_publish` series (100-300 commits) can't show any of this — the 512-leaf minimum window covers the whole prefix in one pass at that scale, so every publish there still does a full walk exactly as before, and fsync dominates regardless (see the entries below on why that bench can't isolate cheaper mechanisms). A new `#[ignore]`d manual profiling test, `profile_scrub_window_vs_full_walk_every_publish` (not run in CI), isolates it at a chain length long enough to matter: at 20,000 leaves, 20 sequential fast-forward publishes averaged 71.8ms/publish with the scrub window against 324.7ms/publish with a full walk forced every time (both paths otherwise identical — same fsync/`sync_dir` sequence, same per-publish MMB rebuild over the full chain, which remains real, unavoidable, unrelated O(N) work this change does not touch) — a 4.5x reduction at this size, growing with N since the shared floor (fsync plus the MMB rebuild) stays roughly constant while the avoided read count grows. **SemVer:** `mkit-core` gains `RefError`-adjacent internals only — `decide_chain`, `ChainDecision`, `ScrubState`, `first_parent_suffix_to`, `SuffixWalk`, and the scrub-file read/write helpers are all private to `history::ancestry`; no public API changes.
-
-- *(core)* stop loading the previous publish's whole first-parent chain from disk on every history-mmr publish — `advance` only ever needed its small, fixed-size descriptor header (repository/full_ref/generation/tip/leaf_count/root), never the up-to-32-MiB `chain: Vec<Hash>` that follows it in the snapshot file. This follows on from `read_current_chain` (below), which already stopped rebuilding an MMB from that chain but still read and checksummed the whole file to get it.
-
-  The key realization: `advance`'s comparison logic (no-op detection, fast-forward/generation-reuse decision) only ever compares `old`'s fields against `chain = first_parent_chain(store, target)` — a fresh, full, store-re-verified walk `advance` computes unconditionally anyway (unchanged — this remains the deliberate O(N) integrity check, not something this commit touches). Because objects are immutable and content-addressed, that walk is a deterministic function of `(store, target)`: if `target == old.tip`, `chain` is byte-for-byte `old.chain` without needing to check — both are `first_parent_chain(store, old.tip)`, just computed at different times against the same unchanging objects. The same argument applied to the sub-walk ending at `old`'s length shows `chain[old.leaf_count - 1] == old.tip` is exactly equivalent to `chain.starts_with(&old.chain)`. So the byte-for-byte chain comparisons were always redundant with a single hash comparison against a value (`old.tip`) that's already a plain header field — `old.chain` itself was never actually needed.
-
-  New `read_current_descriptor` (replacing `read_current_chain`/`PriorChain`) reads only that header, via a new `read_prefix` helper bounded to `DESCRIPTOR_HEADER_MAX_LEN` (143 fixed bytes + the largest possible ref-name length) — one small bounded read regardless of chain length, instead of reading and linearly checksumming the whole file. `parse_descriptor_header` is factored out of `decode_descriptor_and_chain` (unchanged for its own callers — `AncestrySnapshot::decode`/`load`, which do need the real chain and a working MMB) to parse just that shared prefix. This narrows the same class of guarantee `read_current_chain` already narrowed, one layer further: no checksum at all is verified on this path now, not just the root rebuild-and-compare. Independently re-reviewed field-by-field: `repository`/`full_ref`/`tip` corruption only ever misses a legitimate fast-forward/no-op (fails closed, safe); `root` is parsed but never read anywhere in `advance`; `leaf_count` only indexes `chain` via `.get`, never panics on an out-of-range value; `generation` is the one field reused directly, but it's independently cross-checked against the separately-read `current` pointer file before `advance` ever sees it. No corrupted header field can make `advance` persist a chain, root, or generation that the mandatory store-verified walk didn't itself produce.
-
-  New tests: `read_current_descriptor_matches_full_snapshot_fields` (agrees field-for-field with the full decode path across several chain lengths, including the `leaf_count == 1` edge case), `read_current_descriptor_handles_a_long_branch_name` (exercises the bounded-prefix read past the fixed header), and `many_sequential_publishes_keep_one_generation_until_a_real_rewrite` (asserts generation continuity at *every* step of 40 sequential fast-forwards, not just once at the end — a weaker end-to-end-only check would pass even with an off-by-one in the index, since two independently-minted random generations are virtually certain to differ regardless of whether the fast-forwards in between were handled correctly; confirmed by deliberately introducing that exact off-by-one during review and watching this test — and only this test, of the whole suite — catch it). All 803 mkit-core tests plus mkit-cli's `history_mmr_*`/`reflog_and_amend` integration tests pass.
-
-  Isolating this mechanism from the fsync noise that swamps it in the full publish pipeline (a new `#[ignore]`d manual profiling test, `profile_read_current_descriptor_vs_full_chain_read`, not run in CI): at 50,000 leaves, reading the previous snapshot dropped from 735µs to 24.5µs per call — a 30x reduction (release build; debug showed 193x, 5.2ms → 27µs). `cargo bench`'s `sequential_publish` series couldn't show this end-to-end: it's fixed at ≤300 leaves (where the old.chain read is microseconds either way, dwarfed by ~5-6ms of fsync per publish) and reaching an N where this cost would compete with that fixed fsync overhead takes far longer to benchmark than is practical here. **SemVer:** none — `read_current_descriptor`, `read_prefix`, `parse_descriptor_header`, and `DESCRIPTOR_HEADER_MAX_LEN` are private to `history::ancestry`; `read_current_chain`/`PriorChain` (both already private, added in the previous commit) are removed.
-
-- *(core)* stop rebuilding an ancestry MMR one leaf at a time, and stop building one at all when `advance` only needs the previous chain for comparison. Two follow-ups to the double-rebuild fix below:
-  - `CommitHistory` gained `extend`, which merkleizes a whole chain in one `new_batch`/`merkleize`/`apply_batch` cycle instead of one cycle per leaf (each cycle allocates a `MerkleizedBatch` Arc, an overwrites map, and per-height dirty-bucket `Vec`s — real, if modest, per-leaf overhead for something the batch API is explicitly designed to do in bulk; verified against `commonware-storage`'s own equivalent "N adds in one batch vs. N single-item batches" tests during review). `AncestrySnapshot::build` (used by every publish, and by `decode`/`load`) now calls it once instead of looping `append`. New `mem_extend_matches_sequential_append_from_empty`/`_onto_existing_history` tests pin that batching produces a bit-identical root/leaf-count to the same hashes appended one at a time, at sizes on either side of MMR peak-merge boundaries. No change to what gets verified against `store` — purely fewer allocations for the same tree.
-  - `advance`'s `read_current` call loaded the *previous* publish's full `AncestrySnapshot` — decoding its wire bytes and rebuilding its MMR from scratch — purely to read `descriptor`/`chain` for the no-op/fast-forward/generation-reuse checks; `old.mmr` was never touched. A new `read_current_chain` (backed by `decode_descriptor_and_chain`, factored out of `AncestrySnapshot::decode`) parses the same wire bytes into just the descriptor and chain, skipping the MMR rebuild. This one is a narrower, explicitly-scoped trade rather than a pure freebie: it also skips `decode`'s rebuild-and-compare of `root` against the wire-persisted value, so a checksum-valid but internally-inconsistent snapshot file (reachable today only via a bug, or by anyone with the same local write access that already lets them edit any other mkit state directly — the checksum is a plain self-computed digest, not a MAC) now fails open on this path (a harmless spurious cache-miss/full rebuild) instead of decode's fail-closed error. Reviewed and judged safe because `advance` never persists `old`'s data as-is: every use of it is a comparison against `first_parent_chain(store, target)`, a fresh store-re-verified walk, and only that freshly-verified chain is ever written into the new snapshot; `AncestrySnapshot::load` and `finish`'s own rebuild path are untouched and keep the full check. `AncestrySnapshot::load` (which does need a working MMR, for `prove`) keeps the full decode.
-
-  Both are correctness-tested (800 mkit-core tests, including the two new ones, plus the `history_mmr_records_commits`/`history_mmr_branch_lifecycle` mkit-cli integration tests) but showed no statistically significant wall-clock change on `cargo bench -p mkit-benches --bench history_mmr --features history-mmr` even at a 40-sample run (`publish/50`/`publish/250` are dominated by this suite's ~10 fsync/`sync_dir` calls per publish, which this sandbox's I/O jitter swamps any CPU-level saving in) — kept anyway since they're strictly-less-work with essentially no practical downside, and matter more on faster storage or larger histories where the fsync floor is smaller relative to chain length. **SemVer:** additive — `mkit-core` gains `history::CommitHistory::extend`; `append`'s behavior is unchanged (now implemented in terms of `extend`). `read_current_chain`/`decode_descriptor_and_chain`/`PriorChain` are private to `history::ancestry`.
-
-- *(core)* stop rebuilding a branch's entire first-parent ancestry MMR twice on every history-mmr publish. `history::ancestry::advance` (`refs::update_ref_with_ancestry`, gated behind the `history-mmr` feature) used to call `first_parent_chain(store, target)` — one `store.read_object` + deserialize per commit from `target` all the way back to the repository's first commit — and build a full in-memory MMR from the result just to validate the target before persisting the publish intent, then unconditionally discard that snapshot and have `finish` redo the identical walk and MMR build a second time to actually write it. `advance` now keeps the snapshot it already built and hands it to `finish` (`finish` takes a new `prebuilt: Option<AncestrySnapshot>`, trusted only when its repository/full_ref/generation/tip exactly match the pending `Transaction`; crash recovery via `recover`, which only ever has a `Transaction` read back from disk, keeps passing `None` and rebuilding as before). `cargo bench -p mkit-benches --bench history_mmr --features history-mmr` (10-sample criterion A/B, this branch's host): `publish/50` 18.8ms → 7.5ms (−60%, p=0.01), `publish/250` 20.9ms → 12.5ms (−40%, p<0.01). **SemVer:** none — `finish` is private to `history::ancestry`; no public API change.
-
-  A second, more aggressive change was prototyped alongside this — a `first_parent_chain_from` fast path that, on a plain fast-forward publish, spliced the previous publish's already-verified chain onto a short newly-walked suffix instead of re-walking `target`'s entire ancestry from `store` every time (the `mkit commit` steady state would have gone from O(history depth) to O(new commits) per publish; a new `history_mmr/sequential_publish` bench added to measure it is kept). It was reverted before landing: a correctness review found it stopped re-verifying the reused prefix against `store` on every publish, silently narrowing the "validate the target from verified objects before persisting intent" guarantee `advance`'s own doc comment asserts — a chain whose objects had been locally corrupted or partially GC'd out from under a stale snapshot would no longer be caught at publish time on the fast path (still caught, but only later, the next time anything calls `AncestrySnapshot::load`, which does its own independent full re-walk). Trading that integrity check for speed is not this change's call to make silently, so it's left as a documented follow-up rather than shipped.
-
-- *(core)* eliminate per-chunk allocate-and-copy in the streaming FastCDC reader. `ChunkReader` (the only chunker used for files above `worktree::CHUNK_THRESHOLD` — `mkit add`, and `status`/`diff` on any stat-mismatched large file) copied every byte twice per chunk: `fill` read into a separate 64 KiB scratch buffer and `extend_from_slice`d it into a growing window, then `next_chunk` cut the window with `Vec::split_off` (a fresh allocation plus a memcpy of the remainder) and `mem::replace`. It now reads into a single fixed `4 * max_size` (1 MiB) buffer with `start`/`end` cursors advanced in place, compacting with `copy_within` only once the tail runs out of room (amortized over several `max_size` windows, not every chunk); a new `next_chunk_ref` returns a borrowed `&[u8]` for callers that don't need to own the bytes, and `worktree::store_large_file_streaming` uses it to avoid a further per-chunk copy. Chunk boundaries are unchanged (same `FastCdc::cut` over the same bytes) — the existing `streaming_matches_in_memory_*`/`proptest_streaming_matches_in_memory` tests all ran on inputs under the 1 MiB window and so never actually exercised `fill`'s `copy_within` compaction path; a new `streaming_matches_in_memory_iterator_across_multiple_compactions` test (6 MiB, forcing several compactions) closes that gap, checking both `next_chunk` and `next_chunk_ref` output against `ChunkIterator`. New `cargo bench -p mkit-benches --bench chunker_streaming` suite (in-memory `Cursor` source, windowing cost isolated from BLAKE3/store I/O, 10-sample criterion A/B, this branch's 4-core host): 8 MiB 5.14ms → 4.63ms (−8.99%, criterion-reported CI [−10.4%, −7.6%], p<0.01), 32 MiB 22.14ms → 18.02ms (−16.7%, criterion-reported CI [−18.9%, −14.6%], p<0.01). **SemVer:** additive — `mkit-core::chunker` gains `ChunkReader::next_chunk_ref`; `ChunkReader::new`/`next_chunk`'s signatures and behavior are unchanged. Minor version bump, not breaking.
-
-- *(core,cli)* parallelize push-plan delta encoding across rayon. `transfer::plan_pack` used to `store.read` + `delta::encode` (disk read + block-hash-table build + greedy scan, all sequential) once per delta candidate while planning a push; `transfer::plan_pack` now delegates that loop to a new `transfer::plan_pack_with(..., encode_deltas)` batch callback, and `mkit-cli`'s push path passes a rayon fan-out (`encode_delta_candidates_batch`, mirroring the existing pack-compression/signature-verification fan-outs) instead of the built-in sequential one. `cargo bench -p mkit-benches --bench delta_plan_fanout` (new suite, isolating `delta::encode` over synthetic 64 KiB near-duplicate chunks, 4-core host): 256 candidates 46.99ms → 14.79ms (3.18x); the crossover is essentially immediate (each candidate already costs ~0.17ms, well above rayon's dispatch overhead), so pushes touching more than a handful of changed blobs benefit. **SemVer:** additive — `mkit-core` gains new public items (`transfer::plan_pack_with`, `transfer::DeltaCandidate`, `transfer::encode_delta_candidate`); `transfer::plan_pack`'s signature and behavior are unchanged. Minor version bump, not breaking.
-- *(core,cli)* parallelize a single large file's chunk hashing across rayon. Every existing `add`/push/fetch fan-out (worktree hashing, pack compression, signature verification, delta encoding) parallelizes across independent *files or objects*, which does nothing for a worktree with one huge file — exactly the "Add + Commit One 1 GiB File" shape on the performance page. `worktree::store_large_file_streaming_with` (the new optional batched path) buffers up to 64 FastCDC-cut chunks per batch and hands each batch to a caller-supplied `hash_chunks` callback instead of hashing chunks one at a time; `hash_file_with_metadata_with` exposes that callback for file ingest; `hash_file_with_metadata` retains the borrowed sequential path. `mkit-cli`'s `add` path (`commands::add::hash_pending`) passes a rayon fan-out once a batch is large enough to amortize dispatch cost (4 chunks/thread, mirroring the existing `hash_fanout_threshold` shape) — but only when `add`'s own per-file fan-out (`hash_pending_batch`) is NOT already running in parallel: nesting a second fan-out into an already-saturated rayon pool was found (during review) to be unvalidated under worker contention, not the assumed clean scaling the original single-file benchmark showed against an idle pool, so `hash_pending_batch`'s `par_iter` branch now hashes each file's chunks sequentially instead. The original `cargo bench -p mkit-benches --bench chunk_hash_fanout` measurements (4-core host, before combining with the reader optimization above) found that per-batch crossover is a wash at 8 chunks (0.641ms vs 0.646ms) but wins clearly from 16 chunks (1.477ms → 1.256ms, ~15%) through a full 64-chunk batch (9.774ms → 8.164ms, ~16%); end-to-end streaming ingest of one real file (`hash_file_with_metadata` vs `_with`'s rayon path) is 8 MiB 107.2ms → 48.4ms (2.2x), 32 MiB 390.1ms → 230.6ms (1.7x), 128 MiB 2095.7ms → 1106.9ms (1.9x). **SemVer:** additive — `mkit-core` gains new public items (`worktree::store_large_file_streaming_with`, `worktree::hash_file_with_metadata_with`, `worktree::store_chunk_blob`); `worktree::hash_file_with_metadata`'s signature and behavior are unchanged. Minor version bump, not breaking.
-- *(cli)* `remote_dispatch::packmap::verify_new_object_signatures`'s parallel path (post-fetch Ed25519 signature verification, issue #692) now processes a 512-entry chunk cap decoupled from the small, pool-size-scaled crossover threshold that decides whether to parallelize at all — previously both used the same value (as few as `2 * num_threads`, e.g. 16 on an 8-core host), so a large legitimate fetch (thousands of newly-signed objects) paid one rayon dispatch per ~16 entries (roughly 625 dispatches for 10,000 objects) purely to bound how much extra work a hostile fetch's first bad signature could force. The bound itself only needs to be small relative to an unbounded fetch, not tiny relative to core count: 512 keeps a hostile remote's forced extra work small and fixed while cutting the legitimate-fetch case to ~20 dispatches. **SemVer:** none — internal constant/behavior change, no public API change.
-- *(core,cli)* `mkit-cli`'s parallel delta-encoding fan-out (`encode_delta_candidates_batch`, added above) now caches repeated base objects within batches of at most 64 candidates and a 64 MiB cache budget, with per-candidate reads for singleton or nonfitting bases — several chunks of one file commonly diff against the same prior chunk, and fanning that out across rayon without deduping turned what used to be redundant-but-serialized reads into concurrent redundant reads and concurrent redundant in-memory copies of the same bytes. New `transfer::encode_delta_candidate_with_base` (mkit-core) is the per-candidate unit that takes already-read base bytes instead of reading `base` itself; `transfer::encode_delta_candidate` is unchanged for the sequential default's benefit. **SemVer:** additive — new public `transfer::encode_delta_candidate_with_base`; existing behavior unchanged.
-- *(core)* stop decoding a `Tree`/`ChunkedBlob` twice on every `ObjectStore::read_object` call. `read_object` used to call `Self::read` (which, for a merkelized type, already `deserialize`s the bytes once to recompute the BMT-root id for the integrity check) and then call `serialize::deserialize` a *second* time on the same bytes to produce the `Object` it returns — two full tree/chunked-blob parses for every read, on one of the hottest paths in the codebase (`read_object` is the primitive every tree-walker, `diff`, `blame`, `merge`, `rebase`, `restore`, `stash`, `bisect`, and `graph` op reads commits and trees through). New `object::verified_id_and_object` decodes once and hands back both the verified id and the decoded `Object` (`None` for a byte-hashed type, or when the merkle-decode itself failed — the same fallback-to-`hash(bytes)` `object_id_from_bytes` already had, now shared by both); `read_object` reuses the decoded object directly instead of decoding again, and `object_id_from_bytes` is now a one-line wrapper around the same function so the two callers can never drift. Alongside it, `serialize::read_tree` stopped cloning every entry's name into a separate `prev: Option<Vec<u8>>` purely to compare it against the *next* entry's name for the ordering check — the just-pushed `TreeEntry` already owns that name, so `entries.last()` gives the same comparison for free.
-
-  Caught in review: the inherent-method fix alone missed the actual hot path. `store::ObjectSource` (the trait `diff::load_tree`, `worktree::blob::LoadedBlob::load`, and every other `S: ObjectSource + ?Sized`-generic caller actually call through) has its own default `read_object` (`deserialize(self.read(h)?)`) — the exact same double-decode pattern — and `impl ObjectSource for ObjectStore` only overrode `read`/`read_unverified`, not `read_object`, so Rust's static trait dispatch kept resolving every one of those generic call sites to the unoptimized default even though the concrete type was always `ObjectStore`. `impl ObjectSource for ObjectStore` now also overrides `read_object` to delegate to the fixed inherent method, so the fan-out of callers that motivated this change in the first place actually get it. Also, `read`/`read_object`'s two independent (and, after the first pass, textually duplicated) `StoreError::HashMismatch { expected: to_hex(..), actual: to_hex(..) }` constructions are now one shared private `check_hash` helper. New tests pin both fixes directly: `read_object_deserialises_tree`/`read_object_detects_tree_corruption_via_store_and_trait` call `read_object` through `&dyn ObjectSource` specifically (the same static-dispatch shape `load_tree`/`LoadedBlob::load` use) and assert it matches the inherent method on both the happy path and a corrupted-tree `HashMismatch`.
-
-  A second, broader review round (8 parallel angles against the full `origin/main...HEAD` diff) found one more sibling gap, independently flagged twice: `EphemeralSink` (the in-memory overlay `diff`/`status` read staged trees through) implements `ObjectSource` too but never overrode `read_object` either, so its store-fall-through path (a miss in the private map) also fell back to the trait's double-decoding default. `impl ObjectSource for EphemeralSink` now overrides `read_object` the same way: an overlay hit decodes the already-trusted bytes once directly, a miss delegates to `self.store.read_object`, reusing the now-fixed store-side decode. New `ephemeral_sink_read_object_tree_overlay_and_fallthrough` test covers both paths plus the store-fall-through corruption case, through `&dyn ObjectSource`. The rest of that review round's findings were all on files outside this diff (`history/ancestry.rs`, `sign.rs`, `remote_dispatch/packmap.rs` — pre-existing code from already-merged PRs) and are out of scope here; this diff's own code was independently confirmed by two review angles to reproduce prior behavior exactly, backed by direct regression tests.
-
-  New `cargo bench -p mkit-benches --bench object_read` suite (release, criterion A/B, this branch's host): `deserialize` (in-memory decode only, no store) 100 entries 6.98µs → 5.58µs (−20.0%), 1000 entries 64.9µs → 52.9µs (−18.4%); `read_object` (through the store: read + id-verify + decode) 100 entries 204.3µs → 131.0µs (−35.9%), 1000 entries 796.0µs → 573.3µs (−28.0%) — measured against the inherent method directly, so these numbers were unaffected by the trait-dispatch gaps above; they now also apply to calls made through `ObjectSource`, on both `ObjectStore` and `EphemeralSink`. All 790 mkit-core tests pass, including `read_detects_corruption`/`read_rejects_oversize_on_disk`/`rejects_unsorted_tree_entries`, which pin that a corrupt or out-of-order tree is still rejected exactly as before. **SemVer:** none — `verified_id_and_object` and `check_hash` are private; `ObjectStore`'s, `EphemeralSink`'s, and `ObjectSource`'s public signatures are unchanged, and both `impl ObjectSource` blocks gaining a `read_object` override changes behavior (faster, same results) but not the trait's documented contract.
-
-- *(core,cli)* parallelize a `ChunkedBlob`'s per-chunk read fan-out during checkout/clone/reset/restore — the read-side counterpart of the ingest-side chunk-hashing fan-out `add` already had. `ops::restore::restore_blob`'s `ChunkedBlob` arm read every chunk (open + BLAKE3-verify + decode, via `ObjectStore::read_object`) sequentially, one at a time, even though each chunk's read is independent of every other chunk in the same file — the exact "add's ingest side is 4-core, checkout's read side is 1-core" gap `chunk_hash_fanout`'s own doc already names for the write direction. New `ops::restore::restore_tree_to_worktree_with` takes an explicit `read_chunks` batch callback (mirroring `worktree::store_large_file_streaming_with`'s `hash_chunks` shape, for the same reason: `mkit-core` has no thread-pool dependency of its own, so it stays usable from wasm targets) in place of a built-in sequential loop; chunks are read in bounded batches of `RESTORE_CHUNK_BATCH` (64, matching `worktree::STREAM_HASH_BATCH`'s 16 MiB window) instead of one at a time, and a batch of raw bytes shorter or longer than its input is a new typed `RestoreError::ChunkBatchLengthMismatch` rather than a silent desync. `restore_tree_to_worktree` (unchanged signature) is now a thin wrapper passing a sequential default. `mkit-cli`'s new `restore_fanout::read_chunks_fanout` wires a rayon fan-out into every checkout/clone/reset/restore/sparse-checkout call site (`commands::{checkout, clone, reset, restore, sparse_checkout}` and `commands::restore_worktree_and_index`), using the same "sequential below a threshold, `par_iter` at or above it" crossover shape as `commands::add`'s own chunk-hashing fan-out (`crate::fanout::try_map_seq_or_par`).
-
-  New `cargo bench -p mkit-benches --bench restore_chunk_fanout` suite (4-core host): `batch/N_chunks` (isolated per-batch crossover, sequential vs rayon) — 8 chunks is a wash (0.164ms vs 0.170ms), 16 chunks already wins clearly (0.343ms vs 0.265ms, ~23%), 64 chunks (a full batch) 1.441ms vs 0.638ms (~56%); `file/N_mib` (end-to-end restore of one real FastCDC-chunked file, sequential `restore_tree_to_worktree` vs fully rayon-fanned `restore_tree_to_worktree_with`) — 8 MiB 5.893ms → 4.745ms (~19%), 32 MiB 26.458ms → 21.042ms (~20%), 128 MiB 115.293ms → 83.199ms (~28%). The end-to-end win is smaller than the isolated batch win because a restored chunk's cost also includes a sequential `write_all` into one shared tmp file (never fanned out — file writes must stay in chunk order), so parallelism only covers the read/verify/decode share of each chunk. All existing `ops::restore` unit tests (including `restore_chunked_blob_reassembled`/`restore_rejects_chunked_total_size_mismatch`) and `mkit-cli`'s checkout/clone/reset/restore/sparse-checkout integration tests pass unchanged; `cargo clippy --all-targets --all-features -- -D warnings` and `cargo fmt --check` are clean. **SemVer:** additive — `mkit-core` gains `ops::restore::restore_tree_to_worktree_with` and `RestoreError::ChunkBatchLengthMismatch` (a new variant in a public exhaustive error enum can require downstream match updates); `restore_tree_to_worktree`'s signature and behavior are unchanged.
-
-### Changed
-
-- *(core)* `mkit-core::merkle`'s BMT inclusion-proof construction is now byte-identical to `commonware_storage::bmt::Proof` at the pinned `2026.9.0` train, replacing the prior provisional format. `Proof` is a new public struct (`leaf_count: u32`, `siblings: Vec<Hash>`) encoded as `u32 BE leaf_count ‖ varint(n) ‖ n × 32-byte digest` via `commonware-codec`, decoded through `Proof::decode(bytes, max_items)` with allocation bounded to `max_items * MAX_LEVELS` (`MAX_LEVELS = 32`) before any sibling is read. Sibling selection is ported from upstream: level-major bottom-up, index-ascending, omitting a sibling that would be a node's own odd-trailing duplicate or is already covered by another proven position in the same proof — the prior format always emitted the self-duplicate. Range (`build_tree_entries_range_proof`/`build_chunks_range_proof`) and multi-leaf (`build_tree_entries_multi_proof`/`build_chunks_multi_proof`) proofs are new. `build_{chunk,tree_entry}_inclusion_proof`/`verify_{chunk,tree,}_inclusion_proof` are replaced by `build_{chunk,tree_entry}_proof` and id-based verifiers — `verify_tree_entry`, `verify_chunk`, and their range/multi counterparts — which check against the object's **id** (via the new `wrap_id(ObjectKind, inner_root)` helper) rather than the bare pre-domain-wrap inner root the old API handed callers, closing an inner-root-vs-id confusion footgun (issue #1015 §Security); `verify_chunk` and its range/multi counterparts additionally reject position 0 (the `ChunkedBlob` metadata leaf) outright. A new native-only cross-check test (`merkle::tests::proofs_match_commonware`) proves byte-identity and mutual verifier acceptance against `commonware_storage::bmt` across randomised trees and single/range/multi positions; golden vectors live under `rust/tests/golden/proofs/` (SPEC-MERKLE-OBJECTS §5.6). No change to any object id, signing byte, or existing golden vector — only the *proof* bytes and API move. **SemVer:** breaking — `mkit-core::merkle`'s proof-related public API (types and function signatures/bytes) changed; `compute_tree_id`/`compute_chunked_id` and every other object-identity function are unchanged. Sanctioned by SPEC-MERKLE-OBJECTS §5's now-removed provisional carve-out and CONTRIBUTING's pre-production policy; the crate version bump itself happens in the release-prep PR, not here.
-
-- *(core)* SPEC-HISTORY-PROOF's ancestry primitive switches from a Merkle Mountain Range (MMR) to a Merkle Mountain Belt (MMB) — `commonware-storage`'s newer structure (<https://arxiv.org/abs/2511.13582>), already available in the exact pinned version (`=2026.9.0`) mkit depends on, so this needed no dependency bump. An MMR requires strictly decreasing peak heights, so a single append can cascade up to `O(log N)` internal-node merges whenever a run of same-height peaks collapses at once (e.g. crossing a power-of-two leaf count); an MMB allows up to two same-height peaks and merges at most one pair per append, bounding the worst case to a constant instead of only the amortized average — the property that matters for `mkit commit`'s one-append-per-publish pattern. `CommitHistory` (`mkit-core::history`) now wraps `commonware_storage::merkle::mmb::mem::Mmb` instead of `merkle::mmr::mem::Mmr`; both are the same generic `Mem<Family, Digest>` machinery (`Clone`, batch API, pruning, proof verification) with only the `Family` (peak/position topology) differing, so the swap was a mechanical type-and-terminology change confined to `history.rs` — `ancestry.rs` and everywhere else in the codebase only ever used mkit's own `Position`/`InclusionProof`/`CommitHistory` wrappers, never MMR types directly. `HistoryError::Mmr` is renamed `HistoryError::Mmb`; the `history-mmr` Cargo feature and `.mkit/history*` paths keep their names (identifiers, not a structural claim) per SPEC-HISTORY-PROOF's updated preamble.
-
-  This changes on-disk roots and `InclusionProof` bytes for the same commit sequence (different forest topology), and pre-production has no back-compat requirement for it (confirmed with the maintainer) — no version bump, dual-format support, or migration path, just an in-place spec rewrite. SPEC-HISTORY-PROOF §§1–5 are updated throughout (root/proof formulas, the `digests` peak-iteration order, which is now non-increasing rather than strictly decreasing since MMB peaks can tie); mkit also does not adopt the same paper's "Pyramid" P-MMB bagging variant, since it is not yet implemented in the pinned commonware release (mkit keeps `Bagging::ForwardFold`, matching what F-MMB uses).
-
-  `cargo test -p mkit-core --features history-mmr` (800 tests, including two pre-existing MMR-generic property tests that now exercise MMB unchanged) and mkit-cli's `history_mmr_*`/`reflog_and_amend` integration tests all pass unmodified — the swap changes proof/root *bytes*, not any documented behavior. Measured effect: `cargo bench -p mkit-benches --bench history_mmr --features history-mmr`'s `publish`/`load` series (through the full fsync-heavy durable-publish pipeline) show no measurable difference — expected, since total node count differs from MMR by under 2% at these sizes and shrinks below 0.1% by a few thousand commits (computed directly: N=250, MMR 494 nodes vs MMB 493; N=10,000, 19,995 vs 19,987), so it was never going to show through multi-millisecond fsync noise. A new in-memory-only `bench_in_memory_build` (batched `extend` over the whole chain, no I/O) shows a small, consistent ~5–8% improvement across N=50..5000, matching that same node-count delta. A separate attempt to isolate the actual claimed property — worst-case single-`append` latency over a sequence of individual appends — was prototyped but removed: allocator/scheduler noise in this sandbox dominated the microsecond-scale effect being measured and produced a directionally contradictory result at one size, so it would have been misleading to ship. The structural claim itself (node-count formulas, bounded merge-per-append, and the proof-size bound for the most recent leaf) is verified directly against `commonware-storage`'s own source and test suite (`mmb::proof::test_last_element_proof_size_is_two`), not re-derived here. **SemVer:** breaking for any consumer that persisted ancestry snapshots or `InclusionProof` bytes under the prior MMR-based format, or matched on `HistoryError::Mmr`; the feature is opt-in (`history-mmr`) and the project has no production deployments of it.
-
-- Sparse proofs and caches move to v2 canonical Tree witnesses. Verification
-  requires the independently requested Tree ID and derives the exact selection;
-  recursive witnesses establish completeness. Caches use `.witness` files;
-  verification returns the derived entries directly.
-- The staged index accepts only checksummed v3. Unsupported or corrupt indexes
-  fail safely, including before GC; there is no migration or automatic rebuild.
-- History proofs now describe canonical first-parent ancestry in explicit
-  generations, with locally trusted contextual descriptors and recoverable
-  publication. Bounded complete snapshots use O(chain length) reconstruction;
-  obsolete journal backends and their runtime dependencies are removed.
-- The keys Worker stores authoritative names and replay records in per-key
-  SQLite Durable Objects, with no KV fallback. Repository Workers use the
-  shared transactional replay ledger without obsolete idempotency tables.
-- *(cli, internal)* `mkit-cli`'s six "sequential below a per-thread threshold, rayon `par_iter` at or above it" fan-outs (`commands::add`'s per-file and per-chunk hashing, `remote_dispatch`'s pack-compression and delta-encoding, `remote_dispatch::packmap`'s signature verification) each hand-duplicated the branch-and-collect boilerplate around the shared `fanout::threshold` formula. New `fanout::map_seq_or_par`/`fanout::try_map_seq_or_par` factor that shape out for the four call sites it fits exactly (by-reference, in-order, infallible or `Result`-collecting); `prepare_delta_batch` (consumes by value) and `verify_new_object_signatures` (deliberately chunks its parallel path — see the entry above) keep their own loops since forcing either into the shared shape would need extra generic machinery to claw back what a bespoke loop gets for free. No behavior change. **SemVer:** none — `pub(crate)`-only, no public API surface.
-
-### Removed
-
-- **`mkit serve --http` and `mkit serve --listen-enc`.** `mkit serve <PATH>`
-  is now only the `mkit+ssh://` forced-command server (SSH-frame protocol on
-  stdin/stdout, unchanged). Its HTTP and encrypted listeners are gone, so the
-  CLI carries no HTTP server stack or `SQLite`. The removed flags are clap
-  usage errors (exit 64). Removed with them: `--http-token`,
-  `--unsafe-allow-any-http-peer`, `--enc-authorized-peers`,
-  `--enc-server-key`, `--unsafe-allow-any-enc-peer`,
-  `--enc-idle-timeout-secs`, `--enc-handshake-timeout-secs`, and
-  `mkit-cli`'s `http-transport` cargo feature (`enc-transport` stays: it is
-  the deprecated `mkit+enc://` client). The pre-production policy allows the
-  removal without a deprecation period.
-
-- **Standalone server binary and container image.** There is no `mkit-server`
-  binary, release archive or `ghcr.io` container image, and no native
-  SQLite/S3/filesystem server deployment. Serve repositories over SSH with
-  `mkit serve`, or on Cloudflare Workers with the `mkit-server-worker`
-  adapter. The `mkit-server` library crate and the Workers adapter remain.
-
-- **`mkit-transport-enc` is deprecated.** The `mkit+enc://` listener went with
-  the standalone server, so there is no maintained server for the client;
-  use SSH (`mkit serve`) or Connect.
-
-- **`mkit-transport-connect`'s `server` cargo feature (breaking).** The
-  axum-hosted server that backed `mkit serve --http` is gone, with its
-  public API: `serve`, `router`, `TransportServer` and
-  `map_transport_error`, and the `axum` and `connectrpc-health`
-  dependencies. The crate is now the `mkit+https://` client
-  (`ConnectTransport`) only; serve `mkit.transport.v1` with the `mkit-server`
-  library or its Workers adapter.
-  Removing a published feature and public items is semver-breaking, so the
-  next release of `mkit-transport-connect` (and, with lockstep versioning,
-  every `mkit-*` crate) is **0.5.0**, done at the release that merges the
-  `mkit-server` work to `main` (cargo-semver-checks runs at the tag,
-  `crates-publish.yml`). crates.io lists `mkit-cli` as its only published
-  dependent, and no published `mkit-cli` enables the feature by default.
-  `mkit-server-conformance`'s legacy `mkit serve --http` wire baseline is
-  removed with it.
-
-- Compatibility-only index readers/migration APIs, legacy history APIs, the
-  hash-only rename API, and redundant sparse-selection APIs. Pre-production
-  development supports the current formats without backward-compatibility shims.
-
-- **Windows is no longer a supported build, test, or release target (MKIT-6).** commonware-runtime `2026.9.0`'s non-Linux storage-sync path calls `libc::sync()`, which does not exist on `x86_64-pc-windows-msvc` — the workspace and its test suite (not just the default-feature `mkit` binary) no longer build there. Rather than ship a Windows CI/release leg that cannot actually build or test the workspace, or maintain an untested Windows-only subset, Windows was dropped: the `windows-smoke` CI job, the `x86_64-pc-windows-msvc` release leg (and its `.zip` archive), the `install.ps1` installer, the Scoop packaging manifest and `release-verify.yml`'s Scoop channel check, and the `windows-credential` leg of the `keystore-backends` CI matrix are all gone. `mkit-keystore`'s `backend-windows-credential` feature and its `BackendKind::WindowsCredentialManager` variant were removed — `"windows-credential"` is now an unrecognized backend name (`key backend: ...` / exit `CONFIG_ERROR`) rather than a compiled-in-but-platform-unavailable one (previously exit `UNAVAILABLE`, "requires Windows"). Removing a public enum variant from a published crate is semver-breaking: `mkit-keystore` (and, per the workspace's lockstep versioning, every `mkit-*` crate) needs a `0.5.0` release, not `0.4.3`, to ship this. Windows users should run mkit under WSL, which uses the Linux binary — see `docs/INVARIANTS.md`'s "Windows is not a build, test, or release target" entry.
-
-### Other
-
-- bump the commonware crate family from the `2026.7.1` release train to `2026.9.0` across every Rust workspace (`rust/`, `contrib/signers/`, `apps/repo-worker`, `apps/vcs-worker`) (MKIT-2). Notable upstream changes this required adapting to:
-  - `merkle::full::Merkle::{apply_batch, sync}` now take `self` by value; `CommitHistory`'s journaled backend handles a failed mutation by leaving the handle poisoned (`HistoryError::Poisoned`) instead of panicking, and `root()`/`len()` fall back to the last known-good value rather than requiring a `Result`.
-  - `commonware-runtime` 2026.9.0 added a per-storage-directory advisory `.hold` file lock, which deadlocked opening a second branch's history journal in the same process; `CommitHistory` now shares one bootstrapped `Context` per `<mkit_dir>/history` directory across every branch opened in-process (see `docs/INVARIANTS.md`, "One commonware storage Context per history dir per process").
-  - `threshold::recover` dropped its `Faults` generic and `sharing::Mode` lost its `Default` impl; `mkit-attest`'s BLS threshold signer names `Mode::NonZeroCounter` explicitly (same value the old default resolved to — pinned by a new golden-vector test).
-  - `commonware_parallel::Strategy` can no longer be implemented outside the `commonware-parallel` crate (`Manual::new` was removed); `pack_shard.rs`'s spy-based `CountingStrategy` test was removed accordingly (see `docs/INVARIANTS.md`).
-  - blst is now opt-in upstream (only pulled in via `commonware-cryptography`'s `std` → `bls12381` feature chain), not unconditional as the 2026.7.0-era comments said.
-  - Windows: see the Removed entry above — this is what motivated dropping Windows as a supported target.
+- *(cli)* `mkit mcp --http <addr>` now refuses to bind without authentication, matching `mkit serve --http`'s fail-closed design. Previously it bound the given address (not restricted to loopback despite its own doc comment's claim) with no `Authorization` check at all — any network-reachable caller got unauthenticated access to the full MCP tool catalog, including mutating tools like `mkit_checkout`. It now requires a bearer token (`--http-token <TOKEN>` or the `MKIT_MCP_TOKEN` env var — a name of its own, not `serve --http`'s `MKIT_API_TOKEN`, since the two surfaces have different threat models and must not share a secret) or an explicit `--unsafe-allow-any-http-peer` opt-out that prints a loud warning, enforced on every request via a new `BearerAuthHttp` tower middleware wrapped around `StreamableHttpService`. New `mcp_v2_http.rs` `mod auth` integration tests cover: refusal with no token/flag, refusal on an empty token, refusal when both a token and the unsafe flag are given, 401 on a missing/wrong `Authorization` header, success with the right token, and the `MKIT_MCP_TOKEN` env fallback. **SemVer:** additive — new CLI flags, new env var; existing `--http` usage without them now refuses to start rather than serving unauthenticated (a deliberate behavior change gated by the same version bump the removed-Windows-support entry below already requires).
 
 ## [0.4.2](https://github.com/officialunofficial/mkit/compare/v0.4.1...v0.4.2) - 2026-09-02
 

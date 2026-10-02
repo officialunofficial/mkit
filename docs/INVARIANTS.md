@@ -634,9 +634,7 @@ readable before it is complete, on one backend only.
 **Enforced by:** one test binary per backend in
 `rust/crates/mkit-server-conformance/tests/`: `memory_backends.rs`
 (full-capability and `RefsOnly` memory stores, `MemoryBlobStore`),
-`fs_backends.rs` (`FsLayoutStore`, `FsBlobStore`), `sqlite_backends.rs`
-(`SqlKvStore` over `RusqliteConn`, file and in-memory) and
-`s3_backends.rs` (`S3BlobStore` against the in-repo fake S3); the Workers
+and `fs_backends.rs` (`FsLayoutStore`, `FsBlobStore`); the Workers
 stores (`DoNamespaceStore` over a simulated Durable Object, `R2BlobStore`)
 in `rust/crates/mkit-server-worker/tests/conformance.rs`. The suite's own
 mutation tests (`suite_selftest.rs`) prove each case fails the store bug it
@@ -2457,7 +2455,7 @@ augmented roots and its standard verifier. Real TLS Connect/streaming tests
 cover trusted CA, hostname mismatch and default refusal; subprocess tests cover
 selection and CLI config layering. Browser clients keep browser-managed trust.
 
-## Durable inspection mode and repository flags (WP-5.5a-0)
+## Durable inspection mode and repository flags
 
 **Always:** Inspection mode is default-off and one-way: an empty store may
 record `on`; a non-empty unmarked store cannot enable it, and a marked store
@@ -2471,7 +2469,7 @@ semantics silently, or a concurrent flag update could be missed. **Enforced by:*
 the core `InspectionMode` and `InspectionFlags` stores, guarded compare-and-swap
 plans, restore/export validation, and Worker startup guard tests.
 
-## Repository-wide inspection holds (WP-5.5a-0 review)
+## Repository-wide inspection holds
 
 **Always:** Every ref's content holds share the canonical repository registry partition.
 A limit-one prefix probe sees any advance's hold under Single and D34. The separate

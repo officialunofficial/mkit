@@ -1,101 +1,53 @@
 # mkit-server
 
-The runtime-agnostic core of the production mkit server. It holds the
-vocabulary every server adapter shares, and compiles for both native targets
-and `wasm32-unknown-unknown`:
+A generic, runtime-agnostic mkit server core. Embedders build a deployment on
+it (for example, the Cloudflare Workers adapter in this repository), and
+`mkit serve` in the `mkit` CLI uses its `fs` and `ssh` pieces. It compiles for
+native targets and `wasm32-unknown-unknown`.
 
-- repo and namespace identifiers (`RepoId`, `NamespaceKey`, `Addressing`)
-- principals (`Principal`) and the typed `Operation` model
-- a transport-neutral `ServerError` with redaction by construction, mapped to
-  Connect (and ssh) error codes by the bindings
-- the async/runtime model: `MaybeSend`, `BoxFuture`, injected `Clock` and
-  `Spawner`, and `send_wrap`
-- a `Metrics` facade with no dependency on a metrics backend
-- the protocol logic every binding shares: ref CAS and ref-name checks
-  (`refs`), `UploadPack` framing (`upload`), download chunking (`download`),
-  quota evaluation (`quota`), auth v2 glue (`auth_v2`) and storage-error
-  redaction (`storage_error`)
-- the storage contract (`store`): a key-level `NamespaceStore` whose only
-  write is one declarative `Batch`, a content-addressed `BlobStore`, the key
-  layouts, value codecs and typed readers, and the replay-ledger model;
-  in-memory reference backends behind the `memory` feature; behind the
-  native `fs` feature, std-only stores over the `.mkit` on-disk layout
-  (`FsBlobStore` for `packs/`, `FsLayoutStore` for refs as files) that
-  delegate to `mkit-transport-file`; and the shared SQL backend
-  (`SqlKvStore` over a synchronous `SqlConn`, with versioned schema
-  migrations) behind the `sql` feature
-- the request pipeline (`pipeline`): the PRD §5.4 stages as hook traits with
-  the M0 defaults, the auth modes (open, bearer, auth v2, transport
-  identity), shard routing (`ShardMap`), pure write planners whose batches
-  carry a `NotAfter` commit deadline, the unary RPCs over the storage
-  contract, and the streaming ones: a resumable `UploadPack`
-  (`UploadSession`, memory bounded by one chunk) and a chunked
-  `DownloadPack` (`DownloadStream`)
-- the `test-faults` feature, for test builds only: `FaultHooks` called at
-  five pipeline points and per-request `TestDirectives`
-  (`x-mkit-test-fault`, `x-mkit-test-clock-skew-ms`). No release build
-  enables it; without it the seam is compiled out.
+## What it provides
 
-- the `connect` feature (on by default): the `mkit.transport.v1` Connect
-  binding. `connect::service(pipeline)` serves `TransportService` and
-  `grpc.health.v1.Health` over the pipeline behind an `AuthInterceptor`
-  that runs stage 0 on the exact unary request bytes. It uses connectrpc
-  without its `server` and `zstd` features, so it stays wasm-clean; the
-  native and Workers adapters mount it unchanged. The generated code is
-  owned by `mkit-rpc` under `generated/transport/` (refresh it with
-  `scripts/regen-transport-proto.sh`), so building needs no `protoc`.
-  Build with `default-features = false` to leave the binding and its
-  dependencies out.
-- the `ssh` feature: the `mkit.rpc.v1.ssh` session over the pipeline
-  (`ssh::serve_session`), with no async runtime of its own. `mkit serve`
-  (the `mkit` CLI, which depends on this crate with only `ssh` and `fs`)
-  runs it over stdio under a blocking executor, and the native enc
-  listener under tokio.
-- the `remote-hooks` feature (off by default): the `hooks` module, the
-  `mkit.server.hooks.v1` adapter (SPEC-SERVER §§6-8). `RemoteAuthorizer`,
-  `RemoteAdmission` and `RemoteOutcomes` implement the stage traits over a
-  transport-agnostic `HookChannel` (the native HTTPS channel and the Workers
-  binding are WP-3.8 and WP-3.9). Requests are Ed25519-signed over their
-  exact body (`HookSigner`), only an isolated service binding may go unsigned,
-  and every Authorize or Admit failure answers retryable `unavailable` with no
-  state written. It uses buffa messages with the JSON codec only, so it stays
-  wasm-clean; the generated code is owned by `mkit-rpc` under `generated/hooks/` (refresh
-  it with `scripts/regen-hooks-proto.sh`). A `Sleep` timeout seam, like
-  `Clock`, keeps deadlines runtime-agnostic.
+- Identifiers (`RepoId`, `NamespaceKey`, `Addressing`), principals and the
+  typed `Operation` model.
+- A transport-neutral `ServerError` with redaction by construction, mapped to
+  Connect and ssh error codes by the bindings.
+- The runtime model: `MaybeSend`, `BoxFuture`, injected `Clock` and `Spawner`,
+  and `send_wrap`; plus a `Metrics` facade with no metrics backend.
+- The storage contract (`store`): a key-level `NamespaceStore` whose only
+  write is one declarative `Batch`, a content-addressed `BlobStore`, key
+  layouts, value codecs and the replay-ledger model.
+- The request pipeline (`pipeline`): stage traits, auth modes (open, bearer,
+  auth v2, transport identity), shard routing, the unary RPCs, and resumable
+  streaming upload and download.
+- Protocol helpers shared by every binding: ref CAS and name checks, upload
+  and download framing, quota evaluation and storage-error redaction.
 
-## Crate map
+## Features
 
-| Crate | Role |
+| Feature | Effect |
 | --- | --- |
-| `mkit-server` | This crate. The core, with no runtime dependency: operation model, identifiers, storage and policy traits, the request pipeline, upload validation, CAS and quota logic, error mapping. |
-| `mkit-server-worker` | Cloudflare Workers adapter: R2 blobs and sharded Durable Objects. |
-| `mkit-server-conformance` | Storage-trait suite for every backend, plus a black-box wire suite for any deployment. |
+| `connect` (default) | The `mkit.transport.v1` Connect binding (`connect::service`), with its health service and auth interceptor. wasm-clean. |
+| `memory` | In-memory reference backends, a template for third-party backends. |
+| `fs` | std-only stores over the `.mkit` on-disk layout (`FsBlobStore`, `FsLayoutStore`). Native only. |
+| `sql` | A shared SQL backend (`SqlKvStore`) over a synchronous `SqlConn` trait; the embedder supplies the engine. |
+| `ssh` | The `mkit.rpc.v1.ssh` session (`ssh::serve_session`), with no async runtime of its own. |
+| `remote-hooks` | Signed `mkit.server.hooks.v1` authorization, admission and outcome adapters over a `HookChannel`. |
+| `http-objects` | Runtime-agnostic HTTP object serving; requires explicit configuration and indexed mode. |
+| `published-view` | Published reader source; explicit adapter configuration. |
+| `pack-ruzstd` | Pure-Rust zstd decoding for wasm targets. |
+| `test-faults` | Test-only fault injection. Never enable it in a release build. |
 
-Not yet published to crates.io: the first release ships with mkit 0.5.
+## Related crates
 
-HTTP object serving is a default-off `http-objects` feature, requiring
-explicit indexed and HTTP configuration. Native and Workers adapters
-have their own default-off forwarding feature and mount opt-in. The Paid
-Workers launch enables these routes when configured; native defaults
-continue to omit HTTP object and URL-token key routes. See the native and Worker adapter READMEs for CORS,
-streaming, retained paid-read settlement and dedicated token keys.
+- `mkit-server-worker`: Cloudflare Workers adapter (R2 blobs, Durable Objects).
+  Not published.
+- `mkit-server-conformance`: backend and wire conformance suites. Not
+  published.
 
-## Launch purge and operator foundations
+See the crate documentation and `docs/SPEC-SERVER.md` in the repository for
+details.
 
-`purge::PurgeConfig` enables durable automatic repository purges. Call
-`Pipeline::plan_repository_purge` before a serving-state mutation and merge its
-batch into that mutation's apply. The batch contains the immutable purge body,
-kind-11 timer, refill fence and root audit relay event. When a caller already
-allocates outbox rows, coallocate the audit event through the existing outbox
-planner. Invalidate process-local reachability immediately after commit.
+## License
 
-The global sink receives signed `hooks.v1.CachePurge` requests with a stable id
-and fresh nonce on each retry. Only an empty acknowledgement completes work;
-failed delivery leaves authoritative serving stops in force. The root relay
-appends automatic audit events and delivery receipts with its watermark, in
-arrival order, retaining source time. Purge delivery runs independently.
-
-`admin::Engine` verifies the separate `mkit-admin:v1` envelope and exports a
-gapless chain through `ReadAuditLog`. No keys means no operator routes. The
-framework includes persistent operation-id planning for later consumers; manual
-`PurgeCache` is not exposed and belongs to WP-5.6a.
+Licensed under either of Apache License, Version 2.0 or MIT license, at your
+option.

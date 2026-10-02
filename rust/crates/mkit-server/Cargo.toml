@@ -84,8 +84,8 @@ getrandom = { version = "0.4", optional = true }
 default = ["connect"]
 # The `mkit.transport.v1` Connect binding (`connect`): vendored codegen,
 # `TransportService` and `grpc.health.v1.Health` over the pipeline, and the
-# auth interceptor. wasm-clean; the native (M0-10) and Workers (M0-17)
-# adapters mount it unchanged.
+# auth interceptor. wasm-clean; embedders such as the Workers adapter
+# mount it unchanged.
 connect = [
     "dep:connectrpc",
     "dep:buffa",
@@ -109,8 +109,8 @@ fs = ["dep:mkit-transport-file"]
 # implements `SqlConn` with Durable Object SQLite. Compiles for wasm32.
 sql = []
 # The `mkit.rpc.v1.ssh` session over the pipeline (`ssh::serve_session`),
-# shared by `mkit serve` over stdio and any enc listener built on it. No async runtime:
-# it runs under the CLI's blocking executor as well as under tokio.
+# used by `mkit serve` over stdio. No async runtime: it runs under the
+# CLI's blocking executor as well as under tokio.
 ssh = ["dep:mkit-rpc"]
 # The remote-hook adapter (`hooks`): `mkit.server.hooks.v1` over a
 # transport-agnostic `HookChannel`, with signed requests and fail-closed
@@ -124,8 +124,8 @@ remote-hooks = [
 ]
 
 # Runtime-agnostic HTTP object serving (`Pipeline::serve_http_object`,
-# SPEC-HTTP-OBJECTS; WP-4.12). No new dependencies, wasm-clean. Off by default;
-# native embedders and the Paid Workers launch opt in through their adapters.
+# SPEC-HTTP-OBJECTS). No new dependencies, wasm-clean. Off by default;
+# embedders and the Workers launch opt in through their adapters.
 # Requires `PipelineConfig::http_objects` and indexed mode.
 http-objects = []
 # Published reader source; explicit adapter configuration, off by default.

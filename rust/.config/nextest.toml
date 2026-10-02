@@ -188,6 +188,18 @@ or (package(mkit-cli) and test(=remote_dispatch::packmap::tests::verify_new_obje
 '''
 slow-timeout = { period = "60s", terminate-after = 5 }
 
+# The storage suite over the `.mkit`-layout stores makes every write durable
+# (fsync the file, rename, fsync the directory): a few cases apply 1,000-2,000
+# single-key batches, ~40s each on a loaded macOS runner (F_FULLFSYNC). Not
+# hangs; the same generous ceiling as the other real-I/O suites.
+[[profile.default.overrides]]
+filter = 'binary(fs_backends)'
+slow-timeout = { period = "150s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'binary(fs_backends)'
+slow-timeout = { period = "150s", terminate-after = 1 }
+
 # The wire suite's growth case waits out replay expiry plus the server's
 # prune grace on the real clock (~80s; so do its store mutants):
 # pruning never follows the test-faults clock skew. The host ticket case
@@ -213,7 +225,7 @@ filter = 'test(=pack::tests::compressed_delta_bomb_releases_targets_and_checks_c
 slow-timeout = { period = "300s", terminate-after = 1 }
 
 # Memory-bounding tests. multipart_bounded_heap / multipart_buffered_heap
-# (mkit-server-conformance's memory binary, mkit-server-worker's
+# (mkit-server-conformance's fs and memory binaries, mkit-server-worker's
 # conformance binary) meter the allocator over a window and assert a peak.
 # They failed under parallel load and passed alone (#1210, #1212, #1218), so
 # the group runs one at a time across the whole run. The meter stays

@@ -249,7 +249,7 @@ pub struct PipelineConfig {
     pub addressing: Addressing,
     /// How metadata partitions are routed.
     pub sharding: Sharding,
-    /// Durable inspection mode, default-off and reserved for WP-5.5a wiring.
+    /// Durable inspection mode, default-off and reserved for asynchronous inspection wiring.
     pub inspection_mode: bool,
     /// How requests authenticate.
     pub auth: AuthMode,

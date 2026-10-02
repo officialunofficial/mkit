@@ -1361,9 +1361,8 @@ Grants, epochs and repository visibility ([SPEC-WRITE-GRANTS](specs/SPEC-WRITE-G
 A *grant* is a statement signed by a namespace owner that lets a grantee's key
 read or write repositories in that namespace on a deployment. `mkit grant`
 manages the grants **you hold**; the store is a directory of files under the
-user config directory. It is not the operator-side `mkit-server grant register`
-(WP-2.12, for ssh/enc transport principals on a server): the two names are
-unrelated commands.
+user config directory. It only holds client-side grants; it does not
+register grants on a server.
 
 - `mkit grant create --cap CAP --grantee HEX (--repo NAME | --all)
   [--refs PATTERN=FLAGS]... [--audience ORIGIN]... [--ttl DURATION]

@@ -1255,8 +1255,7 @@ flag, so issue grants for pushes that move a branch as
 .Cm cuf ,
 not
 .Cm cu .
-This store is unrelated to the operator-side
-.Cm mkit-server grant register .
+This store holds client-side grants only; it does not register grants on a server.
 .It Cm epoch Cm show | Cm bump
 .Cm epoch show Ar remote
 prints the grant epoch a remote stores for a namespace.

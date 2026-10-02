@@ -103,6 +103,8 @@ tower-http = { version = "0.6", default-features = false, features = ["cors"], o
 [dev-dependencies]
 base64 = "0.22"
 mkit-cli = { path = "../mkit-cli" }
+# The `.mkit`-layout stores `mkit serve` uses, for tests/fs_backends.rs.
+mkit-server = { version = "0.5", path = "../mkit-server", features = ["memory", "fs"] }
 tempfile = "3"
 # The automated wire baselines serve over real HTTP on 127.0.0.1:0.
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
