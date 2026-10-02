@@ -390,7 +390,7 @@ def collect_observation(folder, result, sampler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sha", required=True)
-    parser.add_argument("--uno", action="store_true", help="run the embedded Uno host directly in Miniflare")
+    parser.add_argument("--uno", action="store_true", help="run the embedded host fixture directly in Miniflare")
     parser.add_argument("--namespace", choices=("both", "allowlist", "any"), default="both")
     parser.add_argument("--observe-resources", action="store_true", help="observe the unchanged local workload")
     parser.add_argument("--artifact-from", type=Path, help="reuse the same owned clean-SHA artifact and runner")
