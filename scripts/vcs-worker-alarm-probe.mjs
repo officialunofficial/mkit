@@ -17,9 +17,11 @@ const root = resolve(import.meta.dirname, '..');
 const WATCHDOG_MS = 20_000;
 const keepGoing = process.argv.slice(2).includes('--keep-going');
 const failSchedule = process.argv.slice(2).find(arg => arg.startsWith('--fail-schedule='))?.split('=')[1];
+const failPhase = process.argv.slice(2).find(arg => arg.startsWith('--fail-phase='))?.split('=')[1];
+assert.ok(!failPhase || (failPhase === 'install' && failSchedule === 'set'), '--fail-phase=install needs --fail-schedule=set');
 assert.ok(!failSchedule || ['set', 'delete'].includes(failSchedule));
-assert.ok(process.argv.slice(2).every(arg => arg === '--keep-going' || arg === `--fail-schedule=${failSchedule}`),
-  'usage: vcs-worker-alarm-probe.mjs [--keep-going] [--fail-schedule=set|delete]');
+assert.ok(process.argv.slice(2).every(arg => arg === '--keep-going' || arg === `--fail-schedule=${failSchedule}` || arg === `--fail-phase=${failPhase}`),
+  'usage: vcs-worker-alarm-probe.mjs [--keep-going] [--fail-schedule=set|delete] [--fail-phase=install]');
 const fixtures = failSchedule ? 1 : 20;
 const scratch = await mkdtemp(join(process.env.TMPDIR || tmpdir(), 'alarm-runtime-'));
 const listener = net.createServer();
@@ -31,7 +33,7 @@ const config = join(scratch, 'wrangler.json');
 await writeFile(config, JSON.stringify({name: 'mkit-alarm-runtime-probe',
   main: join(root, 'apps/vcs-worker/tests/alarm-probe/wrapper.mjs'),
   compatibility_date: '2026-09-09', build: {command: 'true'},
-  vars: {FAIL_SCHEDULE: failSchedule || '', WORKERS_PLAN: 'free', AUTH_AUDIENCE: origin, AUTH_REPOSITORY: 'default',
+  vars: {FAIL_SCHEDULE: failSchedule || '', FAIL_PHASE: failPhase || '', WORKERS_PLAN: 'free', AUTH_AUDIENCE: origin, AUTH_REPOSITORY: 'default',
     SHARDING: 'single', TICKET_KEYS: 'fake-dev 1111111111111111111111111111111111111111111111111111111111111111'},
   durable_objects: {bindings: [{name: 'ALARM_PROBE', class_name: 'AlarmProbe'}]},
   migrations: [{tag: 'v1', new_sqlite_classes: ['AlarmProbe']}]}));
@@ -88,8 +90,9 @@ try {
     assert.ok(state.ticks.length >= 3, `fixture ${i} must span the existing 32-fire kind cap`);
     if (failSchedule) {
       assert.equal(state.fault.injected, 1, 'scheduling fault must be exercised');
-      assert.equal(state.fault.rejected, 1, 'failed scheduling must reject the alarm for runtime retry');
+      assert.equal(state.fault.rejected, failPhase === 'install' ? 0 : 1, 'failed scheduling must reject the alarm for runtime retry');
     }
+    if (failPhase === 'install') assert.equal(state.fault.idleSets, 0, 'an armed object must not call setAlarm again');
     passed++;
     console.log(`PASS alarm continuation ${i}/${fixtures}: 65 timers drained in ${state.ticks.length} ticks`);
   }

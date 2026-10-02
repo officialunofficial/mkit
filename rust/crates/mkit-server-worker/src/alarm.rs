@@ -162,6 +162,23 @@ pub fn alarm_after_put(current: Option<i64>, earliest: u64, now_ms: u64) -> Opti
     }
 }
 
+/// The due time of the earliest stored timer row, if `window` (a
+/// `timer_window(None, 1)` result) holds one; an unparsable row wakes now.
+#[must_use]
+pub fn head_due_ms(window: &[TimerCursor], now_ms: u64) -> Option<u64> {
+    window.first().map(|row| match keys::parse(&row.key) {
+        Some(keys::ParsedKey::Timer { due_at_ms, .. }) => due_at_ms,
+        _ => now_ms,
+    })
+}
+
+/// Self-healing arm: the alarm to set so stored timers cannot sit with no
+/// wake, or `None` when no row exists or an alarm at or before it is set.
+#[must_use]
+pub fn alarm_to_arm(current: Option<i64>, head_due: Option<u64>, now_ms: u64) -> Option<i64> {
+    head_due.and_then(|due| alarm_after_put(current, due, now_ms))
+}
+
 /// The action after a tick has examined the stored timer heads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlarmAction {
@@ -301,6 +318,17 @@ mod tests {
             alarm_after_tick_with_dirty(None, None, 100, false),
             AlarmAction::Delete
         );
+    }
+
+    #[test]
+    fn unarmed_or_late_alarm_is_healed_from_the_head_row() {
+        assert_eq!(alarm_to_arm(None, Some(500), 100), Some(500));
+        assert_eq!(alarm_to_arm(Some(900), Some(500), 100), Some(500));
+        assert_eq!(alarm_to_arm(None, Some(50), 100), Some(100));
+        assert_eq!(alarm_to_arm(Some(500), Some(500), 100), None);
+        assert_eq!(alarm_to_arm(Some(200), Some(500), 100), None);
+        assert_eq!(alarm_to_arm(None, None, 100), None);
+        assert_eq!(head_due_ms(&[], 7), None);
     }
 
     #[test]
