@@ -14,7 +14,7 @@ production server work; [`prd-snapshot.md`](prd-snapshot.md) is a dated copy of 
 | [`linear-groups.json`](linear-groups.json) | The 26 Linear work groups (G01–G26) and the WPs each one contains. |
 | [`m0-overview.md`](m0-overview.md) | M0 (foundation) overview. |
 | [`m1-m2-breakdown.md`](m1-m2-breakdown.md), [`m3-m5-breakdown.md`](m3-m5-breakdown.md) | Coarse breakdowns for the later milestones (rolling wave: detailed briefs are written at each milestone boundary). |
-| [`staging-uno.md`](staging-uno.md) | Early D35 Uno launch environment and key-role inventory; final contracts pending. |
+| [`staging-uno.md`](staging-uno.md) | Early D35 Paid Workers launch environment and key-role inventory; final contracts pending. |
 | [`launch-operations.md`](launch-operations.md) | User-operated deploy/rollback/reset/rotation and failure-drill skeleton; unexecuted. |
 | [`launch-readiness.md`](launch-readiness.md) | REL-1 dependency mapping and empty user-owned launch evidence/sign-off slots. |
 | [`briefs/REL-1-draft.md`](briefs/REL-1-draft.md) | DRAFT user-only main merge, tags, publishing and deploy prompt; no execution authority. |
@@ -60,11 +60,11 @@ and one PR per WP. A group is done when all of its WPs have merged.
 | G23 | M5 Lifecycle | M5: storage receipts (server signing and client storage) | 5.8, 5.12 |
 | G24 | M5 Lifecycle | M5: takedown, redaction notices, cache purge, admin API, reinstatement | 5.6, 5.7a, 5.7b, 5.9a, 5.9b, 5.10, 5.11a, 5.11b, 5.14 |
 | G25 | Release | Post-launch follow-ups and M5 exit conformance (R-185) | 5.13, REL-2 |
-| G26 | Release | Single Workers launch for Uno (0.5.0, R-185) | REL-1 |
+| G26 | Release | Single Workers launch for embedding host (0.5.0, R-185) | REL-1 |
 
 ## Delivery status (R-185, 2026-09-29)
 
-One Workers launch for the Uno monorepo (UNO-403/UNO-404) replaces R-154's two-stage release.
+One Workers launch for the embedding host monorepo (UNO-403/UNO-404) replaces R-154's two-stage release.
 The [launch mapping and critical path](00-plan.md#3-launch-mapping-delivery-and-critical-path-r-185)
 govern delivery; older milestone/WP states below are historical tracking, not current release gates.
 
@@ -232,5 +232,5 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 | 5.13 | G25 | Conformance: lifecycle wire suite (M5 exit) | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 5.14 | G24 | Reinstatement via server-side pack rewrite | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 5.15 | G22 | Publication Event delivery | [launch plan](00-plan.md#3-launch-mapping-delivery-and-critical-path-r-185) | | planned (launch) |
-| REL-1 | G26 | Single Workers launch for Uno: 0.5.0 bump, publish crates, release and merge to main | [launch plan](00-plan.md#3-launch-mapping-delivery-and-critical-path-r-185) | | planned |
+| REL-1 | G26 | Single Workers launch for embedding host: 0.5.0 bump, publish crates, release and merge to main | [launch plan](00-plan.md#3-launch-mapping-delivery-and-critical-path-r-185) | | planned |
 | REL-2 | G25 | Post-launch follow-ups | [launch plan](00-plan.md#3-launch-mapping-delivery-and-critical-path-r-185) | | deferred, in plan order |

@@ -1880,7 +1880,7 @@ mechanics, while §16 defines the admin release and audit contract.
 
 Launch inspection MAY enable a separate private retrieval channel on native
 and Workers servers. It is disabled by default and Paid-only. On Workers, the
-Uno launch profile and complete valid scanner retrieval settings MUST be
+Paid Workers launch profile and complete valid scanner retrieval settings MUST be
 present at startup before the route is mounted; partial settings MUST be
 refused. Without enablement, the route MUST NOT be mounted. It grants no
 public-serving, write, admin, or preservation-read permission. Global denial
@@ -3805,11 +3805,13 @@ action descriptors and activate every requested denial before returning success.
 It returns `complete = false`; acceptance MUST NOT imply verified preservation,
 holder discovery or repository/global completion. The pending record MUST retain
 preservation work. Production takedown and `ReadPreserved` activation MUST be
-available only when admin keys, `LAUNCH_PROFILE=uno`,
+available only when admin keys, `LAUNCH_PROFILE=paid-workers` (or its deprecated
+`uno` alias, which MUST log a startup deprecation warning),
 `TAKEDOWN_ENABLED=true`, indexed Workers Paid mode, and the complete §14.7
 preservation configuration are valid. This includes the `PRESERVATION`
 binding, explicit positive retention, receipt signing and publication keys,
-and signed HTTPS cache-purge configuration. Startup MUST refuse partial or
+and a configured cache-purge delivery: the signed HTTPS hook, or an
+embedder-supplied purge sink. Startup MUST refuse partial or
 invalid configuration. The
 preservation core, restricted admin catalog and §14.7 configuration are all
 required for launch, as are the launch conformance gates. This implementation
@@ -3906,11 +3908,12 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 | Version | Status | Change |
 |---|---|---|
 | 1 | draft | Namespace-scoped ListRepos authorization with an arbitrary repository selector; authority full listing requires explicit opt-in and writer view (§6.2; STC §7.10). |
-| 1 | draft | Production takedown and `ReadPreserved` activation uses the configured admin, Uno launch profile, takedown, indexed Paid and complete §14.7 preservation gate; startup refuses partial configuration. |
+| 1 | draft | Worker launch profile is `LAUNCH_PROFILE=paid-workers`; `uno` remains a deprecated alias with a startup warning. §18 accepts configured cache-purge delivery through the signed HTTPS hook or an embedder-supplied purge sink. |
+| 1 | draft | Production takedown and `ReadPreserved` activation uses the configured admin, Paid Workers launch profile, takedown, indexed Paid and complete §14.7 preservation gate; startup refuses partial configuration. |
 | 1 | draft | Bounded resumable publication rechecks retain a binding and witness position in the existing timer-12 value, guard checkpoints against obligation/generation changes, and preserve valid dependency limits. Unsupported pre-launch timer values require store reset (R-198 B1). |
 | 1 | draft | R-190 restricted takedown administration (WP-5.6a-3): additive acquisition, verification, discovery, legal-hold and purge status fields in existing v1 TakedownRecord; signed audited reads and atomic holds, byte-free replay and freshly verified Connect streaming. No new protocol or wire version. |
 | 1 | draft | R-190 lean launch preservation: finite allowlist/Single Root safety-cut sweeps; Any supports denial/preservation and incomplete known-namespace discovery pending the post-launch catalog. Pending, verified preservation and real completion stay distinct. Restricted ReadPreserved uses byte-free replay descriptors and fresh audited verified streams; full-profile and §14.7 key/list requirements remain. No schema fields or versions change in this amendment. |
-| 1 | draft | R-193 additive Inspect retrieval metadata (§6.4, §11.4), private raw added-pack reads with dedicated MAC capability and scanner auth-v2 keys, bounded ranges, uniform not_found and global denial. Current open-ticket state plus short capability expiry defines lifetime; fail-closed attempts remain readable until expiry, and retries preserve inspection_id while minting fresh capabilities. Default-off and Paid-only; Worker activation requires the Uno launch profile and complete valid retrieval settings. |
+| 1 | draft | R-193 additive Inspect retrieval metadata (§6.4, §11.4), private raw added-pack reads with dedicated MAC capability and scanner auth-v2 keys, bounded ranges, uniform not_found and global denial. Current open-ticket state plus short capability expiry defines lifetime; fail-closed attempts remain readable until expiry, and retries preserve inspection_id while minting fresh capabilities. Default-off and Paid-only; Worker activation requires the Paid Workers launch profile and complete valid retrieval settings. |
 | 1 | draft | R-190 pending launch takedown: repository-local object or whole-pack input (additive admin `pack_id = 9`), independent immediate denial and unresolved preservation work; production activation awaits preservation. Manual PurgeCache accepts asynchronously with audited completion. |
 | 1 | draft | R-200 launch inspection: sync/fail-closed only, at most four inspectors, positive whole-advance bound <=10,000 advertised as inspection_max_objects, conservative header/job-count refusal before enumeration with the existing index-limit error; one batch each and PRE_RECEIVE quarantine rejects. Inspect added-pack Blob/ChunkedBlob entries, surplus included, as BLOB/CHUNKED_FILE; chunk-only blobs MAY be BLOB, CHUNK unused. Earlier membership was synchronously inspected; activation requires an empty store. Enumerate frame/checkpoint pages of <=1,000 rows without inspection role reads. No durable continuation/marker; async, holds, quarantine, full classification and unrestricted multi-batch inspection deferred to WP-5.5c (§11, §18). |
 | 1 | draft | Launch admin foundation subset: signed framework, gapless audit/ReadAuditLog and automatic purge delivery; manual PurgeCache deferred. Automatic audit uses committed source relay events and atomic root append/dedup/watermark. |

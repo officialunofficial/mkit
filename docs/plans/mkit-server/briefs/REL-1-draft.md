@@ -15,7 +15,7 @@ docs, including [the operator guide](../../../operations/workers.md).
 Follow-ups move to a new feature branch after launch.
 
 Current as-built reference is `c3921b06effc0f38e2cdbe6f25b4e5a309018136`,
-including #1259 and #1260. It is not the launch candidate. The requested Uno
+including #1259 and #1260. It is not the launch candidate. The requested embedding host
 matrix is local evidence at an earlier source, with gaps and historical failures
 retained in [readiness](../launch-readiness.md). FIX-preservation-memory,
 PR-size cleanup, readiness/operator docs and delta review remain prerequisites.

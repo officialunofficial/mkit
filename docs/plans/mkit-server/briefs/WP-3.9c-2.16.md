@@ -1,7 +1,7 @@
 ## Purpose
 
-Uno's storage Worker (built on `vcs-worker`) can call uno-api's hooks on GKE over **signed HTTPS**. And when uno-api
-revokes a delegate, **no write that uno-api's Authority hook allowed earlier can commit afterwards**, across D34 leased
+the embedding host's storage Worker (built on `vcs-worker`) can call the embedding API's hooks on GKE over **signed HTTPS**. And when the embedding API
+revokes a delegate, **no write that the embedding API's Authority hook allowed earlier can commit afterwards**, across D34 leased
 shards, with the same completion guarantees as grant epochs.
 
 ## A. Fixed (do not change)
@@ -70,7 +70,7 @@ shards, with the same completion guarantees as grant epochs.
   writes.
   - **Ticket-only part paths** bypass Authorize, so add ticket-generation checks so revoked writers can't keep
     staging bytes.
-  - Record that re-enrolling the same key needs fresh keys or incarnation binding; that's Uno's job, noted in R-181.
+  - Record that re-enrolling the same key needs fresh keys or incarnation binding; that's the embedding host's job, noted in R-181.
 - **B10. Exposure:**
   - native: flags for the deployment-authority key and fence enablement;
   - Worker: vars and secrets;

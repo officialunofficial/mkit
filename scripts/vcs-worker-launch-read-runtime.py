@@ -307,7 +307,7 @@ def main():
                    ('REPO_INDEX', 'RepoIndexShard'), ('CONTENT_INDEX', 'ContentIndexShard')]
         config = {'name': 'mkit-launch-read-runtime', 'main': str(wrapper),
                   'compatibility_date': '2026-09-09', 'build': {'command': 'true'},
-                  'vars': {'AUTH_AUDIENCE': AUDIENCE, 'LAUNCH_PROFILE': 'uno', 'WORKERS_PLAN': 'paid',
+                  'vars': {'AUTH_AUDIENCE': AUDIENCE, 'LAUNCH_PROFILE': 'paid-workers', 'WORKERS_PLAN': 'paid',
                            'INDEXED_MODE': 'true', 'ADDRESSING': 'multi', 'SHARDING': 'd34',
                            'NAMESPACE_POLICY': 'any', 'UNSAFE_OPEN_NAMESPACES': 'true',
                            'RETENTION': 'permanent', 'STORAGE_LEASES': 'false', 'GC_ENABLED': 'false',

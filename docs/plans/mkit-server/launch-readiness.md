@@ -1,4 +1,4 @@
-# Uno launch readiness checklist
+# Paid Workers launch readiness checklist
 
 Status: **FINAL PREPARATION — NOT READY FOR LAUNCH; EXTERNAL GATES UNRUN**
 (WP-1.20 / R-195). As-built feature checkpoint:
@@ -50,7 +50,7 @@ Merged provenance does not mean a local or staging case passed.
 | CLI CA option | Additive PEM roots, preserved TLS checks; Connect HTTPS only | #1254 / `b90f74a3` |
 | Launch review repair | Inherited timers/jobs/goldens, memory/pack cap/scanner writes, decoder scratch, purge/admin/outcomes/sha2 | #1255 / `acd17923`; #1256 / `e1533a9c`; #1257 / `86c04dfd`; #1258 / `dd0c875c` |
 | Stale-connection retry | Replay-safe unary retry once, same envelope/deadline; streams never replayed | #1260 / `849d83cb` |
-| 4.18 | Paid indexed Multi/D34 activation, embedding, requested Uno local matrix, R-194 | #1259 / `c3921b06` |
+| 4.18 | Paid indexed Multi/D34 activation, embedding, requested embedding host local matrix, R-194 | #1259 / `c3921b06` |
 | FIX-preservation-memory | 48 MiB scheduled allowance; latest-base retention, 50-hop canonical/restart regressions | #1263; no whole-isolate staging claim |
 | 1.20 final | This preparation and standalone operator guide, R-195 | #1262 / `28bd8f7e`; no staging claim |
 
@@ -82,18 +82,18 @@ contains those fixes; revalidate affected evidence at the future candidate.
 
 | Pin | Value |
 |---|---|
-| Uno host features | `mkit-server-worker`: `http-objects,pack-ruzstd`; custom in-process Authorize/Admit/Outcome and paired local purge; no test-faults, signed-HTTPS or snapshot runtime acceptance inferred |
-| Uno Wasm SHA-256 | `8db43d251998a36c4206bdf921bc1a60a01cf5c5978cfc9949fa226997d3faaf` |
+| embedding host features | `mkit-server-worker`: `http-objects,pack-ruzstd`; custom in-process Authorize/Admit/Outcome and paired local purge; no test-faults, signed-HTTPS or snapshot runtime acceptance inferred |
+| embedding host Wasm SHA-256 | `8db43d251998a36c4206bdf921bc1a60a01cf5c5978cfc9949fa226997d3faaf` |
 | Native CLI SHA-256 | `e2c69903f0d5431fb7bb2c73bff08fa0be1990e5c536150a8a6a91d1868d32e8` |
 | Matrix runner SHA-256 | `d80dc9005565676e2b198f3a296ef8f95d870fcbd04a37258579e1227cc85b65` |
 | Matrix manifest SHA-256 | `809c176afc05fdf4f262ae097c7ae3361721accf54dba5f42956067c06552ca4` |
 | Runtime / command | Wrangler 4.134.0 / Miniflare 5.20260917.0-alpha; `vcs-worker-launch-admin-runtime.py --uno --namespace any --observe-resources`; exact args/times/config/log hashes in the retained record |
-| Uno config digest | `82c634fff2d30b4cd3d976913193d19b8702d78054f417bd72bc31e44f320c2f` |
+| embedding host config digest | `82c634fff2d30b4cd3d976913193d19b8702d78054f417bd72bc31e44f320c2f` |
 | Geometry | Embedded 8,631,723-byte canonical pack, two streamed parts; native HTTPS four 128 KiB files, signed zstd push/exact clone; public Multi/D34 `any`, internal admin, leases/GC off |
 
 | #1259 local lane | PASS | FAIL | Declared skip / scope |
 |---|---:|---:|---|
-| Requested Uno functional matrix | 5 grouped rows | 0 in final run | 0 in those rows: embedded push/AlreadyPresent/402; native HTTPS push/clone; HTTP/headers; takedown/preservation/audit; cold-restart Outcome. Sixth PR row records scoped resource observations, not a sixth functional test |
+| Requested embedding host functional matrix | 5 grouped rows | 0 in final run | 0 in those rows: embedded push/AlreadyPresent/402; native HTTPS push/clone; HTTP/headers; takedown/preservation/audit; cold-restart Outcome. Sixth PR row records scoped resource observations, not a sixth functional test |
 | Embedded fixture checks | 10 named assertions | 0 | 0; count from retained matrix manifest, distinct from grouped PR rows |
 | Physical observation | All groups complete | 0 completeness failures | 72,685 records, 244 alarm groups; no resource certificate |
 | Conformance + transport nextest | 680 | 0 | 2 |
@@ -121,7 +121,7 @@ response bytes; partial replies/HTTP errors and streams are not replayed.
 | Connections | Peak four complete outgoing lifetimes; ceiling six |
 | Timer window / SQL | Peak nine rows; 114,223 read / 31,315 written |
 | Memory | Wasm linear capacity 20,316,160 bytes; sampled co-observed used sum 60,458,558 and allocated-capacity sum 104,604,962 bytes (~105 MB) |
-| Memory coverage | 154 identified samples / 1,667 total; 1,513 unknown, 27 gaps. Raw-Blob Uno fixture does not exercise maximum preservation delta geometry |
+| Memory coverage | 154 identified samples / 1,667 total; 1,513 unknown, 27 gaps. Raw-Blob embedding host fixture does not exercise maximum preservation delta geometry |
 
 Historical five-variant sizes are pinned to
 `43256803446f7f29a7fbf45d794afcfb78cea181`, before final review fixes, in
@@ -136,7 +136,7 @@ All commands start `worker-build --release --features` from `apps/vcs-worker`.
 | `pack-ruzstd,signed-http-hooks` | 6,665,414 | 2,282,338 | 6,705,440 |
 | `pack-ruzstd,http-objects,signed-http-hooks` | 6,993,827 | 2,383,298 | 7,034,055 |
 | `launch` (also published-view) | 7,029,471 | 2,397,658 | 7,070,032 |
-| Distinct Uno host at matrix source | 6,934,119 | 2,370,989 | 6,974,355 |
+| Distinct embedding host at matrix source | 6,934,119 | 2,370,989 | 6,974,355 |
 
 The five variants passed their local 64 MiB emitted-size guard; final-head
 variant measurements and remote packaging acceptance remain UNRUN. Gzip is
@@ -151,12 +151,12 @@ informational. Size does not establish runtime/resource acceptance.
   ~105 MB sample do not certify isolate headroom. Exercise the
   [whole-isolate memory gate](staging-uno.md#whole-isolate-memory-gate).
 - **many_refs connection reuse:** inherited Worker conformance failure remains
-  Medium/unclassified. #1260 and the requested Uno matrix do not constitute a
+  Medium/unclassified. #1260 and the requested embedding host matrix do not constitute a
   rerun/closure of many_refs. Diagnose at its original geometry and preserve
   its failed evidence.
 - **Confirmed delta-review findings at `c3921b06`, still open:** High 7-1
   (interrupted Takedown can replay success before every denial is activated),
-  High 4-1 (actual Worker/Uno feature graphs omit server-local decoder scratch
+  High 4-1 (actual Worker/embedding host feature graphs omit server-local decoder scratch
   reservation and idle-reader release), and High 6-1 (batch URL issuance renews
   stale reachability when takedown denial is off) require source corrections and
   focused regression evidence before selecting the affected launch candidate.

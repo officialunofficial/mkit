@@ -3,7 +3,7 @@
 //! private stage functions; everything reusable is in `http_objects`.
 //!
 //! Reachable only when a deployment opts into indexed HTTP serving through
-//! `PipelineConfig::http_objects`; native embedders and the Uno Worker launch
+//! `PipelineConfig::http_objects`; native embedders and the Paid Workers launch
 //! configure this through their adapters.
 
 use mkit_core::hash::{Hash, to_hex};

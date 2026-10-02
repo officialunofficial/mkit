@@ -1,6 +1,6 @@
-# Uno read-failure repair and completed local matrix
+# Embedding host read-failure repair and completed local matrix
 
-The requested Uno Kit matrix passes locally at
+The requested matrix for the first embedding consumer passes locally at
 `7527556d09c7753462f0449622d86ade0fb3b70e`, tree
 `d83f2cb00a13f21189dfb07e5fff4fbcd09fb032`. This is the embedded
 Paid indexed Multi/D34 `any` profile, permanent retention, leases/GC off,
@@ -46,19 +46,19 @@ completeness and budget checks remain unchanged.
 | Public HTTP reads/content headers | PASS | Object/file GET, HEAD, range, invalid range, safe filename/type and security headers; raw Blob canonical BLAKE3 independently verified |
 | Takedown → denial → preservation → audit | PASS | Immediate 404, verified private preserved canonical bytes and terminal offsets, role denial, hold set/clear, bounded list scopes, gapless accepted audit, deferred catalog absent; custom paired LocalCache acknowledgement |
 | Outcome after cold-alarm restart | PASS | Both committed reservation IDs first fail in the test sink, then deliver from the same persisted stores in a new process before another request; no new timer kind or signing identity |
-| Uno size/CPU/calls/memory measurements | MEASURED | Sizes and complete physical-call traces below; CPU is OS process accounting, memory is identified inspector sampling with explicit gaps |
+| embedding host size/CPU/calls/memory measurements | MEASURED | Sizes and complete physical-call traces below; CPU is OS process accounting, memory is identified inspector sampling with explicit gaps |
 
 The native run is pinned to source `d205ac61db76f9e7dc94877dc68f355561742e98`.
 The subsequent matrix-source commit changes only the JS alarm observer; the
-native CLI and Uno Wasm bytes are identical. Final evidence-only commits do
-not change those executable bytes. This Uno acceptance does not fill every
+native CLI and embedding host Wasm bytes are identical. Final evidence-only commits do
+not change those executable bytes. This embedding acceptance does not fill every
 historical full-profile case in [launch-evidence.md](launch-evidence.md).
 
 ## Resource measurements and limits
 
 | Measurement | Local result | Scope |
 |---|---:|---|
-| Uno Wasm / deterministic gzip | 6,934,119 / 2,370,989 bytes | Actual host with panic/failure fixture; all emitted artifact files total 6,974,355 bytes |
+| embedding host Wasm / deterministic gzip | 6,934,119 / 2,370,989 bytes | Actual host with panic/failure fixture; all emitted artifact files total 6,974,355 bytes |
 | Request physical calls peak | 8,290 | Complete invocation groups; below 9,000 backend and 10,000 combined request allowances |
 | Alarm physical calls peak | 123 | 244 completed alarm groups; below unchanged 960 allowance |
 | Combined outgoing lifetime peak | 4 | Below unchanged six; bodies/cancellation included |
@@ -86,7 +86,7 @@ full memory/cost before launch, per the
 The earlier D64 five-variant table remains pinned to `43256803`: minimal
 6,661,292 raw bytes, HTTP 6,990,192, signed 6,665,414, HTTP+signed 6,993,827,
 snapshots 7,029,471. Those are historical variant measurements, not this
-latest Uno host digest or a new runtime acceptance for those variants.
+latest embedding host digest or a new runtime acceptance for those variants.
 
 ## Pins, commands and retained failures
 
@@ -99,7 +99,7 @@ Scratch root: `~/.cache/mkit-test-tmp/wp-4-18/executor-readfix/`.
 | `final-memory-summary.json` | `d325486667c2798306ff6ba89e1ec32e3ebd1bd9a8417b5a3c79a98d5eb6f885` |
 | `heavy-direct-cpu-final/cpu.json` | `e8a3c95f60d8c62b44389ca249c0eb68f715dd3870eefecab0353ea7d44ad840` |
 | `native-https-r3/evidence.json` | `4de8c6b801c7d8d36050791b976897a6ea7de8405919da453e6b527509a8c6f2` |
-| Uno `artifact/index_bg.wasm` | `8db43d251998a36c4206bdf921bc1a60a01cf5c5978cfc9949fa226997d3faaf` |
+| embedding host `artifact/index_bg.wasm` | `8db43d251998a36c4206bdf921bc1a60a01cf5c5978cfc9949fa226997d3faaf` |
 | Matrix conformance runner | `d80dc9005565676e2b198f3a296ef8f95d870fcbd04a37258579e1227cc85b65` |
 | Native CLI | `e2c69903f0d5431fb7bb2c73bff08fa0be1990e5c536150a8a6a91d1868d32e8` |
 
@@ -122,7 +122,7 @@ corrected observer rerun above passes the unchanged physical checks.
 ## Gates and review
 
 Locked full workspace/all-targets/all-features clippy, root/app formatting,
-Uno fixture wasm clippy, warnings-as-errors rustdoc, doctests, scripts and
+embedding host fixture wasm clippy, warnings-as-errors rustdoc, doctests, scripts and
 security checks pass. Current conformance + transport nextest: 680 passed,
 two skipped. Separate transport: 140 passed, one skipped; reverse-dependency
 CLI + conformance: 2,073 passed, ten skipped. Existing observer tests were
@@ -141,5 +141,5 @@ deductions, activation is **3,495 / 3,500** lines, conservatively including all
 changed non-test Rust lines and is excluded from activation accounting; its
 tests are separate. `cap-final.json` records this split. Other variants,
 deployed CDN purge, staging and user-owned external acceptance remain outside
-this requested Uno matrix; larger native publication workloads retain the
+this requested embedding host matrix; larger native publication workloads retain the
 existing cumulative limit.

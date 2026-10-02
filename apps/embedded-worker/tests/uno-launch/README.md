@@ -1,4 +1,4 @@
-# Local Uno acceptance fixture
+# Local embedding acceptance fixture
 
 This host embeds the launch adapter, remounts the restricted admin router at
 `/_uno/operator`, supplies local Authorize/Admit/Outcome callbacks and

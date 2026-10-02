@@ -33,7 +33,7 @@ Your first commit copies this prompt plus the base brief, from "Purpose" on, to
     from the matrix and the budgets.
 - **Proofs are native-only at launch.** Worker proofs (4.14b-2) are post-launch. The release Worker keeps HTTP
   `?proof=1` unsupported and must **not** advertise proof capability. Native advertises and serves proofs.
-- **Namespace policy:** `allowlist`, or `any` with `UNSAFE_OPEN_NAMESPACES=true`. The Uno Kit demo runs
+- **Namespace policy:** `allowlist`, or `any` with `UNSAFE_OPEN_NAMESPACES=true`. The embedding host demo runs
   `any`. Under `any`, takedown works but reports discovery as incomplete (the 5.6a-2 ruling). Update `staging-uno.md`
   accordingly: it currently says "allowlist" only.
 - **Features are opt-ins inside the Paid indexed launch profile.** Each opt-in validates its complete configuration at
@@ -113,13 +113,13 @@ Enable one explicit Paid Workers profile only when complete publication, inspect
 
 ## A. Fixed
 
-R-185 replaces all historical Stage1/Stage2 activation timing. Uno profile: indexed serving and inspection, leases=false, permanent retention, GC disabled. Non-open write policy, ticketed uploads with threshold0, fail-closed scanner and explicit async deadlines. Held/blocked bytes deny writers and readers through every public/reuse/cache/relay path; remote scanner has only its assigned private scope. Lean unresolved takedown permission does not waive verified preservation, retention/legal hold/global denial/audit or14.7 key requirements. Rewrite/451/reinstatement remain excluded and cannot be advertised.
+R-185 replaces all historical Stage1/Stage2 activation timing. The Paid Workers profile: indexed serving and inspection, leases=false, permanent retention, GC disabled. Non-open write policy, ticketed uploads with threshold0, fail-closed scanner and explicit async deadlines. Held/blocked bytes deny writers and readers through every public/reuse/cache/relay path; remote scanner has only its assigned private scope. Lean unresolved takedown permission does not waive verified preservation, retention/legal hold/global denial/audit or14.7 key requirements. Rewrite/451/reinstatement remain excluded and cannot be advertised.
 
-Keep native as reference/test server; no Uno source edits. Specs win over old prompts, adapter shortcuts and size estimates. No test-faults route/config in release production. Local wrangler success cannot establish deployed CPU/cost/multicolo safety.
+Keep native as reference/test server; no embedding host source edits. Specs win over old prompts, adapter shortcuts and size estimates. No test-faults route/config in release production. Local wrangler success cannot establish deployed CPU/cost/multicolo safety.
 
 ## B. Root decisions
 
-B1. Production opt-in explicitly selects the Uno launch profile and Paid plan. Default-off core/native/Worker wire and config remain compatible. Remove the release INDEXED_MODE refusal only here, after all concrete prerequisites merge. Startup rejects Free, open/opaque inspection, missing indexed verification/extraction/HTTP/proofs/private retrieval, no retention, enabledGC/storageleases, missing signed hook/scanner/admin/preservation configuration, absent deadline, contradictory/unknown role/binding/audience config and key reuse across roles. Check old persisted authority/publication migration states according to owning contracts; a mismatched executor cannot suppress durable mode to accept writes.
+B1. Production opt-in explicitly selects the Paid Workers launch profile and Paid plan. Default-off core/native/Worker wire and config remain compatible. Remove the release INDEXED_MODE refusal only here, after all concrete prerequisites merge. Startup rejects Free, open/opaque inspection, missing indexed verification/extraction/HTTP/proofs/private retrieval, no retention, enabledGC/storageleases, missing signed hook/scanner/admin/preservation configuration, absent deadline, contradictory/unknown role/binding/audience config and key reuse across roles. Check old persisted authority/publication migration states according to owning contracts; a mismatched executor cannot suppress durable mode to accept writes.
 
 B2. GetServerInfo advertises implemented ACTIVE capabilities honestly, including explicit false storage leases where the protocol requires it; no async inspection before a complete active scanner. No default-full-profile claim, receipt/notice/rewrite capability inflation or false exposure of inert operations. Document exact configuration grammar and minimal bindings/secret NAMES, never secret values. Configure canonical HTTPS hook audiences and all required14.7 preservation/receipt key/public-key list protections; resolve any concrete lean-profile conflict through root rather than silently skipping requirements.
 
@@ -146,7 +146,7 @@ Any prerequisite remains default-inert/partial; fail-closed isolation/no-oracle 
 Run all current common/full/area local gates at final immutable head, plus complete native and wrangler launch matrix. Gates include release/default-off regression and opted-in release Worker runtime, not test-faults alone. Count whole-alarm calls/ops/resident work and concurrent response lifetimes with adversarial inputs. Keep per-worktree ports/processes isolated; serialize known high-memory models appropriately. Two independent self-reviews including security/spec/crypto audit, followed by independent adversarial PR review. Open PR with exact commands/logs, measured limits and remaining user-owned staging/external review slots. No cloud/CI polling.
 
 
-## Addendum (2026-09-30): embedding support for Uno Kit, in scope for 4.18
+## Addendum (2026-09-30): embedding support for the first embedding consumer, in scope for 4.18
 
 - Budget: up to about 350 extra production lines; the cap becomes 3,350.
 - Phase: 1 or 2.
@@ -177,7 +177,7 @@ Run all current common/full/area local gates at final immutable head, plus compl
      Workers script size limits. Record the exact build commands.
 - **Not in scope:** a `ListRepos` RPC. It's post-launch.
 
-### Addendum 2 (2026-09-30): embedding gaps found by Uno Kit's questions (cap now 3,500)
+### Addendum 2 (2026-09-30): embedding gaps found by the first embedding consumer's questions (cap now 3,500)
 
 6. **A custom purge sink.** The DO builder (addendum item 2) also accepts an optional
    `Arc<dyn mkit_server::purge::PurgeSink>` (plus `LocalInvalidation`), so an embedder can purge in-process. Today
@@ -199,7 +199,7 @@ Run all current common/full/area local gates at final immutable head, plus compl
   - reserved path prefixes: Connect `/mkit.transport.v1.TransportService/`, `/mkit.server.admin.v1.AdminService/`,
     any path containing `/-/` when HTTP serving is mounted, `/.well-known/mkit-*`, `/_mkit/`, and `/__mkit_test/` in
     test builds;
-  - that a host may use any other prefix, such as `/_uno/`. Namespaces and repo names can't start with `_`.
+  - that a host may use any other prefix, such as `/_host/`. Namespaces and repo names can't start with `_`.
 
 Executor phase assignment: both embedding addenda will be implemented and verified in phase 2. The final binding production-line cap is 3,500 (addendum 2). Phase 1 removes the extraction and retrieval placeholders after merged PRs #1244 and #1243; only WP-5.6a-2 preservation remains a startup refusal. The separate timer-12 repair is PR #1245 (`3038c158`), to merge before phase 2.
 

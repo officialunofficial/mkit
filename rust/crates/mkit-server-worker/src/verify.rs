@@ -14,7 +14,7 @@
 //! registered there. Raise `limits.cpu_ms` on a Paid deployment that verifies
 //! large packs; a slice the runtime kills is counted and shrinks its own work.
 //!
-//! **Launch.** The explicit Paid indexed Uno profile selects this handler
+//! **Launch.** The explicit Paid indexed Workers profile selects this handler
 //! with the real R2 extraction driver. Without the opt-in, indexed mode stays
 //! off and no verification job or kind-7 timer is created.
 

@@ -6,7 +6,7 @@
 //! (WP-4.16) mounts it, adds CORS and streams the body.
 //!
 //! The `http-objects` feature is off by default. Native embedders and the
-//! Paid Uno Worker launch can opt in through their adapter features and
+//! Paid Workers launch can opt in through their adapter features and
 //! mount configuration. The handler requires indexed mode and
 //! `PipelineConfig::http_objects`.
 //!

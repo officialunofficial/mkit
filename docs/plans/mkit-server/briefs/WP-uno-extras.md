@@ -22,7 +22,7 @@ Run locally in `<repo>`.
 
 ## 1. R-204: batch URL-token issuance on the in-process reader
 
-The Uno Kit viewer shows many files of a private kit. Today each needs a signed `IssueObjectUrl` RPC.
+The first embedding consumer's viewer shows many files of a private kit. Today each needs a signed `IssueObjectUrl` RPC.
 - Add `ObjectReader::issue_urls(&self, targets: &[UrlTarget], ttl_s: u32) -> Result<Vec<Option<IssuedUrl>>>`.
 - The rules are **exactly** those of `IssueObjectUrl` for the reader's view: the same authorization (an Owner view
   built from a verified owner/grant envelope; a Public view only for public repositories), the same reachability,
@@ -35,7 +35,7 @@ The Uno Kit viewer shows many files of a private kit. Today each needs a signed 
 
 ## 2. R-205: deployment default visibility for new repositories
 
-Uno Kit wants every kit private by default. Today it must remember a `SetRepoVisibility` call before each first push.
+The first embedding consumer wants every kit private by default. Today it must remember a `SetRepoVisibility` call before each first push.
 - Add an optional deployment setting: `WorkerConfig.default_repo_visibility` (programmatic) and the env var
   `DEFAULT_REPO_VISIBILITY=public|private` (default `public`, today's behavior), plus a native config flag.
 - It applies when a repository has **no stored visibility**. An explicit `SetRepoVisibility` always wins.

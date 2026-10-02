@@ -1,6 +1,6 @@
 ## Purpose
 
-Embedders such as Uno Kit need canonical object bytes in-process, to build file layouts, disclosure proofs
+Embedders such as the first embedding consumer need canonical object bytes in-process, to build file layouts, disclosure proofs
 (`build_disclosure_from`) and diffs. Those bytes include `ChunkedBlob` manifests, which HTTP serving never returns
 (it serves concatenated content). Everything must follow the same reachability, visibility and takedown rules as HTTP
 id-route serving. It is in-process only: **no wire, HTTP or spec change.**
@@ -40,7 +40,7 @@ id-route serving. It is in-process only: **no wire, HTTP or spec change.**
    embedding section of the Worker README. 4.18 is writing that section in parallel, so add a short subsection and
    keep it merge-friendly.
 5. **Docs:**
-   - R-202 row in `00-plan.md` ("WP-4.16c: in-process canonical object reader for embedders, for Uno Kit demo");
+   - R-202 row in `00-plan.md` ("WP-4.16c: in-process canonical object reader for embedders, for embedding host demo");
    - a registry row;
    - CHANGELOG.
 

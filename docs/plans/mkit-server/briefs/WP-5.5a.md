@@ -1,6 +1,6 @@
 ## Purpose
 
-Uno's scanner decides at push time. Before apply, mkit calls each synchronous inspector with the complete inspected
+the embedding host's scanner decides at push time. Before apply, mkit calls each synchronous inspector with the complete inspected
 set, rejects on `reject`, and fails closed when an inspector is unavailable.
 
 ## A. Fixed

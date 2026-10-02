@@ -35,7 +35,7 @@ admission and settlement path as ordinary content, so proofs can never bypass pa
   - make merged 4.13 an explicit dependency in the plan;
   - add 4.10b as 4.14b-2's dependency;
   - add registry rows 4.14b-1 and 4.14b-2.
-- **B5. Accuracy notes** for Uno in R-187:
+- **B5. Accuracy notes** for embedding host in R-187:
   - MKDP and MKDS verification uses `mkit-core`/`mkit-wasm`, not `mkit-attest` (that one handles DSSE);
   - a manifest proof alone doesn't verify separately fetched file bytes.
 

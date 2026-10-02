@@ -249,7 +249,7 @@ mod tests {
         let mut v = vars();
         v.remove("AUTH_REPOSITORY");
         for (key, value) in [
-            ("LAUNCH_PROFILE", "uno"),
+            ("LAUNCH_PROFILE", "paid-workers"),
             ("INDEXED_MODE", "true"),
             ("WORKERS_PLAN", "paid"),
             ("ADDRESSING", "multi"),
@@ -300,10 +300,20 @@ mod tests {
             }]})
             .to_string(),
         );
-        assert!(
-            parse(&v).is_ok(),
-            "custom sink with complete preservation must parse"
-        );
+        for profile in ["paid-workers", "uno"] {
+            v.insert("LAUNCH_PROFILE".into(), profile.into());
+            let cfg = parse(&v).unwrap();
+            assert!(cfg.hooks.is_none(), "no HTTPS hook is configured");
+            assert!(cfg.launch.as_ref().unwrap().takedown);
+            cfg.validate().unwrap();
+            assert!(cfg.pipeline_config().unwrap().purge.is_some());
+            assert!(
+                WorkerConfig::from_vars(|key| v.get(key).cloned())
+                    .unwrap_err()
+                    .0
+                    .contains("cache-purge")
+            );
+        }
         assert_receipt_seed_is_not_public(&v);
         let mut cfg = parse(&v).unwrap();
         let admin = cfg.admin.take();
@@ -399,7 +409,7 @@ mod tests {
         let mut v = vars();
         v.remove("AUTH_REPOSITORY");
         for (key, value) in [
-            ("LAUNCH_PROFILE", "uno"),
+            ("LAUNCH_PROFILE", "paid-workers"),
             ("INDEXED_MODE", "true"),
             ("WORKERS_PLAN", "paid"),
             ("ADDRESSING", "multi"),

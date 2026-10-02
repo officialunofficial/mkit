@@ -1,4 +1,4 @@
-# Uno staging environment definition (D35)
+# Embedding host staging environment definition (D35)
 
 Status: **FINAL DEFINITION — actual staging and sign-offs UNRUN / user-owned**
 (WP-1.20, R-195). As-built checkpoint `c3921b06`, not the launch candidate.
@@ -6,7 +6,7 @@ Use the [standalone operator guide](../../operations/workers.md) for deployment 
 This resource and measurement inventory is not a deployable config.
 No resource, secret, route or deployment is created by this document.
 
-[R-185 and D35](00-plan.md) place staging before the single Uno launch.
+[R-185 and D35](00-plan.md) place staging before the single Paid Workers launch.
 R-198 requires resetting unsupported pre-launch stores rather than migrating
 them. The existing [WP-1.19 template](../../../apps/vcs-worker/staging/wrangler.staging.jsonc.template)
 and [runbook](../../../apps/vcs-worker/staging/README.md) remain inert; the runbook
@@ -18,24 +18,24 @@ acceptance; no version bump or tag is part of the Workers launch.
 D35 selects `staging-vcs.mkit.sh` on the `mkit.sh` zone, in the same account as
 the other mkit workers, using `env.staging` of `vcs-worker`. Use a distinct
 staging Worker identity and DO namespaces, private staging buckets and one
-dedicated CI Ed25519 signer. The Uno Kit demo uses
+dedicated CI Ed25519 signer. The embedding host demo uses
 `NAMESPACE_POLICY=any` with `UNSAFE_OPEN_NAMESPACES=true`. An isolated CI
 deployment may instead allowlist that signer's namespace.
 Staging data has no retention promise and may be reset by the user.
 
-| Setting | Uno launch requirement | Merged contract / execution owner |
+| Setting | Paid Workers launch requirement | Merged contract / execution owner |
 |---|---|---|
 | Origin | `AUTH_AUDIENCE=https://staging-vcs.mkit.sh`; exact canonical origin | Merged adapter grammar; user verifies deployed origin |
 | Addressing / sharding | `ADDRESSING=multi`, `SHARDING=d34` | Existing deployment markers; never change them over existing state |
-| Namespace admission | `allowlist` with a nonempty `NAMESPACE_ALLOWLIST`, or `any` with `UNSAFE_OPEN_NAMESPACES=true` and `NAMESPACE_ALLOWLIST` absent; Uno Kit demo selects `any` | Under `any`, takedown works but holder discovery is incomplete; report that limitation (5.6a-2) |
+| Namespace admission | `allowlist` with a nonempty `NAMESPACE_ALLOWLIST`, or `any` with `UNSAFE_OPEN_NAMESPACES=true` and `NAMESPACE_ALLOWLIST` absent; embedding host demo selects `any` | Under `any`, takedown works but holder discovery is incomplete; report that limitation (5.6a-2) |
 | Account plan | `WORKERS_PLAN=paid`, actual Workers Paid account | Paid-only launch; 4.18 validates profile. Provisional `limits.cpu_ms=60000`; validate per-invocation CPU in staging |
-| Indexed serving | Scheduled verification and extraction; optional HTTP objects; native/core proofs (Worker proofs 4.14b-2 are a post-launch follow-up, R-200) | 4.10b-2 and 4.14b-1; `LAUNCH_PROFILE=uno`, `INDEXED_MODE=true`. Extraction #1244 and activation #1259 are merged; test builds are separate evidence |
+| Indexed serving | Scheduled verification and extraction; optional HTTP objects; native/core proofs (Worker proofs 4.14b-2 are a post-launch follow-up, R-200) | 4.10b-2 and 4.14b-1; `LAUNCH_PROFILE=paid-workers`, `INDEXED_MODE=true`. Extraction #1244 and activation #1259 are merged; test builds are separate evidence |
 | Storage leases | Off | 5.4 launch spec amendment; 4.18 config and discovery. Existing epoch leases and authority fencing remain separate |
 | Serving retention | Permanent | 5.4 / 4.18; no lifecycle deletion of packs or extracted `objects/` |
 | Serving-store GC | Off; enabling GC in indexed mode refused | R-198 B4; 4.18 validates. No serving GC activation at launch |
 | Inspection | Optional, zero to four inspectors. Synchronous PRE_RECEIVE only (R-200): `pass`, `reject` (a `quarantine` is rejected), fail-closed when unavailable; async inspectors, publish-on-unavailable and clear deadlines are refused | 5.5a (sync scope). R-193 retrieval #1243 and activation #1259 are merged. Async inspection, holds and review ops are follow-up 5.5c |
 | Publication Events | Not at launch (R-200). Inspection completes synchronously, but D34 dependency projections can leave publication pending. `Committed` means Sent and does not prove publication or Delivered | 5.15 is a post-launch follow-up |
-| Lean takedown | Optional with admin plus complete preservation and signed HTTPS cache-purge. Immediate global denial, verified restricted preservation, retention/legal holds, audited administration; requests can remain unresolved | All three 5.6a parts and activation #1259 are merged. No rewrite, 451 notices or reinstatement claim |
+| Lean takedown | Optional with admin plus complete preservation and configured cache-purge delivery (signed HTTPS or an embedder-supplied purge sink). Immediate global denial, verified restricted preservation, retention/legal holds, audited administration; requests can remain unresolved | All three 5.6a parts and activation #1259 are merged. No rewrite, 451 notices or reinstatement claim |
 | Uploads | Ticketed uploads with threshold zero; measured pack/decode/concurrency limits | `MAX_PACK_BYTES` defaults to 1 GiB, ceiling 4.995 GiB; 65 MiB request cap and 8 MiB non-final multipart minimum. User fills sizing evidence |
 
 Sync-only inspection leaves no durable obligations or holds, so the launch has
@@ -86,10 +86,10 @@ token does not replace mkit message authentication.
 | Tickets and multipart receipts | `TICKET_KEYS` secret: one `<key-id> <64 hex>` entry per line; first signs, all verify | Dedicated random 32-byte MAC secrets; existing [rotation contract](upload-key-rotation.md) |
 | Signed outgoing hooks | `MKIT_HOOK_KEY` secret: `<key-id> <64 hex seed>`; `HOOK_URL` HTTPS, `HOOK_ROLES`, timeout and signature validity | Receiver trusts public hook key list under SPEC-SERVER §7; existing `signed-http-hooks` opt-in. Inspect role uses R-193; publication Event role is post-launch; 4.18 integrates |
 | Optional isolated hook binding | `ADMISSION_HOOK` service binding instead of `HOOK_URL` | Mutually exclusive channels; unsigned exception only for the isolated nonpublic §7.3 channel. It does not authorize a public scanner route |
-| Deployment authority fence | `AUTHORITY_FENCE=true`, `AUTHORITY_KEYS` configured public key list with namespace permissions; private signer stays with Uno operator | Existing 2.16 contract requires `AUTHORIZER_ROLE=authority` and authorize hook. Merged #1259 wires the profile |
+| Deployment authority fence | `AUTHORITY_FENCE=true`, `AUTHORITY_KEYS` configured public key list with namespace permissions; private signer stays with embedding host operator | Existing 2.16 contract requires `AUTHORIZER_ROLE=authority` and authorize hook. Merged #1259 wires the profile |
 | Incoming scanner | `SCANNER_KEYS`: newline-separated 64-hex Ed25519 public keys; private keys stay with scanner. `SCANNER_RETRIEVAL_KEYS` secret: one `active <key-id> <64-hex secret>` plus optional `retained <key-id> <64-hex secret> <retired_at_ms>` lines | R-193: `POST /_mkit/scanner/pack` requires a dedicated retrieval MAC capability and scanner auth-v2 signature with server-origin audience and exact body/path/repository binding. Only raw added packs in the capability; global blocks always deny. Default-off native `--scanner-retrieval` / Worker `SCANNER_RETRIEVAL=true`, Paid-only and integrated by 4.18. Missing/conflicting keys and configured role reuse refuse startup; no Workers Caching or cache headers |
 | Admin | Dedicated public admin key list, §16.3 JSON with roles; private signing keys offline / HSM | `ADMIN_KEYS`; `audit` for ReadAuditLog, appropriate dedicated moderation/preservation roles for takedown/ReadPreserved. Never client bearer/write/hook authentication. No hold review or Reinstate mount |
-| Purge sink | CachePurge is signed with a deployment **hook** key under §7, to the sink's canonical audience; sink trusts its configured public key list | Signed HTTPS `cache-purge` hook required when takedown is enabled. Isolated binding alone cannot satisfy that opt-in. No new purge-signature domain or admin key reuse. Manual PurgeCache is **5.6a**, asynchronous with purge id and audited completion |
+| Purge sink | CachePurge is signed with a deployment **hook** key under §7, to the sink's canonical audience; sink trusts its configured public key list | Takedown requires a signed HTTPS `cache-purge` hook or an embedder-supplied `PurgeSink`. Isolated binding alone cannot satisfy that opt-in. No new purge-signature domain or admin key reuse. Manual PurgeCache is **5.6a**, asynchronous with purge id and audited completion |
 | URL tokens | Dedicated `URL_TOKEN_KEYS` secret and optional `URL_TOKEN_TTL`; existing HTTP feature grammar | Separate active/retained keys; HTTP serving requires `HTTP_OBJECTS=true` and an `http-objects` build. Keys alone leave routes off. 4.18 activates |
 | Preservation signing | Dedicated `PRESERVATION` bucket, explicit positive `PRESERVATION_RETENTION_MS`, secret `RECEIPT_NOTICE_KEY` and published `RECEIPT_KEYS` | Required by §14.7 even for lean takedown; merged 5.6a-2 core is wired in 4.18. Restricted operator endpoints are wired from 5.6a-3. This requirement does not enable storage receipts or notices |
 
@@ -146,19 +146,19 @@ or deploy and no feature-branch dispatch workaround.
 
 ## Local activation checkpoint
 
-`LAUNCH_PROFILE=uno` requires Paid indexed Multi/D34 and ticket keys;
+`LAUNCH_PROFILE=paid-workers` requires Paid indexed Multi/D34 and ticket keys;
 `RETENTION=permanent`, `STORAGE_LEASES=false` and `GC_ENABLED=false` are fixed.
 HTTP objects, hooks, inspection and admin/takedown are opt-ins, validated as
 complete configurations at startup. URL-token, scanner retrieval, admin,
 authority, ticket, hook and preservation keys have distinct roles and cannot
-be substituted. See the [app grammar](../../../apps/vcs-worker/README.md#paid-uno-launch-profile-wp-418--r-194).
+be substituted. See the [app grammar](../../../apps/vcs-worker/README.md#paid-workers-launch-profile-wp-418--r-194).
 
 Extraction (4.10b-2 / #1244) and retrieval (R-193 / #1243) are merged
 and are wired by merged 4.18 (#1259). Preservation core (5.6a-2 / #1249) is
 configured without the old startup refusal; restricted operator endpoints
 use 5.6a-3 / #1251. The launch build enables R-203’s bounded pure-Rust zstd decoder; the default build keeps it off.
 The [local launch harness](../../../scripts/vcs-worker-launch.sh) records exact
-SHAs and isolated runtime logs. The [requested Uno matrix](launch-read-failure-evidence.md)
+SHAs and isolated runtime logs. The [requested embedding host matrix](launch-read-failure-evidence.md)
 passes locally at its pinned source; broader historical
 [evidence slots](launch-evidence.md) retain their scope and remain unrun until
 executed. See [final readiness](launch-readiness.md) for reviewed source changes
@@ -167,7 +167,7 @@ and open items. Local wrangler supplies no deployed CPU, cost or multicolo resul
 ## Explicit CPU allowance
 
 Set `limits.cpu_ms = 60000` on the launch Worker and its staging environment.
-A local workerd inspector profile of the exact Uno two-part upload recorded
+A local workerd inspector profile of the exact embedding host two-part upload recorded
 28.224 seconds of active V8 samples across the complete upload/verification/
 publication sequence (30.502 seconds profiled wall time); the final AdvanceRefs
 response took 17.290 seconds of wall time. The whole-sequence samples guide
@@ -184,7 +184,7 @@ workerd threads, internal storage isolates and concurrent alarms; it is not
 deployed per-isolate accounting. The earlier pending polls each used 0.01–0.10
 seconds of bracketed process CPU. These measurements support the provisional
 60-second allowance without changing alarm slicing. See the
-[completed local Uno matrix](launch-read-failure-evidence.md) for pins and limits.
+[completed local embedding host matrix](launch-read-failure-evidence.md) for pins and limits.
 
 ## Whole-isolate memory gate
 
@@ -199,7 +199,7 @@ Verification and acquisition each keep a 48 MiB allowance. These per-phase
 bounds do not certify whole-isolate headroom with concurrent request buffers,
 JS backing storage and retained Wasm capacity. The staging gate below remains.
 
-Before accepting memory headroom, stage the exact final Uno artifact/config and
+Before accepting memory headroom, stage the exact final embedding host artifact/config and
 record its source, Wasm, configuration and runtime pins. Preserve a valid
 50-hop chain with near-1-MiB canonical members and the largest admitted source
 frames/compressed windows; exercise Takedown through the acquisition alarm and

@@ -20,7 +20,7 @@ mod tests;
 pub use intent::{Record, Service};
 pub use publication::PublicationConfig;
 
-/// Default-off native activation. The Worker Uno launch separately enables
+/// Default-off native activation. The Paid Workers launch separately enables
 /// the completed lean catalog through its validated takedown configuration.
 pub const ACTIVATED: bool = false;
 

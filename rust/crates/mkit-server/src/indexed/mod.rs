@@ -61,7 +61,7 @@ pub fn pending(retry_after_ms: u64) -> ServerError {
 /// Limits for opt-in indexed mode. A deployment cannot switch an existing
 /// opaque repository to indexed mode: its member packs have no `i` rows.
 /// Native embedders configure it programmatically; Workers enable it through
-/// the Paid Uno launch profile with scheduled verification, permanent retention
+/// the Paid Workers launch profile with scheduled verification, permanent retention
 /// and GC disabled. Async inspection and holds remain post-launch features.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

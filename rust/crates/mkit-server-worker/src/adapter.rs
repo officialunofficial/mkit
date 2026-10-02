@@ -22,7 +22,7 @@
 //!   (`mkit_worker_common::adapter::respond_streamed`): a `DownloadPack`
 //!   chunk is at most 800 KiB. A unary response is one frame, so a large
 //!   `ListRefs` page is held whole (about 45 bytes per ref, with a
-//!   128-ref page cap for the Uno launch). A unary response connectrpc compressed
+//!   128-ref page cap for the Paid Workers launch). A unary response connectrpc compressed
 //!   itself (`Content-Encoding: gzip`, for a client that accepts it) is
 //!   passed through with `encodeBody: "manual"`, so the runtime does not
 //!   compress it a second time.
@@ -35,7 +35,7 @@
 //! **Pipeline.** Auth v2 with the default write quota, one repository
 //! (`AUTH_REPOSITORY`) in the deployment-default namespace and the Worker clock.
 //! `MAX_PACK_BYTES` defaults to 1 GiB; resumable parts carry larger packs.
-//! The Paid Uno launch selects Multi/D34 and scheduled indexed verification.
+//! The Paid Workers launch selects Multi/D34 and scheduled indexed verification.
 //! It is built per request from the request's `Env`: building it costs no
 //! I/O.
 //!
@@ -586,7 +586,7 @@ impl WorkerConfig {
         #[cfg(not(feature = "test-faults"))]
         if indexed_requested && launch.is_none() {
             return Err(ConfigError(
-                "INDEXED_MODE requires LAUNCH_PROFILE=uno".into(),
+                "INDEXED_MODE requires LAUNCH_PROFILE=paid-workers".into(),
             ));
         }
         let required =
@@ -936,7 +936,7 @@ fn resolve_authority_fence(
 /// (WP-4.8), which needs a Paid plan (a slice spends about 256 of an alarm's
 /// 1,000 subrequests; Free's 50 are all assigned, R-147), D34 (the slices run
 /// on ref shards), Multi addressing and upload tickets. Release activation
-/// additionally requires the explicit Uno launch selection in `from_vars`.
+/// additionally requires the explicit Paid Workers launch selection in `from_vars`.
 fn resolve_indexed(
     requested: bool,
     plan: Option<&str>,
@@ -4885,7 +4885,7 @@ mod tests {
                     .unwrap_err();
             assert!(
                 err.to_string()
-                    .contains("INDEXED_MODE requires LAUNCH_PROFILE=uno"),
+                    .contains("INDEXED_MODE requires LAUNCH_PROFILE=paid-workers"),
                 "{value}"
             );
         }

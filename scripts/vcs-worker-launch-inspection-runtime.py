@@ -66,7 +66,7 @@ def run_mode(mode, port, run, artifact, runner, env, evidence):
             allowlist = subprocess.check_output([str(runner), "allowlist", *auth],
                                                cwd=ROOT, env=env, text=True)
             variables = {
-                "AUTH_AUDIENCE": runtime.AUDIENCE, "LAUNCH_PROFILE": "uno",
+                "AUTH_AUDIENCE": runtime.AUDIENCE, "LAUNCH_PROFILE": "paid-workers",
                 "WORKERS_PLAN": "paid", "INDEXED_MODE": "true", "ADDRESSING": "multi",
                 "SHARDING": "d34", "NAMESPACE_POLICY": "allowlist",
                 "NAMESPACE_ALLOWLIST": ",".join(allowlist.splitlines()), "RETENTION": "permanent",
