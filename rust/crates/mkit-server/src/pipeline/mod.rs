@@ -263,6 +263,9 @@ pub struct PipelineConfig {
     pub default_repo_visibility: RepoVisibility,
     /// Role of the authorizer hook, defaulting to an additional check.
     pub authorizer_role: AuthorizerRole,
+    /// Opt in to namespace-wide `ListRepos` authority grants, requiring returned writer view.
+    /// Default false: non-owner authority callers receive only the public listing.
+    pub list_repos_authority_full: bool,
     /// Upload caps, supplied by the binding (used by M0-05b).
     pub upload_limits: UploadLimits,
     /// Optional tighter cap for legacy single-part `UploadPack` requests.
@@ -360,6 +363,7 @@ impl PipelineConfig {
             write_policy,
             default_repo_visibility: RepoVisibility::Public,
             authorizer_role: AuthorizerRole::Check,
+            list_repos_authority_full: false,
             addressing,
             sharding: Sharding::Single,
             inspection_mode: false,

@@ -1719,11 +1719,16 @@ Multi listing rights are deliberately narrower than repository read rights:
 - Anonymous and non-owner signed callers receive only the public listing.
 - A signed namespace owner receives the full registered repository listing,
   subject to a configured authorizer's check.
-- In `authority` mode, an authorizer's successful allowance of `ListRepos`
-  authorizes the **entire requested namespace**, including private names.
-  A denial for a non-owner selects the public view; hook/storage failures fail
-  closed. Authority sources MUST treat this procedure as namespace-wide, not
-  as permission on the header's repository name.
+- In `authority` mode, non-owner callers receive the public view by default.
+  A deployment MAY explicitly enable `PipelineConfig::list_repos_authority_full`
+  (default false) only for an authority that understands namespace-wide listing.
+  With this opt-in, a signed non-owner caller without a grant receives the full
+  registry only if the hook Allow also returns `writer_view = true`. A repository-scoped
+  read Allow alone MUST NOT confer namespace listing rights. Authority hooks MUST
+  treat this procedure as namespace-wide, not as permission on the arbitrary
+  header selector repository. A `permission_denied` or `not_found` hook denial
+  selects the public view for both owners and non-owners; hook/storage failures
+  fail closed.
 - Presenting `X-Write-Grant` selects the public view even for an owner or
   authority caller. Grants do not add repository listing rights, including
   grants with `read` capability. The normal §9.3 private read rights remain
@@ -1766,9 +1771,12 @@ cursor or private filtering position is returned in the public view.
 There is no snapshot across pages. Concurrent creation or visibility changes may
 add/remove names; subsequent pages still resume in name order. Storage errors
 are `unavailable`, never successful partial listings. Public scans have fan-out
-at most two and fetch at most 101 rows per scan; even short backend pages need
-at most 102 `NamespaceStore` calls per RPC. Full listings need at most 102 such calls including
-one batched visibility read. Worker stores implement that read in one call; a backend
+at most two and fetch at most 101 rows per scan. Short backend pages, including
+empty pages with a continuation, MUST resume using the backend cursor for the
+same range before merging. Every scan counts against the 102-call top-level
+`NamespaceStore` budget per RPC; exhausting it is `resource_exhausted`, never
+successful truncation. Full listings reserve one of those calls for the batched
+visibility read. Worker stores implement that read in one call; a backend
 using the default `get_many` implementation performs at most 201 primitive calls. All applies retain the 100-op/1-MiB limits and Worker
 requests retain their shared call budgets. An empty namespace and one containing
 only unreadable private repositories MUST have identical public results,

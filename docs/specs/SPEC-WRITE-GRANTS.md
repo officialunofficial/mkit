@@ -865,8 +865,8 @@ ref's strongly consistent state
 ### 9.3 Read authorization
 
 `ListRepos` lists a namespace under STC §7.10. Grants do not extend its public
-listing view; signed owners and namespace-wide authority allowances may list
-private names. This does not change repository read capabilities below.
+listing view; signed owners and explicitly enabled namespace-wide authority
+writer allowances may list private names. This does not change repository read capabilities below.
 
 For each read procedure on a repository:
 

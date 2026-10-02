@@ -253,23 +253,214 @@ fn private_only_and_empty_namespaces_have_identical_public_pages_and_cost() {
     );
 }
 
+struct ListingAuthority {
+    selector: Option<&'static str>,
+    writer: bool,
+}
+
+impl Authorizer for ListingAuthority {
+    async fn authorize(&self, op: &Operation) -> Result<AuthzFacts, ServerError> {
+        if !op.authz.owner
+            && self
+                .selector
+                .is_some_and(|name| op.repo.name.as_str() != name)
+        {
+            return Err(ServerError::permission_denied("other repository"));
+        }
+        if matches!(op.kind, OpKind::ListRepos { .. }) {
+            return Ok(AuthzFacts {
+                caller_view: if self.writer {
+                    CallerView::Writer
+                } else {
+                    CallerView::Reader
+                },
+                ..AuthzFacts::default()
+            });
+        }
+        Ok(AuthzFacts::default())
+    }
+}
+
+fn authority_hooks(selector: Option<&'static str>, writer: bool) -> Hooks<ListingAuthority> {
+    let defaults = Hooks::new();
+    Hooks {
+        authorizer: ListingAuthority { selector, writer },
+        admission: defaults.admission,
+        pre_receive: defaults.pre_receive,
+        receipts: defaults.receipts,
+        outcomes: defaults.outcomes,
+    }
+}
+
 #[test]
-fn authority_sources_get_registry_while_grants_remain_public() {
-    let mut e = setup(Sharding::D34, RepoVisibility::Private);
-    e.pipe.cfg.authorizer_role = AuthorizerRole::Authority;
-    create(&e, "secret", 1);
-    let authority = request(Procedure::ListRepos, &identity("selector"), Some(&key(2)));
-    assert_eq!(
-        names(&listing(&e, &authority, "", 100, None).unwrap()),
-        ["secret"]
-    );
-    let presented_grant = authority.header("x-write-grant", "invalid-but-irrelevant-to-listing");
-    assert!(
-        listing(&e, &presented_grant, "", 100, None)
-            .unwrap()
-            .repos
-            .is_empty()
-    );
+fn authority_full_listing_requires_opt_in_and_writer_view_while_grants_remain_public() {
+    for sharding in [Sharding::Single, Sharding::D34] {
+        for writer in [false, true] {
+            let mut cfg = config(&key(1), AuthorizerRole::Authority);
+            cfg.sharding = sharding;
+            cfg.default_repo_visibility = RepoVisibility::Private;
+            assert!(!cfg.list_repos_authority_full);
+            let clock = clock();
+            let mut e = build(
+                cfg,
+                Spy::new(store(&clock)),
+                authority_hooks(None, writer),
+                clock,
+            );
+            create(&e, "secret", 1);
+            create(&e, "visible", 2);
+            set(&e, "visible", RepoVisibility::Public, 3);
+            let authority = request(Procedure::ListRepos, &identity("selector"), Some(&key(2)));
+            assert_eq!(
+                names(&listing(&e, &authority, "", 100, None).unwrap()),
+                ["visible"]
+            );
+            e.pipe.cfg.list_repos_authority_full = true;
+            assert_eq!(
+                names(&listing(&e, &authority, "", 100, None).unwrap()),
+                if writer {
+                    vec!["secret", "visible"]
+                } else {
+                    vec!["visible"]
+                }
+            );
+            let presented_grant =
+                authority.header("x-write-grant", "invalid-but-irrelevant-to-listing");
+            assert_eq!(
+                names(&listing(&e, &presented_grant, "", 100, None).unwrap()),
+                ["visible"]
+            );
+        }
+    }
+}
+
+#[test]
+fn repository_scoped_authority_allow_cannot_enumerate_private_names() {
+    for opt_in in [false, true] {
+        let mut cfg = config(&key(1), AuthorizerRole::Authority);
+        cfg.default_repo_visibility = RepoVisibility::Private;
+        cfg.list_repos_authority_full = opt_in;
+        let clock = clock();
+        let e = build(
+            cfg,
+            Spy::new(store(&clock)),
+            authority_hooks(Some("x"), false),
+            clock,
+        );
+        create(&e, "x", 1);
+        create(&e, "secret", 2);
+        let collaborator = request(Procedure::ListRepos, &identity("x"), Some(&key(2)));
+        assert!(
+            listing(&e, &collaborator, "", 100, None)
+                .unwrap()
+                .repos
+                .is_empty()
+        );
+        let other_selector = request(Procedure::ListRepos, &identity("secret"), Some(&key(2)));
+        assert!(
+            listing(&e, &other_selector, "", 100, None)
+                .unwrap()
+                .repos
+                .is_empty()
+        );
+        let owner = request(Procedure::ListRepos, &identity("x"), Some(&key(1)));
+        assert_eq!(
+            names(&listing(&e, &owner, "", 100, None).unwrap()),
+            ["secret", "x"]
+        );
+    }
+}
+
+#[test]
+fn empty_scan_pages_resume_before_merging_and_count_against_the_budget() {
+    for sharding in [Sharding::Single, Sharding::D34] {
+        let mut e = setup(sharding, RepoVisibility::Public);
+        create(&e, "repo-a", 1);
+        set(&e, "repo-a", RepoVisibility::Public, 2);
+        create(&e, "repo-b", 3);
+        e.pipe.meta.scan_page_hook = Some(Box::new(|start, after, page| {
+            if after.is_none() {
+                ScanPage {
+                    entries: Vec::new(),
+                    next: Some(crate::store::Cursor::new(start.as_bytes().to_vec())),
+                }
+            } else {
+                page
+            }
+        }));
+        let anon = request(Procedure::ListRepos, &identity("selector"), None);
+        let before = e.pipe.meta.calls();
+        let page = listing(&e, &anon, "repo-", 1, None).unwrap();
+        assert_eq!(names(&page), ["repo-a"]);
+        assert_eq!(e.pipe.meta.calls() - before, 4);
+        let next = listing(&e, &anon, "repo-", 1, page.next.as_deref()).unwrap();
+        assert_eq!(names(&next), ["repo-b"]);
+        assert!(next.next.is_none());
+        let owner = request(Procedure::ListRepos, &identity("selector"), Some(&key(1)));
+        let before = e.pipe.meta.calls();
+        assert_eq!(
+            names(&listing(&e, &owner, "repo-", 100, None).unwrap()),
+            ["repo-a", "repo-b"]
+        );
+        assert_eq!(e.pipe.meta.calls() - before, 3);
+        // Arbitrarily many empty pages still advance through the gap before printable names.
+        e.pipe.meta.scan_page_hook = Some(Box::new(|start, after, _| {
+            let mut cursor =
+                after.map_or_else(|| start.as_bytes().to_vec(), |c| c.as_bytes().to_vec());
+            cursor.push(0);
+            ScanPage {
+                entries: Vec::new(),
+                next: Some(crate::store::Cursor::new(cursor)),
+            }
+        }));
+        for (req, expected_calls) in [(&anon, 102), (&owner, 101)] {
+            let before = e.pipe.meta.calls();
+            assert_eq!(
+                listing(&e, req, "repo-", 100, None).unwrap_err().code(),
+                Code::ResourceExhausted
+            );
+            assert_eq!(e.pipe.meta.calls() - before, expected_calls);
+        }
+    }
+}
+
+#[test]
+fn creation_survives_three_visibility_conflicts_before_the_fourth_apply() {
+    for sharding in [Sharding::Single, Sharding::D34] {
+        let mut cfg = config(&key(1), AuthorizerRole::Check);
+        cfg.sharding = sharding;
+        let name = RepoName::new("racing").unwrap();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let counter = attempts.clone();
+        let clock = clock();
+        let spy =
+            Spy::new(store(&clock)).hook(move |kv, p, batch| {
+                if batch.writes.iter().any(
+                    |write| matches!(write, Write::Put(k, _) if *k == keys::repo_record(&name)),
+                ) {
+                    let attempt = counter.fetch_add(1, Ordering::SeqCst);
+                    if attempt < 3 {
+                        now(kv.apply(
+                            p,
+                            Batch::new().put(
+                                keys::repo_visibility(&name),
+                                codec::encode_repo_visibility(&codec::RepoVisibilityV1 {
+                                    visibility: codec::StoredVisibility::Private,
+                                    last_created_ms: u64::from(attempt),
+                                    last_statement_id: None,
+                                }),
+                            ),
+                        ))
+                        .unwrap();
+                    }
+                }
+            });
+        let e = build(cfg, spy, Hooks::new(), clock);
+        create(&e, "racing", 1);
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
+        let anon = request(Procedure::ListRepos, &identity("selector"), None);
+        assert!(listing(&e, &anon, "", 100, None).unwrap().repos.is_empty());
+    }
 }
 
 #[test]
@@ -495,12 +686,16 @@ fn authority_denial_selects_public_but_failure_does_not_fail_open() {
         };
         let e = build(cfg, Spy::new(store(&clock)), hooks, clock);
         create(&e, "secret", 1);
-        let authority = request(Procedure::ListRepos, &identity("selector"), Some(&key(2)));
-        let result = listing(&e, &authority, "", 100, None);
-        if unavailable {
-            assert_eq!(result.unwrap_err().code(), Code::Unavailable);
-        } else {
-            assert!(result.unwrap().repos.is_empty());
+        create(&e, "visible", 2);
+        set(&e, "visible", RepoVisibility::Public, 3);
+        for signer in [key(1), key(2)] {
+            let authority = request(Procedure::ListRepos, &identity("selector"), Some(&signer));
+            let result = listing(&e, &authority, "", 100, None);
+            if unavailable {
+                assert_eq!(result.unwrap_err().code(), Code::Unavailable);
+            } else {
+                assert_eq!(names(&result.unwrap()), ["visible"]);
+            }
         }
     }
 }

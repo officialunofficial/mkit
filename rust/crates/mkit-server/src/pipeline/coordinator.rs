@@ -63,10 +63,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         let created_at_ms = ms(self.clock.now_ms().saturating_add(business_skew_ms));
         let p = self.shards.coordinator(&op.repo.namespace);
-        // Rows only ever go from absent to present, so a lost race leaves at
+        // Registry rows only go from absent to present, so a lost race leaves at
         // most the rows another writer has not created yet: re-read and
         // create only those. A second writer racing for a different repo in
         // a new namespace loses on `nr` and still registers its own `rr`.
+        // A guarded `rv` change also retries with its new visibility projection.
         let mut want = creation;
         for _ in 0..CREATION_ATTEMPTS {
             let mut batch = Batch::new();
@@ -129,6 +130,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 }
 
-/// Coordinator creation batches one write attempts: the first, one after
-/// losing `nr`, and one after losing `rr` to a same-repo writer.
-pub(super) const CREATION_ATTEMPTS: usize = 3;
+/// Coordinator creation attempts: the first, one after losing `nr`, one
+/// after losing `rr` to a same-repo writer, and one after an `rv` change.
+pub(super) const CREATION_ATTEMPTS: usize = 4;

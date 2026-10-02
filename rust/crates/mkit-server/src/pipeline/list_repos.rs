@@ -9,7 +9,9 @@ use crate::error::ServerError;
 use crate::op::{AuthzFacts, CallerView, OpKind};
 use crate::policy::AuthorizerRole;
 use crate::repo::{Addressing, MAX_REPO_NAME_BYTES, RepoName};
-use crate::store::{Batch, Key, MultipartBlobStore, NamespaceStore, Partition, Value, codec, keys};
+use crate::store::{
+    Batch, Cursor, Key, MultipartBlobStore, NamespaceStore, Partition, Value, codec, keys,
+};
 
 /// A repository name and its effective visibility. The registry has no cheap head/update projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +64,8 @@ pub(super) fn index_writes(
 
 struct Source {
     prefix: Key,
+    start: Key,
+    cursor: Option<Cursor>,
     last: Option<String>,
     rows: VecDeque<String>,
     more: bool,
@@ -73,33 +77,37 @@ impl Source {
         &mut self,
         store: &N,
         partition: &Partition,
+        calls_left: &mut usize,
     ) -> Result<(), ServerError> {
         if !self.rows.is_empty() || !self.more {
             return Ok(());
         }
-        let start = self.last.as_ref().map_or_else(
-            || self.prefix.clone(),
-            |last| {
-                let mut bytes = self.prefix.as_bytes().to_vec();
-                bytes.extend_from_slice(last.as_bytes());
-                bytes.push(0);
-                Key::new(bytes)
-            },
-        );
-        // All names are printable ASCII; 0xff strictly bounds the prefix range.
+        // The opaque backend cursor belongs to this fixed range for the entire request.
         let mut end = self.prefix.as_bytes().to_vec();
         end.push(0xff);
+        if *calls_left == 0 {
+            return Err(ServerError::resource_exhausted(
+                "repository listing call budget exceeded",
+            ));
+        }
+        *calls_left -= 1;
         let page = store
-            .scan(partition, &start, &Key::new(end), None, 101)
+            .scan(
+                partition,
+                &self.start,
+                &Key::new(end),
+                self.cursor.as_ref(),
+                101,
+            )
             .await
             .map_err(listing_unavailable)?;
-        if page.entries.len() > 101 || (page.entries.is_empty() && page.next.is_some()) {
+        if page.entries.len() > 101 {
             return Err(listing_unavailable("invalid repository listing scan"));
         }
-        let mut previous: Option<String> = None;
+        let mut previous = self.last.clone();
         for (key, value) in page.entries {
             if !key.as_bytes().starts_with(self.prefix.as_bytes())
-                || key.as_bytes() < start.as_bytes()
+                || key.as_bytes() < self.start.as_bytes()
             {
                 return Err(listing_unavailable("repository listing key outside range"));
             }
@@ -121,7 +129,9 @@ impl Source {
             previous = Some(name.clone());
             self.rows.push_back(name);
         }
+        self.last = previous;
         self.more = page.next.is_some();
+        self.cursor = page.next;
         Ok(())
     }
 }
@@ -261,14 +271,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ..AuthzFacts::default()
             };
             match self.hooks.authorizer().authorize(&op).await {
-                Ok(_) => full |= authority,
+                Ok(facts) => {
+                    full |= authority
+                        && self.cfg.list_repos_authority_full
+                        && facts.caller_view == CallerView::Writer;
+                }
                 Err(error)
                     if authority
-                        && !owner
                         && matches!(
                             error.code(),
                             crate::Code::PermissionDenied | crate::Code::NotFound
-                        ) => {}
+                        ) =>
+                {
+                    full = false;
+                }
                 Err(error) => return Err(error.strip_admission_shape()),
             }
         }
@@ -316,10 +332,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 let mut bytes = base;
                 bytes.extend_from_slice(name_prefix.as_bytes());
                 prefix = Key::new(bytes);
-                // last is a full name; strip the requested prefix before extending this range.
+                let mut start = prefix.as_bytes().to_vec();
+                if let Some(last) = &last {
+                    start.extend_from_slice(&last.as_bytes()[name_prefix.len()..]);
+                    start.push(0);
+                }
                 Source {
                     prefix,
-                    last: last.as_ref().map(|name| name[name_prefix.len()..].into()),
+                    start: Key::new(start),
+                    cursor: None,
+                    last: last.clone(),
                     rows: VecDeque::new(),
                     more: true,
                     registry: full,
@@ -327,10 +349,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             })
             .collect();
         let partition = self.shards.coordinator(&op.repo.namespace);
+        // Reserve one top-level call for the full view's batched visibility read.
+        let mut calls_left = if full { 101 } else { 102 };
         let mut names = Vec::with_capacity(size);
         loop {
             for source in &mut sources {
-                source.fill(&self.meta, &partition).await?;
+                while source.rows.is_empty() && source.more {
+                    source.fill(&self.meta, &partition, &mut calls_left).await?;
+                }
             }
             let next = sources
                 .iter()
@@ -347,7 +373,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .rows
                 .pop_front()
                 .ok_or_else(|| internal("repository listing merge"))?;
-            sources[index].last = Some(name[name_prefix.len()..].into());
             if names.last().is_some_and(|last| last >= &name) {
                 return Err(internal("duplicate repository listing row"));
             }
