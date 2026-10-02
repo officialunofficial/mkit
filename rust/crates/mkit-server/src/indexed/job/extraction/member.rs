@@ -8,7 +8,7 @@ use super::{
 use crate::indexed::checkpoint::MemberCursor;
 use crate::store::codec::CODEC_V1;
 use crate::store::index::{self, LocatedObject};
-use mkit_core::pack::{DecodeLimits, decode_frame_with};
+use mkit_core::pack::decode_frame_with;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -46,7 +46,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
 {
     fn member_limits(&self, index: index::IndexValue) -> Result<(u64, u64), Stop> {
         let budget = self.decode_limits().max_decoded_bytes;
-        let wire = self.h.limits.window_bytes.max(budget).saturating_add(128);
+        let wire = crate::indexed::geometry::FRAME_BYTES;
         if index.frame_length > wire
             || index.decoded_size > budget
             || index.chain_depth > self.h.cfg.max_delta_chain_depth
@@ -343,7 +343,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
             &wire,
             version,
             &mut CacheBases(&st.cache),
-            DecodeLimits::default().with_max_decoded_bytes(budget),
+            crate::indexed::geometry::entry_limits(budget),
         )
         .map_err(|_| corrupt())?;
         let length = bytes.len() as u64;

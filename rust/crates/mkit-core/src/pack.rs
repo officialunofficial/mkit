@@ -1479,6 +1479,7 @@ pub struct DecodeLimits {
     /// fetched, so the peak can pass the cap by the one base whose fetch
     /// trips it.
     pub max_decoded_bytes: u64,
+    entry_geometry: Option<(u64, u64)>,
 }
 
 impl DecodeLimits {
@@ -1492,12 +1493,35 @@ impl DecodeLimits {
         self.max_decoded_bytes = bytes;
         self
     }
+    /// Bound encoded payloads and delta streams separately from canonical bytes.
+    #[must_use]
+    pub const fn with_entry_geometry(mut self, frame: u64, delta_stream: u64) -> Self {
+        self.entry_geometry = Some((frame, delta_stream));
+        self
+    }
+
+    fn check_frame(&self, kind: u8, payload: &[u8]) -> Result<(), PackError> {
+        if let Some((frame, stream)) = self.entry_geometry {
+            let bytes = payload.len() as u64;
+            if bytes > frame || (kind == 2 && bytes > stream.saturating_add(32)) {
+                return Err(PackError::PackfileTooLarge);
+            }
+            if kind == 4
+                && zstd_claim(payload.get(32..).ok_or(PackError::DeltaEntryTruncated)?)?.0 as u64
+                    > stream
+            {
+                return Err(PackError::PackfileTooLarge);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for DecodeLimits {
     fn default() -> Self {
         Self {
             max_decoded_bytes: Self::DEFAULT_MAX_DECODED_BYTES,
+            entry_geometry: None,
         }
     }
 }
@@ -1650,6 +1674,10 @@ impl<'a> PackDecodeCursor<'a> {
             let payload = pack_entries
                 .last_payload_range()
                 .ok_or(PackError::UnexpectedEof)?;
+            limits.check_frame(
+                pack[payload.start - ENTRY_FRAME_LEN],
+                &pack[payload.clone()],
+            )?;
             let offset = payload
                 .start
                 .checked_sub(ENTRY_FRAME_LEN)
@@ -1901,6 +1929,7 @@ pub fn decode_frame_with<B: DeltaBaseSource>(
         return Err(PackError::UnexpectedEof);
     }
     let payload = &frame[ENTRY_FRAME_LEN..];
+    limits.check_frame(frame[0], payload)?;
     match frame[0] {
         0x00 if payload.len() as u64 > limits.max_decoded_bytes => {
             return Err(PackError::PackfileTooLarge);
@@ -1909,7 +1938,10 @@ pub fn decode_frame_with<B: DeltaBaseSource>(
             return Err(PackError::PackfileTooLarge);
         }
         0x04 if payload.len() >= hash::HASH_LEN
-            && zstd_claim(&payload[hash::HASH_LEN..])?.0 as u64 > limits.max_decoded_bytes =>
+            && zstd_claim(&payload[hash::HASH_LEN..])?.0 as u64
+                > limits
+                    .entry_geometry
+                    .map_or(limits.max_decoded_bytes, |(_, stream)| stream) =>
         {
             return Err(PackError::PackfileTooLarge);
         }
@@ -1937,7 +1969,11 @@ pub fn decode_entry_with<B: DeltaBaseSource>(
     let bytes = match entry {
         PackEntry::Raw { bytes } => bytes.into_owned(),
         PackEntry::Delta { base, stream } => {
-            if validate_delta_result_size(stream.as_ref())? as u64 > limits.max_decoded_bytes {
+            if limits
+                .entry_geometry
+                .is_some_and(|(_, cap)| stream.len() as u64 > cap)
+                || validate_delta_result_size(stream.as_ref())? as u64 > limits.max_decoded_bytes
+            {
                 return Err(PackError::PackfileTooLarge);
             }
             resolve_delta_target(
