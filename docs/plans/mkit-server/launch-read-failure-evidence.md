@@ -90,7 +90,7 @@ latest embedding host digest or a new runtime acceptance for those variants.
 
 ## Pins, commands and retained failures
 
-Scratch root: `~/.cache/mkit-test-tmp/wp-4-18/executor-readfix/`.
+The local evidence retains the raw logs, manifests and resource samples.
 
 | Evidence | SHA-256 |
 |---|---|
