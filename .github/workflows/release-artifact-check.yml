@@ -70,6 +70,7 @@ jobs:
           prefix-key: "rust-artifact-check"
           key: artifact-check-${{ env.TARGET }}
 
+      # Select only mkit-cli with -p to avoid workspace feature unification (D31).
       - name: Build release mkit binary
         shell: bash
         working-directory: rust

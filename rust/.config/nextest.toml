@@ -176,13 +176,15 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 
 # The wire suite's growth case waits out replay expiry plus the server's
 # prune grace on the real clock (~80s; so do its store mutants):
-# pruning never follows the test-faults clock skew. Not a hang.
+# pruning never follows the test-faults clock skew. The host ticket case
+# waits this interval twice (~160s) to settle before calibration and prune
+# after loading tickets. Not a hang.
 [[profile.default.overrides]]
-filter = 'binary(baseline_pipeline_memory) and (test(=pipeline_auth_v2_test_faults) or test(/_fails_growth$/))'
+filter = '(binary(baseline_pipeline_memory) and (test(=pipeline_auth_v2_test_faults) or test(/_fails_growth$/))) or test(=timer_and_ticket_pruning_wire_cases_run_against_the_host)'
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 [[profile.ci.overrides]]
-filter = 'binary(baseline_pipeline_memory) and (test(=pipeline_auth_v2_test_faults) or test(/_fails_growth$/))'
+filter = '(binary(baseline_pipeline_memory) and (test(=pipeline_auth_v2_test_faults) or test(/_fails_growth$/))) or test(=timer_and_ticket_pruning_wire_cases_run_against_the_host)'
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 # This pack residency regression expands several 128 MiB delta targets.

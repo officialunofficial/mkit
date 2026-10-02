@@ -11,7 +11,7 @@ use mkit_server_conformance::stubs::hook::HookKey;
 use mkit_server_conformance::stubs::mpp::{Mode, MppStub, Settings};
 use mkit_server_conformance::test_host::{LoopbackHookChannel, TestHost};
 use mkit_server_conformance::wire::{
-    CASES, Feature, Milestone, Profile, Report, WireAuth, WireTarget, run,
+    CASES, Feature, Milestone, Profile, QuotaLimits, Report, Verdict, WireAuth, WireTarget, run,
 };
 
 fn profile() -> Profile {
@@ -39,7 +39,8 @@ fn judge(report: &Report) {
 // The wire cases stay unchanged. This test-side driver polls their future
 // alongside explicit core timer ticks; business time moves only to an eligible
 // persisted timer. Long listing cases also follow the unchanged wire client's
-// signing clock; their assertions concern paging, not timer timing.
+// signing clock; their assertions concern paging, not timer timing. Timer and
+// growth cases follow real time without advancing a future persisted timer.
 async fn run_driven<O: OutcomeSink + Clone + 'static>(
     host: &TestHost,
     filter: &str,
@@ -50,6 +51,9 @@ async fn run_driven<O: OutcomeSink + Clone + 'static>(
         base_url: host.base_url().parse().expect("valid host origin"),
         profile: host.profile().clone(),
     };
+    let follows_real_clock = filter.starts_with("list.")
+        || filter == "timers.fire_on_schedule"
+        || filter.starts_with("growth.");
     let driver = async {
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -58,7 +62,7 @@ async fn run_driven<O: OutcomeSink + Clone + 'static>(
         let coordinator = Partition::Coordinator(NamespaceKey::deployment_default());
         let mut cursor: Option<Cursor> = None;
         loop {
-            if filter.starts_with("list.") {
+            if follows_real_clock {
                 let signed_at = mkit_server::SystemClock.now_ms();
                 host.clock().set(host.clock().now_ms().max(signed_at));
             }
@@ -86,7 +90,11 @@ async fn run_driven<O: OutcomeSink + Clone + 'static>(
                 .expect("drain core timers");
                 advance_due_work(host, &partition, filter, stub, &client).await;
             }
-            tokio::task::yield_now().await;
+            if filter == "timers.fire_on_schedule" || filter.starts_with("growth.") {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            } else {
+                tokio::task::yield_now().await;
+            }
         }
     };
     tokio::select! {
@@ -242,4 +250,76 @@ async fn listing_over_32_mib_pages_under_d34() {
     let report = run_driven(&host, "list.merge_paging_over_32_mib", NoOutcomes, None).await;
     host.shutdown().await;
     judge(&report);
+}
+
+#[tokio::test]
+async fn indexed_pending_verification_wire_case_runs_against_the_host() {
+    let case = "indexed.pending_verification_unavailable";
+    let mut profile = profile();
+    let WireAuth::AuthV2 {
+        audience,
+        repository,
+        seed,
+    } = &mut profile.auth
+    else {
+        unreachable!("auth v2 profile");
+    };
+    let signer = mkit_server_conformance::wire::sign::Signer::derive(
+        seed,
+        &profile.run_id,
+        &format!("{case}/main"),
+        audience,
+        repository,
+    );
+    *repository = format!("ed25519-{}/default", signer.public_key_hex());
+    profile.milestone = Milestone::M4;
+    profile.features.extend([
+        Feature::Tickets,
+        Feature::TestFaults,
+        Feature::MultiRepo,
+        Feature::IndexedMode,
+    ]);
+    let host = TestHost::start(profile).await.unwrap();
+    let target = WireTarget {
+        base_url: host.base_url().parse().unwrap(),
+        profile: host.profile().clone(),
+    };
+    let report = run(&target, Some(case)).await;
+    host.shutdown().await;
+    judge(&report);
+    assert!(
+        matches!(report.verdict(case), Some(Verdict::Pass(_))),
+        "{}",
+        report.tap()
+    );
+}
+
+// Ticket pruning waits out signed replay expiry and grace twice on the real
+// clock. The timer driver follows that clock without advancing future work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn timer_and_ticket_pruning_wire_cases_run_against_the_host() {
+    for case in [
+        "timers.fire_on_schedule",
+        "growth.tickets_and_outbox_pruned",
+    ] {
+        let mut profile = profile();
+        profile.milestone = Milestone::M1;
+        profile.quota = Some(QuotaLimits {
+            window_ms: 5_000,
+            max_ops: 1_000,
+            max_bytes: 2 << 20,
+        });
+        profile
+            .features
+            .extend([Feature::TestFaults, Feature::Timers, Feature::ShortTickets]);
+        let host = TestHost::start(profile).await.unwrap();
+        let report = run_driven(&host, case, NoOutcomes, None).await;
+        host.shutdown().await;
+        judge(&report);
+        assert!(
+            matches!(report.verdict(case), Some(Verdict::Pass(_))),
+            "{}",
+            report.tap()
+        );
+    }
 }
