@@ -16,7 +16,7 @@ import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
-CASES = ROOT / "docs/plans/mkit-server/launch-cases.json"
+CASES = ROOT / "scripts/testdata/vcs-worker-launch-cases.json"
 WRANGLER = "4.134.0"
 LANES = {
     "native": ["cargo", "nextest", "run", "--locked", "--manifest-path", "rust/Cargo.toml",

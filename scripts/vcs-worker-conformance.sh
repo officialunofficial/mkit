@@ -307,10 +307,10 @@ run_suite() {
 # import it into a separate fresh DO, then export that DO again. The header's
 # export timestamp changes; the portable records and end marker must match.
 snapshot_round_trip() {
-    local source="${work}/suite/source.kvlog"
-    local restored="${work}/suite/restored.kvlog"
-    local result="${work}/suite/restore.json"
-    echo ">> [suite] test-faults Durable Object snapshot round trip"
+    local source="${work}/snapshot/source.kvlog"
+    local restored="${work}/snapshot/restored.kvlog"
+    local result="${work}/snapshot/restore.json"
+    echo ">> [snapshot] test-faults Durable Object snapshot round trip"
     curl -fsS "${ORIGIN}/__mkit_test/snapshot" -o "${source}"
     curl -fsS -X POST "${ORIGIN}/__mkit_test/restore" \
         -H 'content-type: application/octet-stream' --data-binary "@${source}" \
@@ -402,13 +402,20 @@ if [ "${test_faults}" -eq 1 ] && [ -z "${runner_args[*]:-}" ]; then
         require_pass lag.list_refs_window leases.bump_completes_and_writes_continue
     fi
 fi
-if [ "${test_faults}" -eq 1 ] && [ "${sharding}" = single ]; then
-    snapshot_round_trip
-fi
 if [ "${test_faults}" -eq 1 ] && [ "${sharding}" = d34 ]; then
     check_relay_delivery
 fi
 stop_server
+
+if [ "${test_faults}" -eq 1 ] && [ "${sharding}" = single ]; then
+    # The full suite's 10,000-ref fixture exceeds the 16 MiB snapshot cap.
+    # Keep its coverage, and round-trip a separate bounded, populated object.
+    start_server snapshot "${vars[@]}"
+    run_suite "${features}" --filter refs.many_refs_one_repository
+    require_pass refs.many_refs_one_repository
+    snapshot_round_trip
+    stop_server
+fi
 
 if [ "${test_faults}" -eq 1 ]; then
     quota_args=(--quota-ops "${TEST_QUOTA_OPS}" --quota-bytes "${TEST_QUOTA_BYTES}"

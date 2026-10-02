@@ -329,17 +329,17 @@
 //!
 //! # Reserved cases (M2–M5)
 //!
-//! The `TODO(M2..M5)` comments in this module's source name them, with
+//! The "Planned:" comments in this module's source name them, with
 //! their milestone and feature, so later milestones add them without
 //! renaming. None exists yet, so none can pass vacuously.
 //!
-// TODO(M2, grants): native transport grant registration and the later read grants.
-// TODO(M4, indexed-mode): `indexed.published_view_hides_quarantine`.
-// TODO(M4, http-objects): `http_objects.*`.
-// TODO(M5, leases): `leases.gc_*`.
-// TODO(M5, takedown): `takedown.*`.
-// TODO(M5, receipts): `receipts.*`.
-// TODO(M5, admin): `admin.*`.
+// Planned (grants): native transport grant registration and the later read grants.
+// Planned (indexed mode): `indexed.published_view_hides_quarantine`.
+// Planned (HTTP objects): `http_objects.*`.
+// Planned (leases): `leases.gc_*`.
+// Planned (takedown): `takedown.*`.
+// Planned (receipts): `receipts.*`.
+// Planned (admin): `admin.*`.
 
 mod cases;
 pub(crate) mod challenges;

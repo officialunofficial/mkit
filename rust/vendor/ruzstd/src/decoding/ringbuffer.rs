@@ -91,7 +91,7 @@ impl RingBuffer {
             .unwrap_or_else(|_| panic!("Could not create layout for u8 array of size {}", new_cap));
 
         // alloc the new memory region and panic if alloc fails
-        // TODO maybe rework this to generate an error?
+        // Known limitation: allocation failure currently panics here.
         let new_buf = unsafe {
             let new_buf = alloc(new_layout);
 
@@ -195,7 +195,7 @@ impl RingBuffer {
     /// by the buffer.
     // SAFETY: other code relies on this pointing to initialized halves of the buffer only
     fn data_slice_lengths(&self) -> (usize, usize) {
-        // TODO can we do this branchless?
+        // Potential optimization: make this calculation branchless.
         let (len_after_head, len_to_tail) = if self.tail >= self.head {
             (self.tail - self.head, 0)
         } else {
@@ -230,7 +230,7 @@ impl RingBuffer {
     // at the beginning/end of the buffer. Everything else must be initialized
     /// Returns the size of the two unoccupied sections of memory used by the buffer.
     fn free_slice_lengths(&self) -> (usize, usize) {
-        // TODO can we do this branchless?
+        // Potential optimization: make this calculation branchless.
         let (len_after_tail, len_to_head) = if self.tail < self.head {
             (self.head - self.tail, 0)
         } else {

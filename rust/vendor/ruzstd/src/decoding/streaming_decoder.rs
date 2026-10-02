@@ -127,7 +127,7 @@ impl<READ: Read, DEC: BorrowMut<FrameDecoder>> Read for StreamingDecoder<READ, D
         // The first few calls can result in just filling the decode buffer but these bytes can not be collected.
         // So we need to call this until we can actually collect enough bytes
 
-        // TODO add BlockDecodingStrategy::UntilCollectable(usize) that pushes this logic into the decode_blocks function
+        // Planned: add BlockDecodingStrategy::UntilCollectable(usize) and move this logic into decode_blocks.
         while decoder.can_collect() < buf.len() && !decoder.is_finished() {
             //More bytes can be decoded
             let additional_bytes_needed = buf.len() - decoder.can_collect();

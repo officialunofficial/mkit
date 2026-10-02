@@ -114,7 +114,7 @@ impl DecodeBuffer {
         // We have at max offset bytes in one chunk, the last one can be smaller
         let mut start_idx = start_idx;
         let mut copied_counter_left = match_length;
-        // TODO this can  be optimized further I think.
+        // Potential optimization: reduce copying in this loop.
         // Each time we copy a chunk we have a repetiton of length 'offset', so we can copy offset * iteration many bytes from start_idx
         while copied_counter_left > 0 {
             let chunksize = usize::min(offset, copied_counter_left);
@@ -195,7 +195,7 @@ impl DecodeBuffer {
     /// Drain as much as possible while retaining enough so that decoding si still possible with the required window_size
     /// At best call only if can_drain_to_window_size reports a 'high' number of bytes to reduce allocations
     pub fn drain_to_window_size(&mut self) -> Option<Vec<u8>> {
-        //TODO investigate if it is possible to return the std::vec::Drain iterator directly without collecting here
+        // Potential optimization: return std::vec::Drain directly without collecting.
         match self.can_drain_to_window_size() {
             None => None,
             Some(can_drain) => {

@@ -108,13 +108,20 @@ if ! cargo geiger --version >/dev/null 2>&1; then
     exit 1
 fi
 
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$rust_dir/target}/geiger"
+export CARGO_BUILD_TARGET_DIR="${CARGO_TARGET_DIR:-$rust_dir/target}/geiger"
 stderr_file="$(mktemp "${TMPDIR:-/tmp}/geiger-stderr.XXXXXX")"
 trap 'rm -f "$stderr_file"' EXIT
 
 cd "$rust_dir/crates/mkit-cli"
+# geiger 0.13.0 embeds Cargo 0.86. On a cold registry its pre-scan clean
+# can request a package twice and panic in Downloads::start_inner before
+# reporting any counts (geiger-rs/cargo-geiger#559). Fetch the complete
+# locked graph with the workspace's newer Cargo first, so geiger has no
+# downloads to schedule. Keep the same scan features, required crates and
+# unsafe ceilings; a fetch or scan failure still fails this gate closed.
+cargo fetch --locked
 geiger_status=0
-OUTPUT=$(cargo geiger --quiet --features enc-transport,git-bridge 2>"$stderr_file") ||
+OUTPUT=$(cargo geiger --quiet --color never --features enc-transport,git-bridge 2>"$stderr_file") ||
     geiger_status=$?
 
 geiger_failed() {

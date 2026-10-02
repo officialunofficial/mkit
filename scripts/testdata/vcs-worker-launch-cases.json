@@ -1,0 +1,211 @@
+{
+  "schema": 1,
+  "owner": "Workers launch conformance matrix",
+  "scope": "Paid Workers launch profile: optional sync inspection, native proofs, configured lean takedown and restricted admin catalog, bounded pure-Rust zstd decoder with native push/clone",
+  "cases": [
+    {
+      "id": "B4.config",
+      "contract": "Default off, Paid indexed profile, optional HTTP/inspection/admin, complete startup grammar and binding/key separation",
+      "native": "config::launch_tests; hook_config; http_inert",
+      "worker": "launch::tests; hooks::config; scanner_retrieval::tests; release-launch discovery",
+      "phase2": "actual release invalid-option/binding/key-role matrix"
+    },
+    {
+      "id": "B4.discovery",
+      "contract": "Active capability honesty, leases false, async false, threshold zero; optional inspection bound; native proofs advertised, Worker proofs absent",
+      "native": "connect::service::tests; wire_multi; native HTTP proof mount",
+      "worker": "release-launch info.shape_and_policy / info.ignores_repository_header",
+      "phase2": "all opt-in combinations; no false full-profile/receipt/rewrite claim"
+    },
+    {
+      "id": "B4.inspected-set",
+      "contract": "Added-pack Blob/ChunkedBlob entries, surplus/small/extracted/deduplicated entries; already inspected Verified reuse and pending membership; manifest decoding covers chunks",
+      "native": "pipeline::tests::indexed::inspection; inspection_budget",
+      "worker": "hooks::config; scanner_retrieval::tests",
+      "phase2": "actual release scanner records exact independent sets, up to four sync inspectors"
+    },
+    {
+      "id": "B4.inspection-bound",
+      "contract": "Whole-advance conservative preflight, one complete batch per inspector, 1..10000 objects, reject/quarantine dominance and unavailable fail_closed",
+      "native": "pipeline::tests::indexed::inspection; pipeline::tests::inspection_budget",
+      "worker": "hooks::config; hooks::inspection runtime probes",
+      "phase2": "release oversized set refuses before Inspect/apply; no marker, holds, deadline or durable continuation"
+    },
+    {
+      "id": "B4.scanner-bytes",
+      "contract": "exact assigned staged immutable added-pack raw ranges and manifests; scanner delta-base resolver/cache is independently authorized; no public HTTP token or writer authority substitution",
+      "native": "scanner_retrieval::tests; pipeline::tests::indexed::scanner_retrieval",
+      "worker": "scanner_retrieval::tests",
+      "phase2": "actual release added-pack-only private retrieval with signed Inspect metadata and external-base nonauthority"
+    },
+    {
+      "id": "B4.scanner-denial",
+      "contract": "Foreign scanner/repo/pack, missing grant, wrong audience, bad range, replay/expiry, terminal or blocked work deny uniformly before source IO; no global existence oracle",
+      "native": "scanner_retrieval::tests; pipeline::tests::indexed::scanner_retrieval",
+      "worker": "scanner_retrieval::tests",
+      "phase2": "actual release transport denial/cancellation/key rotation matrix"
+    },
+    {
+      "id": "B4.publication",
+      "contract": "Paired head/packmap publication, ListRefs/ReadRef, authorized writer live versus reader published, delayed D34 dependency delivery",
+      "native": "pipeline::tests::published; d34_creation; relay",
+      "worker": "published_view::tests; scripts/vcs-worker-conformance.sh D34",
+      "phase2": "release real source/projection/publication race and restart; no publication Event"
+    },
+    {
+      "id": "B4.public-reads",
+      "contract": "PackExists/DownloadPack, index objects, HTTP/MKDP/MKDS, URL token, ref headers, snapshots/cache all enforce visibility and global denial",
+      "native": "pipeline::tests::http_objects; http_mount; pipeline::tests::published",
+      "worker": "http_mount::tests; published_view::tests",
+      "phase2": "actual release opted-in HTTP objects and snapshots with stale cache/token cases"
+    },
+    {
+      "id": "B4.native-proofs",
+      "contract": "Native object/range proofs validate canonical raw/manifest/chunk roots and independent verification; Worker proof=1 unsupported",
+      "native": "http_mount::native_*proof*; http_proofs::tests",
+      "worker": "http_mount::tests; release HTTP fixture",
+      "phase2": "native complete proof matrix plus actual release Worker unsupported response on a reachable fixture"
+    },
+    {
+      "id": "B4.writer-reuse",
+      "contract": "UploadPack, multipart, dedup/AlreadyPresent, consumed/reused Verified tickets, implicit membership and external delta chains cannot bypass global denial",
+      "native": "pipeline::tests::indexed; takedown::tests; ticketed_upload",
+      "worker": "adapter::tests; scripts/vcs-worker-conformance.sh --test-faults --indexed",
+      "phase2": "actual release full writer/reuse/global-denial matrix with admin takedown configured"
+    },
+    {
+      "id": "B4.authority-races",
+      "contract": "Revocation/generation changes during backend upload, multipart marker/apply; restart/lost replies and signing rotation do not authorize stale writes",
+      "native": "pipeline::tests::authority; epoch_leases; write_gate",
+      "worker": "scripts/vcs-worker-authority.sh --authority",
+      "phase2": "actual release authority and upload intersection with inspection/takedown"
+    },
+    {
+      "id": "B4.extraction",
+      "contract": "Freeze/group scan, A+B/B+C overlap, immutable delta sources, gp protection renewal and cancellation/restart; Verified implies extracted",
+      "native": "indexed::extraction*; indexed::job::tests",
+      "worker": "extraction::tests; indexed verifier tests",
+      "phase2": "actual release wrangler extraction after scheduled verification, repeated source/dedup and cancellation"
+    },
+    {
+      "id": "B4.takedown",
+      "contract": "Acceptance globally denies before success; verified private preservation, retention/legal hold, late holders and unresolved requests; any reports discovery incomplete",
+      "native": "takedown::tests; pipeline::tests::http_objects::takedown_denial",
+      "worker": "admin::tests; configured preservation and activated Worker takedown mount",
+      "phase2": "actual release Takedown acceptance, preservation and all read/reuse denial paths under allowlist and any; merged core/catalog are inputs, not runtime evidence"
+    },
+    {
+      "id": "B4.admin",
+      "contract": "Configured Takedown/GetTakedown/ListTakedowns/ReadPreserved/SetLegalHold/PurgeCache/ReadAuditLog; dedicated roles, durable replay and gapless audit; no Reinstate/hold review",
+      "native": "admin::tests; takedown::tests",
+      "worker": "admin::tests",
+      "phase2": "actual release configured and unconfigured admin mount/role matrix"
+    },
+    {
+      "id": "B4.admin-get-takedown",
+      "contract": "Signed moderation-role GetTakedown reports acquisition pending, historical verification, discovery, legal hold and purged copies separately without preserved bytes; any never reports complete discovery or real completion",
+      "native": "takedown::admin_tests::every_operation_is_signed_role_checked_replayed_and_audited; status_keeps_acquisition_verification_discovery_hold_and_completion_separate",
+      "worker": "admin::tests configured mount; production streamed Engine dispatch to Work catalog",
+      "phase2": "actual release configured GetTakedown pending/verified/held/purged status and unknown-id cases under allowlist and any, signed role/replay/audit checks and no payload leakage"
+    },
+    {
+      "id": "B4.admin-list-takedowns",
+      "contract": "Signed moderation-role ListTakedowns supports absent/null/empty all scope and repository/namespace scope, page size 1..100, bounded 100-row root scans and 256KiB record JSON; continuation binds normalized scope and last key, and empty filtered pages can continue",
+      "native": "takedown::admin_tests::list_pagination_rejects_foreign_scope_token_and_reports_missing_state_pending; absent_and_empty_list_scopes_list_all_and_tokens_bind_all_scope; list_accepts_protojson_null_scope_and_quoted_page_size",
+      "worker": "admin::tests configured mount; real DO root scan and shared request counter",
+      "phase2": "actual release all/scoped pagination including empty filtered pages, 1/100 and invalid sizes, malformed/foreign 2KiB-bounded tokens, status confidentiality and bounded calls/retained records"
+    },
+    {
+      "id": "B4.admin-read-preserved",
+      "contract": "Signed moderation-role ReadPreserved persists only byte-free replay descriptors; every retry checks current key/role/retention/ownership and audits acceptance; verify each bounded owner-framed piece before release and after I/O, exact ordered offsets, one success last or empty last at size, audited Connect error without last on failure, no caching/log/replay payload",
+      "native": "takedown::admin_tests::fresh_retry_roles_retention_and_ownership_never_replay_bytes; offsets_final_rules_and_empty_at_size_are_exact; corrupt_second_piece_is_audited_connect_error_without_last; expiry_between_pieces_ends_with_error_and_no_success_last; read_retry_rechecks_current_key_expiry_and_buffered_adapter_cannot_return_descriptor; audit_failure_cannot_commit_a_hold_or_release_bytes",
+      "worker": "admin::serve handle_streamed Reply::Stream bridge; shared DO/R2 counter across acceptance and polling",
+      "phase2": "actual release application/connect+json stream with no-store, incremental verified bytes, fresh signed retry after key/role/retention/ownership changes, size and above-size offsets, corrupt/missing second piece and audit failure, cancellation and retained-piece/call measurements"
+    },
+    {
+      "id": "B4.admin-set-legal-hold",
+      "contract": "Signed moderation-role SetLegalHold uses existing preservation ownership/state/deadline CAS; hold effects, signed audit and terminal nonce commit atomically; reason/operator label follow 512/128 UTF-8 byte bounds; stale hold cannot seize purge-owned state and a committed hold blocks actual purge",
+      "native": "takedown::admin_tests::signed_hold_commits_with_audit_and_nonce_and_blocks_actual_purge; hold_planned_before_purge_cannot_take_ownership_after_purge_commits; legal_hold_reason_and_label_follow_existing_utf8_byte_bounds; audit_failure_cannot_commit_a_hold_or_release_bytes",
+      "worker": "admin::tests configured mount; Work plan_legal_hold through existing ledger batch",
+      "phase2": "actual release hold/set/clear and replay with audit chain, UTF-8 byte limits, retention deadline, concurrent purge CAS and audit failure; no hold or nonce mutation on denied/failed atomic apply"
+    },
+    {
+      "id": "B4.purge",
+      "contract": "Signed HTTPS cache-purge, stale snapshots/cache, retries/lost acknowledgements and asynchronous manual purge acceptance/completion",
+      "native": "purge::tests; admin::tests",
+      "worker": "purge::tests; hooks::config",
+      "phase2": "actual release purge outage/recovery and audited completion without relaxing denial"
+    },
+    {
+      "id": "B4.recovery",
+      "contract": "Current-format fresh startup, restart/lost replies/duplicate timers, immutable source retention and empty-store inspection activation; unsupported prelaunch stores reset",
+      "native": "timers; export_restore; pipeline::tests::published",
+      "worker": "scripts/vcs-worker-conformance.sh --test-faults; published_view::tests",
+      "phase2": "actual release same-format restart with pending extraction/purge/takedown and no compatibility migration"
+    },
+    {
+      "id": "B5.admission",
+      "contract": "Raw/token public HTTP admission, native proof exact encoded size before Admit; no payload/proof build on 304/416/challenge/deny",
+      "native": "pipeline::tests::http_objects::paid_reads; http_mount::native_proofs_share_payment_length_head_and_validator_cache_policy",
+      "worker": "http_mount::tests; scripts/vcs-worker-hooks.sh",
+      "phase2": "actual release opted-in HTTP_ADMIT_READS; proof admission native only"
+    },
+    {
+      "id": "B5.settlement",
+      "contract": "HEAD settles zero, partial actual-byte ReadServed, abort-before-first-byte, durable completion/reconcile arbiter and duplicate/lost reply handling",
+      "native": "pipeline::tests::http_objects::paid_reads; http_mount; admission_e2e",
+      "worker": "http_mount::tests; scripts/vcs-worker-hooks.sh",
+      "phase2": "actual release response lifetime/abort/reconcile including waitUntil; test-faults separately labeled"
+    },
+    {
+      "id": "B5.runtime",
+      "contract": "Actual wasm Fetch/Delay header+body timeout, cancellation, redirects refused, oversized hook response, fresh nonce retry",
+      "native": "hook_channel; hook_e2e",
+      "worker": "scripts/vcs-worker-conformance.sh --hooks; scripts/vcs-worker-hooks-probe.mjs",
+      "phase2": "release signed channel behavioral probes; no reliance on test-faults wrapper alone"
+    },
+    {
+      "id": "B5.outcomes",
+      "contract": "Durable Outcome duplicate/reordered delivery never changes Committed to Aborted; Committed means Sent, never Delivered; D34 publication can remain pending and publication Events are excluded",
+      "native": "admission_e2e; hook_e2e; pipeline::tests::outcomes",
+      "worker": "scripts/vcs-worker-hooks.sh",
+      "phase2": "actual release remote Admit and Outcome delivery/restart/reconcile; no internal quota charges"
+    },
+    {
+      "id": "B3.request-budget",
+      "contract": "Whole request physical DO/R2/Fetch, retry/hook-before-apply, seven-ticket/100-op batch, six outgoing connections and retained body/settlement lifetime",
+      "native": "inspection_budget; indexed::extraction_count_tests; pipeline::tests",
+      "worker": "ns_client::tests; r2::tests; adapter::tests",
+      "phase2": "actual release counters and concurrent response peaks with opted-in features"
+    },
+    {
+      "id": "B3.alarm-budget",
+      "contract": "Whole physical alarm shared limits/headroom, verification/extraction 256 calls and 48MiB, due-kind retries/frozen clock, bounded cold heads/local scans/fair progress",
+      "native": "timers::tests; indexed::extraction_budget_tests; purge::tests",
+      "worker": "ns_object::tests; sql::kv::tests; published_view::tests",
+      "phase2": "with merged publication/timer/alarm repairs, actual release multiple due kinds/cold heads and resident-work measurements"
+    },
+    {
+      "id": "B4.embedding",
+      "contract": "Uno Kit supported embedding API, combined DO outcome/publication/purge builder, configurable admin placement and programmatic ref policy/takedown knobs; streamed in-process UploadPart with shared isolate budget",
+      "native": "Source API/compile checks; documented external custom HookSet and OutcomeSink traits",
+      "worker": "Phase 2 embedded-worker example wasm check and real wrangler streamed UploadPart",
+      "phase2": "Retain real wrangler embedded upload test and measure release wasm raw/gzip size for minimal/HTTP/signed variants; no ListRepos RPC"
+    },
+    {
+      "id": "B4.native-push-zstd",
+      "contract": "Native mkit push zstd-compressed packs complete indexed verification on the release Worker and clone back canonically; bounded decode CPU and resident work remain within the launch budgets",
+      "native": "real mkit CLI push/clone with zstd pack encoder",
+      "worker": "bounded pack-ruzstd decoder in the launch profile",
+      "phase2": "enable decoder only after merge, run real CLI push -> release Worker -> clone and record decode CPU/resident-memory evidence"
+    }
+  ],
+  "external": [
+    "whole-launch code/spec review",
+    "Cloudflare staging",
+    "deployed CPU/subrequests/resident memory/cost",
+    "multicolo block/cache/purge behavior",
+    "user staging acceptance",
+    "user release authorization"
+  ]
+}

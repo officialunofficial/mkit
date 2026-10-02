@@ -242,8 +242,8 @@ impl GrantSource for LocalGrants {
 /// none. Otherwise each advance's condition must have a grant that covers it,
 /// and the later advances (`Match` updates) need a grant carrying `f`: no
 /// server yet accepts `u` alone for them (Stage 1 refuses it, "update without
-/// force needs indexed mode", and indexed mode's ancestry check is R-148's
-/// TODO). The check asks for an `Any` write, which only an `f` grant covers.
+/// force needs indexed mode", and indexed mode's ancestry check remains a
+/// known gap). The check asks for an `Any` write, which only an `f` grant covers.
 pub(crate) struct ConnectAuthority {
     pub(crate) transport: Arc<ConnectTransport>,
     pub(crate) grants: Arc<LocalGrants>,

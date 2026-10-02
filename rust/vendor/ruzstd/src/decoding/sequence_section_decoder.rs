@@ -464,7 +464,7 @@ fn test_ll_default() {
 
     assert!(table.decode.len() == 64);
 
-    //just test a few values. TODO test all values
+    // This test currently checks a few values; expand it to cover all values.
     assert!(table.decode[0].symbol == 0);
     assert!(table.decode[0].num_bits == 4);
     assert!(table.decode[0].base_line == 0);
