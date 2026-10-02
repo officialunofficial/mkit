@@ -8,7 +8,7 @@ use crate::error::ServerError;
 use crate::op::{Creation, Operation};
 use crate::repo::Addressing;
 use crate::store::{
-    Batch, BatchOutcome, MultipartBlobStore, NamespaceStore, Precondition, codec, keys,
+    Batch, BatchOutcome, MultipartBlobStore, NamespaceStore, Precondition, StoreError, codec, keys,
 };
 
 use super::{HookSet, Pipeline, Snapshot, internal, meta_error, ms};
@@ -113,7 +113,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     .require(Precondition::Absent(key.clone()))
                     .put(key, codec::encode_repo_record(&record));
             }
-            match self.meta.apply(&p, batch).await.map_err(meta_error)? {
+            let outcome = match self.meta.apply(&p, batch).await {
+                Ok(outcome) => outcome,
+                Err(StoreError::Full) => return Err(self.partition_full(&p, None).await),
+                Err(error) => return Err(meta_error(error)),
+            };
+            match outcome {
                 BatchOutcome::Committed => return Ok(want),
                 BatchOutcome::PreconditionFailed { .. } => {
                     want = self.read_creation(op).await?;

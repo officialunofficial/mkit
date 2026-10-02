@@ -83,6 +83,85 @@ fn names(page: &RepoPage) -> Vec<&str> {
     page.repos.iter().map(|entry| entry.name.as_str()).collect()
 }
 
+fn full_creation_is_retryable(sharding: Sharding) {
+    let mut cfg = config(&key(1), AuthorizerRole::Check);
+    cfg.sharding = sharding;
+    let clock = clock();
+    let e = build(
+        cfg,
+        Spy::new(store(&clock).with_capacity_limit(0)),
+        Hooks::new(),
+        clock,
+    );
+    let req = request(Procedure::UpdateRef, &identity("new-repo"), Some(&key(1)));
+    let a = e.auth(&req).unwrap();
+    let error = block_on(e.pipe.update_ref(&a, upd(HEAD, Missing, A))).unwrap_err();
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(error.public_message(), "storage partition full");
+    assert_eq!(e.metrics.count(METRIC_PARTITION_FULL), 1);
+    let coordinator = e.pipe.shards.coordinator(&a.repo().repo.namespace);
+    assert_eq!(
+        block_on(e.pipe.meta.stats(&coordinator)).unwrap().keys,
+        Some(0)
+    );
+    let anon = request(Procedure::ListRepos, &identity("selector"), None);
+    assert!(listing(&e, &anon, "", 100, None).unwrap().repos.is_empty());
+}
+
+#[test]
+fn full_repository_creation_is_retryable() {
+    full_creation_is_retryable(Sharding::Single);
+}
+
+#[test]
+fn full_coordinator_lease_grant_is_retryable() {
+    full_creation_is_retryable(Sharding::D34);
+}
+
+fn full_relay_lease_is_retryable(local_full: bool) {
+    let mut cfg = config(&key(1), AuthorizerRole::Check);
+    cfg.sharding = Sharding::D34;
+    let clock = clock();
+    let e = build(
+        cfg,
+        Spy::new(store(&clock).with_capacity_limit(if local_full { 4096 } else { 0 })),
+        Hooks::new(),
+        clock,
+    );
+    let req = request(Procedure::UpdateRef, &identity("new-repo"), Some(&key(1)));
+    let a = e.auth(&req).unwrap();
+    let repo = &a.repo().repo;
+    if local_full {
+        block_on(e.pipe.meta.inner.apply(
+            &e.pipe.shards.ref_shard(repo, HEAD),
+            Batch::new().put(Key::new(b"filler".to_vec()), Value::new(vec![0; 4089])),
+        ))
+        .unwrap();
+    }
+    let error = block_on(renew_for_relay(
+        &e.pipe.meta,
+        &e.pipe.meta,
+        e.pipe.shards.as_ref(),
+        e.clock.as_ref(),
+        repo,
+        &e.pipe.shards.ref_shard(repo, HEAD),
+        &LeaseParams::from(&e.pipe.cfg),
+    ))
+    .unwrap_err();
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(error.public_message(), "storage partition full");
+}
+
+#[test]
+fn full_relay_lease_grant_is_retryable() {
+    full_relay_lease_is_retryable(false);
+}
+
+#[test]
+fn full_relay_lease_install_is_retryable() {
+    full_relay_lease_is_retryable(true);
+}
+
 #[test]
 fn visibility_views_and_atomic_creation_work_in_single_and_d34() {
     for sharding in [Sharding::Single, Sharding::D34] {
