@@ -1,0 +1,475 @@
+//! Durable deployment inspection mode on the Memory backend.
+#![cfg(feature = "memory")]
+#![allow(clippy::unwrap_used)]
+
+use futures_executor::block_on;
+use mkit_server::store::inspection_mode::{Outcome, check_mode};
+use mkit_server::store::restore::{RestoreOptions, restore};
+use mkit_server::store::{
+    EXPORT_END, ExportRecord, encode_export_header, encode_export_record, export_header,
+    export_page, keys,
+};
+use mkit_server::{Batch, MemoryKv, NamespaceKey, NamespaceStore, Partition, Value};
+
+fn root() -> Partition {
+    Partition::Namespace(NamespaceKey::deployment_default())
+}
+
+#[test]
+fn pipeline_config_defaults_inspection_off() {
+    let config = mkit_server::pipeline::PipelineConfig::new(
+        mkit_server::Addressing::Single {
+            repo: mkit_server::RepoId {
+                namespace: NamespaceKey::deployment_default(),
+                name: mkit_server::RepoName::new("project").unwrap(),
+            },
+        },
+        mkit_server::pipeline::AuthMode::TransportIdentity,
+        mkit_server::upload::UploadLimits {
+            max_total_bytes: 1024,
+            max_chunks: 1,
+        },
+    );
+    assert!(!config.inspection_mode);
+}
+fn put(store: &MemoryKv, key: mkit_server::Key, bytes: &[u8]) {
+    block_on(store.apply(&root(), Batch::new().put(key, Value::new(bytes.to_vec())))).unwrap();
+}
+fn archive(store: &MemoryKv) -> Vec<u8> {
+    archive_partition(store, &root())
+}
+fn archive_partition(store: &MemoryKv, partition: &Partition) -> Vec<u8> {
+    let header = block_on(export_header(store, partition, 0)).unwrap();
+    let page = block_on(export_page(store, partition, None, 100)).unwrap();
+    assert!(page.next.is_none());
+    let mut bytes = encode_export_header(&header).to_vec();
+    for record in page.records {
+        bytes.extend(encode_export_record(&record).unwrap());
+    }
+    bytes.extend(EXPORT_END);
+    bytes
+}
+
+#[test]
+fn restore_retains_registry_and_per_advance_hold_rows_in_single_and_d34() {
+    use mkit_server::store::codec;
+    use mkit_server::store::inspection_flags::{FlagInstall, FlagSource, FlagV1, encode_flag};
+    let ns = NamespaceKey::deployment_default();
+    let repo = mkit_server::RepoName::new("project").unwrap();
+    let id = [1; 32];
+    let advance = [2; 32];
+    let flag = encode_flag(
+        &FlagV1::new(FlagInstall {
+            id,
+            reason: "review".into(),
+            source: FlagSource {
+                inspector: "moderator".into(),
+                inspection_id: "inspect-1".into(),
+                ref_name: "refs/heads/main".into(),
+                sequence: 1,
+            },
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let manifest = Value::new([vec![1], id.to_vec()].concat());
+    for d34 in [false, true] {
+        let source = MemoryKv::default();
+        assert_eq!(block_on(check_mode(&source, true)).unwrap(), Outcome::Ok);
+        put(
+            &source,
+            keys::sharding_marker(),
+            if d34 { b"d34" } else { b"single" },
+        );
+        let shards: &dyn mkit_server::pipeline::ShardMap = if d34 {
+            &mkit_server::pipeline::D34Shards
+        } else {
+            &mkit_server::pipeline::SinglePartition
+        };
+        let repository = mkit_server::RepoId {
+            namespace: ns.clone(),
+            name: repo.clone(),
+        };
+        let registry = shards.object_index(&repository, &[0; 32]);
+        let refs = shards.ref_shard(&repository, "refs/heads/main");
+        let rows = [
+            (
+                registry.clone(),
+                keys::inspection_flag(&repo, &id),
+                flag.clone(),
+            ),
+            (
+                registry.clone(),
+                keys::inspection_version(&repo),
+                codec::encode_u64(1),
+            ),
+            (
+                registry.clone(),
+                keys::inspection_hold(&repo, &id, &advance),
+                Value::default(),
+            ),
+            (
+                refs.clone(),
+                keys::inspection_hold_index(&repo, &advance),
+                Value::new(vec![0]),
+            ),
+            (
+                registry.clone(),
+                keys::inspection_hold_manifest(&repo, &advance),
+                manifest.clone(),
+            ),
+        ];
+        for (partition, key, value) in &rows {
+            block_on(source.apply(partition, Batch::new().put(key.clone(), value.clone())))
+                .unwrap();
+        }
+        let mut archives = vec![archive(&source)];
+        if d34 {
+            let coordinator = Partition::Coordinator(ns.clone());
+            block_on(source.apply(
+                &coordinator,
+                Batch::new().put(keys::grant_epoch(), codec::encode_u64(1)),
+            ))
+            .unwrap();
+            archives.extend([
+                archive_partition(&source, &coordinator),
+                archive_partition(&source, &registry),
+                archive_partition(&source, &refs),
+            ]);
+        }
+        let restored = MemoryKv::default();
+        block_on(restore(&archives, &restored, RestoreOptions::default())).unwrap();
+        for (partition, key, expected) in &rows {
+            assert_eq!(
+                block_on(restored.get(partition, key)).unwrap().as_ref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            block_on(check_mode(&restored, false)).unwrap(),
+            Outcome::Disabled
+        );
+    }
+}
+
+#[test]
+fn restore_retains_pending_advance_hold_marker() {
+    let source = MemoryKv::default();
+    let repo = mkit_server::RepoName::new("project").unwrap();
+    let advance = [3; 32];
+    assert_eq!(block_on(check_mode(&source, true)).unwrap(), Outcome::Ok);
+    put(&source, keys::sharding_marker(), b"single");
+    put(&source, keys::inspection_hold_index(&repo, &advance), &[0]);
+    let restored = MemoryKv::default();
+    block_on(restore(
+        &[archive(&source)],
+        &restored,
+        RestoreOptions::default(),
+    ))
+    .unwrap();
+    assert_eq!(
+        block_on(restored.get(&root(), &keys::inspection_hold_index(&repo, &advance))).unwrap(),
+        Some(Value::new(vec![0]))
+    );
+}
+
+/// A competing first ordinary write installs the logical layout row between
+/// the empty scan and activation's apply; the second CAS must refuse it.
+struct LateWrite(MemoryKv);
+impl NamespaceStore for LateWrite {
+    fn capabilities(&self) -> mkit_server::StoreCapabilities {
+        self.0.capabilities()
+    }
+    async fn get(
+        &self,
+        p: &Partition,
+        k: &mkit_server::Key,
+    ) -> Result<Option<Value>, mkit_server::StoreError> {
+        self.0.get(p, k).await
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        s: &mkit_server::Key,
+        e: &mkit_server::Key,
+        a: Option<&mkit_server::Cursor>,
+        limit: u32,
+    ) -> Result<mkit_server::ScanPage, mkit_server::StoreError> {
+        assert_eq!(limit, 1);
+        self.0.scan(p, s, e, a, limit).await
+    }
+    async fn apply(
+        &self,
+        p: &Partition,
+        batch: Batch,
+    ) -> Result<mkit_server::BatchOutcome, mkit_server::StoreError> {
+        self.0
+            .apply(
+                p,
+                Batch::new().put(
+                    keys::layout_version(),
+                    mkit_server::store::codec::encode_u32(keys::LAYOUT_VERSION),
+                ),
+            )
+            .await?;
+        self.0.apply(p, batch).await
+    }
+    async fn stats(
+        &self,
+        p: &Partition,
+    ) -> Result<mkit_server::PartitionStats, mkit_server::StoreError> {
+        self.0.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), mkit_server::StoreError> {
+        self.0.probe().await
+    }
+}
+
+#[test]
+fn memory_write_between_empty_probe_and_marker_apply_refuses_activation() {
+    let store = LateWrite(MemoryKv::default());
+    assert_eq!(
+        block_on(check_mode(&store, true)).unwrap(),
+        Outcome::NonEmpty
+    );
+    assert_eq!(
+        block_on(store.get(&root(), &keys::inspection_marker())).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn memory_empty_activation_and_one_way_restart_with_zero_inspectors() {
+    let store = MemoryKv::default();
+    assert_eq!(block_on(check_mode(&store, false)).unwrap(), Outcome::Ok);
+    assert_eq!(
+        block_on(store.get(&root(), &keys::inspection_marker())).unwrap(),
+        None
+    );
+    assert_eq!(block_on(check_mode(&store, true)).unwrap(), Outcome::Ok);
+    assert_eq!(block_on(check_mode(&store, true)).unwrap(), Outcome::Ok);
+    assert_eq!(
+        block_on(store.get(&root(), &keys::inspection_marker())).unwrap(),
+        Some(Value::new(b"on".to_vec()))
+    );
+    assert_eq!(
+        block_on(check_mode(&store, false)).unwrap(),
+        Outcome::Disabled
+    );
+}
+
+#[test]
+fn memory_nonempty_store_and_bootstrap_rows_refuse_first_activation() {
+    for key in [
+        keys::layout_version(),
+        keys::sharding_marker(),
+        keys::addressing_marker(),
+        mkit_server::Key::new(b"data".as_slice()),
+    ] {
+        let store = MemoryKv::default();
+        put(&store, key, b"single");
+        assert_eq!(
+            block_on(check_mode(&store, true)).unwrap(),
+            Outcome::NonEmpty
+        );
+        assert_eq!(block_on(check_mode(&store, false)).unwrap(), Outcome::Ok);
+        assert_eq!(
+            block_on(store.get(&root(), &keys::inspection_marker())).unwrap(),
+            None
+        );
+    }
+}
+
+#[test]
+fn memory_corrupt_marker_fails_closed_even_when_disabled() {
+    for bad in [b"".as_slice(), b"off", b"ON", b"on\0", b"single"] {
+        let store = MemoryKv::default();
+        put(&store, keys::inspection_marker(), bad);
+        for enabled in [false, true] {
+            assert_eq!(
+                block_on(check_mode(&store, enabled)).unwrap(),
+                Outcome::Corrupt
+            );
+        }
+    }
+}
+
+#[test]
+fn memory_export_restore_preserves_inspection_mode() {
+    let store = MemoryKv::default();
+    assert_eq!(block_on(check_mode(&store, true)).unwrap(), Outcome::Ok);
+    put(&store, keys::sharding_marker(), b"single");
+    let restored = MemoryKv::default();
+    block_on(restore(
+        &[archive(&store)],
+        &restored,
+        RestoreOptions::default(),
+    ))
+    .unwrap();
+    assert_eq!(block_on(check_mode(&restored, true)).unwrap(), Outcome::Ok);
+    assert_eq!(
+        block_on(check_mode(&restored, false)).unwrap(),
+        Outcome::Disabled
+    );
+}
+
+#[test]
+fn restore_rejects_invalid_or_misplaced_inspection_marker_before_writes() {
+    for (partition, value) in [
+        (root(), b"off".as_slice()),
+        (Partition::ContentShard(1), b"on".as_slice()),
+    ] {
+        let header = mkit_server::store::ExportHeader::new(keys::LAYOUT_VERSION, 0);
+        let mut bytes = encode_export_header(&header).to_vec();
+        bytes.extend(
+            encode_export_record(&ExportRecord::new(
+                partition,
+                keys::inspection_marker(),
+                Value::new(value.to_vec()),
+            ))
+            .unwrap(),
+        );
+        bytes.extend(EXPORT_END);
+        let store = MemoryKv::default();
+        assert!(matches!(
+            block_on(restore(&[bytes], &store, RestoreOptions::default())),
+            Err(mkit_server::StoreError::Corrupt(_))
+        ));
+        assert_eq!(
+            block_on(store.get(&root(), &keys::inspection_marker())).unwrap(),
+            None
+        );
+    }
+}
+
+#[test]
+fn restore_rejects_misplaced_or_corrupt_repository_hold_records() {
+    let repo = mkit_server::RepoName::new("project").unwrap();
+    let registry = Partition::RepoIndex {
+        ns: NamespaceKey::deployment_default(),
+        repo: repo.clone(),
+        prefix: 0,
+    };
+    let refs = Partition::Ref {
+        ns: NamespaceKey::deployment_default(),
+        repo: repo.clone(),
+        shard_ref: "refs/heads/main".into(),
+    };
+    let advance = [2; 32];
+    let cases = [
+        (
+            refs.clone(),
+            keys::inspection_hold(&repo, &[1; 32], &advance),
+            Value::default(),
+        ),
+        (
+            refs.clone(),
+            keys::inspection_hold_manifest(&repo, &advance),
+            Value::new(vec![1]),
+        ),
+        (
+            registry.clone(),
+            keys::inspection_hold_index(&repo, &advance),
+            Value::new(vec![0]),
+        ),
+        (
+            registry.clone(),
+            keys::inspection_hold_manifest(&repo, &advance),
+            Value::new(vec![3]),
+        ),
+        (
+            refs,
+            keys::inspection_hold_index(&repo, &advance),
+            Value::new(vec![1, 0]),
+        ),
+    ];
+    for (partition, key, value) in cases {
+        let source = MemoryKv::default();
+        block_on(source.apply(&partition, Batch::new().put(key, value))).unwrap();
+        let restored = MemoryKv::default();
+        assert!(
+            block_on(restore(
+                &[archive_partition(&source, &partition)],
+                &restored,
+                RestoreOptions::default()
+            ))
+            .is_err()
+        );
+        assert!(
+            block_on(restored.scan(
+                &partition,
+                &mkit_server::Key::default(),
+                &mkit_server::Key::new(vec![0xff; 1025]),
+                None,
+                1
+            ))
+            .unwrap()
+            .entries
+            .is_empty()
+        );
+    }
+}
+
+#[test]
+fn restore_preserves_repository_release_fence_in_single_and_d34() {
+    use mkit_server::pipeline::{D34Shards, ShardMap, SinglePartition};
+    use mkit_server::store::inspection_holds::InspectionHolds;
+    let repo = mkit_server::RepoId {
+        namespace: NamespaceKey::deployment_default(),
+        name: mkit_server::RepoName::new("project").unwrap(),
+    };
+    for shards in [
+        &SinglePartition as &dyn ShardMap,
+        &D34Shards as &dyn ShardMap,
+    ] {
+        let source = MemoryKv::default();
+        let holds = InspectionHolds::new(&source, shards, &repo, "refs/heads/a");
+        assert_eq!(block_on(check_mode(&source, true)).unwrap(), Outcome::Ok);
+        put(
+            &source,
+            keys::sharding_marker(),
+            if holds.partition() == &root() {
+                b"single"
+            } else {
+                b"d34"
+            },
+        );
+        let advance = [3; 32];
+        block_on(source.apply(
+            holds.partition(),
+            block_on(holds.plan_holds(&advance, &[[1; 32]])).unwrap(),
+        ))
+        .unwrap();
+        block_on(source.apply(
+            holds.partition(),
+            block_on(holds.plan_release(&advance)).unwrap(),
+        ))
+        .unwrap();
+        let mut snapshots = vec![archive(&source)];
+        if holds.partition() != &root() {
+            let coordinator = shards.coordinator(&repo.namespace);
+            block_on(source.apply(
+                &coordinator,
+                Batch::new().put(
+                    keys::grant_epoch(),
+                    mkit_server::store::codec::encode_u64(1),
+                ),
+            ))
+            .unwrap();
+            snapshots.push(archive_partition(&source, &coordinator));
+            snapshots.push(archive_partition(&source, holds.partition()));
+        }
+        let restored = MemoryKv::default();
+        block_on(restore(&snapshots, &restored, RestoreOptions::default())).unwrap();
+        let holds = InspectionHolds::new(&restored, shards, &repo, "refs/heads/b");
+        assert!(holds.partition() == &shards.object_index(&repo, &[0; 32]));
+        assert!(block_on(holds.is_held(&[[1; 32]])).unwrap().is_empty());
+        assert!(block_on(holds.plan_holds(&advance, &[[1; 32]])).is_err());
+        assert!(
+            block_on(holds.plan_release(&advance))
+                .unwrap()
+                .writes
+                .is_empty()
+        );
+    }
+}

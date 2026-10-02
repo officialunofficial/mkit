@@ -13,6 +13,12 @@
 //! |---|---|---|
 //! | deployment sharding marker (root `Namespace` only) | `sm 00` | UTF-8 `single` or `d34` |
 //! | deployment addressing marker (root `Namespace` only) | `am 00` | UTF-8 `single` or `multi` |
+//! | durable inspection mode (root `Namespace` only) | `im 00` | UTF-8 `on`; absence means off |
+//! | repository inspection flag (canonical `RepoIndex` prefix 0 / Single Namespace) | `if 00 <repo> 00 <id:32>` | strict versioned flag |
+//! | inspection registry version (same partition) | `iv 00 <repo>` | be64 |
+//! | per-advance inspection hold (canonical repository registry partition) | `ih 00 <repo> 00 <content:32> <advance:32>` | empty |
+//! | advance hold record (ref shard) | `ia 00 <repo> 00 <advance:32>` | 0 pending or 1 complete |
+//! | repository hold release manifest (canonical registry partition) | `ir 00 <repo> 00 <advance:32>` | 1 active or 2 released, followed by sorted content ids |
 //! | layout version | `v 00` | be32 [`LAYOUT_VERSION`]; never on `RefsOnly` stores |
 //! | publication sequence and boundary | `pp 00 <repo> 00 <canonical ref>` | v1 `Publication` |
 //! | retained advance | `av 00 <repo> 00 <canonical ref> 00 <seq:be64>` | v1 `Advance` |
@@ -109,6 +115,18 @@ pub const TAG_LAYOUT_VERSION: &str = "v";
 pub const TAG_SHARDING_MARKER: &str = "sm";
 /// Worker deployment addressing marker tag (root Namespace only).
 pub const TAG_ADDRESSING_MARKER: &str = "am";
+/// Durable inspection mode marker.
+pub const TAG_INSPECTION_MARKER: &str = "im";
+/// Repository inspection flag record.
+pub const TAG_INSPECTION_FLAG: &str = "if";
+/// Repository inspection registry version.
+pub const TAG_INSPECTION_VERSION: &str = "iv";
+/// Per-content, per-advance inspection hold.
+pub const TAG_INSPECTION_HOLD: &str = "ih";
+/// Ref-level advance inspection hold record.
+pub const TAG_INSPECTION_HOLD_INDEX: &str = "ia";
+/// Repository-level per-advance release manifest.
+pub const TAG_INSPECTION_HOLD_MANIFEST: &str = "ir";
 /// Ref tag.
 pub const TAG_REF: &str = "r";
 /// Ref-name index tag.
@@ -273,6 +291,22 @@ pub enum ParsedKey {
     ShardingMarker,
     /// `am 00`: the Worker deployment addressing mode.
     AddressingMarker,
+    /// `im 00`: durable inspection mode.
+    InspectionMarker,
+    /// `if 00 <repo> 00 <id:32>`.
+    InspectionFlag { repo: RepoName, id: Hash },
+    /// `iv 00 <repo>`.
+    InspectionVersion(RepoName),
+    /// `ih 00 <repo> 00 <content:32> <advance:32>`.
+    InspectionHold {
+        repo: RepoName,
+        content: Hash,
+        advance: Hash,
+    },
+    /// `ia 00 <repo> 00 <advance:32>`.
+    InspectionHoldIndex { repo: RepoName, advance: Hash },
+    /// `ir 00 <repo> 00 <advance:32>`.
+    InspectionHoldManifest { repo: RepoName, advance: Hash },
     /// `v 00`.
     LayoutVersion,
     /// `nr 00`.
@@ -531,6 +565,62 @@ pub fn sharding_marker() -> Key {
 #[must_use]
 pub fn addressing_marker() -> Key {
     key(TAG_ADDRESSING_MARKER, &[])
+}
+
+/// Durable inspection deployment marker; only the root Namespace partition.
+#[must_use]
+pub fn inspection_marker() -> Key {
+    key(TAG_INSPECTION_MARKER, &[])
+}
+
+/// A repository flag in the canonical registry partition.
+#[must_use]
+pub fn inspection_flag(repo: &RepoName, id: &Hash) -> Key {
+    key(TAG_INSPECTION_FLAG, &[repo.as_str().as_bytes(), &[0], id])
+}
+
+/// The canonical repository inspection registry version.
+#[must_use]
+pub fn inspection_version(repo: &RepoName) -> Key {
+    key(TAG_INSPECTION_VERSION, &[repo.as_str().as_bytes()])
+}
+
+/// An advance's independent hold on content, in the canonical repository registry partition.
+#[must_use]
+pub fn inspection_hold(repo: &RepoName, content: &Hash, advance: &Hash) -> Key {
+    key(
+        TAG_INSPECTION_HOLD,
+        &[repo.as_str().as_bytes(), &[0], content, advance],
+    )
+}
+
+/// All advances holding this content; callers probe with limit one.
+#[must_use]
+pub fn inspection_hold_range(repo: &RepoName, content: &Hash) -> (Key, Key) {
+    let start = key(
+        TAG_INSPECTION_HOLD,
+        &[repo.as_str().as_bytes(), &[0], content],
+    );
+    let end = successor(&start);
+    (start, end)
+}
+
+/// The advance-level hold record, in its ref shard.
+#[must_use]
+pub fn inspection_hold_index(repo: &RepoName, advance: &Hash) -> Key {
+    key(
+        TAG_INSPECTION_HOLD_INDEX,
+        &[repo.as_str().as_bytes(), &[0], advance],
+    )
+}
+
+/// One bounded release manifest per advance, beside the repository-wide content holds.
+#[must_use]
+pub fn inspection_hold_manifest(repo: &RepoName, advance: &Hash) -> Key {
+    key(
+        TAG_INSPECTION_HOLD_MANIFEST,
+        &[repo.as_str().as_bytes(), &[0], advance],
+    )
 }
 
 /// `nr 00`: the namespace coordinator record.
@@ -1224,6 +1314,35 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"cg" if !body.is_empty() => ParsedKey::CachePurgeGeneration(text(body)?),
         b"sm" if body.is_empty() => ParsedKey::ShardingMarker,
         b"am" if body.is_empty() => ParsedKey::AddressingMarker,
+        b"im" if body.is_empty() => ParsedKey::InspectionMarker,
+        b"iv" => ParsedKey::InspectionVersion(RepoName::new(text(body)?).ok()?),
+        b"if" | b"ih" | b"ia" | b"ir" => {
+            let sep = body.iter().position(|&b| b == 0)?;
+            let repo = RepoName::new(text(&body[..sep])?).ok()?;
+            let suffix = &body[sep + 1..];
+            match tag {
+                b"if" => ParsedKey::InspectionFlag {
+                    repo,
+                    id: hash(suffix)?,
+                },
+                b"ia" => ParsedKey::InspectionHoldIndex {
+                    repo,
+                    advance: hash(suffix)?,
+                },
+                b"ir" => ParsedKey::InspectionHoldManifest {
+                    repo,
+                    advance: hash(suffix)?,
+                },
+                _ => {
+                    let (content, advance) = suffix.split_first_chunk::<32>()?;
+                    ParsedKey::InspectionHold {
+                        repo,
+                        content: *content,
+                        advance: hash(advance)?,
+                    }
+                }
+            }
+        }
         b"v" if body.is_empty() => ParsedKey::LayoutVersion,
         b"e" if body.is_empty() => ParsedKey::GrantEpoch,
         b"ag" if body.is_empty() => ParsedKey::AuthorityGeneration,
@@ -1446,6 +1565,13 @@ mod tests {
     fn all_tags() -> Vec<&'static str> {
         let mut tags = vec![
             TAG_SHARDING_MARKER,
+            TAG_ADDRESSING_MARKER,
+            TAG_INSPECTION_MARKER,
+            TAG_INSPECTION_FLAG,
+            TAG_INSPECTION_VERSION,
+            TAG_INSPECTION_HOLD,
+            TAG_INSPECTION_HOLD_INDEX,
+            TAG_INSPECTION_HOLD_MANIFEST,
             TAG_LAYOUT_VERSION,
             TAG_REF,
             TAG_REF_INDEX,
@@ -1497,6 +1623,78 @@ mod tests {
         ];
         tags.extend_from_slice(RESERVED_TAGS);
         tags
+    }
+
+    #[test]
+    fn inspection_key_goldens_and_strict_parsing() {
+        let repository = repo("room");
+        let content = [0xff; 32];
+        let advance_id = [0x02; 32];
+        let cases = [
+            (
+                inspection_marker(),
+                b"im\0".to_vec(),
+                ParsedKey::InspectionMarker,
+            ),
+            (
+                inspection_version(&repository),
+                b"iv\0room".to_vec(),
+                ParsedKey::InspectionVersion(repository.clone()),
+            ),
+            (
+                inspection_flag(&repository, &content),
+                [&b"if\0room\0"[..], &content].concat(),
+                ParsedKey::InspectionFlag {
+                    repo: repository.clone(),
+                    id: content,
+                },
+            ),
+            (
+                inspection_hold(&repository, &content, &advance_id),
+                [&b"ih\0room\0"[..], &content, &advance_id].concat(),
+                ParsedKey::InspectionHold {
+                    repo: repository.clone(),
+                    content,
+                    advance: advance_id,
+                },
+            ),
+            (
+                inspection_hold_index(&repository, &advance_id),
+                [&b"ia\0room\0"[..], &advance_id].concat(),
+                ParsedKey::InspectionHoldIndex {
+                    repo: repository.clone(),
+                    advance: advance_id,
+                },
+            ),
+            (
+                inspection_hold_manifest(&repository, &advance_id),
+                [&b"ir\0room\0"[..], &advance_id].concat(),
+                ParsedKey::InspectionHoldManifest {
+                    repo: repository.clone(),
+                    advance: advance_id,
+                },
+            ),
+        ];
+        for (key, golden, parsed) in cases {
+            assert_eq!(key.as_bytes(), golden);
+            assert_eq!(parse(&key), Some(parsed));
+            let mut extra = golden.clone();
+            extra.push(0);
+            if key != inspection_version(&repository) {
+                assert_eq!(parse(&Key::new(extra)), None);
+            }
+            let mut short = golden;
+            short.pop();
+            if key != inspection_version(&repository) {
+                assert_eq!(parse(&Key::new(short)), None);
+            }
+        }
+
+        let (start, end) = inspection_hold_range(&repository, &content);
+        assert!(start <= inspection_hold(&repository, &content, &advance_id));
+        assert!(inspection_hold(&repository, &content, &[0xff; 32]) < end);
+        assert!(inspection_hold(&repo("other"), &content, &advance_id) < start);
+        assert!(inspection_hold(&repository, &[0xfe; 32], &advance_id) < start);
     }
 
     #[test]
@@ -1574,6 +1772,7 @@ mod tests {
         let cases: Vec<(Key, Vec<u8>)> = vec![
             (sharding_marker(), b"sm\0".to_vec()),
             (addressing_marker(), b"am\0".to_vec()),
+            (inspection_marker(), b"im\0".to_vec()),
             (layout_version(), b"v\0".to_vec()),
             (relay_scan(), b"rs\0".to_vec()),
             (
