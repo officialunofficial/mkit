@@ -1822,3 +1822,178 @@ fn unprovable_stored_ids_match_unknown_ids_for_public_readers_but_owners_get_typ
         }
     }
 }
+
+fn set_reader_request_budget(fx: &Fx, limit: u32) -> crate::indexed::budget::SliceBudget {
+    let budget = crate::indexed::budget::SliceBudget::new(limit);
+    *fx.pipe.meta.request_budget.lock().unwrap() = Some(budget.clone());
+    *fx.pipe.blobs.request_budget.lock().unwrap() = Some(budget.clone());
+    budget
+}
+
+#[test]
+fn legacy_rows_support_metadata_advances_and_size_dependent_reads() {
+    for takedown in [false, true] {
+        let fx = fixture_tweaked(Hooks::new(), http_cfg(), |cfg| {
+            cfg.takedown_denial = takedown;
+        });
+        let d = data();
+        let pack = fx.push("room", &d.refs(), d.head(), None);
+        block_on(crate::takedown::inventory::tests::install_legacy_pack(
+            &*fx.pipe.meta.inner,
+            &pack,
+        ));
+        let reader = block_on(
+            fx.pipe
+                .object_reader(fx.repo_id("room"), ReaderView::Public),
+        )
+        .unwrap();
+        let budget = set_reader_request_budget(&fx, 9000);
+        fx.clear_calls();
+        let ids = [id(&d.small), id(&d.manifest), id(&d.small)];
+        let metadata = block_on(reader.object_metadata(&ids)).unwrap();
+        assert_eq!(
+            metadata[0].unwrap().logical_len,
+            Some(d.small_bytes.len() as u64)
+        );
+        assert_eq!(
+            metadata[1].unwrap().logical_len,
+            Some(d.whole().len() as u64)
+        );
+        assert_eq!(
+            metadata[1].unwrap().canonical_len,
+            serialize(&d.manifest).unwrap().len() as u64
+        );
+        assert_eq!(metadata[0], metadata[2]);
+        assert_eq!(fx.blob_calls(BlobKey::object(id(&d.manifest))), ["head"]);
+        assert!(fx.blob_calls(BlobKey::object(id(&d.small))).is_empty());
+        assert!(budget.used() < 9000);
+        let ranged = fx.get_with(
+            &fx.object_url("room", &id(&d.manifest)),
+            &[("Range", "bytes=1-9")],
+        );
+        assert_eq!(ranged.status, 206);
+        assert_eq!(ranged.body, d.whole()[1..10]);
+        assert!(budget.used() < 9000);
+        // The next commit reuses the old tree and its indexed objects.
+        *fx.pipe.meta.request_budget.lock().unwrap() = None;
+        *fx.pipe.blobs.request_budget.lock().unwrap() = None;
+        if takedown {
+            let map = hash(&mkit_core::transfer::encode_packlist(None, &[pack]).unwrap());
+            block_on(crate::takedown::inventory::tests::install_legacy_pack(
+                &*fx.pipe.meta.inner,
+                &map,
+            ));
+            let request = signed(
+                &fx.owner,
+                &fx.identity("room"),
+                Procedure::AdvanceRefs,
+                fx.number(),
+            );
+            assert_eq!(
+                block_on(fx.pipe.advance_refs_with_tickets(
+                    &fx.auth(&request),
+                    upd(HEAD, Match(d.head()), d.head()),
+                    upd(PACKMAP, Match(map), map),
+                    vec![],
+                ))
+                .unwrap(),
+                AdvanceOutcome::Committed
+            );
+        }
+        let head = commit(&d.root, &[&d.commit], "after upgrade");
+        let mut refs = d.refs();
+        refs.push(&head);
+        fx.push("room", &refs, id(&head), Some((d.head(), pack)));
+        assert_eq!(
+            fx.get(&fx.ref_url("room", "main", "small.txt")).body,
+            d.small_bytes
+        );
+    }
+}
+
+#[test]
+fn legacy_manifest_length_costs_one_call_and_exhaustion_is_resource_exhausted() {
+    let fx = fixture_tweaked(Hooks::new(), http_cfg(), |cfg| cfg.takedown_denial = true);
+    let d = data();
+    let pack = fx.push("room", &d.refs(), d.head(), None);
+    let reader = block_on(
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Public),
+    )
+    .unwrap();
+    let target = id(&d.manifest);
+    let budget = set_reader_request_budget(&fx, 9000);
+    let expected = block_on(reader.object_metadata(&[target])).unwrap();
+    let known_cost = budget.used();
+    *fx.pipe.meta.request_budget.lock().unwrap() = None;
+    *fx.pipe.blobs.request_budget.lock().unwrap() = None;
+    block_on(crate::takedown::inventory::tests::install_legacy_pack(
+        &*fx.pipe.meta.inner,
+        &pack,
+    ));
+    let budget = set_reader_request_budget(&fx, 9000);
+    fx.clear_calls();
+    assert_eq!(
+        block_on(reader.object_metadata(&[target, target])).unwrap(),
+        [expected[0]; 2]
+    );
+    assert_eq!(budget.used(), known_cost + 1);
+    assert_eq!(fx.blob_calls(BlobKey::object(target)), ["head"]);
+    // The final HEAD is refused before dispatch and charges no excess call.
+    let budget = set_reader_request_budget(&fx, known_cost);
+    fx.clear_calls();
+    assert_eq!(
+        block_on(reader.object_metadata(&[target]))
+            .unwrap_err()
+            .code(),
+        Code::ResourceExhausted
+    );
+    assert_eq!(budget.used(), known_cost);
+    assert!(fx.blob_calls(BlobKey::object(target)).is_empty());
+    // Refusals in earlier proof reads retain the same caller error class.
+    for limit in [0, 1, 2, known_cost / 2, known_cost - 1] {
+        let budget = set_reader_request_budget(&fx, limit);
+        assert_eq!(
+            block_on(reader.object_metadata(&[target]))
+                .unwrap_err()
+                .code(),
+            Code::ResourceExhausted,
+            "caller allowance {limit}"
+        );
+        assert_eq!(budget.used(), limit);
+    }
+}
+
+#[test]
+fn legacy_commit_inventory_cannot_hide_missing_history_closure() {
+    let fx = fixture_tweaked(Hooks::new(), http_cfg(), |cfg| cfg.takedown_denial = true);
+    let d = data();
+    let pack = fx.push("room", &d.refs(), d.head(), None);
+    block_on(crate::takedown::inventory::tests::install_legacy_pack(
+        &*fx.pipe.meta.inner,
+        &pack,
+    ));
+    let repo = fx.repo_id("room");
+    let tree = id(&d.root);
+    block_on(fx.pipe.meta.inner.apply(
+        &fx.pipe.shards.object_index(&repo, &tree),
+        Batch::new().delete(keys::object_index(&repo.name, &tree, &pack)),
+    ))
+    .unwrap();
+    let map = hash(&mkit_core::transfer::encode_packlist(None, &[pack]).unwrap());
+    let request = signed(
+        &fx.owner,
+        &fx.identity("room"),
+        Procedure::AdvanceRefs,
+        fx.number(),
+    );
+    let error = block_on(fx.pipe.advance_refs_with_tickets(
+        &fx.auth(&request),
+        upd(HEAD, Match(d.head()), d.head()),
+        upd(PACKMAP, Match(map), map),
+        vec![],
+    ))
+    .unwrap_err();
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert_eq!(error.public_message(), "open closure");
+}

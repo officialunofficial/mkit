@@ -142,6 +142,27 @@ pub fn concurrent_pending(state: &VerificationV1, now_ms: u64) -> Option<ServerE
 mod tests {
     use super::*;
 
+    // Version-one constants from the state DTO at 8948ae34.
+    const LEGACY_STATES: [&[u8]; 3] = [
+        b"\x01{\"state\":\"pending\",\"lease_until_ms\":1000}",
+        b"\x01{\"state\":\"verified\",\"pack_len\":123,\"verified_at_ms\":456}",
+        b"\x01{\"state\":\"rejected\",\"code\":\"invalid_argument\",\"message\":\"object hash mismatch\"}",
+    ];
+    #[test]
+    fn legacy_verification_variants_keep_the_version_one_codec() {
+        for bytes in LEGACY_STATES {
+            let value = Value::new(bytes.to_vec());
+            assert_eq!(encode(&decode(&value).unwrap()), value);
+        }
+        assert!(matches!(
+            decode(&Value::new(LEGACY_STATES[1].to_vec())).unwrap(),
+            VerificationV1::Verified {
+                publication: None,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn codec_golden_and_live_lease_boundary() {
         let state = VerificationV1::Verified {

@@ -47,13 +47,24 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         seams: &HttpSeams,
         prechecked: Option<Result<Prechecked, TokenRejected>>,
     ) -> Result<Option<i64>, Fail> {
+        self.authorize_http_read_in(op, requested, seams, prechecked, &self.meta)
+            .await
+    }
+
+    pub(super) async fn authorize_http_read_in<S: NamespaceStore>(
+        &self,
+        op: &Operation,
+        requested: &Target,
+        seams: &HttpSeams,
+        prechecked: Option<Result<Prechecked, TokenRejected>>,
+        store: &S,
+    ) -> Result<Option<i64>, Fail> {
         let partition = self.shards.coordinator(&op.repo.namespace);
         let mut changed_ms = 0;
         let private = if self.visibility_gates_reads() {
             // Deliberately do not use read_repo_state: e must not be read
             // until every stateless token binding check has passed.
-            let values = self
-                .meta
+            let values = store
                 .get_many(
                     &partition,
                     &[
@@ -103,8 +114,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             bound
                 .check_visibility_change(changed_ms)
                 .map_err(|_| Fail::NotFound)?;
-            let value = self
-                .meta
+            let value = store
                 .get(&partition, &keys::grant_epoch())
                 .await
                 .map_err(|_| Fail::Unavailable)?;

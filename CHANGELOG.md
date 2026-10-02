@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- 0.5.0 could not read some index rows written by earlier development builds; 0.5.1 reads them.
+
 ## [0.5.0](https://github.com/officialunofficial/mkit/compare/v0.4.2...v0.5.0) - 2026-10-02
 
 The production mkit server arrives as a runtime-agnostic core (`mkit-server`)

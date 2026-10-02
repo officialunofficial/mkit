@@ -59,6 +59,7 @@ struct SpyBlobs {
     calls: Calls,
     reads: Arc<Mutex<Reads>>,
     produced: Arc<AtomicU32>,
+    request_budget: Arc<Mutex<Option<crate::indexed::budget::SliceBudget>>>,
 }
 
 impl BlobStore for SpyBlobs {
@@ -73,6 +74,9 @@ impl BlobStore for SpyBlobs {
         key: &BlobKey,
         range: Option<ByteRange>,
     ) -> Result<Option<BlobBody>, StoreError> {
+        if let Some(budget) = &*self.request_budget.lock().unwrap() {
+            budget.charge_many(if range.is_some() { 2 } else { 1 })?;
+        }
         self.calls.lock().unwrap().push(("get", *key));
         let mode = *self.reads.lock().unwrap();
         if mode == Reads::Normal || *key != BlobKey::object(*key.hash()) {
@@ -113,6 +117,9 @@ impl BlobStore for SpyBlobs {
     }
 
     async fn head(&self, key: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
+        if let Some(budget) = &*self.request_budget.lock().unwrap() {
+            budget.charge()?;
+        }
         self.calls.lock().unwrap().push(("head", *key));
         self.inner.head(key).await
     }
@@ -227,6 +234,7 @@ fn fixture_tweaked<H: HookSet>(
             calls: calls.clone(),
             reads: Arc::default(),
             produced: Arc::default(),
+            request_budget: Arc::default(),
         },
         Arc::new(Spy::new(store(&clock))),
         hooks,

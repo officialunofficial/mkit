@@ -17,23 +17,57 @@ pub const SCAN_ROWS: u32 = 8;
 pub struct Entry {
     pub version: u8,
     pub kind: u8,
+    /// Reserved marker for rows written before lengths were stored.
+    /// Read through `known_canonical_len`, never as a byte count.
+    #[serde(
+        default = "unknown_length",
+        deserialize_with = "decode_length",
+        skip_serializing_if = "is_unknown_length"
+    )]
     pub canonical_len: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_len: Option<u64>,
     pub base: Option<Hash>,
     pub references: StoredAction,
 }
+/// In-memory legacy marker; it is never written as a stored length.
+/// This preserves the public `Entry` field type and struct literal API.
+pub const UNKNOWN_CANONICAL_LEN: u64 = u64::MAX;
+fn unknown_length() -> u64 {
+    UNKNOWN_CANONICAL_LEN
+}
+#[allow(clippy::trivially_copy_pass_by_ref)] // Serde skip predicates receive a reference.
+fn is_unknown_length(length: &u64) -> bool {
+    *length == UNKNOWN_CANONICAL_LEN
+}
+fn decode_length<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    let length = u64::deserialize(d)?;
+    if is_unknown_length(&length) {
+        return Err(serde::de::Error::custom("reserved inventory length"));
+    }
+    Ok(length)
+}
 impl Entry {
+    /// Legacy rows omit both lengths; zero is a known dependency length.
+    #[must_use]
+    pub fn known_canonical_len(&self) -> Option<u64> {
+        (!is_unknown_length(&self.canonical_len)).then_some(self.canonical_len)
+    }
     fn validate(&self) -> Result<(), StoreError> {
         if self.version != 1
             || self.kind > 7
-            || match self.kind {
-                0 => self.canonical_len != 0 || self.logical_len.is_some(),
-                1 => {
-                    self.canonical_len < 10
-                        || self.logical_len != self.canonical_len.checked_sub(10)
+            || if self.known_canonical_len().is_none() {
+                self.logical_len.is_some()
+            } else {
+                match self.kind {
+                    0 => self.canonical_len != 0 || self.logical_len.is_some(),
+                    1 => {
+                        self.canonical_len < 10
+                            || self.logical_len != self.canonical_len.checked_sub(10)
+                    }
+                    5 => self.canonical_len < 22 || self.logical_len.is_none(),
+                    _ => self.canonical_len < 6 || self.logical_len.is_some(),
                 }
-                5 => self.canonical_len < 22 || self.logical_len.is_none(),
-                _ => self.canonical_len < 6 || self.logical_len.is_some(),
             }
         {
             return Err(bad());
@@ -52,6 +86,7 @@ struct Head {
     parent_digest: Hash,
     digest: Hash,
     complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     packlist: Option<PacklistFacts>,
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -93,7 +128,10 @@ pub async fn stage_packlist<S: NamespaceStore>(
         return if old == facts { Ok(()) } else { Err(bad()) };
     }
     if head.complete {
-        return Err(bad());
+        // A legacy completed head has no packlist facts. Re-verification may
+        // resume after its seal was written, but must preserve the old bytes.
+        // Publication uses canonical verification for this legacy head.
+        return Ok(());
     }
     head.packlist = Some(facts);
     if store
@@ -115,7 +153,7 @@ pub async fn stage_packlist<S: NamespaceStore>(
 pub(crate) async fn packlist_facts<S: NamespaceStore>(
     store: &S,
     pack: &Hash,
-) -> Result<(u64, Option<Hash>, Vec<Hash>), StoreError> {
+) -> Result<Option<(u64, Option<Hash>, Vec<Hash>)>, StoreError> {
     let raw = store
         .get(&content_shard(pack), &head_key(pack))
         .await?
@@ -124,13 +162,15 @@ pub(crate) async fn packlist_facts<S: NamespaceStore>(
     if head.version != 1 || !head.complete {
         return Err(bad());
     }
-    let facts = head.packlist.ok_or_else(bad)?;
+    let Some(facts) = head.packlist else {
+        return Ok(None);
+    };
     if facts.packs.len()
         > crate::store::index::MAX_LOOKUP_IDS + crate::store::outbox::MAX_TICKETS_PER_ADVANCE
     {
         return Err(bad());
     }
-    Ok((head.length, facts.prev, facts.packs))
+    Ok(Some((head.length, facts.prev, facts.packs)))
 }
 #[must_use]
 pub fn entry_key(pack: &Hash, id: &Hash) -> Key {
@@ -245,10 +285,7 @@ pub(super) async fn next<S: NamespaceStore>(
             return Err(bad());
         }
         let entry: Entry = decode(&raw)?;
-        if entry.version != 1 || entry.kind > 7 {
-            return Err(bad());
-        }
-        denial::encode_actions(vec![entry.references.clone()])?;
+        entry.validate()?;
         state.count = state.count.checked_add(1).ok_or_else(bad)?;
         add_digest(&mut state.digest, &id, &raw);
         entries.push((id, entry));
@@ -683,3 +720,7 @@ pub async fn is_file<S: NamespaceStore>(
     })
     .await
 }
+
+#[cfg(test)]
+#[path = "inventory_tests.rs"]
+pub(crate) mod tests;

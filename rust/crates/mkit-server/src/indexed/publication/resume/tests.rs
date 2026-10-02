@@ -51,6 +51,7 @@ fn progress(a: &Advance) -> Progress {
         terminal: None,
         missing: false,
         missing_base: false,
+        canonical_fallback: false,
         complete: false,
     }
 }
@@ -748,5 +749,150 @@ fn lowered_delta_depth_becomes_durable_terminal_failure_across_timers() {
         let mut corrupt = serde_json::to_value(read_progress(&kv, &repo, root).await).unwrap();
         corrupt["terminal"] = serde_json::json!("UnknownFailure");
         assert!(serde_json::from_value::<Progress>(corrupt).is_err());
+    });
+}
+
+#[test]
+fn canonical_fallback_chain_uses_canonical_fallback_without_inventory_rewrite_or_timer() {
+    block_on(async {
+        let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+        let repo = repo();
+        let root = [51; 32];
+        let prev = [52; 32];
+        facts(&kv, root, Some(prev)).await;
+        facts(&kv, prev, None).await;
+        verified(&kv, &repo, root).await;
+        inventory::tests::install_legacy_pack(&kv, &prev).await;
+        let source = SinglePartition.ref_shard(&repo, "refs/heads/main");
+        let seal = inventory::seal(&kv, &prev).await.unwrap();
+        let calls = SliceBudget::new(9000);
+        let store = crate::indexed::budget::Budgeted::new(&kv, &calls);
+        let mut a = advance(root);
+        a.additions.push(prev);
+        assert!(
+            !prepare(
+                &store,
+                &source,
+                &SinglePartition,
+                &repo,
+                &mut a,
+                IndexedConfig::default(),
+                0,
+                &crate::NoopMetrics,
+                0
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(calls.used(), 4); // State, two sealed heads, and checkpoint CAS.
+        assert!(read_progress(&kv, &repo, root).await.canonical_fallback);
+        assert_eq!(inventory::seal(&kv, &prev).await.unwrap(), seal);
+        let key = keys::verification(&repo.name, &root);
+        assert!(
+            kv.get(&source, &keys::timer(1000, 12, key.as_bytes()))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !prepare(
+                &store,
+                &source,
+                &SinglePartition,
+                &repo,
+                &mut a,
+                IndexedConfig::default(),
+                0,
+                &crate::NoopMetrics,
+                0
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(calls.used(), 5); // Retained fallback needs only the state read.
+    });
+}
+
+#[test]
+fn alarm_that_reaches_legacy_inventory_stops_and_requests_canonical_fallback() {
+    block_on(async {
+        let clock = std::sync::Arc::new(crate::rt::ManualClock::new(0));
+        let kv = MemoryKv::with_clock(clock.clone());
+        let repo = repo();
+        let root = [61; 32];
+        let prev = [62; 32];
+        facts(&kv, root, Some(prev)).await;
+        facts(&kv, prev, None).await;
+        inventory::tests::install_legacy_pack(&kv, &prev).await;
+        let source = SinglePartition.ref_shard(&repo, "refs/heads/main");
+        let mut a = advance(root);
+        a.additions.push(prev);
+        let mut p = progress(&a);
+        p.next_packmap = Some(prev);
+        p.chain.insert(root);
+        p.dependencies.insert(root);
+        p.bytes = 100;
+        p.calls = 1;
+        // Existing 0.5.0 checkpoints omit the new false marker.
+        let json = serde_json::to_value(&p).unwrap();
+        assert!(json.get("canonical_fallback").is_none());
+        assert!(
+            !serde_json::from_value::<Progress>(json)
+                .unwrap()
+                .canonical_fallback
+        );
+        let key = keys::verification(&repo.name, &root);
+        let timer = keys::timer(1000, 12, key.as_bytes());
+        kv.apply(
+            &source,
+            Batch::new()
+                .put(
+                    key,
+                    state::encode(&state::VerificationV1::Verified {
+                        pack_len: 100,
+                        verified_at_ms: 0,
+                        publication: Some(Box::new(p.clone())),
+                    }),
+                )
+                .put(timer.clone(), Value::new(p.binding.to_vec())),
+        )
+        .await
+        .unwrap();
+        let registry = crate::timers::TimerRegistry::new().register(
+            crate::timers::publication_recheck::PublicationRecheck::new(
+                crate::store::BorrowedStore(&kv),
+            ),
+        );
+        clock.advance(1000);
+        let report = crate::timers::run_due(
+            &kv,
+            &source,
+            &registry,
+            clock.as_ref(),
+            1000,
+            &crate::timers::TickBudget::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.fired, 1);
+        assert!(kv.get(&source, &timer).await.unwrap().is_none());
+        let p = read_progress(&kv, &repo, root).await;
+        assert!(p.canonical_fallback && !p.complete);
+        p.validate().unwrap();
+        assert!(
+            !prepare(
+                &kv,
+                &source,
+                &SinglePartition,
+                &repo,
+                &mut a,
+                IndexedConfig::default(),
+                1000,
+                &crate::NoopMetrics,
+                0
+            )
+            .await
+            .unwrap()
+        );
     });
 }

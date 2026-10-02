@@ -13,13 +13,14 @@ use crate::{Batch, BatchOutcome, BoxFuture, MaybeSend, MaybeSync, PartitionStats
 use futures::StreamExt as _;
 use mkit_core::hash::Hash;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// A shared call counter with a fixed limit.
 #[derive(Debug, Clone)]
 pub struct SliceBudget {
     used: Arc<AtomicU32>,
     limit: u32,
+    exhausted: Arc<AtomicBool>,
 }
 
 impl SliceBudget {
@@ -29,6 +30,7 @@ impl SliceBudget {
         Self {
             used: Arc::new(AtomicU32::new(0)),
             limit,
+            exhausted: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -63,8 +65,23 @@ impl SliceBudget {
             })
             .map(|_| ())
             .map_err(|_| {
+                self.exhausted.store(true, Ordering::SeqCst);
                 StoreError::Unavailable("verification slice subrequest budget exhausted".into())
             })
+    }
+
+    // Preserve an outer caller budget's refusal before consumers translate
+    // storage errors or hide unprovable membership as absence.
+    fn observe<T>(&self, result: Result<T, StoreError>) -> Result<T, StoreError> {
+        if result.as_ref().is_err_and(is_exhausted) {
+            self.exhausted.store(true, Ordering::SeqCst);
+        }
+        result
+    }
+
+    #[cfg(any(test, feature = "http-objects"))]
+    pub(crate) fn was_exhausted(&self) -> bool {
+        self.exhausted.load(Ordering::SeqCst)
     }
 }
 
@@ -96,11 +113,11 @@ impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
     }
     async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
         self.budget.charge()?;
-        self.inner.get(p, key).await
+        self.budget.observe(self.inner.get(p, key).await)
     }
     async fn has(&self, p: &Partition, key: &Key) -> Result<bool, StoreError> {
         self.budget.charge()?;
-        self.inner.has(p, key).await
+        self.budget.observe(self.inner.has(p, key).await)
     }
     async fn get_many(
         &self,
@@ -108,7 +125,7 @@ impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
         keys: &[Key],
     ) -> Result<Vec<Option<Value>>, StoreError> {
         self.budget.charge()?;
-        self.inner.get_many(p, keys).await
+        self.budget.observe(self.inner.get_many(p, keys).await)
     }
     async fn scan_many(
         &self,
@@ -116,7 +133,7 @@ impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
         ranges: &[RangeScan],
     ) -> Result<Vec<ScanPage>, StoreError> {
         self.budget.charge()?;
-        self.inner.scan_many(p, ranges).await
+        self.budget.observe(self.inner.scan_many(p, ranges).await)
     }
     async fn scan(
         &self,
@@ -127,19 +144,20 @@ impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
         limit: u32,
     ) -> Result<ScanPage, StoreError> {
         self.budget.charge()?;
-        self.inner.scan(p, start, end, after, limit).await
+        self.budget
+            .observe(self.inner.scan(p, start, end, after, limit).await)
     }
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
         self.budget.charge()?;
-        self.inner.apply(p, batch).await
+        self.budget.observe(self.inner.apply(p, batch).await)
     }
     async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
         self.budget.charge()?;
-        self.inner.stats(p).await
+        self.budget.observe(self.inner.stats(p).await)
     }
     async fn probe(&self) -> Result<(), StoreError> {
         self.budget.charge()?;
-        self.inner.probe().await
+        self.budget.observe(self.inner.probe().await)
     }
 }
 
@@ -161,11 +179,11 @@ impl<B: BlobStore> BlobStore for Budgeted<'_, B> {
         if range.is_some() {
             self.budget.charge()?;
         }
-        self.inner.get(key, range).await
+        self.budget.observe(self.inner.get(key, range).await)
     }
     async fn head(&self, key: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
         self.budget.charge()?;
-        self.inner.head(key).await
+        self.budget.observe(self.inner.head(key).await)
     }
     async fn probe(&self) -> Result<(), StoreError> {
         self.inner.probe().await
@@ -265,6 +283,30 @@ impl<B: BlobStore> PackWindows for BlobWindows<'_, B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reader_observes_outer_budget_exhaustion_without_confusing_a_backend_fault() {
+        use futures_executor::block_on;
+        let store = crate::MemoryKv::default();
+        let caller = SliceBudget::new(0);
+        let reader = SliceBudget::new(2);
+        let outer = Budgeted::new(&store, &caller);
+        let inner = Budgeted::new(&outer, &reader);
+        let p = Partition::Namespace(crate::NamespaceKey::deployment_default());
+        assert!(is_exhausted(
+            &block_on(inner.get(&p, &Key::default())).unwrap_err()
+        ));
+        assert!(reader.was_exhausted());
+        assert_eq!(reader.remaining(), 1);
+        assert_eq!(caller.used(), 0);
+        let reader = SliceBudget::new(2);
+        assert!(
+            reader
+                .observe::<()>(Err(StoreError::unavailable("backend outage")))
+                .is_err()
+        );
+        assert!(!reader.was_exhausted());
+    }
 
     #[test]
     fn budget_counts_calls_and_stays_exhausted() {

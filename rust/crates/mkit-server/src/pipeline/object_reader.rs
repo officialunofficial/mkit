@@ -7,7 +7,7 @@ use crate::http_objects::{
     resolve::{self, Budget, Env},
 };
 use crate::indexed::budget::{Budgeted, SliceBudget};
-use crate::store::{MultipartBlobStore, NamespaceStore, view::ViewStore};
+use crate::store::{BlobKey, BlobStore, MultipartBlobStore, NamespaceStore, view::ViewStore};
 use crate::takedown::{
     denial::{denied, object_denials},
     inventory,
@@ -64,6 +64,13 @@ pub struct ObjectReader<'a, B, N, H> {
 fn failure<E>(_: E) -> ServerError {
     ServerError::unavailable("object reader unavailable")
 }
+fn call_failure(error: crate::StoreError) -> ServerError {
+    if crate::indexed::budget::is_exhausted(&error) {
+        ServerError::resource_exhausted("object reader call budget exhausted")
+    } else {
+        failure(error)
+    }
+}
 fn http_failure(fail: &Fail) -> ServerError {
     ServerError::new(fail.code(), "object reader unavailable")
 }
@@ -100,8 +107,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     ObjectReader<'_, B, N, H>
 {
     async fn authorize(&self, budget: &SliceBudget) -> Result<bool, ServerError> {
-        for _ in 0..2 {
-            budget.charge().map_err(failure)?;
+        // Reserve hook/authority work; public metadata calls below are
+        // charged individually and retain an enclosing caller-budget refusal.
+        budget.charge().map_err(call_failure)?;
+        if matches!(self.view, ReaderView::Owner(_)) {
+            budget.charge().map_err(call_failure)?;
         }
         match &self.view {
             ReaderView::Public => {
@@ -111,10 +121,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     None,
                     OpKind::HttpGet { ref_name: None },
                 );
-                self.pipe
-                    .authorize_http_read(&op, &Target::Object([0; 32]), self.seams, None)
-                    .await
-                    .map_err(|e| http_failure(&e))?;
+                let meta = Budgeted::new(&self.pipe.meta, budget);
+                let result = self
+                    .pipe
+                    .authorize_http_read_in(&op, &Target::Object([0; 32]), self.seams, None, &meta)
+                    .await;
+                if budget.was_exhausted() {
+                    return Err(ServerError::resource_exhausted(
+                        "object reader call budget exhausted",
+                    ));
+                }
+                result.map_err(|e| http_failure(&e))?;
                 Ok(false)
             }
             ReaderView::Owner(meta) => {
@@ -171,6 +188,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         Ok(ids.iter().map(|id| bytes.get(id).cloned()).collect())
     }
     /// Verified object metadata without fetching requested canonical bytes.
+    /// Legacy inventory rows use indexed canonical lengths; a `ChunkedBlob`
+    /// additionally spends one budgeted HEAD on its verified extracted content.
+    /// Rows and their byte-bound inventory seals are never rewritten.
     /// # Errors
     /// Invalid authority, incomplete proof, corrupt facts or storage failure.
     pub async fn object_metadata(
@@ -259,8 +279,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         let now = self.pipe.clock.now_ms();
         let mut issued = Vec::with_capacity(targets.len());
         for target in targets {
-            calls.charge().map_err(failure)?;
-            calls.charge().map_err(failure)?;
+            calls.charge().map_err(call_failure)?;
+            calls.charge().map_err(call_failure)?;
             op.kind = OpKind::IssueObjectUrl {
                 target: target.clone(),
                 ttl_seconds: ttl_s,
@@ -395,8 +415,39 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         )
         .await
     }
-    #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // One shared-budget authorization/resolution pass, in precedence order.
+    #[allow(clippy::too_many_arguments)]
     async fn batch_with_budget(
+        &self,
+        ids: &[Hash],
+        sizes_only: bool,
+        calls: &SliceBudget,
+        writer: bool,
+        forbidden: &BTreeSet<Hash>,
+        decode: &mut Budget,
+        capped_as_absent: bool,
+        max_bytes: Option<u64>,
+    ) -> Result<Prefetched, ServerError> {
+        let result = self
+            .batch_with_budget_inner(
+                ids,
+                sizes_only,
+                calls,
+                writer,
+                forbidden,
+                decode,
+                capped_as_absent,
+                max_bytes,
+            )
+            .await;
+        if calls.was_exhausted() {
+            return Err(ServerError::resource_exhausted(
+                "object reader call budget exhausted",
+            ));
+        }
+        result
+    }
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // One shared-budget authorization/resolution pass, in precedence order.
+    async fn batch_with_budget_inner(
         &self,
         ids: &[Hash],
         sizes_only: bool,
@@ -533,7 +584,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             {
                 continue;
             }
-            calls.charge().map_err(failure)?;
+            calls.charge().map_err(call_failure)?;
             if !matches!(
                 seams.takedown.check(&self.repo, &id).await?,
                 TakedownVerdict::Clear
@@ -575,15 +626,43 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     7 => ObjectType::Tag,
                     _ => return Err(failure(resolve::Miss::Unavailable)),
                 };
-                if row.canonical_len != located.value.decoded_size {
+                let canonical_len = row
+                    .known_canonical_len()
+                    .unwrap_or(located.value.decoded_size);
+                if canonical_len != located.value.decoded_size {
                     return Err(failure(resolve::Miss::Unavailable));
                 }
+                let logical_len = if row.known_canonical_len().is_some() {
+                    row.logical_len
+                } else {
+                    match kind {
+                        ObjectType::Blob => Some(
+                            canonical_len
+                                .checked_sub(10)
+                                .ok_or_else(|| failure(resolve::Miss::Unavailable))?,
+                        ),
+                        ObjectType::ChunkedBlob if canonical_len >= 22 => Some(
+                            // Extraction and holder delivery precede the inventory
+                            // seal. HEAD returns the manifest's logical file size
+                            // with exactly one extra caller-budgeted storage call.
+                            blobs
+                                .head(&BlobKey::object(id))
+                                .await
+                                .map_err(call_failure)?
+                                .ok_or_else(|| failure(resolve::Miss::Unavailable))?
+                                .len,
+                        ),
+                        ObjectType::ChunkedBlob => return Err(failure(resolve::Miss::Unavailable)),
+                        _ if canonical_len >= 6 => None,
+                        _ => return Err(failure(resolve::Miss::Unavailable)),
+                    }
+                };
                 sizes.insert(
                     id,
                     ObjectMetadata {
                         kind,
-                        canonical_len: row.canonical_len,
-                        logical_len: row.logical_len,
+                        canonical_len,
+                        logical_len,
                     },
                 );
             } else {
