@@ -77,11 +77,12 @@ export class AlarmProbe extends RefStore {
       const writes = [];
       for (let i = 0; i < TIMER_COUNT; i++) {
         const reference = utf8(`default\0refs/heads/alarm-probe/${i}`);
-        const key = new Uint8Array(11 + reference.length);
-        key.set([119, 0]); // Existing w\0 <due:be64> <kind:u8> <reference>.
+        const key = new Uint8Array(20 + reference.length);
+        key.set([119, 0]); // w\0 <due:be64> <kind:u8> <attempt:u8> <original:be64> <reference>.
         new DataView(key.buffer).setBigUint64(2, BigInt(due));
         key[10] = 255; // Existing ref-deleting test timer, test-faults only.
-        key.set(reference, 11);
+        new DataView(key.buffer).setBigUint64(12, BigInt(due));
+        key.set(reference, 20);
         writes.push({kind: 'put', key: encode(key), value: ''});
       }
       const result = await this.call({op: 'apply', batch: {preconditions: [], writes}});
