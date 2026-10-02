@@ -1,5 +1,7 @@
 # mkit-transport-enc
 
+**Deprecated:** no maintained server; use SSH (`mkit serve`) or Connect.
+
 Encrypted-stream transport for mkit, layering `mkit-rpc`'s `SshFrame` on top
 of `commonware-stream::encrypted` (`ChaCha20-Poly1305`, `X25519` and `Ed25519`
 handshake). Full picture in `docs/specs/SPEC-TRANSPORT-ENC.md`.
@@ -12,7 +14,7 @@ policy (`tcp::serve_tcp_with_policy_and_bounds`, and the async
 `tcp::serve_tcp_listener` with a connection cap and graceful shutdown for a
 server already on a tokio runtime), and `mkit+enc://` URL parsing
 (`url::parse_enc_url`). It's consumed in production by `mkit-cli`'s remote
-dispatch and `mkit-server serve --listen-enc`.
+dispatch. The standalone native listener has been removed.
 
 ## Layering
 

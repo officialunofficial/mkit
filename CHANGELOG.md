@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Deprecated `mkit-transport-enc`: no maintained server; use SSH (`mkit serve`)
+  or Connect.
+
 - HTTP object readback accepts streamed chunk-offset sidecar tails from R2.
 
 - Indexed verification, extraction and preservation count canonical Blob framing

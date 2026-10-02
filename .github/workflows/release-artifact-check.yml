@@ -1,12 +1,6 @@
 name: "CI: Release artifact check"
 
-# PR-time preview of release.yml's build job for one Linux target: the two
-# release cargo invocations (mkit, then mkit-server with the shipped feature
-# set from scripts/release/mkit-server-features) and
-# scripts/check-release-artifact-features.sh on each. Without it, feature
-# drift (a new server-only package in the mkit CLI, a renamed or missing
-# mkit-server feature, a new default feature) would first surface at tag
-# time, when release.yml runs.
+# PR-time preview of the release mkit build and its artifact feature guard.
 #
 # Triggers: PRs to main and pushes to main only. Nothing runs for feature
 # branches (feat/*), per the mkit-server epic's CI policy. The release
@@ -25,7 +19,6 @@ on:
       - 'rust/Cargo.toml'
       - 'rust/crates/**/Cargo.toml'
       - 'rust/crates/mkit-cli/**'
-      - 'rust/crates/mkit-server-native/**'
       - 'rust/rust-toolchain.toml'
   pull_request:
     branches: [main]
@@ -38,7 +31,6 @@ on:
       - 'rust/Cargo.toml'
       - 'rust/crates/**/Cargo.toml'
       - 'rust/crates/mkit-cli/**'
-      - 'rust/crates/mkit-server-native/**'
       - 'rust/rust-toolchain.toml'
 
 permissions:
@@ -78,15 +70,6 @@ jobs:
           prefix-key: "rust-artifact-check"
           key: artifact-check-${{ env.TARGET }}
 
-      - name: Read mkit-server feature set
-        id: server_features
-        shell: bash
-        run: |
-          FEATURES="$(bash scripts/check-release-artifact-features.sh --server-features)"
-          echo "features=${FEATURES}" >> "$GITHUB_OUTPUT"
-          echo "mkit-server features: ${FEATURES}"
-
-      # The same two invocations as release.yml's build job.
       - name: Build release mkit binary
         shell: bash
         working-directory: rust
@@ -107,33 +90,6 @@ jobs:
           bash scripts/check-release-artifact-features.sh \
             "${RUNNER_TEMP}/mkit-build.jsonl" \
             "rust/target/${TARGET}/release/mkit"
-
-      - name: Build release mkit-server binary
-        shell: bash
-        working-directory: rust
-        env:
-          RUSTFLAGS: "-C codegen-units=1 -C strip=symbols"
-          SERVER_FEATURES: ${{ steps.server_features.outputs.features }}
-        run: |
-          cargo build \
-            --release \
-            --locked \
-            --target "${TARGET}" \
-            -p mkit-server-native \
-            --no-default-features \
-            --features "${SERVER_FEATURES}" \
-            --bin mkit-server \
-            --message-format=json-render-diagnostics > "${RUNNER_TEMP}/mkit-server-build.jsonl"
-
-      - name: Check release mkit-server artifact
-        shell: bash
-        env:
-          SERVER_FEATURES: ${{ steps.server_features.outputs.features }}
-        run: |
-          bash scripts/check-release-artifact-features.sh \
-            --server "${SERVER_FEATURES}" \
-            "${RUNNER_TEMP}/mkit-server-build.jsonl" \
-            "rust/target/${TARGET}/release/mkit-server"
 
       # The golden package list must still match release.yml's targets
       # (`--update-golden` output is deterministic): catches a Cargo.lock or
