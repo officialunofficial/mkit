@@ -519,8 +519,9 @@ mod tests {
     use crate::error::Code;
     use crate::repo::{NamespaceKey, RepoName};
 
-    const ALL: [(Procedure, &str); 13] = [
+    const ALL: [(Procedure, &str); 14] = [
         (Procedure::ListRefs, "ListRefs"),
+        (Procedure::ListRepos, "ListRepos"),
         (Procedure::ReadRef, "ReadRef"),
         (Procedure::UpdateRef, "UpdateRef"),
         (Procedure::AdvanceRefs, "AdvanceRefs"),
