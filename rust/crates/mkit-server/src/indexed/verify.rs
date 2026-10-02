@@ -26,7 +26,7 @@ use mkit_core::hash::{Hash, hash};
 use mkit_core::object::Object;
 use mkit_core::ops::graph::{ClosureMode, children};
 use mkit_core::pack::{
-    DecodeLimits, DecodedEntry, DeltaBaseSource, PackDecodeCursor, PackError, decode_entries_with,
+    DecodedEntry, DeltaBaseSource, PackDecodeCursor, PackError, decode_entries_with,
     delta_base_hashes,
 };
 use mkit_core::sign::verify_object_signature;
@@ -659,8 +659,7 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
                 // matching member, so no such member frame is fetched.
                 if let Ok(mut probe) = PackDecodeCursor::new(
                     &bytes,
-                    DecodeLimits::default()
-                        .with_max_decoded_bytes(cfg.decode_budget.saturating_sub(staged_bytes)),
+                    super::geometry::entry_limits(cfg.decode_budget.saturating_sub(staged_bytes)),
                 ) {
                     let mut probe_depths = BTreeMap::new();
                     loop {
@@ -732,6 +731,13 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
                                 ));
                             }
                         };
+                        super::geometry::check_entry(
+                            located.value.decoded_size,
+                            located.value.frame_length,
+                        )
+                        .map_err(|_| {
+                            ServerError::invalid_argument(resolve::DECODE_BUDGET_MESSAGE)
+                        })?;
                         let budget = cfg.decode_budget.saturating_sub(staged_bytes);
                         let (canonical, depth) = resolve::member_object(
                             blobs,
@@ -796,11 +802,12 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
                 let decoded = decode_entries_with(
                     &bytes,
                     &mut bases,
-                    DecodeLimits::default().with_max_decoded_bytes(
+                    super::geometry::entry_limits(
                         cfg.decode_budget
                             .saturating_sub(staged_bytes.saturating_add(memo.retained_bytes())),
                     ),
                     |entry: DecodedEntry<'_>| {
+                        super::geometry::check_entry(entry.bytes.len() as u64, entry.frame_length)?;
                         let (hops, external) = match entry.delta_base {
                             None => (0, None),
                             Some(base) => match local_depths.get(&base) {

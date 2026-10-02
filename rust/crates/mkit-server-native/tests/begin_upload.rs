@@ -1395,7 +1395,7 @@ async fn indexed_push_extracts_a_large_file_to_the_object_store() {
         .unwrap(),
     );
 
-    let file: Vec<u8> = (0..1_300_000_u32).map(|i| (i % 251) as u8).collect();
+    let file: Vec<u8> = (0..(1_u32 << 20)).map(|i| (i % 251) as u8).collect();
     let blob = Object::Blob(mkit_core::object::Blob { data: file.clone() });
     let blob_id = blob.id().unwrap();
     let tree = Object::Tree(Tree {

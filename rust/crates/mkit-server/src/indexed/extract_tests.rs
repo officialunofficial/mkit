@@ -317,14 +317,25 @@ fn hold_ttl_covers_the_relay_and_stays_capped() {
 
 /// One repository's push of a single large file.
 fn file_push(data: &[u8]) -> (Vec<u8>, Hash, Hash) {
-    let (blob_id, blob_raw, _) = blob_object(data);
-    let (tree_id, tree_raw, head, commit_raw) = commit_of(&[("big", blob_id)]);
-    let pack = pack_of(&[
-        (blob_id, &blob_raw),
-        (tree_id, &tree_raw),
-        (head, &commit_raw),
-    ]);
-    (pack, head, blob_id)
+    let (file_id, objects) = if data.len() > (1 << 20) {
+        let chunks: Vec<_> = data.chunks(1 << 20).map(<[u8]>::to_vec).collect();
+        let (id, manifest, mut objects) = manifest(&chunks);
+        let object = Object::ChunkedBlob(manifest);
+        objects.push((id, serialize(&object).unwrap(), object));
+        (id, objects)
+    } else {
+        let blob = blob_object(data);
+        (blob.0, vec![blob])
+    };
+    let (tree_id, tree_raw, head, commit_raw) = commit_of(&[("big", file_id)]);
+    let mut canonical: BTreeMap<_, _> = objects
+        .iter()
+        .map(|(id, raw, _)| (*id, raw.as_slice()))
+        .collect();
+    canonical.insert(tree_id, &tree_raw);
+    canonical.insert(head, &commit_raw);
+    let pack = pack_of(&canonical.into_iter().collect::<Vec<_>>());
+    (pack, head, file_id)
 }
 
 #[test]
@@ -1466,9 +1477,9 @@ fn objects_beyond_the_single_put_limit_are_extracted_in_verified_parts() {
     assert_eq!(world.holds(&id), 0);
     assert_eq!(blobs.multipart_session_count(), 0, "the session is closed");
 
-    // A manifest whose reassembly crosses the limit: four 3 MiB chunks, two
-    // of them members, with the sidecar written whole.
-    let chunks: Vec<Vec<u8>> = (0..4).map(|i| content(47 + i, 3 << 20)).collect();
+    // A manifest whose reassembly crosses the limit: twelve 1 MiB chunks,
+    // two of them members, with the sidecar written whole.
+    let chunks: Vec<Vec<u8>> = (0..12).map(|i| content(47 + i, 1 << 20)).collect();
     let (manifest_id, cb, objects) = manifest(&chunks);
     for (id, raw, _) in &objects[..2] {
         seed_member_raw(&world.blobs, &world.store, &repo, *id, raw);
@@ -1479,7 +1490,7 @@ fn objects_beyond_the_single_put_limit_are_extracted_in_verified_parts() {
     let ex = extractor(&blobs, &world.store, &repo, &world.clock, &staged);
     extract_one(&ex, manifest_id, Kind::Chunked).unwrap();
     assert_eq!(world.read(&BlobKey::object(manifest_id)), chunks.concat());
-    let bounds: Vec<u64> = (0..=4).map(|i| i * (3 << 20)).collect();
+    let bounds: Vec<u64> = (0..=12).map(|i| i * (1 << 20)).collect();
     assert_eq!(
         world.read(&BlobKey::object_offsets(manifest_id)),
         encode_offsets(&bounds)
@@ -1491,11 +1502,11 @@ fn objects_beyond_the_single_put_limit_are_extracted_in_verified_parts() {
 fn a_failed_multipart_extraction_aborts_its_session_and_publishes_nothing() {
     let world = World::new();
     let blobs = world.blobs.clone().with_single_put_limit(PART as u64);
-    // The second chunk is corrupt, after the first part already uploaded.
-    let chunks: Vec<Vec<u8>> = (0..4).map(|i| content(53 + i, 3 << 20)).collect();
+    // The tenth chunk is corrupt, after the first part already uploaded.
+    let chunks: Vec<Vec<u8>> = (0..12).map(|i| content(53 + i, 1 << 20)).collect();
     let (manifest_id, cb, mut objects) = manifest(&chunks);
-    objects[3].1 = serialize(&Object::Blob(Blob {
-        data: content(99, 3 << 20),
+    objects[9].1 = serialize(&Object::Blob(Blob {
+        data: content(99, 1 << 20),
     }))
     .unwrap();
     let mut all = objects;

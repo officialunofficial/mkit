@@ -8,6 +8,7 @@ pub mod classify;
 pub mod entries;
 mod etag;
 mod extract;
+pub mod geometry;
 pub mod inspection;
 pub mod job;
 pub mod publication;
@@ -71,7 +72,8 @@ pub struct IndexedConfig {
     pub relay_lag_bound_ms: u64,
     /// Largest accepted indexed pack.
     pub max_pack_bytes: u64,
-    /// Whole-pack decoding budget; at least `max_pack_bytes`.
+    /// Whole-pack decoding budget; at least `max_pack_bytes`. Each canonical
+    /// entry and encoded frame also obeys [`geometry`], in either verification mode.
     pub decode_budget: u64,
     /// Least Blob size extracted into the global object store, at least 1.
     /// Never advertised (SPEC-SERVER §9.6).

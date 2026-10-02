@@ -20,8 +20,8 @@ use super::{
     IndexedConfig,
     budget::{Budgeted, PackWindows, SliceBudget, Window, WindowError, is_exhausted},
     checkpoint::{
-        self, BaseRow, FrameRow, Kind, Outcome, Phase, VerifyJobV1, WINDOW_BYTES, decode_base,
-        decode_frame, encode_base, encode_frame, encode_job, parse_reference,
+        self, BaseRow, FrameRow, Kind, Outcome, Phase, VerifyJobV1, decode_base, decode_frame,
+        encode_base, encode_frame, encode_job, parse_reference,
     },
     classify::{self, UploadType},
     resolve::{self, MemberCache, ResolveFailure},
@@ -77,29 +77,29 @@ pub struct SliceLimits {
 impl Default for SliceLimits {
     fn default() -> Self {
         Self {
-            window_bytes: WINDOW_BYTES,
-            resident_bytes: 48 << 20,
+            window_bytes: super::geometry::FRAME_PAYLOAD_BYTES,
+            resident_bytes: super::geometry::RESIDENT_BYTES,
             max_subrequests: 256,
             max_entries: checkpoint::DEFAULT_ENTRY_CAP,
         }
     }
 }
 
-/// Original admission allowance. Keep entry limits independent of retention:
-/// a smaller cache must not admit or reject a different frame.
-const ENTRY_CACHE_ALLOWANCE: u64 = 8 << 20;
 /// R-203: old/new ring growth is at most three 8 MiB windows; four MiB
 /// covers bounded blocks and decoder tables. Decoder and object parsing do
 /// not overlap. Reserve this scratch while retaining one reader window.
 #[cfg(feature = "pack-ruzstd")]
 const DECODER_SCRATCH_BYTES: u64 = 3 * (8 << 20) + (4 << 20);
-/// Default decoder phase: 16 MiB source window, 28 MiB decoder scratch,
-/// two 1 MiB entry buffers and 1 MiB metadata headroom leave a 1 MiB LRU.
-/// Larger configured entries still retain their one required newest base.
+/// A 16 MiB window, 28 MiB decoder, two delta streams and 1 MiB metadata
+/// leave an LRU under 1 MiB; always retain its required newest base.
 #[cfg(feature = "pack-ruzstd")]
-const CACHE_BYTES: u64 = (48 << 20) - WINDOW_BYTES - DECODER_SCRATCH_BYTES - 3 * (1 << 20);
+const CACHE_BYTES: u64 = super::geometry::RESIDENT_BYTES
+    - super::geometry::FRAME_PAYLOAD_BYTES
+    - DECODER_SCRATCH_BYTES
+    - 2 * super::geometry::DELTA_STREAM_BYTES
+    - (1 << 20);
 #[cfg(not(feature = "pack-ruzstd"))]
-const CACHE_BYTES: u64 = ENTRY_CACHE_ALLOWANCE;
+const CACHE_BYTES: u64 = super::geometry::ENTRY_CACHE_BYTES;
 /// Slice failures on one cursor before its entry cap halves.
 const ATTEMPTS_PER_CAP: u32 = 3;
 /// Subrequests kept back when a slice decides to fetch its next entry.
@@ -394,13 +394,7 @@ where
     /// Cache retention separately reserves R-203's decoder working memory.
     fn decode_limits(&self) -> DecodeLimits {
         let limits = self.h.limits;
-        DecodeLimits::default().with_max_decoded_bytes(
-            limits
-                .resident_bytes
-                .saturating_sub(limits.window_bytes.saturating_mul(2))
-                .saturating_sub(ENTRY_CACHE_ALLOWANCE)
-                / 8,
-        )
+        super::geometry::decode_limits(limits.resident_bytes, limits.window_bytes)
     }
 
     fn deadline(&self) -> u64 {
@@ -1026,7 +1020,7 @@ where
                         _ => self.read(job, request.offset, request.len).await?,
                     };
                     reader
-                        .feed(request.offset, &window.bytes)
+                        .feed_owned(request.offset, window.bytes)
                         .map_err(|e| Self::reader_error(job, &e))?;
                     fed += 1;
                     job.windows_done = job.windows_done.saturating_add(1);
@@ -1127,6 +1121,9 @@ where
         let cap = self.h.cfg.max_delta_chain_depth;
         st.entry_idx = job.entries;
         st.memo = MemberCache::default();
+        if frame.length > super::geometry::FRAME_BYTES {
+            return Err(Stop::Outcome(Outcome::DecodeBudget));
+        }
         let base = match &entry {
             PackEntry::Delta { base, .. } => Some(*base),
             PackEntry::Raw { .. } => None,
@@ -1259,7 +1256,7 @@ where
                 job.extract_needed = true;
             }
         }
-        if size <= ENTRY_CACHE_ALLOWANCE {
+        if size <= super::geometry::ENTRY_CACHE_BYTES {
             st.cache.insert(id, Arc::from(bytes));
         }
         job.entries += 1;
@@ -1286,8 +1283,7 @@ where
             {
                 Some(row) => {
                     let limits = self.decode_limits();
-                    let maximum = self.h.limits.window_bytes.max(limits.max_decoded_bytes);
-                    if row.value.frame_length > maximum.saturating_add(128)
+                    if row.value.frame_length > super::geometry::FRAME_BYTES
                         || row.value.decoded_size > limits.max_decoded_bytes
                         || row.value.chain_depth > self.h.cfg.max_delta_chain_depth
                     {

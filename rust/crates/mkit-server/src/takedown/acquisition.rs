@@ -1,5 +1,8 @@
 //! Privileged canonical acquisition with explicit runtime admission geometry.
-use crate::indexed::resolve::{self, MemberCache, MemberSourceLimits};
+use crate::indexed::{
+    geometry,
+    resolve::{self, MemberCache, MemberSourceLimits},
+};
 use crate::pipeline::ShardMap;
 use crate::{BlobStore, Metrics, NamespaceStore, RepoId, ServerError};
 use mkit_core::hash::Hash;
@@ -30,8 +33,8 @@ impl Profile {
             .ok_or_else(|| ServerError::invalid_argument("acquisition resident bound overflow"))?;
         Ok(Self {
             limits: MemberSourceLimits {
-                max_frame_bytes: decode_budget,
-                max_decoded_bytes: decode_budget.min(mkit_core::store::MAX_RAW_OBJECT_SIZE as u64),
+                max_frame_bytes: decode_budget.min(geometry::FRAME_BYTES),
+                max_decoded_bytes: decode_budget.min(geometry::CANONICAL_BYTES),
             },
             chain_depth,
             retained: decode_budget,
@@ -40,26 +43,26 @@ impl Profile {
             slice_calls: ((chain_depth + 1) * 8 + 256).max(700),
         })
     }
-    /// Current Worker admission: 1 MiB entries, 16 MiB frame/read windows, 50 delta hops.
+    /// Current Worker admission: 1 MiB payloads plus canonical framing, 50 delta hops.
     /// Resident bound: 16 MiB encoded payload + 28 MiB R-203 decoder scratch
-    /// + 1 MiB latest base/memo + 1 MiB decoded stream + 2 MiB headroom = 48 MiB.
+    /// + two canonical entry buffers leaves almost 2 MiB headroom within 48 MiB.
     /// Decoder scratch drops before base copies, delta output, object parsing
-    /// and Arc conversion. That later phase fits eight 1 MiB entry regions
+    /// and Arc conversion. That later phase fits eight canonical entry regions
     /// alongside the frame, below 25 MiB including metadata. Range collection
     /// and its transport copies drop before decoding; even two full-frame
-    /// copies plus the base fit below 34 MiB. The five-byte header fits headroom.
+    /// copies plus the canonical base fit below 34 MiB. The five-byte header fits headroom.
     /// Source-selection descriptors are checkpointed separately across slices.
     #[must_use]
     pub const fn scheduled() -> Self {
         Self {
             limits: MemberSourceLimits {
-                max_frame_bytes: (16 << 20) + 5,
-                max_decoded_bytes: 1 << 20,
+                max_frame_bytes: geometry::FRAME_BYTES,
+                max_decoded_bytes: geometry::CANONICAL_BYTES,
             },
             chain_depth: 50,
-            retained: 1 << 20,
+            retained: geometry::CANONICAL_BYTES,
             retain_latest: true,
-            resident: 48 << 20,
+            resident: geometry::RESIDENT_BYTES,
             slice_calls: 700,
         }
     }
