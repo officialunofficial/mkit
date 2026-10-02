@@ -4,6 +4,7 @@ mod admin;
 mod closure;
 mod copy;
 pub mod denial;
+pub(crate) mod directory;
 pub mod discovery;
 mod intent;
 pub mod inventory;

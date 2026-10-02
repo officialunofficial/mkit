@@ -3000,6 +3000,7 @@ fn verified_duplicate_pack_rebuild_keeps_both_tickets_and_first_decode_owner() {
         &VerificationV1::Verified {
             pack_len: first.bytes,
             verified_at_ms: NOW as u64,
+            publication: None,
         },
         u64::MAX,
     ))

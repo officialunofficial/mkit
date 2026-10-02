@@ -43,7 +43,7 @@ mod http_tokens;
 mod object_reader;
 #[cfg(feature = "http-objects")]
 pub use object_reader::{
-    IssuedUrl, OBJECT_READER_BATCH, OBJECT_READER_CALLS, ObjectReader, ReaderView,
+    IssuedUrl, OBJECT_READER_BATCH, OBJECT_READER_CALLS, ObjectMetadata, ObjectReader, ReaderView,
 };
 mod implicit;
 mod info;
@@ -3508,18 +3508,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }),
         };
         let mut ahead = ahead;
-        let prepared = match self
-            .prepare_publication(
-                op,
-                &a.repo().identity,
-                p,
-                &req,
-                &mut ahead,
-                implicit_ids.as_deref(),
-                external_bases,
-                inspected,
-            )
-            .await
+        let prepared = match Box::pin(self.prepare_publication(
+            op,
+            &a.repo().identity,
+            p,
+            &req,
+            &mut ahead,
+            implicit_ids.as_deref(),
+            external_bases,
+            inspected,
+        ))
+        .await
         {
             Ok(prepared) => prepared,
             Err(error)
@@ -3601,7 +3600,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     /// Prepare inspection against the complete resulting pair before any write.
-    #[allow(clippy::too_many_arguments)] // Carry the authenticated wire identity for empty retrieval scope.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Carry authenticated wire identity and ticket lag context.
     async fn prepare_publication(
         &self,
         op: &Operation,
@@ -3682,6 +3681,25 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .is_some(),
                 external_bases,
                 verification_set,
+                req.advance
+                    .as_ref()
+                    .and_then(|a| {
+                        a.ids
+                            .iter()
+                            .filter_map(|id| {
+                                snapshot
+                                    .get(&keys::ticket(id))
+                                    .and_then(|raw| codec::decode_ticket(raw).ok())
+                                    .filter(|t| Some(t.pack_id) == pair.packmap)
+                                    .map(|t| t.created_at_ms)
+                            })
+                            .min()
+                    })
+                    .unwrap_or_else(|| {
+                        op.auth
+                            .as_ref()
+                            .map_or(ms(self.clock.now_ms()), |a| ms(a.created_at_ms))
+                    }),
             )
             .await?;
             #[cfg(feature = "remote-hooks")]
@@ -3711,6 +3729,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
     }
 
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Carry consuming-ticket age for repository lag classification.
     async fn verify_publication(
         &self,
         op: &Operation,
@@ -3720,12 +3739,31 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         branch: bool,
         external_bases: &std::collections::BTreeSet<Hash>,
         mut inspected: Option<&mut crate::indexed::inspection::InspectionSet>,
+        created: u64,
     ) -> Result<(), ServerError> {
-        let mut indexed = self
+        let indexed = self
             .cfg
             .indexed
             .ok_or_else(|| internal("publication requires indexed mode"))?;
-        if self.cfg.takedown_denial {
+        let resumed = self.cfg.takedown_denial
+            && self.publication_policy.is_none()
+            && inspected.is_none()
+            && Box::pin(crate::indexed::publication::resume::prepare(
+                &self.meta,
+                p,
+                self.shards.as_ref(),
+                &op.repo,
+                prepared,
+                indexed,
+                ms(self.clock.now_ms()),
+                self.metrics.as_ref(),
+                created,
+            ))
+            .await?;
+        // The canonical fallback retains delta bases; only the metadata-only
+        // continuation can use the whole-job allowance without that residency.
+        let mut indexed = indexed;
+        if self.cfg.takedown_denial && !resumed {
             indexed.decode_budget = indexed.decode_budget.min(8 << 20);
         }
         // Pair verification and dependency visibility share one allocation.
@@ -3748,7 +3786,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 set,
             )
             .await?;
-        } else {
+        } else if !resumed {
             crate::indexed::publication::verify(
                 &self.blobs,
                 &self.meta,

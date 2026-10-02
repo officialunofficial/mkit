@@ -179,7 +179,10 @@ impl NamespaceStore for Remote {
         self.inner.capabilities()
     }
     async fn get(&self, p: &Partition, k: &Key) -> Result<Option<Value>, StoreError> {
-        assert_eq!(*p, root(), "content self calls must use TimerCtx store");
+        assert!(
+            *p == root() || matches!(p, Partition::ContentShard(0..=15)),
+            "content self calls must use TimerCtx store; directory calls route remotely"
+        );
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.inner.get(p, k).await
     }
@@ -194,13 +197,16 @@ impl NamespaceStore for Remote {
         self.inner.scan(partition, start, end, cursor, limit).await
     }
     async fn apply(&self, p: &Partition, b: Batch) -> Result<BatchOutcome, StoreError> {
-        assert_eq!(*p, root(), "content self calls must use TimerCtx store");
+        assert!(
+            *p == root() || matches!(p, Partition::ContentShard(0..=15)),
+            "content self calls must use TimerCtx store; directory calls route remotely"
+        );
         self.calls.fetch_add(1, Ordering::SeqCst);
-        if self.fail {
+        if self.fail && *p == root() {
             return Err(unavailable());
         }
         let result = self.inner.apply(p, b).await?;
-        if self.lose.swap(false, Ordering::SeqCst) {
+        if *p == root() && self.lose.swap(false, Ordering::SeqCst) {
             return Err(unavailable());
         }
         Ok(result)

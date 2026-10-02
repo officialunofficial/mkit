@@ -459,7 +459,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             return Err(err);
         }
         let span = self.outcome.span.clone();
-        let result = self.complete().instrument(span).await;
+        let result = Box::pin(self.complete()).instrument(span).await;
         self.outcome.record(result.as_ref().copied());
         result
     }
