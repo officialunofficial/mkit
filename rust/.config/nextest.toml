@@ -109,16 +109,18 @@ threads-required = "num-test-threads"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 # The 10,000-object inspection fixture repeatedly copies a growing in-memory
-# partition during verification. It takes about 16s alone but exceeds the 60s
-# limit alongside other tests. Reserve this run's threads, retaining the full
-# object set, assertions and each profile's existing timeout.
+# partition during verification. It passed in 41s on Linux but exceeded the
+# default 60s ceiling under load. Reserve this run's threads and allow three
+# minutes in both profiles, retaining the full object set and assertions.
 [[profile.default.overrides]]
 filter = 'package(mkit-server) and test(=pipeline::tests::indexed::inspection::exactly_ten_thousand_distinct_file_objects_are_inspected_and_accepted)'
 threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 3 }
 
 [[profile.ci.overrides]]
 filter = 'package(mkit-server) and test(=pipeline::tests::indexed::inspection::exactly_ten_thousand_distinct_file_objects_are_inspected_and_accepted)'
 threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 3 }
 
 # The six-group reuse proof completes 42 real 256-member lookup jobs. It takes
 # 47-53s alone but exceeded 60s in the suite on the shared machine. Retain all
