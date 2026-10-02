@@ -243,6 +243,7 @@ fn public(meta: &impl NamespaceStore, private: bool) {
                     },
                     last_created_ms: 0,
                     last_statement_id: None,
+                    changed_ms: 0,
                 }),
             ),
     )

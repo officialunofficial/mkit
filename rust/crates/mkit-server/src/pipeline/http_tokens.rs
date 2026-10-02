@@ -48,6 +48,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         prechecked: Option<Result<Prechecked, TokenRejected>>,
     ) -> Result<Option<i64>, Fail> {
         let partition = self.shards.coordinator(&op.repo.namespace);
+        let mut changed_ms = 0;
         let private = if self.visibility_gates_reads() {
             // Deliberately do not use read_repo_state: e must not be read
             // until every stateless token binding check has passed.
@@ -73,6 +74,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .map(codec::decode_repo_visibility)
                 .transpose()
                 .map_err(|_| Fail::Unavailable)?;
+            changed_ms = visibility.as_ref().map_or(0, |row| row.changed_ms);
             super::repo_is_private(visibility.as_ref(), self.cfg.default_repo_visibility)
         } else {
             false
@@ -94,6 +96,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     self.clock.now_ms(),
                     seams.tokens.ttl_ms(),
                 )
+                .map_err(|_| Fail::NotFound)?;
+            // A visibility change revokes earlier tokens; no extra read.
+            bound
+                .check_visibility_change(changed_ms)
                 .map_err(|_| Fail::NotFound)?;
             let value = self
                 .meta

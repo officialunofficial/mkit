@@ -342,8 +342,10 @@ token target. Tokens MUST resolve in the published view.
 Step 5 prechecks syntax, key id, and signature before repository lookup,
 retaining the result until repository visibility is known. For a private
 repository the server MUST also verify every §9.4 request binding,
-audience, epoch, and expiry rule. It MUST run the stateless audience,
-repository, target, and expiry checks before reading the stored epoch.
+audience, epoch, expiry, and issued-after-visibility-change rule. It MUST run the stateless audience,
+repository, target, and expiry checks before reading the stored epoch;
+the visibility-change comparison uses the visibility row already read for
+step 5 and adds no read.
 Every verification failure on a private
 repository, including an unknown key, MUST produce the uniform 404. Public
 repositories MUST ignore the precheck result and all other token claims,

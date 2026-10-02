@@ -57,6 +57,11 @@ pub struct RepoVisibilityV1 {
     /// is corrupt.
     #[serde(deserialize_with = "present_option")]
     pub last_statement_id: Option<String>,
+    /// The server clock when the row last changed visibility (envelope or
+    /// statement), Unix milliseconds. URL tokens issued at or before it are
+    /// refused (SPEC-WRITE-GRANTS §9.4). The key is always present; a row
+    /// missing it is corrupt.
+    pub changed_ms: u64,
 }
 
 /// Deserialize an `Option` whose key must be present (serde would default
@@ -1861,22 +1866,24 @@ mod tests {
             visibility: StoredVisibility::Public,
             last_created_ms: 0,
             last_statement_id: None,
+            changed_ms: 0,
         };
         let private = RepoVisibilityV1 {
             visibility: StoredVisibility::Private,
             last_created_ms: 1_700_000_000_000,
             last_statement_id: Some("ab".repeat(32)),
+            changed_ms: 1_700_000_000_001,
         };
         let public_value = encode_repo_visibility(&public);
         let private_value = encode_repo_visibility(&private);
         assert_eq!(
             public_value.as_bytes(),
-            b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":null}"
+            b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":null,\"changed_ms\":0}"
         );
         assert_eq!(
             private_value.as_bytes(),
             format!(
-                "\x01{{\"visibility\":\"private\",\"last_created_ms\":1700000000000,\"last_statement_id\":\"{}\"}}",
+                "\x01{{\"visibility\":\"private\",\"last_created_ms\":1700000000000,\"last_statement_id\":\"{}\",\"changed_ms\":1700000000001}}",
                 "ab".repeat(32)
             )
             .as_bytes()
@@ -1885,12 +1892,13 @@ mod tests {
         assert_eq!(decode_repo_visibility(&private_value).unwrap(), private);
         for bytes in [
             &b""[..],
-            b"\x02{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":null}",
-            b"\x01{\"visibility\":\"internal\",\"last_created_ms\":0,\"last_statement_id\":null}",
+            b"\x02{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":null,\"changed_ms\":0}",
+            b"\x01{\"visibility\":\"internal\",\"last_created_ms\":0,\"last_statement_id\":null,\"changed_ms\":0}",
             b"\x01{\"visibility\":\"public\"}",
-            b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":\"AB\"}",
+            b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":\"AB\",\"changed_ms\":0}",
             b"\x01{\"visibility\":\"public\",\"last_created_ms\":0}",
-            b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":\"ab\",\"extra\":1}",
+            b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":null}",
+            b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":\"ab\",\"changed_ms\":0,\"extra\":1}",
         ] {
             assert!(matches!(
                 decode_repo_visibility(&Value::new(bytes.to_vec())),

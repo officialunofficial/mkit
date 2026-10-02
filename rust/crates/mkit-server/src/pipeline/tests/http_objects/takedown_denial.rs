@@ -53,6 +53,7 @@ pub(super) fn shared_chunk_stop(proofs: Arc<Proofs>) -> (Fx, Hash, Hash, Hash, S
                 visibility: codec::StoredVisibility::Public,
                 last_created_ms: 0,
                 last_statement_id: None,
+                changed_ms: 0,
             }),
         ),
     ))
