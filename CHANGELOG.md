@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Indexed verification, extraction and preservation count canonical Blob framing
+  around the 1 MiB payload boundary while retaining the 48 MiB slice allowance.
+
 - Worker embedding: supplied Admission, Authorizer/Authority and OutcomeSink
   capabilities satisfy launch validation without an unused external hook channel.
   `fetch_with` now takes explicit `HookCapabilities`; shared config factories use

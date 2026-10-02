@@ -377,7 +377,12 @@ impl WindowReader {
             .payload_sum
             .checked_add(self.payload_len)
             .ok_or(PackError::PackfileTooLarge)?;
-        if self.state.payload_sum > MAX_TOTAL_PAYLOAD {
+        if self
+            .limits
+            .entry_geometry
+            .is_some_and(|(frame, _)| self.payload_len > frame)
+            || self.state.payload_sum > MAX_TOTAL_PAYLOAD
+        {
             return Err(PackError::PackfileTooLarge);
         }
         if self.payload_len
@@ -439,7 +444,12 @@ impl WindowReader {
             return Ok(Some(Step::Entry(entry)));
         }
         if self.carry.is_empty() {
-            if self.payload_len > self.limits.max_decoded_bytes {
+            if self.payload_len
+                > self
+                    .limits
+                    .entry_geometry
+                    .map_or(self.limits.max_decoded_bytes, |(frame, _)| frame)
+            {
                 return Err(PackError::PackfileTooLarge);
             }
             self.carry
@@ -466,6 +476,7 @@ impl WindowReader {
             == self.payload_len
         {
             self.check_budget(&self.carry, self.payload_len)?;
+            let released = self.release_carried_window()?;
             let entry = if matches!(self.kind, 0 | 2) {
                 let mut bytes = std::mem::take(&mut self.carry);
                 if self.kind == 0 {
@@ -488,13 +499,47 @@ impl WindowReader {
                 self.carry = Vec::new();
                 entry
             };
-            self.entry_finished()?;
+            if let Some(cursor) = released {
+                let frame = self.last_frame;
+                *self = Self::resume(&cursor, self.limits)?;
+                self.last_frame = frame;
+            } else {
+                self.entry_finished()?;
+            }
             return Ok(Some(Step::Entry(entry)));
         }
         Ok(None)
     }
 
+    // Authenticate the post-entry prefix before releasing the carried frame's window.
+    fn release_carried_window(&mut self) -> Result<Option<WindowCursor>, PackError> {
+        if self.limits.entry_geometry.is_none() || !matches!(self.kind, 3 | 4) {
+            return Ok(None);
+        }
+        self.entry_finished()?;
+        let cursor = self.checkpoint().ok_or(PackError::PackfileCorrupted)?;
+        self.window = Vec::new();
+        Ok(Some(cursor))
+    }
+
     fn check_budget(&self, payload: &[u8], carried: u64) -> Result<(), PackError> {
+        if let Some((frame, stream)) = self.limits.entry_geometry {
+            let claim = match self.kind {
+                3 => zstd_claim(payload)?.0 as u64,
+                4 => zstd_claim(payload.get(32..).ok_or(PackError::DeltaEntryTruncated)?)?.0 as u64,
+                _ => self.payload_len,
+            };
+            let cap = match self.kind {
+                2 => stream.saturating_add(32),
+                4 => stream,
+                _ => self.limits.max_decoded_bytes,
+            };
+            return if self.payload_len <= frame && claim <= cap {
+                Ok(())
+            } else {
+                Err(PackError::PackfileTooLarge)
+            };
+        }
         let charge = if matches!(self.kind, 3 | 4) {
             let prefix = if self.kind == 4 { 32 } else { 0 };
             let (claim, _) = zstd_claim(
@@ -560,9 +605,11 @@ impl WindowReader {
         Ok(())
     }
 
-    // The synchronous driver transfers its source allocation instead of
-    // briefly retaining two copies of a window.
-    fn feed_owned(&mut self, offset: u64, bytes: Vec<u8>) -> Result<(), PackError> {
+    /// Supply a range by transferring its buffer, avoiding two full-window copies.
+    ///
+    /// # Errors
+    /// Wrong ranges give `PackfileCorrupted`; allocation failure gives `PackfileTooLarge`.
+    pub fn feed_owned(&mut self, offset: u64, bytes: Vec<u8>) -> Result<(), PackError> {
         self.validate_feed(offset, &bytes)?;
         let retain = self.retains_window();
         let bytes = if retain && bytes.capacity() > us(self.state.window_size)? {
@@ -684,6 +731,12 @@ impl WindowReader {
             return None;
         }
         let mut cursor = self.boundary.clone()?;
+        if self.window.is_empty()
+            && self.limits.entry_geometry.is_some()
+            && self.resume_prefix.is_some()
+        {
+            return Some(cursor);
+        }
         let start = cursor.completed.checked_mul(cursor.window_size)?;
         let prefix_len = cursor.pos.checked_sub(start)?;
         cursor.window_prefix = if prefix_len == 0 {
