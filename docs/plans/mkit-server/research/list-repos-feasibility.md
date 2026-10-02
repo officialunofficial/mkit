@@ -8,9 +8,9 @@ listing rights for grants. No cross-partition protocol or backfill is permitted.
 Implementation and the additive contract are in
 [SPEC-TRANSPORT-CONNECT §7.10](../../../specs/SPEC-TRANSPORT-CONNECT.md#710-namespace-repository-listing).
 The `rl` tag was absent from the base key registry; the key-tag uniqueness test
-includes it. The old R-208 stop is superseded by this ruling.
+includes it. The old R-209 stop is superseded by this ruling.
 Base: `2db7f9c29fda85b973060c242401dfd628ba1f54` on `feat/mkit-server-next`.
-Decision row: R-208.
+Decision row: R-209.
 
 ## Storage contracts at the escalation base
 

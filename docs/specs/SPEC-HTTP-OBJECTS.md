@@ -206,6 +206,14 @@ sniffed. This applies equally to public, private and URL-token requests.
 | txt | text/plain; charset=utf-8 | inline |
 | json | application/json | attachment |
 | pdf | application/pdf | inline |
+| mp4 | video/mp4 | inline |
+| webm | video/webm | inline |
+| mp3 | audio/mpeg | inline |
+| ogg | audio/ogg | inline |
+| wav | audio/wav | inline |
+| heic | image/heic | inline |
+| md | text/markdown; charset=utf-8 | inline |
+| csv | text/csv; charset=utf-8 | inline |
 | Every other extension, or none | application/octet-stream | attachment |
 
 SVG, HTML, HTM, XHTML, XML, JS, MJS and CSS MUST NOT receive their real media
@@ -458,6 +466,7 @@ separate work.
 
 | Version | Status | Changes |
 |---|---|---|
+| 1 | draft | Extend §5.1 with inline MP4/WebM video, MP3/Ogg/WAV audio, HEIC images, Markdown and CSV. Dangerous extensions remain binary attachments; filename encoding, security headers and ordinary byte ranges are unchanged. |
 | 1 | draft | WP-4.16b (R-201) adds an extension allowlist and encoded filenames to successful ordinary ref-path Blob/ChunkedBlob responses, including HEAD and 206; object-id, proof, non-file, 304 and error responses are unchanged. |
 | 1 | draft | WP-4.12 clarifies §4: the global content store decides no membership, reachability, or existence, but may supply the bytes of an id already resolved in this repository and held by it (SPEC-SERVER §9.6; R-163, R-169). |
 | 1 | draft | WP-4.14a clarifies that the boundary-aware builder reduces reads and memory, while complete preceding length proofs still impose an O(first chunk index) encoded-size cost and 416 on oversize. |
