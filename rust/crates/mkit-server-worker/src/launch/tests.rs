@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 fn vars() -> BTreeMap<String, String> {
     [
         ("AUTH_AUDIENCE", "https://vcs.example"),
-        ("LAUNCH_PROFILE", "uno"),
+        ("LAUNCH_PROFILE", "paid-workers"),
         ("INDEXED_MODE", "true"),
         ("WORKERS_PLAN", "paid"),
         ("ADDRESSING", "multi"),
@@ -41,7 +41,12 @@ fn programmatic_launch_changes_cannot_disable_the_extraction_driver() {
 fn programmatic_indexed_activation_requires_the_launch_profile() {
     let mut cfg = check(&vars()).unwrap();
     cfg.launch = None;
-    assert!(cfg.validate().unwrap_err().0.contains("LAUNCH_PROFILE=uno"));
+    assert!(
+        cfg.validate()
+            .unwrap_err()
+            .0
+            .contains("LAUNCH_PROFILE=paid-workers")
+    );
     #[cfg(feature = "http-objects")]
     {
         cfg.http_mount = Some(crate::http_mount::WorkerHttpMountConfig {
@@ -50,7 +55,12 @@ fn programmatic_indexed_activation_requires_the_launch_profile() {
             options: mkit_server::http_objects::mount::HttpMountOptions::default(),
             read_runtime: None,
         });
-        assert!(cfg.validate().unwrap_err().0.contains("LAUNCH_PROFILE=uno"));
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .0
+                .contains("LAUNCH_PROFILE=paid-workers")
+        );
     }
     cfg.indexed = None;
     #[cfg(feature = "http-objects")]
@@ -478,4 +488,62 @@ fn configured_launch_cannot_run_with_a_free_runtime_plan() {
     })
     .unwrap();
     assert!(baseline.validate_for_plan(Some("free")).is_ok());
+}
+
+#[test]
+fn both_profile_names_start_and_only_the_alias_logs_a_deprecation_warning() {
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<(tracing::Level, String)>>>);
+    #[derive(Default)]
+    struct Message(String);
+    impl tracing::field::Visit for Message {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn core::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
+        }
+    }
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut message = Message::default();
+            event.record(&mut message);
+            self.0
+                .lock()
+                .unwrap()
+                .push((*event.metadata().level(), message.0));
+        }
+    }
+    for profile in ["paid-workers", "uno"] {
+        let captured = Capture::default();
+        let subscriber = tracing_subscriber::registry().with(captured.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let mut v = vars();
+        v.insert("LAUNCH_PROFILE".into(), profile.into());
+        let cfg = check(&v).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.launch, Some(LaunchConfig { takedown: false }));
+        assert!(cfg.pipeline_config().is_ok());
+        let events = captured.0.lock().unwrap();
+        if profile == "uno" {
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].0, tracing::Level::WARN);
+            assert!(events[0].1.contains("LAUNCH_PROFILE=uno is deprecated"));
+            assert!(events[0].1.contains("use LAUNCH_PROFILE=paid-workers"));
+        } else {
+            assert!(events.is_empty());
+        }
+        drop(events);
+        for name in ["STORAGE_LEASES", "GC_ENABLED"] {
+            let mut bad = v.clone();
+            bad.insert(name.into(), "true".into());
+            assert!(check(&bad).is_err());
+        }
+    }
 }

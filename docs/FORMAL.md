@@ -249,7 +249,7 @@ issue whose model found it.
   Lock steps, the `history-mmr` ancestry path and age-based recovery
   pruning are not compared.
 - **Not modelled.** Among others: pack GC, ledger expiry, `MAX_REACHABLE`
-  truncation, `mkit-server --meta sqlite`, the S3 spool sweep, the git
+  truncation, SQLite-backed server metadata, the S3 spool sweep, the git
   bridge locks, the shard byte budget, multi-entry trees in Kani, and
   every decoder input beyond the Kani bounds (left to fuzzing and
   proptests).

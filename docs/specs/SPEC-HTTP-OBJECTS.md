@@ -153,7 +153,10 @@ check repository membership first, with a cheap uniform 404 on a miss
 unless this repository has a tombstone for that exact id. A tombstone
 candidate MUST then prove reachability from a published ref value before
 step 8 can return 451; a failed proof is the same 404 as any other miss.
-Ordinary member ids also prove reachability. The walk follows
+A proof that cannot finish within the walk or decode caps is a failed proof for
+every non-writer reader: the same 404, and the same absent answer from the
+server-side object reader, as an unknown id. Only an authorized writer view may
+receive a typed exhaustion error. Ordinary member ids also prove reachability. The walk follows
 repository-local object references, including parents and chunk manifests,
 but MUST NOT descend through a blocked or tombstoned manifest;
 it MUST NOT follow foreign remix sources or pack-only delta bases.
@@ -206,6 +209,14 @@ sniffed. This applies equally to public, private and URL-token requests.
 | txt | text/plain; charset=utf-8 | inline |
 | json | application/json | attachment |
 | pdf | application/pdf | inline |
+| mp4 | video/mp4 | inline |
+| webm | video/webm | inline |
+| mp3 | audio/mpeg | inline |
+| ogg | audio/ogg | inline |
+| wav | audio/wav | inline |
+| heic | image/heic | inline |
+| md | text/markdown; charset=utf-8 | inline |
+| csv | text/csv; charset=utf-8 | inline |
 | Every other extension, or none | application/octet-stream | attachment |
 
 SVG, HTML, HTM, XHTML, XML, JS, MJS and CSS MUST NOT receive their real media
@@ -331,8 +342,10 @@ token target. Tokens MUST resolve in the published view.
 Step 5 prechecks syntax, key id, and signature before repository lookup,
 retaining the result until repository visibility is known. For a private
 repository the server MUST also verify every §9.4 request binding,
-audience, epoch, and expiry rule. It MUST run the stateless audience,
-repository, target, and expiry checks before reading the stored epoch.
+audience, epoch, expiry, and issued-after-visibility-change rule. It MUST run the stateless audience,
+repository, target, and expiry checks before reading the stored epoch;
+the visibility-change comparison uses the visibility row already read for
+step 5 and adds no read.
 Every verification failure on a private
 repository, including an unknown key, MUST produce the uniform 404. Public
 repositories MUST ignore the precheck result and all other token claims,
@@ -458,6 +471,7 @@ separate work.
 
 | Version | Status | Changes |
 |---|---|---|
+| 1 | draft | Extend §5.1 with inline MP4/WebM video, MP3/Ogg/WAV audio, HEIC images, Markdown and CSV. Dangerous extensions remain binary attachments; filename encoding, security headers and ordinary byte ranges are unchanged. |
 | 1 | draft | WP-4.16b (R-201) adds an extension allowlist and encoded filenames to successful ordinary ref-path Blob/ChunkedBlob responses, including HEAD and 206; object-id, proof, non-file, 304 and error responses are unchanged. |
 | 1 | draft | WP-4.12 clarifies §4: the global content store decides no membership, reachability, or existence, but may supply the bytes of an id already resolved in this repository and held by it (SPEC-SERVER §9.6; R-163, R-169). |
 | 1 | draft | WP-4.14a clarifies that the boundary-aware builder reduces reads and memory, while complete preceding length proofs still impose an O(first chunk index) encoded-size cost and 416 on oversize. |

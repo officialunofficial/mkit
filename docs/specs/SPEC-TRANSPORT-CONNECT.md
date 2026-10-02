@@ -51,9 +51,8 @@ Reference implementation: `mkit-transport-connect` (the native CLI
 client, §7.3) against `mkit-transport-connect/tests/roundtrip.rs`'s
 in-process server &mdash; real HTTP, real protobuf framing, real Connect
 streaming, backed by `mkit-transport-memory` rather than R2/a Durable
-Object. The self-hosted server is `mkit-server` (§7.2), whose
-`mkit-server-native/tests/client_e2e.rs` drives the same client against it
-end to end; it replaced `mkit serve --http`, which the CLI no longer has.
+Object. The `mkit-server` library and its conformance host (§7.2) drive the same
+client end to end; they replaced `mkit serve --http`, which the CLI no longer has.
 [`apps/vcs-worker`](../../apps/vcs-worker) (mkit#699)
 implements the unary and client-streaming RPCs
 (`ListRefs`/`ReadRef`/`UpdateRef`/`AdvanceRefs`/`PackExists`/`UploadPack`)
@@ -69,7 +68,7 @@ including a SECOND pass driving the real `mkit` CLI (`push`/`clone`/
 `pull`) end to end against this exact server through `ConnectTransport`'s
 new envelope-signing auth mode (§7.3). `ConnectTransport` now supports
 BOTH the bearer-token scheme (SPEC-TRANSPORT §5.2, unchanged, used by
-`mkit-server serve --auth bearer`) and this server's Ed25519 write envelope (§7.1) as
+bearer-mode `mkit-server` deployments) and this server's Ed25519 write envelope (§7.1) as
 independent, additive auth modes &mdash; see §7.3. No AUTOMATED test drives
 this client/server pair yet (the `wrangler dev` verification above is
 manual, matching `apps/vcs-worker`'s existing testing posture for
@@ -127,6 +126,7 @@ same trait `mkit-transport-http`/`-s3`/`-ssh`/`-enc` implement today.
 
 | `Transport` trait method | RPC | Shape |
 |---|---|---|
+| *(none; lists namespace repositories)* | `ListRepos` (§7.10) | unary |
 | `list_refs(prefix)` | `ListRefs` | unary |
 | `read_ref(name)` | `ReadRef` | unary |
 | `update_ref(name, condition, hash)` | `UpdateRef` | unary |
@@ -908,7 +908,7 @@ and the signature does not bind it.
 
 **Signed reads.** The same contract signs read RPCs
 ([SPEC-WRITE-GRANTS §9.2](SPEC-WRITE-GRANTS.md#92-signed-reads)):
-`ListRefs`, `ReadRef`, `PackExists`, `DownloadPack`, `IssueObjectUrl`,
+`ListRepos`, `ListRefs`, `ReadRef`, `PackExists`, `DownloadPack`, `IssueObjectUrl`,
 and `GetReceipt`,
 each with a `body:` commitment over the exact request body. A client
 that has a signer for a remote MUST sign every read RPC to it. A request that carries any auth v2 header MUST verify in full, or it
@@ -1004,24 +1004,21 @@ unreachable ledger or failed quota read fails closed.
 `AUTH_AUDIENCE` must be explicitly configured for every deployment and local
 development origin.
 
-### 7.2 `mkit-server` (native)
+### 7.2 `mkit-server` (library and adapters)
 
 The same generated `TransportService` binding (`mkit-server`'s `connect`
-module over its pipeline), served over axum/hyper by the `mkit-server`
-binary ([`mkit-server-native`](../../rust/crates/mkit-server-native/))
-instead of `workers-rs`: one handler implementation for both targets, over
-different storage backends (R2 and Durable Objects on Workers; the
-`.mkit` on-disk layout or `SQLite` metadata with filesystem or S3 blobs
-natively, per [SPEC-WORKTREE](SPEC-WORKTREE.md)/[SPEC-CONCURRENCY](SPEC-CONCURRENCY.md)
-for the on-disk layout). `mkit-server serve --listen <ADDR> --repo-root
-<DIR>` is the self-hosted `mkit+https://` remote; the same process can
-also serve `mkit+enc://` (`--listen-enc`, SPEC-TRANSPORT-ENC §6). Its
-flags, authentication modes and limits are in the crate's README.
+module over its pipeline) is served on Workers by the `mkit-server-worker`
+adapter (§7.1) and in process by the conformance host
+(`mkit-server-conformance`), one handler implementation over different
+storage backends (R2 and Durable Objects on Workers; the `.mkit` on-disk
+layout, per [SPEC-WORKTREE](SPEC-WORKTREE.md)/[SPEC-CONCURRENCY](SPEC-CONCURRENCY.md),
+in process). There is no standalone self-hosted server binary: the former
+`mkit-server serve` deployment was removed.
 
 `mkit serve <path>` (the CLI) is only the `mkit+ssh://` forced-command
 server, speaking the SSH-frame protocol on stdin/stdout. Its former HTTP
-mode (`--http`, mkit#700) and encrypted listener (`--listen-enc`) moved to
-`mkit-server`, and with them the axum-hosted `TransportServer` of
+mode (`--http`, mkit#700) and encrypted listener (`--listen-enc`) are gone,
+and with them the axum-hosted `TransportServer` of
 `mkit-transport-connect`'s former `server` feature.
 
 ### 7.3 Native CLI Connect client
@@ -1070,8 +1067,8 @@ a deployment can require either, both, or neither:
 - **Bearer token** (unchanged, #700/#701): `MKIT_API_TOKEN`, read from
   the environment at `connect()` time, sent as `Authorization: Bearer
   <token>` on every call. This is `mkit-transport-http`'s scheme
-  (SPEC-TRANSPORT §5.2) and is what `mkit-server serve --auth bearer`
-  (§7.2) expects.
+  (SPEC-TRANSPORT §5.2) and is what bearer-mode `mkit-server` deployments
+  (§7.2) expect.
 - **Ed25519 envelope**: `EnvelopeTransport` signs the auth v2 contract
   in §7.1 for reads and writes, with an exact request body commitment for
   reads and unary writes, including the framed `DownloadPack` request, and
@@ -1222,12 +1219,9 @@ it always has. `mkit serve --root <DIR>` is the multi-repository form:
 the path names a `<NAMESPACE>/<NAME>` resolved to the directory
 `<DIR>/<NAMESPACE>/<NAME>`, one repository per process, and writes run
 the `ed25519-` owner rule of §7.5 against the `--principal` key the
-sshd configuration asserts (SPEC-TRANSPORT §4.1). For enc,
-`mkit-server serve --repo-root <DIR> --listen-enc <ADDR>` without
-`--enc-repository` serves the configured repository as before; under
-multi-repository addressing the listener requires
-`--enc-repository <NAMESPACE>/<NAME>` and binds every session it
-accepts to that one repository (SPEC-TRANSPORT-ENC §6). Both carry the
+sshd configuration asserts (SPEC-TRANSPORT §4.1). For enc (deprecated),
+a listener under multi-repository addressing binds every session it
+accepts to one configured repository (SPEC-TRANSPORT-ENC §6). Both carry the
 same implicit-membership rule in place of §7.6's upload tickets: packs
 uploaded and verified in a session (at most seven before a packmap
 write) may be consumed into membership by that session's packmap write
@@ -1686,14 +1680,110 @@ the `ListRefs` page bound (§2.1).
 
 ---
 
+### 7.10 Namespace repository listing
+
+`ListRepos` is an additive unary read RPC. `ListReposRequest` carries
+`namespace = 1`, an opaque `page_token = 2`, `page_size = 3`, and optional
+`name_prefix = 4`. Zero or absent page size means 100; a value above 100 is
+`invalid_argument`. The prefix is at most 255 bytes of printable ASCII without
+whitespace and matches raw name bytes. Empty matches every repository.
+
+`ListReposResponse` carries `repos = 1` and `next_page_token = 2`. Each new
+`RepoEntry` carries its complete namespace-local `name = 1` and effective
+`visibility = 2`, using the existing `RepoVisibility` enum. Names MUST be sorted
+by ascending byte order and MUST NOT be duplicated. No existing field changes
+meaning. The registry has no cheap head or last-update projection, so neither
+is included. A page MUST contain at most 100 entries and its encoded protobuf
+response MUST fit in 64 KiB. An empty continuation ends the listing.
+
+Addressing and authentication retain §7.1 and §7.4: `X-Repository` is an
+ordinary full repository identity in Multi mode, and its namespace MUST equal
+`request.namespace`. A mismatch is `invalid_argument`. The header's repository
+name is only a namespace selector for this RPC: it need not exist and does not
+limit or confer listing rights. Signed auth v2 commits the exact request bytes
+and full procedure. All supplied auth v2 markers MUST verify; malformed signed
+requests never become anonymous. Listing is idempotent, with no replay writes
+or admission. Under Single addressing, the namespace is the deployment's
+configured namespace (normally `root`), ordinary Single header rules apply,
+and the sole configured public repository is returned if its name matches.
+
+Multi listing rights are deliberately narrower than repository read rights:
+
+- Anonymous and non-owner signed callers receive only the public listing.
+- A signed namespace owner receives the full registered repository listing,
+  subject to a configured authorizer's check.
+- In `authority` mode, non-owner callers receive the public view by default.
+  A deployment MAY explicitly enable `PipelineConfig::list_repos_authority_full`
+  (default false) only for an authority that understands namespace-wide listing.
+  With this opt-in, a signed non-owner caller without a grant receives the full
+  registry only if the hook Allow also returns `writer_view = true`. A repository-scoped
+  read Allow alone MUST NOT confer namespace listing rights. Authority hooks MUST
+  treat this procedure as namespace-wide, not as permission on the arbitrary
+  header selector repository. A `permission_denied` or `not_found` hook denial
+  selects the public view for both owners and non-owners; hook/storage failures
+  fail closed.
+- Presenting `X-Write-Grant` selects the public view even for an owner or
+  authority caller. Grants do not add repository listing rights, including
+  grants with `read` capability. The normal §9.3 private read rights remain
+  unchanged. An unsigned grant header remains `unauthenticated`.
+
+A configured `check` authorizer MUST check every namespace listing, including
+anonymous, non-owner and grant-bearing public views, once before storage scans.
+Its denial or failure MUST propagate; an allowance cannot widen the public view.
+Like authority hooks, this check concerns the entire requested namespace rather
+than the selector repository name.
+
+A public listing MUST NOT scan or filter private registry rows. In Multi mode,
+the namespace coordinator (Namespace partition under Single sharding) maintains
+`rl 00 p 00 <name>` for registered explicitly-public repositories and
+`rl 00 d 00 <name>` for registered repositories without an explicit visibility.
+Values are empty. The latter prefix participates only when deployment default
+visibility is public. A bounded k-way merge across those sorted prefixes gives
+the public listing. Owners and approved authority sources scan `rr` and batch
+read `rv` for the emitted page's effective visibility. `RepoIndex` object shards
+are not repository-name indexes and are not scanned by this RPC.
+
+These index rows MUST change atomically in the same coordinator apply as repo
+creation or `SetRepoVisibility`; visibility on an uncreated repository MUST NOT
+create a listing row. Creation guards its observed `rv`, and visibility updates
+guard observed registration, so competing applies cannot leave stale public
+rows. Changing the deployment default automatically includes/excludes the
+inherited prefix; explicit settings always win. Only fresh stores are supported;
+there is no backfill or pre-launch persisted-format migration.
+
+The token MUST be integrity-protected and bound to the namespace, name prefix,
+caller, listing view, deployment audience, and default visibility. It resumes
+strictly after the last returned name. Tokens use a dedicated MAC domain derived
+from deployment ticket keys; retained keys verify after rotation. Foreign,
+malformed, tampered, or binding-mismatched tokens are `invalid_argument`, checked
+before scanning. A token gives no authorization: owner/authority classification
+is repeated on every page. Multi deployments need configured MAC keys; otherwise
+listing is `failed_precondition`. Tokens are opaque to callers; no internal scan
+cursor or private filtering position is returned in the public view.
+
+There is no snapshot across pages. Concurrent creation or visibility changes may
+add/remove names; subsequent pages still resume in name order. Storage errors
+are `unavailable`, never successful partial listings. Public scans have fan-out
+at most two and fetch at most 101 rows per scan. Short backend pages, including
+empty pages with a continuation, MUST resume using the backend cursor for the
+same range before merging. Every scan counts against the 102-call top-level
+`NamespaceStore` budget per RPC; exhausting it is `resource_exhausted`, never
+successful truncation. Full listings reserve one of those calls for the batched
+visibility read. Worker stores implement that read in one call; a backend
+using the default `get_many` implementation performs at most 201 primitive calls. All applies retain the 100-op/1-MiB limits and Worker
+requests retain their shared call budgets. An empty namespace and one containing
+only unreadable private repositories MUST have identical public results,
+including the absence of a continuation.
+
+
 ## 8. Out of scope
 
 This document specifies the proto and its consumption pattern only.
 Explicitly deferred to sibling issues:
 
 - The reference Worker implementation (mkit#699).
-- ~~`mkit serve`'s HTTP mode (mkit#700).~~ Implemented, then moved to the
-  `mkit-server` binary &mdash; see §7.2.
+- ~~`mkit serve`'s HTTP mode (mkit#700).~~ Implemented, then removed with the
+  standalone server &mdash; see §7.2.
 - ~~The native CLI Connect client (mkit#701).~~ Implemented &mdash; see §7.3.
 - Fully deleting `mkit-transport-http` and SPEC-TRANSPORT §5 (waits on a
   `mkit.transport.v1` equivalent for its `sparse-checkout`/`pack-shards`
@@ -1732,6 +1822,7 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
+| `2` (ListRepos) | draft | Additive §7.10 namespace listing RPC and new messages, atomic coordinator visibility indexes, bounded sorted pages and integrity-protected tokens; grants retain public listing rights only. |
 | `2` (WP-2.16) | draft | Additive namespace Get/SetAuthorityGeneration RPCs outside auth-v2, with deployment-authority statements and pending completion hints. |
 | `2` (WP-1.28c) | draft | §7.9 states the client rule for stale listings: a listed branch whose packmap and head are both strongly absent is skipped without a tracking ref; a present head with no packmap and any transport error stay failures. |
 | `2` (WP-1.15) | draft | §7.4's ssh/enc paragraph gains ssh root mode (`mkit serve --root`, one repository per process addressed by `<NAMESPACE>/<NAME>`) and the enc `--enc-repository` listener binding, and notes the same-session implicit-membership rule transport-identity sessions use in place of upload tickets (informative). |

@@ -18,7 +18,27 @@ use crate::{Code, RepoId, ServerError};
 pub type IssuedUrl = crate::url_token::MintedToken;
 use mkit_core::{hash::Hash, object::ObjectType, repo_identity::Namespace};
 use std::collections::{BTreeMap, BTreeSet};
-type Prefetched = (BTreeMap<Hash, Vec<u8>>, BTreeMap<Hash, u64>);
+type Prefetched = (BTreeMap<Hash, Vec<u8>>, BTreeMap<Hash, ObjectMetadata>);
+/// Verified lengths describe canonical objects separately from logical files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectMetadata {
+    /// Reconstructed canonical object kind.
+    pub kind: ObjectType,
+    /// Length of the complete canonical serialization.
+    pub canonical_len: u64,
+    /// `Blob` payload or `ChunkedBlob::total_size`; absent for non-file objects.
+    pub logical_len: Option<u64>,
+}
+fn exhausted() -> ServerError {
+    ServerError::resource_exhausted("object reader byte limit exceeded")
+}
+fn resolution_failure(miss: resolve::Miss, limited: bool) -> ServerError {
+    if limited && miss == resolve::Miss::Capped {
+        exhausted()
+    } else {
+        failure(miss)
+    }
+}
 /// Maximum IDs per call; duplicates preserve input order and share proof work.
 pub const OBJECT_READER_BATCH: usize = 16;
 /// Core call cap inside the Worker invocation allowance.
@@ -134,22 +154,51 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     /// # Errors
     /// Oversized batches, invalid authority, exhausted budgets or store failures.
     pub async fn read_canonical(&self, ids: &[Hash]) -> Result<Vec<Option<Vec<u8>>>, ServerError> {
-        let (bytes, _) = self.batch(ids, false).await?;
-        let total = ids
-            .iter()
-            .filter_map(|id| bytes.get(id))
-            .try_fold(0u64, |n, b| n.checked_add(b.len() as u64));
-        if total.is_none_or(|n| n > self.cfg.http_decode_budget) {
-            return Err(failure(resolve::Miss::Capped));
-        }
+        self.read_canonical_with_limit(ids, self.cfg.http_decode_budget)
+            .await
+    }
+    /// Bound canonical decode work (including ancestors/bases) and output bytes
+    /// for this call. Duplicate outputs count individually. Inaccessible ids
+    /// remain absent. Length checks precede requested-object allocation.
+    /// # Errors
+    /// `ResourceExhausted` for the caller cap; other errors as `read_canonical`.
+    pub async fn read_canonical_with_limit(
+        &self,
+        ids: &[Hash],
+        max_bytes: u64,
+    ) -> Result<Vec<Option<Vec<u8>>>, ServerError> {
+        let (bytes, _) = self.batch_limited(ids, false, Some(max_bytes)).await?;
         Ok(ids.iter().map(|id| bytes.get(id).cloned()).collect())
     }
-    /// Indexed content sizes without requested-object byte reads.
+    /// Verified object metadata without fetching requested canonical bytes.
     /// # Errors
-    /// As [`Self::read_canonical`]; an incomplete proof is `unavailable`.
+    /// Invalid authority, incomplete proof, corrupt facts or storage failure.
+    pub async fn object_metadata(
+        &self,
+        ids: &[Hash],
+    ) -> Result<Vec<Option<ObjectMetadata>>, ServerError> {
+        let (_, metadata) = self.batch(ids, true).await?;
+        Ok(ids.iter().map(|id| metadata.get(id).copied()).collect())
+    }
+    /// Historical mixed sizes: `Blob` payload, other kinds' canonical length.
+    /// # Errors
+    /// As `object_metadata`; incomplete proofs remain unavailable.
+    #[deprecated(note = "use object_metadata for kind, canonical_len and logical_len")]
     pub async fn object_sizes(&self, ids: &[Hash]) -> Result<Vec<Option<u64>>, ServerError> {
-        let (_, sizes) = self.batch(ids, true).await?;
-        Ok(ids.iter().map(|id| sizes.get(id).copied()).collect())
+        Ok(self
+            .object_metadata(ids)
+            .await?
+            .into_iter()
+            .map(|row| {
+                row.map(|m| {
+                    if m.kind == ObjectType::Blob {
+                        m.logical_len.unwrap_or(0)
+                    } else {
+                        m.canonical_len
+                    }
+                })
+            })
+            .collect())
     }
     /// Issue at most 16 URL tokens, preserving order and duplicates.
     /// Requires configured URL-token keys. Inaccessible targets are uniformly
@@ -296,6 +345,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 &BTreeSet::new(),
                 &mut decode,
                 true,
+                None,
             )
             .await?;
         Ok(ids
@@ -305,6 +355,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             .collect())
     }
     async fn batch(&self, ids: &[Hash], sizes_only: bool) -> Result<Prefetched, ServerError> {
+        self.batch_limited(ids, sizes_only, None).await
+    }
+    async fn batch_limited(
+        &self,
+        ids: &[Hash],
+        sizes_only: bool,
+        max_bytes: Option<u64>,
+    ) -> Result<Prefetched, ServerError> {
         if ids.len() > OBJECT_READER_BATCH {
             return Err(ServerError::invalid_argument("batch exceeds 16 ids"));
         }
@@ -325,12 +383,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             } else {
                 BTreeSet::new()
             },
-            &mut Budget(self.cfg.http_decode_budget),
-            false,
+            &mut Budget(
+                max_bytes
+                    .unwrap_or(self.cfg.http_decode_budget)
+                    .min(self.cfg.http_decode_budget),
+            ),
+            // Non-writer views never distinguish a stored but unprovable id
+            // from an unknown one.
+            !writer,
+            max_bytes,
         )
         .await
     }
-    #[allow(clippy::too_many_lines)] // One bounded authorization/resolution pass, in precedence order.
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // One shared-budget authorization/resolution pass, in precedence order.
     async fn batch_with_budget(
         &self,
         ids: &[Hash],
@@ -340,7 +405,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         forbidden: &BTreeSet<Hash>,
         decode: &mut Budget,
         capped_as_absent: bool,
+        max_bytes: Option<u64>,
     ) -> Result<Prefetched, ServerError> {
+        let mut output_left = max_bytes
+            .unwrap_or(self.cfg.http_decode_budget)
+            .min(self.cfg.http_decode_budget);
+        let limited = max_bytes.is_some() && !capped_as_absent;
         let pipe = self.pipe;
         let (cfg, indexed, seams) = (self.cfg, self.indexed, self.seams);
         let meta = Budgeted::new(&pipe.meta, calls);
@@ -366,6 +436,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         } else {
             resolve::locate_many(&env, ids).await.map_err(failure)?
         };
+        // Directly denied members are absent even when their reachability
+        // cannot be proved within the caller's byte or walk budget.
+        let mut clear = Vec::with_capacity(located.len());
+        for (id, location) in located {
+            if !denied(&meta, &id).await.map_err(failure)?
+                && !denied(&meta, &location.pack).await.map_err(failure)?
+            {
+                clear.push((id, location));
+            }
+        }
+        located = clear;
         // Issuance proves missing IDs too: proof cost must not expose membership.
         let mut targets = if capped_as_absent {
             ids.iter().copied().collect::<BTreeSet<_>>()
@@ -376,7 +457,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         let mut fresh = BTreeSet::new();
         if !writer && !pipe.cfg.takedown_denial {
             for id in &targets {
-                calls.charge().map_err(failure)?;
+                if let Err(e) = calls.charge() {
+                    if capped_as_absent {
+                        break;
+                    }
+                    return Err(failure(e));
+                }
                 if seams
                     .reachability
                     .known_reachable(&self.repo, id, ms(pipe.clock.now_ms()))
@@ -388,18 +474,29 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         }
         targets.retain(|id| !reached.contains(id));
         if !targets.is_empty() {
-            let (tips, truncated) = pipe
+            let tips = pipe
                 .reader_tips(&meta, &self.repo, cfg.max_walk_objects, writer)
-                .await
-                .map_err(|e| http_failure(&e))?;
+                .await;
+            // A spent call budget is an unprovable proof, not a store fault.
+            let (tips, truncated) = match tips {
+                Err(_) if capped_as_absent && calls.remaining() == 0 => (Vec::new(), true),
+                other => other.map_err(|e| http_failure(&e))?,
+            };
             if truncated && sizes_only && !capped_as_absent {
                 return Err(failure(resolve::Miss::Capped));
             }
             if !truncated {
-                let (found, incomplete) =
-                    reach::walk_many(&env, seams.takedown.as_ref(), &tips, &targets, decode)
-                        .await
-                        .map_err(failure)?;
+                let walked =
+                    reach::walk_many(&env, seams.takedown.as_ref(), &tips, &targets, decode).await;
+                let (found, incomplete) = match walked {
+                    Err(_) if capped_as_absent && calls.remaining() == 0 => {
+                        (BTreeSet::new(), Some(resolve::Miss::Capped))
+                    }
+                    other => other.map_err(|e| resolution_failure(e, limited))?,
+                };
+                if limited && incomplete == Some(resolve::Miss::Capped) {
+                    return Err(exhausted());
+                }
                 if sizes_only && !capped_as_absent && incomplete == Some(resolve::Miss::Capped) {
                     return Err(failure(resolve::Miss::Capped));
                 }
@@ -469,20 +566,43 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 if row.kind == ObjectType::Delta as u8 {
                     continue;
                 }
-                let header = u64::from(row.kind == ObjectType::Blob as u8) * 10;
-                let size = located
+                let kind = match row.kind {
+                    1 => ObjectType::Blob,
+                    2 => ObjectType::Tree,
+                    3 => ObjectType::Commit,
+                    4 => ObjectType::Remix,
+                    5 => ObjectType::ChunkedBlob,
+                    7 => ObjectType::Tag,
+                    _ => return Err(failure(resolve::Miss::Unavailable)),
+                };
+                if row.canonical_len != located.value.decoded_size {
+                    return Err(failure(resolve::Miss::Unavailable));
+                }
+                sizes.insert(
+                    id,
+                    ObjectMetadata {
+                        kind,
+                        canonical_len: row.canonical_len,
+                        logical_len: row.logical_len,
+                    },
+                );
+            } else {
+                let output = located
                     .value
                     .decoded_size
-                    .checked_sub(header)
-                    .ok_or_else(|| failure(resolve::Miss::Unavailable))?;
-                sizes.insert(id, size);
-            } else {
+                    .checked_mul(ids.iter().filter(|requested| **requested == id).count() as u64)
+                    .filter(|n| *n <= output_left)
+                    .ok_or_else(exhausted)?;
                 match resolve::load(&env, id, located, decode).await {
                     Ok(canonical) if resolve::type_of(&canonical) != Some(ObjectType::Delta) => {
+                        if canonical.len() as u64 != located.value.decoded_size {
+                            return Err(failure(resolve::Miss::Unavailable));
+                        }
+                        output_left -= output;
                         bytes.insert(id, canonical.to_vec());
                     }
                     Ok(_) | Err(resolve::Miss::NotFound) => {}
-                    Err(miss) => return Err(failure(miss)),
+                    Err(miss) => return Err(resolution_failure(miss, limited)),
                 }
             }
         }

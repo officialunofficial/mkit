@@ -3,8 +3,8 @@
 # `Transport` itself: the implementation behind the `mkit+https://` /
 # loopback `mkit+http://` remote scheme in `mkit-cli`'s `remote_dispatch`.
 #
-# The server is `mkit-server` (`mkit-server-native` over `mkit-server`'s
-# pipeline). This crate's former `server` feature (the axum-hosted
+# The server is `mkit-server`'s pipeline (hosted on Workers by
+# `mkit-server-worker`). This crate's former `server` feature (the axum-hosted
 # `TransportServer` behind `mkit serve --http`) was removed with that flag
 # (WP-M0-15, a breaking change: the next release is 0.5).
 #
@@ -30,10 +30,10 @@ authors.workspace = true
 all = { level = "warn", priority = -1 }
 
 [dependencies]
-mkit-rpc = { version = "0.4", path = "../mkit-rpc", features = ["transport"] }
+mkit-rpc = { version = "0.5", path = "../mkit-rpc", features = ["transport"] }
 # Inter-workspace deps need explicit version + path so `cargo publish`
 # accepts them.
-mkit-core = { version = "0.4", path = "../mkit-core" }
+mkit-core = { version = "0.5", path = "../mkit-core" }
 
 # ConnectRPC native client: hyper/hyper-util transport + rustls TLS.
 # `UploadPack`/`DownloadPack`'s client-streaming/server-streaming RPCs work
@@ -99,7 +99,7 @@ rustls = { version = "0.23", features = ["ring"] }
 
 [dev-dependencies]
 serde_json = "1"
-mkit-transport-memory = { version = "0.4", path = "../mkit-transport-memory" }
+mkit-transport-memory = { version = "0.5", path = "../mkit-transport-memory" }
 # Test-only: `envelope::tests::parity` independently re-verifies the write
 # envelope headers `EnvelopeTransport` produces against a from-scratch
 # reimplementation of `apps/vcs-worker`'s server-side `verify_envelope` /

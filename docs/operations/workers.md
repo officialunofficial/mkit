@@ -38,7 +38,7 @@ The base launch vars are:
 
 | Name | Value / purpose |
 |---|---|
-| `LAUNCH_PROFILE` | `uno` |
+| `LAUNCH_PROFILE` | `paid-workers` |
 | `WORKERS_PLAN` | `paid`; actual Paid account required |
 | `INDEXED_MODE` | `true`; scheduled verification and extraction |
 | `ADDRESSING` / `SHARDING` | `multi` / `d34`; fixed over the store lifetime |
@@ -57,6 +57,9 @@ The base launch vars are:
 | `BACKUP_INTERVAL_MS` | Default `86400000`; zero disables portable export |
 | `BACKUP_MAX_BYTES` | Default `16777216`; maximum `25165824` |
 | `BACKUP_FORCE_REUPLOAD_MS` | Default `2419200000` (28 days); keep below backup lifecycle retention |
+
+`LAUNCH_PROFILE=uno` remains accepted as a deprecated alias and logs a startup
+deprecation warning. Use `LAUNCH_PROFILE=paid-workers` for new deployments.
 
 Ticketed uploads use threshold zero. `any` requires explicit operator acceptance
 of incomplete holder discovery. Remove the template's `NAMESPACE_ALLOWLIST`
@@ -95,7 +98,7 @@ identity. Configured inspection disables this snapshot optimization.
 With `any`, namespace authority fencing is supported only for Ed25519
 namespaces: Address (`0x...`) authority generation setters are not supported
 under that policy. Keep that combination disabled; a supported finite allowlist
-is required for Address authority administration. The intended Uno configuration
+is required for Address authority administration. The intended embedding host configuration
 uses Ed25519 owner/Check policy.
 
 ### Secrets and key roles
@@ -141,8 +144,22 @@ credentials/settings, not server role keys.
 | Namespace fencing | `AUTHORITY_FENCE=true`, dedicated `AUTHORITY_KEYS`, Multi and authority Authorize; allowances carry `authority_generation` |
 | Write grants | `GRANT_SCHEMES` comma list of `ed25519`, `secp256k1-eip191`, `webauthn-p256`; WebAuthn additionally requires `WEBAUTHN_RPS` as `id=origin[,origin...]` entries separated by `;` or newline. Blank/partial settings are refused |
 | Inspection and scanner retrieval | `inspect` role on the selected hook channel, `INSPECT_MODE=sync`, `INSPECT_ON_UNAVAILABLE=fail_closed`, `SCANNER_RETRIEVAL=true`, `SCANNER_KEYS`, `SCANNER_RETRIEVAL_KEYS`; `INSPECT_BATCH_MAX_OBJECTS` default 10000, range 1–10000 |
-| Admin, takedown and preservation | `ADMIN_KEYS`, `TAKEDOWN_ENABLED=true`, `PRESERVATION`, positive `PRESERVATION_RETENTION_MS` (no default), `RECEIPT_NOTICE_KEY`, `RECEIPT_KEYS`, and signed HTTPS `cache-purge` configuration |
-| Global cache purge | Paid, `signed-http-hooks`, `HOOK_URL`, dedicated `MKIT_HOOK_KEY`, explicit `cache-purge` in `HOOK_ROLES`; an isolated binding alone cannot satisfy it |
+| Admin, takedown and preservation | `ADMIN_KEYS`, `TAKEDOWN_ENABLED=true`, `PRESERVATION`, positive `PRESERVATION_RETENTION_MS` (no default), `RECEIPT_NOTICE_KEY`, `RECEIPT_KEYS`, and configured cache-purge delivery (signed HTTPS hook or an embedder-supplied `PurgeSink`) |
+| Global cache purge | Embedders can supply `PurgeSink`; the reference Worker requires Paid, `signed-http-hooks`, `HOOK_URL`, dedicated `MKIT_HOOK_KEY`, explicit `cache-purge` in `HOOK_ROLES`; an isolated binding alone cannot satisfy it |
+
+Successful ordinary ref-path Blob/ChunkedBlob responses select media types by
+case-insensitive filename extension. MP4/WebM video, MP3/Ogg/WAV audio, HEIC
+images, Markdown and CSV are served inline alongside the existing image,
+plain-text and PDF types. Markdown and CSV include `charset=utf-8`; JSON stays
+an attachment. HTML, HTM, XHTML, XML, SVG, JS, MJS, CSS and unknown extensions
+remain `application/octet-stream` attachments. Object-id and proof responses
+keep their existing types.
+
+GET and HEAD retain encoded RFC 5987 filenames, `nosniff`, sandbox CSP and
+`no-referrer`. Video playback can use a single `Range: bytes=a-b` request,
+which returns 206 with `Content-Range` and the selected length; HEAD has no
+body. Multiple ranges return the full 200 representation. See
+[SPEC-HTTP-OBJECTS §5.1](../specs/SPEC-HTTP-OBJECTS.md#51-object-content-and-ordinary-ranges).
 
 Zero inspectors is supported; embedders can supply up to four synchronous
 fail-closed inspectors. The environment channel configures one inspector.
@@ -321,7 +338,7 @@ Measure all nested work and retries; arbitrary host hook work shares those limit
 
 Whole-isolate memory is still an open acceptance gate. A local sampled
 allocated-capacity sum was 104604962 bytes (about 105 MB), with attribution gaps.
-The current launch and Uno Worker feature graphs omit the server-local pure-Rust
+The current launch and Paid Workers feature graphs omit the server-local pure-Rust
 decoder scratch reservation and idle-reader release. Correct those actual
 deployment graphs and run their focused allocator regressions before candidate
 selection; bounded core decoding alone does not establish the verification

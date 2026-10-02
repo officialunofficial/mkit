@@ -112,7 +112,9 @@ async fn fixture(
     entries: &[IndexEntry],
 ) -> (MemoryBlobStore, std::sync::Arc<MemoryKv>, RepoId) {
     let blobs = MemoryBlobStore::default();
-    let store = std::sync::Arc::new(MemoryKv::default());
+    let store = std::sync::Arc::new(MemoryKv::with_clock(std::sync::Arc::new(
+        mkit_server::ManualClock::new(0),
+    )));
     let repo = RepoId {
         namespace: NamespaceKey::deployment_default(),
         name: RepoName::new("repo").unwrap(),

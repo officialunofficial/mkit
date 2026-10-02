@@ -207,6 +207,8 @@ pub struct VerifyJobV1 {
     /// The packs a packlist names.
     #[serde(skip)]
     pub packlist: Vec<Hash>,
+    /// Verified MKPL predecessor, checkpointed with its decoded header.
+    pub packlist_prev: Option<Hash>,
     /// A terminal non-persisted result.
     pub outcome: Option<Outcome>,
 }

@@ -948,7 +948,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mkit-attest"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -969,7 +969,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-core"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "bao",
  "blake3",
@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-rpc"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "buffa",
  "buffa-build",
@@ -1014,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-server"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -1041,7 +1041,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-server-worker"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",

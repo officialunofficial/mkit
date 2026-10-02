@@ -11,7 +11,7 @@ identity and DO namespaces, exact HTTPS audience and private staging buckets.
 Copy the template to `apps/vcs-worker/wrangler.staging.jsonc`, replace all
 placeholders and repeat every environment var/binding; they do not inherit.
 Set its build command to the approved release feature selection. Add
-`LAUNCH_PROFILE=uno`, `INDEXED_MODE=true`, Multi/D34, permanent retention,
+`LAUNCH_PROFILE=paid-workers`, `INDEXED_MODE=true`, Multi/D34, permanent retention,
 leases/GC off and ticket keys. The allowlist variant needs a nonempty canonical
 namespace list; `any` additionally needs `UNSAFE_OPEN_NAMESPACES=true` and
 acceptance of incomplete takedown discovery. For `any`, remove the template's

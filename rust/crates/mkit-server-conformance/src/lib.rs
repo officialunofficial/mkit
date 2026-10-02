@@ -69,12 +69,17 @@
 //! # fn main() {}
 //! ```
 
-#[cfg(feature = "fake-s3")]
-pub mod fake_s3;
 pub mod storage;
 #[cfg(feature = "stubs")]
 pub mod stubs;
+/// A loopback host for external contract tests. Available only with the
+/// `test-host` feature and debug assertions (release builds reject it).
+#[cfg(all(feature = "test-host", debug_assertions))]
+pub mod test_host;
 pub mod wire;
+
+#[cfg(all(feature = "test-host", not(debug_assertions)))]
+compile_error!("mkit-server-conformance's test-host feature is unavailable in release builds");
 
 #[doc(hidden)]
 pub mod __private {

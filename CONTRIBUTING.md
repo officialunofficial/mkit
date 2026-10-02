@@ -186,7 +186,7 @@ rust/
     mkit-rpc/                 # Protobuf-defined wire protocols
     mkit-transport-connect/   # ConnectRPC client for mkit.transport.v1.TransportService;
                                #   used for mkit+https:// / mkit+http://
-    mkit-transport-enc/       # mkit+enc:// no-OpenSSH encrypted transport
+    mkit-transport-enc/       # mkit+enc:// no-OpenSSH encrypted transport (deprecated)
     mkit-transport-file/
     mkit-transport-http/      # legacy JSON dialect, superseded by mkit-transport-connect
     mkit-transport-memory/

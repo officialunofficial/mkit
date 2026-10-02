@@ -133,7 +133,7 @@ def fixture(namespace, port, run, artifact, runner, env, evidence):
     shutil.copyfile(FIXTURE / "memory.mjs", folder / "memory.mjs")
     auth = ["--auth", "auth-v2", "--audience", runtime.AUDIENCE, "--repository", "default",
             "--signer-seed-hex", runtime.SEED, "--run-id", runtime.RUN_ID]
-    variables = {"AUTH_AUDIENCE": runtime.AUDIENCE, "LAUNCH_PROFILE": "uno",
+    variables = {"AUTH_AUDIENCE": runtime.AUDIENCE, "LAUNCH_PROFILE": "paid-workers",
         "WORKERS_PLAN": "paid", "INDEXED_MODE": "true", "ADDRESSING": "multi",
         "SHARDING": "d34", "NAMESPACE_POLICY": namespace, "RETENTION": "permanent",
         "STORAGE_LEASES": "false", "GC_ENABLED": "false",

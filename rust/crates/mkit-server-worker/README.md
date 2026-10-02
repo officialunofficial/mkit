@@ -5,12 +5,12 @@ R2 blobs, Durable Object metadata, Connect dispatch and remote hooks over
 service bindings.
 
 HTTP object serving is explicitly opt-in. The default build omits
-`http-objects` and `WorkerConfig::http_mount` defaults to `None`. The Paid Uno
-profile (`LAUNCH_PROFILE=uno`, `INDEXED_MODE=true`, Multi/D34 and tickets)
+`http-objects` and `WorkerConfig::http_mount` defaults to `None`. The Paid Workers
+profile (`LAUNCH_PROFILE=paid-workers`, `INDEXED_MODE=true`, Multi/D34 and tickets)
 activates the merged verification/extraction driver. `HTTP_OBJECTS=true` plus
 complete dedicated `URL_TOKEN_KEYS` selects the HTTP mount when compiled with
 `http-objects`. A programmatic `WorkerHttpMountConfig` also configures serving
-and read-CORS options. See the [reference configuration](../../../apps/vcs-worker/README.md#paid-uno-launch-profile-wp-418--r-194).
+and read-CORS options. See the [reference configuration](../../../apps/vcs-worker/README.md#paid-workers-launch-profile-wp-418--r-194).
 Native serves proofs; release Worker `?proof=1` remains unsupported and its
 ServerInfo does not advertise proof capability.
 
@@ -63,7 +63,7 @@ fencing under Multi addressing and an Authority hook. Each key line is
 `<key-id> <64 lowercase hex public key> <namespace[,namespace...]>`; keys must be
 dedicated and differ from owner, hook, ticket and active/retired URL-token keys.
 Every write allowance must include `authority_generation`. Fencing is off by
-default; the Uno launch validates its activation (WP-4.18). The getter/setter and canonical
+default; the Paid Workers launch validates its activation (WP-4.18). The getter/setter and canonical
 signed statement contract are SPEC-SERVER §6.2.1.
 
 Once a namespace has persisted authority fencing, disabling the executor setting
@@ -189,7 +189,12 @@ response bytes, including duplicate IDs, also fit `http_decode_budget`.
 
 `read_canonical` returns serialized Blob, Tree, Commit, Remix, Tag and
 **ChunkedBlob manifest** bytes, never pack-only Delta encodings.
-`object_sizes` returns indexed uncompressed content sizes: Blob payload length
+`object_metadata` returns verified object kind, canonical serialization length and
+logical file length (Blob payload or ChunkedBlob total_size; absent for other kinds).
+`read_canonical_with_limit` applies a caller byte cap to two separate counters:
+cumulative ancestor/base decoding and ordered output, including duplicates.
+It returns ResourceExhausted on exhaustion.
+The deprecated `object_sizes` preserves its historical mixed sizes: Blob payload length
 and other objects' canonical serialized length. It performs **no requested-object
 byte reads**. Authorization may read canonical commit/tree/tag/manifest
 ancestors; one manifest authorizes all requested chunks, without a read per

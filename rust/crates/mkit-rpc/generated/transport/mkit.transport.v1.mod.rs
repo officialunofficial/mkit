@@ -34,6 +34,9 @@ pub mod __buffa {
     pub fn register_types(reg: &mut ::buffa::type_registry::TypeRegistry) {
         reg.register_json_any(super::__REF_ENTRY_JSON_ANY);
         reg.register_json_any(super::__PACK_CHUNK_JSON_ANY);
+        reg.register_json_any(super::__LIST_REPOS_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__REPO_ENTRY_JSON_ANY);
+        reg.register_json_any(super::__LIST_REPOS_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__LIST_REFS_REQUEST_JSON_ANY);
         reg.register_json_any(super::__LIST_REFS_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__REF_REDACTION_JSON_ANY);
@@ -93,6 +96,18 @@ pub use self::__buffa::view::RefEntryOwnedView;
 pub use self::__buffa::view::PackChunkView;
 #[doc(inline)]
 pub use self::__buffa::view::PackChunkOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::ListReposRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::ListReposRequestOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::RepoEntryView;
+#[doc(inline)]
+pub use self::__buffa::view::RepoEntryOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::ListReposResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::ListReposResponseOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::ListRefsRequestView;
 #[doc(inline)]

@@ -55,7 +55,7 @@ def main():
     evidence["wasm_sha256"] = runtime.digest(artifact / "index_bg.wasm")
     namespaces = subprocess.check_output([str(runner), "allowlist", *auth], text=True, env=env).splitlines()
     key = json.loads(subprocess.check_output(["node", str(ROOT / "apps/vcs-worker/tests/launch-admin/receiver.mjs"), "keys"], env=env))["admin"]["keys"][0]["publicKey"]
-    variables = {"AUTH_AUDIENCE": runtime.AUDIENCE, "LAUNCH_PROFILE": "uno", "WORKERS_PLAN": "paid",
+    variables = {"AUTH_AUDIENCE": runtime.AUDIENCE, "LAUNCH_PROFILE": "paid-workers", "WORKERS_PLAN": "paid",
                  "INDEXED_MODE": "true", "ADDRESSING": "multi", "SHARDING": "d34",
                  "NAMESPACE_POLICY": "allowlist", "NAMESPACE_ALLOWLIST": ",".join(namespaces),
                  "TICKET_KEYS": "ticket " + "11" * 32, "URL_TOKEN_KEYS": "active " + "22" * 32,

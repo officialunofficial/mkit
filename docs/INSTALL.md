@@ -22,8 +22,6 @@ verify the result.
 | CLI on a dev machine (Linux/macOS)    | Release archive or `cargo install --git` | `curl mkit.sh \| sh` *or* `cargo install --git https://github.com/officialunofficial/mkit mkit-cli` |
 | CLI on a dev machine (Windows)        | Not supported &mdash; use WSL         | run the above `install.sh` (or `cargo install`) inside WSL |
 | CI / backend (pin a version)          | Release archive                      | `curl -LO …/releases/download/v<VERSION>/mkit-<VERSION>-<target>.tar.gz && tar -xzf mkit-<VERSION>-<target>.tar.gz` |
-| Self-hosted server (`mkit-server`)    | Release archive                      | `curl -LO …/releases/download/v<VERSION>/mkit-server-<VERSION>-<target>.tar.gz` ([details](#mkit-server)) |
-| Self-hosted server in a container     | Container image (ghcr.io)            | `docker pull ghcr.io/officialunofficial/mkit-server@sha256:<digest>` ([details](#container)) |
 | Browser / Cloudflare Worker           | npm                                  | `bun add @officialunofficial/mkit-wasm`                                                                                  |
 | Library inside another Rust crate     | crates.io (or git dependency)        | `mkit-core = "0.3"`                                                                                  |
 
@@ -72,7 +70,7 @@ cargo test --workspace       # all crates, all tests
 | `mkit-rpc`                           | shared stdio framing for subprocess protocols              |
 | `mkit-cli`                           | the `mkit` binary                                          |
 | `mkit-transport-{memory,file,http,s3,ssh}` | one crate per transport scheme                       |
-| `mkit-transport-enc`                 | `mkit+enc://` encrypted transport                          |
+| `mkit-transport-enc`                 | `mkit+enc://` encrypted transport (deprecated: no maintained server) |
 | `mkit-wasm`                          | wasm-bindgen surface for browsers / Workers (npm-only, not on crates.io) |
 
 ## From GitHub Releases
@@ -100,7 +98,7 @@ Windows is not a supported target (MKIT-6; see `docs/INVARIANTS.md`).
 Windows users should run mkit under WSL, which uses the Linux binary.
 
 **Linux glibc requirement.** The published x86_64 and aarch64 Linux
-archives (v0.3.0 through v0.4.2) require **glibc 2.39 or newer**.
+archives (v0.3.0 through v0.5.0) require **glibc 2.39 or newer**.
 Check your glibc with `ldd --version | head -1`.
 
 | Release archives | Distributions |
@@ -131,7 +129,7 @@ by default. Direct release URLs are best when you want a pinned artifact.
 **Download a pinned release for your platform:**
 
 ```sh
-VERSION=0.4.2
+VERSION=0.5.0
 TARGET=aarch64-apple-darwin
 curl -LO "https://github.com/officialunofficial/mkit/releases/download/v${VERSION}/mkit-${VERSION}-${TARGET}.tar.gz"
 tar -xzf "mkit-${VERSION}-${TARGET}.tar.gz"
@@ -140,7 +138,7 @@ tar -xzf "mkit-${VERSION}-${TARGET}.tar.gz"
 **Pin a version (recommended for CI):**
 
 ```sh
-VERSION=0.4.2
+VERSION=0.5.0
 TARGET=x86_64-unknown-linux-gnu
 TAG="v${VERSION}"
 URL="https://github.com/officialunofficial/mkit/releases/download/${TAG}/mkit-${VERSION}-${TARGET}.tar.gz"
@@ -172,66 +170,6 @@ cosign verify-blob \
 
 Full reproducibility, signing, and supply-chain notes live under
 [`docs/RELEASE.md`](RELEASE.md).
-
-### `mkit-server`
-
-Every release also ships `mkit-server`, the long-running native server
-(HTTP/Connect listener, `SQLite` or `.mkit`-layout metadata, filesystem or
-S3 blobs, and the `mkit+enc://` listener), as its own archive for the same
-four targets: `mkit-server-<version>-<target>.tar.gz`, starting with
-0.5.0 (earlier releases have no server archive). It holds the
-`mkit-server` binary, the licenses, the operator guide (`README.md`) and
-the changelog. It is a separate binary, so the `mkit` CLI carries no HTTP
-server and no `SQLite`. The installer, Homebrew and `cargo binstall`
-install `mkit` only; fetch `mkit-server` directly:
-
-```sh
-VERSION=<version>   # 0.5.0 or later
-TARGET=x86_64-unknown-linux-gnu
-ARCHIVE="mkit-server-${VERSION}-${TARGET}.tar.gz"
-URL="https://github.com/officialunofficial/mkit/releases/download/v${VERSION}/${ARCHIVE}"
-curl -LO "$URL"
-curl -LO "${URL}.cosign.bundle"
-cosign verify-blob \
-  --bundle "${ARCHIVE}.cosign.bundle" \
-  --certificate-identity-regexp '^https://github\.com/officialunofficial/mkit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  "${ARCHIVE}"
-tar -xzf "${ARCHIVE}"
-"./mkit-server-${VERSION}-${TARGET}/mkit-server" version
-```
-
-It is covered by the same signed `SHA256SUMS`, SLSA provenance (`gh
-attestation verify "${ARCHIVE}" --repo officialunofficial/mkit`), SBOM and
-`THIRD-PARTY-NOTICES` as `mkit`. How to run it (authentication, storage,
-limits, the reverse proxy it expects) is in the operator guide,
-[`rust/crates/mkit-server-native/README.md`](../rust/crates/mkit-server-native/README.md).
-
-### Container
-
-From 0.5.0 on, each release also publishes `mkit-server` as a multi-arch
-(`linux/amd64`, `linux/arm64`) image, `ghcr.io/officialunofficial/mkit-server`,
-tagged `<version>` (and `<major>.<minor>`, which follows the newest final
-release of that line; there is no `latest` tag). The package is public, so
-no login is needed. The image is distroless and non-root, and holds exactly
-the binary of the signed Linux archive above. Take the digest from the
-release notes, verify it against the exact release tag's signer, and pull
-by digest:
-
-```sh
-VERSION=<version>
-IMAGE=ghcr.io/officialunofficial/mkit-server@sha256:<digest>
-cosign verify "$IMAGE" \
-  --certificate-identity "https://github.com/officialunofficial/mkit/.github/workflows/release.yml@refs/tags/v${VERSION}" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com
-gh attestation verify "oci://${IMAGE}" --repo officialunofficial/mkit
-docker run --rm --entrypoint /usr/local/bin/mkit-server "$IMAGE" version
-```
-
-The entrypoint is `mkit-server serve`, so arguments after the image are
-`serve` flags. Running it (volumes and their owner, uid 65532; secrets;
-ports; health probes; what to put in front of it) is in
-[`docs/CONTAINER.md`](CONTAINER.md).
 
 ## WASM / npm
 
@@ -370,7 +308,7 @@ version:
 
 ```sh
 $ mkit version
-mkit 0.4.2
+mkit 0.5.0
 ```
 
 The exact format `mkit <X.Y.Z>\n` (no extra whitespace, no banner) is
@@ -391,7 +329,7 @@ binary can update itself:
 ```sh
 mkit self update            # update to the latest release
 mkit self update --check    # just report whether an update exists
-mkit self update --version v0.4.2   # pin a specific release
+mkit self update --version v0.5.0   # pin a specific release
 ```
 
 `self update` downloads the release archive for your platform and, when

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run real Paid Uno indexed writes against an optimized local release Worker."""
+"""Run real Paid Workers indexed writes against an optimized local release Worker."""
 import argparse
 import datetime
 import gzip
@@ -96,7 +96,7 @@ def run_fixture(namespace, mode, port, run, runner, artifact, env, evidence):
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", port))
     vars_ = {
-        "AUTH_AUDIENCE": AUDIENCE, "LAUNCH_PROFILE": "uno", "WORKERS_PLAN": "paid",
+        "AUTH_AUDIENCE": AUDIENCE, "LAUNCH_PROFILE": "paid-workers", "WORKERS_PLAN": "paid",
         "INDEXED_MODE": "true", "ADDRESSING": "multi", "SHARDING": "d34",
         "NAMESPACE_POLICY": namespace, "RETENTION": "permanent",
         "STORAGE_LEASES": "false", "GC_ENABLED": "false",
@@ -168,7 +168,7 @@ def run_fixture(namespace, mode, port, run, runner, artifact, env, evidence):
             status, body = request(origin, "/__mkit_test/stats")
             if status == 200:
                 raise RuntimeError("release artifact exposes test-faults stats")
-            fixture["checks"] += ["Paid Uno indexed discovery", "leases/async disabled",
+            fixture["checks"] += ["Paid Workers indexed discovery", "leases/async disabled",
                                    "threshold zero", "no inspector/receipt/proof claim",
                                    "test-faults route absent"]
             features = "indexed-async,indexed-mode,multi-repo,tickets,timers"

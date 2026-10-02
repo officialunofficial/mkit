@@ -22,7 +22,7 @@
 //!   (`mkit_worker_common::adapter::respond_streamed`): a `DownloadPack`
 //!   chunk is at most 800 KiB. A unary response is one frame, so a large
 //!   `ListRefs` page is held whole (about 45 bytes per ref, with a
-//!   128-ref page cap for the Uno launch). A unary response connectrpc compressed
+//!   128-ref page cap for the Paid Workers launch). A unary response connectrpc compressed
 //!   itself (`Content-Encoding: gzip`, for a client that accepts it) is
 //!   passed through with `encodeBody: "manual"`, so the runtime does not
 //!   compress it a second time.
@@ -35,7 +35,7 @@
 //! **Pipeline.** Auth v2 with the default write quota, one repository
 //! (`AUTH_REPOSITORY`) in the deployment-default namespace and the Worker clock.
 //! `MAX_PACK_BYTES` defaults to 1 GiB; resumable parts carry larger packs.
-//! The Paid Uno launch selects Multi/D34 and scheduled indexed verification.
+//! The Paid Workers launch selects Multi/D34 and scheduled indexed verification.
 //! It is built per request from the request's `Env`: building it costs no
 //! I/O.
 //!
@@ -196,6 +196,8 @@ pub struct WorkerConfig {
     pub takedown: Option<crate::admin::TakedownSettings>,
     /// Default-off private scanner retrieval, available only to Paid inspection.
     pub scanner_retrieval: Option<Arc<mkit_server::scanner_retrieval::RetrievalConfig>>,
+    /// Durable asynchronous inspection mode; default-off and programmatic.
+    pub inspection_mode: bool,
     /// Optional dedicated deployment-authority keys (`AUTHORITY_FENCE`, `AUTHORITY_KEYS`).
     pub authority_fence: Option<mkit_server::authority::AuthorityFence>,
     /// `AUTH_AUDIENCE`: the canonical origin writes are signed for.
@@ -359,6 +361,7 @@ impl WorkerConfig {
         config.single_upload_max_bytes = Some(SINGLE_PUT_MAX_BYTES);
         config.sharding = self.sharding;
         config.default_repo_visibility = self.default_repo_visibility;
+        config.inspection_mode = self.inspection_mode;
         config.ticket_keys.clone_from(&self.ticket_keys);
         config.authority_fence.clone_from(&self.authority_fence);
         config.scanner_retrieval.clone_from(&self.scanner_retrieval);
@@ -583,7 +586,7 @@ impl WorkerConfig {
         #[cfg(not(feature = "test-faults"))]
         if indexed_requested && launch.is_none() {
             return Err(ConfigError(
-                "INDEXED_MODE requires LAUNCH_PROFILE=uno".into(),
+                "INDEXED_MODE requires LAUNCH_PROFILE=paid-workers".into(),
             ));
         }
         let required =
@@ -758,6 +761,7 @@ impl WorkerConfig {
             takedown,
             admin,
             scanner_retrieval,
+            inspection_mode: false,
             authority_fence,
             indexed,
             sharding,
@@ -932,7 +936,7 @@ fn resolve_authority_fence(
 /// (WP-4.8), which needs a Paid plan (a slice spends about 256 of an alarm's
 /// 1,000 subrequests; Free's 50 are all assigned, R-147), D34 (the slices run
 /// on ref shards), Multi addressing and upload tickets. Release activation
-/// additionally requires the explicit Uno launch selection in `from_vars`.
+/// additionally requires the explicit Paid Workers launch selection in `from_vars`.
 fn resolve_indexed(
     requested: bool,
     plan: Option<&str>,
@@ -2293,6 +2297,37 @@ mod glue {
 
     thread_local! {
         static SHARDING_GUARD: std::cell::RefCell<Option<Settled>> = const { std::cell::RefCell::new(None) };
+        static INSPECTION_GUARD: std::cell::RefCell<Option<crate::inspection_guard::Settled>> = const { std::cell::RefCell::new(None) };
+    }
+
+    async fn check_inspection_mode(
+        meta: &WorkerNamespaceStore,
+        cfg: &WorkerConfig,
+    ) -> Result<(), crate::inspection_guard::GuardError> {
+        let multi = matches!(cfg.addressing, mkit_server::Addressing::Multi(_));
+        let jurisdiction = cfg.placement.jurisdiction.as_deref();
+        if let Some(outcome) = INSPECTION_GUARD.with(|cache| {
+            crate::inspection_guard::Settled::cached(
+                cache,
+                cfg.inspection_mode,
+                cfg.sharding,
+                multi,
+                jurisdiction,
+            )
+        }) {
+            return crate::inspection_guard::into_result(outcome);
+        }
+        let result = crate::inspection_guard::check_mode(meta, cfg.inspection_mode).await;
+        INSPECTION_GUARD.with(|cache| {
+            crate::inspection_guard::Settled::finish(
+                cache,
+                cfg.inspection_mode,
+                cfg.sharding,
+                multi,
+                jurisdiction,
+                result,
+            )
+        })
     }
 
     static BACKUPS_MISSING_LOG: Once = Once::new();
@@ -2613,6 +2648,12 @@ mod glue {
             cfg.probe_partition(),
         )
         .with_budget(request_budget.clone());
+        if let Err(error) = check_inspection_mode(&meta, cfg).await {
+            return crate::admin::no_store(json_response(
+                unavailable_json(error.public_message()),
+                503,
+            ));
+        }
         let checked = match check_mode(&meta, cfg.sharding).await {
             Ok(Outcome::Ok) => {
                 check_addressing(
@@ -2713,8 +2754,7 @@ mod glue {
         if !scanner_request && is_options_preflight(&req) {
             return cors_preflight_response(&cors_allow_headers(), CORS_ALLOW_METHODS);
         }
-        // One invocation owns all backend phases and lazy upload/proof clones.
-        // Reserve 1000 calls for bounded remote hooks and response settlement.
+        // The budget covers all backend phases and reserves 1000 calls for hooks and settlement.
         let request_budget = mkit_server::indexed::budget::SliceBudget::new(9000);
         let meta = WorkerNamespaceStore::new(
             StubTransport::new(env.clone(), cfg.placement.clone()),
@@ -2723,6 +2763,9 @@ mod glue {
         .with_budget(request_budget.clone());
         let jurisdiction = cfg.placement.jurisdiction.as_deref();
         let multi = matches!(cfg.addressing, mkit_server::Addressing::Multi(_));
+        if let Err(error) = check_inspection_mode(&meta, cfg).await {
+            return inspection_unavailable_response(&error, scanner_request);
+        }
         let cached =
             SHARDING_GUARD.with(|cache| Settled::cached(cache, cfg.sharding, multi, jurisdiction));
         #[cfg(feature = "published-view")]
@@ -2776,8 +2819,6 @@ mod glue {
             let body = body_too_large_json(cfg.max_body_bytes);
             return Ok(cors(json_response(body, 400)?));
         }
-        // Cold guard discovery spends additional DO calls: attach no snapshot
-        // reader then, retaining the configured page cap and inspection refusal.
         let pipe = match make_hooks(&env, cfg).and_then(|hooks| {
             pipeline(
                 &env,
@@ -2800,6 +2841,19 @@ mod glue {
             return crate::scanner_retrieval::serve(&pipe, req).await;
         }
         serve_connect(&req, cfg, pipe).await
+    }
+
+    fn inspection_unavailable_response(
+        error: &crate::inspection_guard::GuardError,
+        scanner_request: bool,
+    ) -> worker::Result<Response> {
+        if scanner_request {
+            return crate::scanner_retrieval::not_found();
+        }
+        Ok(cors(json_response(
+            unavailable_json(error.public_message()),
+            503,
+        )?))
     }
 
     fn exceeds_body_cap(req: &Request, cfg: &WorkerConfig) -> bool {
@@ -3792,6 +3846,9 @@ mod tests {
         config.indexed = Some(mkit_server::indexed::IndexedConfig::scheduled(
             config.max_pack_bytes,
         ));
+        // Indexed configuration is only valid under the explicit launch
+        // profile in release-shaped builds.
+        config.launch = Some(crate::launch::LaunchConfig { takedown: false });
         let scanner_public =
             mkit_server::hooks::HookSigner::new("scanner", zeroize::Zeroizing::new([0x33; 32]))
                 .unwrap()
@@ -4828,7 +4885,7 @@ mod tests {
                     .unwrap_err();
             assert!(
                 err.to_string()
-                    .contains("INDEXED_MODE requires LAUNCH_PROFILE=uno"),
+                    .contains("INDEXED_MODE requires LAUNCH_PROFILE=paid-workers"),
                 "{value}"
             );
         }

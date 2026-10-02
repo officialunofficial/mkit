@@ -20,7 +20,7 @@ CASES = ROOT / "scripts/testdata/vcs-worker-launch-cases.json"
 WRANGLER = "4.134.0"
 LANES = {
     "native": ["cargo", "nextest", "run", "--locked", "--manifest-path", "rust/Cargo.toml",
-               "-p", "mkit-server", "-p", "mkit-server-native", "-p", "mkit-server-worker",
+               "-p", "mkit-server", "-p", "mkit-server-worker",
                "-p", "mkit-server-conformance", "--all-features", "--test-threads", "1"],
     "baseline": ["bash", "scripts/vcs-worker-conformance.sh", "--multi", "--", "--filter", "info."],
     "hooks": ["bash", "scripts/vcs-worker-conformance.sh", "--hooks", "--", "--filter", "info."],
@@ -87,7 +87,7 @@ def release_launch(run, env, evidence):
                "--config", "wrangler.dev.jsonc", "--ip", "127.0.0.1", "--port", str(port),
                "--persist-to", str(run / "state"), "--show-interactive-dev-session=false"]
     for name, value in {
-        "AUTH_AUDIENCE": "https://vcs.launch.invalid", "LAUNCH_PROFILE": "uno",
+        "AUTH_AUDIENCE": "https://vcs.launch.invalid", "LAUNCH_PROFILE": "paid-workers",
         "INDEXED_MODE": "true", "WORKERS_PLAN": "paid", "ADDRESSING": "multi",
         "SHARDING": "d34", "NAMESPACE_POLICY": "any", "UNSAFE_OPEN_NAMESPACES": "true",
         "RETENTION": "permanent", "STORAGE_LEASES": "false", "GC_ENABLED": "false",

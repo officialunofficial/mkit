@@ -41,6 +41,7 @@ mod lag;
 mod launch_reads;
 mod leases;
 mod list;
+mod list_repos;
 mod multipart;
 mod outcomes;
 mod packs;
@@ -281,6 +282,7 @@ cases! {
     "epochs.zero_x_secp256k1_statement" => epochs::zero_x_secp256k1_statement, M2, [Grants, MultiRepo], [];
     "epochs.zero_x_webauthn_statement" => epochs::zero_x_webauthn_statement, M2, [Grants, MultiRepo], [];
     "epochs.old_grant_denied_new_grant_works_after_set" => epochs::old_grant_denied_new_grant_works_after_set, M2, [Grants, MultiRepo], [];
+    "repo.list_repos" => list_repos::listing, M2, [SignedReads, MultiRepo, AuthV2], [];
     "reads.signed_verified_in_full" => reads::signed_verified_in_full, M2, [SignedReads, MultiRepo, AuthV2], [];
     "reads.public_unsigned_ok" => reads::public_unsigned_ok, M2, [SignedReads, MultiRepo, AuthV2], [];
     "reads.private_anonymous_not_found" => reads::private_anonymous_not_found, M2, [SignedReads, MultiRepo, AuthV2], [];
@@ -325,6 +327,8 @@ cases! {
     "tickets.advance_expired_ticket" => tickets::advance_expired_ticket, M1, [Tickets, AuthV2, TestFaults], [];
     "indexed.pending_verification_unavailable" => indexed::pending_verification_unavailable, M4, [IndexedMode, MultiRepo, Tickets, AuthV2, TestFaults], [];
     "indexed.async_verification_commits" => indexed::async_verification_commits, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2, TestFaults], [];
+    "launch.takedown_nine_mib_publish" => indexed::takedown_nine_mib_publish, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
+    "launch.takedown_chunked_publish" => indexed::takedown_chunked_publish, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
     "launch.indexed_verification_commits" => indexed::launch_verification_commits, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
     "launch.admin_fixture" => indexed::launch_admin_fixture, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
     "uno.public_fixture" => indexed::uno_public_fixture, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];

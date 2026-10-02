@@ -8,6 +8,7 @@ mod grants;
 mod http_objects;
 mod indexed;
 mod info;
+mod list_repos;
 mod policy;
 mod ref_policy;
 #[cfg(feature = "remote-hooks")]
@@ -578,19 +579,25 @@ type AfterApplyHook = Box<dyn Fn(&MemoryKv, &Partition, &Batch, &BatchOutcome) +
 
 type ApplyHook = Box<dyn Fn(&MemoryKv, &Partition, &Batch) + Send + Sync>;
 type ScanHook = Box<dyn Fn(&MemoryKv, &Partition) + Send + Sync>;
+type ScanPageHook =
+    Box<dyn Fn(&Key, Option<&crate::store::Cursor>, ScanPage) -> ScanPage + Send + Sync>;
 type ReadManyHook = Box<dyn Fn(&MemoryKv, &Partition, &[Key]) + Send + Sync>;
 
 /// A `MemoryKv` that records every key it sees and batch it applies, can
 /// run a hook before each apply, can yield at every call and can fail
 /// every read.
 struct Spy {
+    request_budget: Mutex<Option<crate::indexed::budget::SliceBudget>>,
     inner: Arc<MemoryKv>,
     hook: Option<ApplyHook>,
     after_hook: Option<AfterApplyHook>,
     scan_hook: Option<ScanHook>,
+    scan_page_hook: Option<ScanPageHook>,
     read_many_hook: Option<ReadManyHook>,
     yields: bool,
     fail_reads: bool,
+    fail_read_many: bool,
+    scan_limit: Option<u32>,
     seen: Mutex<Vec<Key>>,
     ops: Mutex<Vec<&'static str>>,
     batches: Mutex<Vec<Batch>>,
@@ -602,12 +609,16 @@ impl Spy {
     fn new(inner: MemoryKv) -> Self {
         Self {
             inner: Arc::new(inner),
+            request_budget: Mutex::new(None),
             hook: None,
             after_hook: None,
             scan_hook: None,
+            scan_page_hook: None,
             read_many_hook: None,
             yields: false,
             fail_reads: false,
+            fail_read_many: false,
+            scan_limit: None,
             seen: Mutex::default(),
             ops: Mutex::default(),
             batches: Mutex::default(),
@@ -658,6 +669,9 @@ impl Spy {
     }
 
     fn maybe_fail_read(&self) -> Result<(), StoreError> {
+        if let Some(budget) = &*self.request_budget.lock().unwrap() {
+            budget.charge()?;
+        }
         if self.fail_reads {
             return Err(StoreError::unavailable("injected read fault"));
         }
@@ -683,6 +697,9 @@ impl NamespaceStore for Spy {
         keys: &[Key],
     ) -> Result<Vec<Option<Value>>, StoreError> {
         self.pause("get_many").await;
+        if self.fail_read_many {
+            return Err(StoreError::unavailable("injected get_many fault"));
+        }
         if let Some(hook) = &self.read_many_hook {
             hook(&self.inner, p, keys);
         }
@@ -707,7 +724,20 @@ impl NamespaceStore for Spy {
         }
         self.maybe_fail_read()?;
         self.saw(start);
-        self.inner.scan(p, start, end, after, limit).await
+        let page = self
+            .inner
+            .scan(
+                p,
+                start,
+                end,
+                after,
+                self.scan_limit.map_or(limit, |cap| limit.min(cap)),
+            )
+            .await?;
+        Ok(self
+            .scan_page_hook
+            .as_ref()
+            .map_or_else(|| page.clone(), |hook| hook(start, after, page.clone())))
     }
 
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
@@ -2735,6 +2765,91 @@ fn authority_fence_requires_capable_store_at_startup() {
             assert_eq!(result.unwrap_err().code(), Code::InvalidArgument);
         }
     }
+}
+
+#[tokio::test]
+async fn any_policy_allows_address_authority_generation_lookup_for_served_namespace() {
+    use crate::repo::MultiAddressing;
+    use crate::store::codec::{NamespaceRecord, encode_namespace_record};
+    use mkit_core::repo_identity::Namespace;
+
+    let clock = clock();
+    let meta = Spy::new(store(&clock));
+    let namespace = Namespace::Address([0x11; 20]);
+    let namespace_key = NamespaceKey::from_namespace(&namespace);
+    let mut config = cfg(authv2());
+    config.addressing = Addressing::Multi(MultiAddressing::new().with_namespace_policy(
+        crate::policy::NamespacePolicy::Any {
+            unsafe_without_admission: true,
+        },
+    ));
+    config.authorizer_role = AuthorizerRole::Authority;
+    config.write_policy = WritePolicy::Owner;
+    config.authority_fence = Some(
+        crate::authority::AuthorityFence::parse(&format!(
+            "deployment {} {}",
+            to_hex(&key(8).verifying_key().to_bytes()),
+            namespace,
+        ))
+        .unwrap(),
+    );
+    let defaults = Hooks::new();
+    let hooks = Hooks {
+        authorizer: Granting,
+        admission: defaults.admission,
+        pre_receive: defaults.pre_receive,
+        receipts: defaults.receipts,
+        outcomes: defaults.outcomes,
+    };
+    let env = build(config, meta, hooks, clock);
+    let coordinator = env.pipe.shards.coordinator(&namespace_key);
+    env.pipe
+        .meta
+        .apply(
+            &coordinator,
+            Batch::new().put(
+                keys::namespace_record(),
+                encode_namespace_record(&NamespaceRecord {
+                    created_at_ms: 1,
+                    config_version: 1,
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let created = u64::try_from(T0).unwrap();
+    let fields = [
+        "mkit-authority-generation:v1".to_owned(),
+        "deployment".to_owned(),
+        namespace.to_string(),
+        "1".to_owned(),
+        AUDIENCE.to_owned(),
+        created.to_string(),
+        (created + 60_000).to_string(),
+        "ab".repeat(32),
+    ];
+    let statement = fields.join("\n");
+    let signature = key(8).sign(&hash(statement.as_bytes()));
+    let wire = format!(
+        "{}.{}",
+        base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            statement.as_bytes()
+        ),
+        base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            signature.to_bytes()
+        )
+    );
+    assert_eq!(env.pipe.set_authority_generation(&wire).await.unwrap(), 1);
+    assert_eq!(
+        env.pipe
+            .get_authority_generation(&namespace.to_string())
+            .await
+            .unwrap(),
+        1
+    );
 }
 
 #[test]
@@ -5255,3 +5370,5 @@ fn prepared_publication_pair_cannot_survive_a_counterpart_guard_race() {
 
 #[cfg(feature = "remote-hooks")]
 mod inspection_budget;
+
+mod takedown_performance;

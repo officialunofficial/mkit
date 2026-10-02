@@ -343,7 +343,7 @@ process.stdout.write(createPublicKey(key).export({format:'der',type:'spki'}).sub
                    ("CONTENT_INDEX", "ContentIndexShard")]
         config = {"name": "mkit-launch-push", "main": str(artifact / "worker/shim.mjs"),
                   "compatibility_date": "2026-09-09", "build": {"command": "true"},
-                  "vars": {"AUTH_AUDIENCE": origin, "LAUNCH_PROFILE": "uno",
+                  "vars": {"AUTH_AUDIENCE": origin, "LAUNCH_PROFILE": "paid-workers",
                            "WORKERS_PLAN": "paid", "INDEXED_MODE": "true", "ADDRESSING": "multi",
                            "SHARDING": "d34", "NAMESPACE_POLICY": "any",
                            "UNSAFE_OPEN_NAMESPACES": "true", "RETENTION": "permanent",
@@ -400,7 +400,7 @@ process.stdout.write(createPublicKey(key).export({format:'der',type:'spki'}).sub
                 raise RuntimeError("default CA unexpectedly trusted scratch-only certificate")
             if request(origin, context, "/__mkit_test/stats", None)[0] == 200:
                 raise RuntimeError("release artifact exposes test-faults stats")
-            evidence["checks"] += ["Paid Uno indexed Any discovery", "HTTPS CA and hostname verified",
+            evidence["checks"] += ["Paid Workers indexed Any discovery", "HTTPS CA and hostname verified",
                                    "default CA rejects scratch-only chain", "test-faults stats absent"]
             home = run / "cli-home"
             xdg = home / ".config"

@@ -10,7 +10,35 @@ const TIMER_COUNT = 65;
 
 export class AlarmProbe extends RefStore {
   constructor(state, env) {
-    super(state, env);
+    const fault = {active: false, injected: 0, rejected: 0, sets: 0, idleSets: 0, inAlarm: false};
+    const storage = new Proxy(state.storage, {
+      get(target, key) {
+        if (key === `${env.FAIL_SCHEDULE}Alarm`) {
+          return (...args) => {
+            if (fault.active && fault.injected === 0) {
+              fault.injected++;
+              return Promise.reject(new Error('injected alarm scheduling failure'));
+            }
+            return target[key](...args);
+          };
+        }
+        if (key === 'setAlarm') {
+          return (...args) => { if (!fault.inAlarm) fault.sets++; return target.setAlarm(...args); };
+        }
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+    });
+    const wrapped = new Proxy(state, {
+      get(target, key) {
+        if (key === 'storage') return storage;
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+    });
+    super(wrapped, env);
+    this.fault = fault;
+    this.phase = env.FAIL_PHASE || '';
     this.storage = state.storage;
     this.ticks = [];
   }
@@ -26,9 +54,20 @@ export class AlarmProbe extends RefStore {
 
   async alarm() {
     const tick = {now: Date.now()};
-    await super.alarm();
-    tick.next = await this.storage.getAlarm();
     this.ticks.push(tick);
+    this.fault.active = this.phase !== 'install';
+    this.fault.inAlarm = true;
+    try {
+      await super.alarm();
+    } catch (error) {
+      tick.failed = true;
+      this.fault.rejected++;
+      throw error;
+    } finally {
+      this.fault.active = false;
+      this.fault.inAlarm = false;
+    }
+    tick.next = await this.storage.getAlarm();
     const state = await this.probeState();
     if (state.remaining === 0 && state.ticks.length >= 3) {
       this.complete(state);
@@ -44,14 +83,23 @@ export class AlarmProbe extends RefStore {
       const writes = [];
       for (let i = 0; i < TIMER_COUNT; i++) {
         const reference = utf8(`default\0refs/heads/alarm-probe/${i}`);
-        const key = new Uint8Array(11 + reference.length);
-        key.set([119, 0]); // Existing w\0 <due:be64> <kind:u8> <reference>.
+        const key = new Uint8Array(20 + reference.length);
+        key.set([119, 0]); // w\0 <due:be64> <kind:u8> <attempt:u8> <original:be64> <reference>.
         new DataView(key.buffer).setBigUint64(2, BigInt(due));
         key[10] = 255; // Existing ref-deleting test timer, test-faults only.
-        key.set(reference, 11);
+        new DataView(key.buffer).setBigUint64(12, BigInt(due));
+        key.set(reference, 20);
         writes.push({kind: 'put', key: encode(key), value: ''});
       }
-      const result = await this.call({op: 'apply', batch: {preconditions: [], writes}});
+      // Install phase: the committing Apply's first alarm install fails; only
+      // a later request (below) may re-arm it.
+      this.fault.active = this.phase === 'install';
+      let result;
+      try {
+        result = await this.call({op: 'apply', batch: {preconditions: [], writes}});
+      } finally {
+        this.fault.active = false;
+      }
       if (result.reply !== 'outcome' || result.outcome.outcome !== 'committed') {
         throw new Error(`fixture did not commit: ${JSON.stringify(result)}`);
       }
@@ -61,6 +109,14 @@ export class AlarmProbe extends RefStore {
       return Response.json(await this.probeState());
     }
     if (!this.completion) throw new Error('fixture has not started');
+    // Any request activation must heal a failed install.
+    if (this.phase === 'install') {
+      await this.probeState();
+      // Once armed, further activations must not call setAlarm again.
+      const before = this.fault.sets;
+      await this.probeState();
+      this.fault.idleSets = this.fault.sets - before;
+    }
     // Await a single completion notification without repeated requests/scans
     // competing with the object's input and storage gates during each tick.
     return Response.json(await this.completion);
@@ -73,7 +129,7 @@ export class AlarmProbe extends RefStore {
       throw new Error(`unexpected timer scan: ${JSON.stringify(result)}`);
     }
     const remaining = result.entries.filter(([key]) => atob(key).charCodeAt(10) === 255).length;
-    return {remaining, ticks: this.ticks, alarm: await this.storage.getAlarm()};
+    return {fault: this.fault, remaining, ticks: this.ticks, alarm: await this.storage.getAlarm()};
   }
 }
 

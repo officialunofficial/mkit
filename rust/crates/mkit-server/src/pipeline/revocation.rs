@@ -145,7 +145,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             let batch = Batch::new()
                 .require(observed_guard(kind.key(), current.as_ref()))
                 .put(kind.key(), codec::encode_u64(new_epoch));
-            match self.meta.apply(&p, batch).await.map_err(meta_error)? {
+            match self.apply_meta(&p, batch).await? {
                 BatchOutcome::Committed => return Ok(EpochTransition::Advance),
                 BatchOutcome::PreconditionFailed { .. } => {}
                 BatchOutcome::DeadlinePassed { .. } => {
@@ -284,7 +284,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         } else {
             batch.delete(key)
         };
-        match self.meta.apply(p, batch).await.map_err(meta_error)? {
+        match self.apply_meta(p, batch).await? {
             BatchOutcome::Committed => Ok(true),
             BatchOutcome::PreconditionFailed { .. } => Ok(false),
             BatchOutcome::DeadlinePassed { .. } => Err(internal("checkpoint had no deadline")),
@@ -496,7 +496,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             let push = Batch::new()
                 .require(observed_guard(keys::epoch_lease(), old.as_ref()))
                 .put(keys::epoch_lease(), codec::encode_epoch_lease(&lease));
-            match self.meta.apply(&p, push).await.map_err(meta_error)? {
+            match self.apply_meta(&p, push).await? {
                 BatchOutcome::PreconditionFailed { .. } => continue,
                 BatchOutcome::DeadlinePassed { .. } => {
                     return Err(internal("epoch push had no deadline"));
@@ -514,12 +514,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .require(Precondition::Equals(key.clone(), value))
                 .require(observed_guard(state.kind.key(), state.epoch_value.as_ref()))
                 .put(key.clone(), codec::encode_leased_shard(&row));
-            match self
-                .meta
-                .apply(coordinator, ack)
-                .await
-                .map_err(meta_error)?
-            {
+            match self.apply_meta(coordinator, ack).await? {
                 BatchOutcome::Committed => return Ok(true),
                 BatchOutcome::DeadlinePassed { .. } => {
                     return Err(internal("epoch acknowledgement had no deadline"));

@@ -26,8 +26,7 @@
 // (mkit#677) to import across module boundaries.
 //
 // The service implementation is `mkit-server`'s `connect` binding over
-// its pipeline, served natively by the `mkit-server` binary
-// (`mkit-server-native`) and on Workers by `mkit-server-worker`; the
+// its pipeline, served on Workers by `mkit-server-worker`; the
 // client is `mkit-transport-connect`'s `ConnectTransport`.
 
 edition = "2023";
@@ -110,6 +109,8 @@ message PackChunk {
 // with expectation=ANY".
 
 service TransportService {
+  // List readable repository names in a namespace (STC §7.10).
+  rpc ListRepos(ListReposRequest) returns (ListReposResponse);
   // List refs whose full name starts with `prefix`. Returned names have
   // `prefix` stripped, per SPEC-REFS §4. An empty prefix lists every ref.
   rpc ListRefs(ListRefsRequest) returns (ListRefsResponse);
@@ -173,6 +174,24 @@ service TransportService {
   // Repository visibility and URL tokens (SPEC-WRITE-GRANTS §9.1, §9.4).
   rpc SetRepoVisibility(SetRepoVisibilityRequest) returns (SetRepoVisibilityResponse);
   rpc IssueObjectUrl(IssueObjectUrlRequest) returns (IssueObjectUrlResponse);
+}
+
+// Namespace listing; grant holders receive the public listing view.
+message ListReposRequest {
+  string namespace = 1;
+  string page_token = 2;
+  uint32 page_size = 3; // 0 means 100; values above 100 are invalid.
+  string name_prefix = 4; // Raw ASCII name prefix, not stripped in responses.
+}
+
+message RepoEntry {
+  string name = 1;
+  RepoVisibility visibility = 2;
+}
+
+message ListReposResponse {
+  repeated RepoEntry repos = 1;
+  string next_page_token = 2;
 }
 
 // ----------------------------------------------------------------------------

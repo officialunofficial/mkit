@@ -223,7 +223,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H
     }
 
     /// Stage 0 for `procedure`: the transport's principal, and the bound
-    /// repository as `x-repository`. Only the enc listener binds a
+    /// repository as `x-repository`. Only an enc listener binds a
     /// repository; a client can never name one. No other header is
     /// answered, so a transport-identity write can never carry a grant.
     pub(super) fn auth(&self, procedure: Procedure) -> Result<Authenticated, ServerError> {

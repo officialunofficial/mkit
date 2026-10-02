@@ -43,7 +43,7 @@ mod http_tokens;
 mod object_reader;
 #[cfg(feature = "http-objects")]
 pub use object_reader::{
-    IssuedUrl, OBJECT_READER_BATCH, OBJECT_READER_CALLS, ObjectReader, ReaderView,
+    IssuedUrl, OBJECT_READER_BATCH, OBJECT_READER_CALLS, ObjectMetadata, ObjectReader, ReaderView,
 };
 mod implicit;
 mod info;
@@ -51,6 +51,8 @@ mod info;
 pub mod inspection;
 mod lease;
 pub mod list;
+mod list_repos;
+pub use list_repos::{RepoEntry, RepoPage};
 mod outcome;
 mod parts;
 mod plan;
@@ -247,6 +249,8 @@ pub struct PipelineConfig {
     pub addressing: Addressing,
     /// How metadata partitions are routed.
     pub sharding: Sharding,
+    /// Durable inspection mode, default-off and reserved for asynchronous inspection wiring.
+    pub inspection_mode: bool,
     /// How requests authenticate.
     pub auth: AuthMode,
     /// Owner-signed write grant verifier for Multi/Owner deployments.
@@ -259,6 +263,9 @@ pub struct PipelineConfig {
     pub default_repo_visibility: RepoVisibility,
     /// Role of the authorizer hook, defaulting to an additional check.
     pub authorizer_role: AuthorizerRole,
+    /// Opt in to namespace-wide `ListRepos` authority grants, requiring returned writer view.
+    /// Default false: non-owner authority callers receive only the public listing.
+    pub list_repos_authority_full: bool,
     /// Upload caps, supplied by the binding (used by M0-05b).
     pub upload_limits: UploadLimits,
     /// Optional tighter cap for legacy single-part `UploadPack` requests.
@@ -356,8 +363,10 @@ impl PipelineConfig {
             write_policy,
             default_repo_visibility: RepoVisibility::Public,
             authorizer_role: AuthorizerRole::Check,
+            list_repos_authority_full: false,
             addressing,
             sharding: Sharding::Single,
+            inspection_mode: false,
             auth,
             grants: None,
             authority_fence: None,
@@ -1000,7 +1009,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// A second pipeline over the same stores, hooks, shard map, clock,
     /// metrics, test fault hooks and write gate, authenticating with
     /// `auth`: how one server hosts bindings with different identity
-    /// sources on one root (the enc listener's `TransportIdentity` beside
+    /// sources on one root (an enc listener's `TransportIdentity` beside
     /// an HTTP listener's bearer token or auth v2) while its writes to a
     /// partition still pass one gate. Every other setting is `self`'s.
     ///
@@ -1936,6 +1945,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     // undo it (§9.1).
                     last_created_ms: row.as_ref().map_or(0, |r| r.last_created_ms).max(now),
                     last_statement_id: row.and_then(|r| r.last_statement_id),
+                    changed_ms: Some(now),
                 }),
             )
             .put(
@@ -1950,6 +1960,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 keys::replay_expiry(ms(auth.expires_at_ms), &auth.replay_scope),
                 Value::default(),
             );
+        self.plan_listing_visibility(p, repo, &mut batch).await?;
         let expired = read::expired_replay_keys(&self.meta, p, now, 32)
             .await
             .map_err(meta_error)?;
@@ -2049,8 +2060,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         visibility: stored_visibility(verified.statement().visibility),
                         last_created_ms: created,
                         last_statement_id: Some(id.clone()),
+                        changed_ms: Some(ms(self.clock.now_ms())),
                     }),
                 );
+            self.plan_listing_visibility(p, repo, &mut batch).await?;
             let purge = self
                 .plan_repository_purge(
                     p,
@@ -3505,18 +3518,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }),
         };
         let mut ahead = ahead;
-        let prepared = match self
-            .prepare_publication(
-                op,
-                &a.repo().identity,
-                p,
-                &req,
-                &mut ahead,
-                implicit_ids.as_deref(),
-                external_bases,
-                inspected,
-            )
-            .await
+        let prepared = match Box::pin(self.prepare_publication(
+            op,
+            &a.repo().identity,
+            p,
+            &req,
+            &mut ahead,
+            implicit_ids.as_deref(),
+            external_bases,
+            inspected,
+        ))
+        .await
         {
             Ok(prepared) => prepared,
             Err(error)
@@ -3598,7 +3610,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     /// Prepare inspection against the complete resulting pair before any write.
-    #[allow(clippy::too_many_arguments)] // Carry the authenticated wire identity for empty retrieval scope.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Carry authenticated wire identity and ticket lag context.
     async fn prepare_publication(
         &self,
         op: &Operation,
@@ -3679,6 +3691,25 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .is_some(),
                 external_bases,
                 verification_set,
+                req.advance
+                    .as_ref()
+                    .and_then(|a| {
+                        a.ids
+                            .iter()
+                            .filter_map(|id| {
+                                snapshot
+                                    .get(&keys::ticket(id))
+                                    .and_then(|raw| codec::decode_ticket(raw).ok())
+                                    .filter(|t| Some(t.pack_id) == pair.packmap)
+                                    .map(|t| t.created_at_ms)
+                            })
+                            .min()
+                    })
+                    .unwrap_or_else(|| {
+                        op.auth
+                            .as_ref()
+                            .map_or(ms(self.clock.now_ms()), |a| ms(a.created_at_ms))
+                    }),
             )
             .await?;
             #[cfg(feature = "remote-hooks")]
@@ -3708,6 +3739,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
     }
 
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Carry consuming-ticket age for repository lag classification.
     async fn verify_publication(
         &self,
         op: &Operation,
@@ -3717,12 +3749,31 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         branch: bool,
         external_bases: &std::collections::BTreeSet<Hash>,
         mut inspected: Option<&mut crate::indexed::inspection::InspectionSet>,
+        created: u64,
     ) -> Result<(), ServerError> {
-        let mut indexed = self
+        let indexed = self
             .cfg
             .indexed
             .ok_or_else(|| internal("publication requires indexed mode"))?;
-        if self.cfg.takedown_denial {
+        let resumed = self.cfg.takedown_denial
+            && self.publication_policy.is_none()
+            && inspected.is_none()
+            && Box::pin(crate::indexed::publication::resume::prepare(
+                &self.meta,
+                p,
+                self.shards.as_ref(),
+                &op.repo,
+                prepared,
+                indexed,
+                ms(self.clock.now_ms()),
+                self.metrics.as_ref(),
+                created,
+            ))
+            .await?;
+        // The canonical fallback retains delta bases; only the metadata-only
+        // continuation can use the whole-job allowance without that residency.
+        let mut indexed = indexed;
+        if self.cfg.takedown_denial && !resumed {
             indexed.decode_budget = indexed.decode_budget.min(8 << 20);
         }
         // Pair verification and dependency visibility share one allocation.
@@ -3745,7 +3796,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 set,
             )
             .await?;
-        } else {
+        } else if !resumed {
             crate::indexed::publication::verify(
                 &self.blobs,
                 &self.meta,
@@ -4096,6 +4147,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
         }
         Ok(snap)
+    }
+
+    /// Apply a batch, typing a full partition as retryable `unavailable`.
+    async fn apply_meta(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, ServerError> {
+        match self.meta.apply(p, batch).await {
+            Ok(outcome) => Ok(outcome),
+            Err(StoreError::Full) => Err(self.partition_full(p, None).await),
+            Err(error) => Err(meta_error(error)),
+        }
     }
 
     /// A full partition: count it, retry the prune alone (deletes still

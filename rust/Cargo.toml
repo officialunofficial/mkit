@@ -26,8 +26,6 @@ members = [
     "crates/mkit-server",
     # The storage-backend conformance suite (publish = false).
     "crates/mkit-server-conformance",
-    # The native adapter: SQLite metadata backend (publish = false).
-    "crates/mkit-server-native",
     # The Cloudflare Workers adapter: R2 blobs, Durable Object metadata
     # (publish = false).
     "crates/mkit-server-worker",
@@ -50,7 +48,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.2"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.95.0"
 license = "MIT OR Apache-2.0"

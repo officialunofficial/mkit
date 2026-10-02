@@ -159,8 +159,7 @@ pub(crate) fn serve(
 /// escape hatch (in which case every request is accepted unchecked).
 type HttpAuth = Option<Arc<str>>;
 
-/// Resolve `--http`'s fail-closed auth gate — FAIL-CLOSED, mirroring
-/// `mkit-server serve`'s bearer-token/`--unsafe-allow-any-peer` gate:
+/// Resolve `--http`'s fail-closed auth gate — FAIL-CLOSED:
 /// refuses to report a usable auth
 /// configuration unless either a non-empty token is available (flag or
 /// [`MCP_TOKEN_ENV`]) or the operator explicitly opted into the unsafe

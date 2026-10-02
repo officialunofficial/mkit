@@ -127,6 +127,30 @@ impl fmt::Debug for TicketKeys {
 pub struct TicketKeyError;
 
 impl TicketKeys {
+    /// Dedicated listing MAC domain; never interchangeable with tickets or receipts.
+    pub(crate) fn listing_signing_key(&self) -> (&str, Zeroizing<Hash>) {
+        let key = &self.keys[0];
+        (
+            &key.id,
+            Zeroizing::new(blake3::derive_key(
+                "mkit ListRepos page token v1",
+                &*key.secret,
+            )),
+        )
+    }
+
+    pub(crate) fn listing_verification_key(&self, id: &[u8]) -> Option<Zeroizing<Hash>> {
+        self.keys
+            .iter()
+            .find(|key| key.id.as_bytes() == id)
+            .map(|key| {
+                Zeroizing::new(blake3::derive_key(
+                    "mkit ListRepos page token v1",
+                    &*key.secret,
+                ))
+            })
+    }
+
     /// The active key id and a domain-separated receipt MAC key. The source
     /// secret is never exposed; the derived key is wiped after use.
     pub(crate) fn receipt_signing_key(&self) -> (&str, Zeroizing<Hash>) {

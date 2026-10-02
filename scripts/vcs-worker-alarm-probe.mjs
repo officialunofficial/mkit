@@ -16,7 +16,13 @@ const root = resolve(import.meta.dirname, '..');
 // Same watchdog as timers.fire_on_schedule; completion has no client polling.
 const WATCHDOG_MS = 20_000;
 const keepGoing = process.argv.slice(2).includes('--keep-going');
-assert.ok(process.argv.slice(2).every(arg => arg === '--keep-going'), 'usage: vcs-worker-alarm-probe.mjs [--keep-going]');
+const failSchedule = process.argv.slice(2).find(arg => arg.startsWith('--fail-schedule='))?.split('=')[1];
+const failPhase = process.argv.slice(2).find(arg => arg.startsWith('--fail-phase='))?.split('=')[1];
+assert.ok(!failPhase || (failPhase === 'install' && failSchedule === 'set'), '--fail-phase=install needs --fail-schedule=set');
+assert.ok(!failSchedule || ['set', 'delete'].includes(failSchedule));
+assert.ok(process.argv.slice(2).every(arg => arg === '--keep-going' || arg === `--fail-schedule=${failSchedule}` || arg === `--fail-phase=${failPhase}`),
+  'usage: vcs-worker-alarm-probe.mjs [--keep-going] [--fail-schedule=set|delete] [--fail-phase=install]');
+const fixtures = failSchedule ? 1 : 20;
 const scratch = await mkdtemp(join(process.env.TMPDIR || tmpdir(), 'alarm-runtime-'));
 const listener = net.createServer();
 await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
@@ -27,7 +33,7 @@ const config = join(scratch, 'wrangler.json');
 await writeFile(config, JSON.stringify({name: 'mkit-alarm-runtime-probe',
   main: join(root, 'apps/vcs-worker/tests/alarm-probe/wrapper.mjs'),
   compatibility_date: '2026-09-09', build: {command: 'true'},
-  vars: {WORKERS_PLAN: 'free', AUTH_AUDIENCE: origin, AUTH_REPOSITORY: 'default',
+  vars: {FAIL_SCHEDULE: failSchedule || '', FAIL_PHASE: failPhase || '', WORKERS_PLAN: 'free', AUTH_AUDIENCE: origin, AUTH_REPOSITORY: 'default',
     SHARDING: 'single', TICKET_KEYS: 'fake-dev 1111111111111111111111111111111111111111111111111111111111111111'},
   durable_objects: {bindings: [{name: 'ALARM_PROBE', class_name: 'AlarmProbe'}]},
   migrations: [{tag: 'v1', new_sqlite_classes: ['AlarmProbe']}]}));
@@ -50,7 +56,7 @@ try {
     await delay(100);
   }
   let passed = 0, failed = 0;
-  for (let i = 1; i <= 20; i++) {
+  for (let i = 1; i <= fixtures; i++) {
     const url = `${origin}/fixture-${i}`;
     const seed = await fetch(url, {method: 'POST', signal: AbortSignal.timeout(WATCHDOG_MS)});
     assert.equal(seed.status, 200);
@@ -77,15 +83,20 @@ try {
     await writeFile(join(scratch, `fixture-${i}.json`), JSON.stringify(state, null, 2));
     if (timedOut || state.remaining !== 0 || state.ticks.length < 3) {
       failed++;
-      console.log(`FAIL alarm continuation ${i}/20: ${JSON.stringify(state)}`);
+      console.log(`FAIL alarm continuation ${i}/${fixtures}: ${JSON.stringify(state)}`);
       assert.ok(keepGoing, `fixture ${i} stalled; see ${scratch}/fixture-${i}.json`);
       continue;
     }
     assert.ok(state.ticks.length >= 3, `fixture ${i} must span the existing 32-fire kind cap`);
+    if (failSchedule) {
+      assert.equal(state.fault.injected, 1, 'scheduling fault must be exercised');
+      assert.equal(state.fault.rejected, failPhase === 'install' ? 0 : 1, 'failed scheduling must reject the alarm for runtime retry');
+    }
+    if (failPhase === 'install') assert.equal(state.fault.idleSets, 0, 'an armed object must not call setAlarm again');
     passed++;
-    console.log(`PASS alarm continuation ${i}/20: 65 timers drained in ${state.ticks.length} ticks`);
+    console.log(`PASS alarm continuation ${i}/${fixtures}: 65 timers drained in ${state.ticks.length} ticks`);
   }
-  console.log(`Alarm continuation rate: ${passed}/20 pass; ${failed}/20 fail`);
+  console.log(`Alarm continuation rate: ${passed}/${fixtures} pass; ${failed}/${fixtures} fail`);
   process.exitCode = failed === 0 ? 0 : 1;
 } finally {
   try { process.kill(-child.pid, 'SIGTERM'); } catch {}

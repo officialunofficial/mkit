@@ -680,6 +680,7 @@ impl<H: HookSet> Fx<H> {
                 visibility: codec::StoredVisibility::Private,
                 last_created_ms: 0,
                 last_statement_id: None,
+                changed_ms: None,
             }),
         );
         let p = self.pipe.shards.coordinator(&repo.namespace);
@@ -2102,8 +2103,7 @@ const RESPONSES: &str =
 const GOLDEN_LEAF: &str = "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f";
 const GOLDEN_COMMIT: &str = "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145";
 
-/// Rows run against the native builder and mount in
-/// mkit-server-native/tests/http_mount.rs::native_proof_response_goldens_hold.
+/// Rows run against the native builder.
 const NATIVE_PROOF_ROWS: &[&str] = &[
     "not_modified_proof_paid_policy",
     "outside_content",

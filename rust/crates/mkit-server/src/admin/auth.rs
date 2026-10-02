@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use ed25519_dalek::{Signature, VerifyingKey};
 use mkit_core::hash::{hash, to_hex};
 use serde::Deserialize;
+use subtle::ConstantTimeEq;
 
 use crate::{ServerError, auth_v2};
 
@@ -156,6 +157,20 @@ impl Config {
         body: &BodyCapture,
         now: i64,
     ) -> Result<Verified, ServerError> {
+        let verified = self.verify_envelope(path, headers, now)?;
+        let body_digest = body.digest();
+        if !bool::from(verified.digest.as_bytes().ct_eq(body_digest.as_bytes())) {
+            return Err(unauth("invalid admin envelope"));
+        }
+        Ok(verified)
+    }
+
+    pub(crate) fn verify_envelope(
+        &self,
+        path: &str,
+        headers: &Headers,
+        now: i64,
+    ) -> Result<Verified, ServerError> {
         check_headers(headers)?;
         if !self.enabled() {
             return Err(ServerError::unauthenticated("admin service disabled"));
@@ -182,6 +197,14 @@ impl Config {
         let nonce = nonce?;
         let digest = digest?;
         let signature = signature?;
+        if digest.len() != 69
+            || !digest.starts_with("body:")
+            || !digest[5..]
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(unauth("invalid admin digest"));
+        }
         let key = self
             .keys
             .iter()
@@ -207,7 +230,6 @@ impl Config {
                 .is_some_and(|a| i128::from(created_ms) > i128::from(a))
             || path == super::READ_PRESERVED_PATH
                 && (key.before.is_some_and(|b| now < b) || key.after.is_some_and(|a| now > a))
-            || digest != body.digest()
         {
             return Err(unauth("invalid admin envelope"));
         }

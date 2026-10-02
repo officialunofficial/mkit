@@ -2,7 +2,7 @@
 #![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
 // `worker::Error` is large; the Workers glue returns it as vcs-worker does.
 #![allow(clippy::result_large_err)]
-//! The Cloudflare Workers adapter of the mkit server (PRD MKIT-29 §5.1),
+//! The Cloudflare Workers adapter of the mkit server (production server design §5.1),
 //! storage half.
 //!
 //! - [`r2`]: [`R2BlobStore`], a content-addressed [`BlobStore`] that
@@ -10,7 +10,7 @@
 //!   depth-1 channel; its final chunk is withheld until the BLAKE3 of every
 //!   byte equals the key, so a blob becomes visible only if it verifies.
 //! - [`do_sql`]: the Durable Object `SQLite` [`SqlConn`], so each Durable
-//!   Object runs the same `SqlKvStore` as the native server.
+//!   Object runs the same `SqlKvStore` as any other `SqlConn` host.
 //! - [`ns_object`]: the Durable Object side of the key-level contract: a
 //!   pure key-value store behind a JSON request, no pipeline logic.
 //! - [`ns_client`]: [`DoNamespaceStore`], the Worker-side
@@ -62,6 +62,10 @@
 //! [`R2BlobStore`]: r2::R2BlobStore
 //! [`DoNamespaceStore`]: ns_client::DoNamespaceStore
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "../tests/common/sqlite.rs"]
+mod test_sqlite;
+
 pub mod adapter;
 pub mod admin;
 pub mod alarm;
@@ -76,6 +80,7 @@ pub mod faults;
 pub mod hooks;
 #[cfg(feature = "http-objects")]
 pub mod http_mount;
+pub mod inspection_guard;
 pub mod launch;
 pub mod naming;
 pub mod ns_client;

@@ -17,7 +17,7 @@ SPEC-CONCURRENCY with `mkit-server`.
 Source: `git diff e7257500 HEAD -- docs/specs/SPEC-CONCURRENCY.md docs/specs/SPEC-REFS.md`.
 
 - **`serve.lock` / `server.lock`** (SPEC-CONCURRENCY §2 table, §3.1):
-  every live server, `mkit serve` and `mkit-server serve`, holds
+  every live server, `mkit serve` and any server embedding `mkit-server`'s filesystem layout, holds
   `serve.lock` shared; `mkit-server` also holds `server.lock` exclusively.
   Modelled in `serveLocks` (invariants `ServeLockRW`, `OneMkitServer`,
   `UpServersHoldServeShared`, `NoMissedDetection`).
@@ -27,8 +27,8 @@ Source: `git diff e7257500 HEAD -- docs/specs/SPEC-CONCURRENCY.md docs/specs/SPE
   and takes the shared lock; busy means skip. Modelled against concurrent
   uploads of other servers, including a stalled streaming upload whose temp
   file is older than the age bound (`SweepAlone`, `NoLiveUploadSwept`).
-- **Cross-domain gap now covers `mkit-server`** (§3.1): `mkit-server
-  --meta fs-layout` writes refs through `FileTransport` under the same
+- **Cross-domain gap now covers `mkit-server`** (§3.1): a `mkit-server`
+  fs-layout deployment writes refs through `FileTransport` under the same
   `<root>/.mkit/refs/.lock` (`FsLayoutStore::apply` ->
   `FileTransport::with_ref_lock`), so in `refs.qnt` a `file` op is a CAS
   from `mkit serve`, `mkit-server` or a `mkit+file://` push alike. The
@@ -146,7 +146,7 @@ cover the whole space to their bounds.
   effects (a starting `mkit serve` skips its sweep, a starting server waits)
   are liveness only. Lock waits never time out (the 5 s timeout is
   abstracted, as in `refs.qnt`). Stop and crash are one action.
-- `mkit-server --meta sqlite` keeps refs in SQLite (the R-81 marker makes
+- A SQLite-metadata `mkit-server` deployment keeps refs in SQLite (the R-81 marker makes
   `FileTransport` refuse ref writes on that root) and is not modelled;
   neither is `mkit-server`'s S3 spool sweep (under `server.lock`, used
   only by `mkit-server`).

@@ -113,12 +113,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             builder
                 .try_finish(&mut batch.preconditions, &mut batch.writes)
                 .map_err(meta_error)?;
-            match self
-                .meta
-                .apply(partition, batch)
-                .await
-                .map_err(meta_error)?
-            {
+            match self.apply_meta(partition, batch).await? {
                 BatchOutcome::Committed => return Ok(()),
                 BatchOutcome::PreconditionFailed { .. } => {}
                 BatchOutcome::DeadlinePassed { .. } => {
@@ -162,12 +157,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         builder
             .try_finish(&mut batch.preconditions, &mut batch.writes)
             .map_err(|_| ServerError::unavailable("admission unavailable"))?;
-        match self
-            .meta
-            .apply(partition, batch)
-            .await
-            .map_err(meta_error)?
-        {
+        match self.apply_meta(partition, batch).await? {
             BatchOutcome::Committed => Ok(PendingGuard {
                 rid: rid.to_owned(),
                 key: keys::reservation(rid).map_err(meta_error)?,
@@ -239,12 +229,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             builder
                 .try_finish(&mut batch.preconditions, &mut batch.writes)
                 .map_err(meta_error)?;
-            match self
-                .meta
-                .apply(partition, batch)
-                .await
-                .map_err(meta_error)?
-            {
+            match self.apply_meta(partition, batch).await? {
                 BatchOutcome::Committed => return Ok(()),
                 // A shard counter moved (or the row changed): re-read and decide.
                 BatchOutcome::PreconditionFailed { .. } => {}

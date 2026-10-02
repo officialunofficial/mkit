@@ -1151,47 +1151,18 @@ Remote / sync:
 
   Refs are served only under `refs/` (SPEC-REFS §2). A read or write of
   any other name is refused by name ("ref name must start with refs/ …");
-  see "Refs outside `refs/`" below. At startup, when no other `mkit serve` or `mkit-server` is serving the
+  see "Refs outside `refs/`" below. At startup, when no other `mkit serve` or server process is serving the
   root, it also removes upload temp files (`packs/.<hex>.tmp.<pid>.<seq>`)
-  that a crashed server left, once they are an hour old. A root served by
-  `mkit-server --meta sqlite:` (marked `.mkit/server-meta`) is refused
+  that a crashed server left, once they are an hour old. A root marked
+  `.mkit/server-meta` (served from SQLite metadata by a server) is refused
   (exit 78): its refs live in the database.
 
-  `mkit serve` has no network listener. The self-hosted `mkit+https://`
-  remote and the `mkit+enc://` listener are the separate `mkit-server`
-  binary (release archive `mkit-server-<version>-<target>.tar.gz`, see
-  [INSTALL.md](INSTALL.md#mkit-server); operator guide
-  [`rust/crates/mkit-server-native/README.md`](../rust/crates/mkit-server-native/README.md)):
-  `mkit-server serve --repo-root <path> --listen <addr>` and/or
-  `--listen-enc <addr>`. It holds the same shared `serve.lock`.
-
-  **Migrating from `mkit serve --http` and `--listen-enc`.** Both were
-  removed from `mkit serve` (passing them is a usage error, exit 64, with a
-  hint). Serve the same root with `mkit-server`:
-
-  | Removed (`mkit serve <path> ...`) | Use (`mkit-server serve --repo-root <path> ...`) |
-  |---|---|
-  | `--http <addr>` | `--listen <addr>` (filesystem packs and `.mkit`-layout refs by default, as before) |
-  | `--http-token <token>` | `--bearer-token-file <path>` (owner-only file) or `MKIT_API_TOKEN`; never on the command line |
-  | `MKIT_API_TOKEN` | unchanged |
-  | `--unsafe-allow-any-http-peer` | `--unsafe-allow-any-peer` |
-  | `--listen-enc <addr>` | `--listen-enc <addr>` (alone, or beside `--listen`) |
-  | `--enc-authorized-peers <path>` | unchanged; the file must be owned by the server's user (or root) and not group- or other-writable |
-  | `--enc-server-key <path>` | unchanged, and required with an allowlist (no `~/.config/mkit/enc/server.key` default) |
-  | `--unsafe-allow-any-enc-peer` | unchanged; refused beside an HTTP listener that requires a token or auth v2 |
-  | `--enc-idle-timeout-secs <secs>` | unchanged; `0` (was "no timeout") is refused |
-  | `--enc-handshake-timeout-secs <secs>` | unchanged; default `10` (was `60`); `0` is refused |
-  | building `mkit` with `--features http-transport` | the `mkit-server` release archive, or `cargo build -p mkit-server-native --bin mkit-server` |
-
-  Clients are unchanged: `mkit+https://` (and loopback `mkit+http://`)
-  remotes send `MKIT_API_TOKEN` as a bearer token, and `mkit+enc://`
-  remotes (a `mkit` built with `--features enc-transport`) pin the
-  server's `?pubkey=`, which `mkit-server` prints at startup. A client may
-  pin its own identity (so an allowlisting server can recognize it across
-  restarts) by pointing the `MKIT_ENC_CLIENT_KEY` environment variable at
-  a user-scoped raw 32-byte key file; otherwise the client uses an
-  ephemeral key. The default port advertised by `mkit+enc://` URLs when
-  none is supplied is **9418**.
+  `mkit serve` has no network listener, and `--http` and `--listen-enc` are
+  usage errors (exit 64). Serve repositories over SSH with `mkit serve`, or
+  on Cloudflare Workers with the `mkit-server-worker` adapter. The
+  `mkit+enc://` transport is deprecated: no maintained server exists for it
+  (a `mkit` built with `--features enc-transport` still carries the client).
+  `MKIT_API_TOKEN` is sent as a bearer token by `mkit+https://` remotes.
 
   **Refs outside `refs/`.** `mkit serve` before 0.5 stored any
   grammar-valid ref name as a file at the served root, so a name without
@@ -1217,7 +1188,7 @@ Remote / sync:
   ```
 
   or delete it if nothing needs it. The same applies to a root served by
-  `mkit-server --repo-root` with the default `.mkit`-layout refs.
+  a `mkit-server` fs-layout deployment with the default `.mkit`-layout refs.
 - `mkit pack-shard <hash> [--out <dir>] [--force]` &mdash; encode a stored
   pack into Reed-Solomon shards plus a manifest, ready to publish to
   an HTTP / S3 origin. Producer side of the SPEC-PACK-SHARDS
@@ -1390,9 +1361,8 @@ Grants, epochs and repository visibility ([SPEC-WRITE-GRANTS](specs/SPEC-WRITE-G
 A *grant* is a statement signed by a namespace owner that lets a grantee's key
 read or write repositories in that namespace on a deployment. `mkit grant`
 manages the grants **you hold**; the store is a directory of files under the
-user config directory. It is not the operator-side `mkit-server grant register`
-(WP-2.12, for ssh/enc transport principals on a server): the two names are
-unrelated commands.
+user config directory. It only holds client-side grants; it does not
+register grants on a server.
 
 - `mkit grant create --cap CAP --grantee HEX (--repo NAME | --all)
   [--refs PATTERN=FLAGS]... [--audience ORIGIN]... [--ttl DURATION]

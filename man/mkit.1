@@ -1255,8 +1255,7 @@ flag, so issue grants for pushes that move a branch as
 .Cm cuf ,
 not
 .Cm cu .
-This store is unrelated to the operator-side
-.Cm mkit-server grant register .
+This store holds client-side grants only; it does not register grants on a server.
 .It Cm epoch Cm show | Cm bump
 .Cm epoch show Ar remote
 prints the grant epoch a remote stores for a namespace.
@@ -1339,14 +1338,11 @@ Both accept at most 604800.
 Only refs named under
 .Pa refs/
 are served; any other name is refused.
-It has no network listener: the self-hosted
-.Cm mkit+https://
+It has no network listener; the
+.Fl Fl http
 and
-.Cm mkit+enc://
-servers are the separate
-.Sy mkit-server
-binary
-.Pq Ic mkit-server serve Fl Fl repo-root Ar path Fl Fl listen Ar addr .
+.Fl Fl listen-enc
+flags no longer exist.
 .It Cm mcp Op Fl Fl repository Ar path
 Start a Model Context Protocol server on stdio so LLM agents can drive
 local repositories: status, diff, log, show, branch, add, commit,

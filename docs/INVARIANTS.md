@@ -56,7 +56,7 @@ bounded key, cursor and collection overhead; continuations and
 nested inventory/chunk/action proofs remain sequential with their existing
 bounds, and existing callers remain serial; core,
 native and Worker scanner retrieval regression suites. The native and Worker
-mounts are default-off; configured Worker launch activation requires the Uno
+mounts are default-off; configured Worker launch activation requires the Paid Workers
 profile and each facility's complete validated configuration.
 
 ## Ticketed pushes bind uploaded bytes to one paired advance
@@ -92,8 +92,8 @@ revocation of every older grant, even when a write was already in flight.
 
 **If violated:** a stale grantee can commit after revocation has completed.
 
-**Enforced by:** `rust/crates/mkit-server-native/tests/epoch_leases.rs`
-on memory and SQLite, and the grant-epoch and ref-scope wire suites.
+**Enforced by:** the grant-epoch and ref-scope wire suites and the pipeline's
+epoch-lease tests.
 
 ## ListRefs pages make bounded forward progress
 
@@ -149,8 +149,6 @@ upload, or a ticketed stream could create business metadata or bypass revocation
 
 **Enforced by:** `mkit-server` pipeline tests `ticketed_upload_no_metadata_and_marker`,
 `ticketed_upload_failures_leave_no_marker`, and `upload::marker::tests::golden_upload_marker_v1`;
-`mkit-server-native` tests `ticketed_memory_all_layouts_touch_no_metadata`
-and `ticketed_sqlite_all_layouts_touch_no_metadata` (including concurrent uploads);
 wire cases `tickets.upload_pack_ticketed` and `repository.ticketed_upload_multi`.
 
 ## Git audit establishes correspondence without a signing key
@@ -412,9 +410,9 @@ cross-service inconsistency, not a build error.
 **Always:** every live server process on a root holds a **shared** kernel
 lock (`mkit_core::repo_lock::acquire_shared`) on `<common_dir>/serve.lock`
 for its entire lifetime: `mkit serve <path>` (stdin SSH-frame, its only
-mode) and `mkit-server serve --repo-root <path>` (HTTP and `mkit+enc://`
-listeners; it also holds `<common_dir>/server.lock` exclusively, so one
-`mkit-server` serves a root at a time). Every command that acquires `worktree.lock`
+mode) and any other server process embedding `mkit-server`'s filesystem
+layout (which also holds `<common_dir>/server.lock` exclusively, so one
+server serves a root at a time). Every command that acquires `worktree.lock`
 or `worktrees.lock` immediately probes that same `serve.lock`
 non-blocking-exclusive (`mkit_core::repo_lock::probe_exclusive`) and, if it
 finds the lock busy, prints a warning to stderr naming the served root
@@ -452,9 +450,7 @@ cover. Detection does not make a concurrent `gc` safe: SPEC-GC
 writer outside gc's lock set must meet, which a dedup hit on an old
 unreachable object does not meet today.
 
-**Enforced by:** `mkit-cli/tests/serve_guard.rs`;
-`mkit-server-native/tests/server_basics.rs`
-(`serve_lock_is_held_while_running`).
+**Enforced by:** `mkit-cli/tests/serve_guard.rs`.
 
 ## Single commonware release train across every manifest and lockfile
 
@@ -585,7 +581,7 @@ on `main` and PRs to it (WP-M0-20).
 ## The default `mkit` CLI is server-free
 
 **Always:** the normal dependency graph of `mkit-cli` with its default
-features, on every target, contains no `axum`, `mkit-server-native`,
+features, on every target, contains no `axum`, `mkit-server-native` (a removed crate, kept on the ban list),
 `rusqlite` or `libsqlite3-sys`; it enables no hyper `server` feature, no
 hyper-util `server*` feature and no connectrpc `server` or `axum` feature;
 and it has `mkit-server` (the engine of `mkit serve`) with only the `ssh`
@@ -595,9 +591,9 @@ tokio itself is allowed: it is the runtime of the Connect and reqwest
 *clients* in the default graph, and `mkit-server` uses only `tokio::sync`.
 
 **Because:** the CLI is what every user installs (`cargo install
-mkit-cli`, the release archives). The HTTP and `mkit+enc://` servers, the
-`SQLite` metadata store and their dependencies belong to the separate
-`mkit-server` binary (production server work, decision Q1). A server stack in the CLI
+mkit-cli`, the release archives). The HTTP server, the
+`SQLite` metadata store and their dependencies belong outside the CLI (the
+`mkit-server` library and its Workers adapter). A server stack in the CLI
 graph grows the published crate's supply chain, its build time and its
 binary, and invites serving code paths the CLI was never reviewed for.
 
@@ -638,9 +634,7 @@ readable before it is complete, on one backend only.
 **Enforced by:** one test binary per backend in
 `rust/crates/mkit-server-conformance/tests/`: `memory_backends.rs`
 (full-capability and `RefsOnly` memory stores, `MemoryBlobStore`),
-`fs_backends.rs` (`FsLayoutStore`, `FsBlobStore`), `sqlite_backends.rs`
-(`SqlKvStore` over `RusqliteConn`, file and in-memory) and
-`s3_backends.rs` (`S3BlobStore` against the in-repo fake S3); the Workers
+and `fs_backends.rs` (`FsLayoutStore`, `FsBlobStore`); the Workers
 stores (`DoNamespaceStore` over a simulated Durable Object, `R2BlobStore`)
 in `rust/crates/mkit-server-worker/tests/conformance.rs`. The suite's own
 mutation tests (`suite_selftest.rs`) prove each case fails the store bug it
@@ -663,22 +657,21 @@ before enabling their repository RPCs.
 **If violated:** an unauthenticated repository RPC can mutate state or mint a token.
 
 **Enforced by:** `mkit-server/tests/connect_dispatch.rs`'s `m2_*` tests
-and the planned-work and SECURITY comments in `connect/service.rs`. Implementing
+and the TODO and SECURITY comments in `connect/service.rs`. Implementing
 WPs replace their stub assertions with behavior and auth tests.
 
-## The native server and the reference Worker pass the black-box wire suite
+## The in-process host and the reference Worker pass the black-box wire suite
 
 **Always:** every `mkit.transport.v1` server mkit ships passes
 `mkit-server-conformance`'s wire suite (`mkit-server-conformance wire`)
 over the network, with no divergences (a divergence must be declared with
 its justification in the test, and fails the test once the case passes):
-`mkit-server` on FS + `.mkit` layout (bearer), FS + SQLite and S3 + SQLite
-(auth v2), both in-process and as the real binary, and `apps/vcs-worker`
+`mkit-server` over the in-process conformance host, and `apps/vcs-worker`
 under `wrangler dev`. The suite speaks raw Connect with its own client, so
 it checks the wire, not mkit's client library.
 
-**Because:** the servers share one pipeline, but each binding (axum,
-Workers fetch, the storage adapters) can still change status codes,
+**Because:** the servers share one pipeline, but each binding (the
+in-process host, Workers fetch, the storage adapters) can still change status codes,
 compression, streaming or limits on its own. "Nothing changes on the wire"
 (production server work §8, M0 exit) is only checkable against a fixed, black-box
 suite; a client that happens to tolerate a change would hide it.
@@ -688,9 +681,7 @@ precondition or a limit, or buffers a stream where the spec requires it to
 stream, and existing clients or third-party implementations break against
 one server only.
 
-**Enforced by:** `rust/crates/mkit-server-native/tests/wire_fs_layout_bearer.rs`,
-`wire_fs_sqlite.rs`, `wire_s3_sqlite.rs` and `wire_binary.rs` (the
-spawned binary), and `rust/crates/mkit-server-conformance/tests/baseline_pipeline_memory.rs`
+**Enforced by:** `rust/crates/mkit-server-conformance/tests/baseline_pipeline_memory.rs`
 (the pipeline over memory stores, plus store mutants each case must catch),
 in the workspace nextest (`just ci`, `just ci-server`, cloudbuild/ci.yaml);
 `scripts/vcs-worker-conformance.sh` for `apps/vcs-worker`, run by
@@ -728,7 +719,7 @@ checksum, the reserved descriptor and sequence-mode bits, and the
 per-block size bound for every window. When both features are on,
 the C decoder serves reads.
 
-**Because:** a pack must mean the same objects on the native server (C)
+**Because:** a pack must mean the same objects on a native build (C)
 and a Workers isolate (`ruzstd`). A frame one runtime accepts and the
 other rejects splits pushes, fetches and indexed state between them.
 
@@ -1226,12 +1217,12 @@ Unknown timer kinds remain stored. Native committed timer Puts notify inside the
 blocking task, even if the awaiting request is canceled.
 
 **Because:** alarm redelivery and concurrent ticks must not duplicate effects;
-cancellation must not hide a durable timer from the native driver.
+cancellation must not hide a durable timer from a driver.
 
 **If violated:** effects can run twice or a committed timer can remain asleep.
 
-**Enforced by:** `mkit-server/src/timers/tests.rs` race and atomicity tests,
-`mkit-server-native/tests/timers.rs`, and the worker's pure alarm tests.
+**Enforced by:** `mkit-server/src/timers/tests.rs` race and atomicity tests
+and the worker's pure alarm tests.
 
 ## Physical timer alarms share bounds and retain cold fairness
 
@@ -1302,10 +1293,7 @@ the equal-timestamp scheduling failure.
 **Always:** a Worker isolate validates its configured sharding (`SHARDING`,
 default `d34`) against `sm 00` in the root RefStore before serving RPCs. An
 unmarked root with rows is single, so it answers 503 until `SHARDING=single` is
-pinned: there is no single to D34 migration (R-123). The native server's
-`bind_sharding` makes the same choice: a recorded or unmarked-with-data `single`
-database under the `d34` default (`--meta sqlite`) is `CONFIG_ERROR`, telling
-the operator to pass `--sharding single`.
+pinned: there is no single to D34 migration (R-123).
 Each cold request runs its own check with its own store handle. The thread-local
 `RefCell<Option<Settled>>` caches only plain definitive data: success, mismatch
 or corruption. No future, promise or request handle crosses request contexts.
@@ -1908,8 +1896,7 @@ isolation across sessions and repositories.
 **Enforced by:** `mkit-server/src/pipeline/mod.rs`
 `check_implicit_packmap` and `update_packmap_consuming` unit tests,
 `mkit-server/src/ssh/tests.rs` pending/consume/reconnect/isolation
-cases, `mkit-cli/tests/serve_golden.rs` session-3 wire goldens, and
-`mkit-server-native/tests/enc_listener.rs` bound-repository cases.
+cases, and `mkit-cli/tests/serve_golden.rs` session-3 wire goldens.
 
 ## Private repositories are indistinguishable from missing ones
 
@@ -2155,8 +2142,8 @@ paused between authorization and durable acceptance.
 **If violated:** a revoked delegate can commit after revocation was acknowledged.
 
 **Enforced by:** the atomic plan, visibility and ticket guards and shared lease
-renewal/completion; memory/SQLite authority tests in
-`rust/crates/mkit-server-native/tests/epoch_leases.rs`. Deployment activation is
+renewal/completion and the conformance memory-backend authority tests.
+Deployment activation is
 optional and requires an Authority hook with explicit generation facts.
 
 ## Worker extracted-object backend completion verifies before visibility
@@ -2200,7 +2187,7 @@ durable takedown request for WP-5.6a. No permissive release API is exposed.
 
 WP-4.10b-1 keeps Extract fail-closed. WP-4.10b-2 supplies source verification,
 holder enqueue/renewal and the opt-in driver; takedown exposure requires admin
-keys, `LAUNCH_PROFILE=uno`, `TAKEDOWN_ENABLED=true`, indexed Paid mode and
+keys, `LAUNCH_PROFILE=paid-workers`, `TAKEDOWN_ENABLED=true`, indexed Paid mode and
 complete §14.7 preservation configuration, with partial configuration refused
 at startup.
 
@@ -2289,7 +2276,7 @@ deferred to WP-5.5c; the durable marker belongs to WP-5.5a-0.
 
 ## Paid launch opt-ins validate before accepting work (WP-4.18 / R-194)
 
-**Always:** the Worker Uno launch explicitly selects Paid indexed Multi/D34,
+**Always:** the Paid Workers launch explicitly selects Paid indexed Multi/D34,
 uses upload tickets at threshold zero, and retains content permanently with
 leases and GC off. Each HTTP/token, hook, and inspection/retrieval opt-in
 validates its complete configuration and distinct key roles before requests.
@@ -2450,7 +2437,7 @@ retention checks or an unaudited hold can expose or destroy evidence.
 verification is mistaken for real takedown completion. **Enforced by:**
 `admin::Engine::handle_streamed`, `takedown::work::Work`'s admin operations,
 the legal-hold planner and the signed catalog/streaming regression tests.
-Production takedown activation requires admin keys, `LAUNCH_PROFILE=uno`,
+Production takedown activation requires admin keys, `LAUNCH_PROFILE=paid-workers`,
 `TAKEDOWN_ENABLED=true`, indexed Paid mode and complete §14.7 preservation
 configuration; startup refuses partial configuration.
 
@@ -2467,3 +2454,27 @@ bad file could silently use another trust configuration.
 augmented roots and its standard verifier. Real TLS Connect/streaming tests
 cover trusted CA, hostname mismatch and default refusal; subprocess tests cover
 selection and CLI config layering. Browser clients keep browser-managed trust.
+
+## Durable inspection mode and repository flags
+
+**Always:** Inspection mode is default-off and one-way: an empty store may
+record `on`; a non-empty unmarked store cannot enable it, and a marked store
+cannot disable it. Each repository flag install or audited release changes its
+monotonic registry version in the same atomic apply as the corresponding flag
+record. Re-installing an unchanged flag is idempotent and does not bump the
+version. **Because:** later inspection work uses the marker to distinguish
+deployments with durable obligations and the version to detect a concurrent
+registry change. **If violated:** existing deployments could acquire inspection
+semantics silently, or a concurrent flag update could be missed. **Enforced by:**
+the core `InspectionMode` and `InspectionFlags` stores, guarded compare-and-swap
+plans, restore/export validation, and Worker startup guard tests.
+
+## Repository-wide inspection holds
+
+**Always:** Every ref's content holds share the canonical repository registry partition.
+A limit-one prefix probe sees any advance's hold under Single and D34. The separate
+ref-level record remains pending until kind-14 pages finish. Release removes only
+its own content rows; its retained released manifest prevents late pages from
+recreating them. The ref-level record is removed after repository cleanup.
+**Because:** ref routing must not hide another advance's serving stop.
+**Enforced by:** cross-ref hold/release, delayed materialization, and restore tests.

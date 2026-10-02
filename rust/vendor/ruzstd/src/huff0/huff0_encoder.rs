@@ -117,7 +117,7 @@ impl<V: AsMut<Vec<u8>>> HuffmanEncoder<'_, '_, V> {
     }
 
     fn write_table(&mut self) {
-        // The strategy for determining this can be improved.
+        // TODO strategy for determining this?
         let weights = self.weights();
         let weights = &weights[..weights.len() - 1]; // dont encode last weight
         if weights.len() > 16 {
@@ -200,7 +200,7 @@ impl HuffmanTable {
             weight: usize,
         }
 
-        // This could use a fixed-size [_; 264] array instead of a temporary Vec.
+        // TODO this doesn't need to be a temporary Vec, it could be done in a [_; 264]
         // only non-zero weights are interesting here
         for (symbol, weight) in weights.iter().copied().enumerate() {
             if weight > 0 {
@@ -321,7 +321,7 @@ fn distribute_weights(amount: usize) -> Vec<usize> {
         // If the amount of new weights needed to get to the next power of two would exceed amount
         // We instead add 1 of a bigger weight and start the cycle again
         if add_new > available_space {
-            // Alternative: repeat this until add_new <= available_space.
+            // TODO we could maybe instead do this until add_new <= available_space?
             //  target_weight += 1
             //  add_new /= 2
             target_weight = weight_counter;

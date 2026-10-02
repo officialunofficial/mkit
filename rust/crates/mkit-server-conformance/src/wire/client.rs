@@ -33,6 +33,8 @@ pub enum Rpc {
     GetGrantEpoch,
     /// Unsigned owner-statement epoch change.
     SetGrantEpoch,
+    /// Namespace repository listing.
+    ListRepos,
     /// `ListRefs`
     ListRefs,
     /// `ReadRef`
@@ -66,6 +68,7 @@ impl Rpc {
         match self {
             Self::GetGrantEpoch => "/mkit.transport.v1.TransportService/GetGrantEpoch",
             Self::SetGrantEpoch => "/mkit.transport.v1.TransportService/SetGrantEpoch",
+            Self::ListRepos => "/mkit.transport.v1.TransportService/ListRepos",
             Self::ListRefs => "/mkit.transport.v1.TransportService/ListRefs",
             Self::ReadRef => "/mkit.transport.v1.TransportService/ReadRef",
             Self::UpdateRef => "/mkit.transport.v1.TransportService/UpdateRef",

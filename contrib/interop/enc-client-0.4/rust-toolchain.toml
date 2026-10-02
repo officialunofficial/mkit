@@ -1,5 +1,0 @@
-# Mirror rust/rust-toolchain.toml (a sibling workspace cannot inherit it).
-[toolchain]
-channel = "1.95.0"
-components = ["rustfmt", "clippy"]
-profile = "minimal"

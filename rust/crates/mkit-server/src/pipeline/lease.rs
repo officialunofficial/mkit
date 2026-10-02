@@ -38,6 +38,7 @@ pub(super) enum LeaseObservation {
 pub(super) struct CoordinatorLease {
     namespace: Option<Value>,
     repo: Option<Value>,
+    visibility: Option<Value>,
     epoch: Option<Value>,
     authority: Option<Value>,
     authority_generation: Option<u64>,
@@ -257,6 +258,11 @@ fn grant_batch(
         batch = batch.put(nr_key, codec::encode_namespace_record(&namespace));
     }
     if creation.repo {
+        batch.preconditions.push(observed_guard(
+            keys::repo_visibility(repo),
+            read.visibility.as_ref(),
+        ));
+        super::list_repos::index_writes(&mut batch, repo, true, read.visibility.as_ref())?;
         batch = batch.put(
             rr_key,
             codec::encode_repo_record(&codec::RepoRecord { created_at_ms }),
@@ -322,6 +328,7 @@ async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
     if let Some(window) = seed_window {
         wanted.push(keys::quota_total(window));
     }
+    wanted.push(keys::repo_visibility(&repo_id.name));
     let reported = match relay_watermark(source, p, ms(clock.now_ms())).await {
         Ok(value) => value,
         Err(StoreError::Corrupt(reason)) => {
@@ -396,6 +403,7 @@ async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
     let read = CoordinatorLease {
         namespace: namespace.clone(),
         repo: repo.clone(),
+        visibility: rows.last().cloned().flatten(),
         epoch: epoch.clone(),
         authority: authority.clone(),
         authority_generation: if authority_fence {
@@ -434,6 +442,24 @@ async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
 /// commit deadline and the margin fit in it.
 const RELAY_LEASE_BUDGET_MS: u64 = 15_000;
 
+fn relay_apply_error(
+    metrics: &dyn crate::telemetry::Metrics,
+    partition: &Partition,
+    error: StoreError,
+) -> ServerError {
+    if matches!(error, StoreError::Full) {
+        metrics.incr(
+            super::METRIC_PARTITION_FULL,
+            &[("kind", partition.kind())],
+            1,
+        );
+        tracing::error!(kind = partition.kind(), "storage partition full");
+        ServerError::unavailable("storage partition full")
+    } else {
+        meta_error(error)
+    }
+}
+
 /// The source epoch lease for an index relay enqueue that a timer performs,
 /// not an `AdvanceRefs` (WP-4.8, D-1). The lease lasts 30 s and a decode
 /// slice can outlast it, but only pipeline batches renew and install it. This
@@ -453,6 +479,7 @@ pub async fn renew_for_relay<L: NamespaceStore, M: NamespaceStore>(
     meta: &M,
     shards: &dyn ShardMap,
     clock: &dyn Clock,
+    metrics: &dyn crate::telemetry::Metrics,
     repo: &RepoId,
     p: &Partition,
     params: &LeaseParams,
@@ -497,10 +524,11 @@ pub async fn renew_for_relay<L: NamespaceStore, M: NamespaceStore>(
         )
         .await?;
         let grant = grant_batch(&read, &repo.name, p, now, now, params)?;
+        let coordinator = shards.coordinator(&repo.namespace);
         match meta
-            .apply(&shards.coordinator(&repo.namespace), grant.batch)
+            .apply(&coordinator, grant.batch)
             .await
-            .map_err(meta_error)?
+            .map_err(|error| relay_apply_error(metrics, &coordinator, error))?
         {
             BatchOutcome::Committed => {}
             BatchOutcome::PreconditionFailed { .. } => continue,
@@ -514,7 +542,10 @@ pub async fn renew_for_relay<L: NamespaceStore, M: NamespaceStore>(
             .require(observed_guard(keys::epoch_lease(), raw.as_ref()))
             .put(keys::epoch_lease(), value.clone());
         if matches!(
-            local.apply(p, install).await.map_err(meta_error)?,
+            local
+                .apply(p, install)
+                .await
+                .map_err(|error| relay_apply_error(metrics, p, error))?,
             BatchOutcome::Committed
         ) {
             return Ok(value);
@@ -653,12 +684,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 created_at_ms,
                 &LeaseParams::from(&self.cfg),
             )?;
-            match self
-                .meta
-                .apply(&coordinator, grant.batch)
-                .await
-                .map_err(meta_error)?
-            {
+            let outcome = match self.meta.apply(&coordinator, grant.batch).await {
+                Ok(outcome) => outcome,
+                Err(StoreError::Full) => return Err(self.partition_full(&coordinator, None).await),
+                Err(error) => return Err(meta_error(error)),
+            };
+            match outcome {
                 BatchOutcome::Committed => {
                     let created = if matches!(self.cfg.addressing, Addressing::Multi(_)) {
                         grant.creation

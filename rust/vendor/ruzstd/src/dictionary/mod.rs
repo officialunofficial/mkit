@@ -42,7 +42,7 @@ use std::{
 /// A set of values that are used during dictionary construction.
 ///
 /// Changing these values can improve the resulting dictionary size for certain datasets.
-// Planned: move `k` here.
+// TODO: move `k` here.
 pub(super) struct DictParams {
     /// Segment size.
     ///

@@ -80,32 +80,20 @@ residency. Snapshots contain private ref names, signer keys, tickets and replay
 rows. Confirm the bucket's access policy before the first deployment.
 Keep `WORKERS_PLAN=free` on a Free account.
 
-Indexed serving selects the Paid Uno launch profile described below. Free
+Indexed serving selects the Paid Workers launch profile described below. Free
 Workers cannot enable indexed mode. WP-4.18 has merged, validates the profile and activates the extraction driver;
 test-faults indexed conformance is separate evidence and does not establish
 the completed launch matrix.
 The alarm budget is shared across handlers; see the
 [Workers operator guide](../../docs/operations/workers.md).
 
-For a backend move or recovery beyond PITR, collect a complete, compatible
-set of `.kvlog` partition snapshots from R2 into the native export directory
-layout. Select exactly one object for each `<kind>/<partition-hash>/`, normally
-the newest. These snapshots are per partition and do not form one consistent
-cut. Keep the target offline, and run `mkit-server restore --meta
-sqlite:<NEW PATH> --from <DIR> --sharding single|d34`. Restore accepts only a
-new database, advances grant epochs by at least 2^32, re-keys relay rows from
-the supplied watermarks and marks coordinators recovered. A native deployment can create a
-consistent portable set directly with `mkit-server export --meta
-sqlite:<PATH> --out <DIR>`; `mkit-server backup` is the physical in-place
-recovery option. A snapshot older than auth v2's maximum 300,000 ms envelope
-validity cannot revive a replayable write envelope.
-
-Owners must re-issue grants after restore. Missing relay sources or coordinators
-are refused by default. `--allow-incomplete` reconstructs missing sources;
-missing coordinators additionally require `--epoch-at-least N` with N ≥ 2^32 (4294967296), above any epoch the lost coordinator could have issued. Review the
-printed missing list. An older target can lack membership or index rows that
-the source had already delivered and removed; index reconcile is required
-before GA (R-116).
+For a backend move or recovery beyond PITR, the `.kvlog` partition snapshots
+in R2 are the source of truth. The standalone `mkit-server` binary that
+shipped `export`, `restore` and `backup` commands for a native SQLite
+deployment was removed, so there is no supported restore tool today. A
+snapshot older than auth v2's maximum 300,000 ms envelope validity cannot
+revive a replayable write envelope, and owners must re-issue grants after
+any restore.
 
 Production Worker restore and PITR administration are deferred to WP-5.11b.
 Logical in-place/Merge restore, segmented export above 16 MiB, index
@@ -246,7 +234,7 @@ no deployments, so this is acceptable.
 - `NAMESPACE_POLICY=any` admits every self-certifying namespace, requires
   `NAMESPACE_ALLOWLIST` to be absent and requires `UNSAFE_OPEN_NAMESPACES=true`: without non-default admission (M3) any
   fresh key resets its namespace's quota, so the open policy is an explicit
-  unsafe opt-in. The Uno Kit demo selects it deliberately. Under
+  unsafe opt-in. The embedding host demo selects it deliberately. Under
   `any`, takedown discovery is incomplete; configured global denial and
   preservation still apply, and completion must report that limitation.
 
@@ -274,7 +262,7 @@ addressing retains its auth-v2 write policy.
   stream, with download chunks of at most 800 KiB.
 - **Unary replies are one frame**: each paged `ListRefs` reply is held whole,
   about 45 bytes per ref, bounded by the configured page size (128 refs for
-  the Uno launch) and the 2 MiB reply cap. The
+  the Paid Workers launch) and the 2 MiB reply cap. The
   conformance script's 1 MiB body-buffer bound covers the streaming RPCs
   only.
 - **Client deadlines are not enforced**: `connect-timeout-ms` and
@@ -350,7 +338,7 @@ Object database for `auth_v2.mjs --corrupt-ref`.
 
 ## Deploy (not yet live)
 
-The historical [staging template](staging/README.md) is inert. The single Uno
+The historical [staging template](staging/README.md) is inert. The single Workers
 launch uses the [Workers operator guide](../../docs/operations/workers.md).
 User-owned staging and launch acceptance remain unrun.
 
@@ -396,9 +384,9 @@ barrier completes. Repeating the signed target resumes durable progress; it does
 not create a namespace or charge first-write creation. Restore must preserve the
 authority mode and generation, then declare real lease-table recovery.
 
-## Paid Uno launch profile (WP-4.18 / R-194)
+## Paid Workers launch profile (WP-4.18 / R-194)
 
-Set `LAUNCH_PROFILE=uno`, `WORKERS_PLAN=paid`, `INDEXED_MODE=true`,
+Set `LAUNCH_PROFILE=paid-workers`, `WORKERS_PLAN=paid`, `INDEXED_MODE=true`,
 `ADDRESSING=multi`, `SHARDING=d34` and `TICKET_KEYS`. The profile fixes
 `RETENTION=permanent`, `STORAGE_LEASES=false` and `GC_ENABLED=false`; other
 values are refused. Ticketed uploads use threshold zero. Namespace policy is
@@ -415,11 +403,11 @@ configuration before activation:
 | Inspection | Zero inspectors is valid. With inspection, up to four sync `fail_closed` inspectors; `HOOK_ROLES=inspect`, `INSPECT_MODE=sync`, `INSPECT_ON_UNAVAILABLE=fail_closed`, `SCANNER_RETRIEVAL=true`, `SCANNER_KEYS` and dedicated `SCANNER_RETRIEVAL_KEYS`. Async, publish-on-unavailable and clear deadlines are refused |
 | Admin | Dedicated `ADMIN_KEYS` with signed requests, permitted roles, replay and gapless audit |
 | Paid HTTP reads | `HTTP_ADMIT_READS=true` additionally requires `HTTP_OBJECTS=true` and the `admit` hook role; response completion retains the fetch request waitUntil lifetime plus durable reconcile |
-| Takedown | `TAKEDOWN_ENABLED=true`, admin keys, separate preservation bucket, explicit retention, dedicated preservation signer and published key list under §14.7, plus signed HTTPS `cache-purge`. Partial configuration is refused |
+| Takedown | `TAKEDOWN_ENABLED=true`, admin keys, separate preservation bucket, explicit retention, dedicated preservation signer and published key list under §14.7, plus configured cache-purge delivery (signed HTTPS or an embedder-supplied `PurgeSink`). Partial configuration is refused |
 
 Extraction (WP-4.10b-2 / #1244) and scanner retrieval (R-193 / #1243) are
 merged; this activation wires their release paths. Configured preservation
-core and the WP-5.6a-3 restricted admin catalog are wired. The requested Uno
+core and the WP-5.6a-3 restricted admin catalog are wired. The requested embedding host
 embedded matrix passes locally; broader variants and actual
 staging remain unrun. Local evidence does not certify deployed resources.
 See the [Workers operator guide](../../docs/operations/workers.md) for deployed verification requirements.
@@ -503,7 +491,7 @@ fetch/alarm delegation. `config_factory(&Env)` returns
 the Outcome sink. `durable_objects!()` uses environment configuration and hooks.
 Both the reference deployment and [embedded example](../embedded-worker/README.md)
 use this macro. [#1259](https://github.com/officialunofficial/mkit/pull/1259)
-records the scoped local Uno acceptance. Use the
+records the scoped local embedding acceptance. Use the
 [Workers operator guide](../../docs/operations/workers.md) for deployed checks.
 
 Set `WorkerConfig::admin_on_public_path = false` to keep AdminService off public
@@ -526,7 +514,7 @@ memory and subrequest limits. Attach the host Context with
 Reserved paths are `/mkit.transport.v1.TransportService/`,
 `/mkit.server.admin.v1.AdminService/`, any path containing `/-/` when HTTP serving
 is mounted, `/.well-known/mkit-*`, `/_mkit/`, and `/__mkit_test/` in test builds.
-A host can choose another prefix such as `/_uno/`. Namespaces and repository
+A host can choose another prefix such as `/_host/`. Namespaces and repository
 names cannot begin with `_`.
 
 The minimal launch profile enables `pack-ruzstd` to accept native compressed pushes.
@@ -548,7 +536,7 @@ historical emitted files fit the recorded local 64 MiB guard.
 | HTTP plus signed HTTPS | `worker-build --release --features pack-ruzstd,http-objects,signed-http-hooks` | 6,993,827 | 2,383,298 | 7,034,055 emitted bytes; local PASS |
 | HTTP plus signed HTTPS and published snapshots | `worker-build --release --features launch` | 7,029,471 | 2,397,658 | 7,070,032 emitted bytes; local PASS |
 
-The distinct Uno acceptance host at `7527556d09c7753462f0449622d86ade0fb3b70e`
+The distinct embedding acceptance host at `7527556d09c7753462f0449622d86ade0fb3b70e`
 measured 6,934,119 raw / 2,370,989 gzip bytes (6,974,355 emitted bytes).
 [#1259](https://github.com/officialunofficial/mkit/pull/1259) pins that distinct
 host artifact and measured runtime scope separately.

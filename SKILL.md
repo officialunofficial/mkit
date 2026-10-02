@@ -123,7 +123,7 @@ mkit visibility set <remote> private                 # owner: public|private (--
 - Among usable grants the **higher epoch wins**; a grant issued for a future epoch
   outranks a live one until the owner bumps the epoch. A write-only grant never lets you
   read a private repository.
-- `mkit grant add` (your store) is unrelated to the operator-side `mkit-server grant register`.
+- `mkit grant add` (your store) is the client-side grant store; it does not register grants on a server.
 
 The signed author is auto-derived from the signing key (difference #4 above); set
 `user.identity` only to pin a different one.

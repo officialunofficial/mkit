@@ -9,11 +9,11 @@
 //       local : direct on-disk mutation under `refs-<ref>.lock` (refs.rs RefMutation)
 //       file  : file transport under `<root>/.mkit/refs/.lock` (RefLock). This
 //               is also the domain of every SERVER of a `.mkit` root: `mkit
-//               serve` (ssh-frame) and `mkit-server serve --meta fs-layout`
+//               serve` (ssh-frame) and a `mkit-server` fs-layout deployment
 //               write refs through `FileTransport` (`FsLayoutStore::apply` ->
 //               `FileTransport::with_ref_lock`), so a `file` op below stands
 //               for a CAS from `mkit serve`, `mkit-server` or a direct
-//               `mkit+file://` push alike. (`mkit-server --meta sqlite` keeps
+//               `mkit+file://` push alike. (a SQLite-metadata `mkit-server` keeps
 //               refs in SQLite; the R-81 root marker makes FileTransport refuse
 //               ref writes there, so that root has no on-disk ref domain; not
 //               modelled.)

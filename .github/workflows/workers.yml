@@ -38,8 +38,7 @@ name: "CI: Workers"
 # `vcs-worker-conformance` job runs the black-box wire suite
 # (mkit-server-conformance) against it under `wrangler dev`
 # (scripts/vcs-worker-conformance.sh). This workflow triggers only on `main`
-# (pushes and PRs into it): during the MKIT-29 epic the same script runs
-# locally, and this job first runs on the final PR to `main`. All jobs feed
+# (pushes and PRs into it). The same script can be run locally. All jobs feed
 # the existing stable gate.
 
 on:

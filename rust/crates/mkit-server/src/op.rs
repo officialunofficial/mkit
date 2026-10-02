@@ -21,6 +21,8 @@ const SERVICE_PREFIX: &str = "/mkit.transport.v1.TransportService/";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Procedure {
+    /// Namespace repository listing.
+    ListRepos,
     /// `ListRefs`.
     ListRefs,
     /// `ReadRef`.
@@ -60,6 +62,7 @@ impl Procedure {
     #[must_use]
     pub const fn connect_path(self) -> &'static str {
         match self {
+            Self::ListRepos => "/mkit.transport.v1.TransportService/ListRepos",
             Self::ListRefs => "/mkit.transport.v1.TransportService/ListRefs",
             Self::ReadRef => "/mkit.transport.v1.TransportService/ReadRef",
             Self::UpdateRef => "/mkit.transport.v1.TransportService/UpdateRef",
@@ -84,6 +87,7 @@ impl Procedure {
     #[must_use]
     pub fn from_connect_path(path: &str) -> Option<Self> {
         Some(match path.strip_prefix(SERVICE_PREFIX)? {
+            "ListRepos" => Self::ListRepos,
             "ListRefs" => Self::ListRefs,
             "ReadRef" => Self::ReadRef,
             "UpdateRef" => Self::UpdateRef,
@@ -114,7 +118,8 @@ impl Procedure {
             | Self::UploadPart
             | Self::CompleteUpload
             | Self::SetRepoVisibility => true,
-            Self::ListRefs
+            Self::ListRepos
+            | Self::ListRefs
             | Self::ReadRef
             | Self::PackExists
             | Self::DownloadPack
@@ -281,6 +286,11 @@ pub struct RefUpdate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OpKind {
+    /// List repository names in the namespace selected by the request.
+    ListRepos {
+        /// Raw repository-name prefix.
+        name_prefix: String,
+    },
     /// List refs under `prefix`.
     ListRefs {
         /// Ref-name prefix; empty lists every ref.
@@ -356,6 +366,7 @@ impl OpKind {
     #[must_use]
     pub const fn procedure(&self) -> Procedure {
         match self {
+            Self::ListRepos { .. } => Procedure::ListRepos,
             Self::ListRefs { .. } => Procedure::ListRefs,
             Self::ReadRef { .. } => Procedure::ReadRef,
             Self::UpdateRef(_) => Procedure::UpdateRef,
@@ -508,8 +519,9 @@ mod tests {
     use crate::error::Code;
     use crate::repo::{NamespaceKey, RepoName};
 
-    const ALL: [(Procedure, &str); 13] = [
+    const ALL: [(Procedure, &str); 14] = [
         (Procedure::ListRefs, "ListRefs"),
+        (Procedure::ListRepos, "ListRepos"),
         (Procedure::ReadRef, "ReadRef"),
         (Procedure::UpdateRef, "UpdateRef"),
         (Procedure::AdvanceRefs, "AdvanceRefs"),

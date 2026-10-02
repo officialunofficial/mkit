@@ -3,6 +3,8 @@ use super::*;
 use crate::pipeline::reservation::PendingGuard;
 use std::collections::BTreeSet;
 
+const DIRECTORY_SCANS: u32 = crate::takedown::directory::DIRECTORY_SHARDS as u32;
+
 fn proof_env(delay: i64, mutate: bool, d34: bool) -> (Env, Arc<AtomicU32>) {
     let clock = clock();
     let mut meta = Spy::new(store(&clock));
@@ -153,7 +155,7 @@ fn cold_proof_expires_original_window_then_warm_reproof_uses_new_attempt() {
     for delay in [11_000, 31_000] {
         let (env, scans) = proof_env(delay, false, false);
         run_proved(&env, None, false).unwrap();
-        assert_eq!(scans.load(Ordering::SeqCst), 8192);
+        assert_eq!(scans.load(Ordering::SeqCst), 2 * DIRECTORY_SCANS);
         let batches = env.batches();
         assert_eq!(batches.len(), 2);
         assert_eq!(
@@ -174,7 +176,7 @@ fn proof_refreshes_ahead_rows_before_guarded_plan() {
         run_proved(&env, None, false).unwrap(),
         StoredResult::UpdateRef(UpdateRefResult::Conflict { current: Some(B) })
     );
-    assert_eq!(scans.load(Ordering::SeqCst), 4096);
+    assert_eq!(scans.load(Ordering::SeqCst), DIRECTORY_SCANS);
     assert!(env.batches().is_empty());
 }
 
@@ -182,7 +184,7 @@ fn proof_refreshes_ahead_rows_before_guarded_plan() {
 fn proof_crossing_initial_lease_renews_before_plan() {
     let (env, scans) = proof_env(31_000, false, true);
     run_proved(&env, None, true).unwrap();
-    assert_eq!(scans.load(Ordering::SeqCst), 8192);
+    assert_eq!(scans.load(Ordering::SeqCst), 2 * DIRECTORY_SCANS);
     let source = D34Shards.ref_shard(&repo(), HEAD);
     let value = now(env.pipe.meta.inner.get(&source, &keys::epoch_lease()))
         .unwrap()
@@ -221,7 +223,7 @@ fn proof_does_not_extend_fixed_pending_deadline() {
         run_proved(&env, Some(&pending), false).unwrap_err().code(),
         Code::Unavailable
     );
-    assert_eq!(scans.load(Ordering::SeqCst), 8192);
+    assert_eq!(scans.load(Ordering::SeqCst), 2 * DIRECTORY_SCANS);
     assert!(
         env.batches().iter().all(
             |batch| batch.preconditions[0] == Precondition::NotAfter(pending.apply_deadline_ms)
@@ -241,6 +243,18 @@ fn proof_does_not_extend_fixed_pending_deadline() {
 #[test]
 fn cas_retries_repeat_proof_without_resetting_nine_thousand_allowance() {
     let (mut env, scans) = proof_env(0, false, true);
+    // Stale monotonic registrations force two expensive complete proofs.
+    // The third exhausts the original ledger instead of receiving a new one.
+    for i in 0..4200u32 {
+        let mut object = [0; 32];
+        object[28..].copy_from_slice(&i.to_be_bytes());
+        now(crate::takedown::directory::reserve(
+            env.pipe.meta.inner.as_ref(),
+            &object,
+            ms(T0),
+        ))
+        .unwrap();
+    }
     let races = Arc::new(AtomicU32::new(0));
     let count = races.clone();
     env.pipe.meta.hook = Some(Box::new(move |store, p, _| {
@@ -269,7 +283,8 @@ fn cas_retries_repeat_proof_without_resetting_nine_thousand_allowance() {
     );
     assert_eq!(races.load(Ordering::SeqCst), 2);
     assert!(scans.load(Ordering::SeqCst) <= 9000);
-    assert!(scans.load(Ordering::SeqCst) > 8192);
+    assert!(scans.load(Ordering::SeqCst) > 3 * DIRECTORY_SCANS);
+    assert!(env.pipe.meta.calls() <= 9000 + 32);
 }
 
 #[test]
@@ -301,7 +316,7 @@ fn proof_reobserves_revoked_epoch_and_authority_before_planning() {
         })
         .unwrap_err();
         assert_eq!(error.code(), Code::PermissionDenied);
-        assert_eq!(scans.load(Ordering::SeqCst), 4096);
+        assert_eq!(scans.load(Ordering::SeqCst), DIRECTORY_SCANS);
         assert!(env.batches().is_empty());
     }
 }
@@ -319,7 +334,7 @@ fn proof_keeps_signed_expiry_deadline_cap() {
     })
     .unwrap_err();
     assert_eq!(error.code(), Code::Unavailable);
-    assert_eq!(scans.load(Ordering::SeqCst), 4096);
+    assert_eq!(scans.load(Ordering::SeqCst), DIRECTORY_SCANS);
     assert_eq!(
         env.batches()[0].preconditions[0],
         Precondition::NotAfter(ms(T0) + 10_000)
@@ -362,7 +377,7 @@ fn failed_cas_reproves_and_renews_the_retry_lease() {
         }
     }));
     run_proved(&env, None, true).unwrap();
-    assert_eq!(scans.load(Ordering::SeqCst), 8192);
+    assert_eq!(scans.load(Ordering::SeqCst), 2 * DIRECTORY_SCANS);
     let source = D34Shards.ref_shard(&repo(), HEAD);
     let value = now(env.pipe.meta.inner.get(&source, &keys::epoch_lease()))
         .unwrap()
@@ -392,7 +407,7 @@ fn repeated_slow_proof_cannot_refresh_either_attempt_window() {
         run_proved(&env, None, true).unwrap_err().code(),
         Code::Unavailable
     );
-    assert_eq!(scans.load(Ordering::SeqCst), 8192);
+    assert_eq!(scans.load(Ordering::SeqCst), 2 * DIRECTORY_SCANS);
     let all = env.batches();
     let ref_key = keys::ref_key(&repo_name(), HEAD);
     let batches: Vec<_> = all
@@ -429,7 +444,7 @@ fn proof_rechecks_ticket_expiry_on_fresh_business_clock() {
     let error = run_proved_ticket(&env, None, false, |_| {}, true).unwrap_err();
     assert_eq!(error.code(), Code::FailedPrecondition);
     assert_eq!(error.public_message(), "invalid or expired upload ticket");
-    assert_eq!(scans.load(Ordering::SeqCst), 4096);
+    assert_eq!(scans.load(Ordering::SeqCst), DIRECTORY_SCANS);
     assert!(env.batches().is_empty());
 }
 
@@ -467,7 +482,7 @@ fn proof_cannot_guard_new_epoch_while_committing_initial_lease() {
         })
         .unwrap_err();
         assert_eq!(error.code(), Code::PermissionDenied);
-        assert_eq!(scans.load(Ordering::SeqCst), 4096);
+        assert_eq!(scans.load(Ordering::SeqCst), DIRECTORY_SCANS);
         assert!(env.batches().is_empty());
         assert_eq!(
             now(env.pipe.meta.inner.get(&source, &keys::epoch_lease())).unwrap(),
@@ -499,7 +514,7 @@ fn action_after_final_clear_cannot_borrow_a_new_commit_window() {
     }));
     let result = run_proved(&env, None, false);
     assert!(fired.load(Ordering::SeqCst));
-    assert!(scans.load(Ordering::SeqCst) >= 4096);
+    assert!(scans.load(Ordering::SeqCst) >= DIRECTORY_SCANS);
     assert!(
         now(crate::takedown::denial::denied(
             env.pipe.meta.inner.as_ref(),
@@ -692,7 +707,7 @@ fn signed_takedown_after_proof_cannot_publish_a_reused_canonical_pair() {
     let time = env.clock.clone();
     env.pipe.meta.read_many_hook = Some(Box::new(move |_, p, _| {
         if *p == barrier_source
-            && count.load(Ordering::SeqCst) >= 4096
+            && count.load(Ordering::SeqCst) >= DIRECTORY_SCANS
             && !activated.swap(true, Ordering::SeqCst)
         {
             time.set(T0 + 10_001);

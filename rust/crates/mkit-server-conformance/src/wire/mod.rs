@@ -1,9 +1,9 @@
 //! The black-box wire conformance suite (PRD §5.1 part b): it drives any
 //! `mkit.transport.v1` server over real HTTP, given only a base URL and a
 //! [`Profile`] of what the server offers. It never reaches into a
-//! server's process, so it runs unchanged against `mkit-server serve`, the
+//! server's process, so it runs unchanged against the in-process host, the
 //! vcs-worker under `wrangler dev`, staging, or a third party's server
-//! (e.g. Workers with custom storage, or a Rust container). It is the M0
+//! (e.g. Workers with custom storage). It is the M0
 //! "nothing changes on the wire" oracle, and the M1–M5 cases extend it.
 //!
 //! ```no_run
@@ -260,6 +260,8 @@
 //! | `indexed.pending_verification_unavailable` | `indexed-mode`, `multi-repo`, `tickets`, `auth-v2`, `test-faults` | HTTP 503, `Retry-After: 5`, one golden `PendingVerification` detail, and a successful same-nonce retry without replay |
 //! | `indexed.async_verification_commits` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`, `test-faults` | a push of three 16 MiB windows answers `PendingVerification` until its scheduled slices finish (the Worker fails one mid-pack slice on purpose), then the same signed advance commits |
 //! | `launch.indexed_verification_commits` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`; excludes `test-faults` | production-only >33 MiB ticketed push answers pending, then commits and publishes both refs with exact public pack bytes; the HTTP opt-in checks a 128 KiB extracted Blob, filename media policy and unsupported Worker proofs |
+//! | `launch.takedown_nine_mib_publish` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`; excludes `test-faults` | ticketed canonical MKPL and more than 9 MiB of reachable Blob payload publish both paired refs with takedown on; report pending polls and whole-push wall time |
+//! | `launch.takedown_chunked_publish` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`; excludes `test-faults` | valid 32-chunk file and canonical MKPL publish both paired refs with takedown on; report pending polls and whole-push wall time |
 //! | `launch.admin_fixture` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`; excludes `test-faults` | bounded 131072-byte Blob and canonical `PackList` undergo ticketed verification, publish paired public refs and return exact pack bytes; the HTTP opt-in checks the extracted Blob |
 //! | `uno.public_fixture` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`; excludes `test-faults` | default-public no-Set, streamed UploadPart/CompleteUpload, 402/AlreadyPresent, exact 1 MiB Blob and canonical `PackList` undergo ticketed verification, publish paired public refs and return exact pack bytes; the HTTP opt-in checks the extracted Blob |
 //! | `uno.multipart_file_readback` | `indexed-async`, `multi-repo`, `tickets`, `auth-v2`, `multipart`, `http-objects`; excludes `test-faults` | 9 MB file in 36 chunks undergoes a real multipart push, pending verification and exact HTTP object/ref readback using the 304-byte chunk-offset sidecar |
@@ -281,6 +283,7 @@
 //! | `repo.isolation_refs` | `multi-repo`, `auth-v2` | refs and writes stay isolated, including equal names in different namespaces |
 //! | `repo.signature_repository_mismatch_unauthenticated` | `multi-repo`, `auth-v2` | a signature for A sent to B is rejected |
 //! | `repo.missing_repository_invalid_argument` | `multi-repo`, `auth-v2` | absent, empty, bare and malformed identities are rejected |
+//! | `repo.list_repos` | `multi-repo`, `auth-v2`, `signed-reads` | visibility-index merge, owner/public/stranger views, pre-creation visibility, prefix paging and token tampering |
 //! | `repo.read_missing_repo_not_found` | `multi-repo`, `auth-v2` | `ListRefs` and `ReadRef` of a nonexistent repo give `not_found` |
 //! | `repo.packs_need_membership` | `multi-repo`, `auth-v2` | absent membership gives false / `not_found`; uploads still require tickets |
 //! | `repository.upload_needs_ticket` | `multi-repo`, `auth-v2` | an un-ticketed upload fails with `failed_precondition` |

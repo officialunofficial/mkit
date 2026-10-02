@@ -1,11 +1,9 @@
 //! `mkit grant create|add|list|revoke` (WP-2.13, WP-2.14; R-155, R-156):
 //! issue, import, inspect and revoke SPEC-WRITE-GRANTS write and read grants.
 //!
-//! This is the *client* grant store, under the user config directory. It is
-//! not the operator-side `mkit-server grant register` of an ssh/enc
-//! deployment (WP-2.12): that registers grants on a server for transport
-//! principals, this holds grants a person was given so `mkit push` and
-//! `mkit clone` present them.
+//! This is the *client* grant store, under the user config directory. It
+//! does not register grants on a server: it holds grants a person was given
+//! so `mkit push` and `mkit clone` present them.
 
 use std::io::Write as _;
 

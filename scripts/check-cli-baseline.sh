@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #
-# The server-free CLI check (PRD MKIT-29 Q1; docs/INVARIANTS.md, "The
+# The server-free CLI check (docs/INVARIANTS.md, "The
 # default `mkit` CLI is server-free"). For the DEFAULT features of
 # `mkit-cli`, on every target, the normal dependency graph must contain:
 #
