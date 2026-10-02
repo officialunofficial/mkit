@@ -37,6 +37,14 @@ fn ref_file_headers_follow_only_the_last_extension_and_preserve_bytes() {
         ("txt", "text/plain; charset=utf-8", "inline"),
         ("json", "application/json", "attachment"),
         ("pdf", "application/pdf", "inline"),
+        ("mp4", "video/mp4", "inline"),
+        ("webm", "video/webm", "inline"),
+        ("mp3", "audio/mpeg", "inline"),
+        ("ogg", "audio/ogg", "inline"),
+        ("wav", "audio/wav", "inline"),
+        ("heic", "image/heic", "inline"),
+        ("md", "text/markdown; charset=utf-8", "inline"),
+        ("csv", "text/csv; charset=utf-8", "inline"),
         ("svg", "application/octet-stream", "attachment"),
         ("html", "application/octet-stream", "attachment"),
         ("htm", "application/octet-stream", "attachment"),
@@ -153,4 +161,60 @@ fn ordinary_ref_headers_cover_head_ranges_both_file_types_and_exclude_other_resp
     let got = paid.get(&paid.ref_url("room", "main", "small.txt"));
     assert_eq!(got.status, 402);
     assert_eq!(got.header("Content-Disposition"), None);
+}
+
+#[test]
+fn mp4_ranges_preserve_inline_headers_and_exact_bytes_for_both_file_types() {
+    let fx = fixture();
+    let bytes = b"0123456789";
+    let file = blob(bytes);
+    let (chunked, chunks) = manifest(&[&bytes[..5], &bytes[5..]]);
+    let root = tree(&[
+        ("chunked.MP4", EntryMode::Blob, &chunked),
+        ("video.mp4", EntryMode::Blob, &file),
+    ]);
+    let head = commit(&root, &[], "mp4 ranges");
+    let mut objects = vec![&file, &chunked, &root, &head];
+    objects.extend(chunks.iter());
+    fx.push("room", &objects, id(&head), None);
+    for name in ["video.mp4", "chunked.MP4"] {
+        let path = fx.ref_url("room", "main", name);
+        let full = fx.get(&path);
+        assert_eq!(full.status, 200);
+        assert_eq!(full.body, bytes);
+        let etag = full.header("ETag").unwrap();
+        for (range, content_range, selected) in [
+            ("bytes=3-6", "bytes 3-6/10", &bytes[3..7]),
+            ("bytes=7-", "bytes 7-9/10", &bytes[7..]),
+            ("bytes=-3", "bytes 7-9/10", &bytes[7..]),
+        ] {
+            for method in ["GET", "HEAD"] {
+                let got =
+                    read(fx.request(method, &path, None, &[("range", range), ("if-range", etag)]));
+                assert_eq!(got.status, 206);
+                assert_eq!(got.header("Content-Type"), Some("video/mp4"));
+                assert_eq!(
+                    got.header("Content-Disposition"),
+                    full.header("Content-Disposition")
+                );
+                assert_eq!(got.header("Content-Range"), Some(content_range));
+                assert_eq!(
+                    got.header("Content-Length"),
+                    Some(selected.len().to_string().as_str())
+                );
+                assert_eq!(got.header("Accept-Ranges"), Some("bytes"));
+                assert_eq!(got.header("ETag"), Some(etag));
+                assert_eq!(got.header("X-Content-Type-Options"), Some("nosniff"));
+                assert_eq!(
+                    got.header("Content-Security-Policy"),
+                    Some("sandbox; default-src 'none'")
+                );
+                assert_eq!(got.header("Referrer-Policy"), Some("no-referrer"));
+                assert_eq!(
+                    got.body.as_slice(),
+                    if method == "HEAD" { &[] } else { selected }
+                );
+            }
+        }
+    }
 }

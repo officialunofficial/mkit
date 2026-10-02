@@ -109,6 +109,102 @@
       "path": "many.dots.PDF"
     },
     {
+      "disposition": "inline; filename=\"file.mp4\"; filename*=UTF-8''file.mp4",
+      "media": "video/mp4",
+      "name": "file.mp4",
+      "path": "file.mp4"
+    },
+    {
+      "disposition": "inline; filename=\"many.dots.MP4\"; filename*=UTF-8''many.dots.MP4",
+      "media": "video/mp4",
+      "name": "many.dots.MP4",
+      "path": "many.dots.MP4"
+    },
+    {
+      "disposition": "inline; filename=\"file.webm\"; filename*=UTF-8''file.webm",
+      "media": "video/webm",
+      "name": "file.webm",
+      "path": "file.webm"
+    },
+    {
+      "disposition": "inline; filename=\"many.dots.WEBM\"; filename*=UTF-8''many.dots.WEBM",
+      "media": "video/webm",
+      "name": "many.dots.WEBM",
+      "path": "many.dots.WEBM"
+    },
+    {
+      "disposition": "inline; filename=\"file.mp3\"; filename*=UTF-8''file.mp3",
+      "media": "audio/mpeg",
+      "name": "file.mp3",
+      "path": "file.mp3"
+    },
+    {
+      "disposition": "inline; filename=\"many.dots.MP3\"; filename*=UTF-8''many.dots.MP3",
+      "media": "audio/mpeg",
+      "name": "many.dots.MP3",
+      "path": "many.dots.MP3"
+    },
+    {
+      "disposition": "inline; filename=\"file.ogg\"; filename*=UTF-8''file.ogg",
+      "media": "audio/ogg",
+      "name": "file.ogg",
+      "path": "file.ogg"
+    },
+    {
+      "disposition": "inline; filename=\"many.dots.OGG\"; filename*=UTF-8''many.dots.OGG",
+      "media": "audio/ogg",
+      "name": "many.dots.OGG",
+      "path": "many.dots.OGG"
+    },
+    {
+      "disposition": "inline; filename=\"file.wav\"; filename*=UTF-8''file.wav",
+      "media": "audio/wav",
+      "name": "file.wav",
+      "path": "file.wav"
+    },
+    {
+      "disposition": "inline; filename=\"many.dots.WAV\"; filename*=UTF-8''many.dots.WAV",
+      "media": "audio/wav",
+      "name": "many.dots.WAV",
+      "path": "many.dots.WAV"
+    },
+    {
+      "disposition": "inline; filename=\"file.heic\"; filename*=UTF-8''file.heic",
+      "media": "image/heic",
+      "name": "file.heic",
+      "path": "file.heic"
+    },
+    {
+      "disposition": "inline; filename=\"many.dots.HEIC\"; filename*=UTF-8''many.dots.HEIC",
+      "media": "image/heic",
+      "name": "many.dots.HEIC",
+      "path": "many.dots.HEIC"
+    },
+    {
+      "disposition": "inline; filename=\"file.md\"; filename*=UTF-8''file.md",
+      "media": "text/markdown; charset=utf-8",
+      "name": "file.md",
+      "path": "file.md"
+    },
+    {
+      "disposition": "inline; filename=\"many.dots.MD\"; filename*=UTF-8''many.dots.MD",
+      "media": "text/markdown; charset=utf-8",
+      "name": "many.dots.MD",
+      "path": "many.dots.MD"
+    },
+    {
+      "disposition": "inline; filename=\"file.csv\"; filename*=UTF-8''file.csv",
+      "media": "text/csv; charset=utf-8",
+      "name": "file.csv",
+      "path": "file.csv"
+    },
+    {
+      "disposition": "inline; filename=\"many.dots.CSV\"; filename*=UTF-8''many.dots.CSV",
+      "media": "text/csv; charset=utf-8",
+      "name": "many.dots.CSV",
+      "path": "many.dots.CSV"
+    },
+    {
       "disposition": "attachment; filename=\"file.svg\"; filename*=UTF-8''file.svg",
       "media": "application/octet-stream",
       "name": "file.svg",
