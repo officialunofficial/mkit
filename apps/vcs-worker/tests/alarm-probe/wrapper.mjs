@@ -10,7 +10,7 @@ const TIMER_COUNT = 65;
 
 export class AlarmProbe extends RefStore {
   constructor(state, env) {
-    const fault = {active: false, injected: 0, rejected: 0};
+    const fault = {active: false, injected: 0, rejected: 0, sets: 0, idleSets: 0, inAlarm: false};
     const storage = new Proxy(state.storage, {
       get(target, key) {
         if (key === `${env.FAIL_SCHEDULE}Alarm`) {
@@ -21,6 +21,9 @@ export class AlarmProbe extends RefStore {
             }
             return target[key](...args);
           };
+        }
+        if (key === 'setAlarm') {
+          return (...args) => { if (!fault.inAlarm) fault.sets++; return target.setAlarm(...args); };
         }
         const value = Reflect.get(target, key, target);
         return typeof value === 'function' ? value.bind(target) : value;
@@ -35,6 +38,7 @@ export class AlarmProbe extends RefStore {
     });
     super(wrapped, env);
     this.fault = fault;
+    this.phase = env.FAIL_PHASE || '';
     this.storage = state.storage;
     this.ticks = [];
   }
@@ -51,7 +55,8 @@ export class AlarmProbe extends RefStore {
   async alarm() {
     const tick = {now: Date.now()};
     this.ticks.push(tick);
-    this.fault.active = true;
+    this.fault.active = this.phase !== 'install';
+    this.fault.inAlarm = true;
     try {
       await super.alarm();
     } catch (error) {
@@ -60,6 +65,7 @@ export class AlarmProbe extends RefStore {
       throw error;
     } finally {
       this.fault.active = false;
+      this.fault.inAlarm = false;
     }
     tick.next = await this.storage.getAlarm();
     const state = await this.probeState();
@@ -85,7 +91,15 @@ export class AlarmProbe extends RefStore {
         key.set(reference, 20);
         writes.push({kind: 'put', key: encode(key), value: ''});
       }
-      const result = await this.call({op: 'apply', batch: {preconditions: [], writes}});
+      // Install phase: the committing Apply's first alarm install fails; only
+      // a later request (below) may re-arm it.
+      this.fault.active = this.phase === 'install';
+      let result;
+      try {
+        result = await this.call({op: 'apply', batch: {preconditions: [], writes}});
+      } finally {
+        this.fault.active = false;
+      }
       if (result.reply !== 'outcome' || result.outcome.outcome !== 'committed') {
         throw new Error(`fixture did not commit: ${JSON.stringify(result)}`);
       }
@@ -95,6 +109,14 @@ export class AlarmProbe extends RefStore {
       return Response.json(await this.probeState());
     }
     if (!this.completion) throw new Error('fixture has not started');
+    // Any request activation must heal a failed install.
+    if (this.phase === 'install') {
+      await this.probeState();
+      // Once armed, further activations must not call setAlarm again.
+      const before = this.fault.sets;
+      await this.probeState();
+      this.fault.idleSets = this.fault.sets - before;
+    }
     // Await a single completion notification without repeated requests/scans
     // competing with the object's input and storage gates during each tick.
     return Response.json(await this.completion);

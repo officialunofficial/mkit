@@ -598,7 +598,8 @@ mod object {
 
     use super::{PressureStore, decode_request, dispatch, encode, failure};
     use crate::alarm::{
-        AlarmAction, alarm_after_put, alarm_after_tick_with_dirty, run_physical_alarm,
+        AlarmAction, alarm_after_put, alarm_after_tick_with_dirty, alarm_to_arm, head_due_ms,
+        run_physical_alarm,
     };
     use crate::classes::ShardClass;
     use crate::clock::WorkerClock;
@@ -628,6 +629,9 @@ mod object {
         backup_interval_ms: Option<u64>,
         /// A request committed a timer Put while an alarm handler awaited R2.
         alarm_dirty: Cell<bool>,
+        /// The alarm is known to cover every stored timer row. Cleared by any
+        /// failed set/delete; the next activation re-checks and re-arms.
+        alarm_armed: Cell<bool>,
         /// Volatile raw-index rotation; durable retry keys survive cold starts.
         timer_cursor: Cell<Option<TimerCursor>>,
         #[cfg(feature = "published-view")]
@@ -666,6 +670,7 @@ mod object {
                 registry: TimerRegistry::new(),
                 backup_interval_ms: None,
                 alarm_dirty: Cell::new(false),
+                alarm_armed: Cell::new(false),
                 timer_cursor: Cell::new(None),
                 #[cfg(feature = "published-view")]
                 snapshot_alarm: None,
@@ -746,6 +751,7 @@ mod object {
                 return Response::error("method not allowed", 405);
             }
             let body = req.text().await?;
+            self.ensure_alarm().await;
             let decoded = decode_request(&body, self.class);
             let reply = match decoded.and_then(|request| {
                 self.store()
@@ -774,6 +780,8 @@ mod object {
                     if let Some(earliest) = earliest
                         && let Err(error) = self.lower_alarm(earliest).await
                     {
+                        // The write is committed; the next activation re-arms.
+                        self.alarm_armed.set(false);
                         crate::log_failure(&format!("timer alarm update failed: {error}"));
                     }
                     encode(&reply)
@@ -802,6 +810,32 @@ mod object {
             self.storage.set_alarm(ScheduledTime::new(date)).await
         }
 
+        /// Self-healing arm: once per cold start (and again after any failed
+        /// set/delete), make sure an alarm covers the earliest stored timer.
+        /// One indexed read plus at most one `setAlarm`; failures only log.
+        async fn ensure_alarm(&self) {
+            if self.alarm_armed.get() {
+                return;
+            }
+            let Ok(store) = self.store() else { return };
+            let result = async {
+                let now = self.now_ms();
+                let window = store.timer_window(None, 1).map_err(|e| alarm_error(&e))?;
+                if let Some(due) = head_due_ms(&window, now) {
+                    let current = self.storage.get_alarm().await?;
+                    if let Some(next) = alarm_to_arm(current, Some(due), now) {
+                        self.set_alarm(next).await?;
+                    }
+                }
+                Ok::<(), worker::Error>(())
+            }
+            .await;
+            match result {
+                Ok(()) => self.alarm_armed.set(true),
+                Err(error) => crate::log_failure(&format!("timer alarm re-arm failed: {error}")),
+            }
+        }
+
         async fn lower_alarm(&self, earliest: u64) -> worker::Result<()> {
             let current = self.storage.get_alarm().await?;
             if let Some(next) = alarm_after_put(current, earliest, self.now_ms()) {
@@ -813,6 +847,7 @@ mod object {
         /// Fire due timers and multiplex all partition heads onto one alarm.
         pub async fn alarm(&self) -> worker::Result<Response> {
             self.alarm_dirty.set(false);
+            self.alarm_armed.set(false);
             if let Some(budget) = &self.alarm_budget {
                 budget.reset();
             }
@@ -856,11 +891,13 @@ mod object {
                 // when durable timer rows still need a continuation.
                 return Err(error);
             }
+            self.alarm_armed.set(true);
             if self.alarm_dirty.replace(false)
                 && let AlarmAction::Set(next) =
                     alarm_after_tick_with_dirty(None, None, self.now_ms(), true)
                 && let Err(error) = self.set_alarm(next).await
             {
+                self.alarm_armed.set(false);
                 crate::log_failure(&format!("timer alarm update failed: {error}"));
                 return Err(error);
             }
