@@ -647,6 +647,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
         if entry.reason.len() > MAX_BLOCK_REASON_BYTES {
             return Err(StoreError::Invalid("block reason too long".into()));
         }
+        crate::takedown::directory::reserve(&self.store, object, now_ms).await?;
         let (key, value) = (keys::block(object), codec::encode_block_entry(entry));
         self.mutate(object, now_ms, None, None, false, |_, _| {
             Ok(Step::Commit(
@@ -696,6 +697,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
         effects: Batch,
     ) -> Result<(), StoreError> {
         use crate::takedown::denial::{action_key, decode_actions, encode_actions};
+        crate::takedown::directory::reserve(&self.store, object, now_ms).await?;
         let key = action_key(object);
         self.mutate(object, now_ms, Some(&key), None, false, |seen, _| {
             let mut actions = decode_actions(seen.probe.as_ref())?;

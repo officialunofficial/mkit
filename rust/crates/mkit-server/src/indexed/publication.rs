@@ -1,4 +1,5 @@
 //! Verify the complete resulting pair, independently of inspector verdicts.
+pub mod resume;
 use super::{IndexedConfig, resolve};
 use crate::ServerError;
 use crate::pipeline::{ShardMap, clearance::PublicationPolicy};
@@ -269,7 +270,9 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
         .await
         .map_err(|e| match e {
             resolve::ResolveFailure::Other(e) if e.public_message() == "object blocked" => e,
-            _ => closed(),
+            resolve::ResolveFailure::Missing => closed(),
+            resolve::ResolveFailure::Capped => capped(),
+            resolve::ResolveFailure::Other(e) | resolve::ResolveFailure::Corrupt(e) => e,
         })?;
         remaining = remaining
             .checked_sub(memo.retained_bytes())

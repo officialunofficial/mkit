@@ -17,8 +17,30 @@ pub const SCAN_ROWS: u32 = 8;
 pub struct Entry {
     pub version: u8,
     pub kind: u8,
+    pub canonical_len: u64,
+    pub logical_len: Option<u64>,
     pub base: Option<Hash>,
     pub references: StoredAction,
+}
+impl Entry {
+    fn validate(&self) -> Result<(), StoreError> {
+        if self.version != 1
+            || self.kind > 7
+            || match self.kind {
+                0 => self.canonical_len != 0 || self.logical_len.is_some(),
+                1 => {
+                    self.canonical_len < 10
+                        || self.logical_len != self.canonical_len.checked_sub(10)
+                }
+                5 => self.canonical_len < 22 || self.logical_len.is_none(),
+                _ => self.canonical_len < 6 || self.logical_len.is_some(),
+            }
+        {
+            return Err(bad());
+        }
+        denial::encode_actions(vec![self.references.clone()])?;
+        Ok(())
+    }
 }
 #[derive(Default, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,6 +52,85 @@ struct Head {
     parent_digest: Hash,
     digest: Hash,
     complete: bool,
+    packlist: Option<PacklistFacts>,
+}
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PacklistFacts {
+    prev: Option<Hash>,
+    packs: Vec<Hash>,
+}
+/// Bind decoded MKPL facts before the verified inventory seal.
+pub async fn stage_packlist<S: NamespaceStore>(
+    store: &S,
+    pack: &Hash,
+    length: u64,
+    prev: Option<Hash>,
+    packs: &[Hash],
+    now: u64,
+) -> Result<(), StoreError> {
+    if packs.len()
+        > crate::store::index::MAX_LOOKUP_IDS + crate::store::outbox::MAX_TICKETS_PER_ADVANCE
+    {
+        return Err(bad());
+    }
+    let p = content_shard(pack);
+    let key = head_key(pack);
+    let raw = store.get(&p, &key).await?;
+    let mut head: Head = raw.as_ref().map(decode).transpose()?.unwrap_or(Head {
+        version: 1,
+        length,
+        ..Head::default()
+    });
+    let facts = PacklistFacts {
+        prev,
+        packs: packs.to_vec(),
+    };
+    if head.version != 1 || head.length != length {
+        return Err(bad());
+    }
+    if let Some(old) = head.packlist {
+        return if old == facts { Ok(()) } else { Err(bad()) };
+    }
+    if head.complete {
+        return Err(bad());
+    }
+    head.packlist = Some(facts);
+    if store
+        .apply(
+            &p,
+            Batch::new()
+                .require(guard(key.clone(), raw))
+                .require(deadline(now))
+                .put(key, encode(&head)?),
+        )
+        .await?
+        != BatchOutcome::Committed
+    {
+        return Err(StoreError::unavailable("packlist inventory contention"));
+    }
+    Ok(())
+}
+/// Canonical source was verified before these immutable facts were sealed.
+pub(crate) async fn packlist_facts<S: NamespaceStore>(
+    store: &S,
+    pack: &Hash,
+) -> Result<(u64, Option<Hash>, Vec<Hash>), StoreError> {
+    let raw = store
+        .get(&content_shard(pack), &head_key(pack))
+        .await?
+        .ok_or_else(bad)?;
+    let head: Head = decode(&raw)?;
+    if head.version != 1 || !head.complete {
+        return Err(bad());
+    }
+    let facts = head.packlist.ok_or_else(bad)?;
+    if facts.packs.len()
+        > crate::store::index::MAX_LOOKUP_IDS + crate::store::outbox::MAX_TICKETS_PER_ADVANCE
+    {
+        return Err(bad());
+    }
+    Ok((head.length, facts.prev, facts.packs))
 }
 #[must_use]
 pub fn entry_key(pack: &Hash, id: &Hash) -> Key {
@@ -186,14 +287,26 @@ pub async fn stage<S: NamespaceStore>(
             return Ok(());
         }
     }
-    let tree_refs: Vec<Hash> = if matches!(object, Object::Tree(_)) {
-        children(object, ClosureMode::History).into_iter().collect()
-    } else {
-        Vec::new()
-    };
-    let chunks = match object {
-        Object::ChunkedBlob(cb) => cb.chunks.as_slice(),
-        _ => tree_refs.as_slice(),
+    let history_refs: Vec<Hash> = children(object, ClosureMode::History).into_iter().collect();
+    let chunks = history_refs.as_slice();
+    let (canonical_len, logical_len) = match object {
+        Object::Blob(b) => (
+            (b.data.len() as u64).checked_add(10).ok_or_else(bad)?,
+            Some(b.data.len() as u64),
+        ),
+        Object::ChunkedBlob(cb) => (
+            (cb.chunks.len() as u64)
+                .checked_mul(32)
+                .and_then(|n| n.checked_add(22))
+                .ok_or_else(bad)?,
+            Some(cb.total_size),
+        ),
+        _ => (
+            mkit_core::serialize::serialize(object)
+                .map_err(|_| bad())?
+                .len() as u64,
+            None,
+        ),
     };
     let references = denial::stage_references(
         store,
@@ -213,6 +326,8 @@ pub async fn stage<S: NamespaceStore>(
     let row = encode(&Entry {
         version: 1,
         kind: object.object_type() as u8,
+        canonical_len,
+        logical_len,
         base,
         references,
     })?;
@@ -303,6 +418,8 @@ pub async fn dependency<S: NamespaceStore>(
         encode(&Entry {
             version: 1,
             kind: 0,
+            canonical_len: 0,
+            logical_len: None,
             base: None,
             references: refs,
         })?,
@@ -374,10 +491,7 @@ pub async fn entry<S: NamespaceStore>(
     }
     let row: Option<Entry> = raw.map(decode).transpose()?;
     if let Some(row) = &row {
-        if row.version != 1 || row.kind > 7 {
-            return Err(bad());
-        }
-        denial::encode_actions(vec![row.references.clone()])?;
+        row.validate()?;
     }
     Ok(row)
 }
@@ -509,10 +623,7 @@ where
                 return Err(bad());
             }
             let row: Entry = decode(&raw)?;
-            if row.version != 1 || row.kind > 7 {
-                return Err(bad());
-            }
-            denial::encode_actions(vec![row.references.clone()])?;
+            row.validate()?;
             count += 1;
             add_digest(&mut digest, &id, &raw);
             if f(id, row).await? {

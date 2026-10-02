@@ -329,6 +329,7 @@ impl<S: NamespaceStore, T: NamespaceStore> TimerHandler<S> for BudgetedRecheck<T
 }
 
 impl<T: NamespaceStore> PublicationRecheck<T> {
+    #[allow(clippy::too_many_lines)] // Dispatch and the existing guarded publication settlement.
     fn fire_inner<'a, S: NamespaceStore>(
         &'a self,
         ctx: &'a TimerCtx<'a, S>,
@@ -336,6 +337,18 @@ impl<T: NamespaceStore> PublicationRecheck<T> {
         alarm_budget: Option<&'a crate::purge::SliceBudget>,
     ) -> BoxFuture<'a, Result<Fired, StoreError>> {
         Box::pin(async move {
+            if matches!(
+                keys::parse(&Key::new(timer.reference.clone())),
+                Some(keys::ParsedKey::Verification { .. })
+            ) {
+                return crate::indexed::publication::resume::fire(
+                    ctx,
+                    &self.target,
+                    timer,
+                    alarm_budget,
+                )
+                .await;
+            }
             let mut progress = Progress::decode(&timer.value)?;
             let key = Key::new(timer.reference.clone());
             let (repo, name, sequence, shards) = location(ctx.partition, &key)?;

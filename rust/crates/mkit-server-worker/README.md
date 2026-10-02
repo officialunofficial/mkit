@@ -189,7 +189,12 @@ response bytes, including duplicate IDs, also fit `http_decode_budget`.
 
 `read_canonical` returns serialized Blob, Tree, Commit, Remix, Tag and
 **ChunkedBlob manifest** bytes, never pack-only Delta encodings.
-`object_sizes` returns indexed uncompressed content sizes: Blob payload length
+`object_metadata` returns verified object kind, canonical serialization length and
+logical file length (Blob payload or ChunkedBlob total_size; absent for other kinds).
+`read_canonical_with_limit` applies a caller byte cap to two separate counters:
+cumulative ancestor/base decoding and ordered output, including duplicates.
+It returns ResourceExhausted on exhaustion.
+The deprecated `object_sizes` preserves its historical mixed sizes: Blob payload length
 and other objects' canonical serialized length. It performs **no requested-object
 byte reads**. Authorization may read canonical commit/tree/tag/manifest
 ancestors; one manifest authorizes all requested chunks, without a read per
