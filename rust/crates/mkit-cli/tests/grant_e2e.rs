@@ -45,7 +45,10 @@ struct Party {
 
 impl Party {
     fn new(seed: u8) -> Self {
-        let root = tempfile::tempdir().unwrap();
+        // Absolute signing keys must stay under the effective uid's home,
+        // even when the platform's default temporary directory is elsewhere.
+        let key_home = mkit_cli::config::home_dir_for_euid().unwrap();
+        let root = tempfile::tempdir_in(key_home).unwrap();
         let repo = root.path().join("repo");
         let xdg = root.path().join("xdg");
         std::fs::create_dir_all(&repo).unwrap();

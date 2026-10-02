@@ -14,15 +14,15 @@
   },
   "dependencies": {
     "@officialunofficial/og": "^0.3.1",
-    "hono": "^4.13.8",
+    "hono": "^4.13.9",
     "workers-og": "^0.0.27"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260918.1",
+    "@cloudflare/workers-types": "^5.20260925.1",
     "@vitest/coverage-v8": "^5.0.1",
     "typescript": "^7.0.2",
     "vitest": "^5.0.1",
-    "wrangler": "^4.135.0"
+    "wrangler": "^4.140.0"
   },
   "overrides": {
     "sharp": "^0.35.4"

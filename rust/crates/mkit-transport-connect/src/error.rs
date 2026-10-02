@@ -36,7 +36,7 @@ use mkit_core::protocol::{AdmissionChallengeEntry, AdmissionRequired, TransportE
 use crate::proto::mkit::transport::v1::{AdmissionChallenge, PendingVerification};
 use crate::status::STATUS_MARKER;
 
-// TODO(R-138): use mkit_core::admission bounds once the server admission bundle lands.
+// Known gap: use mkit_core::admission bounds once the server admission bundle lands.
 const MAX_CHALLENGES: usize = 8;
 const MAX_SCHEME: usize = 64;
 const MAX_VALUE: usize = 8_192;

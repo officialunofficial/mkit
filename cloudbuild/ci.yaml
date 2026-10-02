@@ -1,6 +1,6 @@
 # Rust workspace CI on Cloud Build — replaces the Linux leg of the
 # `build-and-test` + `msrv` jobs in .github/workflows/rust.yml. Failure-ordered,
-# single sequential build: fmt → clippy → build → signers → nextest → doctests.
+# sequential main and ignored-test steps, both required for the build to pass.
 #
 # NOTE: mkit's Rust workspace lives in `rust/`, and the reference signers are a
 # SEPARATE workspace in `contrib/signers/`. Steps cd into the right tree; this
@@ -39,11 +39,18 @@ options:
   # under triggers, off for a manual `gcloud builds submit` repro).
   dynamicSubstitutions: true
 
-timeout: 2400s # cold ~15-20 min; warm (sccache hit) far less.
+# The workspace grew from 3,218 to 6,780 tests: nextest rose from 88s to
+# 499s, and test compilation from 63s to 209s. The old 40-minute build cap
+# expired during the serial ignored lane, before later main-lane gates ran.
+# Allow 60 minutes for the main step and 50 for the ignored lane, plus
+# ten minutes for source/image setup. Both steps must pass; no tests move out
+# of this required build.
+timeout: 7200s
 
 steps:
   - name: ${_CI_IMAGE}
     id: check
+    timeout: 3600s
     entrypoint: bash
     env:
       - "CARGO_TERM_COLOR=always"
@@ -173,18 +180,6 @@ steps:
         ( cd rust
           cargo nextest run --locked --workspace --all-features
 
-          # #505 PR 5/5: a handful of irreducibly-real tests (subprocess
-          # sleeps, real localhost TCP, the ~5s worktree-lock wait, a real
-          # `ssh` connect attempt to 127.0.0.1:22) were quarantined behind
-          # `#[ignore]` instead of determinized. The `ignored-lane` nextest
-          # profile (rust/.config/nextest.toml) is the single source of
-          # truth for which quarantined tests this serial lane runs and
-          # why — see that profile's comment for the full rationale (both
-          # this file and .github/workflows/rust.yml invoke the same
-          # profile instead of duplicating the test-name filter inline).
-          cargo nextest run --locked --workspace --all-features \
-            --profile ignored-lane --run-ignored ignored-only
-
           # nextest doesn't run doctests; gate them separately.
           cargo test --manifest-path fuzz/Cargo.toml
           cargo test --locked --doc --workspace
@@ -237,4 +232,34 @@ steps:
         bash scripts/check-wasm-dep-graph.sh
         bash scripts/check-cli-baseline.sh
 
+        sccache --show-stats
+
+  # Run the same serial ignored-lane profile after the main gates. The
+  # 75,000-ref D34 listing has an 1800s test ceiling; 3000s also covers the
+  # 300s pack-residency test, the other real-I/O tests, and build headroom.
+  # /workspace retains the main step's target artifacts, with identical
+  # compilation flags, so this step does not need a second cold test build.
+  - name: ${_CI_IMAGE}
+    id: ignored-lane
+    waitFor: [check]
+    timeout: 3000s
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUST_BACKTRACE=short"
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+      - "CARGO_PROFILE_TEST_DEBUG=0"
+      - "MKIT_TEST_STRICT=1"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cd rust
+        cargo nextest run --locked --workspace --all-features \
+          --profile ignored-lane --run-ignored ignored-only
         sccache --show-stats

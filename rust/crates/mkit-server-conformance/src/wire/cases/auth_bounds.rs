@@ -8,7 +8,7 @@
 //! Not asserted, because §7.1 does not state it: lowercase hex in
 //! `X-Public-Key` and `X-Signature` (mkit-core rejects uppercase; the spec
 //! names neither header's encoding).
-// TODO(spec pass): add `auth.v2_key_and_signature_hex_lowercase` once the
+// Planned case: add `auth.v2_key_and_signature_hex_lowercase` once the
 // spec defines the header encodings.
 //
 // The clock-lead case assumes the suite's clock is within about 5 s of the

@@ -89,7 +89,7 @@ fn client(base: &Url, file: Option<File>) -> Client {
 }
 
 fn file() -> tempfile::NamedTempFile {
-    tempfile::NamedTempFile::new_in(std::env::var_os("TMPDIR").unwrap()).unwrap()
+    tempfile::NamedTempFile::new().unwrap()
 }
 
 fn records(file: &tempfile::NamedTempFile) -> Vec<serde_json::Value> {

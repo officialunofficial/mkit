@@ -39,7 +39,7 @@ layout.
 |---|---|---|
 | `Dockerfile.ci` | &mdash; | Baked toolchain: rust 1.95.0, protoc 31.0, native deps, nextest/sccache/deny/audit/llvm-cov/geiger@0.13.0. Tag `:rust-1.95.0`. |
 | `builder.yaml` | &mdash; | Builds and pushes `Dockerfile.ci` to GAR. |
-| `ci.yaml` | `rust.yml` build-and-test (Linux) and `msrv` | fmt → clippy → build → signers → nextest → doctests → version contract → enc-transport → msrv check. |
+| `ci.yaml` | `rust.yml` build-and-test (Linux) and `msrv` | Main gates (60-minute step): fmt → clippy → build → signers → nextest → doctests → version contract → enc-transport → msrv/wasm checks. Required serial ignored-test step follows (50 minutes); overall build limit is 120 minutes. |
 | `codegen.yaml` | `rust.yml` codegen-fresh | `scripts/check-generated-fresh.sh` (needs git and wasm32), then `buf lint` and `buf breaking` against every module in the repo-root `buf.yaml` (`buf` downloaded at run time, not baked into the image). |
 | `security.yaml` | `rust-security.yml` | `cargo audit` (both workspaces) and `cargo deny`. |
 | `docs.yaml` | retired from GitHub Actions, Cloud Build only | rustdoc `-D warnings`, both workspaces. |

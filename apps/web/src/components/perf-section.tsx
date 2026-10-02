@@ -2,8 +2,8 @@ import { CaretRightIcon } from '@phosphor-icons/react/ssr'
 import * as Collapsible from '@radix-ui/react-collapsible'
 import type { ReactNode } from 'react'
 import { labelColor } from '../lib/hash-color'
-import { methodology, sizeBenchmarks, timingBenchmarks, transferBenchmarks } from '../lib/perf-data'
-import type { SizeBenchmark, Theme, TimingBenchmark, TransferBenchmark } from '../lib/perf-data'
+import { methodology, microBenchmarks, sizeBenchmarks, timingBenchmarks, transferBenchmarks } from '../lib/perf-data'
+import type { MicroBenchmark, SizeBenchmark, Theme, TimingBenchmark, TransferBenchmark } from '../lib/perf-data'
 
 /** `13.4628 → "13.5s"`, `0.3108 → "311ms"`, `0.0134 → "13.4ms"`. Sub-second values read better in ms. */
 function fmtSeconds(s: number): string {
@@ -112,6 +112,29 @@ function TransferBlock({ b }: { b: TransferBenchmark }) {
       <div className='space-y-1.5'>
         <Bar label='whole' value={b.wholeChunkBytes} max={max} display={fmtBytes(b.wholeChunkBytes)} />
         <Bar label='delta' value={b.deltaBytes} max={max} display={fmtBytes(b.deltaBytes)} color={labelColor(b.id)} />
+      </div>
+      {b.note ? <p className='max-w-prose text-xs leading-4'>{b.note}</p> : null}
+    </div>
+  )
+}
+
+function fmtMs(ms: number): string {
+  return `${ms.toFixed(ms >= 10 ? 1 : 2)}ms`
+}
+
+function MicroBlock({ b }: { b: MicroBenchmark }) {
+  const max = Math.max(b.beforeMs, b.afterMs)
+  const pct = Math.round((1 - b.afterMs / b.beforeMs) * 100)
+  return (
+    <div className='space-y-3 px-3 py-4'>
+      <div className='flex items-baseline justify-between gap-4'>
+        <h4 className='text-sm font-semibold'>{b.name}</h4>
+        <span className='shrink-0 text-xs font-medium'>{pct}% faster</span>
+      </div>
+      <p className='max-w-prose text-sm'>{b.description}</p>
+      <div className='space-y-1.5'>
+        <Bar label='before' value={b.beforeMs} max={max} display={fmtMs(b.beforeMs)} />
+        <Bar label='after' value={b.afterMs} max={max} display={fmtMs(b.afterMs)} color={labelColor(b.id)} />
       </div>
       {b.note ? <p className='max-w-prose text-xs leading-4'>{b.note}</p> : null}
     </div>
@@ -234,6 +257,23 @@ export function PerfSection() {
           </section>
         )
       })}
+
+      {microBenchmarks.length > 0 ? (
+        <section className='space-y-4'>
+          <div className='rule-square pb-2'>
+            <h2 className='ds-h2'>Core microbenchmarks</h2>
+            <p className='ds-note mt-1'>
+              Criterion benchmarks of a single mkit code path, comparing mkit against its own previous commit rather
+              than Git. Median time; lower is better.
+            </p>
+          </div>
+          <div className='data-frame'>
+            {microBenchmarks.map((b) => (
+              <MicroBlock key={b.id} b={b} />
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <section className='space-y-3'>
         <h2 className='ds-h2 rule-square pb-2'>Methodology and limitations</h2>
