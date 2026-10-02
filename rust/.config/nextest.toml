@@ -27,17 +27,6 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # can render failure annotations inline on PR diffs.
 path = "junit.xml"
 
-# The S3 wire profile deliberately delays CompleteUpload by 31 seconds to
-# prove it uses the long deadline. The rest of the wire suite follows that
-# request, so its total runtime can exceed the default 60-second envelope.
-[[profile.default.overrides]]
-filter = 'test(=wire_suite_s3_sqlite_auth_v2)'
-slow-timeout = { period = "180s", terminate-after = 1 }
-
-[[profile.ci.overrides]]
-filter = 'test(=wire_suite_s3_sqlite_auth_v2)'
-slow-timeout = { period = "180s", terminate-after = 1 }
-
 # The bounded PR run of the stateful suite (tests/state_machine.rs, 32 cases)
 # is ~12s locally, but it spawns the `mkit` binary per op, so a slow/loaded
 # (especially macOS) runner could drift toward the default 60s / ci 120s kill
@@ -199,27 +188,17 @@ or (package(mkit-cli) and test(=remote_dispatch::packmap::tests::verify_new_obje
 '''
 slow-timeout = { period = "60s", terminate-after = 5 }
 
-# The storage suite over the `.mkit`-layout stores makes every write durable
-# (fsync the file, rename, fsync the directory): a few cases apply 1,000-2,000
-# single-key batches, ~40s each on a loaded macOS runner (F_FULLFSYNC). Not
-# hangs; the same generous ceiling as the other real-I/O suites.
-[[profile.default.overrides]]
-filter = 'binary(fs_backends)'
-slow-timeout = { period = "150s", terminate-after = 1 }
-
-[[profile.ci.overrides]]
-filter = 'binary(fs_backends)'
-slow-timeout = { period = "150s", terminate-after = 1 }
-
 # The wire suite's growth case waits out replay expiry plus the server's
 # prune grace on the real clock (~80s; so do its store mutants):
-# pruning never follows the test-faults clock skew. Not a hang.
+# pruning never follows the test-faults clock skew. The host ticket case
+# waits this interval twice (~160s) to settle before calibration and prune
+# after loading tickets. Not a hang.
 [[profile.default.overrides]]
-filter = 'binary(baseline_pipeline_memory) and (test(=pipeline_auth_v2_test_faults) or test(/_fails_growth$/))'
+filter = '(binary(baseline_pipeline_memory) and (test(=pipeline_auth_v2_test_faults) or test(/_fails_growth$/))) or test(=timer_and_ticket_pruning_wire_cases_run_against_the_host)'
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 [[profile.ci.overrides]]
-filter = 'binary(baseline_pipeline_memory) and (test(=pipeline_auth_v2_test_faults) or test(/_fails_growth$/))'
+filter = '(binary(baseline_pipeline_memory) and (test(=pipeline_auth_v2_test_faults) or test(/_fails_growth$/))) or test(=timer_and_ticket_pruning_wire_cases_run_against_the_host)'
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 # This pack residency regression expands several 128 MiB delta targets.
@@ -234,7 +213,7 @@ filter = 'test(=pack::tests::compressed_delta_bomb_releases_targets_and_checks_c
 slow-timeout = { period = "300s", terminate-after = 1 }
 
 # Memory-bounding tests. multipart_bounded_heap / multipart_buffered_heap
-# (mkit-server-conformance's fs, s3 and memory binaries, mkit-server-worker's
+# (mkit-server-conformance's memory binary, mkit-server-worker's
 # conformance binary) meter the allocator over a window and assert a peak.
 # They failed under parallel load and passed alone (#1210, #1212, #1218), so
 # the group runs one at a time across the whole run. The meter stays
@@ -273,10 +252,7 @@ test-group = 'heap-bounds'
 # PR quarantined keeps the lane green regardless of what other
 # `#[ignore]`d tests exist.
 #
-# The four `listen_enc_*` real-TCP tests live in mkit-server-native's
-# `enc_listener` (`mkit-server serve --listen-enc`); WP-M0-15 deleted their
-# mkit-cli copies with `mkit serve --listen-enc`.
-default-filter = 'test(/hang_before_stdout_times_out_and_reaps_child|fills_stderr_before_stdout_does_not_deadlock|valid_response_then_never_exits_is_bounded|listen_enc_rejected_upload_does_not_overwrite_existing_pack|listen_enc_rejects_non_hello_first_frame|listen_enc_cas_conflict_classifies_as_ref_conflict|listen_enc_terminates_connection_past_frame_budget|open_accepts_syntactically_valid_mkit_ssh_url|second_mutating_command_blocks_on_worktree_lock|list_refs_round_trip_over_real_tcp|post_handshake_idle_timeout_drops_silent_peer|wait_child_timeout_kills_stalled_child|list_refs_retries_past_dropped_connection_via_reconnect|ssh_clone_retries_past_a_dropped_first_connection|large_mixed_pack_decodes_under_production_resident_cap|listing_over_32_mib_pages_under_d34/)'
+default-filter = 'test(/hang_before_stdout_times_out_and_reaps_child|fills_stderr_before_stdout_does_not_deadlock|valid_response_then_never_exits_is_bounded|open_accepts_syntactically_valid_mkit_ssh_url|second_mutating_command_blocks_on_worktree_lock|list_refs_round_trip_over_real_tcp|post_handshake_idle_timeout_drops_silent_peer|wait_child_timeout_kills_stalled_child|list_refs_retries_past_dropped_connection_via_reconnect|ssh_clone_retries_past_a_dropped_first_connection|large_mixed_pack_decodes_under_production_resident_cap|listing_over_32_mib_pages_under_d34/)'
 # Run serially so the quarantined tests' real timers/sockets don't
 # contend with each other; only localhost networking is needed, which
 # every CI runner (Linux + macOS) provides.
@@ -312,19 +288,8 @@ slow-timeout = { period = "1200s", terminate-after = 1 }
 retries = 0
 fail-fast = false
 
-# The lag-window and D34 native wire lanes hold the relay for several seconds
-# per case (x-mkit-test-relay-delay-ms) and wait for it to deliver. Deterministic,
-# not hangs: give these exact-name lanes their own ceiling.
-[[profile.default.overrides]]
-filter = 'test(=wire_suite_multi_sqlite_auth_v2_d34) or test(=binary_fs_sqlite_auth_v2_d34)'
-slow-timeout = { period = "180s", terminate-after = 1 }
-
-[[profile.ci.overrides]]
-filter = 'test(=wire_suite_multi_sqlite_auth_v2_d34) or test(=binary_fs_sqlite_auth_v2_d34)'
-slow-timeout = { period = "180s", terminate-after = 1 }
-
-# The 75,000-ref listing (wire_large_listing) creates its refs over real HTTP
-# and waits for the D34 relay to index them: minutes, not a hang.
+# The memory-host 75,000-ref listing creates its refs over real HTTP
+# and drains D34 timers to index them: minutes, not a hang.
 [[profile.ignored-lane.overrides]]
 filter = 'test(=listing_over_32_mib_pages_under_d34)'
 slow-timeout = { period = "1800s", terminate-after = 1 }

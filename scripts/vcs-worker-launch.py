@@ -20,7 +20,7 @@ CASES = ROOT / "docs/plans/mkit-server/launch-cases.json"
 WRANGLER = "4.134.0"
 LANES = {
     "native": ["cargo", "nextest", "run", "--locked", "--manifest-path", "rust/Cargo.toml",
-               "-p", "mkit-server", "-p", "mkit-server-native", "-p", "mkit-server-worker",
+               "-p", "mkit-server", "-p", "mkit-server-worker",
                "-p", "mkit-server-conformance", "--all-features", "--test-threads", "1"],
     "baseline": ["bash", "scripts/vcs-worker-conformance.sh", "--multi", "--", "--filter", "info."],
     "hooks": ["bash", "scripts/vcs-worker-conformance.sh", "--hooks", "--", "--filter", "info."],

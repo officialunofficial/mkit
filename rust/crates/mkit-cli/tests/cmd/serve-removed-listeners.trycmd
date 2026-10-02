@@ -1,6 +1,6 @@
 `mkit serve` is only the ssh-frame stdin/stdout server. The HTTP and
 mkit+enc:// listener flags it used to take are unknown arguments (usage
-error, exit 64) with a pointer to `mkit-server`.
+error, exit 64) with SSH/Connect guidance and an enc deprecation notice.
 
 ```
 $ mkit serve --http 127.0.0.1:0 .
@@ -13,10 +13,8 @@ Usage: mkit serve [OPTIONS] [PATH]
 
 For more information, try '--help'.
 hint: `mkit serve` no longer takes `--http`; it only speaks the ssh-frame protocol on stdin/stdout.
-      The HTTP and mkit+enc:// listeners are the separate `mkit-server` binary:
-        mkit-server serve --repo-root <PATH> --listen <ADDR>      (was: mkit serve <PATH> --http <ADDR>)
-        mkit-server serve --repo-root <PATH> --listen-enc <ADDR>  (was: mkit serve <PATH> --listen-enc <ADDR>)
-      See "Migrating from `mkit serve --http` and `--listen-enc`" in docs/CLI.md.
+      Use SSH (`mkit serve`) or a Connect server such as vcs-worker.
+      The mkit+enc:// transport is deprecated: no maintained server.
 
 ```
 
@@ -31,10 +29,8 @@ Usage: mkit serve <PATH>
 
 For more information, try '--help'.
 hint: `mkit serve` no longer takes `--listen-enc`; it only speaks the ssh-frame protocol on stdin/stdout.
-      The HTTP and mkit+enc:// listeners are the separate `mkit-server` binary:
-        mkit-server serve --repo-root <PATH> --listen <ADDR>      (was: mkit serve <PATH> --http <ADDR>)
-        mkit-server serve --repo-root <PATH> --listen-enc <ADDR>  (was: mkit serve <PATH> --listen-enc <ADDR>)
-      See "Migrating from `mkit serve --http` and `--listen-enc`" in docs/CLI.md.
+      Use SSH (`mkit serve`) or a Connect server such as vcs-worker.
+      The mkit+enc:// transport is deprecated: no maintained server.
 
 ```
 

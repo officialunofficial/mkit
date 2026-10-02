@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Deprecated `mkit-transport-enc`: no maintained server; use SSH (`mkit serve`)
+  or Connect.
 - HTTP ref-path files: serve MP4, WebM, MP3, Ogg, WAV, HEIC, Markdown and CSV
   inline with their media types, preserving encoded filenames, security headers
   and byte ranges. Dangerous extensions remain binary attachments.

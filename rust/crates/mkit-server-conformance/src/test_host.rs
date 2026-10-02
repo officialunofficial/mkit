@@ -528,12 +528,14 @@ fn configure_profile_features(
             .map_err(|error| error.to_string())?,
         );
     }
-    #[cfg(feature = "http-objects")]
-    if profile.has(Feature::HttpObjects) {
+    if profile.has(Feature::IndexedMode) || profile.has(Feature::HttpObjects) {
         let mut indexed = mkit_server::indexed::IndexedConfig::default();
         indexed.max_pack_bytes = profile.max_pack_bytes;
         indexed.decode_budget = indexed.decode_budget.max(profile.max_pack_bytes);
         config.indexed = Some(indexed);
+    }
+    #[cfg(feature = "http-objects")]
+    if profile.has(Feature::HttpObjects) {
         config.http_objects = Some(mkit_server::http_objects::HttpObjectsConfig::default());
     }
     Ok(())
@@ -693,6 +695,13 @@ fn multi_allowlist(profile: &Profile) -> BTreeSet<mkit_core::repo_identity::Name
             })
         })
         .collect();
+    // A case may address the owner repository declared by its profile.
+    if let Some(namespace) = repository
+        .split_once('/')
+        .and_then(|(namespace, _)| mkit_core::repo_identity::Namespace::parse(namespace).ok())
+    {
+        allowed.insert(namespace);
+    }
     if profile.has(Feature::Grants) {
         allowed.extend(crate::wire::grant_owner_namespaces());
     }
