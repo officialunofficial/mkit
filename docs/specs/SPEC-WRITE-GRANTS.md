@@ -966,11 +966,28 @@ the statement parses; `key id` names a key in the deployment's
 verification set; the signature verifies under that key; `audience` is
 the deployment's own; `repository` and `target` equal the request's,
 byte for byte; `epoch` equals the stored epoch, read as §5.6 requires
-for reads; and `now < expiry`. Anything else is `not_found` for a
+for reads; `now < expiry`; and `issued` is strictly later than the
+repository's **visibility change time**. Anything else is `not_found` for a
 private repository, as in §9.3. Serving always resolves the target in
 the published view.
 For HTTP serving, the stateless audience, repository, target, and expiry
 checks MUST precede the stored-epoch read, as SPEC-HTTP-OBJECTS §6 requires.
+
+**Visibility change time.** A token is a read grant for the repository as
+it stood when issued, and a visibility change revokes every earlier
+token even though it does not change the namespace epoch. The server
+stores, with the repository's visibility (§9.1), the time at which it last
+applied a visibility change, read from its own clock whether the change
+came by envelope or by statement (never from a statement's signed
+`created`). A token whose `issued` is at or before that time MUST be
+refused, for object-id and ref-path targets alike; the comparison uses
+only server-side times (the token's `issued` is the issuing server's
+clock). A visibility row stored before this rule has no change time; its last
+accepted creation time (§9.1) is used instead, which is never earlier
+than the change. A repository with no stored visibility has never
+changed, so its tokens carry no such bound. The time is read in the same strong read as
+the visibility, so it adds no storage round trip. This is a
+verification rule only: the `mkit-url-token:v1` statement is unchanged.
 
 **Response.** `IssueObjectUrl` returns the token and its expiry. The URL
 form MUST carry it only in a `token=` query parameter. Header and cookie
@@ -1226,6 +1243,7 @@ Landed so far (each pinned by BLAKE3 in the directory's `MANIFEST.txt`):
 
 | Version | Status | Changes |
 |---|---|---|
+| `1` (URL-token visibility amendment) | draft | A URL token issued at or before the repository's last visibility change is refused (§9.4). The stored visibility row gains an optional server-clock change time (older rows fall back to their last accepted creation time); the token statement and signature are unchanged. |
 | `1` (R-205 amendment) | draft | Repository visibility without a stored setting follows the deployment default, public unless configured; explicit visibility always wins. Changing the default also changes existing repositories without explicit visibility. |
 | `1` | draft | Initial grant statement (audiences, ref scopes, capabilities), owner schemes, exact-epoch revocation with bounded epoch statements, epoch leases and the commit deadline, server policy, signed reads, private repositories and URL tokens, and server-side grants for ssh and enc (mkit#1085, mkit#1089). WP-4.11 adds the `token=` URL form and key-set publication, and amends token paths to 0–1024 bytes so an empty path names the root tree. Fix round 1 orders stateless token checks before the stored-epoch read. WP-2.9 pins the `DownloadPack` signed-read body; WP-2.11 lands the URL-token fixtures. Fix round 2 caps `url_token_ttl` at 24 h and excludes control characters from token paths. |
 
@@ -1245,5 +1263,5 @@ Landed so far (each pinned by BLAKE3 in the directory's `MANIFEST.txt`):
 | A rejected grant allocates no quota, reservation, or replay record. | §7, final paragraph. |
 | An unauthorized read of a private repository is indistinguishable from a read of a missing repository. | §9.3. |
 | A signed read never creates or consumes a replay record. | §9.2. |
-| A URL token is signed only by the dedicated URL-token key, is valid only for its audience, repository and target until its expiry and while its epoch equals the stored epoch, and resolves only in the published view. | §9.4. |
+| A URL token is signed only by the dedicated URL-token key, is valid only for its audience, repository and target until its expiry, while its epoch equals the stored epoch and only if issued after the repository's last visibility change, and resolves only in the published view. | §9.4. |
 | A repository's visibility changes only through the owner key, an authority source, or an owner-signed visibility statement newer than the last accepted one; never through a grant. | §9.1. |

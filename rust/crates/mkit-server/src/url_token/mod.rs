@@ -500,6 +500,7 @@ pub struct Binding<'a> {
 #[derive(Clone, Copy)]
 pub struct BoundToken {
     epoch: u64,
+    issued_ms: i64,
     expiry_ms: i64,
 }
 
@@ -519,6 +520,20 @@ impl BoundToken {
     #[must_use]
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// The visibility rule (SPEC-WRITE-GRANTS §9.4): a token issued at or
+    /// before the repository's last visibility change (`changed_ms`, the
+    /// server's clock, 0 when it never changed) no longer serves.
+    ///
+    /// # Errors
+    /// [`TokenRejected`] when the token predates the change.
+    pub fn check_visibility_change(&self, changed_ms: u64) -> Result<(), TokenRejected> {
+        if u64::try_from(self.issued_ms).is_ok_and(|issued| issued > changed_ms) {
+            Ok(())
+        } else {
+            Err(TokenRejected)
+        }
     }
 
     /// The last check: the token serves only while the stored epoch
@@ -566,6 +581,7 @@ impl Prechecked {
         }
         Ok(BoundToken {
             epoch: statement.epoch(),
+            issued_ms: statement.issued_ms(),
             expiry_ms: statement.expiry_ms(),
         })
     }
