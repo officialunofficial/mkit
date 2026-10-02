@@ -651,3 +651,33 @@ fn tokens_on_a_default_private_repository_without_a_row_keep_serving() {
     let path = fx.object_url("room", &id(&d.small));
     assert_eq!(with_token(&fx, "GET", &path, &token, &[]).status, 200);
 }
+
+/// A visibility row stored before `changed_ms` existed still serves reads;
+/// its `last_created_ms` stands in as the change time.
+#[test]
+fn legacy_visibility_row_without_a_change_time_uses_its_creation_time() {
+    let (fx, d, _, tokens) = setup();
+    let repo = fx.repo_id("room");
+    let last_created = fx.clock.now_ms() + 5_000;
+    let legacy = format!(
+        "\x01{{\"visibility\":\"private\",\"last_created_ms\":{last_created},\"last_statement_id\":null}}"
+    );
+    block_on(fx.pipe.meta.inner.apply(
+        &fx.pipe.shards.coordinator(&repo.namespace),
+        Batch::new().put(
+            keys::repo_visibility(&repo.name),
+            crate::store::Value::new(legacy.into_bytes()),
+        ),
+    ))
+    .unwrap();
+    let path = fx.object_url("room", &id(&d.small));
+    let target = UrlTarget::Object(id(&d.small));
+    let before = mint(&fx, &tokens, &target, 0);
+    fx.clock.set(last_created);
+    let at = mint(&fx, &tokens, &target, 0);
+    fx.clock.advance(1);
+    let after = mint(&fx, &tokens, &target, 0);
+    assert_eq!(with_token(&fx, "GET", &path, &before, &[]).status, 404);
+    assert_eq!(with_token(&fx, "GET", &path, &at, &[]).status, 404);
+    assert_eq!(with_token(&fx, "GET", &path, &after, &[]).status, 200);
+}

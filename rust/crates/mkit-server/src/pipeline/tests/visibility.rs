@@ -43,7 +43,7 @@ pub(super) fn put_repo<H: HookSet>(
                 visibility,
                 last_created_ms: 0,
                 last_statement_id: None,
-                changed_ms: 0,
+                changed_ms: None,
             }),
         );
     }
@@ -460,7 +460,7 @@ fn visibility_row_without_repository_record_is_missing() {
                     visibility: codec::StoredVisibility::Private,
                     last_created_ms: 0,
                     last_statement_id: None,
-                    changed_ms: 0,
+                    changed_ms: None,
                 }),
             ),
         ))

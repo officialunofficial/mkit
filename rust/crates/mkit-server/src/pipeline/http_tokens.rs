@@ -74,7 +74,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .map(codec::decode_repo_visibility)
                 .transpose()
                 .map_err(|_| Fail::Unavailable)?;
-            changed_ms = visibility.as_ref().map_or(0, |row| row.changed_ms);
+            changed_ms = visibility
+                .as_ref()
+                .map_or(0, codec::RepoVisibilityV1::visibility_changed_ms);
             super::repo_is_private(visibility.as_ref(), self.cfg.default_repo_visibility)
         } else {
             false

@@ -2834,7 +2834,7 @@ fn private_repository_reads_are_not_found_over_transport_identity() {
             visibility: codec::StoredVisibility::Private,
             last_created_ms: 0,
             last_statement_id: None,
-            changed_ms: 0,
+            changed_ms: None,
         }),
     );
     let coordinator = root(&repo_id.namespace);

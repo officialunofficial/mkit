@@ -59,9 +59,21 @@ pub struct RepoVisibilityV1 {
     pub last_statement_id: Option<String>,
     /// The server clock when the row last changed visibility (envelope or
     /// statement), Unix milliseconds. URL tokens issued at or before it are
-    /// refused (SPEC-WRITE-GRANTS §9.4). The key is always present; a row
-    /// missing it is corrupt.
-    pub changed_ms: u64,
+    /// refused (SPEC-WRITE-GRANTS §9.4). Absent in a row stored before the
+    /// field existed; read it through [`Self::visibility_changed_ms`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_ms: Option<u64>,
+}
+
+impl RepoVisibilityV1 {
+    /// The time of the last visibility change. A legacy row has none, so
+    /// its `last_created_ms` stands in: the envelope path stored server
+    /// time there and the statement path the accepted `created`, never
+    /// earlier than the change, so the fallback fails closed.
+    #[must_use]
+    pub fn visibility_changed_ms(&self) -> u64 {
+        self.changed_ms.unwrap_or(self.last_created_ms)
+    }
 }
 
 /// Deserialize an `Option` whose key must be present (serde would default
@@ -1866,19 +1878,19 @@ mod tests {
             visibility: StoredVisibility::Public,
             last_created_ms: 0,
             last_statement_id: None,
-            changed_ms: 0,
+            changed_ms: None,
         };
         let private = RepoVisibilityV1 {
             visibility: StoredVisibility::Private,
             last_created_ms: 1_700_000_000_000,
             last_statement_id: Some("ab".repeat(32)),
-            changed_ms: 1_700_000_000_001,
+            changed_ms: Some(1_700_000_000_001),
         };
         let public_value = encode_repo_visibility(&public);
         let private_value = encode_repo_visibility(&private);
         assert_eq!(
             public_value.as_bytes(),
-            b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":null,\"changed_ms\":0}"
+            b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":null}"
         );
         assert_eq!(
             private_value.as_bytes(),
@@ -1890,14 +1902,23 @@ mod tests {
         );
         assert_eq!(decode_repo_visibility(&public_value).unwrap(), public);
         assert_eq!(decode_repo_visibility(&private_value).unwrap(), private);
+        // A legacy 3-key row has no change time and falls back to its
+        // last accepted creation time.
+        let legacy = decode_repo_visibility(&Value::new(
+            b"\x01{\"visibility\":\"private\",\"last_created_ms\":7,\"last_statement_id\":null}"
+                .to_vec(),
+        ))
+        .unwrap();
+        assert_eq!(legacy.changed_ms, None);
+        assert_eq!(legacy.visibility_changed_ms(), 7);
+        assert_eq!(private.visibility_changed_ms(), 1_700_000_000_001);
         for bytes in [
             &b""[..],
-            b"\x02{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":null,\"changed_ms\":0}",
-            b"\x01{\"visibility\":\"internal\",\"last_created_ms\":0,\"last_statement_id\":null,\"changed_ms\":0}",
+            b"\x02{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":null}",
+            b"\x01{\"visibility\":\"internal\",\"last_created_ms\":0,\"last_statement_id\":null}",
             b"\x01{\"visibility\":\"public\"}",
             b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":\"AB\",\"changed_ms\":0}",
             b"\x01{\"visibility\":\"public\",\"last_created_ms\":0}",
-            b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":null}",
             b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":\"ab\",\"changed_ms\":0,\"extra\":1}",
         ] {
             assert!(matches!(

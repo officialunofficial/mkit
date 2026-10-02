@@ -529,7 +529,7 @@ fn creation_survives_three_visibility_conflicts_before_the_fourth_apply() {
                                     visibility: codec::StoredVisibility::Private,
                                     last_created_ms: u64::from(attempt),
                                     last_statement_id: None,
-                                    changed_ms: 0,
+                                    changed_ms: None,
                                 }),
                             ),
                         ))
@@ -571,7 +571,7 @@ fn creation_retries_if_visibility_changes_before_its_apply() {
                                 visibility: codec::StoredVisibility::Private,
                                 last_created_ms: 0,
                                 last_statement_id: None,
-                                changed_ms: 0,
+                                changed_ms: None,
                             }),
                         ),
                     ))
