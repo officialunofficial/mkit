@@ -38,6 +38,7 @@ pub(super) enum LeaseObservation {
 pub(super) struct CoordinatorLease {
     namespace: Option<Value>,
     repo: Option<Value>,
+    visibility: Option<Value>,
     epoch: Option<Value>,
     authority: Option<Value>,
     authority_generation: Option<u64>,
@@ -257,6 +258,11 @@ fn grant_batch(
         batch = batch.put(nr_key, codec::encode_namespace_record(&namespace));
     }
     if creation.repo {
+        batch.preconditions.push(observed_guard(
+            keys::repo_visibility(repo),
+            read.visibility.as_ref(),
+        ));
+        super::list_repos::index_writes(&mut batch, repo, true, read.visibility.as_ref())?;
         batch = batch.put(
             rr_key,
             codec::encode_repo_record(&codec::RepoRecord { created_at_ms }),
@@ -322,6 +328,7 @@ async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
     if let Some(window) = seed_window {
         wanted.push(keys::quota_total(window));
     }
+    wanted.push(keys::repo_visibility(&repo_id.name));
     let reported = match relay_watermark(source, p, ms(clock.now_ms())).await {
         Ok(value) => value,
         Err(StoreError::Corrupt(reason)) => {
@@ -396,6 +403,7 @@ async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
     let read = CoordinatorLease {
         namespace: namespace.clone(),
         repo: repo.clone(),
+        visibility: rows.last().cloned().flatten(),
         epoch: epoch.clone(),
         authority: authority.clone(),
         authority_generation: if authority_fence {

@@ -8,6 +8,7 @@ mod grants;
 mod http_objects;
 mod indexed;
 mod info;
+mod list_repos;
 mod policy;
 mod ref_policy;
 #[cfg(feature = "remote-hooks")]
@@ -591,6 +592,8 @@ struct Spy {
     read_many_hook: Option<ReadManyHook>,
     yields: bool,
     fail_reads: bool,
+    fail_read_many: bool,
+    scan_limit: Option<u32>,
     seen: Mutex<Vec<Key>>,
     ops: Mutex<Vec<&'static str>>,
     batches: Mutex<Vec<Batch>>,
@@ -608,6 +611,8 @@ impl Spy {
             read_many_hook: None,
             yields: false,
             fail_reads: false,
+            fail_read_many: false,
+            scan_limit: None,
             seen: Mutex::default(),
             ops: Mutex::default(),
             batches: Mutex::default(),
@@ -683,6 +688,9 @@ impl NamespaceStore for Spy {
         keys: &[Key],
     ) -> Result<Vec<Option<Value>>, StoreError> {
         self.pause("get_many").await;
+        if self.fail_read_many {
+            return Err(StoreError::unavailable("injected get_many fault"));
+        }
         if let Some(hook) = &self.read_many_hook {
             hook(&self.inner, p, keys);
         }
@@ -707,7 +715,15 @@ impl NamespaceStore for Spy {
         }
         self.maybe_fail_read()?;
         self.saw(start);
-        self.inner.scan(p, start, end, after, limit).await
+        self.inner
+            .scan(
+                p,
+                start,
+                end,
+                after,
+                self.scan_limit.map_or(limit, |cap| limit.min(cap)),
+            )
+            .await
     }
 
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {

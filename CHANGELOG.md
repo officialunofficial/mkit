@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: add `ListRepos`, with bounded namespace-name pagination and authenticated
+  continuation tokens. Atomic coordinator visibility indexes hide private names
+  from public listings; owners and approved namespace authorities list all repos.
+  Grants retain public listing rights only. Fresh stores are required.
+
 - HTTP object readback accepts streamed chunk-offset sidecar tails from R2.
 
 - Indexed verification, extraction and preservation count canonical Blob framing

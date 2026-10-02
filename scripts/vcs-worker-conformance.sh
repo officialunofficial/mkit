@@ -481,6 +481,22 @@ if [ "${multi}" -eq 1 ]; then
     done
     stop_server
 
+    # Namespace listing is an M2 signed-read RPC. Run it explicitly so the
+    # ordinary M1 Multi suite cannot silently skip this additive case.
+    start_server multi-list-repos "${vars[@]}" \
+        --var "ADDRESSING:multi" --var "NAMESPACE_ALLOWLIST:${allowlist}"
+    capture "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
+        --repository "${REPOSITORY}" --signer-seed-hex "${multi_seed}" \
+        --run-id "${multi_run_id}" --atomic-advance --fresh-target --milestone M2 \
+        --features "${multi_features},signed-reads" --sign-reads \
+        --sharding "${sharding}" --filter repo.list_repos
+    if [ "${status}" -ne 0 ]; then
+        tail -n 80 "${log}" >&2
+        exit "${status}"
+    fi
+    require_pass repo.list_repos
+    stop_server
+
     if [ "${test_faults}" -eq 1 ]; then
         # The Multi grant phase (WP-1.30b): every owner scheme, the
         # conformance relying party, and the loopback opt-in the local

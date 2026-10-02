@@ -1,10 +1,18 @@
 # ListRepos feasibility escalation
 
-Status: **implementation stopped under Section D of the executor brief**.
+Status: **resolved by the user visibility-index ruling (2026-10-02)**.
+The original escalation below records why the prior storage contracts were
+insufficient. The ruling authorizes coordinator-local `rl` subkeys `p` and `d`,
+atomic index updates alongside creation and SetRepoVisibility, and public-only
+listing rights for grants. No cross-partition protocol or backfill is permitted.
+Implementation and the additive contract are in
+[SPEC-TRANSPORT-CONNECT §7.10](../../../specs/SPEC-TRANSPORT-CONNECT.md#710-namespace-repository-listing).
+The `rl` tag was absent from the base key registry; the key-tag uniqueness test
+includes it. The old R-208 stop is superseded by this ruling.
 Base: `2db7f9c29fda85b973060c242401dfd628ba1f54` on `feat/mkit-server-next`.
-Decision row: R-207.
+Decision row: R-208.
 
-## Existing storage contracts
+## Storage contracts at the escalation base
 
 - [`Partition`](../../../../rust/crates/mkit-server/src/store/partition.rs)
   documents one repository registry per namespace coordinator. A D34
@@ -70,7 +78,7 @@ complete, oracle-free visible page. Moving this filtering into a Durable Object
 would introduce a new query/storage primitive and still require a bound on its
 work; the generic storage contract does not provide that operation.
 
-## Ruling needed
+## Ruling requested at the escalation base
 
 The existing registry supports deterministic coordinator pagination, but not
 the decided k-way pagination across repository-name shards. More fundamentally,
@@ -79,7 +87,6 @@ oracle needs an approved visibility-selective enumeration foundation, or an
 explicit change to the fixed listing contract. The key layout and authorization
 semantics of that foundation require a ruling before implementation.
 
-No new key tag, index, storage primitive, cross-partition protocol, RPC, generated
-code, or native-server change has been introduced. The requested transport spec,
-proto, pipeline, Worker route, and test cases remain unimplemented. This report
-and R-207 preserve the escalation; they do not approve a new foundation.
+At the initial escalation commit, no runtime, wire or storage foundation had
+been introduced. The subsequent user ruling above authorizes the coordinator
+visibility index and resolves this stop. Native-server code remains out of scope.

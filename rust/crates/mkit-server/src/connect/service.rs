@@ -270,6 +270,67 @@ where
     N: NamespaceStore + 'static,
     H: HookSet + 'static,
 {
+    async fn list_repos(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, super::proto::mkit::transport::v1::ListReposRequest>,
+    ) -> ServiceResult<super::proto::mkit::transport::v1::ListReposResponse> {
+        let a = authenticated(&ctx)?;
+        let m = request.to_owned_message();
+        let pipe = self.pipe.arc();
+        send_wrap(async move {
+            let token = m
+                .page_token
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    if s.len() > 512 {
+                        return Err(ServerError::invalid_argument(
+                            "invalid repository page token",
+                        ));
+                    }
+                    URL_SAFE_NO_PAD
+                        .decode(s)
+                        .map_err(|_| ServerError::invalid_argument("invalid repository page token"))
+                })
+                .transpose()?;
+            let page = pipe
+                .list_repos_page(
+                    &a,
+                    m.namespace.as_deref().unwrap_or_default(),
+                    m.name_prefix.as_deref().unwrap_or_default(),
+                    m.page_size,
+                    token.as_deref(),
+                )
+                .await?;
+            let response = super::proto::mkit::transport::v1::ListReposResponse {
+                repos: page
+                    .repos
+                    .into_iter()
+                    .map(|entry| super::proto::mkit::transport::v1::RepoEntry {
+                        name: Some(entry.name),
+                        visibility: Some(
+                            if entry.visibility == crate::pipeline::RepoVisibility::Public {
+                                RepoVisibility::REPO_VISIBILITY_PUBLIC
+                            } else {
+                                RepoVisibility::REPO_VISIBILITY_PRIVATE
+                            }
+                            .into(),
+                        ),
+                        ..Default::default()
+                    })
+                    .collect(),
+                next_page_token: page.next.map(|bytes| URL_SAFE_NO_PAD.encode(bytes)),
+                ..Default::default()
+            };
+            if response.encoded_len() > 64 * 1024 {
+                return Err(ServerError::unavailable("repository listing unavailable").into());
+            }
+            Response::ok(response)
+        })
+        .await
+    }
+
     async fn list_refs(
         &self,
         ctx: RequestContext,

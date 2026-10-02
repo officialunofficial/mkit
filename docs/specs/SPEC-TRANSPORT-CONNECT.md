@@ -127,6 +127,7 @@ same trait `mkit-transport-http`/`-s3`/`-ssh`/`-enc` implement today.
 
 | `Transport` trait method | RPC | Shape |
 |---|---|---|
+| *(none; lists namespace repositories)* | `ListRepos` (§7.10) | unary |
 | `list_refs(prefix)` | `ListRefs` | unary |
 | `read_ref(name)` | `ReadRef` | unary |
 | `update_ref(name, condition, hash)` | `UpdateRef` | unary |
@@ -908,7 +909,7 @@ and the signature does not bind it.
 
 **Signed reads.** The same contract signs read RPCs
 ([SPEC-WRITE-GRANTS §9.2](SPEC-WRITE-GRANTS.md#92-signed-reads)):
-`ListRefs`, `ReadRef`, `PackExists`, `DownloadPack`, `IssueObjectUrl`,
+`ListRepos`, `ListRefs`, `ReadRef`, `PackExists`, `DownloadPack`, `IssueObjectUrl`,
 and `GetReceipt`,
 each with a `body:` commitment over the exact request body. A client
 that has a signer for a remote MUST sign every read RPC to it. A request that carries any auth v2 header MUST verify in full, or it
@@ -1686,6 +1687,88 @@ the `ListRefs` page bound (§2.1).
 
 ---
 
+### 7.10 Namespace repository listing
+
+`ListRepos` is an additive unary read RPC. `ListReposRequest` carries
+`namespace = 1`, an opaque `page_token = 2`, `page_size = 3`, and optional
+`name_prefix = 4`. Zero or absent page size means 100; a value above 100 is
+`invalid_argument`. The prefix is at most 255 bytes of printable ASCII without
+whitespace and matches raw name bytes. Empty matches every repository.
+
+`ListReposResponse` carries `repos = 1` and `next_page_token = 2`. Each new
+`RepoEntry` carries its complete namespace-local `name = 1` and effective
+`visibility = 2`, using the existing `RepoVisibility` enum. Names MUST be sorted
+by ascending byte order and MUST NOT be duplicated. No existing field changes
+meaning. The registry has no cheap head or last-update projection, so neither
+is included. A page MUST contain at most 100 entries and its encoded protobuf
+response MUST fit in 64 KiB. An empty continuation ends the listing.
+
+Addressing and authentication retain §7.1 and §7.4: `X-Repository` is an
+ordinary full repository identity in Multi mode, and its namespace MUST equal
+`request.namespace`. A mismatch is `invalid_argument`. The header's repository
+name is only a namespace selector for this RPC: it need not exist and does not
+limit or confer listing rights. Signed auth v2 commits the exact request bytes
+and full procedure. All supplied auth v2 markers MUST verify; malformed signed
+requests never become anonymous. Listing is idempotent, with no replay writes
+or admission. Under Single addressing, the namespace is the deployment's
+configured namespace (normally `root`), ordinary Single header rules apply,
+and the sole configured public repository is returned if its name matches.
+
+Multi listing rights are deliberately narrower than repository read rights:
+
+- Anonymous and non-owner signed callers receive only the public listing.
+- A signed namespace owner receives the full registered repository listing,
+  subject to a configured authorizer's check.
+- In `authority` mode, an authorizer's successful allowance of `ListRepos`
+  authorizes the **entire requested namespace**, including private names.
+  A denial for a non-owner selects the public view; hook/storage failures fail
+  closed. Authority sources MUST treat this procedure as namespace-wide, not
+  as permission on the header's repository name.
+- Presenting `X-Write-Grant` selects the public view even for an owner or
+  authority caller. Grants do not add repository listing rights, including
+  grants with `read` capability. The normal §9.3 private read rights remain
+  unchanged. An unsigned grant header remains `unauthenticated`.
+
+A public listing MUST NOT scan or filter private registry rows. In Multi mode,
+the namespace coordinator (Namespace partition under Single sharding) maintains
+`rl 00 p 00 <name>` for registered explicitly-public repositories and
+`rl 00 d 00 <name>` for registered repositories without an explicit visibility.
+Values are empty. The latter prefix participates only when deployment default
+visibility is public. A bounded k-way merge across those sorted prefixes gives
+the public listing. Owners and approved authority sources scan `rr` and batch
+read `rv` for the emitted page's effective visibility. `RepoIndex` object shards
+are not repository-name indexes and are not scanned by this RPC.
+
+These index rows MUST change atomically in the same coordinator apply as repo
+creation or `SetRepoVisibility`; visibility on an uncreated repository MUST NOT
+create a listing row. Creation guards its observed `rv`, and visibility updates
+guard observed registration, so competing applies cannot leave stale public
+rows. Changing the deployment default automatically includes/excludes the
+inherited prefix; explicit settings always win. Only fresh stores are supported;
+there is no backfill or pre-launch persisted-format migration.
+
+The token MUST be integrity-protected and bound to the namespace, name prefix,
+caller, listing view, deployment audience, and default visibility. It resumes
+strictly after the last returned name. Tokens use a dedicated MAC domain derived
+from deployment ticket keys; retained keys verify after rotation. Foreign,
+malformed, tampered, or binding-mismatched tokens are `invalid_argument`, checked
+before scanning. A token gives no authorization: owner/authority classification
+is repeated on every page. Multi deployments need configured MAC keys; otherwise
+listing is `failed_precondition`. Tokens are opaque to callers; no internal scan
+cursor or private filtering position is returned in the public view.
+
+There is no snapshot across pages. Concurrent creation or visibility changes may
+add/remove names; subsequent pages still resume in name order. Storage errors
+are `unavailable`, never successful partial listings. Public scans have fan-out
+at most two and fetch at most 101 rows per scan; even short backend pages need
+at most 102 `NamespaceStore` calls per RPC. Full listings need at most 102 such calls including
+one batched visibility read. Worker stores implement that read in one call; a backend
+using the default `get_many` implementation performs at most 201 primitive calls. All applies retain the 100-op/1-MiB limits and Worker
+requests retain their shared call budgets. An empty namespace and one containing
+only unreadable private repositories MUST have identical public results,
+including the absence of a continuation.
+
+
 ## 8. Out of scope
 
 This document specifies the proto and its consumption pattern only.
@@ -1732,6 +1815,7 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
+| `2` (ListRepos) | draft | Additive §7.10 namespace listing RPC and new messages, atomic coordinator visibility indexes, bounded sorted pages and integrity-protected tokens; grants retain public listing rights only. |
 | `2` (WP-2.16) | draft | Additive namespace Get/SetAuthorityGeneration RPCs outside auth-v2, with deployment-authority statements and pending completion hints. |
 | `2` (WP-1.28c) | draft | §7.9 states the client rule for stale listings: a listed branch whose packmap and head are both strongly absent is skipped without a tracking ref; a present head with no packmap and any transport error stay failures. |
 | `2` (WP-1.15) | draft | §7.4's ssh/enc paragraph gains ssh root mode (`mkit serve --root`, one repository per process addressed by `<NAMESPACE>/<NAME>`) and the enc `--enc-repository` listener binding, and notes the same-session implicit-membership rule transport-identity sessions use in place of upload tickets (informative). |

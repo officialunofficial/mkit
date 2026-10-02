@@ -41,6 +41,7 @@ mod lag;
 mod launch_reads;
 mod leases;
 mod list;
+mod list_repos;
 mod multipart;
 mod outcomes;
 mod packs;
@@ -281,6 +282,7 @@ cases! {
     "epochs.zero_x_secp256k1_statement" => epochs::zero_x_secp256k1_statement, M2, [Grants, MultiRepo], [];
     "epochs.zero_x_webauthn_statement" => epochs::zero_x_webauthn_statement, M2, [Grants, MultiRepo], [];
     "epochs.old_grant_denied_new_grant_works_after_set" => epochs::old_grant_denied_new_grant_works_after_set, M2, [Grants, MultiRepo], [];
+    "repo.list_repos" => list_repos::listing, M2, [SignedReads, MultiRepo, AuthV2], [];
     "reads.signed_verified_in_full" => reads::signed_verified_in_full, M2, [SignedReads, MultiRepo, AuthV2], [];
     "reads.public_unsigned_ok" => reads::public_unsigned_ok, M2, [SignedReads, MultiRepo, AuthV2], [];
     "reads.private_anonymous_not_found" => reads::private_anonymous_not_found, M2, [SignedReads, MultiRepo, AuthV2], [];

@@ -95,6 +95,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     .put(key, codec::encode_namespace_record(&record));
             }
             if want.repo {
+                let rv_key = keys::repo_visibility(&op.repo.name);
+                let visibility = self.meta.get(&p, &rv_key).await.map_err(meta_error)?;
+                batch
+                    .preconditions
+                    .push(super::lease::observed_guard(rv_key, visibility.as_ref()));
+                super::list_repos::index_writes(
+                    &mut batch,
+                    &op.repo.name,
+                    true,
+                    visibility.as_ref(),
+                )?;
                 let key = keys::repo_record(&op.repo.name);
                 let record = codec::RepoRecord { created_at_ms };
                 batch = batch

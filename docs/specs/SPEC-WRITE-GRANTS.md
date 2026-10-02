@@ -833,7 +833,7 @@ eight-field contract of SPEC-TRANSPORT-CONNECT §7.1 unchanged:
 enveloped request message. The required headers are the same as for a
 unary write.
 
-The read procedures are `ListRefs`, `ReadRef`, `PackExists`,
+The read procedures are `ListRepos` (STC §7.10), `ListRefs`, `ReadRef`, `PackExists`,
 `DownloadPack`, `IssueObjectUrl`, and `GetReceipt` (STC §2.2).
 For `DownloadPack` the committed bytes are the uncompressed envelope
 `0x00`, the 4-byte big-endian message length and the message; a signed
@@ -863,6 +863,10 @@ ref's strongly consistent state
 ([SPEC-TRANSPORT-CONNECT §7.9](SPEC-TRANSPORT-CONNECT.md#79-consistency-and-paging)).
 
 ### 9.3 Read authorization
+
+`ListRepos` lists a namespace under STC §7.10. Grants do not extend its public
+listing view; signed owners and namespace-wide authority allowances may list
+private names. This does not change repository read capabilities below.
 
 For each read procedure on a repository:
 
