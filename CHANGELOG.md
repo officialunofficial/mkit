@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Workers retry transient alarm scheduling failures twice after committed timer
+  writes and return exhausted failures for replay and cold-start repair.
+- The embedded Worker example enables the pure-Rust zstd decoder for default
+  CLI pushes.
+
 ## [0.5.0](https://github.com/officialunofficial/mkit/compare/v0.4.2...v0.5.0) - 2026-10-02
 
 The production mkit server arrives as a runtime-agnostic core (`mkit-server`)

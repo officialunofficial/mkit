@@ -1,9 +1,9 @@
 use super::{Pipeline, meta_error};
 use crate::pipeline::HookSet;
-#[cfg(test)]
+#[cfg(all(test, feature = "memory"))]
 use crate::purge::plan_enqueue;
 use crate::purge::{Request, Trigger};
-#[cfg(test)]
+#[cfg(all(test, feature = "memory"))]
 use crate::store::keys;
 use crate::store::{Batch, MultipartBlobStore, NamespaceStore, Partition};
 use crate::{RepoId, ServerError};

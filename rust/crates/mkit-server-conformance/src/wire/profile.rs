@@ -245,6 +245,8 @@ pub const DEFAULT_DUPLICATE_RETRY_MS: u64 = 10_000;
 #[derive(Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)] // Independent server capabilities and runner settings.
 pub struct Profile {
+    /// Server clock for in-process hosts; live targets use wall time.
+    pub server_clock: Option<std::sync::Arc<mkit_server::ManualClock>>,
     /// Loopback-only MPP control plane origin.
     pub hook_stub: Option<url::Url>,
     /// Configured test backlog row cap, when declared.
@@ -318,6 +320,7 @@ impl Profile {
     pub fn new(auth: WireAuth) -> Self {
         let mut profile = Self {
             auth,
+            server_clock: None,
             hook_stub: None,
             backlog_cap: None,
             atomic_advance: false,

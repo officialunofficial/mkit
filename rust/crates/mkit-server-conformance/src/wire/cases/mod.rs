@@ -449,6 +449,7 @@ pub(crate) struct Ctx {
     profile: Arc<Profile>,
     case: &'static str,
     note: Arc<Mutex<Option<String>>>,
+    retries: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// A 32-byte id helper.
@@ -657,11 +658,21 @@ impl Ctx {
             profile,
             case,
             note: Arc::default(),
+            retries: Arc::default(),
         }
     }
 
     pub(crate) fn profile(&self) -> &Profile {
         &self.profile
+    }
+
+    pub(crate) fn server_now_ms(&self) -> i64 {
+        self.profile
+            .server_clock
+            .as_ref()
+            .map_or_else(crate::wire::sign::now_ms, |clock| {
+                mkit_server::Clock::now_ms(clock.as_ref())
+            })
     }
 
     pub(crate) fn client(&self) -> &Client {
@@ -674,7 +685,16 @@ impl Ctx {
             profile: self.profile.clone(),
             case: self.case,
             note: self.note.clone(),
+            retries: self.retries.clone(),
         })
+    }
+
+    pub(crate) fn record_retry(&self, reason: &str) {
+        let count = self
+            .retries
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        eprintln!("{}: retry {count}: {reason}", self.case);
     }
 
     /// Attach a note to a passing verdict (e.g. a measured size).
@@ -683,10 +703,19 @@ impl Ctx {
     }
 
     pub(crate) fn take_note(&self) -> Option<String> {
-        self.note
+        let note = self
+            .note
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .take()
+            .take();
+        let retries = self.retries.load(std::sync::atomic::Ordering::Relaxed);
+        if retries == 0 {
+            return note;
+        }
+        Some(format!(
+            "{}retries={retries}",
+            note.map_or_else(String::new, |note| format!("{note}; "))
+        ))
     }
 
     /// `conformance/<run_id>/<case>`: this case's ref namespace.
@@ -1087,6 +1116,20 @@ pub(crate) fn want_outcome(got: Result<i32, RpcError>, want: AdvanceOutcome) -> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retries_survive_context_clones_and_appear_in_verdict_notes() {
+        let client = super::Client::new(&"http://localhost:1".parse().unwrap()).unwrap();
+        let profile = super::Profile::new(super::WireAuth::None);
+        let ctx = super::Ctx::new(client, std::sync::Arc::new(profile), "fixture");
+        ctx.record_retry("lost response");
+        ctx.clone().record_retry("in-flight replay");
+        ctx.set_note("fixture complete".into());
+        assert_eq!(
+            ctx.take_note().as_deref(),
+            Some("fixture complete; retries=2")
+        );
+    }
+
     use super::*;
 
     #[test]

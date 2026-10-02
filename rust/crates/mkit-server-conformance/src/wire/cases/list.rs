@@ -67,7 +67,7 @@ async fn create(
             return Err(failed);
         }
         attempt += 1;
-        eprintln!("list fixture: proxy blip on write {i}, retry {attempt}: {failed}");
+        ctx.record_retry(&failed);
         // Up to about 5 s in total: an in-flight original took 2-3 s to commit.
         tokio::time::sleep(std::time::Duration::from_millis(
             (200 * u64::from(attempt)).min(1_000),

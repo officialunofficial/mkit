@@ -323,7 +323,7 @@ async fn send_launch_retry<M: buffa::Message>(
         if attempt == 8 {
             return Err(failed);
         }
-        eprintln!("takedown fixture: proxy retry {}: {failed}", attempt + 1);
+        ctx.record_retry(&failed);
         tokio::time::sleep(std::time::Duration::from_millis(
             (200 * u64::from(attempt + 1)).min(1_000),
         ))
