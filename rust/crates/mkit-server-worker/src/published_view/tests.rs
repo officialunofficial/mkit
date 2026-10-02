@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_sqlite::RusqliteConn;
 use futures::FutureExt as _;
 use futures::executor::block_on;
 use mkit_server::pipeline::{D34Shards, RepoVisibility, ShardMap};
@@ -9,7 +10,6 @@ use mkit_server::{
     Batch, BatchOutcome, Clock, Key, ManualClock, MemoryKv, NamespaceKey, NamespaceStore,
     Partition, Precondition, RepoId, RepoName, Value,
 };
-use mkit_server_native::RusqliteConn;
 use std::sync::{
     Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},

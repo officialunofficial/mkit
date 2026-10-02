@@ -4,6 +4,7 @@
 mod common;
 
 use bytes::Bytes;
+use common::RusqliteConn;
 use common::{DoConfig, Loopback, SimBucket, SimDoConn, capacity_above_empty};
 use futures::executor::block_on;
 use mkit_core::hash::hash;
@@ -13,7 +14,6 @@ use mkit_server::{
     Batch, BatchOutcome, BlobKey, BlobStore, CommitOutcome, Key, MultipartBlobStore, NamespaceKey,
     NamespaceStore, PackSink, PartRef, PartSink, Partition, StoreError, StoreMaintenance, Value,
 };
-use mkit_server_native::RusqliteConn;
 use mkit_server_worker::naming::{REFSTORE, ROOT_INSTANCE};
 use mkit_server_worker::r2::{PACKS_KEYSPACE, R2BlobStore};
 

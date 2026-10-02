@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server conformance: add a debug-only memory-backed in-process HTTP host for
+  contract tests, with origin-bound auth-v2, signed loopback hook support, and
+  an explicitly advanced manual clock.
 - Server: add default-off durable inspection mode, a guarded repository flag
   registry, and bounded per-advance hold records as storage foundations for
   post-launch asynchronous inspection (WP-5.5a-0, R-206). Content holds are
