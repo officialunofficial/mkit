@@ -134,7 +134,8 @@ fn fetch_one(
     // Snapshot the remote-tracking refs so we can report exactly which
     // ones moved (git prints nothing when nothing changed).
     let before = tracking_snapshot(layout, &resolved.name);
-    match remote_dispatch::open_trusted(endpoint, resolved.repo_chosen, cfg, layout) {
+    match remote_dispatch::open_trusted(endpoint, &resolved.name, resolved.repo_chosen, cfg, layout)
+    {
         Ok(tx) => {
             let fetch_outcome = {
                 // Scoped tightly so the progress guard's final line
@@ -143,6 +144,7 @@ fn fetch_one(
                     "Unpacking objects",
                     None,
                     crate::progress::should_report(quiet),
+                    quiet,
                 );
                 remote_dispatch::fetch_all_with(cwd, tx.as_ref(), &resolved.name, require_signed)
             };

@@ -1,0 +1,1584 @@
+{
+  "cases": [
+    {
+      "expect": {
+        "absent_headers": [
+          "Access-Control-Allow-Credentials"
+        ],
+        "body_bytes": 0,
+        "headers": {
+          "Access-Control-Allow-Headers": "Range, If-None-Match, If-Range, Payment-Authorization, PAYMENT-SIGNATURE, Authorization, Accept-Payment",
+          "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "private",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 204
+      },
+      "name": "preflight_before_auth",
+      "request": {
+        "admission": "challenge",
+        "bearer_required": true,
+        "malformed_url": true,
+        "method": "OPTIONS",
+        "repository_missing": true
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [],
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Allow": "GET, HEAD, OPTIONS",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 405
+      },
+      "name": "method_before_syntax",
+      "request": {
+        "malformed_url": true,
+        "method": "POST"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [],
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "private, no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 400
+      },
+      "name": "syntax_before_bearer",
+      "request": {
+        "bearer_required": true,
+        "malformed_url": true,
+        "method": "GET"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [],
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "private, no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 401
+      },
+      "name": "bearer_before_repo",
+      "request": {
+        "bearer_required": true,
+        "method": "GET",
+        "repository_missing": true
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-Object",
+          "X-Mkit-Commit"
+        ],
+        "body_equivalence_group": "uniform_404",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 404
+      },
+      "name": "missing_repository",
+      "request": {
+        "admission": "challenge",
+        "failure": "repository_missing",
+        "if_none_match": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "method": "GET"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-Object",
+          "X-Mkit-Commit"
+        ],
+        "body_equivalence_group": "uniform_404",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 404
+      },
+      "name": "private_missing_token",
+      "request": {
+        "admission": "challenge",
+        "failure": "private_missing_token",
+        "if_none_match": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "method": "GET"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-Object",
+          "X-Mkit-Commit"
+        ],
+        "body_equivalence_group": "uniform_404",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 404
+      },
+      "name": "private_invalid_token",
+      "request": {
+        "admission": "challenge",
+        "failure": "private_invalid_token",
+        "if_none_match": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "method": "GET"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-Object",
+          "X-Mkit-Commit"
+        ],
+        "body_equivalence_group": "uniform_404",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 404
+      },
+      "name": "authorizer_private",
+      "request": {
+        "admission": "challenge",
+        "failure": "authorizer_private",
+        "if_none_match": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "method": "GET"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-Object",
+          "X-Mkit-Commit"
+        ],
+        "body_equivalence_group": "uniform_404",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 404
+      },
+      "name": "authorizer_not_found",
+      "request": {
+        "admission": "challenge",
+        "failure": "authorizer_not_found",
+        "if_none_match": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "method": "GET"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-Object",
+          "X-Mkit-Commit"
+        ],
+        "body_equivalence_group": "uniform_404",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 404
+      },
+      "name": "missing_ref",
+      "request": {
+        "admission": "challenge",
+        "failure": "missing_ref",
+        "if_none_match": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "method": "GET"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-Object",
+          "X-Mkit-Commit"
+        ],
+        "body_equivalence_group": "uniform_404",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 404
+      },
+      "name": "non_tree",
+      "request": {
+        "admission": "challenge",
+        "failure": "non_tree",
+        "if_none_match": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "method": "GET"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-Object",
+          "X-Mkit-Commit"
+        ],
+        "body_equivalence_group": "uniform_404",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 404
+      },
+      "name": "missing_entry",
+      "request": {
+        "admission": "challenge",
+        "failure": "missing_entry",
+        "if_none_match": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "method": "GET"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-Object",
+          "X-Mkit-Commit"
+        ],
+        "body_equivalence_group": "uniform_404",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 404
+      },
+      "name": "unreachable_commit",
+      "request": {
+        "admission": "challenge",
+        "failure": "unreachable_commit",
+        "if_none_match": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "method": "GET"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-Object",
+          "X-Mkit-Commit"
+        ],
+        "body_equivalence_group": "uniform_404",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 404
+      },
+      "name": "wrong_leaf",
+      "request": {
+        "admission": "challenge",
+        "failure": "wrong_leaf",
+        "if_none_match": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "method": "GET"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-Object",
+          "X-Mkit-Commit"
+        ],
+        "body_equivalence_group": "uniform_404",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 404
+      },
+      "name": "nonmember",
+      "request": {
+        "admission": "challenge",
+        "failure": "nonmember",
+        "if_none_match": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "method": "GET"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-Object",
+          "X-Mkit-Commit"
+        ],
+        "body_equivalence_group": "uniform_404",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 404
+      },
+      "name": "unreachable_id",
+      "request": {
+        "admission": "challenge",
+        "failure": "unreachable_id",
+        "if_none_match": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "method": "GET"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-Object",
+          "X-Mkit-Commit"
+        ],
+        "body_equivalence_group": "uniform_404",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 404
+      },
+      "name": "pending",
+      "request": {
+        "admission": "challenge",
+        "failure": "pending",
+        "if_none_match": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "method": "GET"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [],
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 403
+      },
+      "name": "authorizer_public",
+      "request": {
+        "failure": "authorizer_deny",
+        "method": "GET"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-*",
+          "Content-Range"
+        ],
+        "body_bytes": 1583,
+        "body_fixture": "redaction/reader-followup-detail.json",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/json",
+          "Link": "<https://vcs.example.test>; rel=\"blocked-by\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 451
+      },
+      "name": "tombstone_before_304_and_admission",
+      "request": {
+        "admission": "challenge",
+        "if_none_match": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "method": "GET",
+        "published_reachable": true,
+        "repository_tombstone": true,
+        "route": "ref"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-*",
+          "Content-Range"
+        ],
+        "body_bytes": 0,
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/json",
+          "Link": "<https://vcs.example.test>; rel=\"blocked-by\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 451
+      },
+      "name": "tombstone_head_no_body",
+      "request": {
+        "method": "HEAD",
+        "published_reachable": true,
+        "repository_tombstone": true,
+        "route": "object"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-*"
+        ],
+        "body_equivalence_group": "uniform_404",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 404
+      },
+      "name": "global_block_without_repository_tombstone",
+      "request": {
+        "global_block": true,
+        "method": "GET",
+        "published_reachable": true,
+        "repository_tombstone": false,
+        "route": "object"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-*"
+        ],
+        "body_equivalence_group": "uniform_404",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 404
+      },
+      "name": "blocked_before_tombstone_before_304",
+      "request": {
+        "global_block": true,
+        "if_none_match": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "method": "GET",
+        "published_reachable": true,
+        "repository_tombstone": false,
+        "route": "object"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-*"
+        ],
+        "body_equivalence_group": "uniform_404",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 404
+      },
+      "name": "chunk_only_under_tombstoned_manifest",
+      "request": {
+        "chunk_only_under_tombstoned_manifest": true,
+        "method": "GET",
+        "repository_tombstone": false,
+        "route": "object"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-*"
+        ],
+        "body_equivalence_group": "uniform_404",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 404
+      },
+      "name": "chunk_only_under_blocked_untombstoned_manifest",
+      "request": {
+        "chunk_only_under_blocked_manifest": true,
+        "if_none_match": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "manifest_globally_blocked": true,
+        "manifest_tombstone": false,
+        "method": "GET",
+        "route": "object"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "PAYMENT-REQUIRED"
+        ],
+        "body_bytes": 0,
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "private, no-cache",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "blob"
+        },
+        "status": 304
+      },
+      "name": "not_modified_before_range_admission",
+      "request": {
+        "admission": "challenge",
+        "if_none_match": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "method": "GET",
+        "range": "bytes=200-300",
+        "route": "ref",
+        "size": 100
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "PAYMENT-REQUIRED"
+        ],
+        "body_bytes": 0,
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "private, max-age=31536000, immutable",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "blob"
+        },
+        "status": 304
+      },
+      "name": "not_modified_paid_policy",
+      "request": {
+        "admission_called": false,
+        "admission_configured": true,
+        "if_none_match": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "method": "GET"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "PAYMENT-REQUIRED"
+        ],
+        "body_bytes": 0,
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "private, max-age=31536000, immutable",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "ETag": "\"1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145.b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f.object\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "chunked_blob"
+        },
+        "status": 304
+      },
+      "name": "not_modified_proof_paid_policy",
+      "request": {
+        "admission_called": false,
+        "admission_configured": true,
+        "if_none_match": "\"1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145.b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f.object\"",
+        "method": "GET",
+        "proof": true,
+        "route": "object"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [],
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 503
+      },
+      "name": "infrastructure_failure",
+      "request": {
+        "failure": "hook_unavailable",
+        "method": "GET"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [],
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "public, max-age=31536000, immutable",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 200
+      },
+      "name": "public_token_ignored",
+      "request": {
+        "method": "GET",
+        "public": true,
+        "token_valid": false
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [],
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "private, max-age=31536000, immutable",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "blob"
+        },
+        "status": 200
+      },
+      "name": "bearer_gated_public_id",
+      "request": {
+        "bearer_required": true,
+        "bearer_valid": true,
+        "method": "GET",
+        "public": true,
+        "route": "object"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [],
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Range": "bytes */100",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 416
+      },
+      "name": "unsatisfiable_before_admission",
+      "request": {
+        "admission": "challenge",
+        "method": "GET",
+        "range": "bytes=100-200",
+        "size": 100
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [],
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 416
+      },
+      "name": "outside_content",
+      "request": {
+        "admission": "challenge",
+        "method": "GET",
+        "proof": true,
+        "range_failure": "outside_content"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [],
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 416
+      },
+      "name": "proof_content_cap",
+      "request": {
+        "admission": "challenge",
+        "method": "GET",
+        "proof": true,
+        "range_failure": "proof_content_cap"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [],
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 416
+      },
+      "name": "proof_encoded_cap",
+      "request": {
+        "admission": "challenge",
+        "method": "GET",
+        "proof": true,
+        "range_failure": "proof_encoded_cap"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [],
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 416
+      },
+      "name": "unsupported_leaf",
+      "request": {
+        "admission": "challenge",
+        "method": "GET",
+        "proof": true,
+        "range_failure": "unsupported_leaf"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-*",
+          "X-Mkit-Object",
+          "X-Mkit-Object-Type",
+          "X-Mkit-Commit",
+          "Content-Range"
+        ],
+        "body_json": {
+          "challenges": [
+            {
+              "scheme": "example",
+              "value": "opaque-challenge"
+            }
+          ],
+          "description": "Admission required"
+        },
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/json",
+          "PAYMENT-REQUIRED": "opaque-challenge",
+          "Referrer-Policy": "no-referrer",
+          "WWW-Authenticate": "Payment example",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 402
+      },
+      "name": "challenge",
+      "request": {
+        "admission": "challenge",
+        "admission_challenge": {
+          "challenges": [
+            {
+              "scheme": "example",
+              "value": "opaque-challenge"
+            }
+          ],
+          "description": "Admission required"
+        },
+        "method": "GET"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [],
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 403
+      },
+      "name": "admission_deny",
+      "request": {
+        "admission": "deny",
+        "method": "GET"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Access-Control-Allow-Credentials"
+        ],
+        "headers": {
+          "Accept-Ranges": "bytes",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "public, max-age=31536000, immutable",
+          "Content-Length": "100",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/octet-stream",
+          "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "blob"
+        },
+        "status": 200
+      },
+      "name": "public_id",
+      "request": {
+        "method": "GET",
+        "public": true,
+        "route": "object"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Access-Control-Allow-Credentials"
+        ],
+        "headers": {
+          "Accept-Ranges": "bytes",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "public, no-cache",
+          "Content-Disposition": "inline; filename=\"small.txt\"; filename*=UTF-8''small.txt",
+          "Content-Length": "100",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "text/plain; charset=utf-8",
+          "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "blob"
+        },
+        "status": 200
+      },
+      "name": "public_ref",
+      "request": {
+        "method": "GET",
+        "public": true,
+        "route": "ref"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Access-Control-Allow-Credentials"
+        ],
+        "headers": {
+          "Accept-Ranges": "bytes",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "private, max-age=60, immutable",
+          "Content-Length": "100",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/octet-stream",
+          "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "blob"
+        },
+        "status": 200
+      },
+      "name": "private_id",
+      "request": {
+        "method": "GET",
+        "public": false,
+        "route": "object",
+        "token_remaining_seconds": 60
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Access-Control-Allow-Credentials"
+        ],
+        "headers": {
+          "Accept-Ranges": "bytes",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "private, no-cache",
+          "Content-Disposition": "inline; filename=\"small.txt\"; filename*=UTF-8''small.txt",
+          "Content-Length": "100",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "text/plain; charset=utf-8",
+          "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "blob"
+        },
+        "status": 200
+      },
+      "name": "private_ref",
+      "request": {
+        "method": "GET",
+        "public": false,
+        "route": "ref"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Access-Control-Allow-Credentials"
+        ],
+        "headers": {
+          "Accept-Ranges": "bytes",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "private, max-age=31536000, immutable",
+          "Content-Length": "100",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/octet-stream",
+          "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "blob"
+        },
+        "status": 200
+      },
+      "name": "paid",
+      "request": {
+        "admission": "allow",
+        "method": "GET",
+        "public": true,
+        "route": "object"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Access-Control-Allow-Credentials"
+        ],
+        "headers": {
+          "Accept-Ranges": "bytes",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "private, no-cache",
+          "Content-Disposition": "inline; filename=\"small.txt\"; filename*=UTF-8''small.txt",
+          "Content-Length": "100",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "text/plain; charset=utf-8",
+          "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "blob"
+        },
+        "status": 200
+      },
+      "name": "paid_ref",
+      "request": {
+        "admission": "allow",
+        "method": "GET",
+        "public": true,
+        "route": "ref"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Access-Control-Allow-Credentials"
+        ],
+        "body_bytes": 0,
+        "headers": {
+          "Accept-Ranges": "bytes",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "private, max-age=31536000, immutable",
+          "Content-Length": "100",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/octet-stream",
+          "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "blob"
+        },
+        "outcome": {
+          "bytes_served": 0,
+          "kind": "ReadServed"
+        },
+        "status": 200
+      },
+      "name": "head",
+      "request": {
+        "admission": "allow",
+        "bytes_served": 0,
+        "declared_bytes": 100,
+        "method": "HEAD",
+        "route": "object"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Access-Control-Allow-Credentials"
+        ],
+        "headers": {
+          "Accept-Ranges": "bytes",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "public, max-age=31536000, immutable",
+          "Content-Length": "100",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/octet-stream",
+          "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "chunked_blob"
+        },
+        "status": 200
+      },
+      "name": "chunked_content",
+      "request": {
+        "method": "GET",
+        "reassembled": true,
+        "type": "chunked_blob"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Access-Control-Allow-Credentials"
+        ],
+        "headers": {
+          "Accept-Ranges": "bytes",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "public, max-age=31536000, immutable",
+          "Content-Length": "100",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/vnd.mkit.object",
+          "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "tree"
+        },
+        "status": 200
+      },
+      "name": "canonical_tree",
+      "request": {
+        "method": "GET",
+        "type": "tree"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Access-Control-Allow-Credentials"
+        ],
+        "headers": {
+          "Accept-Ranges": "bytes",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "public, max-age=31536000, immutable",
+          "Content-Length": "10",
+          "Content-Range": "bytes 10-19/100",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/octet-stream",
+          "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "blob"
+        },
+        "status": 206
+      },
+      "name": "single_range",
+      "request": {
+        "method": "GET",
+        "range": "bytes=10-19",
+        "size": 100
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Access-Control-Allow-Credentials"
+        ],
+        "headers": {
+          "Accept-Ranges": "bytes",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "public, max-age=31536000, immutable",
+          "Content-Length": "10",
+          "Content-Range": "bytes 10-19/100",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/octet-stream",
+          "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "blob"
+        },
+        "status": 206
+      },
+      "name": "if_range_match",
+      "request": {
+        "if_range": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "method": "GET",
+        "range": "bytes=10-19",
+        "size": 100
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Access-Control-Allow-Credentials"
+        ],
+        "headers": {
+          "Accept-Ranges": "bytes",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "public, max-age=31536000, immutable",
+          "Content-Length": "100",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/octet-stream",
+          "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "blob"
+        },
+        "status": 200
+      },
+      "name": "if_range_miss",
+      "request": {
+        "if_range": "\"different\"",
+        "method": "GET",
+        "range": "bytes=10-19",
+        "size": 100
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Access-Control-Allow-Credentials"
+        ],
+        "headers": {
+          "Accept-Ranges": "bytes",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "public, max-age=31536000, immutable",
+          "Content-Length": "100",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/octet-stream",
+          "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "blob"
+        },
+        "status": 200
+      },
+      "name": "multi_range",
+      "request": {
+        "method": "GET",
+        "range": "bytes=0-1,5-6",
+        "size": 100
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Content-Range"
+        ],
+        "headers": {
+          "Accept-Ranges": "none",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "public, max-age=31536000, immutable",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/vnd.mkit.disclosure",
+          "ETag": "\"1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145.b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f.object\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "chunked_blob"
+        },
+        "status": 200
+      },
+      "name": "proof_object",
+      "request": {
+        "admission": "off",
+        "kind": "MKDP",
+        "method": "GET",
+        "proof": true,
+        "public": true,
+        "range_header": "bytes=1-2",
+        "route": "object",
+        "selector": "object",
+        "token_remaining_seconds": 60
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Content-Range"
+        ],
+        "headers": {
+          "Accept-Ranges": "none",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "public, no-cache",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/vnd.mkit.disclosure",
+          "ETag": "\"1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145.b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f.object\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "chunked_blob"
+        },
+        "status": 200
+      },
+      "name": "proof_ref",
+      "request": {
+        "admission": "off",
+        "kind": "MKDP",
+        "method": "GET",
+        "proof": true,
+        "public": true,
+        "range_header": "bytes=1-2",
+        "route": "ref",
+        "selector": "object",
+        "token_remaining_seconds": 60
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Content-Range"
+        ],
+        "headers": {
+          "Accept-Ranges": "none",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "public, no-cache",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/vnd.mkit.disclosure",
+          "ETag": "\"1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145.b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f.range-10-19\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "blob"
+        },
+        "status": 200
+      },
+      "name": "proof_blob_range",
+      "request": {
+        "admission": "off",
+        "kind": "MKDP",
+        "method": "GET",
+        "proof": true,
+        "public": true,
+        "range_header": "bytes=1-2",
+        "route": "ref",
+        "selector": "range-10-19",
+        "token_remaining_seconds": 60
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Content-Range"
+        ],
+        "headers": {
+          "Accept-Ranges": "none",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "public, max-age=31536000, immutable",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/vnd.mkit.disclosure-span",
+          "ETag": "\"1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145.b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f.range-10-19\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "chunked_blob"
+        },
+        "status": 200
+      },
+      "name": "proof_span",
+      "request": {
+        "admission": "off",
+        "kind": "MKDS",
+        "method": "GET",
+        "proof": true,
+        "public": true,
+        "range_header": "bytes=1-2",
+        "route": "object",
+        "selector": "range-10-19",
+        "token_remaining_seconds": 60
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Content-Range"
+        ],
+        "headers": {
+          "Accept-Ranges": "none",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "private, max-age=60, immutable",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/vnd.mkit.disclosure",
+          "ETag": "\"1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145.b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f.object\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "chunked_blob"
+        },
+        "status": 200
+      },
+      "name": "proof_private",
+      "request": {
+        "admission": "off",
+        "kind": "MKDP",
+        "method": "GET",
+        "proof": true,
+        "public": false,
+        "range_header": "bytes=1-2",
+        "route": "object",
+        "selector": "object",
+        "token_remaining_seconds": 60
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Content-Range"
+        ],
+        "headers": {
+          "Accept-Ranges": "none",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "private, max-age=31536000, immutable",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/vnd.mkit.disclosure-span",
+          "ETag": "\"1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145.b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f.range-10-19\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "chunked_blob"
+        },
+        "status": 200
+      },
+      "name": "proof_paid",
+      "request": {
+        "admission": "allow",
+        "kind": "MKDS",
+        "method": "GET",
+        "proof": true,
+        "public": true,
+        "range_header": "bytes=1-2",
+        "route": "object",
+        "selector": "range-10-19",
+        "token_remaining_seconds": 60
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [],
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "private, max-age=31536000, immutable",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "PAYMENT-RESPONSE": "opaque-response",
+          "Payment-Receipt": "opaque-receipt",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 200
+      },
+      "name": "receipt",
+      "request": {
+        "method": "GET",
+        "receipt": true,
+        "route": "object"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [],
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-cache",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Location": "/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 302
+      },
+      "name": "public_redirect",
+      "request": {
+        "method": "GET",
+        "public": true,
+        "redirects": true,
+        "route": "ref"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Location"
+        ],
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "private, no-cache",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "ETag": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Mkit-Commit": "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145",
+          "X-Mkit-Object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "X-Mkit-Object-Type": "blob"
+        },
+        "status": 200
+      },
+      "name": "admitted_ref_served_directly",
+      "request": {
+        "admission": "allow",
+        "admission_configured": true,
+        "method": "GET",
+        "public": true,
+        "redirects": true,
+        "route": "ref"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "Access-Control-Allow-Credentials"
+        ],
+        "headers": {
+          "Access-Control-Allow-Origin": "https://viewer.example",
+          "Access-Control-Expose-Headers": "ETag, Content-Range, Accept-Ranges, Content-Length, X-Mkit-Commit, X-Mkit-Object, X-Mkit-Object-Type, WWW-Authenticate, Payment-Receipt, PAYMENT-REQUIRED, PAYMENT-RESPONSE, Link",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "Vary": "Origin",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 200
+      },
+      "name": "cors_configured",
+      "request": {
+        "method": "GET",
+        "origin": "https://viewer.example"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [],
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "public, max-age=300",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/json",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 200
+      },
+      "name": "key_document_exempt",
+      "request": {
+        "bearer_required": true,
+        "method": "GET",
+        "route": "/.well-known/mkit-url-token-keys.json"
+      }
+    }
+  ],
+  "notes": {
+    "402_body": "AdmissionChallenge canonical protobuf JSON; HEAD has no body.",
+    "451": "Only a repository tombstone with published-tree reachability returns 451; prior 404 checks win.",
+    "opaque": "No object routes mounted.",
+    "uniform_404": "Missing repository and missing/invalid private token use identical headers and body."
+  },
+  "schema_version": 1
+}

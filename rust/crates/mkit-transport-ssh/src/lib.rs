@@ -64,8 +64,8 @@ use mkit_rpc::mkit::rpc::v1::ssh::{
     ssh_frame,
 };
 use mkit_rpc::{
-    CHUNK_DATA_MAX, FrameError, MAX_REF_NAME, body_name, cond_to_wire, map_update_ref_error,
-    read_frame, ref_entry_to_ref, rpc_error_to_transport, unexpected_frame, write_frame,
+    CHUNK_DATA_MAX, FrameError, MAX_REF_NAME, body_name, cond_to_wire, list_response_refs,
+    map_update_ref_error, read_frame, rpc_error_to_transport, unexpected_frame, write_frame,
 };
 
 pub use crate::url::{MKIT_SSH_PREFIX, SshTarget, parse_mkit_ssh_url, validate_ssh_path};
@@ -615,11 +615,7 @@ impl Transport for SshTransport {
             write_child_frame_or_err(io, req)?;
             let resp = read_child_frame_or_err(io)?;
             match resp.body {
-                Some(ssh_frame::Body::ListRefsResponse(r)) => r
-                    .refs
-                    .into_iter()
-                    .map(ref_entry_to_ref)
-                    .collect::<TransportResult<Vec<_>>>(),
+                Some(ssh_frame::Body::ListRefsResponse(r)) => list_response_refs(prefix, r.refs),
                 Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "ssh")),
                 other => Err(unexpected_frame("ssh", "ListRefsResponse", other)),
             }
@@ -1114,7 +1110,7 @@ mod tests {
             .with_name("refs/heads/main")
             .with_object_id(vec![0u8; 16]);
         assert!(matches!(
-            ref_entry_to_ref(bad),
+            mkit_rpc::ref_entry_to_ref(bad),
             Err(TransportError::InvalidResponse)
         ));
     }
@@ -1126,7 +1122,7 @@ mod tests {
             .with_name(String::new())
             .with_object_id(vec![0u8; 32]);
         assert!(matches!(
-            ref_entry_to_ref(bad),
+            mkit_rpc::ref_entry_to_ref(bad),
             Err(TransportError::InvalidRef(_))
         ));
     }

@@ -1068,9 +1068,39 @@ Remote / sync:
   up-to-date`). `--format=json` emits one JSON object to stdout:
   `{"ok":true,"remote":"...","endpoint":"...","branch":"...",
   "remote_branch":"...","old":"<hex>|null","new":"<hex>","forced":<bool>,
-  "up_to_date":<bool>}` on success, or `{"ok":false,"rejected":true,
+  "up_to_date":<bool>,"steps":<n>}` on success (`steps` is 0 when up to date, otherwise the number of branch
+  advances the push took; `--all` reports the total plus `ref_count`), or
+  `{"ok":false,"rejected":true,
   "branch":"...","error":"..."}` on a non-fast-forward (CAS) rejection
   (`{"ok":false,"error":"..."}` for any other failure).
+  On a V2 Connect remote, pushes at or above its advertised upload threshold
+  open a signed ticket for each data pack and packmap node, then consume those
+  tickets with the branch advance. A single advance can carry six data packs.
+  A push that needs more is split automatically along the branch's
+  first-parent history into several advances, each moving the branch to an
+  intermediate commit whose closure fits; nothing is uploaded ahead of its
+  advance. **Every intermediate state is published**: the remote branch, its
+  Stage 2 hooks, receipts and lifecycle events all fire once per advance, and
+  a failed push leaves the branch at the last published commit, which the
+  error names. Run `mkit push` again to resume from there (the
+  remote-tracking ref follows each advance). The first advance uses your usual
+  lease (or `--force`); every later one is a compare-and-swap on the previous
+  advance's commit, even under `--force`. Before uploading anything, the
+  client checks that your stored write grants cover every advance: a
+  non-owner key needs `c` to create the branch (or `u`/`f` to update it), and
+  an `f` grant for the later advances, on every server until indexed-mode
+  `u`-only fast-forwards land (R-148); the owner key needs no grant. A push
+  that would be refused midway is refused up front, with no advance
+  published. A single commit or merge that cannot be split (a merge always
+  lands whole) and still needs more than six packs is refused before any
+  upload, naming the commit; ask the operator to raise `max_pack_bytes`. On a
+  terminal the progress line reads `Writing objects (step 2/5)`; piped, a
+  `pushed step 2/5: branch now at <hex>` line follows each advance; `--quiet`
+  prints neither. Large packs upload in parts. Receipt files in the
+  repository's common `upload-parts/` cache let the next `mkit push` resume
+  the parts already accepted, provided the regenerated push plan is identical.
+  After an interruption, run `mkit push` again to resume; the message reports
+  how many parts were saved. Legacy Connect remotes use the existing upload path.
 - **Transfer progress (#711).** `clone`/`push`/`pull`/`fetch` stream a
   live, honest progress line on stderr while the network transfer runs &mdash;
   `Writing objects: N objects, B bytes` while building/uploading the
@@ -1082,76 +1112,112 @@ Remote / sync:
   delta graph. Progress shows only when stderr is a tty; `-q`/`--quiet`
   forces it off, and `MKIT_PROGRESS=always`/`never` overrides the
   tty-detection explicitly (mirrors `NO_COLOR`/`CLICOLOR_FORCE`).
-- `mkit serve <path>` &mdash; internal SSH transport server. Speaks the
-  mkit-rpc SSH framing on stdin/stdout by default. Holds a shared
-  `serve.lock` in `<path>/.mkit` for as long as the process is alive
-  (any number of concurrent `serve` processes may hold it at once); a
-  local worktree-mutating command or `gc` run against that same path
-  while it is held prints a warning to stderr and proceeds &mdash; it is not
-  refused, and this is detection, not coordination (SPEC-CONCURRENCY
-  §3.1).
-- `mkit serve <path> --listen-enc <addr>` &mdash; bind a TCP socket on
-  `<addr>` (for example, `0.0.0.0:9418`) and serve the same protocol over
-  an encrypted-stream transport. Requires building the binary with
-  `--features enc-transport`. **Fail-closed**: the listener refuses to
-  bind unless one of the following is supplied:
-  - `--enc-authorized-peers <PATH>` &mdash; an allowlist of authorized client
-    public keys, one per line (64-hex or 43-char url-safe base64; `#`
-    comments and blank lines ignored). A client whose static ed25519
-    key is not listed is rejected at the handshake and receives no data.
-    This path MUST be CLI-supplied or user-scoped &mdash; peer-authorization
-    is never read from repo-local `.mkit/config`.
-  - `--unsafe-allow-any-enc-peer` &mdash; a development escape that accepts
-    ANY peer. Prints a loud warning; never use in production.
-  These two flags are mutually exclusive.
+- `mkit serve [--idle-timeout-secs <secs>] [--max-session-secs <secs>] <path>` &mdash; internal SSH
+  transport server. Speaks the mkit-rpc SSH framing on stdin/stdout (its
+  only mode). `mkit serve --root <dir> [--principal <hex>] [<ns>/<name>]`
+  is the multi-repository form a forge forces: the path (or, when it is
+  omitted, an `SSH_ORIGINAL_COMMAND` of exactly `mkit serve <path>`)
+  names a `<NAMESPACE>/<NAME>` resolved under `<dir>` &mdash; a bare
+  name, an uppercase byte, `..`, an extra component or a symlinked
+  component is refused &mdash; and only the namespace's Ed25519 owner
+  may write. `--principal` (a raw 32-byte key as 64 lowercase hex) is
+  the sshd configuration's trust assertion of the caller's key, read
+  from argv alone and never from the environment; a session without it
+  is read-only. Packs a session uploads and verifies may be published
+  by that session's packmap write (at most seven between packmap
+  writes); a packmap whose node's `prev` is neither absent nor the
+  value the write replaces, whose node or a listed pack is neither
+  pending nor a member (a pending packlist listed as a pack counts as
+  refused), or that lists more than 1,024 packs is refused. See
+  SPEC-TRANSPORT §4.1 and [SSH-SECURITY.md](SSH-SECURITY.md) §5. Both
+  forms hold a shared `serve.lock` in `<path>/.mkit` for as long as
+  the process is alive (any number of concurrent `serve` processes may
+  hold it at once); a local worktree-mutating command or `gc` run against
+  that same path while it is held prints a warning to stderr and proceeds
+  &mdash; it is not refused, and this is detection, not coordination
+  (SPEC-CONCURRENCY §3.1).
 
-  Post-handshake resource bounds (slow-loris hardening):
-  - `--enc-idle-timeout-secs <SECS>` &mdash; per-frame idle timeout applied
-    after the handshake completes. A peer that does not send its next
-    verb/upload frame within this window has its session dropped, so a
-    peer that finishes the handshake then stalls cannot pin a worker plus
-    socket indefinitely. `0` disables the timeout (not recommended).
-    Default: `60`.
-  - `--enc-handshake-timeout-secs <SECS>` &mdash; overall deadline for
-    completing the cryptographic handshake. SPEC-TRANSPORT-ENC §6.2
-    recommends tightening to ≤5–10s on real networks; the default is
-    deliberately generous. Default: `60`.
+  `--idle-timeout-secs <secs>` (default `60`; `0` disables it) ends the
+  session after that long without a byte from the client, whether before
+  the handshake, between requests or in the middle of an upload (whose
+  partial pack is discarded): it answers `Error{INVALID_REQUEST, "idle
+  timeout"}` and exits 76. An upload that keeps sending never trips it,
+  however slow. It bounds only a *silent* client: one that trickles bytes,
+  or stops reading a download, is not idle. For those, `--max-session-secs
+  <secs>` (default `0`, off) ends the process that long after it starts,
+  whatever the client is doing, exit 76; set it above your longest
+  legitimate clone or push. Both flags accept at most 604800 (7 days). See
+  [SSH-SECURITY.md](SSH-SECURITY.md) §4.
 
-  `--enc-server-key <PATH>` selects the server's stable raw 32-byte
-  ed25519 key file (auto-created with `0600`/`0700` hardening on first
-  run). When allowlisting and the flag is omitted, the key is
-  auto-created at the user-scoped default `~/.config/mkit/enc/server.key`
-  so the advertised `?pubkey=` is **stable across restarts**. Only the
-  unsafe allow-any mode without a key file falls back to an ephemeral
-  per-process key. The server prints its public key to stderr at
-  startup; clients dial `mkit+enc://<host>:<port>?pubkey=<key>` after
-  copying that key out-of-band. A client may pin its own identity (so
-  an allowlisting server can recognize it across restarts) by pointing
-  the `MKIT_ENC_CLIENT_KEY` environment variable at a user-scoped raw
-  32-byte key file; otherwise the client uses an ephemeral key. The
-  default port advertised by `mkit+enc://` URLs when none is supplied
-  is **9418**. Full keystore integration is deferred (see
-  SPEC-TRANSPORT-ENC §6.2).
-- `mkit serve <path> --http <addr>` &mdash; self-hosted Connect remote: bind
-  `<addr>` (for example, `0.0.0.0:8443`) and host `mkit.transport.v1.TransportService`
-  (SPEC-TRANSPORT-CONNECT) over axum/HTTP, instead of the SSH-frame
-  protocol. Requires building with `--features http-transport`. This is
-  a plaintext HTTP listener &mdash; put a TLS-terminating reverse proxy in
-  front for production use (or bind to loopback and tunnel).
-  **Fail-closed**, mirroring `--listen-enc`: refuses to bind unless one
-  of the following is supplied:
-  - `--http-token <TOKEN>` (or the `MKIT_API_TOKEN` environment variable
-    &mdash; the same variable `mkit+https://` clients already send as
-    `Authorization: Bearer <token>`, SPEC-TRANSPORT §5.2) &mdash; every RPC
-    (unary and streaming, including `UploadPack`/`DownloadPack`) is
-    rejected with `unauthenticated` unless it carries a matching bearer
-    token, checked in constant time.
-  - `--unsafe-allow-any-http-peer` &mdash; a development escape that accepts
-    ANY caller with no authentication at all. Prints a loud warning;
-    never use in production.
-  These two are mutually exclusive, and mutually exclusive with
-  `--listen-enc`. `Ctrl-C`/`SIGTERM` drain in-flight requests before
-  exiting (the same cooperative shutdown flag the rest of the CLI uses).
+  Refs are served only under `refs/` (SPEC-REFS §2). A read or write of
+  any other name is refused by name ("ref name must start with refs/ …");
+  see "Refs outside `refs/`" below. At startup, when no other `mkit serve` or `mkit-server` is serving the
+  root, it also removes upload temp files (`packs/.<hex>.tmp.<pid>.<seq>`)
+  that a crashed server left, once they are an hour old. A root served by
+  `mkit-server --meta sqlite:` (marked `.mkit/server-meta`) is refused
+  (exit 78): its refs live in the database.
+
+  `mkit serve` has no network listener. The self-hosted `mkit+https://`
+  remote and the `mkit+enc://` listener are the separate `mkit-server`
+  binary (release archive `mkit-server-<version>-<target>.tar.gz`, see
+  [INSTALL.md](INSTALL.md#mkit-server); operator guide
+  [`rust/crates/mkit-server-native/README.md`](../rust/crates/mkit-server-native/README.md)):
+  `mkit-server serve --repo-root <path> --listen <addr>` and/or
+  `--listen-enc <addr>`. It holds the same shared `serve.lock`.
+
+  **Migrating from `mkit serve --http` and `--listen-enc`.** Both were
+  removed from `mkit serve` (passing them is a usage error, exit 64, with a
+  hint). Serve the same root with `mkit-server`:
+
+  | Removed (`mkit serve <path> ...`) | Use (`mkit-server serve --repo-root <path> ...`) |
+  |---|---|
+  | `--http <addr>` | `--listen <addr>` (filesystem packs and `.mkit`-layout refs by default, as before) |
+  | `--http-token <token>` | `--bearer-token-file <path>` (owner-only file) or `MKIT_API_TOKEN`; never on the command line |
+  | `MKIT_API_TOKEN` | unchanged |
+  | `--unsafe-allow-any-http-peer` | `--unsafe-allow-any-peer` |
+  | `--listen-enc <addr>` | `--listen-enc <addr>` (alone, or beside `--listen`) |
+  | `--enc-authorized-peers <path>` | unchanged; the file must be owned by the server's user (or root) and not group- or other-writable |
+  | `--enc-server-key <path>` | unchanged, and required with an allowlist (no `~/.config/mkit/enc/server.key` default) |
+  | `--unsafe-allow-any-enc-peer` | unchanged; refused beside an HTTP listener that requires a token or auth v2 |
+  | `--enc-idle-timeout-secs <secs>` | unchanged; `0` (was "no timeout") is refused |
+  | `--enc-handshake-timeout-secs <secs>` | unchanged; default `10` (was `60`); `0` is refused |
+  | building `mkit` with `--features http-transport` | the `mkit-server` release archive, or `cargo build -p mkit-server-native --bin mkit-server` |
+
+  Clients are unchanged: `mkit+https://` (and loopback `mkit+http://`)
+  remotes send `MKIT_API_TOKEN` as a bearer token, and `mkit+enc://`
+  remotes (a `mkit` built with `--features enc-transport`) pin the
+  server's `?pubkey=`, which `mkit-server` prints at startup. A client may
+  pin its own identity (so an allowlisting server can recognize it across
+  restarts) by pointing the `MKIT_ENC_CLIENT_KEY` environment variable at
+  a user-scoped raw 32-byte key file; otherwise the client uses an
+  ephemeral key. The default port advertised by `mkit+enc://` URLs when
+  none is supplied is **9418**.
+
+  **Refs outside `refs/`.** `mkit serve` before 0.5 stored any
+  grammar-valid ref name as a file at the served root, so a name without
+  the `refs/` prefix (`main`, `heads/main`) became `<path>/main` or
+  `<path>/heads/main`. No mkit client ever wrote such names, but a
+  third-party client could have. Servers now serve only `refs/` names
+  (SPEC-REFS §2) and refuse others; they never read, move or delete these
+  files. To find candidates, with no server running against the root,
+  list the small files outside `.mkit/`, `refs/` and `packs/` that hold a
+  64-hex ref id, and review each one (a worktree file can match too):
+
+  ```sh
+  cd /srv/mkit/repo
+  find . -path ./.mkit -prune -o -path ./refs -prune -o -path ./packs -prune \
+    -o -type f -size -81c -exec grep -lxE '[0-9a-f]{64}' {} +
+  ```
+
+  Then move each real ref to the `refs/` name your clients use, without
+  overwriting an existing one (for a branch `main`, `refs/heads/main`):
+
+  ```sh
+  mkdir -p refs/heads && mv -n main refs/heads/main
+  ```
+
+  or delete it if nothing needs it. The same applies to a root served by
+  `mkit-server --repo-root` with the default `.mkit`-layout refs.
 - `mkit pack-shard <hash> [--out <dir>] [--force]` &mdash; encode a stored
   pack into Reed-Solomon shards plus a manifest, ready to publish to
   an HTTP / S3 origin. Producer side of the SPEC-PACK-SHARDS
@@ -1319,6 +1385,96 @@ Agent integration:
   claude mcp add mkit-repo -- mkit mcp --repository /path/to/repo
   ```
 
+Grants, epochs and repository visibility ([SPEC-WRITE-GRANTS](specs/SPEC-WRITE-GRANTS.md)):
+
+A *grant* is a statement signed by a namespace owner that lets a grantee's key
+read or write repositories in that namespace on a deployment. `mkit grant`
+manages the grants **you hold**; the store is a directory of files under the
+user config directory. It is not the operator-side `mkit-server grant register`
+(WP-2.12, for ssh/enc transport principals on a server): the two names are
+unrelated commands.
+
+- `mkit grant create --cap CAP --grantee HEX (--repo NAME | --all)
+  [--refs PATTERN=FLAGS]... [--audience ORIGIN]... [--ttl DURATION]
+  [--epoch N | --offline] [--namespace NS] [--remote REMOTE] [--store]`
+  &mdash; create an owner-signed grant and print its header (give it to the grantee).
+  `CAP` is `read`, `read,write` or `write` (`write,read` is accepted and spelled
+  canonically). `--refs` is `pattern=flags` with flags from `cufd`, required with
+  write and not allowed with read (a server without indexed mode cannot check a
+  fast-forward, so it applies an update to an existing ref only under `f`: use
+  `cuf`, not `cu`, for pushes that move a branch); audiences, ref scopes and flags are sorted and
+  deduplicated. `--ttl` is at most `30d` (default `7d`). The epoch defaults to the
+  remote's current one (`GetGrantEpoch`) or `0` with `--offline`; the audience
+  defaults to the trusted remote's origin. `--store` also adds it to your own store.
+- `mkit grant add [--remote REMOTE | --offline] <file|->` &mdash; verify a grant
+  header's owner signature and add it to your grant store. Idempotent on the same
+  grant id. Anything the verifier rejects is refused with the rule named. It then
+  makes one short attempt to ask the trusted (or `--remote`) deployment for the
+  namespace's epoch and warns when the grant's epoch is above it (see the epoch
+  rule below); if that check fails it warns and stores anyway, and `--offline`
+  skips it.
+- `mkit grant list [--check] [--remote REMOTE] [--json]` &mdash; id, namespace,
+  scope, capabilities, ref scopes, audiences, epoch, expiry and status
+  (`valid`, `expired`, `not yet valid`). `--check` asks the trusted (or named)
+  remote for each namespace's epoch and marks `stale epoch` / `future epoch`, only
+  for grants whose audiences include that remote (others are `unchecked`).
+  It never contacts an origin that a grant file merely names.
+- `mkit grant revoke <remote> [--namespace NS] [--audience ORIGIN]... [--prune]
+  [--timeout DURATION]` &mdash; sugar for `mkit epoch bump --by 1`. It first lists
+  the local grants the bump invalidates, and afterwards prints how to reissue.
+  A grant that also lists an audience the bump does not cover stays valid there:
+  it is listed as "still valid at ..." and kept. `--prune` deletes only the grants
+  every audience of which the bump covers, once it succeeds.
+- `mkit epoch show <remote> [--namespace NS] [--json]` &mdash; the epoch the remote
+  stores for a namespace (0 if never set).
+- `mkit epoch bump <remote> [--by N] [--namespace NS] [--audience ORIGIN]...
+  [--timeout DURATION] [--json]` &mdash; raise the epoch by `N` (1 to 1024,
+  default 1), revoking every grant issued at a lower epoch. The statement is signed
+  once. While the server answers `unavailable` with `Retry-After`, `bump` waits
+  (1 to 60 s per wait) and re-sends the **identical statement**, up to
+  `--timeout` (default `5m`). Ctrl-C cancels and says the bump may still finish on
+  the server; check `mkit epoch show` before running it again, because a new run
+  signs a new statement and would raise the epoch again.
+- `mkit visibility set <remote> public|private [--statement] [--audience ORIGIN]...
+  [--timeout DURATION]` &mdash; switch a repository between public and private.
+  By default it is a signed request with the repository signing key
+  (`transport_auth = envelope`, a trusted remote, and the owner's key). With
+  `--statement` it sends an owner-signed `mkit-repo-visibility:v1` statement
+  with no envelope, which any owner scheme can sign.
+
+Cloning a private repository: a Connect clone with `transport_auth = envelope`
+signs with `signing_key`, which defaults to the repository-relative
+`.mkit/keys/default.key`. A fresh clone has no such file, so set a user-level
+`signing_key` (or `signer = keystore`) before cloning.
+
+Signing flags (`grant create`, `epoch bump`, `grant revoke`, `visibility set
+--statement`): the owner signs with the mkit signing key (`ed25519`, the
+default; the namespace is `ed25519-<pubkey>`) or, with `--scheme
+secp256k1-eip191`, with a software-keystore secp256k1 key (`key.secp256k1_ref`;
+the namespace is its `0x` address). A wallet or authenticator signs by import:
+`--print-statement` writes the exact statement bytes to stdout (the digest or
+challenge to sign goes to stderr); then rerun with `--statement-file <that
+file>` and either `--signature <hex>` (65 bytes `r‖s‖v`, `v` of 0, 1, 27 or 28,
+a high `s` is normalized) or `--webauthn-assertion <file>` (JSON with base64url
+`publicKey` (x‖y), `authenticatorData`, `clientDataJSON` and `signature`, DER or
+low-`s` raw). A `webauthn-p256` import is refused unless the user config pins the
+relying party with `grant.webauthn_rp = <rp_id> <origin>...`. Every header is
+verified locally before it is stored or sent.
+
+How a held grant is used: `mkit push`, `pull`, `fetch` and `clone` attach the best
+grant from your store to each signed request, for the key that signs them. Among
+the grants valid for the request, the **higher epoch wins**, then the most
+specific repository and ref scope, then the latest expiry, then the greater
+header bytes. A grant pre-issued for epoch *e*+1 therefore outranks a live
+epoch-*e* grant until the owner raises the epoch. A **write-only grant never
+implies read on a private repository** (only `GetReceipt` accepts it). Each signed
+read may prompt for a signature when your key needs a touch or a passphrase.
+Epochs are per deployment, so a grant lists the audiences it is valid at.
+The grant store directory is never followed through a symlink: if
+`$XDG_CONFIG_HOME/mkit/grants` is a symlink, mkit refuses it rather than trust
+where it points. Files are read without following symlinks and only files named
+`<64 hex>.grant` are considered.
+
 Config / keys / version:
 
 - `mkit keygen` &mdash; generate a new Ed25519 signing keypair.
@@ -1387,7 +1543,7 @@ Config / keys / version:
     `core.fsmonitor`) are **rejected** rather than stored. Names match
     case-insensitively and canonicalize to lowercase, like git.
 - `mkit self update [--version <tag>] [--check] [--allow-downgrade]
-  [--format human|json]` &mdash; update this binary in place from a signed
+  [--format human|json]` &mdash; update this binary in place from a
   GitHub Release. The downloaded archive is checked against its sha256
   sidecar asset when the release publishes one; this runs entirely
   in-process, no `cosign` and no GitHub attestation API are involved.
@@ -1549,7 +1705,8 @@ Stored in `.mkit/config` as `key = value` lines &mdash; **except** security-sens
 keys, which are **user-scoped only** and ignored if set in a repo's
 `.mkit/config` (a hostile repo must not be able to redirect signing or trust).
 Those keys &mdash; `user.identity`, `signing_key`, `signer`, `key.*`, `attest.*`,
-`ssh.*`, and `trusted_remote_endpoint` &mdash; live in the user config
+`ssh.*`, `trusted_remote_endpoint`, `admission_helper`, `grant.webauthn_rp`, and
+`remote.<name>.admission_headers` &mdash; live in the user config
 (`$XDG_CONFIG_HOME/mkit/config`); set them with `mkit config <key> <value>`,
 which routes them to the user scope automatically.
 
@@ -1562,6 +1719,9 @@ which routes them to the user scope automatically.
 | `remote_bucket` | name | empty | For s3 remotes |
 | `remote_type` | `file` / `http` / `s3` / `ssh` / `memory` | auto | |
 | `transport_auth` | `bearer` / `envelope` | `bearer` | Write-auth mode for `mkit+https://`/`mkit+http://`; `envelope` additionally Ed25519-signs writes with the commit-signing key (see `signer`/`signing_key`/`key.ed25519_ref`) |
+| `http.sslCAInfo` | PEM certificate file path | unset | Additional trust certificates for native Connect HTTPS remotes only; normal user/repository/`-c` configuration scopes apply. `MKIT_SSL_CA_FILE` takes precedence. See [HTTPS certificate trust](#https-certificate-trust). |
+| `admission_helper` | absolute executable path | unset | User-scoped; invoked once for a 402 on a trusted remote. Its stdin includes untrusted server challenge content. The helper decides whether and how much to spend. |
+| `remote.<name>.admission_headers` | comma-separated HTTP header names | empty | User-scoped additions to the admission helper's request allowlist; hard-reserved names are refused. |
 | `ssh.strict_host_key_checking` | `yes` / `no` / `accept-new` | inherit | User-scoped only |
 | `ssh.user_known_hosts_file` | path | inherit | User-scoped only |
 | `ssh.identity_file` | path | inherit | User-scoped only |
@@ -1572,12 +1732,52 @@ which routes them to the user scope automatically.
 | `key.secp256k1_ref` | `<backend>:<label>` | `software:default-secp256k1` | User-scoped secp256k1 ref |
 | `key.p256_ref` | `<backend>:<label>` | `software:default-p256` | User-scoped P-256 ref |
 | `attest.signer` | `repo-key` / `keystore` / `external` | `repo-key` | User-scoped attestation signer |
+| `grant.webauthn_rp` | `<rp_id> <origin>...` (repeatable; `\|` separates entries in one value) | unset | User-scoped only. Pins the `WebAuthn` relying parties `mkit grant`/`epoch`/`visibility` accept for `webauthn-p256` signatures; unset refuses them |
 
 Keystore backend names include `software`, `software-raw`, `macos-keychain`,
 `linux-secret-service`, `systemd-creds`, and `yubikey`
 when the target build enables the corresponding backend feature. Security-
 sensitive selector keys are ignored from repo-local config; set them in
 `$XDG_CONFIG_HOME/mkit/config` or with explicit command flags.
+
+### HTTPS certificate trust
+
+For a private or local mkit remote over Connect HTTPS (`mkit+https://`),
+supply a PEM file containing the CA certificates you trust:
+
+```sh
+mkit config http.sslCAInfo /absolute/path/to/local-ca.pem
+# Override the configured file for one command:
+MKIT_SSL_CA_FILE=/absolute/path/to/other-ca.pem mkit fetch origin
+```
+
+`http.sslCAInfo` follows the normal user, repository, and command-line `-c`
+configuration precedence. `MKIT_SSL_CA_FILE` overrides the resulting value.
+Configured relative paths start at the repository root; `~/` expands against
+`HOME`. An environment file path is used as supplied.
+The selected file adds certificates to the bundled Mozilla roots; certificate-chain
+and hostname verification remain enabled. A missing, unreadable, empty,
+or malformed selected file is a hard error. Keep private keys out of the
+CA file; it contains certificates only.
+
+These settings apply only to native mkit remotes over the Connect transport:
+HTTPS RPCs, pack uploads and downloads. The self-updater uses the OS trust
+store and the release checksum when present; it does not read
+`MKIT_SSL_CA_FILE` / `http.sslCAInfo`. S3 remotes do not yet honor either
+setting; private-CA S3 endpoints are a post-launch follow-up. Wasm/browser
+certificate trust is unchanged.
+The key shares its spelling with [Git's CA-file setting](https://git-scm.com/docs/git-config#Documentation/git-config.txt-httpsslCAInfo);
+mkit uses its own `MKIT_SSL_CA_FILE` environment variable.
+
+### Admission helper
+
+The admission helper's stdin carries raw `headers["www-authenticate"]`
+field values. One value can contain several challenges when the server's
+platform combines repeated fields. Helpers MUST parse each value as an
+RFC 9110 §11.6.1 challenge list, preserve challenge order, and distinguish
+list separators from commas within auth-params and quoted strings.
+The separate typed `challenges` array remains available. mkit forwards
+the raw fields without splitting them.
 
 ### `user.identity`
 
@@ -1691,6 +1891,12 @@ parsing stderr.
   `NO_COLOR` overrides this.
 - **`SSH_AUTH_SOCK`** &mdash; standard OpenSSH agent socket, used by
   `mkit+ssh://` transports.
+- **`MKIT_SSL_CA_FILE`** &mdash; PEM certificate file for additional native
+  Connect HTTPS remote trust only, overriding `http.sslCAInfo`. The
+  self-updater is excluded by design; S3 remotes are not yet covered.
+  Certificates are added to the Mozilla roots, with chain and hostname verification enabled.
+  Missing, unreadable, empty, or malformed files are hard errors. See
+  [HTTPS certificate trust](#https-certificate-trust).
 - **`XDG_CONFIG_HOME`**, **`XDG_DATA_HOME`**, **`XDG_CACHE_HOME`**,
   **`XDG_STATE_HOME`** &mdash; XDG Base Directory roots for user-level config,
   keystore, cache, and state respectively. Defaults per the freedesktop
@@ -1707,6 +1913,7 @@ parsing stderr.
 | `.mkit/index.lock`                  | Held by commit/checkout/merge/rebase             |
 | `.mkit/COMMIT_EDITMSG`              | Scratch file for `mkit commit` without `-m`      |
 | `$XDG_CONFIG_HOME/mkit/config`      | User-level config (cross-repo defaults)          |
+| `$XDG_CONFIG_HOME/mkit/grants/`     | Your grant store: `<grant id>.grant` files (0700/0600), never repo-scoped |
 | `$XDG_DATA_HOME/mkit/keys/`         | User-level keystore (optional)                   |
 | `$XDG_CACHE_HOME/mkit/`             | User-level cache                                 |
 | `$XDG_STATE_HOME/mkit/`             | User-level state                                 |

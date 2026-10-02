@@ -105,9 +105,9 @@ fn tool_from_spec(spec: &ToolSpec) -> Tool {
 }
 
 /// Environment-variable fallback for `--http-token`, checked when the flag
-/// is omitted — mirrors `mkit serve --http`'s `--http-token`/
+/// is omitted — mirrors `mkit-server`'s bearer-token/
 /// `mkit_transport_http::TOKEN_ENV` sourcing, but under a name of its own:
-/// `mkit mcp --http` and `mkit serve --http` are different threat models
+/// `mkit mcp --http` and `mkit-server` are different threat models
 /// (a high-privilege, agent-facing tool catalog including `mkit_checkout`,
 /// versus a Git transport) and MUST NOT share a secret — a token leaked to
 /// one surface would otherwise also grant the other.
@@ -159,9 +159,9 @@ pub(crate) fn serve(
 /// escape hatch (in which case every request is accepted unchecked).
 type HttpAuth = Option<Arc<str>>;
 
-/// Resolve `--http`'s fail-closed auth gate — FAIL-CLOSED, mirroring `mkit
-/// serve --http`'s `--http-token`/`--unsafe-allow-any-http-peer` gate
-/// (`commands/serve/http.rs`): refuses to report a usable auth
+/// Resolve `--http`'s fail-closed auth gate — FAIL-CLOSED, mirroring
+/// `mkit-server serve`'s bearer-token/`--unsafe-allow-any-peer` gate:
+/// refuses to report a usable auth
 /// configuration unless either a non-empty token is available (flag or
 /// [`MCP_TOKEN_ENV`]) or the operator explicitly opted into the unsafe
 /// escape. Exit-code side effects (printing + returning early) live here
@@ -280,10 +280,9 @@ async fn serve_http(allowed: Option<PathBuf>, addr: &str, auth: HttpAuth) -> Res
 
 /// Constant-time `Authorization: Bearer <token>` gate wrapped around
 /// `StreamableHttpService`, applied to every request before it reaches
-/// `rmcp`'s handler — mirrors `mkit serve --http`'s `BearerAuth`
-/// interceptor (`commands/serve/http.rs`), reimplemented against
-/// `tower_service::Service` directly rather than `connectrpc::Interceptor`
-/// since this transport is raw hyper/tower, not connect-rpc.
+/// `rmcp`'s handler — mirrors `mkit-server`'s constant-time bearer
+/// pre-check, implemented against `tower_service::Service` directly since
+/// this transport is raw hyper/tower, not connect-rpc.
 ///
 /// `expected: None` is the explicit `--unsafe-allow-any-http-peer` escape
 /// hatch (every request accepted unchecked); `resolve_http_auth` is the

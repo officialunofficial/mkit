@@ -1,0 +1,29 @@
+{
+  "blake3": "9af627f9700ebecde0b4769a2edb3fadb532d06e889f3b4e69e0de3199b044ec",
+  "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expect": {
+    "accept": false,
+    "expand_to": null,
+    "reject_reason": "span_magic"
+  },
+  "name": "neg_mkdp_as_mkds",
+  "recipe": {
+    "segments": [
+      {
+        "length": 787,
+        "offset": 55,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "hex": "200000000000000010"
+      },
+      {
+        "length": 3198,
+        "offset": 851,
+        "source": "span_two_chunks.bin"
+      }
+    ]
+  },
+  "schema_version": 1,
+  "size": 3994
+}

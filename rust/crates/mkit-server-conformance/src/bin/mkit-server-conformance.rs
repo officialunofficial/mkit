@@ -1,0 +1,303 @@
+//! `mkit-server-conformance wire`: run the black-box wire suite against a
+//! server at a URL and print a TAP report. Exits 1 if any case fails, 2 on
+//! a usage error.
+//!
+//! ```text
+//! mkit-server-conformance wire --base-url http://localhost:8791 \
+//!     --auth auth-v2 --audience http://localhost:8791 --repository default \
+//!     --random-signer --atomic-advance --max-pack-bytes 67108864
+//! ```
+
+use std::process::ExitCode;
+
+use clap::{Args, Parser, Subcommand};
+use mkit_server_conformance::wire::{
+    CASES, ProfileSpec, WireAuth, WireTarget, grant_owner_allowlist_text, multi_allowlist_text, run,
+};
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "mkit-server-conformance",
+    about = "Conformance suites for mkit servers"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Run the black-box wire suite against a `mkit.transport.v1` server.
+    Wire(WireArgs),
+    /// Run the loopback MPP hook fixture (never a release feature).
+    #[cfg(feature = "stubs")]
+    StubHook {
+        /// Loopback IP socket address.
+        #[arg(long, default_value = "127.0.0.1:0")]
+        listen: std::net::SocketAddr,
+        /// Isolated service-binding test channel, without signatures.
+        #[arg(long, conflicts_with = "key_list")]
+        unsigned: bool,
+        /// Trusted public hook key list (SPEC-SERVER §7.2).
+        #[arg(long, required_unless_present = "unsigned")]
+        key_list: Option<std::path::PathBuf>,
+    },
+    /// Print the namespace allowlist a multi deployment needs for this
+    /// suite's derived signers (one canonical namespace per line): pass
+    /// the same auth-v2 profile flags `wire` runs with (`--audience`,
+    /// `--repository`, a signer seed and `--run-id`).
+    Allowlist(WireArgs),
+}
+
+#[derive(Debug, Args)]
+#[allow(clippy::struct_excessive_bools)] // clap flags
+struct WireArgs {
+    /// Loopback-only MPP fixture control plane origin.
+    #[arg(long)]
+    hook_stub: Option<url::Url>,
+    /// Declared test backlog row cap (1..16).
+    #[arg(long)]
+    backlog_cap: Option<u64>,
+    /// `allowlist` only: also list the grant cases' fixed owner namespaces.
+    /// Their keys are public test seeds: local conformance runs only.
+    #[arg(long)]
+    grant_owners: bool,
+    /// The server's base URL (http or https).
+    #[arg(long, value_name = "URL")]
+    base_url: Option<url::Url>,
+    /// A TOML profile; the flags below override it.
+    #[arg(long, value_name = "FILE")]
+    profile: Option<std::path::PathBuf>,
+    /// How the server authenticates: none, bearer or auth-v2.
+    #[arg(long, value_name = "MODE")]
+    auth: Option<String>,
+    /// The environment variable holding the bearer token.
+    #[arg(long, value_name = "VAR")]
+    bearer_token_env: Option<String>,
+    /// Auth v2: the server's canonical origin, exactly as configured.
+    #[arg(long, value_name = "ORIGIN")]
+    audience: Option<String>,
+    /// Auth v2: the server's repository identity.
+    #[arg(long, value_name = "ID")]
+    repository: Option<String>,
+    /// Auth v2: the environment variable holding the seed every case
+    /// signer derives from (64 hex). Keeps the seed out of `ps`.
+    #[arg(long, value_name = "VAR", conflicts_with_all = ["signer_seed_hex", "random_signer"])]
+    signer_seed_env: Option<String>,
+    /// Auth v2: the seed itself (visible in process listings; prefer
+    /// `--signer-seed-env`).
+    #[arg(long, value_name = "HEX", conflicts_with = "random_signer")]
+    signer_seed_hex: Option<String>,
+    /// Auth v2: a random seed.
+    #[arg(long)]
+    random_signer: bool,
+    /// Sign read RPCs too (M2 signed reads; off in M0).
+    #[arg(long)]
+    sign_reads: bool,
+    /// The server started empty for this run and has no other writers:
+    /// enables whole-server listings (`ListRefs("")`).
+    #[arg(long)]
+    fresh_target: bool,
+    /// The server commits `AdvanceRefs` atomically.
+    #[arg(long)]
+    atomic_advance: bool,
+    /// Server metadata routing: single or d34.
+    #[arg(long, value_name = "single|d34")]
+    sharding: Option<String>,
+    /// The largest pack the server accepts.
+    #[arg(long, value_name = "N")]
+    max_pack_bytes: Option<u64>,
+    /// A tiny per-signer write quota (disposable servers only): writes.
+    #[arg(long, value_name = "N", requires = "quota_bytes")]
+    quota_ops: Option<u32>,
+    /// ... and bytes per window.
+    #[arg(long, value_name = "N", requires = "quota_ops")]
+    quota_bytes: Option<u64>,
+    /// ... and the window, ms (default one hour).
+    #[arg(long, value_name = "MS")]
+    quota_window_ms: Option<i64>,
+    /// Highest milestone to run (M0..M5).
+    #[arg(long, value_name = "M")]
+    milestone: Option<String>,
+    /// Add features to the derived set, or remove one with a leading `-`
+    /// (comma-separated, e.g. health,test-faults,-replay). With
+    /// test-faults and a declared short quota window, the growth case runs:
+    /// it needs a disposable server (fresh, no other writers).
+    #[arg(
+        long,
+        value_name = "A,B",
+        value_delimiter = ',',
+        allow_hyphen_values = true
+    )]
+    features: Option<Vec<String>>,
+    /// Run only cases whose name contains this.
+    #[arg(long, value_name = "SUBSTR")]
+    filter: Option<String>,
+    /// A fixed run id (default random); refs go under
+    /// refs/heads/conformance/<run-id>/.
+    #[arg(long, value_name = "ID")]
+    run_id: Option<String>,
+    /// Refs the large-listing case creates (default 10000; 0 skips it).
+    #[arg(long, value_name = "N")]
+    list_refs: Option<u32>,
+    /// In-flight creates for that case (default 8). Use 1 against
+    /// `wrangler dev`: miniflare's proxy drops a connection when several
+    /// slow debug-wasm writes are in flight.
+    #[arg(long, value_name = "N")]
+    list_parallel: Option<u32>,
+    /// The server's replay prune grace after expiry, ms (default 60000).
+    #[arg(long, value_name = "MS")]
+    replay_prune_grace_ms: Option<i64>,
+    /// How long a concurrent duplicate retries `aborted`, ms (default 10000).
+    #[arg(long, value_name = "MS")]
+    duplicate_retry_ms: Option<u64>,
+    /// Print the cases with their milestone and requirements, and exit.
+    #[arg(long)]
+    list_cases: bool,
+}
+
+impl WireArgs {
+    fn spec(&self) -> ProfileSpec {
+        ProfileSpec {
+            hook_stub: self.hook_stub.clone(),
+            backlog_cap: self.backlog_cap,
+            auth: self.auth.clone(),
+            bearer_token_env: self.bearer_token_env.clone(),
+            audience: self.audience.clone(),
+            repository: self.repository.clone(),
+            signer_seed_hex: self.signer_seed_hex.clone(),
+            signer_seed_env: self.signer_seed_env.clone(),
+            random_signer: self.random_signer.then_some(true),
+            atomic_advance: self.atomic_advance.then_some(true),
+            sharding: self.sharding.clone(),
+            max_pack_bytes: self.max_pack_bytes,
+            quota_ops: self.quota_ops,
+            quota_bytes: self.quota_bytes,
+            quota_window_ms: self.quota_window_ms,
+            milestone: self.milestone.clone(),
+            features: self.features.clone(),
+            run_id: self.run_id.clone(),
+            list_refs: self.list_refs,
+            list_parallel: self.list_parallel,
+            replay_prune_grace_ms: self.replay_prune_grace_ms,
+            duplicate_retry_ms: self.duplicate_retry_ms,
+            sign_reads: self.sign_reads.then_some(true),
+            fresh_target: self.fresh_target.then_some(true),
+        }
+    }
+}
+
+fn list_cases() {
+    for case in CASES {
+        let requires = case.requires.iter().map(|f| f.as_str().to_owned());
+        let excludes = case.excludes.iter().map(|f| format!("!{}", f.as_str()));
+        let needs: Vec<_> = requires.chain(excludes).collect();
+        let needs = needs.join(",");
+        println!("{:<56} {:?} {needs}", case.name, case.milestone);
+    }
+}
+
+fn build_profile(args: &WireArgs) -> Result<mkit_server_conformance::wire::Profile, String> {
+    let file = match &args.profile {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("--profile {}: {e}", path.display()))?;
+            ProfileSpec::from_toml(&text)?
+        }
+        None => ProfileSpec::default(),
+    };
+    file.merge(args.spec()).build(|var| std::env::var(var).ok())
+}
+
+fn wire(args: &WireArgs) -> Result<bool, String> {
+    if args.list_cases {
+        list_cases();
+        return Ok(true);
+    }
+    let base_url = args.base_url.clone().ok_or("--base-url is required")?;
+    if !matches!(base_url.scheme(), "http" | "https") {
+        return Err(format!(
+            "--base-url: unsupported scheme `{}` (http, https)",
+            base_url.scheme()
+        ));
+    }
+    let profile = build_profile(args)?;
+    let target = WireTarget { base_url, profile };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {e}"))?;
+    let report = runtime.block_on(run(&target, args.filter.as_deref()));
+    print!("{}", report.tap());
+    Ok(!report.failed())
+}
+
+fn main() -> ExitCode {
+    match Cli::parse().command {
+        #[cfg(feature = "stubs")]
+        Command::StubHook {
+            listen,
+            unsigned,
+            key_list,
+        } => {
+            if !listen.ip().is_loopback() {
+                eprintln!("stub-hook: loopback required");
+                return ExitCode::from(2);
+            }
+            let keys = match key_list
+                .map(std::fs::read_to_string)
+                .transpose()
+                .map_err(|_| "key list could not be read")
+                .and_then(|s| {
+                    mkit_rpc::hooks::VerifierKey::parse_list(
+                        s.as_deref().unwrap_or("{\"version\":1,\"keys\":[]}"),
+                    )
+                    .map_err(|_| "invalid key list")
+                }) {
+                Ok(keys) => keys,
+                Err(reason) => {
+                    eprintln!("stub-hook: {reason}");
+                    return ExitCode::from(2);
+                }
+            };
+            let stub = mkit_server_conformance::stubs::mpp::MppStub::start_on(
+                &listen.to_string(),
+                keys,
+                unsigned,
+            );
+            println!("{}", stub.origin());
+            std::thread::park();
+            ExitCode::SUCCESS
+        }
+        Command::Wire(args) => match wire(&args) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::FAILURE,
+            Err(e) => {
+                eprintln!("mkit-server-conformance: {e}");
+                ExitCode::from(2)
+            }
+        },
+        Command::Allowlist(args) => {
+            match build_profile(&args).map(|profile| {
+                if !matches!(profile.auth, WireAuth::AuthV2 { .. }) {
+                    return Err("a multi-deployment allowlist needs an auth v2 profile \
+                         (--auth auth-v2 --audience ... --repository ...)"
+                        .to_owned());
+                }
+                Ok(profile)
+            }) {
+                Ok(Ok(profile)) => {
+                    print!("{}", multi_allowlist_text(&profile));
+                    if args.grant_owners {
+                        print!("{}", grant_owner_allowlist_text());
+                    }
+                    ExitCode::SUCCESS
+                }
+                Ok(Err(e)) | Err(e) => {
+                    eprintln!("mkit-server-conformance: {e}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+    }
+}

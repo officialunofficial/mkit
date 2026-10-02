@@ -1,0 +1,19 @@
+[package]
+name = "mkit-transport-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+[lib]
+crate-type = ["cdylib", "rlib"]
+[dependencies]
+worker = { version = "0.8", features = ["http"] }
+mkit-server-worker = { path = "../../../../rust/crates/mkit-server-worker" }
+futures = "0.3"
+serde_json = "1"
+[profile.release]
+opt-level = "s"
+lto = true
+[workspace]
+[patch.crates-io]
+ruzstd = { path = "../../../../rust/vendor/ruzstd" }

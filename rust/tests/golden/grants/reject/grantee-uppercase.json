@@ -1,0 +1,5 @@
+{
+  "rule": "uppercase or wrong-length hexadecimal",
+  "statement": "mkit-write-grant:v1\n0x8ba1f109551bd432803012645ac136ddd64dba72\n0x8ba1f109551bd432803012645ac136ddd64dba72/website\n3B6A27BCCEB6A42D62A3A8D02A6F0D73653215771DE243A63AC048A18B59DA29\nread,write\nhttps://git.example.com,https://git.example.org\nrefs/heads/main=cu;refs/heads/wip/*=cufd\n0\n1790000000000\n1792592000000\n9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "expected_error": "noncanonical hex"
+}

@@ -580,3 +580,104 @@ fn multi_branch_fetch_persists_the_record_at_most_once() {
         );
     }
 }
+
+/// A memory remote whose listing is stale (STC §7.9): it also names a branch
+/// that no longer exists, and can be made to fail the strong head re-read.
+struct StaleListing {
+    inner: MemoryTransport,
+    ghost: Ref,
+    head_read_fails: bool,
+}
+
+impl Transport for StaleListing {
+    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+        self.inner.upload_pack(bytes, key)
+    }
+
+    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+        self.inner.download_pack(key)
+    }
+
+    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
+        self.inner.pack_exists(key)
+    }
+
+    fn update_ref(
+        &self,
+        name: &str,
+        condition: RefWriteCondition,
+        hash: &Hash,
+    ) -> TransportResult<()> {
+        self.inner.update_ref(name, condition, hash)
+    }
+
+    fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
+        if self.head_read_fails && name == format!("refs/heads/{}", self.ghost.name) {
+            return Err(mkit_core::protocol::TransportError::RemoteError(
+                "injected head read failure".into(),
+            ));
+        }
+        self.inner.read_ref(name)
+    }
+
+    fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
+        let mut refs = self.inner.list_refs(prefix)?;
+        refs.push(self.ghost.clone());
+        Ok(refs)
+    }
+}
+
+fn stale_remote(head_read_fails: bool) -> (tempfile::TempDir, StaleListing) {
+    let alice = tempfile::tempdir().unwrap();
+    init_repo(alice.path());
+    fs::write(alice.path().join("a.txt"), b"live").unwrap();
+    commit_all(alice.path(), "c1");
+    let tx = StaleListing {
+        inner: MemoryTransport::new(),
+        ghost: Ref {
+            name: "ghost".into(),
+            hash: Some(hash::hash(b"a branch deleted after the listing")),
+        },
+        head_read_fails,
+    };
+    push_all(alice.path(), &tx).expect("push main");
+    (alice, tx)
+}
+
+/// D34 `ListRefs` is eventual: a branch listed after its delete has neither
+/// head nor packmap. The fetch skips it, still fetches the live branches and
+/// writes no tracking ref for it.
+#[test]
+fn stale_listing_skips_a_branch_whose_head_and_packmap_are_gone() {
+    let (alice, tx) = stale_remote(false);
+    let bob = tempfile::tempdir().unwrap();
+    init_repo(bob.path());
+    let fetched = fetch_all(bob.path(), &tx, "default").expect("stale entry is skipped");
+    assert_eq!(fetched, 1, "only the live branch counts");
+    let bob_layout = RepoLayout::single(bob.path());
+    let alice_tip = refs::read_ref(&RepoLayout::single(alice.path()), "main")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        refs::read_remote_ref(&bob_layout, "default", "main").unwrap(),
+        Some(alice_tip)
+    );
+    assert_eq!(
+        refs::read_remote_ref(&bob_layout, "default", "ghost").unwrap(),
+        None,
+        "no tracking ref for a skipped branch"
+    );
+}
+
+/// A failed strong re-read is an error, never a skip.
+#[test]
+fn stale_listing_head_reread_transport_error_stays_an_error() {
+    let (_alice, tx) = stale_remote(true);
+    let bob = tempfile::tempdir().unwrap();
+    init_repo(bob.path());
+    let err = fetch_all(bob.path(), &tx, "default").expect_err("transport error propagates");
+    assert!(
+        matches!(err, DispatchError::Transport(_)),
+        "expected a transport error, got {err:?}"
+    );
+}

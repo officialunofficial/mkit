@@ -90,10 +90,10 @@ this same `PackChunk` shape on the wire. Until a Connect client lands,
 - `Match(expected)` &mdash; write only if the ref currently contains `expected`.
 
 CAS failure (`Missing` on an existing ref, or `Match` on a mismatched
-hash) returns `TransportError::RefConflict`. Per §6, callers retrying
-after a network timeout MUST follow up with `read_ref` to disambiguate
-whether the first attempt landed before treating `RefConflict` as a
-true conflict.
+hash) returns `TransportError::RefConflict`. Because the §7 retry ladder
+can re-issue a write whose first attempt landed, a caller MUST follow
+up a `RefConflict` with `read_ref` before treating it as a true conflict
+(§7).
 
 ---
 
@@ -172,6 +172,38 @@ configurations). The path is already restricted to a safe ASCII
 subset by `validate_ssh_path`, so passing it as a separate token is
 sound.
 
+**Root mode.** A server that hosts many repositories under one
+filesystem root can instead force `mkit serve --root <dir>`:
+
+```
+command="mkit serve --root /srv/mkit --principal <hex>",restrict ssh-ed25519 AAAA…
+```
+
+sshd places the client's command in `SSH_ORIGINAL_COMMAND`, and `mkit
+serve` accepts only the exact form `mkit serve <path>` from it —
+three space-separated tokens, no flags, quoting, or shell syntax —
+reading the path as a `<NAMESPACE>/<NAME>` repository identity
+([SPEC-TRANSPORT-CONNECT §7.4](SPEC-TRANSPORT-CONNECT.md#74-repository-addressing))
+resolved under `<dir>`. One process serves one repository, and the
+client cannot name a flag or a different command through
+`SSH_ORIGINAL_COMMAND`. Writes run the namespace's owner rule:
+`--principal` asserts the client's Ed25519 public key (a raw 32-byte
+key as 64 lowercase hex), and only a principal equal to the
+namespace's key may write; a forced command asserting no principal
+serves reads only. `--principal` is a trust assertion made by the
+sshd configuration — never by the peer, and never from the
+environment; see [SSH-SECURITY.md](../SSH-SECURITY.md) §5. Packs
+uploaded and verified in a session (at most seven between packmap
+writes) may be consumed into membership by that session's packmap
+write — the implicit form of the upload tickets signed writes use. The
+packmap check only refuses: the node's `prev` is absent or the packmap
+value the write replaces (under `Any` the current value is read and the
+condition rewritten to guard it, so a concurrent move surfaces as an
+ordinary CAS conflict), the node and every pack it lists — at most
+1,024 — are pending in this session or already members (a pending
+packlist listed as a pack is refused: a packlist is a node, not a
+pack), or the write is refused.
+
 ### 4.2 Conversation
 
 ```
@@ -231,7 +263,18 @@ the `mkit.repo.v1` multiplayer protocol uses for its own `UpdateRef`.
 
 A conforming server MUST treat `REF_EXPECTATION_UNSPECIFIED` (the
 zero value, sent when the client omits the field) as a protocol
-error and reply with `ERROR_CODE_INVALID_REQUEST`. mkit is alpha
+error and reply with `ERROR_CODE_INVALID_REQUEST`.
+
+A server serves only ref names under `refs/` (SPEC-REFS §2). An
+`UpdateRef` or `ReadRef` whose name passes the SPEC-REFS §3 grammar but
+lies outside `refs/` is answered, before any storage access, with:
+
+| Request | Reply |
+|---|---|
+| `UpdateRef`/`ReadRef` naming a grammar-valid ref outside `refs/` | `Error { code = ERROR_CODE_INVALID_REQUEST, message = "ref name must start with refs/ (…)" }`, empty `details` |
+
+Never with an absent-ref answer. Having empty `details`, it is not a
+CAS conflict; a client surfaces it as a remote error with its message. mkit is alpha
 (pre-1.0) &mdash; clients and servers move together; there is no v0.x
 back-compatibility surface to preserve.
 
@@ -282,7 +325,8 @@ See [`SSH-SECURITY.md`](../SSH-SECURITY.md) for the full trust model.
 
 The `mkit serve` server enforces per-connection budgets to bound a
 misbehaving or malicious client (see
-[`mkit-cli/src/commands/serve/mod.rs`](../../rust/crates/mkit-cli/src/commands/serve/mod.rs)):
+[`mkit-server/src/ssh/budget.rs`](../../rust/crates/mkit-server/src/ssh/budget.rs),
+the session `mkit serve` runs since it moved onto `mkit-server`):
 
 - `MAX_FRAMES_PER_CONN = 10_000` &mdash; hard cap on frames after `Hello`.
 - `MAX_BYTES_PER_CONN  = 1 GiB`  &mdash; cap on cumulative request payload bytes.
@@ -295,18 +339,32 @@ the declared upload length and additionally cap the number of chunk
 frames at `MAX_FRAMES_PER_CONN`, so a client cannot bypass the outer
 frame loop by streaming unbounded chunks inside one upload request.
 
-The encrypted-transport listener (`mkit serve --listen-enc`,
-[`mkit-cli/src/commands/serve/enc.rs`](../../rust/crates/mkit-cli/src/commands/serve/enc.rs))
-enforces the same two constants against its own top-level frame loop &mdash;
-sharing `MAX_FRAMES_PER_CONN`/`MAX_BYTES_PER_CONN` with the SSH
-server rather than defining a second set of numbers &mdash; on top of its
-per-frame idle timeout (`--enc-idle-timeout-secs`). Without this, a
-peer that stays under the per-frame idle timeout but never closes the
-connection could hold a listener worker and stream unbounded work
-indefinitely; the SSH path already terminates such a peer via the
-cumulative caps above. A cap trip sends an
-`Error{ ERROR_CODE_INVALID_REQUEST }` frame and drops the connection,
-matching the SSH server's response shape.
+The budgets bound how much a client can make the server do; an idle
+timeout bounds a client that goes silent. `mkit serve` ends a session after `--idle-timeout-secs`
+seconds (default 60; `0` disables it) in which no byte arrives from the
+client, whether before `Hello`, between requests or inside an upload
+(whose partial pack is discarded). It answers, best effort, with
+`Error{ ERROR_CODE_INVALID_REQUEST, "idle timeout" }` and exits with
+`exit::PROTOCOL_ERROR`. The timer counts only silence: an upload that is
+still arriving never trips it, however long one chunk frame takes, and
+time the server spends answering is not counted. It does not bound a
+client that trickles bytes or stops reading; the budgets do, in part,
+and an operator can cap the whole session with `--max-session-secs`
+(off by default). See [`SSH-SECURITY.md`](../SSH-SECURITY.md) §4.
+
+The encrypted-transport listener (`mkit-server serve --listen-enc`,
+[`mkit-server-native/src/enc.rs`](../../rust/crates/mkit-server-native/src/enc.rs))
+enforces the same two caps: it runs each session through the SSH
+server's own session (`mkit_server::ssh::serve_session`), so the caps are
+the same code, on top of its per-frame idle timeout
+(`--enc-idle-timeout-secs`). Without this, a peer that stays under the
+per-frame idle timeout but never closes the connection could hold a
+listener worker and stream unbounded work indefinitely; the SSH path
+already terminates such a peer via the cumulative caps above. A cap trip
+sends an `Error{ ERROR_CODE_INVALID_REQUEST }` frame and drops the
+connection, matching the SSH server's response shape. (The CLI's former
+`mkit serve --listen-enc` listener, removed in favour of `mkit-server`,
+shared the constants with `mkit serve` the same way.)
 
 The framing layer's per-frame `MAX_FRAME_BYTES = 1 MiB` cap (per
 [SPEC-RPC §1](SPEC-RPC.md#1-wire-framing)) bounds individual frames;
@@ -335,8 +393,8 @@ that finds the connection `closed` first respawns `ssh` from the
 original `target`/`options` and redoes the `Hello` handshake before
 re-issuing the verb against the fresh child. `upload_pack` is
 content-addressed and safe to resend in full on the new connection;
-`update_ref` is not idempotent across retries per §7, so a retried CAS
-write that returns `RefConflict` still requires the caller's `read_ref`
+`update_ref` is not idempotent across retries per §7, so a CAS write
+that returns `RefConflict` still requires the caller's `read_ref`
 disambiguation.
 
 The encrypted transport (`mkit-transport-enc`) applies the identical
@@ -623,7 +681,10 @@ All transports MUST retry the following errors with exponential
 backoff: `ConnectionFailed`, `ServerError{status >= 500}`, and
 `ServerError{status == 429}`. The default ladder is `1s, 2s, 4s,
 8s, 16s` (5 attempts), with subsequent delays doubling and capped
-at 300 s. The ladder is exposed via
+at 300 s. An `AdmissionRequired` error (HTTP 402; see
+[SPEC-TRANSPORT-CONNECT §5.1](SPEC-TRANSPORT-CONNECT.md#51-admission-challenges))
+is not a `ServerError` for this rule and is never retried by the
+ladder. The ladder is exposed via
 [`BackoffIterator`](../../rust/crates/mkit-core/src/protocol.rs), the
 classifier as [`is_retryable`], and the retry loop itself as
 [`retrying`](../../rust/crates/mkit-core/src/protocol.rs) &mdash; a single
@@ -634,11 +695,40 @@ fresh request per attempt; connection-oriented transports (SSH, enc)
 MUST reconnect before re-attempting once a prior attempt has left the
 connection in a possibly-desynced state &mdash; see §4.5.
 
-`update_ref` with `Missing` or `Match` is NOT idempotent across
-retries: a network timeout after the server applied the write looks
-identical to a write that never landed. After a retried `update_ref`
-returns `RefConflict`, callers MUST follow up with `read_ref` to
-disambiguate.
+`update_ref` with `Missing` or `Match`, and `advance_refs`, are NOT
+idempotent across retries: a network timeout after the server applied
+the write looks identical to a write that never landed. The network
+transports' clients still send them through the ladder above (HTTP,
+SSH, enc and Connect through `mkit_core::protocol::retrying`; S3 through
+its own loop over `BackoffIterator` and `is_retryable`), so a call can be
+re-issued after its first attempt landed. The re-issue cannot apply the write twice: the
+landed attempt has already falsified the precondition the re-issue
+carries (a `Missing` ref now exists; a `Match(h)` ref no longer holds
+`h`). It can, however, report a conflict for the caller's own write, and
+the caller cannot observe whether the ladder re-issued the call. The
+caller obligations are therefore:
+
+- On `RefConflict` from `update_ref`, the caller MUST call `read_ref`
+  on that ref before reporting a conflict. If the ref holds the value
+  the caller wrote, the caller MUST treat the write as having landed.
+- On `HeadConflict` or `PackmapConflict` from `advance_refs`, the caller
+  MUST likewise read the ref whose precondition failed. A packmap that
+  already holds the caller's node means only the head write remains; a
+  head that already holds the caller's value means the advance landed.
+- `update_ref` with `Any` may be re-issued freely: it writes the same
+  value again. Like any `Any` write, it can overwrite a value another
+  writer stored between the two attempts.
+
+The one case where a re-issue reports the true outcome is a Connect
+deployment that keeps the auth v2 replay ledger
+([SPEC-TRANSPORT-CONNECT §7.1](SPEC-TRANSPORT-CONNECT.md#71-reference-worker)):
+`mkit-transport-connect` reuses one nonce and validity window for every
+attempt of one logical call (`RetryIdentity`), so the server returns the
+committed attempt's stored result. That covers only re-issues within one
+call's ladder, inside the signed validity window. A caller that invokes
+the operation again gets a fresh nonce, and the obligations above apply.
+A caller MAY skip the `read_ref` only when it knows the remote keeps
+that ledger.
 
 `upload_pack` IS idempotent (content-addressed: re-uploading the
 same bytes produces the same digest and is a no-op on the server
@@ -723,7 +813,7 @@ These hold for every conformant transport, regardless of scheme:
 | Stored pack bytes match their announced digest | SSH: server verifies `BLAKE3(received) == pack_id` before storing (§4.2); HTTP: client cross-checks the server-returned key against its pre-computed digest → `InvalidResponse` (§5.1) |
 | A rejected upload never creates or overwrites the destination pack | SSH upload-stream validation: `total_bytes` required and capped, `pack_id` match, contiguous offsets, exact end (§4.2) |
 | Ref CAS conflicts surface, never silently clobber | `Missing`/`Match` encodings per transport (§4.2.1, §5.3, §6.3); conflict → `RefConflict`; 409/412 never retried (§5.3, §6.5, §7.1) |
-| A retry never duplicates a conditional ref write | 4xx is not retryable; after a retried `update_ref` returns `RefConflict`, callers MUST `read_ref` to disambiguate (§7) |
+| A retry never duplicates a conditional ref write | a landed attempt falsifies the precondition its re-issue carries; 4xx is not retryable; on `RefConflict` (or an `advance_refs` conflict outcome) callers MUST `read_ref` before reporting a conflict (§7) |
 | `upload_pack` is idempotent across retries | content-addressed keys: same bytes → same digest → server-side no-op (§7) |
 | A misbehaving peer cannot exhaust memory | `MAX_FRAME_BYTES` 1 MiB, `MAX_FRAMES_PER_CONN`, `MAX_BYTES_PER_CONN` shared by the SSH and enc-listener frame loops (§4.4); `PACK_BODY_LIMIT` 4 GiB with pre-check and running-total streaming counters (§4.4, §5.4, §6.4); ref/list body caps (§6.4) |
 | `*_streaming` is additive &mdash; no transport is forced to implement real streaming | default trait impls express both streaming verbs in terms of the existing whole-buffer verbs (§1.1) |

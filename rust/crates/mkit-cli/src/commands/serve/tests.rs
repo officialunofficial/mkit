@@ -1,36 +1,359 @@
+//! `mkit serve`'s own code: repo resolution, the stdio adapter and its idle
+//! timeout, the session cap flag and the startup sweep. The session's
+//! frame-level behavior is tested in `mkit-server` (`ssh::tests`); the
+//! golden sessions run through the real binary in `tests/serve_golden.rs`.
+
+use std::fs;
+use std::io::{self, Cursor, Read};
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use mkit_core::hash::hash;
+use mkit_core::protocol::{PackKey, RefWriteCondition, Transport as _};
+use mkit_rpc::mkit::rpc::v1::ssh::{
+    Close, Hello, HelloResponse, PackChunk, SshFrame, UploadPack, ssh_frame,
+};
+use mkit_rpc::mkit::rpc::v1::{ErrorCode, ProtocolVersion};
+use mkit_transport_file::FileTransport;
+
 use super::*;
 use crate::exit;
-use std::fs;
-use std::io::Cursor;
 
-fn upload_header(pack_id: Vec<u8>, total_bytes: Option<u64>) -> UploadPack {
-    UploadPack {
-        pack_id: Some(pack_id),
-        total_bytes,
+const GOLDEN_IN: &[u8] = include_bytes!("../../../../../tests/golden/ssh-serve/session-1.in.bin");
+const GOLDEN_OUT: &[u8] = include_bytes!("../../../../../tests/golden/ssh-serve/session-1.bin");
+/// The `server_id` the golden sessions were captured with.
+const GOLDEN_SERVER_ID: &str = "mkit serve/0.4.2";
+
+type Body = ssh_frame::Body;
+
+// ---------------------------------------------------------------- helpers
+
+fn repo_root() -> tempfile::TempDir {
+    let td = tempfile::tempdir().unwrap();
+    fs::create_dir_all(td.path().join(".mkit")).unwrap();
+    td
+}
+
+fn frame(body: Body) -> SshFrame {
+    SshFrame {
+        body: Some(body),
         ..Default::default()
     }
 }
 
-fn upload_chunk(pack_id: Vec<u8>, offset: Option<u64>, data: &[u8], last: bool) -> PackChunk {
-    PackChunk {
-        pack_id: Some(pack_id),
-        offset,
-        data: Some(data.to_vec()),
-        last: Some(last),
-        ..Default::default()
+fn hello() -> Body {
+    Body::Hello(Box::new(
+        Hello::default().with_proto(ProtocolVersion::ProtocolVersion1),
+    ))
+}
+
+fn close() -> Body {
+    Body::Close(Box::<Close>::default())
+}
+
+fn encode(bodies: impl IntoIterator<Item = Body>) -> Vec<u8> {
+    let mut out = Vec::new();
+    for body in bodies {
+        mkit_rpc::write_frame(&mut out, &frame(body)).unwrap();
+    }
+    out
+}
+
+fn decode(mut bytes: &[u8]) -> Vec<SshFrame> {
+    let mut out = Vec::new();
+    while !bytes.is_empty() {
+        out.push(mkit_rpc::read_frame::<_, SshFrame>(&mut bytes).unwrap());
+    }
+    out
+}
+
+fn assert_error(f: &SshFrame, code: ErrorCode, message: &str) {
+    let Some(Body::Error(e)) = &f.body else {
+        panic!("expected Error, got {:?}", f.body);
+    };
+    assert!(e.code.is_some_and(|c| c == code), "code of {e:?}");
+    assert_eq!(e.message.as_deref(), Some(message));
+}
+
+/// The plain-mode target `mkit serve <path>` serves.
+fn plain_target(root: &Path) -> ServeTarget {
+    ServeTarget {
+        root: root.to_path_buf(),
+        repo: repo_id(),
+        write_policy: WritePolicy::Open,
+        principal: Principal::SshForcedCommand { key: None },
     }
 }
 
-fn valid_pack() -> (Vec<u8>, PackKey) {
-    let bytes = b"valid pack bytes".to_vec();
-    let key = PackKey::new(hash(&bytes));
-    (bytes, key)
+/// `serve_stdio` over in-memory streams, with the output bytes.
+fn serve(root: &Path, input: impl Read + Send + 'static, idle: Option<Duration>) -> (u8, Vec<u8>) {
+    let mut out = Vec::new();
+    let code = serve_stdio(&plain_target(root), input, &mut out, idle, false);
+    (code, out)
 }
+
+/// The golden patterned pack bytes (`mkit-server`'s `ssh::tests`).
+fn pack_bytes(len: usize, seed: u8) -> Vec<u8> {
+    #[allow(clippy::cast_possible_truncation)]
+    (0..len)
+        .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
+        .collect()
+}
+
+/// `golden` with its `HelloResponse` (the first frame) re-encoded with
+/// this build's `server_id`, so the pin survives a version bump; the rest
+/// is compared byte for byte.
+fn with_current_server_id(golden: &[u8]) -> Vec<u8> {
+    let mut tail = golden;
+    let first: SshFrame = mkit_rpc::read_frame(&mut tail).unwrap();
+    let resp = HelloResponse {
+        proto: Some(ProtocolVersion::ProtocolVersion1.into()),
+        server_id: Some(GOLDEN_SERVER_ID.to_owned()),
+        ..Default::default()
+    };
+    assert_eq!(first, frame(Body::HelloResponse(Box::new(resp.clone()))));
+    let current = HelloResponse {
+        server_id: Some(format!("mkit serve/{CLI_VERSION}")),
+        ..resp
+    };
+    let mut out = Vec::new();
+    mkit_rpc::write_frame(&mut out, &frame(Body::HelloResponse(Box::new(current)))).unwrap();
+    out.extend_from_slice(tail);
+    out
+}
+
+/// A reader that serves `bytes` in `piece`-byte reads, sleeping `gap`
+/// before each (and `first_gap` before the first).
+struct Trickle {
+    bytes: Cursor<Vec<u8>>,
+    piece: usize,
+    first_gap: Duration,
+    gap: Duration,
+    started: bool,
+}
+
+impl Read for Trickle {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let gap = if self.started {
+            self.gap
+        } else {
+            self.first_gap
+        };
+        self.started = true;
+        std::thread::sleep(gap);
+        let n = buf.len().min(self.piece);
+        self.bytes.read(&mut buf[..n])
+    }
+}
+
+// ------------------------------------------------------------- resolution
 
 #[test]
 fn resolve_repo_path_rejects_missing_path() {
     let err = resolve_repo_path("/definitely/does/not/exist/xyzzy").unwrap_err();
     assert_eq!(err, exit::NOINPUT);
+}
+
+// ------------------------------------------------- --principal (Test 5)
+
+/// A namespace every root-mode fixture uses: `ed25519-<64 lowercase hex>`.
+const NS: &str = "ed25519-abababababababababababababababababababababababababababababababab";
+
+fn parse_opts(a: &[&str]) -> Result<ServeOpts, u8> {
+    let args = a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    clap_shim::parse::<ServeOpts>("mkit serve", &args)
+}
+
+/// `--principal` accepts only the raw 32-byte key as 64 lowercase hex.
+#[test]
+fn principal_flag_accepts_raw_hex_only() {
+    let hex = "ab".repeat(32);
+    let opts = parse_opts(&["repo", "--principal", &hex]).unwrap();
+    assert_eq!(opts.principal, Some([0xab; 32]));
+    let zero = "00".repeat(32);
+    assert_eq!(
+        parse_opts(&["repo", "--principal", &zero])
+            .unwrap()
+            .principal,
+        Some([0; 32])
+    );
+    for bad in [
+        "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB", // uppercase
+        &"ab".repeat(31)[..62],                                             // too short
+        &"ab".repeat(33),                                                   // too long
+        &format!("ed25519-{hex}"),                                          // prefixed
+        &format!("0x{}", &hex[..62]),                                       // 0x
+        &format!("{}gg", "ab".repeat(31)),                                  // non-hex
+        "",
+    ] {
+        // Clap's value parser refuses the flag before any frame is read;
+        // `InvalidValue` maps to DATAERR like `--commit not-a-hash`.
+        assert_eq!(
+            parse_opts(&["repo", "--principal", bad]).unwrap_err(),
+            exit::DATAERR,
+            "{bad:?} must be refused before any frame is read"
+        );
+    }
+}
+
+// -------------------------------------------- SSH_ORIGINAL_COMMAND (Test 7)
+
+#[test]
+fn original_command_accepts_exactly_mkit_serve_path() {
+    let path = format!("{NS}/room-a");
+    let command = format!("mkit serve {path}");
+    assert_eq!(parse_original_command(&command), Some(path.as_str()));
+    // A path with every permitted byte class.
+    assert_eq!(
+        parse_original_command("mkit serve a-b_c.d/e"),
+        Some("a-b_c.d/e")
+    );
+    for bad in [
+        "mkit serve",             // no path
+        "mkit serve a b",         // extra argument
+        "mkit serve  a",          // double space
+        "mkit  serve a",          // double space
+        " mkit serve a",          // leading space
+        "mkit serve a ",          // trailing space
+        "mkit serve\ta",          // tab
+        "mkit serve a\n",         // LF
+        "mkit serve a\r\n",       // CRLF
+        "mkit serve 'a'",         // quotes
+        "mkit serve \"a\"",       // double quotes
+        "mkit serve a; rm -rf /", // shell metachar
+        "mkit serve $(id)",       // command substitution
+        "mkit serve `id`",        // backticks
+        "mkit serve a\0b",        // NUL
+        "sh -c mkit serve a",     // a wrapper
+        "mkit serve --root /srv", // smuggled flag (3+ tokens)
+        "mkit serve --principal", // flag as path
+        "mkit serve -a",          // flag as path
+        "mkit serve --",          // flag as path
+        "mkit update-ref a",      // another verb
+        "MKIT serve a",           // case
+        "mkit serve a>b",         // redirect
+        "mkit serve a|b",         // pipe
+    ] {
+        assert_eq!(parse_original_command(bad), None, "{bad:?}");
+    }
+    // `parse_original_command` checks only the command's shape: a path the
+    // identity grammar will refuse still comes back, to fail downstream.
+    assert_eq!(parse_original_command("mkit serve /a/"), Some("/a/"));
+}
+
+// -------------------------------------------------- --root resolution (Test 6)
+
+/// A root holding `<ns>/<name>` repository dirs, canonicalized.
+fn root_mode_root(names: &[(&str, &str)]) -> (tempfile::TempDir, std::path::PathBuf) {
+    let td = tempfile::tempdir().unwrap();
+    for (ns, name) in names {
+        fs::create_dir_all(td.path().join(ns).join(name).join(".mkit")).unwrap();
+    }
+    let root = fs::canonicalize(td.path()).unwrap();
+    (td, root)
+}
+
+#[test]
+fn root_repo_resolves_namespaced_path() {
+    let (_td, root) = root_mode_root(&[(NS, "room-a"), (NS, "room-b")]);
+    for path in [
+        format!("{NS}/room-a"),
+        format!("/{NS}/room-a"),
+        format!("{NS}/room-a/"),
+        format!("/{NS}/room-a/"),
+    ] {
+        let (dir, repo) = resolve_root_repo(&root, &path).unwrap();
+        assert_eq!(dir, root.join(NS).join("room-a"));
+        assert_eq!(repo.name.as_str(), "room-a");
+        assert_eq!(repo.namespace.as_str(), NS);
+    }
+    // The other repository resolves to its own dir.
+    let (dir, repo) = resolve_root_repo(&root, &format!("{NS}/room-b")).unwrap();
+    assert_eq!(dir, root.join(NS).join("room-b"));
+    assert_eq!(repo.name.as_str(), "room-b");
+}
+
+#[test]
+fn root_repo_refuses_bad_identities() {
+    let (_td, root) = root_mode_root(&[(NS, "room-a")]);
+    for (path, code) in [
+        ("room-a", exit::USAGE),                                 // bare name
+        (&format!("{NS}/room-a/x")[..], exit::USAGE),            // extra component
+        (&format!("{}/room-a", NS.to_uppercase()), exit::USAGE), // uppercase
+        (&format!("{NS}/../room-a"), exit::USAGE),               // dotdot
+        (&format!("{NS}/room-a/../room-b"), exit::USAGE),
+        ("", exit::USAGE),
+        ("/", exit::USAGE),
+    ] {
+        assert_eq!(resolve_root_repo(&root, path).unwrap_err(), code, "{path}");
+    }
+    // A 0x namespace is a valid identity but its directory must exist.
+    let addr = format!("0x{}", "ab".repeat(20));
+    assert_eq!(
+        resolve_root_repo(&root, &format!("{addr}/room-a")).unwrap_err(),
+        exit::NOINPUT
+    );
+}
+
+#[test]
+fn root_repo_refuses_symlinked_components() {
+    let (_td, root) = root_mode_root(&[(NS, "room-a")]);
+    let target = tempfile::tempdir().unwrap();
+    // A repository dir outside the root, linked from `<root>/<ns2>`: the
+    // addressed path resolves through the link but its canonical form
+    // differs from `<root>/<ns2>/room-a`.
+    fs::create_dir_all(target.path().join("room-a/.mkit")).unwrap();
+    let ns2 = format!("ed25519-{}", "cd".repeat(32));
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target.path(), root.join(&ns2)).unwrap();
+        assert_eq!(
+            resolve_root_repo(&root, &format!("{ns2}/room-a")).unwrap_err(),
+            exit::NOPERM,
+            "a symlinked namespace dir must not alias another repository"
+        );
+        // Even a symlink inside the root aliasing a real dir: canonical
+        // must equal the addressed path exactly.
+        let ns3 = format!("ed25519-{}", "ef".repeat(32));
+        fs::create_dir_all(root.join("real/repo/.mkit")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join(&ns3)).unwrap();
+        assert_eq!(
+            resolve_root_repo(&root, &format!("{ns3}/repo")).unwrap_err(),
+            exit::NOPERM
+        );
+        // The repository dir itself is a symlink into another repo.
+        let ns4 = format!("ed25519-{}", "12".repeat(32));
+        fs::create_dir(root.join(&ns4)).unwrap();
+        std::os::unix::fs::symlink(root.join(NS).join("room-a"), root.join(&ns4).join("room-a"))
+            .unwrap();
+        assert_eq!(
+            resolve_root_repo(&root, &format!("{ns4}/room-a")).unwrap_err(),
+            exit::NOPERM
+        );
+    }
+}
+
+#[test]
+fn root_repo_requires_a_repo_dir() {
+    let td = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(td.path()).unwrap();
+    // Missing entirely.
+    assert_eq!(
+        resolve_root_repo(&root, &format!("{NS}/gone")).unwrap_err(),
+        exit::NOINPUT
+    );
+    // Present but no `.mkit`.
+    fs::create_dir_all(root.join(NS).join("plain")).unwrap();
+    assert_eq!(
+        resolve_root_repo(&root, &format!("{NS}/plain")).unwrap_err(),
+        exit::DATAERR
+    );
+    // A file, not a dir: canonicalize succeeds on a file, so DATAERR.
+    fs::write(root.join(NS).join("file"), b"x").unwrap();
+    assert_eq!(
+        resolve_root_repo(&root, &format!("{NS}/file")).unwrap_err(),
+        exit::DATAERR
+    );
 }
 
 #[test]
@@ -42,922 +365,287 @@ fn resolve_repo_path_rejects_non_repo_dir() {
 
 #[test]
 fn resolve_repo_path_accepts_repo_dir() {
-    let td = tempfile::tempdir().unwrap();
-    fs::create_dir_all(td.path().join(".mkit")).unwrap();
+    let td = repo_root();
     let resolved = resolve_repo_path(td.path().to_str().unwrap()).unwrap();
     assert!(resolved.join(".mkit").is_dir());
 }
 
 #[test]
-fn upload_drain_accepts_valid_chunks() {
-    let (bytes, key) = valid_pack();
-    let mut drain = UploadDrain::new(&upload_header(
-        key.as_bytes().to_vec(),
-        Some(bytes.len() as u64),
-    ))
-    .unwrap();
-    assert!(
-        !drain
-            .push_chunk(&upload_chunk(
-                key.as_bytes().to_vec(),
-                Some(0),
-                &bytes[..5],
-                false
-            ))
-            .unwrap()
-    );
-    assert!(
-        drain
-            .push_chunk(&upload_chunk(
-                key.as_bytes().to_vec(),
-                Some(5),
-                &bytes[5..],
-                true,
-            ))
-            .unwrap()
-    );
-    let (got, got_key) = drain.into_parts();
-    assert_eq!(got, bytes);
-    assert_eq!(got_key.as_bytes(), key.as_bytes());
-}
-
-#[test]
-fn upload_drain_rejects_malformed_streams() {
-    let (bytes, key) = valid_pack();
-    assert!(UploadDrain::new(&upload_header(key.as_bytes().to_vec(), None)).is_err());
-    assert!(
-        UploadDrain::new(&upload_header(
-            key.as_bytes().to_vec(),
-            Some(MAX_BYTES_PER_CONN + 1),
-        ))
-        .is_err()
-    );
-
-    let mut drain = UploadDrain::new(&upload_header(
-        key.as_bytes().to_vec(),
-        Some(bytes.len() as u64),
-    ))
-    .unwrap();
-    assert!(
-        drain
-            .push_chunk(&upload_chunk(
-                key.as_bytes().to_vec(),
-                Some(1),
-                &bytes,
-                true
-            ))
-            .is_err()
-    );
-
-    let mut drain = UploadDrain::new(&upload_header(
-        key.as_bytes().to_vec(),
-        Some(bytes.len() as u64),
-    ))
-    .unwrap();
-    assert!(
-        drain
-            .push_chunk(&upload_chunk(vec![0xAA; 32], Some(0), &bytes, true))
-            .is_err()
-    );
-
-    let mut drain = UploadDrain::new(&upload_header(
-        key.as_bytes().to_vec(),
-        Some(bytes.len() as u64 - 1),
-    ))
-    .unwrap();
-    assert!(
-        drain
-            .push_chunk(&upload_chunk(
-                key.as_bytes().to_vec(),
-                Some(0),
-                &bytes,
-                true
-            ))
-            .is_err()
-    );
-
-    let mut drain = UploadDrain::new(&upload_header(
-        key.as_bytes().to_vec(),
-        Some(bytes.len() as u64),
-    ))
-    .unwrap();
-    assert!(
-        drain
-            .push_chunk(&upload_chunk(
-                key.as_bytes().to_vec(),
-                Some(0),
-                &bytes[..bytes.len() - 1],
-                true,
-            ))
-            .is_err()
-    );
-
-    let wrong_bytes = b"wrong pack bytes";
-    let mut drain = UploadDrain::new(&upload_header(
-        key.as_bytes().to_vec(),
-        Some(wrong_bytes.len() as u64),
-    ))
-    .unwrap();
-    assert!(
-        drain
-            .push_chunk(&upload_chunk(
-                key.as_bytes().to_vec(),
-                Some(0),
-                wrong_bytes,
-                true,
-            ))
-            .is_err()
-    );
-}
-
-fn write_body(buf: &mut Vec<u8>, body: ssh_frame::Body) {
-    mkit_rpc::write_frame(
-        buf,
-        &SshFrame {
-            body: Some(body),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-}
-
-#[test]
-fn serve_loop_rejects_invalid_upload_before_storage() {
-    let td = tempfile::tempdir().unwrap();
-    let tx = FileTransport::new(td.path());
-    let bogus_key = PackKey::new([0x77; 32]);
-
-    let mut input = Vec::new();
-    write_body(
-        &mut input,
-        ssh_frame::Body::Hello(Box::new(
-            mkit_rpc::mkit::rpc::v1::ssh::Hello::default()
-                .with_proto(ProtocolVersion::ProtocolVersion1),
-        )),
-    );
-    write_body(
-        &mut input,
-        ssh_frame::Body::UploadPack(Box::new(upload_header(
-            bogus_key.as_bytes().to_vec(),
-            Some(5),
-        ))),
-    );
-    write_body(
-        &mut input,
-        ssh_frame::Body::PackChunk(Box::new(upload_chunk(
-            bogus_key.as_bytes().to_vec(),
-            Some(0),
-            b"wrong",
-            true,
-        ))),
-    );
-
-    let mut reader = Cursor::new(input);
-    let mut output = Vec::new();
-    assert_eq!(serve_loop(&tx, &mut reader, &mut output), exit::OK);
-    assert!(!tx.pack_exists(&bogus_key).unwrap());
-
-    let mut out = Cursor::new(output);
-    let _hello: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
-    let err: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
-    assert!(matches!(err.body, Some(ssh_frame::Body::Error(_))));
-}
-
-#[test]
-fn serve_loop_rejected_upload_does_not_overwrite_existing_pack() {
-    let td = tempfile::tempdir().unwrap();
-    let tx = FileTransport::new(td.path());
-    let (bytes, key) = valid_pack();
-    tx.upload_pack(&bytes, &key).unwrap();
-
-    let mut input = Vec::new();
-    write_body(
-        &mut input,
-        ssh_frame::Body::Hello(Box::new(
-            mkit_rpc::mkit::rpc::v1::ssh::Hello::default()
-                .with_proto(ProtocolVersion::ProtocolVersion1),
-        )),
-    );
-    write_body(
-        &mut input,
-        ssh_frame::Body::UploadPack(Box::new(upload_header(key.as_bytes().to_vec(), Some(5)))),
-    );
-    write_body(
-        &mut input,
-        ssh_frame::Body::PackChunk(Box::new(upload_chunk(
-            key.as_bytes().to_vec(),
-            Some(0),
-            b"wrong",
-            true,
-        ))),
-    );
-
-    let mut reader = Cursor::new(input);
-    let mut output = Vec::new();
-    assert_eq!(serve_loop(&tx, &mut reader, &mut output), exit::OK);
-    assert_eq!(tx.download_pack(&key).unwrap(), bytes);
-}
-
-/// Build an `UpdateRef` request body. `expected` is only set for MATCH.
-fn update_ref_body(
-    name: &str,
-    new_id: [u8; 32],
-    expectation: RefExpectation,
-    expected: Option<[u8; 32]>,
-) -> ssh_frame::Body {
-    let mut req = mkit_rpc::mkit::rpc::v1::ssh::UpdateRef::default()
-        .with_name(name)
-        .with_new_id(new_id.to_vec())
-        .with_expectation(expectation);
-    if let Some(e) = expected {
-        req = req.with_expected_id(e.to_vec());
-    }
-    ssh_frame::Body::UpdateRef(Box::new(req))
-}
-
-/// SPEC-TRANSPORT §4.2.1 over the real sync server: two writers race a
-/// create-only (`MISSING`) update; the loser's reply is
-/// `Error{INVALID_REQUEST}` carrying the WINNER's id in `details`, and
-/// the shared client classifier maps it to `RefConflict` — not
-/// `RemoteError`. Before the #551 fix the server sent empty `details`,
-/// so the strict SSH classifier degraded the conflict to `RemoteError`.
-#[test]
-fn serve_loop_cas_conflict_carries_current_id_in_details() {
-    let td = tempfile::tempdir().unwrap();
-    let tx = FileTransport::new(td.path());
-    let id_winner = [0xA1u8; 32];
-    let id_loser = [0xB2u8; 32];
-
-    let mut input = Vec::new();
-    write_body(
-        &mut input,
-        ssh_frame::Body::Hello(Box::new(
-            mkit_rpc::mkit::rpc::v1::ssh::Hello::default()
-                .with_proto(ProtocolVersion::ProtocolVersion1),
-        )),
-    );
-    // Writer A: create-only, wins.
-    write_body(
-        &mut input,
-        update_ref_body("refs/heads/main", id_winner, RefExpectation::Missing, None),
-    );
-    // Writer B: create-only, loses the race.
-    write_body(
-        &mut input,
-        update_ref_body("refs/heads/main", id_loser, RefExpectation::Missing, None),
-    );
-
-    let mut reader = Cursor::new(input);
-    let mut output = Vec::new();
-    assert_eq!(serve_loop(&tx, &mut reader, &mut output), exit::OK);
-    // The ref holds the winner's id; the loser clobbered nothing.
-    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(id_winner));
-
-    let mut out = Cursor::new(output);
-    let _hello: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
-    let win: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
-    assert!(matches!(
-        win.body,
-        Some(ssh_frame::Body::UpdateRefResponse(_))
-    ));
-    let lose: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
-    let Some(ssh_frame::Body::Error(err)) = lose.body else {
-        panic!("loser must receive an Error frame, got {:?}", lose.body);
-    };
-    assert!(err.code.is_some_and(|c| c == ErrorCode::InvalidRequest));
+fn removed_listener_flag_names_the_first_removed_flag() {
+    let args = |a: &[&str]| a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
     assert_eq!(
-        err.details.as_deref(),
-        Some(&id_winner[..]),
-        "details must carry the CURRENT ref value (the winner's id)"
+        removed_listener_flag(&args(&["repo", "--http", "127.0.0.1:0"])),
+        Some("--http")
     );
-    // The exact frame the server produced classifies as RefConflict
-    // through the shared client-side mapping both transports use.
-    assert!(matches!(
-        mkit_rpc::map_update_ref_error(*err, RefWriteCondition::Missing, "ssh"),
-        mkit_core::protocol::TransportError::RefConflict
-    ));
+    assert_eq!(
+        removed_listener_flag(&args(&["--enc-idle-timeout-secs=5", "--listen-enc", "x"])),
+        Some("--enc-idle-timeout-secs")
+    );
+    // Not a removed flag, a prefix of one, anything after `--`, or the
+    // idle timeout `mkit serve` does take.
+    assert_eq!(removed_listener_flag(&args(&["repo", "--bogus"])), None);
+    assert_eq!(removed_listener_flag(&args(&["--htt", "repo"])), None);
+    assert_eq!(removed_listener_flag(&args(&["--", "--http"])), None);
+    assert_eq!(
+        removed_listener_flag(&args(&["repo", "--idle-timeout-secs", "5"])),
+        None
+    );
 }
 
-/// A stale `MATCH` update against the real sync server: the reply's
-/// `details` carries the current (unchanged) ref value.
+/// Both timeout flags are bounded at 7 days; past that clap refuses the
+/// value (no `Instant` overflow can follow from a huge one).
 #[test]
-fn serve_loop_match_conflict_reports_current_value() {
-    let td = tempfile::tempdir().unwrap();
+fn timeout_flags_are_bounded() {
+    let parse = |a: &[&str]| {
+        let args = a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        clap_shim::parse::<ServeOpts>("mkit serve", &args)
+    };
+    let week = MAX_TIMEOUT_SECS.to_string();
+    let over = (MAX_TIMEOUT_SECS + 1).to_string();
+    for flag in ["--idle-timeout-secs", "--max-session-secs"] {
+        assert!(parse(&["repo", flag, &week]).is_ok(), "{flag}");
+        assert_eq!(
+            parse(&["repo", flag, &over]).unwrap_err(),
+            exit::DATAERR,
+            "{flag}"
+        );
+        let max = u64::MAX.to_string();
+        assert_eq!(
+            parse(&["repo", flag, &max]).unwrap_err(),
+            exit::DATAERR,
+            "{flag}"
+        );
+    }
+    let opts = parse(&["repo"]).unwrap();
+    assert_eq!(
+        opts.max_session_secs, 0,
+        "the session cap is off by default"
+    );
+    assert_eq!(
+        parse(&["repo", "--max-session-secs", "30"])
+            .unwrap()
+            .max_session_secs,
+        30
+    );
+}
+
+/// An idle timeout whose deadline an `Instant` cannot hold waits forever
+/// instead of panicking.
+#[test]
+fn a_huge_idle_timeout_does_not_overflow() {
+    let td = repo_root();
+    let input = Cursor::new(encode([hello(), close()]));
+    let (code, out) = serve(td.path(), input, Some(Duration::from_secs(u64::MAX)));
+    assert_eq!(code, exit::OK);
+    assert!(matches!(decode(&out)[0].body, Some(Body::HelloResponse(_))));
+}
+
+#[test]
+fn idle_timeout_flag_defaults_to_60_and_takes_zero() {
+    let parse = |a: &[&str]| {
+        let args = a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        clap_shim::parse::<ServeOpts>("mkit serve", &args).unwrap()
+    };
+    assert_eq!(parse(&["repo"]).idle_timeout_secs, 60);
+    assert_eq!(
+        parse(&["repo", "--idle-timeout-secs", "0"]).idle_timeout_secs,
+        0
+    );
+    assert_eq!(
+        parse(&["--idle-timeout-secs=5", "repo"]).idle_timeout_secs,
+        5
+    );
+}
+
+// ---------------------------------------------------------------- session
+
+/// The M0-12 golden session through `serve_stdio`, over the `.mkit`
+/// layout seeded as it was captured: refs `main`, `dev`, `tags/v1` and one
+/// 1000-byte pack.
+#[test]
+fn serve_stdio_matches_golden_session() {
+    let td = repo_root();
     let tx = FileTransport::new(td.path());
-    let current = [0x11u8; 32];
-    let stale = [0x22u8; 32];
-    let next = [0x33u8; 32];
-    tx.update_ref("refs/heads/main", RefWriteCondition::Any, &current)
+    for (name, id) in [
+        ("refs/heads/main", [0x11; 32]),
+        ("refs/heads/dev", [0x22; 32]),
+        ("refs/tags/v1", [0x33; 32]),
+    ] {
+        tx.update_ref(name, RefWriteCondition::Any, &id).unwrap();
+    }
+    let seeded = pack_bytes(1000, 7);
+    tx.upload_pack(&seeded, &PackKey::new(hash(&seeded)))
         .unwrap();
 
-    let mut input = Vec::new();
-    write_body(
-        &mut input,
-        ssh_frame::Body::Hello(Box::new(
-            mkit_rpc::mkit::rpc::v1::ssh::Hello::default()
-                .with_proto(ProtocolVersion::ProtocolVersion1),
-        )),
+    let (code, out) = serve(
+        td.path(),
+        Cursor::new(GOLDEN_IN),
+        Some(Duration::from_mins(1)),
     );
-    write_body(
-        &mut input,
-        update_ref_body("refs/heads/main", next, RefExpectation::Match, Some(stale)),
-    );
-
-    let mut reader = Cursor::new(input);
-    let mut output = Vec::new();
-    assert_eq!(serve_loop(&tx, &mut reader, &mut output), exit::OK);
-    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(current));
-
-    let mut out = Cursor::new(output);
-    let _hello: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
-    let reply: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
-    let Some(ssh_frame::Body::Error(err)) = reply.body else {
-        panic!(
-            "stale MATCH must receive an Error frame, got {:?}",
-            reply.body
-        );
-    };
-    assert!(err.code.is_some_and(|c| c == ErrorCode::InvalidRequest));
-    assert_eq!(err.details.as_deref(), Some(&current[..]));
-}
-
-/// `MATCH` against a ref that does not exist: still a CAS conflict on
-/// the wire (`INVALID_REQUEST`), but there is no current value to
-/// surface, so `details` stays empty — mirroring `ReadRefResponse`'s
-/// empty-means-absent encoding. Strict clients surface this as a
-/// remote error carrying the server's descriptive message rather than
-/// a `RefConflict` with a fabricated id.
-#[test]
-fn serve_loop_match_conflict_on_absent_ref_has_empty_details() {
-    let td = tempfile::tempdir().unwrap();
-    let tx = FileTransport::new(td.path());
-
-    let mut input = Vec::new();
-    write_body(
-        &mut input,
-        ssh_frame::Body::Hello(Box::new(
-            mkit_rpc::mkit::rpc::v1::ssh::Hello::default()
-                .with_proto(ProtocolVersion::ProtocolVersion1),
-        )),
-    );
-    write_body(
-        &mut input,
-        update_ref_body(
-            "refs/heads/ghost",
-            [0x44u8; 32],
-            RefExpectation::Match,
-            Some([0x55u8; 32]),
-        ),
-    );
-
-    let mut reader = Cursor::new(input);
-    let mut output = Vec::new();
-    assert_eq!(serve_loop(&tx, &mut reader, &mut output), exit::OK);
-    assert_eq!(tx.read_ref("refs/heads/ghost").unwrap(), None);
-
-    let mut out = Cursor::new(output);
-    let _hello: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
-    let reply: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
-    let Some(ssh_frame::Body::Error(err)) = reply.body else {
-        panic!("absent-ref MATCH must receive an Error frame");
-    };
-    assert!(err.code.is_some_and(|c| c == ErrorCode::InvalidRequest));
-    assert_eq!(err.details.as_deref().map_or(0, <[u8]>::len), 0);
-    // Empty details → strict classifier reports the server's message,
-    // not RefConflict.
-    let mapped =
-        mkit_rpc::map_update_ref_error(*err, RefWriteCondition::Match([0x55u8; 32]), "ssh");
-    match mapped {
-        mkit_core::protocol::TransportError::RemoteError(msg) => {
-            assert!(msg.contains("absent"), "message should say absent: {msg}");
-        }
-        other => panic!("expected RemoteError, got {other:?}"),
+    assert_eq!(code, exit::OK);
+    let want = with_current_server_id(GOLDEN_OUT);
+    let (got_frames, want_frames) = (decode(&out), decode(&want));
+    for (i, (g, w)) in got_frames.iter().zip(&want_frames).enumerate() {
+        assert_eq!(g, w, "frame {i}");
     }
+    assert_eq!(out, want);
+    // The refs the session left are `FileTransport`'s files.
+    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some([0x44; 32]));
 }
 
-#[cfg(feature = "enc-transport")]
 #[test]
-// #505 PR 5/5: binds a real `TcpListener` on 127.0.0.1 and waits on a
-// 10s `recv_timeout` — quarantined to the serial `--ignored` CI lane
-// (cloudbuild/ci.yaml, .github/workflows/rust.yml) rather than paying
-// real socket/thread setup on every `cargo test`. Only needs localhost
-// networking, so it runs fine in that lane.
-#[ignore = "real localhost TCP + wall-clock recv_timeout; run via the serial --ignored CI lane"]
-fn listen_enc_rejected_upload_does_not_overwrite_existing_pack() {
-    use commonware_codec::Encode as _;
-    use commonware_cryptography::Signer as _;
-    use commonware_cryptography::ed25519::PrivateKey;
-    use mkit_transport_enc::tcp::{TokioExecutor, connect_tcp_with_executor, serve_tcp_with_addr};
-    use std::sync::{Arc, mpsc};
-    use std::thread;
-    use std::time::Duration;
+fn idle_timeout_ends_session_with_protocol_error() {
+    let td = repo_root();
+    // A client that connects and sends nothing: the pipe's writer stays
+    // open until the test ends.
+    let (reader, _writer) = io::pipe().unwrap();
+    let started = Instant::now();
+    let (code, out) = serve(td.path(), reader, Some(Duration::from_millis(100)));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(code, exit::PROTOCOL_ERROR);
+    let frames = decode(&out);
+    assert_eq!(frames.len(), 1, "{frames:?}");
+    assert_error(&frames[0], ErrorCode::InvalidRequest, "idle timeout");
+}
 
-    let td = tempfile::tempdir().unwrap();
-    let tx = FileTransport::new(td.path());
-    let (bytes, key) = valid_pack();
-    tx.upload_pack(&bytes, &key).unwrap();
-
-    let exec = TokioExecutor::new().expect("tokio runtime");
-    let server_key = PrivateKey::from_seed(1001);
-    let server_pubkey = {
-        let encoded = server_key.public_key().encode();
-        let bytes = encoded.as_ref();
-        assert_eq!(bytes.len(), 32);
-        let mut out = [0u8; 32];
-        out.copy_from_slice(bytes);
-        out
+#[test]
+fn zero_disables_timeout() {
+    let td = repo_root();
+    let slow = Trickle {
+        bytes: Cursor::new(encode([hello(), close()])),
+        piece: usize::MAX,
+        first_gap: Duration::from_millis(300),
+        gap: Duration::ZERO,
+        started: false,
     };
-
-    let server_tx = Arc::new(FileTransport::new(td.path()));
-    let (addr_tx, addr_rx) = mpsc::channel();
-    let exec_for_server = exec.clone();
-    let _server_handle = thread::spawn(move || {
-        let serve_fn =
-            move |sess: mkit_transport_enc::EncSession<
-                mkit_transport_enc::tokio_io::TokioStream,
-                mkit_transport_enc::tokio_io::TokioSink,
-            >,
-                  _peer: commonware_cryptography::ed25519::PublicKey| {
-                let tx = server_tx.clone();
-                // Tests drive a cooperative client, so the idle
-                // timeout is irrelevant here; keep it generous.
-                async move {
-                    serve_enc_session(tx, sess, Some(std::time::Duration::from_secs(30))).await;
-                }
-            };
-        let _ = serve_tcp_with_addr(
-            "127.0.0.1:0",
-            server_key,
-            exec_for_server,
-            move |addr| {
-                let _ = addr_tx.send(addr);
-            },
-            serve_fn,
-        );
-    });
-
-    let addr = addr_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("encrypted listener address");
-    let client_key = PrivateKey::from_seed(2002);
-    let client = connect_tcp_with_executor(
-        &addr.ip().to_string(),
-        addr.port(),
-        &server_pubkey,
-        client_key,
-        exec,
-    )
-    .expect("connect encrypted client");
-
-    assert!(client.upload_pack(b"wrong", &key).is_err());
-    assert_eq!(tx.download_pack(&key).unwrap(), bytes);
-}
-
-#[cfg(feature = "enc-transport")]
-#[test]
-// Same quarantine rationale as
-// `listen_enc_rejected_upload_does_not_overwrite_existing_pack` above:
-// real localhost TCP + wall-clock recv_timeout → serial `--ignored` lane.
-#[ignore = "real localhost TCP + wall-clock recv_timeout; run via the serial --ignored CI lane"]
-fn listen_enc_rejects_non_hello_first_frame() {
-    // #564: the app-level handshake (SPEC-RPC §4) requires `Hello` as
-    // the first frame after the crypto handshake completes. A peer
-    // that skips it and sends an ordinary verb request instead must
-    // get no response at all — `serve_enc_session` silently drops the
-    // connection rather than processing the request or replying with
-    // an error frame.
-    use commonware_codec::Encode as _;
-    use commonware_cryptography::Signer as _;
-    use commonware_cryptography::ed25519::PrivateKey;
-    use mkit_rpc::mkit::rpc::v1::ssh::ListRefs;
-    use mkit_transport_enc::tcp::{TokioExecutor, dial_tcp_session_for_test, serve_tcp_with_addr};
-    use std::sync::{Arc, mpsc};
-    use std::thread;
-    use std::time::Duration;
-
-    let td = tempfile::tempdir().unwrap();
-    let tx = Arc::new(FileTransport::new(td.path()));
-
-    let exec = TokioExecutor::new().expect("tokio runtime");
-    let server_key = PrivateKey::from_seed(5005);
-    let server_pubkey = {
-        let encoded = server_key.public_key().encode();
-        let bytes = encoded.as_ref();
-        assert_eq!(bytes.len(), 32);
-        let mut out = [0u8; 32];
-        out.copy_from_slice(bytes);
-        out
+    let (code, out) = serve(td.path(), slow, None);
+    assert_eq!(code, exit::OK);
+    let frames = decode(&out);
+    assert!(matches!(frames[0].body, Some(Body::HelloResponse(_))));
+    // The same client against a 100 ms timeout is cut off before `Hello`.
+    let slow = Trickle {
+        bytes: Cursor::new(encode([hello(), close()])),
+        piece: usize::MAX,
+        first_gap: Duration::from_millis(300),
+        gap: Duration::ZERO,
+        started: false,
     };
-
-    let (addr_tx, addr_rx) = mpsc::channel();
-    let exec_for_server = exec.clone();
-    let server_tx = tx.clone();
-    let _server_handle = thread::spawn(move || {
-        let serve_fn =
-            move |sess: mkit_transport_enc::EncSession<
-                mkit_transport_enc::tokio_io::TokioStream,
-                mkit_transport_enc::tokio_io::TokioSink,
-            >,
-                  _peer: commonware_cryptography::ed25519::PublicKey| {
-                let tx = server_tx.clone();
-                async move {
-                    serve_enc_session(tx, sess, Some(Duration::from_secs(30))).await;
-                }
-            };
-        let _ = serve_tcp_with_addr(
-            "127.0.0.1:0",
-            server_key,
-            exec_for_server,
-            move |addr| {
-                let _ = addr_tx.send(addr);
-            },
-            serve_fn,
-        );
-    });
-
-    let addr = addr_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("encrypted listener address");
-    let client_key = PrivateKey::from_seed(6006);
-    // Raw dial: completes the crypto handshake but skips the
-    // app-level Hello `connect_tcp_with_executor` would send
-    // automatically, so we can send whatever frame we like first.
-    let session = dial_tcp_session_for_test(
-        &addr.ip().to_string(),
-        addr.port(),
-        &server_pubkey,
-        client_key,
-        mkit_transport_enc::HANDSHAKE_NAMESPACE.to_vec(),
-        &exec,
-    )
-    .expect("crypto handshake succeeds");
-    let (mut sender, mut receiver) = session.into_parts();
-
-    let bogus_first_frame = ssh_frame::Body::ListRefs(Box::<ListRefs>::default());
-    exec.handle().block_on(async {
-        mkit_transport_enc::send_frame(
-            &mut sender,
-            &SshFrame {
-                body: Some(bogus_first_frame),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("send bogus first frame");
-
-        // The server must never respond — no HelloResponse, no error
-        // frame, nothing — so a bounded receive must time out.
-        let result =
-            mkit_transport_enc::recv_frame_within(&mut receiver, Duration::from_secs(2)).await;
-        assert!(
-            result.is_err(),
-            "server must not respond to a non-Hello first frame, got {result:?}"
-        );
-    });
+    let (code, _) = serve(td.path(), slow, Some(Duration::from_millis(100)));
+    assert_eq!(code, exit::PROTOCOL_ERROR);
 }
 
-#[cfg(feature = "enc-transport")]
+/// An upload that keeps sending never trips the timeout, even though one
+/// chunk frame takes several timeouts to arrive; a client that stops in
+/// the middle of one does, and the upload is discarded.
 #[test]
-// Same quarantine rationale as
-// `listen_enc_rejected_upload_does_not_overwrite_existing_pack` above:
-// real localhost TCP + wall-clock recv_timeout → serial `--ignored` lane.
-#[ignore = "real localhost TCP + wall-clock recv_timeout; run via the serial --ignored CI lane"]
-fn listen_enc_cas_conflict_classifies_as_ref_conflict() {
-    // #551 / SPEC-TRANSPORT §4.2.1 over the REAL encrypted listener: a
-    // stale MATCH update must surface as `TransportError::RefConflict`
-    // through the enc client (which now requires the server's
-    // current-id `details` payload), not as a generic RemoteError. The
-    // losing write must not clobber the ref.
-    use commonware_codec::Encode as _;
-    use commonware_cryptography::Signer as _;
-    use commonware_cryptography::ed25519::PrivateKey;
-    use mkit_core::protocol::TransportError;
-    use mkit_transport_enc::tcp::{TokioExecutor, connect_tcp_with_executor, serve_tcp_with_addr};
-    use std::sync::{Arc, mpsc};
-    use std::thread;
-    use std::time::Duration;
+fn idle_timeout_counts_bytes_not_frames() {
+    let pack = pack_bytes(4000, 3);
+    let id = hash(&pack).to_vec();
+    let header = Body::UploadPack(Box::new(UploadPack {
+        pack_id: Some(id.clone()),
+        total_bytes: Some(pack.len() as u64),
+        ..Default::default()
+    }));
+    let chunk = Body::PackChunk(Box::new(PackChunk {
+        pack_id: Some(id.clone()),
+        offset: Some(0),
+        data: Some(pack.clone()),
+        last: Some(true),
+        ..Default::default()
+    }));
+    let input = encode([hello(), header.clone(), chunk, close()]);
 
-    let td = tempfile::tempdir().unwrap();
-    let tx = FileTransport::new(td.path());
-    let current = [0x11u8; 32];
-    let stale = [0x22u8; 32];
-    let next = [0x33u8; 32];
-    tx.update_ref("refs/heads/main", RefWriteCondition::Any, &current)
+    // ~4 KiB at 400 bytes per 40 ms: about 400 ms, 4x the timeout.
+    let td = repo_root();
+    let trickle = Trickle {
+        bytes: Cursor::new(input),
+        piece: 400,
+        first_gap: Duration::ZERO,
+        gap: Duration::from_millis(40),
+        started: false,
+    };
+    let (code, out) = serve(td.path(), trickle, Some(Duration::from_millis(100)));
+    assert_eq!(code, exit::OK);
+    let frames = decode(&out);
+    assert!(
+        matches!(frames[1].body, Some(Body::UploadPackResponse(_))),
+        "{frames:?}"
+    );
+    let key = PackKey::new(hash(&pack));
+    assert!(FileTransport::new(td.path()).pack_exists(&key).unwrap());
+
+    // The header, then silence.
+    let td = repo_root();
+    let (reader, mut writer) = io::pipe().unwrap();
+    io::Write::write_all(&mut writer, &encode([hello(), header])).unwrap();
+    let (code, out) = serve(td.path(), reader, Some(Duration::from_millis(100)));
+    assert_eq!(code, exit::PROTOCOL_ERROR);
+    let frames = decode(&out);
+    assert_error(&frames[1], ErrorCode::InvalidRequest, "idle timeout");
+    assert!(!FileTransport::new(td.path()).pack_exists(&key).unwrap());
+    let packs = td.path().join("packs");
+    let left = fs::read_dir(&packs).map_or(0, Iterator::count);
+    assert_eq!(left, 0, "the upload's temp file is removed");
+    drop(writer);
+}
+
+#[test]
+fn a_root_whose_refs_live_in_sqlite_is_refused() {
+    let td = repo_root();
+    fs::write(td.path().join(".mkit/server-meta"), b"sqlite").unwrap();
+    let (code, out) = serve(td.path(), Cursor::new(encode([hello()])), None);
+    assert_eq!(code, exit::CONFIG_ERROR);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn stop_after_hello_ends_cleanly_after_the_handshake() {
+    let td = repo_root();
+    let input = Cursor::new(encode([hello(), close()]));
+    let mut out = Vec::new();
+    let code = serve_stdio(&plain_target(td.path()), input, &mut out, None, true);
+    assert_eq!(code, exit::OK);
+    let frames = decode(&out);
+    assert_eq!(frames.len(), 1);
+    assert!(matches!(frames[0].body, Some(Body::HelloResponse(_))));
+}
+
+// ------------------------------------------------------- startup upkeep
+
+#[test]
+fn startup_sweeps_crashed_uploads_only_when_no_server_holds_the_lock() {
+    let td = repo_root();
+    let packs = td.path().join("packs");
+    fs::create_dir_all(&packs).unwrap();
+    let stale = packs.join(format!(".{}.tmp.4242.0", "ab".repeat(32)));
+    fs::write(&stale, b"partial").unwrap();
+    let old = std::time::SystemTime::now() - Duration::from_hours(2);
+    fs::File::options()
+        .write(true)
+        .open(&stale)
+        .unwrap()
+        .set_modified(old)
         .unwrap();
 
-    let exec = TokioExecutor::new().expect("tokio runtime");
-    let server_key = PrivateKey::from_seed(3003);
-    let server_pubkey = {
-        let encoded = server_key.public_key().encode();
-        let bytes = encoded.as_ref();
-        assert_eq!(bytes.len(), 32);
-        let mut out = [0u8; 32];
-        out.copy_from_slice(bytes);
-        out
-    };
-
-    let server_tx = Arc::new(FileTransport::new(td.path()));
-    let (addr_tx, addr_rx) = mpsc::channel();
-    let exec_for_server = exec.clone();
-    let _server_handle = thread::spawn(move || {
-        let serve_fn =
-            move |sess: mkit_transport_enc::EncSession<
-                mkit_transport_enc::tokio_io::TokioStream,
-                mkit_transport_enc::tokio_io::TokioSink,
-            >,
-                  _peer: commonware_cryptography::ed25519::PublicKey| {
-                let tx = server_tx.clone();
-                async move {
-                    serve_enc_session(tx, sess, Some(std::time::Duration::from_secs(30))).await;
-                }
-            };
-        let _ = serve_tcp_with_addr(
-            "127.0.0.1:0",
-            server_key,
-            exec_for_server,
-            move |addr| {
-                let _ = addr_tx.send(addr);
-            },
-            serve_fn,
-        );
-    });
-
-    let addr = addr_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("encrypted listener address");
-    let client_key = PrivateKey::from_seed(4004);
-    let client = connect_tcp_with_executor(
-        &addr.ip().to_string(),
-        addr.port(),
-        &server_pubkey,
-        client_key,
-        exec,
+    // Another server is up (it holds `serve.lock` shared): no sweep.
+    let dot_mkit = td.path().join(".mkit");
+    let other = repo_lock::acquire_shared(
+        &dot_mkit,
+        crate::commands::SERVE_LOCK,
+        repo_lock::DEFAULT_TIMEOUT,
     )
-    .expect("connect encrypted client");
+    .unwrap();
+    let ours = lock_and_sweep(td.path()).unwrap();
+    assert!(stale.exists(), "swept while another server was up");
+    drop((ours, other));
 
-    let err = client
-        .update_ref("refs/heads/main", RefWriteCondition::Match(stale), &next)
-        .unwrap_err();
-    assert!(
-        matches!(err, TransportError::RefConflict),
-        "stale MATCH over the enc transport must classify as RefConflict, got {err:?}"
-    );
-    // The losing write clobbered nothing.
-    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(current));
-}
-
-#[cfg(feature = "enc-transport")]
-#[test]
-// Same quarantine rationale as the other real-TCP enc tests above:
-// this drives MAX_FRAMES_PER_CONN + 1 real round trips.
-#[ignore = "real localhost TCP + MAX_FRAMES_PER_CONN round trips; run via the serial --ignored CI lane"]
-fn listen_enc_terminates_connection_past_frame_budget() {
-    // #559 / SPEC-TRANSPORT §4.4 parity with the stdin/stdout `serve_loop`:
-    // the encrypted listener must enforce the same cumulative per-
-    // connection frame budget, not just the per-frame idle timeout, so a
-    // peer that stays under the per-frame cap but never closes the
-    // connection can't hold a worker and stream unbounded work.
-    use commonware_codec::Encode as _;
-    use commonware_cryptography::Signer as _;
-    use commonware_cryptography::ed25519::PrivateKey;
-    use mkit_core::protocol::TransportError;
-    use mkit_transport_enc::tcp::{TokioExecutor, connect_tcp_with_executor, serve_tcp_with_addr};
-    use std::sync::{Arc, mpsc};
-    use std::thread;
-    use std::time::Duration;
-
-    let td = enc_repo();
-    let server_tx = Arc::new(FileTransport::new(td.path()));
-
-    let exec = TokioExecutor::new().expect("tokio runtime");
-    let server_key = PrivateKey::from_seed(5005);
-    let server_pubkey = {
-        let encoded = server_key.public_key().encode();
-        let bytes = encoded.as_ref();
-        assert_eq!(bytes.len(), 32);
-        let mut out = [0u8; 32];
-        out.copy_from_slice(bytes);
-        out
-    };
-
-    let (addr_tx, addr_rx) = mpsc::channel();
-    let exec_for_server = exec.clone();
-    let _server_handle = thread::spawn(move || {
-        let serve_fn =
-            move |sess: mkit_transport_enc::EncSession<
-                mkit_transport_enc::tokio_io::TokioStream,
-                mkit_transport_enc::tokio_io::TokioSink,
-            >,
-                  _peer: commonware_cryptography::ed25519::PublicKey| {
-                let tx = server_tx.clone();
-                async move {
-                    serve_enc_session(tx, sess, Some(Duration::from_secs(30))).await;
-                }
-            };
-        let _ = serve_tcp_with_addr(
-            "127.0.0.1:0",
-            server_key,
-            exec_for_server,
-            move |addr| {
-                let _ = addr_tx.send(addr);
-            },
-            serve_fn,
-        );
-    });
-
-    let addr = addr_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("encrypted listener address");
-    let client_key = PrivateKey::from_seed(6006);
-    let client = connect_tcp_with_executor(
-        &addr.ip().to_string(),
-        addr.port(),
-        &server_pubkey,
-        client_key,
-        exec,
-    )
-    .expect("connect encrypted client");
-
-    // Cheap, budget-neutral-per-frame requests: each one costs the
-    // `frame_byte_estimate` baseline (64 bytes), so only the frame-count
-    // cap — not the byte cap — can trip here.
-    for _ in 0..MAX_FRAMES_PER_CONN {
-        client
-            .read_ref("refs/heads/does-not-exist")
-            .expect("request under the frame budget must succeed");
-    }
-    // The (MAX_FRAMES_PER_CONN + 1)th top-level frame exceeds the budget;
-    // the server must reject it and tear down the connection rather than
-    // serve it or silently keep counting forever.
-    let err = client.read_ref("refs/heads/does-not-exist").unwrap_err();
-    assert!(
-        !matches!(err, TransportError::InvalidRef(_)),
-        "budget rejection must not be misclassified as a client-side validation error, got {err:?}"
-    );
-}
-
-// Note: containment via MKIT_SERVE_ROOT is enforced — tested via
-// an integration test in tests/ rather than here, since this
-// crate forbids `unsafe` (which `std::env::set_var` requires
-// since Rust 1.92).
-
-#[cfg(feature = "enc-transport")]
-fn enc_repo() -> tempfile::TempDir {
-    let td = tempfile::tempdir().unwrap();
-    fs::create_dir_all(td.path().join(".mkit")).unwrap();
-    td
-}
-
-/// Fail-closed: `serve --listen-enc` with neither an authorized-peers
-/// file nor the unsafe flag returns `CONFIG_ERROR` before binding.
-#[cfg(feature = "enc-transport")]
-#[test]
-fn listen_enc_fails_closed_without_peer_auth() {
-    let td = enc_repo();
-    let args = vec![
-        td.path().to_str().unwrap().to_string(),
-        "--listen-enc".to_string(),
-        "127.0.0.1:0".to_string(),
-    ];
-    assert_eq!(run(&args), exit::CONFIG_ERROR);
-}
-
-/// An authorized-peers file that exists but parses to no valid keys
-/// is rejected (fail-closed), not silently treated as allow-any.
-#[cfg(feature = "enc-transport")]
-#[test]
-fn listen_enc_rejects_empty_authorized_peers() {
-    let td = enc_repo();
-    let peers = td.path().join("peers.txt");
-    fs::write(&peers, "# only comments\n\n").unwrap();
-    let args = vec![
-        td.path().to_str().unwrap().to_string(),
-        "--listen-enc".to_string(),
-        "127.0.0.1:0".to_string(),
-        "--enc-authorized-peers".to_string(),
-        peers.to_str().unwrap().to_string(),
-    ];
-    assert_eq!(run(&args), exit::CONFIG_ERROR);
-}
-
-/// Supplying both `--enc-authorized-peers` and the unsafe flag is a
-/// usage error.
-#[cfg(feature = "enc-transport")]
-#[test]
-fn listen_enc_rejects_conflicting_flags() {
-    let td = enc_repo();
-    let peers = td.path().join("peers.txt");
-    fs::write(&peers, format!("{}\n", "aa".repeat(32))).unwrap();
-    let args = vec![
-        td.path().to_str().unwrap().to_string(),
-        "--listen-enc".to_string(),
-        "127.0.0.1:0".to_string(),
-        "--enc-authorized-peers".to_string(),
-        peers.to_str().unwrap().to_string(),
-        "--unsafe-allow-any-enc-peer".to_string(),
-    ];
-    assert_eq!(run(&args), exit::USAGE);
-}
-
-#[cfg(feature = "enc-transport")]
-#[test]
-fn authorized_peers_parses_hex_and_skips_comments() {
-    let td = tempfile::tempdir().unwrap();
-    let peers = td.path().join("peers.txt");
-    let k1 = "aa".repeat(32);
-    let k2 = "bb".repeat(32);
-    fs::write(&peers, format!("# header\n{k1}\n\n  {k2}  \n")).unwrap();
-    let set = load_authorized_peers(peers.to_str().unwrap()).unwrap();
-    assert_eq!(set.len(), 2);
-    assert!(set.contains(&[0xAA; 32]));
-    assert!(set.contains(&[0xBB; 32]));
-}
-
-/// The allowlist file accepts the SAME 43-char url-safe base64
-/// encoding the `mkit+enc://?pubkey=` query uses, and it decodes to
-/// the identical 32-byte key as the hex form. Without this the docs
-/// and `--enc-authorized-peers` help would promise base64 support
-/// that the parser silently rejected.
-#[cfg(feature = "enc-transport")]
-#[test]
-#[allow(clippy::cast_possible_truncation)] // test-only b64 encoder
-fn authorized_peers_parses_base64_matching_hex() {
-    // A key whose final byte's low bits are zero so the canonical
-    // 43-char base64 has zero trailing bits. All-0xAA: last byte 0xAA.
-    // Build from a real ed25519 public key to guarantee a valid pair
-    // of encodings.
-    use commonware_codec::Encode as _;
-    use commonware_cryptography::Signer as _;
-    use commonware_cryptography::ed25519::PrivateKey;
-
-    let pk = PrivateKey::from_seed(4242).public_key();
-    let raw: [u8; 32] = {
-        let enc = pk.encode();
-        let mut out = [0u8; 32];
-        out.copy_from_slice(enc.as_ref());
-        out
-    };
-    let hex = mkit_core::hash::to_hex(&raw);
-    // Round-trip the raw bytes through our own base64 decoder by
-    // first encoding with the standard alphabet.
-    let b64 = {
-        const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-        let mut s = String::new();
-        for chunk in raw.chunks(3) {
-            let b0 = u32::from(chunk[0]);
-            let b1 = chunk.get(1).copied().map_or(0, u32::from);
-            let b2 = chunk.get(2).copied().map_or(0, u32::from);
-            let n = (b0 << 16) | (b1 << 8) | b2;
-            let chars = match chunk.len() {
-                1 => 2,
-                2 => 3,
-                _ => 4,
-            };
-            for i in 0..chars {
-                let idx = ((n >> (18 - 6 * i)) & 0x3F) as usize;
-                s.push(A[idx] as char);
-            }
-        }
-        s
-    };
-    assert_eq!(b64.len(), 43, "ed25519 key encodes to 43 b64 chars");
-
-    let td = tempfile::tempdir().unwrap();
-    let peers = td.path().join("peers.txt");
-    fs::write(&peers, format!("{hex}\n{b64}\n")).unwrap();
-    let set = load_authorized_peers(peers.to_str().unwrap()).unwrap();
-    // Both lines decode to the SAME key, so the set has one element.
-    assert_eq!(set.len(), 1, "hex and base64 forms must coincide");
-    assert!(set.contains(&raw));
-}
-
-#[cfg(feature = "enc-transport")]
-#[test]
-fn authorized_peers_rejects_malformed_key() {
-    let td = tempfile::tempdir().unwrap();
-    let peers = td.path().join("peers.txt");
-    fs::write(&peers, "not-a-valid-key\n").unwrap();
-    assert!(load_authorized_peers(peers.to_str().unwrap()).is_err());
-}
-
-#[test]
-fn pack_key_from_id_rejects_bad_length_as_invalid_request() {
-    // `pack_key_from_id` is the shared decoder behind PackExists and
-    // DownloadPack on both the sync and encrypted transports. This covers
-    // the decoder itself: a wrong-length or missing pack_id must yield an
-    // InvalidRequest verb error, which the dispatchers then turn into an
-    // error frame — replacing the pre-unification sync path that silently
-    // dropped the connection. (The frame emission is exercised separately
-    // by the serve_loop tests.)
-    let wrong_len = vec![0u8; 16];
-    assert!(matches!(
-        pack_key_from_id(Some(&wrong_len)),
-        Err((ErrorCode::InvalidRequest, _))
-    ));
-    assert!(matches!(
-        pack_key_from_id(None),
-        Err((ErrorCode::InvalidRequest, _))
-    ));
-    // A correct 32-byte id still decodes.
-    assert!(pack_key_from_id(Some(&vec![7u8; 32])).is_ok());
+    // Alone: swept, and the shared lock is held afterwards.
+    let ours = lock_and_sweep(td.path()).unwrap();
+    assert!(!stale.exists());
+    assert!(!repo_lock::probe_exclusive(&dot_mkit, crate::commands::SERVE_LOCK).unwrap());
+    drop(ours);
 }

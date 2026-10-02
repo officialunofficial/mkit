@@ -1,0 +1,775 @@
+//! What the suite may assume about the server under test: its auth mode,
+//! limits and capabilities. Built from flags, a TOML file, or both
+//! ([`ProfileSpec`]); flags win.
+
+use std::collections::BTreeSet;
+use std::fmt;
+use std::str::FromStr;
+
+use serde::Deserialize;
+
+/// How the server authenticates transport RPCs.
+#[derive(Clone, PartialEq, Eq)]
+pub enum WireAuth {
+    /// No authentication (`mkit-server serve --unsafe-allow-any-peer`, open deployments).
+    None,
+    /// `Authorization: Bearer <token>` on every transport RPC.
+    Bearer {
+        /// The token.
+        token: String,
+    },
+    /// Auth v2 signed writes (SPEC-TRANSPORT-CONNECT §7.1); reads unsigned.
+    AuthV2 {
+        /// The server's canonical origin, byte for byte.
+        audience: String,
+        /// The repository identity the server is configured with.
+        repository: String,
+        /// Seed every case signer is derived from (see
+        /// [`super::sign::Signer::derive`]).
+        seed: [u8; 32],
+    },
+}
+
+impl fmt::Debug for WireAuth {
+    // Never print the token or the seed.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => f.write_str("None"),
+            Self::Bearer { .. } => f.write_str("Bearer"),
+            Self::AuthV2 {
+                audience,
+                repository,
+                ..
+            } => f
+                .debug_struct("AuthV2")
+                .field("audience", audience)
+                .field("repository", repository)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+/// A per-signer write quota the server enforces, for the `quota.*` cases.
+/// Declare it only for a disposable server with a tiny quota: the cases
+/// exhaust it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuotaLimits {
+    /// Writes allowed per window.
+    pub max_ops: u32,
+    /// `UploadPack` bytes allowed per window.
+    pub max_bytes: u64,
+    /// Window length, ms (the growth case skews past it).
+    pub window_ms: i64,
+}
+
+/// The milestone a case belongs to (reconciliation R-12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Milestone {
+    /// Today's wire: no wire change.
+    M0,
+    /// Addressing, namespace policy, tickets.
+    M1,
+    /// Grants, signed reads.
+    M2,
+    /// Admission, outcomes.
+    M3,
+    /// Indexed mode, HTTP objects.
+    M4,
+    /// Leases, takedown, receipts, admin.
+    M5,
+}
+
+impl FromStr for Milestone {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        Ok(match s.to_ascii_uppercase().as_str() {
+            "M0" => Self::M0,
+            "M1" => Self::M1,
+            "M2" => Self::M2,
+            "M3" => Self::M3,
+            "M4" => Self::M4,
+            "M5" => Self::M5,
+            _ => return Err(format!("unknown milestone `{s}` (M0..M5)")),
+        })
+    }
+}
+
+/// A capability a case may require. The runner derives the set from the
+/// profile, adjusted by `--features`. Switching to server-reported
+/// `GetServerInfo` features is a follow-up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Feature {
+    /// Bearer-token authentication (from `--auth bearer`).
+    Bearer,
+    /// Auth v2 signed writes (from `--auth auth-v2`).
+    AuthV2,
+    /// `AdvanceRefs` commits both refs atomically.
+    AtomicAdvance,
+    /// A replay ledger for signed writes (implied by auth v2 in M0).
+    Replay,
+    /// A declared per-signer quota ([`Profile::quota`]).
+    Quota,
+    /// The server honors the `test-faults` request directives and serves
+    /// `GET /__mkit_test/stats`.
+    TestFaults,
+    /// The server fires due timers on its own clock (a driver runs).
+    Timers,
+    /// The server serves `grpc.health.v1.Health`. No mkit spec requires
+    /// it, so a profile declares it.
+    Health,
+    /// Opt-in: the server rejects an auth v2 signature over a gzip-encoded
+    /// body. SPEC-WRITE-GRANTS §9.2 has yet to say whether `body:` commits
+    /// to the encoded or the decoded bytes (the M2 spec pass, WP-2.6/2.9).
+    StrictGzipAuth,
+    /// Multi-repository addressing (M1).
+    MultiRepo,
+    /// Epoch leases for D34 grant revocation (M1).
+    EpochLeases,
+
+    /// Namespace allowlists and owner writes (M1). The profile's allowlist
+    /// admits each Multi case's derived `repository-a` and `repository-b`
+    /// keys and excludes `policy.non_allowlisted_namespace_denied`'s
+    /// `non-allowlisted` key (see [`super::sign::Signer::derive`]).
+    NamespacePolicy,
+    /// Upload tickets and resumable parts (M1).
+    Tickets,
+    /// Streaming multipart uploads through a capable blob backend (M1).
+    Multipart,
+    /// Write grants (M2).
+    Grants,
+    /// Signed reads and private repositories (M2).
+    SignedReads,
+    /// Admission challenges (M3).
+    Admission,
+    /// Loopback MPP fixture control plane.
+    HookStub,
+    /// Test-only short ticket lifetime.
+    ShortTickets,
+    /// Platform may combine repeated challenge fields per RFC 9110.
+    CombinedChallengeFields,
+    /// Tiny configured backlog cap.
+    BacklogCap,
+    /// Indexed mode (M4).
+    IndexedMode,
+    /// Indexed mode whose packs verify asynchronously in scheduled slices,
+    /// answering `PendingVerification` until they finish (WP-4.8, Workers).
+    IndexedAsync,
+    /// Plain-HTTP object serving (M4).
+    HttpObjects,
+    /// Fixture explicitly configured with synchronous inspection refusal.
+    /// A runner selection flag; not a wire capability.
+    SyncInspection,
+    /// Explicit local paid-read fixture with an owned token output file.
+    /// A runner selection flag; never inferred from HTTP support.
+    LaunchReadFixture,
+    /// Lifecycle leases and GC (M5).
+    Leases,
+    /// Takedown (M5).
+    Takedown,
+    /// Storage receipts (M5).
+    Receipts,
+    /// Admin RPCs (M5).
+    Admin,
+}
+
+const FEATURE_NAMES: [(Feature, &str); 30] = [
+    (Feature::Bearer, "bearer"),
+    (Feature::AuthV2, "auth-v2"),
+    (Feature::AtomicAdvance, "atomic-advance"),
+    (Feature::Replay, "replay"),
+    (Feature::Quota, "quota"),
+    (Feature::TestFaults, "test-faults"),
+    (Feature::Timers, "timers"),
+    (Feature::Health, "health"),
+    (Feature::StrictGzipAuth, "strict-gzip-auth"),
+    (Feature::MultiRepo, "multi-repo"),
+    (Feature::EpochLeases, "epoch-leases"),
+    (Feature::NamespacePolicy, "namespace-policy"),
+    (Feature::Tickets, "tickets"),
+    (Feature::Multipart, "multipart"),
+    (Feature::Grants, "grants"),
+    (Feature::SignedReads, "signed-reads"),
+    (Feature::Admission, "admission"),
+    (Feature::HookStub, "hook-stub"),
+    (Feature::ShortTickets, "short-tickets"),
+    (Feature::BacklogCap, "backlog-cap"),
+    (
+        Feature::CombinedChallengeFields,
+        "combined-challenge-fields",
+    ),
+    (Feature::IndexedMode, "indexed-mode"),
+    (Feature::IndexedAsync, "indexed-async"),
+    (Feature::HttpObjects, "http-objects"),
+    (Feature::SyncInspection, "sync-inspection"),
+    (Feature::LaunchReadFixture, "launch-read-fixture"),
+    (Feature::Leases, "leases"),
+    (Feature::Takedown, "takedown"),
+    (Feature::Receipts, "receipts"),
+    (Feature::Admin, "admin"),
+];
+
+impl Feature {
+    /// The flag spelling, e.g. `atomic-advance`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        FEATURE_NAMES
+            .iter()
+            .find(|(f, _)| *f == self)
+            .map_or("?", |(_, name)| name)
+    }
+}
+
+impl FromStr for Feature {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        let wanted = s.trim().replace('_', "-").to_ascii_lowercase();
+        FEATURE_NAMES
+            .iter()
+            .find(|(_, name)| *name == wanted)
+            .map(|(f, _)| *f)
+            .ok_or_else(|| format!("unknown feature `{s}`"))
+    }
+}
+
+/// Default `list.large_response_within_limit` population.
+pub const DEFAULT_LIST_REFS: u32 = 10_000;
+
+/// Default [`Profile::replay_prune_grace_ms`]: mkit-server's grace after an
+/// envelope's expiry before its replay record may be pruned.
+pub const DEFAULT_REPLAY_PRUNE_GRACE_MS: i64 = 60_000;
+
+/// Default [`Profile::duplicate_retry_ms`].
+pub const DEFAULT_DUPLICATE_RETRY_MS: u64 = 10_000;
+
+/// Everything the suite assumes about one server.
+#[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // Independent server capabilities and runner settings.
+pub struct Profile {
+    /// Loopback-only MPP control plane origin.
+    pub hook_stub: Option<url::Url>,
+    /// Configured test backlog row cap, when declared.
+    pub backlog_cap: Option<u64>,
+    /// How transport RPCs authenticate.
+    pub auth: WireAuth,
+    /// `true`: head/packmap conflicts leave both refs untouched.
+    pub atomic_advance: bool,
+    /// D34 ref shards and eventual `ListRefs` over the ref-name index.
+    pub sharding_d34: bool,
+    /// The largest pack the server accepts; the oversize case sends a
+    /// header declaring one byte more.
+    pub max_pack_bytes: u64,
+    /// Configured open-ticket cap per signer in one target-ref shard.
+    /// In-process baselines use a small cap to stay within their tiny write quota.
+    pub ticket_per_signer: u64,
+    /// Configured open-ticket cap per target ref (`TicketCaps::per_ref`; the
+    /// server default is 1,024). `tickets.begin_upload_per_ref_cap` opens
+    /// this many tickets across enough signers, then one more.
+    pub ticket_per_ref: u64,
+    /// Refs `list.merge_paging_over_32_mib` creates, each with a name near
+    /// the 512-byte cap: about 75,000 make the whole listing exceed 32 MiB.
+    /// Zero (the default) skips the case, which only a native deployment can
+    /// run in reasonable time (R-134 keeps the Worker at 1,000 refs).
+    pub merge_paging_refs: u32,
+    /// Enables the `quota.*` cases.
+    pub quota: Option<QuotaLimits>,
+    /// Random per run: every ref is `refs/heads/conformance/<run_id>/<case>/..`.
+    pub run_id: String,
+    /// The highest milestone whose cases run.
+    pub milestone: Milestone,
+    /// What the server offers; a case runs only if it has every feature it
+    /// requires.
+    pub features: BTreeSet<Feature>,
+    /// Refs `list.large_response_within_limit` creates.
+    pub list_refs: u32,
+    /// How many of those creates are in flight at once. Default 8, which
+    /// the native write-gate regression needs. A local `wrangler dev` debug
+    /// build drops connections when that many slow requests sit in
+    /// miniflare's proxy; the worker script paces this to 1.
+    pub list_parallel: u32,
+    /// How long after an envelope's expiry the server may keep its replay
+    /// record before pruning it; the growth case waits it out. No spec
+    /// fixes it (a record MUST outlive the signed expiry, §7.1).
+    pub replay_prune_grace_ms: i64,
+    /// How long `replay.concurrent_duplicates_all_succeed` keeps retrying a
+    /// duplicate answered with the retryable `aborted`.
+    pub duplicate_retry_ms: u64,
+    /// Sign read RPCs too (SPEC-WRITE-GRANTS §9.2, M2). Off in M0, where
+    /// reads are unsigned; the hook the M2 signed-read cases turn on.
+    pub sign_reads: bool,
+    /// The server started empty for this run and has no other writers, so
+    /// a whole-server `ListRefs("")` is bounded by this run's own refs.
+    /// Off by default: on a long-lived server such a listing grows with
+    /// every run (and a unary listing has no paging before M1, WP-1.27).
+    pub fresh_target: bool,
+    /// The target seeds the membership fixtures the three `repo.*_packs`/
+    /// `membership` cases need. In-process baselines set it and plant the
+    /// rows directly; a served deployment leaves it off and the cases seed
+    /// the fixture through a real ticketed push instead (all but
+    /// `repo.membership_read_your_writes`, which needs the index held
+    /// undelivered and still skips).
+    pub planted_membership: bool,
+}
+
+impl Profile {
+    /// A profile for `auth` with M0 defaults: non-atomic advance, the
+    /// `mkit serve` pack cap (4 GiB), no quota, a random run id, and the
+    /// features `auth` implies.
+    #[must_use]
+    pub fn new(auth: WireAuth) -> Self {
+        let mut profile = Self {
+            auth,
+            hook_stub: None,
+            backlog_cap: None,
+            atomic_advance: false,
+            sharding_d34: false,
+            max_pack_bytes: mkit_core::protocol::PACK_BODY_LIMIT,
+            ticket_per_signer: 64,
+            ticket_per_ref: 1024,
+            merge_paging_refs: 0,
+            quota: None,
+            run_id: random_hex::<8>(),
+            milestone: Milestone::M0,
+            features: BTreeSet::new(),
+            list_refs: DEFAULT_LIST_REFS,
+            list_parallel: 8,
+            replay_prune_grace_ms: DEFAULT_REPLAY_PRUNE_GRACE_MS,
+            duplicate_retry_ms: DEFAULT_DUPLICATE_RETRY_MS,
+            sign_reads: false,
+            fresh_target: false,
+            planted_membership: false,
+        };
+        profile.derive_features();
+        profile
+    }
+
+    /// Recompute the M0 features from the fields: `Bearer`, `AuthV2` and
+    /// `Replay` from the auth mode, `AtomicAdvance`, `Quota`. Features the
+    /// fields cannot express (e.g. `TestFaults`) are kept.
+    pub fn derive_features(&mut self) {
+        let derived = [
+            (
+                Feature::Bearer,
+                matches!(self.auth, WireAuth::Bearer { .. }),
+            ),
+            (
+                Feature::AuthV2,
+                matches!(self.auth, WireAuth::AuthV2 { .. }),
+            ),
+            (
+                Feature::Replay,
+                matches!(self.auth, WireAuth::AuthV2 { .. }),
+            ),
+            (Feature::AtomicAdvance, self.atomic_advance),
+            (Feature::Quota, self.quota.is_some()),
+            (Feature::SignedReads, self.sign_reads),
+        ];
+        for (feature, on) in derived {
+            if on {
+                self.features.insert(feature);
+            } else {
+                self.features.remove(&feature);
+            }
+        }
+    }
+
+    /// Whether the server offers `feature`.
+    #[must_use]
+    pub fn has(&self, feature: Feature) -> bool {
+        self.features.contains(&feature)
+    }
+}
+
+/// `N` random bytes as lowercase hex.
+pub(crate) fn random_hex<const N: usize>() -> String {
+    mkit_core::hash::to_hex_bytes(&random_bytes::<N>())
+}
+
+/// `N` bytes from the OS RNG.
+pub(crate) fn random_bytes<const N: usize>() -> [u8; N] {
+    let mut out = [0u8; N];
+    if let Err(e) = getrandom::fill(&mut out) {
+        // No usable OS RNG: nothing in this suite can run safely.
+        panic!("OS random number generator failed: {e}");
+    }
+    out
+}
+
+/// A partial profile, as read from TOML or flags. [`ProfileSpec::merge`]
+/// layers flags over a file, [`ProfileSpec::build`] validates the result.
+///
+/// ```toml
+/// auth = "auth-v2"            # none | bearer | auth-v2
+/// audience = "http://localhost:8791"
+/// repository = "default"
+/// random_signer = true        # or signer_seed_env = "VAR" (or signer_seed_hex)
+/// atomic_advance = true
+/// max_pack_bytes = 67108864
+/// milestone = "M0"
+/// features = ["test-faults"]  # added to the derived set; "-name" removes one
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileSpec {
+    /// Loopback-only MPP control plane origin.
+    pub hook_stub: Option<url::Url>,
+    /// Configured test backlog row cap.
+    pub backlog_cap: Option<u64>,
+    /// `none`, `bearer` or `auth-v2`.
+    pub auth: Option<String>,
+    /// The environment variable holding the bearer token (never the token
+    /// itself, so it stays out of files and process listings).
+    pub bearer_token_env: Option<String>,
+    /// Auth v2 audience.
+    pub audience: Option<String>,
+    /// Auth v2 repository.
+    pub repository: Option<String>,
+    /// Auth v2 signer seed, 64 hex characters.
+    pub signer_seed_hex: Option<String>,
+    /// The environment variable holding the signer seed (64 hex), which
+    /// keeps it out of files and process listings.
+    pub signer_seed_env: Option<String>,
+    /// Use a random auth v2 signer seed.
+    pub random_signer: Option<bool>,
+    /// The server commits `AdvanceRefs` atomically.
+    pub atomic_advance: Option<bool>,
+    /// Metadata routing: `single` (default) or `d34`.
+    pub sharding: Option<String>,
+    /// The server's pack cap.
+    pub max_pack_bytes: Option<u64>,
+    /// Declared quota: writes per window.
+    pub quota_ops: Option<u32>,
+    /// Declared quota: bytes per window.
+    pub quota_bytes: Option<u64>,
+    /// Declared quota window, ms (default one hour).
+    pub quota_window_ms: Option<i64>,
+    /// Highest milestone to run.
+    pub milestone: Option<String>,
+    /// Features added to the derived set (`-name` removes one).
+    pub features: Option<Vec<String>>,
+    /// Fixed run id (default random).
+    pub run_id: Option<String>,
+    /// Refs the large-listing case creates.
+    pub list_refs: Option<u32>,
+    /// In-flight creates for that case (default 8; 1 paces a local worker).
+    pub list_parallel: Option<u32>,
+    /// See [`Profile::replay_prune_grace_ms`].
+    pub replay_prune_grace_ms: Option<i64>,
+    /// See [`Profile::duplicate_retry_ms`].
+    pub duplicate_retry_ms: Option<u64>,
+    /// See [`Profile::sign_reads`].
+    pub sign_reads: Option<bool>,
+    /// See [`Profile::fresh_target`].
+    pub fresh_target: Option<bool>,
+}
+
+impl ProfileSpec {
+    /// Parse a TOML profile.
+    ///
+    /// # Errors
+    /// Malformed TOML or an unknown key.
+    pub fn from_toml(text: &str) -> Result<Self, String> {
+        toml::from_str(text).map_err(|e| format!("profile: {e}"))
+    }
+
+    /// `self` with every field `over` sets replaced. The signer is one
+    /// choice: if `over` names any signer source, `self`'s are dropped.
+    #[must_use]
+    pub fn merge(self, over: Self) -> Self {
+        let over_signer = over.signer_seed_hex.is_some()
+            || over.signer_seed_env.is_some()
+            || over.random_signer.is_some();
+        let (signer_seed_hex, signer_seed_env, random_signer) = if over_signer {
+            (
+                over.signer_seed_hex,
+                over.signer_seed_env,
+                over.random_signer,
+            )
+        } else {
+            (
+                self.signer_seed_hex,
+                self.signer_seed_env,
+                self.random_signer,
+            )
+        };
+        Self {
+            hook_stub: over.hook_stub.or(self.hook_stub),
+            backlog_cap: over.backlog_cap.or(self.backlog_cap),
+            auth: over.auth.or(self.auth),
+            bearer_token_env: over.bearer_token_env.or(self.bearer_token_env),
+            audience: over.audience.or(self.audience),
+            repository: over.repository.or(self.repository),
+            signer_seed_hex,
+            signer_seed_env,
+            random_signer,
+            atomic_advance: over.atomic_advance.or(self.atomic_advance),
+            sharding: over.sharding.or(self.sharding),
+            max_pack_bytes: over.max_pack_bytes.or(self.max_pack_bytes),
+            quota_ops: over.quota_ops.or(self.quota_ops),
+            quota_bytes: over.quota_bytes.or(self.quota_bytes),
+            quota_window_ms: over.quota_window_ms.or(self.quota_window_ms),
+            milestone: over.milestone.or(self.milestone),
+            features: over.features.or(self.features),
+            run_id: over.run_id.or(self.run_id),
+            list_refs: over.list_refs.or(self.list_refs),
+            list_parallel: over.list_parallel.or(self.list_parallel),
+            replay_prune_grace_ms: over.replay_prune_grace_ms.or(self.replay_prune_grace_ms),
+            duplicate_retry_ms: over.duplicate_retry_ms.or(self.duplicate_retry_ms),
+            sign_reads: over.sign_reads.or(self.sign_reads),
+            fresh_target: over.fresh_target.or(self.fresh_target),
+        }
+    }
+
+    /// The profile this spec describes; `env` looks up environment
+    /// variables (the bearer token, the signer seed).
+    ///
+    /// # Errors
+    /// A missing or inconsistent field.
+    pub fn build(self, env: impl Fn(&str) -> Option<String>) -> Result<Profile, String> {
+        let auth = match self.auth.as_deref().unwrap_or("none") {
+            "none" => WireAuth::None,
+            "bearer" => {
+                let var = self
+                    .bearer_token_env
+                    .ok_or("--auth bearer needs --bearer-token-env VAR")?;
+                let token = env(&var).ok_or_else(|| format!("${var} is not set"))?;
+                WireAuth::Bearer { token }
+            }
+            "auth-v2" => {
+                let audience = self.audience.ok_or("--auth auth-v2 needs --audience")?;
+                mkit_core::write_auth::validate_audience(&audience)
+                    .map_err(|e| format!("--audience {audience}: {e}"))?;
+                let repository = self.repository.ok_or("--auth auth-v2 needs --repository")?;
+                let random = self.random_signer.unwrap_or(false);
+                let seed = match (self.signer_seed_hex, self.signer_seed_env, random) {
+                    (Some(hex), None, false) => mkit_core::hash::from_hex(&hex)
+                        .map_err(|_| "--signer-seed-hex needs 64 hex characters".to_owned())?,
+                    (None, Some(var), false) => {
+                        let hex = env(&var).ok_or_else(|| format!("${var} is not set"))?;
+                        mkit_core::hash::from_hex(hex.trim())
+                            .map_err(|_| format!("${var} needs 64 hex characters"))?
+                    }
+                    (None, None, true) => random_bytes::<32>(),
+                    _ => {
+                        return Err("--auth auth-v2 needs exactly one of --signer-seed-env, \
+                             --signer-seed-hex, --random-signer"
+                            .to_owned());
+                    }
+                };
+                WireAuth::AuthV2 {
+                    audience,
+                    repository,
+                    seed,
+                }
+            }
+            other => return Err(format!("unknown auth mode `{other}` (none|bearer|auth-v2)")),
+        };
+        let mut profile = Profile::new(auth);
+        profile.atomic_advance = self.atomic_advance.unwrap_or(false);
+        profile.sharding_d34 = match self.sharding.as_deref().unwrap_or("single") {
+            "single" => false,
+            "d34" => true,
+            other => return Err(format!("unknown sharding `{other}` (single|d34)")),
+        };
+        if let Some(max) = self.max_pack_bytes {
+            profile.max_pack_bytes = max;
+        }
+        profile.quota = match (self.quota_ops, self.quota_bytes) {
+            (None, None) => None,
+            (Some(max_ops), Some(max_bytes)) => Some(QuotaLimits {
+                max_ops,
+                max_bytes,
+                window_ms: self.quota_window_ms.unwrap_or(3_600_000),
+            }),
+            _ => return Err("--quota-ops and --quota-bytes go together".to_owned()),
+        };
+        if let Some(m) = self.milestone {
+            profile.milestone = m.parse()?;
+        }
+        if let Some(run_id) = self.run_id {
+            let valid = !run_id.is_empty()
+                && run_id.len() <= 32
+                && run_id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-');
+            if !valid {
+                return Err("--run-id: 1 to 32 of [A-Za-z0-9-]".to_owned());
+            }
+            profile.run_id = run_id;
+        }
+        if let Some(n) = self.list_refs {
+            profile.list_refs = n;
+        }
+        if let Some(n) = self.list_parallel {
+            if !(1..=32).contains(&n) {
+                return Err("--list-parallel: 1 to 32".to_owned());
+            }
+            profile.list_parallel = n;
+        }
+        if let Some(ms) = self.replay_prune_grace_ms {
+            profile.replay_prune_grace_ms = ms;
+        }
+        if let Some(ms) = self.duplicate_retry_ms {
+            profile.duplicate_retry_ms = ms;
+        }
+        profile.sign_reads = self.sign_reads.unwrap_or(false);
+        profile.fresh_target = self.fresh_target.unwrap_or(false);
+        configure_hooks(&mut profile, self.hook_stub, self.backlog_cap)?;
+        profile.derive_features();
+        // `name` adds a feature to the derived set, `-name` removes one.
+        for entry in self.features.unwrap_or_default() {
+            match entry.strip_prefix('-') {
+                Some(name) => profile.features.remove(&name.parse()?),
+                None => profile.features.insert(entry.parse()?),
+            };
+        }
+        Ok(profile)
+    }
+}
+
+fn configure_hooks(
+    profile: &mut Profile,
+    hook_stub: Option<url::Url>,
+    backlog_cap: Option<u64>,
+) -> Result<(), String> {
+    if let Some(url) = hook_stub {
+        let ip = url
+            .host_str()
+            .and_then(|s| s.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok());
+        if url.scheme() != "http"
+            || !ip.is_some_and(|ip| ip.is_loopback())
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.path() != "/"
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err("--hook-stub must be a loopback HTTP origin".into());
+        }
+        profile.hook_stub = Some(url);
+        profile.features.insert(Feature::HookStub);
+    }
+    if let Some(cap) = backlog_cap {
+        if cap == 0 || cap > 16 {
+            return Err("--backlog-cap must be 1..16".into());
+        }
+        profile.backlog_cap = Some(cap);
+        profile.features.insert(Feature::BacklogCap);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sharding_profile_defaults_validates_and_overrides() {
+        let single = ProfileSpec::default().build(|_| None).unwrap();
+        assert!(!single.sharding_d34);
+        let file = ProfileSpec::from_toml("sharding = \"d34\"").unwrap();
+        assert!(file.clone().build(|_| None).unwrap().sharding_d34);
+        let flags = ProfileSpec {
+            sharding: Some("single".into()),
+            ..ProfileSpec::default()
+        };
+        assert!(!file.merge(flags).build(|_| None).unwrap().sharding_d34);
+        assert!(
+            ProfileSpec {
+                sharding: Some("other".into()),
+                ..ProfileSpec::default()
+            }
+            .build(|_| None)
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn toml_and_flags_merge_flags_win() {
+        let file = ProfileSpec::from_toml(
+            "auth = \"auth-v2\"\naudience = \"http://localhost:8791\"\nrepository = \"a\"\n\
+             random_signer = true\natomic_advance = true\nmax_pack_bytes = 10\n",
+        )
+        .unwrap();
+        let flags = ProfileSpec {
+            repository: Some("b".into()),
+            ..ProfileSpec::default()
+        };
+        let p = file.merge(flags).build(|_| None).unwrap();
+        let WireAuth::AuthV2 { repository, .. } = &p.auth else {
+            panic!("{:?}", p.auth);
+        };
+        assert_eq!(repository, "b");
+        assert_eq!(p.max_pack_bytes, 10);
+        for f in [Feature::AuthV2, Feature::Replay, Feature::AtomicAdvance] {
+            assert!(p.has(f), "{f:?}");
+        }
+        assert!(!p.has(Feature::Quota));
+    }
+
+    #[test]
+    fn invalid_specs_are_refused() {
+        let bad = [
+            "auth = \"bearer\"\nbearer_token_env = \"NOPE\"",
+            "auth = \"auth-v2\"\naudience = \"http://x.test/\"\nrepository = \"r\"\nrandom_signer = true",
+            "auth = \"auth-v2\"\naudience = \"http://x.test\"\nrepository = \"r\"",
+            "quota_ops = 3",
+            "milestone = \"M9\"",
+            "features = [\"warp-drive\"]",
+            "unknown_key = 1",
+        ];
+        for text in bad {
+            let built = ProfileSpec::from_toml(text).and_then(|s| s.build(|_| None));
+            assert!(built.is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn flags_override_the_file_signer_and_seeds_come_from_env() {
+        let file = ProfileSpec::from_toml(
+            "auth = \"auth-v2\"\naudience = \"http://localhost:1\"\nrepository = \"r\"\n\
+             random_signer = true",
+        )
+        .unwrap();
+        let flags = ProfileSpec {
+            signer_seed_env: Some("SEED".into()),
+            ..ProfileSpec::default()
+        };
+        let seed = "ab".repeat(32);
+        let p = file
+            .merge(flags)
+            .build(|v| (v == "SEED").then(|| seed.clone()))
+            .unwrap();
+        let WireAuth::AuthV2 { seed: got, .. } = p.auth else {
+            panic!("{:?}", p.auth);
+        };
+        assert_eq!(got, [0xab; 32]);
+    }
+
+    #[test]
+    fn features_add_to_and_remove_from_the_derived_set() {
+        let spec = ProfileSpec::from_toml(
+            "auth = \"auth-v2\"\naudience = \"http://localhost:1\"\nrepository = \"r\"\n\
+             random_signer = true\nfeatures = [\"test-faults\", \"-replay\"]",
+        )
+        .unwrap();
+        let p = spec.build(|_| None).unwrap();
+        assert!(p.has(Feature::AuthV2) && p.has(Feature::TestFaults));
+        assert!(!p.has(Feature::Replay));
+    }
+
+    #[test]
+    fn debug_hides_secrets() {
+        let auth = WireAuth::Bearer {
+            token: "s3cret".into(),
+        };
+        assert!(!format!("{auth:?}").contains("s3cret"));
+    }
+
+    #[test]
+    fn feature_names_round_trip() {
+        for (feature, name) in FEATURE_NAMES {
+            assert_eq!(name.parse::<Feature>().unwrap(), feature);
+            assert_eq!(feature.as_str(), name);
+        }
+    }
+}

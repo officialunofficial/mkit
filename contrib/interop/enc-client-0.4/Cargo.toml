@@ -1,0 +1,29 @@
+# Interop check: the PUBLISHED `mkit-transport-enc` 0.4 client, from
+# crates.io and on the commonware train it shipped with, against this
+# tree's `mkit-server serve --listen-enc` (WP-M0-14). Clients already in the
+# field keep working only if this passes.
+#
+# Its own workspace, like contrib/signers: as a member of rust/ the
+# `mkit-transport-enc` requirement would resolve to the path crate, not the
+# published one. `Cargo.lock` pins the published versions; `cargo update -p
+# mkit-transport-enc` moves it to a newer 0.4.x. Run it with
+# `just interop-enc`, which builds the server and points
+# `MKIT_SERVER_BIN` at it.
+[package]
+name = "mkit-enc-interop"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace]
+
+[dev-dependencies]
+mkit-transport-enc = { version = "0.4", features = ["tcp"] }
+mkit-core = "0.4"
+# The key types `connect_tcp` takes, at the exact commonware release the
+# published 0.4 crates pin (bump with them).
+commonware-cryptography = { version = "=2026.7.1", features = ["std"] }
+commonware-codec = "=2026.7.1"
+tempfile = "3"

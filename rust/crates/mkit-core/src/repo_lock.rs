@@ -133,6 +133,7 @@ impl RepoLock {
             // mid-test reader can re-acquire on the same handle if it
             // wants to.
             let _ = file.unlock();
+            #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
             drop(file);
         }
     }
@@ -213,6 +214,7 @@ pub fn probe_exclusive(dir: &Path, name: &str) -> LockResult<bool> {
         Ok(()) => {
             // Drop releases the kernel lock (and the fd); the sentinel
             // file at `_path` is intentionally left in place.
+            #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
             drop(file);
             Ok(true)
         }

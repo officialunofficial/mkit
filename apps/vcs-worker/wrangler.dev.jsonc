@@ -1,14 +1,37 @@
 // DEV-ONLY local config. Same as wrangler.jsonc but the build command is a
-// no-op: the wasm bundle is prebuilt with `worker-build --release`, and
-// letting wrangler re-run worker-build on its file-watcher causes an
-// infinite rebuild/reload loop (it watches the build/ dir it writes into).
-// Run with: wrangler dev -c wrangler.dev.jsonc
+// no-op: the wasm bundle is prebuilt with `worker-build` (`--dev` or
+// `--release`), and letting wrangler re-run worker-build on its file-watcher
+// causes an infinite rebuild/reload loop (it watches the build/ dir it
+// writes into). Run with: wrangler dev -c wrangler.dev.jsonc, or run
+// scripts/vcs-worker-conformance.sh (repo root), which passes the vars.
 {
   "name": "mkit-vcs-worker",
   "main": "build/worker/shim.mjs",
-  "compatibility_date": "2024-09-23",
+  "compatibility_date": "2026-09-09",
   "build": { "command": "true" },
-  "r2_buckets": [{ "binding": "STORAGE", "bucket_name": "mkit-vcs-objects" }],
-  "durable_objects": { "bindings": [{ "name": "REFSTORE", "class_name": "RefStore" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RefStore"] }]
+  "vars": {
+    "WORKERS_PLAN": "free",
+    // Clearly fake local-development secret. Never use this key in a deployment.
+    "TICKET_KEYS": "fake-dev 1111111111111111111111111111111111111111111111111111111111111111"
+    // For a local multi-repository deployment add ADDRESSING=multi and
+    // NAMESPACE_ALLOWLIST (or NAMESPACE_POLICY=any with
+    // UNSAFE_OPEN_NAMESPACES=true); see wrangler.jsonc for the format.
+  },
+  "r2_buckets": [
+    { "binding": "STORAGE", "bucket_name": "mkit-vcs-objects" },
+    { "binding": "BACKUPS", "bucket_name": "mkit-vcs-backups" }
+  ],
+  "durable_objects": { "bindings": [
+    { "name": "REFSTORE", "class_name": "RefStore" },
+    { "name": "NS_COORD", "class_name": "NsCoordinator" },
+    { "name": "REF_SHARD", "class_name": "RefShard" },
+    { "name": "REPO_INDEX", "class_name": "RepoIndexShard" },
+    { "name": "CONTENT_INDEX", "class_name": "ContentIndexShard" }
+  ] },
+  // `migrations`, not the `exports`-style declaration: the two are mutually
+  // exclusive (see wrangler.jsonc).
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RefStore"] },
+    { "tag": "v2", "new_sqlite_classes": ["NsCoordinator", "RefShard", "RepoIndexShard", "ContentIndexShard"] }
+  ]
 }

@@ -1,0 +1,283 @@
+{
+  "spec": "SPEC-WRITE-GRANTS §3.2-§3.4",
+  "vectors": [
+    {
+      "fields": {
+        "audiences": [
+          "https://git.example.com",
+          "https://git.example.org"
+        ],
+        "capabilities": "read,write",
+        "created": 1790000000000,
+        "epoch": 0,
+        "expiry": 1792592000000,
+        "grantee": "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
+        "namespace": "0x8ba1f109551bd432803012645ac136ddd64dba72",
+        "nonce": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "ref_scopes": [
+          [
+            "refs/heads/main",
+            "cu"
+          ],
+          [
+            "refs/heads/wip/*",
+            "cufd"
+          ]
+        ],
+        "scope": "0x8ba1f109551bd432803012645ac136ddd64dba72/website"
+      },
+      "id": "ee48e97d056387cc70c341b01ffdf4b108b81aaabada8ad000d50c431d5bb750",
+      "name": "spec-3.4-example",
+      "statement": "mkit-write-grant:v1\n0x8ba1f109551bd432803012645ac136ddd64dba72\n0x8ba1f109551bd432803012645ac136ddd64dba72/website\n3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29\nread,write\nhttps://git.example.com,https://git.example.org\nrefs/heads/main=cu;refs/heads/wip/*=cufd\n0\n1790000000000\n1792592000000\n9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+    },
+    {
+      "fields": {
+        "audiences": [
+          "https://git.example.com"
+        ],
+        "capabilities": "read",
+        "created": 0,
+        "epoch": 1,
+        "expiry": 2592000000,
+        "grantee": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+        "namespace": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618",
+        "nonce": "1111111111111111111111111111111111111111111111111111111111111111",
+        "ref_scopes": null,
+        "scope": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website"
+      },
+      "id": "2997981f2adce6e6ad210601b6571f7888093bdb67de6eeeaa7932b25d688bcd",
+      "name": "read-ed25519-single-repo-created-0-max-lifetime",
+      "statement": "mkit-write-grant:v1\ned25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618\ned25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website\nea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\nread\nhttps://git.example.com\n-\n1\n0\n2592000000\n1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "fields": {
+        "audiences": [
+          "http://127.0.0.1:8080",
+          "http://[::1]:8443",
+          "http://localhost:8080",
+          "https://a.example",
+          "https://git.example.com",
+          "https://git.example.org",
+          "https://mkit.example.net:8443",
+          "https://xn--bcher-kva.example"
+        ],
+        "capabilities": "write",
+        "created": 1790000000000,
+        "epoch": 18446744073709551615,
+        "expiry": 1790003600000,
+        "grantee": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+        "namespace": "0x8ba1f109551bd432803012645ac136ddd64dba72",
+        "nonce": "2222222222222222222222222222222222222222222222222222222222222222",
+        "ref_scopes": [
+          [
+            "refs/changes/*",
+            "cd"
+          ],
+          [
+            "refs/heads/*",
+            "c"
+          ],
+          [
+            "refs/heads/dependabot/npm_and_yarn/x",
+            "ud"
+          ],
+          [
+            "refs/heads/feature/X-1",
+            "cf"
+          ],
+          [
+            "refs/heads/main/*",
+            "ud"
+          ],
+          [
+            "refs/heads/main",
+            "cu"
+          ],
+          [
+            "refs/heads/release-1.0",
+            "d"
+          ],
+          [
+            "refs/heads/wip/*",
+            "cufd"
+          ],
+          [
+            "refs/heads/wip/a_b",
+            "u"
+          ],
+          [
+            "refs/mkit/*",
+            "f"
+          ],
+          [
+            "refs/mkit/packmap",
+            "c"
+          ],
+          [
+            "refs/notes/*",
+            "cu"
+          ],
+          [
+            "refs/notes/commits",
+            "d"
+          ],
+          [
+            "refs/pull/1/head",
+            "u"
+          ],
+          [
+            "refs/tags/*",
+            "c"
+          ],
+          [
+            "refs/tags/v1.0.0",
+            "cufd"
+          ]
+        ],
+        "scope": "0x8ba1f109551bd432803012645ac136ddd64dba72/*"
+      },
+      "id": "0efb6b0e78db0bb7d99906c434eed61d123c0aff8adfd6e223f6ab482c969181",
+      "name": "write-0x-namespace-8-audiences-16-scopes-epoch-max",
+      "statement": "mkit-write-grant:v1\n0x8ba1f109551bd432803012645ac136ddd64dba72\n0x8ba1f109551bd432803012645ac136ddd64dba72/*\nea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\nwrite\nhttp://127.0.0.1:8080,http://[::1]:8443,http://localhost:8080,https://a.example,https://git.example.com,https://git.example.org,https://mkit.example.net:8443,https://xn--bcher-kva.example\nrefs/changes/*=cd;refs/heads/*=c;refs/heads/dependabot/npm_and_yarn/x=ud;refs/heads/feature/X-1=cf;refs/heads/main/*=ud;refs/heads/main=cu;refs/heads/release-1.0=d;refs/heads/wip/*=cufd;refs/heads/wip/a_b=u;refs/mkit/*=f;refs/mkit/packmap=c;refs/notes/*=cu;refs/notes/commits=d;refs/pull/1/head=u;refs/tags/*=c;refs/tags/v1.0.0=cufd\n18446744073709551615\n1790000000000\n1790003600000\n2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    {
+      "fields": {
+        "audiences": [
+          "http://[::1]:8443"
+        ],
+        "capabilities": "read,write",
+        "created": 9223372034262775807,
+        "epoch": 0,
+        "expiry": 9223372036854775807,
+        "grantee": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+        "namespace": "0x8ba1f109551bd432803012645ac136ddd64dba72",
+        "nonce": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "ref_scopes": [
+          [
+            "refs/*",
+            "cufd"
+          ]
+        ],
+        "scope": "0x8ba1f109551bd432803012645ac136ddd64dba72/a"
+      },
+      "id": "5c3e04ce67ec642973b096a796d288ebaf2b441ad05bc6e5ead73fe3abb8bd0b",
+      "name": "read-write-0x-single-repo-max-timestamps",
+      "statement": "mkit-write-grant:v1\n0x8ba1f109551bd432803012645ac136ddd64dba72\n0x8ba1f109551bd432803012645ac136ddd64dba72/a\nea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\nread,write\nhttp://[::1]:8443\nrefs/*=cufd\n0\n9223372034262775807\n9223372036854775807\nffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "fields": {
+        "audiences": [
+          "https://mkit.example.net:8443"
+        ],
+        "capabilities": "write",
+        "created": 1,
+        "epoch": 42,
+        "expiry": 2,
+        "grantee": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+        "namespace": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618",
+        "nonce": "3333333333333333333333333333333333333333333333333333333333333333",
+        "ref_scopes": [
+          [
+            "refs/heads/main",
+            "u"
+          ]
+        ],
+        "scope": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/*"
+      },
+      "id": "f82efb44d4f32bd78229c4ba7877b6e7bf593f4b0e316f3f30cedd23a2232353",
+      "name": "write-ed25519-namespace-min-lifetime",
+      "statement": "mkit-write-grant:v1\ned25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618\ned25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/*\nea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\nwrite\nhttps://mkit.example.net:8443\nrefs/heads/main=u\n42\n1\n2\n3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    {
+      "fields": {
+        "audiences": [
+          "http://127.0.0.1:8080",
+          "http://[::1]:8443",
+          "http://localhost:8080",
+          "https://a.example",
+          "https://git.example.com",
+          "https://git.example.org",
+          "https://mkit.example.net:8443",
+          "https://xn--bcher-kva.example"
+        ],
+        "capabilities": "read,write",
+        "created": 1790000000000,
+        "epoch": 7,
+        "expiry": 1792592000000,
+        "grantee": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+        "namespace": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618",
+        "nonce": "4444444444444444444444444444444444444444444444444444444444444444",
+        "ref_scopes": [
+          [
+            "refs/heads/b00",
+            "cufd"
+          ],
+          [
+            "refs/heads/b01",
+            "cufd"
+          ],
+          [
+            "refs/heads/b02",
+            "cufd"
+          ],
+          [
+            "refs/heads/b03",
+            "cufd"
+          ],
+          [
+            "refs/heads/b04",
+            "cufd"
+          ],
+          [
+            "refs/heads/b05",
+            "cufd"
+          ],
+          [
+            "refs/heads/b06",
+            "cufd"
+          ],
+          [
+            "refs/heads/b07",
+            "cufd"
+          ],
+          [
+            "refs/heads/b08",
+            "cufd"
+          ],
+          [
+            "refs/heads/b09",
+            "cufd"
+          ],
+          [
+            "refs/heads/b10",
+            "cufd"
+          ],
+          [
+            "refs/heads/b11",
+            "cufd"
+          ],
+          [
+            "refs/heads/b12",
+            "cufd"
+          ],
+          [
+            "refs/heads/b13",
+            "cufd"
+          ],
+          [
+            "refs/heads/b14",
+            "cufd"
+          ],
+          [
+            "refs/heads/b15xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "cufd"
+          ]
+        ],
+        "scope": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/z0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-."
+      },
+      "id": "dc291a6f883d3b29a58c6d6195874ef510755bee83fe9f31a9a6db35753d8adc",
+      "name": "read-write-max-length-4096",
+      "statement": "mkit-write-grant:v1\ned25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618\ned25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/z0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-._0-.\nea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\nread,write\nhttp://127.0.0.1:8080,http://[::1]:8443,http://localhost:8080,https://a.example,https://git.example.com,https://git.example.org,https://mkit.example.net:8443,https://xn--bcher-kva.example\nrefs/heads/b00=cufd;refs/heads/b01=cufd;refs/heads/b02=cufd;refs/heads/b03=cufd;refs/heads/b04=cufd;refs/heads/b05=cufd;refs/heads/b06=cufd;refs/heads/b07=cufd;refs/heads/b08=cufd;refs/heads/b09=cufd;refs/heads/b10=cufd;refs/heads/b11=cufd;refs/heads/b12=cufd;refs/heads/b13=cufd;refs/heads/b14=cufd;refs/heads/b15xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=cufd\n7\n1790000000000\n1792592000000\n4444444444444444444444444444444444444444444444444444444444444444"
+    }
+  ]
+}

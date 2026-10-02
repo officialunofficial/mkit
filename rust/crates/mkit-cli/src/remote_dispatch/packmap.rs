@@ -36,9 +36,9 @@ use std::io::{Read as _, Write as _};
 use mkit_core::hash::{self, Hash};
 use mkit_core::object::Object;
 use mkit_core::pack::{self, PackReader};
-use mkit_core::protocol::{AdvanceOutcome, PackKey, Transport, TransportError};
+use mkit_core::protocol::{AdvanceOutcome, CommitOutcome, PackKey, Transport, TransportError};
 use mkit_core::refs;
-use mkit_core::sign::{self, verify_commit, verify_remix, verify_tag};
+use mkit_core::sign;
 use mkit_core::store::ObjectStore;
 use mkit_core::transfer;
 use rayon::prelude::*;
@@ -55,6 +55,14 @@ use super::applied_packs::AppliedPacks;
 /// heads/tags. See [`mkit_core::transfer`].
 pub(crate) fn packmap_ref(branch: &str) -> String {
     format!("refs/mkit/packmap/{branch}")
+}
+
+/// Push and fetch callers may carry a short branch name or its full ref name.
+fn branch_ref_hint(branch: &str) -> String {
+    format!(
+        "refs/heads/{}",
+        branch.strip_prefix("refs/heads/").unwrap_or(branch)
+    )
 }
 
 /// Number of read-modify-write attempts when chaining a new pack onto the
@@ -128,13 +136,14 @@ pub(crate) fn rebaseline_depth() -> usize {
 
 /// Download and decode one packlist node by key. Packlist nodes are
 /// auxiliary transfer metadata, not packfiles, so they travel over the
-/// dedicated [`Transport::download_blob`] verb.
+/// dedicated [`Transport::download_blob_via_ref`] verb, with the branch hint.
 fn download_packlist_node(
     tx: &dyn Transport,
     key: Hash,
+    ref_name: &str,
 ) -> Result<transfer::PackListNode, DispatchError> {
     let requested = PackKey::from_hash(key);
-    let bytes = tx.download_blob(&requested)?;
+    let bytes = tx.download_blob_via_ref(&requested, ref_name)?;
     requested.verify_bytes(&bytes)?;
     Ok(transfer::decode_packlist(&bytes)?)
 }
@@ -169,6 +178,7 @@ fn walk_pack_chain(
     let mut pack_count = 0usize;
     let mut seen = std::collections::HashSet::new();
     let mut cursor = Some(head_key);
+    let ref_name = branch_ref_hint(branch);
     while let Some(key) = cursor {
         if crate::signal::is_shutdown() {
             return Err(DispatchError::Interrupted);
@@ -177,7 +187,7 @@ fn walk_pack_chain(
         if !seen.insert(key) || seen.len() > MAX_PACK_CHAIN_DEPTH {
             return Err(invalid());
         }
-        let node = match download_packlist_node(tx, key) {
+        let node = match download_packlist_node(tx, key, &ref_name) {
             Ok(n) => n,
             // A referenced-but-undeliverable / undecodable node = broken
             // chain (distinct from a transient transport error).
@@ -467,33 +477,58 @@ pub(crate) fn advance_packmap(
         };
         let node = transfer::encode_packlist(prev, pack_keys)?;
         let node_key = pack::pack_key(&node);
-        tx.upload_blob(&node, &PackKey::from_hash(node_key))?;
+        tx.upload_blob_via_ref(&node, &PackKey::from_hash(node_key), &head_name)
+            .map_err(|error| super::repository_operation_error(tx, error))?;
         // CAS off the packmap's CURRENT value (`prior`), independent of the
         // node's `prev` — a reset still has to win the race for the ref.
         let packmap_condition = match prior {
             Some(k) => refs::RefWriteCondition::Match(k),
             None => refs::RefWriteCondition::Missing,
         };
+        let commit_keys: Vec<PackKey> = pack_keys
+            .iter()
+            .copied()
+            .map(PackKey::from_hash)
+            .chain(std::iter::once(PackKey::from_hash(node_key)))
+            .collect();
         // Commit the packmap AND the head together (#408). A transactional
         // transport applies both atomically; the default does packmap-then-
         // head — still safe, the head never lands past an unadvanced packmap.
-        match tx.advance_refs(
-            &head_name,
-            head_condition,
-            &tip,
-            &packmap_name,
-            packmap_condition,
-            &node_key,
-        )? {
-            AdvanceOutcome::Committed => return Ok(()),
+        match tx
+            .advance_refs_committing(
+                &head_name,
+                head_condition,
+                &tip,
+                &packmap_name,
+                packmap_condition,
+                &node_key,
+                &commit_keys,
+            )
+            .map_err(|error| super::repository_operation_error(tx, error))?
+        {
+            CommitOutcome::Advanced(AdvanceOutcome::Committed) => return Ok(()),
             // Another pusher advanced the packmap under us — re-read and retry.
-            AdvanceOutcome::PackmapConflict => {}
-            // The branch moved under us — the push is stale.
-            AdvanceOutcome::HeadConflict => {
-                return Err(DispatchError::NonFastForwardPush {
-                    branch: branch.to_owned(),
-                });
+            CommitOutcome::Advanced(AdvanceOutcome::PackmapConflict) => {}
+            // The head precondition failed. Either the branch moved under
+            // us (the push is stale) or the retry ladder re-issued a write
+            // that had already landed (SPEC-TRANSPORT §7) — disambiguate.
+            CommitOutcome::Advanced(AdvanceOutcome::HeadConflict) => {
+                return head_conflict(tx, &head_name, &tip, branch);
             }
+            CommitOutcome::TicketRejected => {
+                if tx.read_ref(&head_name)? == Some(tip) {
+                    return Ok(());
+                }
+                return Err(DispatchError::TicketRejected);
+            }
+            CommitOutcome::PacklistNotInRepository => {
+                if tx.read_ref(&head_name)? == Some(tip) {
+                    return Ok(());
+                }
+                return Err(DispatchError::PacklistNotInRepository);
+            }
+            CommitOutcome::DeltaBaseUnavailable => return Err(DispatchError::DeltaBaseUnavailable),
+            _ => return Err(DispatchError::Transport(TransportError::InvalidResponse)),
         }
     }
     Err(DispatchError::PackmapContended {
@@ -513,11 +548,36 @@ pub(crate) fn commit_head(
 ) -> Result<(), DispatchError> {
     match tx.update_ref(head_name, condition, tip) {
         Ok(()) => Ok(()),
-        Err(TransportError::RefConflict) => Err(DispatchError::NonFastForwardPush {
-            branch: branch.to_owned(),
-        }),
-        Err(e) => Err(e.into()),
+        Err(TransportError::RefConflict) => head_conflict(tx, head_name, tip, branch),
+        Err(e) => Err(super::repository_operation_error(tx, e)),
     }
+}
+
+/// Resolve a failed head precondition (`RefConflict` from `update_ref`,
+/// `HeadConflict` from `advance_refs`) per SPEC-TRANSPORT §7: the retry
+/// ladder may have re-issued a write whose first attempt landed, so the
+/// conflict can be our own write. Re-read the head; if it already holds
+/// `tip` the push landed, otherwise it is a genuine non-fast-forward.
+///
+/// Only the head is checked. Whoever moved the head to `tip` also advanced
+/// the packmap to reconstruct it first (packmap-then-head, or both at once),
+/// so a head at `tip` already satisfies the push's invariant even if a later
+/// pusher has since moved the packmap past our node.
+fn head_conflict(
+    tx: &dyn Transport,
+    head_name: &str,
+    tip: &Hash,
+    branch: &str,
+) -> Result<(), DispatchError> {
+    let current = tx
+        .read_ref(head_name)
+        .map_err(|error| super::repository_operation_error(tx, error))?;
+    if current == Some(*tip) {
+        return Ok(());
+    }
+    Err(DispatchError::NonFastForwardPush {
+        branch: branch.to_owned(),
+    })
 }
 
 /// Walk a branch's packlist chain from `head_key` and unpack every pack in
@@ -791,23 +851,15 @@ fn verify_new_object_signatures(
         .try_for_each(|chunk| verify_slice(store, chunk, true))
 }
 
-/// Verify [`verify_commit`]/[`verify_remix`]/[`verify_tag`] on a single
-/// already-read object; Blob/Tree/ChunkedBlob/Delta carry no signature
-/// and are skipped. The exact per-object check
-/// [`verify_new_object_signatures`] used unconditionally before batch
-/// verification was added, now used both as [`verify_slice`]'s fallback
-/// and — via that fallback — the sole check whenever the batch fast path
-/// doesn't apply or doesn't succeed.
+/// Verify the signature on a single already-read object through
+/// [`sign::verify_object_signature`] (commit/remix/tag; Blob/Tree/
+/// ChunkedBlob/Delta carry no signature and pass). The exact per-object
+/// check [`verify_new_object_signatures`] used unconditionally before
+/// batch verification was added, now used both as [`verify_slice`]'s
+/// fallback and — via that fallback — the sole check whenever the batch
+/// fast path doesn't apply or doesn't succeed.
 fn verify_one_object(h: Hash, obj: &Object) -> Result<(), DispatchError> {
-    let result = match obj {
-        Object::Commit(c) => verify_commit(c),
-        Object::Remix(r) => verify_remix(r),
-        Object::Tag(t) => verify_tag(t),
-        Object::Blob(_) | Object::Tree(_) | Object::ChunkedBlob(_) | Object::Delta(_) => {
-            return Ok(());
-        }
-    };
-    result.map_err(|e| DispatchError::UnsignedOrInvalidObject {
+    sign::verify_object_signature(obj).map_err(|e| DispatchError::UnsignedOrInvalidObject {
         hash: hash::to_hex(&h),
         reason: e.to_string(),
     })
@@ -999,6 +1051,7 @@ fn download_pack_chain_with_limits(
         packs: Vec::new(),
         bytes: 0,
     };
+    let ref_name = branch_ref_hint(branch);
     for &pk in chain {
         if crate::signal::is_shutdown() {
             return Err(DispatchError::Interrupted);
@@ -1007,7 +1060,7 @@ fn download_pack_chain_with_limits(
         if applied.contains(&key) {
             continue;
         }
-        let pack = match tx.download_pack(&key) {
+        let pack = match tx.download_pack_via_ref(&key, &ref_name) {
             Ok(b) => b,
             Err(TransportError::PackNotFound) => {
                 return Err(DispatchError::AdvertisedPackMissing {
@@ -1163,7 +1216,7 @@ mod tests {
         let key = hash::hash(&a);
         tx.upload_blob(&b, &PackKey::from_hash(key)).unwrap();
         assert!(matches!(
-            download_packlist_node(&tx, key),
+            download_packlist_node(&tx, key, "refs/heads/main"),
             Err(DispatchError::Transport(TransportError::InvalidResponse))
         ));
     }
@@ -1474,6 +1527,273 @@ mod tests {
             resolve_pack_chain(&tx, "main", new_head).unwrap(),
             vec![k1, k1, k2, k3],
         );
+    }
+
+    // ---- lost-response retries — SPEC-TRANSPORT §7 (MKIT-58) --------
+
+    /// How [`LostResponseTransport`] models the retry ladder re-issuing a
+    /// CAS write whose first attempt landed but whose response was lost.
+    #[derive(Clone, Copy)]
+    enum Reissue {
+        /// `update_ref` on a `refs/heads/` name is applied twice and the
+        /// caller sees only the second result. `advance_refs` keeps the
+        /// ordered packmap-then-head default, so the re-issued head write
+        /// surfaces as `AdvanceOutcome::HeadConflict` after the packmap
+        /// write landed.
+        HeadUpdate,
+        /// `advance_refs` is transactional and applied twice; the caller
+        /// sees only the second outcome (`PackmapConflict`: both refs
+        /// already moved).
+        Advance,
+        /// Nothing is re-issued: a plain transport, for the genuine
+        /// non-fast-forward cases.
+        None,
+    }
+
+    struct LostResponseTransport {
+        inner: MemoryTransport,
+        reissue: Reissue,
+    }
+
+    impl LostResponseTransport {
+        fn new(reissue: Reissue) -> Self {
+            Self {
+                inner: MemoryTransport::new(),
+                reissue,
+            }
+        }
+
+        fn atomic_advance_once(
+            &self,
+            head: (&str, refs::RefWriteCondition, &Hash),
+            packmap: (&str, refs::RefWriteCondition, &Hash),
+        ) -> Result<AdvanceOutcome, TransportError> {
+            fn holds(c: refs::RefWriteCondition, cur: Option<Hash>) -> bool {
+                match c {
+                    refs::RefWriteCondition::Any => true,
+                    refs::RefWriteCondition::Missing => cur.is_none(),
+                    refs::RefWriteCondition::Match(h) => cur == Some(h),
+                }
+            }
+            if !holds(packmap.1, self.inner.read_ref(packmap.0)?) {
+                return Ok(AdvanceOutcome::PackmapConflict);
+            }
+            if !holds(head.1, self.inner.read_ref(head.0)?) {
+                return Ok(AdvanceOutcome::HeadConflict);
+            }
+            self.inner.update_ref(packmap.0, packmap.1, packmap.2)?;
+            self.inner.update_ref(head.0, head.1, head.2)?;
+            Ok(AdvanceOutcome::Committed)
+        }
+    }
+
+    impl Transport for LostResponseTransport {
+        fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> Result<(), TransportError> {
+            self.inner.upload_pack(bytes, key)
+        }
+        fn download_pack(&self, key: &PackKey) -> Result<Vec<u8>, TransportError> {
+            self.inner.download_pack(key)
+        }
+        fn pack_exists(&self, key: &PackKey) -> Result<bool, TransportError> {
+            self.inner.pack_exists(key)
+        }
+        fn upload_blob(&self, bytes: &[u8], key: &PackKey) -> Result<(), TransportError> {
+            self.inner.upload_blob(bytes, key)
+        }
+        fn download_blob(&self, key: &PackKey) -> Result<Vec<u8>, TransportError> {
+            self.inner.download_blob(key)
+        }
+        fn update_ref(
+            &self,
+            name: &str,
+            condition: refs::RefWriteCondition,
+            hash: &Hash,
+        ) -> Result<(), TransportError> {
+            if matches!(self.reissue, Reissue::HeadUpdate) && name.starts_with("refs/heads/") {
+                // First attempt lands; its response is lost.
+                let _ = self.inner.update_ref(name, condition, hash);
+            }
+            self.inner.update_ref(name, condition, hash)
+        }
+        fn read_ref(&self, name: &str) -> Result<Option<Hash>, TransportError> {
+            self.inner.read_ref(name)
+        }
+        fn list_refs(&self, prefix: &str) -> Result<Vec<refs::Ref>, TransportError> {
+            self.inner.list_refs(prefix)
+        }
+        fn advance_refs(
+            &self,
+            head_ref: &str,
+            head_condition: refs::RefWriteCondition,
+            head_value: &Hash,
+            packmap_ref: &str,
+            packmap_condition: refs::RefWriteCondition,
+            packmap_value: &Hash,
+        ) -> Result<AdvanceOutcome, TransportError> {
+            let head = (head_ref, head_condition, head_value);
+            let packmap = (packmap_ref, packmap_condition, packmap_value);
+            match self.reissue {
+                Reissue::Advance => {
+                    // First attempt lands; its response is lost.
+                    let _ = self.atomic_advance_once(head, packmap)?;
+                    self.atomic_advance_once(head, packmap)
+                }
+                Reissue::HeadUpdate | Reissue::None => {
+                    // The trait's ordered default: packmap, then head.
+                    match self.update_ref(packmap_ref, packmap_condition, packmap_value) {
+                        Ok(()) => {}
+                        Err(TransportError::RefConflict) => {
+                            return Ok(AdvanceOutcome::PackmapConflict);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                    match self.update_ref(head_ref, head_condition, head_value) {
+                        Ok(()) => Ok(AdvanceOutcome::Committed),
+                        Err(TransportError::RefConflict) => Ok(AdvanceOutcome::HeadConflict),
+                        Err(e) => Err(e),
+                    }
+                }
+            }
+        }
+        fn supports_atomic_advance(&self) -> bool {
+            matches!(self.reissue, Reissue::Advance)
+        }
+    }
+
+    fn advance_first_push(
+        tx: &dyn Transport,
+        keys: &[Hash],
+        tip: Hash,
+    ) -> Result<(), DispatchError> {
+        advance_packmap(
+            tx,
+            "main",
+            keys,
+            ChainAction::Append {
+                self_contained: true,
+            },
+            None,
+            refs::RefWriteCondition::Missing,
+            tip,
+        )
+    }
+
+    #[test]
+    fn advance_packmap_head_conflict_from_reissued_head_write_is_success() {
+        // Ordered advance: the packmap write lands, the head write lands
+        // but its response is lost, and the ladder's re-issue reports
+        // `HeadConflict` for our own write. SPEC-TRANSPORT §7: read the
+        // head; it holds our tip, so the push landed.
+        let tx = LostResponseTransport::new(Reissue::HeadUpdate);
+        let tip = h("tip");
+        advance_first_push(&tx, &[h("k1")], tip).unwrap();
+        assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(tip));
+        let pm = tx.read_ref(&packmap_ref("main")).unwrap().unwrap();
+        assert_eq!(decode_node_at(&tx.inner, pm).packs, vec![h("k1")]);
+    }
+
+    #[test]
+    fn advance_packmap_reissued_atomic_advance_is_success() {
+        // Transactional advance: the first attempt commits both refs and
+        // its response is lost. The re-issue reports `PackmapConflict`; the
+        // re-read finds our node already chained, so only the head write
+        // remains, and that write's `RefConflict` is our own landed head.
+        let tx = LostResponseTransport::new(Reissue::Advance);
+        let tip = h("tip");
+        advance_first_push(&tx, &[h("k1"), h("k2")], tip).unwrap();
+        assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(tip));
+        let pm = tx.read_ref(&packmap_ref("main")).unwrap().unwrap();
+        let node = decode_node_at(&tx.inner, pm);
+        assert_eq!(node.prev, None, "no redundant node was appended");
+        assert_eq!(node.packs, vec![h("k1"), h("k2")]);
+    }
+
+    #[test]
+    fn advance_packmap_reissued_rebaseline_reset_is_success() {
+        // A re-baseline reset re-issued after it landed: the retry loop
+        // re-reads the packmap (now our node) and CASes off it, and the
+        // head precondition then fails against our own landed tip.
+        let tx = LostResponseTransport::new(Reissue::Advance);
+        let old = h("old-tip");
+        let prior = put_node(&tx.inner, None, &[h("old-pack")]);
+        tx.inner
+            .update_ref(
+                &packmap_ref("main"),
+                refs::RefWriteCondition::Missing,
+                &prior,
+            )
+            .unwrap();
+        tx.inner
+            .update_ref("refs/heads/main", refs::RefWriteCondition::Missing, &old)
+            .unwrap();
+        let tip = h("tip");
+        advance_packmap(
+            &tx,
+            "main",
+            &[h("full")],
+            ChainAction::ResetSelfContained,
+            None,
+            refs::RefWriteCondition::Match(old),
+            tip,
+        )
+        .unwrap();
+        assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(tip));
+    }
+
+    #[test]
+    fn advance_packmap_genuine_head_conflict_stays_non_fast_forward() {
+        // Another writer moved the head to a different commit: the re-read
+        // does not find our tip, so the push is still rejected.
+        for reissue in [Reissue::None, Reissue::Advance] {
+            let tx = LostResponseTransport::new(reissue);
+            let theirs = h("their-tip");
+            tx.inner
+                .update_ref("refs/heads/main", refs::RefWriteCondition::Missing, &theirs)
+                .unwrap();
+            let err = advance_first_push(&tx, &[h("k1")], h("tip")).unwrap_err();
+            assert!(
+                matches!(err, DispatchError::NonFastForwardPush { ref branch } if branch == "main"),
+                "{err:?}"
+            );
+            assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(theirs));
+        }
+    }
+
+    #[test]
+    fn commit_head_reissued_write_is_success() {
+        let tx = LostResponseTransport::new(Reissue::HeadUpdate);
+        let tip = h("tip");
+        commit_head(
+            &tx,
+            "refs/heads/main",
+            refs::RefWriteCondition::Missing,
+            &tip,
+            "main",
+        )
+        .unwrap();
+        assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(tip));
+    }
+
+    #[test]
+    fn commit_head_genuine_conflict_stays_non_fast_forward() {
+        let tx = LostResponseTransport::new(Reissue::None);
+        let theirs = h("their-tip");
+        tx.inner
+            .update_ref("refs/heads/main", refs::RefWriteCondition::Missing, &theirs)
+            .unwrap();
+        let err = commit_head(
+            &tx,
+            "refs/heads/main",
+            refs::RefWriteCondition::Match(h("stale-lease")),
+            &h("tip"),
+            "main",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, DispatchError::NonFastForwardPush { ref branch } if branch == "main"),
+            "{err:?}"
+        );
+        assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(theirs));
     }
 
     // ---- verify_new_object_signatures — sequential/rayon fan-out parity ----

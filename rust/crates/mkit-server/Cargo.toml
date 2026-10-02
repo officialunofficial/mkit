@@ -1,0 +1,156 @@
+# mkit-server — the runtime-agnostic core of the production mkit server
+# (production server work §5.1). It owns the vocabulary every adapter shares: repo and
+# namespace identifiers, principals, the typed `Operation` model, the
+# transport-neutral `ServerError`, the async/runtime model (`MaybeSend`,
+# `Clock`, `Spawner`, `send_wrap`) and the metrics facade. Native
+# (`mkit-server-native`) and Workers (`mkit-server-worker`) adapters build on
+# it, so it must compile for both the host and `wasm32-unknown-unknown`
+# (enforced by scripts/check-wasm-dep-graph.sh and `just ci-scripts`).
+#
+# Not `publish = false`: `mkit-cli` depends on it from WP-M0-13 and is
+# published. It is first published at the 0.5 release (WP-REL), not before.
+[package]
+name = "mkit-server"
+description = "Runtime-agnostic core of the mkit server: operation model, errors, runtime and telemetry vocabulary"
+keywords = ["mkit", "vcs", "server", "connectrpc", "wasm"]
+categories = ["network-programming", "web-programming::http-server"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# default-features = false keeps `pack-zstd` (zstd-sys, a C library) out of
+# the wasm32 graph. Inter-workspace deps need explicit version + path so
+# `cargo publish` accepts them.
+mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
+mkit-attest = { version = "0.4", path = "../mkit-attest", default-features = false, features = ["grants"] }
+thiserror = "2"
+blake3 = { version = "1", default-features = false }
+zeroize = "1"
+bytes = "1"
+futures-core = "0.3"
+# `join_all` for concurrent blob heads in the ticketed advance (pipeline::advance),
+# on every build, so not optional. `std` only: wasm-clean.
+futures = { version = "0.3", default-features = false, features = ["std"] }
+# The optional write gate's async mutex (`Pipeline::with_write_gate`):
+# `tokio::sync::Mutex` is strictly FIFO-fair, and the `sync` feature alone
+# needs no tokio runtime and no C code, so it stays runtime-agnostic and
+# wasm-clean. (`futures::lock::Mutex` is not fair; `async-lock`'s is only
+# eventually fair, timed with `Instant`.)
+tokio = { version = "1", default-features = false, features = ["sync"] }
+tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+# Stored-value codecs (`store::codec`), on every target, so not optional.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Constant-time bearer-token comparison (pipeline::auth).
+subtle = { version = "2", default-features = false }
+# The `connect` binding. connectrpc never enables `server` (tokio/net,
+# hyper-util server, libc: not wasm-clean) or `zstd` (zstd-sys, a C
+# library; PRD §5.1). 0.9.1 carries the RUSTSEC-2026-0304 fix: after a
+# client-streaming handler returns, at most 1 MiB / 5 s more of the body is
+# drained (1 MiB only on wasm32).
+connectrpc = { version = "0.9.1", default-features = false, features = ["gzip", "json"], optional = true }
+buffa = { version = "0.9.1", optional = true }
+http = { version = "1", optional = true }
+# Unpadded base64: standard for Connect error-detail values, url-safe for
+# URL tokens (`url_token`, on every target, so not optional).
+base64 = { version = "0.22" }
+# URL-token Ed25519 signing and strict verification (`url_token`):
+# `zeroize` wipes `SigningKey` secrets on drop. alloc-only, wasm-clean.
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc", "zeroize"] }
+# The ssh-frame wire types and framing (feature `ssh`).
+mkit-rpc = { version = "0.4", path = "../mkit-rpc", optional = true }
+# The `remote-hooks` adapter draws a fresh 32-byte nonce per signed request
+# (SPEC-SERVER §7.1) and signs with the normal `ed25519-dalek` above.
+# getrandom is already in mkit-core's wasm graph, which also enables its
+# `wasm_js` on wasm32-unknown-unknown.
+getrandom = { version = "0.4", optional = true }
+
+[features]
+default = ["connect"]
+# The `mkit.transport.v1` Connect binding (`connect`): vendored codegen,
+# `TransportService` and `grpc.health.v1.Health` over the pipeline, and the
+# auth interceptor. wasm-clean; the native (M0-10) and Workers (M0-17)
+# adapters mount it unchanged.
+connect = [
+    "dep:connectrpc",
+    "dep:buffa",
+    "dep:http",
+    "mkit-rpc/transport",
+]
+# In-memory reference backends (`MemoryKv`, `MemoryBlobStore`): the template
+# for third-party backends. Always compiled for this crate's own unit tests.
+memory = []
+pack-ruzstd = ["mkit-core/pack-ruzstd"]
+# The pipeline's test seam: `FaultHooks` at five points and per-request
+# `TestDirectives` (`x-mkit-test-fault`, `x-mkit-test-clock-skew-ms`).
+# Never enabled by a release build or any binary's default features.
+test-faults = []
+# The `.mkit` on-disk layout stores (`fs::FsBlobStore`, `fs::FsLayoutStore`):
+# std-only, no async runtime, so the server-free `mkit serve` (ssh) can use
+# them. Native only: the module and its dependency are cfg'd out on wasm32.
+fs = ["dep:mkit-transport-file"]
+# The shared SQL backend (`sql::SqlKvStore`) over the synchronous
+# `sql::SqlConn` trait. No SQL engine dependency: `mkit-server-native`
+# implements `SqlConn` with rusqlite, the Workers adapter with Durable
+# Object SQLite. Compiles for wasm32.
+sql = []
+# The `mkit.rpc.v1.ssh` session over the pipeline (`ssh::serve_session`),
+# shared by `mkit serve` over stdio and the enc listener. No async runtime:
+# it runs under the CLI's blocking executor as well as under tokio.
+ssh = ["dep:mkit-rpc"]
+# The remote-hook adapter (`hooks`): `mkit.server.hooks.v1` over a
+# transport-agnostic `HookChannel`, with signed requests and fail-closed
+# mapping (SPEC-SERVER §§6-8). buffa messages with the JSON codec only: no
+# connectrpc client, so it stays wasm-clean. Off by default.
+remote-hooks = [
+    "dep:buffa",
+    "buffa/json",
+    "dep:getrandom",
+    "mkit-rpc/hooks",
+]
+
+# Runtime-agnostic HTTP object serving (`Pipeline::serve_http_object`,
+# SPEC-HTTP-OBJECTS; WP-4.12). No new dependencies, wasm-clean. Off by default;
+# native embedders and the Paid Uno Worker launch opt in through their adapters.
+# Requires `PipelineConfig::http_objects` and indexed mode.
+http-objects = []
+# Published reader source; explicit adapter configuration, off by default.
+published-view = []
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# `fs` delegates ref CAS, the ref lock and atomic writes to FileTransport, so
+# the files stay byte-identical to what `mkit` and `mkit+file://` read.
+mkit-transport-file = { version = "0.4", path = "../mkit-transport-file", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `send_wrap` on wasm32: lets a `!Send` handler future satisfy the `+ Send`
+# bound the generated connectrpc traits require (PRD §5.2).
+send_wrapper = { version = "0.6", features = ["futures"] }
+
+[dev-dependencies]
+futures-executor = "0.3"
+sha2 = "0.11"
+# Mints secp256k1 EIP-191 owner grants for the `0x` namespace pipeline test.
+k256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
+proptest = "1"
+# Temp roots for the `fs` store tests.
+tempfile = "3"
+# tests/connect_dispatch.rs drives `connect::service` over real Connect HTTP
+# requests on the host.
+http-body-util = "0.1"
+# Gzip request bodies for the Content-Encoding test.
+flate2 = "1"
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+tower = { version = "0.5", features = ["util"] }
+
+[[test]]
+name = "connect_dispatch"
+required-features = ["connect", "memory"]

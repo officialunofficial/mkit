@@ -53,3 +53,7 @@ tokio = { version = "1", features = ["macros", "rt"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
+
+# Bound pure-Rust decoding in this independent workspace too.
+[patch.crates-io]
+ruzstd = { path = "../../rust/vendor/ruzstd" }

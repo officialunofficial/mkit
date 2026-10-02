@@ -66,8 +66,9 @@ pub use framing::{
     FRAME_RECURSION_LIMIT, FrameError, frame_decode_options, read_frame, write_frame,
 };
 pub use helpers::{
-    CHUNK_DATA_MAX, MAX_REF_NAME, body_name, cond_to_wire, map_update_ref_error, ref_entry_to_ref,
-    rpc_error_to_transport, signer_error_frame, ssh_error_frame, unexpected_frame,
+    CHUNK_DATA_MAX, MAX_REF_NAME, body_name, cond_to_wire, list_response_refs,
+    map_update_ref_error, ref_entry_to_ref, rpc_error_to_transport, signer_error_frame,
+    ssh_error_frame, unexpected_frame,
 };
 
 #[cfg(test)]
@@ -95,4 +96,15 @@ mod tests {
         assert!(dbg.contains("[REDACTED]"), "Debug must redact pin: {dbg}");
         assert!(!dbg.contains("123456"), "PIN leaked into Debug: {dbg}");
     }
+}
+
+/// Public server-hook wire types and authentication (feature `hooks`).
+#[cfg(feature = "hooks")]
+pub mod hooks;
+
+/// Shared transport and health wire types and Connect service traits.
+#[cfg(feature = "transport")]
+#[allow(missing_debug_implementations, clippy::all, clippy::pedantic)]
+pub mod transport {
+    include!(concat!(env!("OUT_DIR"), "/_connectrpc.rs"));
 }

@@ -41,7 +41,11 @@
 //! *before* any decompression allocation, decompression itself is
 //! capacity-bounded to that claim, and the actual decompressed length
 //! is re-checked against the claim afterward (`DecompressedSizeMismatch`
-//! / `DecompressedSizeOverCap`).
+//! / `DecompressedSizeOverCap`). The payload must be exactly one
+//! Zstandard frame. The C decoder (`pack-zstd`) serves reads when it is
+//! compiled in; otherwise the pure-Rust, decode-only `pack-ruzstd`
+//! backend does, under the same checks; with neither, a compressed entry
+//! fails closed.
 //!
 //! Caps (SPEC-PACKFILE §5, unchanged by v2 — measured on the *wire*
 //! size; the decompressed-side cap above is separate and new):
@@ -53,17 +57,24 @@
 //! (`0x02` or `0x04`) `base_hash` MUST appear earlier in the same pack
 //! as a raw entry, OR already exist in the destination object store.
 //! `0x04`'s `base_hash` is never compressed, so this never requires
-//! decompression to evaluate.
+//! decompression to evaluate. The "destination object store" is the
+//! [`DeltaBaseSource`] the decoder is given: the local [`ObjectStore`]
+//! for [`PackReader::read`], or a repository-scoped source for the
+//! store-less [`decode_entries_with`].
 //!
 //! The pack key (SPEC-PACKFILE §7) is `packs/<lower-hex BLAKE3 of entire
 //! pack>`. The trailer is then redundant w.r.t. that key, but it lets a
 //! streaming reader detect bit-rot before the whole pack has been
 //! hashed end-to-end.
 
+pub mod window;
+
+pub mod rewrite;
 use crate::delta;
 use crate::hash::{self, Hash};
 use crate::object::{MkitError, Object};
 use crate::store::{MAX_RAW_OBJECT_SIZE, ObjectStore};
+pub use rewrite::{Rewritten, rewrite_excluding};
 use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -606,6 +617,16 @@ pub fn pack_key(pack_bytes: &[u8]) -> Hash {
 /// rather than a new failure mode to propagate.
 #[cfg(feature = "pack-zstd")]
 fn maybe_compress(data: &[u8]) -> Option<Vec<u8>> {
+    maybe_compress_capped(data, MAX_RAW_OBJECT_SIZE)
+}
+
+#[cfg(feature = "pack-zstd")]
+fn maybe_compress_capped(data: &[u8], max_len: usize) -> Option<Vec<u8>> {
+    // SPEC-PACKFILE §3.3: a reader rejects any `uncompressed_len` over
+    // MAX_RAW_OBJECT_SIZE, so a larger payload is written uncompressed.
+    if data.len() > max_len {
+        return None;
+    }
     if data.len() < MIN_COMPRESS_LEN {
         return None;
     }
@@ -649,18 +670,12 @@ fn maybe_compress(_data: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-/// Check the wire claim before either public iteration or budgeted unpack.
-fn zstd_entry_len(payload: &[u8]) -> Result<usize, PackError> {
-    if payload.len() < ZSTD_LEN_PREFIX {
-        return Err(PackError::ZstdEntryTruncated);
-    }
-    let len = u32::from_le_bytes(payload[..ZSTD_LEN_PREFIX].try_into().expect("4 bytes")) as usize;
-    if len > MAX_RAW_OBJECT_SIZE {
-        return Err(PackError::DecompressedSizeOverCap(len));
-    }
-    Ok(len)
-}
-
+/// Parse and decompress a `0x03`/`0x04`-style `[uncompressed_len][zstd
+/// frame]` payload, enforcing SPEC-PACKFILE §3.3's bomb-guarding
+/// before any decompression allocation: the claimed length is checked
+/// against [`MAX_RAW_OBJECT_SIZE`] first, decompression is bounded to
+/// that claim, and the actual decompressed length is re-checked
+/// against the claim afterward.
 fn decompress_zstd_entry(payload: &[u8]) -> Result<Vec<u8>, PackError> {
     let len = zstd_entry_len(payload)?;
     let mut output = Vec::new();
@@ -671,26 +686,437 @@ fn decompress_zstd_entry(payload: &[u8]) -> Result<Vec<u8>, PackError> {
     Ok(output)
 }
 
-/// The caller reserves fallibly and (for unpack) charges the claimed size
-/// first. Decompression writes into that buffer and cannot grow it.
-#[cfg(feature = "pack-zstd")]
+/// [`decompress_zstd_entry`] over an explicit backend, so the
+/// differential tests can drive the C and pure-Rust decoders through the
+/// exact same claim / length checks.
+#[cfg(all(test, feature = "pack-ruzstd"))]
+fn decompress_zstd_entry_with(
+    payload: &[u8],
+    backend: fn(&[u8], usize) -> Result<Vec<u8>, PackError>,
+) -> Result<Vec<u8>, PackError> {
+    let (uncompressed_len, frame) = zstd_claim(payload)?;
+    let decompressed = backend(frame, uncompressed_len)?;
+    if decompressed.len() != uncompressed_len {
+        return Err(PackError::DecompressedSizeMismatch(
+            uncompressed_len,
+            decompressed.len(),
+        ));
+    }
+    Ok(decompressed)
+}
+
+fn zstd_claim(payload: &[u8]) -> Result<(usize, &[u8]), PackError> {
+    if payload.len() < ZSTD_LEN_PREFIX {
+        return Err(PackError::ZstdEntryTruncated);
+    }
+    let uncompressed_len =
+        u32::from_le_bytes(payload[..ZSTD_LEN_PREFIX].try_into().expect("4 bytes")) as usize;
+    if uncompressed_len > MAX_RAW_OBJECT_SIZE {
+        return Err(PackError::DecompressedSizeOverCap(uncompressed_len));
+    }
+    let frame = &payload[ZSTD_LEN_PREFIX..];
+    Ok((uncompressed_len, frame))
+}
+
+fn zstd_entry_len(payload: &[u8]) -> Result<usize, PackError> {
+    zstd_claim(payload).map(|(len, _)| len)
+}
+
+/// Reserve and charge before calling this; neither backend grows or zero-fills
+/// the output. Shared by lazy unpack and buffered/window entry decoding.
 fn decompress_zstd_into(payload: &[u8], output: &mut Vec<u8>) -> Result<(), PackError> {
-    let len = zstd_entry_len(payload)?;
+    let (len, frame) = zstd_claim(payload)?;
     output.clear();
-    let actual = zstd::bulk::Decompressor::new()
-        .and_then(|mut decoder| decoder.decompress_to_buffer(&payload[ZSTD_LEN_PREFIX..], output))
-        .map_err(|e| PackError::ZstdDecompress(e.to_string()))?;
-    if actual != len {
-        return Err(PackError::DecompressedSizeMismatch(len, actual));
+    zstd_decompress_into(frame, len, output)?;
+    if output.len() != len {
+        return Err(PackError::DecompressedSizeMismatch(len, output.len()));
     }
     Ok(())
 }
 
-#[cfg(not(feature = "pack-zstd"))]
-fn decompress_zstd_into(_payload: &[u8], _output: &mut Vec<u8>) -> Result<(), PackError> {
+/// RFC 8878 §3.1.1 Zstandard frame magic number, as it appears on the
+/// wire (`0xFD2FB528` little-endian). SPEC-PACKFILE §3.3 allows exactly
+/// one such frame per entry: a skippable frame (`0x184D2A5?`) or a
+/// legacy pre-RFC frame magic is rejected by both backends.
+#[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
+const ZSTD_FRAME_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
+/// Both backends' first check: the payload must open with the one
+/// Zstandard frame magic SPEC-PACKFILE §3.3 permits.
+#[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
+fn require_zstd_frame_magic(frame: &[u8]) -> Result<(), PackError> {
+    if frame.starts_with(&ZSTD_FRAME_MAGIC) {
+        Ok(())
+    } else {
+        Err(PackError::ZstdDecompress(
+            "entry payload does not start with a Zstandard frame magic \
+             (skippable and legacy frames are not allowed)"
+                .to_string(),
+        ))
+    }
+}
+
+/// Decompress `frame` — exactly one Zstandard frame, nothing before or
+/// after it — bounding the allocation to `capacity` bytes (already
+/// checked against [`MAX_RAW_OBJECT_SIZE`] by the caller) so a corrupt
+/// or hostile frame can't force an over-large allocation. The C decoder
+/// (`pack-zstd`) is selected whenever it is compiled in.
+#[cfg(feature = "pack-zstd")]
+fn zstd_decompress_into(
+    frame: &[u8],
+    capacity: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PackError> {
+    require_zstd_frame_magic(frame)?;
+    // `ZSTD_decompressDCtx` (behind `bulk::decompress`) would otherwise
+    // decode concatenated frames and skip skippable ones.
+    match zstd::zstd_safe::find_frame_compressed_size(frame) {
+        Ok(n) if n == frame.len() => {}
+        Ok(n) => {
+            return Err(PackError::ZstdDecompress(format!(
+                "{} byte(s) after the entry's single zstd frame",
+                frame.len() - n
+            )));
+        }
+        Err(code) => {
+            return Err(PackError::ZstdDecompress(
+                zstd::zstd_safe::get_error_name(code).to_string(),
+            ));
+        }
+    }
+    let mut decoder =
+        zstd::bulk::Decompressor::new().map_err(|e| PackError::ZstdDecompress(e.to_string()))?;
+    decoder
+        .decompress_to_buffer(frame, output)
+        .map_err(|e| PackError::ZstdDecompress(e.to_string()))?;
+    if output.len() > capacity {
+        return Err(PackError::ZstdDecompress(
+            "zstd frame exceeds its claim".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "pack-zstd", test))]
+fn zstd_decompress_capped(frame: &[u8], capacity: usize) -> Result<Vec<u8>, PackError> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(capacity)
+        .map_err(|_| PackError::PackfileTooLarge)?;
+    zstd_decompress_into(frame, capacity, &mut output)?;
+    Ok(output)
+}
+
+/// Without the C library, the pure-Rust decoder serves every read.
+#[cfg(all(not(feature = "pack-zstd"), feature = "pack-ruzstd"))]
+fn zstd_decompress_into(
+    frame: &[u8],
+    capacity: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PackError> {
+    ruzstd_decompress_into(frame, capacity, output)
+}
+
+#[cfg(not(any(feature = "pack-zstd", feature = "pack-ruzstd")))]
+fn zstd_decompress_into(
+    _frame: &[u8],
+    _capacity: usize,
+    _output: &mut Vec<u8>,
+) -> Result<(), PackError> {
     Err(PackError::ZstdDecompress(
-        "this build was compiled without the `pack-zstd` feature".to_string(),
+        "this build was compiled without the `pack-zstd` or `pack-ruzstd` feature".to_string(),
     ))
+}
+
+/// Fixed pure-Rust decode window cap: 8 MiB (`windowLog` 23).
+/// This covers the default windows of non-ultra zstd levels. Larger windows
+/// fail closed even if the output claim is larger; native C keeps its policy.
+#[cfg(feature = "pack-ruzstd")]
+#[cfg_attr(all(feature = "pack-zstd", not(test)), allow(dead_code))]
+const RUZSTD_WINDOW_LIMIT: u64 = 8 << 20;
+
+/// Read the base and result lengths from a zstd-compressed SPEC-DELTA v1 header.
+///
+/// `frame` is the zstd frame alone, without the pack frame, base hash or
+/// uncompressed-length prefix. Only the nine-byte delta header is read out;
+/// no allocation is sized from the delta stream's claim or result length.
+/// The pure-Rust backend uses the patched block bound and fixed 8 MiB window.
+/// Its working memory remains within the existing 28 MiB allowance, even when
+/// it retains window history before emitting the prefix. C-only builds use a
+/// streaming decoder with the same window cap. The decoder is dropped here,
+/// before the caller performs its ordinary budgeted decode.
+///
+/// This is a prefix inspection, not full frame or delta validation. Callers
+/// must still decode and verify the complete object after checking metadata.
+///
+/// # Errors
+/// Unsupported compression, malformed/truncated compression or delta header.
+pub fn peek_delta_header(frame: &[u8]) -> Result<(u32, u32), PackError> {
+    let mut header = [0; delta::HEADER_LEN];
+    read_delta_header_prefix(frame, &mut header)?;
+    if header[0] != delta::STREAM_VERSION {
+        return Err(PackError::DeltaApply(MkitError::UnsupportedObjectVersion));
+    }
+    Ok((
+        u32::from_le_bytes([header[1], header[2], header[3], header[4]]),
+        u32::from_le_bytes([header[5], header[6], header[7], header[8]]),
+    ))
+}
+
+#[cfg(feature = "pack-ruzstd")]
+fn read_delta_header_prefix(
+    frame: &[u8],
+    header: &mut [u8; delta::HEADER_LEN],
+) -> Result<(), PackError> {
+    use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
+    use std::io::Read as _;
+    require_zstd_frame_magic(frame)?;
+    let mut decoder = FrameDecoder::new();
+    decoder.set_max_window_size(RUZSTD_WINDOW_LIMIT);
+    let mut stream = StreamingDecoder::new_with_decoder(frame, decoder)
+        .map_err(|error| PackError::ZstdDecompress(error.to_string()))?;
+    stream
+        .read_exact(header)
+        .map_err(|error| PackError::ZstdDecompress(error.to_string()))
+}
+
+#[cfg(all(feature = "pack-zstd", not(feature = "pack-ruzstd")))]
+fn read_delta_header_prefix(
+    frame: &[u8],
+    header: &mut [u8; delta::HEADER_LEN],
+) -> Result<(), PackError> {
+    use std::io::Read as _;
+    require_zstd_frame_magic(frame)?;
+    let mut stream = zstd::stream::read::Decoder::with_buffer(frame)
+        .map_err(|error| PackError::ZstdDecompress(error.to_string()))?
+        .single_frame();
+    stream
+        .window_log_max(23)
+        .map_err(|error| PackError::ZstdDecompress(error.to_string()))?;
+    stream
+        .read_exact(header)
+        .map_err(|error| PackError::ZstdDecompress(error.to_string()))
+}
+
+#[cfg(not(any(feature = "pack-zstd", feature = "pack-ruzstd")))]
+fn read_delta_header_prefix(
+    frame: &[u8],
+    _header: &mut [u8; delta::HEADER_LEN],
+) -> Result<(), PackError> {
+    zstd_decompress_into(frame, 0, &mut Vec::new())
+}
+
+/// Pure-Rust (`ruzstd`) decode of exactly one Zstandard frame, bounded
+/// to `capacity` output bytes. Compiled whenever `pack-ruzstd` is on,
+/// including alongside `pack-zstd`, so the differential tests can run
+/// both backends over the same inputs.
+///
+/// Matches the C path's accept/reject decisions and error variants:
+/// a declared frame content size must not exceed `capacity` and must
+/// equal the decoded length; output past `capacity` is an error, not a
+/// short read; a content checksum, when present, must match; nothing
+/// may follow the frame. At most `capacity + 1` bytes are ever read out.
+///
+/// Memory: the output is reserved fallibly to the claim without zero-filling.
+/// Unpack charges that reservation before allocation. The pure-Rust decoder's
+/// ring buffer is separate working memory. With the fixed 8 MiB window and
+/// vendored RFC block preflight, working allocations stay below 28 MiB,
+/// including old/new ring allocations during growth and bounded block scratch.
+/// This fixed allowance is outside the owned-payload resident cap, as for the window reader's
+/// carry/output budget. No output allocation grows past the admitted claim.
+///
+/// Allocating adapter for differential tests. Production decode supplies its
+/// already reserved output to `ruzstd_decompress_into` when `pack-zstd` is off,
+/// and to the C `zstd_decompress_into` when it is on.
+#[cfg(feature = "pack-ruzstd")]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn ruzstd_decompress_capped(
+    frame: &[u8],
+    capacity: usize,
+) -> Result<Vec<u8>, PackError> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(capacity)
+        .map_err(|_| PackError::PackfileTooLarge)?;
+    ruzstd_decompress_into(frame, capacity, &mut output)?;
+    Ok(output)
+}
+
+#[cfg(feature = "pack-ruzstd")]
+#[cfg_attr(all(feature = "pack-zstd", not(test)), allow(dead_code))]
+fn ruzstd_decompress_into(
+    frame: &[u8],
+    capacity: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PackError> {
+    use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
+    use std::io::Read as _;
+
+    fn fail(msg: impl std::fmt::Display) -> PackError {
+        PackError::ZstdDecompress(msg.to_string())
+    }
+
+    require_zstd_frame_magic(frame)?;
+    let cap = u64::try_from(capacity).unwrap_or(u64::MAX);
+    let mut decoder = FrameDecoder::new();
+    decoder.set_max_window_size(RUZSTD_WINDOW_LIMIT);
+    let mut src = frame;
+    let mut stream = StreamingDecoder::new_with_decoder(&mut src, decoder).map_err(fail)?;
+
+    // RFC 8878 §3.1.1.1.1. The header parsed, so the descriptor byte
+    // after the magic exists. ruzstd ignores the reserved bit, which a
+    // decoder must refuse (the C decoder does).
+    let descriptor = frame[ZSTD_FRAME_MAGIC.len()];
+    if descriptor & 0x08 != 0 {
+        return Err(fail("zstd frame descriptor has its reserved bit set"));
+    }
+    // A content size is present iff the FCS flag or the single-segment
+    // flag is set.
+    let declared =
+        (descriptor >> 6 != 0 || descriptor & 0x20 != 0).then(|| stream.decoder.content_size());
+    if let Some(n) = declared
+        && n > cap
+    {
+        return Err(fail(format_args!(
+            "frame content size {n} exceeds the claimed {capacity} bytes"
+        )));
+    }
+
+    let out = output;
+    out.clear();
+    let mut chunk = [0; 8192];
+    // ruzstd's in-memory decoder never yields Interrupted.
+    loop {
+        // Probe one extra byte without allocating past the claim.
+        let room = capacity.saturating_sub(out.len());
+        let take = room.saturating_add(1).min(chunk.len());
+        let n = stream.read(&mut chunk[..take]).map_err(fail)?;
+        if n == 0 {
+            break;
+        }
+        if n > room {
+            return Err(fail(format_args!(
+                "zstd frame decompresses past the claimed {capacity} bytes"
+            )));
+        }
+        out.extend_from_slice(&chunk[..n]);
+    }
+    let decoder = &stream.decoder;
+    if !decoder.is_finished() {
+        return Err(fail("zstd frame ended before its last block"));
+    }
+    if let Some(n) = declared
+        && n != out.len() as u64
+    {
+        return Err(fail(format_args!(
+            "frame content size {n} does not match the {} decoded bytes",
+            out.len()
+        )));
+    }
+    if let Some(stored) = decoder.get_checksum_from_data()
+        && decoder.get_calculated_checksum() != Some(stored)
+    {
+        return Err(fail("zstd frame content checksum mismatch"));
+    }
+    drop(stream);
+    if !src.is_empty() {
+        return Err(fail(format_args!(
+            "{} byte(s) after the entry's single zstd frame",
+            src.len()
+        )));
+    }
+    ruzstd_check_reserved_fields(frame).map_err(fail)?;
+    Ok(())
+}
+
+/// Re-walk an already-decoded frame's blocks (RFC 8878 §3.1.1.2–3) for
+/// the reserved fields ruzstd ignores and the C decoder rejects: the
+/// sequences section's `Symbol_Compression_Modes` reserved bits. Without
+/// this, a frame the C path refuses would decode here — a fail-open
+/// divergence between the native and Workers readers.
+#[cfg(feature = "pack-ruzstd")]
+#[cfg_attr(all(feature = "pack-zstd", not(test)), allow(dead_code))]
+fn ruzstd_check_reserved_fields(frame: &[u8]) -> Result<(), &'static str> {
+    const MALFORMED: &str = "malformed zstd frame";
+    let byte = |i: usize| frame.get(i).copied().ok_or(MALFORMED);
+    let descriptor = byte(ZSTD_FRAME_MAGIC.len())?;
+    let single_segment = descriptor & 0x20 != 0;
+    let fcs_len = match descriptor >> 6 {
+        0 => usize::from(single_segment),
+        1 => 2,
+        2 => 4,
+        _ => 8,
+    };
+    let mut pos = ZSTD_FRAME_MAGIC.len()
+        + 1
+        + usize::from(!single_segment)
+        + [0, 1, 2, 4][usize::from(descriptor & 3)]
+        + fcs_len;
+    loop {
+        let header = u32::from_le_bytes([byte(pos)?, byte(pos + 1)?, byte(pos + 2)?, 0]);
+        pos += 3;
+        let size = (header >> 3) as usize;
+        let body_len = match (header >> 1) & 3 {
+            1 => 1, // RLE: one byte, repeated `size` times
+            _ => size,
+        };
+        let body = frame.get(pos..pos + body_len).ok_or(MALFORMED)?;
+        if (header >> 1) & 3 == 2 && ruzstd_sequence_modes(body)? & 3 != 0 {
+            return Err("zstd sequences section has its reserved mode bits set");
+        }
+        pos += body_len;
+        if header & 1 == 1 {
+            return Ok(());
+        }
+    }
+}
+
+/// The `Symbol_Compression_Modes` byte of a compressed block, or `0` when
+/// the block has no sequences (RFC 8878 §3.1.1.3.1.1, §3.1.1.3.2.1).
+#[cfg(feature = "pack-ruzstd")]
+#[cfg_attr(all(feature = "pack-zstd", not(test)), allow(dead_code))]
+fn ruzstd_sequence_modes(block: &[u8]) -> Result<u8, &'static str> {
+    const MALFORMED: &str = "malformed zstd block";
+    // Header fields are assembled in `u64`, never `usize`: the 5-byte
+    // literals header spans 40 bits, which overflows a 32-bit `usize`
+    // (wasm32) and silently drops the compressed size's top bits.
+    let byte = |i: usize| block.get(i).copied().ok_or(MALFORMED).map(u64::from);
+    let b0 = byte(0)?;
+    // Literals section: header, then its content.
+    let (header_len, content_len) = match (b0 & 3, (b0 >> 2) & 3) {
+        // Raw / RLE literals: 5-, 12- or 20-bit regenerated size.
+        (kind @ (0 | 1), format) => {
+            let (len, regen) = match format {
+                0 | 2 => (1, b0 >> 3),
+                1 => (2, (b0 >> 4) | (byte(1)? << 4)),
+                _ => (3, (b0 >> 4) | (byte(1)? << 4) | (byte(2)? << 12)),
+            };
+            (len, if kind == 0 { regen } else { 1 })
+        }
+        // Compressed / treeless literals: 10-, 14- or 18-bit sizes.
+        (_, format) => {
+            let (len, bits) = match format {
+                0 | 1 => (3, 10),
+                2 => (4, 14),
+                _ => (5, 18),
+            };
+            let mut h = 0u64;
+            for i in (0..len).rev() {
+                h = (h << 8) | byte(i)?;
+            }
+            (len, (h >> (4 + bits)) & ((1 << bits) - 1))
+        }
+    };
+    // At most 20 bits, so it fits any `usize`.
+    let content_len = usize::try_from(content_len).map_err(|_| MALFORMED)?;
+    let seq = header_len + content_len;
+    let modes_at = match byte(seq)? {
+        0 => return Ok(0),
+        n if n < 128 => seq + 1,
+        255 => seq + 3,
+        _ => seq + 2,
+    };
+    block.get(modes_at).copied().ok_or(MALFORMED)
 }
 
 /// Collect the `base_hash` of every `0x02` delta entry in `pack_bytes`,
@@ -886,6 +1312,650 @@ impl PackReader {
     }
 }
 
+/// Where a delta's *external* base — one that is not an earlier entry
+/// of the same pack — may come from.
+///
+/// SPEC-PACKFILE §3.2's "destination object store" is the implementor:
+/// the local [`ObjectStore`] on a client, and on a server the pushing
+/// repository's own membership. A server MUST NOT back this with a
+/// global content store or another repository's objects: whether a
+/// delta resolves would then reveal that some other repository holds
+/// the base (PRD §6.5 repository isolation, no existence oracles).
+///
+/// The seam is generic, never `dyn`: [`PackReader::read`] instantiates
+/// it with `&ObjectStore` so the hot unpack path stays monomorphic.
+pub trait DeltaBaseSource {
+    /// Whether [`Self::base`] returns bytes already verified to be the
+    /// object named by the requested id (the store's `read` verifies).
+    ///
+    /// When `false` (the default), the decoder deserializes the bytes
+    /// and re-derives the id itself; anything that is not a storable
+    /// canonical object with exactly the requested id is treated as
+    /// absent ([`PackError::DeltaBaseMissing`]), so an untrusted source
+    /// can never smuggle a different object in as a base. Set it to
+    /// `true` only when `base` itself guarantees that identity, as
+    /// `ObjectStore::read` does; the decoder then skips the re-derive.
+    const VERIFIED: bool = false;
+
+    /// Canonical object bytes for `id`, or `None` when this source may
+    /// not provide it. "Not permitted" and "does not exist" MUST both
+    /// be `None`: the decoder reports them identically, by design.
+    ///
+    /// # Errors
+    ///
+    /// A source failure (I/O, backend error) that is not an answer
+    /// about `id`. It aborts the decode.
+    fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError>;
+
+    /// Fetch with allocation admission. The default charges after `base`
+    /// returns; sources that know the length first should override this to
+    /// call `admit` before allocating, as `&ObjectStore` does. Before
+    /// returning `Some(bytes)`, every override must successfully invoke
+    /// `admit` exactly once with `bytes.len()` and propagate its error.
+    ///
+    /// # Errors
+    /// Returns a source failure or the error from `admit`.
+    fn base_with_admission(
+        &mut self,
+        id: &Hash,
+        admit: impl FnOnce(usize) -> Result<(), PackError>,
+    ) -> Result<Option<Vec<u8>>, PackError> {
+        let Some(bytes) = self.base(id)? else {
+            return Ok(None);
+        };
+        admit(bytes.len())?;
+        Ok(Some(bytes))
+    }
+}
+
+/// A [`DeltaBaseSource`] with no external bases: a pack must be
+/// self-contained (every delta's base an earlier entry). Used for
+/// closure-profile packs, pack rewrites and tests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NoExternalBases;
+
+impl DeltaBaseSource for NoExternalBases {
+    fn base(&mut self, _id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+        Ok(None)
+    }
+}
+
+impl DeltaBaseSource for &ObjectStore {
+    /// `ObjectStore::read` BLAKE3/BMT-verifies the bytes against `id`
+    /// and fails with `HashMismatch` otherwise.
+    const VERIFIED: bool = true;
+
+    fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+        if self.contains(id) {
+            Ok(Some(self.read(id)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn base_with_admission(
+        &mut self,
+        id: &Hash,
+        admit: impl FnOnce(usize) -> Result<(), PackError>,
+    ) -> Result<Option<Vec<u8>>, PackError> {
+        if !self.contains(id) {
+            return Ok(None);
+        }
+        self.read_with_allocator(id, |len| {
+            admit(len)?;
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(len)
+                .map_err(|_| PackError::PackfileTooLarge)?;
+            Ok(bytes)
+        })
+        .map(Some)
+    }
+}
+
+/// One entry handed to [`decode_entries_with`]'s sink, in pack order.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct DecodedEntry<'a> {
+    /// The entry's object id, re-derived from `bytes` (BLAKE3, or the
+    /// BMT root for `Tree`/`ChunkedBlob`).
+    pub id: Hash,
+    /// Canonical object bytes: the raw payload (decompressed for
+    /// `0x03`), or the reconstructed delta target.
+    pub bytes: &'a [u8],
+    /// `bytes` decoded, so the consumer need not deserialize again.
+    pub object: Object,
+    /// `true` for a `0x02`/`0x04` delta target, `false` for a raw entry.
+    pub from_delta: bool,
+    /// Offset of the complete encoded frame in the source pack.
+    pub frame_offset: u64,
+    /// Length of the complete encoded frame, including type and length.
+    pub frame_length: u64,
+    /// Encoded frame type (`0x00`, `0x02`, `0x03`, or `0x04`).
+    pub wire_type: u8,
+    /// Delta base id, if this frame is a delta.
+    pub delta_base: Option<Hash>,
+}
+
+/// Summary of a successful [`decode_entries_with`] call.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DecodeReport {
+    /// Raw (`0x00`/`0x03`) entries decoded.
+    pub raw_count: usize,
+    /// Delta (`0x02`/`0x04`) entries reconstructed.
+    pub delta_count: usize,
+    /// Every entry's id, in pack order (a repeated entry repeats here,
+    /// as in [`UnpackReport::stored`]).
+    pub ids: Vec<Hash>,
+}
+
+/// Resource limits for [`decode_entries_with`].
+///
+/// A pack's wire size says little about what decoding it allocates: a
+/// `0x03`/`0x04` entry may claim up to [`MAX_RAW_OBJECT_SIZE`] bytes from a
+/// few-byte zstd frame, a delta may declare a result of the same size
+/// from a short run of copies, and a tiny delta may name a huge external
+/// base. A decoder that held all of that until the pack ends would let a
+/// sub-kilobyte pack pin gigabytes. [`decode_entries_with`] therefore
+/// charges every such allocation against [`Self::max_decoded_bytes`] and
+/// rejects the pack with [`PackError::PackfileTooLarge`] once the total
+/// passes it.
+///
+/// The budget is **per call**. It bounds one decode, not a process: a
+/// server running several decodes at once (WP-4.7) must size it from its
+/// isolate's memory limit divided by its decode concurrency. The default,
+/// [`Self::DEFAULT_MAX_DECODED_BYTES`] (1 GiB), equals the largest object
+/// the format allows ([`MAX_RAW_OBJECT_SIZE`]) so that any single valid
+/// object decodes; it is not sized for a constrained isolate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DecodeLimits {
+    /// Cap on the bytes one decode may hold beyond the pack itself: every
+    /// `0x03`/`0x04` entry's claimed `uncompressed_len`, every delta's
+    /// declared result length, and every external base fetched from the
+    /// [`DeltaBaseSource`] while it is cached. `0x00` payloads are borrowed
+    /// from the pack and do not count. An external base is measured once
+    /// fetched, so the peak can pass the cap by the one base whose fetch
+    /// trips it.
+    pub max_decoded_bytes: u64,
+}
+
+impl DecodeLimits {
+    /// Default [`Self::max_decoded_bytes`]: 1 GiB, the maximum object size
+    /// ([`MAX_RAW_OBJECT_SIZE`]). Servers set their own (see the type docs).
+    pub const DEFAULT_MAX_DECODED_BYTES: u64 = MAX_RAW_OBJECT_SIZE as u64;
+
+    /// These limits with [`Self::max_decoded_bytes`] set to `bytes`.
+    #[must_use]
+    pub const fn with_max_decoded_bytes(mut self, bytes: u64) -> Self {
+        self.max_decoded_bytes = bytes;
+        self
+    }
+}
+
+impl Default for DecodeLimits {
+    fn default() -> Self {
+        Self {
+            max_decoded_bytes: Self::DEFAULT_MAX_DECODED_BYTES,
+        }
+    }
+}
+
+/// Running total of a decode's claimed allocations against
+/// [`DecodeLimits::max_decoded_bytes`].
+// Distinct from ResidentBudget: compressed and delta claims accumulate over
+// the entire storeless decode; only external-base charges are credited on last
+// use, matching DecodeLimits. PackReader uses the peak resident cap instead.
+#[derive(Debug)]
+struct DecodeBudget {
+    used: u64,
+    max: u64,
+}
+
+impl DecodeBudget {
+    fn charge(&mut self, bytes: u64) -> Result<(), PackError> {
+        self.used = self.used.saturating_add(bytes);
+        if self.used > self.max {
+            return Err(PackError::PackfileTooLarge);
+        }
+        Ok(())
+    }
+}
+
+/// The decode path's [`DeltaBaseSource`]: forwards to the caller's source
+/// and charges each base it returns against the decode budget, remembering
+/// the charge so [`Self::release`] can credit it back once no later delta
+/// needs that base. [`PackReader::read`] never uses this.
+struct ChargedBases<'b, B> {
+    inner: &'b mut B,
+    budget: &'b mut DecodeBudget,
+    charged: &'b mut std::collections::HashMap<Hash, u64>,
+}
+
+impl<B: DeltaBaseSource> DeltaBaseSource for ChargedBases<'_, B> {
+    const VERIFIED: bool = B::VERIFIED;
+
+    fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+        self.base_with_admission(id, |_| Ok(()))
+    }
+
+    fn base_with_admission(
+        &mut self,
+        id: &Hash,
+        admit: impl FnOnce(usize) -> Result<(), PackError>,
+    ) -> Result<Option<Vec<u8>>, PackError> {
+        self.inner.base_with_admission(id, |len| {
+            let charged_len = u64::try_from(len).map_err(|_| PackError::PackfileTooLarge)?;
+            self.budget.charge(charged_len)?;
+            admit(len)?;
+            let held = self.charged.entry(*id).or_default();
+            *held = held.saturating_add(charged_len);
+            Ok(())
+        })
+    }
+}
+
+impl<B> ChargedBases<'_, B> {
+    /// Credit back the charge for external base `id`, if it had one.
+    fn release(&mut self, id: &Hash) {
+        if let Some(len) = self.charged.remove(id) {
+            self.budget.used = self.budget.used.saturating_sub(len);
+        }
+    }
+}
+
+/// Little-endian `u32` at `at` in `bytes`, if all four bytes are there.
+fn le_u32_at(bytes: &[u8], at: usize) -> Option<u64> {
+    let field: [u8; 4] = bytes.get(at..at.checked_add(4)?)?.try_into().ok()?;
+    Some(u64::from(u32::from_le_bytes(field)))
+}
+
+/// Charge every `0x03`/`0x04` entry's claimed decompressed size, reading
+/// only its uncompressed-length prefix. Runs after [`PackEntries::new`]
+/// has validated the framing (every frame lies inside the body, which is
+/// why the bounds here can only fall short on a malformed pack) and
+/// before anything is decompressed. A payload too short to carry its
+/// prefix is left for the drain to reject.
+fn charge_compressed_claims(pack: &[u8], budget: &mut DecodeBudget) -> Result<(), PackError> {
+    let split = pack.len() - TRAILER_LEN;
+    let mut pos = HEADER_LEN;
+    while pos < split {
+        let etype = pack[pos];
+        let payload_len = le_u32_at(pack, pos + 1)
+            .and_then(|len| usize::try_from(len).ok())
+            .ok_or(PackError::UnexpectedEof)?;
+        let start = pos + ENTRY_FRAME_LEN;
+        if payload_len > split.saturating_sub(start) {
+            return Err(PackError::UnexpectedEof);
+        }
+        let payload = &pack[start..start + payload_len];
+        let claim = match etype {
+            0x03 => le_u32_at(payload, 0),
+            0x04 => le_u32_at(payload, hash::HASH_LEN),
+            _ => None,
+        };
+        if let Some(claim) = claim {
+            budget.charge(claim)?;
+        }
+        pos = start + payload_len;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct CursorFrame<'a> {
+    entry: PackEntry<'a>,
+    frame_offset: u64,
+    frame_length: u64,
+    wire_type: u8,
+    delta_base: Option<Hash>,
+}
+
+/// A store-less pack decoder that pauses at an unresolved external base.
+///
+/// [`Self::new`] performs the same framing and allocation preflight as
+/// [`decode_entries_with`]. Each successful entry reaches the sink exactly
+/// once across calls to [`Self::resume`]; a missing base leaves its frame at
+/// the cursor so the caller can supply that base and resume. Other errors
+/// end the decode. The same cumulative budget spans every resume call.
+#[derive(Debug)]
+pub struct PackDecodeCursor<'a> {
+    entries: Vec<Option<CursorFrame<'a>>>,
+    next: usize,
+    budget: DecodeBudget,
+    charged: std::collections::HashMap<Hash, u64>,
+    uses: std::collections::HashMap<Hash, usize>,
+    in_pack: std::collections::HashMap<Hash, Cow<'a, [u8]>>,
+    report: Option<DecodeReport>,
+}
+
+impl<'a> PackDecodeCursor<'a> {
+    /// Preflight one content-addressed pack without fetching external bases.
+    ///
+    /// # Errors
+    /// Invalid framing, unsupported content, or a decoded-size claim over
+    /// `limits` is returned before the sink observes any entry.
+    pub fn new(pack: &'a [u8], limits: DecodeLimits) -> Result<Self, PackError> {
+        let mut pack_entries = PackEntries::new(pack)?;
+        let mut budget = DecodeBudget {
+            used: 0,
+            max: limits.max_decoded_bytes,
+        };
+        charge_compressed_claims(pack, &mut budget)?;
+
+        let mut entries = Vec::with_capacity(pack_entries.entry_count());
+        while let Some(entry) = pack_entries.next() {
+            let entry = entry?;
+            let payload = pack_entries
+                .last_payload_range()
+                .ok_or(PackError::UnexpectedEof)?;
+            let offset = payload
+                .start
+                .checked_sub(ENTRY_FRAME_LEN)
+                .ok_or(PackError::UnexpectedEof)?;
+            let delta_base = match &entry {
+                PackEntry::Delta { base, .. } => Some(*base),
+                PackEntry::Raw { .. } => None,
+            };
+            entries.push(Some(CursorFrame {
+                entry,
+                frame_offset: offset as u64,
+                frame_length: (payload.end - offset) as u64,
+                wire_type: pack[offset],
+                delta_base,
+            }));
+        }
+
+        // As in decode_entries_with, all delta result claims precede the
+        // first object validation; base charges are added only on use.
+        let mut uses = std::collections::HashMap::new();
+        for frame in entries.iter().flatten() {
+            if let PackEntry::Delta { base, stream } = &frame.entry {
+                if let Some(result_len) = le_u32_at(stream, 5) {
+                    budget.charge(result_len)?;
+                }
+                let n = uses.entry(*base).or_insert(0usize);
+                *n = n.saturating_add(1);
+            }
+        }
+        Ok(Self {
+            report: Some(DecodeReport {
+                ids: Vec::with_capacity(entries.len()),
+                ..DecodeReport::default()
+            }),
+            entries,
+            next: 0,
+            budget,
+            charged: std::collections::HashMap::new(),
+            uses,
+            in_pack: std::collections::HashMap::new(),
+        })
+    }
+
+    /// Set the remaining decode's allocation cap. A caller retaining
+    /// external objects beside this cursor can lower the cap as those
+    /// objects accumulate. Earlier claims and live bases stay charged.
+    ///
+    /// # Errors
+    /// [`PackError::PackfileTooLarge`] if bytes already charged exceed
+    /// `max`; the previous cap is kept in that case.
+    pub fn set_max_decoded_bytes(&mut self, max: u64) -> Result<(), PackError> {
+        if self.budget.used > max {
+            return Err(PackError::PackfileTooLarge);
+        }
+        self.budget.max = max;
+        Ok(())
+    }
+
+    /// Continue from the first unprocessed frame.
+    ///
+    /// # Errors
+    /// [`PackError::DeltaBaseMissing`] leaves the current frame ready to
+    /// retry after `bases` gains that id. Any other error is terminal. The
+    /// sink may have seen earlier entries when either error is returned.
+    #[allow(clippy::too_many_lines)] // One stateful loop preserves frame order and charges.
+    pub fn resume<B: DeltaBaseSource>(
+        &mut self,
+        bases: &mut B,
+        mut sink: impl FnMut(DecodedEntry<'_>) -> Result<(), PackError>,
+    ) -> Result<DecodeReport, PackError> {
+        if self.report.is_none() {
+            return Err(PackError::PackfileCorrupted);
+        }
+        let mut bases = ChargedBases {
+            inner: bases,
+            budget: &mut self.budget,
+            charged: &mut self.charged,
+        };
+        while self.next < self.entries.len() {
+            let frame = self.entries[self.next]
+                .take()
+                .ok_or(PackError::PackfileCorrupted)?;
+            let CursorFrame {
+                entry,
+                frame_offset,
+                frame_length,
+                wire_type,
+                delta_base,
+            } = frame;
+            match entry {
+                PackEntry::Raw { bytes } => {
+                    let object = validate_storable_object(&bytes)?;
+                    let id = crate::object::id_from_object(&object, &bytes);
+                    sink(DecodedEntry {
+                        id,
+                        bytes: bytes.as_ref(),
+                        object,
+                        from_delta: false,
+                        frame_offset,
+                        frame_length,
+                        wire_type,
+                        delta_base,
+                    })?;
+                    if self.uses.contains_key(&id) {
+                        self.in_pack.insert(id, bytes);
+                    }
+                    let report = self.report.as_mut().ok_or(PackError::PackfileCorrupted)?;
+                    report.raw_count += 1;
+                    report.ids.push(id);
+                }
+                PackEntry::Delta { base, stream } => {
+                    // A source may return invalid bytes, which is publicly
+                    // indistinguishable from absence. Undo that attempted
+                    // base's charge before a caller retries with good bytes.
+                    let before_used = bases.budget.used;
+                    let before_charged = bases.charged.get(&base).copied();
+                    let resolved = match resolve_delta_target(
+                        &mut bases,
+                        &mut self.in_pack,
+                        base,
+                        stream.as_ref(),
+                    ) {
+                        Ok(resolved) => resolved,
+                        Err(error @ PackError::DeltaBaseMissing(_)) => {
+                            bases.budget.used = before_used;
+                            match before_charged {
+                                Some(len) => {
+                                    bases.charged.insert(base, len);
+                                }
+                                None => {
+                                    bases.charged.remove(&base);
+                                }
+                            }
+                            self.entries[self.next] = Some(CursorFrame {
+                                entry: PackEntry::Delta { base, stream },
+                                frame_offset,
+                                frame_length,
+                                wire_type,
+                                delta_base,
+                            });
+                            return Err(error);
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    drop(stream);
+                    if let Some(left) = self.uses.get_mut(&base) {
+                        *left = left.saturating_sub(1);
+                        if *left == 0 {
+                            self.uses.remove(&base);
+                            self.in_pack.remove(&base);
+                            bases.release(&base);
+                        }
+                    }
+                    let object = validate_storable_object(&resolved)?;
+                    let id = crate::object::id_from_object(&object, &resolved);
+                    sink(DecodedEntry {
+                        id,
+                        bytes: &resolved,
+                        object,
+                        from_delta: true,
+                        frame_offset,
+                        frame_length,
+                        wire_type,
+                        delta_base,
+                    })?;
+                    if self.uses.contains_key(&id) {
+                        self.in_pack.insert(id, Cow::Owned(resolved));
+                    }
+                    let report = self.report.as_mut().ok_or(PackError::PackfileCorrupted)?;
+                    report.delta_count += 1;
+                    report.ids.push(id);
+                }
+            }
+            self.next += 1;
+        }
+        self.report.take().ok_or(PackError::PackfileCorrupted)
+    }
+}
+
+/// Store-less decode of `pack` over an explicit [`DeltaBaseSource`].
+///
+/// Validates the pack exactly as [`PackReader::read`] does — header,
+/// trailer, caps and framing via [`PackEntries`], every entry drained
+/// (and `0x03`/`0x04` decompressed) before any entry is judged — then,
+/// in pack order, validates each raw payload as a storable canonical
+/// object, resolves each delta against an earlier entry or else
+/// `bases`, validates the reconstructed target, and hands every entry to
+/// `sink`, without writing to the store. Given `&ObjectStore` as `bases`
+/// and non-binding limits, it decodes the same valid objects as
+/// `PackReader::read`. Its cumulative-budget and decompression preflight
+/// precede object validation; lazy unpack instead reports errors as their
+/// pack positions are reached, so malformed packs can differ in error order.
+///
+/// Memory is bounded by `limits` (see [`DecodeLimits`]): every
+/// compressed entry's claimed size is charged before anything is
+/// decompressed, every delta's declared result length before any delta
+/// is applied, and every external base as it is fetched. An entry or an
+/// external base stays resident only until the last delta that names it
+/// as its base; an external base's charge is then credited back.
+///
+/// External bases are fetched only for a delta whose base is not an
+/// earlier entry, at most once per distinct base while it is needed, and
+/// never recursively: a base is a canonical object, never a pack-only
+/// delta.
+///
+/// # Errors
+///
+/// [`PackError::PackfileTooLarge`] when the decoded size passes
+/// `limits.max_decoded_bytes`: claims are checked ahead of every
+/// per-entry error except framing, an external base when the delta that
+/// names it is reached. After preflight, the first [`PackError`] in pack
+/// order, or the first error `sink` returns. `sink` may already have seen earlier
+/// entries when an error is returned; a consumer staging them must
+/// discard that staging.
+pub fn decode_entries_with<B: DeltaBaseSource>(
+    pack: &[u8],
+    bases: &mut B,
+    limits: DecodeLimits,
+    sink: impl FnMut(DecodedEntry<'_>) -> Result<(), PackError>,
+) -> Result<DecodeReport, PackError> {
+    PackDecodeCursor::new(pack, limits)?.resume(bases, sink)
+}
+
+/// Decode one complete encoded frame, using the same payload parser and
+/// repository-supplied base contract as [`decode_entries_with`]. The caller
+/// authenticates the containing pack and its frame offset separately.
+///
+/// # Errors
+/// Invalid framing, unsupported version, missing or invalid base, decoded
+/// object, or a result beyond `limits`.
+pub fn decode_frame_with<B: DeltaBaseSource>(
+    frame: &[u8],
+    version: u32,
+    bases: &mut B,
+    limits: DecodeLimits,
+) -> Result<(Hash, Vec<u8>), PackError> {
+    if version != VERSION && version != VERSION_V2 {
+        return Err(PackError::UnsupportedVersion(version));
+    }
+    if frame.len() < ENTRY_FRAME_LEN {
+        return Err(PackError::UnexpectedEof);
+    }
+    let payload_len = u32::from_le_bytes(
+        frame[1..5]
+            .try_into()
+            .map_err(|_| PackError::UnexpectedEof)?,
+    ) as usize;
+    if Some(frame.len()) != ENTRY_FRAME_LEN.checked_add(payload_len) {
+        return Err(PackError::UnexpectedEof);
+    }
+    let payload = &frame[ENTRY_FRAME_LEN..];
+    match frame[0] {
+        0x00 if payload.len() as u64 > limits.max_decoded_bytes => {
+            return Err(PackError::PackfileTooLarge);
+        }
+        0x03 if zstd_claim(payload)?.0 as u64 > limits.max_decoded_bytes => {
+            return Err(PackError::PackfileTooLarge);
+        }
+        0x04 if payload.len() >= hash::HASH_LEN
+            && zstd_claim(&payload[hash::HASH_LEN..])?.0 as u64 > limits.max_decoded_bytes =>
+        {
+            return Err(PackError::PackfileTooLarge);
+        }
+        _ => {}
+    }
+    decode_entry_with(
+        decode_payload(frame[0], version, &frame[ENTRY_FRAME_LEN..])?,
+        bases,
+        limits,
+    )
+}
+
+/// Resolve one already-framed entry, such as a [`window::WindowReader`]
+/// yield, into its canonical bytes and id, with the payload rules of
+/// [`decode_frame_with`]: a delta's base comes only from `bases`, and the
+/// result is a storable canonical object bounded by `limits`.
+///
+/// # Errors
+/// A missing or invalid base, an invalid object, or a result beyond `limits`.
+pub fn decode_entry_with<B: DeltaBaseSource>(
+    entry: PackEntry<'_>,
+    bases: &mut B,
+    limits: DecodeLimits,
+) -> Result<(Hash, Vec<u8>), PackError> {
+    let bytes = match entry {
+        PackEntry::Raw { bytes } => bytes.into_owned(),
+        PackEntry::Delta { base, stream } => {
+            if validate_delta_result_size(stream.as_ref())? as u64 > limits.max_decoded_bytes {
+                return Err(PackError::PackfileTooLarge);
+            }
+            resolve_delta_target(
+                bases,
+                &mut std::collections::HashMap::new(),
+                base,
+                stream.as_ref(),
+            )?
+        }
+    };
+    if bytes.len() as u64 > limits.max_decoded_bytes {
+        return Err(PackError::PackfileTooLarge);
+    }
+    let object = validate_storable_object(&bytes)?;
+    let id = crate::object::id_from_object(&object, &bytes);
+    Ok((id, bytes))
+}
+
 /// Replay staging results in pack order; deferred admissions are strict here.
 fn finish_pack_read<'b>(
     entries: Vec<Entry<'_>>,
@@ -895,6 +1965,7 @@ fn finish_pack_read<'b>(
     store: &ObjectStore,
     batch: crate::batch::WriteBatch<'_>,
 ) -> Result<UnpackReport, PackError> {
+    let mut bases = store;
     let mut raw_results = raw_results.into_iter();
     let mut in_pack = std::collections::HashMap::new();
     let mut report = UnpackReport::default();
@@ -922,7 +1993,7 @@ fn finish_pack_read<'b>(
             Entry::Delta { base, stream } => {
                 let stream = stream.decode(budget)?;
                 let stored_hash = stage_delta_target(
-                    store,
+                    &mut bases,
                     &batch,
                     &mut in_pack,
                     &mut uses,
@@ -950,6 +2021,9 @@ fn resident_bytes_cap(pack_len: usize) -> usize {
         .max(pack_len.saturating_mul(16))
 }
 
+/// Peak owned payload bytes, released with each reservation. Unlike
+/// `DecodeBudget`, this applies to `PackReader::read` and bounds live
+/// compressed output, delta targets and external bases rather than total work.
 struct ResidentBudget<'a> {
     cap: usize,
     used: std::sync::atomic::AtomicUsize,
@@ -1007,7 +2081,7 @@ impl<'a> Reservation<'a> {
             .map_err(|_| PackError::PackfileTooLarge)?;
         Ok(OwnedBytes {
             bytes,
-            reservation: self,
+            _reservation: self,
         })
     }
 }
@@ -1020,7 +2094,7 @@ impl Drop for Reservation<'_> {
 
 struct OwnedBytes<'a> {
     bytes: Vec<u8>,
-    reservation: Reservation<'a>,
+    _reservation: Reservation<'a>,
 }
 
 enum ResidentBytes<'p, 'b> {
@@ -1079,6 +2153,7 @@ impl<'p> EncodedPayload<'p> {
     }
 }
 
+#[derive(Clone, Copy)]
 enum Entry<'p> {
     Raw(EncodedPayload<'p>),
     Delta {
@@ -1471,43 +2546,57 @@ impl<'a> PackEntries<'a> {
         self.last_payload_range = Some(payload_start..payload_end);
         self.pos = payload_end;
         self.yielded += 1;
-        match etype {
-            0x00 => Ok(Entry::Raw(EncodedPayload::Plain(payload))),
-            0x03 if self.version == VERSION_V2 => Ok(Entry::Raw(EncodedPayload::Zstd(payload))),
-            0x02 | 0x04 if etype == 0x02 || self.version == VERSION_V2 => {
-                if payload.len() < hash::HASH_LEN {
-                    return Err(PackError::DeltaEntryTruncated);
-                }
-                let base = payload[..hash::HASH_LEN].try_into().expect("32 bytes");
-                let bytes = &payload[hash::HASH_LEN..];
-                let stream = if etype == 0x02 {
-                    EncodedPayload::Plain(bytes)
-                } else {
-                    EncodedPayload::Zstd(bytes)
-                };
-                Ok(Entry::Delta { base, stream })
-            }
-            other => Err(PackError::InvalidEntryType(other)),
-        }
+        encoded_payload(etype, self.version, payload)
     }
 
     fn next_entry(&mut self) -> Result<PackEntry<'a>, PackError> {
-        fn decode(payload: EncodedPayload<'_>) -> Result<Cow<'_, [u8]>, PackError> {
-            match payload {
-                EncodedPayload::Plain(bytes) => Ok(Cow::Borrowed(bytes)),
-                EncodedPayload::Zstd(bytes) => Ok(Cow::Owned(decompress_zstd_entry(bytes)?)),
+        decode_encoded_payload(self.next_encoded_entry()?)
+    }
+}
+
+// One type/payload parser shared by buffered iteration, lazy unpack and windows.
+fn encoded_payload(etype: u8, version: u32, payload: &[u8]) -> Result<Entry<'_>, PackError> {
+    match etype {
+        0x00 => Ok(Entry::Raw(EncodedPayload::Plain(payload))),
+        0x03 if version == VERSION_V2 => Ok(Entry::Raw(EncodedPayload::Zstd(payload))),
+        0x02 | 0x04 if etype == 0x02 || version == VERSION_V2 => {
+            if payload.len() < hash::HASH_LEN {
+                return Err(PackError::DeltaEntryTruncated);
             }
+            let base = payload[..hash::HASH_LEN].try_into().expect("32 bytes");
+            let bytes = &payload[hash::HASH_LEN..];
+            let stream = if etype == 0x02 {
+                EncodedPayload::Plain(bytes)
+            } else {
+                EncodedPayload::Zstd(bytes)
+            };
+            Ok(Entry::Delta { base, stream })
         }
-        match self.next_encoded_entry()? {
-            Entry::Raw(bytes) => Ok(PackEntry::Raw {
-                bytes: decode(bytes)?,
-            }),
-            Entry::Delta { base, stream } => Ok(PackEntry::Delta {
-                base,
-                stream: decode(stream)?,
-            }),
+        other => Err(PackError::InvalidEntryType(other)),
+    }
+}
+
+fn decode_encoded_payload(entry: Entry<'_>) -> Result<PackEntry<'_>, PackError> {
+    fn decode(payload: EncodedPayload<'_>) -> Result<Cow<'_, [u8]>, PackError> {
+        match payload {
+            EncodedPayload::Plain(bytes) => Ok(Cow::Borrowed(bytes)),
+            EncodedPayload::Zstd(bytes) => Ok(Cow::Owned(decompress_zstd_entry(bytes)?)),
         }
     }
+    match entry {
+        Entry::Raw(bytes) => Ok(PackEntry::Raw {
+            bytes: decode(bytes)?,
+        }),
+        Entry::Delta { base, stream } => Ok(PackEntry::Delta {
+            base,
+            stream: decode(stream)?,
+        }),
+    }
+}
+
+// Framing is checked by each caller, payload interpretation is shared.
+fn decode_payload(etype: u8, version: u32, payload: &[u8]) -> Result<PackEntry<'_>, PackError> {
+    decode_encoded_payload(encoded_payload(etype, version, payload)?)
 }
 
 impl<'a> Iterator for PackEntries<'a> {
@@ -1531,8 +2620,8 @@ impl<'a> Iterator for PackEntries<'a> {
 /// Apply a delta while charging the stream, cached base and declared target
 /// before allocating. The use count is consumed before retaining the target,
 /// which also handles identity deltas whose target hash equals their base.
-fn stage_delta_target<'b>(
-    store: &ObjectStore,
+fn stage_delta_target<'b, B: DeltaBaseSource>(
+    bases: &mut B,
     batch: &crate::batch::WriteBatch<'_>,
     in_pack: &mut std::collections::HashMap<Hash, ResidentBytes<'_, 'b>>,
     uses: &mut std::collections::HashMap<Hash, BaseUses>,
@@ -1541,19 +2630,19 @@ fn stage_delta_target<'b>(
     stream: &[u8],
 ) -> Result<Hash, PackError> {
     if let std::collections::hash_map::Entry::Vacant(entry) = in_pack.entry(base_hash) {
-        if !store.contains(&base_hash) {
+        let mut reservation = None;
+        let bytes = bases
+            .base_with_admission(&base_hash, |len| {
+                reservation = Some(budget.charge(len)?);
+                Ok(())
+            })?
+            .ok_or_else(|| PackError::DeltaBaseMissing(hash::to_hex(&base_hash)))?;
+        if !external_base_matches::<B>(&bytes, &base_hash)? {
             return Err(PackError::DeltaBaseMissing(hash::to_hex(&base_hash)));
         }
-        let mut reservation = None;
-        let bytes = store.read_with_allocator(&base_hash, |len| {
-            let output = budget.allocate(len)?;
-            reservation = Some(output.reservation);
-            Ok::<_, PackError>(output.bytes)
-        })?;
-        validate_storable_object(&bytes)?;
         entry.insert(ResidentBytes::Owned(OwnedBytes {
             bytes,
-            reservation: reservation.expect("store allocated its buffer"),
+            _reservation: reservation.expect("source admitted its buffer"),
         }));
     }
     let result_len = validate_delta_result_size(stream)?;
@@ -1573,6 +2662,73 @@ fn stage_delta_target<'b>(
         in_pack.insert(stored_hash, ResidentBytes::Owned(resolved));
     }
     Ok(stored_hash)
+}
+
+/// Resolve a delta's base (in-pack first, then the external
+/// [`DeltaBaseSource`]) and decode `stream` against it. Shared by the
+/// `0x02` and `0x04` branches of [`PackReader::read_inner`] and by
+/// [`decode_entries_with`] — `0x04` differs only in how `stream` was
+/// sourced (decompressed vs. borrowed straight from `pack_bytes`), not
+/// in how base resolution or delta decoding work.
+fn resolve_delta_target<B: DeltaBaseSource>(
+    bases: &mut B,
+    in_pack: &mut std::collections::HashMap<Hash, Cow<'_, [u8]>>,
+    base_hash: Hash,
+    stream: &[u8],
+) -> Result<Vec<u8>, PackError> {
+    // Resolve base: in-pack first, then the external source. An
+    // externally resolved base is cached into `in_pack` under its own
+    // hash so a later delta entry referencing the same out-of-pack base
+    // hits the cache-hit branch above instead of paying another full
+    // read + verify + decode (#643). This is safe because
+    // `external_base` has already established that the bytes are the
+    // object `base_hash` names (the store's `read` hash-verifies; an
+    // unverified source is re-derived there). Cloning once here (vs.
+    // #643's original Arc::clone) is the cost of composing with #647's
+    // Cow-based `in_pack`, which trades that one-time clone for
+    // zero-copy borrows on the far more common raw-entry path — a net
+    // win, and this clone only happens once per unique out-of-pack
+    // base, not per delta entry.
+    let base_bytes: Cow<'_, [u8]> = if let Some(b) = in_pack.get(&base_hash) {
+        Cow::Borrowed(b.as_ref())
+    } else if let Some(bytes) = external_base(bases, &base_hash)? {
+        in_pack.insert(base_hash, Cow::Owned(bytes.clone()));
+        Cow::Owned(bytes)
+    } else {
+        return Err(PackError::DeltaBaseMissing(hash::to_hex(&base_hash)));
+    };
+    validate_delta_result_size(stream)?;
+    let resolved = delta::decode(base_bytes.as_ref(), stream)?;
+    Ok(resolved)
+}
+
+/// Fetch an external delta base from `bases` and establish that it is the
+/// storable canonical object `id` names, or report it absent.
+///
+/// A [`DeltaBaseSource::VERIFIED`] source (the local [`ObjectStore`])
+/// already hash-verified the bytes, so this runs exactly the pre-seam
+/// store path: a non-storable object is a loud error. Any other source
+/// is untrusted for identity: bytes that do not deserialize to a
+/// storable object whose re-derived id is `id` are treated as absent,
+/// so the caller reports [`PackError::DeltaBaseMissing`] — the same
+/// error bytes as a base the source does not have at all.
+fn external_base<B: DeltaBaseSource>(
+    bases: &mut B,
+    id: &Hash,
+) -> Result<Option<Vec<u8>>, PackError> {
+    let Some(bytes) = bases.base(id)? else {
+        return Ok(None);
+    };
+    Ok(external_base_matches::<B>(&bytes, id)?.then_some(bytes))
+}
+
+fn external_base_matches<B: DeltaBaseSource>(bytes: &[u8], id: &Hash) -> Result<bool, PackError> {
+    if B::VERIFIED {
+        validate_storable_object(bytes)?;
+        return Ok(true);
+    }
+    Ok(matches!(validate_storable_object(bytes),
+        Ok(obj) if crate::object::id_from_object(&obj, bytes) == *id))
 }
 
 /// Decode `bytes`, enforce the size and storability invariants, and hand back
@@ -1606,6 +2762,9 @@ fn validate_delta_result_size(stream: &[u8]) -> Result<usize, PackError> {
 // =========================================================================
 // Tests
 // =========================================================================
+
+#[cfg(test)]
+mod zstd_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1722,29 +2881,149 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "pack-zstd")]
+    #[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
     fn junk_zstd_claims_fail_without_zero_filling() {
-        let mut body = Vec::from(MAGIC.as_slice());
-        body.extend_from_slice(&VERSION_V2.to_le_bytes());
-        body.extend_from_slice(&64u32.to_le_bytes());
-        for _ in 0..64 {
-            body.push(0x03);
-            body.extend_from_slice(&5u32.to_le_bytes());
-            body.extend_from_slice(&u32::try_from(MAX_RAW_OBJECT_SIZE).unwrap().to_le_bytes());
-            body.push(0xAA);
+        for etype in [0x03, 0x04] {
+            for count in [16u32, 64, 256] {
+                let mut body = Vec::from(MAGIC.as_slice());
+                body.extend_from_slice(&VERSION_V2.to_le_bytes());
+                body.extend_from_slice(&count.to_le_bytes());
+                for _ in 0..count {
+                    body.push(etype);
+                    let base_len = if etype == 0x04 { hash::HASH_LEN } else { 0 };
+                    body.extend_from_slice(&u32::try_from(base_len + 5).unwrap().to_le_bytes());
+                    if etype == 0x04 {
+                        body.extend_from_slice(&[0; hash::HASH_LEN]);
+                    }
+                    body.extend_from_slice(
+                        &u32::try_from(MAX_RAW_OBJECT_SIZE).unwrap().to_le_bytes(),
+                    );
+                    body.push(0xAA);
+                }
+                let pack = finish_pack_body(body);
+                let (_dir, store) = fresh_store();
+                let started = std::time::Instant::now();
+                assert!(matches!(
+                    PackReader::read(&pack, &store),
+                    Err(PackError::ZstdDecompress(_))
+                ));
+                let elapsed = started.elapsed();
+                println!("junk zstd type=0x{etype:02x} N={count}: {elapsed:?}");
+                assert!(
+                    elapsed < std::time::Duration::from_secs(5),
+                    "junk frames must not initialize the claimed buffers: {elapsed:?}"
+                );
+                assert!(store.iter_object_hashes().unwrap().is_empty());
+            }
         }
-        let pack = finish_pack_body(body);
+    }
+
+    #[test]
+    fn resident_and_decode_limits_are_independent() {
+        let base = write_blob_via_serialize(b"base payload");
+        let target = write_blob_via_serialize(b"target payload");
+        let mut writer = PackWriter::new();
+        writer.push_raw(hash::hash(&base), &base).unwrap();
+        let stream = delta::encode(&base, &target).unwrap();
+        for _ in 0..3 {
+            writer.push_delta(&hash::hash(&base), &stream).unwrap();
+        }
+        let pack = writer.finish().unwrap();
         let (_dir, store) = fresh_store();
-        let started = std::time::Instant::now();
+        let resident = ResidentBudget::new(target.len(), None);
+        PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &resident).unwrap();
+        assert_eq!(resident.used.load(Ordering::Relaxed), 0);
+        // Each target fits simultaneously resident memory, but all three
+        // declared targets together exceed the cumulative DecodeLimits.
+        let low = DecodeLimits::default().with_max_decoded_bytes(target.len() as u64);
+        let mut seen = 0;
         assert!(matches!(
-            PackReader::read(&pack, &store),
-            Err(PackError::ZstdDecompress(_))
+            decode_entries_with(&pack, &mut NoExternalBases, low, |_| {
+                seen += 1;
+                Ok(())
+            }),
+            Err(PackError::PackfileTooLarge)
         ));
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(5),
-            "junk frames must not initialize the claimed buffers: {:?}",
-            started.elapsed()
+        assert_eq!(seen, 0);
+        let high = DecodeLimits::default().with_max_decoded_bytes((3 * target.len()) as u64);
+        decode_entries_with(&pack, &mut NoExternalBases, high, |_| Ok(())).unwrap();
+        let (_dir, store) = fresh_store();
+        let resident = ResidentBudget::new(target.len() - 1, None);
+        assert!(matches!(
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &resident),
+            Err(PackError::PackfileTooLarge)
+        ));
+        assert_eq!(resident.peak.load(Ordering::Relaxed), 0);
+        assert!(store.iter_object_hashes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn external_base_admission_charges_both_budgets() {
+        let (_dir, store) = fresh_store();
+        let bytes = write_blob_via_serialize(b"external base");
+        let id = store.write(&bytes).unwrap();
+        for (decoded_cap, resident_cap) in [
+            (bytes.len() - 1, bytes.len()),
+            (bytes.len(), bytes.len() - 1),
+            (bytes.len(), bytes.len()),
+        ] {
+            let mut source = &store;
+            let mut budget = DecodeBudget {
+                used: 0,
+                max: decoded_cap as u64,
+            };
+            let mut charged = std::collections::HashMap::new();
+            let mut bases = ChargedBases {
+                inner: &mut source,
+                budget: &mut budget,
+                charged: &mut charged,
+            };
+            let resident = ResidentBudget::new(resident_cap, None);
+            let mut reservation = None;
+            let result = bases.base_with_admission(&id, |len| {
+                reservation = Some(resident.charge(len)?);
+                Ok(())
+            });
+            if decoded_cap < bytes.len() || resident_cap < bytes.len() {
+                assert!(matches!(result, Err(PackError::PackfileTooLarge)));
+                assert!(reservation.is_none());
+                assert_eq!(resident.peak.load(Ordering::Relaxed), 0);
+            } else {
+                assert_eq!(result.unwrap(), Some(bytes.clone()));
+                assert_eq!(bases.budget.used, bytes.len() as u64);
+                assert_eq!(resident.used.load(Ordering::Relaxed), bytes.len());
+                bases.release(&id);
+                drop(reservation);
+                assert_eq!(bases.budget.used, 0);
+                assert_eq!(resident.used.load(Ordering::Relaxed), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn provided_base_admission_preserves_existing_sources() {
+        struct Source(Vec<u8>);
+        impl DeltaBaseSource for Source {
+            fn base(&mut self, _id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+                Ok(Some(self.0.clone()))
+            }
+        }
+        let mut source = Source(vec![1, 2, 3]);
+        let mut admitted = None;
+        assert_eq!(
+            source
+                .base_with_admission(&[0; 32], |len| {
+                    admitted = Some(len);
+                    Ok(())
+                })
+                .unwrap(),
+            Some(vec![1, 2, 3])
         );
+        assert_eq!(admitted, Some(3));
+        assert!(matches!(
+            source.base_with_admission(&[0; 32], |_| Err(PackError::PackfileTooLarge)),
+            Err(PackError::PackfileTooLarge)
+        ));
     }
 
     #[test]
@@ -2198,7 +3477,7 @@ mod tests {
         for remaining in [1, 0] {
             assert_eq!(
                 stage_delta_target(
-                    &store,
+                    &mut &store,
                     &batch,
                     &mut in_pack,
                     &mut uses,
@@ -2233,7 +3512,7 @@ mod tests {
         )]);
         assert!(matches!(
             stage_delta_target(
-                &store,
+                &mut &store,
                 &batch,
                 &mut in_pack,
                 &mut uses,
@@ -2728,6 +4007,47 @@ mod tests {
             delta_base_hashes(&pack),
             Err(PackError::InvalidMagic)
         ));
+    }
+
+    #[test]
+    fn decoded_frame_metadata_reconstructs_the_same_object() {
+        let blob = write_blob_via_serialize(b"frame metadata");
+        let id = hash::hash(&blob);
+        let mut writer = PackWriter::new_raw_only();
+        writer.push_raw(id, &blob).unwrap();
+        let pack = writer.finish().unwrap();
+        let mut frames = Vec::new();
+        decode_entries_with(
+            &pack,
+            &mut NoExternalBases,
+            DecodeLimits::default(),
+            |entry| {
+                frames.push((
+                    entry.id,
+                    entry.frame_offset,
+                    entry.frame_length,
+                    entry.wire_type,
+                    entry.delta_base,
+                ));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(frames.len(), 1);
+        let (found, offset, length, kind, base) = frames[0];
+        assert_eq!(found, id);
+        assert_eq!(kind, 0);
+        assert_eq!(base, None);
+        let frame =
+            &pack[usize::try_from(offset).unwrap()..usize::try_from(offset + length).unwrap()];
+        let (decoded, bytes) = decode_frame_with(
+            frame,
+            VERSION,
+            &mut NoExternalBases,
+            DecodeLimits::default(),
+        )
+        .unwrap();
+        assert_eq!((decoded, bytes), (id, blob));
     }
 
     #[test]
@@ -3232,6 +4552,7 @@ mod tests {
     /// Highly-compressible synthetic payload: `MIN_COMPRESS_LEN` (64) is
     /// the writer's floor, so use something well past it — a single
     /// repeated byte is the easiest thing for zstd to shrink hard.
+    #[cfg(feature = "pack-zstd")]
     fn compressible_bytes(len: usize) -> Vec<u8> {
         vec![0x42u8; len]
     }
@@ -3475,6 +4796,705 @@ mod tests {
         assert_eq!(store.read(&h).unwrap(), blob);
     }
 
+    // =====================================================================
+    // `DeltaBaseSource` seam / `decode_entries_with` (WP-4.2)
+    // =====================================================================
+
+    /// `(target id, target bytes, delta stream against the base)`.
+    type Variant = (Hash, Vec<u8>, Vec<u8>);
+    /// `(id, bytes, from_delta)` as a decode sink saw it.
+    type Seen = (Hash, Vec<u8>, bool);
+
+    /// A 512-byte base blob and `n` single-byte variants of it, with
+    /// their delta streams against the base.
+    fn base_and_variants(n: usize) -> (Vec<u8>, Hash, Vec<Variant>) {
+        let mut content = vec![0u8; 512];
+        for (i, b) in content.iter_mut().enumerate() {
+            *b = u8::try_from(i % 251).expect("modulo < 256");
+        }
+        let base = write_blob_via_serialize(&content);
+        let base_hash = hash::hash(&base);
+        let variants = (0..n)
+            .map(|i| {
+                let mut c = content.clone();
+                c[100] = u8::try_from(i).unwrap() ^ 0xA5;
+                let target = write_blob_via_serialize(&c);
+                let stream = delta::encode(&base, &target).unwrap();
+                (hash::hash(&target), target, stream)
+            })
+            .collect();
+        (base, base_hash, variants)
+    }
+
+    /// Decode `pack` through `bases`, collecting what the sink saw.
+    fn decode_collect<B: DeltaBaseSource>(
+        pack: &[u8],
+        bases: &mut B,
+    ) -> Result<(DecodeReport, Vec<Seen>), PackError> {
+        let mut seen = Vec::new();
+        let report = decode_entries_with(pack, bases, DecodeLimits::default(), |e| {
+            assert_eq!(e.id, crate::object::id_from_object(&e.object, e.bytes));
+            seen.push((e.id, e.bytes.to_vec(), e.from_delta));
+            Ok(())
+        })?;
+        Ok((report, seen))
+    }
+
+    #[test]
+    fn decode_cursor_resumes_at_two_external_bases_without_replaying_entries() {
+        #[derive(Default)]
+        struct Supplied(std::collections::HashMap<Hash, Vec<u8>>);
+        impl DeltaBaseSource for Supplied {
+            fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+                Ok(self.0.get(id).cloned())
+            }
+        }
+
+        let raw_before = write_blob_via_serialize(b"before first base");
+        let raw_between = write_blob_via_serialize(b"between bases");
+        let base_a = write_blob_via_serialize(b"external base a");
+        let base_b = write_blob_via_serialize(b"external base b");
+        let target_a = write_blob_via_serialize(b"target a");
+        let target_b = write_blob_via_serialize(b"target b");
+        let base_a_id = hash::hash(&base_a);
+        let second_id = hash::hash(&base_b);
+        let mut writer = PackWriter::new();
+        writer
+            .push_raw(hash::hash(&raw_before), &raw_before)
+            .unwrap();
+        writer
+            .push_delta(&base_a_id, &delta::encode(&base_a, &target_a).unwrap())
+            .unwrap();
+        writer
+            .push_raw(hash::hash(&raw_between), &raw_between)
+            .unwrap();
+        writer
+            .push_delta(&second_id, &delta::encode(&base_b, &target_b).unwrap())
+            .unwrap();
+        let pack = writer.finish().unwrap();
+
+        let mut cursor = PackDecodeCursor::new(&pack, DecodeLimits::default()).unwrap();
+        let mut supplied = Supplied::default();
+        let mut seen = Vec::new();
+        let first = cursor
+            .resume(&mut supplied, |entry| {
+                seen.push((entry.id, entry.bytes.to_vec(), entry.from_delta));
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(
+            matches!(first, PackError::DeltaBaseMissing(ref id) if *id == hash::to_hex(&base_a_id))
+        );
+        assert_eq!(seen.len(), 1);
+        assert!(matches!(
+            cursor.set_max_decoded_bytes(0),
+            Err(PackError::PackfileTooLarge)
+        ));
+        cursor.set_max_decoded_bytes(4096).unwrap();
+
+        supplied.0.insert(base_a_id, base_a.clone());
+        let second = cursor
+            .resume(&mut supplied, |entry| {
+                seen.push((entry.id, entry.bytes.to_vec(), entry.from_delta));
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(
+            matches!(second, PackError::DeltaBaseMissing(ref id) if *id == hash::to_hex(&second_id))
+        );
+        assert_eq!(seen.len(), 3);
+
+        supplied.0.insert(second_id, base_b.clone());
+        let report = cursor
+            .resume(&mut supplied, |entry| {
+                seen.push((entry.id, entry.bytes.to_vec(), entry.from_delta));
+                Ok(())
+            })
+            .unwrap();
+        let (baseline_report, baseline_seen) = decode_collect(&pack, &mut supplied).unwrap();
+        assert_eq!(report, baseline_report);
+        assert_eq!(seen, baseline_seen);
+        assert_eq!(report.ids.len(), 4);
+    }
+
+    /// Self-contained test packs of every entry shape the writer emits
+    /// (raw, raw + in-pack delta, and — under `pack-zstd` — `0x03`/`0x04`).
+    fn self_contained_packs() -> Vec<Vec<u8>> {
+        let mut packs = vec![PackWriter::new().finish().unwrap()];
+
+        let mut w = PackWriter::new();
+        for i in 0..20u32 {
+            let blob = write_blob_via_serialize(&incompressible_bytes(u64::from(i), 256));
+            w.push_raw(hash::hash(&blob), &blob).unwrap();
+        }
+        packs.push(w.finish().unwrap());
+
+        let (base, base_hash, variants) = base_and_variants(3);
+        let mut w = PackWriter::new();
+        w.push_raw(base_hash, &base).unwrap();
+        for (_, _, stream) in &variants {
+            w.push_delta(&base_hash, stream).unwrap();
+        }
+        // Chain: a delta whose base is itself an earlier delta target.
+        let (t0_hash, t0, _) = &variants[0];
+        let mut chained = t0.clone();
+        let last = chained.len() - 1;
+        chained[last] ^= 0x01;
+        w.push_delta(t0_hash, &delta::encode(t0, &chained).unwrap())
+            .unwrap();
+        packs.push(w.finish().unwrap());
+
+        let tree = crate::serialize::serialize(&Object::Tree(crate::object::Tree {
+            entries: vec![crate::object::TreeEntry {
+                name: b"f".to_vec(),
+                mode: crate::object::EntryMode::Blob,
+                object_hash: base_hash,
+            }],
+        }))
+        .unwrap();
+        let mut w = PackWriter::new_raw_only();
+        w.push_raw(crate::object::object_id_from_bytes(&tree), &tree)
+            .unwrap();
+        w.push_raw(base_hash, &base).unwrap();
+        packs.push(w.finish().unwrap());
+
+        #[cfg(feature = "pack-zstd")]
+        {
+            let base = write_blob_via_serialize(b"delta base filler, not target-shaped");
+            let base_hash = hash::hash(&base);
+            let target = write_blob_via_serialize(&compressible_bytes(4096));
+            let raw = write_blob_via_serialize(&compressible_bytes(8192));
+            let mut w = PackWriter::new();
+            w.push_raw(hash::hash(&raw), &raw).unwrap();
+            w.push_raw(base_hash, &base).unwrap();
+            w.push_delta(&base_hash, &delta::encode(&base, &target).unwrap())
+                .unwrap();
+            let pack = w.finish().unwrap();
+            assert_eq!(pack[HEADER_LEN], 0x03, "sanity: zstd-raw entry");
+            packs.push(pack);
+        }
+        packs
+    }
+
+    #[test]
+    fn decode_with_no_external_bases_matches_reader() {
+        for pack in self_contained_packs() {
+            let (_dir, store) = fresh_store();
+            let unpacked = PackReader::read(&pack, &store).unwrap();
+            let (report, seen) = decode_collect(&pack, &mut NoExternalBases).unwrap();
+
+            assert_eq!(report.ids, unpacked.stored);
+            assert_eq!(report.raw_count, unpacked.raw_count as usize);
+            assert_eq!(report.delta_count, unpacked.delta_count as usize);
+            assert_eq!(
+                seen.iter().filter(|s| s.2).count(),
+                unpacked.delta_count as usize
+            );
+            for (id, bytes, _) in &seen {
+                assert_eq!(&store.read(id).unwrap(), bytes, "same bytes under {id:?}");
+            }
+            assert_eq!(seen.iter().map(|s| s.0).collect::<Vec<_>>(), report.ids);
+        }
+    }
+
+    #[test]
+    fn decode_rejects_exactly_what_reader_rejects() {
+        // The reader has no decode budget, so compare against an unbounded
+        // decoder (the over-cap delta would otherwise trip the budget first).
+        let unbounded = DecodeLimits::default().with_max_decoded_bytes(u64::MAX);
+        // Every error-precedence pack pinned above must fail the same way
+        // through the store-less decoder.
+        let base_obj = write_blob_via_serialize(&[0u8; 64]);
+        let target_obj = write_blob_via_serialize(&[1u8; 64]);
+        let base_hash = hash::hash(&base_obj);
+        let stream = delta::encode(&base_obj, &target_obj).unwrap();
+        let mut w = PackWriter::new();
+        w.push_delta(&base_hash, &stream).unwrap();
+        for i in 0..200u32 {
+            if i == 100 {
+                w.push_raw([0xEE; 32], b"not a valid mkit object").unwrap();
+                continue;
+            }
+            let obj = write_blob_via_serialize(&i.to_le_bytes());
+            w.push_raw(hash::hash(&obj), &obj).unwrap();
+        }
+        w.push_raw(base_hash, &base_obj).unwrap();
+        let delta_first = w.finish().unwrap();
+
+        let mut w = PackWriter::new();
+        w.push_raw([0xEE; 32], b"not a valid mkit object").unwrap();
+        w.push_delta(&base_hash, &stream).unwrap();
+        let raw_first = w.finish().unwrap();
+
+        let mut w = PackWriter::new();
+        w.push_raw(base_hash, &base_obj).unwrap();
+        let oversized = {
+            let mut s = stream.clone();
+            s[5..9].copy_from_slice(
+                &u32::try_from(MAX_RAW_OBJECT_SIZE + 1)
+                    .unwrap()
+                    .to_le_bytes(),
+            );
+            s
+        };
+        w.push_delta(&base_hash, &oversized).unwrap();
+        let over_cap = w.finish().unwrap();
+
+        let mut flipped = PackWriter::new().finish().unwrap();
+        flipped[HEADER_LEN] ^= 0x01;
+
+        for pack in [delta_first, raw_first, over_cap, flipped] {
+            let (_dir, store) = fresh_store();
+            let reader = PackReader::read(&pack, &store).unwrap_err();
+            let decoder = decode_entries_with(&pack, &mut NoExternalBases, unbounded, |_| Ok(()))
+                .unwrap_err();
+            assert_eq!(reader.to_string(), decoder.to_string());
+        }
+    }
+
+    #[test]
+    fn external_base_outside_source_is_delta_base_missing() {
+        // The base exists — in a store the decoder is not given. A
+        // membership-scoped source that does not list it, and a source
+        // with no external bases at all, must both fail exactly as a base
+        // that exists nowhere does.
+        struct Membership<'s> {
+            store: &'s ObjectStore,
+            members: std::collections::BTreeSet<Hash>,
+        }
+        impl DeltaBaseSource for Membership<'_> {
+            fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+                if !self.members.contains(id) {
+                    return Ok(None);
+                }
+                Ok(Some(self.store.read(id)?))
+            }
+        }
+
+        let (_other_dir, other_repo) = fresh_store();
+        let (base, base_hash, variants) = base_and_variants(1);
+        other_repo.write(&base).unwrap();
+        let mut w = PackWriter::new();
+        w.push_delta(&base_hash, &variants[0].2).unwrap();
+        let pack = w.finish().unwrap();
+
+        let (_dir, empty) = fresh_store();
+        let nowhere = PackReader::read(&pack, &empty).unwrap_err().to_string();
+        assert_eq!(
+            nowhere,
+            PackError::DeltaBaseMissing(hash::to_hex(&base_hash)).to_string()
+        );
+
+        let mut sink_calls = 0usize;
+        let no_ext =
+            decode_entries_with(&pack, &mut NoExternalBases, DecodeLimits::default(), |_| {
+                sink_calls += 1;
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(no_ext.to_string(), nowhere);
+
+        let mut scoped = Membership {
+            store: &other_repo,
+            members: std::collections::BTreeSet::new(),
+        };
+        let not_member = decode_entries_with(&pack, &mut scoped, DecodeLimits::default(), |_| {
+            sink_calls += 1;
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(not_member.to_string(), nowhere);
+        assert_eq!(sink_calls, 0);
+
+        // Once the base IS a member, the same pack decodes.
+        scoped.members.insert(base_hash);
+        let (report, seen) = decode_collect(&pack, &mut scoped).unwrap();
+        assert_eq!(report.ids, vec![variants[0].0]);
+        assert_eq!(seen[0].1, variants[0].1);
+        assert!(seen[0].2);
+    }
+
+    #[test]
+    fn untrusted_source_returning_wrong_bytes_is_rejected() {
+        struct Lying {
+            answer: Vec<u8>,
+        }
+        impl DeltaBaseSource for Lying {
+            fn base(&mut self, _id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+                Ok(Some(self.answer.clone()))
+            }
+        }
+
+        let (base, base_hash, variants) = base_and_variants(1);
+        let mut w = PackWriter::new();
+        w.push_delta(&base_hash, &variants[0].2).unwrap();
+        let pack = w.finish().unwrap();
+        let expected = PackError::DeltaBaseMissing(hash::to_hex(&base_hash)).to_string();
+
+        // A different, perfectly valid object; bytes that are not an
+        // object; and a pack-only delta object: none may stand in.
+        let impostor = write_blob_via_serialize(b"a different valid object");
+        let delta_obj = crate::serialize::serialize(&Object::Delta(crate::object::Delta {
+            base_hash,
+            result_size: 0,
+            instructions: vec![],
+        }))
+        .unwrap();
+        for answer in [impostor, b"garbage".to_vec(), delta_obj] {
+            let mut emitted = Vec::new();
+            let err =
+                decode_entries_with(&pack, &mut Lying { answer }, DecodeLimits::default(), |e| {
+                    emitted.push(e.id);
+                    Ok(())
+                })
+                .unwrap_err();
+            assert_eq!(err.to_string(), expected);
+            assert!(emitted.is_empty(), "no target may be emitted");
+        }
+
+        // The genuine bytes from the same untrusted source are accepted.
+        let (report, _) = decode_collect(&pack, &mut Lying { answer: base }).unwrap();
+        assert_eq!(report.ids, vec![variants[0].0]);
+    }
+
+    #[test]
+    fn store_source_is_verified_once() {
+        // `multiple_deltas_against_shared_external_base_read_store_once`,
+        // through the store-less decoder with `&ObjectStore` as source.
+        const N: usize = 5;
+        let (_dir, store) = fresh_store();
+        let (base, base_hash, variants) = base_and_variants(N);
+        store.write(&base).unwrap();
+        let mut w = PackWriter::new();
+        for (_, _, stream) in &variants {
+            w.push_delta(&base_hash, stream).unwrap();
+        }
+        let pack = w.finish().unwrap();
+
+        let reads_before = store.read_call_count();
+        let mut source = &store;
+        let (report, seen) = decode_collect(&pack, &mut source).unwrap();
+        assert_eq!(store.read_call_count() - reads_before, 1);
+        assert_eq!(report.delta_count, N);
+        for ((id, bytes, _), (want_id, want, _)) in seen.iter().zip(&variants) {
+            assert_eq!(id, want_id);
+            assert_eq!(bytes, want);
+        }
+        // Store-less: nothing was written.
+        for (id, _, _) in &variants {
+            assert!(!store.contains(id));
+        }
+    }
+
+    #[test]
+    fn corrupt_store_base_is_a_loud_store_error() {
+        // The verified store path keeps its pre-seam behavior: a base whose
+        // on-disk bytes no longer hash to its id is `Store(HashMismatch)`,
+        // not a silent "missing".
+        use std::io::{Seek, Write};
+        let (_dir, store) = fresh_store();
+        let (base, base_hash, variants) = base_and_variants(1);
+        store.write(&base).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(store.path_for(&base_hash))
+            .unwrap();
+        f.seek(std::io::SeekFrom::End(-1)).unwrap();
+        f.write_all(&[base[base.len() - 1] ^ 0xFF]).unwrap();
+        drop(f);
+        let mut w = PackWriter::new();
+        w.push_delta(&base_hash, &variants[0].2).unwrap();
+        let pack = w.finish().unwrap();
+
+        let reader = PackReader::read(&pack, &store).unwrap_err();
+        let mut source = &store;
+        let decoder = decode_entries_with(&pack, &mut source, DecodeLimits::default(), |_| Ok(()))
+            .unwrap_err();
+        assert!(matches!(reader, PackError::Store(_)), "{reader:?}");
+        assert_eq!(reader.to_string(), decoder.to_string());
+    }
+
+    /// The WP-4.2 review's memory probe: one 64 KiB raw base, then `n`
+    /// deltas, each a valid SPEC-DELTA stream that rebuilds a distinct
+    /// `target_len`-byte blob purely by copying base bytes (a few bytes of
+    /// wire per 64 KiB of result; `pack-zstd` shrinks it further).
+    /// Returns the pack and the ids of the delta targets.
+    fn delta_bomb(n: u32, target_len: usize) -> (Vec<u8>, Vec<Hash>) {
+        let base = write_blob_via_serialize(&vec![0u8; 65536]);
+        let base_hash = hash::hash(&base);
+        let zeros_at = u32::try_from(base.len() - 65536).unwrap();
+        // Blob prologue + length for a `target_len`-byte blob.
+        let mut prologue = write_blob_via_serialize(&[]);
+        let len_at = prologue.len() - 4;
+        prologue[len_at..].copy_from_slice(&u32::try_from(target_len).unwrap().to_le_bytes());
+        let total = prologue.len() + target_len;
+
+        let mut w = PackWriter::new();
+        w.push_raw(base_hash, &base).unwrap();
+        let mut ids = Vec::new();
+        for i in 0..n {
+            let mut s = vec![delta::STREAM_VERSION];
+            s.extend_from_slice(&u32::try_from(base.len()).unwrap().to_le_bytes());
+            s.extend_from_slice(&u32::try_from(total).unwrap().to_le_bytes());
+            s.push(u8::try_from(prologue.len()).unwrap());
+            s.extend_from_slice(&prologue);
+            // Four distinguishing data bytes, then zeros copied from base.
+            s.push(4);
+            s.extend_from_slice(&i.to_le_bytes());
+            let mut left = target_len - 4;
+            while left > 0 {
+                let len = left.min(65535);
+                s.push(delta::OP_COPY);
+                s.extend_from_slice(&zeros_at.to_le_bytes());
+                s.extend_from_slice(&u16::try_from(len).unwrap().to_le_bytes());
+                left -= len;
+            }
+            w.push_delta(&base_hash, &s).unwrap();
+            let mut data = vec![0u8; target_len];
+            data[..4].copy_from_slice(&i.to_le_bytes());
+            ids.push(hash::hash(&write_blob_via_serialize(&data)));
+        }
+        (w.finish().unwrap(), ids)
+    }
+
+    #[test]
+    fn delta_bomb_is_rejected_before_any_delta_is_applied() {
+        // 16 deltas declaring 128 MiB each (2 GiB in all) from a pack of a
+        // few hundred KiB at most: over the default 1 GiB budget, so the
+        // decode fails before it applies (allocates) a single target.
+        let (pack, _) = delta_bomb(16, 128 << 20);
+        assert!(pack.len() < 512 * 1024, "pack is {} bytes", pack.len());
+        let mut sink_calls = 0usize;
+        let err = decode_entries_with(&pack, &mut NoExternalBases, DecodeLimits::default(), |_| {
+            sink_calls += 1;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(matches!(err, PackError::PackfileTooLarge), "{err:?}");
+        assert_eq!(sink_calls, 0, "rejected before the first entry is judged");
+    }
+
+    #[test]
+    fn decode_budget_is_caller_set() {
+        // The same construction at a small size decodes to real objects
+        // under a budget that covers it, and fails under one just short of
+        // the declared results alone. (Under `pack-zstd` the writer also
+        // compresses the streams, whose claims are charged too, so the
+        // exact boundary depends on the build.)
+        const TARGET: usize = 256 * 1024;
+        let (pack, ids) = delta_bomb(3, TARGET);
+        let declared = 3 * (TARGET as u64 + 10);
+
+        let fits = DecodeLimits::default().with_max_decoded_bytes(2 * declared);
+        let (_dir, store) = fresh_store();
+        let unpacked = PackReader::read(&pack, &store).unwrap();
+        let mut seen = Vec::new();
+        let report = decode_entries_with(&pack, &mut NoExternalBases, fits, |e| {
+            seen.push(e.id);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(report.ids, unpacked.stored);
+        assert_eq!(seen[1..], ids[..]);
+
+        let short = DecodeLimits::default().with_max_decoded_bytes(declared - 1);
+        let err = decode_entries_with(&pack, &mut NoExternalBases, short, |_| Ok(())).unwrap_err();
+        assert!(matches!(err, PackError::PackfileTooLarge), "{err:?}");
+    }
+
+    #[test]
+    fn compressed_claims_are_charged_before_decompression() {
+        // A v2 `0x03` entry claiming 512 MiB behind a bogus frame: a
+        // decoder that decompressed first would fail on the frame; the
+        // budget must reject on the claim alone.
+        let claimed = u32::try_from(512usize << 20).unwrap();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(MAGIC);
+        buf.extend_from_slice(&VERSION_V2.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.push(0x03);
+        let mut inner = claimed.to_le_bytes().to_vec();
+        inner.extend_from_slice(&[0u8; 8]);
+        buf.extend_from_slice(&u32::try_from(inner.len()).unwrap().to_le_bytes());
+        buf.extend_from_slice(&inner);
+        let pack = finish_pack_body(buf);
+
+        let small = DecodeLimits::default().with_max_decoded_bytes(1 << 20);
+        let err = decode_entries_with(&pack, &mut NoExternalBases, small, |_| Ok(())).unwrap_err();
+        assert!(matches!(err, PackError::PackfileTooLarge), "{err:?}");
+        // Within budget, the frame itself is what fails.
+        let err = decode_entries_with(&pack, &mut NoExternalBases, DecodeLimits::default(), |_| {
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(!matches!(err, PackError::PackfileTooLarge), "{err:?}");
+    }
+
+    #[test]
+    fn payload_len_u32_max_is_a_clean_error() {
+        // `pos + payload_len` used to overflow a 32-bit `usize` (wasm32)
+        // here; the checks are now subtraction-based. 64-bit hosts get the
+        // same clean `UnexpectedEof`; `mkit-core-wasm-check` runs the
+        // wasm32 lane.
+        let blob = write_blob_via_serialize(&[1, 2, 3]);
+        let mut w = PackWriter::new_raw_only();
+        w.push_raw(hash::hash(&blob), &blob).unwrap();
+        let mut pack = w.finish().unwrap();
+        pack[HEADER_LEN + 1..HEADER_LEN + 5].copy_from_slice(&u32::MAX.to_le_bytes());
+        let split = pack.len() - TRAILER_LEN;
+        let trailer = hash::hash(&pack[..split]);
+        pack[split..].copy_from_slice(&trailer);
+
+        assert!(matches!(
+            PackEntries::new(&pack).unwrap_err(),
+            PackError::UnexpectedEof
+        ));
+        assert!(matches!(
+            delta_base_hashes(&pack).unwrap_err(),
+            PackError::UnexpectedEof
+        ));
+        let err = decode_entries_with(&pack, &mut NoExternalBases, DecodeLimits::default(), |_| {
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(matches!(err, PackError::UnexpectedEof), "{err:?}");
+    }
+
+    #[test]
+    fn only_named_bases_stay_resident() {
+        // Behavioral pin for the retention rule: an entry no delta names
+        // is dropped after the sink, yet a later delta against an earlier
+        // *named* entry (raw or delta target) still resolves.
+        let (base, base_hash, variants) = base_and_variants(2);
+        let unrelated = write_blob_via_serialize(b"never a base");
+        let (t0_hash, t0, _) = &variants[0];
+        let mut chained = t0.clone();
+        let last = chained.len() - 1;
+        chained[last] ^= 0x01;
+        let mut w = PackWriter::new();
+        w.push_raw(hash::hash(&unrelated), &unrelated).unwrap();
+        w.push_raw(base_hash, &base).unwrap();
+        w.push_delta(&base_hash, &variants[0].2).unwrap();
+        w.push_delta(t0_hash, &delta::encode(t0, &chained).unwrap())
+            .unwrap();
+        let pack = w.finish().unwrap();
+        let (_dir, store) = fresh_store();
+        let unpacked = PackReader::read(&pack, &store).unwrap();
+        let (report, _) = decode_collect(&pack, &mut NoExternalBases).unwrap();
+        assert_eq!(report.ids, unpacked.stored);
+    }
+
+    /// A repository-membership source over in-memory objects, counting
+    /// fetches (the review's `bomb ext` shape: bases live only here).
+    struct Members {
+        objects: std::collections::HashMap<Hash, Vec<u8>>,
+        fetches: usize,
+    }
+
+    impl DeltaBaseSource for Members {
+        fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+            self.fetches += 1;
+            Ok(self.objects.get(id).cloned())
+        }
+    }
+
+    /// Two 600 KiB member blobs and a tiny delta against each: `(source,
+    /// [(base id, delta stream)])`. Each delta rebuilds a small blob, so
+    /// its declared result is a few hundred bytes.
+    fn large_member_bases() -> (Members, Vec<(Hash, Vec<u8>)>) {
+        let mut objects = std::collections::HashMap::new();
+        let mut deltas = Vec::new();
+        for seed in [1u64, 2] {
+            let base = write_blob_via_serialize(&incompressible_bytes(seed, 600 * 1024));
+            let id = hash::hash(&base);
+            let target = write_blob_via_serialize(&base[10..300]);
+            deltas.push((id, delta::encode(&base, &target).unwrap()));
+            objects.insert(id, base);
+        }
+        (
+            Members {
+                objects,
+                fetches: 0,
+            },
+            deltas,
+        )
+    }
+
+    fn pack_of_deltas(deltas: &[&(Hash, Vec<u8>)]) -> Vec<u8> {
+        let mut w = PackWriter::new();
+        for (base, stream) in deltas {
+            w.push_delta(base, stream).unwrap();
+        }
+        w.finish().unwrap()
+    }
+
+    #[test]
+    fn external_bases_are_charged_against_the_budget() {
+        let one_mib = DecodeLimits::default().with_max_decoded_bytes(1 << 20);
+        let (mut members, deltas) = large_member_bases();
+
+        // A then B then A: A must stay cached while B is fetched, so the
+        // two 600 KiB bases are held at once and pass the 1 MiB budget at
+        // B's fetch. Only the first delta reaches the sink.
+        let pack = pack_of_deltas(&[&deltas[0], &deltas[1], &deltas[0]]);
+        let mut sink_calls = 0usize;
+        let err = decode_entries_with(&pack, &mut members, one_mib, |_| {
+            sink_calls += 1;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(matches!(err, PackError::PackfileTooLarge), "{err:?}");
+        assert_eq!(sink_calls, 1);
+
+        // A single base larger than the budget fails before any sink call.
+        let half_mib = DecodeLimits::default().with_max_decoded_bytes(512 * 1024);
+        let pack = pack_of_deltas(&[&deltas[0]]);
+        let mut sink_calls = 0usize;
+        let err = decode_entries_with(&pack, &mut members, half_mib, |_| {
+            sink_calls += 1;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(matches!(err, PackError::PackfileTooLarge), "{err:?}");
+        assert_eq!(sink_calls, 0);
+    }
+
+    #[test]
+    fn external_base_charge_is_released_after_its_last_use() {
+        // A, A, then B: A's last use comes before B is fetched, so A is
+        // dropped and its charge credited back; the peak is one base, and
+        // the same 1 MiB budget accepts the pack. A is fetched once.
+        let one_mib = DecodeLimits::default().with_max_decoded_bytes(1 << 20);
+        let (mut members, deltas) = large_member_bases();
+        let pack = pack_of_deltas(&[&deltas[0], &deltas[0], &deltas[1]]);
+        let report = decode_entries_with(&pack, &mut members, one_mib, |_| Ok(())).unwrap();
+        assert_eq!(report.delta_count, 3);
+        assert_eq!(members.fetches, 2);
+    }
+
+    #[test]
+    fn sink_error_stops_decode() {
+        let mut w = PackWriter::new();
+        let mut ids = Vec::new();
+        for i in 0..5u32 {
+            let blob = write_blob_via_serialize(&i.to_le_bytes());
+            ids.push(w.push_raw(hash::hash(&blob), &blob).unwrap());
+        }
+        let pack = w.finish().unwrap();
+
+        let mut seen = Vec::new();
+        let err = decode_entries_with(&pack, &mut NoExternalBases, DecodeLimits::default(), |e| {
+            seen.push(e.id);
+            if seen.len() == 2 {
+                return Err(PackError::TrailingData);
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(matches!(err, PackError::TrailingData), "{err:?}");
+        assert_eq!(seen, ids[..2]);
+    }
+
     #[test]
     fn pack_entries_is_raw_only_false_for_delta() {
         let base = write_blob_via_serialize(b"base-for-delta-scan");
@@ -3488,5 +5508,351 @@ mod tests {
         let entries = PackEntries::new(&pack).unwrap();
         assert!(!entries.is_raw_only());
         assert_eq!(entries.first_non_raw_index(), Some(1));
+    }
+}
+
+/// Kani proof harnesses (`cargo kani -p mkit-core --no-default-features
+/// -Z stubbing --harness pack_`, see `delta.rs`; the reader-side zstd
+/// call is stubbed either way and the writer never compresses below
+/// `MIN_COMPRESS_LEN`, so the feature does not change what is checked),
+/// the model-checked counterparts of the `pack` and `pack_entries` fuzz
+/// targets.
+///
+/// BLAKE3 is stubbed with a cheap deterministic `toy_hash`: the trailer
+/// bytes stay fully symbolic, so both the §8 trailer-match and -mismatch
+/// paths are explored, and the writer/reader round-trip still agrees on
+/// one function. zstd (C FFI, not modelable) is stubbed with a
+/// nondeterministic "fail, or return any <= 2-byte buffer" — a sound
+/// over-approximation for panic-freedom of the surrounding framing code.
+/// `PackReader::read` itself needs an on-disk `ObjectStore`, which Kani
+/// cannot model. A store-free harness over its per-entry steps (entry
+/// parsing + the storability gate) ran out of memory even for one 5-byte
+/// entry frame: CBMC's symbolic execution of the `PackError` →
+/// `StoreError` → `std::io::Error` drop glue dominates (~13 min), so
+/// that composition is left to the `pack` fuzz target.
+///
+/// The `pack_window_cursor_*` harnesses cover the one new decoder surface
+/// of the windowed reader (SPEC-PACKFILE §11): the persisted resumable
+/// cursor (`window::WindowCursor::from_bytes`). Its framing path shares
+/// `decode_payload` with `PackEntries`; `rewrite::rewrite_excluding`
+/// parses through `PackEntries`/`decode_entries_with` and adds no decoder.
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Loop-free deterministic stand-in for BLAKE3: the first and last
+    /// 16 bytes of `data` plus its length (loop-free so it does not
+    /// interact with the global unwind bound).
+    fn toy_hash(data: &[u8]) -> Hash {
+        let mut h = [0u8; hash::HASH_LEN];
+        let n = data.len().min(16);
+        h[..n].copy_from_slice(&data[..n]);
+        h[16..16 + n].copy_from_slice(&data[data.len() - n..]);
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            h[31] ^= data.len() as u8;
+        }
+        h
+    }
+
+    fn stub_zstd(_frame: &[u8], _capacity: usize) -> Result<Vec<u8>, PackError> {
+        if kani::any() {
+            return Err(PackError::ZstdDecompress(String::new()));
+        }
+        let buf: [u8; 2] = kani::any();
+        let n: usize = kani::any_where(|&n| n <= 2);
+        Ok(buf[..n].to_vec())
+    }
+
+    /// Symbolic pack with an entry area of exactly `BODY` bytes (header,
+    /// body and trailer all symbolic). Harnesses call this once per
+    /// concrete `BODY` so CBMC can constant-fold the pack length.
+    fn any_pack<const BODY: usize>() -> Vec<u8> {
+        let head: [u8; HEADER_LEN] = kani::any();
+        let body: [u8; BODY] = kani::any();
+        let trailer: [u8; TRAILER_LEN] = kani::any();
+        let mut v = Vec::with_capacity(HEADER_LEN + BODY + TRAILER_LEN);
+        v.extend_from_slice(&head);
+        v.extend_from_slice(&body);
+        v.extend_from_slice(&trailer);
+        v
+    }
+
+    fn entries_at<const BODY: usize>() {
+        let bytes = any_pack::<BODY>();
+        let parsed = PackEntries::new(&bytes);
+        let Ok(mut entries) = parsed else {
+            kani::cover!(
+                matches!(parsed, Err(PackError::PackfileCorrupted)),
+                "bad_trailer"
+            );
+            kani::cover!(matches!(parsed, Err(PackError::TrailingData)), "trailing");
+            return;
+        };
+        let split = bytes.len() - TRAILER_LEN;
+        assert_eq!(&bytes[..4], MAGIC.as_slice());
+        assert!(entries.version == VERSION || entries.version == VERSION_V2);
+        assert_eq!(toy_hash(&bytes[..split]).as_slice(), &bytes[split..]);
+        let count = entries.count;
+        let raw_only = entries.is_raw_only();
+        let v1 = entries.version == VERSION;
+        let mut ok = 0u32;
+        let mut failed = false;
+        while let Some(item) = entries.next() {
+            let r = entries.last_payload_range().expect("set after an item");
+            assert!(HEADER_LEN + ENTRY_FRAME_LEN <= r.start && r.end <= split);
+            match item {
+                Ok(PackEntry::Raw { bytes: b }) => {
+                    assert!(!v1 || matches!(b, Cow::Borrowed(_)));
+                    ok += 1;
+                }
+                Ok(PackEntry::Delta { .. }) => {
+                    assert!(!raw_only);
+                    ok += 1;
+                }
+                Err(_) => {
+                    assert!(!v1, "a v1 pack accepted by new() must iterate cleanly");
+                    failed = true;
+                }
+            }
+        }
+        if !failed {
+            assert_eq!(ok, count);
+            assert_eq!(entries.pos, split);
+        }
+        kani::cover!(count == 2 && ok == 2, "two_entries");
+        kani::cover!(!raw_only && ok >= 1, "delta_or_zstd_entry");
+    }
+
+    /// `pack_entries` target, 5-byte entry area (exactly one entry frame
+    /// — type + length — with an empty payload, or a truncated/oversized
+    /// one), header, frame and trailer all symbolic (so any magic,
+    /// version, `entry_count` and trailer): `PackEntries::new` and full
+    /// iteration never panic/overflow/read OOB. On `Ok`: magic/version
+    /// valid (§1), trailer equals the hash of the preceding bytes (§8), a
+    /// v1 pack yields exactly `entry_count` `Ok` items ending at the
+    /// trailer with no gap (§3, §6), every payload range lies inside the
+    /// entry area (§2), and `is_raw_only` ⇒ no delta item.
+    ///
+    /// Run with `-Z unstable-options --cbmc-args --unwindset memcmp.0:33`
+    /// (the 32-byte trailer comparison); every other loop is bounded by
+    /// the global unwind of 4, which keeps CBMC from unrolling the
+    /// symbolic-`entry_count` loop 33 times. Unwinding assertions stay
+    /// on, so a too-small bound fails loudly. One entry-area length per
+    /// harness: 0..=6 (and 0..=12) in one harness did not finish within
+    /// 15 min, and the empty (0-byte) area alone ran out of memory.
+    #[kani::proof]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    #[kani::stub(zstd_decompress_capped, stub_zstd)]
+    #[kani::unwind(4)]
+    fn pack_entries_one_frame() {
+        entries_at::<5>();
+    }
+
+    /// As above for a 10-byte entry area: two empty-payload entries (or
+    /// one with a 5-byte payload).
+    #[kani::proof]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    #[kani::stub(zstd_decompress_capped, stub_zstd)]
+    #[kani::unwind(4)]
+    fn pack_entries_two_entries() {
+        entries_at::<10>();
+    }
+
+    fn writer_rt<const R: usize, const S: usize>(with_delta: bool) {
+        let raw: [u8; R] = kani::any();
+        let base: Hash = kani::any();
+        let stream: [u8; S] = kani::any();
+
+        let mut w = PackWriter::new();
+        w.push_raw(hash::ZERO, &raw).expect("raw fits caps");
+        if with_delta {
+            w.push_delta(&base, &stream).expect("delta fits caps");
+        }
+        let pack = w.finish().expect("finish");
+
+        let mut it = PackEntries::new(&pack).expect("own pack parses");
+        assert_eq!(it.version, VERSION);
+        assert_eq!(it.is_raw_only(), !with_delta);
+        match it.next() {
+            Some(Ok(PackEntry::Raw { bytes })) => {
+                assert_eq!(bytes.as_ref(), raw);
+            }
+            _ => panic!("first entry must be the pushed raw payload"),
+        }
+        if with_delta {
+            match it.next() {
+                Some(Ok(PackEntry::Delta {
+                    base: b,
+                    stream: st,
+                })) => {
+                    assert_eq!(b, base);
+                    assert_eq!(st.as_ref(), stream);
+                }
+                _ => panic!("second entry must be the pushed delta"),
+            }
+            assert_eq!(it.first_non_raw_index(), Some(1));
+        }
+        assert!(it.next().is_none());
+    }
+
+    /// Writer → reader round-trip (SPEC-PACKFILE §1–§3): a pack built by
+    /// `PackWriter` from one raw entry of 1 symbolic byte is accepted by
+    /// `PackEntries::new` as v1 (no compression below `MIN_COMPRESS_LEN`)
+    /// and yields exactly the pushed entry. CBMC's symbolic execution of
+    /// the `PackError` → `StoreError` → `std::io::Error` drop glue costs
+    /// ~4 min per writer/reader pass here, so the bound is one entry
+    /// shape (0..=2 bytes in one harness, and a raw + delta pack, ran out
+    /// of memory; the delta writer path is covered by the unit tests).
+    #[kani::proof]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    // Run with `-Z unstable-options --cbmc-args --unwindset memcmp.0:33`
+    // (32-byte trailer / base-hash comparisons); <= 2 entries otherwise.
+    #[kani::unwind(4)]
+    fn pack_writer_roundtrip_raw() {
+        writer_rt::<1, 0>(false);
+    }
+
+    /// Canary: with the trailer check in place, a single flipped body
+    /// byte must be detectable — the checker has to falsify "every
+    /// single-byte mutation of a valid pack still parses".
+    #[kani::proof]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    // As above: `--cbmc-args --unwindset memcmp.0:33`.
+    #[kani::unwind(4)]
+    #[kani::should_panic]
+    fn pack_canary_mutation_still_parses() {
+        let mut w = PackWriter::new_raw_only();
+        w.push_raw(hash::ZERO, b"ab").expect("raw fits caps");
+        let mut pack = w.finish().expect("finish");
+        let i: usize = kani::any_where(|&i| i < pack.len());
+        let flip: u8 = kani::any_where(|&f| f != 0);
+        pack[i] ^= flip;
+        assert!(PackEntries::new(&pack).is_ok());
+    }
+
+    /// A checksum-valid symbolic cursor encoding (canonical v1 field
+    /// order: see the `window::cursor` module doc) of `N` body bytes, all
+    /// symbolic except the option tags (0/1) at the concrete `(offset,
+    /// present)` positions in `tags` and the two tree depth bytes at
+    /// `depths`, which are 0. A symbolic tag or depth byte (even one
+    /// restricted to "valid or rejected") makes CBMC explore every
+    /// layout after it (the reader's `Result` is merged at each return,
+    /// so later field offsets become symbolic); that did not finish within
+    /// 10 min. The (toy) checksum is appended
+    /// so the checksum gate passes and every field parser and the
+    /// geometry validation run on attacker-chosen values.
+    fn cursor_bytes<const N: usize>(tags: &[(usize, bool)], depths: [usize; 2]) -> Vec<u8> {
+        let mut body: [u8; N] = kani::any();
+        for &(at, present) in tags {
+            body[at] = u8::from(present);
+        }
+        for at in depths {
+            body[at] = 0;
+        }
+        let mut out = Vec::with_capacity(N + hash::HASH_LEN);
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&toy_hash(&body));
+        out
+    }
+
+    /// Layout A (125-byte body): first-window boundary bound to the
+    /// trailer anchor, no pack id requested, no first-non-raw index;
+    /// current-window prefix commitment present; both trees empty.
+    /// Offsets: version 0, four u64 + three u32 at 1..45, tags at 45
+    /// (first-non-raw), 54 (expected), 55 (anchor) + digest, 88 (prefix)
+    /// + digest, trees at 121/122 and 123/124.
+    fn cursor_anchor() -> Vec<u8> {
+        cursor_bytes::<125>(
+            &[
+                (45, false),
+                (54, false),
+                (55, true),
+                (88, true),
+                (122, false),
+                (124, false),
+            ],
+            [121, 123],
+        )
+    }
+
+    /// Resumable-cursor decoder (`window::WindowCursor::from_bytes`, the
+    /// persisted state of the SPEC-PACKFILE §11 windowed reader) on a
+    /// checksum-valid layout-A encoding whose every numeric field and
+    /// digest is symbolic: decoding (field parsing, trailing-byte check,
+    /// geometry validation) never panics, overflows
+    /// or reads out of bounds; `cover` shows acceptance is reachable.
+    /// (Also asserting that an accepted cursor re-encodes byte-exactly
+    /// via `to_bytes`, and the pack-id-bound layout, each did not finish
+    /// within 15 min; the round-trip stays with the `window` unit tests.)
+    #[kani::proof]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    // Run with `-Z unstable-options --cbmc-args --unwindset memcmp.0:33`
+    // (checksum comparison); the tree loops read no CVs.
+    #[kani::unwind(7)]
+    fn pack_window_cursor_decode() {
+        let got = window::WindowCursor::from_bytes(&cursor_anchor());
+        let ok = got.is_ok();
+        // Skip the harness-side `PackError` drop glue (`Store` →
+        // `std::io::Error`); nothing about dropping is checked here.
+        core::mem::forget(got);
+        kani::cover!(ok, "accepted_anchor_cursor");
+    }
+
+    /// A concrete, valid layout-A cursor (100-byte pack, 64 KiB windows,
+    /// boundary right after the header, no entries; symbolic anchor and
+    /// prefix digests) with `mask` XORed into the low byte of `pack_len`
+    /// (offset 1, inside the checksummed body) after the checksum is
+    /// computed. Every flipped `pack_len` in 44..=255 is still valid
+    /// geometry for this cursor, so for those only the checksum rejects.
+    fn flipped_cursor(mask: u8) -> Vec<u8> {
+        let mut body = [0u8; 125];
+        body[0] = 1; // cursor encoding version
+        body[1..9].copy_from_slice(&100u64.to_le_bytes()); // pack_len
+        body[9..17].copy_from_slice(&(64u64 << 10).to_le_bytes()); // window
+        body[17..25].copy_from_slice(&12u64.to_le_bytes()); // pos
+        body[33..37].copy_from_slice(&1u32.to_le_bytes()); // pack version
+        body[55] = 1; // anchor present
+        body[56..88].copy_from_slice(&kani::any::<Hash>());
+        body[88] = 1; // window prefix present
+        body[89..121].copy_from_slice(&kani::any::<Hash>());
+        let mut out = body.to_vec();
+        out.extend_from_slice(&toy_hash(&body));
+        out[1] ^= mask;
+        out
+    }
+
+    /// Checksum gate: the concrete cursor above decodes iff it is
+    /// unmodified, i.e. every single-byte change to its `pack_len` field
+    /// (most of which leave a still-valid cursor) is rejected. One
+    /// `from_bytes` call per harness: each costs ~7 min of CBMC symbolic
+    /// execution (~6.8M steps, much of it `PackError` → `StoreError` →
+    /// `std::io::Error` machinery), so two calls did not finish within
+    /// 15 min.
+    #[kani::proof]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    // As above: `--cbmc-args --unwindset memcmp.0:33`.
+    #[kani::unwind(7)]
+    fn pack_window_cursor_flip_rejected() {
+        let mask: u8 = kani::any();
+        let got = window::WindowCursor::from_bytes(&flipped_cursor(mask));
+        let ok = got.is_ok();
+        core::mem::forget(got);
+        assert_eq!(ok, mask == 0);
+    }
+
+    /// Canary: the checker must falsify "a flipped `pack_len` byte still
+    /// decodes" (the negation of the property above).
+    #[kani::proof]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    // As above: `--cbmc-args --unwindset memcmp.0:33`.
+    #[kani::unwind(7)]
+    #[kani::should_panic]
+    fn pack_window_cursor_canary_flip_accepted() {
+        let got =
+            window::WindowCursor::from_bytes(&flipped_cursor(kani::any_where(|&m: &u8| m != 0)));
+        let ok = got.is_ok();
+        core::mem::forget(got);
+        assert!(ok);
     }
 }

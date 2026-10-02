@@ -1,0 +1,31 @@
+{
+  "accepted_schemes": [
+    "webauthn-p256"
+  ],
+  "audience": "https://git.example.com",
+  "context": {
+    "capability": "write",
+    "now": 1790000000000,
+    "repository": "0x3f17f1962b36e491b30a40b2405849e597ba5fb5/website",
+    "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+  },
+  "expected_error": "invalid owner key",
+  "header": "bWtpdC13cml0ZS1ncmFudDp2MQoweDNmMTdmMTk2MmIzNmU0OTFiMzBhNDBiMjQwNTg0OWU1OTdiYTVmYjUKMHgzZjE3ZjE5NjJiMzZlNDkxYjMwYTQwYjI0MDU4NDllNTk3YmE1ZmI1L3dlYnNpdGUKZWE0YTZjNjNlMjljNTIwYWJlZjU1MDdiMTMyZWM1Zjk5NTQ3NzZhZWJlYmU3YjkyNDIxZWVhNjkxNDQ2ZDIyYwpyZWFkLHdyaXRlCmh0dHBzOi8vZ2l0LmV4YW1wbGUuY29tLGh0dHBzOi8vZ2l0LmV4YW1wbGUub3JnCnJlZnMvaGVhZHMvbWFpbj1jdTtyZWZzL2hlYWRzL3dpcC8qPWN1ZmQKMAoxNzkwMDAwMDAwMDAwCjE3OTAwODY0MDAwMDAKYjRiNGI0YjRiNGI0YjRiNGI0YjRiNGI0YjRiNGI0YjRiNGI0YjRiNGI0YjRiNGI0YjRiNGI0YjRiNGI0YjRiNA.webauthn-p256.QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlAAAAo3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUcBAAAAKoQAAAB7InR5cGUiOiJ3ZWJhdXRobi5nZXQiLCJjaGFsbGVuZ2UiOiJfX1FFOS01bTQ2QzdqWTU3VDZNMkdGUEM2WUxqUHFEVGg3T0ZhcXgzdUZVIiwib3JpZ2luIjoiaHR0cHM6Ly9leGFtcGxlLmNvbSIsImNyb3NzT3JpZ2luIjpmYWxzZX1AAAAAfPJ7GI0DT36KUjgDBLUaw8CJaeJ38hs1pgtI_EdmmXhW_8w_Sm8jsER1Audg98QiYo6pkE-smMITOyWhENCBxA",
+  "kind": "grant",
+  "relying_parties": [
+    {
+      "id": "example.com",
+      "origins": [
+        "https://example.com",
+        "https://www.example.com"
+      ]
+    },
+    {
+      "id": "wallet.example",
+      "origins": [
+        "https://wallet.example"
+      ]
+    }
+  ],
+  "rule": "§4.1: the public key is a valid P-256 point; x = y = 0 is not (some libraries encode the point at infinity so, and this signature verifies against infinity)"
+}

@@ -11,7 +11,7 @@
 //! (`tcp::connect_tcp`), a TCP listener with peer-authorization policy
 //! (`tcp::serve_tcp_with_policy_and_bounds`), and `mkit+enc://` URL
 //! parsing ([`url::parse_enc_url`]). It is consumed in production by
-//! `mkit-cli`'s remote dispatch and `mkit serve --listen-enc`.
+//! `mkit-cli`'s remote dispatch and `mkit-server serve --listen-enc`.
 //!
 //! ## Layering (see SPEC-TRANSPORT-ENC for the full picture)
 //!
@@ -78,16 +78,16 @@ pub mod tokio_io;
 
 #[cfg(feature = "tcp")]
 pub use tcp::{
-    PeerPolicy, TokioExecutor, connect_tcp, connect_tcp_with_executor,
-    serve_tcp_with_policy_and_bounds,
+    ListenerLimits, PeerPolicy, TokioExecutor, connect_tcp, connect_tcp_with_executor,
+    serve_tcp_listener, serve_tcp_with_policy_and_bounds,
 };
 
 /// Re-export of the encrypted-stream `Sender` / `Receiver` types
 /// downstream callers need to plug a custom server-side verb loop on
-/// top of an [`EncSession`]. The `mkit serve --listen-enc` dispatch
-/// lives in `mkit-cli` and consumes this re-export rather than
-/// depending on `commonware-stream` directly; that keeps the CLI
-/// crate's transitive surface area centred on `mkit-transport-enc`.
+/// top of an [`EncSession`]. The `mkit-server serve --listen-enc`
+/// dispatch (`mkit-server-native`) consumes this re-export rather than
+/// depending on `commonware-stream` directly; that keeps its transitive
+/// surface area centred on `mkit-transport-enc`.
 pub use commonware_stream::encrypted::{Receiver as EncReceiver, Sender as EncSender};
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -115,8 +115,8 @@ use mkit_rpc::mkit::rpc::v1::ssh::{
     ssh_frame,
 };
 use mkit_rpc::{
-    CHUNK_DATA_MAX, MAX_FRAME_BYTES, MAX_REF_NAME, body_name, cond_to_wire, map_update_ref_error,
-    ref_entry_to_ref, rpc_error_to_transport, unexpected_frame,
+    CHUNK_DATA_MAX, MAX_FRAME_BYTES, MAX_REF_NAME, body_name, cond_to_wire, list_response_refs,
+    map_update_ref_error, rpc_error_to_transport, unexpected_frame,
 };
 
 use mkit_core::protocol::{PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE};
@@ -893,11 +893,7 @@ impl<I: Stream, O: Sink, E: Executor> Transport for EncTransport<I, O, E> {
                 .block_on(send_frame(&mut session.sender, &req))?;
             let resp = self.executor.block_on(recv_frame(&mut session.receiver))?;
             match resp.body {
-                Some(ssh_frame::Body::ListRefsResponse(r)) => r
-                    .refs
-                    .into_iter()
-                    .map(ref_entry_to_ref)
-                    .collect::<TransportResult<Vec<_>>>(),
+                Some(ssh_frame::Body::ListRefsResponse(r)) => list_response_refs(prefix, r.refs),
                 Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "enc")),
                 other => Err(unexpected_frame("enc", "ListRefsResponse", other)),
             }

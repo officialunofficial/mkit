@@ -47,6 +47,24 @@ updates:
           - "minor"
           - "patch"
 
+  # The mkit-server container image's base (distroless cc-debian13:nonroot),
+  # pinned by digest in contrib/docker/mkit-server/Dockerfile. Dependabot
+  # bumps the digest within the same tag; a new Debian release is a manual
+  # change (scripts/stage-server-image.sh's MAX_GLIBC moves with it).
+  - package-ecosystem: "docker"
+    directory: "/contrib/docker/mkit-server"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "deps(docker)"
+
   - package-ecosystem: "npm"
     directory: "/apps/workspace-worker"
     schedule:

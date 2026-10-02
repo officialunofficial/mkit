@@ -27,6 +27,17 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # can render failure annotations inline on PR diffs.
 path = "junit.xml"
 
+# The S3 wire profile deliberately delays CompleteUpload by 31 seconds to
+# prove it uses the long deadline. The rest of the wire suite follows that
+# request, so its total runtime can exceed the default 60-second envelope.
+[[profile.default.overrides]]
+filter = 'test(=wire_suite_s3_sqlite_auth_v2)'
+slow-timeout = { period = "180s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'test(=wire_suite_s3_sqlite_auth_v2)'
+slow-timeout = { period = "180s", terminate-after = 1 }
+
 # The bounded PR run of the stateful suite (tests/state_machine.rs, 32 cases)
 # is ~12s locally, but it spawns the `mkit` binary per op, so a slow/loaded
 # (especially macOS) runner could drift toward the default 60s / ci 120s kill
@@ -39,6 +50,20 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 
 [[profile.ci.overrides]]
 filter = 'test(=stateful_invariants)'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+# This preservation progress regression restores the checkpoint on every
+# eight-row page across 51 dense member lookups (up to 26,112 ticks). Its
+# measured debug run takes 62s; retain the full continuation/hash assertions
+# and run this exact test alone with a bounded allowance under machine load.
+[[profile.default.overrides]]
+filter = 'package(mkit-server) and test(=takedown::source::tests::dense_external_fifty_hops_complete_and_final_decode_rechecks_membership)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'package(mkit-server) and test(=takedown::source::tests::dense_external_fifty_hops_complete_and_final_decode_rechecks_membership)'
+threads-required = "num-test-threads"
 slow-timeout = { period = "300s", terminate-after = 1 }
 
 # The fault-injection suites reconstruct many on-disk crash images and
@@ -55,19 +80,145 @@ filter = 'binary(crash_recovery) or binary(lock_contention)'
 slow-timeout = { period = "300s", terminate-after = 1 }
 
 # branch_rename_commit_race races a real rename against a real concurrent
-# commit and asserts the outcome, so it legitimately takes ~40s even
-# running alone (confirmed by an isolated rerun) — comfortably past the
-# 10s slow-test warning and uncomfortably close to the default 60s / ci
-# 120s kill envelope under the contention of a full parallel run. Not a
-# hang; give it the same generous per-test ceiling as the other
-# real-timing-dependent suites above.
+# commit and asserts the outcome. It runs with no other test beside it.
+# The sweep is one pass of 12 rounds and the calibration delay is capped,
+# so a loaded start cannot inflate the sleeps into the old 150s kill.
+# The ceiling stays above a loaded serialized run; it is not a hang.
 [[profile.default.overrides]]
 filter = 'binary(branch_rename_commit_race)'
+threads-required = "num-test-threads"
 slow-timeout = { period = "150s", terminate-after = 1 }
 
 [[profile.ci.overrides]]
 filter = 'binary(branch_rename_commit_race)'
+threads-required = "num-test-threads"
 slow-timeout = { period = "150s", terminate-after = 1 }
+
+# 80,000-row SQLite backup. Wall time is 2.5s alone and 12s beside other
+# tests (-j4); the 5s check is opt-in (MKIT_BACKUP_TIMING). Run it with no
+# other test beside it so that check, and the always-on ceiling, see the
+# backup's own cost.
+[[profile.default.overrides]]
+filter = 'test(=backup::tests::sqlite_eighty_thousand_small_rows_at_cap_under_five_seconds)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "180s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'test(=backup::tests::sqlite_eighty_thousand_small_rows_at_cap_under_five_seconds)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "180s", terminate-after = 1 }
+
+# The 10,000-object inspection fixture repeatedly copies a growing in-memory
+# partition during verification. It takes about 16s alone but exceeds the 60s
+# limit alongside other tests. Reserve this run's threads, retaining the full
+# object set, assertions and each profile's existing timeout.
+[[profile.default.overrides]]
+filter = 'package(mkit-server) and test(=pipeline::tests::indexed::inspection::exactly_ten_thousand_distinct_file_objects_are_inspected_and_accepted)'
+threads-required = "num-test-threads"
+
+[[profile.ci.overrides]]
+filter = 'package(mkit-server) and test(=pipeline::tests::indexed::inspection::exactly_ten_thousand_distinct_file_objects_are_inspected_and_accepted)'
+threads-required = "num-test-threads"
+
+# The six-group reuse proof completes 42 real 256-member lookup jobs. It takes
+# 47-53s alone but exceeded 60s in the suite on the shared machine. Retain all
+# 10,752 lookup assertions, reserve this run's threads and use CI's 120s ceiling.
+[[profile.default.overrides]]
+filter = 'test(=indexed::job_tests::scheduled_reclaim_tests::completed_groups_with_full_member_lists_remain_claimable)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'test(=indexed::job_tests::scheduled_reclaim_tests::completed_groups_with_full_member_lists_remain_claimable)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# CPU-bound debug-build tests that the suite's own parallelism pushes past
+# the default 60s. Named one by one: each took 40s or more in a full
+# `cargo nextest run --workspace --all-features` in WP-M0-20's quiet-machine
+# runs (10-core M1 Pro, nothing else building), measured under a 600s
+# ceiling on this branch and on `main`; every other test in these modules
+# keeps the 60s (ci: 120s) hang detection.
+#   history::ancestry, the 4 scrub/full-walk tests      20-23s alone; 117-123s
+#                                                       in the suite (TIMEOUT)
+#   history::ancestry, the other scrub tests            40-64s in the suite
+#   scrub_age_boundary_is_exclusive                     two 600-leaf publishes; >60s alone under load
+#   refs::tests::cas_{match,delete_vs_match}_* races    44-73s in the suite
+#   batch_write_hash_equals_store_write_hash            8s alone; 88-90s (TIMEOUT)
+#   write_parts_equals_concatenated_write               38-48s in the suite
+#   mkit-cli verify_new_object_signatures_mixed_*       11.5s alone; 56-60s (TIMEOUT)
+#   pack::window generated_valid_and_mutated_packs_agree  ~48s alone (pack-ruzstd); 60s under -j 4 (TIMEOUT)
+#   pack delta_bomb_is_rejected_before_any_delta_is_applied  50-60s alone (pack-ruzstd)
+# None hangs: each walks, hashes or verifies a large fixture in an
+# unoptimized build and is starved of CPU by the other test threads. They
+# get 300s, about 2.4x the worst measured. That margin was calibrated on an
+# M1 Pro, not on the CI machines.
+[[profile.default.overrides]]
+filter = '''
+package(mkit-core) and (
+    test(=history::ancestry::tests::corruption_outside_the_current_window_is_caught_within_a_bounded_number_of_publishes)
+    or test(=history::ancestry::tests::fast_forward_scrubs_a_bounded_window_not_the_whole_prefix)
+    or test(=history::ancestry::tests::full_walk_fallback_still_verifies_the_spliced_prefix)
+    or test(=history::ancestry::tests::missing_scrub_state_forces_a_full_walk_instead_of_trusting_nothing)
+    or test(=history::ancestry::tests::scrub_lap_completion_forces_a_full_walk_but_keeps_the_generation)
+    or test(=history::ancestry::tests::scrub_state_from_a_superseded_generation_is_discarded_not_misapplied)
+    or test(=history::ancestry::tests::stale_scrub_state_forces_a_full_walk_regardless_of_cursor_position)
+    or test(=history::ancestry::tests::scrub_age_boundary_is_exclusive)
+    or test(=refs::tests::cas_delete_vs_match_advance_race_never_lets_both_win_or_loses_the_advance)
+    or test(=refs::tests::cas_match_race_never_loses_an_update_across_uncoordinated_callers)
+    or test(=batch::tests::batch_write_hash_equals_store_write_hash)
+    or test(=batch::tests::write_parts_equals_concatenated_write)
+    or test(=pack::window::tests::generated_valid_and_mutated_packs_agree)
+    or test(=pack::tests::delta_bomb_is_rejected_before_any_delta_is_applied)
+)
+or (package(mkit-cli) and test(=remote_dispatch::packmap::tests::verify_new_object_signatures_mixed_with_unsigned_object_kinds))
+'''
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[[profile.ci.overrides]]
+filter = '''
+package(mkit-core) and (
+    test(=history::ancestry::tests::corruption_outside_the_current_window_is_caught_within_a_bounded_number_of_publishes)
+    or test(=history::ancestry::tests::fast_forward_scrubs_a_bounded_window_not_the_whole_prefix)
+    or test(=history::ancestry::tests::full_walk_fallback_still_verifies_the_spliced_prefix)
+    or test(=history::ancestry::tests::missing_scrub_state_forces_a_full_walk_instead_of_trusting_nothing)
+    or test(=history::ancestry::tests::scrub_lap_completion_forces_a_full_walk_but_keeps_the_generation)
+    or test(=history::ancestry::tests::scrub_state_from_a_superseded_generation_is_discarded_not_misapplied)
+    or test(=history::ancestry::tests::stale_scrub_state_forces_a_full_walk_regardless_of_cursor_position)
+    or test(=history::ancestry::tests::scrub_age_boundary_is_exclusive)
+    or test(=refs::tests::cas_delete_vs_match_advance_race_never_lets_both_win_or_loses_the_advance)
+    or test(=refs::tests::cas_match_race_never_loses_an_update_across_uncoordinated_callers)
+    or test(=batch::tests::batch_write_hash_equals_store_write_hash)
+    or test(=batch::tests::write_parts_equals_concatenated_write)
+    or test(=pack::window::tests::generated_valid_and_mutated_packs_agree)
+    or test(=pack::tests::delta_bomb_is_rejected_before_any_delta_is_applied)
+)
+or (package(mkit-cli) and test(=remote_dispatch::packmap::tests::verify_new_object_signatures_mixed_with_unsigned_object_kinds))
+'''
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+# The storage suite over the `.mkit`-layout stores makes every write durable
+# (fsync the file, rename, fsync the directory): a few cases apply 1,000-2,000
+# single-key batches, ~40s each on a loaded macOS runner (F_FULLFSYNC). Not
+# hangs; the same generous ceiling as the other real-I/O suites.
+[[profile.default.overrides]]
+filter = 'binary(fs_backends)'
+slow-timeout = { period = "150s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'binary(fs_backends)'
+slow-timeout = { period = "150s", terminate-after = 1 }
+
+# The wire suite's growth case waits out replay expiry plus the server's
+# prune grace on the real clock (~80s; so do its store mutants):
+# pruning never follows the test-faults clock skew. Not a hang.
+[[profile.default.overrides]]
+filter = 'binary(baseline_pipeline_memory) and (test(=pipeline_auth_v2_test_faults) or test(/_fails_growth$/))'
+slow-timeout = { period = "180s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'binary(baseline_pipeline_memory) and (test(=pipeline_auth_v2_test_faults) or test(/_fails_growth$/))'
+slow-timeout = { period = "180s", terminate-after = 1 }
 
 # This pack residency regression expands several 128 MiB delta targets.
 # Its debug CPU work takes about 26 s alone, so allow shared-machine load
@@ -79,6 +230,24 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 [[profile.ci.overrides]]
 filter = 'test(=pack::tests::compressed_delta_bomb_releases_targets_and_checks_cap_before_allocation)'
 slow-timeout = { period = "300s", terminate-after = 1 }
+
+# Memory-bounding tests. multipart_bounded_heap / multipart_buffered_heap
+# (mkit-server-conformance's fs, s3 and memory binaries, mkit-server-worker's
+# conformance binary) meter the allocator over a window and assert a peak.
+# They failed under parallel load and passed alone (#1210, #1212, #1218), so
+# the group runs one at a time across the whole run. The meter stays
+# process-global (the store work runs on runtime threads, so it can't be
+# narrowed to the test's own thread); serialization is the fix, no test change.
+[test-groups]
+heap-bounds = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(/multipart_(bounded|buffered)_heap$/) | test(=sixteen_maximum_bodies_and_rows_fit_in_two_mib_of_heap) | test(=corrupt_zstd_frames_bound_heap) | test(=scheduled_ruzstd_slice_retains_at_most_48_mib_requested_heap) | test(=aggregate_index_lookup_has_bounded_peak_and_smaller_batches_work) | binary(=takedown_acquisition_bounds)'
+test-group = 'heap-bounds'
+
+[[profile.ci.overrides]]
+filter = 'test(/multipart_(bounded|buffered)_heap$/) | test(=sixteen_maximum_bodies_and_rows_fit_in_two_mib_of_heap) | test(=corrupt_zstd_frames_bound_heap) | test(=scheduled_ruzstd_slice_retains_at_most_48_mib_requested_heap) | test(=aggregate_index_lookup_has_bounded_peak_and_smaller_batches_work) | binary(=takedown_acquisition_bounds)'
+test-group = 'heap-bounds'
 
 [profile.ignored-lane]
 # #505 PR 5/5: a handful of irreducibly-real tests (subprocess sleeps,
@@ -101,7 +270,11 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 # fail regardless of MKIT_TEST_STRICT. Naming exactly the tests this
 # PR quarantined keeps the lane green regardless of what other
 # `#[ignore]`d tests exist.
-default-filter = 'test(/hang_before_stdout_times_out_and_reaps_child|fills_stderr_before_stdout_does_not_deadlock|valid_response_then_never_exits_is_bounded|listen_enc_rejected_upload_does_not_overwrite_existing_pack|open_accepts_syntactically_valid_mkit_ssh_url|second_mutating_command_blocks_on_worktree_lock|list_refs_round_trip_over_real_tcp|post_handshake_idle_timeout_drops_silent_peer|wait_child_timeout_kills_stalled_child|list_refs_retries_past_dropped_connection_via_reconnect|ssh_clone_retries_past_a_dropped_first_connection|large_mixed_pack_decodes_under_production_resident_cap/)'
+#
+# The four `listen_enc_*` real-TCP tests live in mkit-server-native's
+# `enc_listener` (`mkit-server serve --listen-enc`); WP-M0-15 deleted their
+# mkit-cli copies with `mkit serve --listen-enc`.
+default-filter = 'test(/hang_before_stdout_times_out_and_reaps_child|fills_stderr_before_stdout_does_not_deadlock|valid_response_then_never_exits_is_bounded|listen_enc_rejected_upload_does_not_overwrite_existing_pack|listen_enc_rejects_non_hello_first_frame|listen_enc_cas_conflict_classifies_as_ref_conflict|listen_enc_terminates_connection_past_frame_budget|open_accepts_syntactically_valid_mkit_ssh_url|second_mutating_command_blocks_on_worktree_lock|list_refs_round_trip_over_real_tcp|post_handshake_idle_timeout_drops_silent_peer|wait_child_timeout_kills_stalled_child|list_refs_retries_past_dropped_connection_via_reconnect|ssh_clone_retries_past_a_dropped_first_connection|large_mixed_pack_decodes_under_production_resident_cap|listing_over_32_mib_pages_under_d34/)'
 # Run serially so the quarantined tests' real timers/sockets don't
 # contend with each other; only localhost networking is needed, which
 # every CI runner (Linux + macOS) provides.
@@ -114,6 +287,17 @@ test-threads = 1
 filter = 'test(=pack::tests::large_mixed_pack_decodes_under_production_resident_cap)'
 slow-timeout = { period = "300s", terminate-after = 1 }
 
+# The admitted maximum-wire chain includes roughly five million legal empty
+# zstd blocks. Pure-Rust admission plus acquisition takes ~42 s locally;
+# allow shared-machine headroom while retaining all heap/canonical assertions.
+[[profile.default.overrides]]
+filter = 'test(=scheduled_bounds_fifty_hops_with_maximum_wire_frame)'
+slow-timeout = { period = "120s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'test(=scheduled_bounds_fifty_hops_with_maximum_wire_frame)'
+slow-timeout = { period = "120s", terminate-after = 1 }
+
 [profile.state-machine]
 # Nightly deep run of the stateful invariant suite
 # (tests/state_machine.rs). It drives the real `mkit` binary through
@@ -125,3 +309,20 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 slow-timeout = { period = "1200s", terminate-after = 1 }
 retries = 0
 fail-fast = false
+
+# The lag-window and D34 native wire lanes hold the relay for several seconds
+# per case (x-mkit-test-relay-delay-ms) and wait for it to deliver. Deterministic,
+# not hangs: give these exact-name lanes their own ceiling.
+[[profile.default.overrides]]
+filter = 'test(=wire_suite_multi_sqlite_auth_v2_d34) or test(=binary_fs_sqlite_auth_v2_d34)'
+slow-timeout = { period = "180s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'test(=wire_suite_multi_sqlite_auth_v2_d34) or test(=binary_fs_sqlite_auth_v2_d34)'
+slow-timeout = { period = "180s", terminate-after = 1 }
+
+# The 75,000-ref listing (wire_large_listing) creates its refs over real HTTP
+# and waits for the D34 relay to index them: minutes, not a hang.
+[[profile.ignored-lane.overrides]]
+filter = 'test(=listing_over_32_mib_pages_under_d34)'
+slow-timeout = { period = "1800s", terminate-after = 1 }

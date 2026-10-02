@@ -1,0 +1,20 @@
+{
+  "bin": "raw_4k_repeat.bin",
+  "description": "one 0x03 zstd-raw entry",
+  "entries": [
+    {
+      "blake3_of_bytes": "8aef4d27f20ef2cfd6a693197fe790b618f6b1fc524164caaea24dfcb8ba6a87",
+      "decoded_blake3": "8aef4d27f20ef2cfd6a693197fe790b618f6b1fc524164caaea24dfcb8ba6a87",
+      "frame_len": 28,
+      "frame_offset": 21,
+      "id": "8aef4d27f20ef2cfd6a693197fe790b618f6b1fc524164caaea24dfcb8ba6a87",
+      "len": 4106,
+      "type": 3,
+      "uncompressed_len": 4106
+    }
+  ],
+  "name": "raw_4k_repeat",
+  "pack_key": "dea58b65addfd67f943440774775f6c63957ab4cd64fa383a23fac52f0b5766a",
+  "size": 81,
+  "version": 2
+}

@@ -1,0 +1,26 @@
+{
+  "bin": "delta_repeat.bin",
+  "description": "a 0x00 base and a 0x04 zstd-delta entry against it",
+  "entries": [
+    {
+      "blake3_of_bytes": "587e28ff4c918a1b1e4dacf09ceaafaa7f11d49d8ad52615aaeb447c6650e902",
+      "id": "587e28ff4c918a1b1e4dacf09ceaafaa7f11d49d8ad52615aaeb447c6650e902",
+      "len": 65,
+      "type": 0
+    },
+    {
+      "blake3_of_bytes": "8aef4d27f20ef2cfd6a693197fe790b618f6b1fc524164caaea24dfcb8ba6a87",
+      "decoded_blake3": "73f1a378cebf1a519197de17137c1e820111fb202ffd0e0f3759a421f6ce0199",
+      "frame_len": 49,
+      "frame_offset": 123,
+      "id": "8aef4d27f20ef2cfd6a693197fe790b618f6b1fc524164caaea24dfcb8ba6a87",
+      "len": 4106,
+      "type": 4,
+      "uncompressed_len": 4148
+    }
+  ],
+  "name": "delta_repeat",
+  "pack_key": "ece5976ae44eb546c029df0da826d13e06abd82f60fadfb3bf702bc1562e478f",
+  "size": 204,
+  "version": 2
+}

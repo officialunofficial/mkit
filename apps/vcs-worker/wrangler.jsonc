@@ -6,7 +6,9 @@
 {
   "name": "mkit-vcs-worker",
   "main": "build/worker/shim.mjs",
-  "compatibility_date": "2024-09-23",
+  // The date the pinned wrangler's workerd supports (as
+  // apps/workspace-worker); scripts/vcs-worker-conformance.sh passes on it.
+  "compatibility_date": "2026-09-09",
   // Same rationale as apps/repo-worker/wrangler.jsonc: the Cloudflare
   // Workers Build image ships no Rust toolchain, so this installs rustup
   // (pinned 1.95.0 + wasm32) and worker-build, guarded by `command -v` so
@@ -16,8 +18,50 @@
   },
 
   "observability": { "enabled": true },
+  // Install the deployment upload MAC keys with `wrangler secret put TICKET_KEYS` (WP-1.19).
   // Override AUTH_AUDIENCE with the exact published origin before deployment.
-  "vars": { "AUTH_AUDIENCE": "http://localhost:8787", "AUTH_REPOSITORY": "default" },
+  // WORKERS_PLAN caps each Durable Object's SQLite store for the account's
+  // plan: `free` (1 GB, the safe default) or `paid` (10 GB). Set `paid` only
+  // once the account is confirmed on Workers Paid: a Paid cap on a Free
+  // account runs into the 1 GB hard limit, which resets the object.
+  "vars": {
+    "AUTH_AUDIENCE": "http://localhost:8787",
+    // AUTH_REPOSITORY names the single repository under ADDRESSING=single
+    // (the default). Under ADDRESSING=multi it is ignored: every request's
+    // X-Repository <ns>/<name> selects its repository.
+    "AUTH_REPOSITORY": "default",
+    "WORKERS_PLAN": "free",
+    // The root RefStore sharding marker refuses changes over existing data (R-94).
+    // d34 is the default; a deployment holding single-sharded data must pin
+    // "single" (there is no migration, R-123), or every RPC answers 503.
+    "SHARDING": "d34"
+    // ADDRESSING=multi serves every namespace its policy admits and
+    // requires TICKET_KEYS. Like SHARDING, ADDRESSING installs a root marker
+    // (`am 00`) on the first request; changing it over existing data is
+    // refused. NAMESPACE_POLICY=allowlist (the multi default)
+    // then requires NAMESPACE_ALLOWLIST: namespaces one per line or
+    // comma-separated, `#` comments allowed. NAMESPACE_POLICY=any admits
+    // every namespace and requires UNSAFE_OPEN_NAMESPACES=true (D27;
+    // development only).
+    // HOOK_ROLES=admit,outcome (with the ADMISSION_HOOK binding below),
+    // HOOK_TIMEOUT_MS and AUTHORIZER_ROLE: see README.md "Remote hooks".
+    // Write grants are off unless GRANT_SCHEMES (comma-separated owner schemes)
+    // is set; it needs ADDRESSING=multi, and the audience is AUTH_AUDIENCE.
+    // WEBAUTHN_RPS lists relying parties as `id=origin[,origin...]` entries
+    // separated by `;` or newlines. Neither is shipped here.
+    // Optional NAMESPACE_LOCATION_HINT / NAMESPACE_JURISDICTION are deployment-wide.
+    // Jurisdiction (eu, us, fedramp) is fixed for the deployment lifetime:
+    // changing it re-maps all names to new, empty objects.
+  },
+
+  // Remote hooks (WP-3.9): to run authorization, admission or outcome delivery
+  // in another Worker, bind it here and set HOOK_ROLES in `vars` (a comma list
+  // of authorize, admit and outcome; no default). The hook Worker must have no
+  // public route (workers_dev and preview_urls off): an unsigned service
+  // binding is only safe if nothing else can reach it (SPEC-SERVER §7.3).
+  // "services": [
+  //   { "binding": "ADMISSION_HOOK", "service": "my-admission-hook" }
+  // ],
 
   // Smart Placement: run the Worker close to its back-end (the RefStore DO +
   // R2), not just at the edge nearest the client.
@@ -29,13 +73,27 @@
 
   // R2 object store for content-addressed packs. Key layout:
   // packs/{hex(pack_id)}.
-  "r2_buckets": [{ "binding": "STORAGE", "bucket_name": "mkit-vcs-objects" }],
+  "r2_buckets": [
+    { "binding": "STORAGE", "bucket_name": "mkit-vcs-objects" },
+    // Create this bucket and its backups/-only lifecycle rule before deploy.
+    { "binding": "BACKUPS", "bucket_name": "mkit-vcs-backups" }
+  ],
 
-  // The RefStore Durable Object — ONE global instance for the whole
-  // deployment (no per-room/per-project split; see README.md) — owns all
-  // mutable refs (serial CAS, including the two-ref AdvanceRefs
-  // transaction).
-  "durable_objects": { "bindings": [{ "name": "REFSTORE", "class_name": "RefStore" }] },
+  // Single deployments use RefStore (instance "root"). D34 routes each
+  // partition kind to its class; repo and ref-name indexes share a binding.
+  "durable_objects": { "bindings": [
+    { "name": "REFSTORE", "class_name": "RefStore" },
+    { "name": "NS_COORD", "class_name": "NsCoordinator" },
+    { "name": "REF_SHARD", "class_name": "RefShard" },
+    { "name": "REPO_INDEX", "class_name": "RepoIndexShard" },
+    { "name": "CONTENT_INDEX", "class_name": "ContentIndexShard" }
+  ] },
 
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RefStore"] }]
+  // Keep `migrations`: wrangler's newer `exports`-style Durable Object
+  // declaration and the `migrations` array are mutually exclusive, and this
+  // deployment keeps RefStore and v1 for single deployments. Append v2 for D34.
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RefStore"] },
+    { "tag": "v2", "new_sqlite_classes": ["NsCoordinator", "RefShard", "RepoIndexShard", "ContentIndexShard"] }
+  ]
 }

@@ -103,6 +103,10 @@ SPEC-SIGNING for the commit/remix signing domain, SPEC-RELEASE-THRESHOLD
 §3 for the BLS namespace); this document does not duplicate that list,
 only the naming rule.
 
+`mkit-authority-generation:v1` is the dedicated deployment-authority statement
+domain for namespace authority generation changes (SPEC-SERVER §6.2.1), distinct
+from grants, hook requests, write envelopes and admin statements.
+
 ## 5. Golden vectors and conformance tests
 
 Where a `SPEC-*.md` document lists numbered test vectors, the

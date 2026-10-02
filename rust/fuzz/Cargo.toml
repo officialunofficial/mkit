@@ -38,6 +38,7 @@ cargo-fuzz = true
 [dependencies]
 arbitrary = "1"
 buffa = "0.9.1"
+mkit-attest = { path = "../crates/mkit-attest", features = ["grants"] }
 mkit-core = { path = "../crates/mkit-core", features = ["sparse-checkout"] }
 mkit-git-bridge = { path = "../crates/mkit-git-bridge" }
 mkit-keystore = { path = "../crates/mkit-keystore", features = ["fuzzing"] }
@@ -171,6 +172,22 @@ bench = false
 required-features = ["libfuzzer"]
 
 [[bin]]
+name = "span_decode"
+path = "fuzz_targets/span_decode.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "verify_span"
+path = "fuzz_targets/verify_span.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
 name = "pack_entries"
 path = "fuzz_targets/pack_entries.rs"
 test = false
@@ -181,6 +198,22 @@ required-features = ["libfuzzer"]
 [[bin]]
 name = "verify_closure"
 path = "fuzz_targets/verify_closure.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "grant_parse"
+path = "fuzz_targets/grant_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "epoch_visibility_parse"
+path = "fuzz_targets/epoch_visibility_parse.rs"
 test = false
 doc = false
 bench = false

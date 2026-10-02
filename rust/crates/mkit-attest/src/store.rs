@@ -232,6 +232,7 @@ fn sync_parent_dir(parent: &Path) -> Result<(), Error> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // Mirrors the unix signature.
 fn sync_parent_dir(_parent: &Path) -> Result<(), Error> {
     Ok(())
 }

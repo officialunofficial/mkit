@@ -24,7 +24,7 @@ The transport has two forms: a deterministic in-process scaffold
 (`EncSession`/`from_session`) exercised by the in-tree round-trip
 test suite, and the real TCP transport used in production &mdash; URL
 parsing, `connect_tcp`/`serve_tcp`, the `mkit-cli/enc-transport`
-feature gate, and the `mkit serve --listen-enc <addr>` listener. §6
+feature gate, and the `mkit-server serve --listen-enc <addr>` listener. §6
 describes the TCP transport's mechanics and its current limitations.
 
 ---
@@ -170,7 +170,12 @@ After the encrypted handshake completes, the client MUST send a
 `Hello` frame with `proto = PROTOCOL_VERSION_1` and `client_id =
 "mkit <semver>"`. The server MUST reply with a `HelloResponse` whose
 `proto` matches. If either side disagrees, both close the connection
-without further verb exchange.
+without further verb exchange. As over ssh (SPEC-TRANSPORT §4.2), a
+server answers a first frame that is not `Hello` with
+`Error{INVALID_REQUEST, "first frame must be Hello"}`, and a `Hello` for
+another version with `Error{INVALID_REQUEST, "unsupported proto_version
+<n>"}`, before it closes; it serves no verb on that connection. (The
+removed `mkit serve --listen-enc` closed without replying.)
 
 This Hello is layered **on top of** the encrypted channel, not inside
 the encrypted handshake. It mirrors what `mkit-transport-ssh` does and
@@ -183,7 +188,7 @@ keeps the protocol-version dance in one place.
 | Cap | Value | Source |
 |---|---|---|
 | Max single encrypted record | 1 MiB | `mkit_rpc::MAX_FRAME_BYTES` |
-| Max ref name / prefix | 4096 bytes | `MAX_REF_NAME` in `mkit-rpc/src/helpers.rs` (re-exported by `mkit-transport-enc`) |
+| Max ref name / prefix | 512 bytes (SPEC-REFS §3) | `MAX_REF_NAME` in `mkit-rpc/src/helpers.rs` (re-exported by `mkit-transport-enc`), equal to `mkit_core::refs::MAX_REF_NAME_BYTES` |
 | Per-chunk pack data | 800 KiB | `CHUNK_DATA_MAX`; same as `mkit-transport-ssh` |
 | Pack body total | `mkit_core::protocol::PACK_BODY_LIMIT` | Shared client cap |
 
@@ -228,24 +233,49 @@ crate.
 `remote_dispatch::open` recognizes the `mkit+enc://` scheme behind the
 `mkit-cli/enc-transport` cargo feature; default builds remain SSH-only.
 
-`mkit serve --listen-enc <addr>` spawns an async accept loop via
-`mkit_transport_enc::serve_tcp_with_policy`. The listener is
+The listener is `mkit-server serve --listen-enc <addr> --repo-root <dir>`
+([`mkit-server-native`](../../rust/crates/mkit-server-native/README.md)).
+It runs `mkit_transport_enc::serve_tcp_listener`, the async accept loop,
+on the server's runtime beside its HTTP listener, and serves every
+session with `mkit_server::ssh::serve_session` over the server's
+pipeline, as the `TransportPeer` principal holding the key the handshake
+authenticated; its verb replies are therefore the ssh session's (§3).
+Under multi-repository addressing the listener requires
+`--enc-repository <NAMESPACE>/<NAME>` and binds every session to that
+one repository (SPEC-TRANSPORT-CONNECT §7.4): nothing in the session's
+frames can select another.
+The CLI's former `mkit serve --listen-enc <addr>` (which ran the blocking
+`serve_tcp_with_policy_and_bounds`) is removed; `mkit serve` is only the
+ssh stdin/stdout server. The listener is
 **fail-closed** (issue #178): it refuses to bind unless the operator
 supplies `--enc-authorized-peers <PATH>` (an allowlist of client public
 keys) or passes `--unsafe-allow-any-enc-peer` (a dev escape that prints
-a loud warning). `serve_tcp_with_policy` consults a `PeerPolicy` &mdash;
+a loud warning). The accept loop consults a `PeerPolicy` &mdash;
 `AllowAny` (dev / the explicit unsafe escape) or
 `Allowlist(HashSet<[u8;32]>)` built from the `--enc-authorized-peers`
 file (one client pubkey per line, 64-hex or 43-char url-safe base64;
-`#` comments and blank lines ignored). The bare `serve_tcp` retains
+`#` comments and blank lines ignored). `serve_tcp_with_addr` retains
 `AllowAny` for the direct e2e harness only. The allowlist bouncer
 rejects any unlisted dialer at the handshake &mdash; a rejected peer never
 receives a `HelloResponse`, list-refs, packs, or update-ref.
 
-The server identity is a **stable** raw-32 key loaded/auto-created from
-`--enc-server-key <PATH>` (or a user-scoped default
-`~/.config/mkit/enc/server.key`) so the advertised `?pubkey=` is stable
-across restarts; only the unsafe allow-any mode keeps an ephemeral
+The listener bounds each client: the handshake deadline
+(`--enc-handshake-timeout-secs`, §2.1, default 10 s), a per-frame idle
+timeout after it (`--enc-idle-timeout-secs`, applied to every frame read
+and write), and the per-connection budgets of SPEC-TRANSPORT §4.4.
+`mkit-server` also caps the connections in the handshake
+(`--enc-max-handshakes`) apart from the sessions (`--max-connections`), so
+clients that connect and never handshake cannot hold the slots of
+authorized ones. On shutdown it
+stops accepting and ends each session at its next frame boundary (never
+inside an upload), within its grace period.
+
+The server identity is a **stable** raw-32 key loaded, or created on
+first run, from `--enc-server-key <PATH>`, which an allowlisting server
+requires (there is no default path: the removed `mkit serve --listen-enc`
+fell back to `~/.config/mkit/enc/server.key`, `mkit-server` resolves no
+home directory), so the advertised `?pubkey=` is stable across restarts;
+only the unsafe allow-any mode without a key file keeps an ephemeral
 per-process key. A client can similarly pin its identity via the
 `MKIT_ENC_CLIENT_KEY` environment variable (a user-scoped or
 CLI-supplied raw-32 key file) so an allowlisting server can pin the

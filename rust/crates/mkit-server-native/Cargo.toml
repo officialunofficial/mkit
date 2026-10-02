@@ -1,0 +1,257 @@
+# mkit-server-native — the native (tokio) adapter of the mkit server (PRD
+# production server work §5.1): the SQLite metadata backend (the rusqlite `SqlConn` under
+# `mkit-server`'s shared `SqlKvStore`), the `Blocking` adapter that runs
+# sync-bodied stores on tokio's blocking pool, the embeddable axum router
+# with its production tower layers, and the `mkit-server` binary (FS blobs,
+# `.mkit`-layout or SQLite metadata; WP-M0-10, D31), and the S3 blob store
+# (`s3`, WP-M0-11).
+#
+# `publish = false` during the epic; WP-REL decides publication. Never a
+# dependency of `mkit-cli`: rusqlite's bundled SQLite (C, built by `cc`)
+# and the HTTP server stack must stay out of the CLI graph.
+[package]
+name = "mkit-server-native"
+description = "Native (tokio) adapter of the mkit server: axum router, SQLite metadata backend and the mkit-server binary"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["sqlite", "http", "s3", "enc", "hooks"]
+# Explicit --launch-profile uno --http-objects or programmatic mount opt-in.
+http-objects = ["http", "mkit-server/http-objects"]
+# Test-only timer handlers and pipeline directives; absent from release builds.
+test-faults = ["mkit-server/test-faults"]
+# `S3BlobStore`: content-addressed blobs in an S3-compatible bucket, signed
+# with `mkit-transport-s3`'s SigV4 code, over reqwest (async, rustls: the
+# workspace's existing HTTP client and TLS stack, no new supply chain).
+s3 = [
+    "dep:mkit-transport-s3",
+    "dep:reqwest",
+    "dep:sha2",
+    "dep:tempfile",
+    "dep:url",
+    "tokio/time",
+]
+# `RusqliteConn`: SQLite through rusqlite, with SQLite bundled.
+sqlite = ["dep:rusqlite", "dep:parking_lot"]
+# The axum router, its tower layers, graceful shutdown, tracing and the
+# `metrics` bridge, and the `mkit-server` binary.
+http = [
+    "sqlite",
+    "dep:axum",
+    "dep:tower",
+    "dep:tower-http",
+    "dep:tracing-subscriber",
+    "dep:metrics",
+    "dep:clap",
+    "dep:connectrpc",
+    "dep:http",
+    "dep:http-body",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:subtle",
+    "dep:getrandom",
+    "mkit-server/connect",
+    "tokio/rt-multi-thread",
+    "tokio/net",
+    "tokio/signal",
+    "tokio/macros",
+    "tokio/time",
+]
+# `mkit-server serve --hook-*-url`: the `mkit.server.hooks.v1` remote hooks
+# (SPEC-SERVER §§6-8) over signed HTTPS (`hooks::HttpChannel`, reqwest with
+# rustls), and the `hook-key-list` command.
+hooks = [
+    "http",
+    "dep:reqwest",
+    "dep:url",
+    "dep:zeroize",
+    "mkit-server/remote-hooks",
+    "tokio/time",
+]
+# `mkit-server serve --listen-enc`: the `mkit+enc://` listener, each
+# session run by `mkit_server::ssh::serve_session` over the pipeline
+# (the feature set of `mkit-cli`'s `enc-transport`).
+enc = [
+    "http",
+    "dep:mkit-transport-enc",
+    "mkit-transport-enc/tcp",
+    "dep:commonware-cryptography",
+    "dep:commonware-codec",
+    "dep:mkit-rpc",
+    "dep:zeroize",
+    "mkit-server/ssh",
+]
+
+[dependencies]
+# `fs`: the `.mkit` on-disk layout stores the binary serves (moved here from
+# WP-M0-09, R-71). `sql`: the shared SQL store under `RusqliteConn`.
+mkit-server = { version = "0.4", path = "../mkit-server", default-features = false, features = ["sql", "fs"] }
+mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
+# The file-ref check behind `--meta sqlite:` (R-81).
+mkit-transport-file = { version = "0.4", path = "../mkit-transport-file" }
+tokio = { version = "1", default-features = false, features = ["rt", "sync"] }
+# Drives a sync-bodied store's future to completion on a blocking thread.
+futures-executor = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+bytes = "1"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+rusqlite = { version = "0.40", default-features = false, features = ["bundled", "cache"], optional = true }
+# A reentrant lock: a transaction body runs statements on the connection
+# its own `transaction` call already holds.
+parking_lot = { version = "0.12", optional = true }
+# The router: axum 0.8, the major connectrpc's `axum` feature targets.
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio"], optional = true }
+tower = { version = "0.5", default-features = false, features = ["limit", "util"], optional = true }
+tower-http = { version = "0.6", default-features = false, features = ["cors", "trace", "limit", "sensitive-headers"], optional = true }
+# `DeadlinePolicy` for the per-procedure timeouts. zstd is fine natively.
+connectrpc = { version = "0.9.1", default-features = false, features = ["axum", "gzip", "zstd", "json"], optional = true }
+http = { version = "1", optional = true }
+http-body = { version = "1", optional = true }
+# The accept loop: hyper-util's auto (HTTP/1.1 + h2c) builder with a timer,
+# so the header-read timeout and HTTP/2 keepalive work, plus graceful
+# shutdown.
+hyper = { version = "1", default-features = false, features = ["server", "http1", "http2"], optional = true }
+hyper-util = { version = "0.1", default-features = false, features = ["server-auto", "server-graceful", "tokio", "http1", "http2"], optional = true }
+# Constant-time bearer pre-check.
+subtle = { version = "2", default-features = false, optional = true }
+# The random root id binding a served root to its SQLite database (R-81).
+getrandom = { version = "0.4", optional = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "ansi", "env-filter", "json"], optional = true }
+# The metrics facade only; no exporter (planner default Q20).
+metrics = { version = "0.24", optional = true }
+clap = { version = "4", default-features = false, features = ["std", "help", "error-context", "usage", "derive", "env"], optional = true }
+# `s3`: only `sigv4` is used, the published crate's public signer; its
+# blocking client is never called here.
+mkit-transport-s3 = { version = "0.4", path = "../mkit-transport-s3", optional = true }
+# Same major and TLS feature as the workspace's other reqwest users.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"], optional = true }
+# The SigV4 payload hash, computed while an upload spools.
+sha2 = { version = "0.11", optional = true }
+# The unnamed upload spool file.
+tempfile = { version = "3", optional = true }
+url = { version = "2", optional = true }
+# The enc listener: the published transport's async accept loop, the
+# server's static ed25519 key, and the ssh frame type the session speaks.
+mkit-transport-enc = { version = "0.4", path = "../mkit-transport-enc", optional = true }
+commonware-cryptography = { workspace = true, features = ["std"], optional = true }
+commonware-codec = { workspace = true, optional = true }
+mkit-rpc = { version = "0.4", path = "../mkit-rpc", optional = true }
+zeroize = { version = "1", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# `O_NOFOLLOW`/`O_NONBLOCK` for opening the bearer token file once.
+libc = "0.2"
+
+[dev-dependencies]
+base64 = "0.22"
+mkit-attest = { version = "0.4", path = "../mkit-attest", default-features = false, features = ["grants"] }
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
+proptest = "1"
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
+tempfile = "3"
+futures = "0.3"
+mkit-server = { version = "0.4", path = "../mkit-server", features = ["memory"] }
+mkit-server-conformance = { path = "../mkit-server-conformance", features = ["fake-s3", "stubs"] }
+# The generated `mkit.transport.v1` messages, and `ConnectTransport`, the
+# `mkit+http://` client (tests/client_e2e.rs).
+mkit-transport-connect = { version = "0.4", path = "../mkit-transport-connect" }
+# The client push path (`push_branch_steps`) against the server it pushes to
+# (tests/client_e2e.rs). A dev-dependency only: the CLI's own graph stays
+# server-free.
+mkit-cli = { version = "0.4", path = "../mkit-cli" }
+buffa = "0.9.1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+serde_json = "1"
+url = "2"
+# tests/hook_channel.rs: a TLS server with a self-signed certificate.
+tokio-rustls = "0.26"
+testcontainers = { version = "0.27", features = ["blocking"] }
+testcontainers-modules = { version = "0.15", features = ["minio", "blocking"] }
+
+[[bin]]
+name = "mkit-server"
+path = "src/bin/mkit-server.rs"
+required-features = ["http"]
+
+[[test]]
+name = "wire_fs_sqlite"
+required-features = ["http"]
+
+[[test]]
+name = "wire_multi"
+required-features = ["http"]
+
+[[test]]
+name = "wire_large_listing"
+required-features = ["http"]
+
+[[test]]
+name = "addressing"
+required-features = ["http"]
+
+[[test]]
+name = "wire_fs_layout_bearer"
+required-features = ["http"]
+
+[[test]]
+name = "client_e2e"
+required-features = ["http"]
+
+[[test]]
+name = "server_basics"
+required-features = ["http"]
+
+[[test]]
+name = "wire_binary"
+required-features = ["http"]
+
+[[test]]
+name = "timers"
+required-features = ["http"]
+
+[[test]]
+name = "server_hardening"
+required-features = ["http"]
+
+[[test]]
+name = "write_gate"
+required-features = ["http"]
+
+[[test]]
+name = "wire_s3_sqlite"
+required-features = ["http", "s3"]
+
+[[test]]
+name = "s3_store"
+required-features = ["s3"]
+
+[[test]]
+name = "enc_listener"
+required-features = ["enc"]
+
+[[test]]
+name = "hook_channel"
+required-features = ["hooks"]
+
+[[test]]
+name = "hook_config"
+required-features = ["hooks"]
+
+[[test]]
+name = "hook_e2e"
+required-features = ["hooks"]
+
+[[test]]
+name = "admission_e2e"
+required-features = ["hooks"]

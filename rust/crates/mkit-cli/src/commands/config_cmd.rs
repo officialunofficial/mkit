@@ -11,7 +11,7 @@ use std::io::Write;
 use clap::{Parser, ValueEnum};
 
 use crate::clap_shim;
-use crate::config::{self, Config, REPO_FORBIDDEN_KEYS};
+use crate::config::{self, Config};
 use crate::exit;
 use crate::format;
 
@@ -49,6 +49,7 @@ struct ConfigOpts {
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)] // one flat set/show/unset dispatch
 pub fn run(args: &[String]) -> u8 {
     let opts = match clap_shim::parse::<ConfigOpts>("mkit config", args) {
         Ok(o) => o,
@@ -105,8 +106,30 @@ pub fn run(args: &[String]) -> u8 {
     let key_normalized = config::normalize_config_key(&opts.args[0]);
     let key = key_normalized.as_str();
     let value = opts.args[1].as_str();
+    if key == "admission_helper" && !std::path::Path::new(value).is_absolute() {
+        return emit_err(
+            "admission_helper must be an absolute path",
+            exit::CONFIG_ERROR,
+        );
+    }
+    if remote_admission_name(key).is_some() {
+        for header in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let bearer = std::env::var("MKIT_API_TOKEN").is_ok_and(|s| !s.is_empty());
+            if mkit_transport_connect::admission::is_reserved(header, bearer) {
+                return emit_err(
+                    &format!("reserved admission header `{header}`"),
+                    exit::CONFIG_ERROR,
+                );
+            }
+        }
+    }
     if let Err(e) = config::validate_value(value) {
         return emit_err(&format!("invalid value: {e}"), exit::CONFIG_ERROR);
+    }
+    if key == "grant.webauthn_rp"
+        && let Err(e) = crate::grants::parse_relying_parties(&[value.to_owned()])
+    {
+        return emit_err(&format!("{key}: {e}"), exit::CONFIG_ERROR);
     }
     let normalized_value = if key == "user.identity" {
         match config::expand_user_identity(value) {
@@ -124,7 +147,7 @@ pub fn run(args: &[String]) -> u8 {
         return emit_err(&format!("{e}"), exit::CONFIG_ERROR);
     }
     warn_if_alias_without_identity(&layered.merged, key);
-    let forbidden = REPO_FORBIDDEN_KEYS.contains(&key);
+    let forbidden = config::is_repo_forbidden_key(key);
     if opts.local && forbidden {
         return emit_err(
             &format!(
@@ -170,7 +193,7 @@ fn run_unset(
     if lookup(&Config::default(), key).is_none() {
         return emit_err(&format!("unknown config key: {key}"), exit::CONFIG_ERROR);
     }
-    let forbidden = REPO_FORBIDDEN_KEYS.contains(&key);
+    let forbidden = config::is_repo_forbidden_key(key);
     if local && forbidden {
         return emit_err(
             &format!(
@@ -237,6 +260,7 @@ fn unset_repo_key(cfg: &mut Config, key: &str) -> Result<bool, u8> {
         "remote_bucket" => Ok(take_nonempty(&mut cfg.remote_bucket)),
         "remote_type" => Ok(take_nonempty(&mut cfg.remote_type)),
         "transport_auth" => Ok(take_nonempty(&mut cfg.transport_auth)),
+        "http.sslcainfo" => Ok(take_nonempty(&mut cfg.http_ssl_ca_info)),
         k if config::is_core_section(k) => match config::core_allowed_suffix(k) {
             Some(suffix) => Ok(cfg.core.remove(&suffix).is_some()),
             None => Err(emit_err(
@@ -261,6 +285,14 @@ fn is_path_key(key: &str) -> bool {
             | "attest.secp256k1_key_path"
             | "attest.p256_key_path"
     )
+}
+
+fn remote_admission_name(key: &str) -> Option<&str> {
+    let name = key
+        .strip_prefix("remote.")?
+        .strip_suffix(".admission_headers")?;
+    (!name.is_empty() && !name.contains('.') && mkit_core::refs::validate_ref_name_grammar(name))
+        .then_some(name)
 }
 
 /// Warn on stderr the first time `user.name`/`user.email` is set in a
@@ -349,6 +381,7 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
         "remote_endpoint" => value.clone_into(&mut cfg.remote_endpoint),
         "remote_bucket" => value.clone_into(&mut cfg.remote_bucket),
         "remote_type" => value.clone_into(&mut cfg.remote_type),
+        "http.sslcainfo" => value.clone_into(&mut cfg.http_ssl_ca_info),
         // Write-auth mode for `mkit+https://`/`mkit+http://` remotes — see
         // `Config::transport_auth`'s doc comment. Validated here (unlike
         // the lenient config-load fallback in `config::apply_kv`, which
@@ -411,6 +444,7 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
 /// paired with its value. Keys are emitted in alphabetical order so
 /// the output is deterministic and easy to snapshot-test.
 const CONFIG_KEYS: &[&str] = &[
+    "admission_helper",
     "attest.default_algorithm",
     "attest.external_signer_args",
     "attest.external_signer_path",
@@ -420,6 +454,8 @@ const CONFIG_KEYS: &[&str] = &[
     "attest.signer",
     "default_branch",
     "durability.objects",
+    "grant.webauthn_rp",
+    "http.sslcainfo",
     "key.backend",
     "key.default_ref",
     "key.ed25519_ref",
@@ -441,7 +477,15 @@ const CONFIG_KEYS: &[&str] = &[
 ];
 
 fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
+    if let Some(name) = remote_admission_name(key) {
+        return Some(Cow::Borrowed(
+            cfg.remote_admission_headers
+                .get(name)
+                .map_or("", String::as_str),
+        ));
+    }
     match key {
+        "admission_helper" => Some(Cow::Borrowed(&cfg.admission_helper)),
         "user.identity" => Some(Cow::Borrowed(&cfg.user_identity)),
         "user.name" => Some(Cow::Borrowed(&cfg.user_name)),
         "user.email" => Some(Cow::Borrowed(&cfg.user_email)),
@@ -452,7 +496,9 @@ fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
         "remote_endpoint" => Some(Cow::Borrowed(&cfg.remote_endpoint)),
         "remote_bucket" => Some(Cow::Borrowed(&cfg.remote_bucket)),
         "remote_type" => Some(Cow::Borrowed(&cfg.remote_type)),
+        "http.sslcainfo" => Some(Cow::Borrowed(&cfg.http_ssl_ca_info)),
         "transport_auth" => Some(Cow::Borrowed(&cfg.transport_auth)),
+        "grant.webauthn_rp" => Some(Cow::Owned(cfg.grant_webauthn_rp.join("|"))),
         "ssh.strict_host_key_checking" => Some(Cow::Borrowed(&cfg.ssh_strict_host_key_checking)),
         "ssh.user_known_hosts_file" => Some(Cow::Borrowed(&cfg.ssh_user_known_hosts_file)),
         "ssh.identity_file" => Some(Cow::Borrowed(&cfg.ssh_identity_file)),

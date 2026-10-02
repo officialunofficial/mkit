@@ -128,17 +128,9 @@ exec "$MKIT_SSH_TARGET_BIN" serve "$path"
     wrapper
 }
 
-/// Build a source repo with real committed content, then push it to a
-/// freshly-initialised `remote` repo so the remote carries the packmap
-/// refs that `clone` reconstructs from. Returns the served `remote`
-/// repo path.
-///
-/// mkit's transfer dialect is packmap-only: a branch tip is only
-/// fetchable once a push has advertised `refs/mkit/packmap/<branch>`. A
-/// repo that was merely committed-to (never pushed) advertises no
-/// packmap, so cloning it yields zero refs. We therefore serve a
-/// push-populated remote, exactly as a real deployment would.
-fn build_and_push_source(root: &Path, xdg: &Path) -> std::path::PathBuf {
+/// Build `root/source` as a repo with real committed content. Returns
+/// its path.
+fn build_source(root: &Path, xdg: &Path) -> std::path::PathBuf {
     let source = root.join("source");
     fs::create_dir_all(&source).unwrap();
     assert!(
@@ -166,6 +158,21 @@ fn build_and_push_source(root: &Path, xdg: &Path) -> std::path::PathBuf {
         "commit source: {}",
         String::from_utf8_lossy(&commit.stderr)
     );
+    source
+}
+
+/// Build a source repo with real committed content, then push it to a
+/// freshly-initialised `remote` repo so the remote carries the packmap
+/// refs that `clone` reconstructs from. Returns the served `remote`
+/// repo path.
+///
+/// mkit's transfer dialect is packmap-only: a branch tip is only
+/// fetchable once a push has advertised `refs/mkit/packmap/<branch>`. A
+/// repo that was merely committed-to (never pushed) advertises no
+/// packmap, so cloning it yields zero refs. We therefore serve a
+/// push-populated remote, exactly as a real deployment would.
+fn build_and_push_source(root: &Path, xdg: &Path) -> std::path::PathBuf {
+    let source = build_source(root, xdg);
 
     let remote = root.join("remote");
     fs::create_dir_all(&remote).unwrap();
@@ -325,4 +332,383 @@ fn ssh_clone_moves_data_and_delivers_pinned_options() {
 /// True when `lines` contains `flag` immediately followed by `value`.
 fn has_pair(lines: &[&str], flag: &str, value: &str) -> bool {
     lines.windows(2).any(|w| w[0] == flag && w[1] == value)
+}
+
+// ------------------------------------------------- WP-1.15 root mode
+//
+// `mkit serve --root <dir> [--principal <hex>]` serves the repositories
+// under `<dir>` addressed by `<namespace>/<name>`; only the namespace's
+// owner may write. The wrapper stands in for sshd's forced command: it
+// finds the client's `mkit serve <path>` in argv (the same scan as
+// `fake_ssh.sh`) and execs `mkit serve --root` locally — handing the
+// path over argv, or over `SSH_ORIGINAL_COMMAND` the way sshd does when
+// `MKIT_SSH_SERVE_ENV` is set. The asserted principal arrives via
+// `MKIT_SSH_PRINCIPAL` (absent → no `--principal`, as a forced command
+// that asserts none).
+
+/// A hex string as a `&'static str` for `run_in`'s env table.
+fn hex(byte: char) -> String {
+    std::iter::repeat_n(byte, 64).collect()
+}
+
+/// `ed25519-<64 hex>` — a self-certifying namespace's canonical form.
+fn ns(byte: char) -> String {
+    format!("ed25519-{}", hex(byte))
+}
+
+/// Write the root-mode ssh wrapper (see the header above).
+fn write_root_ssh_wrapper(dir: &Path) -> std::path::PathBuf {
+    let wrapper = dir.join("fake_ssh_root.sh");
+    let script = r#"#!/bin/sh
+set -eu
+
+{ echo "=== ssh invocation ==="; for a in "$@"; do printf '%s\n' "$a"; done; } >> "$MKIT_SSH_ARGV_LOG"
+
+found=0
+path=""
+for a in "$@"; do
+  if [ "$found" = 2 ]; then
+    path="$a"
+    break
+  fi
+  if [ "$found" = 1 ] && [ "$a" = serve ]; then
+    found=2
+    continue
+  fi
+  if [ "$a" = mkit ]; then
+    found=1
+  fi
+done
+
+if [ -z "$path" ]; then
+  echo "fake_ssh_root: could not locate 'mkit serve <path>' in argv" >&2
+  exit 64
+fi
+
+# `MKIT_SSH_SERVE_ENV=1`: hand the path over SSH_ORIGINAL_COMMAND the way
+# sshd does, instead of as a positional argument.
+serve_env=${MKIT_SSH_SERVE_ENV:-}
+if [ -n "$serve_env" ]; then
+  SSH_ORIGINAL_COMMAND="mkit serve $path"
+  export SSH_ORIGINAL_COMMAND
+  path=""
+fi
+
+if [ -n "${MKIT_SSH_PRINCIPAL:-}" ]; then
+  if [ -n "$path" ]; then
+    exec "$MKIT_SSH_TARGET_BIN" serve --root "$MKIT_SSH_ROOT" --principal "$MKIT_SSH_PRINCIPAL" "$path"
+  fi
+  exec "$MKIT_SSH_TARGET_BIN" serve --root "$MKIT_SSH_ROOT" --principal "$MKIT_SSH_PRINCIPAL"
+elif [ -n "$path" ]; then
+  exec "$MKIT_SSH_TARGET_BIN" serve --root "$MKIT_SSH_ROOT" "$path"
+else
+  exec "$MKIT_SSH_TARGET_BIN" serve --root "$MKIT_SSH_ROOT"
+fi
+"#;
+    fs::write(&wrapper, script).expect("write root wrapper");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&wrapper).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&wrapper, perms).unwrap();
+    }
+    wrapper
+}
+
+/// A `--root` deployment at `work/serve-root` with each of `rooms`
+/// `mkit init`ed under `ed25519-<owner>`. Returns the root's path.
+fn serve_root_with_rooms(
+    work: &Path,
+    xdg: &Path,
+    owner_ns: &str,
+    rooms: &[&str],
+) -> std::path::PathBuf {
+    let serve_root = work.join("serve-root");
+    for room in rooms {
+        let dir = serve_root.join(owner_ns).join(room);
+        fs::create_dir_all(&dir).unwrap();
+        let out = run_in(&dir, xdg, &["init"], &[]);
+        assert!(
+            out.status.success(),
+            "init {room}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    serve_root
+}
+
+/// The environment `run_in` needs so the spawned `mkit` reaches the
+/// root-mode wrapper: `MKIT_SSH_PROGRAM` picks the wrapper itself, the
+/// rest it inherits. `principal` is the asserted `--principal` key
+/// (`None` → the forced command asserts none); `env_path` hands the
+/// path via `SSH_ORIGINAL_COMMAND` instead of argv.
+fn root_env(
+    wrapper: &Path,
+    serve_root: &Path,
+    principal: Option<&str>,
+    env_path: bool,
+) -> Vec<(String, String)> {
+    let mut env = vec![
+        (
+            "MKIT_SSH_PROGRAM".to_owned(),
+            wrapper.to_str().unwrap().to_owned(),
+        ),
+        (
+            "MKIT_SSH_ARGV_LOG".to_owned(),
+            wrapper
+                .parent()
+                .unwrap()
+                .join("ssh_argv.log")
+                .to_str()
+                .unwrap()
+                .to_owned(),
+        ),
+        ("MKIT_SSH_TARGET_BIN".to_owned(), mkit_bin().to_owned()),
+        (
+            "MKIT_SSH_ROOT".to_owned(),
+            serve_root.to_str().unwrap().to_owned(),
+        ),
+    ];
+    if let Some(key) = principal {
+        env.push(("MKIT_SSH_PRINCIPAL".to_owned(), key.to_owned()));
+    }
+    if env_path {
+        env.push(("MKIT_SSH_SERVE_ENV".to_owned(), "1".to_owned()));
+    }
+    env
+}
+
+/// `mkit remote add origin <url>` on `source`, then `push origin` with
+/// `env`; returns the push's output.
+fn push_over_ssh(source: &Path, xdg: &Path, url: &str, env: &[(String, String)]) -> Output {
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let add = run_in(source, xdg, &["remote", "add", "origin", url], &env);
+    assert!(
+        add.status.success(),
+        "remote add: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    run_in(source, xdg, &["push", "origin"], &env)
+}
+
+/// The owner pushes over `mkit+ssh://` — sshd's forced command asserting
+/// the principal over `SSH_ORIGINAL_COMMAND` — and a clone of the same
+/// `<namespace>/<name>` address reconstructs the repo.
+#[test]
+fn ssh_root_mode_owner_pushes_and_clones() {
+    if cfg!(not(unix)) {
+        eprintln!("ssh_root_mode: skipped (requires a POSIX shell)");
+        return;
+    }
+    let work = tempfile::tempdir().expect("work tempdir");
+    let xdg = tempfile::tempdir().expect("xdg tempdir");
+    let root = work.path();
+
+    let owner_ns = ns('a');
+    let serve_root = serve_root_with_rooms(root, xdg.path(), &owner_ns, &["room-a"]);
+    let source = build_source(root, xdg.path());
+    let wrapper = write_root_ssh_wrapper(root);
+    let env = root_env(&wrapper, &serve_root, Some(&hex('a')), true);
+    let url = format!("mkit+ssh://e2euser@localhost/{owner_ns}/room-a");
+
+    let push = push_over_ssh(&source, xdg.path(), &url, &env);
+    assert!(
+        push.status.success(),
+        "owner push must succeed; stderr:\n{}",
+        String::from_utf8_lossy(&push.stderr)
+    );
+
+    let dest = root.join("dest");
+    let clone = run_in(
+        root,
+        xdg.path(),
+        &["clone", &url, dest.to_str().unwrap()],
+        &env.iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect::<Vec<_>>(),
+    );
+    assert!(
+        clone.status.success(),
+        "clone over ssh must succeed; stderr:\n{}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
+    let source_tip = refs::read_ref(&RepoLayout::single(&source), "main")
+        .unwrap()
+        .expect("source has refs/heads/main");
+    let dest_tip = refs::read_ref(&RepoLayout::single(&dest), "main")
+        .unwrap()
+        .expect("cloned repo has refs/heads/main");
+    assert_eq!(source_tip, dest_tip, "clone must reconstruct the push");
+}
+
+/// A principal that is not the namespace's key is denied: the push fails
+/// and the error the client surfaces is the pinned
+/// `write not permitted` (B11's `INVALID_REQUEST` frame).
+#[test]
+fn ssh_root_mode_non_owner_push_is_refused() {
+    if cfg!(not(unix)) {
+        eprintln!("ssh_root_mode: skipped (requires a POSIX shell)");
+        return;
+    }
+    let work = tempfile::tempdir().expect("work tempdir");
+    let xdg = tempfile::tempdir().expect("xdg tempdir");
+    let root = work.path();
+
+    let owner_ns = ns('a');
+    let serve_root = serve_root_with_rooms(root, xdg.path(), &owner_ns, &["room-a"]);
+    let source = build_source(root, xdg.path());
+    let wrapper = write_root_ssh_wrapper(root);
+    // 'b' is not 'a': the forced command asserts a non-owner key.
+    let env = root_env(&wrapper, &serve_root, Some(&hex('b')), false);
+    let url = format!("mkit+ssh://e2euser@localhost/{owner_ns}/room-a");
+
+    let push = push_over_ssh(&source, xdg.path(), &url, &env);
+    assert!(!push.status.success(), "non-owner push must fail: {push:?}");
+    let stderr = String::from_utf8_lossy(&push.stderr);
+    assert!(
+        stderr.contains("write not permitted"),
+        "the pinned refusal reaches the client: {stderr}"
+    );
+    // The refused push wrote nothing: the repo still advertises no refs.
+    let dest = root.join("dest");
+    let clone = run_in(
+        root,
+        xdg.path(),
+        &["clone", &url, dest.to_str().unwrap()],
+        &env.iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect::<Vec<_>>(),
+    );
+    assert!(clone.status.success(), "{clone:?}");
+    assert!(
+        refs::read_ref(&RepoLayout::single(&dest), "main")
+            .unwrap()
+            .is_none(),
+        "a denied push leaves the repo with no refs"
+    );
+}
+
+/// No `--principal` asserted at all: reads work, every write is denied.
+#[test]
+fn ssh_root_mode_without_principal_reads_but_cannot_write() {
+    if cfg!(not(unix)) {
+        eprintln!("ssh_root_mode: skipped (requires a POSIX shell)");
+        return;
+    }
+    let work = tempfile::tempdir().expect("work tempdir");
+    let xdg = tempfile::tempdir().expect("xdg tempdir");
+    let root = work.path();
+
+    let owner_ns = ns('a');
+    let serve_root = serve_root_with_rooms(root, xdg.path(), &owner_ns, &["room-a"]);
+    let source = build_source(root, xdg.path());
+    let wrapper = write_root_ssh_wrapper(root);
+    let url = format!("mkit+ssh://e2euser@localhost/{owner_ns}/room-a");
+
+    // Seed the repo as the owner so the read side has content.
+    let owner_env = root_env(&wrapper, &serve_root, Some(&hex('a')), false);
+    let push = push_over_ssh(&source, xdg.path(), &url, &owner_env);
+    assert!(
+        push.status.success(),
+        "owner push: {}",
+        String::from_utf8_lossy(&push.stderr)
+    );
+
+    // The same forced command with no --principal: clone works, push fails.
+    let anon_env = root_env(&wrapper, &serve_root, None, false);
+    let anon: Vec<(&str, &str)> = anon_env
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let dest = root.join("dest");
+    let clone = run_in(
+        root,
+        xdg.path(),
+        &["clone", &url, dest.to_str().unwrap()],
+        &anon,
+    );
+    assert!(
+        clone.status.success(),
+        "a keyless principal may read: {}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
+    let second = root.join("source2");
+    fs::create_dir_all(&second).unwrap();
+    assert!(run_in(&second, xdg.path(), &["init"], &[]).status.success());
+    assert!(
+        run_in(&second, xdg.path(), &["keygen"], &[])
+            .status
+            .success()
+    );
+    fs::write(second.join("f.txt"), b"nope\n").unwrap();
+    assert!(
+        run_in(&second, xdg.path(), &["add", "."], &[])
+            .status
+            .success()
+    );
+    assert!(
+        run_in(&second, xdg.path(), &["commit", "-m", "x"], &[])
+            .status
+            .success()
+    );
+    let push = push_over_ssh(&second, xdg.path(), &url, &anon_env);
+    assert!(!push.status.success(), "a keyless push must fail: {push:?}");
+    assert!(
+        String::from_utf8_lossy(&push.stderr).contains("write not permitted"),
+        "{}",
+        String::from_utf8_lossy(&push.stderr)
+    );
+}
+
+/// Two repositories under one root are isolated: pushing to
+/// `ed25519-<a>/room-a` leaves `ed25519-<a>/room-b` empty.
+#[test]
+fn ssh_root_mode_isolates_repositories() {
+    if cfg!(not(unix)) {
+        eprintln!("ssh_root_mode: skipped (requires a POSIX shell)");
+        return;
+    }
+    let work = tempfile::tempdir().expect("work tempdir");
+    let xdg = tempfile::tempdir().expect("xdg tempdir");
+    let root = work.path();
+
+    let owner_ns = ns('a');
+    let serve_root = serve_root_with_rooms(root, xdg.path(), &owner_ns, &["room-a", "room-b"]);
+    let source = build_source(root, xdg.path());
+    let wrapper = write_root_ssh_wrapper(root);
+    let env = root_env(&wrapper, &serve_root, Some(&hex('a')), false);
+    let url_a = format!("mkit+ssh://e2euser@localhost/{owner_ns}/room-a");
+    let url_b = format!("mkit+ssh://e2euser@localhost/{owner_ns}/room-b");
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
+    let push = push_over_ssh(&source, xdg.path(), &url_a, &env);
+    assert!(
+        push.status.success(),
+        "push to room-a: {}",
+        String::from_utf8_lossy(&push.stderr)
+    );
+
+    // room-b reconstructs nothing of room-a's push.
+    let dest_b = root.join("dest-b");
+    let clone = run_in(
+        root,
+        xdg.path(),
+        &["clone", &url_b, dest_b.to_str().unwrap()],
+        &env_refs,
+    );
+    assert!(
+        clone.status.success(),
+        "clone room-b: {}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
+    assert!(
+        refs::read_ref(&RepoLayout::single(&dest_b), "main")
+            .unwrap()
+            .is_none(),
+        "room-b must not see room-a's refs/heads/main"
+    );
+    // And the pack the push stored in room-a is not visible through
+    // room-b's repo either: cloning it yields zero refs (the ssh-session
+    // tests cover `PackExists`/`DownloadPack` at frame level).
 }

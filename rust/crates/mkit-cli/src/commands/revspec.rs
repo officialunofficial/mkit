@@ -152,7 +152,9 @@ fn resolve_base(store: &ObjectStore, layout: &RepoLayout, base: &str) -> Result<
     //    `read_tag` validate the name, returning `InvalidRefName` for a
     //    bad ref name — which we treat as "not a ref" and fall through
     //    to hash parsing (a bare hash is not a valid ref name anyway).
-    if refs::validate_ref_name(base) {
+    // The grammar only, so a branch named before SPEC-REFS §3 bounded
+    // names still resolves.
+    if refs::validate_ref_name_grammar(base) {
         if let Ok(Some(h)) = refs::read_ref(layout, base) {
             return Ok(h);
         }

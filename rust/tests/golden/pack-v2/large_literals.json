@@ -1,0 +1,40 @@
+{
+  "bin": "large_literals.bin",
+  "description": "three 0x03 blobs (10 KiB, 64 KiB, 263 KiB) whose frames use the 4- and 5-byte literals-section headers",
+  "entries": [
+    {
+      "blake3_of_bytes": "f3b38880d58138bfef17e0c7db979eb04f9ce2aff3259966e43b29396b869057",
+      "decoded_blake3": "f3b38880d58138bfef17e0c7db979eb04f9ce2aff3259966e43b29396b869057",
+      "frame_len": 5364,
+      "frame_offset": 21,
+      "id": "f3b38880d58138bfef17e0c7db979eb04f9ce2aff3259966e43b29396b869057",
+      "len": 10250,
+      "type": 3,
+      "uncompressed_len": 10250
+    },
+    {
+      "blake3_of_bytes": "1f79b26275a9a50d4dc59eec0ac92d8c10ccb162f38e17245fd7f7417858c64d",
+      "decoded_blake3": "1f79b26275a9a50d4dc59eec0ac92d8c10ccb162f38e17245fd7f7417858c64d",
+      "frame_len": 33321,
+      "frame_offset": 5394,
+      "id": "1f79b26275a9a50d4dc59eec0ac92d8c10ccb162f38e17245fd7f7417858c64d",
+      "len": 65546,
+      "type": 3,
+      "uncompressed_len": 65546
+    },
+    {
+      "blake3_of_bytes": "597c74e3b236fe45de51a24ed94f127b222f377e2d677b2b281f195040608928",
+      "decoded_blake3": "597c74e3b236fe45de51a24ed94f127b222f377e2d677b2b281f195040608928",
+      "frame_len": 137494,
+      "frame_offset": 38724,
+      "id": "597c74e3b236fe45de51a24ed94f127b222f377e2d677b2b281f195040608928",
+      "len": 269322,
+      "type": 3,
+      "uncompressed_len": 269322
+    }
+  ],
+  "name": "large_literals",
+  "pack_key": "df925789c13ba282cbc4251b9fa06bcf8e40faae3fc456a26174f6d1211e56bf",
+  "size": 176250,
+  "version": 2
+}

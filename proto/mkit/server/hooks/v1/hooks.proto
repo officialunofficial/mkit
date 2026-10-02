@@ -1,0 +1,545 @@
+edition = "2023";
+package mkit.server.hooks.v1;
+
+// Deployment business-logic hooks, called as configured; SPEC-SERVER §6.1.
+service HooksService {
+  // Decide whether the verified principal may act; SPEC-SERVER §6.2.
+  rpc Authorize(AuthorizeRequest) returns (AuthorizeResponse);
+  // Decide admission before the guarded apply; SPEC-SERVER §6.3.
+  rpc Admit(AdmitRequest) returns (AdmitResponse);
+  // Inspect object metadata without inline content; SPEC-SERVER §6.4.
+  rpc Inspect(InspectRequest) returns (InspectResponse);
+  // Deliver a durable reservation outcome at least once; SPEC-SERVER §§5, 6.5.
+  rpc Outcome(OutcomeRequest) returns (OutcomeResponse);
+  // Deliver a durable lifecycle event at least once; SPEC-SERVER §12.4.
+  rpc Event(EventRequest) returns (EventResponse);
+  // Deliver a durable cache purge at least once; SPEC-SERVER §16.7.
+  rpc CachePurge(CachePurgeRequest) returns (CachePurgeResponse);
+}
+
+// Verified operation context shared by decision hooks; SPEC-SERVER §6.2.
+message Operation {
+  // The mkit server's canonical origin, not the hook's origin; SPEC-SERVER §6.2.
+  string audience = 1;
+  // Full repository identity as STC §7.4 requires; SPEC-SERVER §6.2.
+  string repository = 2;
+  // Full Connect procedure path of the client RPC; SPEC-SERVER §6.2.
+  string procedure = 3;
+  // Identity established before authorization; SPEC-SERVER §6.2.
+  Principal principal = 4;
+  // Auth v2 nonce of a signed write; empty otherwise; SPEC-SERVER §6.2.
+  string idempotency_key = 5;
+  // Intended ref writes in decision order; SPEC-SERVER §6.2.
+  repeated RefChange refs = 6;
+  // Namespace-owner result, set for Authorize and Admit; SPEC-SERVER §6.2.
+  bool owner = 7;
+  // Grant-rule result, if any, set for Authorize and Admit; SPEC-SERVER §6.2.
+  GrantUsed grant = 8;
+}
+
+// Credential class and verified identity, without bearer secrets; SPEC-SERVER §6.2.
+message Principal {
+  // Exactly one identity class; SPEC-SERVER §6.2.
+  oneof kind {
+    // No authenticated credentials; SPEC-SERVER §6.2.
+    Anonymous anonymous = 1;
+    // Verified auth v2 signer; SPEC-SERVER §6.2.
+    Signer signer = 2;
+    // Holder of the deployment's bearer credential; SPEC-SERVER §6.2.
+    BearerHolder bearer_holder = 3;
+    // Authenticated encrypted-transport peer; SPEC-SERVER §6.2.
+    TransportPeer transport_peer = 4;
+    // Identity established by an SSH forced command; SPEC-SERVER §6.2.
+    SshForcedCommand ssh_forced_command = 5;
+  }
+}
+
+// Anonymous identity; no credential data accompanies it; SPEC-SERVER §6.2.
+message Anonymous {}
+
+// Identity proved by an auth v2 signature; SPEC-SERVER §6.2.
+message Signer {
+  // Raw 32-byte Ed25519 public key of the signer; SPEC-SERVER §6.2.
+  bytes ed25519_public_key = 1;
+}
+
+// Bearer-holder identity; the token is never sent to hooks; SPEC-SERVER §6.2.
+message BearerHolder {}
+
+// Identity of an authenticated encrypted-transport peer; SPEC-SERVER §6.2.
+message TransportPeer {
+  // Raw 32-byte Ed25519 public key of the peer; SPEC-SERVER §6.2.
+  bytes ed25519_public_key = 1;
+}
+
+// Identity named by an SSH forced command; SPEC-SERVER §6.2.
+message SshForcedCommand {
+  // Raw 32-byte Ed25519 public key, or empty if unknown; SPEC-SERVER §6.2.
+  bytes ed25519_public_key = 1;
+}
+
+// One intended conditional ref write or deletion; SPEC-SERVER §6.2.
+message RefChange {
+  // Full ref name, such as refs/heads/main; SPEC-SERVER §6.2.
+  string name = 1;
+  // Exactly one compare-and-swap precondition; SPEC-SERVER §6.2.
+  oneof condition {
+    // Accept any current ref state; SPEC-SERVER §6.2.
+    Unconditional any = 2;
+    // Require the ref to be absent; SPEC-SERVER §6.2.
+    MustNotExist missing = 3;
+    // Require the ref to hold this 32-byte object id; SPEC-SERVER §6.2.
+    bytes expected = 4;
+  }
+
+  // New 32-byte target id; empty when delete is true; SPEC-SERVER §6.2.
+  bytes new = 5;
+  // True when the operation deletes this ref; SPEC-SERVER §6.2.
+  bool delete = 6;
+}
+
+// Unconditional ref-write precondition; SPEC-SERVER §6.2.
+message Unconditional {}
+
+// Create-only precondition requiring an absent ref; SPEC-SERVER §6.2.
+message MustNotExist {}
+
+// Write grant and epoch established by authorization; SPEC-SERVER §6.3.
+message GrantUsed {
+  // Raw 32-byte id of the grant used; SPEC-SERVER §6.3.
+  bytes grant_id = 1;
+  // Namespace grant epoch checked during authorization; SPEC-SERVER §6.3.
+  uint64 epoch = 2;
+}
+
+// An HTTP header: a response pass-through header or a forwarded admission
+// credential header; SPEC-SERVER §6.3 and §6.6.
+message Header {
+  // Header name, compared case-insensitively; SPEC-SERVER §6.6.
+  string name = 1;
+  // At most 8,192 bytes: visible ASCII plus SP for response headers,
+  // visible ASCII plus SP and HTAB for credential headers; SPEC-SERVER §6.6.
+  string value = 2;
+}
+
+// Stage-2 authorization input before quota or replay allocation; SPEC-SERVER §6.2.
+message AuthorizeRequest {
+  // Verified operation and intended ref writes; SPEC-SERVER §6.2.
+  Operation operation = 1;
+}
+
+// Authorization decision returned in a successful Connect response; SPEC-SERVER §6.2.
+message AuthorizeResponse {
+  // Exactly one allow or deliberate denial; SPEC-SERVER §6.2.
+  oneof result {
+    // Permit the operation to proceed to admission; SPEC-SERVER §6.2.
+    AuthorizeAllow allow = 1;
+    // Refuse the operation with public client text; SPEC-SERVER §6.2.
+    Deny deny = 2;
+  }
+}
+
+// Authorization permission; it conveys no admission reservation; SPEC-SERVER §6.2.
+message AuthorizeAllow {
+  // Authority-source allowance grants this signed caller the repository's writer view;
+  // ignored for a check hook and does not bypass read authorization; SPEC-SERVER §10.1.
+  bool writer_view = 1;
+  // Mandatory on fenced Authority write allowances; SPEC-SERVER §6.2.1.
+  uint64 authority_generation = 2;
+}
+
+// Deliberate refusal, distinct from hook execution failure; SPEC-SERVER §§6.2, 8.
+message Deny {
+  // Authorize allows permission_denied/not_found/unauthenticated; SPEC-SERVER §6.2.
+  // Admit and pre-receive Inspect answer permission_denied; async Inspect is a hit; SPEC-SERVER §11.
+  string code = 1;
+  // Public UTF-8 text, at most 512 bytes and no control characters; SPEC-SERVER §6.2.
+  string message = 2;
+}
+
+// Stage-3 pricing and admission facts, without store-deduplication data; SPEC-SERVER §6.3.
+message AdmitRequest {
+  // Operation including established owner and grant facts; SPEC-SERVER §6.3.
+  Operation operation = 1;
+  // Declared request bytes; zero for ref-only writes; SPEC-SERVER §6.3.
+  uint64 declared_bytes = 2;
+  // Raw 32-byte pack id for BeginUpload; empty otherwise; SPEC-SERVER §6.3.
+  bytes pack_id = 3;
+  // Whether this operation creates its namespace; SPEC-SERVER §6.3.
+  bool creates_namespace = 4;
+  // Whether this operation creates its repository; SPEC-SERVER §6.3.
+  bool creates_repo = 5;
+  // Bytes new to the repository; absent when unknown, present zero when none; SPEC-SERVER §6.3.
+  uint64 new_to_repo_bytes = 6;
+  // Admission credential headers the client attached; SPEC-SERVER §6.3.
+  repeated Header credential_headers = 7;
+}
+
+// Admission decision with no internal quota charges on the wire; SPEC-SERVER §6.3.
+message AdmitResponse {
+  // Exactly one permission, challenge, or deliberate denial; SPEC-SERVER §6.3.
+  oneof decision {
+    // Permit apply and identify the reservation to settle; SPEC-SERVER §6.3.
+    AdmitAllow allow = 1;
+    // Request credentials without allocating server state; SPEC-SERVER §6.3.
+    AdmitChallenge challenge = 2;
+    // Refuse the operation; SPEC-SERVER §6.3.
+    Deny deny = 3;
+  }
+}
+
+// Admission permission with a required outcome idempotency key; SPEC-SERVER §6.3.
+message AdmitAllow {
+  // Required 1–128 bytes of [A-Za-z0-9._:-], used to key outcomes; SPEC-SERVER §6.6.
+  string reservation_id = 1;
+  // Only Payment-Receipt and PAYMENT-RESPONSE, within §6.6 limits; SPEC-SERVER §6.3.
+  repeated Header response_headers = 2;
+  // Implementer contract/payment reference copied into a storage receipt;
+  // at most 256 bytes of visible ASCII and never a secret (SPEC-SERVER §6.6).
+  string external_ref = 3;
+}
+
+// Credential challenge passed to the client as STC §5.1 requires; SPEC-SERVER §6.3.
+message AdmitChallenge {
+  // One to eight challenges within STC §5.1 bounds; SPEC-SERVER §6.6.
+  repeated Challenge challenges = 1;
+  // Human-readable challenge description, at most 512 bytes; SPEC-SERVER §6.6.
+  string description = 2;
+  // Only WWW-Authenticate (repeatable) and PAYMENT-REQUIRED; SPEC-SERVER §6.6.
+  repeated Header response_headers = 3;
+}
+
+// One opaque credential challenge under STC §5.1; SPEC-SERVER §6.3.
+message Challenge {
+  // Authentication-scheme token as STC §5.1 requires; SPEC-SERVER §6.6.
+  string scheme = 1;
+  // Opaque challenge value, at most 8,192 bytes; SPEC-SERVER §6.6.
+  string value = 2;
+}
+
+// Inspection input with metadata only; SPEC-SERVER §§6.4, 11.
+message InspectRequest {
+  // Verified operation whose content is inspected; SPEC-SERVER §6.4.
+  Operation operation = 1;
+  // Newly reachable files plus every file entry of added packs; SPEC-SERVER §11.1.
+  repeated InspectObject objects = 2;
+  // PRE_RECEIVE at stage 5 or QUARANTINE at stage 9; SPEC-SERVER §11.1.
+  InspectPhase phase = 3;
+  // Stable logical inspection id across retries, distinct from hook nonces; SPEC-SERVER §11.3.
+  string inspection_id = 4;
+  // Optional private added-pack retrieval metadata; never inline bytes; SPEC-SERVER §11.4.
+  InspectRetrieval scanner_retrieval = 5;
+}
+
+// Capability and ordered raw added packs for a single call; SPEC-SERVER §11.4.
+message InspectRetrieval {
+  // Origin-relative private endpoint path, without a query; SPEC-SERVER §11.4.
+  string endpoint_path = 1;
+  // Short-lived opaque retrieval capability; never log it; SPEC-SERVER §11.4.
+  string capability = 2;
+  // Exclusive expiry, as Unix epoch milliseconds; SPEC-SERVER §11.4.
+  uint64 expires_at_ms = 3;
+  // Exact added-pack order with lengths of raw stored packs; SPEC-SERVER §11.4.
+  repeated InspectPack packs = 4;
+}
+
+// Raw added-pack identity and byte length; SPEC-SERVER §11.4.
+message InspectPack {
+  // Raw 32-byte pack id; SPEC-SERVER §11.4.
+  bytes id = 1;
+  // Length of the raw staged pack in bytes; SPEC-SERVER §11.4.
+  uint64 length = 2;
+}
+
+// Pipeline phase of the inspection; SPEC-SERVER §11.1.
+enum InspectPhase {
+  // Legacy unspecified phase; callers of the §11 contract send an explicit phase.
+  INSPECT_PHASE_UNSPECIFIED = 0;
+  // Synchronous inspection before apply.
+  INSPECT_PHASE_PRE_RECEIVE = 1;
+  // Asynchronous inspection after commit.
+  INSPECT_PHASE_QUARANTINE = 2;
+}
+
+// Object identity, type and length without content bytes; SPEC-SERVER §6.4.
+message InspectObject {
+  // Raw 32-byte object id; SPEC-SERVER §6.4.
+  bytes id = 1;
+  // Object size in bytes; SPEC-SERVER §6.4.
+  uint64 size = 2;
+  // Blob, chunked-file manifest, or chunk; SPEC-SERVER §11.1.
+  InspectObjectKind kind = 3;
+}
+
+// File-object classification, independent of extraction; SPEC-SERVER §11.1.
+enum InspectObjectKind {
+  // Legacy unspecified kind; callers of the §11 contract send an explicit kind.
+  INSPECT_OBJECT_KIND_UNSPECIFIED = 0;
+  // Plain blob of any size, including an extracted blob.
+  INSPECT_OBJECT_KIND_BLOB = 1;
+  // Chunked-file manifest; its chunks are also inspected.
+  INSPECT_OBJECT_KIND_CHUNKED_FILE = 2;
+  // A chunk of a newly reachable chunked file or of an added pack; a blob
+  // also used as a chunk is reported once as BLOB.
+  INSPECT_OBJECT_KIND_CHUNK = 3;
+}
+
+// Verdict semantics depend on phase, never on on_unavailable; SPEC-SERVER §11.
+message InspectResponse {
+  // Exactly one pass, quarantine, rejection, or async deferral; SPEC-SERVER §6.4.
+  oneof verdict {
+    // Accept this inspector's inspected content; SPEC-SERVER §11.
+    InspectPass pass = 1;
+    // Hold before publication, or suspend flagged content after publication,
+    // pending re-inspection or admin release; SPEC-SERVER §11.
+    InspectQuarantine quarantine = 2;
+    // Pre-receive denial or post-commit takedown hit; SPEC-SERVER §11.
+    Deny reject = 3;
+    // Re-poll an asynchronous inspection; invalid in PRE_RECEIVE; SPEC-SERVER §11.3.
+    InspectDefer defer = 4;
+  }
+  // Raw 32-byte ids from the inspected set, only with reject or quarantine;
+  // nonempty for QUARANTINE-phase reject or quarantine (SPEC-SERVER §6.4).
+  repeated bytes flagged_objects = 5;
+  // Registered §14.6 token for an async reject that becomes a takedown.
+  // Ignored on PRE_RECEIVE reject; invalid with pass, quarantine, or defer.
+  string takedown_reason = 6;
+}
+
+// Asynchronous re-poll suggestion; SPEC-SERVER §11.3.
+message InspectDefer {
+  // Server clamps to 1000–60000 ms; absent or zero means 1000 ms.
+  uint32 retry_after_ms = 1;
+}
+
+// Empty successful inspection verdict; SPEC-SERVER §6.4.
+message InspectPass {}
+
+// Inspection decision to quarantine content; SPEC-SERVER §6.4.
+message InspectQuarantine {
+  // Explanation of the quarantine decision, at most 512 bytes; SPEC-SERVER §§6.4, 6.6.
+  string reason = 1;
+}
+
+// At-least-once delivery of one durable reservation outcome; SPEC-SERVER §§5, 6.5.
+message OutcomeRequest {
+  // Outcome keyed by its reservation id; SPEC-SERVER §6.5.
+  Outcome outcome = 1;
+}
+
+// Empty acknowledgement; any 2xx Connect response acknowledges delivery; SPEC-SERVER §8.
+message OutcomeResponse {}
+
+// Final result of a reservation; receivers deduplicate by its id; SPEC-SERVER §§5, 6.5.
+message Outcome {
+  // Admission reservation id and delivery idempotency key; SPEC-SERVER §6.5.
+  string reservation_id = 1;
+  // Canonical origin of the mkit server that performed the operation; SPEC-SERVER §6.5.
+  string audience = 2;
+  // Full repository identity of the operation; SPEC-SERVER §6.5.
+  string repository = 3;
+  // Time the outcome occurred, in Unix epoch milliseconds; SPEC-SERVER §6.5.
+  int64 occurred_unix_ms = 4;
+  // Exactly one final outcome; SPEC-SERVER §6.5.
+  oneof kind {
+    // Successful write applied durably; SPEC-SERVER §§3, 6.5.
+    Committed committed = 5;
+    // Failed or abandoned apply; SPEC-SERVER §§5, 6.5.
+    Aborted aborted = 6;
+    // Upload ticket expired without consumption; SPEC-SERVER §§5, 6.5.
+    Expired expired = 7;
+    // Paid read served content; SPEC-SERVER §6.5.
+    ReadServed read_served = 8;
+  }
+}
+
+// Successful apply and its byte accounting and ref effects; SPEC-SERVER §6.5.
+message Committed {
+  // Bytes stored for this reservation's committed operation; SPEC-SERVER §6.5.
+  uint64 bytes_stored = 1;
+  // Bytes newly added to the repository's membership; SPEC-SERVER §6.5.
+  uint64 new_to_repo = 2;
+  // Bytes new to the store, disclosed only in Committed; SPEC-SERVER §§5, 6.5.
+  uint64 new_to_store = 3;
+  // Ref changes durably applied by the operation; SPEC-SERVER §6.5.
+  repeated CommittedRef refs = 4;
+}
+
+// One committed ref target or deletion; SPEC-SERVER §6.5.
+message CommittedRef {
+  // Full name of the changed ref; SPEC-SERVER §6.5.
+  string name = 1;
+  // New raw 32-byte target id; empty when deleted is true; SPEC-SERVER §6.5.
+  bytes new = 2;
+  // True when the committed change deleted the ref; SPEC-SERVER §6.5.
+  bool deleted = 3;
+}
+
+// Failed apply, recorded separately from that apply; SPEC-SERVER §§3, 6.5.
+message Aborted {
+  // Typed failure or reconciliation reason; SPEC-SERVER §6.5.
+  AbortReason reason = 1;
+  // Operator text, at most 512 bytes; never shown to clients; SPEC-SERVER §6.5.
+  string detail = 2;
+}
+
+// Reason the guarded apply failed or was abandoned; SPEC-SERVER §§5, 6.5.
+enum AbortReason {
+  // No specific failure reason supplied; SPEC-SERVER §6.5.
+  ABORT_REASON_UNSPECIFIED = 0;
+  // Ref compare-and-swap was lost; SPEC-SERVER §6.5.
+  ABORT_REASON_REF_CONFLICT = 1;
+  // Grant epoch changed before apply; SPEC-SERVER §6.5.
+  ABORT_REASON_EPOCH_MISMATCH = 2;
+  // A pack needed for apply was missing; SPEC-SERVER §6.5.
+  ABORT_REASON_PACK_MISSING = 3;
+  // Another operation won the replay reservation race; SPEC-SERVER §6.5.
+  ABORT_REASON_REPLAY_RACE = 4;
+  // Internal failure prevented apply; SPEC-SERVER §6.5.
+  ABORT_REASON_INTERNAL = 5;
+  // No recorded apply result (e.g. a crash); set by reconcile; SPEC-SERVER §5.
+  ABORT_REASON_ABANDONED = 6;
+}
+
+// Ticket expired unconsumed; its reservation is released; SPEC-SERVER §§5, 6.5.
+message Expired {}
+
+// Paid-read result with the object and bytes delivered; SPEC-SERVER §6.5.
+message ReadServed {
+  // Raw 32-byte id of the object served; SPEC-SERVER §6.5.
+  bytes object = 1;
+  // Number of bytes served to the client; SPEC-SERVER §6.5.
+  uint64 bytes_served = 2;
+}
+
+// Durable lifecycle event delivery; SPEC-SERVER §12.4.
+message EventRequest {
+  // Required event, with exactly one kind; SPEC-SERVER §12.4.
+  Event event = 1;
+}
+
+// Empty acknowledgement of the delivered event; SPEC-SERVER §12.4 and §8.
+message EventResponse {}
+
+// Common lifecycle event envelope; SPEC-SERVER §12.4.
+message Event {
+  // Audience-unique idempotency key: 1–128 bytes of [A-Za-z0-9._:-].
+  string event_id = 1;
+  // The mkit server's canonical origin, not the hook signing audience.
+  string audience = 2;
+  // Full repository identity under STC §7.4; empty for namespace scope.
+  string repository = 3;
+  // Transition time in Unix epoch milliseconds, independent of delivery time.
+  int64 occurred_unix_ms = 4;
+  // Strictly increasing per repository/ref or namespace scope; stable on retry.
+  uint64 sequence = 5;
+  // Exactly one transition kind; SPEC-SERVER §12.4.
+  oneof kind {
+    // Storage-lease or administrative transition.
+    LeaseTransition lease = 6;
+    // Field 7 is left for the publication transition (§10); not reserved in schema.
+    // A content, repository, or namespace takedown transition (§14).
+    TakedownTransition takedown = 8;
+  }
+  // Namespace identity for a namespace-scoped override; empty otherwise.
+  string namespace = 9;
+}
+
+// A durable takedown state change. Namespace scope uses Event.namespace
+// and an empty Event.repository; content scope emits per repository (§12.4).
+message TakedownTransition {
+  string takedown_id = 1;
+  TakedownLevel level = 2;
+  TakedownState state = 3;
+  // Registered public token, never free text; SPEC-SERVER §14.6.
+  string reason = 4;
+}
+
+// Same level numbers as the admin TakedownLevel (§14.1, §16).
+enum TakedownLevel {
+  TAKEDOWN_LEVEL_UNSPECIFIED = 0;
+  TAKEDOWN_LEVEL_CONTENT = 1;
+  TAKEDOWN_LEVEL_REPOSITORY = 2;
+  TAKEDOWN_LEVEL_NAMESPACE = 3;
+}
+
+enum TakedownState {
+  TAKEDOWN_STATE_UNSPECIFIED = 0;
+  TAKEDOWN_STATE_BLOCKED = 1;
+  TAKEDOWN_STATE_COMPLETE = 2;
+  TAKEDOWN_STATE_REINSTATED = 3;
+}
+
+// Durable remote cache invalidation; SPEC-SERVER §16.7.
+message CachePurgeRequest {
+  // Unique per server audience, stable across delivery retries.
+  string purge_id = 1;
+  // The mkit server's canonical origin, not the hook signing audience.
+  string audience = 2;
+  // Full repository identity, empty for a namespace-wide purge.
+  string repository = 3;
+  // Reason for the purge.
+  CachePurgeTrigger trigger = 4;
+  // Origin-relative URL paths matched by exact path, without query strings or fragments.
+  repeated string url_paths = 5;
+  // Raw 32-byte object ids.
+  repeated bytes object_ids = 6;
+  // Full ref names.
+  repeated string refs = 7;
+  // Namespace identity when repository is empty for a namespace-wide purge.
+  string namespace = 8;
+}
+
+// Empty acknowledgement; a retry of the same purge id is idempotent.
+message CachePurgeResponse {}
+
+enum CachePurgeTrigger {
+  CACHE_PURGE_TRIGGER_UNSPECIFIED = 0;
+  CACHE_PURGE_TRIGGER_TAKEDOWN = 1;
+  CACHE_PURGE_TRIGGER_SUSPENSION = 2;
+  CACHE_PURGE_TRIGGER_LEASE_DELETION = 3;
+  CACHE_PURGE_TRIGGER_VISIBILITY_CHANGE = 4;
+  CACHE_PURGE_TRIGGER_MANUAL = 5;
+}
+
+// Effective storage-lease state transition; SPEC-SERVER §12.4.
+message LeaseTransition {
+  // Full ref name; empty means repository-level scope.
+  string ref = 1;
+  // Previous effective state; must not be UNSPECIFIED.
+  LeaseState from = 2;
+  // Resulting effective state; must not be UNSPECIFIED.
+  LeaseState to = 3;
+  // Applicable lease expiry; absent for permanent retention.
+  int64 lease_expires_unix_ms = 4;
+  // Transition cause; must not be UNSPECIFIED.
+  LeaseCause cause = 5;
+}
+
+// Storage-lease states ordered by severity; SPEC-SERVER §12.2.
+enum LeaseState {
+  // Invalid for emitted transitions.
+  LEASE_STATE_UNSPECIFIED = 0;
+  // Normal access.
+  LEASE_STATE_ACTIVE = 1;
+  // Writes blocked, reads allowed.
+  LEASE_STATE_GRACE = 2;
+  // Reads and writes blocked.
+  LEASE_STATE_SUSPENDED = 3;
+  // Terminal removal; objects await GC.
+  LEASE_STATE_DELETED = 4;
+}
+
+// Reason for a storage-lease transition; SPEC-SERVER §12.4.
+enum LeaseCause {
+  // Invalid for emitted transitions.
+  LEASE_CAUSE_UNSPECIFIED = 0;
+  // A time boundary was reached.
+  LEASE_CAUSE_EXPIRY = 1;
+  // Payment or policy renewal restored active storage terms.
+  LEASE_CAUSE_RENEWAL = 2;
+  // Deployment policy changed the storage terms.
+  LEASE_CAUSE_POLICY = 3;
+  // An administrative override changed the effective state.
+  LEASE_CAUSE_ADMIN = 4;
+}

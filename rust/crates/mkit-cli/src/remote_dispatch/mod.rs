@@ -22,7 +22,10 @@
 // the record's lifecycle ops (#545); everything else stays module-private.
 pub(crate) mod applied_packs;
 mod envelope_signer;
+pub(crate) mod grants;
 mod packmap;
+mod split;
+mod upload_receipts;
 
 use mkit_core::layout::RepoLayout;
 use std::path::Path;
@@ -35,15 +38,20 @@ use mkit_core::object::Object;
 use mkit_core::ops::merge::is_ancestor;
 use mkit_core::ops::restore;
 use mkit_core::pack::{self, PackError, PackWriter, PreparedDelta, PreparedRaw};
-use mkit_core::protocol::{PackKey, Transport, TransportError};
+use mkit_core::protocol::{PackKey, Transport, TransportError, UploadLimits};
 use mkit_core::refs::{self, Head};
 use mkit_core::store::{ObjectStore, StoreError};
 use mkit_core::transfer::{self, PackListError};
-use mkit_transport_connect::ConnectTransport;
+use mkit_transport_connect::admission::{AdmissionPolicy, is_reserved};
+use mkit_transport_connect::{
+    ConnectTransport, PENDING_INTERRUPTED_MESSAGE, repository_identity_from_url,
+};
 use mkit_transport_file::FileTransport;
 use mkit_transport_s3::S3Transport;
 use mkit_transport_ssh::{SshInitError, SshOptions, SshTransport, parse_mkit_ssh_url};
 use rayon::prelude::*;
+
+pub use split::{MAX_CHAIN_COMMITS, MAX_SPLIT_STEPS, PushControl, StepAuthority, plan_push_steps};
 
 use packmap::{
     ChainAction, advance_packmap, apply_fetched_chain, commit_head, packmap_ref, probe_chain,
@@ -60,6 +68,10 @@ pub enum DispatchError {
     UnsupportedScheme(String),
     #[error("malformed URL: {0}")]
     MalformedUrl(String),
+    #[error(
+        "repository `{identity}` not found at {origin}; check the remote URL path against the server's configured name (an empty path selects `default` on a single-repository deployment)"
+    )]
+    RepositoryNotFound { identity: String, origin: String },
     #[error("no HEAD branch to push")]
     NoHead,
     /// A poll-loop checkpoint observed `signal::is_shutdown() == true`
@@ -69,6 +81,8 @@ pub enum DispatchError {
     /// hadn't reached yet.
     #[error("interrupted")]
     Interrupted,
+    #[error("{0}")]
+    UploadInterrupted(String),
     #[error("transport: {0}")]
     Transport(#[from] TransportError),
     #[error("refs: {0}")]
@@ -177,6 +191,178 @@ pub enum DispatchError {
     /// a raw path component under `.mkit/applied-packs/`.
     #[error("invalid remote name for applied-packs record: '{0}'")]
     InvalidRemoteName(String),
+    /// One advance would need more data packs than the server permits per
+    /// advance. `commit` names the single commit or merge that cannot be split
+    /// further when the refusal came from the pre-flight dry seal, before
+    /// anything was published; without it the seal-time backstop fired.
+    #[error(
+        "push needs {packs} data packs but this server permits {limit} per advance{}{}; ask the operator to raise max_pack_bytes",
+        .commit.as_ref().map_or_else(String::new, |c| format!(" ({c} cannot be split further)")),
+        if *.holds_remote_head {
+            " (it is the first commit that contains the remote head: rebase onto the remote head, or merge it in a smaller or earlier commit)"
+        } else {
+            ""
+        }
+    )]
+    PushTooLarge {
+        packs: usize,
+        limit: usize,
+        commit: Option<String>,
+        /// The unsplittable commit is the first that contains the remote head,
+        /// so the split could not cut before it.
+        holds_remote_head: bool,
+    },
+    /// A retry of one advance (a rejected ticket, a lost delta base) re-planned
+    /// the push and the new plan no longer fits one advance. Found by a dry
+    /// seal, so nothing was uploaded for the retry.
+    #[error(
+        "{reason}, and the retry needs {packs} data packs but this server permits {limit} per advance; nothing was uploaded for the retry"
+    )]
+    RetryTooLarge {
+        reason: RetryReason,
+        packs: usize,
+        limit: usize,
+    },
+    /// A split push would exceed a bound (steps or chain length). Nothing was
+    /// published.
+    #[error("{0}")]
+    PushSplitLimit(String),
+    /// The stored grants do not authorize every advance of a split push.
+    /// Nothing was published.
+    #[error("{0}")]
+    PushNotAuthorized(String),
+    /// A split push failed after publishing some advances. `head` is the last
+    /// advance this push published, a first-parent ancestor of the local tip
+    /// (another pusher may have moved the branch since); re-running the push
+    /// resumes from the remote branch unless a concurrent push caused the
+    /// failure.
+    #[error(
+        "{cause}; {published} of {total} advances were published and the last published advance was {head} on branch '{branch}'{}",
+        resume_hint(.cause)
+    )]
+    SplitInterrupted {
+        branch: String,
+        head: String,
+        published: usize,
+        total: usize,
+        cause: Box<DispatchError>,
+    },
+    #[error("upload ticket was rejected after the push was retried")]
+    TicketRejected,
+    #[error("delta base is unavailable after a restart")]
+    DeltaBaseUnavailable,
+    #[error("packlist still names a pack absent from this repository after retry")]
+    PacklistNotInRepository,
+}
+
+/// The closing advice of a split push's failure: resume, unless the failure
+/// was a concurrent push (the branch then moved, and a re-run would only
+/// compare against whatever the other pusher left).
+fn resume_hint(cause: &DispatchError) -> &'static str {
+    if matches!(cause, DispatchError::NonFastForwardPush { .. }) {
+        "; the branch was moved by another push, so fetch and merge before pushing again"
+    } else {
+        "; re-run the push to resume"
+    }
+}
+
+/// Why an advance was re-planned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RetryReason {
+    /// The server no longer holds a delta base the plan relied on.
+    #[error(
+        "the server no longer holds a delta base this push relied on, so it must be re-sent as a full closure (ask the operator whether the repository was restored from an older copy)"
+    )]
+    LostDeltaBase,
+    /// The upload ticket or packlist was rejected, so the push was planned
+    /// again against the remote's current head, which may have moved.
+    #[error(
+        "the upload was rejected and the push was re-planned against the remote's current head, which may have moved (fetch and merge, then push again)"
+    )]
+    Replanned,
+}
+
+/// The advances a split push published before it failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedPrefix {
+    pub branch: String,
+    pub published: usize,
+    pub total: usize,
+    pub head: String,
+    /// Whether re-running the push is the advice (not after a concurrent push).
+    pub resumable: bool,
+}
+
+impl PublishedPrefix {
+    /// The note printed with any failure that left a prefix published.
+    #[must_use]
+    pub fn note(&self) -> String {
+        format!(
+            "{} of {} advances were published; the last published advance on branch '{}' was {}{}",
+            self.published,
+            self.total,
+            self.branch,
+            self.head,
+            if self.resumable {
+                "; re-run the push to resume"
+            } else {
+                "; the branch was moved by another push, so fetch and merge before pushing again"
+            }
+        )
+    }
+}
+
+impl DispatchError {
+    /// The error a split push failed with, without its published-prefix
+    /// wrapper, and that prefix (`None` when no advance of this branch was published).
+    #[must_use]
+    pub fn into_published_prefix(self) -> (Self, Option<PublishedPrefix>) {
+        match self {
+            Self::SplitInterrupted {
+                branch,
+                head,
+                published,
+                total,
+                cause,
+            } => {
+                let resumable = !matches!(*cause, Self::NonFastForwardPush { .. });
+                (
+                    *cause,
+                    Some(PublishedPrefix {
+                        branch,
+                        published,
+                        total,
+                        head,
+                        resumable,
+                    }),
+                )
+            }
+            other => (other, None),
+        }
+    }
+}
+
+/// Interpret a missing result as a repository failure only for repository-level
+/// operations. Pack downloads retain their content-specific missing errors.
+fn repository_operation_error(tx: &dyn Transport, error: TransportError) -> DispatchError {
+    if let TransportError::RemoteError(message) = &error
+        && message.starts_with("upload interrupted; ")
+    {
+        return DispatchError::UploadInterrupted(message.clone());
+    }
+    if matches!(&error, TransportError::RemoteError(message) if message == PENDING_INTERRUPTED_MESSAGE)
+    {
+        return DispatchError::Interrupted;
+    }
+    if matches!(&error, TransportError::PackNotFound)
+        && let Some(address) = tx.repository_address()
+    {
+        return DispatchError::RepositoryNotFound {
+            identity: address.repository.to_owned(),
+            origin: address.origin.to_owned(),
+        };
+    }
+    error.into()
 }
 
 /// Open a transport for `endpoint` only after the per-endpoint
@@ -200,13 +386,57 @@ pub enum DispatchError {
 /// hand (it discovered the repo before building `cfg`).
 pub fn open_trusted(
     endpoint: &str,
+    remote_name: &str,
     repo_chosen: bool,
     cfg: &crate::config::LayeredConfig,
     layout: &RepoLayout,
 ) -> Result<Arc<dyn Transport>, DispatchError> {
     crate::config::endpoint_credential_trust(cfg, endpoint, repo_chosen)
         .map_err(DispatchError::UntrustedRemote)?;
-    open_with_config(endpoint, &cfg.merged, layout)
+    open_with_config_for_remote(endpoint, &cfg.merged, layout, Some(remote_name))
+}
+
+/// A remote opened for `mkit push`: the transport, and (for a signing Connect
+/// client) the check that its stored grants authorize every advance of a split
+/// push.
+pub(crate) struct PushRemote {
+    pub tx: Arc<dyn Transport>,
+    pub authority: Option<Arc<dyn StepAuthority>>,
+}
+
+/// [`open_trusted`] for a push: the same trust gate and transport, plus the
+/// grant pre-check a split push needs (WP-1.17b, B5).
+///
+/// # Errors
+/// As [`open_trusted`].
+pub(crate) fn open_trusted_for_push(
+    endpoint: &str,
+    remote_name: &str,
+    repo_chosen: bool,
+    cfg: &crate::config::LayeredConfig,
+    layout: &RepoLayout,
+) -> Result<PushRemote, DispatchError> {
+    crate::config::endpoint_credential_trust(cfg, endpoint, repo_chosen)
+        .map_err(DispatchError::UntrustedRemote)?;
+    if !is_connect_url(endpoint) {
+        return Ok(PushRemote {
+            tx: open_with_config_for_remote(endpoint, &cfg.merged, layout, Some(remote_name))?,
+            authority: None,
+        });
+    }
+    let parts = open_connect_parts(endpoint, &cfg.merged, layout, Some(remote_name), true)?;
+    let tx = Arc::new(parts.transport);
+    let authority = parts
+        .signer_key
+        .zip(parts.grants)
+        .map(|(signer_key, grants)| {
+            Arc::new(grants::ConnectAuthority {
+                transport: tx.clone(),
+                grants,
+                signer_key,
+            }) as Arc<dyn StepAuthority>
+        });
+    Ok(PushRemote { tx, authority })
 }
 
 /// The single chokepoint that resolves SSH trust-pinning (issue #389) and
@@ -222,7 +452,88 @@ pub(crate) fn open_with_config(
     cfg: &crate::config::Config,
     layout: &RepoLayout,
 ) -> Result<Arc<dyn Transport>, DispatchError> {
-    let envelope_signer = if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
+    open_with_config_for_remote(url, cfg, layout, None)
+}
+
+fn open_with_config_for_remote(
+    url: &str,
+    cfg: &crate::config::Config,
+    layout: &RepoLayout,
+    remote_name: Option<&str>,
+) -> Result<Arc<dyn Transport>, DispatchError> {
+    if is_connect_url(url) {
+        return Ok(Arc::new(open_connect_with_config(
+            url,
+            cfg,
+            layout,
+            remote_name,
+            true,
+        )?));
+    }
+    open_with_ssh_options(url, &ssh_options_from_config(cfg), None)
+}
+
+fn is_connect_url(url: &str) -> bool {
+    url.starts_with("mkit+https://") || url.starts_with("mkit+http://")
+}
+
+/// [`open_trusted`] for a Connect endpoint, returning the concrete
+/// [`ConnectTransport`] so callers can reach the epoch and visibility RPCs
+/// (WP-2.14). `sign` chooses whether the ambient signing identity is used:
+/// `mkit epoch` and statement-mode `mkit visibility set` send unsigned RPCs
+/// and pass `false`; envelope-mode visibility passes `true` and so needs
+/// `transport_auth = envelope` and a trusted remote, like `mkit push`.
+///
+/// # Errors
+/// The credential-trust gate, a non-Connect endpoint, or connection setup.
+pub(crate) fn open_connect_trusted(
+    endpoint: &str,
+    remote_name: &str,
+    repo_chosen: bool,
+    cfg: &crate::config::LayeredConfig,
+    layout: &RepoLayout,
+    sign: bool,
+) -> Result<ConnectTransport, DispatchError> {
+    crate::config::endpoint_credential_trust(cfg, endpoint, repo_chosen)
+        .map_err(DispatchError::UntrustedRemote)?;
+    if !is_connect_url(endpoint) {
+        return Err(DispatchError::UnsupportedScheme(format!(
+            "`{endpoint}` is not an mkit+https:// or mkit+http:// remote; grant epochs and repository visibility are served over Connect"
+        )));
+    }
+    open_connect_with_config(endpoint, &cfg.merged, layout, Some(remote_name), sign)
+}
+
+/// Build the Connect transport for `url` from `cfg`: envelope signing (when
+/// `sign` and configured), the user grant store as the `GrantSource`, the
+/// upload receipt store, progress observers and the admission helper.
+pub(crate) fn open_connect_with_config(
+    url: &str,
+    cfg: &crate::config::Config,
+    layout: &RepoLayout,
+    remote_name: Option<&str>,
+    sign: bool,
+) -> Result<ConnectTransport, DispatchError> {
+    Ok(open_connect_parts(url, cfg, layout, remote_name, sign)?.transport)
+}
+
+/// A Connect transport with what a push needs to check its authority.
+struct ConnectParts {
+    transport: ConnectTransport,
+    /// The user grants installed on the transport (none without a signer).
+    grants: Option<Arc<grants::LocalGrants>>,
+    /// The signing key's public hex, when requests are signed.
+    signer_key: Option<String>,
+}
+
+fn open_connect_parts(
+    url: &str,
+    cfg: &crate::config::Config,
+    layout: &RepoLayout,
+    remote_name: Option<&str>,
+    sign: bool,
+) -> Result<ConnectParts, DispatchError> {
+    let envelope_signer = if sign {
         if cfg.transport_auth_envelope() && cfg.trusted_remote_endpoint.trim() != url {
             return Err(DispatchError::UntrustedRemote(format!(
                 "refusing request signing for untrusted destination `{url}`; run `mkit config trusted_remote_endpoint {url}` before using ambient signing identity"
@@ -232,7 +543,131 @@ pub(crate) fn open_with_config(
     } else {
         None
     };
-    open_with_ssh_options(url, &ssh_options_from_config(cfg), envelope_signer)
+    validate_connect_repository(url)?;
+    let signed = envelope_signer.is_some();
+    let signer_key = envelope_signer
+        .as_ref()
+        .map(|signer| signer.public_key_hex());
+    // Resolve only the selected config fallback: an authoritative environment
+    // path must not be defeated by an ignored fallback's tilde/HOME error.
+    let ca_file = if url.starts_with("mkit+https://")
+        && std::env::var_os(mkit_transport_connect::tls::CA_FILE_ENV).is_none()
+    {
+        cfg.ssl_ca_file_path(layout).map_err(|error| {
+            DispatchError::Transport(TransportError::TlsConfiguration(error.to_string()))
+        })?
+    } else {
+        None
+    };
+    let mut tx = ConnectTransport::connect_with_signer_and_ca_file(
+        url,
+        envelope_signer,
+        ca_file.as_deref(),
+    )?
+    .with_receipt_store(Arc::new(upload_receipts::FilePartReceiptStore::new(
+        layout.upload_parts_dir(),
+    )))
+    .with_pending_observer(|event| {
+        crate::progress::pending_event(event);
+        !crate::signal::is_shutdown()
+    })
+    .with_upload_observer(|event| {
+        crate::progress::upload_event(event);
+        !crate::signal::is_shutdown()
+    })
+    .with_admission_receipt_observer(|receipt| {
+        eprintln!(
+            "note: remote returned a {} receipt for {}",
+            receipt.header,
+            receipt
+                .procedure
+                .rsplit('/')
+                .next()
+                .unwrap_or(receipt.procedure)
+        );
+    });
+    // Grants ride only on signed requests (SPEC-WRITE-GRANTS §4.2), so the
+    // store is read only when there is a signer to present them with.
+    let grants = signed.then(|| Arc::new(grants::LocalGrants::from_stored(load_user_grants(cfg))));
+    if let Some(grants) = &grants {
+        tx = tx.with_grant_source(grants.clone());
+    }
+    if !cfg.admission_helper.is_empty() && cfg.trusted_remote_endpoint.trim() == url {
+        let responder = Arc::new(crate::admission_helper::ExecResponder {
+            path: cfg.admission_helper.clone().into(),
+        });
+        let mut policy = AdmissionPolicy::new(responder);
+        if let Some(name) = remote_name
+            && let Some(headers) = cfg.remote_admission_headers.get(name)
+        {
+            let bearer = std::env::var("MKIT_API_TOKEN").is_ok_and(|s| !s.is_empty());
+            for header in headers.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                if is_reserved(header, bearer) {
+                    eprintln!(
+                        "warning: ignoring reserved header `{header}` in remote.{name}.admission_headers (see SPEC-TRANSPORT-CONNECT §5.1)"
+                    );
+                } else {
+                    policy = policy.with_extra_allowed(header);
+                }
+            }
+        }
+        tx = tx.with_admission(policy);
+    }
+    Ok(ConnectParts {
+        transport: tx,
+        grants,
+        signer_key,
+    })
+}
+
+/// The verified grants in the user store, one warning per skipped file.
+fn load_user_grants(cfg: &crate::config::Config) -> Vec<crate::grants::store::StoredGrant> {
+    let rps = crate::grants::parse_relying_parties(&cfg.grant_webauthn_rp).unwrap_or_else(|e| {
+        eprintln!("warning: grant.webauthn_rp: {e}; treating no relying party as pinned");
+        Vec::new()
+    });
+    let store = match crate::grants::store::GrantStore::open_default() {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("warning: {e}; using no stored grants");
+            return Vec::new();
+        }
+    };
+    let report = store.load(&rps);
+    for warning in &report.warnings {
+        eprintln!("warning: {warning}");
+    }
+    report.grants
+}
+
+/// The configured mkit signing key as an owner signer for `mkit grant`,
+/// `mkit epoch` and `mkit visibility`. Same key resolution as
+/// [`envelope_signer_from_config`], without its `transport_auth` gate: the
+/// owner asked for this signature explicitly.
+pub(crate) fn owner_ed25519_signer(
+    cfg: &crate::config::Config,
+    layout: &RepoLayout,
+) -> Result<Arc<dyn mkit_transport_connect::EnvelopeSigner>, String> {
+    match cfg.signer.as_str() {
+        "" | "legacy" => {
+            let key_path = crate::config::resolve_key_path(layout, &cfg.signing_key)
+                .map_err(|e| format!("signing_key: {e}"))?;
+            if !key_path.exists() {
+                return Err(format!(
+                    "no signing key at {} — run `mkit keygen` first",
+                    key_path.display()
+                ));
+            }
+            let kp = mkit_core::sign::load_key(&key_path).map_err(|e| format!("load key: {e}"))?;
+            Ok(Arc::new(envelope_signer::RepoKeyEnvelopeSigner::new(kp)))
+        }
+        "keystore" => Ok(Arc::new(envelope_signer::KeystoreEnvelopeSigner::open(
+            cfg,
+        )?)),
+        other => Err(format!(
+            "unknown signer `{other}` — expected `legacy` or `keystore`"
+        )),
+    }
 }
 
 /// Resolve an [`mkit_transport_connect::EnvelopeSigner`] from `cfg`, when
@@ -331,9 +766,10 @@ pub fn open(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
 /// `ssh_options` (issue #389) into the spawned `ssh(1)` child via
 /// [`SshTransport::connect_with_options`], and the `mkit+https://`/
 /// `mkit+http://` branch threads `envelope_signer` (issue #699 follow-up)
-/// into [`ConnectTransport::connect_with_signer`]. Reached only via
-/// [`open`] (no config — both `None`/default) and [`open_with_config`]
-/// (config-derived).
+/// into [`ConnectTransport::connect_with_signer`]. Reached via [`open`]
+/// (no config — both `None`/default) and [`open_with_config`] for non-Connect
+/// schemes; `open_with_config` handles Connect URLs itself, so the Connect
+/// branch here is reached only from [`open`].
 fn open_with_ssh_options(
     url: &str,
     ssh_options: &SshOptions,
@@ -360,13 +796,14 @@ fn open_with_ssh_options(
         ));
     }
     if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
+        validate_connect_repository(url)?;
         // ConnectTransport::connect_with_signer strips the `mkit+` prefix
         // itself and reads MKIT_API_TOKEN from the environment (mkit#701 —
         // the native mkit.transport.v1 ConnectRPC client, replacing the
         // retired mkit-transport-http JSON dialect as of
-        // SPEC-TRANSPORT-CONNECT verb parity). `envelope_signer` is `None`
-        // unless the caller resolved one via `open_with_config` (mkit#699
-        // follow-up: `transport_auth = envelope`) — bearer token and
+        // SPEC-TRANSPORT-CONNECT verb parity). Only the config-less `open`
+        // reaches this branch (`open_with_config` returns early for Connect
+        // URLs), so `envelope_signer` is always `None` here; bearer token and
         // envelope signing are independent, additive auth modes.
         let tx = ConnectTransport::connect_with_signer(url, envelope_signer)?;
         return Ok(Arc::new(tx));
@@ -396,6 +833,21 @@ fn open_with_ssh_options(
     Err(DispatchError::MalformedUrl(url.to_string()))
 }
 
+fn validate_connect_repository(url: &str) -> Result<(), DispatchError> {
+    repository_identity_from_url(url).map_err(|reason| {
+        let path = url
+            .split_once("://")
+            .and_then(|(_, rest)| rest.split_once('/'))
+            .map_or("", |(_, path)| path)
+            .split(['?', '#'])
+            .next()
+            .unwrap_or("")
+            .trim_matches('/');
+        DispatchError::MalformedUrl(format!("repository identity `{path}` in {url}: {reason}"))
+    })?;
+    Ok(())
+}
+
 /// `mkit+enc://` dispatch (issue #156).
 ///
 /// Parses the URL, derives an ephemeral dialer keypair (keystore
@@ -409,7 +861,7 @@ fn open_with_ssh_options(
 /// environment variable (a user-scoped / CLI-supplied path — never
 /// repo-local `.mkit/config`, which `open_enc` has no access to anyway).
 /// When the variable is unset we fall back to a fresh ephemeral key per
-/// process, which still works against `--unsafe-allow-any-enc-peer`
+/// process, which still works against `mkit-server serve --unsafe-allow-any-enc-peer`
 /// servers.
 #[cfg(feature = "enc-transport")]
 const ENC_CLIENT_KEY_ENV: &str = "MKIT_ENC_CLIENT_KEY";
@@ -461,7 +913,16 @@ fn load_or_ephemeral_client_key()
 /// one delta-compressed pack of the objects the remote lacks, advertises it
 /// via the `refs/mkit/packmap/<branch>` ref, then moves the branch ref.
 pub fn push_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> {
-    push_all_with(cwd, tx, None, false)
+    push_all_with(cwd, tx, None, false, None).map(|pushed| pushed.refs)
+}
+
+/// What a successful push published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pushed {
+    /// Branches pushed.
+    pub refs: usize,
+    /// Advances published in total (one per branch unless a push was split).
+    pub steps: usize,
 }
 
 /// CAS-aware mirror push (`mkit push --all`). Pushes every local
@@ -472,18 +933,24 @@ pub fn push_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> 
 /// remote-tracking ref is advanced to the pushed tip.
 ///
 /// `remote` is the remote NAME used for the local tracking-ref
-/// namespace; `None` means the legacy `default`.
+/// namespace; `None` means the legacy `default`. A branch too large for one
+/// advance is split (see [`push_branch_steps`]); its tracking ref follows each
+/// published advance, so an interrupted push resumes where it stopped.
+/// `authority` is checked before a split branch uploads anything.
 pub fn push_all_with(
     cwd: &Path,
     tx: &dyn Transport,
     remote: Option<&str>,
     force: bool,
-) -> Result<usize, DispatchError> {
+    authority: Option<&dyn StepAuthority>,
+) -> Result<Pushed, DispatchError> {
     let layout = mkit_core::layout::discover(cwd)?;
     let store = crate::commands::open_store_configured(&layout)?;
     let refs_list = crate::commands::list_refs_parallel(&layout)?;
     let remote = remote.unwrap_or(DEFAULT_REMOTE);
     let mut n = 0;
+    let mut steps = 0;
+    let shallow = shallow_boundaries(&layout)?;
     // Batch every pushed branch's remote-tracking-ref write (#645):
     // publishing lands each ref as soon as its branch's `push_branch`
     // succeeds (same visibility as before), but the directory fsync that
@@ -504,8 +971,22 @@ pub fn push_all_with(
                     None => refs::RefWriteCondition::Missing,
                 }
             };
-            push_branch(tx, &store, &r.name, h, condition)?;
-            tracking.write(&r.name, &h)?;
+            let control = PushControl {
+                authority,
+                shallow: shallow.clone(),
+                ..PushControl::default()
+            };
+            steps += push_branch_steps(
+                tx,
+                &store,
+                &r.name,
+                h,
+                condition,
+                rebaseline_depth(),
+                pack::MAX_TOTAL_PAYLOAD,
+                &control,
+                &mut |published| Ok(tracking.write(&r.name, &published)?),
+            )?;
             n += 1;
         }
         Ok(())
@@ -517,7 +998,16 @@ pub fn push_all_with(
     // durable before the loop moved to the next branch.
     tracking.commit()?;
     result?;
-    Ok(n)
+    Ok(Pushed { refs: n, steps })
+}
+
+fn shallow_boundaries(
+    layout: &RepoLayout,
+) -> Result<std::collections::HashSet<Hash>, DispatchError> {
+    Ok(refs::load_shallow_boundaries(layout)?
+        .unwrap_or_default()
+        .into_iter()
+        .collect())
 }
 
 /// True iff advancing a ref from `old` to `new` is a fast-forward (i.e.
@@ -578,6 +1068,10 @@ pub fn lease_condition(
 /// `remote` is the upstream remote NAME (for the tracking-ref
 /// namespace); `branch` is the local branch name; `remote_branch` is the
 /// branch name on the remote (`refs/heads/<remote_branch>`).
+///
+/// Returns the pushed tip and the number of advances it took: more than one
+/// when the push was split along first-parent history (see
+/// [`push_branch_steps`]). The tracking ref follows every published advance.
 pub fn push_branch_tracked(
     cwd: &Path,
     tx: &dyn Transport,
@@ -585,7 +1079,8 @@ pub fn push_branch_tracked(
     branch: &str,
     remote_branch: &str,
     lease: PushLease,
-) -> Result<Hash, DispatchError> {
+    authority: Option<&dyn StepAuthority>,
+) -> Result<(Hash, usize), DispatchError> {
     let layout = mkit_core::layout::discover(cwd)?;
     let store = crate::commands::open_store_configured(&layout)?;
     let tip = refs::read_ref(&layout, branch)?
@@ -607,9 +1102,30 @@ pub fn push_branch_tracked(
         });
     }
     let condition = lease_condition(cwd, remote, remote_branch, lease)?;
-    push_branch(tx, &store, remote_branch, tip, condition)?;
-    refs::write_remote_ref(&layout, remote, remote_branch, &tip)?;
-    Ok(tip)
+    let control = PushControl {
+        authority,
+        shallow: shallow_boundaries(&layout)?,
+        ..PushControl::default()
+    };
+    let steps = push_branch_steps(
+        tx,
+        &store,
+        remote_branch,
+        tip,
+        condition,
+        rebaseline_depth(),
+        pack::MAX_TOTAL_PAYLOAD,
+        &control,
+        &mut |published| {
+            Ok(refs::write_remote_ref(
+                &layout,
+                remote,
+                remote_branch,
+                &published,
+            )?)
+        },
+    )?;
+    Ok((tip, steps))
 }
 
 /// Push one branch: upload one or more delta-compressed packs carrying
@@ -671,9 +1187,11 @@ pub fn push_branch_tracked(
 /// CAS attempt does not have to walk the chain a second time (#521 perf
 /// fix).
 ///
-/// On a CAS failure ([`TransportError::RefConflict`]) this returns
-/// [`DispatchError::NonFastForwardPush`] so callers can render an
-/// actionable fetch-then-retry hint. Does NOT touch local
+/// On a CAS failure ([`TransportError::RefConflict`]) this reads the head
+/// back first (SPEC-TRANSPORT §7: a retried write can report a conflict for
+/// its own landed attempt); a head already at `tip` is success, anything
+/// else returns [`DispatchError::NonFastForwardPush`] so callers can render
+/// an actionable fetch-then-retry hint. Does NOT touch local
 /// remote-tracking refs — the caller decides when to advance them.
 pub fn push_branch(
     tx: &dyn Transport,
@@ -732,16 +1250,235 @@ pub fn push_branch_with_limits(
     rebaseline_threshold: usize,
     pack_payload_cap: u64,
 ) -> Result<(), DispatchError> {
+    push_branch_steps(
+        tx,
+        store,
+        branch,
+        tip,
+        condition,
+        rebaseline_threshold,
+        pack_payload_cap,
+        &PushControl::default(),
+        &mut |_| Ok(()),
+    )
+    .map(drop)
+}
+
+/// [`push_branch_with_limits`] that splits a push too large for one advance
+/// along the branch's first-parent history (WP-1.17b, R-164), and reports each
+/// published advance to `on_step` with the commit the remote branch now
+/// points at. Returns the number of advances.
+///
+/// The split applies only when the transport ticketed-uploads
+/// ([`UploadLimits::tickets_per_advance`]) and the conservative estimate of the
+/// push's packs exceeds the data-pack budget of one advance. Otherwise this is
+/// exactly one [`push_branch_with_limits`] call. When it applies, the first
+/// advance uses `condition`, and every later one is a `Match` on the previous
+/// advance's commit, whatever `condition` was, so a long split never
+/// overwrites a concurrent pusher. Each advance uploads its own packs just
+/// before it lands; nothing is pre-uploaded.
+///
+/// A failure after the first advance is returned as
+/// [`DispatchError::SplitInterrupted`], naming the published prefix; running
+/// the push again resumes from it.
+///
+/// # Errors
+/// As [`push_branch`], plus the split's own refusals (see
+/// [`plan_push_steps`]), and whatever `on_step` returns.
+#[allow(clippy::too_many_arguments)]
+pub fn push_branch_steps(
+    tx: &dyn Transport,
+    store: &ObjectStore,
+    branch: &str,
+    tip: Hash,
+    condition: refs::RefWriteCondition,
+    rebaseline_threshold: usize,
+    pack_payload_cap: u64,
+    control: &PushControl<'_>,
+    on_step: &mut dyn FnMut(Hash) -> Result<(), DispatchError>,
+) -> Result<usize, DispatchError> {
+    let limits = tx.upload_limits();
+    let mut single = |plan| {
+        push_step_recovering(
+            tx,
+            store,
+            branch,
+            tip,
+            condition,
+            rebaseline_threshold,
+            pack_payload_cap,
+            plan,
+        )?;
+        on_step(tip)?;
+        Ok(1)
+    };
+    if limits.tickets_per_advance.is_none() {
+        return single(None);
+    }
+    refs::check_pushable_branch(branch)?;
+    let remote_tip = tx.read_ref(&format!("refs/heads/{branch}"))?;
+    let plan = transfer::plan_pack_with(store, tip, remote_tip, encode_delta_candidates_batch)?;
+    let cap = effective_payload_cap(pack_payload_cap, limits.max_pack_bytes)?;
+    if estimate_pack_sizes(store, &plan, cap, limits.max_pack_bytes)?.len()
+        <= split::data_pack_budget(limits)
+    {
+        return single(Some(plan));
+    }
+    // The estimate is uncompressed: a push that compresses into the budget
+    // is not split (exact dry seal), and one against a remote tip this store
+    // lacks is left to the head CAS rather than walking all of history.
+    let unknown_remote = remote_tip.is_some_and(|remote| !store.contains(&remote));
+    if unknown_remote {
+        return single(None);
+    }
+    match build_and_upload_packs(PackSink::Count, store, plan, cap, limits) {
+        Err(DispatchError::PushTooLarge { .. }) => {}
+        Err(DispatchError::Interrupted) => return Err(DispatchError::Interrupted),
+        _ => return single(None),
+    }
+    let steps = plan_push_steps(
+        store,
+        tip,
+        remote_tip,
+        limits,
+        pack_payload_cap,
+        control,
+        condition,
+        branch,
+    )?;
+    if steps.len() == 1 {
+        return single(None);
+    }
+    let total = steps.len();
+    let mut published: Option<Hash> = None;
+    for (index, step_tip) in steps.into_iter().enumerate() {
+        let step_condition = published.map_or(condition, refs::RefWriteCondition::Match);
+        let mut landed = false;
+        let outcome = (|| {
+            if crate::signal::is_shutdown() {
+                return Err(DispatchError::Interrupted);
+            }
+            crate::progress::report(crate::progress::Event::Step {
+                index: index + 1,
+                total,
+            });
+            push_step_recovering(
+                tx,
+                store,
+                branch,
+                step_tip,
+                step_condition,
+                rebaseline_threshold,
+                pack_payload_cap,
+                None,
+            )?;
+            landed = true;
+            on_step(step_tip)?;
+            crate::progress::step_committed(index + 1, total, &step_tip);
+            Ok(())
+        })();
+        if landed {
+            published = Some(step_tip);
+        }
+        if let Err(cause) = outcome {
+            return Err(match published {
+                Some(head) => DispatchError::SplitInterrupted {
+                    branch: branch.to_owned(),
+                    head: mkit_core::hash::to_hex(&head),
+                    published: index + usize::from(landed),
+                    total,
+                    cause: Box::new(cause),
+                },
+                None => cause,
+            });
+        }
+    }
+    Ok(total)
+}
+
+/// One advance to `tip` with the restart-once recovery: a rejected ticket or
+/// packlist re-plans the same way, a missing delta base re-plans as the full
+/// closure. `plan` is an already-computed plan against the remote's current
+/// tip, used for the first attempt only.
+#[allow(clippy::too_many_arguments)]
+fn push_step_recovering(
+    tx: &dyn Transport,
+    store: &ObjectStore,
+    branch: &str,
+    tip: Hash,
+    condition: refs::RefWriteCondition,
+    rebaseline_threshold: usize,
+    pack_payload_cap: u64,
+    plan: Option<transfer::PackPlan>,
+) -> Result<(), DispatchError> {
+    let once = |retry, plan| {
+        push_branch_once(
+            tx,
+            store,
+            branch,
+            tip,
+            condition,
+            rebaseline_threshold,
+            pack_payload_cap,
+            retry,
+            plan,
+        )
+    };
+    match once(None, plan) {
+        Err(DispatchError::TicketRejected | DispatchError::PacklistNotInRepository) => {
+            once(Some(RetryReason::Replanned), None)
+        }
+        Err(DispatchError::DeltaBaseUnavailable) => once(Some(RetryReason::LostDeltaBase), None),
+        result => result,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_branch_once(
+    tx: &dyn Transport,
+    store: &ObjectStore,
+    branch: &str,
+    tip: Hash,
+    condition: refs::RefWriteCondition,
+    rebaseline_threshold: usize,
+    pack_payload_cap: u64,
+    retry: Option<RetryReason>,
+    preplanned: Option<transfer::PackPlan>,
+) -> Result<(), DispatchError> {
+    let force_self_contained = retry == Some(RetryReason::LostDeltaBase);
+    // Both wire names must fit SPEC-REFS §3's bound; a local branch named
+    // before `MAX_BRANCH_NAME_BYTES` existed may not. Say so by name
+    // rather than as a transport's "invalid ref name".
+    refs::check_pushable_branch(branch)?;
     // Diff against the remote's CURRENT tip so we send only what it lacks
     // and can delta against bases it already holds. Planning is an
     // optimization; the head CAS below remains authoritative.
-    let remote_tip = tx.read_ref(&format!("refs/heads/{branch}"))?;
+    // A caller that already planned against the remote's current tip (the
+    // split decision does) passes its plan, so it is diffed once.
+    let mut plan = if let Some(plan) = preplanned {
+        plan
+    } else {
+        let remote_tip = tx.read_ref(&format!("refs/heads/{branch}"))?;
+        // Plan FIRST, against the remote's current tip (#521 perf): a no-op push
+        // (the remote already holds this closure) yields an empty plan and takes
+        // the cheap head-only path below WITHOUT walking the packmap chain. Only
+        // a push that actually has objects to send pays the O(depth) chain probe.
+        transfer::plan_pack_with(
+            store,
+            tip,
+            if force_self_contained {
+                None
+            } else {
+                remote_tip
+            },
+            encode_delta_candidates_batch,
+        )?
+    };
 
-    // Plan FIRST, against the remote's current tip (#521 perf): a no-op push
-    // (the remote already holds this closure) yields an empty plan and takes
-    // the cheap head-only path below WITHOUT walking the packmap chain. Only
-    // a push that actually has objects to send pays the O(depth) chain probe.
-    let mut plan = transfer::plan_pack_with(store, tip, remote_tip, encode_delta_candidates_batch)?;
+    let limits = tx.upload_limits();
+    // Payload and serialized-byte limits are checked separately. Framing
+    // overhead grows with the entry count, so a fixed margin is insufficient.
+    let effective_cap = effective_payload_cap(pack_payload_cap, limits.max_pack_bytes)?;
 
     if plan.is_empty() {
         // Nothing to send — the remote already holds the closure; just move
@@ -775,7 +1512,8 @@ pub fn push_branch_with_limits(
     //     force push MUST take the safe append path instead of resetting.
     let mut rebaseline = false;
     let mut resolved_chain = None;
-    if rebaseline_threshold > 0
+    if !force_self_contained
+        && rebaseline_threshold > 0
         && let Some(pm) = tx.read_ref(&packmap_ref(branch))?
     {
         match probe_chain(tx, branch, pm) {
@@ -795,8 +1533,41 @@ pub fn push_branch_with_limits(
     if rebaseline {
         // Force a full-closure plan: no external bases, so the pack is
         // self-contained and safe to reset the chain onto.
-        plan = transfer::plan_pack_with(store, tip, None, encode_delta_candidates_batch)?;
+        let full = transfer::plan_pack_with(store, tip, None, encode_delta_candidates_batch)?;
+        let full_cap = effective_payload_cap(pack_payload_cap, limits.max_pack_bytes)?;
+        if estimated_ticketed_count(
+            &estimate_pack_sizes(store, &full, full_cap, limits.max_pack_bytes)?,
+            limits,
+        ) > split::data_pack_budget(limits)
+        {
+            rebaseline = false;
+        } else {
+            plan = full;
+        }
     }
+
+    // A retry re-planned the push: make sure the new plan still fits before
+    // uploading any of it, so the failure leaves no half-uploaded advance.
+    if let Some(reason) = retry
+        && estimated_ticketed_count(
+            &estimate_pack_sizes(store, &plan, effective_cap, limits.max_pack_bytes)?,
+            limits,
+        ) > split::data_pack_budget(limits)
+        && let Err(DispatchError::PushTooLarge { packs, limit, .. }) =
+            build_and_upload_packs(PackSink::Count, store, plan.clone(), effective_cap, limits)
+    {
+        return Err(DispatchError::RetryTooLarge {
+            reason,
+            packs,
+            limit,
+        });
+    }
+
+    // No pre-flight PushTooLarge: the estimate uses uncompressed sizes, so it
+    // would refuse pushes that compress into six packs. The seal-time gate is
+    // exact and still stops before the seventh ticketed pack's BeginUpload.
+    // (The re-baseline check above may use the conservative estimate: a false
+    // "too many" only keeps the append plan.)
 
     // Build the plan into one or more payload-bounded packs (splitting
     // when the plan exceeds `pack_payload_cap`, issue #831) and upload
@@ -811,7 +1582,17 @@ pub fn push_branch_with_limits(
     // delta streams can be handed to the compression fan-out without
     // an extra clone — see that function's doc comment).
     let self_contained = plan.self_contained;
-    let pack_keys = build_and_upload_packs(tx, store, plan, pack_payload_cap)?;
+    let head_ref = format!("refs/heads/{branch}");
+    let pack_keys = build_and_upload_packs(
+        PackSink::Upload {
+            tx,
+            head_ref: &head_ref,
+        },
+        store,
+        plan,
+        effective_cap,
+        limits,
+    )?;
 
     // Chain the pack(s) onto the packmap AND move the head together
     // (#408): a transactional transport applies both atomically, the
@@ -872,13 +1653,94 @@ pub fn push_branch_with_limits(
 /// extra bytes copied, where borrowing would force a clone per entry
 /// just to satisfy ownership. The caller reads whatever it needs off
 /// `plan` (just `self_contained`) before making this call.
+fn effective_payload_cap(requested: u64, advertised: Option<u64>) -> Result<u64, DispatchError> {
+    // The serialized limit's overhead margin is exact and dynamic: header,
+    // trailer and one frame per entry. `should_seal` applies it on each add.
+    let cap = requested
+        .min(pack::MAX_TOTAL_PAYLOAD)
+        .min(advertised.unwrap_or(pack::MAX_TOTAL_PAYLOAD));
+    if cap == 0 {
+        return Err(DispatchError::Transport(TransportError::PayloadTooLarge(0)));
+    }
+    Ok(cap)
+}
+
+fn serialized_bound(payload: u64, entries: usize) -> u64 {
+    payload
+        .saturating_add((entries as u64).saturating_mul(pack::ENTRY_FRAME_LEN as u64))
+        .saturating_add((pack::HEADER_LEN + pack::TRAILER_LEN) as u64)
+}
+
+fn ticketed_pack(limits: UploadLimits, serialized_size: u64) -> bool {
+    limits.tickets_per_advance.is_some()
+        && serialized_size >= limits.ticket_threshold_bytes.unwrap_or(0)
+}
+
+fn estimated_ticketed_count(sizes: &[u64], limits: UploadLimits) -> usize {
+    sizes
+        .iter()
+        .filter(|&&size| ticketed_pack(limits, size))
+        .count()
+}
+
+fn estimate_pack_sizes(
+    store: &ObjectStore,
+    plan: &transfer::PackPlan,
+    payload_cap: u64,
+    max_pack_bytes: Option<u64>,
+) -> Result<Vec<u64>, DispatchError> {
+    let mut packs = Vec::new();
+    let mut payload = 0_u64;
+    let mut entries = 0_usize;
+    let sizes = plan
+        .raw
+        .iter()
+        .map(|hash| store.object_metadata(hash).map(|meta| meta.len()))
+        .collect::<Result<Vec<_>, _>>()?;
+    for size in sizes.into_iter().chain(
+        plan.deltas
+            .iter()
+            .map(|delta| (HASH_LEN + delta.stream.len()) as u64),
+    ) {
+        let next_payload = payload.saturating_add(size);
+        if entries > 0
+            && (next_payload > payload_cap
+                || max_pack_bytes
+                    .is_some_and(|limit| serialized_bound(next_payload, entries + 1) > limit))
+        {
+            packs.push(serialized_bound(payload, entries));
+            payload = 0;
+            entries = 0;
+        }
+        payload = payload.saturating_add(size);
+        entries += 1;
+    }
+    if entries > 0 {
+        packs.push(serialized_bound(payload, entries));
+    }
+    Ok(packs)
+}
+
+/// Where sealed packs go: to the remote, or nowhere (an exact local dry run of
+/// the seal, for the split's pre-flight check).
+#[derive(Clone, Copy)]
+enum PackSink<'a> {
+    Upload {
+        tx: &'a dyn Transport,
+        head_ref: &'a str,
+    },
+    Count,
+}
+
 fn build_and_upload_packs(
-    tx: &dyn Transport,
+    sink: PackSink<'_>,
     store: &ObjectStore,
     plan: transfer::PackPlan,
     payload_cap: u64,
+    limits: UploadLimits,
 ) -> Result<Vec<Hash>, DispatchError> {
     let mut pack_keys = Vec::new();
+    let mut ticketed_count = 0;
     let mut w = PackWriter::new();
     let max_entries = pack_fanout_threshold().max(1);
     let transfer::PackPlan {
@@ -897,14 +1759,19 @@ fn build_and_upload_packs(
         let chunk = &raw[start..start + len];
         start += len;
         for entry in prepare_raw_batch(store, chunk)? {
-            if should_seal(&w, entry.conservative_len() as u64, payload_cap) {
-                seal_pack(tx, &mut w, &mut pack_keys)?;
+            if should_seal(
+                &w,
+                entry.conservative_len() as u64,
+                payload_cap,
+                limits.max_pack_bytes,
+            ) {
+                seal_pack(sink, &mut w, &mut pack_keys, &mut ticketed_count, limits)?;
             }
             w.push_prepared_raw(entry)?;
             // Honest progress (#711): one real object just got staged into
             // the outgoing pack. Never git's fabricated
             // Enumerating/Counting/Compressing lines — see `crate::progress`.
-            crate::progress::report(crate::progress::Event::ObjectsPacked(1));
+            report_packed(sink);
         }
     }
 
@@ -919,16 +1786,30 @@ fn build_and_upload_packs(
     for len in size_capped_batch_lens(&delta_sizes, payload_cap, max_entries) {
         let chunk: Vec<transfer::PlannedDelta> = deltas.drain(..len).collect();
         for entry in prepare_delta_batch(chunk) {
-            if should_seal(&w, entry.conservative_len() as u64, payload_cap) {
-                seal_pack(tx, &mut w, &mut pack_keys)?;
+            if should_seal(
+                &w,
+                entry.conservative_len() as u64,
+                payload_cap,
+                limits.max_pack_bytes,
+            ) {
+                seal_pack(sink, &mut w, &mut pack_keys, &mut ticketed_count, limits)?;
             }
             w.push_prepared_delta(entry)?;
-            crate::progress::report(crate::progress::Event::ObjectsPacked(1));
+            report_packed(sink);
         }
     }
 
-    seal_pack(tx, &mut w, &mut pack_keys)?;
+    seal_pack(sink, &mut w, &mut pack_keys, &mut ticketed_count, limits)?;
     Ok(pack_keys)
+}
+
+/// Honest progress (#711): one real object just got staged into the outgoing
+/// pack. Never git's fabricated Enumerating/Counting/Compressing lines — see
+/// `crate::progress`. A dry seal stages nothing to send and reports nothing.
+fn report_packed(sink: PackSink<'_>) {
+    if matches!(sink, PackSink::Upload { .. }) {
+        crate::progress::report(crate::progress::Event::ObjectsPacked(1));
+    }
 }
 
 /// Split `sizes` (each item's conservative uncompressed byte size, in
@@ -1144,29 +2025,64 @@ fn cache_delta_bases(
 /// test-injected tiny cap; production entries are bounded well under
 /// [`pack::MAX_TOTAL_PAYLOAD`] by [`mkit_core::store::MAX_RAW_OBJECT_SIZE`])
 /// lands alone in its own pack rather than looping forever.
-fn should_seal(w: &PackWriter, add_bound: u64, payload_cap: u64) -> bool {
-    w.entry_count() > 0 && w.total_payload().saturating_add(add_bound) > payload_cap
+fn should_seal(
+    w: &PackWriter,
+    add_bound: u64,
+    payload_cap: u64,
+    max_pack_bytes: Option<u64>,
+) -> bool {
+    let next_payload = w.total_payload().saturating_add(add_bound);
+    w.entry_count() > 0
+        && (next_payload > payload_cap
+            || max_pack_bytes
+                .is_some_and(|limit| serialized_bound(next_payload, w.entry_count() + 1) > limit))
 }
 
 /// Finish `w`, upload it, record its key, and replace `w` with a fresh
 /// empty writer so the caller can keep pushing entries into the next
 /// pack.
 fn seal_pack(
-    tx: &dyn Transport,
+    sink: PackSink<'_>,
     w: &mut PackWriter,
     pack_keys: &mut Vec<Hash>,
+    ticketed_count: &mut usize,
+    limits: UploadLimits,
 ) -> Result<(), DispatchError> {
     if crate::signal::is_shutdown() {
         return Err(DispatchError::Interrupted);
     }
     let sealed = std::mem::replace(w, PackWriter::new());
     let pack = sealed.finish()?;
+    let is_ticketed = ticketed_pack(limits, pack.len() as u64);
+    let budget = split::data_pack_budget(limits);
+    if is_ticketed && *ticketed_count >= budget {
+        return Err(DispatchError::PushTooLarge {
+            packs: *ticketed_count + 1,
+            limit: budget,
+            commit: None,
+            holds_remote_head: false,
+        });
+    }
+    if limits
+        .max_pack_bytes
+        .is_some_and(|limit| pack.len() as u64 > limit)
+    {
+        return Err(DispatchError::Transport(TransportError::PayloadTooLarge(
+            pack.len(),
+        )));
+    }
     let pack_key = pack::pack_key(&pack);
-    tx.upload_pack(&pack, &PackKey::from_hash(pack_key))?;
-    // Upload is complete — report the real byte count handed to the
-    // transport, not an estimate.
-    crate::progress::report(crate::progress::Event::PackUploaded(pack.len() as u64));
+    if let PackSink::Upload { tx, head_ref } = sink {
+        tx.upload_pack_via_ref(&pack, &PackKey::from_hash(pack_key), head_ref)
+            .map_err(|error| repository_operation_error(tx, error))?;
+        // Upload is complete — report the real byte count handed to the
+        // transport, not an estimate.
+        crate::progress::report(crate::progress::Event::PackUploaded(pack.len() as u64));
+    }
     pack_keys.push(pack_key);
+    if is_ticketed {
+        *ticketed_count += 1;
+    }
     Ok(())
 }
 
@@ -1211,7 +2127,7 @@ pub fn pull_all_with(
     // per branch, around only the local unpack + remote-ref-publish window
     // (#642 — see `packmap::apply_fetched_chain`). No lock is held here
     // across the network transfer.
-    let n = fetch_objects(&store, &layout, tx, remote, require_signed)?;
+    let n = fetch_objects(&store, &layout, tx, remote, target_branch, require_signed)?;
     let remote_refs = crate::commands::list_remote_refs_parallel(&layout, remote)?
         .into_iter()
         .filter_map(|r| r.hash.map(|hash| (r.name, hash)))
@@ -1353,7 +2269,7 @@ pub fn fetch_all_with(
     // network transfer. See `packmap::resolve_and_download_chain` /
     // `apply_fetched_chain` and `fetch_objects_inner` below.
     let store = crate::commands::open_store_configured(&layout)?;
-    fetch_objects(&store, &layout, tx, remote, require_signed)
+    fetch_objects(&store, &layout, tx, remote, None, require_signed)
 }
 
 /// Reconstruct every remote `refs/heads/*` from its packmap chain and
@@ -1385,7 +2301,9 @@ pub fn fetch_all_with(
 /// survived), the very first symptom is exactly this closure check
 /// failing, not a download/unpack error — the retry has to cover both.
 ///
-/// Both ends fail loudly: an absent packmap is [`DispatchError::PackmapMissing`]
+/// Both ends fail loudly: an absent packmap beside a present head is
+/// [`DispatchError::PackmapMissing`] (a head absent too is a stale listing,
+/// STC §7.9: the branch is skipped and its tracking ref left untouched)
 /// and a present-but-incomplete packmap (even after the self-heal retry) is
 /// [`DispatchError::RemoteMissingObject`]. We never publish a
 /// remote-tracking ref to a closure we couldn't fully materialise locally.
@@ -1429,15 +2347,30 @@ pub fn fetch_all_with(
 /// #267 GC-prune race: `gc` takes the very same lock before computing its
 /// live set, so it can never observe a branch's objects on disk without
 /// that branch's ref already published.
+///
+/// `target_branch` (a `clone -b` / `pull` target) is fetched even when an
+/// eventual `ListRefs` (D34, STC §7.9) has not caught up with it: the branch
+/// is strongly read by name, fetched if present, and
+/// [`DispatchError::RemoteBranchMissing`] if absent. Never an exit-0 empty
+/// clone for `-b`.
 fn fetch_objects(
     store: &ObjectStore,
     layout: &RepoLayout,
     tx: &dyn Transport,
     remote: &str,
+    target_branch: Option<&str>,
     require_signed: bool,
 ) -> Result<usize, DispatchError> {
     let mut applied = AppliedPacks::load_or_empty(layout, remote);
-    let result = fetch_objects_inner(store, layout, tx, remote, &mut applied, require_signed);
+    let result = fetch_objects_inner(
+        store,
+        layout,
+        tx,
+        remote,
+        target_branch,
+        &mut applied,
+        require_signed,
+    );
     persist_record(&mut applied, remote);
     result
 }
@@ -1449,10 +2382,27 @@ fn fetch_objects_inner(
     layout: &RepoLayout,
     tx: &dyn Transport,
     remote: &str,
+    target_branch: Option<&str>,
     applied: &mut AppliedPacks,
     require_signed: bool,
 ) -> Result<usize, DispatchError> {
-    let remote_refs = tx.list_refs("refs/heads/")?;
+    let mut remote_refs = tx
+        .list_refs("refs/heads/")
+        .map_err(|error| repository_operation_error(tx, error))?;
+    if let Some(branch) = target_branch
+        && !remote_refs.iter().any(|r| r.name == branch)
+    {
+        // The listing may be stale (eventual under D34): a strong read by
+        // name decides whether the branch exists. A transport error here
+        // propagates; only `Ok(None)` is the "no such branch" verdict.
+        match tx.read_ref(&format!("refs/heads/{branch}"))? {
+            Some(hash) => remote_refs.push(refs::Ref {
+                name: branch.to_owned(),
+                hash: Some(hash),
+            }),
+            None => return Err(DispatchError::RemoteBranchMissing(branch.to_owned())),
+        }
+    }
     let mut n = 0;
     // Batch every fetched branch's remote-tracking-ref write (#645): see
     // `push_all_with` for the same pattern and its rationale. `tracking.write`
@@ -1473,8 +2423,26 @@ fn fetch_objects_inner(
             // a format we degrade to: the push path ALWAYS advertises a packmap
             // before moving the branch ref. A real transport error (network blip,
             // auth) propagates unchanged — only `Ok(None)` is the explicit
-            // "no packmap" verdict, and it is now an error.
+            // "no packmap" verdict.
+            //
+            // The one exception is a stale listing (STC §7.9): `ListRefs` is
+            // eventual, so under D34 a branch deleted since the listing can
+            // still be named. Re-read the head strongly: absent too means the
+            // listing is stale, so skip the branch and write no tracking ref;
+            // present means corruption (a head and its packmap share a shard),
+            // which stays `PackmapMissing`. A transport error on the re-read
+            // propagates and never becomes a skip.
             let Some(chain_head) = tx.read_ref(&packmap_ref(&r.name))? else {
+                if tx.read_ref(&format!("refs/heads/{}", r.name))?.is_none() {
+                    if crate::progress::should_report(false) {
+                        eprintln!(
+                            "fetch: skipping branch `{}`: listed by an eventual ListRefs but \
+                             no longer present (deleted since the listing)",
+                            r.name
+                        );
+                    }
+                    continue;
+                }
                 return Err(DispatchError::PackmapMissing(r.name.clone()));
             };
 
@@ -1669,6 +2637,23 @@ mod tests {
                 "trusted destination should reach key resolution: {error}"
             );
         }
+    }
+
+    #[test]
+    fn configured_connect_open_reports_malformed_repository_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(directory.path());
+        let url = "mkit+https://host/Uppercase";
+        let error = super::open_with_config(url, &Config::default(), &layout)
+            .err()
+            .expect("uppercase repository identity must be rejected");
+        assert!(
+            matches!(error, super::DispatchError::MalformedUrl(_)),
+            "expected malformed URL, got {error:?}"
+        );
+        let message = error.to_string();
+        assert!(message.contains("Uppercase"), "{message}");
+        assert!(!message.contains("invalid response"), "{message}");
     }
 
     #[test]

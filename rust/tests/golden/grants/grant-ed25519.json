@@ -1,0 +1,272 @@
+{
+  "accepted_schemes": [
+    "ed25519"
+  ],
+  "namespace": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618",
+  "owner_seed": "0909090909090909090909090909090909090909090909090909090909090909",
+  "spec": "SPEC-WRITE-GRANTS §4, §7",
+  "vectors": [
+    {
+      "accept_contexts": [
+        {
+          "audience": "https://git.example.com",
+          "capability": "write",
+          "name": "write-at-created",
+          "now": 1790000000000,
+          "repository": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website",
+          "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        {
+          "audience": "https://git.example.com",
+          "capability": "read",
+          "name": "read-at-created",
+          "now": 1790000000000,
+          "repository": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website",
+          "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        {
+          "audience": "https://git.example.com",
+          "capability": "write",
+          "name": "created-30000ms-ahead",
+          "now": 1789999970000,
+          "repository": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website",
+          "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        {
+          "audience": "https://git.example.com",
+          "capability": "write",
+          "name": "last-ms-before-expiry",
+          "now": 1790086399999,
+          "repository": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website",
+          "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        {
+          "audience": "https://git.example.org",
+          "capability": "write",
+          "name": "second-audience",
+          "now": 1790000000000,
+          "repository": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website",
+          "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        }
+      ],
+      "fields": {
+        "audiences": [
+          "https://git.example.com",
+          "https://git.example.org"
+        ],
+        "capabilities": "read,write",
+        "created": 1790000000000,
+        "epoch": 3,
+        "expiry": 1790086400000,
+        "grantee": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+        "namespace": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618",
+        "nonce": "5555555555555555555555555555555555555555555555555555555555555555",
+        "ref_scopes": [
+          [
+            "refs/heads/main",
+            "cu"
+          ],
+          [
+            "refs/heads/wip/*",
+            "cufd"
+          ]
+        ],
+        "scope": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website"
+      },
+      "header": "bWtpdC13cml0ZS1ncmFudDp2MQplZDI1NTE5LWZkMTcyNDM4NWFhMGM3NWI2NGZiNzhjZDYwMmZhMWQ5OTFmZGViZjc2YjEzYzU4ZWQ3MDJlYWM4MzVlOWY2MTgKZWQyNTUxOS1mZDE3MjQzODVhYTBjNzViNjRmYjc4Y2Q2MDJmYTFkOTkxZmRlYmY3NmIxM2M1OGVkNzAyZWFjODM1ZTlmNjE4L3dlYnNpdGUKZWE0YTZjNjNlMjljNTIwYWJlZjU1MDdiMTMyZWM1Zjk5NTQ3NzZhZWJlYmU3YjkyNDIxZWVhNjkxNDQ2ZDIyYwpyZWFkLHdyaXRlCmh0dHBzOi8vZ2l0LmV4YW1wbGUuY29tLGh0dHBzOi8vZ2l0LmV4YW1wbGUub3JnCnJlZnMvaGVhZHMvbWFpbj1jdTtyZWZzL2hlYWRzL3dpcC8qPWN1ZmQKMwoxNzkwMDAwMDAwMDAwCjE3OTAwODY0MDAwMDAKNTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NQ.ed25519.hvtZJNbAmv1ZO9s01SdsuEWJp131VBKigWSySaYhHQGm3QF1htr4rAj1_E6g0QA8_rPFsHdA2NMfs6_U7lE7CQ",
+      "id": "c13356dd81571ee36737801a436ca6b9a4e75ab48b042a1018c1167b3b9d35a6",
+      "name": "read-write-single-repo",
+      "reject_contexts": [
+        {
+          "audience": "https://git.example.com",
+          "capability": "write",
+          "expected_error": "not yet valid",
+          "name": "created-30001ms-ahead",
+          "now": 1789999969999,
+          "repository": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website",
+          "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        {
+          "audience": "https://git.example.com",
+          "capability": "write",
+          "expected_error": "expired",
+          "name": "at-expiry",
+          "now": 1790086400000,
+          "repository": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website",
+          "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        {
+          "audience": "https://git.example.com",
+          "capability": "write",
+          "expected_error": "expired",
+          "name": "after-expiry",
+          "now": 1790086400001,
+          "repository": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website",
+          "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        {
+          "audience": "https://git.example.net",
+          "capability": "write",
+          "expected_error": "audience not listed",
+          "name": "audience-not-listed",
+          "now": 1790000000000,
+          "repository": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website",
+          "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        {
+          "audience": "https://git.example.com:8443",
+          "capability": "write",
+          "expected_error": "audience not listed",
+          "name": "audience-port-differs",
+          "now": 1790000000000,
+          "repository": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website",
+          "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        {
+          "audience": "https://git.example.com",
+          "capability": "write",
+          "expected_error": "repository not in scope",
+          "name": "other-repository",
+          "now": 1790000000000,
+          "repository": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/blog",
+          "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        {
+          "audience": "https://git.example.com",
+          "capability": "write",
+          "expected_error": "namespace mismatch",
+          "name": "other-namespace",
+          "now": 1790000000000,
+          "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+          "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        {
+          "audience": "https://git.example.com",
+          "capability": "write",
+          "expected_error": "namespace mismatch",
+          "name": "bare-repository",
+          "now": 1790000000000,
+          "repository": "website",
+          "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        {
+          "audience": "https://git.example.com",
+          "capability": "write",
+          "expected_error": "grantee mismatch",
+          "name": "grantee-mismatch",
+          "now": 1790000000000,
+          "repository": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website",
+          "signer": "0101010101010101010101010101010101010101010101010101010101010101"
+        }
+      ],
+      "signature_hex": "86fb5924d6c09afd593bdb34d5276cb84589a75df55412a28164b249a6211d01a6dd017586daf8ac08f5fc4ea0d1003cfeb3c5b07740d8d31fb3afd4ee513b09",
+      "statement": "mkit-write-grant:v1\ned25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618\ned25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website\nea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\nread,write\nhttps://git.example.com,https://git.example.org\nrefs/heads/main=cu;refs/heads/wip/*=cufd\n3\n1790000000000\n1790086400000\n5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    {
+      "accept_contexts": [
+        {
+          "audience": "https://git.example.com",
+          "capability": "write",
+          "name": "write-any-repository",
+          "now": 1790000000000,
+          "repository": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/new-repo",
+          "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        {
+          "audience": "https://git.example.com",
+          "capability": "write",
+          "name": "last-ms-of-max-lifetime",
+          "now": 1792591999999,
+          "repository": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website",
+          "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        }
+      ],
+      "fields": {
+        "audiences": [
+          "https://git.example.com"
+        ],
+        "capabilities": "write",
+        "created": 1790000000000,
+        "epoch": 0,
+        "expiry": 1792592000000,
+        "grantee": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+        "namespace": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618",
+        "nonce": "6666666666666666666666666666666666666666666666666666666666666666",
+        "ref_scopes": [
+          [
+            "refs/heads/*",
+            "cufd"
+          ]
+        ],
+        "scope": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/*"
+      },
+      "header": "bWtpdC13cml0ZS1ncmFudDp2MQplZDI1NTE5LWZkMTcyNDM4NWFhMGM3NWI2NGZiNzhjZDYwMmZhMWQ5OTFmZGViZjc2YjEzYzU4ZWQ3MDJlYWM4MzVlOWY2MTgKZWQyNTUxOS1mZDE3MjQzODVhYTBjNzViNjRmYjc4Y2Q2MDJmYTFkOTkxZmRlYmY3NmIxM2M1OGVkNzAyZWFjODM1ZTlmNjE4LyoKZWE0YTZjNjNlMjljNTIwYWJlZjU1MDdiMTMyZWM1Zjk5NTQ3NzZhZWJlYmU3YjkyNDIxZWVhNjkxNDQ2ZDIyYwp3cml0ZQpodHRwczovL2dpdC5leGFtcGxlLmNvbQpyZWZzL2hlYWRzLyo9Y3VmZAowCjE3OTAwMDAwMDAwMDAKMTc5MjU5MjAwMDAwMAo2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2.ed25519.FWEETAhckJP9r_F698ohqX0--w5OEss9dYNHUGBTaxQtRnLhaYuKkrnIyXYSsFo85y6rPd_ZKpNVDJXVuIzRAg",
+      "id": "5cbf1082f8943f59fe89e02770b2913e888e90caae8672d657819774c297c1d8",
+      "name": "write-namespace-max-lifetime",
+      "reject_contexts": [
+        {
+          "audience": "https://git.example.com",
+          "capability": "read",
+          "expected_error": "capability not granted",
+          "name": "read-not-granted",
+          "now": 1790000000000,
+          "repository": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website",
+          "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        {
+          "audience": "https://git.example.com",
+          "capability": "write",
+          "expected_error": "expired",
+          "name": "at-max-lifetime-expiry",
+          "now": 1792592000000,
+          "repository": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website",
+          "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        }
+      ],
+      "signature_hex": "1561044c085c9093fdaff17af7ca21a97d3efb0e4e12cb3d7583475060536b142d4672e1698b8a92b9c8c97612b05a3ce72eab3ddfd92a93550c95d5b88cd102",
+      "statement": "mkit-write-grant:v1\ned25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618\ned25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/*\nea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\nwrite\nhttps://git.example.com\nrefs/heads/*=cufd\n0\n1790000000000\n1792592000000\n6666666666666666666666666666666666666666666666666666666666666666"
+    },
+    {
+      "accept_contexts": [
+        {
+          "audience": "https://git.example.com",
+          "capability": "read",
+          "name": "private-read",
+          "now": 1790000000000,
+          "repository": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website",
+          "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        }
+      ],
+      "fields": {
+        "audiences": [
+          "https://git.example.com"
+        ],
+        "capabilities": "read",
+        "created": 1790000000000,
+        "epoch": 1,
+        "expiry": 1790086400000,
+        "grantee": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+        "namespace": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618",
+        "nonce": "7777777777777777777777777777777777777777777777777777777777777777",
+        "ref_scopes": null,
+        "scope": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website"
+      },
+      "header": "bWtpdC13cml0ZS1ncmFudDp2MQplZDI1NTE5LWZkMTcyNDM4NWFhMGM3NWI2NGZiNzhjZDYwMmZhMWQ5OTFmZGViZjc2YjEzYzU4ZWQ3MDJlYWM4MzVlOWY2MTgKZWQyNTUxOS1mZDE3MjQzODVhYTBjNzViNjRmYjc4Y2Q2MDJmYTFkOTkxZmRlYmY3NmIxM2M1OGVkNzAyZWFjODM1ZTlmNjE4L3dlYnNpdGUKZWE0YTZjNjNlMjljNTIwYWJlZjU1MDdiMTMyZWM1Zjk5NTQ3NzZhZWJlYmU3YjkyNDIxZWVhNjkxNDQ2ZDIyYwpyZWFkCmh0dHBzOi8vZ2l0LmV4YW1wbGUuY29tCi0KMQoxNzkwMDAwMDAwMDAwCjE3OTAwODY0MDAwMDAKNzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nw.ed25519.H1nqhRDB2ACbKcH00y2dlPUSWKA8jyBfY-l8jIRUKEJlx_nhWBHPY3aMENqtI6P5GfJw_OFQ5IikW7Qui-JJCg",
+      "id": "7bcc302489245858200dd9fc3feb86ea39d98bf9c67359814b92d9e896383265",
+      "name": "read-single-repo",
+      "reject_contexts": [
+        {
+          "audience": "https://git.example.com",
+          "capability": "write",
+          "expected_error": "capability not granted",
+          "name": "write-not-granted",
+          "now": 1790000000000,
+          "repository": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website",
+          "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        }
+      ],
+      "signature_hex": "1f59ea8510c1d8009b29c1f4d32d9d94f51258a03c8f205f63e97c8c8454284265c7f9e15811cf63768c10daad23a3f919f270fce150e488a45bb42e8be2490a",
+      "statement": "mkit-write-grant:v1\ned25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618\ned25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website\nea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\nread\nhttps://git.example.com\n-\n1\n1790000000000\n1790086400000\n7777777777777777777777777777777777777777777777777777777777777777"
+    }
+  ]
+}

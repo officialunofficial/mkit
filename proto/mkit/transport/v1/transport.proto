@@ -3,7 +3,7 @@
 // mkit.transport.v1 — the canonical Connect remote protocol.
 //
 // TransportService is the single Connect service every remote mkit
-// deployment target implements: the reference Worker, `mkit serve`
+// deployment target implements: the reference Worker, `mkit-server`
 // (self-hosted, over axum/hyper), and the native (non-wasm) CLI client
 // all compile against this one proto — no per-target dialect. It maps
 // one-to-one onto the verbs of the
@@ -25,10 +25,10 @@
 // `mkit/common/v1/refs.proto` once the buf workspace exists
 // (mkit#677) to import across module boundaries.
 //
-// This proto does not yet have a Rust service implementation anywhere
-// in the tree — it is the design artifact reviewed before the
-// reference Worker / `mkit serve` / CLI client issues (mkit#699-#707)
-// build against it.
+// The service implementation is `mkit-server`'s `connect` binding over
+// its pipeline, served natively by the `mkit-server` binary
+// (`mkit-server-native`) and on Workers by `mkit-server-worker`; the
+// client is `mkit-transport-connect`'s `ConnectTransport`.
 
 edition = "2023";
 
@@ -147,6 +147,32 @@ service TransportService {
   // any message is sent) if the digest is absent. See
   // SPEC-TRANSPORT-CONNECT §6.
   rpc DownloadPack(DownloadPackRequest) returns (stream DownloadPackResponse);
+
+  // Discover deployment capabilities without authentication (SPEC-TRANSPORT-CONNECT §2.1).
+  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+
+  // Fetch a retained writer-view storage receipt (SPEC-SERVER §15).
+  rpc GetReceipt(GetReceiptRequest) returns (GetReceiptResponse);
+
+  // Reserve an upload for a ref (SPEC-TRANSPORT-CONNECT §7.6).
+  rpc BeginUpload(BeginUploadRequest) returns (BeginUploadResponse);
+
+  // Stream one ticketed upload part (SPEC-TRANSPORT-CONNECT §7.6).
+  rpc UploadPart(stream UploadPartRequest) returns (UploadPartResponse);
+
+  // Complete a multipart upload using its receipts (SPEC-TRANSPORT-CONNECT §7.6).
+  rpc CompleteUpload(CompleteUploadRequest) returns (CompleteUploadResponse);
+
+  // Namespace grant epoch RPCs (SPEC-WRITE-GRANTS §5.3).
+  rpc GetGrantEpoch(GetGrantEpochRequest) returns (GetGrantEpochResponse);
+  rpc SetGrantEpoch(SetGrantEpochRequest) returns (SetGrantEpochResponse);
+  // Outside auth-v2; the setter verifies a deployment-authority statement.
+  rpc GetAuthorityGeneration(GetAuthorityGenerationRequest) returns (GetAuthorityGenerationResponse);
+  rpc SetAuthorityGeneration(SetAuthorityGenerationRequest) returns (SetAuthorityGenerationResponse);
+
+  // Repository visibility and URL tokens (SPEC-WRITE-GRANTS §9.1, §9.4).
+  rpc SetRepoVisibility(SetRepoVisibilityRequest) returns (SetRepoVisibilityResponse);
+  rpc IssueObjectUrl(IssueObjectUrlRequest) returns (IssueObjectUrlResponse);
 }
 
 // ----------------------------------------------------------------------------
@@ -154,10 +180,24 @@ service TransportService {
 
 message ListRefsRequest {
   string prefix = 1;
+  // Requested page bound, capped by the server (SPEC-TRANSPORT-CONNECT §7.9).
+  uint32 page_size = 2;
+  // Opaque continuation token; empty starts a listing (SPEC-TRANSPORT-CONNECT §7.9).
+  string page_token = 3;
 }
 
 message ListRefsResponse {
   repeated RefEntry refs = 1;
+  // Empty ends the listing (SPEC-TRANSPORT-CONNECT §7.9).
+  string next_page_token = 2;
+  // Active notices associated with visible refs on this page (SPEC-SERVER §14.6).
+  repeated RefRedaction ref_redactions = 3;
+}
+
+// Notice associated with one visible ref; RefEntry's pinned wire layout is unchanged.
+message RefRedaction {
+  string ref = 1;  // Full ref name, not the prefix-stripped ListRefs display name.
+  RedactionNotice notice = 2;
 }
 
 message ReadRefRequest {
@@ -167,6 +207,8 @@ message ReadRefRequest {
 message ReadRefResponse {
   bool exists = 1;
   bytes object_id = 2;  // 32-byte BLAKE3 digest; meaningful only when exists
+  // Active notices for this visible ref; empty when absent (SPEC-SERVER §14.6).
+  repeated RedactionNotice redaction_notices = 3;
 }
 
 message UpdateRefRequest {
@@ -174,11 +216,14 @@ message UpdateRefRequest {
   RefExpectation expectation = 2;  // REQUIRED; UNSPECIFIED is a protocol error
   bytes expected_id = 3;            // 32 bytes for MATCH; empty for ANY/MISSING
   bytes new_id = 4;                  // 32-byte BLAKE3 digest to write
+  // Delete the ref under its CAS precondition (SPEC-TRANSPORT-CONNECT §7.8).
+  bool delete = 5;
 }
 
 message UpdateRefResponse {
-  // Empty body is success. CAS failure and validation failure are surfaced
-  // as Connect errors, not response fields — see SPEC-TRANSPORT-CONNECT §3.
+  // DSSE storage-receipt envelope JSON; empty when receipts are disabled.
+  // CAS and validation failures remain Connect errors (STC §3).
+  bytes receipt = 1;
 }
 
 message AdvanceRefsRequest {
@@ -191,10 +236,39 @@ message AdvanceRefsRequest {
   RefExpectation packmap_expectation = 6;
   bytes packmap_expected_id = 7;
   bytes packmap_new_id = 8;
+  // Upload tickets consumed by this advance (SPEC-TRANSPORT-CONNECT §7.6).
+  repeated bytes ticket_ids = 9;
+  // Delete both refs under their CAS preconditions (SPEC-TRANSPORT-CONNECT §7.8).
+  bool delete = 10;
 }
 
 message AdvanceRefsResponse {
   AdvanceOutcome outcome = 1;
+  // DSSE storage-receipt envelope JSON; empty on conflict or when disabled.
+  bytes receipt = 2;
+}
+
+// A signed, writer-view read. Exactly one selector is required (STC §2.2).
+message GetReceiptRequest {
+  oneof selector {
+    AdvanceReceiptSelector advance = 1;
+    LeaseReceiptSelector lease = 2;
+  }
+}
+
+message AdvanceReceiptSelector {
+  string ref = 1;                // full ref name
+  uint64 advance_sequence = 2;  // 0 selects the latest committed advance
+}
+
+message LeaseReceiptSelector {
+  string ref = 1;            // empty selects the repository or namespace lease scope
+  uint64 lease_version = 2;  // 0 selects the latest committed version
+  bool namespace_scope = 3;  // with empty ref, selects signed repository's namespace
+}
+
+message GetReceiptResponse {
+  bytes receipt = 1; // complete DSSE storage-receipt envelope JSON
 }
 
 // ----------------------------------------------------------------------------
@@ -214,6 +288,8 @@ message PackExistsResponse {
 message UploadPackHeader {
   bytes pack_id = 1;
   uint64 total_bytes = 2;
+  // Opaque authenticated upload ticket (SPEC-TRANSPORT-CONNECT §7.6).
+  bytes ticket_token = 3;
 }
 
 message UploadPackRequest {
@@ -241,4 +317,236 @@ message DownloadPackResponse {
     DownloadPackHeader header = 1;
     PackChunk chunk = 2;
   }
+}
+
+// ----------------------------------------------------------------------------
+// Discovery.
+
+// Empty discovery request; X-Repository is optional (SPEC-TRANSPORT-CONNECT §2.1).
+message GetServerInfoRequest {}
+
+// Deployment capabilities, independent of repository existence (SPEC-TRANSPORT-CONNECT §2.1).
+message GetServerInfoResponse {
+  // Wire package: "mkit.transport.v1" (SPEC-TRANSPORT-CONNECT §2.1).
+  string protocol = 1;
+  // Transport specification version: 2 (SPEC-TRANSPORT-CONNECT §2.1).
+  uint32 spec_version = 2;
+  // Largest accepted pack length (SPEC-TRANSPORT-CONNECT §2.1).
+  uint64 max_pack_bytes = 3;
+  // Power of two, at least 8 MiB (SPEC-TRANSPORT-CONNECT §2.1, §7.6).
+  uint64 part_size = 4;
+  // Largest number of parts per upload (SPEC-TRANSPORT-CONNECT §2.1, §7.6).
+  uint32 max_parts = 5;
+  // Largest ref count per page (SPEC-TRANSPORT-CONNECT §2.1, §7.9).
+  uint32 max_list_refs_page_size = 6;
+  // Smaller packs may skip BeginUpload; zero with admission or multiple repositories (SPEC-TRANSPORT-CONNECT §2.1).
+  uint64 begin_upload_threshold_bytes = 7;
+  // Whether AdvanceRefs commits both refs atomically (SPEC-TRANSPORT-CONNECT §2.1, §4).
+  bool atomic_advance = 8;
+  // Whether pushed packs are decoded and verified (SPEC-TRANSPORT-CONNECT §2.1).
+  bool indexed_mode = 9;
+  // Whether admission can challenge requests (SPEC-TRANSPORT-CONNECT §2.1, §5.1).
+  bool admission = 10;
+  // Raw 32-byte current receipt+notice public key; empty only if unconfigured.
+  bytes receipt_public_key = 11;
+  // 64-hex BLAKE3 of receipt_public_key; empty only if unconfigured.
+  string receipt_key_id = 12;
+  // Accepted owner signature schemes; empty until M2 (SPEC-TRANSPORT-CONNECT §2.1).
+  repeated string grant_schemes = 13;
+  // "allowlist", "any", or "single-repository" (SPEC-TRANSPORT-CONNECT §2.1, §7.5).
+  string namespace_policy = 14;
+  // Fixed index prefix fan-out; default 4096 (SPEC-TRANSPORT-CONNECT §2.1, §7.9).
+  uint32 index_fanout = 15;
+  uint32 max_delta_chain_depth = 16;   // SPEC-SERVER §9.8; 0 when indexed mode is off
+  // Whether storage leases are enforced; STC §2.1 and SPEC-SERVER §12.
+  bool leases = 17;
+  // Whether async inspection is configured; writers MUST sign reads to see
+  // non-held pending content. Held content is hidden from every caller,
+  // including with sync holds when false (SPEC-SERVER §§10–11).
+  bool async_inspection = 18;
+  // Maximum distinct inspected objects in one advance; absent when no inspector
+  // is configured (SPEC-TRANSPORT-CONNECT §2.1; SPEC-SERVER §11.1).
+  uint32 inspection_max_objects = 19;
+}
+
+// ----------------------------------------------------------------------------
+// Uploads (tickets and parts).
+
+// Reserve an upload; the repository comes only from X-Repository (SPEC-TRANSPORT-CONNECT §7.4, §7.6).
+message BeginUploadRequest {
+  // The ref this upload will advance (SPEC-TRANSPORT-CONNECT §7.6).
+  string ref = 1;
+  // Pack's 32-byte BLAKE3 digest (SPEC-TRANSPORT-CONNECT §7.6).
+  bytes pack_id = 2;
+  // Total pack length (SPEC-TRANSPORT-CONNECT §7.6).
+  uint64 bytes = 3;
+}
+
+// Repository membership or an upload reservation (SPEC-TRANSPORT-CONNECT §7.6).
+message BeginUploadResponse {
+  // Exactly one BeginUpload outcome (SPEC-TRANSPORT-CONNECT §7.6).
+  oneof result {
+    // The pack is already a repository member (SPEC-TRANSPORT-CONNECT §7.6).
+    AlreadyPresent already_present = 1;
+    // The upload reservation and session (SPEC-TRANSPORT-CONNECT §7.6).
+    UploadTicket ticket = 2;
+  }
+}
+
+// Indicates existing pack membership (SPEC-TRANSPORT-CONNECT §7.6).
+message AlreadyPresent {}
+
+// Upload reservation bound by an opaque authenticated token (SPEC-TRANSPORT-CONNECT §7.6).
+message UploadTicket {
+  // 32-byte id; its hex form is <ticket> in part: commitments (SPEC-TRANSPORT-CONNECT §7.6).
+  bytes id = 1;
+  // Uniform non-final part length (SPEC-TRANSPORT-CONNECT §7.6).
+  uint64 part_size = 2;
+  // Expiry in Unix milliseconds, as in auth v2 (SPEC-TRANSPORT-CONNECT §7.6).
+  int64 expires_unix_ms = 3;
+  // Opaque server-authenticated ticket token (SPEC-TRANSPORT-CONNECT §7.6, "Ticket token").
+  bytes token = 4;
+}
+
+// First message of one part's stream (SPEC-TRANSPORT-CONNECT §7.6).
+message UploadPartHeader {
+  // Opaque server-authenticated ticket token (SPEC-TRANSPORT-CONNECT §7.6).
+  bytes ticket_token = 1;
+  // Zero-based part index (SPEC-TRANSPORT-CONNECT §7.6).
+  uint32 index = 2;
+}
+
+// Header followed by ordered part bytes (SPEC-TRANSPORT-CONNECT §7.6).
+message UploadPartRequest {
+  // One message in the part stream (SPEC-TRANSPORT-CONNECT §7.6).
+  oneof msg {
+    // First message only (SPEC-TRANSPORT-CONNECT §7.6).
+    UploadPartHeader header = 1;
+    // Following messages carry the part's bytes in order (SPEC-TRANSPORT-CONNECT §7.6).
+    bytes chunk = 2;
+  }
+}
+
+// Acknowledges one uploaded part (SPEC-TRANSPORT-CONNECT §7.6).
+message UploadPartResponse {
+  // Opaque server-authenticated part receipt (SPEC-TRANSPORT-CONNECT §7.6).
+  bytes receipt = 1;
+}
+
+// Finish an upload after all parts (SPEC-TRANSPORT-CONNECT §7.6).
+message CompleteUploadRequest {
+  // Opaque server-authenticated ticket token (SPEC-TRANSPORT-CONNECT §7.6).
+  bytes ticket_token = 1;
+  // Part receipts in part-index order (SPEC-TRANSPORT-CONNECT §7.6).
+  repeated bytes receipts = 2;
+}
+
+// Empty body is successful completion (SPEC-TRANSPORT-CONNECT §7.6).
+message CompleteUploadResponse {}
+
+// Grants, visibility and URL tokens (SPEC-WRITE-GRANTS).
+
+// Namespace RPC; it carries no X-Repository (SPEC-WRITE-GRANTS §5.3).
+message GetGrantEpochRequest {
+  string namespace = 1;
+}
+
+// An absent stored epoch is 0 (SPEC-WRITE-GRANTS §5.3).
+message GetGrantEpochResponse {
+  uint64 epoch = 1;
+}
+
+// The single §4.2-encoded owner statement is at most 8,192 bytes. No auth v2
+// envelope or replay entry applies (SPEC-WRITE-GRANTS §5.3).
+message SetGrantEpochRequest {
+  string signed_statement = 1;
+}
+
+// Stored epoch after revocation completion (SPEC-WRITE-GRANTS §5.3).
+message SetGrantEpochResponse {
+  uint64 epoch = 1;
+}
+
+enum RepoVisibility {
+  REPO_VISIBILITY_UNSPECIFIED = 0;
+  REPO_VISIBILITY_PUBLIC = 1;
+  REPO_VISIBILITY_PRIVATE = 2;
+}
+
+// Repository comes only from X-Repository (SPEC-TRANSPORT-CONNECT §7.4).
+// A grant never authorizes either mode (SPEC-WRITE-GRANTS §9.1).
+message SetRepoVisibilityRequest {
+  oneof mode {
+    // Auth v2 body: owner key or authority; UNSPECIFIED is invalid_argument.
+    RepoVisibility visibility = 1;
+    // Owner-signed mkit-repo-visibility:v1 in §4.2 encoding; no auth v2.
+    string signed_statement = 2;
+  }
+}
+
+message SetRepoVisibilityResponse {}
+
+// Signed read; repository comes only from X-Repository (§9.4; STC §7.4).
+message IssueObjectUrlRequest {
+  oneof target {
+    // 32-byte id maps to object:<64 lowercase hex>.
+    bytes object_id = 1;
+    // Maps to path:<ref>:<base64url(path)>.
+    RefPath ref_path = 2;
+  }
+  // 0 requests the default; otherwise clamped to url_token_ttl (§9.4).
+  uint32 ttl_seconds = 3;
+}
+
+// Full ref name and UTF-8 path of 0..1,024 bytes; empty names the root tree.
+message RefPath {
+  string ref = 1;
+  string path = 2;
+}
+
+message IssueObjectUrlResponse {
+  string token = 1;
+  int64 expires_unix_ms = 2;
+}
+
+// ----------------------------------------------------------------------------
+// Errors/details.
+
+// Detail on a challenged unary request (SPEC-TRANSPORT-CONNECT §5.1).
+message AdmissionChallenge {
+  repeated Challenge challenges = 1; // 1 to 8 entries, in the server's order of preference
+  string description = 2;            // text for a person; at most 512 bytes of UTF-8
+}
+
+// One opaque admission challenge (SPEC-TRANSPORT-CONNECT §5.1).
+message Challenge {
+  string scheme = 1; // lowercase token: [a-z0-9][a-z0-9.-]{0,63}
+  string value = 2;  // opaque to mkit; at most 8,192 bytes
+}
+
+// Detail on an `unavailable` AdvanceRefs whose consumed pack is still under
+// verification (SPEC-TRANSPORT-CONNECT §7.6; SPEC-SERVER §9.5).
+message PendingVerification {
+  uint32 retry_after_ms = 1;   // server's suggested poll interval, 1000..=60000
+}
+
+// Signed takedown notice used as a Connect error detail and on visible refs.
+// The sole field is the exact DSSE JSON envelope (SPEC-SERVER §14.6).
+message RedactionNotice {
+  bytes envelope = 1;
+}
+
+// Optional namespace authority fence; SPEC-SERVER §6.2.1.
+message GetAuthorityGenerationRequest {
+  string namespace = 1;
+}
+message GetAuthorityGenerationResponse {
+  uint64 generation = 1;
+}
+// Bounded, canonical deployment-authority statement; never an owner fallback.
+message SetAuthorityGenerationRequest {
+  string signed_statement = 1;
+}
+message SetAuthorityGenerationResponse {
+  uint64 generation = 1;
 }

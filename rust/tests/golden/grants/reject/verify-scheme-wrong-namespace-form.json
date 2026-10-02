@@ -1,0 +1,16 @@
+{
+  "accepted_schemes": [
+    "ed25519"
+  ],
+  "audience": "https://git.example.com",
+  "context": {
+    "capability": "write",
+    "now": 1790000000000,
+    "repository": "0x8ba1f109551bd432803012645ac136ddd64dba72/website",
+    "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+  },
+  "expected_error": "scheme namespace mismatch",
+  "header": "bWtpdC13cml0ZS1ncmFudDp2MQoweDhiYTFmMTA5NTUxYmQ0MzI4MDMwMTI2NDVhYzEzNmRkZDY0ZGJhNzIKMHg4YmExZjEwOTU1MWJkNDMyODAzMDEyNjQ1YWMxMzZkZGQ2NGRiYTcyL3dlYnNpdGUKZWE0YTZjNjNlMjljNTIwYWJlZjU1MDdiMTMyZWM1Zjk5NTQ3NzZhZWJlYmU3YjkyNDIxZWVhNjkxNDQ2ZDIyYwpyZWFkLHdyaXRlCmh0dHBzOi8vZ2l0LmV4YW1wbGUuY29tLGh0dHBzOi8vZ2l0LmV4YW1wbGUub3JnCnJlZnMvaGVhZHMvbWFpbj1jdTtyZWZzL2hlYWRzL3dpcC8qPWN1ZmQKMwoxNzkwMDAwMDAwMDAwCjE3OTAwODY0MDAwMDAKNTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NQ.ed25519.ZpHUbL9pxSnX3wPNutlcySKSFIpusre8NzxdUMSNLO66IcjsY5fSSYEAI03e4NC3yGEB6LWbqTKYz7kRW8ivDg",
+  "kind": "grant",
+  "rule": "§4: ed25519 is valid only for an ed25519- namespace"
+}

@@ -88,8 +88,12 @@ fn write_head(layout: &RepoLayout, target: &str) -> u8 {
             exit::USAGE,
         );
     };
-    if !refs::validate_ref_name(branch) {
-        return emit_err(&format!("invalid branch name '{branch}'"), exit::USAGE);
+    match refs::check_new_ref_name(branch) {
+        Ok(()) => {}
+        Err(e @ refs::RefError::RefNameTooLong { .. }) => {
+            return emit_err(&format!("invalid branch name: {e}"), exit::USAGE);
+        }
+        Err(_) => return emit_err(&format!("invalid branch name '{branch}'"), exit::USAGE),
     }
     match refs::write_head_branch(layout, branch) {
         Ok(()) => exit::OK,

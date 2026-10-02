@@ -1,0 +1,31 @@
+{
+  "accepted_schemes": [
+    "webauthn-p256"
+  ],
+  "audience": "https://git.example.com",
+  "context": {
+    "capability": "write",
+    "now": 1790000000000,
+    "repository": "0xdb1cf7c2c5375aea1b363bd4a67803c7f704051b/website",
+    "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+  },
+  "expected_error": "cross origin",
+  "header": "bWtpdC13cml0ZS1ncmFudDp2MQoweGRiMWNmN2MyYzUzNzVhZWExYjM2M2JkNGE2NzgwM2M3ZjcwNDA1MWIKMHhkYjFjZjdjMmM1Mzc1YWVhMWIzNjNiZDRhNjc4MDNjN2Y3MDQwNTFiL3dlYnNpdGUKZWE0YTZjNjNlMjljNTIwYWJlZjU1MDdiMTMyZWM1Zjk5NTQ3NzZhZWJlYmU3YjkyNDIxZWVhNjkxNDQ2ZDIyYwpyZWFkLHdyaXRlCmh0dHBzOi8vZ2l0LmV4YW1wbGUuY29tLGh0dHBzOi8vZ2l0LmV4YW1wbGUub3JnCnJlZnMvaGVhZHMvbWFpbj1jdTtyZWZzL2hlYWRzL3dpcC8qPWN1ZmQKMAoxNzkwMDAwMDAwMDAwCjE3OTAwODY0MDAwMDAKYjFiMWIxYjFiMWIxYjFiMWIxYjFiMWIxYjFiMWIxYjFiMWIxYjFiMWIxYjFiMWIxYjFiMWIxYjFiMWIxYjFiMQ.webauthn-p256.QAAAAGD-1LolWp0xyWHrdMY1bWjASbiSO2H6bOZpYi5g8p-2eQP-EAi4vJmkGunpVii8ZPLxsgwtfp9Rd6PClNRGIpklAAAAo3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUcBAAAAKoMAAAB7InR5cGUiOiJ3ZWJhdXRobi5nZXQiLCJjaGFsbGVuZ2UiOiJ5dWxXQ2NEcThHWVdXRVlnWjd0VDIxNUZvV1lMU0FvMGZaVWtZbGxuaC1jIiwib3JpZ2luIjoiaHR0cHM6Ly9leGFtcGxlLmNvbSIsImNyb3NzT3JpZ2luIjp0cnVlfUAAAADbMvDPH_-jpV9xqxAUknn9lEOgIikrvHU5m8eJ_4nPZHJxeE85-_nBGHXorBGqlNQNFxhmgRVbONLX1zpdlZxb",
+  "kind": "grant",
+  "relying_parties": [
+    {
+      "id": "example.com",
+      "origins": [
+        "https://example.com",
+        "https://www.example.com"
+      ]
+    },
+    {
+      "id": "wallet.example",
+      "origins": [
+        "https://wallet.example"
+      ]
+    }
+  ],
+  "rule": "§4.3 rule 2: crossOrigin, if present, is false"
+}

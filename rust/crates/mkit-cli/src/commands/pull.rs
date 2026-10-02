@@ -139,7 +139,8 @@ fn pull_one(
     let old_tip = branch
         .as_deref()
         .and_then(|b| mkit_core::refs::read_ref(layout, b).ok().flatten());
-    match remote_dispatch::open_trusted(endpoint, resolved.repo_chosen, cfg, layout) {
+    match remote_dispatch::open_trusted(endpoint, &resolved.name, resolved.repo_chosen, cfg, layout)
+    {
         Ok(tx) => {
             let pull_outcome = {
                 // Scoped tightly so the progress guard's final line
@@ -149,6 +150,7 @@ fn pull_one(
                     "Unpacking objects",
                     None,
                     crate::progress::should_report(quiet),
+                    quiet,
                 );
                 remote_dispatch::pull_all_with(
                     cwd,

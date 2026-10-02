@@ -1,6 +1,6 @@
 ---
 spec: SPEC-DISCLOSURE
-version: 3
+version: 4
 status: draft-normative
 audience: implementers of an mkit disclosure-bundle or closure-profile verifier (any language)
 ---
@@ -8,14 +8,15 @@ audience: implementers of an mkit disclosure-bundle or closure-profile verifier 
 # SPEC-DISCLOSURE &mdash; partial-disclosure bundle and closure-profile verification
 
 Status: **Draft, normative.** The wire format and verification algorithm
-below are pinned by the golden vectors in §6 and §7.7 and are not expected to
+below are pinned by the golden vectors in §6, §7.6, and §8.3 and are not expected to
 change incompatibly, but this document has not yet accumulated the
 implementation experience SPEC-CONVENTIONS §2.1 reserves `stable` for.
 Scope: proving that a single path, chunk, or byte range of a file belongs
 to a specific mkit commit id, with proof bytes on the order of a few KiB
 regardless of repository size ("partial disclosure"), **and** proving that
 a served object set is the full content that commit id commits to
-("closure profile" / full disclosure, §7).
+("closure profile" / full disclosure, §7), and a multi-chunk range
+container (MKDS, §8).
 
 This is issue #1015 (verifier kit). Out of scope, deliberately:
 wasm bindings (PR 4), CLI commands (PR 5), the docs guide (PR 6).
@@ -38,7 +39,7 @@ A verified disclosure does **not** prove:
 
 - **completeness.** That the disclosed path is the *only* thing under its
   parent, or that nothing else exists in the repository. A disclosure
-  bundle carries a proof of *inclusion*, never of *exclusion* &mdash; see §8
+  bundle carries a proof of *inclusion*, never of *exclusion* &mdash; see §9
   and issue [#1027](https://github.com/officialunofficial/mkit/issues/1027).
 - **signer identity.** `signer`/`signature_valid` report whether the
   commit's (or remix's) embedded Ed25519 signature verifies against its
@@ -448,7 +449,122 @@ the manifest.
 `rust/crates/mkit-core/tests/golden_closure.rs` reads only the committed
 files.
 
-## 8. Later (out of scope for this document)
+## 8. Multi-chunk span container (MKDS v1)
+
+MKDS proves a content range crossing chunk boundaries of one ChunkedBlob.
+It wraps unchanged MKDP v2 Range and Chunk bundles, rather than introducing
+a payload kind. External tools MUST be able to encode and verify MKDS from
+this section and §3–§5 alone. [SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md)
+selects this representation by query.
+
+### 8.1 Encoding and bounds
+
+Fixed-width integers are big-endian; vector lengths are unsigned LEB128
+varints as in §3 (minimal encoding, bounded to u32 for vector lengths).
+Arrays are raw bytes. No padding is inserted.
+
+```text
+magic: [4] = "MKDS"
+version: u8 = 1
+commit_id: [32]
+offset: u64                 absolute content offset
+len: u64                    content length, not inclusive endpoint
+anchor: Vec<u8>             encoded MKDP v2 Range
+chunks: Vec<Vec<u8>>         encoded MKDP v2 Chunk bundles
+```
+
+The anchor MUST disclose content offset 0, length 1 of chunk `first`,
+with a complete preceding `chunk_len_proofs` set. For `first = 0` that
+set MUST be empty; for `first > 0` it MUST cover exactly `0..first`.
+The chunk vector MUST contain 2–1,000,000 bundles, with consecutive
+indices `first..last` in ascending order, inclusive: for every adjacent
+pair, `index[i+1] = index[i] + 1`. Each contains the
+full canonical Blob bytes, including its prologue and length field.
+
+A decoder MUST reject an encoded container larger than 64 MiB before
+any decoding or allocation. It MUST bound each vector length by the
+remaining input and 64 MiB, and chunk count to at most 1,000,000, before
+allocation. The verifier classifies a zero or one chunk count under §8.2.
+The decoder MUST reject trailing bytes, unknown magic or version,
+truncated fields, and invalid varints. A deployment SHOULD also cap
+requested content, for example at 8 MiB; this service cap is separate
+from format validity.
+
+### 8.2 Verification and reject reasons
+
+The caller supplies a trusted commit id; the embedded id MUST equal it.
+The verifier MUST perform the following checks in order and return a
+distinct reason for the first failed check. Reason labels below are the
+language-independent golden contract, not implementation type names.
+
+| Check | Reject reason |
+|---|---|
+| Total encoded size at most 64 MiB | `span_too_large` |
+| Magic equals MKDS | `span_magic` |
+| Version equals 1 | `span_version` |
+| Fields and bounded vectors decode completely, including chunk count at most 1,000,000 | `span_encoding` |
+| No trailing bytes | `span_trailing_bytes` |
+| Embedded commit equals caller's trusted commit | `span_commit` |
+| Nonzero len and checked offset + len | `span_range_arithmetic` |
+| At least two chunk bundles | `span_chunk_count` |
+| Anchor exists and verifies under §4 against commit_id | `span_anchor_invalid` |
+| Anchor is a chunked Range at offset_in_blob 0 disclosing exactly one byte | `span_anchor_selector` |
+| Anchor has a complete preceding length-proof set and an authenticated absolute offset | `span_anchor_offset` |
+| Every chunk bundle verifies under §4 against commit_id | `span_inner_invalid` |
+| Every chunk payload is Chunk | `span_chunk_selector` |
+| Anchor and every chunk share authenticated path and leaf id | `span_leaf_context` |
+| Every bundle shares total_size, chunk_size, and chunk inner root | `span_chunk_context` |
+| Chunk indices are first..last, consecutive and in order (`index[i+1] = index[i] + 1`), starting at the anchor index | `span_chunk_order` |
+| Every Chunk's canonical bytes decode as a nonempty Blob; length comes from these verified bytes | `span_chunk_bytes` |
+| The first chunk's content begins with the anchor's disclosed byte and its canonical id equals the anchor's chunk id | `span_anchor_binding` |
+| Checked sum of lengths and anchor absolute offset fits total_size; requested [offset, offset+len) lies inside this span and starts inside the first chunk | `span_range_outside` |
+| The requested end exceeds the beginning of the last chunk (the last chunk is needed) | `span_last_unneeded` |
+
+An incomplete nonempty length-proof set fails anchor verification with
+`span_anchor_invalid`; a valid MKDP anchor omitting its optional offset
+proofs at index > 0 fails with `span_anchor_offset`. The anchor's proven
+absolute offset is the beginning of the first included chunk, not
+`first * chunk_size`: content-defined chunking has variable lengths.
+Canonical Blob lengths, not the metadata chunk-size marker, determine
+all following boundaries. Checked arithmetic MUST be used throughout.
+`span_chunk_context` and `span_anchor_binding` are defence-in-depth checks:
+the authenticated object and chunk proofs make those failures unreachable
+once all earlier checks pass. They remain distinct reject reasons for an
+independent verifier that receives inconsistent decoded proof data.
+
+On success the verifier MUST strip each Blob's canonical header,
+concatenate its content in order, and return the slice
+`[offset - span_start, offset + len - span_start)`. It MUST also return
+the authenticated path, leaf id, trusted commit id, absolute offset,
+and signature verification result under §4's trust model. A claimed path
+outside the verified bundles is not evidence. The caller MUST compare
+that authenticated path and range against its request.
+
+### 8.3 Vectors and version history
+
+[`rust/tests/golden/http-objects/`](../../rust/tests/golden/http-objects/)
+pins accept containers starting at both zero and nonzero chunk indices,
+and rejects for gaps, duplicates, wrong selectors, mixed commits,
+mismatched leaves, missing/incomplete anchors, ranges outside the span,
+an unnecessary last chunk, magic/version errors, trailing bytes,
+truncation, a non-minimal varint, a varint above `u32::MAX`, a chunk count
+of 1,000,001, an MKDP or MKDS container supplied as the anchor, an MKDP
+supplied in place of an MKDS, and oversize input. Large reject bodies use sidecar byte-range copy and patch
+recipes over the accepted containers; each recipe reconstructs exact bytes
+before verification.
+The oversize vector uses a pinned small seed plus a sidecar expansion
+recipe to construct 64 MiB + 1 bytes without checking in a large zero file.
+The bad-varint vectors splice the malformed prefix over the real anchor
+length inside an otherwise complete valid container, and the chunk-count
+vector is zero-filled to one empty vector per declared chunk, so a lenient
+reader fails for a different reason and only the 1,000,000 cap rejects it.
+Each reject sidecar names the exact reason in §8.2.
+
+Document version 4 adds MKDS wire version 1; MKDP wire version 2 and its
+existing vectors remain unchanged. No migration or compatibility reader
+is needed for the additive container.
+
+## 9. Later (out of scope for this document)
 
 - **Non-membership.** `payload_kind 3` is reserved for a future proof
   that a name is *absent* from a `Tree` (a range proof over the two
@@ -456,10 +572,12 @@ files.
   [#1027](https://github.com/officialunofficial/mkit/issues/1027). Not
   implemented here.
 
-## 9. Invariants
+## 10. Invariants
 
 | Mutation | Detected because |
 |---|---|
+| a span mixes commits, leaves, metadata, or nonconsecutive chunks | the checks and distinct reject reasons in §8.2 |
+| a span claims incorrect boundaries | an offset-proving anchor plus canonical chunk lengths (§8.2) |
 | any disclosed byte tampered | the Bao slice / BLAKE3 check against the authenticated id fails |
 | a step's `(name, mode, child_id)` tampered | that step's inclusion proof no longer folds to the expected parent id |
 | declared inner root does not wrap to the parent id | wrap-check-first (`domain_digest(TYPE_DOMAIN, inner_root) == expected_id`) fails with `InnerRootMismatch` |

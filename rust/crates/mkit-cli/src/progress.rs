@@ -40,8 +40,12 @@
 //! `--quiet` flag (forces off) or the `MKIT_PROGRESS` env var
 //! (`always`/`never`/`auto`, mirroring `NO_COLOR`/`CLICOLOR_FORCE`'s
 //! override convention) — `always` is how the CLI integration tests
-//! observe progress lines over a piped (non-tty) stderr.
+//! observe progress lines over a piped (non-tty) stderr. Verification waiting
+//! is an exception: a piped, non-quiet push gets one start and one completion
+//! line because the wait can last for minutes.
 
+use mkit_core::hash::{Hash, to_hex};
+use mkit_transport_connect::{PendingEvent, UploadEvent};
 use std::cell::RefCell;
 use std::io::{IsTerminal, Write};
 
@@ -62,6 +66,9 @@ pub enum Event {
     /// side, `unpack_downloaded_packs`) — real counts from the pack's own
     /// [`mkit_core::pack::UnpackReport`].
     ObjectsUnpacked(usize),
+    /// A split push (WP-1.17b) is starting advance `index` of `total`. The
+    /// counters restart for it and its label carries the step.
+    Step { index: usize, total: usize },
 }
 
 /// Objects between throttled stderr re-writes. The final event
@@ -77,6 +84,7 @@ struct Reporter {
     bytes: u64,
     last_emit_done: usize,
     emitted: bool,
+    step: Option<(usize, usize)>,
 }
 
 impl Reporter {
@@ -88,6 +96,7 @@ impl Reporter {
             bytes: 0,
             last_emit_done: 0,
             emitted: false,
+            step: None,
         }
     }
 
@@ -106,26 +115,40 @@ impl Reporter {
                 self.bytes = self.bytes.saturating_add(bytes);
                 self.emit();
             }
+            Event::Step { index, total } => {
+                self.finish();
+                self.done = 0;
+                self.bytes = 0;
+                self.last_emit_done = 0;
+                self.emitted = false;
+                self.step = Some((index, total));
+            }
+        }
+    }
+
+    fn label(&self) -> String {
+        match self.step {
+            Some((index, total)) => format!("{} (step {index}/{total})", self.label),
+            None => self.label.to_owned(),
         }
     }
 
     fn emit(&mut self) {
         self.last_emit_done = self.done;
         self.emitted = true;
+        let label = self.label();
         let mut stderr = std::io::stderr().lock();
         let _ = match (self.total, self.bytes) {
-            (Some(total), 0) => write!(stderr, "\r{}: {}/{} objects", self.label, self.done, total),
-            (Some(total), bytes) => write!(
-                stderr,
-                "\r{}: {}/{} objects, {} bytes",
-                self.label, self.done, total, bytes
-            ),
-            (None, 0) => write!(stderr, "\r{}: {} objects", self.label, self.done),
-            (None, bytes) => write!(
-                stderr,
-                "\r{}: {} objects, {} bytes",
-                self.label, self.done, bytes
-            ),
+            (Some(total), 0) => write!(stderr, "\r{label}: {}/{total} objects", self.done),
+            (Some(total), bytes) => {
+                write!(
+                    stderr,
+                    "\r{label}: {}/{total} objects, {bytes} bytes",
+                    self.done
+                )
+            }
+            (None, 0) => write!(stderr, "\r{label}: {} objects", self.done),
+            (None, bytes) => write!(stderr, "\r{label}: {} objects, {bytes} bytes", self.done),
         };
         let _ = stderr.flush();
     }
@@ -144,7 +167,157 @@ impl Reporter {
 }
 
 thread_local! {
+    /// `Some(quiet)` while a [`Guard`] is installed on this thread.
+    static QUIET: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static REPORTER: RefCell<Option<Reporter>> = const { RefCell::new(None) };
+    static PENDING: RefCell<Option<PendingReporter>> = const { RefCell::new(None) };
+    static UPLOAD: RefCell<Option<UploadReporter>> = const { RefCell::new(None) };
+}
+
+struct UploadReporter {
+    quiet: bool,
+    interactive: bool,
+    active: bool,
+}
+
+impl UploadReporter {
+    fn render(&mut self, event: UploadEvent) -> Option<String> {
+        if self.quiet {
+            return None;
+        }
+        match event {
+            UploadEvent::PartsPlanned {
+                parts,
+                resumed,
+                saved_bytes,
+                bytes,
+            } => {
+                self.active = true;
+                if self.interactive {
+                    Some(format!(
+                        "\rUploading pack: part {resumed}/{parts} ({}/{} MiB), {resumed} resumed\x1b[K",
+                        saved_bytes / (1024 * 1024),
+                        bytes / (1024 * 1024)
+                    ))
+                } else {
+                    Some(format!(
+                        "Uploading pack: {parts} parts, {resumed} resumed.\n"
+                    ))
+                }
+            }
+            UploadEvent::PartSent {
+                index,
+                parts,
+                saved_bytes,
+                bytes,
+                resumed,
+            } if self.interactive => Some(format!(
+                "\rUploading pack: part {}/{parts} ({}/{} MiB), {resumed} resumed\x1b[K",
+                index + 1,
+                saved_bytes / (1024 * 1024),
+                bytes / (1024 * 1024)
+            )),
+            UploadEvent::Finished if self.active => {
+                self.active = false;
+                if self.interactive {
+                    Some("\rUploading pack: done.\x1b[K\n".to_owned())
+                } else {
+                    Some("Upload complete.\n".to_owned())
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Render a multipart upload event on the current command's stderr sink.
+pub fn upload_event(event: UploadEvent) {
+    UPLOAD.with(|slot| {
+        if let Some(reporter) = slot.borrow_mut().as_mut()
+            && let Some(line) = reporter.render(event)
+        {
+            let mut stderr = std::io::stderr().lock();
+            let _ = stderr.write_all(line.as_bytes());
+            let _ = stderr.flush();
+        }
+    });
+}
+
+struct PendingReporter {
+    quiet: bool,
+    interactive: bool,
+    active: bool,
+}
+
+impl PendingReporter {
+    fn new(quiet: bool, mode: Option<&str>, is_tty: bool) -> Self {
+        Self {
+            quiet: quiet || mode == Some("never"),
+            interactive: mode == Some("always") || is_tty,
+            active: false,
+        }
+    }
+
+    fn render(&mut self, event: PendingEvent) -> Option<String> {
+        if self.quiet {
+            return None;
+        }
+        match event {
+            PendingEvent::Waiting { elapsed, .. } if self.interactive => {
+                self.active = true;
+                Some(format!(
+                    "\rWaiting for server verification: {}s\x1b[K",
+                    elapsed.as_secs()
+                ))
+            }
+            PendingEvent::Waiting { .. } if !self.active => {
+                self.active = true;
+                Some("Waiting for server verification...\n".to_owned())
+            }
+            PendingEvent::Finished { elapsed, succeeded } if self.active => {
+                self.active = false;
+                if self.interactive {
+                    let status = if succeeded { "done" } else { "stopped" };
+                    Some(format!(
+                        "\rWaiting for server verification: {}s, {status}.\x1b[K\n",
+                        elapsed.as_secs()
+                    ))
+                } else if succeeded {
+                    Some("Server verification complete.\n".to_owned())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Report verification polling on the same caller thread as the transfer.
+pub fn pending_event(event: PendingEvent) {
+    PENDING.with(|slot| {
+        if let Some(reporter) = slot.borrow_mut().as_mut()
+            && let Some(line) = reporter.render(event)
+        {
+            let mut stderr = std::io::stderr().lock();
+            let _ = stderr.write_all(line.as_bytes());
+            let _ = stderr.flush();
+        }
+    });
+}
+
+/// End the current self-overwriting progress line before helper UX appears.
+pub fn suspend_for_admission() {
+    REPORTER.with(|slot| {
+        if slot
+            .borrow()
+            .as_ref()
+            .is_some_and(|reporter| reporter.emitted)
+        {
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(stderr);
+        }
+    });
 }
 
 /// RAII handle returned by [`start`]. Dropping it flushes a final
@@ -160,6 +333,13 @@ pub struct Guard {
 
 impl Drop for Guard {
     fn drop(&mut self) {
+        QUIET.with(|quiet| quiet.set(None));
+        PENDING.with(|r| {
+            r.borrow_mut().take();
+        });
+        UPLOAD.with(|r| {
+            r.borrow_mut().take();
+        });
         REPORTER.with(|r| {
             if let Some(mut rep) = r.borrow_mut().take() {
                 rep.finish();
@@ -178,7 +358,24 @@ impl Drop for Guard {
 /// side, where the object count isn't known until each pack is
 /// downloaded) renders as a running count only — never a fabricated
 /// total.
-pub fn start(label: &'static str, total: Option<usize>, enabled: bool) -> Guard {
+pub fn start(label: &'static str, total: Option<usize>, enabled: bool, quiet: bool) -> Guard {
+    let progress_mode = std::env::var("MKIT_PROGRESS").ok();
+    QUIET.with(|state| state.set(Some(quiet || progress_mode.as_deref() == Some("never"))));
+    PENDING.with(|r| {
+        *r.borrow_mut() = Some(PendingReporter::new(
+            quiet,
+            progress_mode.as_deref(),
+            std::io::stderr().is_terminal(),
+        ));
+    });
+    UPLOAD.with(|r| {
+        *r.borrow_mut() = Some(UploadReporter {
+            quiet: quiet || progress_mode.as_deref() == Some("never"),
+            interactive: progress_mode.as_deref() == Some("always")
+                || std::io::stderr().is_terminal(),
+            active: false,
+        });
+    });
     REPORTER.with(|r| {
         *r.borrow_mut() = if enabled {
             Some(Reporter::new(label, total))
@@ -208,6 +405,41 @@ pub fn report(event: Event) {
             rep.record(event);
         }
     });
+}
+
+/// The line a piped, non-quiet run gets when one advance of a split push has
+/// landed.
+fn step_line(index: usize, total: usize, head: &Hash) -> String {
+    format!(
+        "pushed step {index}/{total}: branch now at {}",
+        to_hex(head)
+    )
+}
+
+/// The line for one landed advance, or `None` when nothing should be printed:
+/// a quiet run, a single advance, or an interactive run, whose live progress
+/// line already carries the step.
+fn step_message(
+    quiet: bool,
+    interactive: bool,
+    index: usize,
+    total: usize,
+    head: &Hash,
+) -> Option<String> {
+    (!quiet && !interactive && total >= 2).then(|| step_line(index, total, head))
+}
+
+/// Report that advance `index` of `total` of a split push has landed. Outside
+/// a [`Guard`] (library callers, tests) nothing is printed.
+pub fn step_committed(index: usize, total: usize, head: &Hash) {
+    let Some(quiet) = QUIET.with(std::cell::Cell::get) else {
+        return;
+    };
+    let interactive = REPORTER.with(|r| r.try_borrow().is_ok_and(|slot| slot.is_some()));
+    if let Some(line) = step_message(quiet, interactive, index, total, head) {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "{line}");
+    }
 }
 
 /// Whether progress should be shown on stderr: not explicitly silenced
@@ -262,9 +494,93 @@ mod tests {
     /// `report` inside its scope is still the no-op path.
     #[test]
     fn disabled_guard_installs_no_reporter() {
-        let guard = start("Writing objects", Some(4), false);
+        let guard = start("Writing objects", Some(4), false, true);
         report(Event::ObjectsPacked(4));
         drop(guard);
+    }
+
+    #[test]
+    fn pending_stderr_lines_for_piped_forced_and_quiet_modes() {
+        let wait = PendingEvent::Waiting {
+            elapsed: std::time::Duration::from_secs(42),
+            next: std::time::Duration::from_secs(1),
+        };
+        let done = PendingEvent::Finished {
+            elapsed: std::time::Duration::from_secs(43),
+            succeeded: true,
+        };
+        let mut piped = PendingReporter::new(false, None, false);
+        assert_eq!(
+            piped.render(wait).as_deref(),
+            Some("Waiting for server verification...\n")
+        );
+        assert_eq!(piped.render(wait), None);
+        assert_eq!(
+            piped.render(done).as_deref(),
+            Some("Server verification complete.\n")
+        );
+
+        let mut forced = PendingReporter::new(false, Some("always"), false);
+        assert_eq!(
+            forced.render(wait).as_deref(),
+            Some("\rWaiting for server verification: 42s\x1b[K")
+        );
+        assert_eq!(
+            forced.render(done).as_deref(),
+            Some("\rWaiting for server verification: 43s, done.\x1b[K\n")
+        );
+
+        let mut quiet = PendingReporter::new(true, Some("always"), false);
+        assert_eq!(quiet.render(wait), None);
+        assert_eq!(quiet.render(done), None);
+
+        let mut never = PendingReporter::new(false, Some("never"), true);
+        assert_eq!(never.render(wait), None);
+        assert_eq!(never.render(done), None);
+    }
+
+    #[test]
+    fn upload_progress_shows_resumed_bytes_on_tty_and_two_lines_when_piped() {
+        let start = UploadEvent::PartsPlanned {
+            parts: 12,
+            resumed: 4,
+            saved_bytes: 32 << 20,
+            bytes: 96 << 20,
+        };
+        let sent = UploadEvent::PartSent {
+            index: 4,
+            parts: 12,
+            saved_bytes: 40 << 20,
+            bytes: 96 << 20,
+            resumed: 4,
+        };
+        let mut tty = UploadReporter {
+            quiet: false,
+            interactive: true,
+            active: false,
+        };
+        assert!(tty.render(start).unwrap().contains("part 4/12 (32/96 MiB)"));
+        assert!(
+            tty.render(sent)
+                .unwrap()
+                .contains("part 5/12 (40/96 MiB), 4 resumed")
+        );
+        assert!(tty.render(UploadEvent::Finished).unwrap().contains("done."));
+
+        let mut piped = UploadReporter {
+            quiet: false,
+            interactive: false,
+            active: false,
+        };
+        assert_eq!(
+            piped.render(start).as_deref(),
+            Some("Uploading pack: 12 parts, 4 resumed.\n")
+        );
+        assert_eq!(piped.render(sent), None);
+        assert_eq!(
+            piped.render(UploadEvent::Finished).as_deref(),
+            Some("Upload complete.\n")
+        );
     }
 
     /// `should_report` precedence: `--quiet` wins outright, then
@@ -275,5 +591,27 @@ mod tests {
     #[test]
     fn should_report_quiet_always_wins() {
         assert!(!should_report(true));
+    }
+
+    /// A split push (WP-1.17b): the live progress line names the step, a
+    /// piped run gets one line per landed advance, a quiet run and a single
+    /// advance get none.
+    #[test]
+    fn split_push_output_in_tty_piped_and_quiet_modes() {
+        let mut reporter = Reporter::new("Writing objects", None);
+        assert_eq!(reporter.label(), "Writing objects");
+        reporter.record(Event::Step { index: 2, total: 5 });
+        assert_eq!(reporter.label(), "Writing objects (step 2/5)");
+        assert_eq!((reporter.done, reporter.bytes), (0, 0));
+
+        let head = [0xab; 32];
+        let hex = to_hex(&head);
+        assert_eq!(
+            step_message(false, false, 2, 5, &head),
+            Some(format!("pushed step 2/5: branch now at {hex}"))
+        );
+        assert_eq!(step_message(false, true, 2, 5, &head), None, "tty");
+        assert_eq!(step_message(true, false, 2, 5, &head), None, "quiet");
+        assert_eq!(step_message(false, false, 1, 1, &head), None, "unsplit");
     }
 }

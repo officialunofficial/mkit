@@ -7,7 +7,8 @@
 //!
 //! * **Local + stdio.** Newline-delimited JSON-RPC 2.0 on stdin/stdout,
 //!   processed sequentially. No async runtime: the loop is plain
-//!   blocking I/O, keeping the default build tokio-free.
+//!   blocking I/O, so the default build stays server-free (no HTTP
+//!   server, no runtime of its own; `scripts/check-cli-baseline.sh`).
 //! * **Subprocess execution.** Each tool call re-invokes this same
 //!   binary (`std::env::current_exe()`) with a structured argv — never
 //!   a shell — capturing stdout/stderr and the sysexits code. The MCP
@@ -53,7 +54,7 @@ struct McpOpts {
     /// tool surface (which includes mutating tools like `mkit_checkout`)
     /// is meant to be reachable from elsewhere.
     ///
-    /// FAIL-CLOSED, mirroring `mkit serve --http`: refuses to bind unless
+    /// FAIL-CLOSED, like `mkit-server serve`: refuses to bind unless
     /// either a bearer token is configured (`--http-token` or the
     /// `MKIT_MCP_TOKEN` env var) or `--unsafe-allow-any-http-peer` is
     /// passed. See `mcp_v2.rs`.
@@ -64,8 +65,8 @@ struct McpOpts {
     /// <token>` header when `--http` is used. Falls back to the
     /// `MKIT_MCP_TOKEN` environment variable when omitted. CLI-only/
     /// env-only — never read from repo-local `.mkit/config`, matching
-    /// `mkit serve --http`'s `--http-token` sourcing. A dedicated env var
-    /// (not `serve --http`'s `MKIT_API_TOKEN`) since the two surfaces
+    /// `mkit-server`'s bearer-token sourcing. A dedicated env var
+    /// (not `mkit-server`'s `MKIT_API_TOKEN`) since the two surfaces
     /// have different threat models — this one is a high-privilege,
     /// agent-facing tool catalog, not a Git transport.
     #[cfg(feature = "mcp-v2")]
@@ -103,8 +104,8 @@ pub fn run(args: &[String]) -> u8 {
 
 /// `mcp-v2` swaps the whole `mkit mcp` implementation over to the rmcp-based
 /// server (MCP 2026-07-28) at compile time — the same "feature changes the
-/// command's behavior, off by default" shape `enc-transport`/`http-transport`
-/// use elsewhere in this crate — rather than adding a runtime flag, so there
+/// command's behavior, off by default" shape `enc-transport` and
+/// `history-mmr` use elsewhere in this crate — rather than adding a runtime flag, so there
 /// is exactly one code path per build to test and reason about. Either way
 /// `dispatch` is the only thing that differs: the tool catalog, argv-building,
 /// path confinement, and injection defenses below are shared unconditionally.

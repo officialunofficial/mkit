@@ -28,7 +28,8 @@ DEPENDABOT_YML=".github/dependabot.yml"
 fail=0
 
 # directory:ecosystem, one per line. "ecosystem" is Dependabot's
-# package-ecosystem value (cargo / bun / npm).
+# package-ecosystem value (cargo / bun / npm / docker). The docker row is the
+# digest-pinned base of the shipped mkit-server image, not a lockfile.
 read -r -d '' MANIFEST_TABLE <<'EOF' || true
 /rust:cargo
 /contrib/signers:cargo
@@ -40,6 +41,7 @@ read -r -d '' MANIFEST_TABLE <<'EOF' || true
 /apps/og:bun
 /apps/spammer-worker:bun
 /apps/mcp:npm
+/contrib/docker/mkit-server:docker
 EOF
 
 # A directory has an entry in dependabot.yml for the given ecosystem when a

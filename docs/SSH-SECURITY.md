@@ -112,11 +112,31 @@ affected, not every SSH session on your machine.
 - **No known-hosts auto-rotation.** If the upstream rotates its host
   key, the user's ssh will prompt or reject depending on
   `StrictHostKeyChecking`. mkit has no custom path here.
-- **No timeout on initial hello (server side).** A misbehaving client
-  that connects and sends nothing will block the server's
-  `mkit serve` process until the SSH channel times out at the
-  transport layer. Implementing a per-handle read timeout is deferred
-  work.
+- **Idle timeout: client silence only (server side).** `mkit serve`
+  ends a session after `--idle-timeout-secs` seconds (default 60; `0`
+  disables it) without a byte from the client: before `Hello`, between
+  requests, or in the middle of an upload, whose partial pack is then
+  discarded. It answers `Error{INVALID_REQUEST, "idle timeout"}` (best
+  effort) and exits with status 76. Only silence counts: an upload that
+  keeps sending never trips it, and time the server spends answering never
+  counts.
+- **What the idle timeout does not bound.** A client that trickles a few
+  bytes at a time, or one that stops *reading* a download while its ssh
+  still answers keepalives, is not idle. `ClientAliveInterval` does not
+  help either, since the client's ssh is alive. Such a session is bounded
+  only by the per-connection frame and byte budgets (SPEC-TRANSPORT §4.4),
+  by sshd's `MaxSessions` and `MaxStartups`, and, if the operator sets
+  one, by `mkit serve --max-session-secs <secs>` (default `0`, off): a
+  hard cap on the process's lifetime, whatever the client does, exit 76.
+  Set it above the longest legitimate clone or push.
+- **No payments over ssh or enc.** A `mkit-server` deployment whose
+  admission asks for a payment (or a reservation, which only a ticketed
+  upload can settle) cannot take that write over an ssh or `mkit+enc://`
+  session: these transports carry no payment credential. The write is
+  refused with `Error{INVALID_REQUEST, "payment required: use
+  mkit+https"}` and empty `details`, so a client reports a non-retryable
+  remote error, never a ref conflict. Push over `mkit+https://` instead;
+  reads are unaffected.
 
 ---
 
@@ -152,6 +172,63 @@ shell that execs `mkit serve` with the resolved path.
 `AuthorizedKeysCommand` gets the pubkey as `%k` (and the fingerprint
 as `%f` / user as `%u`); see `sshd_config(5)` for the full token list.
 
+### 5.1 Root mode and `--principal`
+
+A forge that serves many repositories under one filesystem root uses
+`mkit serve --root <dir>`: the client still runs `mkit serve <path>`,
+which sshd hands the process in `SSH_ORIGINAL_COMMAND`, and the path
+names a `<NAMESPACE>/<NAME>` resolved under the root (SPEC-TRANSPORT
+§4.1). The repository's owner is then whoever the namespace's
+`ed25519-` key is — and the session's claim to that key is
+`--principal`:
+
+```
+command="mkit serve --root /srv/mkit --principal <hex>",restrict ssh-ed25519 AAAA…
+```
+
+`--principal` is a **trust assertion made by the sshd
+configuration**, the public-key half of the credential sshd has
+already verified for this session (a raw 32-byte Ed25519 key as 64
+lowercase hex). The rules:
+
+- Only `authorized_keys` `command=`, a `ForceCommand`, or
+  `AuthorizedKeysCommand` output may set it. The serving account MUST
+  have no login shell — a shell (or any other way to run the binary)
+  would let a caller invoke `mkit serve --principal <anyone's key>`
+  and assert a principal it does not own.
+- It MUST NOT come from the environment. Never reach for it via
+  `AcceptEnv`, `PermitUserEnvironment`, or `SendEnv`: a variable the
+  client supplies is an assertion the client makes about itself.
+  `mkit serve` reads it from its argv alone.
+- The client cannot name it through `SSH_ORIGINAL_COMMAND`: the
+  server accepts only the exact `mkit serve <path>` form from that
+  variable, so a forced command controls the flags entirely.
+- Root-mode resolution checks the canonical path once at startup and
+  later opens use the path; this is safe only because the root is not
+  writable by ssh clients, and operators must keep it so.
+
+For `AuthorizedKeysCommand`, the asserted key is the one sshd just
+authenticated — `%k`, the base64 SSH wire blob whose tail is the raw
+32-byte Ed25519 key (`len | "ssh-ed25519" | len | 32-byte key` after
+decoding). The resolver hexes that tail into `--principal` and echoes
+the key itself:
+
+```sh
+#!/bin/sh
+# forge-resolve-pubkey — AuthorizedKeysCommand /usr/local/bin/forge-resolve-pubkey %t %k
+# $1 = %t (key type), $2 = %k (base64 key blob)
+[ "$1" = ssh-ed25519 ] || exit 1
+hex=$(printf %s "$2" | base64 -d | tail -c 32 | od -An -tx1 | tr -d ' \n')
+printf 'command="mkit serve --root /srv/mkit --principal %s",restrict %s %s\n' \
+    "$hex" "$1" "$2"
+```
+
+The emitted line MUST assert the same key it carries: `--principal`
+is the raw 32-byte key inside the `ssh-ed25519` blob that follows it.
+Operators who need pubkey→account indirection resolve `%k` against
+their account database first (as in step 3 above) and emit the
+account's key, not the caller's.
+
 ---
 
 ## 6. Upgrade path
@@ -161,7 +238,6 @@ Candidate future work (non-binding):
 - A native SSH implementation (for example, via `russh`), so mkit owns
   host-key verification and can ship fingerprint pinning in
   `.mkit/config`.
-- Server-side read deadline on the hello handshake.
 - `mkit fingerprint` CLI for verifying and storing remote host keys.
 
 Until then: rely on `ssh(1)` and the pinning keys above.
@@ -176,11 +252,15 @@ Until then: rely on `ssh(1)` and the pinning keys above.
 | Upstream host-key rotation (silent swap)  | user's `StrictHostKeyChecking=yes` plus known_hosts |
 | Wrong binary on remote (legacy rename)    | OP_HELLO, §7.4 (fails loud)         |
 | Future-proto mkit client ↔ older server   | OP_HELLO STATUS_UNSUPPORTED reply   |
-| Slow-loris client against `mkit serve`    | **NOT mitigated** (§4)             |
+| Silent client holding `mkit serve`        | `--idle-timeout-secs` (default 60 s; §4) |
+| Trickling or non-reading client           | budgets (SPEC-TRANSPORT §4.4), sshd `MaxSessions`/`MaxStartups`, optional `--max-session-secs` (§4) |
 | Compromised identity file                 | user's key management              |
 | Agent forwarding abuse                    | user's `ForwardAgent no`           |
 
-For the `NOT mitigated` row: until the server-side read deadline lands,
-run `mkit serve` under the SSH transport (which itself times out idle
-channels via `ClientAliveInterval`). Do not expose it as a standalone
-service on an unmanaged socket.
+For the last two rows: the idle timeout bounds only a client that goes
+silent. A client that keeps a session busy slowly, or stops reading, is
+bounded by the budgets, by sshd's limits on sessions per connection and
+on unauthenticated connections, and by `--max-session-secs` when the
+operator sets it; it is off by default. Keep `mkit serve` behind sshd as
+a forced command; do not expose it as a standalone service on an
+unmanaged socket.

@@ -93,7 +93,7 @@ impl Transaction {
         let checksum_start = bytes.len().checked_sub(65).ok_or_else(malformed)?;
         if parse_hash(lines[7])? != hash::hash(&bytes[..checksum_start])
             || !lines[2].starts_with("refs/heads/")
-            || !super::validate_ref_name(lines[2])
+            || !super::validate_ref_name_grammar(lines[2])
         {
             return Err(malformed());
         }

@@ -14,6 +14,7 @@ use std::io::Write;
 
 use clap::{Parser, ValueEnum};
 use mkit_core::layout::RepoLayout;
+use mkit_core::protocol::UploadLimits;
 
 use crate::clap_shim;
 use crate::config;
@@ -56,7 +57,7 @@ struct PushOpts {
     /// Emit a machine-readable JSON result object to stdout:
     /// `{"ok":true,"remote":"...","endpoint":"...","branch":"...",
     /// "remote_branch":"...","old":"<hex>|null","new":"<hex>",
-    /// "forced":<bool>,"up_to_date":<bool>}` on success, or
+    /// "forced":<bool>,"up_to_date":<bool>,"steps":<n>}` on success, or
     /// `{"ok":false,"error":"...","rejected":<bool>,...}` on a
     /// non-fast-forward (CAS) rejection.
     #[arg(long, value_enum, default_value = "default")]
@@ -64,6 +65,18 @@ struct PushOpts {
     /// Suppress transfer progress output on stderr (#711).
     #[arg(short = 'q', long)]
     quiet: bool,
+}
+
+fn interrupted_hint(endpoint: &str, limits: UploadLimits) -> &'static str {
+    let connect = endpoint.starts_with("mkit+https://") || endpoint.starts_with("mkit+http://");
+    if connect
+        && limits.tickets_per_advance.is_some()
+        && limits.ticket_threshold_bytes != Some(u64::MAX)
+    {
+        "push: interrupted; if BeginUpload issued a ticket, re-run push to resume the upload"
+    } else {
+        "push: interrupted; re-run push to retry"
+    }
 }
 
 #[must_use]
@@ -165,7 +178,8 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
                 .field_opt_hash("old", old_tracked.as_ref())
                 .field_opt_hash("new", old_tracked.as_ref())
                 .field_bool("forced", false)
-                .field_bool("up_to_date", true);
+                .field_bool("up_to_date", true)
+                .field_u64("steps", 0);
             emit_json_stdout(obj);
         }
         return exit::OK;
@@ -192,18 +206,20 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
         return exit::OK;
     }
 
-    let tx = match remote_dispatch::open_trusted(
+    let remote = match remote_dispatch::open_trusted_for_push(
         &resolved.endpoint,
+        &resolved.name,
         resolved.repo_chosen,
         cfg,
         layout,
     ) {
-        Ok(tx) => tx,
+        Ok(remote) => remote,
         Err(remote_dispatch::DispatchError::UntrustedRemote(msg)) => {
             return emit_err_json(&msg, exit::CONFIG_ERROR, json);
         }
         Err(e) => return emit_err_json(&format!("open remote: {e}"), exit::PROTOCOL_ERROR, json),
     };
+    let tx = remote.tx;
 
     let push_outcome = {
         // Scoped tightly around the transfer call so the progress
@@ -213,6 +229,7 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
             "Writing objects",
             None,
             crate::progress::should_report(opts.quiet),
+            opts.quiet,
         );
         remote_dispatch::push_branch_tracked(
             layout.worktree_root(),
@@ -221,10 +238,11 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
             &branch,
             &remote_branch,
             lease,
+            remote.authority.as_deref(),
         )
     };
-    match push_outcome {
-        Ok(new_tip) => {
+    match push_outcome.map_err(remote_dispatch::DispatchError::into_published_prefix) {
+        Ok((new_tip, steps)) => {
             // Remember the upstream so a bare `mkit push` works next
             // time (Git-like first-push convenience). Only persisted
             // when not already set, and never for a detached/forced
@@ -267,12 +285,13 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
                     .field_opt_hash("old", old_tracked.as_ref())
                     .field_hash("new", &new_tip)
                     .field_bool("forced", forced)
-                    .field_bool("up_to_date", false);
+                    .field_bool("up_to_date", false)
+                    .field_u64("steps", steps as u64);
                 emit_json_stdout(obj);
             }
             exit::OK
         }
-        Err(remote_dispatch::DispatchError::NonFastForwardPush { branch: rejected }) => {
+        Err((remote_dispatch::DispatchError::NonFastForwardPush { branch: rejected }, prefix)) => {
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(stderr, "To {}", resolved.endpoint);
             let _ = writeln!(
@@ -281,9 +300,12 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
                 crate::format::ref_rejected_line(&rejected, &rejected)
             );
             drop(stderr);
-            let msg = format!(
-                "updates were rejected for '{rejected}' (non-fast-forward); \
-                 `mkit fetch` and merge/rebase first, or re-run with --force-with-lease / --force"
+            let msg = with_prefix(
+                format!(
+                    "updates were rejected for '{rejected}' (non-fast-forward); \
+                     `mkit fetch` and merge/rebase first, or re-run with --force-with-lease / --force"
+                ),
+                prefix.as_ref(),
             );
             if json {
                 let mut obj = JsonObject::new();
@@ -298,14 +320,25 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
             }
             emit_err(&msg, exit::GENERAL_ERROR)
         }
-        Err(remote_dispatch::DispatchError::Interrupted) => {
-            emit_err_json("push: interrupted", exit::TEMPFAIL, json)
-        }
-        Err(e) => emit_err_json(&format!("push: {e}"), exit::GENERAL_ERROR, json),
+        Err((remote_dispatch::DispatchError::UploadInterrupted(message), prefix)) => emit_err_json(
+            &with_prefix(format!("push: {message}"), prefix.as_ref()),
+            exit::TEMPFAIL,
+            json,
+        ),
+        Err((remote_dispatch::DispatchError::Interrupted, prefix)) => emit_err_json(
+            &with_prefix(
+                interrupted_hint(&resolved.endpoint, tx.upload_limits()).to_owned(),
+                prefix.as_ref(),
+            ),
+            exit::TEMPFAIL,
+            json,
+        ),
+        Err((e, prefix)) => emit_push_error(e, prefix.as_ref(), json),
     }
 }
 
 /// `--all`: mirror every local branch to the remote (CAS-safe).
+#[allow(clippy::too_many_lines)] // Linear branch loop keeps each push result and hint together.
 fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -> u8 {
     let json = matches!(opts.format, PushFormat::Json);
     let remote_name = opts
@@ -336,33 +369,38 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
         }
         return exit::OK;
     }
-    let tx = match remote_dispatch::open_trusted(
+    let remote = match remote_dispatch::open_trusted_for_push(
         &resolved.endpoint,
+        &resolved.name,
         resolved.repo_chosen,
         cfg,
         layout,
     ) {
-        Ok(tx) => tx,
+        Ok(remote) => remote,
         Err(remote_dispatch::DispatchError::UntrustedRemote(msg)) => {
             return emit_err_json(&msg, exit::CONFIG_ERROR, json);
         }
         Err(e) => return emit_err_json(&format!("open remote: {e}"), exit::PROTOCOL_ERROR, json),
     };
+    let tx = remote.tx;
     let push_outcome = {
         let _progress = crate::progress::start(
             "Writing objects",
             None,
             crate::progress::should_report(opts.quiet),
+            opts.quiet,
         );
         remote_dispatch::push_all_with(
             layout.worktree_root(),
             tx.as_ref(),
             Some(&resolved.name),
             opts.force,
+            remote.authority.as_deref(),
         )
     };
-    match push_outcome {
-        Ok(n) => {
+    match push_outcome.map_err(remote_dispatch::DispatchError::into_published_prefix) {
+        Ok(pushed) => {
+            let n = pushed.refs;
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(
                 stderr,
@@ -374,15 +412,19 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
                 obj.field_bool("ok", true)
                     .field_str("remote", &resolved.name)
                     .field_str("endpoint", &resolved.endpoint)
-                    .field_u64("ref_count", n as u64);
+                    .field_u64("ref_count", n as u64)
+                    .field_u64("steps", pushed.steps as u64);
                 emit_json_stdout(obj);
             }
             exit::OK
         }
-        Err(remote_dispatch::DispatchError::NonFastForwardPush { branch }) => {
-            let msg = format!(
-                "updates were rejected for '{branch}' (non-fast-forward); \
-                 `mkit fetch` first, or re-run with --force"
+        Err((remote_dispatch::DispatchError::NonFastForwardPush { branch }, prefix)) => {
+            let msg = with_prefix(
+                format!(
+                    "updates were rejected for '{branch}' (non-fast-forward); \
+                     `mkit fetch` first, or re-run with --force"
+                ),
+                prefix.as_ref(),
             );
             if json {
                 let mut obj = JsonObject::new();
@@ -396,10 +438,20 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
             }
             emit_err(&msg, exit::GENERAL_ERROR)
         }
-        Err(remote_dispatch::DispatchError::Interrupted) => {
-            emit_err_json("push: interrupted", exit::TEMPFAIL, json)
-        }
-        Err(e) => emit_err_json(&format!("push: {e}"), exit::GENERAL_ERROR, json),
+        Err((remote_dispatch::DispatchError::UploadInterrupted(message), prefix)) => emit_err_json(
+            &with_prefix(format!("push: {message}"), prefix.as_ref()),
+            exit::TEMPFAIL,
+            json,
+        ),
+        Err((remote_dispatch::DispatchError::Interrupted, prefix)) => emit_err_json(
+            &with_prefix(
+                interrupted_hint(&resolved.endpoint, tx.upload_limits()).to_owned(),
+                prefix.as_ref(),
+            ),
+            exit::TEMPFAIL,
+            json,
+        ),
+        Err((e, prefix)) => emit_push_error(e, prefix.as_ref(), json),
     }
 }
 
@@ -417,9 +469,53 @@ fn emit_err_json(msg: &str, code: u8, json: bool) -> u8 {
     if json {
         let mut obj = JsonObject::new();
         obj.field_bool("ok", false).field_str("error", msg);
+        if code == exit::NOPERM {
+            obj.field_bool("admission_required", true);
+        }
         emit_json_stdout(obj);
     }
     emit_err(msg, code)
+}
+
+/// `msg`, followed by the published prefix a split push left behind, if any.
+fn with_prefix(msg: String, prefix: Option<&remote_dispatch::PublishedPrefix>) -> String {
+    match prefix {
+        Some(prefix) => format!("{msg}; {}", prefix.note()),
+        None => msg,
+    }
+}
+
+fn emit_push_error(
+    error: remote_dispatch::DispatchError,
+    prefix: Option<&remote_dispatch::PublishedPrefix>,
+    json: bool,
+) -> u8 {
+    match error {
+        remote_dispatch::DispatchError::Transport(
+            mkit_core::protocol::TransportError::AdmissionRequired(required),
+        ) => {
+            // The hint helps only when no helper ran; after a helper ran, the
+            // reason (a second challenge or the run limit) says why it stopped.
+            let hint = if required.reason.is_none() {
+                "\nhint: configure admission_helper and trust this remote with mkit config trusted_remote_endpoint"
+            } else {
+                ""
+            };
+            emit_err_json(&format!("push: {required}{hint}"), exit::NOPERM, json)
+        }
+        remote_dispatch::DispatchError::Transport(
+            mkit_core::protocol::TransportError::AdmissionConfiguration(message),
+        ) => emit_err_json(
+            &format!("push: admission configuration: {message}"),
+            exit::CONFIG_ERROR,
+            json,
+        ),
+        other => emit_err_json(
+            &with_prefix(format!("push: {other}"), prefix),
+            exit::GENERAL_ERROR,
+            json,
+        ),
+    }
 }
 
 fn lease_for(opts: &PushOpts) -> PushLease {
@@ -473,3 +569,25 @@ fn record_upstream(
 }
 
 use super::error as emit_err;
+
+#[cfg(test)]
+mod interrupted_hint_tests {
+    use super::*;
+
+    #[test]
+    fn begin_upload_hint_only_for_ticketing_connect_remote() {
+        let ticketing = UploadLimits {
+            tickets_per_advance: Some(7),
+            ticket_threshold_bytes: Some(0),
+            ..UploadLimits::default()
+        };
+        assert!(
+            interrupted_hint("mkit+https://example.test/repo", ticketing).contains("BeginUpload")
+        );
+        assert!(!interrupted_hint("file:///repo", ticketing).contains("BeginUpload"));
+        assert!(
+            !interrupted_hint("mkit+https://example.test/repo", UploadLimits::default())
+                .contains("BeginUpload")
+        );
+    }
+}

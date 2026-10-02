@@ -92,6 +92,30 @@ pub trait KeySigner: Send {
     /// Returns an error if backend authentication, user presence, hardware I/O,
     /// or signature generation fails.
     fn sign(&mut self, msg: &[u8]) -> Result<Vec<u8>>;
+
+    /// Sign a finished 32-byte digest with a recoverable secp256k1 signature
+    /// (SPEC-KEYSTORE, "Recoverable prehash signing").
+    ///
+    /// This exists for the SPEC-WRITE-GRANTS `secp256k1-eip191` owner scheme,
+    /// whose digest is Keccak-256 of the EIP-191 message and whose signature
+    /// carries a recovery byte, neither of which [`KeySigner::sign`] can
+    /// produce. It never exports the secret.
+    ///
+    /// # Returns
+    ///
+    /// `r || s || v` with `s <= n / 2` and `v` of 27 or 28.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedOperation`] unless this is a secp256k1 key
+    /// held by the software or software-raw backend; every hardware and
+    /// OS-native signer keeps the default.
+    fn sign_prehash_recoverable_secp256k1(&mut self, prehash: &[u8; 32]) -> Result<[u8; 65]> {
+        let _ = prehash;
+        Err(Error::UnsupportedOperation(
+            "recoverable secp256k1 prehash signing",
+        ))
+    }
 }
 
 /// Backend operation that can generate keys.

@@ -15,7 +15,7 @@ use bytes::Buf;
 use commonware_codec::{EncodeSize, ReadExt, ReadRangeExt, Write};
 
 use crate::hash::{Hash, hash};
-use crate::object::Object;
+use crate::object::{Object, ObjectType};
 use crate::ops::graph::{ClosureMode, children};
 use crate::pack::{self, PackEntries, PackEntry, PackWriter, pack_key};
 use crate::store::{ObjectStore, StoreError};
@@ -211,39 +211,114 @@ impl ObjectSource for &ObjectStore {
     }
 }
 
-fn walk_closure(
-    root: &Hash,
+/// What the shared walker does when a root turns out not to be a
+/// commit, remix or tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RootRule {
+    /// Abort with [`VerifyError::ClosureRootWrongType`] (closure callers).
+    Fail,
+    /// Record it in [`Walk::bad_roots`] and keep walking (push verification).
+    Record,
+}
+
+/// Outcome of the shared [`walk`].
+#[derive(Debug, Default)]
+pub(crate) struct Walk {
+    /// Fetched objects whose id was re-derived and matched.
+    pub(crate) verified: usize,
+    /// Frontier stops: ids for which `known` held; never fetched.
+    pub(crate) skipped_known: usize,
+    /// Referenced (or a root) but absent from the source, sorted.
+    pub(crate) missing: Vec<Hash>,
+    /// Undecodable or mis-identified bytes, sorted by requested id.
+    pub(crate) corrupt: Vec<(Hash, String)>,
+    /// Roots that are not a commit/remix/tag ([`RootRule::Record`]), sorted.
+    pub(crate) bad_roots: Vec<(Hash, ObjectType)>,
+    /// Every id the walk reached, including frontier stops.
+    pub(crate) visited: BTreeSet<Hash>,
+    /// Largest queue length seen, so tests can pin that an id is queued
+    /// at most once.
+    #[cfg(test)]
+    pub(crate) peak_queue: usize,
+}
+
+/// The one closure BFS. Every closure and push verifier in this crate
+/// walks through here, taking its edges from [`children`]`(obj, mode)`.
+///
+/// Starting from every id in `roots`, each id is queued and visited at
+/// most once (an id is marked reached when it is queued, so a tree whose
+/// entries repeat one id does not grow the queue):
+/// - `known(id)` true: a frontier stop, counted and neither fetched nor
+///   descended;
+/// - otherwise fetched once from `source`, deserialized and re-hashed
+///   ([`crate::object::id_from_object`]); absent → `missing`, bad bytes
+///   or a different derived id → `corrupt` (not descended);
+/// - a root must be a commit/remix/tag (`root_rule`);
+/// - `visit` sees each verified object, then its children are queued and
+///   its bytes dropped.
+///
+/// `known` is the caller's frontier contract: it may hold only for ids
+/// whose whole closure in `mode` was already verified *in the same
+/// repository*. See [`crate::verify::verify_push`].
+///
+/// # Errors
+///
+/// [`VerifyError::TooManyClosureObjects`] once more than
+/// [`pack::MAX_ENTRIES`] distinct ids are reached (checked as they are
+/// queued, which bounds the queue), [`VerifyError::ClosureRootWrongType`] under
+/// [`RootRule::Fail`], a source error, or the first error `visit` returns.
+pub(crate) fn walk(
+    roots: &[Hash],
     mode: ClosureMode,
     source: &mut impl ObjectSource,
-) -> Result<(ClosureReport, BTreeSet<Hash>), VerifyError> {
-    let mut visited = BTreeSet::new();
-    let mut missing = Vec::new();
-    let mut corrupt = Vec::new();
-    let mut queue = VecDeque::from([*root]);
-    let mut verified = 0usize;
+    mut known: impl FnMut(&Hash) -> bool,
+    root_rule: RootRule,
+    mut visit: impl FnMut(&Hash, &Object) -> Result<(), VerifyError>,
+) -> Result<Walk, VerifyError> {
+    let root_set: BTreeSet<Hash> = roots.iter().copied().collect();
+    let mut out = Walk::default();
+    let mut queue: VecDeque<Hash> = VecDeque::new();
+    // `out.visited` is "reached": an id joins it when first queued, and is
+    // never queued again. Dequeue order is therefore exactly the order of
+    // first occurrence a queue with duplicates would have produced, so the
+    // fetch sequence is unchanged; only repeats are no longer stored.
+    let reach = |id: Hash, out: &mut Walk, queue: &mut VecDeque<Hash>| {
+        if out.visited.insert(id) {
+            if out.visited.len() > pack::MAX_ENTRIES as usize {
+                return Err(VerifyError::TooManyClosureObjects);
+            }
+            queue.push_back(id);
+            #[cfg(test)]
+            {
+                out.peak_queue = out.peak_queue.max(queue.len());
+            }
+        }
+        Ok(())
+    };
+    for root in roots {
+        reach(*root, &mut out, &mut queue)?;
+    }
 
     while let Some(id) = queue.pop_front() {
-        if !visited.insert(id) {
+        if known(&id) {
+            out.skipped_known += 1;
             continue;
-        }
-        if visited.len() > pack::MAX_ENTRIES as usize {
-            return Err(VerifyError::TooManyClosureObjects);
         }
 
         let Some(bytes) = source.fetch(&id)? else {
-            missing.push(id);
+            out.missing.push(id);
             continue;
         };
         let object = match crate::serialize::deserialize(bytes.as_ref()) {
             Ok(object) => object,
             Err(error) => {
-                corrupt.push((id, error.to_string()));
+                out.corrupt.push((id, error.to_string()));
                 continue;
             }
         };
         let derived = crate::object::id_from_object(&object, bytes.as_ref());
         if derived != id {
-            corrupt.push((
+            out.corrupt.push((
                 id,
                 format!(
                     "object bytes hash to {}, expected {}",
@@ -253,34 +328,61 @@ fn walk_closure(
             ));
             continue;
         }
-        if id == *root {
+        if root_set.contains(&id) {
             match &object {
                 Object::Commit(_) | Object::Remix(_) | Object::Tag(_) => {}
-                other => return Err(VerifyError::ClosureRootWrongType(other.object_type())),
+                other => match root_rule {
+                    RootRule::Fail => {
+                        return Err(VerifyError::ClosureRootWrongType(other.object_type()));
+                    }
+                    RootRule::Record => out.bad_roots.push((id, other.object_type())),
+                },
             }
         }
+        visit(&id, &object)?;
 
         let child_ids = children(&object, mode);
-        verified += 1;
+        out.verified += 1;
         drop(object);
         drop(bytes);
-        queue.extend(child_ids);
+        for child in child_ids {
+            reach(child, &mut out, &mut queue)?;
+        }
     }
 
-    missing.sort_unstable();
-    missing.dedup();
-    corrupt.sort_by_key(|(id, _)| *id);
+    out.missing.sort_unstable();
+    out.missing.dedup();
+    out.corrupt.sort_by_key(|(id, _)| *id);
+    out.bad_roots.sort_by_key(|(id, _)| *id);
+    Ok(out)
+}
+
+/// Single-root closure walk: [`walk`] with no frontier, no visitor and a
+/// hard root-type rule.
+fn walk_closure(
+    root: &Hash,
+    mode: ClosureMode,
+    source: &mut impl ObjectSource,
+) -> Result<(ClosureReport, BTreeSet<Hash>), VerifyError> {
+    let walked = walk(
+        std::slice::from_ref(root),
+        mode,
+        source,
+        |_| false,
+        RootRule::Fail,
+        |_, _| Ok(()),
+    )?;
     Ok((
         ClosureReport {
             root: *root,
             mode,
-            verified,
-            missing,
-            corrupt,
+            verified: walked.verified,
+            missing: walked.missing,
+            corrupt: walked.corrupt,
             unreferenced: Vec::new(),
             unreferenced_checked: false,
         },
-        visited,
+        walked.visited,
     ))
 }
 
@@ -869,6 +971,73 @@ mod tests {
                 .unwrap_or_else(|| panic!("unexpected object fetch: {}", crate::hash::to_hex(id)));
             Ok(Some(Cow::Borrowed(bytes)))
         }
+    }
+
+    #[test]
+    fn repeated_child_ids_are_queued_once() {
+        // A tree whose entries all name one blob (plus a commit naming the
+        // tree twice over its parents) must not grow the queue per
+        // reference: every id is queued once, fetched once, and the fetch
+        // order is the first-occurrence BFS order.
+        const ENTRIES: usize = 10_000;
+        let blob_bytes = crate::serialize::serialize(&Object::Blob(Blob {
+            data: b"shared".to_vec(),
+        }))
+        .unwrap();
+        let blob = hash(&blob_bytes);
+        let tree = Object::Tree(Tree {
+            entries: (0..ENTRIES)
+                .map(|i| TreeEntry {
+                    name: format!("f{i:05}").into_bytes(),
+                    mode: EntryMode::Blob,
+                    object_hash: blob,
+                })
+                .collect(),
+        });
+        let tree_bytes = crate::serialize::serialize(&tree).unwrap();
+        let tree_id = crate::object::id_from_object(&tree, &tree_bytes);
+        let kp = KeyPair::from_seed([0x11; 32]);
+        let mut commit = Commit {
+            tree_hash: tree_id,
+            parents: vec![],
+            author: Identity::ed25519(kp.public.0),
+            signer: kp.public.0,
+            message: b"fan-in".to_vec(),
+            timestamp: 1,
+            message_hash: ZERO,
+            content_digest: ZERO,
+            signature: [0u8; 64],
+        };
+        commit.signature = sign_commit(&commit, &kp).unwrap().0;
+        let commit_bytes = crate::serialize::serialize(&Object::Commit(commit)).unwrap();
+        let root = hash(&commit_bytes);
+
+        let mut source = CountingSource {
+            objects: BTreeMap::from([
+                (blob, blob_bytes),
+                (tree_id, tree_bytes),
+                (root, commit_bytes),
+            ]),
+            missing: BTreeSet::new(),
+            fetches: BTreeMap::new(),
+        };
+        let walked = walk(
+            &[root, root],
+            ClosureMode::History,
+            &mut source,
+            |_| false,
+            RootRule::Fail,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(walked.verified, 3);
+        assert!(walked.peak_queue <= 1, "peak queue {}", walked.peak_queue);
+        assert!(source.fetches.values().all(|n| *n == 1));
+        assert_eq!(
+            walked.visited,
+            BTreeSet::from([root, tree_id, blob]),
+            "reached set must equal the visited set"
+        );
     }
 
     #[test]

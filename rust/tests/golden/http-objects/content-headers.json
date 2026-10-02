@@ -1,0 +1,245 @@
+{
+  "cases": [
+    {
+      "disposition": "inline; filename=\"file.png\"; filename*=UTF-8''file.png",
+      "media": "image/png",
+      "name": "file.png",
+      "path": "file.png"
+    },
+    {
+      "disposition": "inline; filename=\"many.dots.PNG\"; filename*=UTF-8''many.dots.PNG",
+      "media": "image/png",
+      "name": "many.dots.PNG",
+      "path": "many.dots.PNG"
+    },
+    {
+      "disposition": "inline; filename=\"file.jpg\"; filename*=UTF-8''file.jpg",
+      "media": "image/jpeg",
+      "name": "file.jpg",
+      "path": "file.jpg"
+    },
+    {
+      "disposition": "inline; filename=\"many.dots.JPG\"; filename*=UTF-8''many.dots.JPG",
+      "media": "image/jpeg",
+      "name": "many.dots.JPG",
+      "path": "many.dots.JPG"
+    },
+    {
+      "disposition": "inline; filename=\"file.jpeg\"; filename*=UTF-8''file.jpeg",
+      "media": "image/jpeg",
+      "name": "file.jpeg",
+      "path": "file.jpeg"
+    },
+    {
+      "disposition": "inline; filename=\"many.dots.JPEG\"; filename*=UTF-8''many.dots.JPEG",
+      "media": "image/jpeg",
+      "name": "many.dots.JPEG",
+      "path": "many.dots.JPEG"
+    },
+    {
+      "disposition": "inline; filename=\"file.gif\"; filename*=UTF-8''file.gif",
+      "media": "image/gif",
+      "name": "file.gif",
+      "path": "file.gif"
+    },
+    {
+      "disposition": "inline; filename=\"many.dots.GIF\"; filename*=UTF-8''many.dots.GIF",
+      "media": "image/gif",
+      "name": "many.dots.GIF",
+      "path": "many.dots.GIF"
+    },
+    {
+      "disposition": "inline; filename=\"file.webp\"; filename*=UTF-8''file.webp",
+      "media": "image/webp",
+      "name": "file.webp",
+      "path": "file.webp"
+    },
+    {
+      "disposition": "inline; filename=\"many.dots.WEBP\"; filename*=UTF-8''many.dots.WEBP",
+      "media": "image/webp",
+      "name": "many.dots.WEBP",
+      "path": "many.dots.WEBP"
+    },
+    {
+      "disposition": "inline; filename=\"file.avif\"; filename*=UTF-8''file.avif",
+      "media": "image/avif",
+      "name": "file.avif",
+      "path": "file.avif"
+    },
+    {
+      "disposition": "inline; filename=\"many.dots.AVIF\"; filename*=UTF-8''many.dots.AVIF",
+      "media": "image/avif",
+      "name": "many.dots.AVIF",
+      "path": "many.dots.AVIF"
+    },
+    {
+      "disposition": "inline; filename=\"file.txt\"; filename*=UTF-8''file.txt",
+      "media": "text/plain; charset=utf-8",
+      "name": "file.txt",
+      "path": "file.txt"
+    },
+    {
+      "disposition": "inline; filename=\"many.dots.TXT\"; filename*=UTF-8''many.dots.TXT",
+      "media": "text/plain; charset=utf-8",
+      "name": "many.dots.TXT",
+      "path": "many.dots.TXT"
+    },
+    {
+      "disposition": "attachment; filename=\"file.json\"; filename*=UTF-8''file.json",
+      "media": "application/json",
+      "name": "file.json",
+      "path": "file.json"
+    },
+    {
+      "disposition": "attachment; filename=\"many.dots.JSON\"; filename*=UTF-8''many.dots.JSON",
+      "media": "application/json",
+      "name": "many.dots.JSON",
+      "path": "many.dots.JSON"
+    },
+    {
+      "disposition": "inline; filename=\"file.pdf\"; filename*=UTF-8''file.pdf",
+      "media": "application/pdf",
+      "name": "file.pdf",
+      "path": "file.pdf"
+    },
+    {
+      "disposition": "inline; filename=\"many.dots.PDF\"; filename*=UTF-8''many.dots.PDF",
+      "media": "application/pdf",
+      "name": "many.dots.PDF",
+      "path": "many.dots.PDF"
+    },
+    {
+      "disposition": "attachment; filename=\"file.svg\"; filename*=UTF-8''file.svg",
+      "media": "application/octet-stream",
+      "name": "file.svg",
+      "path": "file.svg"
+    },
+    {
+      "disposition": "attachment; filename=\"many.dots.SVG\"; filename*=UTF-8''many.dots.SVG",
+      "media": "application/octet-stream",
+      "name": "many.dots.SVG",
+      "path": "many.dots.SVG"
+    },
+    {
+      "disposition": "attachment; filename=\"file.html\"; filename*=UTF-8''file.html",
+      "media": "application/octet-stream",
+      "name": "file.html",
+      "path": "file.html"
+    },
+    {
+      "disposition": "attachment; filename=\"many.dots.HTML\"; filename*=UTF-8''many.dots.HTML",
+      "media": "application/octet-stream",
+      "name": "many.dots.HTML",
+      "path": "many.dots.HTML"
+    },
+    {
+      "disposition": "attachment; filename=\"file.js\"; filename*=UTF-8''file.js",
+      "media": "application/octet-stream",
+      "name": "file.js",
+      "path": "file.js"
+    },
+    {
+      "disposition": "attachment; filename=\"many.dots.JS\"; filename*=UTF-8''many.dots.JS",
+      "media": "application/octet-stream",
+      "name": "many.dots.JS",
+      "path": "many.dots.JS"
+    },
+    {
+      "disposition": "attachment; filename=\"file.htm\"; filename*=UTF-8''file.htm",
+      "media": "application/octet-stream",
+      "name": "file.htm",
+      "path": "file.htm"
+    },
+    {
+      "disposition": "attachment; filename=\"many.dots.HTM\"; filename*=UTF-8''many.dots.HTM",
+      "media": "application/octet-stream",
+      "name": "many.dots.HTM",
+      "path": "many.dots.HTM"
+    },
+    {
+      "disposition": "attachment; filename=\"file.xhtml\"; filename*=UTF-8''file.xhtml",
+      "media": "application/octet-stream",
+      "name": "file.xhtml",
+      "path": "file.xhtml"
+    },
+    {
+      "disposition": "attachment; filename=\"many.dots.XHTML\"; filename*=UTF-8''many.dots.XHTML",
+      "media": "application/octet-stream",
+      "name": "many.dots.XHTML",
+      "path": "many.dots.XHTML"
+    },
+    {
+      "disposition": "attachment; filename=\"file.xml\"; filename*=UTF-8''file.xml",
+      "media": "application/octet-stream",
+      "name": "file.xml",
+      "path": "file.xml"
+    },
+    {
+      "disposition": "attachment; filename=\"many.dots.XML\"; filename*=UTF-8''many.dots.XML",
+      "media": "application/octet-stream",
+      "name": "many.dots.XML",
+      "path": "many.dots.XML"
+    },
+    {
+      "disposition": "attachment; filename=\"file.mjs\"; filename*=UTF-8''file.mjs",
+      "media": "application/octet-stream",
+      "name": "file.mjs",
+      "path": "file.mjs"
+    },
+    {
+      "disposition": "attachment; filename=\"many.dots.MJS\"; filename*=UTF-8''many.dots.MJS",
+      "media": "application/octet-stream",
+      "name": "many.dots.MJS",
+      "path": "many.dots.MJS"
+    },
+    {
+      "disposition": "attachment; filename=\"file.css\"; filename*=UTF-8''file.css",
+      "media": "application/octet-stream",
+      "name": "file.css",
+      "path": "file.css"
+    },
+    {
+      "disposition": "attachment; filename=\"many.dots.CSS\"; filename*=UTF-8''many.dots.CSS",
+      "media": "application/octet-stream",
+      "name": "many.dots.CSS",
+      "path": "many.dots.CSS"
+    },
+    {
+      "disposition": "inline; filename=\"caf__.txt\"; filename*=UTF-8''caf%C3%A9.txt",
+      "media": "text/plain; charset=utf-8",
+      "name": "café.txt",
+      "path": "caf%C3%A9.txt"
+    },
+    {
+      "disposition": "inline; filename=\"a____b.txt\"; filename*=UTF-8''a%22%3B%0D%0Ab.txt",
+      "media": "text/plain; charset=utf-8",
+      "name": "a\";\r\nb.txt",
+      "path": "a%22%3B%0D%0Ab.txt"
+    },
+    {
+      "disposition": "attachment; filename=\"no-extension\"; filename*=UTF-8''no-extension",
+      "media": "application/octet-stream",
+      "name": "no-extension",
+      "path": "no-extension"
+    },
+    {
+      "disposition": "attachment; filename=\"image.png.exe\"; filename*=UTF-8''image.png.exe",
+      "media": "application/octet-stream",
+      "name": "image.png.exe",
+      "path": "image.png.exe"
+    },
+    {
+      "disposition": "attachment; filename=\"png\"; filename*=UTF-8''png",
+      "media": "application/octet-stream",
+      "name": "png",
+      "path": "png"
+    },
+    {
+      "disposition": "inline; filename=\"a___.txt\"; filename*=UTF-8''a%27%25%2A.txt",
+      "media": "text/plain; charset=utf-8",
+      "name": "a'%*.txt",
+      "path": "a%27%25%2A.txt"
+    }
+  ],
+  "schema_version": 1
+}

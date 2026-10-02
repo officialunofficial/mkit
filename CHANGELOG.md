@@ -7,6 +7,531 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Worker embedding: supplied Admission, Authorizer/Authority and OutcomeSink
+  capabilities satisfy launch validation without an unused external hook channel.
+  `fetch_with` now takes explicit `HookCapabilities`; shared config factories use
+  `from_env_with_hooks`/`from_vars_with_hooks` (delta review 8b-1).
+- Launch builds forward the Worker pure-Rust decoder to the server feature;
+  mandatory PR gates run the isolated 48 MiB allocator regression (4-1, 12-3).
+- Object reader and URL batches retain the expiry of cached reachability proofs.
+  Only fresh published walks renew them after rewind/deletion (6-1).
+
+- Server: retain retryable Takedown acceptance with its stable id until every
+  denial is active. Exact retries resume bounded activation; timer-15 recovery
+  finalizes the original nonce and operation result (delta review 7-1).
+- Worker preservation acquisition: bound scheduled reconstruction to 48 MiB
+  by evicting previous delta intermediates and retaining only the current base.
+  Preserve 50-hop, 1 MiB canonical chains, existing frame admission, corruption
+  checkpoints and the 700-call slice budget; inline profiles are unchanged.
+
+- Server (WP-4.18, phase 1, R-194): explicit Paid indexed Uno launch selection
+  and startup validation for optional HTTP/URL tokens, signed hooks/binding,
+  synchronous inspection and private scanner retrieval. Native serves proofs;
+  Worker proofs stay unsupported. Leases/GC remain off with permanent retention.
+  Complete preservation configuration activates its core and restricted admin
+  catalog; the launch build enables R-203’s bounded pure-Rust zstd decoder.
+  Worker HTTP mounts retain read settlement in the fetch context; ticket and
+  implicit packmap checks use at most six simultaneous backend responses.
+  Added local conformance/evidence skeleton; complete runtime evidence and
+  preservation integration remains pending phase 2.
+- Worker embedding (supported, 0.x): combine programmatic configuration,
+  published snapshots, custom Outcome and purge sinks in `NsObjectBuilder`;
+  generate the five DO classes with `durable_objects!`. Host-routed admin
+  dispatch retains ADMIN_KEYS authentication, and programmatic ref policies
+  validate before serving. Add a service-binding streamed-upload example and
+  its wasm check. These APIs are unpublished, consumed at a pinned git tag.
+- Native Connect transport: retry unary reads and replay-safe auth-v2 writes
+  once on a fresh connection when a reused HTTP/1 socket fails before any
+  response bytes; preserve the signed envelope and deadline. Streaming RPCs
+  start on fresh connections and are never replayed.
+
+- Server: align the receipt-golden test SHA-256 dependency with the repository
+  sha2 0.11 crypto channel (launch review 12-2).
+
+- Server: a purge that creates positive shared backlog also schedules the
+  existing outcome-delivery wake, so later paid read outcomes survive purge
+  completion, reconciliation and restart (launch review 3-1). Zero backlog
+  retains wake ownership until the guarded kind-8 drain, preventing duplicate
+  wakes across repeated purge cycles; content shards register the same driver.
+
+- Server: completed identical Takedown retries replay their stored response
+  after role changes and without runtime operations. ReadPreserved retains fresh
+  role and retention checks on every retry (launch review 7b-1).
+
+- Server: automatically enqueue audited cache purges with takedown acceptance,
+  denial activation and late-holder ownership. Checkpoint newly discovered
+  repository purges with timer-15 progress and immediately invalidate configured
+  local caches (launch review 7a-2, existing R-190). Audit source snapshots and
+  immediate invalidation share the enclosing request or slice call allowance.
+
+- Scheduled indexed verification reserves R-203 decoder scratch within the
+  existing 48 MiB slice allowance, preserving window geometry and frame
+  admission. Delta slices release the idle reader before source reconstruction;
+  allocator regressions cover corruption, nested decode and valid custom limits.
+
+- Server: cap aggregate object-index candidate retention at a charged 4 MiB,
+  bound membership joins and Worker request allocation, and enforce the current
+  indexed pack-byte limit before Scheduled job claims/reuse and timer decoding.
+  Native Verified reuse returns the exact advertised pack-size error. Scanner
+  retrieval supports ticketless ref writes with an empty Inspect batch and a
+  capability granting no access to previously published packs.
+
+- Server: keep relay progress continuations after the current wake when retry
+  metadata retains an older due time. Update timer, verification-job and
+  published-view tests to assert retained capped retries and recovery;
+  recognize the HTTP content-header golden as a JSON table in the wasm verifier,
+  and correct the route property's reserved-name fixture expectations.
+
+- CLI (`mkit-cli`, additive): add `http.sslCAInfo` and overriding
+  `MKIT_SSL_CA_FILE` for extra PEM trust certificates on all native Connect
+  HTTPS remote RPCs and pack streams only. Keep Mozilla roots and
+  chain/hostname verification; invalid CA files fail closed. The self-updater
+  keeps OS trust and release checksums when present, ignoring both settings.
+  S3 remotes are not yet covered. Browser trust is unchanged.
+
+- Server (R-205): `DEFAULT_REPO_VISIBILITY=public|private` on Workers and
+  native `--default-repo-visibility` select visibility for repositories without
+  a stored setting. The default remains public; explicit visibility wins.
+  Set it at deployment creation: changing it affects all unset repositories.
+
+- Server (R-204): embedders can issue batches of up to 16 URL tokens through
+  `ObjectReader::issue_urls`, sharing RPC authorization, epochs and minting,
+  with bounded published-view reachability and denial preflight.
+
+- Server (WP-5.6a-3, R-190): add signed moderation GetTakedown/ListTakedowns,
+  atomic audited SetLegalHold and freshly verified ReadPreserved streaming.
+  Replay stores byte-free read descriptors; each attempt rechecks authority and
+  retention. Add separate v1 status fields for acquisition, verification,
+  discovery, legal hold and purged copies. Activation remains off until 4.18.
+
+- Core/server (WP-4.16c, R-202): in-process canonical object prefetch for
+  embedders, including ChunkedBlob manifests and indexed content sizes;
+  verified public/owner views share bounded reachability and global-denial
+  proofs. Add wasm-clean `store::MemorySource` for synchronous disclosures
+  and diffs, with native and Worker embedding entry points. No wire change.
+
+- Bound pure-Rust zstd block expansion before allocation, with a fixed 8 MiB
+  window cap, and checkpoint corrupt preservation sources as terminal audited
+  failures. Preflight compressed delta result headers against verified metadata
+  before decode budgeting; genuine resource failures remain retryable. Worker
+  admission and native C decoding are unchanged (R-203).
+
+- Server/Worker: bound raw timer-alarm enumeration and share tick limits across
+  logical heads. Persist capped exponential backoff in the existing timer row
+  for cold fairness, preserving payloads and original handler due times. The
+  unshipped timer key codec gains retry metadata; timer payloads reserve enough
+  headroom for a guarded move within the existing batch limit.
+- Server/Worker: keep immediate alarm continuations strictly after the current
+  clock so bounded ticket, outcome and relay cleanup cannot strand an alarm
+  chain. Native test timer directives share tick exclusion with the autonomous
+  driver, making due-timer and redelivery conformance deterministic.
+
+- Server/Worker (WP-4.16b, R-201): ordinary ref-path file responses now select
+  Content-Type from a fixed extension allowlist and include inline/attachment
+  filenames with RFC 5987 encoding and a sanitized ASCII fallback. HEAD and
+  ranges share the headers; SVG/HTML remain binary attachments. Security,
+  object-id routes, proofs, caching and private-token rules are unchanged.
+
+- Server: publication timer 12 resumes bounded dependency checks across alarms
+  and restarts after guarded obligation, dependency or generation changes.
+  Valid large D34 packmaps no longer stall at the whole-alarm call limit.
+  Its internal timer-value codec changes; reset unsupported pre-launch stores.
+
+- Docs (WP-5.6a-2/3, R-190): specify finite root sweeps and support Any denial/
+  preservation with incomplete discovery pending the post-launch catalog.
+  Distinguish verified preservation from unresolved completion; require byte-free
+  admin replay and fresh audited verified streams. §14.7 signing/publication and
+  full-profile requirements remain. PR2 owns preservation/retention/hold core; PR3
+  owns the restricted admin catalog. Activation stays off; no completed gates claimed.
+
+- Server/Worker (default-off, WP-4.10b-2, R-186): complete consumed-group extraction
+  with closure before effects, native union counts, bounded job header/body guards,
+  resumable delta reconstruction and root-checked multipart uploads. Hold renewal
+  and durable holder delivery precede Verified; release activation waits for 4.18.
+
+- Server (R-193): default-off private raw-pack retrieval for synchronous
+  scanners, with separate capability MAC and scanner signing keys, bounded
+  ranges, current-ticket lifetime checks, uniform `not_found` and global
+  block enforcement on native and Worker. Inspect remains metadata-only;
+  retries keep their inspection id and mint fresh short-lived capabilities.
+  Production activation remains gated by WP-4.18.
+
+- Server (WP-5.6a-1, R-190): independent V2 denial actions, verified pack inventory
+  and signed, audited pending takedown intents; manual PurgeCache returns a purge
+  id asynchronously and audits completion. Preservation and production takedown
+  activation await WP-5.6a-2/3. Timer 15 is TAKEDOWN_WORK; no new key tag or migration.
+
+- Server (WP-5.5a, R-200): synchronous added-pack file inspection before apply,
+  fail-closed retries without replay, signed remote Inspect, and advertised
+  launch input limits (default 10,000 objects, maximum four inspectors).
+  Inspect every Blob and ChunkedBlob, surplus included, without role reads;
+  enabling inspection requires an empty store. Full classification follows in WP-5.5c.
+- Server/Worker (inert, WP-4.10b-1, R-186): pending-holder protection and atomic
+  content-holder relay delivery retain protection beyond hold expiry; late
+  blocked holders leave durable takedown requests for WP-5.6a. Add bounded
+  verification projections, opaque ETag capture and default-compatible internal
+  R2 upload callbacks. Worker Extract remains fail-closed; the driver is PR2.
+
+- HTTP proofs on the opt-in native mount: canonical Object bundles and MKDP/MKDS query ranges now share validators, caps, payment and durable settlement with ordinary reads; exact core wire-size planning constructs no proof, and native canonical reads bound prefix memory (WP-4.14b-1). Workers prefetch follows in WP-4.14b-2. Unshipped `ProofServer` now builds selected bytes through a repository-scoped `ProofSource`.
+- WP-5.10: durable timer-11 automatic cache purge intents, signed global delivery
+  with stable ids and fresh nonces, local invalidation and snapshot refill fences.
+- WP-5.11a: default-off signed admin framework with separate role keys, durable
+  replay and gapless audit export. Automatic actions join the audit through the
+  existing outbox relay; manual PurgeCache moves to WP-5.6a.
+- Server (WP-5.4, R-198): remove compatibility with unreleased publication stores;
+  reset existing stores. Hold authority belongs to post-launch WP-5.5c; timer 15 and `pv` are freed.
+
+- **WP-5.4:** add persistent paired published refs, versioned membership and durable
+  cross-ref dependency rechecks; route reader RPCs, snapshots, tokens and HTTP
+  bytes/proofs through published values while retaining writer visibility and
+  serving stops. Specify indexed permanent-retention launch without storage leases
+  or GC, and publication Events: Committed means Sent; Delivered requires the
+  contiguous published prefix.
+
+- Docs: add the early Uno launch-readiness skeleton (WP-1.20, R-195 / R-198):
+  D35 environment/key roles, operator reset/rollback/rotation/drills, empty
+  user-owned evidence slots and a DRAFT user-only REL-1 prompt. Final readiness
+  waits for 4.18; no staging, measurements or release actions are claimed.
+
+- Add optional namespace authority-generation fencing with dedicated deployment-authority statements, native/Worker configuration, independent D34 lease barriers and generation-bound upload tickets (WP-2.16).
+  Ticket streams coalesce legal client frames into bounded 256 KiB storage
+  checkpoints, preserving revocation checks within Worker request budgets.
+
+- WP-3.9c: default-off signed HTTPS Worker hooks with canonical origin signing,
+  manual redirects, streamed response limits and aborting call timeouts.
+- Worker (inert): extracted-object storage can use root-pinned backend R2
+  multipart sessions with verified streamed parts and bounded finalization.
+  Internal object receipts preserve opaque backend ETags without changing pack
+  wire receipts; extraction and production activation remain separate work
+  (WP-4.10b-multipart, R-192).
+
+- Server: kind-8 completion uses the guarded fresh backlog, preserving delivery
+  after a concurrent outcome append (WP-3.13; correction to #1219).
+
+- Server conformance: M3 cases cover admission, CORS, CAS-loss and ticket expiry; the
+  orchestrator rulings preserve pipeline ordering and accept ordered combined
+  WWW-Authenticate lists on Workers (WP-3.13).
+
+- Server conformance: MPP stub, loopback controls, real native binary/exec-helper
+  push tests and a shared admission commit case; isolated Worker forwarder
+  calls the same Rust fixture (WP-3.12). Release guards reject `stubs`.
+
+- RPC: public `mkit-rpc::hooks` message types with JSON support and runtime-free
+  `HookSigner` and `HookVerifier`, enabled by the `hooks` feature. The server
+  re-exports its authentication surface for external hook implementers (WP-3.7b).
+
+- Server (Stage 2, inert): default-off `http-objects` adapter features mount
+  raw escaped HTTP object routes with streaming Range/HEAD, read CORS on
+  every response, query-free diagnostics, and public URL-token key documents.
+  Native token key-file/TTL flags and Worker token secrets use dedicated keys;
+  retained keys also cannot repeat hook or enc keys. Public ref redirects are
+  explicitly opt-in and disabled with admission (WP-4.16, R-179).
+
+- Server (Stage 2, inert): URL tokens now authorize private HTTP object
+  and ref-path reads through staged signature, stateless binding and epoch
+  checks, while preserving anonymous published access and Authorizer checks.
+  Private immutable cache lifetimes are bounded by token expiry; private ref
+  paths require revalidation. Active and retained token keys are separated
+  from ticket secrets without exposing seeds (WP-4.15, R-178).
+
+- Server (Stage 2, inert): programmatic `HttpObjectsConfig::admit_reads`
+  enables paid GET and HEAD reads, canonical JSON 402s, private admitted
+  responses, durable pending reads before transmission, deadline enforcement
+  and retained asynchronous byte accounting (WP-4.13, R-177). The shared
+  credential selector now denies comma-joined selected payment headers,
+  correcting #1212; non-Payment Authorization remains excluded. API:
+  `HttpReadRuntime` injects retained tasks and deadlines, and
+  `HttpObjectRequest::header_names` preserves credential name spelling.
+- WP-1.19: add an inert Stage 2 staging template and activation/backup runbook; provisioning, routes and CPU sizing wait until after REL-1.
+
+- **WP-1.21 (Stage 2):** default-off Worker published ref-index snapshots with bounded binary envelopes,
+  atomic debounce/generations, private R2/Cache serving after coordinator authorization, signed bypass,
+  inspection refusal and live fallback; existing Stage 1 entrypoints stay inert.
+
+
+- Server: built-in ref policy (SPEC-SERVER §9.7, programmatic, Stage 2):
+  `PipelineConfig::ref_policy` with per-ref allowed operation signers (both
+  modes) and fast-forward-only rules (indexed mode). In indexed mode a
+  `u`-only write grant now fast-forwards, proven against this repository's
+  history (`IndexedConfig::max_ancestry_commits`, default 256), and a ticketless
+  head must be a member commit, remix or tag. API: `verify_ticketed` returns
+  `StagedCommits`; `VerifiedAuth::created_at_ms` and
+  `IndexedConfig::max_ancestry_commits` are new (WP-4.17).
+- Server: the native server can run authorization, admission and outcome
+  delivery in a remote hook service over signed HTTPS (`--hook-authorize-url`,
+  `--hook-admit-url`, `--hook-outcome-url`, `--hook-key-file`, `--hook-timeout-secs`,
+  `--authorizer-role`; `mkit-server hook-key-list` prints the public key list).
+  Plain HTTP is loopback-only, redirects are never followed, the hook key must
+  differ from the ticket and enc keys, and a remote admission replaces the
+  default abuse quota. New in `mkit-server`: `pipeline::Choice`,
+  `hooks::HookVerifier` (the hook service's side of the signature),
+  `HookSigner::public_key`, `TicketKeys::contains_secret`; new in
+  `mkit-server-native`: `server::open_with` (WP-3.8).
+- Server: the Workers adapter can call a hook Worker over an unsigned
+  `ADMISSION_HOOK` service binding (`HOOK_ROLES`, `HOOK_TIMEOUT_MS`,
+  `AUTHORIZER_ROLE`), and `adapter::fetch_with` and `ns_object_with` take a
+  deployment's own `HookSet` and outcome sink (WP-3.9). The Queue outcome sink
+  and a signed Worker webhook are deferred (WP-3.9b).
+- Server (Stage 2, inert): `mkit-server` gains the default-off `http-objects`
+  feature: `Pipeline::serve_http_object` serves repository objects and ref paths
+  per SPEC-HTTP-OBJECTS (the URL grammar, published resolution, a bounded
+  reachability proof for id URLs, ordinary Range and conditional requests,
+  security headers and one uniform 404), reading extracted objects that this
+  repository holds by range and everything else from its own pack entries.
+  It needs `PipelineConfig::http_objects`, which requires indexed mode, and no
+  adapter enables the feature or mounts a route (WP-4.12, R-169). SPEC-HTTP-OBJECTS
+  §4 now says the global content store decides no membership or reachability
+  but may supply the bytes of an id this repository holds. API: new
+  `Procedure::{HttpGetObject, HttpGetRefPath}` and `OpKind::HttpGet`.
+  Request queries use `RedactedQuery`, exposed only to the parser; ref scans
+  bound all rows and pages, and ref paths peel up to 16 tags.
+- **Breaking (server):** D34 is now the default sharding for Connect
+  deployments: `mkit-server serve --meta sqlite:<PATH>` without `--sharding`
+  runs `d34` (fs-layout stays `single`), `mkit-server restore` follows the
+  export's marker, and the Worker's unset `SHARDING` means `d34`
+  (`wrangler.jsonc` sets it). There is no migration: a database written
+  `single`, or written before `--sharding` existed and holding data, is
+  refused with `CONFIG_ERROR` (native; pass `--sharding single`) or answers
+  503 until `SHARDING="single"` is pinned (Worker). Under Single addressing the
+  default write quota is now counted per (signer, branch). The client skips a
+  listed branch that a stale `ListRefs` names after its delete (head and
+  packmap both absent) instead of failing with `PackmapMissing` (WP-1.28c).
+- Server: the Worker registers the kind-5 namespace quota rollup on its ref
+  shard, coordinator and root classes; the quota conformance cases run under
+  D34 (per-branch) and a Multi + D34 case checks the namespace cap across
+  branches after a forced rollup (WP-1.26b).
+- Server: the M1 exit wire conformance suite (WP-1.27): isolation replay, target-ref ticket caps and expiry, the
+  D34 lag windows and D36 hinted reads over a held relay, idle and expired epoch-lease renewal, 64-ref writes, an
+  over-32 MiB native listing and bounded ticket growth; the `test-faults` timer directive also expires tickets and
+  the Worker stats hook is scoped to one ref's shard under D34.
+  `mkit-server-conformance` `Profile` gains `ticket_per_ref` and
+  `merge_paging_refs` (WP-1.27).
+- Server: `mkit-server serve` gains `--grant-schemes`, a repeatable
+  `--webauthn-rp <id=origin[,origin...]>` and the development-only
+  `--unsafe-allow-loopback-grants`; the Worker gains the `GRANT_SCHEMES` and
+  `WEBAUTHN_RPS` vars and a `test-faults`-only `UNSAFE_LOOPBACK_GRANTS`, to
+  configure write grants on Multi + auth v2 deployments. Any bad or partial
+  value refuses to start; unset keeps grants off (WP-1.30b).
+
+- Server: a Worker can verify a ticketed pack asynchronously in checkpointed,
+  budgeted alarm slices (timer kind 7, `IndexedConfig::verification =
+  Scheduled`) with the same answers as native inline verification: the advance
+  answers `PendingVerification` until the slices finish (Paid plan only; index
+  rows are relayed after the decode reaches `Done`, and `Verified` waits for
+  their delivery). The job lives in the new `vc` key class; kind 2 now also
+  removes an expired unconsumed pack's verification state. Indexed mode stays
+  refused on Workers until WP-4.10b (WP-4.8). `mkit-core` gains
+  `WindowReader::last_frame` and `pack::decode_entry_with` (additive).
+- Server: in indexed mode, extract every ChunkedBlob (as its reassembled content,
+  with a chunk-offset sidecar) and every file Blob of at least 64 KiB into the
+  deployment-wide object store under its object id, before a pack is marked
+  verified. Object keys are verified against a content root by a new
+  `PackSink::commit_with_root`; holder rows carry a sequence and the consuming
+  ticket; a hold protects each object until its holder is recorded. New
+  `IndexedConfig::{extract_min_bytes, max_extract_bytes}`. Workers still refuse
+  indexed mode (WP-4.10). API: `IndexedConfig::max_extract_bytes` is now
+  `Option<u64>` (default `4 * max_pack_bytes`); `verify_ticketed` takes the
+  consuming ticket ids and needs a `MultipartBlobStore`; `ContentIndex` gains
+  `extend_hold` and `add_holder_unless_blocked`, and `release_hold` is
+  deadline-guarded; `is_reserved_pack_keyspace` is exported.
+- CLI: a Connect push that needs more than six data packs per advance is now
+  split automatically along the branch's first-parent history instead of
+  failing with `PushTooLarge` after uploading six packs. Every intermediate
+  commit is a published state; the tracking ref follows each advance, so a
+  re-run resumes, and later advances always compare-and-swap on the previous
+  one. For a split push, stored write grants are checked for every advance before
+  anything is uploaded, and an unsplittable oversize commit or merge is refused before any
+  upload. `--format=json` reports `steps` (WP-1.17b).
+- Server: the native adapter delivers terminal outcomes (kind 8) to an
+  embedder's `OutcomeSink` (`server::open_with_sink`) with a 5 s bound per
+  call, stops a fire at its first failure and drains due outcomes on
+  shutdown (`--shutdown-drain-secs`, default 10). CORS allows and exposes the
+  payment headers, configured extra credential headers are redacted from
+  traces, and an ssh or enc write that needs a payment answers
+  `INVALID_REQUEST "payment required: use mkit+https"` (WP-3.4).
+- Server: the Workers adapter takes an outcome sink with the same per-call
+  timeout, budgets kind 8 by plan (Free: 8 sink calls per alarm), allows
+  and exposes the payment headers for browsers and keeps repeated
+  `WWW-Authenticate` fields (WP-3.5).
+- Server: `mkit serve --root <DIR>` serves the repositories under `<DIR>`
+  addressed by `<NAMESPACE>/<NAME>` (from the path argument or a strict
+  `SSH_ORIGINAL_COMMAND`), one repository per process, with writes
+  restricted to the namespace's Ed25519 owner asserted by
+  `--principal <hex>`; a Multi deployment's `--listen-enc` binds every
+  session to its `--enc-repository`. Transport-identity sessions grant
+  pack membership implicitly for packs uploaded and verified in the same
+  session — at most seven pending packs, consumed by the session's
+  packmap write — so `mkit+ssh://` and `mkit+enc://` pushes need no
+  upload tickets. Denied writes answer `INVALID_REQUEST "write not
+  permitted"` (WP-1.15).
+- Server: the native and Worker adapters can serve multi-repository
+  deployments (`mkit-server serve --addressing multi` with
+  `--namespace-policy`/`--namespace-allowlist`/`--unsafe-open-namespaces`,
+  or the Worker's `ADDRESSING`/`NAMESPACE_POLICY`/`NAMESPACE_ALLOWLIST`/
+  `UNSAFE_OPEN_NAMESPACES` vars). Multi requires auth v2 with upload ticket
+  keys — a deployment without them now refuses to start — and, natively,
+  `--meta sqlite:<PATH>` (WP-1.30).
+- Server: add validated two-phase admission with bounded HTTP 402 challenges,
+  redacted payment credential forwarding and committed-success receipt headers
+  (WP-3.2).
+- Server: durably arbitrate admitted reservations with pending and terminal
+  outcomes, reconcile abandoned reservations, deliver through a retrying
+  outcome sink and apply per-shard outbox backpressure (WP-3.3).
+- Server (WP-3.7): add the default-off `remote-hooks` feature to `mkit-server`:
+  Authorize, Admit and Outcome over `mkit.server.hooks.v1` on a
+  transport-agnostic `HookChannel`, with Ed25519-signed requests, fail-closed
+  mapping and response bounds. Adds the `Sleep` timeout seam, and
+  `scripts/regen-hooks-proto.sh` for the vendored codegen.
+
+- CLI: add `mkit grant create|add|list` and a user grant store under
+  `$XDG_CONFIG_HOME/mkit/grants/` (never repository-scoped). Owners sign with the
+  mkit key, a software-keystore secp256k1 key, or an imported wallet or WebAuthn
+  signature; the Connect client now presents the best stored grant, ranking the
+  higher epoch first. New user-only config key `grant.webauthn_rp`.
+  Issue grants for pushes that move a branch as `cuf`, not `cu`: while servers are
+  opaque, updating an existing ref needs the `f` flag.
+  `mkit-keystore` gains a defaulted `KeySigner::sign_prehash_recoverable_secp256k1`
+  for the software backends (WP-2.13).
+- CLI: add `mkit epoch show|bump`, `mkit grant revoke [--prune]` and
+  `mkit visibility set`, waiting out the server's `Retry-After`. Connect client:
+  new `ConnectTransport::{get_grant_epoch, set_grant_epoch, set_repo_visibility}`
+  returning `Completion`, and a per-request signed-or-unsigned classification of
+  `SetRepoVisibility` (WP-2.14).
+- Core and wasm: verify MKDS v1 multi-chunk disclosure spans against a trusted
+  commit and build boundary-aware MKDP/MKDS range proofs (WP-4.14a).
+- Server (WP-4.6): batch repository object-index range reads on Workers,
+  add bounded relay enqueue and delivery checks, increase paid relay
+  throughput, and report index pressure, lag, backlog, and lookup caps.
+- Server (WP-4.7): opt-in native indexed ingestion verifies ticketed packs
+  before ref publication, resolves member-only thin delta bases, checks all
+  consumed objects and packlists, and writes index rows before membership.
+- Core: expose decoded pack frame metadata, single-frame decoding, and an
+  additive resumable decode cursor for repository-scoped external bases.
+- Server Worker: stream verified multipart parts into CV-keyed R2 objects and
+  verify the complete pack before publishing it; raise the ticketed pack cap
+  to 1 GiB while retaining the 64 MiB single-upload limit (WP-1.12).
+- Server native: support S3 multipart with verified CV-keyed parts and
+  server-side `UploadPartCopy` assembly, plus a long CompleteUpload deadline
+  (WP-1.13).
+- Server: expire unconsumed upload tickets with one guarded `Expired` outcome
+  and best-effort upload-session cleanup (WP-1.14).
+- Server: maintain D34's 16-bucket ref-name index through relay upserts and
+  deletes, and serve eventual paged ListRefs from it (WP-1.28b).
+- Connect push: BeginUpload tickets now follow each pack into AdvanceRefs, with
+  bounded membership polling, nonce renewal, a six-data-pack advance limit,
+  and a one-time re-plan for ticket, packlist, or delta-base failures (WP-1.17).
+- Connect push: large ticketed packs stream resumable parts with locally saved
+  receipts, progress and an interruption hint; non-multipart deployments now
+  advertise a compatible pack limit (WP-1.18).
+- Server conformance: restore Single and D34 wire cases for
+  secp256k1-eip191 and webauthn-p256 owner grants (WP-2.6b).
+- Server: enforce grant ref scopes per change, including apply-time
+  presence guards for `ANY` and head/packmap pairing (WP-2.7).
+- Server: add unsigned grant-epoch RPCs with owner statements, bounded
+  epoch transitions and completion after leased shards are fenced (WP-2.8).
+- Server: verify auth v2 on every signed read, including the framed
+  `DownloadPack` request, and add private repositories:
+  `SetRepoVisibility` in envelope and owner-statement modes, a
+  coordinator `rv` row, and `not_found` for every unauthorized private
+  read, indistinguishable from a missing repository (WP-2.9). A read that
+  carries auth headers but fails verification is now `unauthenticated`
+  instead of anonymous, and a grant header on an unsigned Multi request is
+  `unauthenticated` on every procedure.
+- Server: mint short-lived `mkit-url-token:v1` object URL tokens with
+  `IssueObjectUrl`, signed by a dedicated deployment key, with a two-phase
+  verification API and a key-set renderer for HTTP object serving
+  (WP-2.11).
+- Server: enforce owner-signed write grants under Multi/Owner, including
+  `0x` namespaces, stored-epoch checks, and grant-scheme discovery.
+  Adapter grant flags follow in WP-1.30b.
+- Connect client: detect bounded 402 admission challenges and report payment receipts without exposing their values (WP-3.10). `TransportError` is now non-exhaustive, a breaking change for exhaustive downstream matches.
+- Connect client: run a trusted, user-configured admission helper once and retry admitted writes with strictly filtered headers (WP-3.11).
+- Connect client: sign repository reads with auth v2 on each attempt, including
+  the framed `DownloadPack` request. Add a grant-source API and local selection
+  logic; the user grant store follows in WP-2.13.
+- Transport: add the `GetGrantEpoch`, `SetGrantEpoch`, `SetRepoVisibility` and
+  `IssueObjectUrl` messages and RPCs; the server answers `unimplemented` until
+  WP-2.8, WP-2.9 and WP-2.11 (WP-2.2).
+- Transport: add the `AdmissionChallenge` and `Challenge` error detail messages
+  with pinned binary, protobuf JSON, and Connect error goldens (WP-3.1).
+- Specify server takedown and redaction notices: global content blocklist,
+  delta-safe ref and pack rewrites, tombstones, preservation and restore,
+  signed DSSE notices on Connect and HTTP 451, and additive transport and
+  hook fields. Runtime enforcement follows in later server work packages.
+- Specify server-signed storage receipts for committed live ref advances and
+  lease changes, with a published receipt-and-notice key list and writer-view
+  retrieval. Add receipt fields to Connect ref-write responses and an optional
+  admission `external_ref`; server signing and delivery follow in WP-5.8.
+- Server: `AdvanceRefs` consumes verified upload tickets atomically with ref
+  publication, outcomes and repository membership. Missing packs after upload
+  close their tickets with `Aborted(PACK_MISSING)`. `UpdateRef` and `AdvanceRefs`
+  now support conditional ref deletion; direct writes with admission
+  reservations fail closed until WP-3.3.
+- Server: add stateless `UploadPart` and `CompleteUpload`, authenticated part
+  receipts, and a multipart blob-store interface with a working memory backend.
+  Multipart BeginUpload tickets now carry opaque storage sessions. The blob-key
+  API separates upload markers from pack keys; FS, R2 and S3 multipart storage
+  follows in later work packages.
+- Server: default Multi-addressing quota now counts namespace-wide usage in
+  fixed windows: exact in each ref shard, reconciled every 60 seconds into the
+  coordinator and checked from an unguarded local view. Coordinator uploads
+  charge that total exactly. Single-addressing keeps its namespace cap off;
+  on D34 its signer quota is per signer and branch. With successful scheduled
+  rollups, other-shard lag is bounded by their admission rate times 3R.
+  Worker timer registration
+  and D34 quota conformance follow in WP-1.26b.
+- Server: add write-once repository object-index keys and binary values,
+  deterministic row planning, and membership-gated lookup APIs for indexed mode.
+- Connect client: poll typed pending AdvanceRefs verification replies with
+  clamped waits, nonce reuse and envelope renewal, progress and cancellation.
+  Ticket deadline threading follows in WP-1.17.
+  API separates upload markers from pack keys. FS multipart storage now stages
+  verified parts durably, completes through the verifying pack sink and sweeps
+  seven-day-old sessions; R2 and S3 follow in later work packages. The trait
+  adds `begin_multipart_for_ticket` so the FS session directory uses the ticket id.
+- Server: ticketed `UploadPack` now verifies the ticket before reading data,
+  streams the full pack without metadata writes, and leaves a content-addressed
+  upload marker for later ticket consumption. The advertised BeginUpload
+  threshold is enforced; non-default admission requires auth v2 and ticket keys.
+- Server: add periodic per-Durable-Object logical snapshots to a dedicated R2
+  `BACKUPS` bucket, plus Fresh-only portable restore with epoch advancement,
+  relay re-keying and coordinator recovery. Native `export` and `restore`
+  commands move metadata between backends. In-place logical restore is deferred
+  to the admin API; use Workers PITR or native physical `backup` for recovery
+  of the same deployment.
+  Deploying this Worker now requires the private `mkit-vcs-backups` bucket
+  bound as `BACKUPS` and a 35-day `backups/` lifecycle rule.
+- Specify the server's published view and quarantine, covering newly reachable
+  file objects and all file entries of added packs. Add inspection phase/id,
+  object kinds, deferral and flagged ids, authority writer-view classification,
+  and discovery field `async_inspection = 18`. These are additive spec/proto
+  contracts; the inspection implementation follows in later server work packages.
+- Specify storage leases, lifecycle Event webhooks, and fail-closed server GC
+  in SPEC-SERVER; add `GetServerInfoResponse.leases` and Event proto goldens
+  (WP-5.1a-1). Server enforcement follows in M5.
+- Server: implement authenticated `BeginUpload` tickets with stateless BLAKE3 MAC
+  tokens, rotation by key id, admission-free live-ticket/member results, open-ticket
+  caps, and byte-identical replay. Configure native keys with `--ticket-key-file`
+  or `MKIT_TICKET_KEYS`, and Worker keys with `TICKET_KEYS`. The internal legacy
+  UploadPack session API is now `open_upload`; ticketed uploads follow in WP-1.9b.
+- Server: Worker console JSON metrics and info/warn/error tracing, with latency
+  observations sampled at 1-in-100. Physical storage pressure alerts at 70%/90%
+  of the soft limit run after committed Worker puts and every 60 seconds for
+  native SQLite metadata. `Metrics::gauge` has a provided no-op default;
+  P-24 is now `mkit_server_partition_full_total{kind}`.
+- Native server: `backup --meta sqlite:<PATH> --out <FILE>` creates an online
+  physical SQLite backup and refuses an existing destination with exit 64.
+
+- Worker: add Durable Object classes for D34 coordinator, ref, repository/ref-name index and content partitions, retaining RefStore for single deployments; reject foreign partition kinds and preserve alarms scheduled while a timer tick awaits I/O. Deployment vars now select `single` (default) or `d34` with a root sharding marker guard that caches settled results, retries transient storage errors and re-checks config changes; placement is deployment-wide and jurisdiction is fixed for its lifetime.
+- Server D34 ref writes now hold coordinator epoch leases, with backend commit
+  deadlines, guarded revocation pushes and kind-1 expiry sweeps. Creation and
+  renewal cost four store calls; usable leases keep steady writes at two.
+  Recovery explicitly records a lease-table holdoff before revocation completes.
+  Single sharding and M1 reads retain their existing behavior. Grant RPCs,
+  read renewal, visibility, and backup restore integration follow in later WPs.
+- Add partition timers with guarded atomic handlers, fair tick budgets, SQLite timer heads, Durable Object alarm multiplexing and a native SQLite driver (WP-1.24). Production handlers register as their work packages land.
+- The SQL store schema moves to version 2 (an index-only migration, applied on open to native databases and Durable Objects). A binary built before it refuses a migrated database, so roll back only to a version-2 binary.
+
 **Verifier kit.** First-class commit-hash verification for an untrusted
 object set or a few-KiB disclosure bundle: CLI `mkit prove`,
 `mkit verify-proof`, `mkit closure export`, and `mkit closure verify`;
@@ -17,7 +542,237 @@ SPEC-MERKLE-OBJECTS §5 and SPEC-DISCLOSURE; user guide
 commonware-identical (`commonware_storage::bmt::Proof` at the pinned
 train).
 
+### Breaking changes
+
+- *(client)* Remove `ConnectTransport::with_atomic_advance` for the upcoming
+  0.5.0 release. `GetServerInfo` is the sole source of atomic-advance capability
+  (WP-1.16).
+- *(client)* Connect remote URLs whose path is not a repository identity now
+  fail at open with `MalformedUrl`, even against servers that ignore the path:
+  for example `/org/repo`, `/MyRepo`, percent-encoded paths, dot segments, and
+  extra or missing slashes after the scheme. Use an empty path or a lowercase
+  bare name (`mkit+https://host/myproj`) for single-repository servers, and
+  `<ed25519-… | 0x…>/<name>` for namespaced ones (STC §7.4) (WP-1.16).
+
 ### Changed
+
+- *(server)* Track a coordinator relay watermark per ref shard, retain expired
+  lease rows while their outboxes are undelivered, and expose the namespace
+  minimum and active shard table for GC and takedown (WP-1.23c). Restore
+  resets maxima and fences watermark reads pending reconciliation. The
+  unshipped `LeasedShard` V1 encoding gains watermark and sweep due fields.
+
+- *(client)* Validate the remote URL path as a repository identity and carry
+  `X-Repository` on every Connect RPC, including anonymous reads. Empty paths
+  address `default`; reads against a different configured single-repository
+  identity now fail. Repository-not-found errors name the identity and origin.
+- *(client)* Discover and cache atomic advance automatically from
+  `GetServerInfo`, with conservative defaults for legacy or unavailable servers.
+  SQLite and Durable Object pushes may now re-baseline the packmap chain.
+  Concatenate paged `ListRefs` responses with ordering and termination guards.
+- *(core)* Add defaulted `Transport::download_pack_via_ref`,
+  `download_blob_via_ref`, and `pack_exists_via_ref` methods. Connect uses their
+  validated `X-Mkit-Ref` hint for packmap-driven downloads; other transports
+  preserve their existing behavior. Add defaulted `repository_address` for
+  remote error context.
+- *(client)* Retry Connect `aborted` responses as temporary failures (503).
+  Missing ref reads return `None`; missing pack checks return `false`.
+- *(server)* Scope Multi `PackExists` and `DownloadPack` to repository membership,
+  with the optional unsigned `X-Mkit-Ref` hint resolving unrelayed additions in
+  the same repository's ref shard. Invalid hints are ignored; Single reads and
+  the Multi upload guard retain their behavior (WP-1.23b).
+- *(worker)* Register relay delivery on RefShard, with bounded target calls
+  and plan-specific alarm budgets. Coordinator relay watermarks follow in
+  WP-1.23c (R-106).
+- *(server)* Persist source relay scan progress in `rs 00`, with a cap of 32
+  failed targets per cycle. Relay fires inspect past blocked targets, pause at
+  the target budget, delete every delivered row in the guarded checkpoint,
+  and deliver the decodable prefix before corruption. Guarded scan checkpoints
+  and exact empty-value relay timer reschedules can use SQL's soft-capacity
+  reserve; the timer exception keeps the next fire immediate after progress
+  on a full shard. Ordinary puts still fail at the cap.
+
+- *(server)* Add source-side outbox relay kind 3, ordered target batches,
+  persistent per-source `rh` deduplication watermarks, atomic pre-delivery hooks,
+  bounded source cleanup and native driver registration (WP-1.23a). Relay
+  writers now call `relay_at(now_ms)` to stamp rows and commit their kick timer;
+  `RelayV1` gains mandatory `at_ms` in place before deployment. Writer chunking
+  keeps each row within target-batch limits, and the local relay watermark and
+  60-second lag warning prepare later readers. Worker registration follows in WP-1.23b;
+  the coordinator watermark follows in WP-1.23c.
+- *(server)* Implement unauthenticated `GetServerInfo` deployment discovery
+  with validated upload limits, namespace/admission policy, store capabilities
+  and private caching for 60 seconds. Repository headers never affect the
+  response; native bearer deployments also expose it without a token (WP-1.6).
+  `mkit-server serve` now refuses a `--max-pack-bytes` above the advertised
+  resumable-upload limit (8 MiB parts × 10,000 parts, about 78 GiB).
+- *(server)* Multi addressing now defaults to an empty namespace allowlist and
+  owner writes. Namespace denials and non-owner writes return `permission_denied`
+  before allocation. Authorizer hooks can be additional checks or explicit
+  authority sources, with owner facts passed to Authorize and Admit. Startup
+  refuses incompatible write policies, an open authority hook, and `any` with
+  default admission unless explicitly overridden (D27; WP-1.5). Embedders select
+  these policies in core; adapter multi-mode configuration follows in WP-1.30.
+- *(server)* Add pure ref-shard planners and strict version-1 codecs for upload
+  tickets, reservations, local pack membership and outcome/relay queues (WP-1.7).
+  Shared counters and outbox sequence/backlog edits carry snapshot guards;
+  ticket expiry kind 2 is allocated without an RPC or timer handler. Storage
+  layout version stays 1.
+
+- *(server)* Add native `--sharding single|d34` (default `single`) for SQLite
+  metadata. D34 co-locates each branch head and canonical packmap in one ref
+  shard and requires that pairing for `AdvanceRefs`, rejecting others before
+  storage access. Multi repositories now use coordinator namespace/repository
+  records and expose observed and committed creation facts to hooks. Replays
+  and quotas follow the ref shard; the default D34 quota counts per ref shard
+  until the namespace aggregate in WP-1.26. D34 `ListRefs` returns
+  `unimplemented` until WP-1.28. Fs-layout and Worker deployments stay Single.
+  Embedders select routing through `PipelineConfig::sharding`; `ShardMap` now
+  exposes a name's ref-index shard and the ordered set of ref-index partitions.
+  The native server records a SQLite database's `--sharding` on first use and
+  refuses to start it with another. `Pipeline::with_shards` is removed; select
+  routing with `PipelineConfig::sharding`.
+- *(core)* Add `pack::window`: a synchronous sans-IO pack reader with bounded
+  entry buffers, 64 KiB–64 MiB range windows, and checksummed resumable cursors.
+  Entries remain provisional until the trailer and optional pack id pass at
+  `Done`. Lazy cursor commitments bind the current window prefix on resume;
+  callers keep sources immutable, and completed windows are not re-read.
+  With no requested id, the first run prefetches
+  the trailer windows and persists their digest as an anchor. Native zstd and wasm32 ruzstd share decoding
+  with `PackEntries`; allocation failures return `PackfileTooLarge`.
+
+- *(server)* Validate `X-Repository` before authentication and storage access.
+  Single deployments retain headerless reads and signed writes naming their
+  configured identity; another valid identity returns `not_found`, and a
+  malformed identity returns `invalid_argument`. Native `--repository` and
+  Worker `AUTH_REPOSITORY` now require the SPEC-TRANSPORT-CONNECT §7.4 grammar
+  (previously any printable ASCII was accepted); `default` remains valid.
+  Embedders can construct `Addressing::Multi` to route refs and replay state
+  by namespace and repository. Multi pack RPCs return `unimplemented` until
+  repository membership lands in WP-1.10. `Addressing::resolve` returns a
+  `ResolvedRepo`, stored on `Authenticated::repo()`, without changing the
+  adapter-facing authentication API.
+
+- *(cli)* `mkit serve <path>` runs on `mkit-server`: its engine is
+  `mkit_server::ssh::serve_session` over the pipeline with the `.mkit`
+  layout stores (`FsBlobStore`, `FsLayoutStore`), driven by
+  `futures::executor::block_on`, so the CLI still builds no async
+  runtime. Its own protocol code is gone. The wire is unchanged: the two
+  golden sessions captured from 0.4.2 (`rust/tests/golden/ssh-serve/`)
+  reproduce byte for byte through the binary. `mkit-cli` now depends on
+  `mkit-server` (features `ssh` and `fs` only), which is first published
+  with the 0.5 release. **Behavior changes:**
+  - **Idle timeout.** `mkit serve` ends a session after
+    `--idle-timeout-secs` (default 60; `0` disables it) without a byte
+    from the client, answering `Error{INVALID_REQUEST, "idle timeout"}`
+    and exiting 76 (SSH-SECURITY §4, §7). It bounds client silence only:
+    an upload that keeps sending never trips it; one that stops midway is
+    discarded. A new, optional `--max-session-secs` (default `0`, off)
+    caps the whole process, which also bounds a client that trickles
+    bytes or stops reading. Both flags accept at most 604800 (7 days).
+  - **Refs only under `refs/`.** A ref name outside `refs/` (`main`,
+    `heads/main`) that `mkit serve` used to store at `<root>/<name>` is
+    refused by name ("ref name must start with refs/ (… see the
+    migration notes)"). Such files are left in place and never reported
+    to clients; docs/CLI.md, "Refs outside `refs/`", gives a `find`/`mv`
+    recipe for an operator to locate and move them by hand. See the
+    `mkit-server` entry below.
+  - **Crashed uploads are swept.** At startup, when no other
+    `mkit serve` or `mkit-server` holds `serve.lock`, upload temp files
+    (`packs/.<hex>.tmp.<pid>.<seq>`) at least an hour old are removed.
+  - A root marked for `mkit-server --meta sqlite:` is refused (exit 78).
+  The default CLI graph is checked server-free by the new
+  `scripts/check-cli-baseline.sh` (in `just ci-scripts`; INVARIANTS "The
+  default `mkit` CLI is server-free").
+- *(server)* The pipeline serves only ref names under `refs/`
+  (`mkit_server::refs::is_served_ref_name`; SPEC-REFS §2), on every
+  binding: `ReadRef`, `UpdateRef` and `AdvanceRefs` refuse any other
+  grammar-valid name with `invalid_argument` "ref name must start with
+  refs/ …" (`INVALID_REQUEST` on the ssh wire), where they used to store it
+  (in `.mkit/server/rows/` on the `.mkit` layout, invisible to the CLI).
+  `ListRefs` prefixes are unrestricted; one outside `refs/` lists nothing.
+  Normative in SPEC-REFS v3 §2 (the §2 namespace list now includes
+  `refs/mkit/packmap/`), SPEC-TRANSPORT §4.2.1 and SPEC-TRANSPORT-CONNECT
+  §5; new wire-suite case `refs.non_refs_prefix_rejected`. New
+  `FsBlobStore::sweep_stale_uploads`. **SemVer:** unreleased API.
+- *(transport-file)* Every ref write through `FileTransport`
+  (`update_ref`/`write_ref`, and `LockedRefs::update_ref`, `delete_ref`,
+  `write_file`, `remove_file`) refuses a root carrying
+  `SERVER_META_MARKER` (`.mkit/server-meta`), the marker a
+  `mkit-server serve --meta sqlite:` deployment writes, with the new
+  `RefFileError::MetaElsewhere` (a `TransportError::RemoteError` on the
+  `Transport` verbs). That root's refs live in the server's `SQLite`
+  database, so a local `mkit push` to a `file://` remote or `mkit serve`
+  can no longer write a second, diverging copy. Reads and pack uploads
+  are unchanged. **SemVer:** additive (new constant and a variant of the
+  `#[non_exhaustive]` enum); **behavior change** only on marked roots.
+- *(vcs-worker)* `apps/vcs-worker` is a thin deployment of
+  `mkit-server-worker`: its fetch handler and `RefStore` Durable Object
+  call the new `mkit_server_worker::adapter`, which serves `mkit-server`'s
+  pipeline over R2 and Durable Object SQLite, streaming request and
+  response bodies (no whole-pack buffering; `DownloadPack` sends 800 KiB
+  chunks instead of one). Class `RefStore`, binding `REFSTORE` and bucket
+  `STORAGE` are unchanged, with no wrangler migration; the Durable Object
+  now keeps a `kv` table and ignores the old `refs`, `write_quota` and
+  `authenticated_operations` tables (never deployed; no migration). Wire
+  changes, all SPEC-mandated: a reused nonce for another operation is
+  `invalid_argument` (was an uncaught 500); a 33-byte `expected_id` is
+  `invalid_argument` (was `failed_precondition`); `ListRefs` matches its
+  prefix at a path-component boundary; a gzip-compressed unary response
+  (e.g. a large `ListRefs`) is no longer compressed a second time by the
+  runtime; an upload stream that runs past its declared size and past
+  64 MiB is `invalid_argument` (was `resource_exhausted`); storage
+  failures surface as `internal`/`unavailable` instead of
+  `invalid_argument` "refstore …"; a missing `AUTH_AUDIENCE` or
+  `AUTH_REPOSITORY` makes every RPC `unavailable` (was: writes only). New
+  var `WORKERS_PLAN` (`free`, the default, or `paid`) caps the Durable
+  Object store for the plan. The generated code, `build.rs` and the
+  duplicated modules are gone; `scripts/vcs-worker-conformance.sh` runs
+  the wire suite against it under `wrangler dev`.
+- *(core)* `mkit_core::refs::validate_ref_name` now also requires a name
+  of at most `MAX_REF_NAME_BYTES` (512) bytes, per SPEC-REFS v2 §3, so
+  every transport and every new local ref refuse a longer one. Creating
+  or writing a local branch, tag or remote-tracking ref over the bound
+  fails with the new `RefError::RefNameTooLong`, whose message names the
+  limit. Reading, listing, resolving and deleting a local ref that
+  already exists check only the grammar (the new
+  `validate_ref_name_grammar`), so a longer ref written earlier stays
+  visible and can be deleted or renamed with `mkit branch -d`/`-m`. New:
+  `MAX_REF_NAME_BYTES`, `check_new_ref_name`,
+  `validate_ref_name_grammar`.
+- *(core, cli)* A new local branch name is at most `MAX_BRANCH_NAME_BYTES`
+  (494) bytes and a new tag name at most `MAX_TAG_NAME_BYTES` (502), so
+  their wire names (`refs/heads/<b>` and `refs/mkit/packmap/<b>`,
+  `refs/tags/<t>`) fit the 512-byte bound; the error names the derived
+  limit and why (`RefError::RefNameTooLong` now carries a `RefNameKind`).
+  A push of an older, longer branch fails with "ref name too long",
+  naming the wire name (`check_pushable_branch`). The ssh and enc clients
+  skip a listed ref whose name is over the bound
+  (`mkit_rpc::list_response_refs`) instead of failing the listing, as the
+  file, memory, s3 and http clients do.
+- *(refs, rpc, server)* SPEC-REFS v2: a ref name is at most 512 bytes
+  (§3). `mkit_rpc::MAX_REF_NAME` drops from 4096 to 512 (it is now
+  `mkit_core::refs::MAX_REF_NAME_BYTES`), so the ssh and enc clients
+  refuse a longer name or `ListRefs` prefix before sending.
+  `mkit-server` refuses one on `ReadRef`/`UpdateRef` with
+  `invalid_argument` "ref name too long" (`INVALID_REQUEST` on the ssh
+  wire), and a `ListRefs` over the `.mkit` layout skips a longer legacy
+  ref file with a warning. `mkit serve` over ssh used to accept names of
+  any length. Pre-production policy: no migration.
+- *(server)* `mkit-server`'s `ListRefs` matches its prefix at a
+  path-component boundary and strips the prefix plus its `/`, as
+  SPEC-REFS §4 and `mkit serve` do (`refs/heads` and `refs/heads/` list
+  `main`; `refs/heads/ma` lists nothing). A listing of the `.mkit` layout
+  skips a ref file that holds no ref id, with a warning, instead of
+  failing. `FileTransport::list_refs_strict` is replaced by
+  `list_ref_files`, which reports such a file as `None`.
+- *(core)* Pack readers enforce SPEC-PACKFILE §3.3's "one zstd frame"
+  rule. A `0x03`/`0x04` payload holding two concatenated frames, a
+  skippable or legacy-magic frame, or trailing bytes after the frame now
+  fails with `PackError::ZstdDecompress`. The C path
+  (`zstd::bulk::decompress`) used to decode concatenated frames and skip
+  skippable ones. mkit's `PackWriter` never produced such payloads.
+  Pre-production policy: no compatibility path.
 
 - *(core)* `list_refs`/tag/remote listing read each ref with a single
   stack-buffer `read` (open+read+close) instead of `fs::read`'s extra
@@ -34,6 +789,407 @@ train).
   `Disclosed.chunk_inner_root`; `Step.inner_root`).
 
 ### Added
+
+- *(spec)* Indexed-mode server contract, D32 file extraction, repository-isolated
+  resolution, and additive `PendingVerification` detail and
+  `max_delta_chain_depth` discovery field (WP-4.4).
+- *(spec)* Add bounded admission credential headers to hooks.v1 `AdmitRequest` (WP-3.6b).
+- *(docs)* Add an unsupported TypeScript `mppx` admission Worker reference for
+  `mkit.server.hooks.v1`, with delayed settlement and optional signed hooks (WP-3.14).
+- *(core)* Add `pack::rewrite_excluding` and `pack::Rewritten` for budgeted
+  pack rewrites: excluded objects are dropped, deltas with excluded direct
+  bases become raw, and unchanged packs retain their exact bytes.
+- *(proto)* Add the M1 discovery and ticketed upload RPCs, upload ticket
+  fields, ref deletion fields, and ref-list paging fields to
+  `mkit.transport.v1` (WP-1.2). The server returns `unimplemented`
+  ("not implemented yet") for these RPCs and non-default new request
+  fields until their implementing WPs land. `ListRefs.page_size` is
+  temporarily ignored; existing requests retain their behavior.
+- *(spec)* SPEC-SERVER v1 M3 pipeline/outcome guarantees and the signed
+  `mkit.server.hooks.v1` contract, proto, and golden vectors (WP-3.6).
+
+- *(server)* The `mkit-server` binary (`mkit-server-native`;
+  `mkit-server serve --repo-root <DIR> [--listen <ADDR>] [--listen-enc
+  <ADDR>]`) is the self-hosted `mkit+https://` and `mkit+enc://` server. It
+  replaces `mkit serve --http` and `mkit serve --listen-enc`, which the CLI
+  no longer has (see **Removed** for the flag mapping). Its operator guide
+  is `rust/crates/mkit-server-native/README.md`.
+
+- *(release)* Every signed release also ships
+  `mkit-server-<version>-<target>.tar.gz` for the same four targets as
+  `mkit` (the `mkit-server` binary, licenses, the operator guide and the
+  changelog), covered by the same per-archive cosign signatures, signed
+  `SHA256SUMS`, SLSA provenance, SBOM and `THIRD-PARTY-NOTICES`. It is
+  built from `mkit-server-native` with `--no-default-features --features
+  enc,http,s3,sqlite`, in a cargo invocation separate from `mkit`'s. The
+  new `scripts/check-release-artifact-features.sh` checks each build's
+  compiler-artifact messages and binary: `mkit` must carry no server
+  package, server feature or `SQLite`, and `mkit-server` exactly the
+  shipped features (`scripts/release/mkit-server-features`) and never
+  `test-faults`; `mkit` may compile only the packages in
+  `scripts/release/mkit-packages.golden` (regenerate with `--update-golden`).
+  The new `release-artifact-check.yml` runs the same builds and checks on
+  PRs to `main`. The `mkit` build now selects
+  `-p mkit-cli`: the bare `--bin mkit` selected every workspace member and
+  unified their features into the shipped CLI. See `docs/RELEASE.md`.
+- *(release)* Every signed release also publishes the public `mkit-server`
+  container image, `ghcr.io/officialunofficial/mkit-server:<version>` (and
+  `:<major>.<minor>` for the newest final release of that line; no
+  `latest`), for `linux/amd64` and `linux/arm64`. It is built from the two
+  signed Linux `mkit-server` archives, not recompiled: the new `container`
+  job verifies each archive's cosign bundle and checksums
+  (`scripts/stage-server-image.sh`), copies the binary into
+  `gcr.io/distroless/cc-debian13:nonroot` (`contrib/docker/mkit-server/Dockerfile`;
+  non-root, no shell, entrypoint `mkit-server serve`), pushes by digest
+  only, and checks each pushed platform's binary against the archive
+  (`scripts/verify-server-image-binaries.sh`). `container-sign` signs the
+  digest with cosign keyless and attaches SLSA provenance and a CycloneDX
+  SBOM attestation; only then does `container-tag` apply the tags
+  (`scripts/ghcr-image.sh`) and check anonymous pulls. The release notes
+  carry the digest and state what was published. Both Linux release legs
+  now run on `ubuntu-24.04` explicitly. `scripts/local-server-image.sh`
+  runs the same staging and image checks locally, without pushing.
+  Running it: `docs/CONTAINER.md`.
+- *(core)* `pack::DeltaBaseSource`: the external delta-base lookup is
+  now an explicit, generic parameter, so a server can resolve bases only
+  from the pushing repository's membership (PRD §6.5, no existence
+  oracles). `&ObjectStore` implements it (`PackReader::read` is
+  unchanged, byte for byte and in error order); `NoExternalBases` is the
+  self-contained-pack source. A source not marked `VERIFIED` has its
+  bytes re-derived, and anything but the requested object is
+  `DeltaBaseMissing`, the same error as an absent base. New store-less
+  `pack::decode_entries_with(pack, bases, limits, sink)` validates and
+  decodes a pack in pack order, handing each `DecodedEntry` to `sink`
+  (`DecodeReport` summarizes). `DecodeLimits::max_decoded_bytes` (default
+  1 GiB, per call) caps what a decode may hold: every compressed entry's
+  claimed size and every delta's declared result length are charged
+  before anything is decompressed or applied, and every external base as
+  it is fetched (credited back after its last use), so a tiny pack cannot
+  pin gigabytes (`PackError::PackfileTooLarge`).
+- *(core)* `verify::verify_push(tips, mode, source, known)` /
+  `PushReport`: incremental push verification before refs move. It walks
+  every new tip's closure through the shared closure BFS, re-hashes each
+  object, checks commit/remix/tag signatures, stops at a caller-supplied
+  frontier of objects already verified in the repository, and reports
+  missing, corrupt, badly signed objects and non-commit tips.
+- *(core)* `sign::verify_object_signature(&Object)`: the per-type
+  signature check (`verify_commit` / `verify_remix` / `verify_tag`; Ok for
+  unsigned kinds). The CLI's fetch-side signature check now calls it.
+- *(core)* `verify::build_disclosure_from`: builds SPEC-DISCLOSURE
+  bundles through any verifying `store::ObjectSource` (a per-repository
+  index or the global object CAS), not just the on-disk `ObjectStore`.
+  `build_disclosure` is now a thin wrapper; bundle bytes are unchanged
+  (the disclosure golden regeneration is a zero diff).
+
+- *(core)* `pack-ruzstd` feature: a decode-only, pure-Rust zstd backend
+  (`ruzstd` 0.9, with `twox-hash` for frame checksums) that lets a
+  `wasm32-unknown-unknown` build read SPEC-PACKFILE v2 `0x03`/`0x04`
+  entries under the same bomb guards, length checks and one-frame rule
+  as the C path. It does not pre-allocate the claimed size, but a frame
+  that decodes to its claim peaks at about 3× the claim (C: about 1×),
+  because ruzstd's ring buffer rounds up to a power of two and
+  `read_to_end` grows the output by doubling; a 512 MiB claim measured
+  about 1.55 GiB RSS. `PackWriter` still compresses only with
+  `pack-zstd`, and `pack-zstd` decodes when both features are on. No
+  consumer enables it yet. Also added: C-encoded v2 fixtures in
+  `rust/tests/golden/pack-v2/` (SPEC-PACKFILE §10 #20, including frames
+  with 4- and 5-byte literals headers), a C-vs-Rust differential test
+  suite, a wasm32 test lane (`scripts/wasm-ruzstd-check.sh`, crate
+  `mkit-core-wasm-check`, in `just ci-scripts`), a `pack-ruzstd` nextest
+  run in `just ci`, and a `pack-ruzstd` graph check in
+  `scripts/check-wasm-dep-graph.sh`.
+  **Accepted deviation:** the WP-4.1 brief called any frame that ruzstd
+  accepts and C rejects "not tolerable". Such frames remain on malformed
+  input and are accepted as a documented residual (no consumer yet;
+  object ids are content-derived). Over 850k mutated frames: 134 accepted
+  only by ruzstd, 2,580 accepted only by C, 4 accepted by both with
+  different bytes, no panics. Consumer requirements are in
+  `docs/INVARIANTS.md`.
+
+- *(server)* `mkit-server` crate (internal foundation for the production
+  server, production server work): repo and namespace identifiers, principals, the typed
+  `Operation` model, a transport-neutral `ServerError` with redaction and
+  response shaping, the `MaybeSend`/`Clock`/`Spawner`/`send_wrap` runtime
+  model and a `Metrics` facade. Builds for native and `wasm32`; first
+  published with 0.5.
+
+- *(server)* `mkit-server` storage contract core: the key-level
+  `NamespaceStore` (one declarative `Batch` of `Absent`/`Present`/`Equals`
+  preconditions and a `NotAfter` deadline on the backend's own clock, plus
+  puts and deletes; get/has/get_many/ordered scan), the key-layout
+  registry, and the in-memory `MemoryKv` reference backend behind the
+  `memory` feature. No SQL required of a backend.
+
+- *(server)* `mkit-server` replay-ledger model (a stored result can never
+  be a challenge or a retryable outcome), versioned value codecs, typed
+  readers over any `NamespaceStore`, and the content-addressed `BlobStore` /
+  `PackSink` contract with the `MemoryBlobStore` reference backend.
+
+- *(server)* `mkit-server-conformance` crate (`publish = false`): the
+  storage-backend conformance suite, the gate for third-party backends.
+  74 generic cases over `NamespaceStore`, `BlobStore` and `ContentIndex`
+  (preconditions, scans, limits, capabilities, the `NotAfter` deadline,
+  capacity, cancellation, crash/restart, export/import, golden encodings);
+  a backend implements `KvHarness`, declares its expected skips (any other
+  skip fails) and invokes `storage_suite!`. Contract changes: `scan`
+  rejects a cursor outside the scanned range as `Invalid` (so `ListRefs`
+  rejects a page token from another prefix instead of restarting); a blob
+  body over 1 MiB MUST be streamed in pieces of at most 1 MiB
+  (`MAX_BLOB_PIECE_BYTES`); rule 4 states what later reads of a dropped
+  apply may see; an import into a `RefsOnly` store refuses an export whose
+  layout version differs from the store's implicit one. **SemVer:**
+  unreleased API.
+- *(attest)* SPEC-WRITE-GRANTS grant codec behind the new `grants` feature
+  (not default): `mkit_attest::grant` parses and encodes the
+  `mkit-write-grant:v1` statement strictly (one canonical encoding, every
+  §3.5 rejection, no repair), with the §3.1 text rules, ref scopes and §8.1
+  effective flags (never for packmap refs; `packmap_head` maps one to the
+  head that covers it, §8.3), the grant id (only from `parse_with_id` or
+  `Grant::id`, never from caller bytes), and the `X-Write-Grant` header
+  (`<statement>.<scheme>.<blob>`, strict unpadded base64url). New fuzz target
+  `grant_parse`. Golden and reject vectors under `rust/tests/golden/grants`,
+  cross-checked by `scripts/golden/grants_ref.py`. **SemVer:** additive.
+
+- *(attest)* SPEC-WRITE-GRANTS verifier (feature `grants`): the
+  `mkit-write-epoch:v1` and `mkit-repo-visibility:v1` statement codecs,
+  the pure `epoch_transition` (§5.2 check 7, overflow-safe, with the retry
+  rule), the `ed25519` owner scheme (`verify_strict` over the BLAKE3 of the
+  statement, bound to `ed25519-` namespaces; the ECDSA schemes return
+  `SchemeNotImplemented` until WP-2.5), and the stateless verifier:
+  `verify_grant_owner` (§7 steps 1, 3, 4, cacheable by header bytes) plus
+  `OwnerVerified::check` (steps 2, 5–7, 9, 10), `verify_epoch_statement`
+  and `verify_visibility_statement` (distinct `VerifiedEpoch` and
+  `VerifiedVisibility` results, valid at one `now` and never to be
+  cached), and `verify_for_registration` (§10).
+  Expiry is exclusive (`now < expiry`), unlike auth v2. `VerifierConfig`
+  holds the deployment's own audience and refuses a loopback one unless
+  built with `new_allowing_loopback` (§3.2, §10), and refuses
+  `webauthn-p256` without a relying party (§4.3). The verifier results
+  have no public fields or constructors; a
+  `VerifiedGrant`'s effective flags never cover packmap refs directly.
+
+- *(attest)* SPEC-WRITE-GRANTS ECDSA owner schemes (feature `grants`):
+  `secp256k1-eip191` (strict low-S recovery from the EIP-191 digest,
+  `v` 27 or 28, and the recovered address must equal the `0x`
+  namespace) and `webauthn-p256` (the four-field blob, low-S raw
+  signature, curve-checked key whose address must equal the namespace,
+  UP flag, relying-party id hash and that relying party's origin, and a
+  strict `clientDataJSON`: duplicate member names rejected at any depth,
+  nesting at most 64 deep, finite binary64 numbers only, `type`, exact
+  challenge, `crossOrigin`, no `topOrigin`, signature over the received
+  bytes; SPEC-WRITE-GRANTS §4.3 now states the depth and number limits).
+  The legacy DSSE helper `verify_webauthn_wrapping_with_policy` is
+  documented as lax and for self-checks only. `mkit-attest` now enables
+  serde_json's `float_roundtrip` feature (correctly rounded number
+  parsing, so a value that rounds to `f64::MAX` is finite); by Cargo
+  feature unification this applies to **every serde_json parse** in a
+  build that includes `mkit-attest` (the CLI, `mkit-wasm`, and more): number
+  parsing changes only in the last bit in rare cases, where it becomes
+  exact, and gets somewhat slower. New `RelyingParty`, `WebAuthnAssertion` and
+  `webauthn_challenge`; `OwnerVerified`/`VerifiedEpoch`/
+  `VerifiedVisibility::relying_party`. **Breaking (unreleased API):**
+  `VerifierConfig::new` and `new_allowing_loopback` take the relying
+  parties (`webauthn-p256` needs one; `new` refuses loopback ones), a
+  cached `OwnerVerified` re-checks its relying party in `check`, and
+  `GrantError::SchemeNotImplemented` is replaced by per-rule variants.
+  Signed goldens and verify-reject vectors for both schemes, cross-checked
+  by `scripts/golden/grants_ref.py` with python-`ecdsa` and pycryptodome.
+  New fuzz target `epoch_visibility_parse`; signed goldens
+  `{grant,epoch,visibility}-ed25519.json` and `reject/verify-*.json`,
+  cross-checked with pycryptodome by `scripts/golden/grants_ref.py`.
+  **SemVer:** additive.
+
+- *(core)* `repo_identity`: the SPEC-TRANSPORT-CONNECT §7.4 repository
+  identity grammar (`Namespace`, `RepositoryIdentity`; lowercase only, at
+  most 173 bytes; bare names only through `parse_bare_allowed`).
+  **SemVer:** additive.
+
+- *(server)* `mkit-server` streaming pipeline: `Pipeline::begin_upload`
+  returns an `UploadSession` (fresh, resume or replay of the signed
+  operation; the replay record is reserved `InFlight { resumable: true }`
+  with the quota charge before any chunk, and committed by a second batch
+  planned with its own `NotAfter` deadline after the stream), and
+  `Pipeline::download` returns a `DownloadStream` of 800 KiB chunks. Both
+  hold at most one chunk. Resuming an in-flight upload is legacy M0
+  behavior for un-ticketed uploads (`vcs-worker` parity), a deliberate
+  exception to SPEC-TRANSPORT-CONNECT §7.1 step 2 that goes when WP-1.9
+  ships replay-exempt ticketed uploads. A replay verifies the stream
+  without writing the blob; a final `pre_receive` rejection is stored as
+  the operation's result; an upload that outlives its envelope returns OK
+  once the blob is committed, leaving its in-flight record to the pruner.
+  The `test-faults` feature adds `FaultHooks` at five points and
+  per-request `TestDirectives`. **SemVer:** unreleased API.
+- *(server)* `mkit-server` `fs` feature (native, std-only, no async
+  runtime): `FsBlobStore` streams uploads into `packs/<64-hex>` and
+  publishes only after BLAKE3 and length verify (temp file, fsync, rename,
+  directory fsync); bodies over 1 MiB stream in 64 KiB pieces.
+  `FsLayoutStore` keeps a repo's `refs/` refs as `FileTransport` ref files
+  under its ref lock (`.mkit/refs/.lock`), evaluating a `NotAfter`
+  deadline under that lock. An undecodable ref file is `Corrupt`, a ref
+  whose file clashes with another ref's directory (or the reverse) is
+  `Invalid`, and a full disk or quota is `Full`. Both pass the storage
+  conformance suite. **SemVer:** unreleased API. **Behavior change:**
+  `mkit serve` wrote a ref named outside `refs/` (e.g. `main`) to
+  `<root>/main`; the FS store keeps such names in the server-side
+  `.mkit/server/rows/` store instead, invisible to the CLI and
+  `FileTransport`, so a name like `packs/<hex>` can no longer overwrite a
+  pack. (The pipeline now refuses such names outright; see the
+  `mkit-server` `refs/` entry above.)
+
+- *(transport-file)* `FileTransport::with_ref_lock` runs a closure under
+  the ref lock with a `LockedRefs` handle (`read_ref`, `update_ref`,
+  `delete_ref`, and atomic `write_file`/`remove_file` confined to
+  `.mkit/server/`, symlink-escape guarded); typed `RefFileError`; strict
+  `read_ref_strict`/`list_refs_strict` (an undecodable ref file is an
+  error, not absent); `server_path`, `root`, `temp_path`, `sync_dir` and
+  `create_dir_all_durably` are public. Ref writes now fsync the parent
+  of every directory they create, and a ref whose file clashes with
+  another ref's directory (or the reverse) is `InvalidRef`, not a
+  `RemoteError`. A panic under the ref lock no longer poisons the
+  transport: the next writer recovers the in-process lock (it guards no
+  data). **SemVer:** additive.
+
+- *(server)* `SQLite` metadata backend: `mkit-server`'s `sql` feature adds
+  `SqlKvStore`, the `NamespaceStore` contract implemented once over a
+  synchronous `SqlConn` (one `kv` table keyed by partition and key, each
+  batch one transaction, `NotAfter` read on the backend clock inside it)
+  with versioned, forward-only schema migrations that refuse a newer
+  schema. An optional `Capacity` sets a hard cap and a soft limit a reserve
+  below it: batches with a put return `StoreError::Full` at the soft limit,
+  and the reserve keeps delete-only batches (which can split b-tree pages)
+  from ever hitting the engine limit. It compiles for wasm32, so Durable
+  Object SQLite can share it. New `mkit-server-native` crate
+  (`publish = false`): `RusqliteConn` (bundled SQLite, WAL,
+  `synchronous = FULL`), the `Blocking` adapter that runs sync-bodied
+  stores on tokio's blocking pool, and physical (`VACUUM INTO`) and
+  logical backup/restore documentation. Passes the conformance suite with
+  zero skips on a file-backed store. Not in the `mkit-cli` graph.
+  **SemVer:** unreleased API.
+
+- *(server)* New `mkit-server-worker` crate (`publish = false`), the
+  storage half of the Cloudflare Workers adapter: `R2BlobStore` streams
+  both ways (a put spawned at `begin` and fed through a depth-1 channel;
+  the blob's last byte is withheld until its BLAKE3 verifies, so only
+  verified bytes are ever published, and an abort or a dropped sink
+  leaves nothing; bodies read back in pieces of at most 1 MiB; a 64 MiB
+  per-blob cap as an M1 stopgap), `DoSqlConn` (Durable Object SQLite under
+  the shared `SqlKvStore`, batches in `transactionSync`, a soft cap below
+  the 10 GB limit measured by `databaseSize`, which excludes free pages),
+  the Durable Object request handler, and `DoNamespaceStore`, which routes
+  each partition to its own Durable Object (M0: `REFSTORE`/`"root"`). It
+  passes the conformance suite with zero skips over simulated R2 and
+  Durable Object backends. Adding workers-rs 0.8.6 moves `rust/Cargo.lock`
+  from wasm-bindgen 0.2.127 to 0.2.128 (with js-sys/web-sys 0.3.105,
+  wasm-bindgen-futures 0.4.78), which `mkit-wasm` shares. **SemVer:**
+  unreleased API.
+
+- *(server)* S3 blob storage for `mkit-server`: `mkit-server-native`'s new
+  `s3` feature (on by default) adds `S3BlobStore`, a content-addressed
+  `BlobStore` over any S3-compatible bucket, signed with
+  `mkit-transport-s3`'s SigV4 code over async reqwest (rustls). An upload
+  spools to an unnamed local temp file while it computes BLAKE3 and
+  SHA-256, and only after the length and BLAKE3 verify does it send one
+  `PUT` with `If-None-Match: *`, so nothing unverified is ever visible
+  and an abort or a dropped sink sends nothing (`412` is
+  `AlreadyPresent`; `409`/`429`/`5xx`/`400 RequestTimeout` are retried from
+  the spool with jittered backoff honoring `Retry-After`, each attempt
+  bounded by a 60 s stall timeout and a size-scaled deadline). Each upload
+  reserves its declared length from a spool budget
+  (`--s3-spool-max-bytes`, default 16 GiB) before any byte arrives; no
+  room, or a full disk, is a retryable "storage partition full". Serve
+  with `mkit-server serve --blob s3://<BUCKET>[/<PREFIX>] --s3-endpoint
+  <URL> [--s3-region auto] --meta sqlite:<PATH>`; a non-loopback `http`
+  endpoint is refused without `--s3-allow-insecure-http`. Credentials from
+  `MKIT_R2_ACCESS_KEY_ID`/`MKIT_R2_SECRET_ACCESS_KEY` (or the `AWS_*`
+  pair; temporary credentials with `AWS_SESSION_TOKEN`, so IAM roles,
+  IRSA and ECS task roles, are unsupported for now) or an owner-only
+  `--s3-credentials-file`, never the command line. The provider must honor
+  `If-None-Match: *` on `PUT` (AWS S3, R2, MinIO). `mkit-server-conformance`
+  gains `fake_s3` (feature `fake-s3`): a strict in-memory S3 server that
+  verifies SigV4 independently and models conditional puts, ranges and S3
+  error codes. The storage suite and the full wire suite (in-process and
+  the real binary) pass over S3 + SQLite. The suite runner's runtime now
+  enables tokio's I/O and timer drivers. **SemVer:** unreleased API.
+- *(transport-s3)* `sigv4::sign_request_with_payload_hash` signs a request
+  for a body whose SHA-256 the caller already has, so a streamed upload
+  need not hold its body in memory; `sign_request` now delegates to it,
+  byte for byte. **SemVer:** additive.
+
+- *(server)* `mkit-server serve --listen-enc <ADDR>` hosts the
+  `mkit+enc://` listener (SPEC-TRANSPORT-ENC §6), beside or instead of the
+  HTTP one (`--listen` is now optional; at least one is required; both
+  share one runtime, one shutdown and one pipeline's stores and write
+  gate). Each session runs `mkit_server::ssh::serve_session` as
+  `Principal::TransportPeer` with the key the handshake authenticated. The
+  flags, fail-closed gate, banner, timeouts, budgets and the
+  `mkit serve-enc/<version>` server id are `mkit serve --listen-enc`'s,
+  which WP-M0-15 removed (see **Removed**). New hardening: handshakes have their own
+  cap (`--enc-max-handshakes`, default 128 or `--max-connections` if
+  lower), apart from the `--max-connections` sessions, so sockets that
+  never handshake cannot lock authorized clients out (a client waiting
+  for a session slot after its handshake waits at most the handshake
+  timeout, and not past a shutdown); a write timeout equal to
+  `--enc-idle-timeout-secs`; on shutdown a session ends at its
+  next frame boundary (an idle one at once, never inside an upload) within
+  `--shutdown-grace-secs`; the allowlist is opened without following a
+  symlink and refused unless owned by the server's user or root and not
+  group- or other-writable; the key file is read with
+  `mkit_core::sign::load_raw_32`'s checks. Differences for operators:
+  `--enc-handshake-timeout-secs` defaults to 10 (was 60; SPEC-TRANSPORT-ENC
+  §2.1) and 0 is refused; `--enc-idle-timeout-secs 0` (which `mkit serve`
+  read as "no timeout") is refused, exit 78; an allowlist needs `--enc-server-key <PATH>` (no
+  `~/.config/mkit` default: the server resolves no home directory); key
+  and allowlist errors exit 78; `--unsafe-allow-any-enc-peer` is refused
+  (exit 78) beside an HTTP listener that requires a bearer token or auth
+  v2. Enc peers are `TransportPeer` principals, not subject to M2 write
+  grants until M2 wires them. The
+  `enc` feature is on by default. New `Pipeline::with_auth` builds a
+  sibling pipeline over the same stores and write gate with another
+  `AuthMode`. **Wire changes versus `mkit serve --listen-enc`**, all to
+  the ssh session's replies (SPEC-TRANSPORT §4.2, which SPEC-TRANSPORT-ENC
+  §3 makes normative): a first frame that is not `Hello` is answered
+  `Error{INVALID_REQUEST, "first frame must be Hello"}` and a `Hello` for
+  another version `"unsupported proto_version N"`, then the connection
+  closes (was: closed without a reply); a frame the session does not serve
+  gets its specific message (`"PackChunk arrived without UploadPack
+  header"`, `"Hello after handshake"`, `"unexpected request frame"`; was:
+  `"unexpected frame"`); a record that does not decode as an `SshFrame`
+  gets `"frame parse error"` at the top level and `"pack chunk read
+  failed"` inside an upload, then the session ends (was: closed without a
+  reply); a ref name over 512 bytes gets `"ref name too long"`; the upload
+  rejections are the ssh session's. Clients see no difference on
+  well-formed traffic: the published `mkit-transport-enc` 0.4.2 client
+  passes against the new listener (`just interop-enc`,
+  `contrib/interop/enc-client-0.4`). **SemVer:** unreleased API.
+
+- *(transport-enc)* `serve_tcp_listener`: the async accept loop on a
+  caller-bound `TcpListener`, for a server already on a tokio runtime,
+  with separate caps on handshakes and sessions (`ListenerLimits`) and a
+  shutdown future; it retries a transient `accept` error (a reset
+  connection, descriptor exhaustion) and, after shutdown, stops accepting
+  and waits for the sessions in flight (the caller bounds the wait). The
+  blocking `serve_tcp_*` entry points share its accept loop with their
+  signatures and behavior unchanged (uncapped, stopping at the first
+  `accept` error and leaving sessions running). **SemVer:** additive.
+
+- *(core)* Resumable-part building blocks (SPEC-TRANSPORT-CONNECT §7.6):
+  `write_auth::ContentCommitment` parses and formats `body:`, `pack:` and the
+  new `part:<ticket>:<index>:<subtree>:<len>` commitment, and
+  `verify_headers_with(.., ExpectedCommitment::PartStream, ..)` verifies an
+  `UploadPart` envelope; the new `upload_parts` module validates part
+  geometry, streams a part into its BLAKE3 subtree chaining value and merges
+  part values into the pack id. Golden vectors under
+  `rust/tests/golden/{uploads,auth-v2}`. **SemVer:** additive.
+
+- *(attest)* `mkit_attest::eth`, behind the new default-off `grants`
+  feature: Keccak-256 (original Keccak, not SHA3-256), the EIP-191
+  personal-message digest, strict low-S secp256k1 recovery from
+  `r ‖ s ‖ v`, curve-validated secp256k1 and P-256 address derivation,
+  and the SPEC-WRITE-GRANTS §4.4 client normalizers (EIP-191 `v`/high-`s`,
+  P-256 DER to raw low-S `r ‖ s`), with a module-local `EthError`. Adds
+  the `sha3 0.11` dependency (optional). Golden vectors in
+  `rust/tests/golden/grants/eth-primitives.json`, cross-checked against
+  Foundry `cast`, viem and pycryptodome.
 
 - *(core)* Closure verification now has a pull-based
   `ObjectSource`/`verify_closure_streaming` API and a native
@@ -185,6 +1341,23 @@ train).
 - *(cli)* `mkit mcp --http <addr>` now refuses to bind without authentication, matching `mkit serve --http`'s fail-closed design. Previously it bound the given address (not restricted to loopback despite its own doc comment's claim) with no `Authorization` check at all — any network-reachable caller got unauthenticated access to the full MCP tool catalog, including mutating tools like `mkit_checkout`. It now requires a bearer token (`--http-token <TOKEN>` or the `MKIT_MCP_TOKEN` env var — a name of its own, not `serve --http`'s `MKIT_API_TOKEN`, since the two surfaces have different threat models and must not share a secret) or an explicit `--unsafe-allow-any-http-peer` opt-out that prints a loud warning, enforced on every request via a new `BearerAuthHttp` tower middleware wrapped around `StreamableHttpService`. New `mcp_v2_http.rs` `mod auth` integration tests cover: refusal with no token/flag, refusal on an empty token, refusal when both a token and the unsafe flag are given, 401 on a missing/wrong `Authorization` header, success with the right token, and the `MKIT_MCP_TOKEN` env fallback. **SemVer:** additive — new CLI flags, new env var; existing `--http` usage without them now refuses to start rather than serving unauthenticated (a deliberate behavior change gated by the same version bump the removed-Windows-support entry below already requires).
 
 ### Fixed
+
+- *(core)* Pack writer no longer zstd-compresses a payload over `MAX_RAW_OBJECT_SIZE`, which readers reject.
+- *(core)* Pack framing no longer overflows a 32-bit `usize`: a
+  `payload_len` near `u32::MAX` made `pos + payload_len` trap on wasm32
+  (release builds keep `overflow-checks`) in `PackEntries::new`,
+  `delta_base_hashes` and, through them, `verify_closure_packs` (exported
+  by mkit-wasm). It is now `PackError::UnexpectedEof`; a wasm32 test in
+  `mkit-core-wasm-check` pins it.
+- *(core)* The closure BFS queues each id once. A tree whose entries all
+  name one object no longer grows the queue per reference; fetch order is
+  unchanged.
+- *(core)* The disclosure builder no longer panics on a `ChunkedBlob`
+  range whose `offset + len` overflows `u64` (e.g.
+  `mkit prove --range 10:18446744073709551615`) or on a chunk shorter
+  than its 10-byte `Blob` prologue: these now return
+  `VerifyError::OffsetOverflow` and `VerifyError::Decode(UnexpectedEof)`.
+  Valid bundles are byte-identical.
 
 - *(core)* A `Range` payload over a chunked leaf (`chunk = Some(hdr)`) now
   rejects `len == 0` before running the chunk header's wrap/fold checks,
@@ -409,6 +1582,50 @@ train).
 - *(cli, internal)* `mkit-cli`'s six "sequential below a per-thread threshold, rayon `par_iter` at or above it" fan-outs (`commands::add`'s per-file and per-chunk hashing, `remote_dispatch`'s pack-compression and delta-encoding, `remote_dispatch::packmap`'s signature verification) each hand-duplicated the branch-and-collect boilerplate around the shared `fanout::threshold` formula. New `fanout::map_seq_or_par`/`fanout::try_map_seq_or_par` factor that shape out for the four call sites it fits exactly (by-reference, in-order, infallible or `Result`-collecting); `prepare_delta_batch` (consumes by value) and `verify_new_object_signatures` (deliberately chunks its parallel path — see the entry above) keep their own loops since forcing either into the shared shape would need extra generic machinery to claw back what a bespoke loop gets for free. No behavior change. **SemVer:** none — `pub(crate)`-only, no public API surface.
 
 ### Removed
+
+- **`mkit serve --http` and `mkit serve --listen-enc` (WP-M0-15).** `mkit
+  serve <PATH>` is now only the `mkit+ssh://` forced-command server
+  (SSH-frame protocol on stdin/stdout, unchanged). Its HTTP and encrypted
+  listeners moved to the separate `mkit-server` binary, so the CLI carries
+  no HTTP server stack or `SQLite`. The removed flags are clap usage errors
+  (exit 64) with a hint naming `mkit-server`. Removed with them: the
+  flags `--http-token`, `--unsafe-allow-any-http-peer`,
+  `--enc-authorized-peers`, `--enc-server-key`,
+  `--unsafe-allow-any-enc-peer`, `--enc-idle-timeout-secs`,
+  `--enc-handshake-timeout-secs`, and `mkit-cli`'s `http-transport` cargo
+  feature (`enc-transport` stays: it is the `mkit+enc://` client). The
+  pre-production policy allows the removal without a deprecation period.
+  Migration, on the same root (the served layout is unchanged):
+
+  | Removed (`mkit serve <PATH> ...`) | Use (`mkit-server serve --repo-root <PATH> ...`) |
+  |---|---|
+  | `--http <ADDR>` | `--listen <ADDR>` (FS packs and `.mkit`-layout refs by default, as before) |
+  | `--http-token <TOKEN>` | `--bearer-token-file <PATH>` (owner-only file) or `MKIT_API_TOKEN`; the token is no longer accepted on the command line |
+  | `MKIT_API_TOKEN` | unchanged |
+  | `--unsafe-allow-any-http-peer` | `--unsafe-allow-any-peer` |
+  | `--listen-enc <ADDR>` | `--listen-enc <ADDR>` (alone, or beside `--listen`) |
+  | `--enc-authorized-peers <PATH>` | unchanged; the file must be owned by the server's user (or root) and not group- or other-writable |
+  | `--enc-server-key <PATH>` | unchanged, and required with an allowlist (no `~/.config/mkit/enc/server.key` default) |
+  | `--unsafe-allow-any-enc-peer` | unchanged; refused beside an HTTP listener that requires a token or auth v2 |
+  | `--enc-idle-timeout-secs <SECS>` | unchanged; `0` (was "no timeout") is refused |
+  | `--enc-handshake-timeout-secs <SECS>` | unchanged; default 10 (was 60); `0` is refused |
+  | `cargo install mkit-cli --features http-transport` | the `mkit-server-<version>-<target>.tar.gz` release archive, or `cargo build -p mkit-server-native --bin mkit-server` |
+
+- **`mkit-transport-connect`'s `server` cargo feature (breaking).** The
+  axum-hosted server that backed `mkit serve --http` is gone, with its
+  public API: `serve`, `router`, `TransportServer` and
+  `map_transport_error`, and the `axum` and `connectrpc-health`
+  dependencies. The crate is now the `mkit+https://` client
+  (`ConnectTransport`) only; serve `mkit.transport.v1` with `mkit-server`.
+  Removing a published feature and public items is semver-breaking, so the
+  next release of `mkit-transport-connect` (and, with lockstep versioning,
+  every `mkit-*` crate) is **0.5.0**, done at the release that merges the
+  `mkit-server` work to `main` (cargo-semver-checks runs at the tag,
+  `crates-publish.yml`). crates.io lists `mkit-cli` as its only published
+  dependent, and no published `mkit-cli` enables the feature by default.
+  `mkit-server-conformance`'s legacy `mkit serve --http` wire baseline is
+  removed with it; the `mkit+http://` client end-to-end tests now run
+  against `mkit-server` (`mkit-server-native/tests/client_e2e.rs`).
 
 - Compatibility-only index readers/migration APIs, legacy history APIs, the
   hash-only rename API, and redundant sparse-selection APIs. Pre-production

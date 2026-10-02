@@ -70,6 +70,7 @@ pub const DEFAULT_P256_KEY_REF: &str = "software:default-p256";
 pub const REPO_FORBIDDEN_KEYS: &[&str] = &[
     "user.identity",
     "trusted_remote_endpoint",
+    "admission_helper",
     "signer",
     "transport_auth",
     "pull.require_signed",
@@ -89,7 +90,18 @@ pub const REPO_FORBIDDEN_KEYS: &[&str] = &[
     "attest.external_signer_timeout_secs",
     "attest.secp256k1_key_path",
     "attest.p256_key_path",
+    "grant.webauthn_rp",
 ];
+
+/// User-scoped exact keys and the dynamic named-remote admission allowlist key.
+#[must_use]
+pub fn is_repo_forbidden_key(key: &str) -> bool {
+    REPO_FORBIDDEN_KEYS.contains(&key)
+        || key
+            .strip_prefix("remote.")
+            .and_then(|rest| rest.strip_suffix(".admission_headers"))
+            .is_some_and(|name| !name.is_empty())
+}
 
 /// Source of a parsed config line — used to decide whether a key is
 /// allowed (`Repo` rejects [`REPO_FORBIDDEN_KEYS`]; `User` accepts
@@ -125,6 +137,10 @@ pub struct Config {
     /// Exact remote endpoint the user has explicitly trusted for
     /// ambient HTTP/S3 environment credentials. User-scoped only.
     pub trusted_remote_endpoint: String,
+    /// Absolute executable path for the user-scoped admission helper.
+    pub admission_helper: String,
+    /// Per-remote extra header allowlists, separate from endpoint listings.
+    pub remote_admission_headers: std::collections::BTreeMap<String, String>,
     pub signing_key: String,
     pub default_branch: String,
     pub remote_endpoint: String,
@@ -133,6 +149,9 @@ pub struct Config {
     pub ssh_strict_host_key_checking: String,
     pub ssh_user_known_hosts_file: String,
     pub ssh_identity_file: String,
+    /// Extra PEM certificate authorities for native HTTPS remote connections.
+    /// `MKIT_SSL_CA_FILE` overrides this normally layered `http.sslCAInfo` key.
+    pub http_ssl_ca_info: String,
     /// Write-auth scheme for `mkit+https://` / `mkit+http://` remotes
     /// (`mkit-transport-connect::ConnectTransport`). Empty/`"bearer"`
     /// (default) sends `MKIT_API_TOKEN` as a Bearer token, unchanged from
@@ -145,6 +164,13 @@ pub struct Config {
     /// request authorization is a separate use of the ambient identity.
     /// Destination trust is checked before loading a signing key.
     pub transport_auth: String,
+    /// `grant.webauthn_rp`: the `WebAuthn` relying parties whose assertions
+    /// `mkit grant create --webauthn-assertion` and the grant store accept
+    /// (SPEC-WRITE-GRANTS §4.3). Each entry is `<rp_id> <origin>...`; the
+    /// key may repeat and one value may hold several entries separated by
+    /// `|`. User-scoped only (a repository must not choose which relying
+    /// party vouches for an owner).
+    pub grant_webauthn_rp: Vec<String>,
     /// Commit-signing selector. User-scoped only.
     pub signer: String,
     /// `pull.require_signed` — gates whether `clone`/`pull`/`fetch` verify
@@ -398,6 +424,8 @@ pub enum ConfigError {
     UnknownKey(String),
     #[error("invalid user.identity: {0}")]
     InvalidUserIdentity(&'static str),
+    #[error("invalid http.sslCAInfo path: {0}")]
+    InvalidHttpCaPath(&'static str),
     #[error(
         "key path must not contain `..`; relative paths must stay under `.mkit/keys/` and absolute paths must stay under `$HOME`: {0}"
     )]
@@ -408,6 +436,42 @@ pub enum ConfigError {
 /// `ssh.*_file`) cannot escape via `..` traversal. Empty strings pass
 /// — callers fall back to the documented default.
 impl Config {
+    /// Resolve `http.sslCAInfo` for a native HTTPS connection. Relative paths
+    /// start at the worktree root; `~` and `~/` use the process's home directory.
+    /// The stored config value remains unchanged for normal config roundtrips.
+    ///
+    /// # Errors
+    /// A tilde path without a home directory, or unsupported `~user` syntax.
+    pub fn ssl_ca_file_path(&self, layout: &RepoLayout) -> Result<Option<PathBuf>, ConfigError> {
+        let value = self.http_ssl_ca_info.as_str();
+        if value.is_empty() {
+            return Ok(None);
+        }
+        let path = if value == "~" || value.starts_with("~/") {
+            let home = std::env::var_os("HOME")
+                .filter(|directory| !directory.is_empty())
+                .ok_or(ConfigError::InvalidHttpCaPath(
+                    "HOME is unavailable for a tilde path",
+                ))?;
+            let mut path = PathBuf::from(home);
+            if let Some(rest) = value.strip_prefix("~/") {
+                path.push(rest);
+            }
+            path
+        } else if value.starts_with('~') {
+            return Err(ConfigError::InvalidHttpCaPath(
+                "use ~/ or an absolute path, not ~user",
+            ));
+        } else {
+            PathBuf::from(value)
+        };
+        Ok(Some(if path.is_absolute() {
+            path
+        } else {
+            layout.worktree_root().join(path)
+        }))
+    }
+
     /// Map `durability.objects` onto the object-store sync policy.
     /// Unknown values fall back to the batched default rather than
     /// erroring — config load must not brick the repo.
@@ -662,7 +726,7 @@ fn apply_cli_overrides(cfg: &mut Config) {
     };
     for (raw_key, val) in overrides.iter() {
         let key = normalize_config_key(raw_key.trim());
-        if REPO_FORBIDDEN_KEYS.contains(&key.as_str()) {
+        if is_repo_forbidden_key(&key) {
             let mut stderr = io::stderr().lock();
             let _ = writeln!(
                 stderr,
@@ -728,7 +792,7 @@ fn apply_file_inner(
         let key = normalize_config_key(k.trim());
         let key = key.as_str();
         let val = v.trim();
-        if scope == ConfigScope::Repo && REPO_FORBIDDEN_KEYS.contains(&key) {
+        if scope == ConfigScope::Repo && is_repo_forbidden_key(key) {
             if warn_on_forbidden {
                 warn_forbidden_repo_key(path, key);
             }
@@ -767,6 +831,7 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
         "user.name" => val.clone_into(&mut cfg.user_name),
         "user.email" => val.clone_into(&mut cfg.user_email),
         "trusted_remote_endpoint" => val.clone_into(&mut cfg.trusted_remote_endpoint),
+        "admission_helper" => val.clone_into(&mut cfg.admission_helper),
         "signer" => val.clone_into(&mut cfg.signer),
         "pull.require_signed" => val.clone_into(&mut cfg.pull_require_signed),
         "key.backend" => val.clone_into(&mut cfg.key.backend),
@@ -783,7 +848,11 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
         "ssh.strict_host_key_checking" => val.clone_into(&mut cfg.ssh_strict_host_key_checking),
         "ssh.user_known_hosts_file" => val.clone_into(&mut cfg.ssh_user_known_hosts_file),
         "ssh.identity_file" => val.clone_into(&mut cfg.ssh_identity_file),
+        "http.sslcainfo" => val.clone_into(&mut cfg.http_ssl_ca_info),
         "transport_auth" => val.clone_into(&mut cfg.transport_auth),
+        "grant.webauthn_rp" => cfg
+            .grant_webauthn_rp
+            .extend(parse_pipe_list(val).into_iter().filter(|e| !e.is_empty())),
         "attest.default_algorithm" => val.clone_into(&mut cfg.attest.default_algorithm),
         "attest.signer" => val.clone_into(&mut cfg.attest.signer),
         "attest.external_signer_path" => val.clone_into(&mut cfg.attest.external_signer_path),
@@ -878,8 +947,17 @@ fn apply_section_kv(cfg: &mut Config, key: &str, val: &str) -> bool {
         return false;
     };
     // Only flat, ref-safe names (no further dots) are accepted.
-    let valid_name = !name.is_empty() && mkit_core::refs::validate_ref_name(name);
+    // The grammar only: an existing config entry is never dropped for a
+    // name longer than SPEC-REFS §3's bound; `remote add` checks it.
+    let valid_name = !name.is_empty() && mkit_core::refs::validate_ref_name_grammar(name);
     match (section, field) {
+        ("remote", "admission_headers") => {
+            if valid_name {
+                cfg.remote_admission_headers
+                    .insert(name.to_owned(), val.to_owned());
+            }
+            true
+        }
         ("remote", "url") => {
             if valid_name {
                 val.clone_into(&mut cfg.remotes.entry(name.to_owned()).or_default().url);
@@ -951,6 +1029,7 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
         ("user.email", cfg.user_email.as_str()),
         ("default_branch", cfg.default_branch.as_str()),
         ("durability.objects", cfg.durability_objects.as_str()),
+        ("http.sslcainfo", cfg.http_ssl_ca_info.as_str()),
         ("remote_endpoint", cfg.remote_endpoint.as_str()),
         ("remote_bucket", cfg.remote_bucket.as_str()),
         ("remote_type", cfg.remote_type.as_str()),
@@ -1409,10 +1488,62 @@ pub fn xdg_config_home() -> PathBuf {
     xdg("XDG_CONFIG_HOME", ".config")
 }
 
+/// The XDG config base for data that must never land in a working directory
+/// (the grant store): an absolute `XDG_CONFIG_HOME`, else `$HOME/.config`.
+///
+/// # Errors
+/// Neither is set to an absolute path.
+pub fn xdg_config_home_absolute() -> Result<PathBuf, String> {
+    absolute_config_home(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+    )
+}
+
+fn absolute_config_home(
+    xdg: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Result<PathBuf, String> {
+    if let Some(v) = xdg.map(PathBuf::from)
+        && v.is_absolute()
+    {
+        return Ok(v);
+    }
+    if let Some(h) = home.map(PathBuf::from)
+        && h.is_absolute()
+    {
+        return Ok(h.join(".config"));
+    }
+    Err(
+        "cannot locate the user config directory: set XDG_CONFIG_HOME or HOME to an absolute path"
+            .to_owned(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mkit_core::layout::RepoLayout;
+
+    #[test]
+    fn config_home_must_be_absolute() {
+        let os = |s: &str| Some(std::ffi::OsString::from(s));
+        assert_eq!(
+            absolute_config_home(os("/x"), os("/h")).unwrap(),
+            PathBuf::from("/x")
+        );
+        assert_eq!(
+            absolute_config_home(os("rel"), os("/h")).unwrap(),
+            PathBuf::from("/h/.config")
+        );
+        assert_eq!(
+            absolute_config_home(None, os("/h")).unwrap(),
+            PathBuf::from("/h/.config")
+        );
+        for (x, h) in [(None, None), (os(""), os("")), (os("rel"), os("rel"))] {
+            assert!(absolute_config_home(x, h).is_err());
+        }
+    }
     use tempfile::TempDir;
 
     #[test]
@@ -1863,6 +1994,7 @@ mod tests {
             let observed = match *key {
                 "user.identity" => cfg.user_identity.as_str(),
                 "trusted_remote_endpoint" => cfg.trusted_remote_endpoint.as_str(),
+                "admission_helper" => cfg.admission_helper.as_str(),
                 "signer" => cfg.signer.as_str(),
                 "transport_auth" => cfg.transport_auth.as_str(),
                 "pull.require_signed" => cfg.pull_require_signed.as_str(),
@@ -1899,6 +2031,13 @@ mod tests {
                 }
                 "attest.secp256k1_key_path" => cfg.attest.secp256k1_key_path.as_str(),
                 "attest.p256_key_path" => cfg.attest.p256_key_path.as_str(),
+                "grant.webauthn_rp" => {
+                    if cfg.grant_webauthn_rp.is_empty() {
+                        ""
+                    } else {
+                        "<non-empty>"
+                    }
+                }
                 // If a new key appears in `REPO_FORBIDDEN_KEYS` without
                 // an arm here, fail loudly — the developer must extend
                 // both the constant AND the meta-test together. Without
@@ -2304,5 +2443,26 @@ mod tests {
         // No upstream + no default remote → None.
         let lc = layered(None, None);
         assert!(resolve_upstream(&lc, "main").is_none());
+    }
+
+    #[test]
+    fn admission_keys_are_user_only_and_do_not_create_remote() {
+        let repo = "admission_helper = /tmp/evil\nremote.origin.admission_headers = X-Evil\n";
+        let cfg = layer(Some(repo), None);
+        assert!(cfg.admission_helper.is_empty());
+        assert!(cfg.remote_admission_headers.is_empty());
+        assert!(cfg.remotes.is_empty());
+        assert!(is_repo_forbidden_key("admission_helper"));
+        assert!(is_repo_forbidden_key("remote.origin.admission_headers"));
+        assert!(is_repo_forbidden_key("remote.a.b.admission_headers"));
+        let cfg = layer(
+            None,
+            Some(
+                "admission_helper = /usr/bin/helper\nremote.origin.admission_headers = X-Payment\n",
+            ),
+        );
+        assert_eq!(cfg.admission_helper, "/usr/bin/helper");
+        assert_eq!(cfg.remote_admission_headers["origin"], "X-Payment");
+        assert!(cfg.remotes.is_empty());
     }
 }

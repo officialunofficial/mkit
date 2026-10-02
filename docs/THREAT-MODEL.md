@@ -190,8 +190,10 @@ Attacker is on the network path between the client and the remote.
 
 mkit defends:
 
-- HTTPS &mdash; via the system rustls trust store and TLS as configured
-  by the user.
+- HTTPS &mdash; native Connect uses bundled Mozilla roots, augmented by
+  certificates explicitly selected through `MKIT_SSL_CA_FILE` or
+  `http.sslCAInfo`. Certificate-chain and hostname verification stay enabled.
+  Browser clients use browser-managed trust.
 - SSH &mdash; via the user's `ssh(1)` configuration (see
   `SSH-SECURITY.md`). mkit does not implement its own SSH. A
   per-repo `ssh.user_known_hosts_file` and `ssh.identity_file`
@@ -216,7 +218,8 @@ authentication mechanisms &mdash; do not conflate them:
   **not** say anything about who the client is.
 - **Client-to-server** &mdash; authentication of the dialing client is the
   job of the server's bouncer **allowlist**, not of `?pubkey=`. Issue
-  #178 makes `mkit serve --listen-enc` **fail-closed**: it refuses to
+  #178 makes the listener (now `mkit-server serve --listen-enc`;
+  formerly `mkit serve --listen-enc`) **fail-closed**: it refuses to
   bind without an `--enc-authorized-peers` allowlist (or the explicit
   `--unsafe-allow-any-enc-peer` dev escape). A client whose static
   ed25519 key is not on the allowlist is rejected at the handshake and

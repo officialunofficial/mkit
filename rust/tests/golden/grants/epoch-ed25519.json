@@ -1,0 +1,108 @@
+{
+  "accepted_schemes": [
+    "ed25519"
+  ],
+  "namespace": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618",
+  "owner_seed": "0909090909090909090909090909090909090909090909090909090909090909",
+  "spec": "SPEC-WRITE-GRANTS §5.1, §5.2",
+  "transitions": [
+    {
+      "new": 1,
+      "outcome": "advance",
+      "stored": 0
+    },
+    {
+      "new": 1024,
+      "outcome": "advance",
+      "stored": 0
+    },
+    {
+      "new": 1025,
+      "outcome": "reject",
+      "stored": 0
+    },
+    {
+      "new": 5,
+      "outcome": "retry",
+      "stored": 5
+    },
+    {
+      "new": 4,
+      "outcome": "reject",
+      "stored": 5
+    },
+    {
+      "new": 18446744073709551615,
+      "outcome": "advance",
+      "stored": 18446744073709551605
+    },
+    {
+      "new": 18446744073709551615,
+      "outcome": "reject",
+      "stored": 18446744073709550590
+    },
+    {
+      "new": 18446744073709551615,
+      "outcome": "retry",
+      "stored": 18446744073709551615
+    }
+  ],
+  "vectors": [
+    {
+      "contexts": [
+        {
+          "audience": "https://git.example.com",
+          "expected_error": null,
+          "name": "at-created",
+          "now": 1790000000000
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": null,
+          "name": "created-30000ms-ahead",
+          "now": 1789999970000
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": null,
+          "name": "last-ms-before-expiry",
+          "now": 1790003599999
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": "not yet valid",
+          "name": "created-30001ms-ahead",
+          "now": 1789999969999
+        },
+        {
+          "audience": "https://git.example.com",
+          "expected_error": "expired",
+          "name": "at-expiry",
+          "now": 1790003600000
+        },
+        {
+          "audience": "https://git.example.net",
+          "expected_error": "audience not listed",
+          "name": "audience-not-listed",
+          "now": 1790000000000
+        }
+      ],
+      "fields": {
+        "audiences": [
+          "https://git.example.com",
+          "https://git.example.org"
+        ],
+        "created": 1790000000000,
+        "expiry": 1790003600000,
+        "namespace": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618",
+        "new_epoch": 4,
+        "nonce": "8888888888888888888888888888888888888888888888888888888888888888"
+      },
+      "header": "bWtpdC13cml0ZS1lcG9jaDp2MQplZDI1NTE5LWZkMTcyNDM4NWFhMGM3NWI2NGZiNzhjZDYwMmZhMWQ5OTFmZGViZjc2YjEzYzU4ZWQ3MDJlYWM4MzVlOWY2MTgKNApodHRwczovL2dpdC5leGFtcGxlLmNvbSxodHRwczovL2dpdC5leGFtcGxlLm9yZwoxNzkwMDAwMDAwMDAwCjE3OTAwMDM2MDAwMDAKODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4OA.ed25519.ZmMj0kmySYIXjd3-yMkcIgTFJ85olG_v370r8xTxAvH1yc8_7gMRuU5zMW1CZxNRpS_nkbWMPEowMyCyjJLEBA",
+      "id": "03e209dd4c3b2c28222642c6ce4aa82635aba413280f0e30feb7d031d15c647f",
+      "name": "epoch-4",
+      "signature_hex": "666323d249b24982178dddfec8c91c2204c527ce68946fefdfbd2bf314f102f1f5c9cf3fee0311b94e73316d42671351a52fe791b58c3c4a303320b28c92c404",
+      "statement": "mkit-write-epoch:v1\ned25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618\n4\nhttps://git.example.com,https://git.example.org\n1790000000000\n1790003600000\n8888888888888888888888888888888888888888888888888888888888888888"
+    }
+  ]
+}

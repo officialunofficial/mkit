@@ -1,0 +1,85 @@
+{
+  "vectors": [
+    {
+      "test_key_label": "TEST KEY ONLY: dedicated admin role, never use in a deployment",
+      "test_seed_hex": "5454545454545454545454545454545454545454545454545454545454545454",
+      "key_id": "test-admin-lease-2026-09",
+      "audience": "https://vcs.example.test",
+      "procedure": "/mkit.server.admin.v1.AdminService/SetLease",
+      "created_at_ms": "1790424000000",
+      "expires_at_ms": "1790424300000",
+      "nonce": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "body_file": "set-lease.request.json",
+      "body_utf8": "{\n  \"ref\": {\n    \"repository\": \"ed25519-a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0/payments-demo\",\n    \"ref\": \"refs/heads/main\"\n  },\n  \"terms\": {\n    \"expiresAtMs\": \"1790500000000\",\n    \"graceMs\": \"86400000\",\n    \"suspensionMs\": \"86400000\"\n  },\n  \"cause\": \"LEASE_CHANGE_CAUSE_RENEWAL\",\n  \"operatorLabel\": \"billing-job\"\n}\n",
+      "body_digest": "body:2964653c2fe3dede1c78928cb1d7872ad98dda7a7cf8d69c8c2c4f6aacb46436",
+      "canonical": "mkit-admin:v1\ntest-admin-lease-2026-09\nhttps://vcs.example.test\n/mkit.server.admin.v1.AdminService/SetLease\nbody:2964653c2fe3dede1c78928cb1d7872ad98dda7a7cf8d69c8c2c4f6aacb46436\n1790424000000\n1790424300000\na1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "canonical_blake3": "5d83727dbfe8f1eceafcdcf62cfc9703ddf80a9c473f91dc0965d25850324787",
+      "public_key": "9f49439e9db095bc4111ed25d35795d831bc55a047f4b1d7f6aee3777bb41220",
+      "signature": "20cbd70b361d2783f45d627c8697512958dc8f2dcfe4d9107cd2fddcd5349a7d63e93bd27a17c38766434f3b90180de62d73ef142c97fcd0f9fe0fd09265a20d",
+      "headers": {
+        "X-Mkit-Admin-Version": "1",
+        "X-Mkit-Admin-Key-Id": "test-admin-lease-2026-09",
+        "X-Mkit-Admin-Audience": "https://vcs.example.test",
+        "X-Mkit-Admin-Created-At": "1790424000000",
+        "X-Mkit-Admin-Expires-At": "1790424300000",
+        "X-Mkit-Admin-Nonce": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "X-Mkit-Admin-Digest": "body:2964653c2fe3dede1c78928cb1d7872ad98dda7a7cf8d69c8c2c4f6aacb46436",
+        "X-Mkit-Admin-Signature": "20cbd70b361d2783f45d627c8697512958dc8f2dcfe4d9107cd2fddcd5349a7d63e93bd27a17c38766434f3b90180de62d73ef142c97fcd0f9fe0fd09265a20d"
+      }
+    },
+    {
+      "test_key_label": "TEST KEY ONLY: dedicated admin role, never use in a deployment",
+      "test_seed_hex": "5555555555555555555555555555555555555555555555555555555555555555",
+      "key_id": "test-admin-moderation-2026-09",
+      "audience": "https://vcs.example.test",
+      "procedure": "/mkit.server.admin.v1.AdminService/Takedown",
+      "created_at_ms": "1790424000000",
+      "expires_at_ms": "1790424300000",
+      "nonce": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+      "body_file": "takedown.request.json",
+      "body_utf8": "{\n  \"operationId\": \"admin:take:1\",\n  \"level\": \"TAKEDOWN_LEVEL_CONTENT\",\n  \"reason\": \"reviewed violation\",\n  \"operatorLabel\": \"case-17\",\n  \"objectIds\": [\n    \"ERERERERERERERERERERERERERERERERERERERERERE=\"\n  ],\n  \"reasonToken\": \"policy\"\n}\n",
+      "body_digest": "body:810382733a47f208a068276c32c9a5fa829a709792798cb5aff7217658905090",
+      "canonical": "mkit-admin:v1\ntest-admin-moderation-2026-09\nhttps://vcs.example.test\n/mkit.server.admin.v1.AdminService/Takedown\nbody:810382733a47f208a068276c32c9a5fa829a709792798cb5aff7217658905090\n1790424000000\n1790424300000\na2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+      "canonical_blake3": "88f0206cb781da13fa4f7e4b38722c72bcae8571bfc04076c725e09ee0bf0f6e",
+      "public_key": "c6822637c7d310ec57627be00ba259d253749f4aaf644470cffbe53a35f73242",
+      "signature": "80719eb0aaeca9a18709cabf6f9dbc9ef292e084a3c55f398f08865db8c6167ea85b325476ef2840ba2df981b0dd31e122cd247fe064bbdc17ebe3689c1aa00e",
+      "headers": {
+        "X-Mkit-Admin-Version": "1",
+        "X-Mkit-Admin-Key-Id": "test-admin-moderation-2026-09",
+        "X-Mkit-Admin-Audience": "https://vcs.example.test",
+        "X-Mkit-Admin-Created-At": "1790424000000",
+        "X-Mkit-Admin-Expires-At": "1790424300000",
+        "X-Mkit-Admin-Nonce": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+        "X-Mkit-Admin-Digest": "body:810382733a47f208a068276c32c9a5fa829a709792798cb5aff7217658905090",
+        "X-Mkit-Admin-Signature": "80719eb0aaeca9a18709cabf6f9dbc9ef292e084a3c55f398f08865db8c6167ea85b325476ef2840ba2df981b0dd31e122cd247fe064bbdc17ebe3689c1aa00e"
+      }
+    },
+    {
+      "test_key_label": "TEST KEY ONLY: lease role intentionally lacks ReleaseHold permission",
+      "test_seed_hex": "5454545454545454545454545454545454545454545454545454545454545454",
+      "key_id": "test-admin-lease-2026-09",
+      "audience": "https://vcs.example.test",
+      "procedure": "/mkit.server.admin.v1.AdminService/ReleaseHold",
+      "created_at_ms": "1790424000000",
+      "expires_at_ms": "1790424300000",
+      "nonce": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+      "body_file": "release-hold.request.json",
+      "body_utf8": "{\n  \"repository\": \"ed25519-a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0/payments-demo\",\n  \"inspector\": \"content-safety\",\n  \"inspectionId\": \"inspect:42\",\n  \"reason\": \"manual review passed\",\n  \"operatorLabel\": \"reviewer-7\"\n}\n",
+      "body_digest": "body:91973e4892a430496bf944f3130acb8bdbd6bb59de6a93fe6c9919efbcad5171",
+      "canonical": "mkit-admin:v1\ntest-admin-lease-2026-09\nhttps://vcs.example.test\n/mkit.server.admin.v1.AdminService/ReleaseHold\nbody:91973e4892a430496bf944f3130acb8bdbd6bb59de6a93fe6c9919efbcad5171\n1790424000000\n1790424300000\na3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+      "canonical_blake3": "b463b5ec63463db0e3bfdcdcf456c13f95004b0e706701bd722673ace9aa1cca",
+      "public_key": "9f49439e9db095bc4111ed25d35795d831bc55a047f4b1d7f6aee3777bb41220",
+      "signature": "fb8763317b070b59690469537add2b3f881cb580594e540b50e75cc0d8ea57de4428af8dbbf746e54c88a3da2804d15b8fd1b0f842da09fb54d9f1aeb97d250a",
+      "headers": {
+        "X-Mkit-Admin-Version": "1",
+        "X-Mkit-Admin-Key-Id": "test-admin-lease-2026-09",
+        "X-Mkit-Admin-Audience": "https://vcs.example.test",
+        "X-Mkit-Admin-Created-At": "1790424000000",
+        "X-Mkit-Admin-Expires-At": "1790424300000",
+        "X-Mkit-Admin-Nonce": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+        "X-Mkit-Admin-Digest": "body:91973e4892a430496bf944f3130acb8bdbd6bb59de6a93fe6c9919efbcad5171",
+        "X-Mkit-Admin-Signature": "fb8763317b070b59690469537add2b3f881cb580594e540b50e75cc0d8ea57de4428af8dbbf746e54c88a3da2804d15b8fd1b0f842da09fb54d9f1aeb97d250a"
+      }
+    }
+  ]
+}

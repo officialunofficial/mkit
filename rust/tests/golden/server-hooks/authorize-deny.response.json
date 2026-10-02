@@ -1,0 +1,6 @@
+{
+  "deny": {
+    "code": "permission_denied",
+    "message": "This repository is read-only."
+  }
+}

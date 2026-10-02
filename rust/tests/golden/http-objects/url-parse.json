@@ -1,0 +1,1016 @@
+{
+  "cases": [
+    {
+      "expect": {
+        "parsed": {
+          "kind": "object",
+          "object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "proof": false,
+          "query": {},
+          "repository": null
+        },
+        "status": 200
+      },
+      "name": "single_id",
+      "request": {
+        "single_repository": true,
+        "url": "/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f"
+      }
+    },
+    {
+      "expect": {
+        "parsed": {
+          "kind": "object",
+          "object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "proof": false,
+          "query": {},
+          "repository": "demo"
+        },
+        "status": 200
+      },
+      "name": "explicit_bare",
+      "request": {
+        "single_repository": true,
+        "url": "/demo/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f"
+      }
+    },
+    {
+      "expect": {
+        "parsed": {
+          "kind": "object",
+          "object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "proof": false,
+          "query": {},
+          "repository": "ed25519-b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f/demo"
+        },
+        "status": 200
+      },
+      "name": "namespace_ed25519",
+      "request": {
+        "single_repository": false,
+        "url": "/ed25519-b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f/demo/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f"
+      }
+    },
+    {
+      "expect": {
+        "parsed": {
+          "kind": "object",
+          "object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "proof": false,
+          "query": {},
+          "repository": "0xb0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f04/demo"
+        },
+        "status": 200
+      },
+      "name": "namespace_address",
+      "request": {
+        "single_repository": false,
+        "url": "/0xb0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f04/demo/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f"
+      }
+    },
+    {
+      "expect": {
+        "parsed": {
+          "kind": "ref",
+          "path_hex": [],
+          "proof": false,
+          "query": {},
+          "ref": "refs/heads/main",
+          "repository": null
+        },
+        "status": 200
+      },
+      "name": "root",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/"
+      }
+    },
+    {
+      "expect": {
+        "parsed": {
+          "kind": "ref",
+          "path_hex": [
+            "737562",
+            "64656570",
+            "646565702e747874"
+          ],
+          "proof": false,
+          "query": {},
+          "ref": "refs/heads/main",
+          "repository": null
+        },
+        "status": 200
+      },
+      "name": "nested",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/sub/deep/deep.txt"
+      }
+    },
+    {
+      "expect": {
+        "parsed": {
+          "kind": "ref",
+          "path_hex": [
+            "2d"
+          ],
+          "proof": false,
+          "query": {},
+          "ref": "refs/heads/main",
+          "repository": null
+        },
+        "status": 200
+      },
+      "name": "dash_file",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/-"
+      }
+    },
+    {
+      "expect": {
+        "parsed": {
+          "kind": "ref",
+          "path_hex": [
+            "746f706963",
+            "2d",
+            "78"
+          ],
+          "proof": false,
+          "query": {},
+          "ref": "refs/heads",
+          "repository": null
+        },
+        "status": 200
+      },
+      "name": "dash_ref_delimits",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/-/topic/-/x"
+      }
+    },
+    {
+      "expect": {
+        "parsed": {
+          "kind": "ref",
+          "path_hex": [
+            "66696c65"
+          ],
+          "proof": false,
+          "query": {},
+          "ref": "refs/heads/feature-a",
+          "repository": null
+        },
+        "status": 200
+      },
+      "name": "dash_embedded",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/feature-a/-/file"
+      }
+    },
+    {
+      "expect": {
+        "parsed": {
+          "kind": "ref",
+          "path_hex": [
+            "6125623f6323642065",
+            "ff"
+          ],
+          "proof": false,
+          "query": {},
+          "ref": "refs/heads/main",
+          "repository": null
+        },
+        "status": 200
+      },
+      "name": "escaped_names",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/a%25b%3Fc%23d%20e/%FF"
+      }
+    },
+    {
+      "expect": {
+        "parsed": {
+          "kind": "ref",
+          "path_hex": [
+            "253246"
+          ],
+          "proof": false,
+          "query": {},
+          "ref": "refs/heads/main",
+          "repository": null
+        },
+        "status": 200
+      },
+      "name": "one_decode",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/%252F"
+      }
+    },
+    {
+      "expect": {
+        "parsed": {
+          "kind": "ref",
+          "path_hex": [
+            "66696c65"
+          ],
+          "proof": false,
+          "query": {},
+          "ref": "refs/heads/Main",
+          "repository": null
+        },
+        "status": 200
+      },
+      "name": "ref_uppercase",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/Main/-/file"
+      }
+    },
+    {
+      "expect": {
+        "parsed": {
+          "kind": "ref",
+          "path_hex": [
+            "66696c65"
+          ],
+          "proof": false,
+          "query": {},
+          "ref": "refs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "repository": null
+        },
+        "status": 200
+      },
+      "name": "ref_max",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/-/file"
+      }
+    },
+    {
+      "expect": {
+        "parsed": {
+          "kind": "ref",
+          "path_hex": [
+            "616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+            "616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+            "616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+            "6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+            "61"
+          ],
+          "proof": false,
+          "query": {},
+          "ref": "refs/heads/main",
+          "repository": null
+        },
+        "status": 200
+      },
+      "name": "path_max",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/a"
+      }
+    },
+    {
+      "expect": {
+        "parsed": {
+          "kind": "ref",
+          "path_hex": [
+            "7368616c6c6f772e747874"
+          ],
+          "proof": true,
+          "query": {
+            "proof": "1"
+          },
+          "ref": "refs/heads/main",
+          "repository": null
+        },
+        "status": 200
+      },
+      "name": "proof_ref",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/shallow.txt?proof=1"
+      }
+    },
+    {
+      "expect": {
+        "parsed": {
+          "kind": "ref",
+          "path_hex": [
+            "6368756e6b65642e62696e"
+          ],
+          "proof": true,
+          "query": {
+            "proof": "1",
+            "range": "001-020"
+          },
+          "ref": "refs/heads/main",
+          "repository": null
+        },
+        "status": 200
+      },
+      "name": "proof_range",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/chunked.bin?proof=1&range=001-020"
+      }
+    },
+    {
+      "expect": {
+        "parsed": {
+          "kind": "object",
+          "object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "proof": true,
+          "query": {
+            "commit": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+            "path": "",
+            "proof": "1"
+          },
+          "repository": null
+        },
+        "status": 200
+      },
+      "name": "proof_root_id",
+      "request": {
+        "single_repository": true,
+        "url": "/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f?proof=1&commit=b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f&path="
+      }
+    },
+    {
+      "expect": {
+        "parsed": {
+          "kind": "object",
+          "object": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+          "proof": true,
+          "query": {
+            "commit": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+            "path": "sub/file",
+            "proof": "1"
+          },
+          "repository": null
+        },
+        "status": 200
+      },
+      "name": "proof_object_context",
+      "request": {
+        "single_repository": true,
+        "url": "/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f?path=sub/file&commit=b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f&proof=1"
+      }
+    },
+    {
+      "expect": {
+        "parsed": {
+          "kind": "ref",
+          "path_hex": [],
+          "proof": false,
+          "query": {
+            "commit": "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f",
+            "path": "a"
+          },
+          "ref": "refs/heads/main",
+          "repository": null
+        },
+        "status": 200
+      },
+      "name": "unused_context",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/?commit=b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f&path=a"
+      }
+    },
+    {
+      "expect": {
+        "parsed": {
+          "kind": "ref",
+          "path_hex": [
+            "72616e67652e62696e"
+          ],
+          "proof": true,
+          "query": {
+            "proof": "1",
+            "range": "0-18446744073709551615"
+          },
+          "ref": "refs/heads/main",
+          "repository": null
+        },
+        "status": 200
+      },
+      "name": "max_endpoint_syntax",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/range.bin?proof=1&range=0-18446744073709551615"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "missing_repo_multi",
+      "request": {
+        "single_repository": false,
+        "url": "/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "bare_repo_multi",
+      "request": {
+        "single_repository": false,
+        "url": "/demo/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "uppercase_repo",
+      "request": {
+        "single_repository": true,
+        "url": "/Demo/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "uppercase_namespace",
+      "request": {
+        "single_repository": false,
+        "url": "/ed25519-B0145B689C72CFB1B8B1E7EC756C2C4A1E0B4F0469393E4FF4A30D8C3D6A0D6F/demo/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "unknown_namespace",
+      "request": {
+        "single_repository": false,
+        "url": "/user/demo/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "long_repo",
+      "request": {
+        "single_repository": true,
+        "url": "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "bad_repo_lead",
+      "request": {
+        "single_repository": true,
+        "url": "/.demo/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "escaped_repo",
+      "request": {
+        "single_repository": true,
+        "url": "/de%6do/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "uppercase_id",
+      "request": {
+        "single_repository": true,
+        "url": "/-/objects/B0145B689C72CFB1B8B1E7EC756C2C4A1E0B4F0469393E4FF4A30D8C3D6A0D6F"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "short_id",
+      "request": {
+        "single_repository": true,
+        "url": "/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "nonhex_id",
+      "request": {
+        "single_repository": true,
+        "url": "/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6g"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "id_trailing_slash",
+      "request": {
+        "single_repository": true,
+        "url": "/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f/"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "missing_ref_delimiter",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "outside_refs",
+      "request": {
+        "single_repository": true,
+        "url": "/-/heads/main/-/file"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "escaped_ref",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/ma%69n/-/file"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "ref_empty_segment",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs//main/-/file"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "ref_dot_segment",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/.main/-/file"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "ref_lock",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main.lock/-/file"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "ref_head",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/HEAD/-/file"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "ref_long",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/-/file"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "path_empty_segment",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/a//b"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "path_trailing_slash",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/a/"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "path_leading_slash",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-//a"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "invalid_escape",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/a%GG"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "escape_with_sign",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/a%+1b"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "truncated_escape",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/a%2"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "decoded_slash",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/a%2Fb"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "decoded_backslash",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/a%5Cb"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "decoded_nul",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/a%00b"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "dot_entry",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/%2E"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "dotdot_entry",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/.."
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "metadata_entry",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/.mkit"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "reserved_entry",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/CON.txt"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "trailing_space",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/a%20"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "trailing_dot",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/a."
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "raw_plus",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/a+b"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "raw_space",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/a b"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "entry_long",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "path_long",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aa"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "empty_query",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/?"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "unknown_parameter",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/?foo=1"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "repeated_parameter",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/?proof=1&proof=1"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "empty_parameter",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/?proof=1&"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "escaped_parameter",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/?%70roof=1"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "proof_value",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/?proof=0"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "range_without_proof",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/?range=0-1"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "range_reverse",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/?proof=1&range=2-1"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "range_overflow",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/?proof=1&range=0-18446744073709551616"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "range_empty",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/?proof=1&range=0-"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "range_sign",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/?proof=1&range=+0-1"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "proof_missing_context",
+      "request": {
+        "single_repository": true,
+        "url": "/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f?proof=1"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "proof_missing_path",
+      "request": {
+        "single_repository": true,
+        "url": "/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f?proof=1&commit=b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "proof_missing_commit",
+      "request": {
+        "single_repository": true,
+        "url": "/-/objects/b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f?proof=1&path=a"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "uppercase_commit",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/?commit=B0145B689C72CFB1B8B1E7EC756C2C4A1E0B4F0469393E4FF4A30D8C3D6A0D6F"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
+      "name": "bad_context_path",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/?path=a%2Fb"
+      }
+    }
+  ],
+  "schema_version": 1
+}

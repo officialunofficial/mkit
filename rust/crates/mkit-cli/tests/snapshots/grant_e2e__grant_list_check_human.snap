@@ -1,0 +1,22 @@
+---
+source: crates/mkit-cli/tests/grant_e2e.rs
+expression: "owner.ok(&[\"grant\", \"list\", \"--check\", \"--remote\", \"origin\"])"
+---
+<hex>  read  epoch 3  valid, stale epoch
+  namespace  ed25519-<hex>
+  scope      ed25519-<hex>/*
+  grantee    <hex>
+  audiences  http://127.0.0.1:<port>
+  expires    <date>
+<hex>  read  epoch 4  valid, epoch current
+  namespace  ed25519-<hex>
+  scope      ed25519-<hex>/*
+  grantee    <hex>
+  audiences  http://127.0.0.1:<port>
+  expires    <date>
+<hex>  read  epoch 5  valid, future epoch
+  namespace  ed25519-<hex>
+  scope      ed25519-<hex>/*
+  grantee    <hex>
+  audiences  http://127.0.0.1:<port>
+  expires    <date>

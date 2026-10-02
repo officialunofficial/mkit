@@ -32,6 +32,7 @@
 // them. cargo-deny still tracks them at warn level via deny.toml.
 #![allow(clippy::multiple_crate_versions)]
 
+pub mod admission;
 pub mod batch;
 pub mod chunker;
 pub mod delta;
@@ -53,11 +54,14 @@ pub mod serialize;
 pub mod sign;
 pub mod store;
 pub mod transfer;
+// BLAKE3 subtree hashing for resumable part uploads
+// (SPEC-TRANSPORT-CONNECT §7.6). Pure and wasm-safe.
+pub mod upload_parts;
 // Partial-disclosure verification: prove and verify that a path, chunk, or
 // byte range belongs to a commit id, with no store access and no trust
 // beyond the id itself (issue #1015 verifier kit PR 2). `default-features
-// = false` wasm-safe; the one native-only item (`build_disclosure`) is
-// gated on nothing extra since `ObjectStore` is already `std`-only.
+// = false` wasm-safe, builder included: `build_disclosure_from` reads through
+// any verifying `store::ObjectSource`; `build_disclosure` wraps `ObjectStore`.
 pub mod verify;
 pub mod write_auth;
 
@@ -71,6 +75,9 @@ pub(crate) mod atomic;
 pub mod ignore;
 pub mod index;
 pub mod refs;
+// SPEC-TRANSPORT-CONNECT §7.4 repository identity grammar (namespaces and
+// names), shared by server addressing and the grant codec.
+pub mod repo_identity;
 pub mod repo_lock;
 pub mod worktree;
 
@@ -112,7 +119,7 @@ pub use sign::{
     COMMIT_DOMAIN, KeyPair, PublicKey, REMIX_DOMAIN, SecretSeed, Signature, TAG_DOMAIN,
     commit_signing_bytes, commit_signing_hash, remix_signing_bytes, remix_signing_hash,
     sign_commit, sign_remix, sign_tag, tag_signing_bytes, tag_signing_hash, verify, verify_commit,
-    verify_remix, verify_tag,
+    verify_object_signature, verify_remix, verify_tag,
 };
 pub use store::{
     MAX_RAW_OBJECT_SIZE, MAX_TREE_DEPTH, MKIT_DIR, OBJECTS_DIR, ObjectStore, StoreError,
@@ -133,9 +140,11 @@ pub use delta::{
 
 // Packfile reader/writer (SPEC-PACKFILE v1).
 pub use pack::{
-    HEADER_LEN as PACK_HEADER_LEN, MAGIC as PACK_MAGIC, MAX_ENTRIES as PACK_MAX_ENTRIES,
-    MAX_TOTAL_PAYLOAD as PACK_MAX_TOTAL_PAYLOAD, PackEntries, PackEntry, PackError, PackReader,
-    PackWriter, TRAILER_LEN as PACK_TRAILER_LEN, UnpackReport, VERSION as PACK_VERSION, pack_key,
+    DecodeLimits, DecodeReport, DecodedEntry, DeltaBaseSource, HEADER_LEN as PACK_HEADER_LEN,
+    MAGIC as PACK_MAGIC, MAX_ENTRIES as PACK_MAX_ENTRIES,
+    MAX_TOTAL_PAYLOAD as PACK_MAX_TOTAL_PAYLOAD, NoExternalBases, PackEntries, PackEntry,
+    PackError, PackReader, PackWriter, TRAILER_LEN as PACK_TRAILER_LEN, UnpackReport,
+    VERSION as PACK_VERSION, decode_entries_with, pack_key,
 };
 
 // Refs, index, worktree, ignore, and repo_lock.
@@ -146,9 +155,11 @@ pub use index::{
 };
 pub use layout::RepoLayout;
 pub use refs::{
-    HEAD_FILE, HEADS_DIR, Head, REFS_DIR, Ref, RefError, RefResult, RefWriteCondition,
-    SHALLOW_FILE, TAGS_DIR, decode_ref_wire, encode_ref_wire, validate_ref_name,
-    validate_ref_prefix,
+    BRANCH_REF_PREFIX, HEAD_FILE, HEADS_DIR, Head, MAX_BRANCH_NAME_BYTES, MAX_REF_NAME_BYTES,
+    MAX_TAG_NAME_BYTES, PACKMAP_REF_PREFIX, REFS_DIR, Ref, RefError, RefNameKind, RefResult,
+    RefWriteCondition, SHALLOW_FILE, TAG_REF_PREFIX, TAGS_DIR, check_new_name, check_new_ref_name,
+    check_pushable_branch, decode_ref_wire, encode_ref_wire, validate_ref_name,
+    validate_ref_name_grammar, validate_ref_prefix,
 };
 pub use repo_lock::{DEFAULT_TIMEOUT as LOCK_DEFAULT_TIMEOUT, LockError, LockResult, RepoLock};
 pub use worktree::{
@@ -160,8 +171,9 @@ pub use worktree::{
 // mkit-rpc's ssh.proto and are consumed by mkit-transport-ssh
 // directly.
 pub use protocol::{
-    AdvanceOutcome, BACKOFF_CAP, BACKOFF_INITIAL, BACKOFF_MAX_ATTEMPTS, BackoffIterator, PackKey,
-    Transport, TransportError, TransportResult, is_retryable, pack_key_from_hex,
+    AdvanceOutcome, BACKOFF_CAP, BACKOFF_INITIAL, BACKOFF_MAX_ATTEMPTS, BackoffIterator,
+    CommitOutcome, PackKey, Transport, TransportError, TransportResult, UploadLimits, is_retryable,
+    pack_key_from_hex,
 };
 
 // Ops re-exports (OPS1: diff/graph/merge/cherry_pick).

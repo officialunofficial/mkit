@@ -36,7 +36,7 @@ A user-level config at
 provides cross-repo defaults; repo-local values in
 .Pa .mkit/config
 win over it for ordinary keys, but security-sensitive keys
-.Pq Cm signing_key , Cm user.identity , Cm signer , Cm key.* , Cm attest.* , Cm ssh.* , No and Cm trusted_remote_endpoint
+.Pq Cm signing_key , Cm user.identity , Cm signer , Cm key.* , Cm attest.* , Cm ssh.* , Cm grant.webauthn_rp , No and Cm trusted_remote_endpoint
 are user-scoped only and are ignored if set repo-locally.
 .Sh GLOBAL OPTIONS
 Parsed before
@@ -1225,6 +1225,52 @@ Manage user-scoped keystore keys backed by the platform keystore
 (Keychain on macOS, libsecret/systemd-creds/YubiKey on Linux). Unlike
 .Cm keygen
 (which writes to a repo-local file), these keys persist across repos.
+.It Cm grant Cm create | Cm add | Cm list | Cm revoke
+Issue, import, list and revoke write and read grants (SPEC-WRITE-GRANTS).
+.Cm grant create
+signs a grant with the owner key
+.Pq Cm ed25519 No or a software-keystore Cm secp256k1-eip191 key ,
+or imports a wallet or WebAuthn signature over a statement printed with
+.Fl Fl print-statement ;
+.Cm grant add Oo Fl Fl remote Ar remote | Fl Fl offline Oc
+verifies a grant header and adds it to the user grant store under
+.Pa $XDG_CONFIG_HOME/mkit/grants/ ,
+then makes one short attempt to compare the grant's epoch with the trusted (or
+named) remote's and only warns if that fails
+.Pq Fl Fl offline No skips it ;
+.Cm grant list Op Fl Fl check
+lists it;
+.Cm grant revoke Ar remote
+is
+.Cm epoch bump
+by one and lists the local grants it invalidates. Among the grants valid for a
+request the higher epoch wins, then the most specific scope, then the latest
+expiry. A grant pre-issued for epoch e+1 outranks a live epoch-e grant until the
+owner raises the epoch. A write-only grant never implies read on a private
+repository. Each signed read may prompt for a signature when the key needs a
+touch or a passphrase. A server without indexed mode applies an update to an
+existing ref only under the
+.Cm f
+flag, so issue grants for pushes that move a branch as
+.Cm cuf ,
+not
+.Cm cu .
+This store is unrelated to the operator-side
+.Cm mkit-server grant register .
+.It Cm epoch Cm show | Cm bump
+.Cm epoch show Ar remote
+prints the grant epoch a remote stores for a namespace.
+.Cm epoch bump Ar remote Op Fl Fl by Ar n
+signs one epoch statement and re-sends the same bytes while the server answers
+.Sy unavailable
+with
+.Sy Retry-After ,
+up to
+.Fl Fl timeout .
+.It Cm visibility Cm set Ar remote Cm public | Cm private Op Fl Fl statement
+Switch a repository between public and private, with a signed request or, with
+.Fl Fl statement ,
+an owner-signed statement.
 .It Cm keygen Oo Fl Fl algorithm Cm ed25519 | Cm secp256k1 | Cm p256 Oc Oo Fl Fl force Oc Op Fl Fl print-pubkey
 Generate a fresh keypair.
 .Fl Fl algorithm
@@ -1277,10 +1323,30 @@ The first time either alias is set in a repo that has never set
 (or the other alias), a one-time warning is printed to stderr pointing
 at
 .Cm user.identity .
-.It Cm serve Ar path
+.It Cm serve Oo Fl Fl idle-timeout-secs Ar secs Oc Oo Fl Fl max-session-secs Ar secs Oc Ar path
 Internal subcommand: act as the server end of an
 .Cm mkit+ssh://
-transport.
+transport, speaking the SSH-frame protocol on stdin and stdout.
+.Fl Fl idle-timeout-secs
+.Pq default 60 ; 0 disables it
+ends the session, with exit status 76, after that many seconds without a
+byte from the client; an upload that keeps sending never trips it.
+.Fl Fl max-session-secs
+.Pq default 0, off
+ends the process that many seconds after it starts, whatever the client
+is doing, with exit status 76.
+Both accept at most 604800.
+Only refs named under
+.Pa refs/
+are served; any other name is refused.
+It has no network listener: the self-hosted
+.Cm mkit+https://
+and
+.Cm mkit+enc://
+servers are the separate
+.Sy mkit-server
+binary
+.Pq Ic mkit-server serve Fl Fl repo-root Ar path Fl Fl listen Ar addr .
 .It Cm mcp Op Fl Fl repository Ar path
 Start a Model Context Protocol server on stdio so LLM agents can drive
 local repositories: status, diff, log, show, branch, add, commit,
@@ -1389,7 +1455,7 @@ as
 .Cm git am Ns
 -able mbox patches, oldest first; merge commits are skipped.
 .It Cm self Cm update Oo Fl Fl version Ar tag Oc Oo Fl Fl check Oc Oo Fl Fl allow-downgrade Oc Oo Fl Fl format Ar human|json Oc
-Update this binary in place from a signed GitHub Release. The
+Update this binary in place from a GitHub Release. The
 downloaded archive is checked against its sha256 sidecar asset when
 the release publishes one; this runs entirely in-process \(em no
 .Cm cosign

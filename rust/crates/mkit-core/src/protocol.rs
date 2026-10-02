@@ -33,6 +33,7 @@ pub use crate::refs::RefWriteCondition;
 /// internally but MUST map them to one of these variants before
 /// returning.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum TransportError {
     /// `download_pack` called on a digest the remote does not hold.
     #[error("pack not found on remote")]
@@ -41,6 +42,18 @@ pub enum TransportError {
     /// S3 `SignatureDoesNotMatch`, …).
     #[error("access denied by remote")]
     AccessDenied,
+    /// A remote requires admission before this write may proceed.
+    #[error("{0}")]
+    AdmissionRequired(Box<AdmissionRequired>),
+    /// User admission configuration or helper headers were rejected.
+    #[error("admission configuration: {0}")]
+    AdmissionConfiguration(String),
+    /// Local HTTPS trust configuration could not be loaded or validated.
+    #[error("HTTPS trust configuration: {0}")]
+    TlsConfiguration(String),
+    /// The configured admission helper failed.
+    #[error("admission helper failed: {0}")]
+    AdmissionHelperFailed(String),
     /// Catch-all remote-side failure carrying an advisory message. The
     /// message is for operators; programs MUST NOT pattern-match on its
     /// contents.
@@ -84,6 +97,113 @@ pub enum TransportError {
     /// transported in the clear.
     #[error("insecure scheme: plain http:// is allowed only for loopback hosts")]
     InsecureScheme,
+}
+
+/// One opaque challenge advertised by the remote.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AdmissionChallengeEntry {
+    /// Lowercase scheme identifier.
+    pub scheme: String,
+    /// Opaque challenge value. Do not display or log it.
+    pub value: String,
+}
+
+impl fmt::Debug for AdmissionChallengeEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AdmissionChallengeEntry")
+            .field("scheme", &self.scheme)
+            .field("value_len", &self.value.len())
+            .finish()
+    }
+}
+
+/// A remote admission challenge and the bounded response headers needed by a helper.
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AdmissionRequired {
+    /// Challenges in server preference order.
+    pub challenges: Vec<AdmissionChallengeEntry>,
+    /// Untrusted server description, retained for the helper.
+    pub description: String,
+    /// Bounded `WWW-Authenticate` header values.
+    pub www_authenticate: Vec<String>,
+    /// Bounded `PAYMENT-REQUIRED` header values.
+    pub payment_required: Vec<String>,
+    /// Terminal admission state, if a helper already ran or hit its cap.
+    pub reason: Option<&'static str>,
+}
+
+impl AdmissionRequired {
+    /// Construct a remote challenge from already-bounded fields. The Connect
+    /// client validates the bounds before calling this.
+    #[must_use]
+    pub fn new(
+        challenges: Vec<AdmissionChallengeEntry>,
+        description: String,
+        www_authenticate: Vec<String>,
+        payment_required: Vec<String>,
+    ) -> Self {
+        Self {
+            challenges,
+            description,
+            www_authenticate,
+            payment_required,
+            reason: None,
+        }
+    }
+
+    /// Add a safe terminal explanation without exposing challenge values.
+    #[must_use]
+    pub fn with_reason(mut self, reason: &'static str) -> Self {
+        self.reason = Some(reason);
+        self
+    }
+}
+
+impl fmt::Debug for AdmissionRequired {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AdmissionRequired")
+            .field("challenges", &self.challenges)
+            .field("description_len", &self.description.len())
+            .field("www_authenticate_count", &self.www_authenticate.len())
+            .field("payment_required_count", &self.payment_required.len())
+            .field("reason", &self.reason)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Display for AdmissionRequired {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("admission required by remote: ")?;
+        write_safe_remote_text(f, &self.description)?;
+        if self.challenges.is_empty() {
+            f.write_str(" (no challenges)")?;
+        } else {
+            f.write_str(" (schemes: ")?;
+            for (i, challenge) in self.challenges.iter().enumerate() {
+                if i != 0 {
+                    f.write_str(", ")?;
+                }
+                write_safe_remote_text(f, &challenge.scheme)?;
+            }
+            f.write_str(")")?;
+        }
+        if let Some(reason) = self.reason {
+            write!(f, ": {reason}")?;
+        }
+        Ok(())
+    }
+}
+
+fn write_safe_remote_text(f: &mut fmt::Formatter<'_>, value: &str) -> fmt::Result {
+    for c in value.chars() {
+        if c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
+            write!(f, "\\u{{{:x}}}", c as u32)?;
+        } else {
+            write!(f, "{c}")?;
+        }
+    }
+    Ok(())
 }
 
 /// Result alias used throughout this module.
@@ -187,10 +307,12 @@ pub fn pack_key_from_hex(s: &str) -> Result<PackKey, FromHexError> {
 /// Explicitly non-retryable:
 /// - [`TransportError::PackNotFound`]
 /// - [`TransportError::AccessDenied`]
+/// - [`TransportError::AdmissionRequired`] — requires an explicit helper response
 /// - [`TransportError::RefConflict`] (CAS retry is a caller-level policy)
 /// - [`TransportError::InvalidRef`]
 /// - [`TransportError::InvalidResponse`] / [`TransportError::ProtocolError`]
 /// - [`TransportError::PayloadTooLarge`]
+/// - [`TransportError::TlsConfiguration`] — local trust setup failed.
 /// - [`TransportError::RemoteError`] — the remote chose not to be specific;
 ///   we do not guess.
 /// - [`TransportError::ServerError`] with any 4xx status.
@@ -391,17 +513,57 @@ pub struct PackChunk {
 /// responsible — the abstract trait takes no position. The
 /// [`is_retryable`] and [`BackoffIterator`] helpers are provided for
 /// implementations that embed the policy.
+/// The repository a transport addresses, for remote error context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RepositoryAddress<'a> {
+    /// Repository identity as sent on the wire (STC §7.4).
+    pub repository: &'a str,
+    /// Origin (scheme and authority) of the remote.
+    pub origin: &'a str,
+}
+
+impl<'a> RepositoryAddress<'a> {
+    /// Build an address from a repository identity and a remote origin.
+    #[must_use]
+    pub const fn new(repository: &'a str, origin: &'a str) -> Self {
+        Self { repository, origin }
+    }
+}
+
 pub trait Transport: Send + Sync {
+    /// Repository identity and origin used for remote error context, if available.
+    /// Existing transports carry no addressing context by default.
+    fn repository_address(&self) -> Option<RepositoryAddress<'_>> {
+        None
+    }
+
     /// Upload a pack. The digest is computed by the caller (BLAKE3 of
     /// the full pack bytes) and used as the object key — servers MAY
     /// dedupe on this key.
     fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()>;
+
+    /// Upload a pack for an intended head ref. Transports without upload
+    /// tickets ignore the hint and retain their existing upload behavior.
+    fn upload_pack_via_ref(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        _head_ref: &str,
+    ) -> TransportResult<()> {
+        self.upload_pack(bytes, key)
+    }
 
     /// Download a pack by its digest.
     ///
     /// Returns [`TransportError::PackNotFound`] if the remote does not
     /// hold this digest.
     fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>>;
+
+    /// Download a pack with a read-your-writes ref hint. Defaults to ignoring it.
+    fn download_pack_via_ref(&self, key: &PackKey, _ref_name: &str) -> TransportResult<Vec<u8>> {
+        self.download_pack(key)
+    }
 
     /// Upload a pack by streaming bounded-size [`PackChunk`]s instead of
     /// requiring the whole pack materialized as one `&[u8]` up front.
@@ -455,7 +617,7 @@ pub trait Transport: Send + Sync {
         let mut saw_last = false;
         for chunk in chunks {
             let c = chunk?;
-            if buf.len().saturating_add(c.data.len()) > PACK_BODY_LIMIT_USIZE {
+            if c.data.len() > PACK_BODY_LIMIT_USIZE.saturating_sub(buf.len()) {
                 return Err(TransportError::PayloadTooLarge(PACK_BODY_LIMIT_USIZE));
             }
             buf.extend_from_slice(&c.data);
@@ -509,6 +671,11 @@ pub trait Transport: Send + Sync {
     /// network transports.
     fn pack_exists(&self, key: &PackKey) -> TransportResult<bool>;
 
+    /// Check a pack with a read-your-writes ref hint. Defaults to ignoring it.
+    fn pack_exists_via_ref(&self, key: &PackKey, _ref_name: &str) -> TransportResult<bool> {
+        self.pack_exists(key)
+    }
+
     /// Upload a content-addressed **auxiliary blob** — transfer metadata
     /// that is NOT a packfile (e.g. a packlist chain node, SPEC-PACKFILE is
     /// silent on these). The key is BLAKE3 of `bytes`, exactly like a pack.
@@ -522,12 +689,28 @@ pub trait Transport: Send + Sync {
         self.upload_pack(bytes, key)
     }
 
+    /// Upload auxiliary content for an intended head ref. The default keeps
+    /// the transport's existing blob behavior.
+    fn upload_blob_via_ref(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        _head_ref: &str,
+    ) -> TransportResult<()> {
+        self.upload_blob(bytes, key)
+    }
+
     /// Download an auxiliary blob by digest. Counterpart to
     /// [`Self::upload_blob`]; default impl delegates to
     /// [`Self::download_pack`]. Returns [`TransportError::PackNotFound`] if
     /// the remote does not hold this digest.
     fn download_blob(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
         self.download_pack(key)
+    }
+
+    /// Download auxiliary metadata with a ref hint. Defaults to ignoring it.
+    fn download_blob_via_ref(&self, key: &PackKey, _ref_name: &str) -> TransportResult<Vec<u8>> {
+        self.download_blob(key)
     }
 
     /// Unconditional ref write — equivalent to
@@ -599,6 +782,36 @@ pub trait Transport: Send + Sync {
         }
     }
 
+    /// Advance both refs while committing any upload tickets for `commit`.
+    /// Other transports ignore the pack keys and use their existing advance.
+    #[allow(clippy::too_many_arguments)]
+    fn advance_refs_committing(
+        &self,
+        head_ref: &str,
+        head_condition: RefWriteCondition,
+        head_value: &Hash,
+        packmap_ref: &str,
+        packmap_condition: RefWriteCondition,
+        packmap_value: &Hash,
+        _commit: &[PackKey],
+    ) -> TransportResult<CommitOutcome> {
+        self.advance_refs(
+            head_ref,
+            head_condition,
+            head_value,
+            packmap_ref,
+            packmap_condition,
+            packmap_value,
+        )
+        .map(CommitOutcome::Advanced)
+    }
+
+    /// Limits the remote advertises to the push planner. `None` means the
+    /// transport does not impose an additional limit.
+    fn upload_limits(&self) -> UploadLimits {
+        UploadLimits::default()
+    }
+
     /// Whether [`Self::advance_refs`] commits the head + packmap advance as
     /// one indivisible transaction, rather than the default's ordered
     /// packmap-then-head writes.
@@ -630,13 +843,40 @@ pub trait Transport: Send + Sync {
 pub enum AdvanceOutcome {
     /// Both refs were updated.
     Committed,
-    /// The head precondition did not hold (the branch moved under us). An
-    /// atomic transport leaves nothing changed; callers treat this as a
-    /// non-fast-forward.
+    /// The head precondition did not hold. An atomic transport leaves
+    /// nothing changed. Callers re-read the head (SPEC-TRANSPORT §7): if it
+    /// already holds their target, a retried write landed and the advance
+    /// succeeded; otherwise the branch moved under them (non-fast-forward).
     HeadConflict,
     /// The packmap precondition did not hold (a concurrent pusher advanced
     /// the chain). Callers re-read the packmap and retry.
     PackmapConflict,
+}
+
+/// Result of an advance that can consume upload tickets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CommitOutcome {
+    /// The advance reached the ordinary two-ref outcome.
+    Advanced(AdvanceOutcome),
+    /// A ticket was invalid, expired, incomplete, or was already consumed.
+    TicketRejected,
+    /// A delta base is not yet available to this repository.
+    DeltaBaseUnavailable,
+    /// The packlist names content not in this repository.
+    PacklistNotInRepository,
+}
+
+/// Server limits relevant to splitting a push into packs and advances.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct UploadLimits {
+    /// Maximum accepted serialized pack bytes, if advertised.
+    pub max_pack_bytes: Option<u64>,
+    /// Maximum number of upload tickets one advance may consume.
+    pub tickets_per_advance: Option<usize>,
+    /// First serialized pack size that requires a ticket, when known.
+    /// A transport may stop requiring tickets after discovery fallback.
+    pub ticket_threshold_bytes: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -711,6 +951,9 @@ mod tests {
         assert!(!is_retryable(&TransportError::ServerError { status: 401 }));
         assert!(!is_retryable(&TransportError::PackNotFound));
         assert!(!is_retryable(&TransportError::AccessDenied));
+        assert!(!is_retryable(&TransportError::TlsConfiguration(
+            "bad CA file".into()
+        )));
         assert!(!is_retryable(&TransportError::RefConflict));
     }
 
@@ -792,6 +1035,21 @@ mod tests {
         fn list_refs(&self, _prefix: &str) -> TransportResult<Vec<Ref>> {
             unimplemented!("not exercised by these tests")
         }
+    }
+
+    #[test]
+    fn ticket_hooks_default_to_existing_transport_behavior() {
+        let transport = RecordingTransport::default();
+        let bytes = b"test pack";
+        let key = PackKey::new(crate::hash::hash(bytes));
+        transport
+            .upload_pack_via_ref(bytes, &key, "refs/heads/main")
+            .unwrap();
+        assert_eq!(transport.download_pack(&key).unwrap(), bytes);
+        transport
+            .upload_blob_via_ref(bytes, &key, "refs/heads/main")
+            .unwrap();
+        assert_eq!(transport.upload_limits(), UploadLimits::default());
     }
 
     fn chunks_of(data: &[u8], chunk_len: usize) -> Vec<PackChunk> {

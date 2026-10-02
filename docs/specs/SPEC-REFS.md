@@ -1,6 +1,6 @@
 ---
 spec: SPEC-REFS
-version: 1
+version: 3
 status: stable-normative
 audience: implementers of compatible ref stores and transports
 ---
@@ -9,18 +9,14 @@ audience: implementers of compatible ref stores and transports
 
 Status: **Normative** and **Stable** for mkit v1 &mdash; the wire format,
 namespace layout, and CAS semantics below are settled and backed by
-shipped, tested transports (memory, file, s3, http, ssh). One
-deliberately-scoped limitation is called out inline rather than left
-implicit: the in-process memory transport's `.match` CAS is a
-read-then-write race by design (§5.1, §8) &mdash; it is single-fiber by
-construction and never shared across processes, so this is a
-documented, permanent property of that one code path, not an open
-question about the format itself, and it does not block this
-document's stability. (The local `mkit-core` `refs::cas_write` helper
-used by commands that write refs directly is, as of #637, serialized
-under a per-ref lock and is *not* part of this exception &mdash; see
-§5.1.) See SPEC-CONVENTIONS §2 for what draft/stable and
-normative/advisory mean.
+shipped, tested transports (memory, file, s3, http, ssh). Every
+transport's `.missing` and `.match` CAS is atomic among the callers that
+share it, given the server support §5.1 requires for s3 and http; the
+in-process memory transport's atomicity is in-process only, because it
+is never shared across processes. The local
+`mkit-core` `refs::cas_write` helper used by commands that write refs
+directly is serialized under a per-ref lock (#637, §5.1). See
+SPEC-CONVENTIONS §2 for what draft/stable and normative/advisory mean.
 Scope: ref names, ref wire bytes, ref storage layout, and the exact
 semantics of `listRefs(prefix)` and `updateRef(condition)` across
 transports.
@@ -57,13 +53,34 @@ Hash value: 32 bytes of BLAKE3. Writer computes
 
 ## 2. Ref namespace
 
-Refs live under three namespaces:
+Refs live under `refs/`, in these namespaces:
 
 ```
 refs/heads/<name>                  branch refs
 refs/tags/<name>                   tag refs
 refs/remotes/<remote>/<name>       remote-tracking branch refs
+refs/mkit/packmap/<name>           pack map of branch <name> (pushed with it)
 ```
+
+**Served names.** A transport server (`mkit serve`, `mkit-server`, the
+Workers server) MUST serve only ref names under `refs/`. It MUST refuse
+any other name that passes the §3 grammar (for example `main`,
+`heads/main`) on every read and write (`ReadRef`, `UpdateRef` and both
+names of `AdvanceRefs`), before touching storage, with an explicit error:
+`invalid_argument` on Connect (SPEC-TRANSPORT-CONNECT §5) and
+`Error{ERROR_CODE_INVALID_REQUEST}` on the ssh frame protocol
+(SPEC-TRANSPORT §4.2.1), whose message starts `ref name must start with
+refs/`. It MUST NOT answer such a name as absent. A `ListRefs` prefix is
+not restricted: a prefix outside `refs/` lists nothing. A name that
+fails the §3 grammar is refused as §3 says. The local and client-side
+transports (file, s3, memory) are not servers and are unaffected.
+
+*Informative.* Every mkit client writes only `refs/heads/`, `refs/tags/`
+and `refs/mkit/packmap/` names. `mkit serve` before 0.5 stored any
+grammar-valid name as a file at the served root (`main` as
+`<root>/main`), so a third-party client could have left such files; they
+are no longer served, and `docs/CLI.md` ("Refs outside `refs/`") says how
+an operator finds and moves them. Version 3 added this rule.
 
 On local disk (`.mkit/refs/heads/<name>`, `.mkit/refs/tags/<name>`,
 `.mkit/refs/remotes/<remote>/<name>`). On transports, branch and tag refs
@@ -123,6 +140,33 @@ Plus these rejections:
   suffix; for example `refs/heads/main.lock` is reserved).
 - Final segment equal to `HEAD` → invalid (shadows the repo-level
   `HEAD` pointer; for example `HEAD` and `refs/heads/HEAD` are rejected).
+- Longer than **512 bytes** → invalid. A ref name is ASCII, so this is
+  also its length in characters. The bound keeps every ref inside a
+  server's storage key (`mkit-server` `store::keys`); the constant is
+  `mkit_core::refs::MAX_REF_NAME_BYTES`. A transport server MUST refuse
+  a longer name on a read or a write with an explicit "ref name too
+  long" error, never as absent or a generic failure, and a client
+  SHOULD refuse it before sending (`mkit_rpc::MAX_REF_NAME`, the same
+  value). A server's listing skips a stored ref whose name is longer
+  (written before this bound existed) and logs it; it does not fail the
+  listing. Locally, a new branch, tag or remote-tracking ref over the
+  bound is refused with a message naming the limit, while an existing
+  one stays readable, listable and deletable (and can be renamed with
+  `mkit branch -m`), so a repository with such a ref keeps working.
+
+*Informative: derived local bounds.* A local branch or tag name is
+short; its wire name adds a prefix. A push of branch `b` writes both
+`refs/heads/<b>` and `refs/mkit/packmap/<b>`, so a new branch name is at
+most 512 − 18 = **494 bytes** (`MAX_BRANCH_NAME_BYTES`); a tag's wire
+name is `refs/tags/<t>`, so a new tag name is at most 512 − 10 = **502
+bytes** (`MAX_TAG_NAME_BYTES`). `mkit` refuses to create a longer one and
+says which bound applies. A branch created before these bounds, up to
+512 bytes, can still be committed to, renamed and deleted locally, but a
+push of it fails with "ref name too long", naming the wire name.
+
+**Version 2** added the 512-byte bound, a deliberate breaking change
+under the pre-production policy with no migration path: version 1 had
+no length limit, and the ssh server accepted names of any length.
 
 **Notable divergences from Git ref naming:**
 
@@ -221,7 +265,9 @@ empty slice, not null.
 ### 4.2 Prefix validation
 
 The prefix itself must be empty or pass the same grammar as a ref name
-(§3), possibly with a single trailing `/`. Transports MUST reject
+(§3), including its 512-byte bound, once its trailing `/`s are removed:
+trailing `/`s are ignored, so `refs/heads`, `refs/heads/` and
+`refs/heads//` are the same prefix (§4 normalizes all three to `P'`). Transports MUST reject
 invalid prefixes (the core helper `validate_ref_prefix` returns a
 boolean; transports wrap the false case as their domain-specific
 `InvalidRef` error, for example `RefError::InvalidRefName` on the file
@@ -253,15 +299,19 @@ not exist or contains a different hash → `RefConflict`.
 
 | Transport | `.any`      | `.missing`                            | `.match`                                                       | Notes |
 |-----------|-------------|---------------------------------------|----------------------------------------------------------------|-------|
-| memory    | atomic*     | atomic*                               | **NOT atomic** &mdash; read-then-write race                          | *Single-threaded by construction. Across fibers: no lock. |
+| memory    | atomic*     | atomic*                               | atomic* &mdash; the read-check-write runs under the instance's one `Mutex` | *In-process only: every verb of one `MemoryTransport` instance holds its `Mutex` for the whole operation, so concurrent threads sharing the instance cannot interleave. Never shared across processes. |
 | file      | atomic      | atomic (via `O_EXCL` create)          | atomic &mdash; OS exclusive file lock (`<root>/.mkit/refs/.lock`) serializes the read-check-write across processes | Lock guard released on drop (including panic-unwind). |
 | s3        | atomic      | atomic via `If-None-Match: *`         | atomic via `If-Match: "<md5-of-wire>"`                         | Requires server that supports conditional writes (R2 and post-2024 AWS S3 do; generic S3 may not). |
 | http      | atomic      | atomic via `If-None-Match: *`         | atomic via `If-Match: "<hex-hash>"`                            | Worker-flavored server. Generic S3 and nginx do NOT conform. |
 | ssh       | atomic      | atomic (`OP_WRITE_REF_IF_ABSENT` path via condition byte) | atomic (`CONDITION_MATCH` with 32-byte expected hash)          | Server enforces CAS; client trusts `STATUS_ERROR`. |
 
-*memory CAS:* v1 ships the non-atomic `.match` implementation for the
-in-process memory transport only. The file transport's `.match` is atomic
-across processes via the OS lock above. As of #637, the local `mkit-core`
+*memory CAS:* `mkit-transport-memory`'s `update_ref` reads the current
+value, checks the condition and writes the new value while holding the
+instance's single `Mutex`, so all three conditions are atomic for every
+thread sharing that instance. It provides no cross-process atomicity and
+needs none: the memory transport is an in-process test transport. The
+file transport's `.match` is atomic across processes via the OS lock
+above. As of #637, the local `mkit-core`
 `refs::cas_write` helper used by commands that mutate refs directly on
 disk (without going through the file transport) is also atomic across
 processes: every write condition takes a dedicated `<common_dir>/refs-<ref>.lock`
@@ -270,9 +320,7 @@ OS exclusive lock (distinct from the file transport's
 around the read-check-write, so two uncoordinated callers on the same
 repo &mdash; for example `branch -m` and `commit`, or `update-ref` from two linked
 worktrees &mdash; can no longer both observe a stale `current` value and both
-report success while one write is silently lost. Only the in-process
-memory transport's `.match` remains genuinely non-atomic (single-fiber
-races), matching the row above.
+report success while one write is silently lost.
 
 **Direct local mixed mutation contract:** Any, Missing, Match, and both
 conditional and unconditional deletes MUST serialize on the same full-ref
@@ -320,7 +368,8 @@ The `.match(H)` condition is serialized differently by transport:
 - **SSH**: no ETag; the 32 raw bytes of `H` are sent in the
   `CONDITION_MATCH` payload.
 - **file / memory**: read-then-compare against `H`'s raw bytes
-  in-process.
+  in-process, under the file transport's OS lock or the memory
+  transport's `Mutex` (§5.1).
 
 Mkit v1 **does not** unify these encodings. The transport spec
 explicitly states which encoding to produce. Clients and servers for a
@@ -442,7 +491,7 @@ base/ours/theirs material lives only in this sidecar.
 | No ref shadows `HEAD` or a lock file | grammar rejections for final-segment `HEAD` and the `.lock` suffix (§3) |
 | `listRefs(prefix)` is byte-identical across transports | single normative stripping algorithm; lexicographic order, no duplicates; conformance-tested (§4, §4.1, test vector 3) |
 | A `.missing` write succeeds at most once per ref | `O_EXCL`/`If-None-Match: *` / condition byte, per the atomicity matrix (§5.1) |
-| A `.match(H)` write on s3/http/ssh/file cannot clobber a moved ref | conditional-write CAS per transport encoding, or the OS exclusive lock for file (§5.1, §5.2) |
+| A `.match(H)` write on s3/http/ssh/file/memory cannot clobber a moved ref | conditional-write CAS per transport encoding, the OS exclusive lock for file, or the instance `Mutex` for memory (in-process only) (§5.1, §5.2) |
 | An `.any` conditional hint is never binding CAS | clients requiring CAS MUST use `.match` explicitly (§5.3) |
 | A default push cannot silently rewind a remote that advanced | `Match(tracked)`/`Missing` CAS lease on the remote-tracking ref (§2) |
 | Fetched tips never overwrite local branches | fetch writes only `refs/remotes/<remote>/<name>`; `pull` fast-forwards from it (§2) |
@@ -450,14 +499,10 @@ base/ours/theirs material lives only in this sidecar.
 | Ref parsing is allocation-bounded | 128 B ref / 4 KiB `HEAD` / 1 MiB shallow caps; 32-level listing depth cap (§6) |
 | At most one of merge / cherry-pick / rebase is in progress | starting a second operation while state files exist is refused (§6.1) |
 
-One property is deliberately **not** guaranteed in v1: `.match` on the
-in-process memory transport is a read-then-write race (§5.1, test
-vector 5) &mdash; it is single-fiber by construction and never shared across
-processes, so this is scoped to that one in-memory code path. The file
-transport's own `.match` is race-free (OS exclusive lock), and the
-local `mkit-core` `refs::cas_write` helper used by commands that write
-refs directly rather than through the file transport is, as of #637,
-likewise serialized under a per-ref lock (§5.1) and is *not* part of
-this exception. Callers needing CAS under concurrency through the
-in-process memory transport MUST use a different transport (file/s3/
-http/ssh) or the local `refs::cas_write` path.
+The memory transport's CAS is atomic only among threads sharing one
+`MemoryTransport` instance; it gives no guarantee across processes or
+across separate instances, which never share state (§5.1). The file
+transport's own `.match` is race-free across processes (OS exclusive
+lock), and the local `mkit-core` `refs::cas_write` helper used by
+commands that write refs directly rather than through the file transport
+is, as of #637, likewise serialized under a per-ref lock (§5.1).

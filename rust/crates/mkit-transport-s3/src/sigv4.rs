@@ -221,9 +221,34 @@ pub fn sign_request(
     endpoint: &str,
     timestamp: i64,
 ) -> SignedRequest {
+    sign_request_with_payload_hash(
+        creds,
+        method,
+        path,
+        query,
+        &sha256_hex(payload),
+        endpoint,
+        timestamp,
+    )
+}
+
+/// [`sign_request`] for a body whose SHA-256 the caller already has, as 64
+/// lowercase hex characters: a streamed upload hashes its body as it spools
+/// it, instead of holding the whole body in memory to sign it. Signing
+/// `sha256_hex(payload)` here gives exactly [`sign_request`]'s output.
+#[must_use]
+pub fn sign_request_with_payload_hash(
+    creds: &Credentials,
+    method: &str,
+    path: &str,
+    query: &str,
+    payload_sha256_hex: &str,
+    endpoint: &str,
+    timestamp: i64,
+) -> SignedRequest {
     const SIGNED_HEADERS: &str = "host;x-amz-content-sha256;x-amz-date";
 
-    let payload_hash = sha256_hex(payload);
+    let payload_hash = payload_sha256_hex;
     let date = format_date(timestamp);
     let datetime = format_iso8601(timestamp);
     let host = parse_host(endpoint);
@@ -250,7 +275,7 @@ pub fn sign_request(
     SignedRequest {
         authorization,
         x_amz_date: datetime,
-        x_amz_content_sha256: payload_hash,
+        x_amz_content_sha256: payload_hash.to_owned(),
         canonical_request,
         string_to_sign,
         signature_hex,
@@ -506,6 +531,48 @@ mod tests {
         );
         assert_eq!(with_q.x_amz_date, without_q.x_amz_date);
         assert_ne!(with_q.signature_hex, without_q.signature_hex);
+    }
+
+    #[test]
+    fn sign_with_payload_hash_equals_sign_request() {
+        let big = [7_u8; 4096];
+        for (method, payload) in [("PUT", &b"hello world"[..]), ("GET", b""), ("PUT", &big)] {
+            let sign = |hashed: bool| {
+                let (path, endpoint) = (
+                    "/mkit-storage/packs/abc",
+                    "https://abc123.r2.cloudflarestorage.com",
+                );
+                if hashed {
+                    let hash = sha256_hex(payload);
+                    sign_request_with_payload_hash(
+                        &demo_creds(),
+                        method,
+                        path,
+                        "",
+                        &hash,
+                        endpoint,
+                        1_711_300_000,
+                    )
+                } else {
+                    sign_request(
+                        &demo_creds(),
+                        method,
+                        path,
+                        "",
+                        payload,
+                        endpoint,
+                        1_711_300_000,
+                    )
+                }
+            };
+            let (whole, hashed) = (sign(false), sign(true));
+            assert_eq!(whole.authorization, hashed.authorization);
+            assert_eq!(whole.x_amz_date, hashed.x_amz_date);
+            assert_eq!(whole.x_amz_content_sha256, hashed.x_amz_content_sha256);
+            assert_eq!(whole.canonical_request, hashed.canonical_request);
+            assert_eq!(whole.string_to_sign, hashed.string_to_sign);
+            assert_eq!(whole.signature_hex, hashed.signature_hex);
+        }
     }
 
     // AWS SigV4 documented Known-Answer Test: "Get Object" example.

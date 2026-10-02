@@ -176,6 +176,80 @@ fn disclosed_to_json(d: &Disclosed) -> Result<String, String> {
     .map_err(|e| format!("disclosed JSON: {e}"))
 }
 
+/// A verified MKDS span, including its authenticated metadata and plaintext.
+///
+/// Both getters use the result of one verification. The JSON deliberately
+/// excludes the bytes; callers obtain them through [`VerifiedSpan::bytes`].
+#[wasm_bindgen]
+#[derive(Debug)]
+pub struct VerifiedSpan {
+    json: String,
+    bytes: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl VerifiedSpan {
+    /// Authenticated span metadata as JSON.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn json(&self) -> String {
+        self.json.clone()
+    }
+
+    /// The authenticated content bytes of the requested range.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn bytes(&self) -> Box<[u8]> {
+        self.bytes.clone().into_boxed_slice()
+    }
+}
+
+/// Verify an MKDS v1 span container against a trusted commit id.
+///
+/// The JSON contains `commit_id`, `tree_hash`, `path`, `leaf_id`, `signer`,
+/// `signature_valid`, `offset`, `bytes_len`, `bytes_blake3`, `first`, `last`,
+/// `span_start`, and `chunk_inner_root`. A `path` entry has `name` (UTF-8 or
+/// `null`), `name_hex`, and `mode`. The bytes are returned by the getter of
+/// the same [`VerifiedSpan`] and are never reverified. Input is capped at
+/// 64 MiB. Every error starts with a SPEC-DISCLOSURE §8.2 reason label,
+/// except a malformed `commit_id_hex`, which is not a §8.2 condition and
+/// starts with `invalid_input:`.
+///
+/// # Errors
+///
+/// Invalid commit hex, an oversized container, malformed framing, or a
+/// failed cryptographic or span check.
+#[wasm_bindgen]
+pub fn verify_disclosure_span(commit_id_hex: &str, bundle: &[u8]) -> Result<VerifiedSpan, String> {
+    if bundle.len() > MAX_BUNDLE_BYTES {
+        return Err("span_too_large: container exceeds 64 MiB".into());
+    }
+    let commit_id = mkit_core::hash::from_hex(commit_id_hex)
+        .map_err(|_| "invalid_input: commit id must be 64 lowercase hex characters".to_string())?;
+    let d = verify::span::verify_disclosure_span(&commit_id, bundle)
+        .map_err(|e| format!("{}: {e}", e.reason()))?;
+    let json = serde_json::to_string(&serde_json::json!({
+        "commit_id": to_hex(&d.commit_id),
+        "tree_hash": to_hex(&d.tree_hash),
+        "path": path_json(&d.path),
+        "leaf_id": to_hex(&d.leaf_id),
+        "signer": to_hex(&d.signer),
+        "signature_valid": d.signature_valid,
+        "offset": d.offset,
+        "bytes_len": d.bytes.len(),
+        "bytes_blake3": to_hex(&hash(&d.bytes)),
+        "first": d.first,
+        "last": d.last,
+        "span_start": d.span_start,
+        "chunk_inner_root": to_hex(&d.chunk_inner_root),
+    }))
+    .map_err(|e| format!("span_encoding: JSON encoding: {e}"))?;
+    Ok(VerifiedSpan {
+        json,
+        bytes: d.bytes,
+    })
+}
+
 fn report_to_json(r: &ClosureReport) -> Result<String, String> {
     serde_json::to_string(&serde_json::json!({
         "root": to_hex(&r.root),

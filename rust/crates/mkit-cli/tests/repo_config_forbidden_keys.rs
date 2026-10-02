@@ -102,6 +102,79 @@ fn repo_trusted_remote_endpoint_dropped() {
 }
 
 #[test]
+fn repo_grant_webauthn_rp_dropped() {
+    assert_forbidden_key_dropped("grant.webauthn_rp", "evil.example https://evil.example", "");
+}
+
+#[test]
+fn admission_keys_are_user_scoped() {
+    assert_forbidden_key_dropped("admission_helper", "/tmp/evil", "");
+    assert_forbidden_key_dropped("remote.origin.admission_headers", "X-Evil", "");
+    let td = repo_with_repo_config("");
+    let out = run_in(
+        td.path(),
+        &[
+            "-c",
+            "remote.origin.admission_headers=X-Evil",
+            "config",
+            "remote.origin.admission_headers",
+        ],
+    );
+    assert!(out.status.success());
+    assert_eq!(stdout_str(&out).trim(), "");
+    assert!(stderr_str(&out).contains("security-sensitive keys cannot be set via -c"));
+}
+
+#[test]
+fn admission_warning_snapshot() {
+    let td = repo_with_repo_config("admission_helper = /tmp/evil\n");
+    let out = run_in(td.path(), &["config", "admission_helper"]);
+    assert!(out.status.success());
+    let stderr = stderr_str(&out);
+    insta::with_settings!({filters => vec![
+        (r"at [^ ]+/\.mkit/config", "at <REPO>/.mkit/config"),
+        (r"see [^ ]+/mkit/config", "see <XDG>/mkit/config"),
+    ]}, {
+        insta::assert_snapshot!("repo_config_admission_warning", stderr);
+    });
+}
+
+#[test]
+fn admission_config_routes_to_user_and_refuses_reserved_names() {
+    let td = repo_with_repo_config("");
+    let xdg = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        Command::new(mkit_bin())
+            .args(args)
+            .current_dir(td.path())
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .output()
+            .unwrap()
+    };
+    assert!(
+        run(&["config", "admission_helper", "/usr/bin/true"])
+            .status
+            .success()
+    );
+    assert!(
+        run(&["config", "remote.origin.admission_headers", "X-Payment"])
+            .status
+            .success()
+    );
+    let user = fs::read_to_string(xdg.path().join("mkit/config")).unwrap();
+    assert!(user.contains("admission_helper = /usr/bin/true"));
+    assert!(user.contains("remote.origin.admission_headers = X-Payment"));
+    assert!(
+        !fs::read_to_string(td.path().join(".mkit/config"))
+            .unwrap()
+            .contains("admission")
+    );
+    let invalid = run(&["config", "remote.origin.admission_headers", "X-Mkit-Ref"]);
+    assert_eq!(invalid.status.code(), Some(78));
+    assert!(stderr_str(&invalid).contains("reserved admission header `X-Mkit-Ref`"));
+}
+
+#[test]
 fn repo_signer_dropped() {
     assert_forbidden_key_dropped("signer", "keystore", "legacy");
 }

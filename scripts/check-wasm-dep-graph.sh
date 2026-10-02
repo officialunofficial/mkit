@@ -4,16 +4,20 @@
 # Fail if the wasm32 dependency graph of mkit's browser/edge-facing crates
 # pulls in a C-toolchain crate (blst, zstd-sys) or commonware's native
 # storage/runtime stack (commonware-runtime, commonware-storage) — none of
-# these build for `wasm32-unknown-unknown`, and mkit-wasm / apps/repo-worker
-# are default-features=false specifically to keep them out (see
-# crates/mkit-core/Cargo.toml and crates/mkit-attest/Cargo.toml's wasm
-# comments). This is a fast `cargo tree` check, not a build: it does not
-# replace `cargo build --target wasm32-unknown-unknown`, only catches a
+# these build for `wasm32-unknown-unknown`, and mkit-wasm / apps/repo-worker /
+# mkit-server depend on mkit-core with default-features=false specifically to
+# keep them out (see crates/mkit-core/Cargo.toml and
+# crates/mkit-attest/Cargo.toml's wasm comments). It also checks the
+# `mkit-core --no-default-features --features pack-ruzstd` graph (the
+# decode-only pure-Rust zstd backend) both contains `ruzstd` and stays
+# C-free. This is a fast `cargo
+# tree` check, not a build: it does not replace
+# `cargo build --target wasm32-unknown-unknown`, only catches a
 # manifest change that widened the dependency graph before a slow wasm
 # build (or a CI run without the target installed) would.
 #
-# See docs/INVARIANTS.md, "mkit-wasm and apps/repo-worker wasm32
-# dependency graphs contain no C-toolchain crates".
+# See docs/INVARIANTS.md, "wasm32 dependency graphs contain no C-toolchain
+# crates".
 
 set -euo pipefail
 
@@ -27,11 +31,24 @@ fail=0
 # `worker` (Cloudflare workers-rs), both of which pull in `tokio` for its
 # wasm-compatible sync/time primitives, unrelated to commonware or to
 # mkit's own crates. Checking for it there would flag a dependency this
-# repo already accepts, not a regression.
+# repo already accepts, not a regression. mkit-server is not checked for it
+# either: its Connect binding pulls `connectrpc` (and so `tokio`) from
+# WP-M0-06 on, for the same reason. Nor is mkit-server-worker, which adds
+# `worker` on top of mkit-server (WP-M0-16).
+#
+# check_tree <label> <manifest-dir> <extra-cargo-tree-args> <required> <forbidden...>
+#   extra-cargo-tree-args: e.g. "--no-default-features --features pack-ruzstd",
+#                          or "" for the crate's own feature set
+#   required:              space-separated crates the graph MUST contain, or ""
+#                          (proves a feature really selects the backend it names)
 check_tree() {
   local label="$1"
   local manifest_dir="$2"
-  shift 2
+  local extra_args=()
+  if [ -n "$3" ]; then read -r -a extra_args <<<"$3"; fi
+  local required=()
+  if [ -n "$4" ]; then read -r -a required <<<"$4"; fi
+  shift 4
   local forbidden=("$@")
 
   if ! command -v cargo >/dev/null 2>&1; then
@@ -44,7 +61,7 @@ check_tree() {
   fi
 
   local tree
-  if ! tree=$(cd "$manifest_dir" && cargo tree --target wasm32-unknown-unknown -e normal --prefix none 2>&1); then
+  if ! tree=$(cd "$manifest_dir" && cargo tree --target wasm32-unknown-unknown -e normal --prefix none ${extra_args[@]+"${extra_args[@]}"} 2>&1); then
     echo "error: 'cargo tree --target wasm32-unknown-unknown' failed for ${label}:"
     echo "$tree"
     fail=1
@@ -52,6 +69,12 @@ check_tree() {
   fi
 
   local crate
+  for crate in ${required[@]+"${required[@]}"}; do
+    if ! echo "$tree" | grep -qE "^${crate} v"; then
+      echo "error: ${label}'s wasm32 dependency graph does not contain '${crate}', which it must"
+      fail=1
+    fi
+  done
   for crate in "${forbidden[@]}"; do
     if echo "$tree" | grep -qE "^${crate} v"; then
       echo "error: ${label}'s wasm32 dependency graph pulls in '${crate}', which does not build for wasm32-unknown-unknown:"
@@ -61,13 +84,41 @@ check_tree() {
   done
 }
 
-check_tree "mkit-wasm" "rust/crates/mkit-wasm" blst zstd-sys commonware-runtime commonware-storage tokio
-check_tree "apps/repo-worker" "apps/repo-worker" blst zstd-sys commonware-runtime commonware-storage
+# `ruzstd` is forbidden in mkit-wasm to make its raw-only decision explicit
+# (SPEC-DISCLOSURE §7.2); drop it from that list when mkit-wasm opts into
+# `pack-ruzstd`.
+check_tree "mkit-wasm" "rust/crates/mkit-wasm" "" "" blst zstd-sys commonware-runtime commonware-storage tokio ruzstd
+check_tree "apps/repo-worker" "apps/repo-worker" "" "" blst zstd-sys commonware-runtime commonware-storage
+check_tree "mkit-server" "rust/crates/mkit-server" "" "" blst zstd-sys commonware-runtime commonware-storage
+# The remote-hook adapter (WP-3.7): buffa messages, signing and a nonce source,
+# no connectrpc client, so the feature must stay wasm-clean.
+check_tree "mkit-server (remote-hooks)" "rust/crates/mkit-server" "--features remote-hooks" "buffa ed25519-dalek getrandom" \
+  blst zstd-sys commonware-runtime commonware-storage
+# HTTP object serving (WP-4.12): no new dependencies, so the feature must stay
+# wasm-clean; adapters opt in through explicit indexed HTTP configuration.
+check_tree "mkit-server (http-objects)" "rust/crates/mkit-server" "--features http-objects" "" \
+  blst zstd-sys commonware-runtime commonware-storage
+check_tree "mkit-server-worker" "rust/crates/mkit-server-worker" "" "" blst zstd-sys commonware-runtime commonware-storage
+# apps/vcs-worker is a thin deployment of mkit-server-worker (WP-M0-17),
+# built by worker-build from its own Cargo.lock.
+check_tree "apps/vcs-worker" "apps/vcs-worker" "" "" blst zstd-sys commonware-runtime commonware-storage
+# mkit-core's decode-only pure-Rust zstd backend must select `ruzstd` and
+# stay C-free. The first consumer that enables it (WP 4.8) adds its own
+# positive check here.
+check_tree "mkit-core (pack-ruzstd)" "rust/crates/mkit-core" "--no-default-features --features pack-ruzstd" "ruzstd" \
+  blst zstd-sys commonware-runtime commonware-storage
+
+check_tree "mkit-rpc (hooks)" "rust/crates/mkit-rpc" "--features hooks" "buffa ed25519-dalek" \
+    blst zstd-sys commonware-runtime commonware-storage
+
+check_tree "mkit-rpc (transport)" "rust/crates/mkit-rpc" "--features transport" "buffa connectrpc" \
+    blst zstd-sys commonware-runtime commonware-storage
 
 if [ "$fail" -ne 0 ]; then
   echo
-  echo "See docs/INVARIANTS.md (\"mkit-wasm and apps/repo-worker wasm32 dependency graphs contain no C-toolchain crates\")."
+  echo "See docs/INVARIANTS.md (\"wasm32 dependency graphs contain no C-toolchain crates\")."
   exit 1
 fi
 
-echo "ok: mkit-wasm and apps/repo-worker wasm32 dependency graphs contain no C-toolchain crates"
+
+echo "ok: mkit-wasm, apps/repo-worker, mkit-server (also with remote-hooks), mkit-server-worker, apps/vcs-worker and mkit-core (pack-ruzstd) wasm32 dependency graphs contain no C-toolchain crates"

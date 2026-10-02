@@ -189,6 +189,197 @@ pub fn git_tag_parse_one_iteration(input: &[u8]) {
     let _ = mkit_git_bridge::gitparse::parse_tag(input);
 }
 
+/// SPEC-WRITE-GRANTS grant codec (`grant_parse`): `Grant::parse` and
+/// `SignedHeader::parse` never panic, and anything they accept re-encodes to
+/// exactly the input bytes (one canonical encoding, so one grant id).
+pub fn grant_parse_one_iteration(input: &[u8]) {
+    use mkit_attest::grant::{Grant, SignedHeader};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Ok(grant) = Grant::parse(input) {
+        assert_eq!(
+            grant.encode().expect("accepted grant must re-encode"),
+            input,
+            "accepted grant must re-encode byte for byte"
+        );
+    }
+    if let Ok(text) = core::str::from_utf8(input)
+        && let Ok(header) = SignedHeader::parse(text)
+    {
+        assert_eq!(
+            header.encode().expect("accepted header must re-encode"),
+            text,
+            "accepted header must re-encode byte for byte"
+        );
+        if let Ok(grant) = Grant::parse(&header.statement) {
+            assert_eq!(
+                grant.encode().expect("accepted grant must re-encode"),
+                header.statement
+            );
+        }
+    }
+}
+
+/// SPEC-WRITE-GRANTS epoch and visibility statements and the stateless
+/// verifier (`epoch_visibility_parse`): `EpochStatement::parse` and
+/// `VisibilityStatement::parse` never panic, and anything they accept
+/// re-encodes to exactly the input bytes. The input, read as an
+/// `X-Write-Grant` value, also runs through every verifier entry point,
+/// which must not panic, and whose accepted statements are the canonical
+/// bytes of the header. The input also drives the `webauthn-p256` parsers
+/// (see [`webauthn_assertion_checks`]).
+pub fn epoch_visibility_parse_one_iteration(input: &[u8]) {
+    use mkit_attest::grant::{
+        AcceptedSchemes, Capability, EpochStatement, GrantRequest, OwnerScheme, RepoScope,
+        RepositoryIdentity, SignedHeader, VerifierConfig, VisibilityStatement,
+        verify_epoch_statement, verify_for_registration, verify_grant_owner,
+        verify_visibility_statement,
+    };
+    const NOW_MS: i64 = 1_790_000_000_000;
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Ok(s) = EpochStatement::parse(input) {
+        assert_eq!(
+            s.encode().expect("accepted epoch statement must re-encode"),
+            input,
+            "accepted epoch statement must re-encode byte for byte"
+        );
+    }
+    if let Ok(s) = VisibilityStatement::parse(input) {
+        assert_eq!(
+            s.encode()
+                .expect("accepted visibility statement must re-encode"),
+            input,
+            "accepted visibility statement must re-encode byte for byte"
+        );
+    }
+    webauthn_assertion_checks(input);
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    let Ok(header) = SignedHeader::parse(text) else {
+        return;
+    };
+    let cfg = VerifierConfig::new(
+        "https://git.example.com",
+        AcceptedSchemes::of(&[
+            OwnerScheme::Ed25519,
+            OwnerScheme::Secp256k1Eip191,
+            OwnerScheme::WebAuthnP256,
+        ]),
+        vec![fuzz_relying_party()],
+    )
+    .expect("fixed fuzz config is valid");
+    if let Ok(v) = verify_epoch_statement(&cfg, text, NOW_MS) {
+        assert_eq!(v.statement().encode().ok(), Some(header.statement.clone()));
+    }
+    if let Ok(s) = VisibilityStatement::parse(&header.statement)
+        && let Ok(v) = verify_visibility_statement(&cfg, text, &s.repository, NOW_MS)
+    {
+        assert_eq!(v.statement(), &s);
+    }
+    if let Ok(owner) = verify_grant_owner(&cfg, text) {
+        let g = owner.statement();
+        assert_eq!(g.encode().ok(), Some(header.statement.clone()));
+        let repository = match &g.scope {
+            RepoScope::Repository(id) => id.clone(),
+            RepoScope::Namespace => RepositoryIdentity::new(Some(g.namespace), "fuzz")
+                .expect("fixed repository name is valid"),
+        };
+        for capability in [Capability::Read, Capability::Write] {
+            let _ = owner.check(
+                &cfg,
+                &GrantRequest {
+                    repository: &repository,
+                    signer: &g.grantee,
+                    capability,
+                    now_ms: NOW_MS,
+                },
+            );
+        }
+        let _ = verify_for_registration(&cfg, text, &g.grantee);
+    }
+}
+
+fn fuzz_relying_party() -> mkit_attest::grant::RelyingParty {
+    mkit_attest::grant::RelyingParty::new("example.com", ["https://example.com"])
+        .expect("fixed relying party is valid")
+}
+
+/// The `webauthn-p256` owner scheme's parsers (SPEC-WRITE-GRANTS §4, §4.3):
+/// `input` as a whole blob, which never panics and, when its framing
+/// parses, re-encodes to exactly the input; and `input` as the
+/// `clientDataJSON` of an assertion that passes every check before the
+/// client data (owner key: the P-256 generator; `authenticatorData` for
+/// `example.com` with UP set), so the strict JSON walk sees arbitrary bytes.
+/// The signature `(1, 1)` never verifies, so neither may succeed.
+pub fn webauthn_assertion_checks(input: &[u8]) {
+    use mkit_attest::grant::{
+        AcceptedSchemes, Namespace, OwnerScheme, VerifierConfig, WebAuthnAssertion,
+        verify_owner_signature,
+    };
+    /// The P-256 generator `x ‖ y` (SEC 2 §2.4.2).
+    const G: [u8; 64] = [
+        0x6b, 0x17, 0xd1, 0xf2, 0xe1, 0x2c, 0x42, 0x47, 0xf8, 0xbc, 0xe6, 0xe5, 0x63, 0xa4, 0x40,
+        0xf2, 0x77, 0x03, 0x7d, 0x81, 0x2d, 0xeb, 0x33, 0xa0, 0xf4, 0xa1, 0x39, 0x45, 0xd8, 0x98,
+        0xc2, 0x96, 0x4f, 0xe3, 0x42, 0xe2, 0xfe, 0x1a, 0x7f, 0x9b, 0x8e, 0xe7, 0xeb, 0x4a, 0x7c,
+        0x0f, 0x9e, 0x16, 0x2b, 0xce, 0x33, 0x57, 0x6b, 0x31, 0x5e, 0xce, 0xcb, 0xb6, 0x40, 0x68,
+        0x37, 0xbf, 0x51, 0xf5,
+    ];
+    /// SHA-256("example.com").
+    const RP_HASH: [u8; 32] = [
+        0xa3, 0x79, 0xa6, 0xf6, 0xee, 0xaf, 0xb9, 0xa5, 0x5e, 0x37, 0x8c, 0x11, 0x80, 0x34, 0xe2,
+        0x75, 0x1e, 0x68, 0x2f, 0xab, 0x9f, 0x2d, 0x30, 0xab, 0x13, 0xd2, 0x12, 0x55, 0x86, 0xce,
+        0x19, 0x47,
+    ];
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let cfg = VerifierConfig::new(
+        "https://git.example.com",
+        AcceptedSchemes::of(&[OwnerScheme::WebAuthnP256]),
+        vec![fuzz_relying_party()],
+    )
+    .expect("fixed fuzz config is valid");
+    let namespace = Namespace::Address(
+        mkit_attest::eth::address_p256(&G).expect("the generator is a P-256 point"),
+    );
+    let statement = b"mkit-write-grant:v1";
+    let _ = verify_owner_signature(
+        &cfg,
+        OwnerScheme::WebAuthnP256,
+        statement,
+        input,
+        &namespace,
+    );
+    if let Ok(assertion) = WebAuthnAssertion::parse(input) {
+        assert_eq!(
+            assertion.encode().expect("a parsed assertion re-encodes"),
+            input,
+            "a parsed webauthn blob must re-encode byte for byte"
+        );
+    }
+    let mut authenticator_data = RP_HASH.to_vec();
+    authenticator_data.extend_from_slice(&[0x01, 0, 0, 0, 0]);
+    let mut signature = [0u8; 64];
+    signature[31] = 1;
+    signature[63] = 1;
+    let blob = WebAuthnAssertion {
+        public_key: G,
+        authenticator_data,
+        client_data_json: input.to_vec(),
+        signature,
+    }
+    .encode()
+    .expect("a bounded assertion encodes");
+    assert!(
+        verify_owner_signature(
+            &cfg,
+            OwnerScheme::WebAuthnP256,
+            statement,
+            &blob,
+            &namespace
+        )
+        .is_err()
+    );
+}
+
 /// Apply the git tree parser + mode classifier against `input`.
 pub fn git_tree_parse_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(MAX_INPUT)];
@@ -360,6 +551,169 @@ pub fn disclosure_decode_one_iteration(input: &[u8]) {
     let _ = mkit_core::verify::verify_disclosure(&commit_id, input);
 }
 
+const GOOD_SPAN: &[u8] = include_bytes!("../../tests/golden/http-objects/span_two_chunks.bin");
+
+/// Exercise the MKDS verifier on arbitrary bytes. The trusted id is the
+/// committed fixture's real commit, and a copy of the input with that commit
+/// spliced into the header is also verified, so mutated containers get past
+/// the commit comparison and reach the anchor and chunk checks.
+pub fn span_decode_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let commit: [u8; 32] = GOOD_SPAN[5..37].try_into().expect("committed commit id");
+    let _ = mkit_core::verify::span::verify_disclosure_span(&commit, input);
+    if input.len() >= 37 && input.starts_with(b"MKDS\x01") {
+        let mut patched = input.to_vec();
+        patched[5..37].copy_from_slice(&commit);
+        let _ = mkit_core::verify::span::verify_disclosure_span(&commit, &patched);
+    }
+}
+
+const SPAN_CHUNK: usize = 48;
+const SPAN_CHUNKS: usize = 4;
+
+/// A small chunked-file repository for [`verify_span_one_iteration_with`].
+pub struct SpanFixture {
+    _dir: tempfile::TempDir,
+    store: mkit_core::store::ObjectStore,
+    commit_id: [u8; 32],
+    plaintext: Vec<u8>,
+}
+
+/// Build a [`SpanFixture`]: one signed commit over a four-chunk file.
+pub fn build_span_fixture() -> SpanFixture {
+    use mkit_core::hash::ZERO;
+    use mkit_core::layout::RepoLayout;
+    use mkit_core::object::{
+        Blob, ChunkedBlob, Commit, EntryMode, Identity, Object, Tree, TreeEntry,
+    };
+    use mkit_core::sign::{KeyPair, sign_commit};
+    use mkit_core::store::ObjectStore;
+
+    const CHUNK: usize = SPAN_CHUNK;
+    const CHUNKS: usize = SPAN_CHUNKS;
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("store init");
+    let plaintext: Vec<u8> = (0..CHUNK * CHUNKS)
+        .map(|i| u8::try_from(i % 251).expect("byte") ^ 0x5a)
+        .collect();
+    let chunk_ids: Vec<[u8; 32]> = plaintext
+        .chunks(CHUNK)
+        .map(|c| {
+            let bytes = mkit_core::serialize::serialize(&Object::Blob(Blob { data: c.to_vec() }))
+                .expect("serialize chunk");
+            store.write(&bytes).expect("write chunk")
+        })
+        .collect();
+    let manifest = ChunkedBlob {
+        total_size: plaintext.len() as u64,
+        chunk_size: CHUNK as u32,
+        chunks: chunk_ids,
+    };
+    let leaf = store
+        .write(&mkit_core::serialize::serialize(&Object::ChunkedBlob(manifest)).expect("manifest"))
+        .expect("write manifest");
+    let tree = Tree {
+        entries: vec![TreeEntry {
+            name: b"f.bin".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: leaf,
+        }],
+    };
+    let tree_hash = store
+        .write(&mkit_core::serialize::serialize(&Object::Tree(tree)).expect("serialize tree"))
+        .expect("write tree");
+    let kp = KeyPair::from_seed([0x43; 32]);
+    let mut commit = Commit {
+        tree_hash,
+        parents: vec![],
+        author: Identity::ed25519(kp.public.0),
+        signer: kp.public.0,
+        message: b"span fuzz fixture".to_vec(),
+        timestamp: 1,
+        message_hash: ZERO,
+        content_digest: ZERO,
+        signature: [0u8; 64],
+    };
+    commit.signature = sign_commit(&commit, &kp).expect("sign commit").0;
+    let commit_id = store
+        .write(&mkit_core::serialize::serialize(&Object::Commit(commit)).expect("commit"))
+        .expect("write commit");
+
+    SpanFixture {
+        _dir: dir,
+        store,
+        commit_id,
+        plaintext,
+    }
+}
+
+/// Build a fresh fixture and run [`verify_span_one_iteration_with`].
+pub fn verify_span_one_iteration(input: &[u8]) {
+    verify_span_one_iteration_with(input, &build_span_fixture());
+}
+
+/// Build an input-driven range proof over the fixture, verify it, then flip
+/// an input-driven byte and require that any acceptance still returns the
+/// file's true plaintext for the range it names. Raw bytes also go through
+/// the verifier against the fixture's real commit.
+pub fn verify_span_one_iteration_with(input: &[u8], fixture: &SpanFixture) {
+    use mkit_core::verify::span::{RangeProof, build_range_proof_from};
+
+    const CHUNK: usize = SPAN_CHUNK;
+    const CHUNKS: usize = SPAN_CHUNKS;
+    let SpanFixture {
+        store,
+        commit_id,
+        plaintext,
+        ..
+    } = fixture;
+    let commit_id = *commit_id;
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let byte = |i: usize| u64::from(input.get(i).copied().unwrap_or(0));
+    let word = |i: usize| byte(i) | (byte(i + 1) << 8);
+
+    let total = plaintext.len() as u64;
+    let offset = word(0) % total;
+    let len = 1 + word(2) % (total - offset);
+    let boundaries: Vec<u64> = (0..=CHUNKS as u64).map(|i| i * CHUNK as u64).collect();
+    let hints = (byte(4) & 1 == 1).then_some(boundaries.as_slice());
+    let proof = build_range_proof_from(store, &commit_id, &[b"f.bin"], offset, len, hints)
+        .expect("in-range proof must build");
+    let expected = &plaintext
+        [usize::try_from(offset).expect("offset")..usize::try_from(offset + len).expect("end")];
+    let container = match proof {
+        RangeProof::Mkdp(bytes) => {
+            let disclosed = mkit_core::verify::verify_disclosure(&commit_id, &bytes)
+                .expect("fresh MKDP must verify");
+            assert!(matches!(
+                disclosed.payload,
+                mkit_core::verify::DisclosedPayload::Range { .. }
+            ));
+            return;
+        }
+        RangeProof::Mkds(bytes) => bytes,
+        _ => unreachable!("non-exhaustive RangeProof"),
+    };
+    let verified = mkit_core::verify::span::verify_disclosure_span(&commit_id, &container)
+        .expect("fresh span must verify");
+    assert_eq!(verified.bytes, expected);
+
+    let mut mutated = container;
+    let at = usize::try_from(word(5)).expect("position") % mutated.len();
+    mutated[at] ^= input.get(7).copied().unwrap_or(1).max(1);
+    if let Ok(accepted) = mkit_core::verify::span::verify_disclosure_span(&commit_id, &mutated) {
+        // A flipped header field may legitimately request another range, but
+        // whatever verifies must be that range's true plaintext.
+        let begin = usize::try_from(accepted.offset).expect("accepted offset");
+        assert_eq!(
+            accepted.bytes,
+            plaintext[begin..begin + accepted.bytes.len()],
+            "a mutated span verified bytes that are not the file's"
+        );
+    }
+    let _ = mkit_core::verify::span::verify_disclosure_span(&commit_id, input);
+}
+
 /// A small native `ObjectStore`-backed fixture for
 /// [`verify_disclosure_one_iteration`]: one committed file, disclosed as
 /// a real `Selector::Object` bundle. Built once by
@@ -483,7 +837,9 @@ pub fn verify_disclosure_one_iteration_with(input: &[u8], fixture: &DisclosureFi
 
 /// Store-less pack iterator: never panics on adversarial bytes. When
 /// `PackReader::read` accepts a pack, `PackEntries::new` accepts it too
-/// and yields `raw_count + delta_count` items.
+/// and yields `raw_count + delta_count` items. `decode_entries_with`
+/// over `NoExternalBases` agrees with `PackReader::read` into an empty
+/// store on every input: same accept/reject, same error, same ids.
 pub fn pack_entries_one_iteration(input: &[u8]) {
     let Some(input) = pack_validated_input(input) else {
         return;
@@ -509,7 +865,36 @@ pub fn pack_entries_one_iteration(input: &[u8]) {
         Ok(s) => s,
         Err(_) => return,
     };
-    if let Ok(report) = mkit_core::pack::PackReader::read(input, &store) {
+    let read = mkit_core::pack::PackReader::read(input, &store);
+    // Into an empty store, the store-less decoder with no external bases
+    // must accept exactly the packs the reader accepts, with the same
+    // error and the same ids in pack order.
+    let decoded = mkit_core::pack::decode_entries_with(
+        input,
+        &mut mkit_core::pack::NoExternalBases,
+        // No budget: this body pins agreement with the reader, which has
+        // none. The budget itself is covered by mkit-core unit tests.
+        mkit_core::pack::DecodeLimits::default().with_max_decoded_bytes(u64::MAX),
+        |_| Ok(()),
+    );
+    match (&read, &decoded) {
+        (Ok(report), Ok(decoded)) => assert_eq!(
+            report.stored, decoded.ids,
+            "decode_entries_with must yield PackReader's ids in pack order"
+        ),
+        (Err(a), Err(b)) => assert_eq!(
+            a.to_string(),
+            b.to_string(),
+            "decode_entries_with must fail exactly as PackReader::read"
+        ),
+        _ => panic!(
+            "decode_entries_with(NoExternalBases) and PackReader::read into an empty \
+             store disagree: reader {:?}, decoder {:?}",
+            read.as_ref().map(|_| ()),
+            decoded.as_ref().map(|_| ())
+        ),
+    }
+    if let Ok(report) = read {
         let entries = mkit_core::pack::PackEntries::new(input)
             .expect("PackReader-accepted pack must parse as PackEntries");
         let got = entries.filter(|e| e.is_ok()).count();
@@ -842,6 +1227,92 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unit_grant_parse() {
+        run_iterated_unit(grant_parse_one_iteration).unwrap();
+        // The SPEC-WRITE-GRANTS §3.4 example, a near miss, and its header.
+        let grant = "mkit-write-grant:v1\n\
+            0x8ba1f109551bd432803012645ac136ddd64dba72\n\
+            0x8ba1f109551bd432803012645ac136ddd64dba72/website\n\
+            3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29\n\
+            read,write\n\
+            https://git.example.com,https://git.example.org\n\
+            refs/heads/main=cu;refs/heads/wip/*=cufd\n\
+            0\n1790000000000\n1792592000000\n\
+            9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        assert!(mkit_attest::grant::Grant::parse(grant.as_bytes()).is_ok());
+        let header = mkit_attest::grant::SignedHeader {
+            statement: grant.as_bytes().to_vec(),
+            scheme: mkit_attest::grant::OwnerScheme::Ed25519,
+            blob: vec![7; 64],
+        }
+        .encode()
+        .unwrap();
+        let near_miss = grant.replace("=cu;", "=uc;");
+        for case in [
+            grant.as_bytes(),
+            near_miss.as_bytes(),
+            header.as_bytes(),
+            b"YQ==.ed25519.YQ",
+            b"QR.ed25519.YQ",
+            b"",
+            &[0xFF; 64][..],
+        ] {
+            run_one(case, grant_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_epoch_visibility_parse() {
+        use mkit_attest::grant::{OwnerScheme, SignedHeader};
+        run_iterated_unit(epoch_visibility_parse_one_iteration).unwrap();
+        let epoch = "mkit-write-epoch:v1\n\
+            ed25519-3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29\n\
+            5\nhttps://git.example.com\n1790000000000\n1790086400000\n\
+            9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        let visibility = "mkit-repo-visibility:v1\n\
+            0x8ba1f109551bd432803012645ac136ddd64dba72/website\n\
+            private\nhttps://git.example.com\n1790000000000\n1790086400000\n\
+            9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        assert!(mkit_attest::grant::EpochStatement::parse(epoch.as_bytes()).is_ok());
+        assert!(mkit_attest::grant::VisibilityStatement::parse(visibility.as_bytes()).is_ok());
+        let headers: Vec<String> = [epoch, visibility]
+            .iter()
+            .flat_map(|s| {
+                [
+                    OwnerScheme::Ed25519,
+                    OwnerScheme::Secp256k1Eip191,
+                    OwnerScheme::WebAuthnP256,
+                ]
+                .map(|scheme| {
+                    SignedHeader {
+                        statement: s.as_bytes().to_vec(),
+                        scheme,
+                        blob: vec![7; 64],
+                    }
+                    .encode()
+                    .unwrap()
+                })
+            })
+            .collect();
+        let near_miss = epoch.replace("\n5\n", "\n05\n");
+        let mut cases: Vec<&[u8]> = vec![
+            epoch.as_bytes(),
+            visibility.as_bytes(),
+            near_miss.as_bytes(),
+            b"",
+            &[0xFF; 64],
+            br#"{"type":"webauthn.get","challenge":"x","origin":"https://example.com"}"#,
+            br#"{"type":"webauthn.get","type":"webauthn.get"}"#,
+            br#"{"a":[{"b":{"c":"\ud800"}}]}"#,
+            &[0; 16],
+        ];
+        cases.extend(headers.iter().map(String::as_bytes));
+        for case in cases {
+            run_one(case, epoch_visibility_parse_one_iteration).unwrap();
+        }
+    }
+
     /// Guardrail #1: MAX_ITER caps every PRNG run at 100.
     #[test]
     fn delta_target_runs_within_caps() {
@@ -894,6 +1365,32 @@ mod tests {
         run_iterated_unit(disclosure_decode_one_iteration).expect("guardrails held");
         for case in [&b""[..], b"MKDP\x01", &[0xFF; 64][..]] {
             run_one(case, disclosure_decode_one_iteration).expect("guardrails held");
+        }
+    }
+
+    #[test]
+    fn span_decode_target_runs_within_caps() {
+        run_iterated_unit(span_decode_one_iteration).expect("guardrails held");
+        for case in [&b""[..], b"MKDS\x01", &[0xff; 64][..]] {
+            run_one(case, span_decode_one_iteration).expect("guardrails held");
+        }
+        let mut nonminimal = GOOD_SPAN[..53].to_vec();
+        nonminimal.extend_from_slice(&[0x80, 0]);
+        let mut over_count = GOOD_SPAN[..53].to_vec();
+        over_count.extend_from_slice(&[0, 0xc1, 0x84, 0x3d]);
+        for case in [&nonminimal, &over_count] {
+            run_one(case, span_decode_one_iteration).expect("guardrails held");
+        }
+    }
+
+    #[test]
+    fn verify_span_target_runs_within_caps() {
+        let fixture = build_span_fixture();
+        run_iterated_unit_with(&fixture, verify_span_one_iteration_with).expect("guardrails held");
+        for case in [&b""[..], b"MKDP\x02", &[0xff; 64][..]] {
+            let started = Instant::now();
+            verify_span_one_iteration_with(case, &fixture);
+            assert!(started.elapsed() <= PER_ITER, "iteration exceeded PER_ITER");
         }
     }
 

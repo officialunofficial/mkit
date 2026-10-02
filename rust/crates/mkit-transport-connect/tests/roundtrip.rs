@@ -55,6 +55,7 @@ fn to_connect_error(err: TransportError) -> ConnectError {
             ErrorCode::Internal,
             "unexpected client-only error surfaced server-side",
         ),
+        _ => ConnectError::new(ErrorCode::Internal, "unexpected transport error"),
     }
 }
 
@@ -91,6 +92,55 @@ struct TestService {
 
 #[allow(refining_impl_trait)]
 impl generated::TransportService for TestService {
+    async fn get_receipt(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::GetReceiptRequest>,
+    ) -> ServiceResult<generated::GetReceiptResponse> {
+        Err(ConnectError::unimplemented("not implemented yet"))
+    }
+
+    // WP-1.2: compile-only stubs for the additive M1 trait methods.
+    async fn get_server_info(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::GetServerInfoRequest>,
+    ) -> ServiceResult<generated::GetServerInfoResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
+
+    async fn begin_upload(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::BeginUploadRequest>,
+    ) -> ServiceResult<generated::BeginUploadResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
+
+    async fn upload_part(
+        &self,
+        _ctx: RequestContext,
+        _requests: connectrpc::InboundStream<generated::UploadPartRequest>,
+    ) -> ServiceResult<generated::UploadPartResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
+
+    async fn complete_upload(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::CompleteUploadRequest>,
+    ) -> ServiceResult<generated::CompleteUploadResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
+
     async fn list_refs(
         &self,
         _ctx: RequestContext,
@@ -281,6 +331,64 @@ impl generated::TransportService for TestService {
             ..Default::default()
         };
         Response::stream_ok(futures::stream::iter([Ok(header), Ok(chunk)]))
+    }
+
+    async fn get_authority_generation(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::GetAuthorityGenerationRequest>,
+    ) -> ServiceResult<generated::GetAuthorityGenerationResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
+    async fn set_authority_generation(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::SetAuthorityGenerationRequest>,
+    ) -> ServiceResult<generated::SetAuthorityGenerationResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
+    async fn get_grant_epoch(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::GetGrantEpochRequest>,
+    ) -> ServiceResult<generated::GetGrantEpochResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
+
+    async fn set_grant_epoch(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::SetGrantEpochRequest>,
+    ) -> ServiceResult<generated::SetGrantEpochResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
+
+    async fn set_repo_visibility(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::SetRepoVisibilityRequest>,
+    ) -> ServiceResult<generated::SetRepoVisibilityResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
+
+    async fn issue_object_url(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::IssueObjectUrlRequest>,
+    ) -> ServiceResult<generated::IssueObjectUrlResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
     }
 }
 
@@ -478,3 +586,6 @@ fn full_roundtrip_through_real_connect_server() {
     let _ = shutdown.send(());
     handle.join().expect("server thread joins cleanly");
 }
+
+#[path = "support/tls.rs"]
+mod tls_tests;

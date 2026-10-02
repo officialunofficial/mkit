@@ -326,6 +326,8 @@ impl ExternalSigner {
         // on stdin (SPEC-EXTERNAL-SIGNER §8) sees EOF and can exit —
         // this must happen AFTER the PinPrompt loop above, which needs
         // stdin to stay open for PinResponse writes.
+        // Not a `Drop` type on every target (wasm).
+        #[allow(clippy::drop_non_drop)]
         drop(stdin);
 
         let (signature, key_id) = match self.extract_signature_with_policy(resp, pae) {

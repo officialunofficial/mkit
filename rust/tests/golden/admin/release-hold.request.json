@@ -1,0 +1,7 @@
+{
+  "repository": "ed25519-a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0/payments-demo",
+  "inspector": "content-safety",
+  "inspectionId": "inspect:42",
+  "reason": "manual review passed",
+  "operatorLabel": "reviewer-7"
+}

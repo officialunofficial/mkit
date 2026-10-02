@@ -1,79 +1,201 @@
-//! `TransportError` <-> Connect [`ErrorCode`] mapping, per
-//! SPEC-TRANSPORT-CONNECT §5.
+//! Connect-code -> [`TransportError`] mapping (SPEC-TRANSPORT-CONNECT §5),
+//! the client-side direction.
 //!
-//! The mapping is total: every [`TransportError`] variant maps onto exactly
-//! one Connect code. A handful of variants are documented in the spec as
-//! "not server-raised" (client-observed transport failures like
-//! `ConnectionFailed`/`InvalidResponse`, or a client-side scheme concern
-//! like `InsecureScheme`) — this server never constructs them, but the
-//! match stays exhaustive so a future variant added to `TransportError`
-//! fails to compile here instead of silently falling through unmapped;
-//! those arms fall back to `unknown`, the same "catch-all" default
-//! `RemoteError` already uses.
+//! The mapping table lives in `docs/specs/SPEC-TRANSPORT-CONNECT.md`. This
+//! module implements the client-side (Connect code -> `TransportError`)
+//! direction — the inverse of the server's table (`mkit-server`'s Connect
+//! binding), with [`TransportError::RemoteError`] as the fallback arm for any
+//! code the table does not otherwise list.
+//!
+//! One wrinkle the spec calls out explicitly: `invalid_argument` is raised
+//! by two different RPC families for two different reasons — a bad ref name
+//! (`ListRefs`/`ReadRef`/`UpdateRef`/`AdvanceRefs`) maps to
+//! [`TransportError::InvalidRef`], while a malformed `UploadPack` stream
+//! (missing header, out-of-order chunk, byte-count mismatch) maps to
+//! [`TransportError::ProtocolError`]. The Connect code alone can't
+//! disambiguate, so callers pass an [`ErrorContext`] naming which family
+//! they called.
+//!
+//! A second wrinkle: `connectrpc`'s own client collapses a genuine
+//! transport-level failure (DNS, TCP connect, TLS handshake — anything with
+//! no [`ConnectError`] in its `source()` chain) into `unavailable`
+//! (internally, via a private `map_transport_send_error` helper), the
+//! same code a server uses for a real backend-overload response. This
+//! module can't tell the two apart either, so both surface as
+//! [`TransportError::ServerError`] with a representative status (503) —
+//! not [`TransportError::ConnectionFailed`]. This is intentional, not a
+//! gap: [`mkit_core::protocol::is_retryable`] treats `ServerError { status:
+//! 503 }` exactly like `ConnectionFailed` (both retryable), so retry
+//! behavior is identical either way.
 
-use connectrpc::ConnectError;
-use mkit_core::protocol::TransportError;
+use base64::Engine as _;
+use buffa::Message as _;
+use connectrpc::{ConnectError, ErrorCode};
+use mkit_core::protocol::{AdmissionChallengeEntry, AdmissionRequired, TransportError};
 
-/// Map a [`TransportError`] returned by the wrapped [`Transport`] backend
-/// onto the Connect error the client sees, per SPEC-TRANSPORT-CONNECT §5's
-/// table.
-///
-/// [`Transport`]: mkit_core::protocol::Transport
-#[cfg(feature = "server")]
-#[must_use]
-pub fn map_transport_error(err: TransportError) -> ConnectError {
-    match err {
-        TransportError::PackNotFound => ConnectError::not_found(err.to_string()),
-        TransportError::AccessDenied => ConnectError::permission_denied(err.to_string()),
-        TransportError::RefConflict => ConnectError::failed_precondition(err.to_string()),
-        TransportError::InvalidRef(_) => ConnectError::invalid_argument(err.to_string()),
-        TransportError::ProtocolError => ConnectError::invalid_argument(err.to_string()),
-        TransportError::PayloadTooLarge(_) => ConnectError::resource_exhausted(err.to_string()),
-        TransportError::ServerError { status } => {
-            if status >= 500 || status == 429 {
-                ConnectError::unavailable(err.to_string())
-            } else {
-                ConnectError::unknown(err.to_string())
-            }
+use crate::proto::mkit::transport::v1::{AdmissionChallenge, PendingVerification};
+use crate::status::STATUS_MARKER;
+
+// Known gap: use mkit_core::admission bounds once the server admission bundle lands.
+const MAX_CHALLENGES: usize = 8;
+const MAX_SCHEME: usize = 64;
+const MAX_VALUE: usize = 8_192;
+const MAX_DESCRIPTION: usize = 512;
+const MAX_DETAIL_BASE64: usize = 88_836;
+const CHALLENGE_TYPE: &str = "mkit.transport.v1.AdmissionChallenge";
+
+fn visible_header_values(
+    err: &ConnectError,
+    name: &'static str,
+) -> Result<Vec<String>, TransportError> {
+    let mut values = Vec::new();
+    for value in err.response_headers().get_all(name) {
+        let bytes = value.as_bytes();
+        if values.len() == 8
+            || bytes.len() > MAX_VALUE
+            || !bytes
+                .iter()
+                .all(|b| *b == b'\t' || (0x20..=0x7e).contains(b))
+        {
+            return Err(TransportError::InvalidResponse);
         }
-        TransportError::ConnectionFailed
-        | TransportError::InvalidResponse
-        | TransportError::InsecureScheme
-        | TransportError::RemoteError(_) => ConnectError::unknown(err.to_string()),
+        values
+            .push(String::from_utf8(bytes.to_vec()).map_err(|_| TransportError::InvalidResponse)?);
     }
+    Ok(values)
 }
 
-// Connect-code <-> [`TransportError`] mapping (SPEC-TRANSPORT-CONNECT §5),
-// client-side direction.
-//
-// The mapping table lives in `docs/specs/SPEC-TRANSPORT-CONNECT.md`. This
-// section implements the client-side (Connect code -> `TransportError`)
-// direction — the mechanical inverse of the server-side table above, with
-// [`TransportError::RemoteError`] as the fallback arm for any code the
-// table does not otherwise list.
-//
-// One wrinkle the spec calls out explicitly: `invalid_argument` is raised
-// by two different RPC families for two different reasons — a bad ref name
-// (`ListRefs`/`ReadRef`/`UpdateRef`/`AdvanceRefs`) maps to
-// [`TransportError::InvalidRef`], while a malformed `UploadPack` stream
-// (missing header, out-of-order chunk, byte-count mismatch) maps to
-// [`TransportError::ProtocolError`]. The Connect code alone can't
-// disambiguate, so callers pass an [`ErrorContext`] naming which family
-// they called.
-//
-// A second wrinkle: `connectrpc`'s own client collapses a genuine
-// transport-level failure (DNS, TCP connect, TLS handshake — anything with
-// no [`ConnectError`] in its `source()` chain) into `unavailable`
-// (internally, via a private `map_transport_send_error` helper), the
-// same code a server uses for a real backend-overload response. This
-// module can't tell the two apart either, so both surface as
-// [`TransportError::ServerError`] with a representative status (503) —
-// not [`TransportError::ConnectionFailed`]. This is intentional, not a
-// gap: [`mkit_core::protocol::is_retryable`] treats `ServerError { status:
-// 503 }` exactly like `ConnectionFailed` (both retryable), so retry
-// behavior is identical either way.
+fn admission_required(err: &ConnectError) -> Option<Result<AdmissionRequired, TransportError>> {
+    let stamped_402 = err
+        .response_headers()
+        .get(STATUS_MARKER)
+        .is_some_and(|v| v == "402");
+    let details: Vec<_> = err
+        .details
+        .iter()
+        .filter(|detail| {
+            detail
+                .type_url
+                .strip_prefix("type.googleapis.com/")
+                .unwrap_or(&detail.type_url)
+                == CHALLENGE_TYPE
+        })
+        .collect();
+    if !(stamped_402 || (err.code == ErrorCode::PermissionDenied && !details.is_empty())) {
+        return None;
+    }
+    Some((|| {
+        if details.len() > 1 {
+            return Err(TransportError::InvalidResponse);
+        }
+        let (challenges, description) = if let Some(detail) = details.first() {
+            let encoded = detail.value.as_deref().unwrap_or("");
+            if encoded.len() > MAX_DETAIL_BASE64 {
+                return Err(TransportError::InvalidResponse);
+            }
+            let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
+                .decode(encoded)
+                .or_else(|_| base64::engine::general_purpose::STANDARD.decode(encoded))
+                .map_err(|_| TransportError::InvalidResponse)?;
+            let decoded = AdmissionChallenge::decode_from_slice(&bytes)
+                .map_err(|_| TransportError::InvalidResponse)?;
+            // A present detail carries 1 to 8 challenges (STC §5.1).
+            if decoded.challenges.is_empty() || decoded.challenges.len() > MAX_CHALLENGES {
+                return Err(TransportError::InvalidResponse);
+            }
+            let mut challenges = Vec::with_capacity(decoded.challenges.len());
+            for challenge in decoded.challenges {
+                let scheme = challenge.scheme.unwrap_or_default();
+                let value = challenge.value.unwrap_or_default();
+                let valid_scheme = !scheme.is_empty()
+                    && scheme.len() <= MAX_SCHEME
+                    && scheme.bytes().enumerate().all(|(i, b)| {
+                        b.is_ascii_lowercase()
+                            || b.is_ascii_digit()
+                            || (i > 0 && matches!(b, b'.' | b'-'))
+                    });
+                if !valid_scheme || value.len() > MAX_VALUE {
+                    return Err(TransportError::InvalidResponse);
+                }
+                challenges.push(AdmissionChallengeEntry { scheme, value });
+            }
+            let description = decoded.description.unwrap_or_default();
+            if description.len() > MAX_DESCRIPTION {
+                return Err(TransportError::InvalidResponse);
+            }
+            (challenges, description)
+        } else {
+            (Vec::new(), String::new())
+        };
+        Ok(AdmissionRequired::new(
+            challenges,
+            description,
+            visible_header_values(err, "www-authenticate")?,
+            visible_header_values(err, "payment-required")?,
+        ))
+    })())
+}
 
-use connectrpc::ErrorCode;
+/// Recognise only a typed `AdvanceRefs` unavailable response. Malformed
+/// details deliberately fall back to the ordinary retry ladder.
+pub(crate) fn pending_verification_delay(err: &ConnectError) -> Option<std::time::Duration> {
+    if err.code != ErrorCode::Unavailable {
+        return None;
+    }
+    let detail = err.details.iter().find(|detail| {
+        detail
+            .type_url
+            .strip_prefix("type.googleapis.com/")
+            .unwrap_or(&detail.type_url)
+            == "mkit.transport.v1.PendingVerification"
+    })?;
+    let value = detail.value.as_deref().unwrap_or("");
+    let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(value)
+        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(value))
+        .ok()?;
+    let pending = PendingVerification::decode_from_slice(&bytes).ok()?;
+    Some(std::time::Duration::from_millis(u64::from(
+        pending.retry_after_ms.unwrap_or(0).clamp(1_000, 60_000),
+    )))
+}
+
+/// Longest wait `Retry-After` can ask for; the shortest is 1 s.
+const RETRY_AFTER_MIN: std::time::Duration = std::time::Duration::from_secs(1);
+const RETRY_AFTER_MAX: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A `Retry-After` delay: delay-seconds only (an HTTP-date is not parsed),
+/// clamped to 1–60 s. A missing, empty or garbage value is 1 s.
+pub(crate) fn parse_retry_after(values: &[String]) -> std::time::Duration {
+    let Some(value) = values.first().map(|v| v.trim()) else {
+        return RETRY_AFTER_MIN;
+    };
+    if value.is_empty() || value.len() > 10 || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return RETRY_AFTER_MIN;
+    }
+    value
+        .parse::<u64>()
+        .map_or(RETRY_AFTER_MIN, std::time::Duration::from_secs)
+        .clamp(RETRY_AFTER_MIN, RETRY_AFTER_MAX)
+}
+
+/// For the epoch and visibility RPCs (SPEC-WRITE-GRANTS §5.3, §9.1): a real
+/// server's `unavailable` with a `Retry-After` header means the change is
+/// still taking effect, and the header says when to ask again. An
+/// `unavailable` without one (a transport-level failure such as DNS, connect
+/// or TLS, or a proxy error) stays an error for the ordinary retry ladder.
+pub(crate) fn pending_retry_after(err: &ConnectError) -> Option<std::time::Duration> {
+    if err.code != ErrorCode::Unavailable {
+        return None;
+    }
+    // Only an answer that carries `Retry-After` says the change is still
+    // taking effect; any other `unavailable` (a proxy, an outage) is an error.
+    let values = visible_header_values(err, "retry-after").unwrap_or_default();
+    if values.is_empty() {
+        return None;
+    }
+    Some(parse_retry_after(&values))
+}
 
 /// Which RPC family raised the error — needed to disambiguate
 /// `invalid_argument` (see module docs).
@@ -99,6 +221,12 @@ const RESOURCE_EXHAUSTED_STATUS: u16 = 429;
 /// Map a [`ConnectError`] to a [`TransportError`] per
 /// SPEC-TRANSPORT-CONNECT §5's inverse mapping.
 pub(crate) fn map_connect_error(err: ConnectError, ctx: ErrorContext) -> TransportError {
+    if let Some(required) = admission_required(&err) {
+        return match required {
+            Ok(required) => TransportError::AdmissionRequired(Box::new(required)),
+            Err(error) => error,
+        };
+    }
     let message = || err.message.clone().unwrap_or_default();
     match err.code {
         ErrorCode::NotFound => TransportError::PackNotFound,
@@ -111,9 +239,354 @@ pub(crate) fn map_connect_error(err: ConnectError, ctx: ErrorContext) -> Transpo
         ErrorCode::ResourceExhausted => TransportError::ServerError {
             status: RESOURCE_EXHAUSTED_STATUS,
         },
-        ErrorCode::Unavailable => TransportError::ServerError {
+        ErrorCode::Unavailable | ErrorCode::Aborted => TransportError::ServerError {
             status: UNAVAILABLE_STATUS,
         },
         _ => TransportError::RemoteError(message()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::mkit::transport::v1::Challenge;
+    use connectrpc::ErrorDetail;
+
+    fn admission_error(challenge: AdmissionChallenge) -> ConnectError {
+        ConnectError::permission_denied("never display this secret")
+            .with_detail(ErrorDetail::from_message(CHALLENGE_TYPE, &challenge))
+    }
+
+    fn challenge(scheme: &str, value: &str) -> Challenge {
+        Challenge {
+            scheme: Some(scheme.into()),
+            value: Some(value.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn retry_after_parses_delay_seconds_clamps_and_defaults() {
+        let secs = |v: &[&str]| {
+            parse_retry_after(&v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>()).as_secs()
+        };
+        assert_eq!(secs(&["5"]), 5);
+        assert_eq!(secs(&[" 12 "]), 12);
+        assert_eq!(secs(&["0"]), 1);
+        assert_eq!(secs(&["1"]), 1);
+        assert_eq!(secs(&["60"]), 60);
+        assert_eq!(secs(&["61"]), 60);
+        assert_eq!(secs(&["999999999"]), 60);
+        // Missing, empty, dates, signs, fractions and overflow are 1 s.
+        assert_eq!(secs(&[]), 1);
+        for garbage in [
+            "",
+            "soon",
+            "-5",
+            "+5",
+            "1.5",
+            "Wed, 21 Oct 2026 07:28:00 GMT",
+            "99999999999999999999",
+        ] {
+            assert_eq!(secs(&[garbage]), 1, "{garbage:?}");
+        }
+        // The first value wins.
+        assert_eq!(secs(&["7", "30"]), 7);
+    }
+
+    #[test]
+    fn only_a_real_unavailable_response_is_pending() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("content-type", "application/json".parse().unwrap());
+        headers.insert("retry-after", "7".parse().unwrap());
+        let real = ConnectError::unavailable("still completing").with_headers(headers);
+        assert_eq!(
+            pending_retry_after(&real),
+            Some(std::time::Duration::from_secs(7))
+        );
+        // An `unavailable` with response headers but no `Retry-After` (a
+        // proxy or an outage) is an error, not a wait.
+        let mut headers = http::HeaderMap::new();
+        headers.insert("content-type", "text/html".parse().unwrap());
+        let proxy = ConnectError::unavailable("bad gateway").with_headers(headers);
+        assert_eq!(pending_retry_after(&proxy), None);
+        // A local transport failure carries no response headers.
+        assert_eq!(pending_retry_after(&ConnectError::unavailable("dns")), None);
+        // Other codes are never pending, whatever the headers.
+        let mut headers = http::HeaderMap::new();
+        headers.insert("retry-after", "7".parse().unwrap());
+        let denied = ConnectError::permission_denied("no").with_headers(headers);
+        assert_eq!(pending_retry_after(&denied), None);
+    }
+
+    #[test]
+    fn admission_golden_and_display_are_safe() {
+        let json = include_str!("../../../tests/golden/transport/admission-challenge-error.json");
+        let error: ConnectError = serde_json::from_str(json).unwrap();
+        let TransportError::AdmissionRequired(required) =
+            map_connect_error(error, ErrorContext::Ref)
+        else {
+            panic!("expected admission")
+        };
+        assert_eq!(
+            required
+                .challenges
+                .iter()
+                .map(|c| c.scheme.as_str())
+                .collect::<Vec<_>>(),
+            ["mpp", "x402"]
+        );
+        assert_eq!(required.description, "Example upload payment required.");
+        assert!(!mkit_core::protocol::is_retryable(
+            &TransportError::AdmissionRequired(required.clone())
+        ));
+        let mut modified = *required;
+        modified.description = "bad\x1b[31m\r\u{202e}text".into();
+        let display = modified.to_string();
+        assert!(display.contains("mpp, x402"));
+        assert!(display.contains("\\u{1b}"));
+        assert!(display.contains("\\u{d}"));
+        assert!(display.contains("\\u{202e}"));
+        assert!(!display.contains("fake-example"));
+    }
+
+    #[test]
+    fn admission_bounds_and_detail_rules() {
+        let valid = AdmissionChallenge {
+            challenges: vec![challenge(&"a".repeat(64), &"v".repeat(8_192)); 8],
+            description: Some("d".repeat(512)),
+            ..Default::default()
+        };
+        assert!(matches!(
+            map_connect_error(admission_error(valid.clone()), ErrorContext::Ref),
+            TransportError::AdmissionRequired(_)
+        ));
+        for invalid in [
+            // A present detail with no challenges.
+            AdmissionChallenge::default(),
+            AdmissionChallenge {
+                challenges: vec![challenge("ok", "v"); 9],
+                ..Default::default()
+            },
+            AdmissionChallenge {
+                challenges: vec![challenge(&"a".repeat(65), "v")],
+                ..Default::default()
+            },
+            AdmissionChallenge {
+                challenges: vec![challenge("a", &"v".repeat(8_193))],
+                ..Default::default()
+            },
+            AdmissionChallenge {
+                description: Some("d".repeat(513)),
+                ..Default::default()
+            },
+            AdmissionChallenge {
+                challenges: vec![challenge("UPPER", "v")],
+                ..Default::default()
+            },
+        ] {
+            assert!(matches!(
+                map_connect_error(admission_error(invalid), ErrorContext::Ref),
+                TransportError::InvalidResponse
+            ));
+        }
+        let mut two = admission_error(valid);
+        two.details.push(two.details[0].clone());
+        assert!(matches!(
+            map_connect_error(two, ErrorContext::Ref),
+            TransportError::InvalidResponse
+        ));
+        let mut oversized = ConnectError::permission_denied("x").with_detail(ErrorDetail {
+            type_url: CHALLENGE_TYPE.into(),
+            // Valid base64: only the pre-decode length check can reject it.
+            value: Some("A".repeat(88_837)),
+            debug: None,
+        });
+        assert!(matches!(
+            map_connect_error(oversized.clone(), ErrorContext::Ref),
+            TransportError::InvalidResponse
+        ));
+        oversized.details[0].value = Some("%%%".into());
+        assert!(matches!(
+            map_connect_error(oversized, ErrorContext::Ref),
+            TransportError::InvalidResponse
+        ));
+    }
+
+    #[test]
+    fn admission_status_headers_and_unrelated_details() {
+        let mut raw = ConnectError::new(ErrorCode::Unknown, "untrusted body with secret");
+        raw.response_headers_mut()
+            .insert(STATUS_MARKER, "402".parse().unwrap());
+        raw.response_headers_mut()
+            .append("www-authenticate", "Payment a".parse().unwrap());
+        raw.response_headers_mut()
+            .append("payment-required", "x".parse().unwrap());
+        raw.response_headers_mut()
+            .append("x-other", "secret".parse().unwrap());
+        let TransportError::AdmissionRequired(required) = map_connect_error(raw, ErrorContext::Ref)
+        else {
+            panic!("expected admission")
+        };
+        assert!(required.challenges.is_empty());
+        assert!(required.description.is_empty());
+        assert_eq!(required.www_authenticate, ["Payment a"]);
+        assert_eq!(required.payment_required, ["x"]);
+        assert!(!format!("{required:?}").contains("secret"));
+
+        let detail = ErrorDetail::from_message(
+            CHALLENGE_TYPE,
+            &AdmissionChallenge {
+                challenges: vec![challenge("mpp", "v")],
+                ..Default::default()
+            },
+        );
+        let mut prefixed = ConnectError::permission_denied("x").with_detail(detail.clone());
+        prefixed.details[0].type_url = format!("type.googleapis.com/{CHALLENGE_TYPE}");
+        assert!(matches!(
+            map_connect_error(prefixed, ErrorContext::Ref),
+            TransportError::AdmissionRequired(_)
+        ));
+        let unavailable = ConnectError::unavailable("x").with_detail(detail);
+        assert!(mkit_core::protocol::is_retryable(&map_connect_error(
+            unavailable,
+            ErrorContext::Ref
+        )));
+        assert!(matches!(
+            map_connect_error(ConnectError::permission_denied("x"), ErrorContext::Ref),
+            TransportError::AccessDenied
+        ));
+        let notice = ErrorDetail {
+            type_url: "mkit.transport.v1.RedactionNotice".into(),
+            value: None,
+            debug: None,
+        };
+        assert!(matches!(
+            map_connect_error(
+                ConnectError::permission_denied("x").with_detail(notice),
+                ErrorContext::Ref
+            ),
+            TransportError::AccessDenied
+        ));
+    }
+
+    #[test]
+    fn admission_header_bounds_are_enforced() {
+        let mut error = ConnectError::unknown("body");
+        error
+            .response_headers_mut()
+            .insert(STATUS_MARKER, "402".parse().unwrap());
+        for _ in 0..8 {
+            error
+                .response_headers_mut()
+                .append("payment-required", "v".repeat(8_192).parse().unwrap());
+        }
+        assert!(matches!(
+            map_connect_error(error.clone(), ErrorContext::Ref),
+            TransportError::AdmissionRequired(_)
+        ));
+        error
+            .response_headers_mut()
+            .append("payment-required", "v".parse().unwrap());
+        assert!(matches!(
+            map_connect_error(error, ErrorContext::Ref),
+            TransportError::InvalidResponse
+        ));
+        let mut error = ConnectError::unknown("body");
+        error
+            .response_headers_mut()
+            .insert(STATUS_MARKER, "402".parse().unwrap());
+        error
+            .response_headers_mut()
+            .insert("www-authenticate", "v".repeat(8_193).parse().unwrap());
+        assert!(matches!(
+            map_connect_error(error, ErrorContext::Ref),
+            TransportError::InvalidResponse
+        ));
+        for invalid in [b"\x7f".as_slice(), b"\x80".as_slice()] {
+            let mut error = ConnectError::unknown("body");
+            error
+                .response_headers_mut()
+                .insert(STATUS_MARKER, "402".parse().unwrap());
+            if let Ok(value) = http::HeaderValue::from_bytes(invalid) {
+                error
+                    .response_headers_mut()
+                    .insert("payment-required", value);
+                assert!(matches!(
+                    map_connect_error(error, ErrorContext::Ref),
+                    TransportError::InvalidResponse
+                ));
+            }
+        }
+    }
+
+    fn pending_error(value: Option<String>) -> ConnectError {
+        ConnectError::unavailable("verification pending").with_detail(connectrpc::ErrorDetail {
+            type_url: "mkit.transport.v1.PendingVerification".to_owned(),
+            value,
+            debug: None,
+        })
+    }
+
+    #[test]
+    fn pending_delay_clamps_all_boundaries() {
+        for (value, expected) in [
+            (None, 1_000),
+            (Some(0), 1_000),
+            (Some(500), 1_000),
+            (Some(5_000), 5_000),
+            (Some(120_000), 60_000),
+            (Some(u32::MAX), 60_000),
+        ] {
+            let bytes = buffa::Message::encode_to_vec(&PendingVerification {
+                retry_after_ms: value,
+                ..Default::default()
+            });
+            let error = pending_error(Some(
+                base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes),
+            ));
+            assert_eq!(
+                pending_verification_delay(&error),
+                Some(std::time::Duration::from_millis(expected))
+            );
+        }
+        assert_eq!(
+            pending_verification_delay(&pending_error(None)),
+            Some(std::time::Duration::from_millis(1_000))
+        );
+    }
+
+    #[test]
+    fn golden_pending_error_decodes_to_five_seconds() {
+        let json = include_str!("../../../tests/golden/transport/pending-verification-error.json");
+        let error: ConnectError = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            pending_verification_delay(&error),
+            Some(std::time::Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn malformed_and_other_code_details_are_plain_errors() {
+        let mut malformed = pending_error(Some("%%%".to_owned()));
+        assert_eq!(pending_verification_delay(&malformed), None);
+        malformed.code = ErrorCode::Aborted;
+        assert_eq!(pending_verification_delay(&malformed), None);
+        let mut other_type = pending_error(None);
+        other_type.details[0].type_url = "mkit.transport.v1.SomethingElse".to_owned();
+        assert_eq!(pending_verification_delay(&other_type), None);
+        let mut prefixed = pending_error(None);
+        prefixed.details[0].type_url = PendingVerification::TYPE_URL.to_owned();
+        assert!(pending_verification_delay(&prefixed).is_some());
+    }
+
+    #[test]
+    fn aborted_is_retryable() {
+        let err = map_connect_error(
+            ConnectError::new(ErrorCode::Aborted, "in flight"),
+            ErrorContext::Ref,
+        );
+        assert!(matches!(err, TransportError::ServerError { status: 503 }));
+        assert!(mkit_core::protocol::is_retryable(&err));
     }
 }

@@ -27,6 +27,11 @@ default = ["algo-ed25519", "algo-secp256k1", "algo-p256"]
 algo-ed25519 = ["dep:ed25519-dalek"]
 algo-secp256k1 = ["dep:k256"]
 algo-p256 = ["dep:p256"]
+# SPEC-WRITE-GRANTS support (not a default feature; pure Rust and wasm32-safe):
+# the grant statement codec and `X-Write-Grant` header (`mkit_attest::grant`)
+# and the §4 owner-signature primitives (`eth` module): Keccak-256, EIP-191
+# digests, strict secp256k1 recovery, curve-validated address derivation.
+grants = ["algo-ed25519", "algo-secp256k1", "algo-p256", "dep:sha3"]
 # BLS12-381 M-of-N threshold signing — for the release-party flow.
 # OFF by default: commonware-cryptography's `std` feature pulls blst
 # (a sizeable precompiled BLS library, via the `bls12381` feature `std`
@@ -75,7 +80,13 @@ zeroize = { version = "1", features = ["derive"] }
 # external-signer response). The canonical JCS encoder is hand-rolled per
 # RFC 8785 — `serde_json::to_string` does NOT satisfy JCS sort/escape rules.
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip`: correctly rounded number parsing. SPEC-WRITE-GRANTS
+# §4.3 rule 2 rejects a clientDataJSON number that is not finite as a
+# binary64 value; without it, values that round to f64::MAX (for example
+# 1.7976931348623158e308) overflow to infinity and are wrongly refused.
+# Cargo feature unification turns it on for every serde_json user in a
+# build that includes mkit-attest (parsing only: no API change).
+serde_json = { version = "1", features = ["float_roundtrip"] }
 # Atomic-rename writes for `store::save`; mirrors mkit-core::store.
 tempfile = "3"
 # Re-used directly so signer_repo_key + verify can talk to the SAME dalek
@@ -98,6 +109,12 @@ p256 = { version = "0.14", optional = true, default-features = false, features =
 # cosign / `gh attestation verify` / the SLSA verifier can read it,
 # regardless of which signing algorithms are compiled in.
 sha2 = { version = "0.11", default-features = false }
+# Keccak-256 (the ORIGINAL Keccak, `0x01` padding) for the `grants`
+# feature's address derivation and EIP-191 digests (SPEC-WRITE-GRANTS
+# §4, §4.1). Same `digest 0.11` line as `sha2`; its only other
+# dependency, `keccak 0.2`, is already in the graph via ed25519-dalek.
+# Never use `sha3::Sha3_256` for these values.
+sha3 = { version = "0.11", default-features = false, optional = true }
 # BLS12-381 threshold signing (feature `bls-threshold`). Pulls blst via
 # commonware-cryptography's `std` feature (which, since 2026.9.0, enables
 # the now-optional `bls12381` feature that gates `dep:blst` — `std` is
@@ -123,6 +140,8 @@ rand_core = { version = "0.10", optional = true, default-features = false }
 
 [dev-dependencies]
 hex = "0.4"
+# Roundtrip property tests over generated grants (`grant` module).
+proptest = "1"
 # Tests that hand-build signing keys need dalek unconditionally, so pull
 # it in as a dev-dep separate from the feature-gated runtime dep.
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
