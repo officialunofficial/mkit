@@ -41,6 +41,20 @@ impl Exhaustion {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum TerminalFailure {
+    OpenClosure,
+    DeltaDepth,
+}
+impl TerminalFailure {
+    fn error(self) -> ServerError {
+        ServerError::invalid_argument(match self {
+            Self::OpenClosure => "open closure",
+            Self::DeltaDepth => "delta chain too deep",
+        })
+    }
+}
+
 /// Verified pack state may carry exactly one frozen pair's resumable evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,6 +76,8 @@ pub struct Progress {
     depth_limit: u32,
     base_cursor: Option<BaseCursor>,
     failure: Option<Exhaustion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    terminal: Option<TerminalFailure>,
     missing: bool,
     missing_base: bool,
     complete: bool,
@@ -104,6 +120,7 @@ impl Progress {
                     || !self.queue.is_empty()
                     || self.base_cursor.is_some()
                     || self.failure.is_some()
+                    || self.terminal.is_some()
                     || self.missing
                     || self.value.head.is_some_and(|h| !self.visited.contains(&h))
                     || self.value.packmap.is_some_and(|m| !self.chain.contains(&m))
@@ -124,6 +141,9 @@ impl Progress {
         lag: u64,
     ) -> Result<(), ServerError> {
         if let Some(failure) = self.failure {
+            return Err(failure.error());
+        }
+        if let Some(failure) = self.terminal {
             return Err(failure.error());
         }
         if self.missing {
@@ -240,12 +260,22 @@ pub(crate) async fn prepare<S: NamespaceStore>(
             depth_limit: cfg.max_delta_chain_depth,
             base_cursor: None,
             failure: None,
+            terminal: None,
             missing: false,
             missing_base: false,
             complete: false,
         }
     };
-    slice(store, shards, repo, &mut progress, metrics, None).await?;
+    // A retryable read failure still spent work. Persist its safe checkpoint
+    // before returning the original storage refusal to the foreground caller.
+    let slice_error = slice(store, shards, repo, &mut progress, metrics, None)
+        .await
+        .err();
+    if let Some(error) = slice_error.as_ref()
+        && error.code() != crate::Code::Unavailable
+    {
+        return Err(error.clone());
+    }
     *publication = Some(Box::new(progress.clone()));
     let encoded = bounded_state(&mut state);
     let state::VerificationV1::Verified {
@@ -261,7 +291,11 @@ pub(crate) async fn prepare<S: NamespaceStore>(
         .require(Precondition::NotAfter(now.saturating_add(10_000)))
         .require(Precondition::Equals(key.clone(), prior))
         .put(key.clone(), encoded);
-    if !progress.complete && progress.failure.is_none() && !progress.missing {
+    if !progress.complete
+        && progress.failure.is_none()
+        && progress.terminal.is_none()
+        && !progress.missing
+    {
         let timer = keys::timer(now.saturating_add(1_000), 12, key.as_bytes());
         batch = batch
             .require(Precondition::Absent(timer.clone()))
@@ -274,6 +308,9 @@ pub(crate) async fn prepare<S: NamespaceStore>(
         != BatchOutcome::Committed
     {
         return Err(crate::indexed::pending(1_000));
+    }
+    if let Some(error) = slice_error {
+        return Err(error);
     }
     progress
         .result(advance, now, created, cfg.relay_lag_bound_ms)
@@ -500,6 +537,9 @@ async fn slice<S: NamespaceStore>(
         let used = budget.used() - start;
         progress.calls = before.calls.saturating_add(u64::from(used));
         if progress.calls > TOTAL_CALLS {
+            let calls = progress.calls;
+            *progress = before;
+            progress.calls = calls;
             progress.failure = Some(Exhaustion::IndexCalls);
             break;
         }
@@ -548,7 +588,20 @@ async fn slice<S: NamespaceStore>(
                 progress.missing = true;
                 break;
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                let calls = progress.calls;
+                *progress = before;
+                progress.calls = calls;
+                progress.terminal = match error.public_message() {
+                    "open closure" => Some(TerminalFailure::OpenClosure),
+                    "delta chain too deep" => Some(TerminalFailure::DeltaDepth),
+                    _ => None,
+                };
+                if progress.terminal.is_some() {
+                    break;
+                }
+                return Err(error);
+            }
         }
         if budget.remaining() < 16 {
             break;
@@ -594,11 +647,12 @@ pub(crate) async fn fire<S: NamespaceStore, T: NamespaceStore>(
     if timer.value.as_bytes() != progress.binding
         || progress.complete
         || progress.failure.is_some()
+        || progress.terminal.is_some()
         || progress.missing
     {
         return Ok(crate::timers::Fired::Done(Batch::new()));
     }
-    slice(
+    let slice_error = slice(
         target,
         shards,
         &RepoId {
@@ -610,7 +664,15 @@ pub(crate) async fn fire<S: NamespaceStore, T: NamespaceStore>(
         alarm,
     )
     .await
-    .map_err(|_| StoreError::unavailable("publication verification slice failed"))?;
+    .err();
+    if let Some(error) = slice_error.as_ref() {
+        if error.code() != crate::Code::Unavailable {
+            return Err(StoreError::unavailable(
+                "publication verification slice failed",
+            ));
+        }
+        tracing::warn!(%error, "publication verification slice retry checkpointed");
+    }
     let encoded = bounded_state(&mut state);
     let state::VerificationV1::Verified {
         publication: Some(progress),
@@ -619,7 +681,10 @@ pub(crate) async fn fire<S: NamespaceStore, T: NamespaceStore>(
     else {
         return Err(StoreError::Corrupt("missing publication progress".into()));
     };
-    let complete = progress.complete || progress.failure.is_some() || progress.missing;
+    let complete = progress.complete
+        || progress.failure.is_some()
+        || progress.terminal.is_some()
+        || progress.missing;
     let batch = Batch::new()
         .require(Precondition::Equals(key.clone(), raw))
         .require(Precondition::NotAfter(ctx.now_ms.saturating_add(10_000)))
@@ -628,7 +693,11 @@ pub(crate) async fn fire<S: NamespaceStore, T: NamespaceStore>(
         crate::timers::Fired::Done(batch)
     } else {
         crate::timers::Fired::Reschedule {
-            due_at_ms: ctx.now_ms.saturating_add(1_000),
+            due_at_ms: ctx.now_ms.saturating_add(if slice_error.is_some() {
+                crate::timers::RETRY_BACKOFF_MS
+            } else {
+                1_000
+            }),
             value: timer.value.clone(),
             batch,
         }

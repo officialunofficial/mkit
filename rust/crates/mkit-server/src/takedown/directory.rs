@@ -218,6 +218,83 @@ mod tests {
     use crate::store::{BlockEntry, ContentIndex};
     use crate::{MemoryFault, MemoryKv};
     use futures_executor::block_on;
+    async fn proof(store: &MemoryKv, object: Hash) -> Result<(), crate::ServerError> {
+        let repo = crate::RepoId {
+            namespace: crate::NamespaceKey::deployment_default(),
+            name: crate::RepoName::new("directory-crash").unwrap(),
+        };
+        super::super::denial::require_repo_clear(
+            store,
+            &crate::pipeline::D34Shards,
+            &repo,
+            &std::collections::BTreeSet::from([object]),
+            &crate::indexed::budget::SliceBudget::new(9000),
+        )
+        .await
+    }
+    #[test]
+    fn crash_before_activation_leaves_discoverable_reservation_for_retry() {
+        block_on(async {
+            let store = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+            let object = [0x81; 32];
+            reserve(&store, &object, 1).await.unwrap();
+            let store = store.with_fault(MemoryFault::ApplyBefore);
+            let index = ContentIndex::new(BorrowedStore(&store));
+            assert!(
+                index
+                    .block(&object, &BlockEntry::new("legal", 1), 1)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                store.get(&partition(&object), &key(&object)).await.unwrap(),
+                Some(value(&object))
+            );
+            assert!(descriptors(&store, &object).await.unwrap().is_empty());
+            proof(&store, object).await.unwrap();
+            index
+                .block(&object, &BlockEntry::new("legal", 1), 1)
+                .await
+                .unwrap();
+            assert_eq!(
+                proof(&store, object).await.unwrap_err().code(),
+                crate::Code::PermissionDenied
+            );
+        });
+    }
+    #[test]
+    fn crash_after_activation_keeps_denial_discoverable_before_retry() {
+        block_on(async {
+            let store = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+            let object = [0x82; 32];
+            reserve(&store, &object, 1).await.unwrap();
+            let store = store.with_fault(MemoryFault::ApplyAfterCommit);
+            let index = ContentIndex::new(BorrowedStore(&store));
+            assert!(
+                index
+                    .block(&object, &BlockEntry::new("legal", 1), 1)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                store.get(&partition(&object), &key(&object)).await.unwrap(),
+                Some(value(&object))
+            );
+            assert_eq!(descriptors(&store, &object).await.unwrap().len(), 1);
+            assert_eq!(
+                proof(&store, object).await.unwrap_err().code(),
+                crate::Code::PermissionDenied
+            );
+            index
+                .block(&object, &BlockEntry::new("legal", 1), 1)
+                .await
+                .unwrap();
+            assert_eq!(
+                proof(&store, object).await.unwrap_err().code(),
+                crate::Code::PermissionDenied
+            );
+        });
+    }
     #[test]
     fn uncertain_committed_registration_is_resolved_before_activation() {
         block_on(async {

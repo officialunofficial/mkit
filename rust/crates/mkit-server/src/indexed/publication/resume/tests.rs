@@ -48,6 +48,7 @@ fn progress(a: &Advance) -> Progress {
         depth_limit: cfg.max_delta_chain_depth,
         base_cursor: None,
         failure: None,
+        terminal: None,
         missing: false,
         missing_base: false,
         complete: false,
@@ -305,51 +306,55 @@ fn exhaustion_and_shared_alarm_refusal_remain_typed_and_bounded() {
         );
     });
 }
+async fn fifty_base_fixture(kv: &MemoryKv, repo: &RepoId) -> (Hash, Hash) {
+    let pack = [5; 32];
+    let mut previous = None;
+    let mut entries = vec![];
+    for n in 0..50u8 {
+        let object = Object::Blob(Blob { data: vec![n] });
+        let id = object.id().unwrap();
+        inventory::stage(kv, &pack, 10_000, &id, &object, previous, 0)
+            .await
+            .unwrap();
+        entries.push(IndexEntry {
+            object: id,
+            value: IndexValue {
+                frame_offset: u64::from(n) * 20,
+                frame_length: 20,
+                wire_type: if previous.is_some() { 2 } else { 0 },
+                decoded_size: 11,
+                chain_depth: u32::from(previous.is_some()),
+                delta_base: previous,
+            },
+        });
+        previous = Some(id);
+    }
+    inventory::complete(kv, &pack, 10_000, 0).await.unwrap();
+    let source = SinglePartition.ref_shard(repo, "refs/heads/main");
+    for batch in plan_index_rows_direct(&SinglePartition, repo, &source, &pack, &entries, 0)
+        .unwrap()
+        .direct
+    {
+        let mut writes = Batch::new();
+        for (k, v) in batch.puts {
+            writes = writes.put(k, v);
+        }
+        kv.apply(&batch.target, writes).await.unwrap();
+    }
+    (pack, previous.unwrap())
+}
 #[test]
 fn fifty_base_hops_cross_slices_without_restarting_the_object() {
     block_on(async {
         let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
         let repo = repo();
-        let pack = [5; 32];
-        let mut previous = None;
-        let mut entries = vec![];
-        for n in 0..50u8 {
-            let object = Object::Blob(Blob { data: vec![n] });
-            let id = object.id().unwrap();
-            inventory::stage(&kv, &pack, 10_000, &id, &object, previous, 0)
-                .await
-                .unwrap();
-            entries.push(IndexEntry {
-                object: id,
-                value: IndexValue {
-                    frame_offset: u64::from(n) * 20,
-                    frame_length: 20,
-                    wire_type: if previous.is_some() { 2 } else { 0 },
-                    decoded_size: 11,
-                    chain_depth: u32::from(previous.is_some()),
-                    delta_base: previous,
-                },
-            });
-            previous = Some(id);
-        }
-        inventory::complete(&kv, &pack, 10_000, 0).await.unwrap();
-        let source = SinglePartition.ref_shard(&repo, "refs/heads/main");
-        for batch in plan_index_rows_direct(&SinglePartition, &repo, &source, &pack, &entries, 0)
-            .unwrap()
-            .direct
-        {
-            let mut writes = Batch::new();
-            for (k, v) in batch.puts {
-                writes = writes.put(k, v);
-            }
-            kv.apply(&batch.target, writes).await.unwrap();
-        }
+        let (pack, last) = fifty_base_fixture(&kv, &repo).await;
         let mut a = advance(pack);
         a.value.packmap = None;
         let mut p = progress(&a);
         p.base_cursor = Some(BaseCursor {
             origin: pack,
-            next: previous.unwrap(),
+            next: last,
             depth: 0,
         });
         let mut rounds = 0;
@@ -418,4 +423,327 @@ fn oversized_frontier_compacts_into_terminal_typed_exhaustion() {
         ))
         .put(crate::Key::new(vec![2; 1024]), encoded);
     batch.validate(&MemoryKv::default().capabilities()).unwrap();
+}
+
+struct FailingMembership<'a> {
+    store: &'a MemoryKv,
+    key: crate::Key,
+    armed: std::sync::atomic::AtomicBool,
+}
+impl NamespaceStore for FailingMembership<'_> {
+    fn capabilities(&self) -> crate::store::StoreCapabilities {
+        self.store.capabilities()
+    }
+    async fn get(&self, p: &Partition, k: &crate::Key) -> Result<Option<Value>, StoreError> {
+        if *k == self.key && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(StoreError::unavailable("injected membership outage"));
+        }
+        self.store.get(p, k).await
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &crate::Key,
+        end: &crate::Key,
+        after: Option<&crate::Cursor>,
+        limit: u32,
+    ) -> Result<crate::ScanPage, StoreError> {
+        self.store.scan(p, start, end, after, limit).await
+    }
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        self.store.apply(p, batch).await
+    }
+    async fn stats(&self, p: &Partition) -> Result<crate::PartitionStats, StoreError> {
+        self.store.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.store.probe().await
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Foreground and real timer settlement share one recovery fixture.
+fn storage_retry_retains_safe_progress_and_dispatched_calls() {
+    block_on(async {
+        let clock = std::sync::Arc::new(crate::rt::ManualClock::new(0));
+        let kv = MemoryKv::with_clock(clock.clone());
+        let repo = repo();
+        let root = [11; 32];
+        let prev = [12; 32];
+        facts(&kv, root, Some(prev)).await;
+        facts(&kv, prev, None).await;
+        verified(&kv, &repo, root).await;
+        let source = SinglePartition.ref_shard(&repo, "refs/heads/main");
+        let membership = keys::membership(&repo.name, &prev);
+        kv.apply(
+            &source,
+            Batch::new().put(membership.clone(), Value::default()),
+        )
+        .await
+        .unwrap();
+        let target = FailingMembership {
+            store: &kv,
+            key: membership,
+            armed: std::sync::atomic::AtomicBool::new(true),
+        };
+        let mut a = advance(root);
+        let error = prepare(
+            &target,
+            &source,
+            &SinglePartition,
+            &repo,
+            &mut a,
+            IndexedConfig::default(),
+            0,
+            &crate::telemetry::NoopMetrics,
+            0,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), Code::Unavailable);
+        assert_eq!(error.public_message(), "object storage request failed");
+        let first = read_progress(&kv, &repo, root).await;
+        assert_eq!(first.calls, 2, "successful and failed dispatch both count");
+        assert_eq!(first.bytes, 100);
+        assert_eq!(first.next_packmap, Some(prev));
+        assert_eq!(first.chain, BTreeSet::from([root]));
+        assert!(!first.complete);
+        first.validate().unwrap();
+
+        target
+            .armed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let registry = crate::timers::TimerRegistry::new().register(
+            crate::timers::publication_recheck::PublicationRecheck::new(
+                crate::store::BorrowedStore(&target),
+            ),
+        );
+        clock.advance(1_000);
+        let report = crate::timers::run_due(
+            &kv,
+            &source,
+            &registry,
+            clock.as_ref(),
+            1_000,
+            &crate::timers::TickBudget::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            report.fired, 1,
+            "error progress settles with its timer move"
+        );
+        let failed = read_progress(&kv, &repo, root).await;
+        assert_eq!(failed.calls, first.calls + 1);
+        assert_eq!(failed.bytes, first.bytes);
+        assert_eq!(failed.chain, first.chain);
+        assert_eq!(failed.next_packmap, Some(prev));
+        assert!(!failed.complete);
+        failed.validate().unwrap();
+        let key = keys::verification(&repo.name, &root);
+        assert!(
+            kv.get(&source, &keys::timer(1_000, 12, key.as_bytes()))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            kv.get(&source, &keys::timer(6_000, 12, key.as_bytes()))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            kv.get(&source, &keys::ref_key(&repo.name, "refs/heads/main"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        clock.advance(5_000);
+        crate::timers::run_due(
+            &kv,
+            &source,
+            &registry,
+            clock.as_ref(),
+            6_000,
+            &crate::timers::TickBudget::default(),
+        )
+        .await
+        .unwrap();
+        let done = read_progress(&kv, &repo, root).await;
+        assert!(done.complete);
+        assert_eq!(done.bytes, 200);
+        assert!(done.calls > failed.calls);
+        assert!(
+            kv.get(&source, &keys::ref_key(&repo.name, "refs/heads/main"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    });
+}
+
+#[test]
+fn failing_dispatch_at_total_limit_is_terminal_typed_exhaustion() {
+    block_on(async {
+        let kv = MemoryKv::default();
+        let repo = repo();
+        let prev = [13; 32];
+        let target = FailingMembership {
+            store: &kv,
+            key: keys::membership(&repo.name, &prev),
+            armed: std::sync::atomic::AtomicBool::new(true),
+        };
+        let mut p = progress(&advance([14; 32]));
+        p.next_packmap = Some(prev);
+        p.calls = TOTAL_CALLS;
+        slice(
+            &target,
+            &SinglePartition,
+            &repo,
+            &mut p,
+            &crate::telemetry::NoopMetrics,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(p.calls, TOTAL_CALLS + 1);
+        assert_eq!(p.failure, Some(Exhaustion::IndexCalls));
+        assert_eq!(p.next_packmap, Some(prev));
+        assert!(p.chain.is_empty(), "failed item changes are rolled back");
+        p.validate().unwrap();
+        assert_eq!(
+            p.result(&mut advance([14; 32]), 0, 0, 1)
+                .unwrap_err()
+                .public_message(),
+            "object index limit exceeded"
+        );
+    });
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Durable binding, timer continuation and repeated permanent refusal.
+fn lowered_delta_depth_becomes_durable_terminal_failure_across_timers() {
+    block_on(async {
+        let clock = std::sync::Arc::new(crate::rt::ManualClock::new(0));
+        let kv = MemoryKv::with_clock(clock.clone());
+        let repo = repo();
+        let (pack, last) = fifty_base_fixture(&kv, &repo).await;
+        let root = [15; 32];
+        let mut a = advance(root);
+        a.additions.push(pack);
+        let cfg = IndexedConfig {
+            max_delta_chain_depth: 30,
+            ..IndexedConfig::default()
+        };
+        // Existing sealed content can have been verified under a higher cap.
+        // This is the frozen proof after its MKPL phase, at a base-hop boundary.
+        let mut p = progress(&a);
+        p.binding = binding(&a, cfg).unwrap();
+        p.depth_limit = cfg.max_delta_chain_depth;
+        p.next_packmap = None;
+        p.chain.insert(root);
+        p.packs.insert(pack);
+        p.dependencies.extend([root, pack]);
+        p.base_cursor = Some(BaseCursor {
+            origin: pack,
+            next: last,
+            depth: 0,
+        });
+        p.validate().unwrap();
+        let source = SinglePartition.ref_shard(&repo, "refs/heads/main");
+        let key = keys::verification(&repo.name, &root);
+        let binding = p.binding;
+        state::write(
+            &kv,
+            &source,
+            &repo.name,
+            &root,
+            None,
+            &state::VerificationV1::Verified {
+                pack_len: 100,
+                verified_at_ms: 0,
+                publication: Some(Box::new(p)),
+            },
+            10_000,
+        )
+        .await
+        .unwrap();
+        kv.apply(
+            &source,
+            Batch::new().put(
+                keys::timer(1_000, 12, key.as_bytes()),
+                Value::new(binding.to_vec()),
+            ),
+        )
+        .await
+        .unwrap();
+        let registry = crate::timers::TimerRegistry::new().register(
+            crate::timers::publication_recheck::PublicationRecheck::new(
+                crate::store::BorrowedStore(&kv),
+            ),
+        );
+        let mut rounds = 0;
+        loop {
+            rounds += 1;
+            clock.advance(1_000);
+            crate::timers::run_due(
+                &kv,
+                &source,
+                &registry,
+                clock.as_ref(),
+                rounds * 1_000,
+                &crate::timers::TickBudget::default(),
+            )
+            .await
+            .unwrap();
+            let retained = read_progress(&kv, &repo, root).await;
+            retained.validate().unwrap();
+            assert!(!retained.complete);
+            assert!(
+                kv.get(&source, &keys::ref_key(&repo.name, "refs/heads/main"))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            if retained.terminal.is_some() {
+                assert_eq!(retained.terminal, Some(TerminalFailure::DeltaDepth));
+                assert_eq!(retained.base_cursor.as_ref().unwrap().depth, 30);
+                assert!(retained.calls > u64::from(SLICE_CALLS));
+                break;
+            }
+            assert!(rounds < 10);
+        }
+        assert!(rounds > 1, "the permanent refusal follows a continuation");
+        for _ in 0..2 {
+            let error = prepare(
+                &kv,
+                &source,
+                &SinglePartition,
+                &repo,
+                &mut a,
+                cfg,
+                rounds * 1_000,
+                &crate::telemetry::NoopMetrics,
+                0,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.code(), Code::InvalidArgument);
+            assert_eq!(error.public_message(), "delta chain too deep");
+        }
+        assert!(
+            kv.get(
+                &source,
+                &keys::timer((rounds + 1) * 1_000, 12, key.as_bytes())
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        let mut corrupt = serde_json::to_value(read_progress(&kv, &repo, root).await).unwrap();
+        corrupt["terminal"] = serde_json::json!("UnknownFailure");
+        assert!(serde_json::from_value::<Progress>(corrupt).is_err());
+    });
 }

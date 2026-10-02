@@ -3760,6 +3760,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 created,
             ))
             .await?;
+        // The canonical fallback retains delta bases; only the metadata-only
+        // continuation can use the whole-job allowance without that residency.
+        let mut indexed = indexed;
+        if self.cfg.takedown_denial && !resumed {
+            indexed.decode_budget = indexed.decode_budget.min(8 << 20);
+        }
         // Pair verification and dependency visibility share one allocation.
         let inspection_budget = crate::indexed::budget::SliceBudget::new(256);
         let inspection_blobs =
