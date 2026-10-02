@@ -323,8 +323,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Server: the M1 exit wire conformance suite (WP-1.27): isolation replay, target-ref ticket caps and expiry, the
   D34 lag windows and D36 hinted reads over a held relay, idle and expired epoch-lease renewal, 64-ref writes, an
   over-32 MiB native listing and bounded ticket growth; the `test-faults` timer directive also expires tickets and
-  the Worker stats hook is scoped to one ref's shard under D34. The report is
-  `docs/plans/mkit-server/m1-exit-report.md`. `mkit-server-conformance` `Profile` gains `ticket_per_ref` and
+  the Worker stats hook is scoped to one ref's shard under D34. `mkit-server-conformance` `Profile` gains `ticket_per_ref` and
   `merge_paging_refs` (WP-1.27).
 - Server: the Worker gains the `GRANT_SCHEMES` and
   `WEBAUTHN_RPS` vars and a `test-faults`-only `UNSAFE_LOOPBACK_GRANTS`, to
