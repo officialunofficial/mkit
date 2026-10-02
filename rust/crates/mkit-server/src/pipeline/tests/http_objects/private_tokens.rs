@@ -560,3 +560,124 @@ fn private_ref_token_file_headers_do_not_change_binding_or_caching() {
         &[],
     ));
 }
+
+fn set_visibility<H: HookSet>(fx: &Fx<H>, visibility: crate::pipeline::RepoVisibility) {
+    let req = signed(
+        &fx.owner,
+        &fx.identity("room"),
+        Procedure::SetRepoVisibility,
+        fx.number(),
+    );
+    block_on(
+        fx.pipe
+            .set_repo_visibility(&fx.auth(&req), VisibilityRequest::Envelope(visibility)),
+    )
+    .unwrap();
+}
+
+/// A token is a bearer read grant for the repository as it was private when
+/// issued: a visibility change after issuance revokes it even though the
+/// namespace epoch is untouched (SPEC-WRITE-GRANTS §9.4).
+#[test]
+fn tokens_issued_before_a_visibility_change_are_refused() {
+    use crate::pipeline::RepoVisibility::{Private, Public};
+    let (fx, d, _, tokens) = setup();
+    let object = (
+        fx.object_url("room", &id(&d.small)),
+        UrlTarget::Object(id(&d.small)),
+    );
+    let by_ref = (
+        fx.ref_url("room", "main", "small.txt"),
+        UrlTarget::path(HEAD, "small.txt").unwrap(),
+    );
+    let serves = |fx: &Fx<Scripts>, token: &str, path: &str| {
+        with_token(fx, "GET", path, token, &[]).status == 200
+    };
+    let mint_both = |fx: &Fx<Scripts>| {
+        (
+            mint(fx, &tokens, &object.1, 0),
+            mint(fx, &tokens, &by_ref.1, 0),
+        )
+    };
+
+    // Private -> public -> private revokes tokens issued while private.
+    let (obj_a, ref_a) = mint_both(&fx);
+    assert!(serves(&fx, &obj_a, &object.0) && serves(&fx, &ref_a, &by_ref.0));
+    fx.clock.advance(1_000);
+    set_visibility(&fx, Public);
+    fx.clock.advance(1_000);
+    set_visibility(&fx, Private);
+    fx.clock.advance(1_000);
+    assert!(!serves(&fx, &obj_a, &object.0), "object token survived");
+    assert!(!serves(&fx, &ref_a, &by_ref.0), "ref token survived");
+
+    // A token issued after the latest change works.
+    let (obj_b, ref_b) = mint_both(&fx);
+    assert!(serves(&fx, &obj_b, &object.0) && serves(&fx, &ref_b, &by_ref.0));
+
+    // Public -> private revokes a token issued while public, and the
+    // earlier private-era token again.
+    fx.clock.advance(1_000);
+    set_visibility(&fx, Public);
+    fx.clock.advance(1_000);
+    let (obj_c, ref_c) = mint_both(&fx);
+    fx.clock.advance(1_000);
+    set_visibility(&fx, Private);
+    fx.clock.advance(1_000);
+    for (token, path) in [
+        (&obj_b, &object.0),
+        (&ref_b, &by_ref.0),
+        (&obj_c, &object.0),
+        (&ref_c, &by_ref.0),
+    ] {
+        assert!(!serves(&fx, token, path));
+    }
+    let (obj_d, ref_d) = mint_both(&fx);
+    assert!(serves(&fx, &obj_d, &object.0) && serves(&fx, &ref_d, &by_ref.0));
+}
+
+/// A repository with no stored visibility row has never changed
+/// visibility: a token issued under the private default keeps serving.
+#[test]
+fn tokens_on_a_default_private_repository_without_a_row_keep_serving() {
+    let tokens = tokens();
+    let fx = fixture_tweaked(Hooks::new(), http_cfg(), |c| {
+        c.default_repo_visibility = crate::pipeline::RepoVisibility::Private;
+        c.url_tokens = Some(tokens.clone());
+    });
+    let d = data();
+    fx.push("room", &d.refs(), d.head(), None);
+    let token = mint(&fx, &tokens, &UrlTarget::Object(id(&d.small)), 0);
+    let path = fx.object_url("room", &id(&d.small));
+    assert_eq!(with_token(&fx, "GET", &path, &token, &[]).status, 200);
+}
+
+/// A visibility row stored before `changed_ms` existed still serves reads;
+/// its `last_created_ms` stands in as the change time.
+#[test]
+fn legacy_visibility_row_without_a_change_time_uses_its_creation_time() {
+    let (fx, d, _, tokens) = setup();
+    let repo = fx.repo_id("room");
+    let last_created = fx.clock.now_ms() + 5_000;
+    let legacy = format!(
+        "\x01{{\"visibility\":\"private\",\"last_created_ms\":{last_created},\"last_statement_id\":null}}"
+    );
+    block_on(fx.pipe.meta.inner.apply(
+        &fx.pipe.shards.coordinator(&repo.namespace),
+        Batch::new().put(
+            keys::repo_visibility(&repo.name),
+            crate::store::Value::new(legacy.into_bytes()),
+        ),
+    ))
+    .unwrap();
+    let path = fx.object_url("room", &id(&d.small));
+    let target = UrlTarget::Object(id(&d.small));
+    let before = mint(&fx, &tokens, &target, 0);
+    fx.clock.set(last_created);
+    let at = mint(&fx, &tokens, &target, 0);
+    fx.clock.advance(1);
+    let after = mint(&fx, &tokens, &target, 0);
+    assert_eq!(with_token(&fx, "GET", &path, &before, &[]).status, 404);
+    assert_eq!(with_token(&fx, "GET", &path, &at, &[]).status, 404);
+    assert_eq!(with_token(&fx, "GET", &path, &after, &[]).status, 200);
+}
