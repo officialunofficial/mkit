@@ -151,7 +151,7 @@ impl mkit_server::hooks::HookChannel for LoopbackHookChannel {
 const REPOSITORY: &str = "default";
 const TICKET_KEY: &str = "dev 1111111111111111111111111111111111111111111111111111111111111111";
 // Bound even a handler that never wakes, without relying on wall-clock sleeps.
-const MAX_TIMER_DRAIN_POLLS: usize = 1_000_000;
+const MAX_TIMER_DRAIN_POLLS: usize = 100_000;
 
 /// Isolated in-process Connect server with a canonical loopback origin.
 ///
