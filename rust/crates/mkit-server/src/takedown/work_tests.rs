@@ -495,7 +495,7 @@ async fn assert_delta_claim_terminal(delta_wire: u8, fault: u8) {
 }
 
 #[tokio::test]
-async fn valid_compressed_delta_stream_budget_failure_remains_retryable() {
+async fn valid_compressed_delta_canonical_budget_failure_remains_retryable() {
     let base = Object::Blob(Blob {
         data: vec![b'A'; 512],
     });
@@ -529,7 +529,7 @@ async fn valid_compressed_delta_stream_budget_failure_remains_retryable() {
         corrupt_offset: None,
     };
     let mut work = fault_work(&f, blobs.clone());
-    work.profile.limits.max_decoded_bytes = 1024;
+    work.profile.limits.max_decoded_bytes = 521;
     let old = work
         .metadata
         .get(&work.root, &key(b"state", &id, &[]))
@@ -2023,7 +2023,7 @@ async fn multi_action_activation_shares_one_immediate_allowance_with_parent_call
 async fn fifty_hop_acquisition_preserves_identical_bytes_across_cold_restart() {
     let objects: Vec<_> = (0u32..=50)
         .map(|sequence| {
-            let mut data = vec![b'A'; (1 << 20) - 10];
+            let mut data = vec![b'A'; 1 << 20];
             let tail = data.len() - 4;
             data[tail..].copy_from_slice(&sequence.to_le_bytes());
             Object::Blob(Blob { data })

@@ -68,7 +68,8 @@ fn finish(mut pack: Vec<u8>, count: u32) -> Vec<u8> {
 fn admitted(mut pack: &[u8], expected: usize) {
     let mut latest = Latest(vec![]);
     let mut count = 0;
-    let limits = DecodeLimits::default().with_max_decoded_bytes(1 << 20);
+    let limits =
+        DecodeLimits::default().with_max_decoded_bytes(crate::indexed::geometry::CANONICAL_BYTES);
     let length = pack.len() as u64;
     let id = hash(pack);
     pack::window::read_all(&mut pack, length, 16 << 20, limits, Some(id), |entry| {
@@ -134,7 +135,7 @@ async fn dense_candidates(store: &MemoryKv, repo: &RepoId, pack: Hash, entry: In
 }
 
 async fn dense_chain(external: bool) -> (MemoryBlobStore, MemoryKv, RepoId, Hash) {
-    let size = 1 << 20;
+    let size = usize::try_from(crate::indexed::geometry::CANONICAL_BYTES).unwrap();
     let store = MemoryKv::default();
     let blobs = MemoryBlobStore::default();
     let repo = RepoId {
@@ -188,7 +189,8 @@ async fn dense_chain(external: bool) -> (MemoryBlobStore, MemoryKv, RepoId, Hash
                 &mut reader,
                 bytes.len() as u64,
                 16 << 20,
-                DecodeLimits::default().with_max_decoded_bytes(1 << 20),
+                DecodeLimits::default()
+                    .with_max_decoded_bytes(crate::indexed::geometry::CANONICAL_BYTES),
                 Some(hash(&bytes)),
                 |entry| {
                     pack::decode_entry_with(entry, &mut base, DecodeLimits::default())
@@ -525,7 +527,13 @@ async fn dense_same_pack_fifty_hops_complete_across_serialized_ticks() {
     )
     .await
     .unwrap();
-    assert_eq!(verified.canonical.as_ref(), blob(1 << 20, 50));
+    assert_eq!(
+        verified.canonical.as_ref(),
+        blob(
+            usize::try_from(crate::indexed::geometry::CANONICAL_BYTES).unwrap(),
+            50
+        )
+    );
     assert_eq!(
         budget.used(),
         357,
@@ -579,7 +587,13 @@ async fn dense_external_fifty_hops_complete_and_final_decode_rechecks_membership
     )
     .await
     .unwrap();
-    assert_eq!(verified.canonical.as_ref(), blob(1 << 20, 50));
+    assert_eq!(
+        verified.canonical.as_ref(),
+        blob(
+            usize::try_from(crate::indexed::geometry::CANONICAL_BYTES).unwrap(),
+            50
+        )
+    );
     assert_eq!(budget.used(), 357);
     let raw = store
         .get(

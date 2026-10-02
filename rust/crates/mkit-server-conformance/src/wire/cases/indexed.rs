@@ -588,7 +588,13 @@ async fn uno_already_present(
 }
 
 async fn launch_verified_fixture(ctx: Ctx, large: bool, set_visibility: bool) -> CaseResult {
-    let data: Vec<_> = (0..131_072_u32)
+    // The embedded Uno producer exercises the core/CLI unchunked boundary.
+    let payload_bytes: u32 = if ctx.case == "uno.public_fixture" {
+        1 << 20
+    } else {
+        131_072
+    };
+    let data: Vec<_> = (0..payload_bytes)
         .map(|i| u8::try_from((i.wrapping_mul(17) ^ (i >> 9)) & 0xff).unwrap_or(0))
         .collect();
     let extracted = Object::Blob(mkit_core::object::Blob { data: data.clone() })

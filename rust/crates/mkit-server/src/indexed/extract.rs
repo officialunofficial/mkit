@@ -740,6 +740,8 @@ impl<B: MultipartBlobStore, S: NamespaceStore> Extractor<'_, B, S> {
         let Some(Ok(Some(location))) = located.get(id) else {
             return Err(inconsistent().into());
         };
+        super::geometry::check_entry(location.value.decoded_size, location.value.frame_length)
+            .map_err(|_| ServerError::invalid_argument(resolve::DECODE_BUDGET_MESSAGE))?;
         let limit = self.resolve_limit();
         // A fresh cache per chunk: the chunk is dropped once written. The
         // cost is charged to the advance-wide counter.
