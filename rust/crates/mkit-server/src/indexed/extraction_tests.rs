@@ -1470,3 +1470,6 @@ fn extraction_effects_refuse_a_lost_source_lease_before_publication() {
         assert!(read_blob(&rig.blobs, &BlobKey::object(object)).is_none());
     }
 }
+
+#[path = "geometry_tests.rs"]
+mod geometry_tests;

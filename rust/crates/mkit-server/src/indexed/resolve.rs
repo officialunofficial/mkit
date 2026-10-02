@@ -11,9 +11,7 @@ use crate::telemetry::{METRIC_INDEX_LOOKUP_CAPPED, Metrics};
 use crate::{BlobBody, BlobKey, BlobStore, BoxFuture, ByteRange, NamespaceStore, ServerError};
 use futures::StreamExt as _;
 use mkit_core::hash::Hash;
-use mkit_core::pack::{
-    DecodeLimits, DeltaBaseSource, PackError, decode_frame_with, peek_delta_header,
-};
+use mkit_core::pack::{DeltaBaseSource, PackError, decode_frame_with, peek_delta_header};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -542,6 +540,10 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
             crate::takedown::denial::require_clear(store, &id).await?;
             crate::takedown::denial::require_clear(store, &located.pack).await?;
         }
+        let source_limits = Some(source_limits.unwrap_or(MemberSourceLimits {
+            max_frame_bytes: super::geometry::FRAME_BYTES,
+            max_decoded_bytes: super::geometry::CANONICAL_BYTES,
+        }));
         if source_limits.is_some_and(|limits| {
             located.value.frame_length > limits.max_frame_bytes
                 || located.value.decoded_size > limits.max_decoded_bytes
@@ -669,7 +671,7 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
                 &frame,
                 version,
                 &mut source,
-                DecodeLimits::default().with_max_decoded_bytes(
+                super::geometry::entry_limits(
                     source_limits
                         .map_or(available, |limits| available.min(limits.max_decoded_bytes)),
                 ),

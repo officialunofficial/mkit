@@ -229,16 +229,17 @@ fn verification_fixture_pack(
         });
     }
     if let Some(data) = extracted {
-        let blob = Object::Blob(mkit_core::object::Blob {
-            data: data.to_vec(),
-        });
-        let id = blob.id().map_err(|e| format!("extracted blob id: {e}"))?;
-        writer
-            .push_raw(
-                id,
-                &serialize(&blob).map_err(|e| format!("extracted blob bytes: {e}"))?,
-            )
-            .map_err(|e| format!("extracted blob frame: {e}"))?;
+        let objects = file_objects(data)?;
+        let mut id = [0; 32];
+        for object in objects {
+            id = object.id().map_err(|e| format!("extracted id: {e}"))?;
+            writer
+                .push_raw(
+                    id,
+                    &serialize(&object).map_err(|e| format!("file bytes: {e}"))?,
+                )
+                .map_err(|e| format!("file frame: {e}"))?;
+        }
         entries.push(mkit_core::object::TreeEntry {
             name: b"extracted.txt".to_vec(),
             mode: mkit_core::object::EntryMode::Blob,
@@ -403,7 +404,7 @@ async fn upload_ticket(
     let Some(BeginResult::Ticket(ticket)) = opened.result else {
         return Err(Failure::Fail("BeginUpload did not issue a ticket".into()));
     };
-    if ctx.case == "uno.public_fixture" && pack.len() > 8 * 1024 * 1024 {
+    if ctx.case.starts_with("uno.") && pack.len() > 8 * 1024 * 1024 {
         return super::multipart::complete_uno_ticket(ctx, &signer, repository, &ticket, pack)
             .await;
     }
@@ -675,6 +676,47 @@ pub(super) async fn launch_admin_fixture(ctx: Ctx) -> CaseResult {
     launch_verified_fixture(ctx, false, true).await
 }
 
+fn file_objects(data: &[u8]) -> Result<Vec<Object>, Failure> {
+    if data.len() <= 1 << 20 {
+        return Ok(vec![Object::Blob(mkit_core::object::Blob {
+            data: data.to_vec(),
+        })]);
+    }
+    let mut objects: Vec<_> = data
+        .chunks(250_000)
+        .map(|piece| {
+            Object::Blob(mkit_core::object::Blob {
+                data: piece.to_vec(),
+            })
+        })
+        .collect();
+    let chunks = objects
+        .iter()
+        .map(Object::id)
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("chunk id: {e}"))?;
+    objects.push(Object::ChunkedBlob(mkit_core::object::ChunkedBlob {
+        total_size: data.len() as u64,
+        chunk_size: 250_000,
+        chunks,
+    }));
+    Ok(objects)
+}
+
+pub(super) async fn uno_multipart_file_readback(ctx: Ctx) -> CaseResult {
+    let data: Vec<_> = (0..9_000_000_u32)
+        .map(|i| u8::try_from((i.wrapping_mul(17) ^ (i >> 9)) & 0xff).unwrap_or(0))
+        .collect();
+    let file = file_objects(&data)?.pop().ok_or("missing file manifest")?;
+    let id = file.id().map_err(|e| format!("file id: {e}"))?;
+    let (pack, head) = verification_fixture_pack(Some(&data), 0, false)?;
+    ensure!(pack.len() > 8 << 20, "multipart fixture fits one part");
+    let (repository, pending) = commit_pack(&ctx, &pack, head, true).await?;
+    check_extracted_http(&ctx, &repository, &id, &data).await?;
+    ctx.set_note(format!("repository={repository} pack_bytes={} pending_polls={pending} extracted_blob={} extracted_blob_bytes={} chunks=36 sidecar_bytes=304", pack.len(), to_hex(&id), data.len()));
+    Ok(())
+}
+
 /// Separate Uno gate: public-by-default repositories, retaining the original Set fixture.
 pub(super) async fn uno_public_fixture(ctx: Ctx) -> CaseResult {
     launch_verified_fixture(ctx, false, false).await
@@ -738,7 +780,13 @@ async fn uno_already_present(
 }
 
 async fn launch_verified_fixture(ctx: Ctx, large: bool, set_visibility: bool) -> CaseResult {
-    let data: Vec<_> = (0..131_072_u32)
+    // The embedded Uno producer exercises the core/CLI unchunked boundary.
+    let payload_bytes: u32 = if ctx.case == "uno.public_fixture" {
+        1 << 20
+    } else {
+        131_072
+    };
+    let data: Vec<_> = (0..payload_bytes)
         .map(|i| u8::try_from((i.wrapping_mul(17) ^ (i >> 9)) & 0xff).unwrap_or(0))
         .collect();
     let extracted = Object::Blob(mkit_core::object::Blob { data: data.clone() })

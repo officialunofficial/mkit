@@ -377,7 +377,7 @@ fn corrupt_frame_is_rejected_before_ranged_read(damage: BadFrame) {
     // producer's frame is individually valid and below the decoded limit.
     let objects = [earlier_base, chunk, manifest, tree, commit]
         .into_iter()
-        .chain((0..6_u8).map(|i| {
+        .chain((0..20_u8).map(|i| {
             Object::Blob(Blob {
                 data: vec![182 + i; 900_000],
             })
@@ -413,14 +413,11 @@ fn corrupt_frame_is_rejected_before_ranged_read(damage: BadFrame) {
         .unwrap()
         .unwrap();
     let mut frame = checkpoint::decode_frame(&chunk_id, &prior).unwrap();
-    let decoded_limit = rig
-        .limits
-        .resident_bytes
-        .saturating_sub(2 * rig.limits.window_bytes)
-        .saturating_sub(8 << 20)
-        / 8;
+    let decoded_limit =
+        crate::indexed::geometry::decode_limits(rig.limits.resident_bytes, rig.limits.window_bytes)
+            .max_decoded_bytes;
     match damage {
-        BadFrame::Length => frame.value.frame_length = decoded_limit + 129,
+        BadFrame::Length => frame.value.frame_length = crate::indexed::geometry::FRAME_BYTES + 1,
         BadFrame::DecodedSize => frame.value.decoded_size = decoded_limit + 1,
         BadFrame::Depth => {
             frame.value.wire_type = 0x02;
@@ -753,7 +750,9 @@ fn fifty_deep_member_chunk(payload_bytes: usize, window_bytes: u64, quota_shortf
         chunk
     );
     if payload_bytes == 250 << 10 {
-        let entry_limit = (rig.limits.resident_bytes - 2 * window_bytes - (8 << 20)) / 8;
+        let entry_limit =
+            crate::indexed::geometry::decode_limits(rig.limits.resident_bytes, window_bytes)
+                .max_decoded_bytes;
         assert!(u64::try_from(blob(0, payload_bytes).1.len()).unwrap() < entry_limit);
         assert!(source_bytes > entry_limit && source_bytes > 12 << 20);
     }

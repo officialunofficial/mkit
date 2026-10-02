@@ -79,7 +79,8 @@ mkit-attest = { path = "../mkit-attest" }
 mkit-server = { version = "0.4", path = "../mkit-server", features = ["memory"] }
 mkit-server-conformance = { path = "../mkit-server-conformance" }
 # `RusqliteConn` under the simulated Durable Object connection.
-mkit-server-native = { path = "../mkit-server-native" }
+rusqlite = { version = "0.40", default-features = false, features = ["bundled", "cache"] }
+parking_lot = "0.12"
 futures = { version = "0.3", features = ["executor"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread"] }
 # The adapter tests build and collect bodies, and name the Connect service

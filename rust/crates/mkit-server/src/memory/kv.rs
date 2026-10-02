@@ -14,12 +14,55 @@ use crate::store::{
 
 type Rows = BTreeMap<Key, Value>;
 
+// Journal only the bounded batch, rather than cloning an arbitrarily large
+// partition. Drop restores entries in reverse order, including repeated keys.
+struct RowEdit<'a> {
+    rows: &'a mut Rows,
+    undo: Vec<(Key, Option<Value>)>,
+}
+
+impl<'a> RowEdit<'a> {
+    fn new(rows: &'a mut Rows, writes: usize) -> Self {
+        Self {
+            rows,
+            undo: Vec::with_capacity(writes),
+        }
+    }
+
+    fn write(&mut self, write: Write) {
+        let key = match &write {
+            Write::Put(key, _) | Write::Delete(key) => key,
+        };
+        // Save the prior value before mutating, so unwinding restores it.
+        self.undo.push((key.clone(), self.rows.get(key).cloned()));
+        match write {
+            Write::Put(key, value) => self.rows.insert(key, value),
+            Write::Delete(key) => self.rows.remove(&key),
+        };
+    }
+
+    fn commit(mut self) {
+        self.undo.clear();
+    }
+}
+
+impl Drop for RowEdit<'_> {
+    fn drop(&mut self) {
+        for (key, prior) in self.undo.drain(..).rev() {
+            match prior {
+                Some(value) => self.rows.insert(key, value),
+                None => self.rows.remove(&key),
+            };
+        }
+    }
+}
+
 /// An in-memory [`NamespaceStore`] over a `BTreeMap` per partition.
 ///
 /// `apply` validates the batch, then, under one lock and with no await,
-/// reads the injected clock once, checks every precondition, builds the
-/// new partition and swaps it in. A panic can therefore never leave a
-/// half-written partition, and a poisoned lock is recovered.
+/// reads the injected clock once and checks every precondition. A bounded
+/// undo journal rolls back writes on a capacity error or panic, without
+/// copying the whole partition. A poisoned lock is recovered.
 pub struct MemoryKv {
     partitions: Mutex<BTreeMap<Partition, Rows>>,
     clock: Arc<dyn Clock>,
@@ -178,17 +221,14 @@ impl NamespaceStore for MemoryKv {
             }
         }
         let adds = batch.has_put();
-        let mut next = rows.clone();
+        let mut edit = RowEdit::new(partitions.entry(p.clone()).or_default(), batch.writes.len());
         for write in batch.writes {
-            match write {
-                Write::Put(k, v) => next.insert(k, v),
-                Write::Delete(k) => next.remove(&k),
-            };
+            edit.write(write);
         }
-        if adds && self.capacity.is_some_and(|cap| size(&next) > cap) {
+        if adds && self.capacity.is_some_and(|cap| size(edit.rows) > cap) {
             return Err(StoreError::Full);
         }
-        partitions.insert(p.clone(), next);
+        edit.commit();
         drop(partitions);
         take_fault(&self.fault, MemoryFault::ApplyAfterCommit)?;
         Ok(BatchOutcome::Committed)
@@ -255,6 +295,33 @@ mod tests {
 
     fn ab(kv: &MemoryKv) -> (Option<Value>, Option<Value>) {
         (get(kv, &k("a")), get(kv, &k("b")))
+    }
+
+    #[test]
+    fn batch_journal_restores_rows_before_recovering_a_poisoned_lock() {
+        let kv = Arc::new(MemoryKv::default());
+        ok(
+            kv.as_ref(),
+            Batch::new().put(k("a"), v("1")).put(k("b"), v("2")),
+        );
+        let before = lock(&kv.partitions).clone();
+        let for_thread = kv.clone();
+        let panicked = std::thread::spawn(move || {
+            let mut partitions = lock(&for_thread.partitions);
+            let rows = partitions.get_mut(&ns()).expect("seeded partition");
+            let mut edit = RowEdit::new(rows, 5);
+            edit.write(Write::Put(k("a"), v("changed")));
+            edit.write(Write::Delete(k("b")));
+            edit.write(Write::Put(k("c"), v("new")));
+            edit.write(Write::Delete(k("a")));
+            edit.write(Write::Delete(k("c")));
+            panic!("interrupt an uncommitted batch");
+        })
+        .join();
+        assert!(panicked.is_err() && kv.partitions.is_poisoned());
+        assert_eq!(*lock(&kv.partitions), before);
+        assert_eq!(ab(kv.as_ref()), (Some(v("1")), Some(v("2"))));
+        assert_eq!(get(kv.as_ref(), &k("c")), None);
     }
 
     #[test]

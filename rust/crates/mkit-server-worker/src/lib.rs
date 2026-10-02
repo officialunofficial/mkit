@@ -62,6 +62,10 @@
 //! [`R2BlobStore`]: r2::R2BlobStore
 //! [`DoNamespaceStore`]: ns_client::DoNamespaceStore
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "../tests/common/sqlite.rs"]
+mod test_sqlite;
+
 pub mod adapter;
 pub mod admin;
 pub mod alarm;
