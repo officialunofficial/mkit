@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- HTTP object readback accepts streamed chunk-offset sidecar tails from R2.
+
 - Indexed verification, extraction and preservation count canonical Blob framing
   around the 1 MiB payload boundary while retaining the 48 MiB slice allowance.
 
