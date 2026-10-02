@@ -17,9 +17,19 @@ pub const VERIFICATION_LEASE_MS: u64 = 30_000;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum VerificationV1 {
-    Pending { lease_until_ms: u64 },
-    Verified { pack_len: u64, verified_at_ms: u64 },
-    Rejected { code: String, message: String },
+    Pending {
+        lease_until_ms: u64,
+    },
+    Verified {
+        pack_len: u64,
+        verified_at_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        publication: Option<Box<super::publication::resume::Progress>>,
+    },
+    Rejected {
+        code: String,
+        message: String,
+    },
 }
 
 /// Encode one state with the metadata codec version byte.
@@ -39,7 +49,21 @@ pub fn decode(value: &Value) -> Result<VerificationV1, StoreError> {
     let Some((&CODEC_V1, body)) = value.as_bytes().split_first() else {
         return Err(StoreError::Corrupt("bad verification version".into()));
     };
-    serde_json::from_slice(body).map_err(|_| StoreError::Corrupt("bad verification state".into()))
+    let decoded: VerificationV1 = serde_json::from_slice(body)
+        .map_err(|_| StoreError::Corrupt("bad verification state".into()))?;
+    if let VerificationV1::Verified {
+        publication: Some(progress),
+        ..
+    } = &decoded
+    {
+        if value.as_bytes().len() > super::publication::resume::MAX_STATE_BYTES {
+            return Err(StoreError::Corrupt(
+                "publication checkpoint too large".into(),
+            ));
+        }
+        progress.validate()?;
+    }
+    Ok(decoded)
 }
 
 /// Three-operation state CAS: `NotAfter`, prior-value guard, and put.
@@ -123,6 +147,7 @@ mod tests {
         let state = VerificationV1::Verified {
             pack_len: 123,
             verified_at_ms: 456,
+            publication: None,
         };
         let bytes = encode(&state);
         assert_eq!(

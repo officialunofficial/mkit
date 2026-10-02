@@ -920,6 +920,7 @@ where
         {
             return Err(Stop::Outcome(Outcome::ClosureCapped));
         }
+        job.packlist_prev = list.prev;
         job.packlist = list.packs;
         job.phase = Phase::Verify;
         Ok(0)
@@ -1676,6 +1677,15 @@ where
     ) -> Result<u64, Stop> {
         let now = now_ms(self.h.clock.as_ref());
         if job.kind == Kind::Packlist {
+            crate::takedown::inventory::stage_packlist(
+                self.remote,
+                &self.pack,
+                job.pack_len,
+                job.packlist_prev,
+                &job.packlist,
+                now,
+            )
+            .await?;
             // Verify owns scan after decoding; checkpoint its inventory position.
             let mut offset = if job.scan.is_empty() {
                 0
@@ -1721,6 +1731,7 @@ where
                 let verified = VerificationV1::Verified {
                     pack_len: job.pack_len,
                     verified_at_ms: now,
+                    publication: None,
                 };
                 let prior = other.map(|(_, raw)| raw);
                 if !state::write(

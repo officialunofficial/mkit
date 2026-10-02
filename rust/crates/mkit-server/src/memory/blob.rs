@@ -50,6 +50,8 @@ impl Stream for Chunks {
 
 #[derive(Debug, Default)]
 struct Shared {
+    #[cfg(test)]
+    read_calls: AtomicU64,
     blobs: Mutex<BTreeMap<BlobKey, Bytes>>,
     sessions: Mutex<BTreeMap<Vec<u8>, MemoryMultipart>>,
     next_session: AtomicU64,
@@ -86,6 +88,10 @@ impl Default for MemoryBlobStore {
 }
 
 impl MemoryBlobStore {
+    #[cfg(test)]
+    pub(crate) fn read_calls(&self) -> u64 {
+        self.shared.read_calls.load(Ordering::SeqCst)
+    }
     /// Open multipart sessions, observable only for test-faults conformance.
     #[cfg(any(test, feature = "test-faults"))]
     #[doc(hidden)]
@@ -367,6 +373,8 @@ impl BlobStore for MemoryBlobStore {
         key: &BlobKey,
         range: Option<ByteRange>,
     ) -> Result<Option<BlobBody>, StoreError> {
+        #[cfg(test)]
+        self.shared.read_calls.fetch_add(1, Ordering::SeqCst);
         let Some(blob) = lock(&self.shared.blobs).get(key).cloned() else {
             return Ok(None);
         };
@@ -380,6 +388,8 @@ impl BlobStore for MemoryBlobStore {
     }
 
     async fn head(&self, key: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
+        #[cfg(test)]
+        self.shared.read_calls.fetch_add(1, Ordering::SeqCst);
         let blobs = lock(&self.shared.blobs);
         Ok(blobs.get(key).map(|b| BlobMeta {
             len: b.len() as u64,

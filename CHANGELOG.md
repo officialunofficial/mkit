@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registry, and bounded per-advance hold records as storage foundations for
   post-launch asynchronous inspection (WP-5.5a-0, R-206). Content holds are
   repository-wide under Single and D34; released manifests fence delayed writes.
+- Takedown-on publication and reader performance: sixteen-shard authoritative
+  descriptor directory, resumable timer-12 pair verification before ref acceptance,
+  caller canonical byte limits and typed object metadata. Deprecated mixed
+  `object_sizes` remains available. Unshipped metadata codecs require fresh stores.
 
 - Worker embedding: supplied Admission, Authorizer/Authority and OutcomeSink
   capabilities satisfy launch validation without an unused external hook channel.

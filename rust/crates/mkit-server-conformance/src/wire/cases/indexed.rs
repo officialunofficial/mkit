@@ -18,7 +18,7 @@ use super::{
     CaseResult, Commit as WireCommit, Ctx, Exp, Failure, Feature, Signed, advance_req, ensure,
     eventually_listed, sign_unary, upload_msgs, want_ok, want_outcome,
 };
-use crate::wire::client::{Rpc, UNARY_PROTO, decode_unary, frame};
+use crate::wire::client::{Rpc, RpcError, UNARY_PROTO, decode_unary, frame};
 use crate::wire::sign::pack_commitment;
 
 fn pack() -> Result<(Vec<u8>, Hash), Failure> {
@@ -296,6 +296,41 @@ async fn commit_large_pack(ctx: &Ctx, pack: &[u8], head: Hash) -> Result<(String
     commit_pack(ctx, pack, head, false).await
 }
 
+/// Replay the same signed launch request when the local dev proxy loses its
+/// response. Ordinary server errors remain visible; a new nonce could obscure
+/// an already committed result. This is the same bounded retry used by the
+/// wide-ref fixtures.
+async fn send_launch_retry<M: buffa::Message>(
+    ctx: &Ctx,
+    signed: &Signed,
+) -> Result<Result<M, RpcError>, String> {
+    if !ctx.case.starts_with("launch.takedown") {
+        return ctx.send(signed).await;
+    }
+    for attempt in 0..=8u32 {
+        let failed = match ctx.send(signed).await {
+            Ok(Err(error))
+                if (error.http_status == 500
+                    && error.message.contains("Network connection lost"))
+                    || (attempt > 0 && error.code == "aborted") =>
+            {
+                error.to_string()
+            }
+            Err(error) if error.contains("Network connection lost") => error,
+            result => return result,
+        };
+        if attempt == 8 {
+            return Err(failed);
+        }
+        eprintln!("takedown fixture: proxy retry {}: {failed}", attempt + 1);
+        tokio::time::sleep(std::time::Duration::from_millis(
+            (200 * u64::from(attempt + 1)).min(1_000),
+        ))
+        .await;
+    }
+    unreachable!("the last attempt returns")
+}
+
 async fn commit_pack(
     ctx: &Ctx,
     pack: &[u8],
@@ -305,7 +340,7 @@ async fn commit_pack(
     let (repository, advance) = ticketed_pair(ctx, pack, head, "async", canonical).await?;
     let mut pending = 0;
     for _ in 0..240 {
-        match ctx.send::<AdvanceRefsResponse>(&advance).await? {
+        match send_launch_retry::<AdvanceRefsResponse>(ctx, &advance).await? {
             Ok(response) => {
                 ensure!(
                     pending > 0,
@@ -363,7 +398,8 @@ async fn upload_ticket(
     let signed_begin = sign_unary(&signer, Rpc::BeginUpload, &begin, |env| {
         repository.clone_into(&mut env.repository);
     });
-    let opened: BeginUploadResponse = want_ok(ctx.send(&signed_begin).await?, "BeginUpload")?;
+    let opened: BeginUploadResponse =
+        want_ok(send_launch_retry(ctx, &signed_begin).await?, "BeginUpload")?;
     let Some(BeginResult::Ticket(ticket)) = opened.result else {
         return Err(Failure::Fail("BeginUpload did not issue a ticket".into()));
     };
@@ -516,6 +552,120 @@ pub(super) async fn inspection_rejects_advance(ctx: Ctx) -> CaseResult {
 /// The production-only intersection: no test directives, ticketed upload,
 /// scheduled verification/extraction, public paired refs and exact pack bytes.
 /// The HTTP opt-in additionally proves the extracted bytes and proof refusal.
+/// Launch-sized reachable content through ordinary upload, verification and publication.
+fn takedown_pack(chunked: bool) -> Result<(Vec<u8>, Hash), Failure> {
+    use mkit_core::object::{Blob, ChunkedBlob, EntryMode, TreeEntry};
+    let (count, length) = if chunked {
+        (32, 62_500)
+    } else {
+        (10, (1 << 20) - 10)
+    };
+    let mut objects: Vec<Object> = (0..count)
+        .map(|n| {
+            Object::Blob(Blob {
+                data: vec![n + 1; length],
+            })
+        })
+        .collect();
+    let ids = objects
+        .iter()
+        .map(Object::id)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("fixture blob ids: {e}"))?;
+    let files = if chunked {
+        let manifest = Object::ChunkedBlob(ChunkedBlob {
+            total_size: u64::from(count) * length as u64,
+            chunk_size: u32::try_from(length).map_err(|e| format!("chunk length: {e}"))?,
+            chunks: ids,
+        });
+        let id = manifest.id().map_err(|e| format!("manifest id: {e}"))?;
+        objects.push(manifest);
+        vec![id]
+    } else {
+        ids
+    };
+    let tree = Object::Tree(Tree {
+        entries: files
+            .into_iter()
+            .enumerate()
+            .map(|(n, id)| TreeEntry {
+                name: format!("file-{n:03}").into_bytes(),
+                mode: EntryMode::Blob,
+                object_hash: id,
+            })
+            .collect(),
+    });
+    let signer = KeyPair::from_seed([9; 32]);
+    let mut commit = Commit::new_unannotated(
+        tree.id().map_err(|e| format!("tree id: {e}"))?,
+        Vec::new(),
+        Identity::ed25519(signer.public.0),
+        signer.public.0,
+        b"takedown performance".to_vec(),
+        42,
+        [0; 64],
+    );
+    commit.signature = sign_commit(&commit, &signer)
+        .map_err(|e| format!("commit signature: {e}"))?
+        .0;
+    let commit = Object::Commit(commit);
+    let head = commit.id().map_err(|e| format!("commit id: {e}"))?;
+    objects.extend([tree, commit]);
+    let mut writer = PackWriter::new_raw_only();
+    for object in objects {
+        writer
+            .push_raw(
+                object.id().map_err(|e| format!("object id: {e}"))?,
+                &serialize(&object).map_err(|e| format!("object bytes: {e}"))?,
+            )
+            .map_err(|e| format!("pack frame: {e}"))?;
+    }
+    Ok((
+        writer.finish().map_err(|e| format!("fixture pack: {e}"))?,
+        head,
+    ))
+}
+
+async fn takedown_publish(ctx: Ctx, chunked: bool) -> CaseResult {
+    let (pack, head) = takedown_pack(chunked)?;
+    let started = std::time::Instant::now();
+    let (repository, pending) = commit_pack(&ctx, &pack, head, true).await?;
+    super::visibility::set_envelope(&ctx, &ctx.v2_signer("repository-a")?, &repository, false)
+        .await?;
+    let map = hash(
+        &mkit_core::transfer::encode_packlist(None, &[hash(&pack)])
+            .map_err(|e| format!("packlist: {e}"))?,
+    );
+    eventually_listed(
+        "published takedown pair",
+        || async {
+            Ok((
+                public_read_ref(&ctx, &repository, ctx.head("async")).await?,
+                public_read_ref(&ctx, &repository, ctx.packmap("async")).await?,
+            ))
+        },
+        |pair| {
+            pair.0.as_deref() == Some(head.as_slice()) && pair.1.as_deref() == Some(map.as_slice())
+        },
+    )
+    .await?;
+    ctx.set_note(format!(
+        "pack_bytes={} chunks={} pending={} wall_ms={:.3}",
+        pack.len(),
+        if chunked { 32 } else { 0 },
+        pending,
+        started.elapsed().as_secs_f64() * 1000.
+    ));
+    Ok(())
+}
+
+pub(super) async fn takedown_nine_mib_publish(ctx: Ctx) -> CaseResult {
+    takedown_publish(ctx, false).await
+}
+pub(super) async fn takedown_chunked_publish(ctx: Ctx) -> CaseResult {
+    takedown_publish(ctx, true).await
+}
+
 pub(super) async fn launch_verification_commits(ctx: Ctx) -> CaseResult {
     launch_verified_fixture(ctx, true, true).await
 }

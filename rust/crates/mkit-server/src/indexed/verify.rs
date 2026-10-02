@@ -609,6 +609,16 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
                     )
                     .await);
                 };
+                crate::takedown::inventory::stage_packlist(
+                    store,
+                    &ticket.pack_id,
+                    ticket.bytes,
+                    list.prev,
+                    &list.packs,
+                    now_ms(clock),
+                )
+                .await
+                .map_err(|_| storage_failed())?;
                 for child in &list.packs {
                     crate::takedown::inventory::dependency(
                         store,
@@ -1175,6 +1185,7 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
             &VerificationV1::Verified {
                 pack_len: pack.ticket.bytes,
                 verified_at_ms: now_ms(clock),
+                publication: None,
             },
             deadline(clock),
         )
