@@ -187,7 +187,7 @@
     },
     {
       "id": "B4.embedding",
-      "contract": "Uno Kit supported embedding API, combined DO outcome/publication/purge builder, configurable admin placement and programmatic ref policy/takedown knobs; streamed in-process UploadPart with shared isolate budget",
+      "contract": "Supported embedding API, combined DO outcome/publication/purge builder, configurable admin placement and programmatic ref policy/takedown knobs; streamed in-process UploadPart with shared isolate budget",
       "native": "Source API/compile checks; documented external custom HookSet and OutcomeSink traits",
       "worker": "Phase 2 embedded-worker example wasm check and real wrangler streamed UploadPart",
       "phase2": "Implement addenda, retain real wrangler embedded upload test and measure release wasm raw/gzip size for minimal/HTTP/signed variants; no ListRepos RPC"

@@ -36,9 +36,14 @@ pub fn parse(
         }
         return Ok(None);
     }
-    if !cfg!(feature = "test-faults") && var("LAUNCH_PROFILE").as_deref() != Some("uno") {
+    if !cfg!(feature = "test-faults")
+        && !matches!(
+            var("LAUNCH_PROFILE").as_deref(),
+            Some("paid-workers" | "uno")
+        )
+    {
         return Err(ConfigError(
-            "scanner retrieval requires LAUNCH_PROFILE=uno".into(),
+            "scanner retrieval requires LAUNCH_PROFILE=paid-workers".into(),
         ));
     }
     if !indexed

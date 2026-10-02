@@ -87,7 +87,7 @@ def release_launch(run, env, evidence):
                "--config", "wrangler.dev.jsonc", "--ip", "127.0.0.1", "--port", str(port),
                "--persist-to", str(run / "state"), "--show-interactive-dev-session=false"]
     for name, value in {
-        "AUTH_AUDIENCE": "https://vcs.launch.invalid", "LAUNCH_PROFILE": "uno",
+        "AUTH_AUDIENCE": "https://vcs.launch.invalid", "LAUNCH_PROFILE": "paid-workers",
         "INDEXED_MODE": "true", "WORKERS_PLAN": "paid", "ADDRESSING": "multi",
         "SHARDING": "d34", "NAMESPACE_POLICY": "any", "UNSAFE_OPEN_NAMESPACES": "true",
         "RETENTION": "permanent", "STORAGE_LEASES": "false", "GC_ENABLED": "false",

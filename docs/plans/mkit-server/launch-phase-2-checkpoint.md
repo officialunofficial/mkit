@@ -411,7 +411,7 @@ owned scratch `embedding-example/runtime-s_xmmj2o/evidence.json`; wasm
 6,475,839 bytes, SHA256
 `e0c0a260b527b5eb65a1de89082c8adb104e960a0df9506f9789214f7b7bc594`.
 All fixture-owned groups stopped. This Single/default core embedding result
-does not certify the complete Uno launch configuration or whole-isolate
+does not certify the complete Paid Workers launch configuration or whole-isolate
 budgets. The final integrated source will be revalidated separately.
 
 

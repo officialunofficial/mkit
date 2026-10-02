@@ -27,7 +27,7 @@ The admission and outcome wire behaviour, CORS and backpressure are pinned in co
 
 ### Part 0: WP-3.7b, a public Rust surface for hook implementers (authentication re-exports). Do this first.
 
-**Why:** external Rust hook implementers (uno-api) need the `mkit.server.hooks.v1` message types and a
+**Why:** external Rust hook implementers (the embedding API) need the `mkit.server.hooks.v1` message types and a
 `mkit-hook:v1` request verifier without depending on the server runtime.
 
 - **B0.1 Location:** a new `hooks` feature on the published, lightweight `mkit-rpc` crate, which already holds

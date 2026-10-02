@@ -1,4 +1,4 @@
-# Local Uno acceptance fixture
+# Local embedding acceptance fixture
 
 This host embeds the launch adapter, remounts the restricted admin router at
 `/_uno/operator`, supplies local Authorize/Admit/Outcome callbacks and
@@ -6,7 +6,7 @@ acknowledges paired LocalCache purge work. It does not certify deployed CDN
 purging. The dedicated 13-byte upload receives the fixture's Admit 402.
 
 From a clean worktree, run the existing admin matrix with `--uno`. Set an owned
-non-symlink `TMPDIR` under `~/.cache/mkit-test-tmp/wp-4-18`, a private
+non-symlink `TMPDIR` in an owned local scratch directory, a private
 `VCS_CONFORMANCE_PORT`, and `MKIT_MINIFLARE_MODULE` to the installed, pinned
 Miniflare SDK entry point. The final measurement used Miniflare 5.20260917.0-alpha
 from Wrangler 4.134.0; the harness never downloads a runtime automatically.

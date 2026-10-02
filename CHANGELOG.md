@@ -51,7 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Preserve 50-hop, 1 MiB canonical chains, existing frame admission, corruption
   checkpoints and the 700-call slice budget; inline profiles are unchanged.
 
-- Server (WP-4.18, phase 1, R-194): explicit Paid indexed Uno launch selection
+- Server (WP-4.18, phase 1, R-194): explicit Paid indexed Workers launch selection
   and startup validation for optional HTTP/URL tokens, signed hooks/binding,
   synchronous inspection and private scanner retrieval. Native serves proofs;
   Worker proofs stay unsupported. Leases/GC remain off with permanent retention.
@@ -215,7 +215,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or GC, and publication Events: Committed means Sent; Delivered requires the
   contiguous published prefix.
 
-- Docs: add the early Uno launch-readiness skeleton (WP-1.20, R-195 / R-198):
+- Docs: add the early Paid Workers launch-readiness skeleton (WP-1.20, R-195 / R-198):
   D35 environment/key roles, operator reset/rollback/rotation/drills, empty
   user-owned evidence slots and a DRAFT user-only REL-1 prompt. Final readiness
   waits for 4.18; no staging, measurements or release actions are claimed.
@@ -566,6 +566,11 @@ train).
   `<ed25519-… | 0x…>/<name>` for namespaced ones (STC §7.4) (WP-1.16).
 
 ### Changed
+
+- Worker launch profile is now `LAUNCH_PROFILE=paid-workers`. `uno` remains an
+  accepted deprecated alias and logs a startup warning. Takedown startup accepts
+  configured purge delivery through signed HTTPS or an embedder-supplied `PurgeSink`;
+  SPEC-SERVER §18 now describes both delivery options.
 
 - *(server)* Track a coordinator relay watermark per ref shard, retain expired
   lease rows while their outboxes are undelivered, and expose the namespace

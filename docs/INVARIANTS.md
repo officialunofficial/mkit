@@ -56,7 +56,7 @@ bounded key, cursor and collection overhead; continuations and
 nested inventory/chunk/action proofs remain sequential with their existing
 bounds, and existing callers remain serial; core,
 native and Worker scanner retrieval regression suites. The native and Worker
-mounts are default-off; configured Worker launch activation requires the Uno
+mounts are default-off; configured Worker launch activation requires the Paid Workers
 profile and each facility's complete validated configuration.
 
 ## Ticketed pushes bind uploaded bytes to one paired advance
@@ -2189,7 +2189,7 @@ durable takedown request for WP-5.6a. No permissive release API is exposed.
 
 WP-4.10b-1 keeps Extract fail-closed. WP-4.10b-2 supplies source verification,
 holder enqueue/renewal and the opt-in driver; takedown exposure requires admin
-keys, `LAUNCH_PROFILE=uno`, `TAKEDOWN_ENABLED=true`, indexed Paid mode and
+keys, `LAUNCH_PROFILE=paid-workers`, `TAKEDOWN_ENABLED=true`, indexed Paid mode and
 complete §14.7 preservation configuration, with partial configuration refused
 at startup.
 
@@ -2278,7 +2278,7 @@ deferred to WP-5.5c; the durable marker belongs to WP-5.5a-0.
 
 ## Paid launch opt-ins validate before accepting work (WP-4.18 / R-194)
 
-**Always:** the Worker Uno launch explicitly selects Paid indexed Multi/D34,
+**Always:** the Paid Workers launch explicitly selects Paid indexed Multi/D34,
 uses upload tickets at threshold zero, and retains content permanently with
 leases and GC off. Each HTTP/token, hook, and inspection/retrieval opt-in
 validates its complete configuration and distinct key roles before requests.
@@ -2439,7 +2439,7 @@ retention checks or an unaudited hold can expose or destroy evidence.
 verification is mistaken for real takedown completion. **Enforced by:**
 `admin::Engine::handle_streamed`, `takedown::work::Work`'s admin operations,
 the legal-hold planner and the signed catalog/streaming regression tests.
-Production takedown activation requires admin keys, `LAUNCH_PROFILE=uno`,
+Production takedown activation requires admin keys, `LAUNCH_PROFILE=paid-workers`,
 `TAKEDOWN_ENABLED=true`, indexed Paid mode and complete §14.7 preservation
 configuration; startup refuses partial configuration.
 

@@ -35,8 +35,8 @@ HANDOFF/gpt/root wording.
    - an operation id.
 
    It installs an independent V2 block action with immediate global denial on every surface (B2), starts verified
-   preservation (B4), and records a request that is honestly unresolved (B7). Uno's contract needs this
-   (`uno-api` contract tests e20–e21).
+   preservation (B4), and records a request that is honestly unresolved (B7). the embedding host's contract needs this
+   (`the embedding API` contract tests e20–e21).
 3. **The launch admin catalog:**
    - `Takedown` (new);
    - `PurgeCache`: manual, asynchronous (R-198 B5). It returns the purge id; completion is visible in the audit log.

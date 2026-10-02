@@ -1,4 +1,4 @@
-# Uno launch operations handoff
+# Paid Workers launch operations handoff
 
 Final preparation (WP-1.20 / R-195), pinned to feature checkpoint
 `c3921b06effc0f38e2cdbe6f25b4e5a309018136`; not a launch candidate.
@@ -22,7 +22,7 @@ user-owned main merge sequence. No version bump or tag at Workers launch.
 | Final candidate/full-delta review and staging sign-off | UNRUN / user |
 | Main merge / separate production deployment authorization | UNRUN / user |
 
-Local Uno push/clone/takedown/Outcome evidence does not fill these slots.
+Local embedding host push/clone/takedown/Outcome evidence does not fill these slots.
 FIX-preservation-memory (#1263) bounds scheduled Rust acquisition to 48 MiB;
 whole-isolate staging measurement remains required before candidate/main.
 many_refs remains unclassified. No operation here

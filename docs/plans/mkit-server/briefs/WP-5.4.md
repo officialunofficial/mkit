@@ -2,7 +2,7 @@
 
 mkit tracks, per ref, the **published** (head, packmap) pair: the contiguous prefix of advances whose content has
 cleared. Readers see only published values, and writers see live ones. This is the foundation for inspection (5.5c)
-and for Uno's Sent → Delivered states.
+and for the embedding host's Sent → Delivered states.
 
 ## A. Fixed (do not change)
 

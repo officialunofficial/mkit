@@ -125,7 +125,7 @@ Custom publication policies and synchronous inspection retain the canonical veri
 
 Native memory measurements exclude compilation and scheduled verification rounds. All three publication fixtures committed. Nine canonical 1 MiB Blobs required 130 kind-7/relay rounds, one timer-12 continuation, then 48 metadata calls plus four BlobStore reads and 16 directory scans in 5.299 ms. The 32-chunk file required 209 verification rounds, one continuation, then 66 metadata calls plus four BlobStore reads and 16 scans in 10.828 ms. The tiny advance with +3 ms per content scan committed after 60 simulated ms (66 metadata/four blob reads/16 scans; 8.551 ms wall), preserving the 10 s window. Six composed canonical/typed-metadata reader batches used 508 fixture physical calls under one shared 8,500 allowance.
 
-A local release Worker with takedown on, paid Uno profile, D34/Multi and fresh stores published both fixtures and read back their published pairs:
+A local release Worker with takedown on, Paid Workers profile, D34/Multi and fresh stores published both fixtures and read back their published pairs:
 
 | Fixture | Raw pack bytes | Pending polls | Final Advance physical calls | Final Advance ingress wall | Whole push wall |
 | --- | ---: | ---: | ---: | ---: | ---: |

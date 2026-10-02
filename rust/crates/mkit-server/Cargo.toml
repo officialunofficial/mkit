@@ -118,7 +118,7 @@ remote-hooks = [
 
 # Runtime-agnostic HTTP object serving (`Pipeline::serve_http_object`,
 # SPEC-HTTP-OBJECTS; WP-4.12). No new dependencies, wasm-clean. Off by default;
-# native embedders and the Paid Uno Worker launch opt in through their adapters.
+# native embedders and the Paid Workers launch opt in through their adapters.
 # Requires `PipelineConfig::http_objects` and indexed mode.
 http-objects = []
 # Published reader source; explicit adapter configuration, off by default.

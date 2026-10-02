@@ -4,7 +4,7 @@ Status: **early documentation skeleton only (R-195, R-198)**. The full
 readiness implementation waits for WP-4.18. This archived brief does not
 activate its deferred scope or authorize staging, cloud or release actions.
 
-The early subset creates the Uno D35 environment definition, operator runbook,
+The early subset creates the embedding host D35 environment definition, operator runbook,
 user-owned empty evidence checklist and DRAFT REL-1 prompt. It changes docs
 only; no workflow, script, configuration, version or runtime changes.
 Run `just ci-scripts` and repository docs lint, self-review, then open a PR into

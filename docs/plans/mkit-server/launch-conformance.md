@@ -78,7 +78,7 @@ stops only processes it starts.
 | `baseline` | Existing real `vcs-worker-conformance.sh --multi -- --filter info.` on the default-off release artifact; deployment discovery only |
 | `hooks` | Component smoke: existing real `vcs-worker-conformance.sh --hooks -- --filter info.` plus M3 service-binding hook suite and actual wasm Fetch/Delay probes. Its signed runtime wrapper uses **test-faults**; full opted-in release signed exchanges remain phase 2 work |
 | `authority` | Existing `vcs-worker-authority.sh --authority` against an actual release Worker and isolated binding fixture |
-| `release-launch` | Builds `worker-build --release --features launch`, runs local pinned wrangler with `LAUNCH_PROFILE=uno`, Paid indexed Multi/D34, `any` unsafe flag and HTTP/token opt-in. Verifies discovery, token key mount and absence of the test-faults route. Inspection and admin/takedown are off in this lane |
+| `release-launch` | Builds `worker-build --release --features launch`, runs local pinned wrangler with `LAUNCH_PROFILE=paid-workers`, Paid indexed Multi/D34, `any` unsafe flag and HTTP/token opt-in. Verifies discovery, token key mount and absence of the test-faults route. Inspection and admin/takedown are off in this lane |
 | `full` | Refused until R-203 and the complete per-case actual release probes. The configured restricted admin catalog is available. A component suite exit zero cannot pass the integrated matrix |
 
 The release-launch discovery lane verifies threshold zero, leases/async false,

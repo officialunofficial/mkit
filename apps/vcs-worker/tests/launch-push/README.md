@@ -3,7 +3,7 @@
 `scripts/vcs-worker-launch-push-runtime.sh` runs the native CLI's default zstd
 pack writer against an optimized `worker-build --release --features launch`
 Worker, then clones the published repository with the same native CLI. The
-Worker uses Paid Uno, indexed D34 addressing, Any namespaces with explicit
+Worker uses Paid Workers, indexed D34 addressing, Any namespaces with explicit
 `UNSAFE_OPEN_NAMESPACES`, permanent retention, and five Durable Object classes.
 HTTP objects, inspection, hooks, admin, and takedown are left off.
 

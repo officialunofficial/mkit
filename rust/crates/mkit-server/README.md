@@ -76,7 +76,7 @@ Not yet published to crates.io: the first release ships with mkit 0.5.
 HTTP object serving is a default-off `http-objects` feature, requiring
 explicit indexed and HTTP configuration. Native and Workers adapters
 have their own default-off forwarding feature and mount opt-in. The Paid
-Uno Worker launch enables these routes when configured; native defaults
+Workers launch enables these routes when configured; native defaults
 continue to omit HTTP object and URL-token key routes. See the native and Worker adapter READMEs for CORS,
 streaming, retained paid-read settlement and dedicated token keys.
 

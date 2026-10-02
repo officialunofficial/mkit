@@ -22,7 +22,7 @@ pub(crate) fn validate_programmatic(cfg: &WorkerConfig) -> Result<(), ConfigErro
         let indexed = indexed || cfg.http_mount.is_some();
         if indexed && cfg.launch.is_none() {
             return Err(error(
-                "indexed Worker configuration requires LAUNCH_PROFILE=uno",
+                "indexed Worker configuration requires LAUNCH_PROFILE=paid-workers",
             ));
         }
     }
@@ -218,8 +218,18 @@ impl LaunchConfig {
     pub fn parse(var: &impl Fn(&str) -> Option<String>) -> Result<Option<Self>, ConfigError> {
         let selected = match var("LAUNCH_PROFILE").as_deref() {
             None => false,
-            Some("uno") => true,
-            _ => return Err(error("LAUNCH_PROFILE must be uno when set")),
+            Some("paid-workers") => true,
+            Some("uno") => {
+                #[cfg(target_arch = "wasm32")]
+                crate::telemetry::install();
+                tracing::warn!("LAUNCH_PROFILE=uno is deprecated; use LAUNCH_PROFILE=paid-workers");
+                true
+            }
+            _ => {
+                return Err(error(
+                    "LAUNCH_PROFILE must be paid-workers when set (uno is a deprecated alias)",
+                ));
+            }
         };
         let http = boolean(var, "HTTP_OBJECTS")?;
         let reads = boolean(var, "HTTP_ADMIT_READS")?;
@@ -237,16 +247,20 @@ impl LaunchConfig {
         if !selected {
             if http || reads || takedown {
                 return Err(error(
-                    "HTTP_OBJECTS, HTTP_ADMIT_READS and TAKEDOWN_ENABLED require LAUNCH_PROFILE=uno",
+                    "HTTP_OBJECTS, HTTP_ADMIT_READS and TAKEDOWN_ENABLED require LAUNCH_PROFILE=paid-workers",
                 ));
             }
             return Ok(None);
         }
         if var("INDEXED_MODE").as_deref() != Some("true") {
-            return Err(error("LAUNCH_PROFILE=uno requires INDEXED_MODE=true"));
+            return Err(error(
+                "LAUNCH_PROFILE=paid-workers requires INDEXED_MODE=true",
+            ));
         }
         if !var("WORKERS_PLAN").is_some_and(|v| v.trim().eq_ignore_ascii_case("paid")) {
-            return Err(error("LAUNCH_PROFILE=uno requires WORKERS_PLAN=paid"));
+            return Err(error(
+                "LAUNCH_PROFILE=paid-workers requires WORKERS_PLAN=paid",
+            ));
         }
         Ok(Some(Self { takedown }))
     }
@@ -326,7 +340,7 @@ pub(crate) fn validate(
         .iter()
         .any(|name| var(name).is_some())
         {
-            return Err(error("preservation requires LAUNCH_PROFILE=uno"));
+            return Err(error("preservation requires LAUNCH_PROFILE=paid-workers"));
         }
         return Ok(());
     }
@@ -425,7 +439,9 @@ fn validate_preservation(
                 .as_ref()
                 .is_none_or(|v| !v.roles.cache_purge || v.http.is_none())
         {
-            return Err(error("TAKEDOWN_ENABLED requires signed HTTPS cache-purge"));
+            return Err(error(
+                "TAKEDOWN_ENABLED requires signed HTTPS cache-purge or an embedder-supplied purge sink",
+            ));
         }
         if cfg.takedown.as_ref().is_some_and(|s| s.retention_ms == 0) {
             return Err(error("PRESERVATION_RETENTION_MS must be positive"));

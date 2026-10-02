@@ -38,7 +38,7 @@ The framework stays **payment-neutral**. mkit defines the mechanism; the busines
 
 ## 3. Non-goals
 
-- Anything specific to one business: pricing, currency, balances or ledgers, accounts and claiming, a specific CSAM vendor, app-store policy, on-chain authority mappings. These belong to implementers. Uno is a reference example of an implementer, but it is out of scope here.
+- Anything specific to one business: pricing, currency, balances or ledgers, accounts and claiming, a specific CSAM vendor, app-store policy, on-chain authority mappings. These belong to implementers. The embedding host is a reference example of an implementer, but it is out of scope here.
 - A hosted-forge feature set: web UI, issues, PRs, CI, org management.
 - Namespaces resolved by a registry at the deployment. Namespaces are self-certifying only (D4).
 - A Postgres metadata backend. The trait leaves room for one (D2).

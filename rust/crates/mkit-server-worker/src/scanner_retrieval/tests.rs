@@ -29,7 +29,7 @@ fn activation_requires_all_inputs_and_the_release_launch_profile() {
     let valid = |name: &str| match name {
         "SCANNER_RETRIEVAL" => Some("true".into()),
         "WORKERS_PLAN" => Some("paid".into()),
-        "LAUNCH_PROFILE" => Some("uno".into()),
+        "LAUNCH_PROFILE" => Some("paid-workers".into()),
         KEYS_SECRET => Some(format!("active scan {}", "18".repeat(32))),
         "SCANNER_KEYS" => Some(mkit_core::hash::to_hex(
             &mkit_server::hooks::HookSigner::new("scanner", zeroize::Zeroizing::new([12; 32]))
@@ -52,7 +52,21 @@ fn activation_requires_all_inputs_and_the_release_launch_profile() {
         )
         .is_err()
     );
-    assert!(parse(&valid, true, true).is_ok());
+    for profile in ["paid-workers", "uno"] {
+        assert!(
+            parse(
+                &|name| if name == "LAUNCH_PROFILE" {
+                    Some(profile.into())
+                } else {
+                    valid(name)
+                },
+                true,
+                true
+            )
+            .unwrap()
+            .is_some()
+        );
+    }
     assert_eq!(
         parse(
             &|name| if name == "LAUNCH_PROFILE" {

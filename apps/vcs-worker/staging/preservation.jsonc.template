@@ -6,7 +6,7 @@
 {
   "r2_buckets": [{ "binding": "PRESERVATION", "bucket_name": "REPLACE_PRIVATE_PRESERVATION_BUCKET" }],
   "vars": {
-    // Activation requires the validated Paid Uno launch profile and complete
+    // Activation requires the validated Paid Workers launch profile and complete
     // preservation, admin and signed cache-purge configuration.
     "TAKEDOWN_ENABLED": "true",
     "PRESERVATION_RETENTION_MS": "REPLACE_EXPLICIT_POSITIVE_DURATION",

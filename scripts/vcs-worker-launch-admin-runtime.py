@@ -99,7 +99,7 @@ def run_fixture(namespace, port, folder, artifact, runner, env, evidence, observ
             wrapper_path.write_text(wrapper)
             auth = ["--auth", "auth-v2", "--audience", runtime.AUDIENCE, "--repository", "default",
                     "--signer-seed-hex", runtime.SEED, "--run-id", runtime.RUN_ID]
-            variables = {"AUTH_AUDIENCE": runtime.AUDIENCE, "LAUNCH_PROFILE": "uno", "WORKERS_PLAN": "paid",
+            variables = {"AUTH_AUDIENCE": runtime.AUDIENCE, "LAUNCH_PROFILE": "paid-workers", "WORKERS_PLAN": "paid",
                 "INDEXED_MODE": "true", "ADDRESSING": "multi", "SHARDING": "d34", "NAMESPACE_POLICY": namespace,
                 "RETENTION": "permanent", "STORAGE_LEASES": "false", "GC_ENABLED": "false",
                 "TICKET_KEYS": "launch-ticket " + "11" * 32, "HTTP_OBJECTS": "true",
@@ -390,7 +390,7 @@ def collect_observation(folder, result, sampler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sha", required=True)
-    parser.add_argument("--uno", action="store_true", help="run the embedded Uno host directly in Miniflare")
+    parser.add_argument("--uno", action="store_true", help="run the embedded host fixture directly in Miniflare")
     parser.add_argument("--namespace", choices=("both", "allowlist", "any"), default="both")
     parser.add_argument("--observe-resources", action="store_true", help="observe the unchanged local workload")
     parser.add_argument("--artifact-from", type=Path, help="reuse the same owned clean-SHA artifact and runner")

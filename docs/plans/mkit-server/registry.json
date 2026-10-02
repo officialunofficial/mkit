@@ -1559,7 +1559,7 @@
       "3.8"
     ],
     "size": "M",
-    "summary": "Existing authentication re-exports prerequisite (R-174, bundled with 3.12/3.13): move the public hooks.v1 messages, HookSigner and HookVerifier into mkit-rpc with mkit-server re-exports, so Uno and the signed Worker channel can share the hook protocol without server-runtime dependencies.",
+    "summary": "Existing authentication re-exports prerequisite (R-174, bundled with 3.12/3.13): move the public hooks.v1 messages, HookSigner and HookVerifier into mkit-rpc with mkit-server re-exports, so an embedding host and the signed Worker channel can share the hook protocol without server-runtime dependencies.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -1632,7 +1632,7 @@
       "3.7b"
     ],
     "size": "L",
-    "summary": "Launch bundle with 2.16: signed Connect JSON over HTTPS to Uno’s external hook endpoint, origin-bound audience, fresh nonces, no redirects or internal retries, bounded response streaming and whole-call timeout/cancellation. Reuses the public mkit-rpc hook contract and supports later remote Inspect; durable HTTP outcome delivery makes Queue optional (R-185).",
+    "summary": "Launch bundle with 2.16: signed Connect JSON over HTTPS to an embedding host’s external hook endpoint, origin-bound audience, fresh nonces, no redirects or internal retries, bounded response streaming and whole-call timeout/cancellation. Reuses the public mkit-rpc hook contract and supports later remote Inspect; durable HTTP outcome delivery makes Queue optional (R-185).",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -2168,7 +2168,7 @@
   },
   {
     "id": "4.16b",
-    "title": "Ref-path file Content-Type allowlist and filename (Uno Kit demo, R-201)",
+    "title": "Ref-path file Content-Type allowlist and filename (embedding demo, R-201)",
     "milestone": "M4",
     "track": "core",
     "depends_on": [
@@ -2187,7 +2187,7 @@
   },
   {
     "id": "4.16c",
-    "title": "In-process canonical object reader for embedders (Uno Kit demo)",
+    "title": "In-process canonical object reader for embedders (embedding demo)",
     "milestone": "M4",
     "track": "core",
     "depends_on": [
@@ -2317,7 +2317,7 @@
       "zstd-bound"
     ],
     "size": "L",
-    "summary": "Merged #1259 at c3921b06 after stale-connection prerequisite #1260 and launch review fixes #1255–#1258. Paid indexed Multi/D34 Uno, permanent retention, leases/GC off; optional HTTP/tokens, signed or isolated binding hooks, sync inspection/private scanner retrieval, complete preservation-backed restricted admin. Requested embedded Uno matrix passes locally; broader historical matrix and staging remain UNRUN. Open whole-isolate preservation memory finding is accepted for this merge only; FIX-preservation-memory must land before candidate/main. Events, async holds, Worker proofs and ListRepos excluded.",
+    "summary": "Merged #1259 at c3921b06 after stale-connection prerequisite #1260 and launch review fixes #1255–#1258. Paid indexed Multi/D34 Workers, permanent retention, leases/GC off; optional HTTP/tokens, signed or isolated binding hooks, sync inspection/private scanner retrieval, complete preservation-backed restricted admin. Requested embedded-host matrix passes locally; broader historical matrix and staging remain UNRUN. Open whole-isolate preservation memory finding is accepted for this merge only; FIX-preservation-memory must land before candidate/main. Events, async holds, Worker proofs and ListRepos excluded.",
     "human_action": true,
     "area_gates": [
       "rust",
