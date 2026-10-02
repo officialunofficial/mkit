@@ -34,6 +34,6 @@ proofs that check them, with each result's bounds.
 - [SPEC-SPARSE-CHECKOUT](SPEC-SPARSE-CHECKOUT.md) &mdash; verifiable server-side sparse checkout over HTTP/S3.
 - [SPEC-TRANSPORT](SPEC-TRANSPORT.md) &mdash; seven-verb transport wire protocol (file, SSH, HTTP [legacy, see SPEC-TRANSPORT-CONNECT], S3, memory).
 - [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) &mdash; draft `mkit.transport.v1` Connect service, the canonical remote protocol superseding SPEC-TRANSPORT §5.
-- [SPEC-TRANSPORT-ENC](SPEC-TRANSPORT-ENC.md) &mdash; self-contained encrypted-stream transport (`mkit+enc://`).
+- [SPEC-TRANSPORT-ENC](SPEC-TRANSPORT-ENC.md) &mdash; self-contained encrypted-stream transport (`mkit+enc://`; deprecated, no maintained server).
 - [SPEC-WORKTREE](SPEC-WORKTREE.md) &mdash; linked working trees: common-dir/per-tree state split, discovery, and cross-worktree locking.
 - [SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md) &mdash; draft owner-signed grants that let Ed25519 keys write to, or read from, a namespace's repositories.

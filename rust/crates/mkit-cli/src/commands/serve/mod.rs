@@ -5,8 +5,8 @@
 //! The engine is `mkit-server`'s: [`mkit_server::ssh::serve_session`] over
 //! the pipeline, with the `.mkit` layout stores (`FsBlobStore` for
 //! `<root>/packs/`, `FsLayoutStore` for `<root>/refs/`), so the files are
-//! the ones `FileTransport`, `mkit+file://` remotes and `mkit-server
-//! --repo-root` read and write. It runs under a blocking executor
+//! the ones `FileTransport`, `mkit+file://` remotes and any
+//! `mkit-server` fs-layout deployment read and write. It runs under a blocking executor
 //! (`futures::executor::block_on`): the CLI builds no async runtime, and
 //! the stores do blocking I/O inside their futures. A reader thread feeds
 //! stdin frames to the session and enforces the idle timeout
@@ -47,8 +47,8 @@ const MAX_TIMEOUT_SECS: u64 = 7 * 24 * 60 * 60;
 #[command(
     name = "mkit serve",
     about = "Speak the mkit-rpc SSH-frame protocol on stdin/stdout (the \
-             mkit+ssh:// forced-command server). The HTTP and mkit+enc:// \
-             listeners are the separate `mkit-server` binary."
+             mkit+ssh:// forced-command server). It has no HTTP or \
+             mkit+enc:// listener."
 )]
 struct ServeOpts {
     /// Path to the repository to serve. Under `--root` it is the
@@ -91,10 +91,9 @@ struct ServeOpts {
     max_session_secs: u64,
 }
 
-/// The listener flags `mkit serve` used to take, removed when the HTTP
-/// (`--http`) and encrypted (`--listen-enc`) listeners moved to the
-/// `mkit-server` binary. Clap rejects them as unknown arguments;
-/// [`run`] then adds a pointer to `mkit-server`.
+/// The listener flags `mkit serve` used to take, removed along with the HTTP
+/// (`--http`) and encrypted (`--listen-enc`) listeners. Clap rejects them as
+/// unknown arguments; [`run`] then adds a hint.
 const REMOVED_LISTENER_FLAGS: &[&str] = &[
     "--http",
     "--http-token",

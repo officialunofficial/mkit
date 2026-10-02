@@ -70,7 +70,7 @@ EXPECTED_CRATES=(
 # Run from the crate that pulls every other first-party crate. mkit-cli
 # depends on every other publishable mkit-* crate except mkit-wasm
 # (Cloudflare Workers builds; lints separately) and the mkit-server-*
-# adapter crates (the separate `mkit-server` binary). Two of those deps —
+# adapter crates. Two of those deps —
 # mkit-transport-enc (enc-transport feature) and mkit-git-bridge
 # (git-bridge feature) — are optional, so they only appear in geiger's
 # output when their feature is enabled; the geiger run below passes

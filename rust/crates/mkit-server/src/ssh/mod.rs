@@ -2,12 +2,12 @@
 //! SPEC-TRANSPORT §4.2): the `Hello` handshake, per-verb dispatch, the
 //! streaming upload and download, the per-connection budgets and the CAS
 //! conflict reply of `mkit serve`, moved here from `mkit-cli` so the ssh
-//! stdio path and the enc listener share one implementation.
+//! stdio path and any enc listener share one implementation.
 //!
 //! [`serve_session`] is transport-agnostic: it reads frames from a
 //! [`FrameSource`] and writes them to a [`FrameSink`], and never spawns or
 //! sleeps, so it runs under a blocking executor (`mkit serve` over stdio)
-//! as well as under tokio (the enc listener). [`ReadFrames`] and
+//! as well as under tokio (an enc listener). [`ReadFrames`] and
 //! [`WriteFrames`] adapt blocking `std::io` streams. The wire is frozen:
 //! responses and error frames are `mkit serve`'s byte for byte, pinned by
 //! `rust/tests/golden/ssh-serve/`.

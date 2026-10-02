@@ -2,8 +2,8 @@
 //! implemented once over `SQLite`, on the tiny synchronous [`SqlConn`]
 //! trait.
 //!
-//! `rusqlite` (`mkit-server-native`) and Durable Object `SQLite` (a later
-//! adapter) both implement [`SqlConn`], so the native backend and every
+//! `rusqlite` and Durable Object `SQLite` can both implement [`SqlConn`], so
+//! a native backend and every
 //! per-partition Durable Object run the same statements and the same
 //! physical [`schema`] migrations. SQL is an internal detail of this
 //! backend: nothing above [`NamespaceStore`] sees it.
@@ -89,8 +89,8 @@ pub type TxFn<C, T> = Box<dyn FnOnce(C) -> Result<T, SqlError> + 'static>;
 /// a shared, locked `Connection`; a Durable Object: its storage handle).
 ///
 /// Synchronous on purpose: Durable Object `sql.exec` and `transactionSync`
-/// are synchronous, and so is `rusqlite`. A native server runs a store over
-/// it on a blocking thread (`mkit-server-native`'s `Blocking`).
+/// are synchronous, and so is `rusqlite`. A native host runs a store over
+/// it on a blocking thread.
 pub trait SqlConn: MaybeSend + MaybeSync + Clone + 'static {
     /// Run one statement that returns no rows; the number of rows changed.
     fn exec(&self, sql: &str, params: &[SqlValue]) -> Result<u64, SqlError>;

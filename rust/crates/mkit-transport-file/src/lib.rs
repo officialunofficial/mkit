@@ -613,8 +613,8 @@ impl FileTransport {
 /// next to the refs ([`LockedRefs::write_file`]).
 pub const SERVER_DIR: &str = ".mkit/server";
 
-/// The marker, under a [`FileTransport`] root, that a `mkit-server --meta
-/// sqlite:` deployment writes: the root's refs live in that server's
+/// The marker, under a [`FileTransport`] root, that a SQLite-metadata
+/// `mkit-server` deployment writes: the root's refs live in that server's
 /// `SQLite` database, not in ref files. Every ref write through this
 /// transport refuses a marked root ([`RefFileError::MetaElsewhere`]), so a
 /// local push or `mkit serve` cannot keep a second, diverging copy of the

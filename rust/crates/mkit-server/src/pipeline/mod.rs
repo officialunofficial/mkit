@@ -1009,7 +1009,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// A second pipeline over the same stores, hooks, shard map, clock,
     /// metrics, test fault hooks and write gate, authenticating with
     /// `auth`: how one server hosts bindings with different identity
-    /// sources on one root (the enc listener's `TransportIdentity` beside
+    /// sources on one root (an enc listener's `TransportIdentity` beside
     /// an HTTP listener's bearer token or auth v2) while its writes to a
     /// partition still pass one gate. Every other setting is `self`'s.
     ///

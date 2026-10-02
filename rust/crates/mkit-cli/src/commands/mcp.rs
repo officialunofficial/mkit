@@ -54,7 +54,7 @@ struct McpOpts {
     /// tool surface (which includes mutating tools like `mkit_checkout`)
     /// is meant to be reachable from elsewhere.
     ///
-    /// FAIL-CLOSED, like `mkit-server serve`: refuses to bind unless
+    /// FAIL-CLOSED: refuses to bind unless
     /// either a bearer token is configured (`--http-token` or the
     /// `MKIT_MCP_TOKEN` env var) or `--unsafe-allow-any-http-peer` is
     /// passed. See `mcp_v2.rs`.

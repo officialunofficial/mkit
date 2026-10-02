@@ -284,16 +284,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   head must be a member commit, remix or tag. API: `verify_ticketed` returns
   `StagedCommits`; `VerifiedAuth::created_at_ms` and
   `IndexedConfig::max_ancestry_commits` are new (WP-4.17).
-- Server: the native server can run authorization, admission and outcome
-  delivery in a remote hook service over signed HTTPS (`--hook-authorize-url`,
-  `--hook-admit-url`, `--hook-outcome-url`, `--hook-key-file`, `--hook-timeout-secs`,
-  `--authorizer-role`; `mkit-server hook-key-list` prints the public key list).
-  Plain HTTP is loopback-only, redirects are never followed, the hook key must
-  differ from the ticket and enc keys, and a remote admission replaces the
-  default abuse quota. New in `mkit-server`: `pipeline::Choice`,
-  `hooks::HookVerifier` (the hook service's side of the signature),
-  `HookSigner::public_key`, `TicketKeys::contains_secret`; new in
-  `mkit-server-native`: `server::open_with` (WP-3.8).
+- Server: authorization, admission and outcome delivery can run in a remote
+  hook service over signed HTTPS. Plain HTTP is loopback-only, redirects are
+  never followed, and a remote admission replaces the default abuse quota.
+  New in `mkit-server`: `pipeline::Choice`, `hooks::HookVerifier` (the hook
+  service's side of the signature), `HookSigner::public_key`,
+  `TicketKeys::contains_secret`.
 - Server: the Workers adapter can call a hook Worker over an unsigned
   `ADMISSION_HOOK` service binding (`HOOK_ROLES`, `HOOK_TIMEOUT_MS`,
   `AUTHORIZER_ROLE`), and `adapter::fetch_with` and `ns_object_with` take a
@@ -313,13 +309,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Request queries use `RedactedQuery`, exposed only to the parser; ref scans
   bound all rows and pages, and ref paths peel up to 16 tags.
 - **Breaking (server):** D34 is now the default sharding for Connect
-  deployments: `mkit-server serve --meta sqlite:<PATH>` without `--sharding`
-  runs `d34` (fs-layout stays `single`), `mkit-server restore` follows the
-  export's marker, and the Worker's unset `SHARDING` means `d34`
-  (`wrangler.jsonc` sets it). There is no migration: a database written
-  `single`, or written before `--sharding` existed and holding data, is
-  refused with `CONFIG_ERROR` (native; pass `--sharding single`) or answers
-  503 until `SHARDING="single"` is pinned (Worker). Under Single addressing the
+  deployments: the Worker's unset `SHARDING` means `d34` (`wrangler.jsonc`
+  sets it). There is no migration: a database written `single`, or written
+  before sharding was configurable and holding data, answers 503 until
+  `SHARDING="single"` is pinned. Under Single addressing the
   default write quota is now counted per (signer, branch). The client skips a
   listed branch that a stale `ListRefs` names after its delete (head and
   packmap both absent) instead of failing with `PackmapMissing` (WP-1.28c).
@@ -333,9 +326,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the Worker stats hook is scoped to one ref's shard under D34. The report is
   `docs/plans/mkit-server/m1-exit-report.md`. `mkit-server-conformance` `Profile` gains `ticket_per_ref` and
   `merge_paging_refs` (WP-1.27).
-- Server: `mkit-server serve` gains `--grant-schemes`, a repeatable
-  `--webauthn-rp <id=origin[,origin...]>` and the development-only
-  `--unsafe-allow-loopback-grants`; the Worker gains the `GRANT_SCHEMES` and
+- Server: the Worker gains the `GRANT_SCHEMES` and
   `WEBAUTHN_RPS` vars and a `test-faults`-only `UNSAFE_LOOPBACK_GRANTS`, to
   configure write grants on Multi + auth v2 deployments. Any bad or partial
   value refuses to start; unset keeps grants off (WP-1.30b).
@@ -384,20 +375,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   addressed by `<NAMESPACE>/<NAME>` (from the path argument or a strict
   `SSH_ORIGINAL_COMMAND`), one repository per process, with writes
   restricted to the namespace's Ed25519 owner asserted by
-  `--principal <hex>`; a Multi deployment's `--listen-enc` binds every
-  session to its `--enc-repository`. Transport-identity sessions grant
+  `--principal <hex>`. Transport-identity sessions grant
   pack membership implicitly for packs uploaded and verified in the same
   session — at most seven pending packs, consumed by the session's
-  packmap write — so `mkit+ssh://` and `mkit+enc://` pushes need no
+  packmap write — so `mkit+ssh://` pushes need no
   upload tickets. Denied writes answer `INVALID_REQUEST "write not
   permitted"` (WP-1.15).
-- Server: the native and Worker adapters can serve multi-repository
-  deployments (`mkit-server serve --addressing multi` with
-  `--namespace-policy`/`--namespace-allowlist`/`--unsafe-open-namespaces`,
-  or the Worker's `ADDRESSING`/`NAMESPACE_POLICY`/`NAMESPACE_ALLOWLIST`/
+- Server: the Worker adapter can serve multi-repository deployments (the
+  `ADDRESSING`/`NAMESPACE_POLICY`/`NAMESPACE_ALLOWLIST`/
   `UNSAFE_OPEN_NAMESPACES` vars). Multi requires auth v2 with upload ticket
-  keys — a deployment without them now refuses to start — and, natively,
-  `--meta sqlite:<PATH>` (WP-1.30).
+  keys — a deployment without them now refuses to start.
 - Server: add validated two-phase admission with bounded HTTP 402 challenges,
   redacted payment credential forwarding and committed-success receipt headers
   (WP-3.2).
@@ -546,9 +533,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the soft limit run after committed Worker puts and every 60 seconds for
   native SQLite metadata. `Metrics::gauge` has a provided no-op default;
   P-24 is now `mkit_server_partition_full_total{kind}`.
-- Native server: `backup --meta sqlite:<PATH> --out <FILE>` creates an online
-  physical SQLite backup and refuses an existing destination with exit 64.
-
 - Worker: add Durable Object classes for D34 coordinator, ref, repository/ref-name index and content partitions, retaining RefStore for single deployments; reject foreign partition kinds and preserve alarms scheduled while a timer tick awaits I/O. Deployment vars now select `single` (default) or `d34` with a root sharding marker guard that caches settled results, retries transient storage errors and re-checks config changes; placement is deployment-wide and jurisdiction is fixed for its lifetime.
 - Server D34 ref writes now hold coordinator epoch leases, with backend commit
   deadlines, guarded revocation pushes and kind-1 expiry sweeps. Creation and
@@ -631,8 +615,8 @@ train).
   with validated upload limits, namespace/admission policy, store capabilities
   and private caching for 60 seconds. Repository headers never affect the
   response; native bearer deployments also expose it without a token (WP-1.6).
-  `mkit-server serve` now refuses a `--max-pack-bytes` above the advertised
-  resumable-upload limit (8 MiB parts × 10,000 parts, about 78 GiB).
+  A configured maximum pack size above the advertised resumable-upload
+  limit (8 MiB parts × 10,000 parts, about 78 GiB) is refused.
 - *(server)* Multi addressing now defaults to an empty namespace allowlist and
   owner writes. Namespace denials and non-owner writes return `permission_denied`
   before allocation. Authorizer hooks can be additional checks or explicit
@@ -656,8 +640,7 @@ train).
   `unimplemented` until WP-1.28. Fs-layout and Worker deployments stay Single.
   Embedders select routing through `PipelineConfig::sharding`; `ShardMap` now
   exposes a name's ref-index shard and the ordered set of ref-index partitions.
-  The native server records a SQLite database's `--sharding` on first use and
-  refuses to start it with another. `Pipeline::with_shards` is removed; select
+  `Pipeline::with_shards` is removed; select
   routing with `PipelineConfig::sharding`.
 - *(core)* Add `pack::window`: a synchronous sans-IO pack reader with bounded
   entry buffers, 64 KiB–64 MiB range windows, and checksummed resumable cursors.
@@ -705,9 +688,9 @@ train).
     recipe for an operator to locate and move them by hand. See the
     `mkit-server` entry below.
   - **Crashed uploads are swept.** At startup, when no other
-    `mkit serve` or `mkit-server` holds `serve.lock`, upload temp files
+    `mkit serve` or server process holds `serve.lock`, upload temp files
     (`packs/.<hex>.tmp.<pid>.<seq>`) at least an hour old are removed.
-  - A root marked for `mkit-server --meta sqlite:` is refused (exit 78).
+  - A root marked as served from external metadata storage is refused (exit 78).
   The default CLI graph is checked server-free by the new
   `scripts/check-cli-baseline.sh` (in `just ci-scripts`; INVARIANTS "The
   default `mkit` CLI is server-free").
@@ -726,7 +709,7 @@ train).
   (`update_ref`/`write_ref`, and `LockedRefs::update_ref`, `delete_ref`,
   `write_file`, `remove_file`) refuses a root carrying
   `SERVER_META_MARKER` (`.mkit/server-meta`), the marker a
-  `mkit-server serve --meta sqlite:` deployment writes, with the new
+  SQLite-metadata server deployment writes, with the new
   `RefFileError::MetaElsewhere` (a `TransportError::RemoteError` on the
   `Transport` verbs). That root's refs live in the server's `SQLite`
   database, so a local `mkit push` to a `file://` remote or `mkit serve`
@@ -834,48 +817,6 @@ train).
 - *(spec)* SPEC-SERVER v1 M3 pipeline/outcome guarantees and the signed
   `mkit.server.hooks.v1` contract, proto, and golden vectors (WP-3.6).
 
-- *(server)* The `mkit-server` binary (`mkit-server-native`;
-  `mkit-server serve --repo-root <DIR> [--listen <ADDR>] [--listen-enc
-  <ADDR>]`) is the self-hosted `mkit+https://` and `mkit+enc://` server. It
-  replaces `mkit serve --http` and `mkit serve --listen-enc`, which the CLI
-  no longer has (see **Removed** for the flag mapping). Its operator guide
-  is `rust/crates/mkit-server-native/README.md`.
-
-- *(release)* Every signed release also ships
-  `mkit-server-<version>-<target>.tar.gz` for the same four targets as
-  `mkit` (the `mkit-server` binary, licenses, the operator guide and the
-  changelog), covered by the same per-archive cosign signatures, signed
-  `SHA256SUMS`, SLSA provenance, SBOM and `THIRD-PARTY-NOTICES`. It is
-  built from `mkit-server-native` with `--no-default-features --features
-  enc,http,s3,sqlite`, in a cargo invocation separate from `mkit`'s. The
-  new `scripts/check-release-artifact-features.sh` checks each build's
-  compiler-artifact messages and binary: `mkit` must carry no server
-  package, server feature or `SQLite`, and `mkit-server` exactly the
-  shipped features (`scripts/release/mkit-server-features`) and never
-  `test-faults`; `mkit` may compile only the packages in
-  `scripts/release/mkit-packages.golden` (regenerate with `--update-golden`).
-  The new `release-artifact-check.yml` runs the same builds and checks on
-  PRs to `main`. The `mkit` build now selects
-  `-p mkit-cli`: the bare `--bin mkit` selected every workspace member and
-  unified their features into the shipped CLI. See `docs/RELEASE.md`.
-- *(release)* Every signed release also publishes the public `mkit-server`
-  container image, `ghcr.io/officialunofficial/mkit-server:<version>` (and
-  `:<major>.<minor>` for the newest final release of that line; no
-  `latest`), for `linux/amd64` and `linux/arm64`. It is built from the two
-  signed Linux `mkit-server` archives, not recompiled: the new `container`
-  job verifies each archive's cosign bundle and checksums
-  (`scripts/stage-server-image.sh`), copies the binary into
-  `gcr.io/distroless/cc-debian13:nonroot` (`contrib/docker/mkit-server/Dockerfile`;
-  non-root, no shell, entrypoint `mkit-server serve`), pushes by digest
-  only, and checks each pushed platform's binary against the archive
-  (`scripts/verify-server-image-binaries.sh`). `container-sign` signs the
-  digest with cosign keyless and attaches SLSA provenance and a CycloneDX
-  SBOM attestation; only then does `container-tag` apply the tags
-  (`scripts/ghcr-image.sh`) and check anonymous pulls. The release notes
-  carry the digest and state what was published. Both Linux release legs
-  now run on `ubuntu-24.04` explicitly. `scripts/local-server-image.sh`
-  runs the same staging and image checks locally, without pushing.
-  Running it: `docs/CONTAINER.md`.
 - *(core)* `pack::DeltaBaseSource`: the external delta-base lookup is
   now an explicit, generic parameter, so a server can resolve bases only
   from the pushing repository's membership (PRD §6.5, no existence
@@ -1084,12 +1025,7 @@ train).
   below it: batches with a put return `StoreError::Full` at the soft limit,
   and the reserve keeps delete-only batches (which can split b-tree pages)
   from ever hitting the engine limit. It compiles for wasm32, so Durable
-  Object SQLite can share it. New `mkit-server-native` crate
-  (`publish = false`): `RusqliteConn` (bundled SQLite, WAL,
-  `synchronous = FULL`), the `Blocking` adapter that runs sync-bodied
-  stores on tokio's blocking pool, and physical (`VACUUM INTO`) and
-  logical backup/restore documentation. Passes the conformance suite with
-  zero skips on a file-backed store. Not in the `mkit-cli` graph.
+  Object SQLite can share it. Not in the `mkit-cli` graph.
   **SemVer:** unreleased API.
 
 - *(server)* New `mkit-server-worker` crate (`publish = false`), the
@@ -1109,84 +1045,10 @@ train).
   wasm-bindgen-futures 0.4.78), which `mkit-wasm` shares. **SemVer:**
   unreleased API.
 
-- *(server)* S3 blob storage for `mkit-server`: `mkit-server-native`'s new
-  `s3` feature (on by default) adds `S3BlobStore`, a content-addressed
-  `BlobStore` over any S3-compatible bucket, signed with
-  `mkit-transport-s3`'s SigV4 code over async reqwest (rustls). An upload
-  spools to an unnamed local temp file while it computes BLAKE3 and
-  SHA-256, and only after the length and BLAKE3 verify does it send one
-  `PUT` with `If-None-Match: *`, so nothing unverified is ever visible
-  and an abort or a dropped sink sends nothing (`412` is
-  `AlreadyPresent`; `409`/`429`/`5xx`/`400 RequestTimeout` are retried from
-  the spool with jittered backoff honoring `Retry-After`, each attempt
-  bounded by a 60 s stall timeout and a size-scaled deadline). Each upload
-  reserves its declared length from a spool budget
-  (`--s3-spool-max-bytes`, default 16 GiB) before any byte arrives; no
-  room, or a full disk, is a retryable "storage partition full". Serve
-  with `mkit-server serve --blob s3://<BUCKET>[/<PREFIX>] --s3-endpoint
-  <URL> [--s3-region auto] --meta sqlite:<PATH>`; a non-loopback `http`
-  endpoint is refused without `--s3-allow-insecure-http`. Credentials from
-  `MKIT_R2_ACCESS_KEY_ID`/`MKIT_R2_SECRET_ACCESS_KEY` (or the `AWS_*`
-  pair; temporary credentials with `AWS_SESSION_TOKEN`, so IAM roles,
-  IRSA and ECS task roles, are unsupported for now) or an owner-only
-  `--s3-credentials-file`, never the command line. The provider must honor
-  `If-None-Match: *` on `PUT` (AWS S3, R2, MinIO). `mkit-server-conformance`
-  gains `fake_s3` (feature `fake-s3`): a strict in-memory S3 server that
-  verifies SigV4 independently and models conditional puts, ranges and S3
-  error codes. The storage suite and the full wire suite (in-process and
-  the real binary) pass over S3 + SQLite. The suite runner's runtime now
-  enables tokio's I/O and timer drivers. **SemVer:** unreleased API.
 - *(transport-s3)* `sigv4::sign_request_with_payload_hash` signs a request
   for a body whose SHA-256 the caller already has, so a streamed upload
   need not hold its body in memory; `sign_request` now delegates to it,
   byte for byte. **SemVer:** additive.
-
-- *(server)* `mkit-server serve --listen-enc <ADDR>` hosts the
-  `mkit+enc://` listener (SPEC-TRANSPORT-ENC §6), beside or instead of the
-  HTTP one (`--listen` is now optional; at least one is required; both
-  share one runtime, one shutdown and one pipeline's stores and write
-  gate). Each session runs `mkit_server::ssh::serve_session` as
-  `Principal::TransportPeer` with the key the handshake authenticated. The
-  flags, fail-closed gate, banner, timeouts, budgets and the
-  `mkit serve-enc/<version>` server id are `mkit serve --listen-enc`'s,
-  which WP-M0-15 removed (see **Removed**). New hardening: handshakes have their own
-  cap (`--enc-max-handshakes`, default 128 or `--max-connections` if
-  lower), apart from the `--max-connections` sessions, so sockets that
-  never handshake cannot lock authorized clients out (a client waiting
-  for a session slot after its handshake waits at most the handshake
-  timeout, and not past a shutdown); a write timeout equal to
-  `--enc-idle-timeout-secs`; on shutdown a session ends at its
-  next frame boundary (an idle one at once, never inside an upload) within
-  `--shutdown-grace-secs`; the allowlist is opened without following a
-  symlink and refused unless owned by the server's user or root and not
-  group- or other-writable; the key file is read with
-  `mkit_core::sign::load_raw_32`'s checks. Differences for operators:
-  `--enc-handshake-timeout-secs` defaults to 10 (was 60; SPEC-TRANSPORT-ENC
-  §2.1) and 0 is refused; `--enc-idle-timeout-secs 0` (which `mkit serve`
-  read as "no timeout") is refused, exit 78; an allowlist needs `--enc-server-key <PATH>` (no
-  `~/.config/mkit` default: the server resolves no home directory); key
-  and allowlist errors exit 78; `--unsafe-allow-any-enc-peer` is refused
-  (exit 78) beside an HTTP listener that requires a bearer token or auth
-  v2. Enc peers are `TransportPeer` principals, not subject to M2 write
-  grants until M2 wires them. The
-  `enc` feature is on by default. New `Pipeline::with_auth` builds a
-  sibling pipeline over the same stores and write gate with another
-  `AuthMode`. **Wire changes versus `mkit serve --listen-enc`**, all to
-  the ssh session's replies (SPEC-TRANSPORT §4.2, which SPEC-TRANSPORT-ENC
-  §3 makes normative): a first frame that is not `Hello` is answered
-  `Error{INVALID_REQUEST, "first frame must be Hello"}` and a `Hello` for
-  another version `"unsupported proto_version N"`, then the connection
-  closes (was: closed without a reply); a frame the session does not serve
-  gets its specific message (`"PackChunk arrived without UploadPack
-  header"`, `"Hello after handshake"`, `"unexpected request frame"`; was:
-  `"unexpected frame"`); a record that does not decode as an `SshFrame`
-  gets `"frame parse error"` at the top level and `"pack chunk read
-  failed"` inside an upload, then the session ends (was: closed without a
-  reply); a ref name over 512 bytes gets `"ref name too long"`; the upload
-  rejections are the ssh session's. Clients see no difference on
-  well-formed traffic: the published `mkit-transport-enc` 0.4.2 client
-  passes against the new listener (`just interop-enc`,
-  `contrib/interop/enc-client-0.4`). **SemVer:** unreleased API.
 
 - *(transport-enc)* `serve_tcp_listener`: the async accept loop on a
   caller-bound `TcpListener`, for a server already on a tokio runtime,
@@ -1609,40 +1471,35 @@ train).
 
 ### Removed
 
-- **`mkit serve --http` and `mkit serve --listen-enc` (WP-M0-15).** `mkit
-  serve <PATH>` is now only the `mkit+ssh://` forced-command server
-  (SSH-frame protocol on stdin/stdout, unchanged). Its HTTP and encrypted
-  listeners moved to the separate `mkit-server` binary, so the CLI carries
-  no HTTP server stack or `SQLite`. The removed flags are clap usage errors
-  (exit 64) with a hint naming `mkit-server`. Removed with them: the
-  flags `--http-token`, `--unsafe-allow-any-http-peer`,
-  `--enc-authorized-peers`, `--enc-server-key`,
-  `--unsafe-allow-any-enc-peer`, `--enc-idle-timeout-secs`,
-  `--enc-handshake-timeout-secs`, and `mkit-cli`'s `http-transport` cargo
-  feature (`enc-transport` stays: it is the `mkit+enc://` client). The
-  pre-production policy allows the removal without a deprecation period.
-  Migration, on the same root (the served layout is unchanged):
+- **`mkit serve --http` and `mkit serve --listen-enc`.** `mkit serve <PATH>`
+  is now only the `mkit+ssh://` forced-command server (SSH-frame protocol on
+  stdin/stdout, unchanged). Its HTTP and encrypted listeners are gone, so the
+  CLI carries no HTTP server stack or `SQLite`. The removed flags are clap
+  usage errors (exit 64). Removed with them: `--http-token`,
+  `--unsafe-allow-any-http-peer`, `--enc-authorized-peers`,
+  `--enc-server-key`, `--unsafe-allow-any-enc-peer`,
+  `--enc-idle-timeout-secs`, `--enc-handshake-timeout-secs`, and
+  `mkit-cli`'s `http-transport` cargo feature (`enc-transport` stays: it is
+  the deprecated `mkit+enc://` client). The pre-production policy allows the
+  removal without a deprecation period.
 
-  | Removed (`mkit serve <PATH> ...`) | Use (`mkit-server serve --repo-root <PATH> ...`) |
-  |---|---|
-  | `--http <ADDR>` | `--listen <ADDR>` (FS packs and `.mkit`-layout refs by default, as before) |
-  | `--http-token <TOKEN>` | `--bearer-token-file <PATH>` (owner-only file) or `MKIT_API_TOKEN`; the token is no longer accepted on the command line |
-  | `MKIT_API_TOKEN` | unchanged |
-  | `--unsafe-allow-any-http-peer` | `--unsafe-allow-any-peer` |
-  | `--listen-enc <ADDR>` | `--listen-enc <ADDR>` (alone, or beside `--listen`) |
-  | `--enc-authorized-peers <PATH>` | unchanged; the file must be owned by the server's user (or root) and not group- or other-writable |
-  | `--enc-server-key <PATH>` | unchanged, and required with an allowlist (no `~/.config/mkit/enc/server.key` default) |
-  | `--unsafe-allow-any-enc-peer` | unchanged; refused beside an HTTP listener that requires a token or auth v2 |
-  | `--enc-idle-timeout-secs <SECS>` | unchanged; `0` (was "no timeout") is refused |
-  | `--enc-handshake-timeout-secs <SECS>` | unchanged; default 10 (was 60); `0` is refused |
-  | `cargo install mkit-cli --features http-transport` | the `mkit-server-<version>-<target>.tar.gz` release archive, or `cargo build -p mkit-server-native --bin mkit-server` |
+- **Standalone server binary and container image.** There is no `mkit-server`
+  binary, release archive or `ghcr.io` container image, and no native
+  SQLite/S3/filesystem server deployment. Serve repositories over SSH with
+  `mkit serve`, or on Cloudflare Workers with the `mkit-server-worker`
+  adapter. The `mkit-server` library crate and the Workers adapter remain.
+
+- **`mkit-transport-enc` is deprecated.** The `mkit+enc://` listener went with
+  the standalone server, so there is no maintained server for the client;
+  use SSH (`mkit serve`) or Connect.
 
 - **`mkit-transport-connect`'s `server` cargo feature (breaking).** The
   axum-hosted server that backed `mkit serve --http` is gone, with its
   public API: `serve`, `router`, `TransportServer` and
   `map_transport_error`, and the `axum` and `connectrpc-health`
   dependencies. The crate is now the `mkit+https://` client
-  (`ConnectTransport`) only; serve `mkit.transport.v1` with `mkit-server`.
+  (`ConnectTransport`) only; serve `mkit.transport.v1` with the `mkit-server`
+  library or its Workers adapter.
   Removing a published feature and public items is semver-breaking, so the
   next release of `mkit-transport-connect` (and, with lockstep versioning,
   every `mkit-*` crate) is **0.5.0**, done at the release that merges the
@@ -1650,8 +1507,7 @@ train).
   `crates-publish.yml`). crates.io lists `mkit-cli` as its only published
   dependent, and no published `mkit-cli` enables the feature by default.
   `mkit-server-conformance`'s legacy `mkit serve --http` wire baseline is
-  removed with it; the `mkit+http://` client end-to-end tests now run
-  against `mkit-server` (`mkit-server-native/tests/client_e2e.rs`).
+  removed with it.
 
 - Compatibility-only index readers/migration APIs, legacy history APIs, the
   hash-only rename API, and redundant sparse-selection APIs. Pre-production

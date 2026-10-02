@@ -218,12 +218,13 @@ authentication mechanisms &mdash; do not conflate them:
   **not** say anything about who the client is.
 - **Client-to-server** &mdash; authentication of the dialing client is the
   job of the server's bouncer **allowlist**, not of `?pubkey=`. Issue
-  #178 makes the listener (now `mkit-server serve --listen-enc`;
-  formerly `mkit serve --listen-enc`) **fail-closed**: it refuses to
-  bind without an `--enc-authorized-peers` allowlist (or the explicit
-  `--unsafe-allow-any-enc-peer` dev escape). A client whose static
-  ed25519 key is not on the allowlist is rejected at the handshake and
-  never receives a `HelloResponse`, list-refs, packs, or update-ref.
+  #178 made the listener **fail-closed**: it refused to bind without an
+  allowlist of authorized peers (or an explicit allow-any development
+  escape). A client whose static ed25519 key is not on the allowlist is
+  rejected at the handshake and never receives a `HelloResponse`,
+  list-refs, packs, or update-ref. The standalone listener has since been
+  removed and the transport is deprecated (no maintained server); the
+  policy below applies to any listener built on `mkit-transport-enc`.
   This closes the previous "accepts any peer" gap where the listener
   hardcoded a permissive bouncer.
 

@@ -42,7 +42,7 @@ document points here.
 | `<root>/.mkit/refs/.lock` | transport root | per-repo, **local to the file transport only** | the file transport's own Any/Missing/Match critical sections (`mkit-transport-file`'s `RefLock`) | SPEC-TRANSPORT, §3.1 (this document) |
 | `git-<remote>.lock` | common dir, keyed on the git bridge remote name | per-bridge-state | one `mkit git import`/`fetch`/`pull` import phase or `mkit git export` against that remote's bridge state dir (`mkit-cli`'s `git_import::import_into`, `git::export`) | §4 (this document) |
 | `git-import-key.lock` | common dir | per-repo | first-time generation of the shared git-import signing key (`git_import::load_or_create_import_key`) | §4 (this document) |
-| `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** for its whole lifetime by every live server process on the root: `mkit serve` (stdin SSH-frame, its only mode) and `mkit-server serve` (HTTP and `mkit+enc://` listeners, which also holds `server.lock` exclusively, so one `mkit-server` serves a root at a time); taken exclusive without waiting by a starting `mkit serve` only to sweep crashed uploads' temp files; probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served (MKIT-11/#655) | §3.1 (this document) |
+| `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** for its whole lifetime by every live server process on the root: `mkit serve` (stdin SSH-frame, its only mode) and any server embedding `mkit-server`'s filesystem layout (which also holds `server.lock` exclusively, so one such server serves a root at a time); taken exclusive without waiting by a starting `mkit serve` only to sweep crashed uploads' temp files; probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served (MKIT-11/#655) | §3.1 (this document) |
 
 The recovery log (`.mkit/recovery-log`) has **no dedicated lock** &mdash; see
 §3.2.
@@ -82,8 +82,8 @@ Local worktree commands against a live `mkit serve` or `mkit-server` root remain
 
 **MKIT-11/#655 turned this from silent into detected**, without closing
 it: every live server process on the root &mdash; `mkit serve <path>`
-(stdin SSH-frame, its only mode) and `mkit-server serve --repo-root
-<path>` (HTTP and `mkit+enc://` listeners) &mdash; holds a **shared**
+(stdin SSH-frame, its only mode) and any server embedding
+`mkit-server`'s filesystem layout &mdash; holds a **shared**
 kernel lock (`std::fs::File::lock_shared`, never exclusive &mdash;
 SPEC-TRANSPORT documents multiple concurrent `serve` processes against
 one root, e.g. one per SSH forced-command connection, as a supported

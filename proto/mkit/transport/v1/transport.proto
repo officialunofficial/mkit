@@ -26,8 +26,7 @@
 // (mkit#677) to import across module boundaries.
 //
 // The service implementation is `mkit-server`'s `connect` binding over
-// its pipeline, served natively by the `mkit-server` binary
-// (`mkit-server-native`) and on Workers by `mkit-server-worker`; the
+// its pipeline, served on Workers by `mkit-server-worker`; the
 // client is `mkit-transport-connect`'s `ConnectTransport`.
 
 edition = "2023";

@@ -74,9 +74,8 @@ mkit-transport-http = { version = "0.4", path = "../mkit-transport-http" }
 # `mkit-transport-connect` is the native ConnectRPC client — the active
 # implementation behind `mkit+https://` / loopback `mkit+http://` dispatch
 # (mkit#701). Required unconditionally (client dispatch, not
-# feature-gated). The CLI hosts no Connect server: the self-hosted
-# `mkit+https://` remote is the separate `mkit-server` binary
-# (`mkit-server-native`), which is never a dependency of this crate.
+# feature-gated). The CLI hosts no Connect server and has no HTTP
+# server stack.
 mkit-transport-connect = { version = "0.4", path = "../mkit-transport-connect" }
 mkit-transport-s3 = { version = "0.4", path = "../mkit-transport-s3" }
 mkit-transport-ssh = { version = "0.4", path = "../mkit-transport-ssh" }
@@ -312,8 +311,8 @@ default = []
 bls-threshold = ["mkit-attest/bls-threshold", "mkit-keystore/bls-threshold", "dep:rand_core", "dep:commonware-codec"]
 # Enables the `mkit+enc://` client dispatch path in
 # `remote_dispatch::open`. Pulls in `mkit-transport-enc` with its `tcp`
-# feature (tokio + governor + rand) for `connect_tcp`. The listener is
-# `mkit-server serve --listen-enc`, not the CLI. See SPEC-TRANSPORT-ENC §6.
+# feature (tokio + governor + rand) for `connect_tcp`. The transport is deprecated:
+# no maintained server hosts it. See SPEC-TRANSPORT-ENC §6.
 enc-transport = ["dep:mkit-transport-enc", "mkit-transport-enc/tcp", "dep:commonware-cryptography", "dep:commonware-codec"]
 # Enables `mkit mcp`'s modern serving path (MCP 2026-07-28, via the official
 # `rmcp` Rust SDK — see the doc comment above rmcp's Cargo.toml entry). Off by

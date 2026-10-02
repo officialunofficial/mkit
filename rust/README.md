@@ -23,7 +23,7 @@ rust/
 │   │                           # (SPEC-TRANSPORT-CONNECT); used for mkit+https:// / mkit+http://
 │   ├── mkit-transport-s3/
 │   ├── mkit-transport-ssh/
-│   ├── mkit-transport-enc/     # mkit+enc:// no-OpenSSH encrypted transport
+│   ├── mkit-transport-enc/     # mkit+enc:// no-OpenSSH encrypted transport (deprecated)
 │   ├── mkit-attest/            # jcs, statement, envelope, signers, verify
 │   ├── mkit-keystore/          # signing-key vault interface + backends
 │   ├── mkit-git-bridge/        # git import/export bridge

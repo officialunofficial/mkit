@@ -2,7 +2,7 @@
 //! [`FileTransport`](mkit_transport_file::FileTransport) uses today (PRD
 //! §5.1, §6.9): [`FsBlobStore`] for `<root>/packs/<64-hex>` and
 //! [`FsLayoutStore`] for refs as files under `<root>/refs/`, so
-//! `mkit serve <repo-path>` (ssh) and a `mkit-server --repo-root`
+//! `mkit serve <repo-path>` (ssh) and any `mkit-server` fs-layout
 //! deployment serve the same files local `mkit` commands and
 //! `mkit+file://` remotes read.
 //!

@@ -1859,7 +1859,7 @@ fn transport_identity_write_never_carries_a_grant() {
 
 // ------------------------------------------------- WP-1.15 B9–B11
 //
-// The implicit transport-identity flows the enc listener runs: a bound
+// The implicit transport-identity flows an enc listener runs: a bound
 // repository (`SessionConfig.repository`), uploads accumulating as
 // session-local pending packs, and the packmap write consuming them into
 // membership.
