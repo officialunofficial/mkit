@@ -16,6 +16,14 @@ pub(crate) fn media_type(name: &[u8]) -> (&'static str, &'static str) {
         (b"txt", "text/plain; charset=utf-8", "inline"),
         (b"json", "application/json", "attachment"),
         (b"pdf", "application/pdf", "inline"),
+        (b"mp4", "video/mp4", "inline"),
+        (b"webm", "video/webm", "inline"),
+        (b"mp3", "audio/mpeg", "inline"),
+        (b"ogg", "audio/ogg", "inline"),
+        (b"wav", "audio/wav", "inline"),
+        (b"heic", "image/heic", "inline"),
+        (b"md", "text/markdown; charset=utf-8", "inline"),
+        (b"csv", "text/csv; charset=utf-8", "inline"),
     ] {
         if extension.eq_ignore_ascii_case(ext) {
             return (media, disposition);

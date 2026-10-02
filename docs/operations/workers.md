@@ -144,6 +144,20 @@ credentials/settings, not server role keys.
 | Admin, takedown and preservation | `ADMIN_KEYS`, `TAKEDOWN_ENABLED=true`, `PRESERVATION`, positive `PRESERVATION_RETENTION_MS` (no default), `RECEIPT_NOTICE_KEY`, `RECEIPT_KEYS`, and signed HTTPS `cache-purge` configuration |
 | Global cache purge | Paid, `signed-http-hooks`, `HOOK_URL`, dedicated `MKIT_HOOK_KEY`, explicit `cache-purge` in `HOOK_ROLES`; an isolated binding alone cannot satisfy it |
 
+Successful ordinary ref-path Blob/ChunkedBlob responses select media types by
+case-insensitive filename extension. MP4/WebM video, MP3/Ogg/WAV audio, HEIC
+images, Markdown and CSV are served inline alongside the existing image,
+plain-text and PDF types. Markdown and CSV include `charset=utf-8`; JSON stays
+an attachment. HTML, HTM, XHTML, XML, SVG, JS, MJS, CSS and unknown extensions
+remain `application/octet-stream` attachments. Object-id and proof responses
+keep their existing types.
+
+GET and HEAD retain encoded RFC 5987 filenames, `nosniff`, sandbox CSP and
+`no-referrer`. Video playback can use a single `Range: bytes=a-b` request,
+which returns 206 with `Content-Range` and the selected length; HEAD has no
+body. Multiple ranges return the full 200 representation. See
+[SPEC-HTTP-OBJECTS §5.1](../specs/SPEC-HTTP-OBJECTS.md#51-object-content-and-ordinary-ranges).
+
 Zero inspectors is supported; embedders can supply up to four synchronous
 fail-closed inspectors. The environment channel configures one inspector.
 Each receives one complete added-pack Blob/ChunkedBlob set, surplus included,
