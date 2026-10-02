@@ -15,7 +15,7 @@ use mkit_server_conformance::wire::{
 
 fn target(host: &TestHost) -> WireTarget {
     WireTarget {
-        base_url: host.base_url().parse().unwrap(),
+        base_url: host.base_url().parse().expect("valid host origin"),
         profile: host.profile().clone(),
     }
 }
@@ -31,12 +31,20 @@ fn auth_v2_profile() -> Profile {
 async fn send_http(host: &TestHost, request: &str) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let address = host.base_url().strip_prefix("http://").unwrap();
-    let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
-    socket.write_all(request.as_bytes()).await.unwrap();
+    let address = host.base_url().strip_prefix("http://").expect("HTTP host");
+    let mut socket = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect to host");
+    socket
+        .write_all(request.as_bytes())
+        .await
+        .expect("send request");
     let mut response = Vec::new();
-    socket.read_to_end(&mut response).await.unwrap();
-    String::from_utf8(response).unwrap()
+    socket
+        .read_to_end(&mut response)
+        .await
+        .expect("read response");
+    String::from_utf8(response).expect("UTF-8 HTTP response")
 }
 
 struct DrainProbe;
@@ -93,6 +101,7 @@ async fn auth_v2_profile_uses_the_allocated_loopback_origin_as_audience() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One ordered wire scenario shares its host and timer state.
 async fn ticketed_auth_v2_wire_cases_run_against_the_host() {
     let mut profile = auth_v2_profile();
     profile.milestone = Milestone::M1;
@@ -310,6 +319,7 @@ async fn d34_multi_addressing_runs_membership_wire_cases_against_the_host() {
 /// Drive the same push/clone/fetch dispatch used by the `mkit` CLI against
 /// the host's real HTTP Connect listener.
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep the complete CLI round trip and assertions together.
 async fn cli_push_clone_and_fetch_work_against_the_in_process_host() {
     let seed = [0x4a; 32];
     let mut profile = Profile::new(WireAuth::AuthV2 {

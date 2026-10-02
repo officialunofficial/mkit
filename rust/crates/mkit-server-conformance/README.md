@@ -3,7 +3,8 @@
 Contract tests that need real loopback HTTP can use the debug-only
 `test-host` feature. It runs the production core Connect handlers over fresh
 `MemoryKv` and `MemoryBlobStore` instances and exposes the same profile shape
-as the wire suite. Release builds reject the feature.
+as the wire suite. This is an unstable test-support API. Release builds reject
+the feature.
 
 Pin the feature-enabled dependency to the same mkit revision as the other
 contract-test dependencies:
@@ -39,4 +40,6 @@ to `stubs::hook::FakeHook` through `LoopbackHookChannel`. `clock()` returns a de
 `ManualClock`; advance it explicitly and call `drain_core_timers()` with a
 partition and budget when a case needs timer delivery. `drain_timers()` accepts
 a custom core `TimerRegistry` for tests that need to control the handler set.
+Drains have a finite executor-poll budget. A handler or outcome sink that stays
+pending returns an unavailable error; its uncommitted timer remains queued.
 Each host owns its stores and listener. Dropping it aborts the listener task.

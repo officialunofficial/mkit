@@ -1,5 +1,6 @@
 //! Integrated Worker registration and target-local SQL audit contracts.
 use super::*;
+use crate::test_sqlite::RusqliteConn;
 use futures::executor::block_on;
 use mkit_server::admin::SystemAudit;
 use mkit_server::purge::{Request, Trigger};
@@ -11,7 +12,6 @@ use mkit_server::{
     Batch, BatchOutcome, Key, ManualClock, MemoryKv, NamespaceKey, NamespaceStore, NoopMetrics,
     Partition, Value,
 };
-use mkit_server_native::RusqliteConn;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 struct ReplyFaults {

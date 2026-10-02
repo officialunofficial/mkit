@@ -150,6 +150,8 @@ impl mkit_server::hooks::HookChannel for LoopbackHookChannel {
 
 const REPOSITORY: &str = "default";
 const TICKET_KEY: &str = "dev 1111111111111111111111111111111111111111111111111111111111111111";
+// Bound even a handler that never wakes, without relying on wall-clock sleeps.
+const MAX_TIMER_DRAIN_POLLS: usize = 1_000_000;
 
 /// Isolated in-process Connect server with a canonical loopback origin.
 ///
@@ -218,6 +220,7 @@ impl TestHost {
         H: HookSet + 'static,
         F: FnOnce(&str, Arc<ManualClock>) -> Result<H, String>,
     {
+        profile.derive_features();
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .map_err(|error| error.to_string())?;
@@ -226,115 +229,13 @@ impl TestHost {
         let clock = Arc::new(ManualClock::new(crate::wire::sign::now_ms()));
         let hooks = make_hooks(&base_url, clock.clone())?;
 
-        let auth = match &mut profile.auth {
-            WireAuth::None => AuthMode::Open,
-            WireAuth::Bearer { token } => AuthMode::Bearer {
-                token: Redacted::new(token.clone()),
-            },
-            WireAuth::AuthV2 {
-                audience,
-                repository,
-                ..
-            } => {
-                *audience = base_url.clone();
-                AuthMode::AuthV2(
-                    AuthV2Config::new(&base_url, repository.as_str())
-                        .map_err(|error| error.to_string())?,
-                )
-            }
-        };
+        if let WireAuth::AuthV2 { audience, .. } = &mut profile.auth {
+            audience.clone_from(&base_url);
+        }
+        let config = profile_config(&profile, &base_url)?;
 
-        let repo = RepoId {
-            namespace: NamespaceKey::deployment_default(),
-            name: RepoName::new(REPOSITORY).map_err(|error| error.to_string())?,
-        };
-        let limits = UploadLimits {
-            max_total_bytes: profile.max_pack_bytes,
-            max_chunks: 64,
-        };
-        let addressing = if profile.has(Feature::MultiRepo) {
-            Addressing::Multi(
-                MultiAddressing::new()
-                    .with_namespace_policy(NamespacePolicy::Allowlist(multi_allowlist(&profile))),
-            )
-        } else {
-            Addressing::Single { repo }
-        };
-        let mut config = PipelineConfig::new(addressing, auth, limits);
-        config.sharding = if profile.sharding_d34 {
-            Sharding::D34
-        } else {
-            Sharding::Single
-        };
-        config.outbox_backlog_cap =
-            profile
-                .backlog_cap
-                .map(|rows| mkit_server::pipeline::OutboxBacklogCap {
-                    rows,
-                    bytes: rows.saturating_mul(16 * 1024),
-                });
-        if let Some(quota) = profile.quota {
-            config.write_quota = Some(QuotaLimits {
-                window_ms: quota.window_ms,
-                max_ops: quota.max_ops,
-                max_bytes: quota.max_bytes,
-            });
-        }
-        if profile.has(Feature::Tickets) {
-            config.ticket_keys = Some(
-                mkit_server::upload::token::TicketKeys::parse(TICKET_KEY)
-                    .map_err(|error| error.to_string())?,
-            );
-            config.ticket_caps.per_signer = profile.ticket_per_signer;
-            config.ticket_caps.per_ref = profile.ticket_per_ref;
-        }
-        if profile.has(Feature::ShortTickets) {
-            config.ticket_ttl_ms = 1_000;
-        }
-        if profile.has(Feature::Grants) {
-            let WireAuth::AuthV2 {
-                audience,
-                repository,
-                ..
-            } = &profile.auth
-            else {
-                return Err("grant profiles require auth v2".into());
-            };
-            config.grants = Some(
-                mkit_server::GrantConfig::new_allowing_loopback(
-                    audience,
-                    AcceptedSchemes::of(&OwnerScheme::ALL),
-                    vec![
-                        RelyingParty::new(crate::wire::GRANT_RP_ID, [crate::wire::GRANT_RP_ORIGIN])
-                            .map_err(|error| error.to_string())?,
-                    ],
-                )
-                .map_err(|error| error.to_string())?,
-            );
-            let _ = repository;
-        }
-        if profile.has(Feature::SignedReads) {
-            config.url_tokens = Some(
-                mkit_server::url_token::UrlTokenConfig::with_ttl_ms(
-                    mkit_server::url_token::UrlTokenKeys::parse_key_file(&format!(
-                        "active {}",
-                        crate::wire::URL_TOKEN_SEED
-                    ))
-                    .map_err(|error| error.to_string())?,
-                    crate::wire::URL_TOKEN_TTL_MS,
-                )
-                .map_err(|error| error.to_string())?,
-            );
-        }
-        #[cfg(feature = "http-objects")]
-        if profile.has(Feature::HttpObjects) {
-            let mut indexed = mkit_server::indexed::IndexedConfig::default();
-            indexed.max_pack_bytes = profile.max_pack_bytes;
-            indexed.decode_budget = indexed.decode_budget.max(profile.max_pack_bytes);
-            config.indexed = Some(indexed);
-            config.http_objects = Some(mkit_server::http_objects::HttpObjectsConfig::default());
-        }
-
+        profile.sign_reads = config.url_tokens.is_some();
+        profile.derive_features();
         let kv = Arc::new(MemoryKv::with_clock(clock.clone()));
         let blobs = MemoryBlobStore::default();
         if profile.has(Feature::MultiRepo) {
@@ -352,8 +253,9 @@ impl TestHost {
             )
             .map_err(|error| error.to_string())?,
         );
-        let app =
-            axum::Router::new().fallback_service(mkit_server::connect::service(pipeline.clone()));
+        let app = axum::Router::new()
+            .fallback_service(mkit_server::connect::service(pipeline.clone()))
+            .layer(connect_cors());
         #[cfg(feature = "http-objects")]
         let app = app.layer(axum::middleware::from_fn(move |request, next| {
             let pipeline = pipeline.clone();
@@ -423,9 +325,11 @@ impl TestHost {
     /// Fires due core timers for one partition. The caller supplies the
     /// registered core handlers so each test controls exactly which durable
     /// work is drained; no background timer task or sleep is used.
+    /// A pending handler is cancelled after a finite number of executor polls.
     ///
     /// # Errors
-    /// Returns a store scan error.
+    /// Returns a store scan error or an unavailable error when a handler
+    /// exhausts the poll budget. Its uncommitted timer remains queued.
     pub async fn drain_timers(
         &self,
         partition: &Partition,
@@ -433,15 +337,23 @@ impl TestHost {
         budget: &TickBudget,
     ) -> Result<RunReport, mkit_server::StoreError> {
         let now_ms = u64::try_from(self.clock.now_ms()).unwrap_or(0);
-        run_due(
+        let mut drain = core::pin::pin!(run_due(
             self.kv.as_ref(),
             partition,
             registry,
             self.clock.as_ref(),
             now_ms,
             budget,
-        )
-        .await
+        ));
+        for _ in 0..MAX_TIMER_DRAIN_POLLS {
+            if let core::task::Poll::Ready(result) = futures::poll!(&mut drain) {
+                return result;
+            }
+            tokio::task::yield_now().await;
+        }
+        Err(mkit_server::StoreError::unavailable(
+            "test host timer drain exhausted its poll budget; a timer handler did not complete",
+        ))
     }
 
     /// Fires due core timers registered by the production adapters. The
@@ -449,7 +361,7 @@ impl TestHost {
     /// use this host's isolated memory stores.
     ///
     /// # Errors
-    /// Returns a store scan error.
+    /// Returns a store scan error or an unavailable error from the bounded drain.
     pub async fn drain_core_timers(
         &self,
         partition: &Partition,
@@ -463,7 +375,7 @@ impl TestHost {
     /// This supports tests that need to observe signed hook outcome delivery.
     ///
     /// # Errors
-    /// Returns a store scan error.
+    /// Returns a store scan error or an unavailable error from the bounded drain.
     pub async fn drain_core_timers_with_outcomes<O>(
         &self,
         partition: &Partition,
@@ -519,6 +431,138 @@ impl TestHost {
             let _ = task.await;
         }
     }
+}
+
+fn profile_config(profile: &Profile, origin: &str) -> Result<PipelineConfig, String> {
+    let auth = match &profile.auth {
+        WireAuth::None => AuthMode::Open,
+        WireAuth::Bearer { token } => AuthMode::Bearer {
+            token: Redacted::new(token.clone()),
+        },
+        WireAuth::AuthV2 { repository, .. } => AuthMode::AuthV2(
+            AuthV2Config::new(origin, repository.as_str()).map_err(|error| error.to_string())?,
+        ),
+    };
+
+    let repo = RepoId {
+        namespace: NamespaceKey::deployment_default(),
+        name: RepoName::new(REPOSITORY).map_err(|error| error.to_string())?,
+    };
+    let limits = UploadLimits {
+        max_total_bytes: profile.max_pack_bytes,
+        max_chunks: 64,
+    };
+    let addressing = if profile.has(Feature::MultiRepo) {
+        Addressing::Multi(
+            MultiAddressing::new()
+                .with_namespace_policy(NamespacePolicy::Allowlist(multi_allowlist(profile))),
+        )
+    } else {
+        Addressing::Single { repo }
+    };
+    let mut config = PipelineConfig::new(addressing, auth, limits);
+    config.sharding = if profile.sharding_d34 {
+        Sharding::D34
+    } else {
+        Sharding::Single
+    };
+    config.outbox_backlog_cap =
+        profile
+            .backlog_cap
+            .map(|rows| mkit_server::pipeline::OutboxBacklogCap {
+                rows,
+                bytes: rows.saturating_mul(16 * 1024),
+            });
+    if let Some(quota) = profile.quota {
+        config.write_quota = Some(QuotaLimits {
+            window_ms: quota.window_ms,
+            max_ops: quota.max_ops,
+            max_bytes: quota.max_bytes,
+        });
+    }
+    if profile.has(Feature::Tickets) {
+        config.ticket_keys = Some(
+            mkit_server::upload::token::TicketKeys::parse(TICKET_KEY)
+                .map_err(|error| error.to_string())?,
+        );
+        config.ticket_caps.per_signer = profile.ticket_per_signer;
+        config.ticket_caps.per_ref = profile.ticket_per_ref;
+    }
+    if profile.has(Feature::ShortTickets) {
+        config.ticket_ttl_ms = 1_000;
+    }
+    configure_profile_features(profile, &mut config)?;
+    Ok(config)
+}
+
+fn configure_profile_features(
+    profile: &Profile,
+    config: &mut PipelineConfig,
+) -> Result<(), String> {
+    if profile.has(Feature::Grants) {
+        let WireAuth::AuthV2 { audience, .. } = &profile.auth else {
+            return Err("grant profiles require auth v2".into());
+        };
+        config.grants = Some(
+            mkit_server::GrantConfig::new_allowing_loopback(
+                audience,
+                AcceptedSchemes::of(&OwnerScheme::ALL),
+                vec![
+                    RelyingParty::new(crate::wire::GRANT_RP_ID, [crate::wire::GRANT_RP_ORIGIN])
+                        .map_err(|error| error.to_string())?,
+                ],
+            )
+            .map_err(|error| error.to_string())?,
+        );
+    }
+    if profile.has(Feature::SignedReads) {
+        config.url_tokens = Some(
+            mkit_server::url_token::UrlTokenConfig::with_ttl_ms(
+                mkit_server::url_token::UrlTokenKeys::parse_key_file(&format!(
+                    "active {}",
+                    crate::wire::URL_TOKEN_SEED
+                ))
+                .map_err(|error| error.to_string())?,
+                crate::wire::URL_TOKEN_TTL_MS,
+            )
+            .map_err(|error| error.to_string())?,
+        );
+    }
+    #[cfg(feature = "http-objects")]
+    if profile.has(Feature::HttpObjects) {
+        let mut indexed = mkit_server::indexed::IndexedConfig::default();
+        indexed.max_pack_bytes = profile.max_pack_bytes;
+        indexed.decode_budget = indexed.decode_budget.max(profile.max_pack_bytes);
+        config.indexed = Some(indexed);
+        config.http_objects = Some(mkit_server::http_objects::HttpObjectsConfig::default());
+    }
+    Ok(())
+}
+
+fn connect_cors() -> tower_http::cors::CorsLayer {
+    use http::{HeaderName, Method};
+    use tower_http::cors::{Any, CorsLayer};
+
+    let allow = mkit_server::auth_v2::CORS_ALLOW_HEADERS
+        .split(',')
+        .map(str::trim)
+        .chain([
+            "authorization",
+            "payment-authorization",
+            "payment-signature",
+            "accept-payment",
+        ])
+        .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
+        .collect::<Vec<_>>();
+    let expose = mkit_server::pipeline::ADMISSION_EXPOSE_HEADERS
+        .iter()
+        .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
+        .collect::<Vec<_>>();
+    CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::POST, Method::GET, Method::OPTIONS])
+        .allow_headers(allow)
+        .expose_headers(expose)
 }
 
 #[cfg(feature = "http-objects")]
@@ -625,7 +669,7 @@ fn multi_allowlist(profile: &Profile) -> BTreeSet<mkit_core::repo_identity::Name
     else {
         return BTreeSet::new();
     };
-    crate::wire::CASES
+    let mut allowed: BTreeSet<_> = crate::wire::CASES
         .iter()
         .filter(|case| {
             case.requires.contains(&Feature::MultiRepo)
@@ -648,7 +692,11 @@ fn multi_allowlist(profile: &Profile) -> BTreeSet<mkit_core::repo_identity::Name
                 .expect("derived namespace is valid")
             })
         })
-        .collect()
+        .collect();
+    if profile.has(Feature::Grants) {
+        allowed.extend(crate::wire::grant_owner_namespaces());
+    }
+    allowed
 }
 
 async fn plant_membership(

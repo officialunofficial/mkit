@@ -2,6 +2,7 @@
 #![allow(clippy::unwrap_used)]
 
 use super::*;
+use crate::test_sqlite::RusqliteConn;
 use futures::executor::block_on;
 use mkit_server::sql::SqlKvStore;
 use mkit_server::timers::{DueTimer, Fired, TimerCtx, TimerHandler};
@@ -9,7 +10,6 @@ use mkit_server::{
     Batch, BoxFuture, Key, ManualClock, NamespaceKey, NamespaceStore, Partition, Precondition,
     RepoName, Value,
 };
-use mkit_server_native::RusqliteConn;
 use std::sync::{Arc, Mutex};
 
 type Store = PressureStore<RusqliteConn>;

@@ -54,6 +54,7 @@ test-host = [
     "stubs",
     "dep:axum",
     "dep:reqwest",
+    "dep:tower-http",
     "tokio/io-util",
     "tokio/net",
 ]
@@ -102,6 +103,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     "rustls",
     "stream",
 ], optional = true }
+tower-http = { version = "0.6", default-features = false, features = ["cors"], optional = true }
 
 [dev-dependencies]
 base64 = "0.22"

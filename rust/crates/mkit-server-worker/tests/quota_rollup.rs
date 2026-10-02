@@ -4,6 +4,7 @@
 
 mod common;
 
+use common::RusqliteConn;
 use common::{DoConfig, Loopback, retained_timer_backoff};
 use futures::executor::block_on;
 use mkit_server::pipeline::{D34Shards, ShardMap};
@@ -13,7 +14,6 @@ use mkit_server::timers::{TickBudget, registry::kinds, run_due};
 use mkit_server::{
     Batch, ManualClock, NamespaceKey, NamespaceStore, Partition, RepoId, RepoName, Value,
 };
-use mkit_server_native::RusqliteConn;
 use mkit_server_worker::adapter::{ConfigError, timer_registry};
 use mkit_server_worker::classes::ShardClass;
 use mkit_server_worker::ns_client::DoNamespaceStore;

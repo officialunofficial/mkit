@@ -98,7 +98,8 @@ use mkit_server::sql::{
     Capacity, DEFAULT_PAGE_SIZE, Row, SqlConn, SqlError, SqlKvStore, SqlValue, TxFn, reserve_floor,
 };
 use mkit_server::{Clock, StoreError};
-use mkit_server_native::RusqliteConn;
+pub use sqlite::RusqliteConn;
+mod sqlite;
 use mkit_server_worker::do_sql::classify_error;
 use mkit_server_worker::naming::DoTarget;
 use mkit_server_worker::ns_client::{DoNamespaceStore, NsTransport};
