@@ -3,7 +3,7 @@ name: "CI: Release artifact check"
 # PR-time preview of the release mkit build and its artifact feature guard.
 #
 # Triggers: PRs to main and pushes to main only. Nothing runs for feature
-# branches (feat/*), per the mkit-server epic's CI policy. The release
+# branches (feat/*), per the repository's CI policy. The release
 # profile (codegen-units=1) makes this a slow job, so it runs only when an
 # input that can move the result changes.
 

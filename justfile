@@ -167,7 +167,7 @@ ci-scripts:
     ( cd apps/embedded-worker && cargo clippy --locked --target wasm32-unknown-unknown -- -D warnings )
     bash scripts/wasm-ruzstd-check.sh
 
-# The MKIT-29 M0 exit gate in one command (WP-M0-20): the mkit-server
+# The mkit-server exit gate in one command: the mkit-server
 # crates' tests (memory storage suite and wire suite over the in-process
 # conformance host), the wasm32 builds of the runtime-agnostic core and the
 # Workers adapter, and the server-free CLI check. `just ci` already covers

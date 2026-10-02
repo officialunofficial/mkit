@@ -2,7 +2,7 @@
 #![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
 // `worker::Error` is large; the Workers glue returns it as vcs-worker does.
 #![allow(clippy::result_large_err)]
-//! The Cloudflare Workers adapter of the mkit server (PRD MKIT-29 §5.1),
+//! The Cloudflare Workers adapter of the mkit server (production server design §5.1),
 //! storage half.
 //!
 //! - [`r2`]: [`R2BlobStore`], a content-addressed [`BlobStore`] that

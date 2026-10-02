@@ -70,10 +70,9 @@
 #   VCS_CONFORMANCE_WRANGLER_ARGS  extra `wrangler dev` arguments, split on
 #                          spaces (e.g. `--compatibility-date 2024-09-23`)
 #
-# During the MKIT-29 epic no CI runs on feat/mkit-server: this script is run
-# locally, at each WP that changes server behavior and at every milestone
-# boundary. `.github/workflows/workers.yml`'s `vcs-worker-conformance` job
-# runs it on `main` only, first on the final PR to `main`.
+# Run it locally whenever server behavior changes.
+# `.github/workflows/workers.yml`'s `vcs-worker-conformance` job runs it on
+# `main` only.
 
 set -euo pipefail
 
