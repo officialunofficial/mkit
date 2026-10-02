@@ -389,6 +389,7 @@ mod tests {
                 &super::super::state::VerificationV1::Verified {
                     pack_len: 1,
                     verified_at_ms: NOW as u64,
+                    publication: None,
                 },
             ),
             decoded_bytes,
@@ -562,6 +563,7 @@ mod tests {
                 super::super::state::encode(&super::super::state::VerificationV1::Verified {
                     pack_len: pack.len() as u64,
                     verified_at_ms: NOW as u64,
+                    publication: None,
                 }),
             );
         block_on(store.apply(&source(&repo), ready)).unwrap();
@@ -572,6 +574,7 @@ mod tests {
                 &super::super::state::VerificationV1::Verified {
                     pack_len: pack.len() as u64,
                     verified_at_ms: NOW as u64,
+                    publication: None,
                 },
             ),
             decoded_bytes: job.in_pack_bytes,

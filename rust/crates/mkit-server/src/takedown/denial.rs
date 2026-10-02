@@ -5,8 +5,7 @@ use crate::indexed::{
 };
 use crate::pipeline::ShardMap;
 use crate::store::{
-    BlockEntry, BorrowedStore, ContentIndex, Key, NamespaceStore, Partition, StoreError, Value,
-    keys,
+    BlockEntry, BorrowedStore, ContentIndex, Key, NamespaceStore, StoreError, Value, keys,
 };
 use crate::{RepoId, ServerError};
 use mkit_core::hash::Hash;
@@ -386,7 +385,7 @@ async fn held<S: NamespaceStore>(
         .map_err(|_| unavailable())?
         .map_err(|_| unavailable())
 }
-/// One authoritative 4096-shard scan per proof attempt; continuation reads
+/// One authoritative sixteen-shard directory walk per proof attempt; continuation reads
 /// share the caller's counter, retained across optimistic apply retries.
 async fn prove<S: NamespaceStore>(
     store: &S,
@@ -432,60 +431,16 @@ async fn prove_shards<S: NamespaceStore>(
     end: &Key,
     concurrency: usize,
 ) -> Result<(), ServerError> {
-    for first in (0..crate::store::INDEX_FANOUT).step_by(concurrency) {
-        let last = (usize::from(first) + concurrency).min(usize::from(crate::store::INDEX_FANOUT));
-        // Joining every dispatched transport prevents early failure/retry from
-        // abandoning live replies. Ordered nested checks start only after EOF.
-        let pages =
-            futures::future::join_all((usize::from(first)..last).map(|prefix| async move {
-                let prefix = u16::try_from(prefix).map_err(|_| unavailable())?;
-                let page = store
-                    .scan(&Partition::ContentShard(prefix), start, end, None, 1)
-                    .await
-                    .map_err(|_| unavailable())?;
-                Ok::<_, ServerError>((prefix, page))
-            }))
-            .await;
-        for page in pages {
-            prove_shard(store, shards, repo, target, page?, start, end).await?;
-        }
-    }
-    Ok(())
-}
-
-async fn prove_shard<S: NamespaceStore>(
-    store: &S,
-    shards: &dyn ShardMap,
-    repo: &RepoId,
-    target: &Target<'_>,
-    first: (u16, crate::store::ScanPage),
-    start: &Key,
-    end: &Key,
-) -> Result<(), ServerError> {
-    let (prefix, page) = first;
-    let mut first = Some(page);
-    let mut after = None;
-    loop {
-        let scan = match first.take() {
-            Some(page) => page,
-            None => store
-                .scan(
-                    &Partition::ContentShard(prefix),
-                    start,
-                    end,
-                    after.as_ref(),
-                    1,
-                )
-                .await
-                .map_err(|_| unavailable())?,
-        };
-        for (key, raw) in scan.entries {
-            Box::pin(check_descriptor(store, shards, repo, target, &key, &raw)).await?;
-        }
-        match scan.next {
-            Some(next) if after.as_ref() != Some(&next) => after = Some(next),
-            Some(_) => return Err(unavailable()),
-            None => break,
+    let _ = (start, end);
+    let mut directory = super::directory::Walk::start(store, concurrency)
+        .await
+        .map_err(|_| unavailable())?;
+    while let Some(id) = directory.next(store).await.map_err(|_| unavailable())? {
+        for (key, raw) in super::directory::descriptors(store, &id)
+            .await
+            .map_err(|_| unavailable())?
+        {
+            check_descriptor(store, shards, repo, target, &key, &raw).await?;
         }
     }
     Ok(())
@@ -704,38 +659,27 @@ pub(crate) async fn object_denials<S: NamespaceStore>(
     *end.last_mut().ok_or_else(unavailable)? = 1;
     let end = Key::new(end);
     let mut denied = BTreeSet::new();
-    for prefix in 0..crate::store::INDEX_FANOUT {
-        let mut after = None;
-        loop {
-            let page = store
-                .scan(
-                    &Partition::ContentShard(prefix),
-                    &start,
-                    &end,
-                    after.as_ref(),
-                    1,
-                )
-                .await
-                .map_err(|_| unavailable())?;
-            for (key, raw) in page.entries {
-                for (id, context) in &contexts {
-                    if denied.contains(id) {
-                        continue;
-                    }
-                    if let Err(error) =
-                        check_descriptor(store, shards, repo, &context.target(), &key, &raw).await
-                    {
-                        if error.public_message() != "object blocked" {
-                            return Err(error);
-                        }
-                        denied.insert(*id);
-                    }
+    let _ = (start, end);
+    let mut directory = super::directory::Walk::start(store, WRITE_PROOF_CONCURRENCY)
+        .await
+        .map_err(|_| unavailable())?;
+    while let Some(object) = directory.next(store).await.map_err(|_| unavailable())? {
+        for (key, raw) in super::directory::descriptors(store, &object)
+            .await
+            .map_err(|_| unavailable())?
+        {
+            for (id, context) in &contexts {
+                if denied.contains(id) {
+                    continue;
                 }
-            }
-            match page.next {
-                Some(next) if after.as_ref() != Some(&next) => after = Some(next),
-                Some(_) => return Err(unavailable()),
-                None => break,
+                if let Err(error) =
+                    check_descriptor(store, shards, repo, &context.target(), &key, &raw).await
+                {
+                    if error.public_message() != "object blocked" {
+                        return Err(error);
+                    }
+                    denied.insert(*id);
+                }
             }
         }
     }
@@ -808,7 +752,9 @@ async fn require_pack_clear_with_concurrency<S: NamespaceStore>(
 mod tests {
     use super::*;
     use crate::pipeline::D34Shards;
-    use crate::store::{BatchOutcome, Cursor, PartitionStats, ScanPage, StoreCapabilities};
+    use crate::store::{
+        BatchOutcome, Cursor, Partition, PartitionStats, ScanPage, StoreCapabilities,
+    };
     use crate::store::{
         content_shard,
         index::{IndexEntry, IndexValue},
@@ -869,7 +815,7 @@ mod tests {
             after: Option<&Cursor>,
             limit: u32,
         ) -> Result<ScanPage, StoreError> {
-            if start.as_bytes() != INDEX_PREFIX {
+            if start.as_bytes() != super::super::directory::PREFIX {
                 assert_eq!(
                     self.active.load(Ordering::SeqCst),
                     0,
@@ -878,7 +824,7 @@ mod tests {
                 self.nested.fetch_add(1, Ordering::SeqCst);
                 return self.inner.scan(p, start, end, after, limit).await;
             }
-            assert_eq!(limit, 1);
+            assert_eq!(limit, super::super::directory::PAGE_ROWS);
             if after.is_some() {
                 assert_eq!(
                     self.active.load(Ordering::SeqCst),
@@ -960,8 +906,8 @@ mod tests {
                     .unwrap();
                 assert_eq!(store.peak.load(Ordering::SeqCst), concurrency);
                 assert!(store.peak.load(Ordering::SeqCst) <= 6);
-                assert_eq!(store.scans.load(Ordering::SeqCst), 4096);
-                assert_eq!(budget.used(), 4096);
+                assert_eq!(store.scans.load(Ordering::SeqCst), 16);
+                assert_eq!(budget.used(), 16);
                 assert_eq!(store.active.load(Ordering::SeqCst), 0);
             }
         });
@@ -987,10 +933,10 @@ mod tests {
                     .await,
                     Err(error) if error.code() == crate::Code::PermissionDenied
                 ));
-                assert_eq!(store.scans.load(Ordering::SeqCst), 4096);
+                assert_eq!(store.scans.load(Ordering::SeqCst), 16);
                 assert_eq!(store.active.load(Ordering::SeqCst), 0);
 
-                // Distinct descriptors in the final shard require continuation.
+                // Distinct descriptors are read through the final directory shard.
                 let mut second_id = blocked_id;
                 second_id[31] = 254;
                 ContentIndex::new(BorrowedStore(&store.inner))
@@ -1006,7 +952,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                assert_eq!(store.scans.load(Ordering::SeqCst), 4097);
+                assert_eq!(store.scans.load(Ordering::SeqCst), 16);
 
                 store
                     .inner
@@ -1022,10 +968,11 @@ mod tests {
                     probe_proof(&store, &SliceBudget::new(9000), &BTreeSet::new(), concurrency).await,
                     Err(error) if error.code() == crate::Code::Unavailable
                 ));
-                assert_eq!(store.scans.load(Ordering::SeqCst), 4096);
+                assert_eq!(store.scans.load(Ordering::SeqCst), 16);
                 assert_eq!(store.active.load(Ordering::SeqCst), 0);
 
-                let failed = ScanProbe::new(Some(crate::store::INDEX_FANOUT - 1), false);
+                let failed =
+                    ScanProbe::new(Some(super::super::directory::DIRECTORY_SHARDS - 1), false);
                 assert!(matches!(
                     probe_proof(
                         &failed,
@@ -1036,7 +983,7 @@ mod tests {
                     .await,
                     Err(error) if error.code() == crate::Code::Unavailable
                 ));
-                assert_eq!(failed.scans.load(Ordering::SeqCst), 4096);
+                assert_eq!(failed.scans.load(Ordering::SeqCst), 16);
                 assert_eq!(failed.active.load(Ordering::SeqCst), 0);
             }
         });
@@ -1058,8 +1005,8 @@ mod tests {
                 assert!(matches!(probe_proof(&store, &SliceBudget::new(9000),
                     &BTreeSet::from([chunk]), concurrency).await,
                     Err(error) if error.code() == crate::Code::PermissionDenied));
-                assert_eq!(store.scans.load(Ordering::SeqCst), concurrency);
-                assert_eq!(store.completed.load(Ordering::SeqCst), concurrency);
+                assert_eq!(store.scans.load(Ordering::SeqCst), 16);
+                assert_eq!(store.completed.load(Ordering::SeqCst), 16);
                 assert!(store.nested.load(Ordering::SeqCst) > 0);
                 assert_eq!(store.active.load(Ordering::SeqCst), 0);
                 store.scans.store(0, Ordering::SeqCst);
@@ -1067,8 +1014,8 @@ mod tests {
                 probe_proof(&store, &budget, &BTreeSet::from([[7; 32]]), concurrency)
                     .await
                     .unwrap();
-                assert_eq!(store.scans.load(Ordering::SeqCst), 4096);
-                assert!(budget.used() > 4096 && budget.used() < 9000);
+                assert_eq!(store.scans.load(Ordering::SeqCst), 16);
+                assert!(budget.used() > 16 && budget.used() < 9000);
                 assert_eq!(store.active.load(Ordering::SeqCst), 0);
             }
         });
@@ -1100,13 +1047,13 @@ mod tests {
     fn scanner_proof_budget_failure_and_cancellation_drop_outstanding_scans() {
         block_on(async {
             let store = ScanProbe::new(None, false);
-            let budget = SliceBudget::new(19);
+            let budget = SliceBudget::new(13);
             assert!(matches!(
                 probe_proof(&store, &budget, &BTreeSet::new(), SCANNER_PROOF_CONCURRENCY).await,
                 Err(error) if error.code() == crate::Code::Unavailable
             ));
-            assert_eq!(budget.used(), 19);
-            assert_eq!(store.scans.load(Ordering::SeqCst), 19);
+            assert_eq!(budget.used(), 13);
+            assert_eq!(store.scans.load(Ordering::SeqCst), 13);
             assert_eq!(store.active.load(Ordering::SeqCst), 0);
 
             let stalled = ScanProbe::new(None, true);
@@ -1201,6 +1148,32 @@ mod tests {
         });
     }
     #[test]
+    fn directory_proof_calls_are_sixteen_plus_descriptors_and_continuations() {
+        block_on(async {
+            for count in [0usize, 7, super::super::directory::PAGE_ROWS as usize + 1] {
+                let store = store();
+                let index = ContentIndex::new(BorrowedStore(&store));
+                for n in 0..count {
+                    let mut id = [0; 32];
+                    id[30..].copy_from_slice(&u16::try_from(n).unwrap().to_be_bytes());
+                    index
+                        .install_block_action(&id, &action(1, vec![]), 1)
+                        .await
+                        .unwrap();
+                }
+                let budget = SliceBudget::new(9000);
+                require_repo_clear(&store, &D34Shards, &repo("a"), &BTreeSet::new(), &budget)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    budget.used(),
+                    16 + u32::try_from(count).unwrap()
+                        + u32::from(count > super::super::directory::PAGE_ROWS as usize)
+                );
+            }
+        });
+    }
+    #[test]
     fn empty_authoritative_scan_has_measured_bound() {
         block_on(async {
             let store = store();
@@ -1214,9 +1187,9 @@ mod tests {
             )
             .await
             .unwrap();
-            // 4096 descriptor-shard scans plus two strong per-object reads:
+            // 16 directory-shard scans plus two strong per-object reads:
             // BorrowedStore inherits get_many's sequential-get default.
-            assert_eq!(budget.used(), 4098);
+            assert_eq!(budget.used(), 18);
         });
     }
     #[test]

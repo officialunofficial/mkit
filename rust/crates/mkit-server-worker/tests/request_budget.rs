@@ -129,6 +129,16 @@ async fn clear(
     .await
 }
 
+async fn metadata_probe(
+    meta: &DoNamespaceStore<EmptyTransport>,
+) -> Result<Option<mkit_server::Value>, StoreError> {
+    meta.get(
+        &Partition::Namespace(repo().namespace),
+        &mkit_server::Key::new(b"b\0test".to_vec()),
+    )
+    .await
+}
+
 #[test]
 fn request_budget_combines_do_r2_range_proofs_and_pipeline_serving() {
     block_on(async {
@@ -151,12 +161,7 @@ fn request_budget_combines_do_r2_range_proofs_and_pipeline_serving() {
             &blobs.object_key(&key).unwrap(),
             Bytes::from_static(b"test"),
         );
-        meta.get(
-            &Partition::Namespace(repo().namespace),
-            &mkit_server::Key::new(b"b\0test".to_vec()),
-        )
-        .await
-        .unwrap();
+        metadata_probe(&meta).await.unwrap();
         assert!(
             blobs
                 .get(
@@ -207,7 +212,17 @@ fn request_budget_combines_do_r2_range_proofs_and_pipeline_serving() {
             .unwrap();
         assert!(pipe.pack_exists(&auth, PackKey([5; 32])).await.unwrap());
         let fresh_proof = SliceBudget::new(9000);
-        assert!(clear(&meta, &fresh_proof).await.is_err());
+        clear(&meta, &fresh_proof).await.unwrap();
+        assert!(
+            budget.used() < 200,
+            "three directory proofs retain headroom"
+        );
+        // Spend the remaining physical allowance on actual metadata dispatches.
+        // A new core proof ledger still cannot replenish the request's parent.
+        while budget.remaining() > 1 {
+            metadata_probe(&meta).await.unwrap();
+        }
+        assert!(clear(&meta, &SliceBudget::new(9000)).await.is_err());
         assert_eq!(budget.used(), 9000);
         let before = transport.0.load(Ordering::SeqCst)
             + u32::try_from(bucket.operations.load(Ordering::SeqCst)).unwrap();

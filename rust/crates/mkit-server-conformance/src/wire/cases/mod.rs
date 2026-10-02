@@ -327,6 +327,8 @@ cases! {
     "tickets.advance_expired_ticket" => tickets::advance_expired_ticket, M1, [Tickets, AuthV2, TestFaults], [];
     "indexed.pending_verification_unavailable" => indexed::pending_verification_unavailable, M4, [IndexedMode, MultiRepo, Tickets, AuthV2, TestFaults], [];
     "indexed.async_verification_commits" => indexed::async_verification_commits, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2, TestFaults], [];
+    "launch.takedown_nine_mib_publish" => indexed::takedown_nine_mib_publish, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
+    "launch.takedown_chunked_publish" => indexed::takedown_chunked_publish, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
     "launch.indexed_verification_commits" => indexed::launch_verification_commits, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
     "launch.admin_fixture" => indexed::launch_admin_fixture, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];
     "uno.public_fixture" => indexed::uno_public_fixture, M4, [IndexedAsync, MultiRepo, Tickets, AuthV2], [TestFaults];

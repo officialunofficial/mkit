@@ -585,6 +585,7 @@ type ReadManyHook = Box<dyn Fn(&MemoryKv, &Partition, &[Key]) + Send + Sync>;
 /// run a hook before each apply, can yield at every call and can fail
 /// every read.
 struct Spy {
+    request_budget: Mutex<Option<crate::indexed::budget::SliceBudget>>,
     inner: Arc<MemoryKv>,
     hook: Option<ApplyHook>,
     after_hook: Option<AfterApplyHook>,
@@ -605,6 +606,7 @@ impl Spy {
     fn new(inner: MemoryKv) -> Self {
         Self {
             inner: Arc::new(inner),
+            request_budget: Mutex::new(None),
             hook: None,
             after_hook: None,
             scan_hook: None,
@@ -663,6 +665,9 @@ impl Spy {
     }
 
     fn maybe_fail_read(&self) -> Result<(), StoreError> {
+        if let Some(budget) = &*self.request_budget.lock().unwrap() {
+            budget.charge()?;
+        }
         if self.fail_reads {
             return Err(StoreError::unavailable("injected read fault"));
         }
@@ -5356,3 +5361,5 @@ fn prepared_publication_pair_cannot_survive_a_counterpart_guard_race() {
 
 #[cfg(feature = "remote-hooks")]
 mod inspection_budget;
+
+mod takedown_performance;

@@ -394,6 +394,7 @@ mod tests {
                     encode(&VerificationV1::Verified {
                         pack_len: 1,
                         verified_at_ms: 1,
+                        publication: None,
                     }),
                 )
                 .put(job.clone(), Value::default());
