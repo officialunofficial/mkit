@@ -50,17 +50,18 @@ export class AlarmProbe extends RefStore {
 
   async alarm() {
     const tick = {now: Date.now()};
+    this.ticks.push(tick);
     this.fault.active = true;
     try {
       await super.alarm();
     } catch (error) {
+      tick.failed = true;
       this.fault.rejected++;
       throw error;
     } finally {
       this.fault.active = false;
     }
     tick.next = await this.storage.getAlarm();
-    this.ticks.push(tick);
     const state = await this.probeState();
     if (state.remaining === 0 && state.ticks.length >= 3) {
       this.complete(state);
