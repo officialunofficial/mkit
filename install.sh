@@ -13,7 +13,7 @@
 # Usage:
 #   curl mkit.sh | sh
 #   curl -sSfL https://mkit.sh/install.sh | sh
-#   curl -sSfL https://mkit.sh/install.sh | sh -s -- --version v0.4.2
+#   curl -sSfL https://mkit.sh/install.sh | sh -s -- --version v0.5.0
 #   # The raw GitHub URL serves the same script as a fallback:
 #   #   curl -sSfL https://raw.githubusercontent.com/officialunofficial/mkit/main/install.sh | sh
 #
@@ -39,7 +39,7 @@
 #     compare against this file and warn loudly on a silent downgrade.
 #
 # Environment overrides:
-#   MKIT_VERSION             explicit tag (e.g. v0.4.2). Default: 'latest'.
+#   MKIT_VERSION             explicit tag (e.g. v0.5.0). Default: 'latest'.
 #   MKIT_INSTALL_DIR         install prefix. Default: ~/.local/bin.
 #   MKIT_STATE_DIR           state dir for installed-tag bookkeeping.
 #                            Default: ~/.local/state/mkit.
@@ -55,7 +55,7 @@
 #
 # For private-repo installs, use `gh release download` instead — it
 # handles auth natively:
-#   gh release download v0.4.2 --repo officialunofficial/mkit \
+#   gh release download v0.5.0 --repo officialunofficial/mkit \
 #     --pattern 'mkit-[0-9]*-<target>.tar.gz' --dir .
 # (`mkit-[0-9]*`, not `mkit-*`, which would also match unrelated assets.)
 #
@@ -85,7 +85,7 @@ Usage:
   sh install.sh [--version <tag>] [--prefix <dir>] [--insecure-skip-cosign]
 
 Flags:
-  --version <tag>           Pin to a specific release tag (e.g. v0.4.2).
+  --version <tag>           Pin to a specific release tag (e.g. v0.5.0).
                             RECOMMENDED for production / reproducible installs.
   --prefix <dir>            Install prefix. Default: ~/.local/bin.
   --insecure-skip-cosign    Skip cosign signature verification. DANGEROUS — use
@@ -116,7 +116,7 @@ skip_cosign="${MKIT_SKIP_COSIGN:-}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --version)               [ $# -ge 2 ] || die "--version requires a tag (e.g. --version v0.4.2)"; version="$2"; shift 2 ;;
+    --version)               [ $# -ge 2 ] || die "--version requires a tag (e.g. --version v0.5.0)"; version="$2"; shift 2 ;;
     --prefix)                [ $# -ge 2 ] || die "--prefix requires a directory (e.g. --prefix /usr/local/bin)"; install_dir="$2"; shift 2 ;;
     --insecure-skip-cosign)  skip_cosign="1"; shift ;;
     --cosign)                shift ;;  # deprecated; cosign is default-on

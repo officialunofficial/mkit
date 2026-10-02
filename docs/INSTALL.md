@@ -98,7 +98,7 @@ Windows is not a supported target (MKIT-6; see `docs/INVARIANTS.md`).
 Windows users should run mkit under WSL, which uses the Linux binary.
 
 **Linux glibc requirement.** The published x86_64 and aarch64 Linux
-archives (v0.3.0 through v0.4.2) require **glibc 2.39 or newer**.
+archives (v0.3.0 through v0.5.0) require **glibc 2.39 or newer**.
 Check your glibc with `ldd --version | head -1`.
 
 | Release archives | Distributions |
@@ -129,7 +129,7 @@ by default. Direct release URLs are best when you want a pinned artifact.
 **Download a pinned release for your platform:**
 
 ```sh
-VERSION=0.4.2
+VERSION=0.5.0
 TARGET=aarch64-apple-darwin
 curl -LO "https://github.com/officialunofficial/mkit/releases/download/v${VERSION}/mkit-${VERSION}-${TARGET}.tar.gz"
 tar -xzf "mkit-${VERSION}-${TARGET}.tar.gz"
@@ -138,7 +138,7 @@ tar -xzf "mkit-${VERSION}-${TARGET}.tar.gz"
 **Pin a version (recommended for CI):**
 
 ```sh
-VERSION=0.4.2
+VERSION=0.5.0
 TARGET=x86_64-unknown-linux-gnu
 TAG="v${VERSION}"
 URL="https://github.com/officialunofficial/mkit/releases/download/${TAG}/mkit-${VERSION}-${TARGET}.tar.gz"
@@ -308,7 +308,7 @@ version:
 
 ```sh
 $ mkit version
-mkit 0.4.2
+mkit 0.5.0
 ```
 
 The exact format `mkit <X.Y.Z>\n` (no extra whitespace, no banner) is
@@ -329,7 +329,7 @@ binary can update itself:
 ```sh
 mkit self update            # update to the latest release
 mkit self update --check    # just report whether an update exists
-mkit self update --version v0.4.2   # pin a specific release
+mkit self update --version v0.5.0   # pin a specific release
 ```
 
 `self update` downloads the release archive for your platform and, when

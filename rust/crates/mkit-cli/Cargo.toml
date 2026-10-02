@@ -54,14 +54,14 @@ path = "src/main.rs"
 # the registry. Track workspace.package.version.
 # `batch-verify` (not a default feature — see mkit-core's Cargo.toml)
 # is required by `verify_new_object_signatures`'s batch fast path.
-mkit-core = { version = "0.4", path = "../mkit-core", features = ["batch-verify"] }
-mkit-attest = { version = "0.4", path = "../mkit-attest", features = ["grants"] }
-mkit-git-bridge = { version = "0.4", path = "../mkit-git-bridge", optional = true }
-mkit-keystore = { version = "0.4", path = "../mkit-keystore" }
+mkit-core = { version = "0.5", path = "../mkit-core", features = ["batch-verify"] }
+mkit-attest = { version = "0.5", path = "../mkit-attest", features = ["grants"] }
+mkit-git-bridge = { version = "0.5", path = "../mkit-git-bridge", optional = true }
+mkit-keystore = { version = "0.5", path = "../mkit-keystore" }
 # `mkit-transport-memory` is a dev-only (test) dependency — see
 # `[dev-dependencies]`. It is intentionally NOT a normal dependency so it
 # does not ship in `cargo install mkit-cli`.
-mkit-transport-file = { version = "0.4", path = "../mkit-transport-file" }
+mkit-transport-file = { version = "0.5", path = "../mkit-transport-file" }
 # `mkit-transport-http`'s bespoke JSON dialect is retired as the ACTIVE
 # `mkit+https://`/`mkit+http://` implementation (see `mkit-transport-connect`
 # below) as of mkit#701 (SPEC-TRANSPORT-CONNECT verb parity). The dependency
@@ -70,21 +70,21 @@ mkit-transport-file = { version = "0.4", path = "../mkit-transport-file" }
 # `config.rs` still reads its `TOKEN_ENV` constant (identical value to
 # `mkit-transport-connect::TOKEN_ENV`, so callers of either transport read
 # the same `MKIT_API_TOKEN` env var).
-mkit-transport-http = { version = "0.4", path = "../mkit-transport-http" }
+mkit-transport-http = { version = "0.5", path = "../mkit-transport-http" }
 # `mkit-transport-connect` is the native ConnectRPC client — the active
 # implementation behind `mkit+https://` / loopback `mkit+http://` dispatch
 # (mkit#701). Required unconditionally (client dispatch, not
 # feature-gated). The CLI hosts no Connect server and has no HTTP
 # server stack.
-mkit-transport-connect = { version = "0.4", path = "../mkit-transport-connect" }
-mkit-transport-s3 = { version = "0.4", path = "../mkit-transport-s3" }
-mkit-transport-ssh = { version = "0.4", path = "../mkit-transport-ssh" }
+mkit-transport-connect = { version = "0.5", path = "../mkit-transport-connect" }
+mkit-transport-s3 = { version = "0.5", path = "../mkit-transport-s3" }
+mkit-transport-ssh = { version = "0.5", path = "../mkit-transport-ssh" }
 # Optional: encrypted-stream transport. Off by default so the
 # default `mkit-cli` build doesn't compile its tcp stack (tokio's `net`,
 # governor, rand) or commonware. Turn on via `--features enc-transport`. See SPEC-TRANSPORT-ENC §6.
 # Version-locked to the workspace (0.3); now that mkit-transport-enc is
 # published, release-plz rewrites this requirement on each lockstep bump.
-mkit-transport-enc = { version = "0.4", path = "../mkit-transport-enc", optional = true }
+mkit-transport-enc = { version = "0.5", path = "../mkit-transport-enc", optional = true }
 # Optional: the tokio runtime `mkit mcp --http` (the `mcp-v2` feature) runs
 # on, with the hyper server. Off by default, so the default `mkit-cli`
 # build stays server-free (scripts/check-cli-baseline.sh): tokio is in the
@@ -135,15 +135,15 @@ tower-service = { version = "0.3", optional = true }
 # root.
 http-body-util = { version = "0.1", optional = true }
 bytes = { version = "1", optional = true }
-mkit-rpc = { version = "0.4", path = "../mkit-rpc" }
+mkit-rpc = { version = "0.5", path = "../mkit-rpc" }
 # `mkit serve`'s engine: the ssh-frame session (`ssh`) over the pipeline
 # with the `.mkit` layout stores (`fs`). `default-features = false` keeps
 # out `connect` (the Connect binding: connectrpc, http) and every other
 # feature: the CLI serves no Connect, SQL or test seam, and
 # scripts/check-release-artifact-features.sh allows only these two.
 # Nothing in it builds an async runtime (tokio's `sync` only, for a lock
-# `mkit serve` never takes). First published at the 0.5 release (WP-REL).
-mkit-server = { version = "0.4", path = "../mkit-server", default-features = false, features = ["ssh", "fs"] }
+# `mkit serve` never takes). First published at the 0.5.0 release.
+mkit-server = { version = "0.5", path = "../mkit-server", default-features = false, features = ["ssh", "fs"] }
 # `mkit serve` drives the session future with `futures::executor::block_on`
 # on the main thread: no async runtime. Already in the graph (via
 # mkit-transport-connect and reqwest), so not a new supply-chain root.
@@ -229,10 +229,10 @@ libc = "0.2"
 signal-hook = { version = "0.4", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-mkit-keystore = { version = "0.4", path = "../mkit-keystore", features = ["backend-macos-keychain"] }
+mkit-keystore = { version = "0.5", path = "../mkit-keystore", features = ["backend-macos-keychain"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-mkit-keystore = { version = "0.4", path = "../mkit-keystore", features = ["backend-linux-secret-service", "backend-systemd-creds"] }
+mkit-keystore = { version = "0.5", path = "../mkit-keystore", features = ["backend-linux-secret-service", "backend-systemd-creds"] }
 
 [build-dependencies]
 # build.rs enforces CLI_VERSION == CARGO_PKG_VERSION at compile time by
@@ -275,7 +275,7 @@ connectrpc = { version = "0.9.0", default-features = false, features = ["server"
 # `epoch bump` and revocation are exercised against the actual verifier. A
 # DEV-dependency only: `scripts/check-cli-baseline.sh` audits the normal
 # graph, where mkit-server stays at `ssh` + `fs`.
-mkit-server = { version = "0.4", path = "../mkit-server", default-features = false, features = ["ssh", "fs", "connect", "memory"] }
+mkit-server = { version = "0.5", path = "../mkit-server", default-features = false, features = ["ssh", "fs", "connect", "memory"] }
 http = "1"
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync"] }
 futures = "0.3"

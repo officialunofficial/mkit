@@ -8,8 +8,8 @@
 #       server's internals.
 # Native only: it drives each case on a tokio runtime.
 #
-# `publish = false` during the epic; WP-REL decides publication. Never a
-# dependency of `mkit-cli`.
+# `publish = false`: a test and conformance harness, not a release artifact.
+# Never a dependency of `mkit-cli`.
 [package]
 name = "mkit-server-conformance"
 description = "Conformance suites for mkit-server storage backends and mkit.transport.v1 servers"
@@ -56,11 +56,11 @@ test-host = [
 ]
 
 [dependencies]
-mkit-rpc = { version = "0.4", path = "../mkit-rpc" }
+mkit-rpc = { version = "0.5", path = "../mkit-rpc" }
 base64 = "0.22"
-mkit-server = { version = "0.4", path = "../mkit-server", features = ["memory"] }
-mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
-mkit-attest = { version = "0.4", path = "../mkit-attest", default-features = false, features = ["grants"] }
+mkit-server = { version = "0.5", path = "../mkit-server", features = ["memory"] }
+mkit-core = { version = "0.5", path = "../mkit-core", default-features = false }
+mkit-attest = { version = "0.5", path = "../mkit-attest", default-features = false, features = ["grants"] }
 k256 = { version = "0.14", features = ["ecdsa"] }
 p256 = { version = "0.14", features = ["ecdsa"] }
 sha2 = "0.11"
@@ -72,7 +72,7 @@ futures = "0.3"
 # client transport, so a case controls every byte, header and frame (and
 # can send deliberately invalid ones) and sees the HTTP status.
 # `client-tls` reaches https deployments.
-mkit-transport-connect = { version = "0.4", path = "../mkit-transport-connect" }
+mkit-transport-connect = { version = "0.5", path = "../mkit-transport-connect" }
 connectrpc = { version = "0.9.1", default-features = false, features = ["client", "client-tls", "gzip", "json"] }
 buffa = "0.9.1"
 http = "1"

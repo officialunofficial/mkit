@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/officialunofficial/mkit/compare/v0.4.2...v0.5.0) - 2026-10-02
+
+The production mkit server arrives as a runtime-agnostic core (`mkit-server`)
+with a Cloudflare Workers adapter (`mkit-server-worker`, not published to
+crates.io) and a conformance harness (`mkit-server-conformance`, not
+published). Every `mkit-*` crate moves to 0.5.0 in lockstep. `mkit-server` is
+published to crates.io for the first time; `mkit-cli` depends on it.
+
+### Breaking changes
+
+- `mkit serve --http` and `mkit serve --listen-enc`, with their companion
+  flags, are removed. `mkit serve` keeps the `mkit+ssh://` session over
+  stdio; each removed flag exits with a usage error.
+- `mkit-transport-connect` no longer exposes the server-side service (its
+  `server` cargo feature is gone); only the client transport remains.
+- The standalone native `mkit-server` binary, the `mkit-server-native` crate
+  and the `mkit-server` container image are removed. The release ships the
+  `mkit` CLI archives only; the production deployment target is the Workers
+  adapter.
+- `mkit-transport-enc` is deprecated: there is no maintained server for it.
+  Use SSH (`mkit serve`) or Connect.
+- The Workers launch profile selector `LAUNCH_PROFILE` value `uno` is renamed
+  `paid-workers`; `uno` remains accepted as an alias.
+- Stores written by earlier unreleased server builds are not migrated; fresh
+  stores are required for the new `ListRepos` visibility indexes and the
+  takedown and inspection metadata.
+
+### Changes
+
 - Server: add `ListRepos`, with bounded namespace-name pagination and authenticated
   continuation tokens. Atomic coordinator visibility indexes hide private names
   from public listings; owners and approved namespace authorities list all repos.

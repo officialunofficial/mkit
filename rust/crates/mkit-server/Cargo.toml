@@ -1,14 +1,14 @@
-# mkit-server — the runtime-agnostic core of the production mkit server
-# (production server work §5.1). It owns the vocabulary every adapter shares: repo and
-# namespace identifiers, principals, the typed `Operation` model, the
-# transport-neutral `ServerError`, the async/runtime model (`MaybeSend`,
-# `Clock`, `Spawner`, `send_wrap`) and the metrics facade. The
-# Workers adapter (`mkit-server-worker`) and the conformance host build on
-# it, so it must compile for both the host and `wasm32-unknown-unknown`
-# (enforced by scripts/check-wasm-dep-graph.sh and `just ci-scripts`).
+# mkit-server: the runtime-agnostic core of the production mkit server. It
+# owns the vocabulary every adapter shares: repo and namespace identifiers,
+# principals, the typed `Operation` model, the transport-neutral
+# `ServerError`, the async/runtime model (`MaybeSend`, `Clock`, `Spawner`,
+# `send_wrap`) and the metrics facade. The Workers adapter
+# (`mkit-server-worker`) and the conformance host build on it, so it must
+# compile for both the host and `wasm32-unknown-unknown` (enforced by
+# scripts/check-wasm-dep-graph.sh and `just ci-scripts`).
 #
-# Not `publish = false`: `mkit-cli` depends on it from WP-M0-13 and is
-# published. It is first published at the 0.5 release (WP-REL), not before.
+# Published to crates.io (not `publish = false`): `mkit-cli` depends on it.
+# First published at 0.5.0; it must be published before `mkit-cli`.
 [package]
 name = "mkit-server"
 description = "Runtime-agnostic core of the mkit server: operation model, errors, runtime and telemetry vocabulary"
@@ -21,6 +21,13 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+homepage = "https://github.com/officialunofficial/mkit"
+documentation = "https://docs.rs/mkit-server"
+
+[package.metadata.docs.rs]
+# Document the portable surface; `test-faults` and the pure-Rust zstd opt-in
+# stay off.
+features = ["connect", "memory", "sql", "ssh", "fs", "remote-hooks", "http-objects", "published-view"]
 
 [lints]
 workspace = true
@@ -29,8 +36,8 @@ workspace = true
 # default-features = false keeps `pack-zstd` (zstd-sys, a C library) out of
 # the wasm32 graph. Inter-workspace deps need explicit version + path so
 # `cargo publish` accepts them.
-mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
-mkit-attest = { version = "0.4", path = "../mkit-attest", default-features = false, features = ["grants"] }
+mkit-core = { version = "0.5", path = "../mkit-core", default-features = false }
+mkit-attest = { version = "0.5", path = "../mkit-attest", default-features = false, features = ["grants"] }
 thiserror = "2"
 blake3 = { version = "1", default-features = false }
 zeroize = "1"
@@ -66,7 +73,7 @@ base64 = { version = "0.22" }
 # `zeroize` wipes `SigningKey` secrets on drop. alloc-only, wasm-clean.
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc", "zeroize"] }
 # The ssh-frame wire types and framing (feature `ssh`).
-mkit-rpc = { version = "0.4", path = "../mkit-rpc", optional = true }
+mkit-rpc = { version = "0.5", path = "../mkit-rpc", optional = true }
 # The `remote-hooks` adapter draws a fresh 32-byte nonce per signed request
 # (SPEC-SERVER §7.1) and signs with the normal `ed25519-dalek` above.
 # getrandom is already in mkit-core's wasm graph, which also enables its
@@ -127,7 +134,7 @@ published-view = []
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # `fs` delegates ref CAS, the ref lock and atomic writes to FileTransport, so
 # the files stay byte-identical to what `mkit` and `mkit+file://` read.
-mkit-transport-file = { version = "0.4", path = "../mkit-transport-file", optional = true }
+mkit-transport-file = { version = "0.5", path = "../mkit-transport-file", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # `send_wrap` on wasm32: lets a `!Send` handler future satisfy the `+ Send`

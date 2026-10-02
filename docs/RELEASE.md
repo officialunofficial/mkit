@@ -255,13 +255,22 @@ in `rust/Cargo.toml` at the tagged tree).
 
 | Publishes to crates.io | Stays off crates.io (`publish = false`) |
 |---|---|
-| the library crates (`mkit-core`, `mkit-rpc`, `mkit-attest`, `mkit-keystore`, `mkit-git-bridge`, `mkit-transport-{file,http,memory,s3,ssh,enc}`) plus `mkit-cli` (so `cargo install mkit-cli` works) | `mkit-wasm` (npm-only), `mkit-repo-client`, `mkit-test-util`, `mkit-core-wasm-check`, `mkit-formal-conformance`, `fuzz`, `benches`. The contrib signers are a separate workspace under `contrib/signers/` (not workspace members at all). |
+| the library crates (`mkit-core`, `mkit-rpc`, `mkit-attest`, `mkit-keystore`, `mkit-git-bridge`, `mkit-server`, `mkit-transport-{file,http,memory,s3,ssh,enc,connect}`) plus `mkit-cli` (so `cargo install mkit-cli` works) | `mkit-server-worker` (the Cloudflare Workers adapter, consumed by git revision), `mkit-server-conformance`, `mkit-wasm` (npm-only), `mkit-repo-client`, `mkit-test-util`, `mkit-core-wasm-check`, `mkit-formal-conformance`, `fuzz`, `benches`. The contrib signers are a separate workspace under `contrib/signers/` (not workspace members at all). |
 
 The published crates depend only on each other, forming a closed,
 dependency-ordered set; `cargo publish --workspace` computes that order and
 skips any `publish = false` member.
 
 Notes on the published set:
+
+- **`mkit-server`** &mdash; the runtime-agnostic server core, first published at
+  0.5.0. `mkit-cli` depends on it (features `ssh` and `fs`, for the stdio
+  `mkit serve` session), so it must be on crates.io before `mkit-cli`;
+  `cargo publish --workspace` orders the two from the dependency graph. There
+  is no native server binary or container image: the Cloudflare Workers
+  adapter (`mkit-server-worker`) is the production deployment and is not
+  published. `mkit-transport-enc` is deprecated and receives no further
+  server counterpart.
 
 - **`mkit-cli`** &mdash; published so `cargo install mkit-cli` installs the `mkit`
   binary; it also ships via the signed GitHub Release archives and `cargo
