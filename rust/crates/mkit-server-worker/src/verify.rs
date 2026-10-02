@@ -269,6 +269,7 @@ where
             windows,
             shards: Arc::new(D34Shards),
             cfg,
+            // Default slices use indexed::geometry, shared with inline and preservation.
             limits: SliceLimits::default(),
             lease: LeaseParams {
                 authority_fence,
@@ -353,6 +354,7 @@ pub(crate) fn register_configured_budgeted<S: NamespaceStore>(
             windows,
             shards: Arc::new(D34Shards),
             cfg: indexed,
+            // Default slices use indexed::geometry, shared with inline and preservation.
             limits: SliceLimits::default(),
             lease: LeaseParams {
                 authority_fence: cfg.authority_fence.is_some(),

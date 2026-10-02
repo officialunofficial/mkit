@@ -626,15 +626,18 @@ fn probe_shaped_resume_rejects_tampered_entry_in_checkpoint_window() {
 
 #[test]
 fn fix_round_one_checkpoint_is_absent_when_its_boundary_window_was_released() {
+    for limits in [
+        DecodeLimits::default(),
+        DecodeLimits::default().with_entry_geometry(16 << 20, 1 << 20),
+    ] {
+        checkpoint_is_absent_when_boundary_released(limits);
+    }
+}
+
+fn checkpoint_is_absent_when_boundary_released(limits: DecodeLimits) {
     let pack = raw_pack(&[vec![0x53; 65_537 - 49]]);
     assert_eq!(pack.len(), 65_537);
-    let mut reader = WindowReader::new(
-        65_537,
-        WINDOW,
-        DecodeLimits::default(),
-        Some(hash::hash(&pack)),
-    )
-    .unwrap();
+    let mut reader = WindowReader::new(65_537, WINDOW, limits, Some(hash::hash(&pack))).unwrap();
     let Step::NeedWindow(request) = reader.step().unwrap() else {
         panic!()
     };
@@ -661,7 +664,7 @@ fn fix_round_one_checkpoint_is_absent_when_its_boundary_window_was_released() {
     assert!(reader.checkpoint().is_none());
     let mut resumed = WindowReader::resume(
         &WindowCursor::from_bytes(&retained.to_bytes()).unwrap(),
-        DecodeLimits::default(),
+        limits,
     )
     .unwrap();
     let (remaining, resumed_summary) = drive(&mut resumed, &pack).unwrap();
@@ -1361,4 +1364,54 @@ fn a_resumed_reader_reports_frames_only_for_entries_it_yields() {
     }
     let resumed = WindowReader::resume(&cursor.unwrap(), DecodeLimits::default()).unwrap();
     assert_eq!(resumed.last_frame(), None);
+}
+
+#[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
+#[test]
+fn explicit_geometry_carried_compressed_frame_binds_the_released_prefix() {
+    let raw = vec![0x42; 4096];
+    let mut encoded = u32::try_from(raw.len()).unwrap().to_le_bytes().to_vec();
+    encoded.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd, 0, 0x68]);
+    let block = (u32::try_from(raw.len()).unwrap() << 3) | 1;
+    encoded.extend_from_slice(&block.to_le_bytes()[..3]);
+    encoded.extend_from_slice(&raw);
+    let pack = synthetic(
+        2,
+        &[
+            (0, vec![0x31; usize::try_from(WINDOW).unwrap() - 100]),
+            (3, encoded),
+        ],
+    );
+    let limits = DecodeLimits::default().with_entry_geometry(16 << 20, 1 << 20);
+    let mut reader =
+        WindowReader::new(pack.len() as u64, WINDOW, limits, Some(hash::hash(&pack))).unwrap();
+    let mut entries = 0;
+    loop {
+        match reader.step().unwrap() {
+            Step::NeedWindow(request) => feed_from(&mut reader, &pack, request),
+            Step::Entry(_) => {
+                entries += 1;
+                if entries == 2 {
+                    break;
+                }
+            }
+            Step::Done(_) => panic!("need the carried compressed entry"),
+        }
+    }
+    assert!(reader.window.is_empty());
+    let cursor = reader.checkpoint().unwrap();
+    cursor.validate().unwrap();
+    let Step::NeedWindow(request) = reader.step().unwrap() else {
+        panic!()
+    };
+    let mut bytes = pack[usize::try_from(request.offset).unwrap()
+        ..usize::try_from(request.offset + request.len).unwrap()]
+        .to_vec();
+    bytes[0] ^= 1;
+    assert!(matches!(
+        reader.feed_owned(request.offset, bytes),
+        Err(PackError::PackfileCorrupted)
+    ));
+    let mut clean = WindowReader::resume(&cursor, limits).unwrap();
+    assert!(drive(&mut clean, &pack).is_ok());
 }

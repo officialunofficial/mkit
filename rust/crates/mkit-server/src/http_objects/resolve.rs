@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use futures::StreamExt as _;
 use mkit_core::hash::Hash;
 use mkit_core::object::{Object, ObjectType};
 use mkit_core::serialize::deserialize;
@@ -283,13 +284,26 @@ async fn sidecar_total<B: BlobStore>(blobs: &B, id: Hash, sidecar_len: u64) -> R
         .await
         .map_err(|_| Miss::Unavailable)?
         .ok_or(Miss::Unavailable)?;
-    let BlobBody::Bytes(tail) = body else {
-        return inconsistent("sidecar tail");
-    };
-    let tail: [u8; 8] = tail
-        .as_ref()
-        .try_into()
-        .or_else(|_| inconsistent("sidecar tail"))?;
+    let mut tail = [0; 8];
+    match body {
+        BlobBody::Bytes(bytes) if bytes.len() == 8 => tail.copy_from_slice(&bytes),
+        BlobBody::Stream { len: 8, mut stream } => {
+            let mut used = 0;
+            while let Some(piece) = stream.next().await {
+                let piece = piece.or_else(|_| inconsistent("sidecar tail"))?;
+                if piece.len() > tail.len() - used {
+                    return inconsistent("sidecar tail");
+                }
+                let end = used + piece.len();
+                tail[used..end].copy_from_slice(&piece);
+                used = end;
+            }
+            if used != tail.len() {
+                return inconsistent("sidecar tail");
+            }
+        }
+        _ => return inconsistent("sidecar tail"),
+    }
     Ok(u64::from_le_bytes(tail))
 }
 
@@ -474,3 +488,7 @@ mod tests {
         assert_eq!(type_of(&[]), None);
     }
 }
+
+#[cfg(test)]
+#[path = "sidecar_tests.rs"]
+mod sidecar_tests;
