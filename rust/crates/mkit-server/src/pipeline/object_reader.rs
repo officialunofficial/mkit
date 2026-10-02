@@ -434,6 +434,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         } else {
             resolve::locate_many(&env, ids).await.map_err(failure)?
         };
+        // Directly denied members are absent even when their reachability
+        // cannot be proved within the caller's byte or walk budget.
+        let mut clear = Vec::with_capacity(located.len());
+        for (id, location) in located {
+            if !denied(&meta, &id).await.map_err(failure)?
+                && !denied(&meta, &location.pack).await.map_err(failure)?
+            {
+                clear.push((id, location));
+            }
+        }
+        located = clear;
         // Issuance proves missing IDs too: proof cost must not expose membership.
         let mut targets = if capped_as_absent {
             ids.iter().copied().collect::<BTreeSet<_>>()

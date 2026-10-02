@@ -1498,12 +1498,19 @@ fn issue_urls_capped_preflight_hides_unreachable_and_denied_membership() {
                     .object_reader(fx.repo_id("room"), ReaderView::Public),
             )
             .unwrap();
-            assert_eq!(
-                block_on(reader.object_sizes(&[id(&orphan)]))
-                    .unwrap_err()
-                    .code(),
-                Code::Unavailable
-            );
+            if blocked {
+                assert_eq!(
+                    block_on(reader.object_sizes(&[id(&orphan)])).unwrap(),
+                    vec![None]
+                );
+            } else {
+                assert_eq!(
+                    block_on(reader.object_sizes(&[id(&orphan)]))
+                        .unwrap_err()
+                        .code(),
+                    Code::Unavailable
+                );
+            }
         }
     }
 }
@@ -1677,4 +1684,66 @@ fn composed_canonical_and_metadata_batches_fit_one_request_allowance() {
         physical < 1000,
         "six composed batches retain request headroom"
     );
+}
+
+fn denied_orphan_matches_missing_before_reader_budget(metadata: bool, whole_pack: bool) {
+    let cfg = HttpObjectsConfig {
+        max_walk_objects: if metadata {
+            1
+        } else {
+            http_cfg().max_walk_objects
+        },
+        ..http_cfg()
+    };
+    let fx = fixture_tweaked(Hooks::new(), cfg, |c| c.takedown_denial = true);
+    let d = data();
+    let orphan = blob(b"blocked orphan");
+    let mut objects = d.refs();
+    objects.push(&orphan);
+    let pack = fx.push("room", &objects, d.head(), None);
+    let denied = if whole_pack { pack } else { id(&orphan) };
+    block_on(ContentIndex::new(BorrowedStore(&fx.pipe.meta)).block(
+        &denied,
+        &crate::store::BlockEntry::new("manual", T0 as u64),
+        T0 as u64,
+    ))
+    .unwrap();
+    let reader = block_on(
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Public),
+    )
+    .unwrap();
+    if metadata {
+        let missing = block_on(reader.object_metadata(&[[91; 32]])).map_err(|e| e.code());
+        let blocked = block_on(reader.object_metadata(&[id(&orphan)])).map_err(|e| e.code());
+        assert_eq!(missing, Ok(vec![None]));
+        assert_eq!(blocked, missing);
+    } else {
+        let missing =
+            block_on(reader.read_canonical_with_limit(&[[91; 32]], 0)).map_err(|e| e.code());
+        let blocked =
+            block_on(reader.read_canonical_with_limit(&[id(&orphan)], 0)).map_err(|e| e.code());
+        assert_eq!(missing, Ok(vec![None]));
+        assert_eq!(blocked, missing);
+    }
+}
+
+#[test]
+fn denied_orphan_canonical_read_is_absent_before_byte_budget() {
+    denied_orphan_matches_missing_before_reader_budget(false, false);
+}
+
+#[test]
+fn denied_pack_canonical_read_is_absent_before_byte_budget() {
+    denied_orphan_matches_missing_before_reader_budget(false, true);
+}
+
+#[test]
+fn denied_orphan_metadata_is_absent_before_walk_budget() {
+    denied_orphan_matches_missing_before_reader_budget(true, false);
+}
+
+#[test]
+fn denied_pack_metadata_is_absent_before_walk_budget() {
+    denied_orphan_matches_missing_before_reader_budget(true, true);
 }
