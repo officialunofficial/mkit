@@ -58,8 +58,8 @@ wrangler dev -c wrangler.dev.jsonc --local --port 8789
 
 ## Deploy
 
-`wrangler deploy` (needs an authenticated Cloudflare token for the Official
-Unofficial account, `CLOUDFLARE_ACCOUNT_ID=0bc82bff…`), or wire a Cloudflare
+`wrangler deploy` (needs an authenticated Cloudflare token and
+`CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID}` for the target account), or wire a Cloudflare
 Workers Build that runs `worker-build --release` on merge to `main` &mdash; the same
 mechanism the other mkit workers use. `keys.mkit.sh` is auto-provisioned via the
 `custom_domain` route on the `mkit.sh` zone.
