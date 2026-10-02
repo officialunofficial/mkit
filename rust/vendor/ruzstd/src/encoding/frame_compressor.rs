@@ -215,7 +215,7 @@ impl<R: Read, W: Write, M: Matcher> FrameCompressor<R, W, M> {
         #[cfg(feature = "hash")]
         {
             // Because we only have the data as a reader, we need to read all of it to calculate the checksum
-            // Possible optimization: hash self.uncompressed data as it is read.
+            // Possible TODO: create a wrapper around self.uncompressed data that hashes the data as it's read?
             let content_checksum = self.hasher.finish();
             drain
                 .write_all(&(content_checksum as u32).to_le_bytes())

@@ -97,7 +97,7 @@ fn test_block_header_reading() {
 
     let mut block_dec = decoding::block_decoder::new();
     let block_header = block_dec.read_block_header(&mut content).unwrap();
-    let _ = block_header; // Known gap: validate the block header more thoroughly.
+    let _ = block_header; //TODO validate blockheader in a smart way
 }
 
 #[test]
