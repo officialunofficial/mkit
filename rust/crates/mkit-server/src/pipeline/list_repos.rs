@@ -159,8 +159,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
     /// List a namespace without visiting private rows for the public view.
     /// Signed envelopes use the ordinary X-Repository syntax; its namespace
-    /// must match `namespace`. The name is only an authorization selector for this RPC.
-    /// Grants never extend listing rights. Authority hooks authorize the entire namespace.
+    /// must match `namespace`. The name is only a namespace selector for this RPC.
+    /// Grants never extend listing rights. Check and Authority hooks concern the entire namespace.
     ///
     /// # Errors
     /// Invalid namespace/prefix/size/token, mismatched authentication, or unavailable storage/hooks.
@@ -247,23 +247,24 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             && matches!(mkit_core::repo_identity::Namespace::parse(namespace),
                 Ok(mkit_core::repo_identity::Namespace::Ed25519(key)) if a.principal.ed25519() == Some(&key));
         let mut full = owner;
-        if a.auth.is_some()
-            && a.write_grant.is_none()
-            && (owner || self.cfg.authorizer_role == AuthorizerRole::Authority)
-        {
+        let authority = self.cfg.authorizer_role == AuthorizerRole::Authority;
+        if !authority || (a.auth.is_some() && a.write_grant.is_none()) {
             op.authz = AuthzFacts {
                 owner,
                 caller_view: if owner {
                     CallerView::Writer
+                } else if a.auth.is_none() {
+                    CallerView::Anonymous
                 } else {
                     CallerView::Reader
                 },
                 ..AuthzFacts::default()
             };
             match self.hooks.authorizer().authorize(&op).await {
-                Ok(_) => full |= self.cfg.authorizer_role == AuthorizerRole::Authority,
+                Ok(_) => full |= authority,
                 Err(error)
-                    if !owner
+                    if authority
+                        && !owner
                         && matches!(
                             error.code(),
                             crate::Code::PermissionDenied | crate::Code::NotFound

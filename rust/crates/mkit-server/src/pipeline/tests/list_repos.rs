@@ -436,6 +436,50 @@ impl Authorizer for ListingDenial {
 }
 
 #[test]
+fn check_denials_and_failures_reject_every_view_before_storage() {
+    for sharding in [Sharding::Single, Sharding::D34] {
+        for unavailable in [false, true] {
+            let mut cfg = config(&key(1), AuthorizerRole::Check);
+            cfg.sharding = sharding;
+            cfg.default_repo_visibility = RepoVisibility::Public;
+            let clock = clock();
+            let defaults = Hooks::new();
+            let hooks = Hooks {
+                authorizer: ListingDenial(unavailable),
+                admission: defaults.admission,
+                pre_receive: defaults.pre_receive,
+                receipts: defaults.receipts,
+                outcomes: defaults.outcomes,
+            };
+            let e = build(cfg, Spy::new(store(&clock)), hooks, clock);
+            create(&e, "public", 1);
+            let read_grant = grant(&key(1), &key(2), |g| {
+                g.capabilities = mkit_attest::grant::Capabilities::Read;
+                g.ref_scopes = None;
+            });
+            for req in [
+                request(Procedure::ListRepos, &identity("selector"), None),
+                request(Procedure::ListRepos, &identity("selector"), Some(&key(1))),
+                request(Procedure::ListRepos, &identity("selector"), Some(&key(2))),
+                request(Procedure::ListRepos, &identity("selector"), Some(&key(2)))
+                    .header("x-write-grant", &read_grant),
+            ] {
+                let before = e.pipe.meta.calls();
+                assert_eq!(
+                    listing(&e, &req, "", 100, None).unwrap_err().code(),
+                    if unavailable {
+                        Code::Unavailable
+                    } else {
+                        Code::PermissionDenied
+                    }
+                );
+                assert_eq!(e.pipe.meta.calls(), before);
+            }
+        }
+    }
+}
+
+#[test]
 fn authority_denial_selects_public_but_failure_does_not_fail_open() {
     for unavailable in [false, true] {
         let mut cfg = config(&key(1), AuthorizerRole::Authority);

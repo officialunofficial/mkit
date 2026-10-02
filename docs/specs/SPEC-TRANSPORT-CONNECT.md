@@ -1729,6 +1729,12 @@ Multi listing rights are deliberately narrower than repository read rights:
   grants with `read` capability. The normal §9.3 private read rights remain
   unchanged. An unsigned grant header remains `unauthenticated`.
 
+A configured `check` authorizer MUST check every namespace listing, including
+anonymous, non-owner and grant-bearing public views, once before storage scans.
+Its denial or failure MUST propagate; an allowance cannot widen the public view.
+Like authority hooks, this check concerns the entire requested namespace rather
+than the selector repository name.
+
 A public listing MUST NOT scan or filter private registry rows. In Multi mode,
 the namespace coordinator (Namespace partition under Single sharding) maintains
 `rl 00 p 00 <name>` for registered explicitly-public repositories and
