@@ -248,7 +248,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
                         .await
                         .map_err(|error| Fail::from_server_error(&error))?
                 {
-                    self.prove_reachable(&env, seams, id, &mut budget).await?;
+                    match self.prove_reachable(&env, seams, id, &mut budget).await {
+                        // A spent proof allowance reads as an unknown id.
+                        Err(Fail::Unavailable) if denial_budget.remaining() == 0 => {
+                            return Err(Fail::NotFound);
+                        }
+                        other => other?,
+                    }
                     seams.reachability.record(repo, id, now);
                 }
                 (*id, None, located)

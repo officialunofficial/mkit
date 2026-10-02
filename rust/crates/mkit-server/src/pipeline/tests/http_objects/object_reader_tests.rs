@@ -390,8 +390,11 @@ fn sizes_refuse_an_unresolved_requested_ancestor_without_reading_it() {
     )
     .unwrap();
     fx.clear_calls();
-    let error = block_on(reader.object_sizes(&[d.head(), id(&d.small)])).unwrap_err();
-    assert_eq!(error.code(), Code::Unavailable);
+    // The requested ancestor is never read, so the descendant is unprovable: absent.
+    assert_eq!(
+        block_on(reader.object_sizes(&[d.head(), id(&d.small)])).unwrap(),
+        vec![Some(serialize(&d.commit).unwrap().len() as u64), None]
+    );
     assert!(fx.calls.lock().unwrap().is_empty());
     assert_eq!(
         block_on(reader.object_sizes(&[d.head()])).unwrap(),
@@ -431,10 +434,8 @@ fn sizes_never_read_a_requested_delta_base_while_loading_an_ancestor() {
     let reader = block_on(fx.pipe.object_reader(repo, ReaderView::Public)).unwrap();
     fx.clear_calls();
     assert_eq!(
-        block_on(reader.object_sizes(&[id(&chunks[0])]))
-            .unwrap_err()
-            .code(),
-        Code::Unavailable
+        block_on(reader.object_sizes(&[id(&chunks[0])])).unwrap(),
+        vec![None]
     );
     assert_eq!(
         fx.blob_calls(BlobKey::pack(pack)),
@@ -1392,10 +1393,8 @@ fn issue_urls_paths_and_reachability_share_one_decode_budget() {
         .unwrap();
         if numerator == 1 {
             assert_eq!(
-                block_on(reader.object_sizes(&[id(&leaf)]))
-                    .unwrap_err()
-                    .code(),
-                Code::Unavailable
+                block_on(reader.object_sizes(&[id(&leaf)])).unwrap(),
+                vec![None]
             );
         } else {
             assert_eq!(
@@ -1498,19 +1497,10 @@ fn issue_urls_capped_preflight_hides_unreachable_and_denied_membership() {
                     .object_reader(fx.repo_id("room"), ReaderView::Public),
             )
             .unwrap();
-            if blocked {
-                assert_eq!(
-                    block_on(reader.object_sizes(&[id(&orphan)])).unwrap(),
-                    vec![None]
-                );
-            } else {
-                assert_eq!(
-                    block_on(reader.object_sizes(&[id(&orphan)]))
-                        .unwrap_err()
-                        .code(),
-                    Code::Unavailable
-                );
-            }
+            assert_eq!(
+                block_on(reader.object_sizes(&[id(&orphan)])).unwrap(),
+                vec![None]
+            );
         }
     }
 }
@@ -1595,11 +1585,10 @@ fn caller_cap_accounts_ancestors_and_duplicate_output_with_typed_exhaustion() {
             .object_reader(fx.repo_id("room"), ReaderView::Public),
     )
     .unwrap();
+    // A walk the cap cannot afford is unprovable: absent, like an unknown id.
     assert_eq!(
-        block_on(reader.read_canonical_with_limit(&[id(&d.big)], 1))
-            .unwrap_err()
-            .code(),
-        Code::ResourceExhausted
+        block_on(reader.read_canonical_with_limit(&[id(&d.big)], 1)).unwrap(),
+        vec![None]
     );
     assert_eq!(
         block_on(reader.read_canonical_with_limit(&[id(&d.big); 2], 100_000))
@@ -1746,4 +1735,90 @@ fn denied_orphan_metadata_is_absent_before_walk_budget() {
 #[test]
 fn denied_pack_metadata_is_absent_before_walk_budget() {
     denied_orphan_matches_missing_before_reader_budget(true, true);
+}
+
+fn assert_same_response(a: &Got, b: &Got) {
+    assert_eq!(a.status, b.status);
+    assert_eq!(a.body, b.body);
+    assert_eq!(a.headers, b.headers);
+}
+
+#[test]
+fn unprovable_stored_ids_match_unknown_ids_for_public_readers_but_owners_get_typed_errors() {
+    // Cap 1 truncates tip enumeration; cap 2 enumerates but cannot finish the walk.
+    for cap in [1, 2] {
+        let fx = fixture_tweaked(
+            Hooks::new(),
+            HttpObjectsConfig {
+                max_walk_objects: cap,
+                ..http_cfg()
+            },
+            |_| {},
+        );
+        let d = data();
+        let orphan = blob(b"stored but unprovable orphan");
+        let mut objects = d.refs();
+        objects.push(&orphan);
+        fx.push("room", &objects, d.head(), None);
+        let (stored, unknown) = (id(&orphan), [91; 32]);
+        let reader = block_on(
+            fx.pipe
+                .object_reader(fx.repo_id("room"), ReaderView::Public),
+        )
+        .unwrap();
+        for target in [stored, unknown] {
+            assert_eq!(block_on(reader.read_canonical(&[target])).unwrap(), [None]);
+            assert_eq!(
+                block_on(reader.read_canonical_with_limit(&[target], 1)).unwrap(),
+                [None]
+            );
+            assert_eq!(block_on(reader.object_metadata(&[target])).unwrap(), [None]);
+            assert_eq!(block_on(reader.object_sizes(&[target])).unwrap(), [None]);
+        }
+        assert_same_response(
+            &fx.get(&fx.object_url("room", &stored)),
+            &fx.get(&fx.object_url("room", &unknown)),
+        );
+        assert_uniform_404(&fx.get(&fx.object_url("room", &stored)));
+        // The authorized owner view keeps the explicit typed errors.
+        let req = signed(
+            &fx.owner,
+            &fx.identity("room"),
+            Procedure::ListRefs,
+            fx.number(),
+        );
+        let lookup = |name: &str| {
+            req.headers
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, v)| v.clone())
+        };
+        let meta = RequestMeta {
+            procedure: req.procedure,
+            header: &lookup,
+            header_values: None,
+            unary_body: Some(&req.body),
+            transport_principal: None,
+        };
+        let owner = block_on(
+            fx.pipe
+                .object_reader(fx.repo_id("room"), ReaderView::Owner(&meta)),
+        )
+        .unwrap();
+        if cap == 2 {
+            assert_eq!(
+                block_on(owner.read_canonical_with_limit(&[stored], 1))
+                    .unwrap_err()
+                    .code(),
+                Code::ResourceExhausted
+            );
+        } else {
+            assert_eq!(
+                block_on(owner.object_metadata(&[stored]))
+                    .unwrap_err()
+                    .code(),
+                Code::Unavailable
+            );
+        }
+    }
 }

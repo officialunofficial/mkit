@@ -143,6 +143,7 @@ fn full_relay_lease_is_retryable(local_full: bool) {
         &e.pipe.meta,
         e.pipe.shards.as_ref(),
         e.clock.as_ref(),
+        e.pipe.metrics.as_ref(),
         repo,
         &e.pipe.shards.ref_shard(repo, HEAD),
         &LeaseParams::from(&e.pipe.cfg),
@@ -150,6 +151,7 @@ fn full_relay_lease_is_retryable(local_full: bool) {
     .unwrap_err();
     assert_eq!(error.code(), Code::Unavailable);
     assert_eq!(error.public_message(), "storage partition full");
+    assert_eq!(e.metrics.count(METRIC_PARTITION_FULL), 1);
 }
 
 #[test]
@@ -795,4 +797,95 @@ fn single_addressing_honors_read_denial_hooks() {
             .code(),
         Code::PermissionDenied
     );
+}
+
+fn full_env(configure: impl FnOnce(&mut PipelineConfig)) -> Env<Hooks> {
+    let mut cfg = config(&key(1), AuthorizerRole::Check);
+    cfg.sharding = Sharding::D34;
+    configure(&mut cfg);
+    let clock = clock();
+    build(
+        cfg,
+        Spy::new(store(&clock).with_capacity_limit(0)),
+        Hooks::new(),
+        clock,
+    )
+}
+
+fn assert_full(e: &Env<Hooks>, error: &ServerError) {
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(error.public_message(), "storage partition full");
+    assert_eq!(e.metrics.count(METRIC_PARTITION_FULL), 1);
+}
+
+#[test]
+fn full_epoch_transition_is_retryable() {
+    let e = full_env(|_| {});
+    let ns = NamespaceKey::deployment_default();
+    assert_full(&e, &block_on(e.pipe.bump_epoch(&ns, 1)).unwrap_err());
+}
+
+#[test]
+fn full_pending_reservation_is_retryable() {
+    let e = full_env(|_| {});
+    let req = request(Procedure::UpdateRef, &identity("new-repo"), Some(&key(1)));
+    let a = e.auth(&req).unwrap();
+    let partition = e.pipe.shards.coordinator(&a.repo().repo.namespace);
+    let error = block_on(e.pipe.record_pending(&a, &partition, "rid")).unwrap_err();
+    assert_full(&e, &error);
+}
+
+#[test]
+fn full_authority_activation_is_retryable() {
+    let clock = clock();
+    let mut cfg = config(&key(1), AuthorizerRole::Authority);
+    cfg.addressing = Addressing::Multi(crate::MultiAddressing::new().with_namespace_policy(
+        crate::policy::NamespacePolicy::Any {
+            unsafe_without_admission: true,
+        },
+    ));
+    cfg.write_policy = WritePolicy::Owner;
+    cfg.authority_fence = Some(
+        crate::authority::AuthorityFence::parse(&format!(
+            "deployment {} {}",
+            to_hex(&key(8).verifying_key().to_bytes()),
+            mkit_core::repo_identity::Namespace::Address([0x11; 20]),
+        ))
+        .unwrap(),
+    );
+    let defaults = Hooks::new();
+    let hooks = Hooks {
+        authorizer: Granting,
+        admission: defaults.admission,
+        pre_receive: defaults.pre_receive,
+        receipts: defaults.receipts,
+        outcomes: defaults.outcomes,
+    };
+    let e = build(
+        cfg,
+        Spy::new(store(&clock).with_capacity_limit(0)),
+        hooks,
+        clock,
+    );
+    let ns = NamespaceKey::deployment_default();
+    let error = block_on(e.pipe.ensure_authority_activation(&ns)).unwrap_err();
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(error.public_message(), "storage partition full");
+    assert_eq!(e.metrics.count(METRIC_PARTITION_FULL), 1);
+}
+
+#[test]
+fn full_ticket_and_admission_batches_share_the_typed_apply() {
+    // Ticket-outcome (advance) and HTTP read admission batches use the same helper.
+    let e = full_env(|_| {});
+    let p = e
+        .pipe
+        .shards
+        .coordinator(&NamespaceKey::deployment_default());
+    let error = block_on(e.pipe.apply_meta(
+        &p,
+        Batch::new().put(keys::namespace_record(), Value::new(vec![1])),
+    ))
+    .unwrap_err();
+    assert_full(&e, &error);
 }

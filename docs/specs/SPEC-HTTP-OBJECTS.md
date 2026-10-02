@@ -153,7 +153,10 @@ check repository membership first, with a cheap uniform 404 on a miss
 unless this repository has a tombstone for that exact id. A tombstone
 candidate MUST then prove reachability from a published ref value before
 step 8 can return 451; a failed proof is the same 404 as any other miss.
-Ordinary member ids also prove reachability. The walk follows
+A proof that cannot finish within the walk or decode caps is a failed proof for
+every non-writer reader: the same 404, and the same absent answer from the
+server-side object reader, as an unknown id. Only an authorized writer view may
+receive a typed exhaustion error. Ordinary member ids also prove reachability. The walk follows
 repository-local object references, including parents and chunk manifests,
 but MUST NOT descend through a blocked or tombstoned manifest;
 it MUST NOT follow foreign remix sources or pack-only delta bases.

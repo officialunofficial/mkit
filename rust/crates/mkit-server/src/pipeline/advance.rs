@@ -389,7 +389,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             // This separate transaction changes only ticket and outcome rows.
             // Equals(t) and Equals(o) arbitrate its terminal result, so lease,
             // grant and layout guards needed for a ref write are unnecessary.
-            match self.meta.apply(p, batch).await.map_err(meta_error)? {
+            match self.apply_meta(p, batch).await? {
                 BatchOutcome::Committed => return Err(answer),
                 BatchOutcome::DeadlinePassed { .. } => {
                     return Err(ServerError::unavailable("commit deadline passed; retry"));

@@ -97,12 +97,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         builder
             .try_finish(&mut batch.preconditions, &mut batch.writes)
             .map_err(meta_error)?;
-        match self
-            .meta
-            .apply(&partition, batch)
-            .await
-            .map_err(meta_error)?
-        {
+        match self.apply_meta(&partition, batch).await? {
             BatchOutcome::Committed => {}
             _ => return Err(ServerError::unavailable("read reservation unavailable")),
         }
