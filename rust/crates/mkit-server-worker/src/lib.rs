@@ -80,6 +80,7 @@ pub mod faults;
 pub mod hooks;
 #[cfg(feature = "http-objects")]
 pub mod http_mount;
+pub mod inspection_guard;
 pub mod launch;
 pub mod naming;
 pub mod ns_client;
