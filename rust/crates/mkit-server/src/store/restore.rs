@@ -249,7 +249,7 @@ fn validate_inspection_record(record: &ExportRecord) -> Result<(), StoreError> {
             Ok(())
         }
         Some(ParsedKey::InspectionHold { repo, .. }) => {
-            inspection_partition(&record.partition, &repo, false)?;
+            inspection_partition(&record.partition, &repo, true)?;
             if !record.value.as_bytes().is_empty() {
                 return Err(corrupt("invalid inspection hold row"));
             }
@@ -257,6 +257,10 @@ fn validate_inspection_record(record: &ExportRecord) -> Result<(), StoreError> {
         }
         Some(ParsedKey::InspectionHoldIndex { repo, .. }) => {
             inspection_partition(&record.partition, &repo, false)?;
+            super::inspection_holds::validate_advance_hold(&record.value)
+        }
+        Some(ParsedKey::InspectionHoldManifest { repo, .. }) => {
+            inspection_partition(&record.partition, &repo, true)?;
             super::inspection_holds::validate_manifest(&record.value)
         }
         _ => Ok(()),

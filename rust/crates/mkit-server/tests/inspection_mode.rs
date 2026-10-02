@@ -81,24 +81,17 @@ fn restore_retains_registry_and_per_advance_hold_rows_in_single_and_d34() {
             keys::sharding_marker(),
             if d34 { b"d34" } else { b"single" },
         );
-        let registry = if d34 {
-            Partition::RepoIndex {
-                ns: ns.clone(),
-                repo: repo.clone(),
-                prefix: 0,
-            }
+        let shards: &dyn mkit_server::pipeline::ShardMap = if d34 {
+            &mkit_server::pipeline::D34Shards
         } else {
-            root()
+            &mkit_server::pipeline::SinglePartition
         };
-        let refs = if d34 {
-            Partition::Ref {
-                ns: ns.clone(),
-                repo: repo.clone(),
-                shard_ref: "refs/heads/main".into(),
-            }
-        } else {
-            root()
+        let repository = mkit_server::RepoId {
+            namespace: ns.clone(),
+            name: repo.clone(),
         };
+        let registry = shards.object_index(&repository, &[0; 32]);
+        let refs = shards.ref_shard(&repository, "refs/heads/main");
         let rows = [
             (
                 registry.clone(),
@@ -111,13 +104,18 @@ fn restore_retains_registry_and_per_advance_hold_rows_in_single_and_d34() {
                 codec::encode_u64(1),
             ),
             (
-                refs.clone(),
+                registry.clone(),
                 keys::inspection_hold(&repo, &id, &advance),
                 Value::default(),
             ),
             (
                 refs.clone(),
                 keys::inspection_hold_index(&repo, &advance),
+                Value::new(vec![0]),
+            ),
+            (
+                registry.clone(),
+                keys::inspection_hold_manifest(&repo, &advance),
                 manifest.clone(),
             ),
         ];
@@ -340,6 +338,138 @@ fn restore_rejects_invalid_or_misplaced_inspection_marker_before_writes() {
         assert_eq!(
             block_on(store.get(&root(), &keys::inspection_marker())).unwrap(),
             None
+        );
+    }
+}
+
+#[test]
+fn restore_rejects_misplaced_or_corrupt_repository_hold_records() {
+    let repo = mkit_server::RepoName::new("project").unwrap();
+    let registry = Partition::RepoIndex {
+        ns: NamespaceKey::deployment_default(),
+        repo: repo.clone(),
+        prefix: 0,
+    };
+    let refs = Partition::Ref {
+        ns: NamespaceKey::deployment_default(),
+        repo: repo.clone(),
+        shard_ref: "refs/heads/main".into(),
+    };
+    let advance = [2; 32];
+    let cases = [
+        (
+            refs.clone(),
+            keys::inspection_hold(&repo, &[1; 32], &advance),
+            Value::default(),
+        ),
+        (
+            refs.clone(),
+            keys::inspection_hold_manifest(&repo, &advance),
+            Value::new(vec![1]),
+        ),
+        (
+            registry.clone(),
+            keys::inspection_hold_index(&repo, &advance),
+            Value::new(vec![0]),
+        ),
+        (
+            registry.clone(),
+            keys::inspection_hold_manifest(&repo, &advance),
+            Value::new(vec![3]),
+        ),
+        (
+            refs,
+            keys::inspection_hold_index(&repo, &advance),
+            Value::new(vec![1, 0]),
+        ),
+    ];
+    for (partition, key, value) in cases {
+        let source = MemoryKv::default();
+        block_on(source.apply(&partition, Batch::new().put(key, value))).unwrap();
+        let restored = MemoryKv::default();
+        assert!(
+            block_on(restore(
+                &[archive_partition(&source, &partition)],
+                &restored,
+                RestoreOptions::default()
+            ))
+            .is_err()
+        );
+        assert!(
+            block_on(restored.scan(
+                &partition,
+                &mkit_server::Key::default(),
+                &mkit_server::Key::new(vec![0xff; 1025]),
+                None,
+                1
+            ))
+            .unwrap()
+            .entries
+            .is_empty()
+        );
+    }
+}
+
+#[test]
+fn restore_preserves_repository_release_fence_in_single_and_d34() {
+    use mkit_server::pipeline::{D34Shards, ShardMap, SinglePartition};
+    use mkit_server::store::inspection_holds::InspectionHolds;
+    let repo = mkit_server::RepoId {
+        namespace: NamespaceKey::deployment_default(),
+        name: mkit_server::RepoName::new("project").unwrap(),
+    };
+    for shards in [
+        &SinglePartition as &dyn ShardMap,
+        &D34Shards as &dyn ShardMap,
+    ] {
+        let source = MemoryKv::default();
+        let holds = InspectionHolds::new(&source, shards, &repo, "refs/heads/a");
+        assert_eq!(block_on(check_mode(&source, true)).unwrap(), Outcome::Ok);
+        put(
+            &source,
+            keys::sharding_marker(),
+            if holds.partition() == &root() {
+                b"single"
+            } else {
+                b"d34"
+            },
+        );
+        let advance = [3; 32];
+        block_on(source.apply(
+            holds.partition(),
+            block_on(holds.plan_holds(&advance, &[[1; 32]])).unwrap(),
+        ))
+        .unwrap();
+        block_on(source.apply(
+            holds.partition(),
+            block_on(holds.plan_release(&advance)).unwrap(),
+        ))
+        .unwrap();
+        let mut snapshots = vec![archive(&source)];
+        if holds.partition() != &root() {
+            let coordinator = shards.coordinator(&repo.namespace);
+            block_on(source.apply(
+                &coordinator,
+                Batch::new().put(
+                    keys::grant_epoch(),
+                    mkit_server::store::codec::encode_u64(1),
+                ),
+            ))
+            .unwrap();
+            snapshots.push(archive_partition(&source, &coordinator));
+            snapshots.push(archive_partition(&source, holds.partition()));
+        }
+        let restored = MemoryKv::default();
+        block_on(restore(&snapshots, &restored, RestoreOptions::default())).unwrap();
+        let holds = InspectionHolds::new(&restored, shards, &repo, "refs/heads/b");
+        assert!(holds.partition() == &shards.object_index(&repo, &[0; 32]));
+        assert!(block_on(holds.is_held(&[[1; 32]])).unwrap().is_empty());
+        assert!(block_on(holds.plan_holds(&advance, &[[1; 32]])).is_err());
+        assert!(
+            block_on(holds.plan_release(&advance))
+                .unwrap()
+                .writes
+                .is_empty()
         );
     }
 }

@@ -105,3 +105,21 @@ Codecs, module layout, exact key layouts and API signatures. Record them in the 
 - wasm32 clippy.
 
 Do the mandatory self-review, then open the PR.
+
+## FIXMERGE rulings
+
+Content/advance hold rows and bounded release manifests live in the canonical repository
+registry partition (RepoIndex prefix zero under D34, Namespace under Single). Every ref
+therefore uses the same repository-wide limit-one content probe. Advance ids bind
+ref identity and sequence and are unique within the repository. The ref-level `ia`
+advance hold record remains constant-cost; post-commit kind-14 pages create the `ih`
+rows and `ir` manifest. `ir` is separate so Single can store both records without a
+key collision. A released manifest fences delayed materialization and remains after
+release. The caller durably ends the advance obligation, releases repository rows in
+bounded pages, and only then removes the ref-level record. Completion is serialized
+with kind-14 progress and follows all committed pages. No cross-partition transaction
+or new storage primitive is required. No compatibility with the unshipped prior layout.
+
+The package depends only on merged storage prerequisites. It is outside the launch
+dependency chain; 5.5c depends on it. The 100-operation assertion and documented
+four-id per-content cost remain; repository materialization costs no advance operations.

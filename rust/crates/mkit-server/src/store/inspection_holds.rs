@@ -1,4 +1,4 @@
-//! Inspection holds share the advance's ref partition; kind-14 work materializes per-content rows.
+//! Repository-wide inspection holds; kind-14 work writes content rows after advance commit.
 
 use std::collections::BTreeSet;
 
@@ -21,26 +21,29 @@ pub const ADVANCE_HOLD_MARKER_OPS: usize = 2;
 const PENDING_HOLD_MARKER: u8 = 0;
 /// Most input ids for an install plan, before deduplication.
 pub const MAX_HOLD_BATCH_IDS: usize = MAX_BATCH_OPS - HOLD_SHARED_OPS;
-/// Maximum distinct ids per advance; the 320,002-byte manifest fits twice under the one MiB limit.
+/// Maximum distinct ids per advance; the 320,001-byte manifest fits twice under the one MiB limit.
 pub const MAX_HOLD_IDS_PER_ADVANCE: usize = 10_000;
 
-/// Per-advance holds, routed beside the advance via the existing shard map.
+/// Content holds and release manifests share the flag registry partition; advance records stay in ref shards.
+/// Callers use repository-unique advance ids, binding the ref identity and advance sequence.
 #[derive(Debug)]
 pub struct InspectionHolds<'a, S> {
     store: &'a S,
     repo: &'a RepoId,
     partition: Partition,
+    advance_partition: Partition,
     reserved_ops: usize,
 }
 
 impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
-    /// Resolve the advance's ref partition.
+    /// Resolve repository hold storage and the separate advance ref partition.
     #[must_use]
     pub fn new(store: &'a S, shards: &dyn ShardMap, repo: &'a RepoId, ref_name: &str) -> Self {
         Self {
             store,
             repo,
-            partition: shards.ref_shard(repo, ref_name),
+            partition: shards.object_index(repo, &[0; 32]),
+            advance_partition: shards.ref_shard(repo, ref_name),
             reserved_ops: 0,
         }
     }
@@ -52,10 +55,16 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
         self
     }
 
-    /// The partition in which the caller applies every returned effect.
+    /// Apply content installation and release plans in this repository partition.
     #[must_use]
     pub fn partition(&self) -> &Partition {
         &self.partition
+    }
+
+    /// Apply advance hold, completion, and final removal plans in this ref partition.
+    #[must_use]
+    pub fn advance_partition(&self) -> &Partition {
+        &self.advance_partition
     }
 
     /// Plan the constant-cost advance hold record; kind-14 work later materializes per-content rows.
@@ -63,18 +72,18 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
     /// # Errors Storage failures propagate; corrupt records and unsupported batches fail closed.
     pub async fn plan_advance_hold(&self, advance: &Hash) -> Result<Batch, StoreError> {
         let key = keys::inspection_hold_index(&self.repo.name, advance);
-        let prior = self.store.get(&self.partition, &key).await?;
+        let prior = self.store.get(&self.advance_partition, &key).await?;
         let mut batch = Batch::new().require(manifest_guard(key.clone(), prior.as_ref()));
         if let Some(value) = &prior {
-            decode_manifest(Some(value))?;
+            validate_advance_hold(value)?;
         } else {
-            batch = batch.put(key, encode_pending_hold());
+            batch = batch.put(key, Value::new(vec![PENDING_HOLD_MARKER]));
         }
         batch.validate(&self.store.capabilities())?;
         Ok(batch)
     }
 
-    /// Plan one bounded kind-14 page. The manifest CAS serializes updates and stays pending until complete.
+    /// Plan one repository-wide kind-14 page after advance commit; the manifest CAS serializes updates.
     /// Existing ids need no forward-row write; re-plan after CAS loss.
     /// # Errors Invalid for oversized input/batch; corrupt for invalid manifests; storage errors propagate.
     pub async fn plan_holds(&self, advance: &Hash, ids: &[Hash]) -> Result<Batch, StoreError> {
@@ -83,13 +92,15 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
                 "inspection hold batch is too large".into(),
             ));
         }
-        let key = keys::inspection_hold_index(&self.repo.name, advance);
+        let key = keys::inspection_hold_manifest(&self.repo.name, advance);
         let prior = self.store.get(&self.partition, &key).await?;
         let manifest = decode_manifest(prior.as_ref())?;
-        let (mut held, materializing) = match manifest {
-            HoldManifest::Materializing(ids) => (ids, true),
-            HoldManifest::Materialized(ids) => (ids, false),
-        };
+        if manifest.released {
+            return Err(StoreError::Invalid(
+                "advance inspection holds are released".into(),
+            ));
+        }
+        let mut held = manifest.ids;
         let mut added = Vec::new();
         for id in ids {
             if held.insert(*id) {
@@ -108,14 +119,7 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
         }
         let mut batch = Batch::new()
             .require(manifest_guard(key.clone(), prior.as_ref()))
-            .put(
-                key,
-                if materializing {
-                    encode_materializing(&held)
-                } else {
-                    encode_manifest(&held)
-                },
-            );
+            .put(key, encode_manifest(&held));
         for id in added {
             batch = batch.put(
                 keys::inspection_hold(&self.repo.name, &id, advance),
@@ -126,50 +130,50 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
         Ok(batch)
     }
 
-    /// Complete kind-14 after all pages commit; until then serving treats all advance content as held.
-    /// Completing an empty materialization is valid.
+    /// Complete kind-14 in the ref shard after every repository page commits.
+    /// The caller serializes completion with its kind-14 progress/advance state.
+    /// Until this commits, serving treats all content of the advance as held.
+    /// # Errors Returns storage, corrupt marker, or missing/released advance errors.
     pub async fn plan_complete(&self, advance: &Hash) -> Result<Batch, StoreError> {
+        let manifest_key = keys::inspection_hold_manifest(&self.repo.name, advance);
+        let manifest = self.store.get(&self.partition, &manifest_key).await?;
+        if decode_manifest(manifest.as_ref())?.released {
+            return Err(StoreError::Invalid(
+                "advance inspection holds are released".into(),
+            ));
+        }
         let key = keys::inspection_hold_index(&self.repo.name, advance);
-        let prior = self.store.get(&self.partition, &key).await?;
-        let manifest = decode_manifest(prior.as_ref())?;
+        let prior = self.store.get(&self.advance_partition, &key).await?;
+        let value = prior
+            .as_ref()
+            .ok_or_else(|| StoreError::Invalid("missing advance hold".into()))?;
+        validate_advance_hold(value)?;
         let mut batch = Batch::new().require(manifest_guard(key.clone(), prior.as_ref()));
-        if prior.is_some()
-            && let HoldManifest::Materializing(ids) = manifest
-        {
-            batch = batch.put(key, encode_manifest(&ids));
+        if value.as_bytes() == [PENDING_HOLD_MARKER] {
+            batch = batch.put(key, Value::new(vec![1]));
         }
         batch.validate(&self.store.capabilities())?;
         Ok(batch)
     }
 
-    /// Plan a bounded release after the obligation ends; guard its terminal transition on the first page.
-    /// Repeat after commits until there are no writes; re-plan after CAS loss.
-    /// # Errors Invalid for unusable limits; corrupt for bad manifests; storage failures propagate.
+    /// Release one repository page after the caller durably ends the obligation in the ref shard.
+    /// The manifest becomes permanently released on the first page, fencing late kind-14 writes.
+    /// Re-plan after CAS loss; repeat until no writes, then remove the ref-level advance record.
+    /// # Errors Returns invalid bounds, corrupt manifests, or storage failures.
     pub async fn plan_release(&self, advance: &Hash) -> Result<Batch, StoreError> {
         let limit = self.batch_limit()?;
-        let key = keys::inspection_hold_index(&self.repo.name, advance);
+        let key = keys::inspection_hold_manifest(&self.repo.name, advance);
         let prior = self.store.get(&self.partition, &key).await?;
-        let mut held = match decode_manifest(prior.as_ref())? {
-            HoldManifest::Materializing(ids) | HoldManifest::Materialized(ids) => ids,
-        };
-        if held.is_empty() {
-            let mut batch = Batch::new().require(manifest_guard(key.clone(), prior.as_ref()));
-            if prior.is_some() {
-                batch = batch.delete(key);
-            }
-            batch.validate(&self.store.capabilities())?;
-            return Ok(batch);
-        }
+        let manifest = decode_manifest(prior.as_ref())?;
+        let mut held = manifest.ids;
         let released: Vec<_> = held.iter().take(limit).copied().collect();
         for id in &released {
             held.remove(id);
         }
         let mut batch = Batch::new().require(manifest_guard(key.clone(), prior.as_ref()));
-        batch = if held.is_empty() {
-            batch.delete(key)
-        } else {
-            batch.put(key, encode_manifest(&held))
-        };
+        if !manifest.released || !released.is_empty() {
+            batch = batch.put(key, encode_released(&held));
+        }
         for id in released {
             batch = batch.delete(keys::inspection_hold(&self.repo.name, &id, advance));
         }
@@ -177,8 +181,33 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
         Ok(batch)
     }
 
+    /// Remove the ref-level hold after repository release finishes; retain the repository tombstone.
+    /// Released manifests cannot gain new ids, so the completed release observation remains valid.
+    /// The caller guards its terminal advance state in this ref-shard apply.
+    /// # Errors Returns storage, corruption, or unfinished release errors.
+    pub async fn plan_release_advance(&self, advance: &Hash) -> Result<Batch, StoreError> {
+        let manifest_key = keys::inspection_hold_manifest(&self.repo.name, advance);
+        let manifest = self.store.get(&self.partition, &manifest_key).await?;
+        let manifest = decode_manifest(manifest.as_ref())?;
+        if !manifest.released || !manifest.ids.is_empty() {
+            return Err(StoreError::Invalid(
+                "repository hold release is incomplete".into(),
+            ));
+        }
+        let key = keys::inspection_hold_index(&self.repo.name, advance);
+        let prior = self.store.get(&self.advance_partition, &key).await?;
+        let mut batch = Batch::new().require(manifest_guard(key.clone(), prior.as_ref()));
+        if let Some(value) = prior.as_ref() {
+            validate_advance_hold(value)?;
+            batch = batch.delete(key);
+        }
+        batch.validate(&self.store.capabilities())?;
+        Ok(batch)
+    }
+
     /// Return sorted, deduplicated ids with forward rows; serving also checks pending advances.
-    /// Each id uses a sequential one-result prefix probe; reads are not a snapshot.
+    /// Each id probes the canonical repository partition with limit one, across all ref advances.
+    /// Reads are sequential, not a snapshot; pending ref-level advance records are checked by serving.
     /// # Errors Invalid above 256 ids; corrupt for malformed rows; storage failures propagate.
     pub async fn is_held(&self, ids: &[Hash]) -> Result<Vec<Hash>, StoreError> {
         if ids.len() > MAX_SCAN_RANGES {
@@ -224,31 +253,36 @@ fn manifest_guard(key: super::Key, prior: Option<&Value>) -> Precondition {
 }
 
 #[derive(Debug)]
-enum HoldManifest {
-    Materializing(BTreeSet<Hash>),
-    Materialized(BTreeSet<Hash>),
-}
-
-fn encode_pending_hold() -> Value {
-    Value::new(vec![PENDING_HOLD_MARKER])
-}
-
-fn encode_materializing(ids: &BTreeSet<Hash>) -> Value {
-    let mut bytes = Vec::with_capacity(2 + ids.len() * 32);
-    bytes.extend_from_slice(&[2, PENDING_HOLD_MARKER]);
-    for id in ids {
-        bytes.extend_from_slice(id);
-    }
-    Value::new(bytes)
+struct HoldManifest {
+    released: bool,
+    ids: BTreeSet<Hash>,
 }
 
 fn encode_manifest(ids: &BTreeSet<Hash>) -> Value {
+    encode_manifest_state(ids, false)
+}
+
+fn encode_released(ids: &BTreeSet<Hash>) -> Value {
+    encode_manifest_state(ids, true)
+}
+
+fn encode_manifest_state(ids: &BTreeSet<Hash>, released: bool) -> Value {
     let mut bytes = Vec::with_capacity(1 + ids.len() * 32);
-    bytes.push(1);
+    bytes.push(if released { 2 } else { 1 });
     for id in ids {
         bytes.extend_from_slice(id);
     }
     Value::new(bytes)
+}
+
+pub(crate) fn validate_advance_hold(value: &Value) -> Result<(), StoreError> {
+    if matches!(value.as_bytes(), [0 | 1]) {
+        Ok(())
+    } else {
+        Err(StoreError::Corrupt(
+            "invalid advance inspection hold".into(),
+        ))
+    }
 }
 
 pub(crate) fn validate_manifest(value: &Value) -> Result<(), StoreError> {
@@ -257,25 +291,20 @@ pub(crate) fn validate_manifest(value: &Value) -> Result<(), StoreError> {
 
 fn decode_manifest(value: Option<&Value>) -> Result<HoldManifest, StoreError> {
     let Some(value) = value else {
-        return Ok(HoldManifest::Materializing(BTreeSet::new()));
+        return Ok(HoldManifest {
+            released: false,
+            ids: BTreeSet::new(),
+        });
     };
-    let bytes = value.as_bytes();
-    if bytes == [PENDING_HOLD_MARKER] {
-        return Ok(HoldManifest::Materializing(BTreeSet::new()));
-    }
-    if bytes == [1] {
-        return Ok(HoldManifest::Materialized(BTreeSet::new()));
-    }
-    let (version, encoded_ids) = match bytes.first() {
-        Some(1) => (1, &bytes[1..]),
-        Some(2) if bytes.get(1) == Some(&PENDING_HOLD_MARKER) => (2, &bytes[2..]),
-        _ => {
-            return Err(StoreError::Corrupt(
-                "invalid inspection hold manifest".into(),
-            ));
-        }
+    let Some((&state, encoded_ids)) = value.as_bytes().split_first() else {
+        return Err(StoreError::Corrupt(
+            "invalid inspection hold manifest".into(),
+        ));
     };
-    if !encoded_ids.len().is_multiple_of(32) || encoded_ids.len() / 32 > MAX_HOLD_IDS_PER_ADVANCE {
+    if !matches!(state, 1 | 2)
+        || !encoded_ids.len().is_multiple_of(32)
+        || encoded_ids.len() / 32 > MAX_HOLD_IDS_PER_ADVANCE
+    {
         return Err(StoreError::Corrupt(
             "invalid inspection hold manifest".into(),
         ));
@@ -293,10 +322,9 @@ fn decode_manifest(value: Option<&Value>) -> Result<HoldManifest, StoreError> {
         ids.insert(id);
         last = Some(id);
     }
-    Ok(if version == 2 {
-        HoldManifest::Materializing(ids)
-    } else {
-        HoldManifest::Materialized(ids)
+    Ok(HoldManifest {
+        released: state == 2,
+        ids,
     })
 }
 

@@ -22,29 +22,38 @@ fn commit<S: NamespaceStore>(holds: &InspectionHolds<'_, S>, batch: Batch) {
     );
 }
 
+fn commit_advance<S: NamespaceStore>(holds: &InspectionHolds<'_, S>, batch: Batch) {
+    assert_eq!(
+        block_on(holds.store.apply(holds.advance_partition(), batch)).unwrap(),
+        BatchOutcome::Committed
+    );
+}
+
 #[test]
-fn releasing_one_advance_preserves_another_hold_in_single_and_d34() {
+fn repository_wide_cross_ref_holds_and_own_release_in_single_and_d34() {
     for shards in [
         &SinglePartition as &dyn ShardMap,
         &D34Shards as &dyn ShardMap,
     ] {
         let store = MemoryKv::default();
         let repo = repo();
-        let holds = InspectionHolds::new(&store, shards, &repo, "refs/heads/main");
+        let a = InspectionHolds::new(&store, shards, &repo, "refs/heads/a");
+        let b = InspectionHolds::new(&store, shards, &repo, "refs/heads/b");
+        assert_eq!(a.partition(), b.partition());
+        assert_eq!(*a.partition(), shards.object_index(&repo, &[0; 32]));
+        if matches!(a.partition(), Partition::RepoIndex { .. }) {
+            assert_ne!(a.advance_partition(), b.advance_partition());
+        }
         let content = [5; 32];
-        commit(
-            &holds,
-            block_on(holds.plan_holds(&[1; 32], &[content])).unwrap(),
-        );
-        commit(
-            &holds,
-            block_on(holds.plan_holds(&[2; 32], &[content])).unwrap(),
-        );
-        commit(&holds, block_on(holds.plan_release(&[1; 32])).unwrap());
-        assert_eq!(block_on(holds.is_held(&[content])).unwrap(), vec![content]);
+        commit(&a, block_on(a.plan_holds(&[1; 32], &[content])).unwrap());
+        assert_eq!(block_on(b.is_held(&[content])).unwrap(), vec![content]);
+        commit(&b, block_on(b.plan_holds(&[2; 32], &[content])).unwrap());
+        commit(&a, block_on(a.plan_release(&[1; 32])).unwrap());
+        assert_eq!(block_on(a.is_held(&[content])).unwrap(), vec![content]);
+        assert_eq!(block_on(b.is_held(&[content])).unwrap(), vec![content]);
         assert!(
             block_on(store.get(
-                holds.partition(),
+                a.partition(),
                 &keys::inspection_hold(&repo.name, &content, &[1; 32])
             ))
             .unwrap()
@@ -52,20 +61,26 @@ fn releasing_one_advance_preserves_another_hold_in_single_and_d34() {
         );
         assert!(
             block_on(store.get(
-                holds.partition(),
+                b.partition(),
                 &keys::inspection_hold(&repo.name, &content, &[2; 32])
             ))
             .unwrap()
             .is_some()
         );
-        commit(&holds, block_on(holds.plan_release(&[2; 32])).unwrap());
-        assert!(block_on(holds.is_held(&[content])).unwrap().is_empty());
+        commit(&b, block_on(b.plan_release(&[2; 32])).unwrap());
+        assert!(block_on(a.is_held(&[content])).unwrap().is_empty());
         assert!(
-            block_on(holds.plan_release(&[2; 32]))
+            block_on(b.plan_release(&[2; 32]))
                 .unwrap()
                 .writes
                 .is_empty()
         );
+        let other_repo = RepoId {
+            name: RepoName::new("other").unwrap(),
+            ..repo.clone()
+        };
+        let other = InspectionHolds::new(&store, shards, &other_repo, "refs/heads/a");
+        assert!(block_on(other.is_held(&[content])).unwrap().is_empty());
     }
 }
 
@@ -167,90 +182,181 @@ fn release_pages_and_limits_remain_within_the_portable_budget() {
 
 #[test]
 fn constant_cost_advance_hold_materializes_and_releases_content_rows() {
-    let store = MemoryKv::default();
-    let repo = repo();
-    let holds = InspectionHolds::new(&store, &D34Shards, &repo, "refs/heads/main");
-    let advance = [4; 32];
-    let marker = block_on(holds.plan_advance_hold(&advance)).unwrap();
-    assert_eq!(marker.preconditions.len() + marker.writes.len(), 2);
-    commit(&holds, marker);
-    let key = keys::inspection_hold_index(&repo.name, &advance);
-    assert_eq!(
-        block_on(store.get(holds.partition(), &key)).unwrap(),
-        Some(Value::new(vec![PENDING_HOLD_MARKER]))
-    );
-    assert!(
-        block_on(holds.plan_advance_hold(&advance))
+    for shards in [
+        &SinglePartition as &dyn ShardMap,
+        &D34Shards as &dyn ShardMap,
+    ] {
+        let store = MemoryKv::default();
+        let repo = repo();
+        let holds = InspectionHolds::new(&store, shards, &repo, "refs/heads/main");
+        let advance = [4; 32];
+        let marker = block_on(holds.plan_advance_hold(&advance)).unwrap();
+        assert_eq!(marker.preconditions.len() + marker.writes.len(), 2);
+        commit_advance(&holds, marker);
+        let key = keys::inspection_hold_index(&repo.name, &advance);
+        assert_eq!(
+            block_on(store.get(holds.advance_partition(), &key)).unwrap(),
+            Some(Value::new(vec![0]))
+        );
+        assert!(
+            block_on(holds.plan_advance_hold(&advance))
+                .unwrap()
+                .writes
+                .is_empty()
+        );
+        let materialized = block_on(holds.plan_holds(&advance, &[[6; 32], [7; 32]])).unwrap();
+        assert_eq!(
+            materialized.preconditions.len() + materialized.writes.len(),
+            4
+        );
+        commit(&holds, materialized);
+        assert_eq!(
+            block_on(store.get(holds.advance_partition(), &key)).unwrap(),
+            Some(Value::new(vec![0])),
+            "repository pages do not clear the pending ref-level fallback"
+        );
+        assert!(
+            block_on(store.get(
+                holds.partition(),
+                &keys::inspection_hold_manifest(&repo.name, &advance)
+            ))
             .unwrap()
-            .writes
-            .is_empty()
-    );
-    let cancel_advance = [5; 32];
-    commit(
-        &holds,
-        block_on(holds.plan_advance_hold(&cancel_advance)).unwrap(),
-    );
-    commit(
-        &holds,
-        block_on(holds.plan_release(&cancel_advance)).unwrap(),
-    );
-    assert!(
-        block_on(store.get(
-            holds.partition(),
-            &keys::inspection_hold_index(&repo.name, &cancel_advance)
-        ))
-        .unwrap()
-        .is_none()
-    );
-
-    let materialized = block_on(holds.plan_holds(&advance, &[[6; 32], [7; 32]])).unwrap();
-    assert_eq!(
-        materialized.preconditions.len() + materialized.writes.len(),
-        4
-    );
-    commit(&holds, materialized);
-    let in_progress = block_on(store.get(holds.partition(), &key))
-        .unwrap()
-        .unwrap();
-    assert_eq!(&in_progress.as_bytes()[..2], &[2, PENDING_HOLD_MARKER]);
-    assert_eq!(
-        block_on(holds.is_held(&[[6; 32], [7; 32]])).unwrap(),
-        vec![[6; 32], [7; 32]]
-    );
-    commit(&holds, block_on(holds.plan_complete(&advance)).unwrap());
-    let complete = block_on(store.get(holds.partition(), &key))
-        .unwrap()
-        .unwrap();
-    assert_eq!(complete.as_bytes()[0], 1);
-    commit(&holds, block_on(holds.plan_release(&advance)).unwrap());
-    assert!(
-        block_on(holds.is_held(&[[6; 32], [7; 32]]))
-            .unwrap()
-            .is_empty()
-    );
+            .is_some()
+        );
+        assert_eq!(
+            block_on(holds.is_held(&[[6; 32], [7; 32]])).unwrap(),
+            vec![[6; 32], [7; 32]]
+        );
+        commit_advance(&holds, block_on(holds.plan_complete(&advance)).unwrap());
+        assert_eq!(
+            block_on(store.get(holds.advance_partition(), &key)).unwrap(),
+            Some(Value::new(vec![1]))
+        );
+        commit(&holds, block_on(holds.plan_release(&advance)).unwrap());
+        commit_advance(
+            &holds,
+            block_on(holds.plan_release_advance(&advance)).unwrap(),
+        );
+        assert!(
+            block_on(holds.is_held(&[[6; 32], [7; 32]]))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            block_on(store.get(holds.advance_partition(), &key))
+                .unwrap()
+                .is_none()
+        );
+    }
 }
 
 #[test]
-fn completing_an_empty_materialization_clears_pending_fallback() {
-    let store = MemoryKv::default();
-    let repo = repo();
-    let holds = InspectionHolds::new(&store, &D34Shards, &repo, "refs/heads/main");
-    let advance = [8; 32];
-    commit(&holds, block_on(holds.plan_advance_hold(&advance)).unwrap());
-    let complete = block_on(holds.plan_complete(&advance)).unwrap();
-    assert_eq!(complete.preconditions.len() + complete.writes.len(), 2);
-    commit(&holds, complete);
-    let key = keys::inspection_hold_index(&repo.name, &advance);
-    assert_eq!(
-        block_on(store.get(holds.partition(), &key)).unwrap(),
-        Some(Value::new(vec![1]))
-    );
-    commit(&holds, block_on(holds.plan_release(&advance)).unwrap());
-    assert!(
-        block_on(store.get(holds.partition(), &key))
-            .unwrap()
-            .is_none()
-    );
+fn completing_and_releasing_empty_materialization_in_single_and_d34() {
+    for shards in [
+        &SinglePartition as &dyn ShardMap,
+        &D34Shards as &dyn ShardMap,
+    ] {
+        let store = MemoryKv::default();
+        let repo = repo();
+        let holds = InspectionHolds::new(&store, shards, &repo, "refs/heads/main");
+        let advance = [8; 32];
+        commit_advance(&holds, block_on(holds.plan_advance_hold(&advance)).unwrap());
+        let complete = block_on(holds.plan_complete(&advance)).unwrap();
+        assert_eq!(complete.preconditions.len() + complete.writes.len(), 2);
+        commit_advance(&holds, complete);
+        let key = keys::inspection_hold_index(&repo.name, &advance);
+        assert_eq!(
+            block_on(store.get(holds.advance_partition(), &key)).unwrap(),
+            Some(Value::new(vec![1]))
+        );
+        commit(&holds, block_on(holds.plan_release(&advance)).unwrap());
+        commit_advance(
+            &holds,
+            block_on(holds.plan_release_advance(&advance)).unwrap(),
+        );
+        assert!(
+            block_on(store.get(holds.advance_partition(), &key))
+                .unwrap()
+                .is_none()
+        );
+        let cancelled = [9; 32];
+        commit_advance(
+            &holds,
+            block_on(holds.plan_advance_hold(&cancelled)).unwrap(),
+        );
+        commit(&holds, block_on(holds.plan_release(&cancelled)).unwrap());
+        commit_advance(
+            &holds,
+            block_on(holds.plan_release_advance(&cancelled)).unwrap(),
+        );
+    }
+}
+
+#[test]
+fn release_fences_delayed_pages_and_preserves_fallback_until_cleanup_in_single_and_d34() {
+    for shards in [
+        &SinglePartition as &dyn ShardMap,
+        &D34Shards as &dyn ShardMap,
+    ] {
+        let store = MemoryKv::default();
+        let repo = repo();
+        let holds = InspectionHolds::new(&store, shards, &repo, "refs/heads/main");
+        let advance = [9; 32];
+        commit_advance(&holds, block_on(holds.plan_advance_hold(&advance)).unwrap());
+        let ids: Vec<Hash> = (0..150_u32)
+            .map(|i| {
+                let mut id = [0; 32];
+                id[..4].copy_from_slice(&i.to_be_bytes());
+                id
+            })
+            .collect();
+        for page in ids.chunks(MAX_HOLD_BATCH_IDS) {
+            commit(&holds, block_on(holds.plan_holds(&advance, page)).unwrap());
+        }
+        let delayed = block_on(holds.plan_holds(&advance, &[[255; 32]])).unwrap();
+        commit(&holds, block_on(holds.plan_release(&advance)).unwrap());
+        assert!(matches!(
+            block_on(store.apply(holds.partition(), delayed)).unwrap(),
+            BatchOutcome::PreconditionFailed { .. }
+        ));
+        assert!(matches!(
+            block_on(holds.plan_holds(&advance, &[[255; 32]])),
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(matches!(
+            block_on(holds.plan_release_advance(&advance)),
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(matches!(
+            block_on(holds.plan_complete(&advance)),
+            Err(StoreError::Invalid(_))
+        ));
+        let key = keys::inspection_hold_index(&repo.name, &advance);
+        assert_eq!(
+            block_on(store.get(holds.advance_partition(), &key)).unwrap(),
+            Some(Value::new(vec![0]))
+        );
+        commit(&holds, block_on(holds.plan_release(&advance)).unwrap());
+        commit_advance(
+            &holds,
+            block_on(holds.plan_release_advance(&advance)).unwrap(),
+        );
+        let manifest = keys::inspection_hold_manifest(&repo.name, &advance);
+        assert_eq!(
+            block_on(store.get(holds.partition(), &manifest)).unwrap(),
+            Some(Value::new(vec![2]))
+        );
+        assert!(matches!(
+            block_on(holds.plan_holds(&advance, &[[255; 32]])),
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(
+            block_on(holds.plan_release(&advance))
+                .unwrap()
+                .writes
+                .is_empty()
+        );
+    }
 }
 
 #[derive(Default)]
@@ -290,20 +396,26 @@ impl NamespaceStore for RecordingStore {
 
 #[test]
 fn prefix_probe_always_requests_one_even_with_many_advances() {
-    let store = RecordingStore::default();
-    let repo = repo();
-    let holds = InspectionHolds::new(&store, &SinglePartition, &repo, "refs/heads/main");
-    for i in 0..20 {
-        commit(
-            &holds,
-            block_on(holds.plan_holds(&[i; 32], &[[7; 32]])).unwrap(),
+    for shards in [
+        &SinglePartition as &dyn ShardMap,
+        &D34Shards as &dyn ShardMap,
+    ] {
+        let store = RecordingStore::default();
+        let repo = repo();
+        let holds = InspectionHolds::new(&store, shards, &repo, "refs/heads/a");
+        for i in 0..20 {
+            commit(
+                &holds,
+                block_on(holds.plan_holds(&[i; 32], &[[7; 32]])).unwrap(),
+            );
+        }
+        let reader = InspectionHolds::new(&store, shards, &repo, "refs/heads/b");
+        assert_eq!(
+            block_on(reader.is_held(&[[7; 32], [8; 32], [7; 32]])).unwrap(),
+            vec![[7; 32]]
         );
+        assert_eq!(*store.limits.lock().unwrap(), vec![1, 1]);
     }
-    assert_eq!(
-        block_on(holds.is_held(&[[7; 32], [8; 32], [7; 32]])).unwrap(),
-        vec![[7; 32]]
-    );
-    assert_eq!(*store.limits.lock().unwrap(), vec![1, 1]);
 }
 
 #[test]
@@ -311,10 +423,10 @@ fn corrupt_manifests_and_forward_rows_fail_closed() {
     let store = MemoryKv::default();
     let repo = repo();
     let holds = InspectionHolds::new(&store, &SinglePartition, &repo, "refs/heads/main");
-    let key = keys::inspection_hold_index(&repo.name, &[1; 32]);
+    let key = keys::inspection_hold_manifest(&repo.name, &[1; 32]);
     let values = [
         Value::default(),
-        Value::new(vec![2]),
+        Value::new(vec![3]),
         Value::new(vec![1, 0]),
         Value::new([vec![1], vec![0; 64]].concat()),
     ];
@@ -359,7 +471,7 @@ fn full_manifest_and_reserved_backend_operations_are_accounted_for() {
     commit(
         &holds,
         Batch::new().put(
-            keys::inspection_hold_index(&repo.name, &[1; 32]),
+            keys::inspection_hold_manifest(&repo.name, &[1; 32]),
             encode_manifest(&ids),
         ),
     );
@@ -384,7 +496,11 @@ fn no_op_plans_guard_the_observed_manifest() {
     let holds = InspectionHolds::new(&store, &SinglePartition, &repo, "refs/heads/main");
     let advance = [1; 32];
     let absent_release = block_on(holds.plan_release(&advance)).unwrap();
-    assert!(absent_release.writes.is_empty());
+    assert_eq!(
+        absent_release.writes.len(),
+        1,
+        "first release installs the permanent replay fence"
+    );
     commit(
         &holds,
         block_on(holds.plan_holds(&advance, &[[2; 32]])).unwrap(),
@@ -403,7 +519,7 @@ fn no_op_plans_guard_the_observed_manifest() {
 }
 
 #[test]
-fn release_reserves_space_for_the_callers_advance_apply() {
+fn release_reserves_space_for_the_callers_repository_apply() {
     let store = MemoryKv::default();
     let repo = repo();
     let holds = InspectionHolds::new(&store, &SinglePartition, &repo, "refs/heads/main");

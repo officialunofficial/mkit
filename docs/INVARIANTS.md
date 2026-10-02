@@ -2481,3 +2481,13 @@ registry change. **If violated:** existing deployments could acquire inspection
 semantics silently, or a concurrent flag update could be missed. **Enforced by:**
 the core `InspectionMode` and `InspectionFlags` stores, guarded compare-and-swap
 plans, restore/export validation, and Worker startup guard tests.
+
+## Repository-wide inspection holds (WP-5.5a-0 review)
+
+**Always:** Every ref's content holds share the canonical repository registry partition.
+A limit-one prefix probe sees any advance's hold under Single and D34. The separate
+ref-level record remains pending until kind-14 pages finish. Release removes only
+its own content rows; its retained released manifest prevents late pages from
+recreating them. The ref-level record is removed after repository cleanup.
+**Because:** ref routing must not hide another advance's serving stop.
+**Enforced by:** cross-ref hold/release, delayed materialization, and restore tests.

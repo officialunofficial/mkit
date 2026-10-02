@@ -16,8 +16,9 @@
 //! | durable inspection mode (root `Namespace` only) | `im 00` | UTF-8 `on`; absence means off |
 //! | repository inspection flag (canonical `RepoIndex` prefix 0 / Single Namespace) | `if 00 <repo> 00 <id:32>` | strict versioned flag |
 //! | inspection registry version (same partition) | `iv 00 <repo>` | be64 |
-//! | per-advance inspection hold (ref shard) | `ih 00 <repo> 00 <content:32> <advance:32>` | empty |
-//! | advance hold record/manifest (ref shard) | `ia 00 <repo> 00 <advance:32>` | v0 pending, v2 materializing ids, or v1 sorted content ids |
+//! | per-advance inspection hold (canonical repository registry partition) | `ih 00 <repo> 00 <content:32> <advance:32>` | empty |
+//! | advance hold record (ref shard) | `ia 00 <repo> 00 <advance:32>` | 0 pending or 1 complete |
+//! | repository hold release manifest (canonical registry partition) | `ir 00 <repo> 00 <advance:32>` | 1 active or 2 released, followed by sorted content ids |
 //! | layout version | `v 00` | be32 [`LAYOUT_VERSION`]; never on `RefsOnly` stores |
 //! | publication sequence and boundary | `pp 00 <repo> 00 <canonical ref>` | v1 `Publication` |
 //! | retained advance | `av 00 <repo> 00 <canonical ref> 00 <seq:be64>` | v1 `Advance` |
@@ -122,8 +123,10 @@ pub const TAG_INSPECTION_FLAG: &str = "if";
 pub const TAG_INSPECTION_VERSION: &str = "iv";
 /// Per-content, per-advance inspection hold.
 pub const TAG_INSPECTION_HOLD: &str = "ih";
-/// Per-advance inspection hold manifest.
+/// Ref-level advance inspection hold record.
 pub const TAG_INSPECTION_HOLD_INDEX: &str = "ia";
+/// Repository-level per-advance release manifest.
+pub const TAG_INSPECTION_HOLD_MANIFEST: &str = "ir";
 /// Ref tag.
 pub const TAG_REF: &str = "r";
 /// Ref-name index tag.
@@ -302,6 +305,8 @@ pub enum ParsedKey {
     },
     /// `ia 00 <repo> 00 <advance:32>`.
     InspectionHoldIndex { repo: RepoName, advance: Hash },
+    /// `ir 00 <repo> 00 <advance:32>`.
+    InspectionHoldManifest { repo: RepoName, advance: Hash },
     /// `v 00`.
     LayoutVersion,
     /// `nr 00`.
@@ -580,7 +585,7 @@ pub fn inspection_version(repo: &RepoName) -> Key {
     key(TAG_INSPECTION_VERSION, &[repo.as_str().as_bytes()])
 }
 
-/// An advance's independent hold on content, in its ref shard.
+/// An advance's independent hold on content, in the canonical repository registry partition.
 #[must_use]
 pub fn inspection_hold(repo: &RepoName, content: &Hash, advance: &Hash) -> Key {
     key(
@@ -600,11 +605,20 @@ pub fn inspection_hold_range(repo: &RepoName, content: &Hash) -> (Key, Key) {
     (start, end)
 }
 
-/// One bounded reverse manifest per advance, in its ref shard.
+/// The advance-level hold record, in its ref shard.
 #[must_use]
 pub fn inspection_hold_index(repo: &RepoName, advance: &Hash) -> Key {
     key(
         TAG_INSPECTION_HOLD_INDEX,
+        &[repo.as_str().as_bytes(), &[0], advance],
+    )
+}
+
+/// One bounded release manifest per advance, beside the repository-wide content holds.
+#[must_use]
+pub fn inspection_hold_manifest(repo: &RepoName, advance: &Hash) -> Key {
+    key(
+        TAG_INSPECTION_HOLD_MANIFEST,
         &[repo.as_str().as_bytes(), &[0], advance],
     )
 }
@@ -1302,7 +1316,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"am" if body.is_empty() => ParsedKey::AddressingMarker,
         b"im" if body.is_empty() => ParsedKey::InspectionMarker,
         b"iv" => ParsedKey::InspectionVersion(RepoName::new(text(body)?).ok()?),
-        b"if" | b"ih" | b"ia" => {
+        b"if" | b"ih" | b"ia" | b"ir" => {
             let sep = body.iter().position(|&b| b == 0)?;
             let repo = RepoName::new(text(&body[..sep])?).ok()?;
             let suffix = &body[sep + 1..];
@@ -1312,6 +1326,10 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
                     id: hash(suffix)?,
                 },
                 b"ia" => ParsedKey::InspectionHoldIndex {
+                    repo,
+                    advance: hash(suffix)?,
+                },
+                b"ir" => ParsedKey::InspectionHoldManifest {
                     repo,
                     advance: hash(suffix)?,
                 },
@@ -1553,6 +1571,7 @@ mod tests {
             TAG_INSPECTION_VERSION,
             TAG_INSPECTION_HOLD,
             TAG_INSPECTION_HOLD_INDEX,
+            TAG_INSPECTION_HOLD_MANIFEST,
             TAG_LAYOUT_VERSION,
             TAG_REF,
             TAG_REF_INDEX,
@@ -1643,6 +1662,14 @@ mod tests {
                 inspection_hold_index(&repository, &advance_id),
                 [&b"ia\0room\0"[..], &advance_id].concat(),
                 ParsedKey::InspectionHoldIndex {
+                    repo: repository.clone(),
+                    advance: advance_id,
+                },
+            ),
+            (
+                inspection_hold_manifest(&repository, &advance_id),
+                [&b"ir\0room\0"[..], &advance_id].concat(),
+                ParsedKey::InspectionHoldManifest {
                     repo: repository.clone(),
                     advance: advance_id,
                 },
