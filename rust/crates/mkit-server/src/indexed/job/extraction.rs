@@ -633,6 +633,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
                     self.remote,
                     self.h.shards.as_ref(),
                     self.h.clock.as_ref(),
+                    self.h.metrics.as_ref(),
                     &self.repo,
                     self.source,
                     &self.h.lease,

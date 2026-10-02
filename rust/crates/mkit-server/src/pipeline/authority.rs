@@ -87,7 +87,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     ))
                     .put(wanted[0].clone(), codec::encode_u64(current))
                     .put(wanted[1].clone(), codec::encode_lease_recovery(&mode));
-                match self.meta.apply(&p, batch).await.map_err(meta_error)? {
+                match self.apply_meta(&p, batch).await? {
                     crate::store::BatchOutcome::Committed => {}
                     crate::store::BatchOutcome::PreconditionFailed { .. } => continue,
                     crate::store::BatchOutcome::DeadlinePassed { .. } => {
@@ -119,7 +119,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ))
                 .require(crate::store::Precondition::Equals(wanted[1].clone(), prior))
                 .put(wanted[1].clone(), codec::encode_lease_recovery(&mode));
-            match self.meta.apply(&p, batch).await.map_err(meta_error)? {
+            match self.apply_meta(&p, batch).await? {
                 crate::store::BatchOutcome::Committed => return Ok(Some(current)),
                 crate::store::BatchOutcome::PreconditionFailed { .. } => {}
                 crate::store::BatchOutcome::DeadlinePassed { .. } => {

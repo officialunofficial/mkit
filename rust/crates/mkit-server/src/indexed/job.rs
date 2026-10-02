@@ -1615,6 +1615,7 @@ where
                         self.remote,
                         self.h.shards.as_ref(),
                         clock,
+                        self.h.metrics.as_ref(),
                         &self.repo,
                         self.source,
                         &self.h.lease,

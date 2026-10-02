@@ -388,7 +388,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     .unwrap_or(self.cfg.http_decode_budget)
                     .min(self.cfg.http_decode_budget),
             ),
-            false,
+            // Non-writer views never distinguish a stored but unprovable id
+            // from an unknown one.
+            !writer,
             max_bytes,
         )
         .await
@@ -408,7 +410,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         let mut output_left = max_bytes
             .unwrap_or(self.cfg.http_decode_budget)
             .min(self.cfg.http_decode_budget);
-        let limited = max_bytes.is_some();
+        let limited = max_bytes.is_some() && !capped_as_absent;
         let pipe = self.pipe;
         let (cfg, indexed, seams) = (self.cfg, self.indexed, self.seams);
         let meta = Budgeted::new(&pipe.meta, calls);
@@ -455,7 +457,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         let mut fresh = BTreeSet::new();
         if !writer && !pipe.cfg.takedown_denial {
             for id in &targets {
-                calls.charge().map_err(failure)?;
+                if let Err(e) = calls.charge() {
+                    if capped_as_absent {
+                        break;
+                    }
+                    return Err(failure(e));
+                }
                 if seams
                     .reachability
                     .known_reachable(&self.repo, id, ms(pipe.clock.now_ms()))
@@ -467,18 +474,26 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         }
         targets.retain(|id| !reached.contains(id));
         if !targets.is_empty() {
-            let (tips, truncated) = pipe
+            let tips = pipe
                 .reader_tips(&meta, &self.repo, cfg.max_walk_objects, writer)
-                .await
-                .map_err(|e| http_failure(&e))?;
+                .await;
+            // A spent call budget is an unprovable proof, not a store fault.
+            let (tips, truncated) = match tips {
+                Err(_) if capped_as_absent && calls.remaining() == 0 => (Vec::new(), true),
+                other => other.map_err(|e| http_failure(&e))?,
+            };
             if truncated && sizes_only && !capped_as_absent {
                 return Err(failure(resolve::Miss::Capped));
             }
             if !truncated {
-                let (found, incomplete) =
-                    reach::walk_many(&env, seams.takedown.as_ref(), &tips, &targets, decode)
-                        .await
-                        .map_err(|e| resolution_failure(e, limited))?;
+                let walked =
+                    reach::walk_many(&env, seams.takedown.as_ref(), &tips, &targets, decode).await;
+                let (found, incomplete) = match walked {
+                    Err(_) if capped_as_absent && calls.remaining() == 0 => {
+                        (BTreeSet::new(), Some(resolve::Miss::Capped))
+                    }
+                    other => other.map_err(|e| resolution_failure(e, limited))?,
+                };
                 if limited && incomplete == Some(resolve::Miss::Capped) {
                     return Err(exhausted());
                 }

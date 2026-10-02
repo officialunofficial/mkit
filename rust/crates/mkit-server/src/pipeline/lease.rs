@@ -442,8 +442,17 @@ async fn read_lease_rows<L: NamespaceStore, M: NamespaceStore>(
 /// commit deadline and the margin fit in it.
 const RELAY_LEASE_BUDGET_MS: u64 = 15_000;
 
-fn relay_apply_error(partition: &Partition, error: StoreError) -> ServerError {
+fn relay_apply_error(
+    metrics: &dyn crate::telemetry::Metrics,
+    partition: &Partition,
+    error: StoreError,
+) -> ServerError {
     if matches!(error, StoreError::Full) {
+        metrics.incr(
+            super::METRIC_PARTITION_FULL,
+            &[("kind", partition.kind())],
+            1,
+        );
         tracing::error!(kind = partition.kind(), "storage partition full");
         ServerError::unavailable("storage partition full")
     } else {
@@ -470,6 +479,7 @@ pub async fn renew_for_relay<L: NamespaceStore, M: NamespaceStore>(
     meta: &M,
     shards: &dyn ShardMap,
     clock: &dyn Clock,
+    metrics: &dyn crate::telemetry::Metrics,
     repo: &RepoId,
     p: &Partition,
     params: &LeaseParams,
@@ -518,7 +528,7 @@ pub async fn renew_for_relay<L: NamespaceStore, M: NamespaceStore>(
         match meta
             .apply(&coordinator, grant.batch)
             .await
-            .map_err(|error| relay_apply_error(&coordinator, error))?
+            .map_err(|error| relay_apply_error(metrics, &coordinator, error))?
         {
             BatchOutcome::Committed => {}
             BatchOutcome::PreconditionFailed { .. } => continue,
@@ -535,7 +545,7 @@ pub async fn renew_for_relay<L: NamespaceStore, M: NamespaceStore>(
             local
                 .apply(p, install)
                 .await
-                .map_err(|error| relay_apply_error(p, error))?,
+                .map_err(|error| relay_apply_error(metrics, p, error))?,
             BatchOutcome::Committed
         ) {
             return Ok(value);

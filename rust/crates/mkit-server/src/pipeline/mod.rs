@@ -4147,6 +4147,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         Ok(snap)
     }
 
+    /// Apply a batch, typing a full partition as retryable `unavailable`.
+    async fn apply_meta(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, ServerError> {
+        match self.meta.apply(p, batch).await {
+            Ok(outcome) => Ok(outcome),
+            Err(StoreError::Full) => Err(self.partition_full(p, None).await),
+            Err(error) => Err(meta_error(error)),
+        }
+    }
+
     /// A full partition: count it, retry the prune alone (deletes still
     /// work) and fail closed with a retryable `unavailable`.
     async fn partition_full(&self, p: &Partition, prune: Option<Batch>) -> ServerError {
