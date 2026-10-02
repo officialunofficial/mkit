@@ -73,7 +73,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
 const MIB: usize = 1 << 20;
 const PREFIX_OBJECTS: usize = 8;
-const CANONICAL_DATA_BYTES: usize = MIB - 16;
+const CANONICAL_DATA_BYTES: usize = MIB;
 const NOW: u64 = 1_700_000_000_000;
 
 /// An immutable backend fixture. The stored pack is seeded before measurement,
@@ -124,7 +124,10 @@ fn raw_entry(pack: &mut Vec<u8>, tag: u8) -> usize {
         data: vec![tag; CANONICAL_DATA_BYTES],
     }))
     .unwrap();
-    assert!(raw.len() < MIB);
+    assert_eq!(
+        raw.len() as u64,
+        mkit_server::indexed::geometry::CANONICAL_BYTES
+    );
     pack.push(0);
     pack.extend_from_slice(&u32::try_from(raw.len()).unwrap().to_le_bytes());
     pack.extend_from_slice(&raw);
@@ -161,7 +164,10 @@ fn fixture() -> (Vec<u8>, usize) {
     for tag in 0..PREFIX_OBJECTS {
         retained_canonical_bytes += raw_entry(&mut pack, u8::try_from(tag).unwrap());
     }
-    assert!(retained_canonical_bytes <= 8 * MIB);
+    assert_eq!(
+        retained_canonical_bytes as u64,
+        8 * mkit_server::indexed::geometry::CANONICAL_BYTES
+    );
     assert!(retained_canonical_bytes > 8 * MIB - 1024);
     rle_history_entry(&mut pack);
     // The backend's first real acquisition must cover a full 16 MiB window;
@@ -196,14 +202,14 @@ fn scheduled_ruzstd_slice_retains_at_most_48_mib_requested_heap() {
     let (pack, retained) = fixture();
     measure(pack, retained, SliceLimits::default(), PREFIX_OBJECTS, true);
 
-    // Preserve the original custom 64 KiB geometry's near-five-MiB admission.
+    // A smaller read window must not widen the shared canonical admission.
     let limits = SliceLimits {
         window_bytes: 64 << 10,
         ..SliceLimits::default()
     };
-    let admitted = (limits.resident_bytes - 2 * limits.window_bytes - (8 << 20)) / 8;
+    let admitted = mkit_server::indexed::geometry::CANONICAL_BYTES;
     let canonical = serialize(&Object::Blob(Blob {
-        data: vec![7; usize::try_from(admitted).unwrap() - 128],
+        data: vec![7; usize::try_from(admitted).unwrap() - 10],
     }))
     .unwrap();
     let mut writer = PackWriter::new_raw_only();
@@ -230,7 +236,20 @@ fn scheduled_ruzstd_slice_retains_at_most_48_mib_requested_heap() {
     pack.extend_from_slice(&frame);
     let trailer = hash(&pack);
     pack.extend_from_slice(&trailer);
-    measure(pack, canonical.len(), SliceLimits::default(), 1, false);
+    // Force the large encoded frame to straddle a window, retaining prefix
+    // entries. The transferred read buffer and released idle window must fit.
+    let trailer = pack.split_off(pack.len() - 32);
+    drop(trailer);
+    let encoded = pack.split_off(12);
+    pack[8..12].copy_from_slice(&13_u32.to_le_bytes());
+    for tag in 0..12 {
+        raw_entry(&mut pack, tag);
+    }
+    assert!((pack.len() as u64) < SliceLimits::default().window_bytes);
+    pack.extend_from_slice(&encoded);
+    assert!((pack.len() as u64) > SliceLimits::default().window_bytes);
+    pack.extend_from_slice(&hash(&pack));
+    measure(pack, canonical.len(), SliceLimits::default(), 13, false);
 
     // A valid wide-wire base is later corrupted during its separate ranged
     // reacquisition. The outer yielded delta and LRU remain live; the idle
@@ -472,8 +491,7 @@ fn custom_nested_case() {
         window_bytes: 64 << 10,
         ..SliceLimits::default()
     };
-    let cap =
-        usize::try_from((limits.resident_bytes - 2 * limits.window_bytes - (8 << 20)) / 8).unwrap();
+    let cap = usize::try_from(mkit_server::indexed::geometry::CANONICAL_BYTES).unwrap();
     let base = serialize(&Object::Blob(Blob {
         data: vec![7; cap - 256],
     }))

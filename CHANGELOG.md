@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Indexed verification, extraction and preservation count canonical Blob framing
+  around the 1 MiB payload boundary while retaining the 48 MiB slice allowance.
+
 - Server conformance: add a debug-only memory-backed in-process HTTP host for
   contract tests, with origin-bound auth-v2, signed loopback hook support, and
   an explicitly advanced manual clock.
