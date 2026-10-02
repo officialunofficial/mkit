@@ -1,3 +1,11 @@
+///Shorthand for `OwnedView<ListReposRequestView<'static>>`.
+pub type OwnedListReposRequestView = ::buffa::view::OwnedView<
+    __buffa::view::ListReposRequestView<'static>,
+>;
+///Shorthand for `OwnedView<ListReposResponseView<'static>>`.
+pub type OwnedListReposResponseView = ::buffa::view::OwnedView<
+    __buffa::view::ListReposResponseView<'static>,
+>;
 ///Shorthand for `OwnedView<ListRefsRequestView<'static>>`.
 pub type OwnedListRefsRequestView = ::buffa::view::OwnedView<
     __buffa::view::ListRefsRequestView<'static>,
@@ -142,6 +150,38 @@ pub type OwnedIssueObjectUrlRequestView = ::buffa::view::OwnedView<
 pub type OwnedIssueObjectUrlResponseView = ::buffa::view::OwnedView<
     __buffa::view::IssueObjectUrlResponseView<'static>,
 >;
+impl ::connectrpc::Encodable<ListReposResponse>
+for __buffa::view::ListReposResponseView<'_> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<ListReposResponse>
+for ::buffa::view::OwnedView<__buffa::view::ListReposResponseView<'static>> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
+}
 impl ::connectrpc::Encodable<ListRefsResponse>
 for __buffa::view::ListRefsResponseView<'_> {
     fn encode(
@@ -724,6 +764,12 @@ for ::buffa::view::OwnedView<__buffa::view::IssueObjectUrlResponseView<'static>>
 }
 /// Full service name for this service.
 pub const TRANSPORT_SERVICE_SERVICE_NAME: &str = "mkit.transport.v1.TransportService";
+/// Static [`Spec`](::connectrpc::Spec) for the `ListRepos` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
+pub const TRANSPORT_SERVICE_LIST_REPOS_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+        "/mkit.transport.v1.TransportService/ListRepos",
+        ::connectrpc::StreamType::Unary,
+    )
+    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
 /// Static [`Spec`](::connectrpc::Spec) for the `ListRefs` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const TRANSPORT_SERVICE_LIST_REFS_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.transport.v1.TransportService/ListRefs",
@@ -883,6 +929,24 @@ pub const TRANSPORT_SERVICE_ISSUE_OBJECT_URL_SPEC: ::connectrpc::Spec = ::connec
 /// example` doc.
 #[allow(clippy::type_complexity)]
 pub trait TransportService: Send + Sync + 'static {
+    /// List readable repository names in a namespace (STC §7.10).
+    ///
+    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
+    ///
+    /// `request` is borrowed from the request body and is valid for the
+    /// duration of the call; message fields are read directly on it
+    /// (zero-copy). The response cannot borrow from `request` — use
+    /// `.to_owned_message()` (or copy the specific fields) for anything
+    /// returned, stored, or moved into `tokio::spawn`.
+    fn list_repos<'a>(
+        &'a self,
+        ctx: ::connectrpc::RequestContext,
+        request: ::connectrpc::ServiceRequest<'_, ListReposRequest>,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            impl ::connectrpc::Encodable<ListReposResponse> + Send + use<'a, Self>,
+        >,
+    > + Send;
     /// List refs whose full name starts with `prefix`. Returned names have
     /// `prefix` stripped, per SPEC-REFS §4. An empty prefix lists every ref.
     ///
@@ -1260,6 +1324,31 @@ impl<S: TransportService> TransportServiceExt for S {
         router: ::connectrpc::Router,
     ) -> ::connectrpc::Router {
         router
+            .route_view(
+                TRANSPORT_SERVICE_SERVICE_NAME,
+                "ListRepos",
+                {
+                    let svc = ::std::sync::Arc::clone(&self);
+                    ::connectrpc::view_handler_fn(move |
+                        ctx,
+                        req: ::buffa::view::OwnedView<
+                            __buffa::view::ListReposRequestView<'static>,
+                        >,
+                        format|
+                    {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            let sreq = ::connectrpc::ServiceRequest::<
+                                ListReposRequest,
+                            >::from_parts(req.reborrow(), req.bytes());
+                            svc.list_repos(ctx, sreq)
+                                .await?
+                                .encode::<ListReposResponse>(format)
+                        }
+                    })
+                },
+            )
+            .with_spec(TRANSPORT_SERVICE_LIST_REPOS_SPEC)
             .route_view(
                 TRANSPORT_SERVICE_SERVICE_NAME,
                 "ListRefs",
@@ -1753,6 +1842,12 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
     ) -> Option<::connectrpc::dispatcher::codegen::MethodDescriptor> {
         let method = path.strip_prefix("mkit.transport.v1.TransportService/")?;
         match method {
+            "ListRepos" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
+                        .with_spec(TRANSPORT_SERVICE_LIST_REPOS_SPEC),
+                )
+            }
             "ListRefs" => {
                 Some(
                     ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
@@ -1876,6 +1971,22 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
         };
         let _ = (&ctx, &request, &format);
         match method {
+            "ListRepos" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        ListReposRequest,
+                    >(request.encoded()?, format)?;
+                    let req: __buffa::view::ListReposRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                        &body,
+                        ctx.decode_options(),
+                    )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        ListReposRequest,
+                    >::from_parts(&req, &body);
+                    svc.list_repos(ctx, req).await?.encode::<ListReposResponse>(format)
+                })
+            }
             "ListRefs" => {
                 let svc = ::std::sync::Arc::clone(&self.inner);
                 Box::pin(async move {
@@ -2249,7 +2360,7 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
 /// let config = ClientConfig::new(uri).with_protocol(Protocol::Grpc);
 ///
 /// let client = TransportServiceClient::new(conn, config);
-/// let response = client.list_refs(request).await?;
+/// let response = client.list_repos(request).await?;
 /// ```
 ///
 /// # Example (Connect / HTTP/1.1 or ALPN)
@@ -2261,7 +2372,7 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
 /// let config = ClientConfig::new("http://localhost:8080".parse()?);
 ///
 /// let client = TransportServiceClient::new(http, config);
-/// let response = client.list_refs(request).await?;
+/// let response = client.list_repos(request).await?;
 /// ```
 ///
 /// # Working with the response
@@ -2271,7 +2382,7 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
 /// message, so field access is zero-copy:
 ///
 /// ```rust,ignore
-/// let resp = client.list_refs(request).await?;
+/// let resp = client.list_repos(request).await?;
 /// let name: &str = resp.view().name;  // borrow into the response buffer
 /// ```
 ///
@@ -2279,7 +2390,7 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
 /// [`into_owned()`](::connectrpc::client::UnaryResponse::into_owned):
 ///
 /// ```rust,ignore
-/// let owned = client.list_refs(request).await?.into_owned();
+/// let owned = client.list_repos(request).await?.into_owned();
 /// ```
 ///
 /// [`into_view()`](::connectrpc::client::UnaryResponse::into_view) keeps the
@@ -2309,6 +2420,43 @@ where
     /// Get a mutable reference to the client configuration.
     pub fn config_mut(&mut self) -> &mut ::connectrpc::client::ClientConfig {
         &mut self.config
+    }
+    /// Call the ListRepos RPC. Sends a request to /mkit.transport.v1.TransportService/ListRepos.
+    pub async fn list_repos(
+        &self,
+        request: ListReposRequest,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::ListReposResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.list_repos_with_options(
+                request,
+                ::connectrpc::client::CallOptions::default(),
+            )
+            .await
+    }
+    /// Call the ListRepos RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    pub async fn list_repos_with_options(
+        &self,
+        request: ListReposRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::ListReposResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_unary(
+                &self.transport,
+                &self.config,
+                TRANSPORT_SERVICE_LIST_REPOS_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
+                request,
+                options,
+            )
+            .await
     }
     /// Call the ListRefs RPC. Sends a request to /mkit.transport.v1.TransportService/ListRefs.
     pub async fn list_refs(

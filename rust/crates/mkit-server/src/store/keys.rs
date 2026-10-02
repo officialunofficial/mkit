@@ -36,6 +36,7 @@
 //! | coordinator source cumulative | `qc 00 <window:be64> <Partition::encode(source)>` | codec `NamespaceUsage` |
 //! | coordinator namespace total | `qt 00 <window:be64>` | codec `NamespaceUsage` |
 //! | namespace record (`Coordinator`) | `nr 00` | codec `NamespaceRecord` |
+//! | repository listing index (`Coordinator`) | `rl 00 p/d 00 <repo>` | empty; explicit public / inherited |
 //! | repo record (`Coordinator`) | `rr 00 <repo>` | codec `RepoRecord` |
 //! | repository visibility (`Coordinator`) | `rv 00 <repo>` | codec `RepoVisibilityV1`; absent uses the deployment default |
 //! | repo-known marker (ref shard) | `rk 00 <repo>` | empty |
@@ -186,6 +187,8 @@ pub const TAG_REPO_KNOWN: &str = "rk";
 /// Repo registry tag: one row per repo of the namespace, in its
 /// coordinator partition. Bounded by repos, not refs.
 pub const TAG_REPO_REGISTRY: &str = "rr";
+/// Coordinator listing index: `rl 00 p/d 00 <repo>` (explicit public / inherited).
+pub const TAG_REPO_LIST: &str = "rl";
 /// Repository visibility tag (`Coordinator`): absent uses the deployment default; the
 /// row may exist without `rr` (SPEC-WRITE-GRANTS §9.1).
 pub const TAG_REPO_VISIBILITY: &str = "rv";
@@ -313,6 +316,11 @@ pub enum ParsedKey {
     NamespaceRecord,
     /// `rr 00 <repo>`.
     RepoRecord(RepoName),
+    /// `rl 00 p/d 00 <repo>`; index values are empty.
+    RepoListing {
+        explicit_public: bool,
+        repo: RepoName,
+    },
     /// `rv 00 <repo>`.
     RepoVisibility(RepoName),
     /// `rk 00 <repo>`.
@@ -633,6 +641,23 @@ pub fn namespace_record() -> Key {
 #[must_use]
 pub fn repo_record(repo: &RepoName) -> Key {
     key(TAG_REPO_REGISTRY, &[repo.as_str().as_bytes()])
+}
+
+/// Listing prefix shared by one coordinator's explicit-public or inherited repositories.
+#[must_use]
+pub fn repo_listing_prefix(explicit_public: bool) -> Key {
+    key(
+        TAG_REPO_LIST,
+        &[if explicit_public { b"p" } else { b"d" }, &[0]],
+    )
+}
+
+/// One registered repository's listing index row.
+#[must_use]
+pub fn repo_listing(repo: &RepoName, explicit_public: bool) -> Key {
+    let mut bytes = repo_listing_prefix(explicit_public).as_bytes().to_vec();
+    bytes.extend_from_slice(repo.as_str().as_bytes());
+    Key::new(bytes)
 }
 
 /// `rv 00 <repo>`: the repository's visibility row in its coordinator.
@@ -1354,6 +1379,10 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"ls" => parse_leased_shard(body)?,
         b"nr" if body.is_empty() => ParsedKey::NamespaceRecord,
         b"rr" => ParsedKey::RepoRecord(RepoName::new(text(body)?).ok()?),
+        b"rl" if body.starts_with(b"p\0") || body.starts_with(b"d\0") => ParsedKey::RepoListing {
+            explicit_public: body[0] == b'p',
+            repo: RepoName::new(text(&body[2..])?).ok()?,
+        },
         b"rv" => ParsedKey::RepoVisibility(RepoName::new(text(body)?).ok()?),
         b"rh" => ParsedKey::RelayHighWater(Partition::decode(body).ok()?),
         b"rs" if body.is_empty() => ParsedKey::RelayScan,
@@ -1596,6 +1625,7 @@ mod tests {
             TAG_OBJECT_STATE,
             TAG_NAMESPACE_RECORD,
             TAG_REPO_REGISTRY,
+            TAG_REPO_LIST,
             TAG_REPO_VISIBILITY,
             TAG_REPO_KNOWN,
             TAG_RELAY_HIGH_WATER,
@@ -2284,6 +2314,29 @@ mod tests {
             })
         );
     }
+    #[test]
+    fn repo_listing_subkeys_are_sorted_and_strict() {
+        let repo = RepoName::new("repo-a").unwrap();
+        for explicit_public in [false, true] {
+            let key = repo_listing(&repo, explicit_public);
+            assert!(
+                key.as_bytes()
+                    .starts_with(repo_listing_prefix(explicit_public).as_bytes())
+            );
+            assert_eq!(
+                parse(&key),
+                Some(ParsedKey::RepoListing {
+                    explicit_public,
+                    repo: repo.clone()
+                })
+            );
+            assert!(key < repo_listing(&RepoName::new("repo-b").unwrap(), explicit_public));
+        }
+        for bytes in [b"rl\0x\0repo-a".as_slice(), b"rl\0p\0", b"rl\0d\0bad\0name"] {
+            assert_eq!(parse(&Key::new(bytes.to_vec())), None);
+        }
+    }
+
     #[test]
     fn repo_visibility_key_roundtrips() {
         let key = repo_visibility(&repo("room-a"));

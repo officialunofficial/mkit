@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: add `ListRepos`, with bounded namespace-name pagination and authenticated
+  continuation tokens. Atomic coordinator visibility indexes hide private names
+  from public listings; owners and approved namespace authorities list all repos.
+  Grants retain public listing rights only. Fresh stores are required.
 - Deprecated `mkit-transport-enc`: no maintained server; use SSH (`mkit serve`)
   or Connect.
 - HTTP ref-path files: serve MP4, WebM, MP3, Ogg, WAV, HEIC, Markdown and CSV

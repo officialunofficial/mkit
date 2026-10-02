@@ -323,6 +323,28 @@ async fn d34_multi_addressing_runs_membership_wire_cases_against_the_host() {
     host.shutdown().await;
 }
 
+#[tokio::test]
+async fn list_repos_wire_case_runs_with_single_and_d34_sharding() {
+    for sharding_d34 in [false, true] {
+        let mut profile = auth_v2_profile();
+        profile.milestone = Milestone::M2;
+        profile.sharding_d34 = sharding_d34;
+        profile.atomic_advance = true;
+        profile.sign_reads = true;
+        profile.features.insert(Feature::MultiRepo);
+        profile.features.insert(Feature::Tickets);
+        profile.derive_features();
+        let host = TestHost::start(profile).await.unwrap();
+        let report = run(&target(&host), Some("repo.list_repos")).await;
+        assert!(
+            matches!(report.verdict("repo.list_repos"), Some(Verdict::Pass(_))),
+            "{}",
+            report.tap()
+        );
+        host.shutdown().await;
+    }
+}
+
 /// Drive the same push/clone/fetch dispatch used by the `mkit` CLI against
 /// the host's real HTTP Connect listener.
 #[tokio::test]

@@ -8,6 +8,7 @@ mod grants;
 mod http_objects;
 mod indexed;
 mod info;
+mod list_repos;
 mod policy;
 mod ref_policy;
 #[cfg(feature = "remote-hooks")]
@@ -578,6 +579,8 @@ type AfterApplyHook = Box<dyn Fn(&MemoryKv, &Partition, &Batch, &BatchOutcome) +
 
 type ApplyHook = Box<dyn Fn(&MemoryKv, &Partition, &Batch) + Send + Sync>;
 type ScanHook = Box<dyn Fn(&MemoryKv, &Partition) + Send + Sync>;
+type ScanPageHook =
+    Box<dyn Fn(&Key, Option<&crate::store::Cursor>, ScanPage) -> ScanPage + Send + Sync>;
 type ReadManyHook = Box<dyn Fn(&MemoryKv, &Partition, &[Key]) + Send + Sync>;
 
 /// A `MemoryKv` that records every key it sees and batch it applies, can
@@ -589,9 +592,12 @@ struct Spy {
     hook: Option<ApplyHook>,
     after_hook: Option<AfterApplyHook>,
     scan_hook: Option<ScanHook>,
+    scan_page_hook: Option<ScanPageHook>,
     read_many_hook: Option<ReadManyHook>,
     yields: bool,
     fail_reads: bool,
+    fail_read_many: bool,
+    scan_limit: Option<u32>,
     seen: Mutex<Vec<Key>>,
     ops: Mutex<Vec<&'static str>>,
     batches: Mutex<Vec<Batch>>,
@@ -607,9 +613,12 @@ impl Spy {
             hook: None,
             after_hook: None,
             scan_hook: None,
+            scan_page_hook: None,
             read_many_hook: None,
             yields: false,
             fail_reads: false,
+            fail_read_many: false,
+            scan_limit: None,
             seen: Mutex::default(),
             ops: Mutex::default(),
             batches: Mutex::default(),
@@ -688,6 +697,9 @@ impl NamespaceStore for Spy {
         keys: &[Key],
     ) -> Result<Vec<Option<Value>>, StoreError> {
         self.pause("get_many").await;
+        if self.fail_read_many {
+            return Err(StoreError::unavailable("injected get_many fault"));
+        }
         if let Some(hook) = &self.read_many_hook {
             hook(&self.inner, p, keys);
         }
@@ -712,7 +724,20 @@ impl NamespaceStore for Spy {
         }
         self.maybe_fail_read()?;
         self.saw(start);
-        self.inner.scan(p, start, end, after, limit).await
+        let page = self
+            .inner
+            .scan(
+                p,
+                start,
+                end,
+                after,
+                self.scan_limit.map_or(limit, |cap| limit.min(cap)),
+            )
+            .await?;
+        Ok(self
+            .scan_page_hook
+            .as_ref()
+            .map_or_else(|| page.clone(), |hook| hook(start, after, page.clone())))
     }
 
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {

@@ -43,7 +43,7 @@ pub struct RepoRecord {
 }
 
 /// A repository's stored visibility (SPEC-WRITE-GRANTS §9.1). A missing
-/// `rv` row means `public`; the row may exist before `rr` does.
+/// `rv` row inherits the deployment default; the row may exist before `rr` does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepoVisibilityV1 {

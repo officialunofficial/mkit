@@ -208,6 +208,16 @@ impl TestService {
 
 #[allow(refining_impl_trait)]
 impl generated::TransportService for TestService {
+    async fn list_repos(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::ListReposRequest>,
+    ) -> ServiceResult<generated::ListReposResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "unused test method",
+        ))
+    }
+
     async fn get_receipt(
         &self,
         _ctx: RequestContext,

@@ -51,6 +51,8 @@ mod info;
 pub mod inspection;
 mod lease;
 pub mod list;
+mod list_repos;
+pub use list_repos::{RepoEntry, RepoPage};
 mod outcome;
 mod parts;
 mod plan;
@@ -261,6 +263,9 @@ pub struct PipelineConfig {
     pub default_repo_visibility: RepoVisibility,
     /// Role of the authorizer hook, defaulting to an additional check.
     pub authorizer_role: AuthorizerRole,
+    /// Opt in to namespace-wide `ListRepos` authority grants, requiring returned writer view.
+    /// Default false: non-owner authority callers receive only the public listing.
+    pub list_repos_authority_full: bool,
     /// Upload caps, supplied by the binding (used by M0-05b).
     pub upload_limits: UploadLimits,
     /// Optional tighter cap for legacy single-part `UploadPack` requests.
@@ -358,6 +363,7 @@ impl PipelineConfig {
             write_policy,
             default_repo_visibility: RepoVisibility::Public,
             authorizer_role: AuthorizerRole::Check,
+            list_repos_authority_full: false,
             addressing,
             sharding: Sharding::Single,
             inspection_mode: false,
@@ -1953,6 +1959,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 keys::replay_expiry(ms(auth.expires_at_ms), &auth.replay_scope),
                 Value::default(),
             );
+        self.plan_listing_visibility(p, repo, &mut batch).await?;
         let expired = read::expired_replay_keys(&self.meta, p, now, 32)
             .await
             .map_err(meta_error)?;
@@ -2054,6 +2061,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         last_statement_id: Some(id.clone()),
                     }),
                 );
+            self.plan_listing_visibility(p, repo, &mut batch).await?;
             let purge = self
                 .plan_repository_purge(
                     p,

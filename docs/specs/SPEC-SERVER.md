@@ -349,6 +349,17 @@ requires; remote Allow does not bypass them.
 | `owner` | Whether the principal owns the namespace under STC §7.5 rule 1; set on both Authorize and Admit requests. |
 | `grant` | The write grant used under STC §7.5 rule 2, if any, and its checked epoch; set on both Authorize and Admit requests. |
 
+For `ListRepos`, `operation.repository` is an arbitrary caller-chosen selector
+within the requested namespace, and its repository name need not exist. The
+operation is **namespace-scoped**, as STC §7.10 requires. A repository-specific
+read allowance MUST NOT imply permission to enumerate other private names.
+Non-owner authority callers retain the public listing unless the deployment
+explicitly opts in with `PipelineConfig::list_repos_authority_full` (default
+false) and the hook Allow returns `writer_view = true` for the entire namespace.
+Authority `permission_denied`/`not_found` denials select the public listing even
+for the owner; hook failures fail closed. A Check hook cannot widen any listing
+view and its denial or failure propagates.
+
 For plain HTTP reads, `procedure` MUST be `/mkit.http.v1/GetObject` or
 `/mkit.http.v1/GetRefPath`, and `principal` MUST be `anonymous`, as
 [SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md) requires. These are hook operation
@@ -3894,6 +3905,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Namespace-scoped ListRepos authorization with an arbitrary repository selector; authority full listing requires explicit opt-in and writer view (§6.2; STC §7.10). |
 | 1 | draft | Production takedown and `ReadPreserved` activation uses the configured admin, Uno launch profile, takedown, indexed Paid and complete §14.7 preservation gate; startup refuses partial configuration. |
 | 1 | draft | Bounded resumable publication rechecks retain a binding and witness position in the existing timer-12 value, guard checkpoints against obligation/generation changes, and preserve valid dependency limits. Unsupported pre-launch timer values require store reset (R-198 B1). |
 | 1 | draft | R-190 restricted takedown administration (WP-5.6a-3): additive acquisition, verification, discovery, legal-hold and purge status fields in existing v1 TakedownRecord; signed audited reads and atomic holds, byte-free replay and freshly verified Connect streaming. No new protocol or wire version. |

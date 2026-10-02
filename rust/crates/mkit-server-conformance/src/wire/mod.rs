@@ -283,6 +283,7 @@
 //! | `repo.isolation_refs` | `multi-repo`, `auth-v2` | refs and writes stay isolated, including equal names in different namespaces |
 //! | `repo.signature_repository_mismatch_unauthenticated` | `multi-repo`, `auth-v2` | a signature for A sent to B is rejected |
 //! | `repo.missing_repository_invalid_argument` | `multi-repo`, `auth-v2` | absent, empty, bare and malformed identities are rejected |
+//! | `repo.list_repos` | `multi-repo`, `auth-v2`, `signed-reads` | visibility-index merge, owner/public/stranger views, pre-creation visibility, prefix paging and token tampering |
 //! | `repo.read_missing_repo_not_found` | `multi-repo`, `auth-v2` | `ListRefs` and `ReadRef` of a nonexistent repo give `not_found` |
 //! | `repo.packs_need_membership` | `multi-repo`, `auth-v2` | absent membership gives false / `not_found`; uploads still require tickets |
 //! | `repository.upload_needs_ticket` | `multi-repo`, `auth-v2` | an un-ticketed upload fails with `failed_precondition` |
