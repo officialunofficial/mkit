@@ -303,6 +303,7 @@ pub(crate) async fn prepare_with<S: NamespaceStore>(
     };
     // A retryable read failure still spent work. Persist its safe checkpoint
     // before returning the original storage refusal to the foreground caller.
+    let failure_before = progress.failure;
     let slice_error = slice_with(store, shards, repo, &mut progress, metrics, None, request)
         .await
         .err();
@@ -343,6 +344,22 @@ pub(crate) async fn prepare_with<S: NamespaceStore>(
         != BatchOutcome::Committed
     {
         return Err(crate::indexed::pending(1_000));
+    }
+    // Count only a newly committed stop that answers with limit_error().
+    // A lost checkpoint precondition must not count work a retry will repeat.
+    if failure_before.is_none() {
+        let reason = match progress.failure {
+            Some(Exhaustion::IndexCalls) => Some("index_calls"),
+            Some(Exhaustion::Traversal) => Some("retained_items"),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            metrics.incr(
+                crate::telemetry::METRIC_PUBLICATION_LIMIT_REACHED,
+                &[("reason", reason)],
+                1,
+            );
+        }
     }
     if let Some(error) = slice_error {
         return Err(error);
@@ -595,7 +612,6 @@ async fn slice_with<S: NamespaceStore>(
         stopped: std::sync::atomic::AtomicBool::new(false),
     };
     let mut bytes = 0u64;
-    let failure_before = progress.failure;
     while !progress.complete && bytes < SLICE_BYTES {
         // A rollback retains only immutable metadata, never decoded content.
         let before = progress.clone();
@@ -685,21 +701,6 @@ async fn slice_with<S: NamespaceStore>(
         if budget.remaining() < 16 {
             break;
         }
-    }
-    if failure_before.is_none()
-        && let Some(failure) = progress.failure
-    {
-        let reason = match failure {
-            Exhaustion::IndexCalls => "index_calls",
-            Exhaustion::Traversal => "retained_items",
-            Exhaustion::DecodeBudget => "decode_budget",
-            Exhaustion::IndexLookup => "index_lookup",
-        };
-        metrics.incr(
-            crate::telemetry::METRIC_PUBLICATION_LIMIT_REACHED,
-            &[("reason", reason)],
-            1,
-        );
     }
     Ok(())
 }

@@ -127,6 +127,13 @@ supported after new reservation rows are written.
 
 ### Fixed
 
+- Publication limit-reached telemetry counts only newly committed foreground
+  stops that answer `unavailable`, excluding checkpoint conflicts and input
+  limits. Per-target URL issuance preserves typed authorization errors after
+  a reader cap; only `unavailable` is rewritten as reader exhaustion.
+  Publication ledger documentation states its preparation-onward scope and
+  recovery exceptions, and names both canonical decode-budget messages.
+
 - `AdmissionInput::new_to_repo_bytes` is now the declared pack size or `Some(0)`
   when the pack is already counted for the repository, for `BeginUpload` and
   streaming uploads under multi-repository addressing (it was always the

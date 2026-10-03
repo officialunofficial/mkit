@@ -1564,8 +1564,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         ttl_seconds: u32,
         now_ms: i64,
     ) -> Result<MintedToken, ServerError> {
-        self.issue_url_with_meta(op, repository, target, ttl_seconds, now_ms, &self.meta)
-            .await
+        self.issue_url_with_meta(
+            op,
+            repository,
+            target,
+            ttl_seconds,
+            now_ms,
+            &self.meta,
+            None,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)] // The reader captures inherited caps without changing RPC mappings.
@@ -1577,11 +1585,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         ttl_seconds: u32,
         now_ms: i64,
         meta: &S,
+        read_cap_message: Option<&'static str>,
     ) -> Result<MintedToken, ServerError> {
         let Some(tokens) = &self.cfg.url_tokens else {
             return Err(ServerError::unimplemented("URL tokens not configured"));
         };
-        let read = self.authorize_read_with_meta(op, meta).await?;
+        let read = self
+            .authorize_read_with_meta(op, meta, read_cap_message)
+            .await?;
         let epoch = match read.epoch {
             Some(epoch) => epoch,
             None => {
@@ -2789,13 +2800,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// caller's view; `epoch` is the stored grant epoch, for
     /// `IssueObjectUrl`'s reuse.
     async fn authorize_read(&self, op: &Operation) -> Result<ReadAuth, ServerError> {
-        self.authorize_read_with_meta(op, &self.meta).await
+        self.authorize_read_with_meta(op, &self.meta, None).await
     }
 
     async fn authorize_read_with_meta<S: NamespaceStore>(
         &self,
         op: &Operation,
         meta: &S,
+        read_cap_message: Option<&'static str>,
     ) -> Result<ReadAuth, ServerError> {
         tracing::debug!(stage = "authorize");
         if !self.visibility_gates_reads() {
@@ -2819,7 +2831,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let owner = op.write_grant.is_none()
             && matches!(Namespace::parse(op.repo.namespace.as_str()),
                 Ok(Namespace::Ed25519(key)) if op.principal.ed25519() == Some(&key));
-        let Some((private, epoch)) = self.read_repo_state(&op.repo, meta).await? else {
+        let Some((private, epoch)) = self
+            .read_repo_state(&op.repo, meta, read_cap_message)
+            .await?
+        else {
             // A missing repository pays the hook round trip a private one
             // would, and discards it, so latency does not tell them apart.
             if signed && op.write_grant.is_none() {
@@ -2894,6 +2909,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         &self,
         repo: &crate::repo::RepoId,
         meta: &S,
+        read_cap_message: Option<&'static str>,
     ) -> Result<Option<(bool, u64)>, ServerError> {
         let coordinator = self.shards.coordinator(&repo.namespace);
         let rows = meta
@@ -2909,7 +2925,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .map_err(|e| {
                 tracing::warn!(detail = %e, "repository state read failed");
                 if crate::indexed::budget::is_exhausted(&e) {
-                    ServerError::resource_exhausted("repository state call budget exhausted")
+                    // Reader URL issuance chooses its stable cap message here;
+                    // typed hook errors never need reclassification later.
+                    ServerError::resource_exhausted(
+                        read_cap_message.unwrap_or("repository state call budget exhausted"),
+                    )
                 } else {
                     ServerError::unavailable("repository state unavailable")
                 }

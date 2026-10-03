@@ -314,11 +314,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 ttl_seconds: ttl_s,
             };
             issued.push(
-                match self
-                    .pipe
-                    .issue_url_with_meta(&op, &repository, target, ttl_s, now, &capture)
-                    .await
-                {
+                match settle(
+                    self.pipe
+                        .issue_url_with_meta(
+                            &op,
+                            &repository,
+                            target,
+                            ttl_s,
+                            now,
+                            &capture,
+                            Some(OBJECT_READER_LIMIT_MESSAGE),
+                        )
+                        .await,
+                    capped,
+                ) {
                     Ok(token) => Some(token),
                     Err(e)
                         if matches!(
@@ -328,7 +337,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     {
                         None
                     }
-                    Err(_) if capped.load(Ordering::SeqCst) => return Err(exhausted()),
                     Err(e) => return Err(e),
                 },
             );
@@ -756,5 +764,96 @@ mod tests {
         let capped = AtomicBool::new(true);
         let error = settle::<()>(Err(ServerError::permission_denied("x")), &capped).unwrap_err();
         assert_eq!(error.code(), Code::PermissionDenied);
+    }
+    struct TargetError(Code);
+    impl super::super::Authorizer for TargetError {
+        async fn authorize(&self, op: &Operation) -> Result<crate::AuthzFacts, ServerError> {
+            if op.procedure() == crate::Procedure::IssueObjectUrl {
+                Err(ServerError::new(self.0, "target refused"))
+            } else {
+                Ok(crate::AuthzFacts::default())
+            }
+        }
+    }
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn issue_urls_target_authorization_settles_only_unavailable() {
+        use super::super::{AuthMode, Hooks, PipelineConfig};
+        use crate::repo::{Addressing, NamespaceKey, RepoName};
+        use std::sync::Arc;
+        for code in [
+            Code::Internal,
+            Code::InvalidArgument,
+            Code::ResourceExhausted,
+            Code::Unavailable,
+        ] {
+            let repo = RepoId {
+                namespace: NamespaceKey::deployment_default(),
+                name: RepoName::new("reader").unwrap(),
+            };
+            let mut cfg = PipelineConfig::new(
+                Addressing::Multi(crate::repo::MultiAddressing::new()),
+                AuthMode::AuthV2(
+                    crate::auth_v2::AuthV2Config::new("https://reader.test", "reader").unwrap(),
+                ),
+                crate::upload::UploadLimits {
+                    max_total_bytes: 1 << 20,
+                    max_chunks: 64,
+                },
+            );
+            cfg.ticket_keys = Some(
+                crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap(),
+            );
+            cfg.http_objects = Some(crate::http_objects::HttpObjectsConfig::default());
+            cfg.indexed = Some(crate::indexed::IndexedConfig::default());
+            cfg.url_tokens = Some(crate::url_token::UrlTokenConfig::new(
+                crate::url_token::UrlTokenKeys::new(zeroize::Zeroizing::new([13; 32]), vec![])
+                    .unwrap(),
+            ));
+            let defaults = Hooks::new();
+            let hooks = Hooks {
+                authorizer: TargetError(code),
+                admission: defaults.admission,
+                pre_receive: defaults.pre_receive,
+                receipts: defaults.receipts,
+                outcomes: defaults.outcomes,
+            };
+            let pipe = Pipeline::new(
+                crate::MemoryBlobStore::default(),
+                Arc::new(crate::MemoryKv::default()),
+                hooks,
+                cfg,
+                Arc::new(crate::rt::ManualClock::new(0)),
+                Arc::new(crate::telemetry::NoopMetrics),
+            )
+            .unwrap();
+            futures_executor::block_on(pipe.meta.apply(
+                &pipe.shards.coordinator(&repo.namespace),
+                crate::Batch::new().put(
+                    crate::store::keys::repo_record(&repo.name),
+                    crate::store::codec::encode_repo_record(&crate::store::codec::RepoRecord {
+                        created_at_ms: 0,
+                    }),
+                ),
+            ))
+            .unwrap();
+            let reader =
+                futures_executor::block_on(pipe.object_reader(repo, ReaderView::Public)).unwrap();
+            let capped = AtomicBool::new(true);
+            let error = futures_executor::block_on(reader.issue_urls_with_budget(
+                &[UrlTarget::Object([1; 32])],
+                0,
+                &SliceBudget::new(OBJECT_READER_CALLS),
+                &capped,
+            ))
+            .unwrap_err();
+            if code == Code::Unavailable {
+                assert_eq!(error.code(), Code::ResourceExhausted);
+                assert_eq!(error.public_message(), OBJECT_READER_LIMIT_MESSAGE);
+            } else {
+                assert_eq!(error.code(), code);
+                assert_eq!(error.public_message(), "target refused");
+            }
+        }
     }
 }
