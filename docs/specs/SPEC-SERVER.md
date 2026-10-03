@@ -1603,6 +1603,179 @@ Published equals live exactly while no advance on that ref is held or
 pending (and no hit awaits resolution). A deployment with only
 synchronous inspectors MUST still maintain the published view.
 
+### 10.2a Incremental publication certificates
+
+An indexed implementation MAY retain immutable publication certificates. A
+certificate is evidence of verified closure and packmap support, never evidence
+of current authorization, availability, or absence of a denial. Implementations
+using certificates MUST apply the following storage and verification contract.
+The Connect protocol, upload tickets, and timer kind 12 are unchanged.
+
+**Storage.** Certificate headers use `pc 00 <digest:32>` and radix pages use
+`pn 00 <digest:32>`, each in the ContentShard selected by the digest. The digest
+is BLAKE3 of the complete stored value, including its version byte. Pages MUST
+be created with an absent-key guard; an existing value MUST compare byte-for-byte
+with the intended value. A mismatched value, unsupported version, malformed
+page, missing referenced page, or hash mismatch MUST fail closed. Pages MUST
+NOT be replaced or removed while an anchored certificate or retained
+verification checkpoint references them, including transitively. Abandoned
+unanchored pages MAY be reclaimed only with a complete reference proof.
+
+A v1 page is a compressed radix-256 map over 32-byte identifiers. Its first
+byte is `1`; the second byte selects a leaf (`0`) or branch (`1`). A leaf
+contains the 32-byte identifier followed by one flags byte, with no trailing
+bytes. The flags are `1` (verified reachable object), `2` (denial target), `4`
+(packmap node, listed support pack, or selected closure-containing pack
+for a non-branch ref), and `8` (external base support pack).
+Unknown flags and a zero flags byte are invalid. A branch contains its one-byte
+branch depth, a 32-byte prefix with bytes at and after that depth zeroed, a
+big-endian two-byte child count, and sorted `(label:u8, digest:32)` entries.
+There MUST be between 2 and 256 distinct child labels. Child branch depths
+MUST strictly increase; every descended prefix or leaf MUST match its ancestor
+prefix and child label. Branch depth is at most 31. No page exceeds 8,485 bytes.
+Empty maps have an absent root, distinct from a missing stored page. Before
+using either presence or absence, readers MUST validate the complete fetched
+page, its hash, version, canonical encoding, labels, and the traversed ancestor
+prefix/label relationship. An omitted child proves absence only in an
+otherwise valid authenticated branch.
+
+Immutable frontier pages use `pn` with page type `2`. Their v1 binary encoding
+is `version:u8 = 1`, `type:u8 = 2`, `has_next:u8`, `count:be16`,
+`next:32`, then `count` tasks encoded as `(kind:u8, id:32)`. `has_next`
+is zero or one; an absent next pointer has 32 zero bytes. The count is between
+1 and 128; kinds are `0` (walk an object), `1` (add a denial target), `2`
+(check a support pack), or `3` (check an external support pack). The page is
+at most 4,261 bytes. The verification checkpoint retains the current frontier
+page, a task ordinal, pending immutable operation state, and the next page
+pointer. Popping or pushing a bounded page requires one lookup or one
+write-once page creation respectively, independent of frontier length.
+Frontier pages MUST NOT be accepted as radix pages. Queueing an identifier
+MUST NOT give it any evidence flag.
+
+A header starts with version byte `1` followed by strict JSON binding the
+repository identity, membership generation, resulting head/packmap pair,
+verification depth limit, and map root. It MUST fit in 16 KiB. The existing
+publication row MAY carry an optional `certificate` digest. The existing
+verification row's publication progress MAY carry the candidate header/root,
+the exact prior published anchor, and bounded continuation state. An anchor
+MUST be written atomically with the corresponding published pair. Preparing a
+candidate MUST NOT change the published anchor or consume an advance. A
+retained pending advance MUST retain its candidate independently of any
+replaceable per-pack verification checkpoint until it publishes or is
+invalidated. Deletion or generation invalidation MUST discard the published
+anchor. A candidate MUST match the proposed pair. A seed MUST match the exact
+guarded prior published pair and may contribute to a different proposed pair
+only through the validated coverage-preserving relationship below. Neither
+may cross repositories or generations, or incompatible depth limits.
+
+Private stored envelopes around the existing public Publication and Advance
+DTOs carry these optional certificate digests; implementations MUST NOT add
+required Rust fields to those public structs. Every append, clearance, prefix
+movement, deletion, lifecycle invalidation, and late-verdict writer MUST
+preserve the matching evidence or deliberately invalidate it. If prefix
+movement publishes an earlier retained advance, it MUST select that advance's
+candidate anchor rather than the most recent checkpoint's anchor. The final
+apply MUST guard the exact source publication state used to select its seed.
+
+**Closure and support.** Every object reachable from a published head MUST
+either be proven by the prior anchored certificate, with its supporting
+packmap still valid, or be verified by this advance. Only completed anchored
+closure qualifies as a seed. Intermediate traversal marks, sealed pack
+inventories, repository membership alone, and surplus objects in a published
+pack do not prove prior reachability. Flags MUST be populated only by verified
+inventory facts and repository-isolated index/membership checks. Only C
+membership in the completed immutable seed root may prune inherited closure.
+A candidate's C marks may deduplicate scheduled work but MUST NOT imply that
+its descendants are complete. Candidate-root changes, frontier scheduling and
+operation cursors MUST be checkpointed atomically; completion requires that
+all queued closure, support and base work has finished.
+
+An authenticated extension reaching the prior certified packmap root preserves
+its coverage. For such an extension, implementations MAY reuse prior reachable
+objects and published support of the same membership generation. A replacement
+packmap MUST instead establish coverage under the proposed map; it MUST NOT
+inherit closure merely because the head is unchanged. A head-only update MUST
+use the existing map's certified support. Non-branch refs verify the reachable
+closure against published repository member packs or this advance's verified
+additions in the same atomic clearance. External delta support
+remains separate from own additions. Lowering the permitted delta depth
+requires revalidation or refusal if the seed cannot prove the new limit.
+
+The denial-target map MUST include every object in all supporting and added
+pack inventories, including surplus entries, every manifest's chunk identifiers,
+all reachable objects, every supporting or added pack and MKPL node identifier,
+and delta-base objects and packs used for publication.
+Newly reachable objects MUST be walked even when their containing pack was
+previously published. Prior denial targets MUST be retained when prior coverage
+is inherited. Custom publication policies MUST still be applied to the relevant
+support: historical certificates MUST NOT waive a current policy refusal.
+An implementation MUST either establish at final apply the continued validity
+of an explicit stable policy snapshot/epoch, or freshly check all relevant
+support under the current policy for that attempt. Immutable coverage work
+may resume, but a mutable gate outcome from an earlier slice MUST NOT authorize
+a later apply. If this fresh non-checkpointable check cannot finish within its
+allowance it returns `resource_exhausted`. Existing policy implementors remain
+valid without providing a stability token. Such arbitrary policies, current
+denial-directory size, and denied-pack inspection have fresh costs independent
+of the amount of new content; each query still obeys the documented bounds.
+
+**Bounds and structural sharing.** Each map lookup reads at most 33 pages.
+An insertion changes at most 34 pages and shares all untouched subtrees.
+Compressed branches provide compaction at every insertion: no linear chain of
+advance deltas is permitted. Storage growth per incremental advance is bounded
+by its newly encountered identifiers times 34 pages, plus a bounded header and
+continuation pages; it MUST NOT copy the inherited closure or inventory.
+Revalidation of changed packmap coverage may require additional resumable work.
+Every read and page-creation apply MUST debit the existing request or alarm
+allowance exactly once. One page creation uses at most one absent-key guard and
+one put, below the 100-operation/1-MiB apply limits. Continuations MUST bound
+frontier memory and persist long frontiers in immutable pages; a completed
+legacy closure larger than 4,096 objects MUST NOT encounter a whole-history cap.
+
+Publication preparation and timer 12 each receive at most 128 verification
+calls per slice; the timer also debits its caller's whole-alarm budget. State
+reads and guarded checkpoint/timer settlement retain their existing separate
+allowance. Each bounded operation MUST either fit in a slice or retain its
+own continuation; exhausting a slice MUST NOT turn progress into a terminal
+content rejection. A request that cannot finish fresh non-checkpointable work
+MUST return `resource_exhausted`. A retry or timer slice can continue retained
+verification; it MUST NOT publish partially checked content. Canonical decode
+limits apply to new decoded content under §9.8, not cumulative historical
+inventory lengths. Metadata-only traversal does not consume a decode allowance.
+
+**Fresh denial.** At each final apply attempt, the authoritative denial directory
+MUST be read at or after that attempt's plan time under §14.2. The anchored or
+candidate certificate MUST be bound to the exact guarded publication state.
+Object and chunk denial intersections query exact denial-target membership;
+pack denials also retain §14.2's cross-pack file and manifest semantics. These
+queries MUST use authenticated radix paths instead of scanning inherited
+inventories. Reading action descriptors or a denied pack's own inventory is
+permitted and is charged to the same request budget. A historical successful
+denial proof MUST NOT be reused. A denial introduced after publication MUST
+still refuse an advance inheriting the denied object or base. Query exhaustion
+returns `resource_exhausted`; missing or corrupt proof data MUST NOT mean
+absence of a denial. No partial or alarm-checkpointed denial proof can authorize
+a later plan-time apply.
+
+**Upgrade and rollback.** Absent anchors on legacy rows require full verification
+through the bounded resumable path before the first certificate is published.
+Legacy inventory lengths may be unknown; that does not invalidate previously
+verified content or authorize an unchecked seed. Missing, corrupt, unanchored,
+or incompatible certificates require bounded resumable full verification, or
+an explicit closed refusal. No migration or wire change is required. Optional
+new stored fields MUST decode as absent when missing. Public Rust DTOs and
+embedding signatures MUST remain compatible. Older binaries ignore the new
+page keys but their strict row decoders refuse new envelope/checkpoint fields.
+Before rollback, operators MUST materialize and revalidate complete legacy
+dependency/frontier state within the older binary's limits, or safely drain or
+invalidate certificate-dependent pending advances, checkpoints and timers
+while retaining membership, inspection and takedown obligations. Removing
+anchors from already-published rows with no certificate-dependent retained work
+is permitted through guarded maintenance; merely stripping fields from pending
+work is forbidden because its legacy lists may contain only incremental work.
+If neither safe procedure can complete, rollback MUST refuse. Pages alone
+MUST NOT authorize publication after downgrade.
+
 ### 10.3 Every reader surface uses the published view
 
 `ListRefs`, `ReadRef`, `PackExists`, `DownloadPack`, `X-Mkit-Ref`, snapshots,
@@ -3905,6 +4078,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Optional immutable paged publication certificates: exact closure/support and denial targets, structural sharing, bounded lookup and timer continuation, fresh denial queries, compatible legacy bootstrap and explicit rollback requirements (§10.2a). |
 | 1 | draft | Namespace-scoped ListRepos authorization with an arbitrary repository selector; authority full listing requires explicit opt-in and writer view (§6.2; STC §7.10). |
 | 1 | draft | Worker launch profile is `LAUNCH_PROFILE=paid-workers`; `uno` remains a deprecated alias with a startup warning. §18 accepts configured cache-purge delivery through the signed HTTPS hook or an embedder-supplied purge sink. |
 | 1 | draft | Production takedown and `ReadPreserved` activation uses the configured admin, Paid Workers launch profile, takedown, indexed Paid and complete §14.7 preservation gate; startup refuses partial configuration. |

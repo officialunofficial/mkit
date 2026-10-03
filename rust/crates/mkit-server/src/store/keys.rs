@@ -53,6 +53,8 @@
 //! | open tickets per signer | `tu 00 <repo> 00 <ref> 00 <signer:32>` | be64; same rules |
 //! | ticket expiry timer | `w 00 <due_at:be64> 02 <attempt:u8> <original_due:be64> <ticket_id:32>` | empty |
 //! | local membership | `m 00 <repo> 00 <pack:32>` | empty (immediate upload) or v1 clearance witness |
+//! | immutable publication certificate (`ContentShard` by digest) | `pc 00 <digest:32>` | versioned certificate header |
+//! | immutable certificate/frontier page (`ContentShard` by digest) | `pn 00 <digest:32>` | versioned radix or frontier page |
 //! | indexed verification state | `vs 00 <repo> 00 <pack:32>` | `VerificationV1` |
 //! | scheduled-verification job (ref shard) | `vc 00 <repo> 00 <pack:32> <sub:u8> [<id:32>]` | sub 0 job `VerifyJobV1`; 1 frame; 2 closure child; 3 charged external base; 4 extraction candidate (WP-4.10b); 5 history edges (parents); 6 external source pack dependency |
 //! | repository object index | `i 00 <repo> 00 <object:32> <pack:32>` | binary `IndexValue` |
@@ -252,6 +254,10 @@ pub fn cache_purge_generation(scope: &str) -> Key {
 
 /// Persistent paired sequence, pointer and deletion boundary.
 pub const TAG_PUBLICATION: &str = "pp";
+/// Immutable publication certificate header.
+pub const TAG_PUBLICATION_CERTIFICATE: &str = "pc";
+/// Immutable radix or frontier page.
+pub const TAG_PUBLICATION_PAGE: &str = "pn";
 /// Retained advance values and obligations.
 pub const TAG_ADVANCE: &str = "av";
 /// Authoritative published ref value.
@@ -284,6 +290,10 @@ pub const VC_DEPENDENCY: u8 = 6;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ParsedKey {
+    /// Content-addressed publication certificate header.
+    PublicationCertificate(Hash),
+    /// Content-addressed radix or frontier page.
+    PublicationPage(Hash),
     /// Pending cache purge id.
     CachePurge(String),
     /// Durable cache scope invalidation time.
@@ -929,6 +939,18 @@ pub fn membership(repo: &RepoName, pack: &Hash) -> Key {
     key(TAG_MEMBERSHIP, &[repo.as_str().as_bytes(), b"\0", pack])
 }
 
+/// Content-addressed certificate header, routed by its digest.
+#[must_use]
+pub fn publication_certificate(digest: &Hash) -> Key {
+    key(TAG_PUBLICATION_CERTIFICATE, &[digest])
+}
+
+/// Content-addressed radix or frontier page, routed by its digest.
+#[must_use]
+pub fn publication_page(digest: &Hash) -> Key {
+    key(TAG_PUBLICATION_PAGE, &[digest])
+}
+
 /// `vs 00 <repo> 00 <pack>`; the ref shard holding the ticket owns it.
 #[must_use]
 pub fn verification(repo: &RepoName, pack: &Hash) -> Key {
@@ -1331,6 +1353,8 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
     let (tag, body) = (&bytes[..split], &bytes[split + 1..]);
     let text = |b: &[u8]| String::from_utf8(b.to_vec()).ok();
     Some(match tag {
+        b"pc" => ParsedKey::PublicationCertificate(hash(body)?),
+        b"pn" => ParsedKey::PublicationPage(hash(body)?),
         b"cp" => {
             let id = text(body)?;
             cache_purge(&id).ok()?;
@@ -1646,6 +1670,8 @@ mod tests {
             TAG_CACHE_PURGE,
             TAG_CACHE_PURGE_GENERATION,
             TAG_PUBLICATION,
+            TAG_PUBLICATION_CERTIFICATE,
+            TAG_PUBLICATION_PAGE,
             TAG_ADVANCE,
             TAG_PUBLISHED_REF,
             TAG_PUBLISHED_INDEX,

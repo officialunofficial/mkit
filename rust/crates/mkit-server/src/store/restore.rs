@@ -231,6 +231,13 @@ fn validate_sequences(
 
 fn validate_inspection_record(record: &ExportRecord) -> Result<(), StoreError> {
     match keys::parse(&record.key) {
+        Some(ParsedKey::PublicationCertificate(_) | ParsedKey::PublicationPage(_)) => {
+            super::publication_certificate::validate_record(
+                &record.partition,
+                &record.key,
+                &record.value,
+            )
+        }
         Some(ParsedKey::InspectionMarker) if record.value.as_bytes() != b"on" => {
             Err(corrupt("invalid inspection marker"))
         }

@@ -26,6 +26,8 @@ mod maintenance;
 pub mod outbox;
 mod partition;
 pub mod publication;
+#[doc(hidden)]
+pub mod publication_certificate;
 pub mod read;
 pub mod restore;
 pub mod tickets;
