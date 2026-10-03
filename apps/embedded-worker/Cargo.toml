@@ -11,7 +11,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 worker = { version = "0.8", features = ["http"] }
-mkit-server-worker = { path = "../../rust/crates/mkit-server-worker" }
+mkit-server-worker = { path = "../../rust/crates/mkit-server-worker", features = ["pack-ruzstd"] }
 mkit-server = { path = "../../rust/crates/mkit-server", default-features = false }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
@@ -23,3 +23,7 @@ opt-level = "s"
 lto = true
 
 [workspace]
+
+# Dependency workspaces do not propagate their decoder patch.
+[patch.crates-io]
+ruzstd = { path = "../../rust/vendor/ruzstd" }

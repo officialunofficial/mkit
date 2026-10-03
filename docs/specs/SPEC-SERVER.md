@@ -3780,6 +3780,11 @@ only when its HTTP mount is enabled. No new profile/proof wire field is implied.
 configuration, including §9–§16. An indexed deployment MUST support per-ref
 storage leases (§12.1).
 
+After a committed timer write, the Worker adapter MUST retry a failed alarm
+scheduling call at most twice inline. If scheduling still fails, it MUST return
+the error instead of acknowledging the write and mark its alarm state unarmed
+so the next activation checks the earliest durable timer again.
+
 **Launch admin subset.** A launch deployment MAY explicitly offer the following
 admin foundation without claiming the full §16 procedure set. It MUST state
 its supported subset in its deployment documentation, and MUST NOT advertise
@@ -3905,6 +3910,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Worker timer writes retry alarm scheduling twice inline, propagate exhaustion and retain cold-start repair. |
 | 1 | draft | Namespace-scoped ListRepos authorization with an arbitrary repository selector; authority full listing requires explicit opt-in and writer view (§6.2; STC §7.10). |
 | 1 | draft | Worker launch profile is `LAUNCH_PROFILE=paid-workers`; `uno` remains a deprecated alias with a startup warning. §18 accepts configured cache-purge delivery through the signed HTTPS hook or an embedder-supplied purge sink. |
 | 1 | draft | Production takedown and `ReadPreserved` activation uses the configured admin, Paid Workers launch profile, takedown, indexed Paid and complete §14.7 preservation gate; startup refuses partial configuration. |

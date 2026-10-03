@@ -198,7 +198,7 @@ async fn many_ref_update(
             Ok(Err(error)) => return Ok(Err(error)),
             Err(error) => return Err(error),
         };
-        eprintln!("many_refs fixture: proxy blip for {label}, retry once: {failed}");
+        ctx.record_retry(&failed);
     }
     unreachable!("the second attempt always returns")
 }

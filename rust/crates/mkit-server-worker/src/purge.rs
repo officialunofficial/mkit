@@ -139,6 +139,7 @@ impl<C: CacheDelete> LocalInvalidation for LocalCache<C> {
     }
 }
 
+#[cfg(any(target_arch = "wasm32", feature = "published-view"))]
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NamespacePosition {
@@ -148,9 +149,11 @@ struct NamespacePosition {
     repository: Option<String>,
     cursor: u32,
 }
+#[cfg(any(target_arch = "wasm32", feature = "published-view"))]
 fn bad_position() -> StoreError {
     StoreError::Corrupt("invalid namespace purge checkpoint".into())
 }
+#[cfg(any(target_arch = "wasm32", feature = "published-view"))]
 struct NamespaceCache<'a, S, T, C> {
     local: &'a LocalCache<C>,
     source: &'a S,
@@ -159,6 +162,7 @@ struct NamespaceCache<'a, S, T, C> {
     sharding: mkit_server::pipeline::Sharding,
     single: Option<&'a mkit_server::RepoId>,
 }
+#[cfg(any(target_arch = "wasm32", feature = "published-view"))]
 impl<S: NamespaceStore, T: NamespaceStore, C: CacheDelete> LocalInvalidation
     for NamespaceCache<'_, S, T, C>
 {
@@ -300,6 +304,7 @@ impl<S: NamespaceStore, T: NamespaceStore, C: CacheDelete> LocalInvalidation
     }
 }
 /// Kind-11 delivery with durable catalog traversal and context-local reads.
+#[cfg(any(target_arch = "wasm32", feature = "published-view"))]
 pub(crate) struct NamespaceDelivery<T, C> {
     pub delivery: mkit_server::purge::PurgeDelivery,
     pub local: LocalCache<C>,
@@ -307,6 +312,7 @@ pub(crate) struct NamespaceDelivery<T, C> {
     pub sharding: mkit_server::pipeline::Sharding,
     pub single: Option<mkit_server::RepoId>,
 }
+#[cfg(any(target_arch = "wasm32", feature = "published-view"))]
 impl<S: NamespaceStore, T: NamespaceStore, C: CacheDelete> TimerHandler<S>
     for NamespaceDelivery<T, C>
 {
@@ -607,8 +613,10 @@ mod tests {
         recorded: Arc<AtomicU32>,
     }
 
+    #[cfg(feature = "published-view")]
     #[derive(Clone)]
     struct NamespaceSink(Arc<Mutex<Vec<Request>>>);
+    #[cfg(feature = "published-view")]
     impl PurgeSink for NamespaceSink {
         fn deliver<'a>(&'a self, request: &'a Request) -> BoxFuture<'a, Result<(), StoreError>> {
             Box::pin(async move {
@@ -618,11 +626,13 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "published-view")]
     #[derive(Clone)]
     struct CatalogCounts {
         inner: Arc<MemoryKv>,
         reads: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
     }
+    #[cfg(feature = "published-view")]
     impl NamespaceStore for CatalogCounts {
         fn capabilities(&self) -> mkit_server::StoreCapabilities {
             self.inner.capabilities()
