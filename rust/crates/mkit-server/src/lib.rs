@@ -9,9 +9,9 @@
 //! modules. The protocol logic lives in public modules, so call sites name
 //! the protocol they apply (`refs::evaluate_cas`, `quota::evaluate_quota`).
 //! The storage contract lives in [`store`]: its contract types are also
-//! re-exported at the root, its key layouts, value codecs and typed
-//! readers live in the doc-hidden `store::adapter_spi`. Portable maintenance
-//! and content-index contracts remain in `store`
+//! re-exported at the root. Key layouts and value codecs live in the
+//! doc-hidden `store::adapter_spi`; typed readers remain crate-private.
+//! Portable maintenance and content-index contracts remain in `store`
 //! (`store::export_partition`, `store::Holder`).
 //! The `memory` feature adds the in-memory reference backends; the native
 //! `fs` feature adds the `fs` module, the stores over the `.mkit` on-disk
