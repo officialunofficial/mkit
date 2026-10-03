@@ -1429,11 +1429,12 @@ response below:
 
 Indexed canonical entries MUST NOT exceed 1,048,586 bytes, including object
 framing. During an indexed `UploadPack`, the server MUST reject an oversized
-entry as soon as its canonical size claim is available, before forwarding the
-revealing chunk to storage or committing the pack. Raw entries use their
-payload length, compressed raw entries their decoded length, and deltas their
-result length (compressed deltas require bounded prefix decoding). This
-refusal uses the indexed decode-limit category `invalid_argument`, with the
+entry as soon as its canonical size is visible in the entry header, before
+forwarding the revealing chunk to storage or committing the pack. Raw entries
+use their payload length, compressed raw entries their decoded length, and
+uncompressed deltas their result length. An entry whose size is not visible
+without decompression (a compressed delta) is refused at verification by the
+existing indexed advance checks. This refusal uses the indexed decode-limit category `invalid_argument`, with the
 public message `canonical entry exceeds indexed limit of 1048586 bytes; split
 very large flat directories`. This does not change the exact advance errors
 above, pack framing, or multipart-part acceptance: independent parts cannot
@@ -3717,6 +3718,9 @@ automatic purges are audited with their system actor. §14
 
 ## 17. Custom backends, backup and migrations (reserved, M5)
 
+Rows written by any 0.5.x release MUST keep decoding in later 0.5.x releases;
+stored-row changes MUST be additive, with serde defaults for added JSON fields.
+
 Reserved: this section is specified with M5 (see the version history).
 
 ## 18. Conformance scope
@@ -3932,7 +3936,8 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
-| 1 | draft | Additive object-reader session accounting and typed exhaustion; early indexed UploadPack canonical-entry geometry refusal under §9.8. Existing public absence, advance messages and stored/wire formats are unchanged. |
+| 1 | draft | Additive object-reader session accounting and typed exhaustion; early indexed UploadPack canonical-entry refusal when the size is visible in the entry header (otherwise at verification), under §9.8. Existing public absence, advance messages and stored/wire formats are unchanged. |
+| 1 | draft | Stored rows remain decodable throughout 0.5.x; additive JSON fields require serde defaults (§17). |
 | 1 | draft | Worker timer writes retry alarm scheduling twice inline, propagate exhaustion and retain cold-start repair. |
 | 1 | draft | Namespace-scoped ListRepos authorization with an arbitrary repository selector; authority full listing requires explicit opt-in and writer view (§6.2; STC §7.10). |
 | 1 | draft | Worker launch profile is `LAUNCH_PROFILE=paid-workers`; `uno` remains a deprecated alias with a startup warning. §18 accepts configured cache-purge delivery through the signed HTTPS hook or an embedder-supplied purge sink. |

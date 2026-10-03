@@ -446,3 +446,9 @@ impl<T: NamespaceStore> PublicationRecheck<T> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::too_many_lines)]
+mod stored_v050_tests {
+    crate::stored_golden::tests!(timers_publication_recheck);
+}

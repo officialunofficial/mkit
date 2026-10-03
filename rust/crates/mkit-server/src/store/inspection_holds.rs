@@ -331,3 +331,9 @@ fn decode_manifest(value: Option<&Value>) -> Result<HoldManifest, StoreError> {
 #[cfg(test)]
 #[path = "inspection_holds_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::too_many_lines)]
+mod stored_v050_tests {
+    crate::stored_golden::tests!(store_inspection_holds);
+}

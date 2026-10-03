@@ -11,13 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Server embedders can share `ReadLimits` and `ReaderSession` across canonical
   and metadata reads to cap aggregate calls, decode work, encoded I/O and output.
-- Core pack users can inspect compressed delta length claims incrementally with
-  `DeltaHeaderProbe`, retaining bounded decoder state across input chunks.
 
 ### Fixed
 
 - Object-reader cap hits consistently return `ResourceExhausted` with a stable
-  public message; unprovable public IDs retain their uniform absent result.
+  public message, including delta-depth and external-base caps hit while
+  checking takedown denial; unprovable public IDs retain their uniform absent
+  result.
+- Owner object-reader authorization preserves `ResourceExhausted` when the
+  caller's storage-call budget runs out during the repository-state lookup.
 - Workers retry transient alarm scheduling failures twice after committed timer
   writes and return exhausted failures for replay and cold-start repair.
 - The embedded Worker example enables the pure-Rust zstd decoder for default
@@ -26,7 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Indexed `UploadPack` streams reject oversized canonical entries as soon as
-  their length claims are known, before committing an unusable pack.
+  the size is visible in the entry header (raw entries, uncompressed deltas),
+  before committing an unusable pack. Compressed delta entries are refused at
+  verification, as before.
 
 ## [0.5.0](https://github.com/officialunofficial/mkit/compare/v0.4.2...v0.5.0) - 2026-10-02
 

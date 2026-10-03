@@ -203,3 +203,9 @@ pub fn cache_key(deployment: &str, partition: &Partition) -> Result<String, Stor
         to_hex_bytes(&hash(&bytes))
     ))
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::too_many_lines)]
+mod v050_tests {
+    crate::stored_golden::tests!(published_view_codec);
+}

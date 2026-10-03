@@ -2463,3 +2463,43 @@ fn corrupt_delta_cycles_remain_unavailable_instead_of_read_exhaustion() {
     });
     assert_eq!(fx.get(&fx.object_url("room", &target)).status, 503);
 }
+
+#[test]
+fn owner_reader_preserves_caller_budget_exhaustion_during_authorization() {
+    use crate::indexed::budget::SliceBudget;
+    let fx = fixture();
+    let d = data();
+    fx.push("room", &d.refs(), d.head(), None);
+    let req = signed(
+        &fx.owner,
+        &fx.identity("room"),
+        Procedure::ListRefs,
+        fx.number(),
+    );
+    let lookup = |name: &str| {
+        req.headers
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.clone())
+    };
+    let meta = RequestMeta {
+        procedure: req.procedure,
+        header: &lookup,
+        header_values: None,
+        unary_body: Some(&req.body),
+        transport_principal: None,
+    };
+    for allowance in [0, 1] {
+        let caller = SliceBudget::new(allowance);
+        *fx.pipe.meta.request_budget.lock().unwrap() = Some(caller.clone());
+        let result = block_on(async {
+            let reader = fx
+                .pipe
+                .object_reader(fx.repo_id("room"), ReaderView::Owner(&meta))
+                .await?;
+            reader.object_metadata(&[id(&d.small)]).await
+        });
+        assert_eq!(result.unwrap_err().code(), Code::ResourceExhausted);
+        assert_eq!(caller.used(), allowance);
+    }
+}

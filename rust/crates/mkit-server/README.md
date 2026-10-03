@@ -67,14 +67,12 @@ Backend failures remain `Unavailable`.
 Indexed canonical entries are limited to **1,048,586 bytes**, including object
 framing. Very large trees and chunk manifests can exceed this even when the
 pack is small or highly compressed. Split very large flat directories into
-smaller subdirectories. Indexed `UploadPack` checks raw lengths, compressed raw
-claims and delta result sizes while streaming, before forwarding the chunk
-that reveals an oversize claim or committing the pack. Compressed deltas use
-a bounded incremental header probe, refusing the revealing chunk before its
-sink write. The Rust backend uses ruzstd 0.9's public APIs: it identifies blocks
-that produce output, then decodes a completed copy of the prefix at most nine
-times. Empty blocks do not cause replays. Encoded prefix buffering is bounded
-by the existing 16 MiB frame allowance, and decode windows remain 8 MiB. Multipart parts have
+smaller subdirectories. Indexed `UploadPack` refuses an oversized entry early,
+before forwarding the chunk that reveals it, when the size is visible in the
+entry header: raw entries, compressed raw claims and uncompressed delta result
+sizes. Otherwise the entry is refused at verification, as before; in particular
+compressed delta entries are checked after upload and there is no decoder
+preflight. Multipart parts have
 no independent entry geometry; existing indexed advance verification still
 checks assembled packs. The early upload refusal is `InvalidArgument`, using
 the indexed decode-limit taxonomy in SPEC-SERVER §9.8. Neither stored data nor

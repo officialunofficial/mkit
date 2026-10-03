@@ -161,3 +161,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/fixtures/stored_v050.rs"]
+mod stored_golden;
