@@ -1329,32 +1329,6 @@ The extraction threshold is deployment configuration. It is not
 advertised through `GetServerInfo`. It does not change object identity,
 chunk layout, or the client's upload obligations.
 
-#### Legacy verified inventory lengths
-
-Inventory entries written before lengths were recorded omit `canonical_len`
-and `logical_len`. Readers MUST treat this pair as unknown lengths, never as
-zero, and MUST continue to enforce entry version, kind, references and seal
-validation. New entries MUST include a verified canonical length and the
-logical length for Blob and ChunkedBlob objects. The in-memory reserved marker
-`u64::MAX` MUST NOT be accepted as an explicitly stored canonical length.
-
-`ObjectReader::object_metadata` MUST use the repository's verified object
-index for a legacy canonical length. Blob logical length is canonical length
-minus its ten-byte header; non-file objects have no logical length. A legacy
-ChunkedBlob MUST obtain its logical length with one HEAD of the verified
-extracted content. These length resolutions cost zero additional storage
-calls for other kinds and exactly one for ChunkedBlob, shared by duplicate
-IDs in a batch. All storage calls MUST use the reader and enclosing caller
-budgets; an exhausted call budget MUST return `resource_exhausted`.
-Readers MUST NOT rewrite legacy rows or their byte-bound seals.
-
-Legacy sealed packlist heads have no recorded predecessor/list facts, and
-legacy Commit, Remix and Tag inventory entries do not record history edges.
-Pair verification MUST use the canonical verifier when a legacy head or entry
-occurs in the closure, without rewriting the old seal. A metadata-only
-continuation MAY retain the need for canonical verification in its existing
-checkpoint; it MUST then stop and let the foreground retry run that verifier.
-
 ### 9.7 Ref policy
 
 A deployment MAY configure the following policies per ref-name pattern,
@@ -3931,7 +3905,6 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
-| 1 | draft | Accept legacy inventory rows with unknown lengths; resolve metadata within caller call budgets and retain canonical verification for legacy packlist heads (§9.6). |
 | 1 | draft | Namespace-scoped ListRepos authorization with an arbitrary repository selector; authority full listing requires explicit opt-in and writer view (§6.2; STC §7.10). |
 | 1 | draft | Worker launch profile is `LAUNCH_PROFILE=paid-workers`; `uno` remains a deprecated alias with a startup warning. §18 accepts configured cache-purge delivery through the signed HTTPS hook or an embedder-supplied purge sink. |
 | 1 | draft | Production takedown and `ReadPreserved` activation uses the configured admin, Paid Workers launch profile, takedown, indexed Paid and complete §14.7 preservation gate; startup refuses partial configuration. |

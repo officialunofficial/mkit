@@ -1340,8 +1340,6 @@ pub fn decode_u32(value: &Value) -> Result<u32, StoreError> {
 
 #[cfg(test)]
 mod tests {
-    const LEGACY_VISIBILITY: &[u8] =
-        b"\x01{\"visibility\":\"private\",\"last_created_ms\":7,\"last_statement_id\":null}";
     use super::*;
 
     fn ticket_fixture() -> TicketV1 {
@@ -1906,7 +1904,11 @@ mod tests {
         assert_eq!(decode_repo_visibility(&private_value).unwrap(), private);
         // A legacy 3-key row has no change time and falls back to its
         // last accepted creation time.
-        let legacy = decode_repo_visibility(&Value::new(LEGACY_VISIBILITY.to_vec())).unwrap();
+        let legacy = decode_repo_visibility(&Value::new(
+            b"\x01{\"visibility\":\"private\",\"last_created_ms\":7,\"last_statement_id\":null}"
+                .to_vec(),
+        ))
+        .unwrap();
         assert_eq!(legacy.changed_ms, None);
         assert_eq!(legacy.visibility_changed_ms(), 7);
         assert_eq!(private.visibility_changed_ms(), 1_700_000_000_001);

@@ -58,7 +58,6 @@ impl TerminalFailure {
 /// Verified pack state may carry exactly one frozen pair's resumable evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(clippy::struct_excessive_bools)] // Independent failure, closure and legacy-verifier facts.
 pub struct Progress {
     binding: Hash,
     value: Pair,
@@ -81,10 +80,6 @@ pub struct Progress {
     terminal: Option<TerminalFailure>,
     missing: bool,
     missing_base: bool,
-    // Legacy entries omit lengths and history edges; old MKPL heads omit
-    // list facts. Stop metadata-only alarms and use canonical verification.
-    #[serde(default, skip_serializing_if = "is_false")]
-    canonical_fallback: bool,
     complete: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,10 +88,6 @@ struct BaseCursor {
     origin: Hash,
     next: Hash,
     depth: u32,
-}
-#[allow(clippy::trivially_copy_pass_by_ref)] // Serde skip predicates receive a reference.
-fn is_false(value: &bool) -> bool {
-    !value
 }
 impl Progress {
     pub(crate) fn validate(&self) -> Result<(), StoreError> {
@@ -131,7 +122,6 @@ impl Progress {
                     || self.failure.is_some()
                     || self.terminal.is_some()
                     || self.missing
-                    || self.canonical_fallback
                     || self.value.head.is_some_and(|h| !self.visited.contains(&h))
                     || self.value.packmap.is_some_and(|m| !self.chain.contains(&m))
                     || !self.chain.is_subset(&self.dependencies)
@@ -214,7 +204,7 @@ fn binding(advance: &Advance, cfg: IndexedConfig) -> Result<Hash, ServerError> {
 
 /// First slice may complete inline. Otherwise only verification state and timer
 /// are written; no ref, membership, outcome or ticket is accepted/consumed.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One guarded proof checkpoint and legacy-verifier transition.
+#[allow(clippy::too_many_arguments)] // Immutable proof inputs plus the consuming request lag context.
 pub(crate) async fn prepare<S: NamespaceStore>(
     store: &S,
     source: &Partition,
@@ -243,9 +233,6 @@ pub(crate) async fn prepare<S: NamespaceStore>(
         .as_ref()
         .filter(|p| p.binding == wanted && !p.missing)
     {
-        if progress.canonical_fallback {
-            return Ok(false);
-        }
         return progress
             .result(advance, now, created, cfg.relay_lag_bound_ms)
             .map(|()| true);
@@ -276,7 +263,6 @@ pub(crate) async fn prepare<S: NamespaceStore>(
             terminal: None,
             missing: false,
             missing_base: false,
-            canonical_fallback: false,
             complete: false,
         }
     };
@@ -309,7 +295,6 @@ pub(crate) async fn prepare<S: NamespaceStore>(
         && progress.failure.is_none()
         && progress.terminal.is_none()
         && !progress.missing
-        && !progress.canonical_fallback
     {
         let timer = keys::timer(now.saturating_add(1_000), 12, key.as_bytes());
         batch = batch
@@ -326,9 +311,6 @@ pub(crate) async fn prepare<S: NamespaceStore>(
     }
     if let Some(error) = slice_error {
         return Err(error);
-    }
-    if progress.canonical_fallback {
-        return Ok(false);
     }
     progress
         .result(advance, now, created, cfg.relay_lag_bound_ms)
@@ -368,15 +350,9 @@ async fn one<S: NamespaceStore>(
         {
             return Err(missing());
         }
-        let Some((length, prev, packs)) = inventory::packlist_facts(store, &id)
+        let (length, prev, packs) = inventory::packlist_facts(store, &id)
             .await
-            .map_err(|_| unavailable())?
-        else {
-            // Preserve the legacy seal. The caller falls back to canonical
-            // verification; an alarm can record this need without blobs.
-            progress.canonical_fallback = true;
-            return Ok(0);
-        };
+            .map_err(|_| unavailable())?;
         progress.next_packmap = prev;
         progress.dependencies.insert(id);
         progress.dependencies.extend(packs.iter().copied());
@@ -410,19 +386,7 @@ async fn one<S: NamespaceStore>(
         .await
         .map_err(|_| unavailable())?
         .ok_or_else(missing)?;
-    if row.known_canonical_len().is_none() {
-        // Before lengths existed, Commit/Remix/Tag inventory references did
-        // not contain their history edges. A sealed legacy row is not a
-        // complete closure proof, even though the index knows its length.
-        progress.canonical_fallback = true;
-        return Ok(0);
-    }
-    if row
-        .known_canonical_len()
-        .is_some_and(|length| length != located.value.decoded_size)
-        || row.kind == 0
-        || row.kind == 6
-    {
+    if row.canonical_len != located.value.decoded_size || row.kind == 0 || row.kind == 6 {
         return Err(unavailable());
     }
     if Some(id) == progress.value.head && !matches!(row.kind, 3 | 4 | 7) {
@@ -445,9 +409,7 @@ async fn one<S: NamespaceStore>(
         next,
         depth: 0,
     });
-    // The sealed object index already records the verified decoded length,
-    // so legacy inventory lengths cost no additional storage calls.
-    Ok(located.value.decoded_size)
+    Ok(row.canonical_len)
 }
 
 // Each base is a durable boundary, so a valid maximum-depth chain can span
@@ -477,16 +439,7 @@ async fn external_base<S: NamespaceStore>(
     inventory::seal(store, &selected.pack)
         .await
         .map_err(|_| unavailable())?;
-    if parent.known_canonical_len().is_none() {
-        progress.canonical_fallback = true;
-        return Ok(0);
-    }
-    if parent
-        .known_canonical_len()
-        .is_some_and(|length| length != selected.value.decoded_size)
-        || parent.kind == 0
-        || parent.kind == 6
-    {
+    if parent.canonical_len != selected.value.decoded_size || parent.kind == 0 || parent.kind == 6 {
         return Err(unavailable());
     }
     if selected.pack != cursor.origin {
@@ -497,7 +450,7 @@ async fn external_base<S: NamespaceStore>(
         next,
         depth: cursor.depth + 1,
     });
-    Ok(selected.value.decoded_size)
+    Ok(parent.canonical_len)
 }
 
 struct SliceStore<'a, S> {
@@ -576,7 +529,7 @@ async fn slice<S: NamespaceStore>(
         stopped: std::sync::atomic::AtomicBool::new(false),
     };
     let mut bytes = 0u64;
-    while !progress.complete && !progress.canonical_fallback && bytes < SLICE_BYTES {
+    while !progress.complete && bytes < SLICE_BYTES {
         // A rollback retains only immutable metadata, never decoded content.
         let before = progress.clone();
         let start = budget.used();
@@ -696,7 +649,6 @@ pub(crate) async fn fire<S: NamespaceStore, T: NamespaceStore>(
         || progress.failure.is_some()
         || progress.terminal.is_some()
         || progress.missing
-        || progress.canonical_fallback
     {
         return Ok(crate::timers::Fired::Done(Batch::new()));
     }
@@ -732,8 +684,7 @@ pub(crate) async fn fire<S: NamespaceStore, T: NamespaceStore>(
     let complete = progress.complete
         || progress.failure.is_some()
         || progress.terminal.is_some()
-        || progress.missing
-        || progress.canonical_fallback;
+        || progress.missing;
     let batch = Batch::new()
         .require(Precondition::Equals(key.clone(), raw))
         .require(Precondition::NotAfter(ctx.now_ms.saturating_add(10_000)))

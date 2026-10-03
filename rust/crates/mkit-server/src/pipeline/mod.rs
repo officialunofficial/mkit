@@ -538,9 +538,6 @@ fn store_error(op: StorageOp, err: StoreError) -> ServerError {
 }
 
 fn meta_error(err: StoreError) -> ServerError {
-    if crate::indexed::budget::is_exhausted(&err) {
-        return ServerError::resource_exhausted("request call budget exhausted");
-    }
     store_error(StorageOp::MetaCall, err)
 }
 
