@@ -70,8 +70,11 @@ pack is small or highly compressed. Split very large flat directories into
 smaller subdirectories. Indexed `UploadPack` checks raw lengths, compressed raw
 claims and delta result sizes while streaming, before forwarding the chunk
 that reveals an oversize claim or committing the pack. Compressed deltas use
-a bounded incremental header probe that processes each block once, refusing
-the revealing chunk before its sink write. Multipart parts have
+a bounded incremental header probe, refusing the revealing chunk before its
+sink write. The Rust backend uses ruzstd 0.9's public APIs: it identifies blocks
+that produce output, then decodes a completed copy of the prefix at most nine
+times. Empty blocks do not cause replays. Encoded prefix buffering is bounded
+by the existing 16 MiB frame allowance, and decode windows remain 8 MiB. Multipart parts have
 no independent entry geometry; existing indexed advance verification still
 checks assembled packs. The early upload refusal is `InvalidArgument`, using
 the indexed decode-limit taxonomy in SPEC-SERVER §9.8. Neither stored data nor

@@ -1851,8 +1851,8 @@ fn oversized_canonical_entry_is_refused_during_upload_without_storage() {
     }
 }
 
-fn oversized_compressed_delta_pack() -> (Vec<u8>, usize, usize) {
-    let mut compressed = vec![0x28, 0xb5, 0x2f, 0xfd, 0, 0];
+fn oversized_compressed_delta_pack(malformed_tail: bool) -> (Vec<u8>, usize, usize) {
+    let mut compressed = vec![0x28, 0xb5, 0x2f, 0xfd, 0, 104];
     for i in 0..3 {
         compressed.extend_from_slice(&(1024_u32 << 3).to_le_bytes()[..3]);
         let mut body = vec![0; 1024];
@@ -1866,9 +1866,11 @@ fn oversized_compressed_delta_pack() -> (Vec<u8>, usize, usize) {
         }
         compressed.extend_from_slice(&body);
     }
-    assert!(mkit_core::pack::peek_delta_header(&compressed).is_ok());
     while compressed.len() < 300 * 1024 {
         compressed.extend_from_slice(&[0, 0, 0]);
+    }
+    if malformed_tail {
+        compressed.extend_from_slice(&[6, 0, 0]); // Reserved block kind after the header.
     }
     let reveal_end = 17 + 36 + compressed.len();
     compressed.extend_from_slice(&[9, 0, 0, 0]);
@@ -1887,7 +1889,16 @@ fn oversized_compressed_delta_pack() -> (Vec<u8>, usize, usize) {
 
 #[test]
 fn compressed_delta_oversize_prefix_is_rejected_before_revealing_sink_write() {
-    let (data, first_end, reveal_end) = oversized_compressed_delta_pack();
+    reject_compressed_delta_before_sink(false);
+}
+
+#[test]
+fn compressed_delta_oversize_prefix_precedes_a_malformed_tail() {
+    reject_compressed_delta_before_sink(true);
+}
+
+fn reject_compressed_delta_before_sink(malformed_tail: bool) {
+    let (data, first_end, reveal_end) = oversized_compressed_delta_pack(malformed_tail);
     let (env, owner, identity) = super::indexed::environment_with(
         Sharding::Single,
         crate::indexed::IndexedConfig::default(),

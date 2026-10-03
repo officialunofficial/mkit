@@ -204,6 +204,10 @@ pub(crate) fn corrupt_zstd_frames_bound_heap() {
     .unwrap();
     assert_eq!(decoded, (hash::hash(&object), object));
 
+    large_window_controls_bound_heap();
+}
+
+fn large_window_controls_bound_heap() {
     // Exercise the largest admitted window's ring growth, including live
     // old/new allocation overlap, with valid per-block raw output >8 MiB.
     let long_object = blob(9 << 20);
@@ -247,5 +251,16 @@ pub(crate) fn corrupt_zstd_frames_bound_heap() {
     assert_eq!(peek_delta_header(&zstd).unwrap(), (512, u32::MAX));
     let peak = PEAK.load(Ordering::SeqCst).saturating_sub(baseline);
     println!("8 MiB window header peek: peak_decode_alloc_bytes={peak}");
+    assert!(peak <= WORKING_ALLOWANCE);
+
+    let baseline = LIVE.load(Ordering::SeqCst);
+    PEAK.store(baseline, Ordering::SeqCst);
+    let mut probe = mkit_core::pack::DeltaHeaderProbe::new().unwrap();
+    assert_eq!(
+        probe.push(&zstd[..6 + 3 + BLOCK_MAXIMUM]).unwrap(),
+        Some((512, u32::MAX))
+    );
+    let peak = PEAK.load(Ordering::SeqCst).saturating_sub(baseline);
+    println!("incremental 8 MiB window probe: peak_decode_alloc_bytes={peak}");
     assert!(peak <= WORKING_ALLOWANCE);
 }
