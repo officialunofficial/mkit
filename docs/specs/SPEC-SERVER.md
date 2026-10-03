@@ -1168,7 +1168,17 @@ rule):
 | An object-index lookup limit is exceeded during closure or packlist checks | `object index limit exceeded` |
 
 These are permanent failures. Clients MUST NOT retry the rejected
-upload as though polling or backoff could make its content valid.
+upload as though polling or backoff could make its content valid. The last
+row is a per-lookup index cap and is also this error on the resumable
+publication path. Informative: during publication verification the indexed
+decode budget is charged over the whole packmap chain and reachable closure,
+so it is history-scoped; it keeps its existing `invalid_argument` errors
+(`object index limit exceeded` on the canonical path, `pack exceeds indexed
+decode budget` on the resumable path, whose budget is cumulative over the
+pair) until a separate amendment of this input contract. Running out of an
+execution allowance, or of an implementation's retained-evidence capacity, is
+not a verification failure of the content and is not in this table: §10.2
+classifies it as `unavailable`.
 An unresolved external delta base follows §9.4's distinct visibility
 and replanning rules rather than being reported as an open closure.
 
@@ -1548,6 +1558,36 @@ opaque mode or without inspectors, where the published view equals the live
 view. Configured takedown or custom-policy verification and delayed
 dependency publication still retain their applicable rules, including pair
 coverage and published-membership dependencies.
+
+Evidence computed against a publication state MUST be bound to that state. The
+server MUST compare the publication state (its membership generation, sequence
+and deletion boundary; the published prefix and value are re-derived at apply
+and are not part of the binding) that verification,
+inspection, policy and denial clearance were computed against with the state
+the final atomic apply guards. On any difference it MUST obtain new evidence
+for the replacement state or refuse with a retryable `unavailable`; it MUST NOT
+re-read a newer publication row and guard only that row, which would validate
+evidence derived from the older one. The binding is request-local and adds no
+stored field.
+
+Exhaustion of an invocation, slice or alarm execution allowance MUST NOT be
+treated as evidence of malformed content or a missing closure member. A server
+MUST preserve any valid bounded continuation, or refuse without publication
+using `unavailable`. The same capacity cause MUST have the same classification
+in preparation, dependency verification and final clearance, whichever call
+the allowance runs out on: classification follows the allowance itself, not
+the shape of the error that surfaced. A publication request MUST draw all of
+that work, including every optimistic retry of the final apply and its own
+snapshot, lease, checkpoint and commit calls, from one allowance, counting
+every dispatched call whether or not it failed. An implementation SHOULD stop
+proof work short of the allowance to leave headroom for settlement; a
+settlement call the allowance cannot cover is refused as capacity. Explicit per-input index, inspection, decode and delta-depth
+limits retain their specified errors. An implementation unable to verify
+historical support within its supported limits, such as a retained-evidence
+bound, MUST fail closed with `unavailable` and document the operational
+limitation; unsupported work MUST be recorded as a terminal stop rather than
+rescheduled by every alarm, and it MUST NOT claim that an ordinary retry
+necessarily resolves it.
 
 Each advance has a clearance state:
 
@@ -3988,6 +4028,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | §10.2 binds publication evidence to the publication state it was computed against (generation, sequence and deletion boundary) and requires new evidence or a retryable refusal on any difference; execution-capacity exhaustion is `unavailable` with one request allowance across preparation, dependency visibility and final-apply retries, and unsupported historical capacity is a terminal stop. §9.3 distinguishes per-lookup index caps (permanent) from capacity. No stored-row or wire change. |
 | 1 | draft | §17 no longer promises that rows written by 0.5.x keep decoding: stored formats are not a compatibility contract before 1.0. No behavior change. |
 | 1 | draft | Clarifies publication verification: a verified member terminates only the direct-child check and waives no §10.2, §14.2 or ref-policy obligation (§9.3); the inspector pair-check shorthand is made precise (§10.2); synchronous inspection of ref-only operations and the duty to document historical-support limits (§18). No wire, stored-row or version change. |
 | 1 | draft | Editorial: §18 states the launch profile deployment-neutrally and points to the Workers operator guide for the Worker-specific selection, bindings and purge configuration; the `store::inspection_*` modules are marked unintegrated groundwork and the deferred inspection, Event and proof work as not implemented. No behavior change. |

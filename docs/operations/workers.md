@@ -377,21 +377,41 @@ of these paths runs:
 | Canonical, custom policy | A custom publication policy is configured | The 256-call canonical proof, and with takedown on a decode budget of at most 8 MiB. |
 | Canonical, mapless | Tags and other refs without a packmap, or a pair whose packmap root has no verification row, with takedown on | The same 256-call proof and 8 MiB decode budget. |
 
-The final denial proof and dependency visibility are further bounded by a
-9,000-call allowance and the request's physical budgets (see Limits and
-acceptance boundaries). Chain growth, dependency growth and the number of
-objects a head reaches consume these allowances together, so no count of
-objects, pushes or files is a supported workload size; the cliff depends on
-history shape, delta fanout, map depth and the size of the denial directory.
+One publication request counts every metadata and blob call it dispatches
+against a single 9,000-call allowance, failed dispatches included: preparation,
+the resumable slice, dependency visibility, each denial proof, and its own
+snapshot, lease, checkpoint and commit calls on every optimistic retry. Proof
+work stops 64 calls short of the allowance, enough for one uncontended attempt's
+settlement; contended retries keep spending the same allowance and are refused
+as capacity when it is empty. The 128- and 256-call slices above are children of
+the proof share, never extra allowance. Policy hooks, inspector calls and other
+RPC work are outside this ledger; the request's physical budgets also apply
+(see Limits and acceptance boundaries). Chain growth,
+dependency growth and the number of objects a head reaches consume these
+allowances together, so no count of objects, pushes or files is a supported
+workload size; the cliff depends on history shape, delta fanout, map depth and
+the size of the denial directory.
 
 These are availability limits, not an authorization decision. Hitting one
-makes the server refuse the write (`object index limit exceeded`, or
-`pack exceeds indexed decode budget` for the byte limit) or leave it pending
-(`pack verification pending`) while bounded progress continues. It never
-publishes on a partial proof, moves a ref, consumes a ticket, writes
-membership or calls a scanner. A repeated refusal or a pending state that never
-completes is an operational failure to investigate, not an in-progress success,
-and retrying does not necessarily resolve it.
+makes the server refuse the write with `unavailable` and the public message
+`publication verification capacity exhausted` (or leave it pending,
+`pack verification pending`, while bounded progress continues). The refusal is
+the same whichever call the allowance ran out on. A resumable job that reaches
+an unsupported historical limit records one stop and answers `unavailable` with
+`publication verification limit reached` (counted by
+`mkit_server_publication_limit_reached_total`, label `reason`): that needs
+operator action, not a retry. The byte limit is different: the decode budget is
+charged over the whole packmap chain and reachable closure, so it is
+history-scoped, but it keeps its specified errors, `invalid_argument` with
+`object index limit exceeded` on the canonical path and `pack exceeds indexed
+decode budget` on the resumable path (whose 2 GiB default is cumulative over the
+pair). Reclassifying those as capacity needs a separate amendment of the input
+contract. It never publishes
+on a partial proof, moves a ref, consumes a ticket, writes membership or calls
+a scanner. A resumable job that hits an unsupported historical limit ends as one
+recorded stop and is not rescheduled by every alarm. A repeated refusal or a
+pending state that never completes is an operational failure to investigate,
+not an in-progress success, and retrying does not necessarily resolve it.
 
 Operator rules:
 

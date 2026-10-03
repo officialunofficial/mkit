@@ -58,7 +58,7 @@ fn run_proved_with(
     leased: bool,
     edit: impl FnOnce(&mut WriteRequest<'_>),
 ) -> Result<StoredResult, ServerError> {
-    run_proved_ticket(env, pending, leased, edit, false)
+    run_proved_ticket(env, pending, leased, edit, false, None)
 }
 
 fn run_proved_ticket(
@@ -67,6 +67,7 @@ fn run_proved_ticket(
     leased: bool,
     edit: impl FnOnce(&mut WriteRequest<'_>),
     expired_ticket: bool,
+    budget: Option<&crate::pipeline::publication_budget::PublicationBudget>,
 ) -> Result<StoredResult, ServerError> {
     let refs = [upd(HEAD, Missing, C)];
     let ids = BTreeSet::from([A]);
@@ -147,7 +148,9 @@ fn run_proved_ticket(
         .pipe
         .identify(&a, OpKind::UpdateRef(refs[0].clone()))
         .unwrap();
-    now(env.pipe.apply_loop(&op, &a, &source, &req, Some(ahead)))
+    now(env
+        .pipe
+        .apply_loop(&op, &a, &source, &req, Some(ahead), budget))
 }
 
 #[test]
@@ -443,7 +446,7 @@ fn repeated_slow_proof_cannot_refresh_either_attempt_window() {
 #[test]
 fn proof_rechecks_ticket_expiry_on_fresh_business_clock() {
     let (env, scans) = proof_env(11_000, false, false);
-    let error = run_proved_ticket(&env, None, false, |_| {}, true).unwrap_err();
+    let error = run_proved_ticket(&env, None, false, |_| {}, true, None).unwrap_err();
     assert_eq!(error.code(), Code::FailedPrecondition);
     assert_eq!(error.public_message(), "invalid or expired upload ticket");
     assert_eq!(scans.load(Ordering::SeqCst), DIRECTORY_SCANS);
@@ -767,4 +770,91 @@ fn signed_takedown_after_proof_cannot_publish_a_reused_canonical_pair() {
         .unwrap(),
         Some(codec::encode_ref_id(&head))
     );
+}
+
+#[test]
+fn replans_share_one_proof_ledger_and_exhaustion_is_capacity() {
+    use crate::pipeline::publication_budget::{PublicationBudget, SETTLEMENT_RESERVE};
+    // The cold proof outlives its commit window, so the loop proves twice.
+    let spent = {
+        let (env, _) = proof_env(11_000, false, false);
+        let ledger = PublicationBudget::new();
+        run_proved_ticket(&env, None, false, |_| {}, false, Some(&ledger)).unwrap();
+        ledger.proof().used()
+    };
+    assert!(spent > 2 * DIRECTORY_SCANS, "both proofs charge one ledger");
+    // Exactly the aggregate allowance succeeds; one call fewer is capacity on the
+    // second proof, never a verdict about the content and never a commit.
+    let (env, _) = proof_env(11_000, false, false);
+    let ledger = PublicationBudget::with_request_calls(spent + SETTLEMENT_RESERVE);
+    run_proved_ticket(&env, None, false, |_| {}, false, Some(&ledger)).unwrap();
+    assert_eq!(ledger.proof().used(), spent);
+    let (env, _) = proof_env(11_000, false, false);
+    let ledger = PublicationBudget::with_request_calls(spent - 1 + SETTLEMENT_RESERVE);
+    let error = run_proved_ticket(&env, None, false, |_| {}, false, Some(&ledger)).unwrap_err();
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(
+        error.public_message(),
+        "publication verification capacity exhausted"
+    );
+    assert!(ledger.proof().refused());
+    assert!(
+        now(env.pipe.meta.inner.get(
+            &env.pipe.shards.ref_shard(&repo(), HEAD),
+            &keys::ref_key(&repo_name(), HEAD)
+        ))
+        .unwrap()
+        .is_none()
+    );
+}
+
+/// A lease-contended write replans up to the cap. Every settlement call it
+/// makes (snapshot reads, lease observation, each commit attempt) is charged
+/// to the request root, so the total including settlement stays inside the
+/// request allowance however many attempts run.
+#[test]
+fn contended_replans_charge_every_settlement_call_to_the_request_root() {
+    use crate::pipeline::publication_budget::PublicationBudget;
+    let (mut env, _) = proof_env(0, false, true);
+    let source = D34Shards.ref_shard(&repo(), HEAD);
+    let bumps = Arc::new(AtomicU32::new(0));
+    let counter = bumps.clone();
+    env.pipe.meta.hook = Some(Box::new(move |store, p, batch| {
+        if *p != source || batch.preconditions.iter().all(|c| !matches!(c, Precondition::Equals(k, _) | Precondition::Absent(k) if *k == keys::epoch_lease())) {
+            return;
+        }
+        // Another writer renews the lease under every commit attempt.
+        let epoch = u64::from(counter.fetch_add(1, Ordering::SeqCst)) + 1;
+        let lease = codec::EpochLease {
+            authority_ready: None,
+            authority_generation: None,
+            epoch,
+            expires_at_ms: ms(T0) + 600_000,
+            config_version: 1,
+        };
+        now(store.apply(
+            &source,
+            Batch::new().put(keys::epoch_lease(), codec::encode_epoch_lease(&lease)),
+        ))
+        .unwrap();
+    }));
+    let ledger = PublicationBudget::new();
+    let before = env.pipe.meta.calls();
+    let error = run_proved_ticket(&env, None, true, |_| {}, false, Some(&ledger)).unwrap_err();
+    assert_eq!(error.code(), Code::Aborted, "{error:?}");
+    assert!(bumps.load(Ordering::SeqCst) > 1, "the write must replan");
+    // Everything the loop dispatched on its own behalf was counted once.
+    assert_eq!(ledger.root().used(), env.pipe.meta.calls() - before);
+    assert!(ledger.root().used() > crate::pipeline::publication_budget::SETTLEMENT_RESERVE);
+    assert!(ledger.root().used() <= ledger.root().limit());
+    // With a smaller allowance the same contention is refused as capacity
+    // instead of running past it.
+    let tight = PublicationBudget::with_request_calls(20);
+    let error = run_proved_ticket(&env, None, true, |_| {}, false, Some(&tight)).unwrap_err();
+    assert_eq!(error.code(), Code::Unavailable, "{error:?}");
+    assert_eq!(
+        error.public_message(),
+        "publication verification capacity exhausted"
+    );
+    assert!(tight.root().used() <= tight.root().limit());
 }

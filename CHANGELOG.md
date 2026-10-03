@@ -28,6 +28,9 @@ supported after new reservation rows are written.
   advances, uploads, visibility changes and reads, including a reservation the
   crash reconciler abandons). Only outcomes written by v0.5.0 have `None`
   (an expired ticket is always `BeginUpload`).
+- `mkit_server::indexed::publication::{verify, verify_inspected}` are removed.
+  They had no callers: the pipeline verifies within the request's publication
+  ledger.
 
 ### Added
 
@@ -111,6 +114,23 @@ supported after new reservation rows are written.
   writes and return exhausted failures for replay and cold-start repair.
 - The embedded Worker example enables the pure-Rust zstd decoder for default
   CLI pushes.
+- A prepared publication proof is bound to the publication row it was computed
+  against (membership generation, sequence and deletion boundary). A
+  generation change, a deletion boundary or a same-pair advance between
+  preparation and the final apply now refuses with retryable `unavailable`
+  instead of committing the proof onto the newer row. The binding is
+  request-local; no stored field changes.
+- Publication verification draws preparation, dependency visibility and every
+  optimistic retry of the final denial proof from one request allowance (with
+  headroom reserved for settlement; snapshot, lease, checkpoint and commit calls
+  are counted too), and exhaustion is `unavailable` with the message
+  `publication verification capacity exhausted` whichever call it lands on. It
+  was `invalid_argument` (`object index limit exceeded`) in some phases, which
+  told clients the content was permanently invalid. A resumable job's recorded
+  stop at an unsupported historical limit now answers `unavailable` with
+  `publication verification limit reached` and a counter, instead of
+  `invalid_argument`. Per-lookup index caps and the indexed decode budget keep
+  their specified errors on both paths.
 
 ## [0.5.0](https://github.com/officialunofficial/mkit/compare/v0.4.2...v0.5.0) - 2026-10-02
 
