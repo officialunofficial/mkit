@@ -3829,8 +3829,7 @@ action descriptors and activate every requested denial before returning success.
 It returns `complete = false`; acceptance MUST NOT imply verified preservation,
 holder discovery or repository/global completion. The pending record MUST retain
 preservation work. Production takedown and `ReadPreserved` activation MUST be
-available only when admin keys, `LAUNCH_PROFILE=paid-workers` (or its deprecated
-`uno` alias, which MUST log a startup deprecation warning),
+available only when admin keys, `LAUNCH_PROFILE=paid-workers`,
 `TAKEDOWN_ENABLED=true`, indexed Workers Paid mode, and the complete §14.7
 preservation configuration are valid. This includes the `PRESERVATION`
 binding, explicit positive retention, receipt signing and publication keys,
@@ -3930,6 +3929,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 | Version | Status | Change |
 |---|---|---|
 | 1 | draft | Additive object-reader session accounting and typed exhaustion. Existing public absence, advance messages and stored/wire formats are unchanged. |
+| 1 | draft | The deprecated `LAUNCH_PROFILE=uno` alias is removed; `paid-workers` is the only accepted value (§14, §18). |
 | 1 | draft | Stored rows remain decodable throughout 0.5.x; additive JSON fields require serde defaults (§17). |
 | 1 | draft | Worker timer writes retry alarm scheduling twice inline, propagate exhaustion and retain cold-start repair. |
 | 1 | draft | Namespace-scoped ListRepos authorization with an arbitrary repository selector; authority full listing requires explicit opt-in and writer view (§6.2; STC §7.10). |

@@ -275,7 +275,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     /// Issue at most 16 URL tokens, preserving order and duplicates.
     /// Requires configured URL-token keys. Inaccessible targets are uniformly
     /// absent. Tokens bind unresolved targets exactly as `IssueObjectUrl` does,
-    /// after a bounded published-view preflight, including for Owner readers.
+    /// after a bounded reachability preflight, including for Owner readers.
     /// # Errors
     /// As [`Self::read_canonical`], plus `unimplemented` without URL-token keys.
     /// Targets whose reachability cannot be proved within decode/walk limits are absent.

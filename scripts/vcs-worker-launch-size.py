@@ -18,7 +18,6 @@ VARIANTS = {
     "http": "pack-ruzstd,http-objects",
     "signed": "pack-ruzstd,signed-http-hooks",
     "http-signed": "pack-ruzstd,http-objects,signed-http-hooks",
-    "snapshots": "launch",
 }
 LIMIT = 64 * 1024 * 1024
 

@@ -33,7 +33,6 @@ native targets and `wasm32-unknown-unknown`.
 | `ssh` | The `mkit.rpc.v1.ssh` session (`ssh::serve_session`), with no async runtime of its own. |
 | `remote-hooks` | Signed `mkit.server.hooks.v1` authorization, admission and outcome adapters over a `HookChannel`. |
 | `http-objects` | Runtime-agnostic HTTP object serving; requires explicit configuration and indexed mode. |
-| `published-view` | Published reader source; explicit adapter configuration. |
 | `pack-ruzstd` | Pure-Rust zstd decoding for wasm targets. |
 | `test-faults` | Test-only fault injection. Never enable it in a release build. |
 

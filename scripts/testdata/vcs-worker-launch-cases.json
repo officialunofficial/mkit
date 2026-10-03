@@ -48,16 +48,16 @@
     {
       "id": "B4.publication",
       "contract": "Paired head/packmap publication, ListRefs/ReadRef, authorized writer live versus reader published, delayed D34 dependency delivery",
-      "native": "pipeline::tests::published; d34_creation; relay",
-      "worker": "published_view::tests; scripts/vcs-worker-conformance.sh D34",
+      "native": "d34_creation; relay",
+      "worker": "scripts/vcs-worker-conformance.sh D34",
       "phase2": "release real source/projection/publication race and restart; no publication Event"
     },
     {
       "id": "B4.public-reads",
-      "contract": "PackExists/DownloadPack, index objects, HTTP/MKDP/MKDS, URL token, ref headers, snapshots/cache all enforce visibility and global denial",
-      "native": "pipeline::tests::http_objects; http_mount; pipeline::tests::published",
-      "worker": "http_mount::tests; published_view::tests",
-      "phase2": "actual release opted-in HTTP objects and snapshots with stale cache/token cases"
+      "contract": "PackExists/DownloadPack, index objects, HTTP/MKDP/MKDS, URL token, ref headers and cache all enforce visibility and global denial",
+      "native": "pipeline::tests::http_objects; http_mount",
+      "worker": "http_mount::tests",
+      "phase2": "actual release opted-in HTTP objects with stale cache/token cases"
     },
     {
       "id": "B4.native-proofs",
@@ -139,8 +139,8 @@
     {
       "id": "B4.recovery",
       "contract": "Current-format fresh startup, restart/lost replies/duplicate timers, immutable source retention and empty-store inspection activation; unsupported prelaunch stores reset",
-      "native": "timers; export_restore; pipeline::tests::published",
-      "worker": "scripts/vcs-worker-conformance.sh --test-faults; published_view::tests",
+      "native": "timers; export_restore",
+      "worker": "scripts/vcs-worker-conformance.sh --test-faults",
       "phase2": "actual release same-format restart with pending extraction/purge/takedown and no compatibility migration"
     },
     {
@@ -182,7 +182,7 @@
       "id": "B3.alarm-budget",
       "contract": "Whole physical alarm shared limits/headroom, verification/extraction 256 calls and 48MiB, due-kind retries/frozen clock, bounded cold heads/local scans/fair progress",
       "native": "timers::tests; indexed::extraction_budget_tests; purge::tests",
-      "worker": "ns_object::tests; sql::kv::tests; published_view::tests",
+      "worker": "ns_object::tests; sql::kv::tests",
       "phase2": "with merged publication/timer/alarm repairs, actual release multiple due kinds/cold heads and resident-work measurements"
     },
     {

@@ -70,12 +70,6 @@ pub(crate) fn fixture(name: &str) -> &'static [u8] {
 ",
         "object-root-binding.hex" => br"0101010101010101010101010101010101010101010101010101010101010101010000000000000008
 ",
-        "published-view-Envelope.hex" => br"4d4b5002000f78726f6f740073616d706c65003900000000000000000200000000000003e8000000000000ee480001000f726566732f68656164732f6d61696e0202020202020202020202020202020202020202020202020202020202020202
-",
-        "published-view-State-clean.hex" => br"0100000000000000000200000000000003e80000000000000384
-",
-        "published-view-State-dirty.hex" => br"0101000000000000000200000000000003e80000000000000384
-",
         "purge-NamespacePosition-empty.json" => br#"{"paths":false,"done":false,"after":null,"repository":null,"cursor":0}"#,
         "purge-NamespacePosition-populated.json" => br#"{"paths":true,"done":false,"after":[114,114,0,114,101,112,111],"repository":"repo","cursor":3}"#,
         "r2-object_multipart-Definition.json" => br#"{"object":"object","root":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"len":8,"part_size":8388608,"cvs":[[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2]],"operation":[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3]}"#,
@@ -90,47 +84,6 @@ pub(crate) fn fixture(name: &str) -> &'static [u8] {
 }
 
 macro_rules! tests {
-    (published_view_codec) => {
-        use super::*;
-        #[test]
-        fn v050_stored_encodings() {
-            let expected = crate::stored_golden::hex_fixture!("published-view-Envelope");
-            let repo = RepoId {
-                namespace: mkit_server::NamespaceKey::deployment_default(),
-                name: mkit_server::RepoName::new("sample").unwrap(),
-            };
-            let partition = D34Shards.ref_index(&repo, "refs/heads/main");
-            let row = Envelope::decode(expected.as_bytes(), &partition, 1000).unwrap();
-            assert_eq!(row.generation, 2);
-            assert_eq!(row.captured_at_ms, 1000);
-            assert_eq!(row.valid_until_ms, 61000);
-            assert_eq!(row.rows, vec![("refs/heads/main".into(), [2; 32])]);
-            assert_eq!(row.encode().unwrap(), expected.as_bytes());
-        }
-    };
-    (published_view_timer) => {
-        use super::*;
-        #[test]
-        fn v050_stored_encodings() {
-            for (expected, dirty) in [
-                (
-                    crate::stored_golden::hex_fixture!("published-view-State-clean"),
-                    false,
-                ),
-                (
-                    crate::stored_golden::hex_fixture!("published-view-State-dirty"),
-                    true,
-                ),
-            ] {
-                let state = State::decode(&expected).unwrap();
-                assert_eq!(state.generation, 2);
-                assert_eq!(state.dirty, dirty);
-                assert_eq!(state.due, 1000);
-                assert_eq!(state.last_success, 900);
-                assert_eq!(state.encode(), expected);
-            }
-        }
-    };
     (purge) => {
         use super::*;
         #[derive(Default)]
@@ -149,10 +102,7 @@ macro_rules! tests {
                 let partition = mkit_server::Partition::Coordinator(
                     mkit_server::NamespaceKey::deployment_default(),
                 );
-                let local = LocalCache {
-                    cache: Cache,
-                    snapshot_deployment: Some("fixture".into()),
-                };
+                let local = LocalCache { cache: Cache };
                 let invalidator = NamespaceCache {
                     local: &local,
                     source: &source,
@@ -171,9 +121,18 @@ macro_rules! tests {
                     object_ids: Vec::new(),
                     refs: Vec::new(),
                 };
-                for expected in [
-                    crate::stored_golden::row_fixture!("purge-NamespacePosition-empty", b""),
-                    crate::stored_golden::row_fixture!("purge-NamespacePosition-populated", b""),
+                for (expected, resumed_repository) in [
+                    (
+                        crate::stored_golden::row_fixture!("purge-NamespacePosition-empty", b""),
+                        false,
+                    ),
+                    (
+                        crate::stored_golden::row_fixture!(
+                            "purge-NamespacePosition-populated",
+                            b""
+                        ),
+                        true,
+                    ),
                 ] {
                     let row: NamespacePosition =
                         serde_json::from_slice(expected.as_bytes()).unwrap();
@@ -183,7 +142,17 @@ macro_rules! tests {
                         .await
                         .unwrap()
                         .unwrap();
-                    assert_eq!(restored, expected.as_bytes());
+                    if resumed_repository {
+                        // A repository step has no cache keys beyond the intent's
+                        // paths, so a restored mid-repository position completes
+                        // that repository and keeps the catalog cursor.
+                        let mut next = row;
+                        next.repository = None;
+                        next.cursor = 0;
+                        assert_eq!(restored, serde_json::to_vec(&next).unwrap());
+                    } else {
+                        assert_eq!(restored, expected.as_bytes());
+                    }
                 }
             });
         }

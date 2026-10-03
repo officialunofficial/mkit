@@ -77,7 +77,6 @@ pub trait CacheDelete: MaybeSend + MaybeSync {
 #[derive(Debug)]
 pub struct LocalCache<C> {
     pub cache: C,
-    pub snapshot_deployment: Option<String>,
 }
 impl<C: CacheDelete> LocalInvalidation for LocalCache<C> {
     fn invalidate<'a>(
@@ -94,39 +93,11 @@ impl<C: CacheDelete> LocalInvalidation for LocalCache<C> {
                     "namespace purge needs repository intents".into(),
                 ));
             }
-            #[allow(unused_mut)] // Snapshot keys are appended only with published-view enabled.
-            let mut keys = request
+            let keys = request
                 .url_paths
                 .iter()
                 .map(|path| format!("{}{path}", request.audience))
                 .collect::<Vec<_>>();
-            #[cfg(feature = "published-view")]
-            if let Some(deployment) = &self.snapshot_deployment {
-                let (namespace, repo) = request
-                    .repository
-                    .rsplit_once('/')
-                    .ok_or_else(|| StoreError::Invalid("invalid repository".into()))?;
-                for bucket in 0..16 {
-                    keys.push(crate::published_view::cache_key(
-                        deployment,
-                        &mkit_server::Partition::RefIndex {
-                            ns: if namespace == "root" {
-                                mkit_server::NamespaceKey::deployment_default()
-                            } else {
-                                mkit_server::NamespaceKey::from_namespace(
-                                    &mkit_core::repo_identity::Namespace::parse(namespace)
-                                        .map_err(|_| {
-                                            StoreError::Invalid("invalid namespace".into())
-                                        })?,
-                                )
-                            },
-                            repo: mkit_server::RepoName::new(repo)
-                                .map_err(|_| StoreError::Invalid("invalid repository".into()))?,
-                            bucket,
-                        },
-                    )?);
-                }
-            }
             for (index, key) in keys.iter().enumerate().skip(cursor as usize) {
                 // Deterministic bounded enumeration and delete share one allowance.
                 if !budget.charge(2) {
@@ -139,7 +110,7 @@ impl<C: CacheDelete> LocalInvalidation for LocalCache<C> {
     }
 }
 
-#[cfg(any(target_arch = "wasm32", feature = "published-view"))]
+#[cfg(any(target_arch = "wasm32", test))]
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NamespacePosition {
@@ -149,11 +120,11 @@ struct NamespacePosition {
     repository: Option<String>,
     cursor: u32,
 }
-#[cfg(any(target_arch = "wasm32", feature = "published-view"))]
+#[cfg(any(target_arch = "wasm32", test))]
 fn bad_position() -> StoreError {
     StoreError::Corrupt("invalid namespace purge checkpoint".into())
 }
-#[cfg(any(target_arch = "wasm32", feature = "published-view"))]
+#[cfg(any(target_arch = "wasm32", test))]
 struct NamespaceCache<'a, S, T, C> {
     local: &'a LocalCache<C>,
     source: &'a S,
@@ -162,7 +133,7 @@ struct NamespaceCache<'a, S, T, C> {
     sharding: mkit_server::pipeline::Sharding,
     single: Option<&'a mkit_server::RepoId>,
 }
-#[cfg(any(target_arch = "wasm32", feature = "published-view"))]
+#[cfg(any(target_arch = "wasm32", test))]
 impl<S: NamespaceStore, T: NamespaceStore, C: CacheDelete> LocalInvalidation
     for NamespaceCache<'_, S, T, C>
 {
@@ -304,7 +275,7 @@ impl<S: NamespaceStore, T: NamespaceStore, C: CacheDelete> LocalInvalidation
     }
 }
 /// Kind-11 delivery with durable catalog traversal and context-local reads.
-#[cfg(any(target_arch = "wasm32", feature = "published-view"))]
+#[cfg(any(target_arch = "wasm32", test))]
 pub(crate) struct NamespaceDelivery<T, C> {
     pub delivery: mkit_server::purge::PurgeDelivery,
     pub local: LocalCache<C>,
@@ -312,7 +283,7 @@ pub(crate) struct NamespaceDelivery<T, C> {
     pub sharding: mkit_server::pipeline::Sharding,
     pub single: Option<mkit_server::RepoId>,
 }
-#[cfg(any(target_arch = "wasm32", feature = "published-view"))]
+#[cfg(any(target_arch = "wasm32", test))]
 impl<S: NamespaceStore, T: NamespaceStore, C: CacheDelete> TimerHandler<S>
     for NamespaceDelivery<T, C>
 {
@@ -345,24 +316,8 @@ impl<S: NamespaceStore, T: NamespaceStore, C: CacheDelete> TimerHandler<S>
 #[derive(Debug)]
 pub struct WorkerCache;
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn local_cache(config: &crate::adapter::WorkerConfig) -> LocalCache<WorkerCache> {
-    LocalCache {
-        cache: WorkerCache,
-        snapshot_deployment: {
-            #[cfg(feature = "published-view")]
-            {
-                config
-                    .published_view
-                    .as_ref()
-                    .map(|config| config.deployment.clone())
-            }
-            #[cfg(not(feature = "published-view"))]
-            {
-                let _ = config;
-                None
-            }
-        },
-    }
+pub(crate) fn local_cache() -> LocalCache<WorkerCache> {
+    LocalCache { cache: WorkerCache }
 }
 #[cfg(target_arch = "wasm32")]
 impl CacheDelete for WorkerCache {
@@ -417,64 +372,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "published-view")]
-    fn every_repository_selector_deletes_all_snapshot_buckets_and_resumes_at_next_key() {
-        use futures::executor::block_on;
-        for variant in 0..4 {
-            let mut request = request("selectors");
-            if variant != 0 {
-                request.url_paths.clear();
-            }
-            if variant == 1 {
-                request
-                    .object_ids
-                    .push("BwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into());
-            }
-            if variant == 2 {
-                request.refs.push("refs/heads/main".into());
-            }
-            let cache = Cache::default();
-            let invalidator = LocalCache {
-                cache: cache.clone(),
-                snapshot_deployment: Some("deployment".into()),
-            };
-            let mut cursor = 0;
-            loop {
-                let budget = SliceBudget::new(6);
-                let next = block_on(invalidator.invalidate(&request, cursor, &budget)).unwrap();
-                assert!(budget.used() <= 6);
-                let Some(next) = next else { break };
-                assert!(next > cursor);
-                cursor = next;
-            }
-            let keys = cache.0.lock().unwrap();
-            assert_eq!(keys.len(), if variant == 0 { 17 } else { 16 });
-            for bucket in 0..16 {
-                let key = crate::published_view::cache_key(
-                    "deployment",
-                    &Partition::RefIndex {
-                        ns: NamespaceKey::deployment_default(),
-                        repo: RepoName::new("repo").unwrap(),
-                        bucket,
-                    },
-                )
-                .unwrap();
-                assert_eq!(keys.iter().filter(|k| **k == key).count(), 1);
-            }
-            if variant == 0 {
-                assert!(keys.contains(&"https://server.example/object".into()));
-            }
-        }
-    }
-
-    #[test]
     fn namespace_local_delivery_stays_pending_without_a_repository_intent() {
         let mut request = request("namespace");
         request.repository.clear();
         request.namespace = "root".into();
         let invalidator = LocalCache {
             cache: Cache::default(),
-            snapshot_deployment: None,
         };
         assert!(
             futures::executor::block_on(invalidator.invalidate(
@@ -486,137 +389,14 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "published-view")]
-    fn remote_snapshot_keys(request: &Request) -> std::collections::BTreeSet<String> {
-        use std::collections::BTreeMap;
-        // A real signed sink needs this explicit deployment mapping and its
-        // namespace repository registry; neither value travels in CachePurge.
-        let deployments = BTreeMap::from([("https://server.example", "fixture-deployment")]);
-        let deployment = deployments[request.audience.as_str()];
-        let names = if request.repository.is_empty() {
-            assert_eq!(request.namespace, "root");
-            vec!["repo", "other"]
-        } else {
-            vec![request.repository.rsplit_once('/').unwrap().1]
-        };
-        names
-            .into_iter()
-            .flat_map(|name| {
-                (0..16).map(move |bucket| {
-                    crate::published_view::cache_key(
-                        deployment,
-                        &Partition::RefIndex {
-                            ns: NamespaceKey::deployment_default(),
-                            repo: RepoName::new(name).unwrap(),
-                            bucket,
-                        },
-                    )
-                    .unwrap()
-                })
-            })
-            .collect()
-    }
-
-    #[test]
-    #[cfg(feature = "published-view")]
-    fn remote_snapshot_mapping_agrees_with_local_repository_keys_and_namespace_expansion() {
-        use futures::executor::block_on;
-        use std::collections::BTreeSet;
-        for selector in 0..4 {
-            let mut request = request("mapping");
-            request.url_paths.clear();
-            if selector == 1 {
-                request
-                    .object_ids
-                    .push("BwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into());
-            }
-            if selector == 2 {
-                request.refs.push("refs/heads/main".into());
-            }
-            if selector == 3 {
-                request.url_paths.push("/proof".into());
-            }
-            let cache = Cache::default();
-            let invalidator = LocalCache {
-                cache: cache.clone(),
-                snapshot_deployment: Some("fixture-deployment".into()),
-            };
-            assert!(
-                block_on(invalidator.invalidate(&request, 0, &SliceBudget::new(100)))
-                    .unwrap()
-                    .is_none()
-            );
-            let actual = cache
-                .0
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|key| key.starts_with("https://mkit-snapshot.invalid/"))
-                .cloned()
-                .collect::<BTreeSet<_>>();
-            assert_eq!(actual, remote_snapshot_keys(&request));
-            if selector != 0 {
-                assert!(request.tags().contains(&mkit_server::purge::cache_tag(
-                    &request.audience,
-                    "proof",
-                    "root/repo"
-                )));
-                assert!(request.tags().contains(&mkit_server::purge::cache_tag(
-                    &request.audience,
-                    "snapshot",
-                    "root/repo"
-                )));
-            }
-        }
-        let mut namespace = request("namespace-mapping");
-        namespace.repository.clear();
-        namespace.namespace = "root".into();
-        namespace.url_paths.clear();
-        let cache = Cache::default();
-        let invalidator = LocalCache {
-            cache: cache.clone(),
-            snapshot_deployment: Some("fixture-deployment".into()),
-        };
-        for name in ["repo", "other"] {
-            let mut repository = namespace.clone();
-            repository.namespace.clear();
-            repository.repository = format!("root/{name}");
-            assert!(
-                block_on(invalidator.invalidate(&repository, 0, &SliceBudget::new(100)))
-                    .unwrap()
-                    .is_none()
-            );
-        }
-        assert_eq!(
-            cache
-                .0
-                .lock()
-                .unwrap()
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>(),
-            remote_snapshot_keys(&namespace)
-        );
-        assert_eq!(
-            namespace.tags(),
-            [mkit_server::purge::cache_tag(
-                &namespace.audience,
-                "namespace",
-                "root"
-            )]
-        );
-    }
-
     struct HandlerCalls {
         kind: u8,
         calls: u32,
         recorded: Arc<AtomicU32>,
     }
 
-    #[cfg(feature = "published-view")]
     #[derive(Clone)]
     struct NamespaceSink(Arc<Mutex<Vec<Request>>>);
-    #[cfg(feature = "published-view")]
     impl PurgeSink for NamespaceSink {
         fn deliver<'a>(&'a self, request: &'a Request) -> BoxFuture<'a, Result<(), StoreError>> {
             Box::pin(async move {
@@ -626,13 +406,11 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "published-view")]
     #[derive(Clone)]
     struct CatalogCounts {
         inner: Arc<MemoryKv>,
         reads: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
     }
-    #[cfg(feature = "published-view")]
     impl NamespaceStore for CatalogCounts {
         fn capabilities(&self) -> mkit_server::StoreCapabilities {
             self.inner.capabilities()
@@ -676,7 +454,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "published-view")]
     async fn namespace_catalog_cursor_is_durable_and_never_restarts_prior_pages() {
         use mkit_server::store::{codec, keys};
         let inner = Arc::new(MemoryKv::default());
@@ -710,7 +487,6 @@ mod tests {
         let cache = Cache::default();
         let local = LocalCache {
             cache: cache.clone(),
-            snapshot_deployment: Some("fixture-deployment".into()),
         };
         let mut checkpoint = Vec::new();
         let mut charges = 0;
@@ -743,12 +519,8 @@ mod tests {
             1,
             "cold slices must resume the opaque position"
         );
-        assert_eq!(cache.0.lock().unwrap().len(), 20 * 16);
-        assert_eq!(
-            charges,
-            20 + 2 * 20 * 16,
-            "every catalog read and delete is reserved"
-        );
+        assert!(cache.0.lock().unwrap().is_empty());
+        assert_eq!(charges, 20, "every catalog read is reserved");
         assert!(
             remote_reads.lock().unwrap().is_empty(),
             "catalog in this DO must use TimerCtx's local store"
@@ -756,7 +528,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "published-view")]
     async fn namespace_checkpoint_exhaustion_corruption_and_single_repo_are_fail_closed() {
         use mkit_server::store::keys;
         let source = CatalogCounts {
@@ -768,7 +539,6 @@ mod tests {
         let cache = Cache::default();
         let local = LocalCache {
             cache: cache.clone(),
-            snapshot_deployment: Some("fixture-deployment".into()),
         };
         let mut work = request("single-namespace");
         work.repository.clear();
@@ -831,11 +601,10 @@ mod tests {
             prior,
             "Single uses its configured repo, not an absent registry"
         );
-        assert_eq!(cache.0.lock().unwrap().len(), 16);
+        assert!(cache.0.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
-    #[cfg(feature = "published-view")]
     async fn manual_namespace_purge_enumerates_registered_repositories_across_cold_slices() {
         use mkit_server::store::{codec, keys};
         use std::collections::BTreeSet;
@@ -877,7 +646,6 @@ mod tests {
                 ),
                 local: LocalCache {
                     cache: cache.clone(),
-                    snapshot_deployment: Some("fixture-deployment".into()),
                 },
                 remote: store.clone(),
                 sharding: mkit_server::pipeline::Sharding::D34,
@@ -912,12 +680,11 @@ mod tests {
                 .is_none(),
             "a finite namespace catalog must complete after bounded cold slices"
         );
-        let mut expected = remote_snapshot_keys(&work);
-        expected.extend(
-            work.url_paths
-                .iter()
-                .map(|path| format!("{}{path}", work.audience)),
-        );
+        let expected = work
+            .url_paths
+            .iter()
+            .map(|path| format!("{}{path}", work.audience))
+            .collect::<BTreeSet<_>>();
         assert_eq!(
             cache
                 .0
@@ -1029,7 +796,6 @@ mod tests {
                 let wrapper = Arc::new(RequestLocal {
                     local: Arc::new(LocalCache {
                         cache: cache.clone(),
-                        snapshot_deployment: Some("deployment".into()),
                     }),
                     budget: outer.clone(),
                     reserved: std::sync::atomic::AtomicBool::new(false),
@@ -1066,12 +832,6 @@ mod tests {
                 pipeline.invalidate_local_cache(&repo).await;
                 assert_eq!(wrapper.reserved.load(Ordering::SeqCst), remaining == 64);
                 assert_eq!(outer.used(), if remaining == 64 { 9000 } else { 8937 });
-                #[cfg(feature = "published-view")]
-                assert_eq!(
-                    cache.0.lock().unwrap().len(),
-                    if remaining == 64 { 16 } else { 0 }
-                );
-                #[cfg(not(feature = "published-view"))]
                 assert!(cache.0.lock().unwrap().is_empty());
             }
         });
@@ -1128,7 +888,6 @@ mod tests {
         registry = registry.register(PurgeDelivery::new(
             Arc::new(LocalCache {
                 cache: cache.clone(),
-                snapshot_deployment: None,
             }),
             Some(Arc::new(Sink(recorded.clone()))),
             budget.clone(),
@@ -1180,7 +939,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "published-view"))]
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::too_many_lines)]
 mod v050_tests {
     crate::stored_golden::tests!(purge);

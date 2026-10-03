@@ -15,23 +15,6 @@ fn root() -> Partition {
     Partition::Namespace(NamespaceKey::deployment_default())
 }
 
-#[test]
-fn pipeline_config_defaults_inspection_off() {
-    let config = mkit_server::pipeline::PipelineConfig::new(
-        mkit_server::Addressing::Single {
-            repo: mkit_server::RepoId {
-                namespace: NamespaceKey::deployment_default(),
-                name: mkit_server::RepoName::new("project").unwrap(),
-            },
-        },
-        mkit_server::pipeline::AuthMode::TransportIdentity,
-        mkit_server::upload::UploadLimits {
-            max_total_bytes: 1024,
-            max_chunks: 1,
-        },
-    );
-    assert!(!config.inspection_mode);
-}
 fn put(store: &MemoryKv, key: mkit_server::Key, bytes: &[u8]) {
     block_on(store.apply(&root(), Batch::new().put(key, Value::new(bytes.to_vec())))).unwrap();
 }

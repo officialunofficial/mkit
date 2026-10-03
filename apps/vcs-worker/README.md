@@ -467,13 +467,11 @@ an approved immutable commit until a release tag exists.
 | `WorkerConfig` | Audience, addressing, sharding, keys, launch selection, and optional mounts; parsing validates complete environment configuration |
 | `http_mount::WorkerHttpMountConfig::with_context(context)` | Attach the host fetch context to programmatic HTTP serving and settlement |
 | `adapter::ns_object_with(state, &env, class, make_sink)` | Construct a DO with a custom Outcome sink and environment configuration |
-| `adapter::ns_object_configured(state, &env, class, publication)` | Configure published snapshots with the environment Outcome sink; requires `published-view` |
 | `ns_object::NsObject`, `classes::ShardClass` | Route DO requests and alarms using the correct one of the five shard classes |
 | `mkit_server::pipeline::{HookSet, Authorizer, Admission, OutcomeSink}` | Implement business decisions and durable Outcome delivery outside the adapter |
 
 Use `embedding::NsObjectBuilder::new(state, &env, class, config_result)` with
-`with_published_view(publication)` and `build_with(make_sink)` to combine
-published snapshots with custom Outcome delivery. `with_purge(sink, local)`
+`build_with(make_sink)` for custom Outcome delivery. `with_purge(sink, local)`
 also installs the actual `Arc<dyn PurgeSink>` and `LocalInvalidation` on durable
 retries. Keep fetch and DO factories on the same configuration. For a takedown
 environment, use `WorkerConfig::from_env_with_purge(env, PurgeHooks::new(sink,
@@ -518,8 +516,7 @@ A host can choose another prefix such as `/_host/`. Namespaces and repository
 names cannot begin with `_`.
 
 The minimal launch profile enables `pack-ruzstd` to accept native compressed pushes.
-Core publication semantics are mandatory; `published-view` adds optional
-snapshot/cache optimization. These historical measurements are pinned to
+Core publication semantics are mandatory. These historical measurements are pinned to
 `43256803446f7f29a7fbf45d794afcfb78cea181`, before the final review fixes.
 The historical size manifest on the feature branch records artifact hashes,
 full emitted sizes, commands and deterministic gzip counts (mtime zero). Its SHA-256 is
@@ -534,15 +531,14 @@ historical emitted files fit the recorded local 64 MiB guard.
 | HTTP objects / tokens | `worker-build --release --features pack-ruzstd,http-objects` | 6,990,192 | 2,380,916 | 7,030,420 emitted bytes; local PASS |
 | Signed HTTPS hooks | `worker-build --release --features pack-ruzstd,signed-http-hooks` | 6,665,414 | 2,282,338 | 6,705,440 emitted bytes; local PASS |
 | HTTP plus signed HTTPS | `worker-build --release --features pack-ruzstd,http-objects,signed-http-hooks` | 6,993,827 | 2,383,298 | 7,034,055 emitted bytes; local PASS |
-| HTTP plus signed HTTPS and published snapshots | `worker-build --release --features launch` | 7,029,471 | 2,397,658 | 7,070,032 emitted bytes; local PASS |
 
 The distinct embedding acceptance host at `7527556d09c7753462f0449622d86ade0fb3b70e`
 measured 6,934,119 raw / 2,370,989 gzip bytes (6,974,355 emitted bytes).
 [#1259](https://github.com/officialunofficial/mkit/pull/1259) pins that distinct
 host artifact and measured runtime scope separately.
 
-The aggregate `launch` build enables `pack-ruzstd`, `http-objects`, `signed-http-hooks` and
-`published-view`; runtime features remain configuration opt-ins. Record the
+The aggregate `launch` build enables `pack-ruzstd`, `http-objects` and
+`signed-http-hooks`; runtime features remain configuration opt-ins. Record the
 example's independent wasm32 build and actual release runtime evidence
 separately, then follow the [operator guide](../../docs/operations/workers.md)
 for deployed validation.
@@ -554,7 +550,7 @@ full bundle acceptance. gzip is informational; there is no compressed-size
 limit. No deploy or cloud-account call is required for these local measurements.
 
 `python3 scripts/vcs-worker-launch-size.py --sha <40-character-HEAD>` runs all
-five commands sequentially from the repository root and preserves each emitted
+four commands sequentially from the repository root and preserves each emitted
 bundle plus its raw/gzip counts and file hashes in the owned `TMPDIR`.
 `python3 scripts/vcs-worker-launch-admin-runtime.py --sha <40-character-HEAD>`
 exercises the configured seven-operation release catalog, private preservation,

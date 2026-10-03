@@ -61,8 +61,6 @@ pub use list_repos::{RepoEntry, RepoPage};
 mod outcome;
 mod parts;
 mod plan;
-#[cfg(feature = "published-view")]
-pub mod published;
 mod purge;
 mod ref_policy;
 mod reservation;
@@ -254,8 +252,6 @@ pub struct PipelineConfig {
     pub addressing: Addressing,
     /// How metadata partitions are routed.
     pub sharding: Sharding,
-    /// Durable inspection mode, default-off and reserved for asynchronous inspection wiring.
-    pub inspection_mode: bool,
     /// How requests authenticate.
     pub auth: AuthMode,
     /// Owner-signed write grant verifier for Multi/Owner deployments.
@@ -371,7 +367,6 @@ impl PipelineConfig {
             list_repos_authority_full: false,
             addressing,
             sharding: Sharding::Single,
-            inspection_mode: false,
             auth,
             grants: None,
             authority_fence: None,
@@ -491,8 +486,6 @@ pub struct Pipeline<B, N, H = Hooks> {
     inspectors: Vec<Arc<dyn inspection::ContentInspector>>,
     #[cfg(feature = "remote-hooks")]
     inspect_limit: usize,
-    #[cfg(feature = "published-view")]
-    published: Option<Arc<dyn published::PublishedSource>>,
     blobs: B,
     meta: N,
     hooks: H,
@@ -889,8 +882,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             seams
         });
         Ok(Self {
-            #[cfg(feature = "published-view")]
-            published: None,
             publication_policy: None,
             #[cfg(feature = "remote-hooks")]
             inspectors: Vec::new(),
@@ -1059,8 +1050,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         #[cfg(feature = "http-objects")]
         sibling.http_seams.clone_from(&self.http_seams);
-        #[cfg(feature = "published-view")]
-        sibling.published.clone_from(&self.published);
         Ok(sibling)
     }
 
@@ -1235,26 +1224,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 requested.min(self.cfg.max_list_refs_page_size)
             };
             let partitions = self.shards.ref_index_partitions(&op.repo);
-            #[cfg(feature = "published-view")]
-            if authorized.facts.caller_view != CallerView::Writer
-                && self
-                    .published
-                    .as_ref()
-                    .is_some_and(|s| s.inspection_configured() && !s.uses_published_values())
-            {
-                return Err(ServerError::unavailable("published view unavailable"));
-            }
-            #[cfg(feature = "published-view")]
-            let source = self.published.as_deref().filter(|_| {
-                self.visibility_gates_reads()
-                    && op.auth.is_none()
-                    && matches!(op.principal, Principal::Anonymous)
-                    && (self.publication_policy.is_none()
-                        || self
-                            .published
-                            .as_ref()
-                            .is_some_and(|s| s.uses_published_values()))
-            });
             let view = crate::store::view::ViewStore {
                 store: &self.meta,
                 repo: &op.repo,
@@ -1276,17 +1245,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 )
                 .await
             } else {
-                #[cfg(feature = "published-view")]
-                let buckets = partitions
-                    .iter()
-                    .map(|partition| published::ReaderBucket {
-                        store: &view,
-                        partition,
-                        source,
-                        now_ms: ms(self.clock.now_ms()),
-                    })
-                    .collect::<Vec<_>>();
-                #[cfg(not(feature = "published-view"))]
                 let buckets = partitions
                     .iter()
                     .map(|partition| list::IndexBucket {
@@ -1316,14 +1274,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             Ok(page)
         })
         .await
-    }
-
-    /// Attach an explicit published reader source (snapshot opt-in).
-    #[cfg(feature = "published-view")]
-    #[must_use]
-    pub fn with_published_source(mut self, source: Arc<dyn published::PublishedSource>) -> Self {
-        self.published = Some(source);
-        self
     }
 
     /// Install the inspection preparation and immediate hold gate (post-launch WP-5.5c).
@@ -1359,35 +1309,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             check_ref_name(name)?;
             let op = self.identify(a, kind)?;
             let authorized = self.authorize_read(&op).await?;
-            #[cfg(feature = "published-view")]
-            if let Some(source) = &self.published {
-                if source.inspection_configured()
-                    && !source.uses_published_values()
-                    && authorized.facts.caller_view != CallerView::Writer
-                {
-                    return Err(ServerError::unavailable("published view unavailable"));
-                }
-                if self.visibility_gates_reads()
-                    && op.auth.is_none()
-                    && matches!(op.principal, Principal::Anonymous)
-                    && source.read_ref_enabled()
-                    && (self.publication_policy.is_none() || source.uses_published_values())
-                {
-                    let partition = self.shards.ref_index(&op.repo, name);
-                    if let Some(rows) = source
-                        .bucket(&op.repo, &partition, ms(self.clock.now_ms()))
-                        .await
-                        .map_err(meta_error)?
-                    {
-                        if self.meta.capabilities().atomic_multi_key
-                            && !source.uses_published_values()
-                        {
-                            return Err(ServerError::unavailable("published view unavailable"));
-                        }
-                        return Ok(rows.into_iter().find(|(n, _)| n == name).map(|(_, id)| id));
-                    }
-                }
-            }
             let p = self.shards.ref_shard(&op.repo, name);
             let view = crate::store::view::ViewStore {
                 store: &self.meta,

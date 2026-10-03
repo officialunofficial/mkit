@@ -103,17 +103,6 @@ pub fn parse(
     }
     Ok(Some(config))
 }
-#[cfg(any(target_arch = "wasm32", test))]
-pub(crate) fn shards(
-    sharding: mkit_server::pipeline::Sharding,
-) -> std::sync::Arc<dyn mkit_server::pipeline::ShardMap> {
-    match sharding {
-        mkit_server::pipeline::Sharding::Single => {
-            std::sync::Arc::new(mkit_server::pipeline::SinglePartition)
-        }
-        _ => std::sync::Arc::new(mkit_server::pipeline::D34Shards),
-    }
-}
 #[cfg(target_arch = "wasm32")]
 type WorkerWork = mkit_server::takedown::work::Work<
     crate::ns_client::DoNamespaceStore<crate::ns_client::StubTransport>,
@@ -132,10 +121,7 @@ pub(crate) fn purge_config<S: mkit_server::NamespaceStore + 'static>(
         return Ok(None);
     };
     let local = cfg.custom_purge.as_ref().map_or_else(
-        || {
-            Arc::new(crate::purge::local_cache(cfg))
-                as Arc<dyn mkit_server::purge::LocalInvalidation>
-        },
+        || Arc::new(crate::purge::local_cache()) as Arc<dyn mkit_server::purge::LocalInvalidation>,
         |custom| custom.local.clone(),
     );
     let local = request.map_or(local.clone(), |budget| {
@@ -198,7 +184,8 @@ fn build_work(
         serving: blob(cfg.blob_binding, crate::r2::PACKS_KEYSPACE),
         preserved: blob(PRESERVATION_BINDING, "preserved"),
         root: cfg.probe_partition(),
-        shards: shards(cfg.sharding),
+        // Preservation requires the launch profile, which validation pins to D34.
+        shards: std::sync::Arc::new(mkit_server::pipeline::D34Shards),
         addressing: cfg.addressing.clone(),
         retention_ms: settings.retention_ms,
         discovery_margin_ms: indexed.relay_lag_bound_ms,
@@ -644,6 +631,5 @@ mod tests {
             cfg.validate().is_err(),
             "denial requires complete indexed configuration"
         );
-        let _shards = shards(mkit_server::pipeline::Sharding::Single);
     }
 }

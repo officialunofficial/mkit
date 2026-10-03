@@ -52,21 +52,19 @@ fn activation_requires_all_inputs_and_the_release_launch_profile() {
         )
         .is_err()
     );
-    for profile in ["paid-workers", "uno"] {
-        assert!(
-            parse(
-                &|name| if name == "LAUNCH_PROFILE" {
-                    Some(profile.into())
-                } else {
-                    valid(name)
-                },
-                true,
-                true
-            )
-            .unwrap()
-            .is_some()
-        );
-    }
+    assert!(
+        parse(
+            &|name| if name == "LAUNCH_PROFILE" {
+                Some("paid-workers".into())
+            } else {
+                valid(name)
+            },
+            true,
+            true
+        )
+        .unwrap()
+        .is_some()
+    );
     assert_eq!(
         parse(
             &|name| if name == "LAUNCH_PROFILE" {

@@ -60,8 +60,6 @@ pub struct PressureStore<C> {
     metrics: Arc<dyn Metrics>,
     backup_interval_ms: Option<u64>,
     backup_seeded: AtomicBool,
-    #[cfg(feature = "published-view")]
-    published_view: bool,
     seeded_due: Mutex<Option<u64>>,
 }
 
@@ -91,18 +89,8 @@ impl<C: SqlConn> PressureStore<C> {
             metrics,
             backup_interval_ms: None,
             backup_seeded: AtomicBool::new(false),
-            #[cfg(feature = "published-view")]
-            published_view: false,
             seeded_due: Mutex::default(),
         }
-    }
-
-    /// Enable target-local snapshot generation and dirty seeding (explicit opt-in).
-    #[cfg(feature = "published-view")]
-    #[must_use]
-    pub fn with_published_view(mut self) -> Self {
-        self.published_view = true;
-        self
     }
 
     /// Seed a backup after the first committed Put in each partition.
@@ -222,16 +210,7 @@ impl<C: SqlConn> PressureStore<C> {
 
 impl<C: SqlConn> NamespaceStore for PressureStore<C> {
     fn capabilities(&self) -> StoreCapabilities {
-        let caps = self.inner.capabilities();
-        #[cfg(feature = "published-view")]
-        let caps = if self.published_view {
-            let mut caps = caps;
-            caps.reserved_batch_ops = 3;
-            caps
-        } else {
-            caps
-        };
-        caps
+        self.inner.capabilities()
     }
 
     async fn get(&self, partition: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
@@ -259,39 +238,16 @@ impl<C: SqlConn> NamespaceStore for PressureStore<C> {
 
     async fn apply(&self, partition: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
         let has_put = batch.has_put();
-        let outcome = {
-            let p = partition.clone();
-            #[cfg(feature = "published-view")]
-            let snapshots = self.published_view;
-            let wake = Arc::new(Mutex::new(None));
-            let staged = wake.clone();
-            let outcome = self
-                .inner
-                .apply_extended(partition, batch, move |get, batch, now| {
-                    mkit_server::admin::extend_audit_batch(&p, batch, |key| {
-                        get(key).map_err(StoreError::from)
-                    })
-                    .map_err(|_| SqlError::Corrupt("automatic audit extension"))?;
-                    #[cfg(feature = "published-view")]
-                    if snapshots && matches!(p, Partition::RefIndex { .. }) {
-                        let due = crate::published_view::extend_relay(&p, get, batch, now)?;
-                        *staged.lock().unwrap_or_else(PoisonError::into_inner) = due;
-                    }
-                    #[cfg(not(feature = "published-view"))]
-                    let _ = (staged, now);
-                    Ok(())
-                })?;
-            if outcome == BatchOutcome::Committed
-                && let Some(due) = *wake.lock().unwrap_or_else(PoisonError::into_inner)
-            {
-                let mut pending = self
-                    .seeded_due
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                *pending = Some(pending.map_or(due, |old| old.min(due)));
-            }
-            outcome
-        };
+        let p = partition.clone();
+        let outcome = self
+            .inner
+            .apply_extended(partition, batch, move |get, batch, _now| {
+                mkit_server::admin::extend_audit_batch(&p, batch, |key| {
+                    get(key).map_err(StoreError::from)
+                })
+                .map_err(|_| SqlError::Corrupt("automatic audit extension"))?;
+                Ok(())
+            })?;
         if has_put && outcome == BatchOutcome::Committed {
             self.observe_pressure(partition);
             self.seed_backup_if_needed(partition).await;
@@ -634,8 +590,6 @@ mod object {
         alarm_armed: Cell<bool>,
         /// Volatile raw-index rotation; durable retry keys survive cold starts.
         timer_cursor: Cell<Option<TimerCursor>>,
-        #[cfg(feature = "published-view")]
-        snapshot_alarm: Option<crate::published_view::SnapshotAlarm>,
         alarm_budget: Option<mkit_server::purge::SliceBudget>,
     }
 
@@ -672,19 +626,9 @@ mod object {
                 alarm_dirty: Cell::new(false),
                 alarm_armed: Cell::new(false),
                 timer_cursor: Cell::new(None),
-                #[cfg(feature = "published-view")]
-                snapshot_alarm: None,
                 alarm_budget: None,
             };
             (object, state)
-        }
-
-        /// Enable snapshot writes and a fire cap shared by this object's alarm.
-        #[cfg(feature = "published-view")]
-        #[must_use]
-        pub fn with_published_view(mut self, alarm: crate::published_view::SnapshotAlarm) -> Self {
-            self.snapshot_alarm = Some(alarm);
-            self
         }
 
         /// Cap the store at `capacity` instead (e.g. Workers Free's 1 GB,
@@ -735,10 +679,6 @@ mod object {
                 Arc::new(WorkerClock),
                 Arc::new(crate::telemetry::ConsoleMetrics::default()),
             );
-            #[cfg(feature = "published-view")]
-            if self.snapshot_alarm.is_some() {
-                store = store.with_published_view();
-            }
             if let Some(interval_ms) = self.backup_interval_ms {
                 store = store.with_backup_interval(interval_ms);
             }
@@ -851,10 +791,6 @@ mod object {
             self.alarm_armed.set(false);
             if let Some(budget) = &self.alarm_budget {
                 budget.reset();
-            }
-            #[cfg(feature = "published-view")]
-            if let Some(alarm) = &self.snapshot_alarm {
-                alarm.reset();
             }
             let store = self.store().map_err(|error| alarm_error(&error))?;
             let now = self.now_ms();

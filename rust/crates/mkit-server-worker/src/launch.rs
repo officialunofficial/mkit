@@ -219,16 +219,8 @@ impl LaunchConfig {
         let selected = match var("LAUNCH_PROFILE").as_deref() {
             None => false,
             Some("paid-workers") => true,
-            Some("uno") => {
-                #[cfg(target_arch = "wasm32")]
-                crate::telemetry::install();
-                tracing::warn!("LAUNCH_PROFILE=uno is deprecated; use LAUNCH_PROFILE=paid-workers");
-                true
-            }
             _ => {
-                return Err(error(
-                    "LAUNCH_PROFILE must be paid-workers when set (uno is a deprecated alias)",
-                ));
+                return Err(error("LAUNCH_PROFILE must be paid-workers when set"));
             }
         };
         let http = boolean(var, "HTTP_OBJECTS")?;
