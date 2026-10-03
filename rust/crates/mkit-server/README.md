@@ -47,7 +47,9 @@ portable export/import and maintenance hooks remain public. The optional
 native `fs` stores keep their constructors and durable filesystem behavior.
 `budget::SliceBudget` is shared by request and purge accounting; its existing
 `indexed::budget::SliceBudget` and `purge::SliceBudget` paths remain reachable.
-Default call allowances are defined once in `limits`; compatibility constants
+Preservation work uses `takedown::work::{Work, WorkConfig}` constructors with
+explicit routing, retention and an injected clock. Default call allowances
+are defined once in `limits`; compatibility constants
 such as `pipeline::OBJECT_READER_CALLS` keep their current paths.
 
 The doc-hidden `store::adapter_spi` exposes only the storage modules used by

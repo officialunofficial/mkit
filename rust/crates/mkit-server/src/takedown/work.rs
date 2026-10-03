@@ -120,7 +120,61 @@ pub(super) struct ObjectInfo {
     pub holders_done: bool,
     pub namespace_after: Option<Vec<u8>>,
 }
+/// Routing and retention settings for preservation work.
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct WorkConfig {
+    /// Partition holding durable preservation state.
+    pub root: Partition,
+    /// Namespace and repository partition routing.
+    pub shards: Arc<dyn ShardMap>,
+    /// Repository addressing policy.
+    pub addressing: Addressing,
+    /// Retention duration for accepted objects.
+    pub retention_ms: u64,
+    /// Additional discovery time after the retention window.
+    pub discovery_margin_ms: u64,
+    /// Acquisition bounds for each work step.
+    pub profile: acquisition::Profile,
+    /// Automatic cache invalidation shared with intake.
+    pub purge: Option<crate::purge::PurgeConfig>,
+    /// Injected clock for durable work.
+    pub clock: Arc<dyn Clock>,
+}
+impl std::fmt::Debug for WorkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkConfig")
+            .field("root", &self.root)
+            .field("retention_ms", &self.retention_ms)
+            .field("discovery_margin_ms", &self.discovery_margin_ms)
+            .finish_non_exhaustive()
+    }
+}
+impl WorkConfig {
+    /// Configure routing, retention and time; optional purge is disabled,
+    /// discovery margin is zero and acquisition uses the scheduled profile.
+    #[must_use]
+    pub fn new(
+        root: Partition,
+        shards: Arc<dyn ShardMap>,
+        addressing: Addressing,
+        retention_ms: u64,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        Self {
+            root,
+            shards,
+            addressing,
+            retention_ms,
+            discovery_margin_ms: 0,
+            profile: acquisition::Profile::scheduled(),
+            purge: None,
+            clock,
+        }
+    }
+}
 /// All runtime dependencies; preservation is a separately provisioned blob store.
+#[non_exhaustive]
 pub struct Work<N, B, P> {
     pub metadata: N,
     /// Automatic cache purge settings shared with signed and late intake.
@@ -134,6 +188,25 @@ pub struct Work<N, B, P> {
     pub discovery_margin_ms: u64,
     pub profile: acquisition::Profile,
     pub clock: Arc<dyn Clock>,
+}
+impl<N, B, P> Work<N, B, P> {
+    /// Assemble storage dependencies with explicit routing and retention settings.
+    #[must_use]
+    pub fn new(metadata: N, serving: B, preserved: P, config: WorkConfig) -> Self {
+        Self {
+            metadata,
+            serving,
+            preserved,
+            root: config.root,
+            shards: config.shards,
+            addressing: config.addressing,
+            retention_ms: config.retention_ms,
+            discovery_margin_ms: config.discovery_margin_ms,
+            profile: config.profile,
+            purge: config.purge,
+            clock: config.clock,
+        }
+    }
 }
 impl<N, B, P> std::fmt::Debug for Work<N, B, P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

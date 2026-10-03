@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SliceLimits` also provide builders for common overrides. Existing
   `PipelineConfig::new`, `IndexedConfig::default`, `HttpObjectsConfig::default`
   and `WorkerConfig::from_vars`/`from_env` remain the construction API.
+- `takedown::work::Work` is non-exhaustive. Replace runtime literals with
+  `Work::new(metadata, serving, preserved, WorkConfig::new(..))`; configure
+  purge, discovery margin and acquisition profile on the non-exhaustive
+  `WorkConfig` before assembly. Routing, retention and clock remain explicit.
 - The duplicate HTTP admission seam (`HttpAdmission`, `AdmitRequest`,
   `AdmitDecision`, `Admitted`, `NoAdmission` and `HttpSeams::admission`) becomes
   crate-private. Implement `pipeline::Admission` in the `HookSet` and enable

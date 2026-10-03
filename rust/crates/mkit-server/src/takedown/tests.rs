@@ -862,23 +862,28 @@ mod accounting {
         assert_eq!(fixture.record().await["activation_cursor"], 0);
         fixture.store().faults.lock().unwrap().activation = 0;
         let clock = Arc::new(crate::ManualClock::new(10));
-        let work = super::super::work::Work {
-            purge: None,
-            metadata: fixture.store().clone(),
-            serving: crate::MemoryBlobStore::default(),
-            preserved: crate::MemoryBlobStore::default(),
-            root: root(),
-            shards: Arc::new(SinglePartition),
-            addressing: crate::Addressing::Single {
-                repo: crate::RepoId {
-                    namespace: NamespaceKey::deployment_default(),
-                    name: crate::RepoName::new("repo").unwrap(),
+        let work = {
+            let mut config = crate::takedown::work::WorkConfig::new(
+                root(),
+                Arc::new(SinglePartition),
+                crate::Addressing::Single {
+                    repo: crate::RepoId {
+                        namespace: NamespaceKey::deployment_default(),
+                        name: crate::RepoName::new("repo").unwrap(),
+                    },
                 },
-            },
-            retention_ms: 1000,
-            discovery_margin_ms: 5000,
-            profile: crate::takedown::acquisition::Profile::scheduled(),
-            clock: clock.clone(),
+                1000,
+                clock.clone(),
+            );
+            config.purge = None;
+            config.discovery_margin_ms = 5000;
+            config.profile = crate::takedown::acquisition::Profile::scheduled();
+            super::super::work::Work::new(
+                fixture.store().clone(),
+                crate::MemoryBlobStore::default(),
+                crate::MemoryBlobStore::default(),
+                config,
+            )
         };
         let registry = crate::timers::TimerRegistry::new().register(work);
         let fired = crate::timers::run_due(

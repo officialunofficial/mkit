@@ -187,20 +187,21 @@ fn build_work(
     if let Some(budget) = alarm {
         metadata = metadata.with_alarm_budget(budget.clone());
     }
-    Ok(mkit_server::takedown::work::Work {
-        purge: purge_config(cfg, metadata.clone(), request)?,
+    let mut config = mkit_server::takedown::work::WorkConfig::new(
+        cfg.probe_partition(),
+        std::sync::Arc::new(mkit_server::pipeline::D34Shards),
+        cfg.addressing.clone(),
+        settings.retention_ms,
+        std::sync::Arc::new(crate::clock::WorkerClock),
+    );
+    config.purge = purge_config(cfg, metadata.clone(), request)?;
+    config.discovery_margin_ms = indexed.relay_lag_bound_ms;
+    Ok(mkit_server::takedown::work::Work::new(
         metadata,
-        serving: blob(cfg.blob_binding, crate::r2::PACKS_KEYSPACE),
-        preserved: blob(PRESERVATION_BINDING, "preserved"),
-        root: cfg.probe_partition(),
-        // Preservation requires the launch profile, which validation pins to D34.
-        shards: std::sync::Arc::new(mkit_server::pipeline::D34Shards),
-        addressing: cfg.addressing.clone(),
-        retention_ms: settings.retention_ms,
-        discovery_margin_ms: indexed.relay_lag_bound_ms,
-        profile: mkit_server::takedown::acquisition::Profile::scheduled(),
-        clock: std::sync::Arc::new(crate::clock::WorkerClock),
-    })
+        blob(cfg.blob_binding, crate::r2::PACKS_KEYSPACE),
+        blob(PRESERVATION_BINDING, "preserved"),
+        config,
+    ))
 }
 #[cfg(any(target_arch = "wasm32", test))]
 fn supported_path(path: &str, cfg: &crate::adapter::WorkerConfig) -> bool {
