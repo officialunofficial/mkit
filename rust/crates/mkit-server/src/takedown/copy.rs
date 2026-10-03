@@ -127,3 +127,9 @@ pub(super) async fn write<P: BlobStore>(
 #[cfg(all(test, feature = "memory"))]
 #[path = "copy_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::too_many_lines)]
+mod stored_v050_tests {
+    crate::stored_golden::tests!(takedown_copy);
+}

@@ -3695,6 +3695,9 @@ automatic purges are audited with their system actor. §14
 
 ## 17. Custom backends, backup and migrations (reserved, M5)
 
+Rows written by any 0.5.x release MUST keep decoding in later 0.5.x releases;
+stored-row changes MUST be additive, with serde defaults for added JSON fields.
+
 Reserved: this section is specified with M5 (see the version history).
 
 ## 18. Conformance scope
@@ -3910,6 +3913,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Stored rows remain decodable throughout 0.5.x; additive JSON fields require serde defaults (§17). |
 | 1 | draft | Worker timer writes retry alarm scheduling twice inline, propagate exhaustion and retain cold-start repair. |
 | 1 | draft | Namespace-scoped ListRepos authorization with an arbitrary repository selector; authority full listing requires explicit opt-in and writer view (§6.2; STC §7.10). |
 | 1 | draft | Worker launch profile is `LAUNCH_PROFILE=paid-workers`; `uno` remains a deprecated alias with a startup warning. §18 accepts configured cache-purge delivery through the signed HTTPS hook or an embedder-supplied purge sink. |

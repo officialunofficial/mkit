@@ -360,3 +360,9 @@ impl<S: crate::NamespaceStore> TimerHandler<S> for TakedownRequestTimer {
         })
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::too_many_lines)]
+mod v050_tests {
+    crate::stored_golden::tests!(relay_content);
+}

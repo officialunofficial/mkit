@@ -332,3 +332,9 @@ fn guard(key: crate::Key, value: Option<&Value>) -> Precondition {
         None => Precondition::Absent(key),
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::too_many_lines)]
+mod stored_v050_tests {
+    crate::stored_golden::tests!(purge_mod);
+}
