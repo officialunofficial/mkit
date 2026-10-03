@@ -1,3 +1,4 @@
+use super::read_limits::{ReaderSession, ReaderStore};
 use super::{
     AuthMode, CallerView, HookSet, OpKind, Operation, Pipeline, Principal, RequestMeta, ms,
     read_policy,
@@ -6,7 +7,7 @@ use crate::http_objects::{
     Fail, TakedownVerdict, Target, reach,
     resolve::{self, Budget, Env},
 };
-use crate::indexed::budget::{Budgeted, SliceBudget};
+use crate::indexed::budget::SliceBudget;
 use crate::store::{MultipartBlobStore, NamespaceStore, view::ViewStore};
 use crate::takedown::{
     denial::{denied, object_denials},
@@ -14,6 +15,7 @@ use crate::takedown::{
 };
 use crate::url_token::UrlTarget;
 use crate::{Code, RepoId, ServerError};
+use std::sync::atomic::{AtomicBool, Ordering};
 /// A signed token and expiry; its credential is redacted from Debug.
 pub type IssuedUrl = crate::url_token::MintedToken;
 use mkit_core::{hash::Hash, object::ObjectType, repo_identity::Namespace};
@@ -30,15 +32,17 @@ pub struct ObjectMetadata {
     pub logical_len: Option<u64>,
 }
 fn exhausted() -> ServerError {
-    ServerError::resource_exhausted("object reader byte limit exceeded")
+    ServerError::resource_exhausted(OBJECT_READER_LIMIT_MESSAGE)
 }
-fn resolution_failure(miss: resolve::Miss, limited: bool) -> ServerError {
-    if limited && miss == resolve::Miss::Capped {
+fn resolution_failure(miss: resolve::Miss) -> ServerError {
+    if miss == resolve::Miss::Capped {
         exhausted()
     } else {
         failure(miss)
     }
 }
+/// Stable public message for exhausted object-reader allowances.
+pub const OBJECT_READER_LIMIT_MESSAGE: &str = "object reader limit exceeded";
 /// Maximum IDs per call; duplicates preserve input order and share proof work.
 pub const OBJECT_READER_BATCH: usize = 16;
 /// Core call cap inside the Worker invocation allowance.
@@ -63,6 +67,19 @@ pub struct ObjectReader<'a, B, N, H> {
 }
 fn failure<E>(_: E) -> ServerError {
     ServerError::unavailable("object reader unavailable")
+}
+fn authorization_failure(error: ServerError) -> ServerError {
+    if error.code() == Code::ResourceExhausted
+        || error
+            .log_detail()
+            .is_some_and(|detail| detail.contains(crate::indexed::budget::EXHAUSTED_MESSAGE))
+    {
+        exhausted()
+    } else if error.code() == Code::Internal {
+        failure(error)
+    } else {
+        error
+    }
 }
 fn http_failure(fail: &Fail) -> ServerError {
     ServerError::new(fail.code(), "object reader unavailable")
@@ -101,7 +118,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
 {
     async fn authorize(&self, budget: &SliceBudget) -> Result<bool, ServerError> {
         for _ in 0..2 {
-            budget.charge().map_err(failure)?;
+            budget.charge().map_err(|_| exhausted())?;
         }
         match &self.view {
             ReaderView::Public => {
@@ -111,10 +128,25 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     None,
                     OpKind::HttpGet { ref_name: None },
                 );
+                let capped = AtomicBool::new(false);
+                let meta = ReaderStore::capture(&self.pipe.meta, &capped);
                 self.pipe
-                    .authorize_http_read(&op, &Target::Object([0; 32]), self.seams, None)
+                    .authorize_http_read_with_meta(
+                        &op,
+                        &Target::Object([0; 32]),
+                        self.seams,
+                        None,
+                        &meta,
+                        Some(&capped),
+                    )
                     .await
-                    .map_err(|e| http_failure(&e))?;
+                    .map_err(|e| {
+                        if capped.load(Ordering::SeqCst) {
+                            exhausted()
+                        } else {
+                            http_failure(&e)
+                        }
+                    })?;
                 Ok(false)
             }
             ReaderView::Owner(meta) => {
@@ -131,7 +163,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                         prefix: "refs/".into(),
                     },
                 )?;
-                let auth = self.pipe.authorize_read(&op).await?;
+                let capped = AtomicBool::new(false);
+                let store = ReaderStore::capture(&self.pipe.meta, &capped);
+                let auth = self
+                    .pipe
+                    .authorize_read_with_meta(&op, &store)
+                    .await
+                    .map_err(|error| {
+                        if capped.load(Ordering::SeqCst) {
+                            exhausted()
+                        } else {
+                            authorization_failure(error)
+                        }
+                    })?;
                 let owner = Namespace::parse(self.repo.namespace.as_str()).is_ok_and(
                     |n| matches!(n, Namespace::Ed25519(key) if a.principal.ed25519() == Some(&key)),
                 );
@@ -169,6 +213,34 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     ) -> Result<Vec<Option<Vec<u8>>>, ServerError> {
         let (bytes, _) = self.batch_limited(ids, false, Some(max_bytes)).await?;
         Ok(ids.iter().map(|id| bytes.get(id).cloned()).collect())
+    }
+    /// Prefetch canonical bytes using an aggregate session allowance.
+    /// # Errors
+    /// As [`Self::read_canonical`]; cap hits use `ResourceExhausted` except
+    /// unprovable public IDs, which remain uniformly absent.
+    pub async fn read_canonical_in(
+        &self,
+        session: &mut ReaderSession,
+        ids: &[Hash],
+    ) -> Result<Vec<Option<Vec<u8>>>, ServerError> {
+        let (bytes, _) = self
+            .batch_limited_in(ids, false, None, Some(session))
+            .await?;
+        Ok(ids.iter().map(|id| bytes.get(id).cloned()).collect())
+    }
+    /// Read verified metadata while charging proof work to a shared session.
+    /// Metadata emits no canonical output bytes.
+    /// # Errors
+    /// As [`Self::object_metadata`], with typed exhaustion for authorized writers.
+    pub async fn object_metadata_in(
+        &self,
+        session: &mut ReaderSession,
+        ids: &[Hash],
+    ) -> Result<Vec<Option<ObjectMetadata>>, ServerError> {
+        let (_, metadata) = self
+            .batch_limited_in(ids, true, None, Some(session))
+            .await?;
+        Ok(ids.iter().map(|id| metadata.get(id).copied()).collect())
     }
     /// Verified object metadata without fetching requested canonical bytes.
     /// # Errors
@@ -259,8 +331,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         let now = self.pipe.clock.now_ms();
         let mut issued = Vec::with_capacity(targets.len());
         for target in targets {
-            calls.charge().map_err(failure)?;
-            calls.charge().map_err(failure)?;
+            calls.charge().map_err(|_| exhausted())?;
+            calls.charge().map_err(|_| exhausted())?;
             op.kind = OpKind::IssueObjectUrl {
                 target: target.clone(),
                 ttl_seconds: ttl_s,
@@ -284,8 +356,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 },
             );
         }
-        let meta = Budgeted::new(&self.pipe.meta, &calls);
-        let blobs = Budgeted::new(&self.pipe.blobs, &calls);
+        let capped = AtomicBool::new(false);
+        let meta = ReaderStore::new(&self.pipe.meta, &calls, None, &capped);
+        let blobs = ReaderStore::new(&self.pipe.blobs, &calls, None, &capped);
         let view = ViewStore {
             store: &meta,
             repo: &self.repo,
@@ -346,6 +419,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 &mut decode,
                 true,
                 None,
+                None,
+                &capped,
             )
             .await?;
         Ok(ids
@@ -363,38 +438,79 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         sizes_only: bool,
         max_bytes: Option<u64>,
     ) -> Result<Prefetched, ServerError> {
+        self.batch_limited_in(ids, sizes_only, max_bytes, None)
+            .await
+    }
+    async fn batch_limited_in(
+        &self,
+        ids: &[Hash],
+        sizes_only: bool,
+        max_bytes: Option<u64>,
+        mut session: Option<&mut ReaderSession>,
+    ) -> Result<Prefetched, ServerError> {
         if ids.len() > OBJECT_READER_BATCH {
             return Err(ServerError::invalid_argument("batch exceeds 16 ids"));
         }
         let calls = SliceBudget::new(OBJECT_READER_CALLS);
+        if let Some(session) = &session {
+            session.io.calls.charge_many(2).map_err(|_| exhausted())?;
+        }
         let writer = match self.authorize(&calls).await {
             Err(e) if e.code() == Code::NotFound && matches!(self.view, ReaderView::Public) => {
                 return Ok((BTreeMap::new(), BTreeMap::new()));
             }
             other => other?,
         };
-        self.batch_with_budget(
-            ids,
-            sizes_only,
-            &calls,
-            writer,
-            &if sizes_only {
-                ids.iter().copied().collect()
-            } else {
-                BTreeSet::new()
-            },
-            &mut Budget(
-                max_bytes
-                    .unwrap_or(self.cfg.http_decode_budget)
-                    .min(self.cfg.http_decode_budget),
-            ),
-            // Non-writer views never distinguish a stored but unprovable id
-            // from an unknown one.
-            !writer,
-            max_bytes,
-        )
-        .await
+        let capped = AtomicBool::new(false);
+        let allowance = max_bytes
+            .unwrap_or(self.cfg.http_decode_budget)
+            .min(self.cfg.http_decode_budget);
+        let mut decode = Budget(allowance);
+        let result = if let Some(session) = session.as_mut() {
+            let (io, mut charge, output) = session.split(allowance);
+            self.batch_with_budget(
+                ids,
+                sizes_only,
+                &calls,
+                writer,
+                &if sizes_only {
+                    ids.iter().copied().collect()
+                } else {
+                    BTreeSet::new()
+                },
+                &mut charge.budget,
+                !writer,
+                max_bytes,
+                Some((io, output)),
+                &capped,
+            )
+            .await
+        } else {
+            self.batch_with_budget(
+                ids,
+                sizes_only,
+                &calls,
+                writer,
+                &if sizes_only {
+                    ids.iter().copied().collect()
+                } else {
+                    BTreeSet::new()
+                },
+                &mut decode,
+                !writer,
+                max_bytes,
+                None,
+                &capped,
+            )
+            .await
+        };
+        if capped.load(Ordering::SeqCst) && result.is_err() {
+            Err(exhausted())
+        } else {
+            result
+        }
     }
+
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // One shared-budget authorization/resolution pass, in precedence order.
     async fn batch_with_budget(
         &self,
@@ -406,15 +522,32 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         decode: &mut Budget,
         capped_as_absent: bool,
         max_bytes: Option<u64>,
+        mut session: Option<(
+            &super::read_limits::IoLedger,
+            &mut super::read_limits::OutputBudget,
+        )>,
+        capped: &AtomicBool,
     ) -> Result<Prefetched, ServerError> {
         let mut output_left = max_bytes
             .unwrap_or(self.cfg.http_decode_budget)
             .min(self.cfg.http_decode_budget);
-        let limited = max_bytes.is_some() && !capped_as_absent;
+        if let Some((_, output)) = &session {
+            output_left = output_left.min(output.remaining());
+        }
         let pipe = self.pipe;
         let (cfg, indexed, seams) = (self.cfg, self.indexed, self.seams);
-        let meta = Budgeted::new(&pipe.meta, calls);
-        let blobs = Budgeted::new(&pipe.blobs, calls);
+        let meta = ReaderStore::new(
+            &pipe.meta,
+            calls,
+            session.as_ref().map(|(io, _)| *io),
+            capped,
+        );
+        let blobs = ReaderStore::new(
+            &pipe.blobs,
+            calls,
+            session.as_ref().map(|(io, _)| *io),
+            capped,
+        );
         let view = ViewStore {
             store: &meta,
             repo: &self.repo,
@@ -434,7 +567,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         let mut located = if capped_as_absent {
             Vec::new()
         } else {
-            resolve::locate_many(&env, ids).await.map_err(failure)?
+            resolve::locate_many_with_caps(&env, ids, true)
+                .await
+                .map_err(resolution_failure)?
         };
         // Directly denied members are absent even when their reachability
         // cannot be proved within the caller's byte or walk budget.
@@ -457,11 +592,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         let mut fresh = BTreeSet::new();
         if !writer && !pipe.cfg.takedown_denial {
             for id in &targets {
-                if let Err(e) = calls.charge() {
+                if meta.charge().is_err() {
                     if capped_as_absent {
                         break;
                     }
-                    return Err(failure(e));
+                    return Err(exhausted());
                 }
                 if seams
                     .reachability
@@ -479,26 +614,33 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .await;
             // A spent call budget is an unprovable proof, not a store fault.
             let (tips, truncated) = match tips {
-                Err(_) if capped_as_absent && calls.remaining() == 0 => (Vec::new(), true),
+                Err(_) if capped_as_absent && capped.load(Ordering::SeqCst) => (Vec::new(), true),
                 other => other.map_err(|e| http_failure(&e))?,
             };
-            if truncated && sizes_only && !capped_as_absent {
-                return Err(failure(resolve::Miss::Capped));
+            if truncated && !capped_as_absent {
+                return Err(exhausted());
             }
             if !truncated {
-                let walked =
-                    reach::walk_many(&env, seams.takedown.as_ref(), &tips, &targets, decode).await;
+                let walked = reach::walk_many_with_caps(
+                    &env,
+                    seams.takedown.as_ref(),
+                    &tips,
+                    &targets,
+                    decode,
+                    true,
+                )
+                .await;
                 let (found, incomplete) = match walked {
-                    Err(_) if capped_as_absent && calls.remaining() == 0 => {
+                    Err(resolve::Miss::Capped) if capped_as_absent => {
                         (BTreeSet::new(), Some(resolve::Miss::Capped))
                     }
-                    other => other.map_err(|e| resolution_failure(e, limited))?,
+                    Err(_) if capped_as_absent && capped.load(Ordering::SeqCst) => {
+                        (BTreeSet::new(), Some(resolve::Miss::Capped))
+                    }
+                    other => other.map_err(resolution_failure)?,
                 };
-                if limited && incomplete == Some(resolve::Miss::Capped) {
+                if !capped_as_absent && incomplete == Some(resolve::Miss::Capped) {
                     return Err(exhausted());
-                }
-                if sizes_only && !capped_as_absent && incomplete == Some(resolve::Miss::Capped) {
-                    return Err(failure(resolve::Miss::Capped));
                 }
                 fresh.extend(found.iter().copied());
                 reached.extend(found);
@@ -514,9 +656,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 }
             }
             reached = accessible.iter().copied().collect();
-            located = resolve::locate_many(&env, &accessible)
-                .await
-                .map_err(failure)?;
+            located = match resolve::locate_many_with_caps(&env, &accessible, true).await {
+                // Membership itself must also be provable for public IDs.
+                Err(resolve::Miss::Capped) => Vec::new(),
+                other => other.map_err(resolution_failure)?,
+            };
         }
         let blocked = if pipe.cfg.takedown_denial && !reached.is_empty() {
             object_denials(&view, pipe.shards.as_ref(), &self.repo, &reached, indexed).await?
@@ -533,7 +677,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             {
                 continue;
             }
-            calls.charge().map_err(failure)?;
+            meta.charge().map_err(|_| exhausted())?;
             if !matches!(
                 seams.takedown.check(&self.repo, &id).await?,
                 TakedownVerdict::Clear
@@ -599,10 +743,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                             return Err(failure(resolve::Miss::Unavailable));
                         }
                         output_left -= output;
+                        if let Some((_, budget)) = &mut session {
+                            budget.used += output;
+                        }
                         bytes.insert(id, canonical.to_vec());
                     }
                     Ok(_) | Err(resolve::Miss::NotFound) => {}
-                    Err(miss) => return Err(resolution_failure(miss, limited)),
+                    Err(miss) => return Err(resolution_failure(miss)),
                 }
             }
         }

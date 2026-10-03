@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Server embedders can share `ReadLimits` and `ReaderSession` across canonical
+  and metadata reads to cap aggregate calls, decode work, encoded I/O and output.
+
+### Fixed
+
+- Object-reader cap hits consistently return `ResourceExhausted` with a stable
+  public message; unprovable public IDs retain their uniform absent result.
+
+### Changed
+
+- Indexed `UploadPack` streams reject oversized canonical entries as soon as
+  their length claims are known, before committing an unusable pack.
+
 ## [0.5.0](https://github.com/officialunofficial/mkit/compare/v0.4.2...v0.5.0) - 2026-10-02
 
 The production mkit server arrives as a runtime-agnostic core (`mkit-server`)

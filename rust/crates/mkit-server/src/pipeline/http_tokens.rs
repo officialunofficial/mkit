@@ -6,6 +6,7 @@ use crate::policy::read as read_policy;
 use crate::store::{MultipartBlobStore, NamespaceStore, codec, keys};
 use crate::url_token::{Binding, Prechecked, TokenRejected, UrlTarget};
 use crate::{Code, Operation};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Token targets are decoded UTF-8 paths joined once, never URL text or
 /// proof selectors. Root paths retain the empty final target field.
@@ -39,6 +40,17 @@ pub(super) fn cache(ref_path: bool, admitted: bool, expiry: Option<i64>, now: i6
     }
 }
 
+fn capture_read_cap(error: &crate::ServerError, read_cap: Option<&AtomicBool>) {
+    if let Some(cap) = read_cap
+        && (error.code() == Code::ResourceExhausted
+            || error
+                .log_detail()
+                .is_some_and(|detail| detail.contains(crate::indexed::budget::EXHAUSTED_MESSAGE)))
+    {
+        cap.store(true, Ordering::SeqCst);
+    }
+}
+
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     pub(super) async fn authorize_http_read(
         &self,
@@ -47,13 +59,24 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         seams: &HttpSeams,
         prechecked: Option<Result<Prechecked, TokenRejected>>,
     ) -> Result<Option<i64>, Fail> {
+        self.authorize_http_read_with_meta(op, requested, seams, prechecked, &self.meta, None)
+            .await
+    }
+    pub(super) async fn authorize_http_read_with_meta<S: NamespaceStore>(
+        &self,
+        op: &Operation,
+        requested: &Target,
+        seams: &HttpSeams,
+        prechecked: Option<Result<Prechecked, TokenRejected>>,
+        meta: &S,
+        read_cap: Option<&AtomicBool>,
+    ) -> Result<Option<i64>, Fail> {
         let partition = self.shards.coordinator(&op.repo.namespace);
         let mut changed_ms = 0;
         let private = if self.visibility_gates_reads() {
             // Deliberately do not use read_repo_state: e must not be read
             // until every stateless token binding check has passed.
-            let values = self
-                .meta
+            let values = meta
                 .get_many(
                     &partition,
                     &[
@@ -103,8 +126,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             bound
                 .check_visibility_change(changed_ms)
                 .map_err(|_| Fail::NotFound)?;
-            let value = self
-                .meta
+            let value = meta
                 .get(&partition, &keys::grant_epoch())
                 .await
                 .map_err(|_| Fail::Unavailable)?;
@@ -124,6 +146,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         // HTTP always calls Authorizer, under either role, retaining an
         // anonymous principal and published view even when it allows a token.
         self.hooks.authorizer().authorize(op).await.map_err(|e| {
+            capture_read_cap(&e, read_cap);
             if private
                 && matches!(
                     e.code(),

@@ -284,6 +284,16 @@ pub(crate) async fn walk_many<B: BlobStore, N: NamespaceStore>(
     targets: &BTreeSet<Hash>,
     budget: &mut Budget,
 ) -> Result<(BTreeSet<Hash>, Option<Miss>), Miss> {
+    walk_many_with_caps(env, takedown, tips, targets, budget, false).await
+}
+pub(crate) async fn walk_many_with_caps<B: BlobStore, N: NamespaceStore>(
+    env: &Env<'_, B, N>,
+    takedown: &dyn TakedownGate,
+    tips: &[Hash],
+    targets: &BTreeSet<Hash>,
+    budget: &mut Budget,
+    typed_caps: bool,
+) -> Result<(BTreeSet<Hash>, Option<Miss>), Miss> {
     let mut reached = BTreeSet::new();
     let mut frontier = Frontier {
         cap: env.cfg.max_walk_objects,
@@ -311,7 +321,7 @@ pub(crate) async fn walk_many<B: BlobStore, N: NamespaceStore>(
         }
         let ids: Vec<Hash> = batch.iter().map(|(id, _)| *id).collect();
         let kinds: BTreeMap<Hash, Kind> = batch.into_iter().collect();
-        for (id, located) in resolve::locate_many(env, &ids).await? {
+        for (id, located) in resolve::locate_many_with_caps(env, &ids, typed_caps).await? {
             if crate::takedown::denial::denied(env.meta, &id)
                 .await
                 .map_err(|_| Miss::Unavailable)?

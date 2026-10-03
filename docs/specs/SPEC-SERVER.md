@@ -1427,6 +1427,18 @@ response below:
 | Indexed pack size | `invalid_argument` | `pack exceeds indexed max_pack_bytes` |
 | Indexed decode budget | `invalid_argument` | `pack exceeds indexed decode budget` |
 
+Indexed canonical entries MUST NOT exceed 1,048,586 bytes, including object
+framing. During an indexed `UploadPack`, the server MUST reject an oversized
+entry as soon as its canonical size claim is available, before forwarding the
+revealing chunk to storage or committing the pack. Raw entries use their
+payload length, compressed raw entries their decoded length, and deltas their
+result length (compressed deltas require bounded prefix decoding). This
+refusal uses the indexed decode-limit category `invalid_argument`, with the
+public message `canonical entry exceeds indexed limit of 1048586 bytes; split
+very large flat directories`. This does not change the exact advance errors
+above, pack framing, or multipart-part acceptance: independent parts cannot
+establish entry boundaries and assembled packs still require indexed verification.
+
 ## 10. Published view
 
 ### 10.1 Caller's view
@@ -1469,6 +1481,16 @@ held content in §11.3. Readers and anonymous callers
 see published ref values and published membership only. These rules
 apply on every serving surface, including HTTP consumers of this
 abstract view.
+
+Server-side object-reader embedders MAY share an additive per-session ledger
+across calls. The ledger bounds storage call units, canonical decode work,
+encoded pack-range reservations and canonical output bytes, including duplicate
+outputs. Failed work MUST NOT refund consumed allowances. Read-path cap hits
+MUST use `resource_exhausted` and the public message `object reader limit exceeded`,
+except that IDs whose public reachability cannot be proved within the walk or
+decode caps MUST remain uniformly absent (SPEC-HTTP-OBJECTS §4). Storage failures
+remain `unavailable`. Existing per-call allowances and invocation call budgets
+remain applicable. This embedding API does not change HTTP error mappings.
 
 ### 10.2 Per-ref clearance and publication
 
@@ -3905,6 +3927,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Additive object-reader session accounting and typed exhaustion; early indexed UploadPack canonical-entry geometry refusal under §9.8. Existing public absence, advance messages and stored/wire formats are unchanged. |
 | 1 | draft | Namespace-scoped ListRepos authorization with an arbitrary repository selector; authority full listing requires explicit opt-in and writer view (§6.2; STC §7.10). |
 | 1 | draft | Worker launch profile is `LAUNCH_PROFILE=paid-workers`; `uno` remains a deprecated alias with a startup warning. §18 accepts configured cache-purge delivery through the signed HTTPS hook or an embedder-supplied purge sink. |
 | 1 | draft | Production takedown and `ReadPreserved` activation uses the configured admin, Paid Workers launch profile, takedown, indexed Paid and complete §14.7 preservation gate; startup refuses partial configuration. |

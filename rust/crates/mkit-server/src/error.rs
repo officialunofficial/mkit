@@ -40,8 +40,9 @@ pub enum Code {
     /// Authenticated, but not allowed; also every admission challenge
     /// (HTTP 402) and denial.
     PermissionDenied,
-    /// A client-attributable size or rate cap, such as an oversized pack
-    /// or a spent per-signer quota. Never a server-side capacity limit:
+    /// A client-attributable size or rate cap, such as an oversized pack,
+    /// a spent per-signer quota, or an object-reader work allowance.
+    /// Never a server-side capacity limit:
     /// those are [`Code::Unavailable`].
     ResourceExhausted,
     /// A compare-and-swap precondition or upload ticket did not hold.

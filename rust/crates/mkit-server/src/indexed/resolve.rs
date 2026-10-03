@@ -226,6 +226,7 @@ pub struct MemberCache {
     no_reads: BTreeSet<Hash>,
     rows: BTreeMap<Location, ResolvedMember>,
     retained_bytes: u64,
+    decoded_work: u64,
     retain_latest: bool,
     remaining_work: Option<u32>,
     selection: Option<(crate::Partition, crate::Key)>,
@@ -288,6 +289,11 @@ impl MemberCache {
     #[must_use]
     pub fn retained_bytes(&self) -> u64 {
         self.retained_bytes
+    }
+
+    #[cfg(feature = "http-objects")]
+    pub(crate) fn decoded_work(&self) -> u64 {
+        self.decoded_work
     }
 
     /// The retained locations, with their canonical bytes and total depth.
@@ -667,6 +673,11 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
                 }
             }
             let mut source = CachedBase(base_bytes);
+            // Reserve canonical decode work even if hash verification or decoding
+            // fails; a reader session must not refund expensive corrupt inputs.
+            memo.decoded_work = memo
+                .decoded_work
+                .saturating_add(located.value.decoded_size.min(available));
             let (actual, bytes) = decode_frame_with(
                 &frame,
                 version,

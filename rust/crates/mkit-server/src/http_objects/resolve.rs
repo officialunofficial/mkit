@@ -51,6 +51,18 @@ pub(crate) struct Env<'a, B, N> {
 /// reachability walk and the inline byte source.
 pub(crate) struct Budget(pub u64);
 
+// A cancelled recursive load may already have decoded bases. Settle that
+// work before the surrounding reader-session guard settles its budget.
+struct LoadCharge<'a> {
+    budget: &'a mut Budget,
+    memo: MemberCache,
+}
+impl Drop for LoadCharge<'_> {
+    fn drop(&mut self) {
+        self.budget.0 = self.budget.0.saturating_sub(self.memo.decoded_work());
+    }
+}
+
 /// Why resolution stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Miss {
@@ -104,13 +116,24 @@ pub(crate) async fn locate<B: BlobStore, N: NamespaceStore>(
 }
 
 /// Locate several ids at once: the members among them, in id order.
-pub(crate) async fn locate_many<B: BlobStore, N: NamespaceStore>(
+pub(crate) async fn locate_many_with_caps<B: BlobStore, N: NamespaceStore>(
     env: &Env<'_, B, N>,
     ids: &[Hash],
+    typed_caps: bool,
 ) -> Result<Vec<(Hash, LocatedObject)>, Miss> {
     let found = resolve::locate_split(env.meta, env.shards, env.repo, ids, env.metrics).await?;
     let mut members = Vec::new();
     for (id, answer) in &found {
+        if typed_caps
+            && matches!(
+                answer,
+                Err(LookupError::TooManyRows
+                    | LookupError::TooManyPages
+                    | LookupError::TooManyMembershipReads)
+            )
+        {
+            return Err(Miss::Capped);
+        }
         if let Some(located) = membership(Some(answer))? {
             members.push((*id, located));
         }
@@ -128,8 +151,12 @@ pub(crate) async fn load<B: BlobStore, N: NamespaceStore>(
     if located.value.decoded_size > budget.0 {
         return Err(Miss::Capped);
     }
-    let mut memo = MemberCache::default();
-    memo.forbid_reads(env.no_reads);
+    let allowance = budget.0;
+    let mut charge = LoadCharge {
+        budget,
+        memo: MemberCache::default(),
+    };
+    charge.memo.forbid_reads(env.no_reads);
     let mut visiting = BTreeSet::new();
     let result = resolve::member_object(
         env.blobs,
@@ -139,13 +166,13 @@ pub(crate) async fn load<B: BlobStore, N: NamespaceStore>(
         id,
         located,
         env.indexed.max_delta_chain_depth,
-        budget.0,
-        &mut memo,
+        allowance,
+        &mut charge.memo,
         &mut visiting,
         env.metrics,
     )
     .await;
-    budget.0 = budget.0.saturating_sub(memo.retained_bytes());
+    drop(charge);
     match result {
         Ok((bytes, _)) => Ok(bytes),
         Err(ResolveFailure::Other(error)) if error.public_message() == DECODE_BUDGET_MESSAGE => {

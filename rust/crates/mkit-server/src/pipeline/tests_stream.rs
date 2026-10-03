@@ -1761,3 +1761,92 @@ fn stream_abort_under_shard_counter_contention_still_writes_the_unsupported_row(
             if detail == "reservations unsupported on this transport"
     ));
 }
+
+#[test]
+fn oversized_canonical_entry_is_refused_during_upload_without_storage() {
+    use mkit_core::{
+        object::{EntryMode, Object, Tree, TreeEntry},
+        pack::PackWriter,
+        serialize::serialize,
+    };
+    let tree = Object::Tree(Tree {
+        entries: (0..25_000)
+            .map(|i| TreeEntry {
+                name: format!("file-{i:08}").into_bytes(),
+                mode: EntryMode::Blob,
+                object_hash: [9; 32],
+            })
+            .collect(),
+    });
+    let canonical = serialize(&tree).unwrap();
+    assert!(canonical.len() as u64 > crate::indexed::geometry::CANONICAL_BYTES);
+    let mut writer = PackWriter::new_raw_only();
+    writer.push_raw(tree.id().unwrap(), &canonical).unwrap();
+    let bytes = writer.finish().unwrap();
+    for chunk in [7, bytes.len(), 1] {
+        let (mut env, owner, identity) = super::indexed::environment_with(
+            Sharding::Single,
+            crate::indexed::IndexedConfig::default(),
+        );
+        env.pipe.cfg.upload_limits.max_total_bytes = 8 << 20;
+        env.pipe.cfg.upload_limits.max_chunks = u32::MAX;
+        let commitment = format!("pack:{}:{}", to_hex(&hash(&bytes)), bytes.len());
+        let req = Req::committed_for(
+            &owner,
+            Procedure::UploadPack,
+            &identity,
+            &commitment,
+            &nonce(1),
+            T0,
+        );
+        let token = env
+            .pipe
+            .cfg
+            .ticket_keys
+            .as_ref()
+            .unwrap()
+            .mint(&TicketClaims {
+                authority_generation: None,
+                ticket_id: [55; 32],
+                audience: AUDIENCE.into(),
+                repository: identity,
+                signer: *owner.verifying_key().as_bytes(),
+                pack_id: hash(&bytes),
+                bytes: bytes.len() as u64,
+                part_size: mkit_core::upload_parts::MIN_PART_SIZE,
+                expires_at_ms: ms(T0 + 60_000),
+                upload_session: Vec::new(),
+            });
+        let a = env.auth(&req).unwrap();
+        let error = block_on(async {
+            let id = hash(&bytes);
+            let mut session = env
+                .pipe
+                .open_ticketed_upload(&a, Some(&id), Some(bytes.len() as u64), &token)
+                .await?;
+            for span in chunk_plan(bytes.len() as u64, chunk) {
+                let at = usize::try_from(span.offset).unwrap();
+                session
+                    .push(
+                        Some(&id),
+                        Some(span.offset),
+                        Bytes::copy_from_slice(&bytes[at..at + span.len]),
+                        span.last,
+                    )
+                    .await?;
+            }
+            session.finish().await
+        })
+        .unwrap_err();
+        assert_eq!(error.code(), Code::InvalidArgument);
+        assert!(
+            error
+                .public_message()
+                .contains("canonical entry exceeds indexed limit")
+        );
+        assert!(!blob_present(&env, &bytes));
+        let (marker, _) = upload_marker(&[55; 32], &hash(&bytes));
+        assert!(block_on(env.pipe.blobs.head(&marker)).unwrap().is_none());
+        assert!(env.rows().is_empty());
+    }
+}

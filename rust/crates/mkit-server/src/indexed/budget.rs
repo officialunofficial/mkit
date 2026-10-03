@@ -15,6 +15,8 @@ use mkit_core::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+pub(crate) const EXHAUSTED_MESSAGE: &str = "verification slice subrequest budget exhausted";
+
 /// A shared call counter with a fixed limit.
 #[derive(Debug, Clone)]
 pub struct SliceBudget {
@@ -62,9 +64,7 @@ impl SliceBudget {
                 used.checked_add(calls).filter(|total| *total <= self.limit)
             })
             .map(|_| ())
-            .map_err(|_| {
-                StoreError::Unavailable("verification slice subrequest budget exhausted".into())
-            })
+            .map_err(|_| StoreError::Unavailable(EXHAUSTED_MESSAGE.into()))
     }
 }
 
