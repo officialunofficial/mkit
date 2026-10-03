@@ -184,6 +184,10 @@ supported after new reservation rows are written.
 
 ### Fixed
 
+- Worker conformance growth measurements use a fresh local state directory for
+  each case, preventing earlier replay rows from expiring during ticket-growth
+  calibration. Both growth assertions and the quota suite remain required.
+
 - The public hook golden-request test expects all 18 requests, including
   visibility and repository-storage outcomes, and checks that every fixture
   field survives protobuf decoding. The stale 16-request assertion failed

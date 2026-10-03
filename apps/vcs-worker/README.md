@@ -304,6 +304,10 @@ scripts/vcs-worker-conformance.sh --test-faults   # + clock skew, quota, growth
 scripts/vcs-worker-conformance.sh --multi         # + the Multi-addressing wire cases
 ```
 
+The fault-injection conformance run starts each bounded-growth case on its
+own empty Wrangler state directory. Expired records from earlier cases cannot
+skew the next case's calibration; quota checks run on a separate fresh server.
+
 The logic's tests live with it: `cargo nextest run -p mkit-server -p
 mkit-server-worker -p mkit-server-conformance --all-features` in `rust/`.
 `cargo test --lib` here has nothing to test.
