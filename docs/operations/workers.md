@@ -327,6 +327,10 @@ timestamps, stable ids, redacted errors, backlog and recovered results.
 | Scanner down | Inspect unavailable/invalid verdict fails closed without commit. Restore scanner and retry; verify fresh assigned capability, bounded retrieval and expiry/block denial |
 | Purge sink down | Intents remain durable and retry with backoff. Fresh global-denial/visibility checks remain authoritative. Restore sink, deduplicate ids and verify global invalidation plus audited completion; acceptance is not completion |
 
+### Repository storage counter
+
+A missing repository storage counter (`rb`) indicates a corrupt store: stored-bytes relays for that repository stay queued, hold the namespace relay watermark and increment `mkit_server_relay_storage_counter_missing_total`. Write `rb = (0, 0)` in the repository's coordinator to resume.
+
 ### Takedown and legal holds
 
 1. With a moderation admin signer, submit a stable `operation_id`, named source

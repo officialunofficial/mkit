@@ -794,8 +794,10 @@ The counter is created, at zero with version zero, in the same batch that
 registers the repository in its coordinator. A repository without a counter
 is a corrupt store, never a reportable state: a write that would count a
 pack into it fails, a coordinator keeps the relay rows carrying its markers
-queued (stalling only that repository's stream, whose rows come from its own
-ref shards) until the counter exists, and `Pipeline::repo_storage` fails.
+queued until the counter exists (the stuck rows also hold that source's relay
+watermark, so consumers of the namespace relay watermark, such as takedown
+discovery, wait too; the counter `mkit_server_relay_storage_counter_missing_total`
+counts such failures), and `Pipeline::repo_storage` fails.
 A deployment with single-repository addressing keeps no counter.
 
 A pack is added to the counter exactly once per repository: when the

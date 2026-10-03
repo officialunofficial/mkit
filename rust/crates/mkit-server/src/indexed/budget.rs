@@ -129,7 +129,6 @@ impl<'a, S> Budgeted<'a, S> {
     }
 
     /// `inner` charging nothing, but recording an inherited cap.
-    #[cfg_attr(not(feature = "http-objects"), allow(dead_code))]
     pub(crate) fn capture(inner: &'a S, hit: &'a AtomicBool) -> Self {
         Self {
             inner,

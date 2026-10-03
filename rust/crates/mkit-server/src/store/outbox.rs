@@ -45,8 +45,6 @@ const _: () = assert!(MAX_TICKETS_PER_ADVANCE * 9 + ADVANCE_SHARED_OPS <= MAX_BA
 const SINGLE_COUNT_OPS: usize = MAX_TICKETS_PER_ADVANCE + 5;
 // Single's maximal advance (85 ops with a retained obligation) plus counting.
 const _: () = assert!(MAX_TICKETS_PER_ADVANCE * 8 + 29 + SINGLE_COUNT_OPS <= MAX_BATCH_OPS);
-// D34 adds one relay row for the markers.
-const _: () = assert!(MAX_TICKETS_PER_ADVANCE * 9 + ADVANCE_SHARED_OPS < MAX_BATCH_OPS);
 
 /// Maximum operations (puts plus deletes) per relay row; two ops guard/advance rh,
 /// and two remain for hooks.

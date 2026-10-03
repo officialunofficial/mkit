@@ -33,6 +33,9 @@ use crate::repo::{NamespaceKey, RepoId, RepoName};
 /// is sized for this (`MAX_TICKETS_PER_ADVANCE`).
 pub(crate) const MAX_COUNTED_PACKS: usize = super::outbox::MAX_TICKETS_PER_ADVANCE;
 
+/// The corruption message of a repository whose counter row is missing.
+pub(crate) const COUNTER_MISSING: &str = "repository counter missing";
+
 /// A pack and its size in bytes.
 pub(crate) type CountedPack = (Hash, u64);
 
@@ -91,7 +94,7 @@ fn apply(
     pre: &mut Vec<Precondition>,
     writes: &mut Vec<Write>,
 ) -> Result<(), StoreError> {
-    let raw = counter.ok_or_else(|| StoreError::Corrupt("repository counter missing".into()))?;
+    let raw = counter.ok_or_else(|| StoreError::Corrupt(COUNTER_MISSING.into()))?;
     let mut state = codec::decode_repo_storage(raw)?;
     let mut added = 0u64;
     let mut fresh = std::collections::BTreeSet::new();

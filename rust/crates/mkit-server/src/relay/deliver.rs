@@ -11,7 +11,8 @@ use crate::store::{
     keys, repo_storage,
 };
 use crate::telemetry::{
-    METRIC_RELAY_BACKLOG_ROWS, METRIC_RELAY_LAG_EXCEEDED, Metrics, NoopMetrics,
+    METRIC_RELAY_BACKLOG_ROWS, METRIC_RELAY_LAG_EXCEEDED, METRIC_RELAY_STORAGE_COUNTER_MISSING,
+    Metrics, NoopMetrics,
 };
 use crate::timers::{
     DueTimer, Fired, RETRY_BACKOFF_MS, TimerCtx, TimerHandler, TimerKind, registry::kinds,
@@ -188,7 +189,9 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
             );
         }
         let rh = keys::relay_high_water(ctx.partition)?;
-        let dispatch = self.dispatch(&window.groups, &scan.blocked, &rh).await;
+        let dispatch = self
+            .dispatch(&window.groups, &scan.blocked, &rh, metrics)
+            .await;
         if !checkpoint_window(ctx, &rs_key, &mut scan_value, &mut scan, &window, &dispatch).await? {
             return Ok(Fired::Retry);
         }
@@ -232,7 +235,13 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         }
     }
 
-    async fn dispatch(&self, groups: &[TargetRows], blocked: &[Partition], rh: &Key) -> Dispatch {
+    async fn dispatch(
+        &self,
+        groups: &[TargetRows],
+        blocked: &[Partition],
+        rh: &Key,
+        metrics: &dyn Metrics,
+    ) -> Dispatch {
         let mut progress = Dispatch {
             delivered: BTreeSet::new(),
             block: BTreeSet::new(),
@@ -270,7 +279,14 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                 .map(|(seq, row, _, _)| (*seq, row.clone()))
                 .collect::<Vec<_>>();
             let result = self
-                .deliver_target(target, rh, &target_rows, call_limit, selected < max_targets)
+                .deliver_target(
+                    target,
+                    rh,
+                    &target_rows,
+                    call_limit,
+                    selected < max_targets,
+                    metrics,
+                )
                 .await;
             calls = calls.saturating_add(result.calls);
             selected += u32::from(result.selected);
@@ -306,6 +322,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         rows: &[(u64, RelayV1)],
         call_limit: Option<u32>,
         allow_apply: bool,
+        metrics: &dyn Metrics,
     ) -> TargetResult {
         let mut result = TargetResult {
             completed: 0,
@@ -399,6 +416,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                         observed.as_ref(),
                         result.completed,
                         &observations,
+                        metrics,
                     )
                     .await
                 else {
@@ -440,6 +458,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         observed: Option<&Value>,
         start: usize,
         observations: &[(Key, Option<Value>)],
+        metrics: &dyn Metrics,
     ) -> Option<(Batch, usize)> {
         let base = Batch::new().require(match observed {
             Some(value) => Precondition::Equals(rh.clone(), value.clone()),
@@ -467,6 +486,10 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                 &mut batch.preconditions,
                 &mut batch.writes,
             ) {
+                if matches!(&error, StoreError::Corrupt(m) if m.as_ref() == repo_storage::COUNTER_MISSING)
+                {
+                    metrics.incr(METRIC_RELAY_STORAGE_COUNTER_MISSING, &[], 1);
+                }
                 tracing::error!(?target, %error, "stored-bytes counting failed; rows stay queued");
                 return None;
             }
