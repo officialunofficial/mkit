@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Object-reader cap hits consistently return `ResourceExhausted` with a stable
   public message; unprovable public IDs retain their uniform absent result.
+- Workers retry transient alarm scheduling failures twice after committed timer
+  writes and return exhausted failures for replay and cold-start repair.
+- The embedded Worker example enables the pure-Rust zstd decoder for default
+  CLI pushes.
 
 ### Changed
 

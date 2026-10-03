@@ -27,6 +27,16 @@ fn check(v: &BTreeMap<String, String>) -> Result<WorkerConfig, ConfigError> {
 }
 
 #[test]
+fn runtime_receipt_seed_cannot_reuse_the_ticket_seed() {
+    let cfg = check(&vars()).unwrap();
+    let error = validate_runtime_key_material(&cfg, &|name| {
+        (name == crate::admin::RECEIPT_SECRET).then(|| "11".repeat(32))
+    })
+    .unwrap_err();
+    assert!(error.0.contains("receipt signing seed"));
+}
+
+#[test]
 fn programmatic_launch_changes_cannot_disable_the_extraction_driver() {
     let mut cfg = check(&vars()).unwrap();
     assert!(cfg.validate().is_ok());

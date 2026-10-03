@@ -380,14 +380,35 @@ jobs:
 
       # D34 is the default sharding (WP-1.28c); the explicit single phase
       # keeps the snapshot round-trip and single-sharding growth coverage.
+      - name: Create diagnostic log directory
+        run: mkdir -p "${RUNNER_TEMP}/wire-logs"
+
       - name: Wire suite (release features, D34)
+        env:
+          TMPDIR: ${{ runner.temp }}/wire-logs
+          VCS_CONFORMANCE_KEEP: '1'
         run: scripts/vcs-worker-conformance.sh
 
       - name: Wire suite (test-faults, D34, Multi)
+        env:
+          TMPDIR: ${{ runner.temp }}/wire-logs
+          VCS_CONFORMANCE_KEEP: '1'
         run: scripts/vcs-worker-conformance.sh --test-faults --multi
 
       - name: Wire suite (test-faults, single sharding)
+        env:
+          TMPDIR: ${{ runner.temp }}/wire-logs
+          VCS_CONFORMANCE_KEEP: '1'
         run: scripts/vcs-worker-conformance.sh --test-faults --sharding single
+
+      - name: Upload Wrangler and Miniflare diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: workers-wire-logs
+          path: ${{ runner.temp }}/wire-logs/**/wrangler.log
+          if-no-files-found: warn
+          retention-days: 7
 
   # Stable required-check name for branch protection. Always runs on PRs
   # (if: always()) so the status is never absent — closing the

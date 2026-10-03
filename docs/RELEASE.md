@@ -206,10 +206,25 @@ disagree, fix the script:
       smoke test above (which verifies the archive itself); this verifies
       every OTHER way a user actually gets `mkit` onto their machine.
 
+### Server compatibility gates
+
+On pushes to `main`, the Rust workflow runs library clippy for `mkit-server`
+and `mkit-server-worker` with `cargo hack --feature-powerset --depth 2`.
+The powerset covers no features, individual features and feature pairs.
+Separate checks cover default features across all targets and all features
+for the library. Library checks avoid dev-dependency feature unification;
+the default check also catches test-only warnings. Each crate has a 30-minute
+job limit. PRs enforce the server's patch API compatibility against 0.5.0;
+the publish gate checks the server too, including that pinned baseline.
+
 ### Post-release
 
-- [ ] Open a PR bumping `CHANGELOG.md` with a fresh `## [Unreleased]` heading at
-      the top.
+- [ ] Verify the release-prep PR left a fresh `## [Unreleased]` heading at
+      the top of `CHANGELOG.md`.
+- [ ] After a crate's first publish, add co-owners:
+      `cargo owner --add github:officialunofficial:makechain <crate>`, then
+      `cargo owner --add <maintainer> <crate>` for each maintainer. Confirm
+      the owners with `cargo owner --list <crate>`.
 - [ ] File follow-up issues for anything discovered during smoke test.
 
 ## Cutting a release
@@ -217,7 +232,7 @@ disagree, fix the script:
 1. Land everything on `main`. Confirm CI is green.
 2. Bump `[workspace.package].version` in `rust/Cargo.toml` (to a version not yet
    on crates.io). Update `CHANGELOG.md` (move `Unreleased` items into
-   `[X.Y.Z] - YYYY-MM-DD`).
+   `[X.Y.Z] - YYYY-MM-DD`, leaving a fresh `[Unreleased]` heading above it).
 3. Open a release-prep PR, merge it.
 4. Tag the merge commit on `main`:
    ```sh

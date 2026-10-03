@@ -101,6 +101,33 @@ async fn auth_v2_profile_uses_the_allocated_loopback_origin_as_audience() {
 }
 
 #[tokio::test]
+async fn expired_ticket_cases_use_the_frozen_server_clock() {
+    let mut profile = auth_v2_profile();
+    profile.milestone = Milestone::M1;
+    profile
+        .features
+        .extend([Feature::Tickets, Feature::TestFaults, Feature::ShortTickets]);
+    profile.ticket_per_signer = 2;
+    let host = TestHost::start(profile).await.unwrap();
+    // Model a slow fixture setup without a wall-clock sleep in every CI run.
+    host.clock().advance(-5_000);
+    let target = target(&host);
+    for name in [
+        "tickets.advance_expired_ticket",
+        "tickets.upload_pack_expired_token",
+        "tickets.expiry_timer_frees_cap_slot",
+    ] {
+        let report = run(&target, Some(name)).await;
+        assert!(
+            matches!(report.verdict(name), Some(Verdict::Pass(_))),
+            "{}",
+            report.tap()
+        );
+    }
+    host.shutdown().await;
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // One ordered wire scenario shares its host and timer state.
 async fn ticketed_auth_v2_wire_cases_run_against_the_host() {
     let mut profile = auth_v2_profile();

@@ -543,7 +543,7 @@ fn zero_disables_timeout() {
 /// the middle of one does, and the upload is discarded.
 #[test]
 fn idle_timeout_counts_bytes_not_frames() {
-    let pack = pack_bytes(4000, 3);
+    let pack = pack_bytes(16000, 3);
     let id = hash(&pack).to_vec();
     let header = Body::UploadPack(Box::new(UploadPack {
         pack_id: Some(id.clone()),
@@ -559,16 +559,16 @@ fn idle_timeout_counts_bytes_not_frames() {
     }));
     let input = encode([hello(), header.clone(), chunk, close()]);
 
-    // ~4 KiB at 400 bytes per 40 ms: about 400 ms, 4x the timeout.
+    // ~16 KiB at 400 bytes per 50 ms: about 2 s, twice the timeout.
     let td = repo_root();
     let trickle = Trickle {
         bytes: Cursor::new(input),
         piece: 400,
         first_gap: Duration::ZERO,
-        gap: Duration::from_millis(40),
+        gap: Duration::from_millis(50),
         started: false,
     };
-    let (code, out) = serve(td.path(), trickle, Some(Duration::from_millis(100)));
+    let (code, out) = serve(td.path(), trickle, Some(Duration::from_secs(1)));
     assert_eq!(code, exit::OK);
     let frames = decode(&out);
     assert!(
@@ -582,7 +582,7 @@ fn idle_timeout_counts_bytes_not_frames() {
     let td = repo_root();
     let (reader, mut writer) = io::pipe().unwrap();
     io::Write::write_all(&mut writer, &encode([hello(), header])).unwrap();
-    let (code, out) = serve(td.path(), reader, Some(Duration::from_millis(100)));
+    let (code, out) = serve(td.path(), reader, Some(Duration::from_secs(1)));
     assert_eq!(code, exit::PROTOCOL_ERROR);
     let frames = decode(&out);
     assert_error(&frames[1], ErrorCode::InvalidRequest, "idle timeout");
