@@ -196,8 +196,6 @@ pub struct WorkerConfig {
     pub takedown: Option<crate::admin::TakedownSettings>,
     /// Default-off private scanner retrieval, available only to Paid inspection.
     pub scanner_retrieval: Option<Arc<mkit_server::scanner_retrieval::RetrievalConfig>>,
-    /// Durable asynchronous inspection mode; default-off and programmatic.
-    pub inspection_mode: bool,
     /// Optional dedicated deployment-authority keys (`AUTHORITY_FENCE`, `AUTHORITY_KEYS`).
     pub authority_fence: Option<mkit_server::authority::AuthorityFence>,
     /// `AUTH_AUDIENCE`: the canonical origin writes are signed for.
@@ -249,9 +247,6 @@ pub struct WorkerConfig {
     /// Feature-gated `URL_TOKEN_KEYS`/`URL_TOKEN_TTL`; no mount is enabled by these vars.
     #[cfg(feature = "http-objects")]
     pub url_tokens: Option<mkit_server::url_token::UrlTokenConfig>,
-    /// Programmatic snapshot opt-in; environment parsing always leaves None.
-    #[cfg(feature = "published-view")]
-    pub published_view: Option<crate::published_view::PublishedViewConfig>,
     /// `TEST_QUOTA_OPS`, `TEST_QUOTA_BYTES` and `TEST_QUOTA_WINDOW_MS`,
     /// when all three are set: the write quota instead of the default
     /// (`test-faults` builds only, for the wire suite's quota and growth
@@ -331,16 +326,6 @@ impl WorkerConfig {
         use mkit_server::upload::UploadLimits;
 
         crate::launch::validate_programmatic(self)?;
-        #[cfg(feature = "published-view")]
-        if let Some(config) = &self.published_view {
-            crate::published_view::PublishedViewConfig::new(config.deployment.clone())
-                .map_err(|e| ConfigError(e.to_string()))?;
-            if self.sharding != Sharding::D34
-                || !matches!(self.addressing, mkit_server::Addressing::Multi(_))
-            {
-                return Err(ConfigError("published-view requires Multi and D34".into()));
-            }
-        }
         let bad = |e: &dyn core::fmt::Display| ConfigError(e.to_string());
         // Under multi addressing the signed repository is the request's,
         // not a configured one: the empty bound the conformance baseline
@@ -354,14 +339,9 @@ impl WorkerConfig {
         };
         let mut config =
             PipelineConfig::new(self.addressing.clone(), AuthMode::AuthV2(auth), limits);
-        #[cfg(feature = "published-view")]
-        if self.published_view.is_some() {
-            config.max_list_refs_page_size = config.max_list_refs_page_size.min(128);
-        }
         config.single_upload_max_bytes = Some(SINGLE_PUT_MAX_BYTES);
         config.sharding = self.sharding;
         config.default_repo_visibility = self.default_repo_visibility;
-        config.inspection_mode = self.inspection_mode;
         config.ticket_keys.clone_from(&self.ticket_keys);
         config.authority_fence.clone_from(&self.authority_fence);
         config.scanner_retrieval.clone_from(&self.scanner_retrieval);
@@ -761,7 +741,6 @@ impl WorkerConfig {
             takedown,
             admin,
             scanner_retrieval,
-            inspection_mode: false,
             authority_fence,
             indexed,
             sharding,
@@ -781,8 +760,6 @@ impl WorkerConfig {
             http_mount: None,
             #[cfg(feature = "http-objects")]
             url_tokens,
-            #[cfg(feature = "published-view")]
-            published_view: None,
             #[cfg(feature = "test-faults")]
             test_quota: test_quota(&var)?,
             #[cfg(feature = "test-faults")]
@@ -2264,8 +2241,6 @@ pub use glue::{
     WorkerPipeline, fetch, fetch_with, ns_object, ns_object_with, pipeline as embedding_pipeline,
     serve, serve_admin_with, serve_with,
 };
-#[cfg(all(target_arch = "wasm32", feature = "published-view"))]
-pub use glue::{fetch_configured, ns_object_configured};
 
 #[cfg(target_arch = "wasm32")]
 mod glue {
@@ -2297,37 +2272,6 @@ mod glue {
 
     thread_local! {
         static SHARDING_GUARD: std::cell::RefCell<Option<Settled>> = const { std::cell::RefCell::new(None) };
-        static INSPECTION_GUARD: std::cell::RefCell<Option<crate::inspection_guard::Settled>> = const { std::cell::RefCell::new(None) };
-    }
-
-    async fn check_inspection_mode(
-        meta: &WorkerNamespaceStore,
-        cfg: &WorkerConfig,
-    ) -> Result<(), crate::inspection_guard::GuardError> {
-        let multi = matches!(cfg.addressing, mkit_server::Addressing::Multi(_));
-        let jurisdiction = cfg.placement.jurisdiction.as_deref();
-        if let Some(outcome) = INSPECTION_GUARD.with(|cache| {
-            crate::inspection_guard::Settled::cached(
-                cache,
-                cfg.inspection_mode,
-                cfg.sharding,
-                multi,
-                jurisdiction,
-            )
-        }) {
-            return crate::inspection_guard::into_result(outcome);
-        }
-        let result = crate::inspection_guard::check_mode(meta, cfg.inspection_mode).await;
-        INSPECTION_GUARD.with(|cache| {
-            crate::inspection_guard::Settled::finish(
-                cache,
-                cfg.inspection_mode,
-                cfg.sharding,
-                multi,
-                jurisdiction,
-                result,
-            )
-        })
     }
 
     static BACKUPS_MISSING_LOG: Once = Once::new();
@@ -2395,7 +2339,6 @@ mod glue {
         cfg: &WorkerConfig,
         hooks: H,
         request_budget: &mkit_server::indexed::budget::SliceBudget,
-        #[cfg(feature = "published-view")] snapshot_warm: bool,
     ) -> Result<WorkerPipeline<H>, ConfigError> {
         cfg.validate_runtime(env)?;
         let bad = |e: &dyn core::fmt::Display| ConfigError(e.to_string());
@@ -2410,15 +2353,7 @@ mod glue {
             cfg.probe_partition(),
         )
         .with_budget(request_budget.clone());
-        #[cfg(feature = "published-view")]
-        let meta = if cfg.published_view.is_some() {
-            meta.with_apply_reserve(3)
-        } else {
-            meta
-        };
         config.purge = crate::admin::purge_config(cfg, meta.clone(), Some(request_budget))?;
-        #[cfg(feature = "published-view")]
-        let snapshot_fence = config.purge.as_ref().map(|_| meta.clone());
         #[cfg(feature = "test-faults")]
         let faulted = blobs.clone();
         let pipe = Pipeline::new(
@@ -2445,36 +2380,6 @@ mod glue {
                 seams.read_runtime.clone_from(&mount.read_runtime);
                 seams
             })
-        } else {
-            pipe
-        };
-        #[cfg(feature = "published-view")]
-        let pipe = if let Some(config) = cfg
-            .published_view
-            .clone()
-            .map(|mut config| {
-                config.inspection_configured |= cfg.hooks.as_ref().is_some_and(|v| v.roles.inspect);
-                config
-            })
-            .filter(|c| snapshot_warm || c.inspection_configured)
-        {
-            let source = crate::published_view::shared_reader(
-                crate::published_view::WorkerSnapshotBucket(
-                    env.clone(),
-                    Some(request_budget.clone()),
-                ),
-                crate::published_view::WorkerCache(Some(request_budget.clone())),
-                config,
-                Arc::new(WorkerClock),
-            );
-            // Paid purge deployments add two strong coordinator reads around
-            // snapshot reads/fills; cached bytes never bypass the durable fence.
-            let source = if let Some(store) = &snapshot_fence {
-                crate::published_view::fenced_reader(source, store.clone(), cfg.sharding)
-            } else {
-                source
-            };
-            pipe.with_published_source(source)
         } else {
             pipe
         };
@@ -2545,22 +2450,6 @@ mod glue {
                 serve_with(req, env, &cfg, hooks_from_env).await
             }
             Err(error) => env_config_error(&req, &env, &error, true),
-        }
-    }
-
-    /// Explicit published-view fetch entry point. Environment variables never enable snapshots.
-    #[cfg(feature = "published-view")]
-    pub async fn fetch_configured(
-        req: Request,
-        env: Env,
-        config: crate::published_view::PublishedViewConfig,
-    ) -> worker::Result<Response> {
-        match WorkerConfig::from_env(&env) {
-            Ok(mut cfg) => {
-                cfg.published_view = Some(config);
-                serve_with(req, env, &cfg, hooks_from_env).await
-            }
-            Err(error) => env_config_error(&req, &env, &error, false),
         }
     }
 
@@ -2648,12 +2537,6 @@ mod glue {
             cfg.probe_partition(),
         )
         .with_budget(request_budget.clone());
-        if let Err(error) = check_inspection_mode(&meta, cfg).await {
-            return crate::admin::no_store(json_response(
-                unavailable_json(error.public_message()),
-                503,
-            ));
-        }
         let checked = match check_mode(&meta, cfg.sharding).await {
             Ok(Outcome::Ok) => {
                 check_addressing(
@@ -2763,13 +2646,8 @@ mod glue {
         .with_budget(request_budget.clone());
         let jurisdiction = cfg.placement.jurisdiction.as_deref();
         let multi = matches!(cfg.addressing, mkit_server::Addressing::Multi(_));
-        if let Err(error) = check_inspection_mode(&meta, cfg).await {
-            return inspection_unavailable_response(&error, scanner_request);
-        }
         let cached =
             SHARDING_GUARD.with(|cache| Settled::cached(cache, cfg.sharding, multi, jurisdiction));
-        #[cfg(feature = "published-view")]
-        let snapshot_warm = cached.is_some();
         let checked = if let Some(outcome) = cached {
             outcome.into_result()
         } else {
@@ -2819,16 +2697,9 @@ mod glue {
             let body = body_too_large_json(cfg.max_body_bytes);
             return Ok(cors(json_response(body, 400)?));
         }
-        let pipe = match make_hooks(&env, cfg).and_then(|hooks| {
-            pipeline(
-                &env,
-                cfg,
-                hooks,
-                &request_budget,
-                #[cfg(feature = "published-view")]
-                snapshot_warm,
-            )
-        }) {
+        let pipe = match make_hooks(&env, cfg)
+            .and_then(|hooks| pipeline(&env, cfg, hooks, &request_budget))
+        {
             Ok(pipe) => pipe,
             Err(_) if scanner_request => return crate::scanner_retrieval::not_found(),
             Err(e) => return Ok(cors(json_response(unavailable_json(&e.0), 503)?)),
@@ -2841,19 +2712,6 @@ mod glue {
             return crate::scanner_retrieval::serve(&pipe, req).await;
         }
         serve_connect(&req, cfg, pipe).await
-    }
-
-    fn inspection_unavailable_response(
-        error: &crate::inspection_guard::GuardError,
-        scanner_request: bool,
-    ) -> worker::Result<Response> {
-        if scanner_request {
-            return crate::scanner_retrieval::not_found();
-        }
-        Ok(cors(json_response(
-            unavailable_json(error.public_message()),
-            503,
-        )?))
     }
 
     fn exceeds_body_cap(req: &Request, cfg: &WorkerConfig) -> bool {
@@ -2952,20 +2810,6 @@ mod glue {
             .build_with(make_sink)
     }
 
-    /// Explicit published-view DO construction, paired with `fetch_configured`.
-    #[cfg(feature = "published-view")]
-    #[must_use]
-    pub fn ns_object_configured(
-        state: State,
-        env: &Env,
-        class: crate::classes::ShardClass,
-        config: crate::published_view::PublishedViewConfig,
-    ) -> NsObject {
-        crate::embedding::NsObjectBuilder::new(state, env, class, WorkerConfig::from_env(env))
-            .with_published_view(config)
-            .build_with(crate::hooks::build::sink_from_env)
-    }
-
     // Keep the one-time DO construction and typed handler wiring together.
     #[allow(clippy::too_many_lines, clippy::arc_with_non_send_sync)] // Worker futures are single-threaded; core shares Arc on both targets.
     pub(crate) fn build_ns_object<O, F>(
@@ -2996,16 +2840,6 @@ mod glue {
                 probe,
             )
         });
-        #[cfg(feature = "published-view")]
-        let target = target.map(|store| {
-            if cfg.as_ref().is_ok_and(|cfg| cfg.published_view.is_some()) {
-                store.with_apply_reserve(3)
-            } else {
-                store
-            }
-        });
-        #[cfg(feature = "published-view")]
-        let snapshot_target = target.clone();
         // The audience the sink names (the hook client's `server_audience`)
         // is the one kind 8 stamps on outcomes: `outcome_audience`, once.
         let (audience, sink) = match &cfg {
@@ -3133,7 +2967,7 @@ mod glue {
                             Some(Arc::new(sink)),
                             budget.clone(),
                         ),
-                        local: crate::purge::local_cache(cfg),
+                        local: crate::purge::local_cache(),
                         remote: WorkerNamespaceStore::new(
                             StubTransport::new(env.clone(), cfg.placement.clone()),
                             cfg.probe_partition(),
@@ -3171,16 +3005,6 @@ mod glue {
                 None
             }
         });
-        #[cfg(feature = "published-view")]
-        let snapshot_alarm = cfg
-            .as_ref()
-            .ok()
-            .and_then(|cfg| cfg.published_view.as_ref())
-            .filter(|c| !c.inspection_configured)
-            .filter(|_| {
-                class == crate::classes::ShardClass::RepoIndexShard && snapshot_target.is_ok()
-            })
-            .map(|_| crate::published_view::SnapshotAlarm::default());
         let registry = if let Some(config) = backup.clone() {
             // Free-plan alarm budget: relay 32 + this handler's single R2 put
             // 1 + outcome delivery <= 8 + quota rollup <= 8 = 49 of 50 (see
@@ -3191,49 +3015,15 @@ mod glue {
                 budget: alarm_budget.clone(),
                 calls: 1,
             };
-            #[cfg(feature = "published-view")]
-            if let Some(alarm) = &snapshot_alarm {
-                registry.register(crate::published_view::AlarmLimited {
-                    handler,
-                    alarm: alarm.clone(),
-                })
-            } else {
-                registry.register(handler)
-            }
-            #[cfg(not(feature = "published-view"))]
             registry.register(handler)
         } else {
             registry.register(BackupDrain)
-        };
-        #[cfg(feature = "published-view")]
-        let registry = if let (Some(alarm), Ok(coordinator), Ok(cfg)) =
-            (&snapshot_alarm, snapshot_target, cfg.as_ref())
-        {
-            registry.register(crate::purge::Budgeted {
-                handler: crate::published_view::SnapshotHandler {
-                    default_repo_visibility: cfg.default_repo_visibility,
-                    bucket: crate::published_view::WorkerSnapshotBucket(env.clone(), None),
-                    coordinator,
-                    clock: Arc::new(WorkerClock),
-                    alarm: alarm.clone(),
-                },
-                budget: alarm_budget.clone(),
-                calls: 3,
-            })
-        } else {
-            registry
         };
         let object = NsObject::new(state, class)
             .0
             .with_capacity(capacity)
             .with_alarm_budget(alarm_budget)
             .with_registry(registry);
-        #[cfg(feature = "published-view")]
-        let object = if let Some(alarm) = snapshot_alarm {
-            object.with_published_view(alarm)
-        } else {
-            object
-        };
         if let Some(config) = backup {
             object.with_backup_interval(config.interval_ms)
         } else {
@@ -4028,38 +3818,6 @@ mod tests {
             pipeline.write_policy,
             mkit_server::policy::WritePolicy::Owner
         );
-    }
-
-    #[cfg(feature = "published-view")]
-    #[test]
-    fn published_view_config_requires_valid_identity_multi_and_d34_and_caps_pages() {
-        let secret = "dev 1111111111111111111111111111111111111111111111111111111111111111";
-        let namespace = ns(1);
-        let pairs = [
-            (AUDIENCE_VAR, "https://vcs.example"),
-            (ADDRESSING_VAR, "multi"),
-            (NAMESPACE_ALLOWLIST_VAR, namespace.as_str()),
-            (TICKET_KEYS_VAR, secret),
-        ];
-        let mut cfg = WorkerConfig::from_vars(vars(&pairs)).unwrap();
-        assert!(cfg.published_view.is_none());
-        assert_eq!(cfg.pipeline_config().unwrap().max_list_refs_page_size, 1000);
-        cfg.published_view =
-            Some(crate::published_view::PublishedViewConfig::new("stage").unwrap());
-        assert_eq!(cfg.pipeline_config().unwrap().max_list_refs_page_size, 128);
-        cfg.published_view.as_mut().unwrap().deployment = "bad/identity".into();
-        assert!(cfg.pipeline_config().is_err());
-        cfg.published_view.as_mut().unwrap().deployment = "stage".into();
-        cfg.sharding = Sharding::Single;
-        assert!(cfg.pipeline_config().is_err());
-        cfg.sharding = Sharding::D34;
-        cfg.addressing = mkit_server::Addressing::Single {
-            repo: mkit_server::RepoId {
-                namespace: mkit_server::NamespaceKey::deployment_default(),
-                name: mkit_server::RepoName::new("default").unwrap(),
-            },
-        };
-        assert!(cfg.pipeline_config().is_err());
     }
 
     /// Every multi var combination the config must refuse.

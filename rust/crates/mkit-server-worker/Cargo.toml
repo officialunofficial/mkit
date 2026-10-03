@@ -36,7 +36,6 @@ workspace = true
 # `mkit-server/test-faults`. Never enabled by a release build.
 test-faults = ["mkit-server/test-faults"]
 signed-http-hooks = []
-published-view = ["mkit-server/published-view"]
 http-objects = ["mkit-server/http-objects"]
 # The launch profile opts into R-203's bounded pure-Rust decoder.
 pack-ruzstd = ["mkit-server/pack-ruzstd"]

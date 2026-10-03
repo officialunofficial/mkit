@@ -28,7 +28,7 @@ documentation = "https://docs.rs/mkit-server"
 [package.metadata.docs.rs]
 # Document the portable surface; `test-faults` and the pure-Rust zstd opt-in
 # stay off.
-features = ["connect", "memory", "sql", "ssh", "fs", "remote-hooks", "http-objects", "published-view"]
+features = ["connect", "memory", "sql", "ssh", "fs", "remote-hooks", "http-objects"]
 
 [lints]
 workspace = true
@@ -129,8 +129,6 @@ remote-hooks = [
 # embedders and the Workers launch opt in through their adapters.
 # Requires `PipelineConfig::http_objects` and indexed mode.
 http-objects = []
-# Published reader source; explicit adapter configuration, off by default.
-published-view = []
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # `fs` delegates ref CAS, the ref lock and atomic writes to FileTransport, so

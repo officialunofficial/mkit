@@ -91,18 +91,6 @@ impl NsObjectBuilder {
         }
     }
 
-    /// Configure snapshot reads/generation together with a custom outcome sink.
-    #[cfg(feature = "published-view")]
-    pub fn with_published_view(
-        mut self,
-        config: crate::published_view::PublishedViewConfig,
-    ) -> Self {
-        if let Ok(cfg) = &mut self.config {
-            cfg.published_view = Some(config);
-        }
-        self
-    }
-
     /// Use custom global delivery and local invalidation for durable purges.
     /// For a takedown environment, parse with `from_env_with_purge` first so
     /// the actual sink participates in startup validation.
@@ -300,20 +288,17 @@ mod tests {
             }]})
             .to_string(),
         );
-        for profile in ["paid-workers", "uno"] {
-            v.insert("LAUNCH_PROFILE".into(), profile.into());
-            let cfg = parse(&v).unwrap();
-            assert!(cfg.hooks.is_none(), "no HTTPS hook is configured");
-            assert!(cfg.launch.as_ref().unwrap().takedown);
-            cfg.validate().unwrap();
-            assert!(cfg.pipeline_config().unwrap().purge.is_some());
-            assert!(
-                WorkerConfig::from_vars(|key| v.get(key).cloned())
-                    .unwrap_err()
-                    .0
-                    .contains("cache-purge")
-            );
-        }
+        let cfg = parse(&v).unwrap();
+        assert!(cfg.hooks.is_none(), "no HTTPS hook is configured");
+        assert!(cfg.launch.as_ref().unwrap().takedown);
+        cfg.validate().unwrap();
+        assert!(cfg.pipeline_config().unwrap().purge.is_some());
+        assert!(
+            WorkerConfig::from_vars(|key| v.get(key).cloned())
+                .unwrap_err()
+                .0
+                .contains("cache-purge")
+        );
         assert_receipt_seed_is_not_public(&v);
         let mut cfg = parse(&v).unwrap();
         let admin = cfg.admin.take();

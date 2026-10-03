@@ -1972,23 +1972,6 @@ remain fresh after the authorization expires.
 `http_objects/private_tokens` tests. With HTTP serving enabled, shared-cache bypass belongs
 to the adapters in WP-4.16.
 
-## Published ref snapshots never authorize a read
-
-**Always:** configured snapshots serve only anonymous reads after the authoritative
-coordinator authorization. Signed reads bypass them, private publication is skipped,
-and inspection configuration refuses live fallback. Snapshot misses or expiry use the
-same bounded live merge and repository-bound token contract. Dirty generation and timer
-seeding commit with index changes; upload completion cannot clear a newer generation.
-
-**Because:** a ref-data cache must not become a visibility cache, an inspection bypass,
-or a source of lost index updates after an upload race.
-
-**If violated:** private or pending values leak, or anonymous listings remain stale
-without a future alarm wake.
-
-**Enforced by:** core `pipeline/tests/published.rs` and Worker
-`published_view/tests.rs`; runtime feature/configuration require explicit snapshot opt-in.
-
 ## HTTP adapter mounts remain explicitly opt-in
 
 **Always:** the native and Worker HTTP-object adapter features are default
@@ -2467,7 +2450,9 @@ deployments with durable obligations and the version to detect a concurrent
 registry change. **If violated:** existing deployments could acquire inspection
 semantics silently, or a concurrent flag update could be missed. **Enforced by:**
 the core `InspectionMode` and `InspectionFlags` stores, guarded compare-and-swap
-plans, restore/export validation, and Worker startup guard tests.
+plans and restore/export validation. No server or Worker path installs the
+inspection marker yet; enabling inspection requires an empty store as an
+operator obligation (see the Workers operator guide).
 
 ## Repository-wide inspection holds
 

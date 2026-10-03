@@ -5234,10 +5234,6 @@ fn pipeline_refuses_more_extra_credential_headers_than_fit() {
     );
 }
 
-#[cfg(feature = "published-view")]
-#[path = "tests/published.rs"]
-mod published_view;
-
 #[test]
 fn admin_keys_cannot_authenticate_client_transport_principals() {
     let admin = key(1);
