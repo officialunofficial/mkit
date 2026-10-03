@@ -2440,6 +2440,9 @@ selection and CLI config layering. Browser clients keep browser-managed trust.
 
 ## Durable inspection mode and repository flags
 
+**Status:** unintegrated groundwork for future async inspection; no pipeline or
+adapter path uses these stores yet.
+
 **Always:** Inspection mode is default-off and one-way: an empty store may
 record `on`; a non-empty unmarked store cannot enable it, and a marked store
 cannot disable it. Each repository flag install or audited release changes its
@@ -2455,6 +2458,9 @@ inspection marker yet; enabling inspection requires an empty store as an
 operator obligation (see the Workers operator guide).
 
 ## Repository-wide inspection holds
+
+**Status:** unintegrated groundwork for future async inspection; launch creates
+no inspection holds.
 
 **Always:** Every ref's content holds share the canonical repository registry partition.
 A limit-one prefix probe sees any advance's hold under Single and D34. The separate

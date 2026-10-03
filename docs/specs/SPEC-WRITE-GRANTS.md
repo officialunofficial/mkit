@@ -991,8 +991,12 @@ came by envelope or by statement (never from a statement's signed
 refused, for object-id and ref-path targets alike; the comparison uses
 only server-side times (the token's `issued` is the issuing server's
 clock). A visibility row stored before this rule has no change time; its last
-accepted creation time (§9.1) is used instead, which is never earlier
-than the change. A repository with no stored visibility has never
+accepted creation time (§9.1) is used instead. For a change that came by
+envelope that is the server time of the change; for one that came by statement
+it is the statement's client-signed `created`, which can be earlier than the
+change, so the fallback can leave a token issued between the two unrefused.
+The gap closes when the token expires (at most 86,400 s after issue) and
+never applies to a row written under this rule. A repository with no stored visibility has never
 changed, so its tokens carry no such bound. The time is read in the same strong read as
 the visibility, so it adds no storage round trip. This is a
 verification rule only: the `mkit-url-token:v1` statement is unchanged.
@@ -1251,6 +1255,7 @@ Landed so far (each pinned by BLAKE3 in the directory's `MANIFEST.txt`):
 
 | Version | Status | Changes |
 |---|---|---|
+| `1` (editorial) | draft | §9.4 states precisely what the legacy change-time fallback is for an envelope and a statement change; no behavior change. |
 | `1` (visibility admission amendment) | draft | `SetRepoVisibility` runs the server's admission and outcome stages in both modes (§9.1; SPEC-SERVER §3). No change to the statement, signature or stored visibility row. |
 | `1` (URL-token visibility amendment) | draft | A URL token issued at or before the repository's last visibility change is refused (§9.4). The stored visibility row gains an optional server-clock change time (older rows fall back to their last accepted creation time); the token statement and signature are unchanged. |
 | `1` (R-205 amendment) | draft | Repository visibility without a stored setting follows the deployment default, public unless configured; explicit visibility always wins. Changing the default also changes existing repositories without explicit visibility. |

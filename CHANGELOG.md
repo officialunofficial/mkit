@@ -74,6 +74,19 @@ supported after new reservation rows are written.
   `ResourceExhausted` when a proven object's delta depth or external base
   lookup cap is hit, matching `read_canonical` (previously the ID was silently
   absent).
+- Documentation only: stale Workers operator and README claims (reader cache
+  refresh, supplied hooks needing remote configuration, the absent ListRepos,
+  decoder scratch in the launch graph, typed read exhaustion) now match the
+  code; SPEC-SERVER §18 is deployment-neutral with the Workers launch rules in
+  the Workers operator guide; the `store::inspection_*` modules and the
+  deferred inspection, Event and proof work are marked as not integrated or
+  not implemented; SPEC-WRITE-GRANTS §9.4 states the legacy visibility
+  fallback precisely.
+- The `pack-ruzstd` feature relies on a bounded-decode patch to ruzstd 0.9
+  that crates.io consumers must apply in their own workspace until upstream
+  releases it: `[patch.crates-io] ruzstd = { git =
+  "https://github.com/officialunofficial/mkit", tag = "v0.5.0" }`. Upstreaming
+  is in progress.
 
 ### Fixed
 

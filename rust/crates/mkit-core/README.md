@@ -29,3 +29,17 @@ must update the spec in the same PR. The crate depends only on `std`: no
 Optional features (`history-mmr`, `sparse-checkout`, `pack-shards`) gate
 heavier `commonware-*`-backed paths &mdash; see the crate's `Cargo.toml` for what
 each pulls in.
+
+`pack-ruzstd` (pure-Rust zstd decoding, for targets without the C `zstd`)
+relies on a bounded-decode patch to ruzstd 0.9 that is applied only inside this
+repository's workspace. Cargo does not inherit a dependency's patches, so a
+crates.io consumer that enables `pack-ruzstd` must add, in its own workspace,
+until upstream releases the fix:
+
+```toml
+[patch.crates-io]
+ruzstd = { git = "https://github.com/officialunofficial/mkit", tag = "v0.5.0" }
+```
+
+Upstreaming is in progress. Without the patch the feature decodes through
+the unbounded upstream path.

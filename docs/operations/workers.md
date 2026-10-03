@@ -7,6 +7,32 @@ Inspection is optional and synchronous. Lean takedown supports immediate global
 denial, restricted preservation, legal holds and audited administration; an
 accepted request can remain unresolved. See [SPEC-SERVER §18](../specs/SPEC-SERVER.md#18-conformance-scope).
 
+## Launch profile requirements
+
+[SPEC-SERVER §18](../specs/SPEC-SERVER.md#18-conformance-scope) defines the
+launch profile without naming a platform. On Workers it means:
+
+- `LAUNCH_PROFILE=paid-workers` selects the profile explicitly, on the Workers
+  Paid plan (`WORKERS_PLAN=paid`), with indexed Multi addressing, D34 sharding
+  and ticketed uploads at threshold zero.
+- Namespace policy is `allowlist`, or `any` with `UNSAFE_OPEN_NAMESPACES=true`;
+  under `any`, takedown holder discovery is incomplete.
+- HTTP serving and URL tokens, signed HTTPS hooks or the isolated service
+  binding, inspection and scanner retrieval, and admin/takedown are
+  independent opt-ins. Each validates its complete configuration and key-role
+  separation at startup.
+- Takedown and `ReadPreserved` activate only with admin keys, `LAUNCH_PROFILE=paid-workers`,
+  `TAKEDOWN_ENABLED=true`, indexed Paid mode, and the complete preservation
+  configuration: the `PRESERVATION` binding, explicit positive
+  `PRESERVATION_RETENTION_MS`, `RECEIPT_NOTICE_KEY` and `RECEIPT_KEYS`, and
+  configured cache-purge delivery. Startup refuses partial or invalid
+  configuration.
+- The environment-configured Worker delivers the global cache purge through the
+  signed HTTPS hook (Paid, `signed-http-hooks`, `HOOK_URL`, dedicated
+  `MKIT_HOOK_KEY`, explicit `cache-purge` in `HOOK_ROLES`); an embedder can
+  supply a `PurgeSink` and local invalidation instead.
+- Worker HTTP proofs (`?proof=1`) are unsupported and are not advertised.
+
 ## Build and deploy
 
 Start with [the reference config](../../apps/vcs-worker/wrangler.jsonc) and
@@ -218,21 +244,35 @@ operator mount while preserving canonical signature verification. Keep operator
 ingress trusted and network-restricted; the remaining unauthenticated admin-body
 lifetime issue must be hardened before offering admin to untrusted ingress.
 
-The cached Public in-process reader and batch URL issuance (`issue_urls`) with
-`takedown_denial=false` have an open reachability-refresh defect: repeated cache
-hits can extend stale authorization and bearer HTTP reads after ref rewind or
-deletion. Keep those affected configurations disabled until corrected and
-verified against the original invalidation deadline. Configured complete
-takedown with fresh global denial avoids that cache path; a programmatic denial
-flag alone cannot bypass preservation/purge prerequisites.
+With `takedown_denial=false`, the in-process Public reader and batch URL
+issuance (`issue_urls`) can use a cached positive reachability proof. Only a
+fresh walk records a proof, and a cache hit never extends it, so a ref rewind or
+deletion is visible within `reachability_lag_ms` (default 60 s) of the original
+proof. Configured complete takedown with fresh global denial bypasses that
+cache; a programmatic denial flag alone cannot bypass preservation/purge
+prerequisites.
 
-Custom paid HTTP Admission and Authority/fence hooks currently require remote
-hook configuration, including an external binding or signed HTTPS channel, even
-when supplied in process.
-Keep those configurations disabled until that validation defect is corrected;
-custom write admission with free public reads is the exercised example.
+Custom Admission and Authority/fence hooks supplied in process (declared with
+`HookCapabilities`) do not require a remote hook binding or signed HTTPS channel,
+including for paid HTTP reads; remote configuration is required only for roles
+that use a remote channel (inspection, cache-purge signing). Admission and the
+Outcome sink also see `SetRepoVisibility`, like every other mutating RPC.
 
-Pin the git dependency to an approved immutable commit until a release tag exists.
+Pin the git dependency to an approved immutable commit or release tag.
+
+`pack-ruzstd` (part of `launch`) relies on a bounded-decode patch to ruzstd 0.9
+that exists only in this repository's workspace `[patch.crates-io]`; Cargo does
+not inherit dependency patches. A host or Worker workspace that builds with
+`pack-ruzstd`, including through crates.io `mkit-core`/`mkit-server`, must
+repeat it until upstream releases the fix:
+
+```toml
+[patch.crates-io]
+ruzstd = { git = "https://github.com/officialunofficial/mkit", tag = "v0.5.0" }
+```
+
+Without it the build succeeds but decodes through the unbounded upstream path.
+Upstreaming the patch is in progress.
 
 ## Operations
 
@@ -323,9 +363,13 @@ underlying denial and cache state are verified, with explicit incident approval.
 
 ### Limits and acceptance boundaries
 
-There is no list-repos RPC. Worker HTTP proofs (`?proof=1`) are unsupported and
-not advertised. Publication Events, async inspection, inspection holds and hold
-review are post-launch. A Committed Outcome means Sent, not Delivered: D34
+`ListRepos` is served with the namespace-scoped authorization of SPEC-SERVER §6.2.
+Worker HTTP proofs (`?proof=1`) are unsupported and not advertised. Publication
+Events, async inspection, inspection holds and hold review, the namespace
+catalog, edge caching, storage leases, GC and storage receipts are not
+implemented. The `store::inspection_*` modules (mode marker, flags, holds) are
+unintegrated groundwork for future async inspection: nothing in the server or
+Worker installs or reads them. A Committed Outcome means Sent, not Delivered: D34
 projections can still delay published-prefix advancement. No full-profile,
 rewrite, reinstatement, notices, lease or storage-receipt claim applies.
 
@@ -338,11 +382,12 @@ Measure all nested work and retries; arbitrary host hook work shares those limit
 
 Whole-isolate memory is still an open acceptance gate. A local sampled
 allocated-capacity sum was 104604962 bytes (about 105 MB), with attribution gaps.
-The current launch and Paid Workers feature graphs omit the server-local pure-Rust
-decoder scratch reservation and idle-reader release. Correct those actual
-deployment graphs and run their focused allocator regressions before candidate
-selection; bounded core decoding alone does not establish the verification
-allowance. This defect is separate from preservation's acquisition allowance.
+The `launch` feature graph enables `pack-ruzstd`, which reserves the
+server-local pure-Rust decoder scratch and releases the idle pack reader before
+delta decoding. Run the focused allocator regressions on the actual deployment
+graph before candidate selection; bounded core decoding alone does not establish
+the verification allowance. This is separate from preservation's acquisition
+allowance.
 Scheduled preservation's Rust allowance is 48 MiB after #1263's latest-base
 retention change. This per-acquisition bound does not certify
 fit in a 128 MB isolate once JS, transport and overlap are counted. Measure

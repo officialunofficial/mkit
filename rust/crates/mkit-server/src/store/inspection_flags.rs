@@ -1,4 +1,6 @@
 //! Repository flags and their monotonic version share the canonical zero-id object-index partition.
+//!
+//! Unintegrated groundwork for future async inspection: no pipeline or adapter path writes flags.
 
 use std::collections::BTreeSet;
 

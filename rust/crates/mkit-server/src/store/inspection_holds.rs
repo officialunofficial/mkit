@@ -1,4 +1,6 @@
 //! Repository-wide inspection holds; kind-14 work writes content rows after advance commit.
+//!
+//! Unintegrated groundwork for future async inspection: no pipeline or adapter path creates holds.
 
 use std::collections::BTreeSet;
 
