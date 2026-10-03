@@ -16,8 +16,8 @@ use crate::store::{
 };
 use crate::takedown::{denial, inventory};
 use crate::{
-    Batch, BatchOutcome, BlobStore, NamespaceStore, Partition, Precondition, RepoId, ServerError,
-    StoreError, Value,
+    Batch, BatchOutcome, NamespaceStore, Partition, Precondition, RepoId, ServerError, StoreError,
+    Value,
 };
 use mkit_core::hash::{Hash, hash};
 use serde::{Deserialize, Serialize};
@@ -48,20 +48,8 @@ pub(super) struct Progress {
     tasks: Vec<cert::Task>,
     active: Active,
     complete: Option<Hash>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    legacy: Option<Legacy>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pages: Vec<cache::Page>,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-enum Legacy {
-    Needed(Hash),
-    Facts {
-        id: Hash,
-        prev: Option<Hash>,
-        packs: Vec<Hash>,
-    },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -149,26 +137,6 @@ impl Active {
 impl Progress {
     pub(super) fn validate(&self) -> Result<(), StoreError> {
         cache::validate(&self.pages)?;
-        if let Some(legacy) = &self.legacy {
-            let id = match legacy {
-                Legacy::Needed(id) | Legacy::Facts { id, .. } => id,
-            };
-            if !matches!(&self.active, Active::Probe { next: Some(next), .. } | Active::Map { next: Some(next) } if next == id)
-            {
-                return Err(StoreError::Corrupt(
-                    "legacy packmap continuation binding mismatch".into(),
-                ));
-            }
-            if let Legacy::Facts { packs, .. } = legacy
-                && packs.len()
-                    > crate::store::index::MAX_LOOKUP_IDS
-                        + crate::store::outbox::MAX_TICKETS_PER_ADVANCE
-            {
-                return Err(StoreError::Corrupt(
-                    "legacy packmap continuation exceeds bound".into(),
-                ));
-            }
-        }
         if self.tasks.len() > cert::FRONTIER_TASKS
             || self.additions.len() > crate::store::outbox::MAX_TICKETS_PER_ADVANCE
             || self.complete.is_some()
@@ -191,34 +159,15 @@ impl Progress {
         Ok(())
     }
     async fn packlist<S: NamespaceStore>(
-        &mut self,
+        &self,
         store: &S,
         id: Hash,
-    ) -> Result<Option<(Option<Hash>, Vec<Hash>)>, ServerError> {
-        if let Some(Legacy::Facts {
-            id: retained,
-            prev,
-            packs,
-        }) = &self.legacy
-        {
-            if *retained != id {
-                return Err(unavailable());
-            }
-            packlist_binding(id, *prev, packs, None)?;
-            let result = (*prev, packs.clone());
-            self.legacy = None;
-            return Ok(Some(result));
-        }
-        if let Some((length, prev, packs)) = inventory::packlist_known(store, &id)
+    ) -> Result<(Option<Hash>, Vec<Hash>), ServerError> {
+        let (length, prev, packs) = inventory::packlist_facts(store, &id)
             .await
-            .map_err(mapped)?
-        {
-            packlist_binding(id, prev, &packs, Some(length))?;
-            Ok(Some((prev, packs)))
-        } else {
-            self.legacy = Some(Legacy::Needed(id));
-            Ok(None)
-        }
+            .map_err(mapped)?;
+        packlist_binding(id, prev, &packs, length)?;
+        Ok((prev, packs))
     }
     async fn push<S: NamespaceStore>(
         &mut self,
@@ -244,10 +193,10 @@ fn packlist_binding(
     id: Hash,
     prev: Option<Hash>,
     packs: &[Hash],
-    length: Option<u64>,
+    length: u64,
 ) -> Result<(), ServerError> {
     let bytes = mkit_core::transfer::encode_packlist(prev, packs).map_err(|_| unavailable())?;
-    if hash(&bytes) != id || length.is_some_and(|length| length != bytes.len() as u64) {
+    if hash(&bytes) != id || length != bytes.len() as u64 {
         return Err(unavailable());
     }
     Ok(())
@@ -281,8 +230,7 @@ fn task(kind: u8, id: Hash) -> Result<cert::Task, ServerError> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn prepare<S: NamespaceStore, B: BlobStore>(
-    blobs: &B,
+pub(crate) async fn prepare<S: NamespaceStore>(
     store: &S,
     source: &Partition,
     shards: &dyn ShardMap,
@@ -348,21 +296,7 @@ pub(crate) async fn prepare<S: NamespaceStore, B: BlobStore>(
         }
     }
     let progress = resume::certificate_progress(&mut state).ok_or_else(unavailable)?;
-    let legacy_result = supply_legacy(
-        &Budgeted::new(blobs, &budget),
-        &counted,
-        shards,
-        repo,
-        progress,
-        cfg.decode_budget,
-        &budget,
-    )
-    .await;
-    let slice_result = if legacy_result.is_ok() {
-        slice(store, shards, repo, progress, now, metrics, None, &budget).await
-    } else {
-        legacy_result
-    };
+    let slice_result = slice(store, shards, repo, progress, now, metrics, None, &budget).await;
     let complete = progress.complete;
     let encoded = state::encode(&state);
     if encoded.as_bytes().len() > resume::MAX_STATE_BYTES {
@@ -392,49 +326,6 @@ pub(crate) async fn prepare<S: NamespaceStore, B: BlobStore>(
         },
         prior: prior.cloned(),
     })
-}
-
-async fn supply_legacy<S: NamespaceStore, B: BlobStore>(
-    blobs: &B,
-    counted: &S,
-    shards: &dyn ShardMap,
-    repo: &RepoId,
-    progress: &mut Progress,
-    decode_budget: u64,
-    budget: &SliceBudget,
-) -> Result<(), ServerError> {
-    if let Some(Legacy::Needed(id)) = progress.legacy {
-        let mut remaining = decode_budget.min(resume::SLICE_BYTES);
-        match super::packlist(
-            blobs,
-            counted,
-            shards,
-            repo,
-            id,
-            &progress.additions,
-            &mut remaining,
-        )
-        .await
-        {
-            Ok(node) => {
-                progress.legacy = Some(Legacy::Facts {
-                    id,
-                    prev: node.prev,
-                    packs: node.packs,
-                });
-                Ok(())
-            }
-            Err(error)
-                if budget.remaining() == 0
-                    || error.public_message() == "object index limit exceeded" =>
-            {
-                Err(exhausted())
-            }
-            Err(error) => Err(error),
-        }
-    } else {
-        Ok(())
-    }
 }
 
 async fn checkpoint_pack<S: NamespaceStore>(
@@ -555,7 +446,6 @@ async fn initial_progress<S: NamespaceStore>(
             count: 0,
         },
         complete: None,
-        legacy: None,
         pages: Vec::new(),
     };
     p.tasks = advance
@@ -610,9 +500,7 @@ async fn one<S: NamespaceStore>(
                 {
                     return Err(closed());
                 }
-                let Some((prev, _)) = p.packlist(store, id).await? else {
-                    return Ok(());
-                };
+                let (prev, _) = p.packlist(store, id).await?;
                 p.active = Active::Probe {
                     next: prev,
                     count: count.saturating_add(1),
@@ -624,9 +512,7 @@ async fn one<S: NamespaceStore>(
             }
         }
         Active::Map { next: Some(id) } => {
-            let Some((prev, packs)) = p.packlist(store, id).await? else {
-                return Ok(());
-            };
+            let (prev, packs) = p.packlist(store, id).await?;
             let next = if p.inherited && prev == p.seed_pair.packmap {
                 None
             } else {
@@ -960,7 +846,7 @@ async fn facts<S: NamespaceStore>(
     id: Hash,
 ) -> Result<inventory::Entry, ServerError> {
     inventory::seal(store, &pack).await.map_err(mapped)?;
-    let row = inventory::facts_entry(store, &pack, &id)
+    let row = inventory::entry(store, &pack, &id)
         .await
         .map_err(mapped)?
         .ok_or_else(closed)?;
@@ -987,7 +873,7 @@ async fn slice<S: NamespaceStore>(
     };
     let cached = cache::Cached::new(charged, std::mem::take(&mut p.pages));
     let result = async {
-        while p.complete.is_none() && !matches!(p.legacy, Some(Legacy::Needed(_))) {
+        while p.complete.is_none() {
             let before = p.clone();
             let start = budget.used();
             if let Err(error) = one(&cached, shards, repo, p, now, metrics).await {

@@ -230,75 +230,17 @@ fn same_pair(
     ))
 }
 
-fn legacy_inventory(env: &Env, pack: Hash) -> (Partition, Key, Value) {
+fn inventory_seal(env: &Env, pack: Hash) -> (Partition, Key, Value) {
     let partition = crate::store::content_shard(&pack);
-    let prefix = [keys::block(&pack).as_bytes(), b"\0inventory\0"].concat();
-    let mut end = prefix.clone();
-    *end.last_mut().unwrap() = 1;
-    let page = block_on(env.pipe.meta.inner.scan(
-        &partition,
-        &Key::new(prefix.clone()),
-        &Key::new(end),
-        None,
-        256,
-    ))
-    .unwrap();
-    assert!(page.next.is_none());
-    let mut digest = [0u8; 32];
-    let mut parent_digest = [0u8; 32];
-    for (key, raw) in page.entries {
-        let id: Hash = key.as_bytes()[prefix.len()..].try_into().unwrap();
-        let mut row: serde_json::Value = serde_json::from_slice(raw.as_bytes()).unwrap();
-        let parent = matches!(row["kind"].as_u64(), Some(2 | 5));
-        row.as_object_mut().unwrap().remove("canonical_len");
-        row.as_object_mut().unwrap().remove("logical_len");
-        let raw = Value::new(serde_json::to_vec(&row).unwrap());
-        let mark = hash(&[id.as_slice(), raw.as_bytes()].concat());
-        for (d, b) in digest.iter_mut().zip(mark) {
-            *d ^= b;
-        }
-        let mut batch = Batch::new().put(key, raw.clone()).put(
-            crate::takedown::inventory::marker_key(&pack, &id),
-            Value::new(mark.to_vec()),
-        );
-        if parent {
-            for (d, b) in parent_digest.iter_mut().zip(mark) {
-                *d ^= b;
-            }
-            batch = batch.put(
-                Key::new([keys::block(&pack).as_bytes(), b"\0inventory-parent\0", &id].concat()),
-                raw,
-            );
-        }
-        assert_eq!(
-            block_on(env.pipe.meta.inner.apply(&partition, batch)).unwrap(),
-            BatchOutcome::Committed
-        );
-    }
     let key = Key::new([keys::block(&pack).as_bytes(), b"\0inventory-head"].concat());
     let raw = block_on(env.pipe.meta.inner.get(&partition, &key))
         .unwrap()
         .unwrap();
-    let mut head: serde_json::Value = serde_json::from_slice(raw.as_bytes()).unwrap();
-    head.as_object_mut().unwrap().remove("packlist");
-    head["digest"] = serde_json::to_value(digest).unwrap();
-    head["parent_digest"] = serde_json::to_value(parent_digest).unwrap();
-    let raw = Value::new(serde_json::to_vec(&head).unwrap());
-    assert_eq!(
-        block_on(
-            env.pipe
-                .meta
-                .inner
-                .apply(&partition, Batch::new().put(key.clone(), raw.clone()))
-        )
-        .unwrap(),
-        BatchOutcome::Committed
-    );
     (partition, key, raw)
 }
 
 #[test]
-fn legacy_upgrade_builds_certificate_without_rewriting_sealed_inventory() {
+fn v050_upgrade_builds_certificate_without_rewriting_sealed_inventory() {
     let (mut env, owner, identity) =
         environment_with(Sharding::Single, crate::indexed::IndexedConfig::default());
     env.pipe.cfg.begin_upload_threshold_bytes = 0;
@@ -332,9 +274,24 @@ fn legacy_upgrade_builds_certificate_without_rewriting_sealed_inventory() {
     let raw = block_on(env.pipe.meta.get(&source, &key)).unwrap().unwrap();
     assert!(publication::stored(&raw).unwrap().1.is_none());
     let seals = [
-        legacy_inventory(&env, hash(&bytes)),
-        legacy_inventory(&env, map),
+        inventory_seal(&env, hash(&bytes)),
+        inventory_seal(&env, map),
     ];
+    let (_, prev, packs) = block_on(crate::takedown::inventory::packlist_facts(
+        &env.pipe.meta,
+        &map,
+    ))
+    .unwrap();
+    assert!(prev.is_none());
+    assert_eq!(packs, vec![hash(&bytes)]);
+    let row = block_on(crate::takedown::inventory::entry(
+        &env.pipe.meta,
+        &hash(&bytes),
+        &head,
+    ))
+    .unwrap()
+    .unwrap();
+    assert!(row.canonical_len > 0);
     env.pipe.cfg.takedown_denial = true;
     let (_, slices) = publish(
         &env,
@@ -461,11 +418,10 @@ fn denied_reference(new_tree: bool) {
     } else {
         pack(std::slice::from_ref(&object))
     };
-    let old_pack = block_on(crate::takedown::inventory::packlist_known(
+    let old_pack = block_on(crate::takedown::inventory::packlist_facts(
         &env.pipe.meta,
         &map,
     ))
-    .unwrap()
     .unwrap()
     .2[0];
     let inventory = [keys::block(&old_pack).as_bytes(), b"\0inventory\0"].concat();
@@ -813,11 +769,10 @@ fn altered_packmap_facts_cannot_forge_an_extension_of_the_seed() {
     let auth = env.auth(&request).unwrap();
     let repo = auth.repo().repo.clone();
     let source = env.pipe.shards.ref_shard(&repo, HEAD);
-    let packs = block_on(crate::takedown::inventory::packlist_known(
+    let packs = block_on(crate::takedown::inventory::packlist_facts(
         &env.pipe.meta,
         &map,
     ))
-    .unwrap()
     .unwrap()
     .2;
     let node = mkit_core::transfer::encode_packlist(None, &[packs[0], map]).unwrap();

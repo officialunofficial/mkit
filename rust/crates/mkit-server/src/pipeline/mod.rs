@@ -3778,7 +3778,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             return Err(ServerError::invalid_argument("open closure"));
         }
         let proof = crate::indexed::publication::incremental::prepare(
-            &self.blobs,
             &self.meta,
             p,
             self.shards.as_ref(),

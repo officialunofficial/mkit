@@ -17,7 +17,6 @@ pub const SCAN_ROWS: u32 = 8;
 pub struct Entry {
     pub version: u8,
     pub kind: u8,
-    #[serde(default)]
     pub canonical_len: u64,
     pub logical_len: Option<u64>,
     pub base: Option<Hash>,
@@ -117,12 +116,6 @@ pub(crate) async fn packlist_facts<S: NamespaceStore>(
     store: &S,
     pack: &Hash,
 ) -> Result<(u64, Option<Hash>, Vec<Hash>), StoreError> {
-    packlist_known(store, pack).await?.ok_or_else(bad)
-}
-pub(crate) async fn packlist_known<S: NamespaceStore>(
-    store: &S,
-    pack: &Hash,
-) -> Result<Option<(u64, Option<Hash>, Vec<Hash>)>, StoreError> {
     let raw = store
         .get(&content_shard(pack), &head_key(pack))
         .await?
@@ -131,15 +124,13 @@ pub(crate) async fn packlist_known<S: NamespaceStore>(
     if head.version != 1 || !head.complete {
         return Err(bad());
     }
-    let Some(facts) = head.packlist else {
-        return Ok(None);
-    };
+    let facts = head.packlist.ok_or_else(bad)?;
     if facts.packs.len()
         > crate::store::index::MAX_LOOKUP_IDS + crate::store::outbox::MAX_TICKETS_PER_ADVANCE
     {
         return Err(bad());
     }
-    Ok(Some((head.length, facts.prev, facts.packs)))
+    Ok((head.length, facts.prev, facts.packs))
 }
 #[must_use]
 pub fn entry_key(pack: &Hash, id: &Hash) -> Key {
@@ -512,18 +503,6 @@ pub async fn entry<S: NamespaceStore>(
     pack: &Hash,
     id: &Hash,
 ) -> Result<Option<Entry>, StoreError> {
-    let row = facts_entry(store, pack, id).await?;
-    if let Some(row) = &row {
-        row.validate()?;
-    }
-    Ok(row)
-}
-
-pub(crate) async fn facts_entry<S: NamespaceStore>(
-    store: &S,
-    pack: &Hash,
-    id: &Hash,
-) -> Result<Option<Entry>, StoreError> {
     let values = store
         .get_many(
             &content_shard(pack),
@@ -541,10 +520,7 @@ pub(crate) async fn facts_entry<S: NamespaceStore>(
     }
     let row: Option<Entry> = raw.map(decode).transpose()?;
     if let Some(row) = &row {
-        if row.version != 1 || row.kind > 7 {
-            return Err(bad());
-        }
-        denial::encode_actions(vec![row.references.clone()])?;
+        row.validate()?;
     }
     Ok(row)
 }
