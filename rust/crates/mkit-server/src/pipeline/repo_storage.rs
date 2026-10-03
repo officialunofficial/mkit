@@ -41,7 +41,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let capped = AtomicBool::new(false);
         let store = Budgeted::capture(&self.meta, &capped);
         let auth = self
-            .authorize_read_with_meta(&op, &store)
+            .authorize_read_with_meta(&op, &store, None)
             .await
             .map_err(|error| {
                 if capped.load(Ordering::SeqCst) {

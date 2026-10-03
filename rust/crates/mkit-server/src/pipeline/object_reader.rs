@@ -316,7 +316,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             issued.push(
                 match settle(
                     self.pipe
-                        .issue_url_with_meta(&op, &repository, target, ttl_s, now, &capture)
+                        .issue_url_with_meta(
+                            &op,
+                            &repository,
+                            target,
+                            ttl_s,
+                            now,
+                            &capture,
+                            Some(OBJECT_READER_LIMIT_MESSAGE),
+                        )
                         .await,
                     capped,
                 ) {
