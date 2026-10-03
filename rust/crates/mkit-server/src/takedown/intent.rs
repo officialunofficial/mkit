@@ -592,5 +592,7 @@ impl<N: NamespaceStore + Clone> AdminOperations for Service<N> {
 }
 
 #[cfg(test)]
-#[path = "intent_v050_tests.rs"]
-mod stored_v050_tests;
+#[allow(clippy::unwrap_used, clippy::too_many_lines)]
+mod stored_v050_tests {
+    crate::stored_golden::tests!(takedown_intent);
+}

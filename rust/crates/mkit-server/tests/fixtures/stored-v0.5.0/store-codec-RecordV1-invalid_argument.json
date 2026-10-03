@@ -1,1 +1,0 @@
-{"fingerprint":"0101010101010101010101010101010101010101010101010101010101010101","expires_at_ms":2,"state":{"state":"committed","result":{"kind":"rejected","code":"invalid_argument","message":"refused"}}}

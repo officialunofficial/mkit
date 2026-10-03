@@ -951,5 +951,7 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "maintenance_v050_tests.rs"]
-mod stored_v050_tests;
+#[allow(clippy::unwrap_used, clippy::too_many_lines)]
+mod stored_v050_tests {
+    crate::stored_golden::tests!(store_maintenance);
+}

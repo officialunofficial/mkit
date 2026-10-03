@@ -205,5 +205,7 @@ pub fn cache_key(deployment: &str, partition: &Partition) -> Result<String, Stor
 }
 
 #[cfg(test)]
-#[path = "codec_v050_tests.rs"]
-mod v050_tests;
+#[allow(clippy::unwrap_used, clippy::too_many_lines)]
+mod v050_tests {
+    crate::stored_golden::tests!(published_view_codec);
+}

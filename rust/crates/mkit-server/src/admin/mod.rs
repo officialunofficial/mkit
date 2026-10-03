@@ -333,5 +333,7 @@ impl<S> core::fmt::Debug for Engine<S> {
 }
 
 #[cfg(test)]
-#[path = "mod_v050_tests.rs"]
-mod stored_v050_tests;
+#[allow(clippy::unwrap_used, clippy::too_many_lines)]
+mod stored_v050_tests {
+    crate::stored_golden::tests!(admin_mod);
+}

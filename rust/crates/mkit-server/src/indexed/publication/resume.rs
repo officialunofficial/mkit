@@ -708,5 +708,7 @@ pub(crate) async fn fire<S: NamespaceStore, T: NamespaceStore>(
 mod tests;
 
 #[cfg(test)]
-#[path = "resume_v050_tests.rs"]
-mod stored_v050_tests;
+#[allow(clippy::unwrap_used, clippy::too_many_lines)]
+mod stored_v050_tests {
+    crate::stored_golden::tests!(indexed_publication_resume);
+}
