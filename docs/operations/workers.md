@@ -20,8 +20,7 @@ Use compatibility date `2026-09-09`, `build/worker/shim.mjs`, Smart Placement,
 route. Confirm the account has Workers Paid before setting its storage cap.
 
 Build from `apps/vcs-worker` with `worker-build --release --features launch`
-for HTTP, signed HTTPS hooks, bounded zstd decoding and optional published
-snapshots. A smaller build can select `pack-ruzstd`, add `http-objects` for
+for HTTP, signed HTTPS hooks and bounded zstd decoding. A smaller build can select `pack-ruzstd`, add `http-objects` for
 HTTP/tokens, and add `signed-http-hooks` for signed hooks/purge. Never deploy
 `test-faults`. The `launch` feature compiles optional facilities; configuration
 still selects each one. Set the copied config's build command to the exact
@@ -58,8 +57,8 @@ The base launch vars are:
 | `BACKUP_MAX_BYTES` | Default `16777216`; maximum `25165824` |
 | `BACKUP_FORCE_REUPLOAD_MS` | Default `2419200000` (28 days); keep below backup lifecycle retention |
 
-`LAUNCH_PROFILE=uno` remains accepted as a deprecated alias and logs a startup
-deprecation warning. Use `LAUNCH_PROFILE=paid-workers` for new deployments.
+`LAUNCH_PROFILE=paid-workers` is the only accepted profile value. The former
+`uno` alias is removed and is refused at startup.
 
 Ticketed uploads use threshold zero. `any` requires explicit operator acceptance
 of incomplete holder discovery. Remove the template's `NAMESPACE_ALLOWLIST`
@@ -82,7 +81,6 @@ they do not migrate unsupported pre-launch data.
 | `CONTENT_INDEX` | `ContentIndexShard`: content indexes |
 | `STORAGE` | Private R2 serving packs and extracted `objects/` |
 | `BACKUPS` | Separate private R2 partition exports |
-| `PUBLISHED_SNAPSHOTS` | Separate private R2 mutable ref snapshots, only for configured published-view optimization |
 | `PRESERVATION` | Separate restricted R2 takedown evidence; required with takedown |
 | `ADMISSION_HOOK` | Optional isolated hook Worker service binding, alternative to signed HTTPS |
 
@@ -91,9 +89,6 @@ serving `packs/` or `objects/`. Restrict a 35-day backup lifecycle rule to
 `backups/` in `BACKUPS`; backups cannot replace preservation. Preservation
 retention is enforced by the audited server timer and legal-hold arbiter;
 do not install a bucket lifecycle that can bypass holds.
-`PUBLISHED_SNAPSHOTS` alone enables nothing: a host supplies one consistent
-`PublishedViewConfig` to fetch and all DO constructors, with a fresh deployment
-identity. Configured inspection disables this snapshot optimization.
 
 With `any`, namespace authority fencing is supported only for Ed25519
 namespaces: Address (`0x...`) authority generation setters are not supported
@@ -191,7 +186,7 @@ and rechecks authority/retention/ownership on retries.
 
 The purge receiver must acknowledge with `{}` and deduplicate stable purge ids;
 retries use fresh nonces. It must map the audience to the actual deployment
-and invalidate all selected global variants, including all 16 snapshot buckets.
+and invalidate all selected global variants.
 A selector alone does not attach cache tags. Local cache deletion is only
 colo-local; measure global convergence separately.
 
@@ -244,6 +239,11 @@ Pin the git dependency to an approved immutable commit until a release tag exist
 ### Empty first store and rollback
 
 First deployment, and first enablement of inspection, require an empty store.
+The server does not enforce the inspection half of this: it keeps no durable
+marker and refuses nothing when inspection is enabled on a store that already
+holds content. Enabling inspection on a populated store is an operator error;
+reset the store first, because content published before inspection was enabled
+was never inspected.
 Unreleased pre-launch persisted formats are unsupported: reset explicitly named
 staging resources or provision fresh Worker/DO namespaces and buckets.
 Do not change markers or transform old rows. Review resource identities before

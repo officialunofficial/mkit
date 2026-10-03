@@ -91,20 +91,16 @@ HTTPS `HOOK_URL` and the `MKIT_HOOK_KEY` signing secret, and use `WORKERS_PLAN=p
 A purge-only role list does not enable Authorize, Admit or Outcome. Invalid or
 unsigned purge configuration refuses startup. The signed sink must acknowledge
 with an empty JSON object; retries keep the body/id and use fresh nonces. The
-sink must map the audience to the configured snapshot deployment and purge the
-actual custom keys, including all 16 snapshot buckets; selector strings alone
-do not attach Cache-Tag headers to existing snapshot entries.
+sink must map the audience to the deployment and purge the actual custom keys;
+selector strings alone do not attach Cache-Tag headers to existing cache entries.
 
 Automatic callers accept repository-scoped intents in the triggering state apply.
-The colo-local Cache API deletes paths and all existing snapshot cache keys.
+The colo-local Cache API deletes the intent's exact URL paths.
 Namespace suspension consumers must use those repository intents; this foundation
 does not expose namespace manual acceptance. Gated entrypoints keep Workers
-Caching disabled. The existing snapshot seam strongly checks durable invalidation
-before and after lookup/refill, so retained R2 bytes cannot resurrect an invalidated
-snapshot. Root audit append and its relay watermark share the target SQL apply.
-All Paid alarm heads share one external-operation allowance and one physical
-tick budget. Published snapshots require their generation-aware serving fence;
-configured inspection keeps snapshot optimization disabled.
+Caching disabled. Root audit append and its relay watermark share the target SQL
+apply. All Paid alarm heads share one external-operation allowance and one
+physical tick budget.
 
 ## Embedding (supported, 0.x)
 
@@ -115,7 +111,7 @@ release tag; breaking 0.x changes are called out in CHANGELOG.
 |---|---|
 | `adapter::serve_with` / `fetch_with` | Constructed request or environment-parsed fetch with a custom `HookSet` |
 | `adapter::ns_object_with` | Environment-configured DO with custom `OutcomeSink` |
-| `embedding::NsObjectBuilder` | Combine explicit config, published snapshots, outcome factory and custom purge/local invalidation |
+| `embedding::NsObjectBuilder` | Combine explicit config, outcome factory and custom purge/local invalidation |
 | `embedding::HookCapabilities`, `WorkerConfig::from_env_with_hooks` | Declare the supplied Admission, Authorizer role and OutcomeSink without a remote binding |
 | `embedding::PurgeHooks`, `WorkerConfig::from_env_with_purge` | Supply an actual Paid in-process `PurgeSink` as the signed HTTPS alternative; complete preservation/admin still required |
 | `durable_objects!(config_factory, sink_factory)` | Generate all five standard DO exports from the same config/sink factories |
@@ -159,9 +155,8 @@ records exact release commands and keeps unexecuted measurements explicit.
 
 With `http-objects` and explicit indexed/HTTP configuration, construct the
 request's pipeline using `adapter::embedding_pipeline(env, cfg, hooks,
-&request_budget, ...)`, then call `pipeline.object_reader(repo, ReaderView::Public)`.
-The optional final `snapshot_warm` argument exists with `published-view`; use
-`false` for an ordinary request. Share the request's existing 9,000-call physical
+&request_budget)`, then call `pipeline.object_reader(repo, ReaderView::Public)`.
+Share the request's existing 9,000-call physical
 `SliceBudget` with the constructor. The native equivalent is
 `Pipeline::object_reader`; native and Worker adapters re-export `ReaderView`
 and `ObjectReader`. This API uses the shared core and adds no HTTP mount or wire.

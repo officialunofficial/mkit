@@ -135,7 +135,6 @@ fn config(env: &Env) -> core::result::Result<WorkerConfig, ConfigError> {
         Arc::new(HostPurge),
         Arc::new(LocalCache {
             cache: WorkerCache,
-            snapshot_deployment: None,
         }),
     );
     let capabilities = HookCapabilities {

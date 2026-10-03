@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- The Workers-only `published-view` optimization (ref snapshots in R2, its
+  timer, `PublishedViewConfig`, `fetch_configured`, `ns_object_configured`,
+  the `PUBLISHED_SNAPSHOTS` binding) and the `mkit-server` `published-view`
+  cargo feature with `pipeline::published` and `Pipeline::with_published_source`
+  are removed. Nothing enabled them by default. `timers::registry::kinds::PUBLISHED_VIEW`
+  is removed and timer kind 10 stays reserved. `embedding_pipeline` and
+  `purge::LocalCache` no longer carry snapshot parameters.
+- The deprecated `LAUNCH_PROFILE=uno` alias is removed; use
+  `LAUNCH_PROFILE=paid-workers`.
+- The never-set `PipelineConfig::inspection_mode` and
+  `WorkerConfig::inspection_mode` fields and the no-op Worker inspection
+  marker guard are removed. Enabling inspection still requires an empty store;
+  this is now documented as an operator requirement.
+
 ### Fixed
 
 - Owner object-reader authorization preserves `ResourceExhausted` when the
