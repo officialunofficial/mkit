@@ -727,7 +727,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     located,
                     indexed.max_delta_chain_depth,
                     pipe.metrics.as_ref(),
-                    writer,
+                    true,
                 )
                 .await?
                 {

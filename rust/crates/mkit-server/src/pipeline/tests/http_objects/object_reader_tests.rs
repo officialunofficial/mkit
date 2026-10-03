@@ -2341,6 +2341,40 @@ fn reader_delta_depth_caps_are_typed_without_changing_http_errors() {
 }
 
 #[test]
+fn proven_public_metadata_depth_cap_is_typed() {
+    let (mut fx, _, target) = published_external_delta_member();
+    fx.pipe.cfg.indexed.as_mut().unwrap().max_delta_chain_depth = 0;
+    let reader = block_on(
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Public),
+    )
+    .unwrap();
+    let error = block_on(reader.object_metadata(&[target])).unwrap_err();
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(
+        error.public_message(),
+        crate::pipeline::OBJECT_READER_LIMIT_MESSAGE
+    );
+}
+
+#[test]
+fn proven_public_metadata_base_membership_cap_is_typed() {
+    let (fx, base, target) = published_external_delta_member();
+    overflow_member_candidates(&fx, base);
+    let reader = block_on(
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Public),
+    )
+    .unwrap();
+    let error = block_on(reader.object_metadata(&[target])).unwrap_err();
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(
+        error.public_message(),
+        crate::pipeline::OBJECT_READER_LIMIT_MESSAGE
+    );
+}
+
+#[test]
 fn corrupt_delta_cycles_remain_unavailable_instead_of_read_exhaustion() {
     let (fx, base, target) = published_external_delta_member();
     let repo = fx.repo_id("room");
