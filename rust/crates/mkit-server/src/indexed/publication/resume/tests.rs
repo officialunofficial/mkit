@@ -283,7 +283,7 @@ fn exhaustion_and_shared_alarm_refusal_remain_typed_and_bounded() {
             p.result(&mut advance(root), 0, 0, 1)
                 .unwrap_err()
                 .public_message(),
-            "object index limit exceeded"
+            "publication verification capacity exhausted"
         );
         let mut p = progress(&a);
         p.byte_limit = 50;
@@ -617,7 +617,7 @@ fn failing_dispatch_at_total_limit_is_terminal_typed_exhaustion() {
             p.result(&mut advance([14; 32]), 0, 0, 1)
                 .unwrap_err()
                 .public_message(),
-            "object index limit exceeded"
+            "publication verification capacity exhausted"
         );
     });
 }
@@ -748,5 +748,156 @@ fn lowered_delta_depth_becomes_durable_terminal_failure_across_timers() {
         let mut corrupt = serde_json::to_value(read_progress(&kv, &repo, root).await).unwrap();
         corrupt["terminal"] = serde_json::json!("UnknownFailure");
         assert!(serde_json::from_value::<Progress>(corrupt).is_err());
+    });
+}
+
+#[test]
+fn spent_request_ledger_checkpoints_resumable_work_without_a_terminal_verdict() {
+    block_on(async {
+        let clock = std::sync::Arc::new(crate::rt::ManualClock::new(0));
+        let kv = MemoryKv::with_clock(clock.clone());
+        let repo = repo();
+        let root = [21; 32];
+        facts(&kv, root, None).await;
+        verified(&kv, &repo, root).await;
+        let source = SinglePartition.ref_shard(&repo, "refs/heads/main");
+        let cfg = IndexedConfig::default();
+        let mut a = advance(root);
+        // The request's proof share is already spent: no read can be charged,
+        // but the checkpoint write is reserved headroom and still lands.
+        let ledger = SliceBudget::new(0);
+        let error = prepare_with(
+            &kv,
+            &source,
+            &SinglePartition,
+            &repo,
+            &mut a,
+            cfg,
+            0,
+            &crate::telemetry::NoopMetrics,
+            0,
+            Some(&ledger),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), Code::Unavailable);
+        assert!(ledger.refused());
+        let kept = read_progress(&kv, &repo, root).await;
+        assert!(kept.failure.is_none() && kept.terminal.is_none() && !kept.complete);
+        assert_eq!(kept.next_packmap, Some(root));
+        // The retained timer resumes the same proof under the alarm's own allowance.
+        let registry = crate::timers::TimerRegistry::new().register(
+            crate::timers::publication_recheck::PublicationRecheck::new(
+                crate::store::BorrowedStore(&kv),
+            ),
+        );
+        clock.advance(1_000);
+        crate::timers::run_due(
+            &kv,
+            &source,
+            &registry,
+            clock.as_ref(),
+            1_000,
+            &crate::timers::TickBudget::default(),
+        )
+        .await
+        .unwrap();
+        assert!(read_progress(&kv, &repo, root).await.complete);
+    });
+}
+
+#[test]
+fn unsupported_historical_capacity_is_one_terminal_stop_not_a_recurring_alarm() {
+    block_on(async {
+        let clock = std::sync::Arc::new(crate::rt::ManualClock::new(0));
+        let kv = MemoryKv::with_clock(clock.clone());
+        let repo = repo();
+        let root = [22; 32];
+        facts(&kv, root, None).await;
+        let a = advance(root);
+        let mut p = progress(&a);
+        // The whole-pair allowance is spent: the next step cannot be supported.
+        p.calls = TOTAL_CALLS;
+        let source = SinglePartition.ref_shard(&repo, "refs/heads/main");
+        let key = keys::verification(&repo.name, &root);
+        let binding = p.binding;
+        state::write(
+            &kv,
+            &source,
+            &repo.name,
+            &root,
+            None,
+            &state::VerificationV1::Verified {
+                pack_len: 100,
+                verified_at_ms: 0,
+                publication: Some(Box::new(p)),
+            },
+            10_000,
+        )
+        .await
+        .unwrap();
+        let timer = keys::timer(1_000, 12, key.as_bytes());
+        kv.apply(
+            &source,
+            Batch::new().put(timer.clone(), Value::new(binding.to_vec())),
+        )
+        .await
+        .unwrap();
+        let registry = crate::timers::TimerRegistry::new().register(
+            crate::timers::publication_recheck::PublicationRecheck::new(
+                crate::store::BorrowedStore(&kv),
+            ),
+        );
+        clock.advance(1_000);
+        crate::timers::run_due(
+            &kv,
+            &source,
+            &registry,
+            clock.as_ref(),
+            1_000,
+            &crate::timers::TickBudget::default(),
+        )
+        .await
+        .unwrap();
+        let stopped = read_progress(&kv, &repo, root).await;
+        assert_eq!(stopped.failure, Some(Exhaustion::IndexCalls));
+        // The one alarm retired the timer: no later alarm finds work.
+        for later in [2_000_u64, 600_000] {
+            clock.advance(i64::try_from(later).unwrap());
+            assert!(kv.get(&source, &timer).await.unwrap().is_none());
+            let report = crate::timers::run_due(
+                &kv,
+                &source,
+                &registry,
+                clock.as_ref(),
+                later,
+                &crate::timers::TickBudget::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(report.fired, 0);
+        }
+        assert_eq!(read_progress(&kv, &repo, root).await, stopped);
+        // Foreground callers see documented capacity, not an invalid-content verdict.
+        for _ in 0..2 {
+            let error = prepare(
+                &kv,
+                &source,
+                &SinglePartition,
+                &repo,
+                &mut advance(root),
+                IndexedConfig::default(),
+                600_000,
+                &crate::telemetry::NoopMetrics,
+                0,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.code(), Code::Unavailable);
+            assert_eq!(
+                error.public_message(),
+                "publication verification capacity exhausted"
+            );
+        }
     });
 }

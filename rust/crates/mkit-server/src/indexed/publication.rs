@@ -21,6 +21,11 @@ fn closed() -> ServerError {
 fn capped() -> ServerError {
     ServerError::invalid_argument("object index limit exceeded")
 }
+/// The retained-evidence item bound (4,096) is an implementation capacity, not
+/// a statement about the content.
+pub(super) fn item_capacity() -> ServerError {
+    crate::pipeline::publication_budget::PublicationBudget::capacity_error()
+}
 fn unavailable() -> ServerError {
     ServerError::unavailable("object storage request failed")
 }
@@ -203,7 +208,10 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
     let mut next = value.packmap;
     let mut remaining = cfg.decode_budget;
     while let Some(id) = next {
-        if chain.len() + packs.len() >= MAX_ADVANCE_ITEMS || !chain.insert(id) {
+        if chain.len() + packs.len() >= MAX_ADVANCE_ITEMS {
+            return Err(item_capacity());
+        }
+        if !chain.insert(id) {
             return Err(capped());
         }
         let node = packlist(
@@ -218,7 +226,7 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
         .await?;
         packs.extend(node.packs);
         if chain.len() + packs.len() > MAX_ADVANCE_ITEMS {
-            return Err(capped());
+            return Err(item_capacity());
         }
         next = node.prev;
     }
@@ -243,7 +251,7 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
             continue;
         }
         if visited.len() > MAX_ADVANCE_ITEMS {
-            return Err(capped());
+            return Err(item_capacity());
         }
         let located = resolve::locate_split(&closure, shards, repo, &[id], metrics)
             .await?
@@ -288,7 +296,7 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
         }
         queue.extend(children(&object, ClosureMode::History));
         if dependencies.len() > MAX_ADVANCE_ITEMS || bases.len() > MAX_ADVANCE_ITEMS {
-            return Err(capped());
+            return Err(item_capacity());
         }
     }
     advance.dependencies = dependencies.into_iter().collect();
@@ -296,8 +304,8 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
     Ok(())
 }
 
-/// Verify within a shared metadata/blob-call cap; scheduled Workers retain
-/// their other advance work budget. Cap exhaustion is a closed-closure denial.
+/// Verify within a fresh 256-call slice. Running out of calls is execution
+/// capacity (`unavailable`), never a closed-closure verdict.
 #[allow(clippy::too_many_arguments)]
 pub async fn verify<B: BlobStore, S: NamespaceStore>(
     blobs: &B,
@@ -311,17 +319,36 @@ pub async fn verify<B: BlobStore, S: NamespaceStore>(
     cfg: IndexedConfig,
     metrics: &dyn Metrics,
 ) -> Result<(), ServerError> {
-    let budget = super::budget::SliceBudget::new(256);
-    let blobs = super::budget::Budgeted::new(blobs, &budget);
-    let store = super::budget::Budgeted::new(store, &budget);
+    let slice = super::budget::SliceBudget::new(256);
+    verify_within(
+        blobs, store, shards, repo, value, branch, advance, policy, cfg, metrics, &slice,
+    )
+    .await
+}
+
+/// [`verify`] drawing from a caller's slice, which may be a child of the
+/// request's publication ledger. Exhaustion is read from the budget itself.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn verify_within<B: BlobStore, S: NamespaceStore>(
+    blobs: &B,
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    value: &Pair,
+    branch: bool,
+    advance: &mut Advance,
+    policy: &dyn PublicationPolicy,
+    cfg: IndexedConfig,
+    metrics: &dyn Metrics,
+    slice: &super::budget::SliceBudget,
+) -> Result<(), ServerError> {
+    let blobs = super::budget::Budgeted::new(blobs, slice);
+    let store = super::budget::Budgeted::new(store, slice);
     let result = verify_inner(
         &blobs, &store, shards, repo, value, branch, advance, policy, cfg, metrics,
     )
     .await;
-    if result.is_err() && budget.remaining() == 0 {
-        return Err(capped());
-    }
-    result
+    crate::pipeline::publication_budget::PublicationBudget::settle(slice, result)
 }
 
 /// Verify the resulting pair, then collect only the added-pack inspection metadata.
@@ -348,4 +375,34 @@ pub async fn verify_inspected<B: BlobStore, S: NamespaceStore>(
     )
     .await?;
     inspection.complete_added(store, repo).await
+}
+
+/// [`verify_inspected`] with pair verification and inspection metadata sharing
+/// one caller slice.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn verify_inspected_within<B: BlobStore, S: NamespaceStore>(
+    blobs: &B,
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    value: &Pair,
+    branch: bool,
+    advance: &mut Advance,
+    policy: &dyn PublicationPolicy,
+    cfg: IndexedConfig,
+    metrics: &dyn Metrics,
+    inspection: &mut super::inspection::InspectionSet,
+    slice: &super::budget::SliceBudget,
+) -> Result<(), ServerError> {
+    let blobs = super::budget::Budgeted::new(blobs, slice);
+    let store = super::budget::Budgeted::new(store, slice);
+    let result = async {
+        verify_inner(
+            &blobs, &store, shards, repo, value, branch, advance, policy, cfg, metrics,
+        )
+        .await?;
+        inspection.complete_added(&store, repo).await
+    }
+    .await;
+    crate::pipeline::publication_budget::PublicationBudget::settle(slice, result)
 }

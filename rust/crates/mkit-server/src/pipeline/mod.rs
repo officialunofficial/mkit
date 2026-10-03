@@ -61,6 +61,7 @@ pub use list_repos::{RepoEntry, RepoPage};
 mod outcome;
 mod parts;
 mod plan;
+pub(crate) mod publication_budget;
 mod purge;
 mod ref_policy;
 mod reservation;
@@ -3506,6 +3507,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
     /// Stages 4 and 6: plan and apply, as one batch on an atomic store or
     /// as sequential single-ref batches on a non-atomic one.
+    #[allow(clippy::too_many_lines)] // One request ledger spans prepare and apply.
     async fn plan_and_apply(
         &self,
         op: &Operation,
@@ -3569,6 +3571,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     source: p,
                     shards: self.shards.as_ref(),
                     prepared: None,
+                    bound: None,
                 },
             ),
             pending,
@@ -3582,6 +3585,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }),
         };
         let mut ahead = ahead;
+        let budget = publication_budget::PublicationBudget::new();
         let prepared = match Box::pin(self.prepare_publication(
             op,
             &a.repo().identity,
@@ -3591,6 +3595,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             implicit_ids.as_deref(),
             external_bases,
             inspected,
+            &budget,
         ))
         .await
         {
@@ -3605,13 +3610,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
             Err(error) => return Err(error),
         };
-        if let Some(publication) = &mut req.publication {
-            publication.prepared = prepared.as_ref();
+        if let (Some(publication), Some((advance, bound))) = (&mut req.publication, &prepared) {
+            publication.prepared = Some(advance);
+            publication.bound = Some(*bound);
         }
         if caps.atomic_multi_key || replay.is_some() || !charges.is_empty() {
-            return self.apply_atomic(op, a, p, &req, ahead).await;
+            return self
+                .apply_atomic(op, a, p, &req, ahead, Some(&budget))
+                .await;
         }
-        self.apply_sequential(op, a, p, req).await
+        self.apply_sequential(op, a, p, req, &budget).await
     }
 
     async fn apply_sequential(
@@ -3620,6 +3628,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         a: &Authenticated,
         p: &Partition,
         mut req: WriteRequest<'_>,
+        budget: &publication_budget::PublicationBudget,
     ) -> Result<StoredResult, ServerError> {
         // `Transport::advance_refs`'s default: packmap first, then head.
         let kind = req.kind;
@@ -3627,7 +3636,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         req.kind = WriteKind::UpdateRef;
         for (i, update) in refs.iter().enumerate() {
             req.refs = core::slice::from_ref(update);
-            let result = self.apply_loop(op, a, p, &req, None).await?;
+            let result = self.apply_loop(op, a, p, &req, None, Some(budget)).await?;
             if let StoredResult::UpdateRef(UpdateRefResult::Conflict { .. }) = result {
                 if kind == WriteKind::UpdateRef {
                     return Ok(result);
@@ -3685,7 +3694,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         implicit_ids: Option<&[Hash]>,
         external_bases: &std::collections::BTreeSet<Hash>,
         inspected: Option<&mut crate::indexed::inspection::InspectionSet>,
-    ) -> Result<Option<crate::store::publication::Advance>, ServerError> {
+        budget: &publication_budget::PublicationBudget,
+    ) -> Result<Option<(crate::store::publication::Advance, clearance::PreparedAt)>, ServerError>
+    {
         #[cfg(not(feature = "remote-hooks"))]
         let _ = repository;
         // Deletions establish an immediate boundary without consulting inspection
@@ -3713,13 +3724,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
             // Membership dependencies belong to the server, not to an
             // inspector's verdict. An Inspect Pass alone cannot publish.
-            prepared.generation =
+            let row =
                 crate::store::publication::Publication::decode(snapshot.get(&keys::publication(
                     &op.repo.name,
                     &crate::store::publication::sequence_ref(&req.refs[0].name),
                 )))
-                .map_err(meta_error)?
-                .generation;
+                .map_err(meta_error)?;
+            prepared.generation = row.generation;
+            // The proof below is only valid for this exact publication row.
+            let bound = clearance::PreparedAt::of(&row);
             prepared.additions = if let Some(advance) = &req.advance {
                 advance
                     .ids
@@ -3774,6 +3787,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                             .as_ref()
                             .map_or(ms(self.clock.now_ms()), |a| ms(a.created_at_ms))
                     }),
+                budget,
             )
             .await?;
             #[cfg(feature = "remote-hooks")]
@@ -3797,7 +3811,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 )
                 .await?;
             }
-            Ok(Some(prepared))
+            Ok(Some((prepared, bound)))
         } else {
             Ok(None)
         }
@@ -3814,6 +3828,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         external_bases: &std::collections::BTreeSet<Hash>,
         mut inspected: Option<&mut crate::indexed::inspection::InspectionSet>,
         created: u64,
+        budget: &publication_budget::PublicationBudget,
     ) -> Result<(), ServerError> {
         let indexed = self
             .cfg
@@ -3822,7 +3837,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let resumed = self.cfg.takedown_denial
             && self.publication_policy.is_none()
             && inspected.is_none()
-            && Box::pin(crate::indexed::publication::resume::prepare(
+            && Box::pin(crate::indexed::publication::resume::prepare_with(
                 &self.meta,
                 p,
                 self.shards.as_ref(),
@@ -3832,6 +3847,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ms(self.clock.now_ms()),
                 self.metrics.as_ref(),
                 created,
+                Some(budget.proof()),
             ))
             .await?;
         // The canonical fallback retains delta bases; only the metadata-only
@@ -3840,28 +3856,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if self.cfg.takedown_denial && !resumed {
             indexed.decode_budget = indexed.decode_budget.min(8 << 20);
         }
-        // Pair verification and dependency visibility share one allocation.
-        let inspection_budget = crate::indexed::budget::SliceBudget::new(256);
-        let inspection_blobs =
-            crate::indexed::budget::Budgeted::new(&self.blobs, &inspection_budget);
-        let inspection_meta = crate::indexed::budget::Budgeted::new(&self.meta, &inspection_budget);
+        // Pair verification and the inspection metadata share one slice of the
+        // request's ledger; dependency visibility draws from the ledger itself.
+        let slice = budget.verify_slice();
         if let Some(set) = inspected.as_deref_mut() {
-            crate::indexed::publication::verify_inspected(
-                &inspection_blobs,
-                &inspection_meta,
-                self.shards.as_ref(),
-                &op.repo,
-                &prepared.value.clone(),
-                branch,
-                prepared,
-                policy,
-                indexed,
-                self.metrics.as_ref(),
-                set,
-            )
-            .await?;
-        } else if !resumed {
-            crate::indexed::publication::verify(
+            crate::indexed::publication::verify_inspected_within(
                 &self.blobs,
                 &self.meta,
                 self.shards.as_ref(),
@@ -3872,6 +3871,23 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 policy,
                 indexed,
                 self.metrics.as_ref(),
+                set,
+                &slice,
+            )
+            .await?;
+        } else if !resumed {
+            crate::indexed::publication::verify_within(
+                &self.blobs,
+                &self.meta,
+                self.shards.as_ref(),
+                &op.repo,
+                &prepared.value.clone(),
+                branch,
+                prepared,
+                policy,
+                indexed,
+                self.metrics.as_ref(),
+                &slice,
             )
             .await?;
         }
@@ -3884,38 +3900,30 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .into_iter()
             .collect();
         if prepared.external_bases.len() > crate::store::publication::MAX_ADVANCE_ITEMS {
-            return Err(ServerError::invalid_argument("object index limit exceeded"));
+            return Err(publication_budget::PublicationBudget::capacity_error());
         }
         if prepared.state.publishable() {
-            let visible = if inspected.is_some() {
-                crate::timers::publication_recheck::dependencies(
-                    &inspection_meta,
-                    &inspection_meta,
-                    p,
-                    self.shards.as_ref(),
-                    &op.repo,
-                    prepared,
-                )
-                .await
-                .map_err(|error| {
-                    if crate::indexed::budget::is_exhausted(&error) {
-                        ServerError::invalid_argument("object index limit exceeded")
-                    } else {
-                        meta_error(error)
-                    }
-                })?
+            // Inspection keeps its one shared slice; otherwise dependencies
+            // draw from the request ledger directly.
+            let dependency_budget = if inspected.is_some() {
+                &slice
             } else {
+                budget.proof()
+            };
+            let meta = crate::indexed::budget::Budgeted::new(&self.meta, dependency_budget);
+            let visible = publication_budget::PublicationBudget::settle(
+                dependency_budget,
                 crate::timers::publication_recheck::dependencies(
-                    &self.meta,
-                    &self.meta,
+                    &meta,
+                    &meta,
                     p,
                     self.shards.as_ref(),
                     &op.repo,
                     prepared,
                 )
                 .await
-                .map_err(meta_error)?
-            };
+                .map_err(meta_error),
+            )?;
             if !visible {
                 prepared.state = crate::store::publication::Clearance::Pending;
             }
@@ -3932,11 +3940,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         p: &Partition,
         req: &WriteRequest<'_>,
         ahead: Option<Snapshot>,
+        budget: Option<&publication_budget::PublicationBudget>,
     ) -> Result<StoredResult, ServerError> {
         if !self.meta.capabilities().atomic_multi_key {
             return Err(internal("replay and quota need atomic multi-key batches"));
         }
-        self.apply_loop(op, a, p, req, ahead).await
+        self.apply_loop(op, a, p, req, ahead, budget).await
     }
 
     /// The bounded optimistic loop: read, plan, apply. The first attempt
@@ -3956,6 +3965,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         p: &Partition,
         req: &WriteRequest<'_>,
         mut ahead: Option<Snapshot>,
+        budget: Option<&publication_budget::PublicationBudget>,
     ) -> Result<StoredResult, ServerError> {
         let mut req = req.for_store(self.meta.capabilities());
         // Held until the loop ends (see `with_write_gate`).
@@ -3966,7 +3976,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let skew_ms = a.business_skew_ms;
         let (mut replans, mut deadline_missed, mut prune_ok) = (0, false, true);
         let mut first_attempt = true;
-        let denial_budget = crate::indexed::budget::SliceBudget::new(9000);
+        // Every attempt, including CAS replans, draws from the request's one
+        // ledger. Only a write with no publication proof owns a fresh allowance.
+        let own_budget;
+        let denial_budget = if let Some(budget) = budget {
+            budget.proof()
+        } else {
+            own_budget = crate::indexed::budget::SliceBudget::new(9000);
+            &own_budget
+        };
         loop {
             let denial_packs: Vec<_> = req
                 .denial_packs
@@ -3987,15 +4005,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             // (SPEC-SERVER §14.2). Slow proof cannot borrow a new commit window.
             let proof_plan_time = prove.then(|| ms(self.clock.now_ms()));
             if let Some(ids) = req.denial_ids.filter(|_| prove) {
-                crate::takedown::denial::require_repo_clear_budgeted(
-                    &self.meta,
-                    self.shards.as_ref(),
-                    &op.repo,
-                    ids,
-                    &denial_packs,
-                    &denial_budget,
-                )
-                .await?;
+                publication_budget::PublicationBudget::settle(
+                    denial_budget,
+                    crate::takedown::denial::require_repo_clear_budgeted(
+                        &self.meta,
+                        self.shards.as_ref(),
+                        &op.repo,
+                        ids,
+                        &denial_packs,
+                        denial_budget,
+                    )
+                    .await,
+                )?;
             }
             // A complete proof can outlive both the commit window and the
             // initial lease. Only fixed admission quota facts survive it;

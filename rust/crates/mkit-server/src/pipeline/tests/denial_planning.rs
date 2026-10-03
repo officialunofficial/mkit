@@ -58,7 +58,7 @@ fn run_proved_with(
     leased: bool,
     edit: impl FnOnce(&mut WriteRequest<'_>),
 ) -> Result<StoredResult, ServerError> {
-    run_proved_ticket(env, pending, leased, edit, false)
+    run_proved_ticket(env, pending, leased, edit, false, None)
 }
 
 fn run_proved_ticket(
@@ -67,6 +67,7 @@ fn run_proved_ticket(
     leased: bool,
     edit: impl FnOnce(&mut WriteRequest<'_>),
     expired_ticket: bool,
+    budget: Option<&crate::pipeline::publication_budget::PublicationBudget>,
 ) -> Result<StoredResult, ServerError> {
     let refs = [upd(HEAD, Missing, C)];
     let ids = BTreeSet::from([A]);
@@ -147,7 +148,9 @@ fn run_proved_ticket(
         .pipe
         .identify(&a, OpKind::UpdateRef(refs[0].clone()))
         .unwrap();
-    now(env.pipe.apply_loop(&op, &a, &source, &req, Some(ahead)))
+    now(env
+        .pipe
+        .apply_loop(&op, &a, &source, &req, Some(ahead), budget))
 }
 
 #[test]
@@ -443,7 +446,7 @@ fn repeated_slow_proof_cannot_refresh_either_attempt_window() {
 #[test]
 fn proof_rechecks_ticket_expiry_on_fresh_business_clock() {
     let (env, scans) = proof_env(11_000, false, false);
-    let error = run_proved_ticket(&env, None, false, |_| {}, true).unwrap_err();
+    let error = run_proved_ticket(&env, None, false, |_| {}, true, None).unwrap_err();
     assert_eq!(error.code(), Code::FailedPrecondition);
     assert_eq!(error.public_message(), "invalid or expired upload ticket");
     assert_eq!(scans.load(Ordering::SeqCst), DIRECTORY_SCANS);
@@ -766,5 +769,41 @@ fn signed_takedown_after_proof_cannot_publish_a_reused_canonical_pair() {
             .get(&source, &keys::ref_key(&repo.name, HEAD)))
         .unwrap(),
         Some(codec::encode_ref_id(&head))
+    );
+}
+
+#[test]
+fn replans_share_one_proof_ledger_and_exhaustion_is_capacity() {
+    use crate::pipeline::publication_budget::{PublicationBudget, SETTLEMENT_RESERVE};
+    // The cold proof outlives its commit window, so the loop proves twice.
+    let spent = {
+        let (env, _) = proof_env(11_000, false, false);
+        let ledger = PublicationBudget::new();
+        run_proved_ticket(&env, None, false, |_| {}, false, Some(&ledger)).unwrap();
+        ledger.proof().used()
+    };
+    assert!(spent > 2 * DIRECTORY_SCANS, "both proofs charge one ledger");
+    // Exactly the aggregate allowance succeeds; one call fewer is capacity on the
+    // second proof, never a verdict about the content and never a commit.
+    let (env, _) = proof_env(11_000, false, false);
+    let ledger = PublicationBudget::with_request_calls(spent + SETTLEMENT_RESERVE);
+    run_proved_ticket(&env, None, false, |_| {}, false, Some(&ledger)).unwrap();
+    assert_eq!(ledger.proof().used(), spent);
+    let (env, _) = proof_env(11_000, false, false);
+    let ledger = PublicationBudget::with_request_calls(spent - 1 + SETTLEMENT_RESERVE);
+    let error = run_proved_ticket(&env, None, false, |_| {}, false, Some(&ledger)).unwrap_err();
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(
+        error.public_message(),
+        "publication verification capacity exhausted"
+    );
+    assert!(ledger.proof().refused());
+    assert!(
+        now(env.pipe.meta.inner.get(
+            &env.pipe.shards.ref_shard(&repo(), HEAD),
+            &keys::ref_key(&repo_name(), HEAD)
+        ))
+        .unwrap()
+        .is_none()
     );
 }

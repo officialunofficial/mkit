@@ -565,7 +565,7 @@ fn over_capacity_closure_fails_closed_without_effects() {
             assert!(
                 matches!(
                     error.public_message(),
-                    "pack verification pending" | "object index limit exceeded"
+                    "pack verification pending" | "publication verification capacity exhausted"
                 ),
                 "{path:?} existing={existing}: {error:?}"
             );
@@ -635,8 +635,12 @@ fn inspected_long_packmap_chain_fails_closed_before_scanning() {
     let error = w
         .settle(30, |w| w.update(PACKMAP, None, Some(root)))
         .expect_err("a chain this long must not publish through the inspected path");
-    assert_eq!(error.code(), Code::InvalidArgument);
-    assert_eq!(error.public_message(), "object index limit exceeded");
+    // Spent execution capacity, not an invalid-content verdict.
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(
+        error.public_message(),
+        "publication verification capacity exhausted"
+    );
     assert_eq!(w.effects(&[HEAD, PACKMAP], &[], &[]), before);
 }
 

@@ -111,6 +111,20 @@ supported after new reservation rows are written.
   writes and return exhausted failures for replay and cold-start repair.
 - The embedded Worker example enables the pure-Rust zstd decoder for default
   CLI pushes.
+- A prepared publication proof is bound to the publication row it was computed
+  against (membership generation, sequence and deletion boundary). A
+  generation change, a deletion boundary or a same-pair advance between
+  preparation and the final apply now refuses with retryable `unavailable`
+  instead of committing the proof onto the newer row. The binding is
+  request-local; no stored field changes.
+- Publication verification draws preparation, dependency visibility and every
+  optimistic retry of the final denial proof from one request allowance (with
+  headroom reserved for settlement), and exhaustion is `unavailable` with the
+  message `publication verification capacity exhausted` whichever call it lands
+  on. It was `invalid_argument` (`object index limit exceeded`) in some phases,
+  which told clients the content was permanently invalid. Per-input limits keep
+  their errors. A resumable verification job over unsupported historical
+  capacity ends as one recorded stop.
 
 ## [0.5.0](https://github.com/officialunofficial/mkit/compare/v0.4.2...v0.5.0) - 2026-10-02
 

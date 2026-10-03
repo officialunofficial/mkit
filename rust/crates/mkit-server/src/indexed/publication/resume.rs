@@ -1,6 +1,6 @@
 //! Pair-bound closure evidence in the existing verified MKPL state row.
 //! Immutable sealed inventories replace repeated canonical reconstruction.
-use super::{PairStore, capped, closed, unavailable};
+use super::{PairStore, capped, closed, item_capacity, unavailable};
 use crate::indexed::{IndexedConfig, budget::SliceBudget, resolve, state};
 use crate::pipeline::{D34Shards, ShardMap, SinglePartition, clearance::Immediate};
 use crate::store::{
@@ -36,7 +36,11 @@ impl Exhaustion {
     fn error(self) -> ServerError {
         match self {
             Self::DecodeBudget => ServerError::invalid_argument(resolve::DECODE_BUDGET_MESSAGE),
-            Self::IndexCalls | Self::Traversal => capped(),
+            // Unsupported historical capacity: the content was never judged
+            // invalid, and retrying the same pair cannot succeed.
+            Self::IndexCalls | Self::Traversal => {
+                crate::pipeline::publication_budget::PublicationBudget::capacity_error()
+            }
         }
     }
 }
@@ -204,6 +208,7 @@ fn binding(advance: &Advance, cfg: IndexedConfig) -> Result<Hash, ServerError> {
 
 /// First slice may complete inline. Otherwise only verification state and timer
 /// are written; no ref, membership, outcome or ticket is accepted/consumed.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)] // Immutable proof inputs plus the consuming request lag context.
 pub(crate) async fn prepare<S: NamespaceStore>(
     store: &S,
@@ -215,6 +220,26 @@ pub(crate) async fn prepare<S: NamespaceStore>(
     now: u64,
     metrics: &dyn crate::Metrics,
     created: u64,
+) -> Result<bool, ServerError> {
+    prepare_with(
+        store, source, shards, repo, advance, cfg, now, metrics, created, None,
+    )
+    .await
+}
+
+/// [`prepare`] whose slice draws from the foreground request's ledger.
+#[allow(clippy::too_many_arguments)] // Immutable proof inputs plus the consuming request lag context.
+pub(crate) async fn prepare_with<S: NamespaceStore>(
+    store: &S,
+    source: &Partition,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    advance: &mut Advance,
+    cfg: IndexedConfig,
+    now: u64,
+    metrics: &dyn crate::Metrics,
+    created: u64,
+    request: Option<&SliceBudget>,
 ) -> Result<bool, ServerError> {
     let Some(root) = advance.value.packmap else {
         return Ok(false);
@@ -268,7 +293,7 @@ pub(crate) async fn prepare<S: NamespaceStore>(
     };
     // A retryable read failure still spent work. Persist its safe checkpoint
     // before returning the original storage refusal to the foreground caller.
-    let slice_error = slice(store, shards, repo, &mut progress, metrics, None)
+    let slice_error = slice_with(store, shards, repo, &mut progress, metrics, None, request)
         .await
         .err();
     if let Some(error) = slice_error.as_ref()
@@ -398,7 +423,7 @@ async fn one<S: NamespaceStore>(
         for child in children {
             if !progress.visited.contains(&child) && !progress.queue.contains(&child) {
                 if progress.visited.len() + progress.queue.len() >= MAX_ADVANCE_ITEMS {
-                    return Err(capped());
+                    return Err(item_capacity());
                 }
                 progress.queue.push_back(child);
             }
@@ -521,7 +546,23 @@ async fn slice<S: NamespaceStore>(
     metrics: &dyn crate::Metrics,
     alarm: Option<&crate::purge::SliceBudget>,
 ) -> Result<(), ServerError> {
-    let budget = SliceBudget::new(SLICE_CALLS);
+    slice_with(store, shards, repo, progress, metrics, alarm, None).await
+}
+
+/// One slice drawing from the foreground request's ledger when it has one.
+async fn slice_with<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    progress: &mut Progress,
+    metrics: &dyn crate::Metrics,
+    alarm: Option<&crate::purge::SliceBudget>,
+    request: Option<&SliceBudget>,
+) -> Result<(), ServerError> {
+    let budget = request.map_or_else(
+        || SliceBudget::new(SLICE_CALLS),
+        |request| request.child(SLICE_CALLS),
+    );
     let remote = SliceStore {
         store,
         calls: &budget,
@@ -570,12 +611,20 @@ async fn slice<S: NamespaceStore>(
                 let calls = progress.calls;
                 *progress = before;
                 progress.calls = calls;
-                if start == 0 && !remote.stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                // A step that alone outgrows a whole slice is unsupported capacity.
+                // A spent request ledger or alarm share only pauses resumable work.
+                if start == 0
+                    && !remote.stopped.load(std::sync::atomic::Ordering::Relaxed)
+                    && !budget.ancestor_refused()
+                {
                     progress.failure = Some(Exhaustion::IndexCalls);
                 }
                 break;
             }
-            Err(error) if error.public_message() == "object index limit exceeded" => {
+            Err(error)
+                if error.public_message() == "object index limit exceeded"
+                    || error.public_message() == item_capacity().public_message() =>
+            {
                 *progress = before;
                 progress.failure = Some(Exhaustion::Traversal);
                 break;
