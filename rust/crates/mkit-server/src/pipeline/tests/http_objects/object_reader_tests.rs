@@ -2267,7 +2267,10 @@ fn public_membership_cap_preserves_other_proven_targets_with_denial_enabled() {
 }
 
 fn published_external_delta_member() -> (Fx, Hash, Hash) {
-    let fx = fixture();
+    published_external_delta_member_with(fixture())
+}
+
+fn published_external_delta_member_with(fx: Fx) -> (Fx, Hash, Hash) {
     let base = blob(b"base payload");
     let old_root = tree(&[("base", EntryMode::Blob, &base)]);
     let old_head = commit(&old_root, &[], "old");
@@ -2372,6 +2375,48 @@ fn proven_public_metadata_base_membership_cap_is_typed() {
         error.public_message(),
         crate::pipeline::OBJECT_READER_LIMIT_MESSAGE
     );
+}
+
+fn denial_fixture() -> (Fx, Hash, Hash) {
+    published_external_delta_member_with(fixture_tweaked(Hooks::new(), http_cfg(), |c| {
+        c.takedown_denial = true;
+    }))
+}
+
+fn assert_typed_exhaustion(error: &ServerError) {
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(
+        error.public_message(),
+        crate::pipeline::OBJECT_READER_LIMIT_MESSAGE
+    );
+}
+
+fn assert_denial_caps_typed(fx: &Fx, target: Hash) {
+    let public = block_on(
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Public),
+    )
+    .unwrap();
+    assert_typed_exhaustion(&block_on(public.read_canonical(&[target])).unwrap_err());
+    assert_typed_exhaustion(&block_on(public.object_metadata(&[target])).unwrap_err());
+    with_owner_reader(fx, |reader| {
+        assert_typed_exhaustion(&block_on(reader.read_canonical(&[target])).unwrap_err());
+        assert_typed_exhaustion(&block_on(reader.object_metadata(&[target])).unwrap_err());
+    });
+}
+
+#[test]
+fn denial_traversal_depth_cap_is_typed_for_public_and_owner_reads() {
+    let (mut fx, _, target) = denial_fixture();
+    fx.pipe.cfg.indexed.as_mut().unwrap().max_delta_chain_depth = 0;
+    assert_denial_caps_typed(&fx, target);
+}
+
+#[test]
+fn denial_traversal_base_membership_cap_is_typed_for_public_and_owner_reads() {
+    let (fx, base, target) = denial_fixture();
+    overflow_member_candidates(&fx, base);
+    assert_denial_caps_typed(&fx, target);
 }
 
 #[test]

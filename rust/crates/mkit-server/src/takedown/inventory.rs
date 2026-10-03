@@ -501,12 +501,36 @@ pub async fn member<S: NamespaceStore>(
     repo: &RepoId,
     id: &Hash,
 ) -> Result<(Hash, Entry), StoreError> {
+    member_with_caps(store, shards, repo, id)
+        .await
+        .map_err(|fail| match fail {
+            MemberFail::Capped => bad(),
+            MemberFail::Store(error) => error,
+        })
+}
+/// Why a membership lookup failed: a bounded index lookup ran out of rows,
+/// pages or membership reads, or an ordinary store/corruption error.
+pub(crate) enum MemberFail {
+    Capped,
+    Store(StoreError),
+}
+impl From<StoreError> for MemberFail {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+pub(crate) async fn member_with_caps<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    id: &Hash,
+) -> Result<(Hash, Entry), MemberFail> {
     let rows = index::locate_many(store, shards, repo, &[*id]).await?;
-    let loc = rows
-        .first()
-        .and_then(|v| v.as_ref().ok())
-        .and_then(|v| *v)
-        .ok_or_else(bad)?;
+    let loc = match rows.first() {
+        Some(Ok(Some(loc))) => *loc,
+        Some(Err(_)) => return Err(MemberFail::Capped),
+        _ => return Err(bad().into()),
+    };
     seal(store, &loc.pack).await?;
     Ok((
         loc.pack,

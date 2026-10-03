@@ -69,10 +69,7 @@
 
 pub mod window;
 
-mod delta_header_probe;
 pub mod rewrite;
-pub use delta_header_probe::DeltaHeaderProbe;
-
 use crate::delta;
 use crate::hash::{self, Hash};
 use crate::object::{MkitError, Object};
