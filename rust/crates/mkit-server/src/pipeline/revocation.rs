@@ -625,3 +625,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "revocation_v050_tests.rs"]
+mod stored_v050_tests;

@@ -331,3 +331,7 @@ impl<S> core::fmt::Debug for Engine<S> {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+#[path = "mod_v050_tests.rs"]
+mod stored_v050_tests;

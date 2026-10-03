@@ -683,3 +683,7 @@ pub async fn is_file<S: NamespaceStore>(
     })
     .await
 }
+
+#[cfg(test)]
+#[path = "inventory_v050_tests.rs"]
+mod stored_v050_tests;

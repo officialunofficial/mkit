@@ -151,3 +151,7 @@ impl PendingHolderV1 {
         Ok(record)
     }
 }
+
+#[cfg(test)]
+#[path = "pending_holder_v050_tests.rs"]
+mod stored_v050_tests;

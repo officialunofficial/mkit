@@ -1,0 +1,1 @@
+{"sourceIdentity":"7332393300","operationId":"activation:7defe718937f3b3e2f75a40dbc80265b5984e49bba83bb97483abeab2dfa2781","recordedAtMs":10,"request":{"purgeId":"purge:3be4b3321322a2143ebea087e78b2533a090d696220141879c451376b67fb5af","audience":"https://server.example","repository":"0x1111111111111111111111111111111111111111/repo","trigger":"CACHE_PURGE_TRIGGER_TAKEDOWN"}}

@@ -251,3 +251,7 @@ pub(crate) async fn step<S: NamespaceStore>(
 #[cfg(all(test, feature = "memory"))]
 #[path = "source_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "source_v050_tests.rs"]
+mod stored_v050_tests;

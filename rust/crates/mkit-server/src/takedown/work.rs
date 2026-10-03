@@ -908,3 +908,7 @@ impl<S: NamespaceStore, N: NamespaceStore + Clone, B: BlobStore, P: BlobStore> T
 #[cfg(all(test, feature = "memory"))]
 #[path = "work_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "work_v050_tests.rs"]
+mod stored_v050_tests;

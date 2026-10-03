@@ -473,3 +473,7 @@ mod bounds_tests {
         const { assert!(MAX_RECEIPT * 10_000 + MAX_ETAG * 10_000 + 2 * MAX_META < 26 << 20) };
     }
 }
+
+#[cfg(test)]
+#[path = "object_multipart_v050_tests.rs"]
+mod stored_v050_tests;

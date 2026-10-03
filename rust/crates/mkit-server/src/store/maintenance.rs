@@ -949,3 +949,7 @@ mod tests {
         assert!(kept.is_some(), "other rows stay");
     }
 }
+
+#[cfg(test)]
+#[path = "maintenance_v050_tests.rs"]
+mod stored_v050_tests;

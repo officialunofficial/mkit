@@ -284,3 +284,7 @@ impl PurgeDelivery {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "delivery_v050_tests.rs"]
+mod stored_v050_tests;

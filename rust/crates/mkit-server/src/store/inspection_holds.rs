@@ -331,3 +331,7 @@ fn decode_manifest(value: Option<&Value>) -> Result<HoldManifest, StoreError> {
 #[cfg(test)]
 #[path = "inspection_holds_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "inspection_holds_v050_tests.rs"]
+mod stored_v050_tests;

@@ -357,3 +357,7 @@ fn contended() -> StoreError {
 #[cfg(test)]
 #[path = "inspection_flags_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "inspection_flags_v050_tests.rs"]
+mod stored_v050_tests;

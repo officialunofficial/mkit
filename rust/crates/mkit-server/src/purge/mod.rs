@@ -332,3 +332,7 @@ fn guard(key: crate::Key, value: Option<&Value>) -> Precondition {
         None => Precondition::Absent(key),
     }
 }
+
+#[cfg(test)]
+#[path = "mod_v050_tests.rs"]
+mod stored_v050_tests;

@@ -1045,3 +1045,7 @@ impl<S: NamespaceStore> Engine<S> {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "ledger_v050_tests.rs"]
+mod stored_v050_tests;

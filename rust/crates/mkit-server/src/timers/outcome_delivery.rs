@@ -1250,3 +1250,7 @@ mod tests {
         assert_eq!(seen[0].body, seen[1].body);
     }
 }
+
+#[cfg(test)]
+#[path = "outcome_delivery_v050_tests.rs"]
+mod stored_v050_tests;

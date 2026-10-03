@@ -84,3 +84,7 @@ pub async fn check_mode<S: NamespaceStore>(
         _ => Outcome::Corrupt,
     })
 }
+
+#[cfg(test)]
+#[path = "inspection_mode_v050_tests.rs"]
+mod stored_v050_tests;

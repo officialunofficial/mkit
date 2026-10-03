@@ -127,3 +127,7 @@ pub(super) async fn write<P: BlobStore>(
 #[cfg(all(test, feature = "memory"))]
 #[path = "copy_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "copy_v050_tests.rs"]
+mod stored_v050_tests;

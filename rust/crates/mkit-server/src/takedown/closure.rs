@@ -229,3 +229,7 @@ pub(super) async fn step<N: NamespaceStore, P: BlobStore>(
 #[cfg(all(test, feature = "memory"))]
 #[path = "closure_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "closure_v050_tests.rs"]
+mod stored_v050_tests;

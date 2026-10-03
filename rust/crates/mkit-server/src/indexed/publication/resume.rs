@@ -706,3 +706,7 @@ pub(crate) async fn fire<S: NamespaceStore, T: NamespaceStore>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "resume_v050_tests.rs"]
+mod stored_v050_tests;

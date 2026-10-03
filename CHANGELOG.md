@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Owner object-reader authorization preserves `ResourceExhausted` when the
+  caller's storage-call budget runs out during the repository-state lookup.
+
 - Workers retry transient alarm scheduling failures twice after committed timer
   writes and return exhausted failures for replay and cold-start repair.
 - The embedded Worker example enables the pure-Rust zstd decoder for default

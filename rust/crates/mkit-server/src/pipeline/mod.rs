@@ -2830,7 +2830,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
     /// One coordinator `get_many` for the `rr`, `rv` and `e` rows of a
     /// read: `Some((private, epoch))`. A missing `rr` is `None`
-    /// (the caller answers the uniform `not_found`); a store failure is `unavailable`, never public.
+    /// (the caller answers the uniform `not_found`). Backend failures remain
+    /// `unavailable`; a caller-budget refusal is `resource_exhausted`.
     async fn read_repo_state(
         &self,
         repo: &crate::repo::RepoId,
@@ -2849,7 +2850,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .await
             .map_err(|e| {
                 tracing::warn!(detail = %e, "repository state read failed");
-                ServerError::unavailable("repository state unavailable")
+                if crate::indexed::budget::is_exhausted(&e) {
+                    ServerError::resource_exhausted("repository state call budget exhausted")
+                } else {
+                    ServerError::unavailable("repository state unavailable")
+                }
             })?;
         let mut rows = rows.into_iter();
         let Some(record) = rows.next().flatten() else {

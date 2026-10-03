@@ -377,3 +377,7 @@ impl RelayHook for AuditReserveHook {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "automatic_v050_tests.rs"]
+mod stored_v050_tests;

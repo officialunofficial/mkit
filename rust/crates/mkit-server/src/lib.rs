@@ -98,3 +98,6 @@ pub use telemetry::{
     METRIC_LATENCY, METRIC_REQUESTS, METRIC_UPLOAD_BYTES, Metrics, NEVER_ECHO, NEVER_LOG,
     NoopMetrics, REDACTED_VALUE, Redactor, is_never_echo, is_never_log,
 };
+
+#[cfg(test)]
+mod stored_golden;

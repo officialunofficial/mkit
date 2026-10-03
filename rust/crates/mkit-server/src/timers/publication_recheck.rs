@@ -446,3 +446,7 @@ impl<T: NamespaceStore> PublicationRecheck<T> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "publication_recheck_v050_tests.rs"]
+mod stored_v050_tests;

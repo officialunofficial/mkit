@@ -358,3 +358,7 @@ pub async fn step<S: NamespaceStore>(
 #[cfg(all(test, feature = "memory"))]
 #[path = "discovery_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "discovery_v050_tests.rs"]
+mod stored_v050_tests;

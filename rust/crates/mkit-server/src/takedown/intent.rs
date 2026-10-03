@@ -590,3 +590,7 @@ impl<N: NamespaceStore + Clone> AdminOperations for Service<N> {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "intent_v050_tests.rs"]
+mod stored_v050_tests;

@@ -324,3 +324,7 @@ pub async fn check_addressing<S: NamespaceStore>(
         | BatchOutcome::DeadlinePassed { .. } => Outcome::AddressingCorrupt,
     })
 }
+
+#[cfg(test)]
+#[path = "sharding_guard_v050_tests.rs"]
+mod stored_v050_tests;

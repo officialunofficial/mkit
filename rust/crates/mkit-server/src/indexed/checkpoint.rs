@@ -694,3 +694,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "checkpoint_v050_tests.rs"]
+mod stored_v050_tests;

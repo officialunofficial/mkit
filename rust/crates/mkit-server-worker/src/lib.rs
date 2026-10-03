@@ -161,3 +161,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod stored_golden;

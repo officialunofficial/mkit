@@ -450,3 +450,7 @@ mod paging_tests {
         assert!(projection.validate_frame(&outside, 1000, 54).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "selection_v050_tests.rs"]
+mod stored_v050_tests;

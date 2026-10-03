@@ -497,3 +497,7 @@ pub fn clear(
 #[cfg(test)]
 #[path = "publication_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "publication_v050_tests.rs"]
+mod stored_v050_tests;

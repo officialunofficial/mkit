@@ -370,3 +370,7 @@ impl<S: NamespaceStore, R: NamespaceStore, B: BlobStore, W: PackWindows, X: Slic
         Ok(None)
     }
 }
+
+#[cfg(test)]
+#[path = "member_v050_tests.rs"]
+mod stored_v050_tests;

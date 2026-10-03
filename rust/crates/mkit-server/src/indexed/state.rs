@@ -163,3 +163,7 @@ mod tests {
         assert!(concurrent_pending(&pending, 1000).is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "state_v050_tests.rs"]
+mod stored_v050_tests;
