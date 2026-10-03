@@ -221,6 +221,9 @@ the publish gate checks the server too, including that pinned baseline.
 
 - [ ] Verify the release-prep PR left a fresh `## [Unreleased]` heading at
       the top of `CHANGELOG.md`.
+- [ ] After 0.6.0 is tagged, restore the `server-semver` job in
+      `.github/workflows/rust.yml` to `--release-type patch` against the
+      0.6.0 baseline (it checks the 0.6 release class against 0.5.0 until then).
 - [ ] After a crate's first publish, add co-owners:
       `cargo owner --add github:officialunofficial:makechain <crate>`, then
       `cargo owner --add <maintainer> <crate>` for each maintainer. Confirm

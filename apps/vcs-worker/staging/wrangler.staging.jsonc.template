@@ -44,12 +44,11 @@
         "BACKUP_FORCE_REUPLOAD_MS": "2419200000"
         // NAMESPACE_LOCATION_HINT is optional (unset by default).
         // NAMESPACE_JURISDICTION, if required, must match all R2 buckets and
-        // stay fixed for the deployment lifetime. No enabling snapshot var.
+        // stay fixed for the deployment lifetime.
       },
       "r2_buckets": [
         { "binding": "STORAGE", "bucket_name": "mkit-vcs-objects-staging" },
-        { "binding": "BACKUPS", "bucket_name": "mkit-vcs-backups-staging" },
-        { "binding": "PUBLISHED_SNAPSHOTS", "bucket_name": "mkit-vcs-published-staging" }
+        { "binding": "BACKUPS", "bucket_name": "mkit-vcs-backups-staging" }
       ],
       "durable_objects": { "bindings": [
         { "name": "REFSTORE", "class_name": "RefStore" },

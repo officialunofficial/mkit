@@ -532,3 +532,253 @@ fn outcomes_from_v050_rows_have_no_recorded_operation() {
     let outcome = Outcome::from_reservation("rid".into(), AUDIENCE.into(), row).unwrap();
     assert_eq!(outcome.procedure, Some(Procedure::BeginUpload));
 }
+
+// ------------------------------------------------- purge, headroom, backlog
+
+fn coordinator_of(owner: &SigningKey) -> Partition {
+    Partition::Namespace(crate::NamespaceKey::from_namespace(
+        &mkit_attest::grant::Namespace::Ed25519(*owner.verifying_key().as_bytes()),
+    ))
+}
+
+fn env_configured(
+    owner: &SigningKey,
+    decision: AdmissionDecision,
+    edit: impl FnOnce(&mut PipelineConfig),
+) -> Env<Hooks<OpenAuthorizer, Scripted>> {
+    let clock = clock();
+    let mut cfg = config(owner, AuthorizerRole::Check);
+    edit(&mut cfg);
+    build(
+        cfg,
+        Spy::new(store(&clock)),
+        with_admission(Scripted::new(decision)),
+        clock,
+    )
+}
+
+fn with_purge(owner: &SigningKey) -> impl FnOnce(&mut PipelineConfig) {
+    let root = coordinator_of(owner);
+    move |cfg| {
+        cfg.purge = Some(
+            crate::purge::PurgeConfig::new(AUDIENCE.into(), true, true).with_audit(Arc::new(
+                crate::admin::SystemAudit::new(Arc::new(crate::MemoryKv::default()), root),
+            )),
+        );
+    }
+}
+
+#[test]
+fn purge_and_a_reservation_share_one_outbox_update_in_both_modes() {
+    let owner = key(1);
+    let repo = repository(&owner);
+    for mode in ["envelope", "statement"] {
+        let e = env_configured(&owner, reserved("rid"), with_purge(&owner));
+        if mode == "envelope" {
+            set(
+                &e,
+                &signed_visibility(&owner, &repo, 1, b"v"),
+                VisibilityRequest::Envelope(Visibility::Private),
+            )
+            .unwrap();
+        } else {
+            let (stmt, _) = statement(&owner, &repo, Visibility::Private, T0, [1; 32]);
+            set(
+                &e,
+                &unsigned_visibility(&repo),
+                VisibilityRequest::Statement(stmt),
+            )
+            .unwrap();
+        }
+        let p = coordinator(&e, &owner);
+        // The outcome and the purge work are both queued, counted once each.
+        let backlog = get(&e, &p, &keys::outcome_backlog()).unwrap();
+        assert_eq!(codec::decode_backlog(&backlog).unwrap().rows, 2, "{mode}");
+        let outcome = delivered_any(&e, &p, "rid");
+        assert_eq!(
+            outcome.procedure,
+            Some(Procedure::SetRepoVisibility),
+            "{mode}"
+        );
+        let purges = now(e.pipe.meta.inner.scan(
+            &p,
+            &Key::new(b"cp\0".to_vec()),
+            &Key::new(b"cp\x01".to_vec()),
+            None,
+            10,
+        ))
+        .unwrap();
+        assert_eq!(purges.entries.len(), 1, "{mode}");
+        // One final put of each counter in the one committing batch.
+        let batches = e.pipe.meta.batches.lock().unwrap();
+        let commit = batches
+            .iter()
+            .find(|b| {
+                b.writes
+                    .iter()
+                    .any(|w| matches!(w, Write::Put(k, _) if *k == keys::repo_visibility(&repo_id(&e, &owner).name)))
+            })
+            .unwrap();
+        for counter in [keys::outbox_sequence(), keys::outcome_backlog()] {
+            let puts = commit
+                .writes
+                .iter()
+                .filter(|w| matches!(w, Write::Put(k, _) if *k == counter))
+                .count();
+            assert!(puts <= 1, "{mode}: {puts} puts of one counter");
+        }
+    }
+}
+
+/// The reservation's terminal row, whatever else is queued.
+fn delivered_any<H: HookSet>(e: &Env<H>, p: &Partition, rid: &str) -> Outcome {
+    let row = get(e, p, &keys::reservation(rid).unwrap()).expect("reservation row");
+    Outcome::from_reservation(
+        rid.to_owned(),
+        AUDIENCE.to_owned(),
+        codec::decode_reservation(&row).unwrap(),
+    )
+    .unwrap()
+}
+
+fn expired_replays_with_charges_stay_inside_the_batch_limit(count: u8) {
+    let owner = key(1);
+    let repo = repository(&owner);
+    let ns = crate::NamespaceKey::from_namespace(&mkit_attest::grant::Namespace::Ed25519(
+        *owner.verifying_key().as_bytes(),
+    ));
+    // Enough custom charges that the base batch leaves little prune room.
+    let charges: Vec<_> = (0..count)
+        .map(|i| crate::quota::QuotaCharge {
+            scope: crate::quota::QuotaScope::for_signer(&ns, &[i; 32]),
+            bytes: 0,
+            limits: QuotaLimits {
+                window_ms: 60_000,
+                max_ops: 1_000,
+                max_bytes: u64::MAX,
+            },
+        })
+        .collect();
+    let e = env_configured(
+        &owner,
+        AdmissionDecision::allow(charges).with_reservation("rid"),
+        with_purge(&owner),
+    );
+    let p = coordinator(&e, &owner);
+    // More expired replay records than the prune loop may take.
+    let expired = u64::try_from(T0).unwrap() - 120_000;
+    for chunk in 0..2_u8 {
+        let mut batch = Batch::new();
+        for i in 0..20_u8 {
+            let scope = [chunk * 20 + i + 1; 32];
+            batch = batch
+                .put(
+                    keys::replay(&scope),
+                    codec::encode_replay_record(&ReplayRecord {
+                        fingerprint: [0; 32],
+                        expires_at_ms: i64::try_from(expired).unwrap(),
+                        state: ReplayState::Committed(StoredResult::RepoVisibility),
+                    }),
+                )
+                .put(keys::replay_expiry(expired, &scope), Value::default());
+        }
+        assert_eq!(
+            now(e.pipe.meta.inner.apply(&p, batch)).unwrap(),
+            BatchOutcome::Committed
+        );
+    }
+    set(
+        &e,
+        &signed_visibility(&owner, &repo, 1, b"v"),
+        VisibilityRequest::Envelope(Visibility::Private),
+    )
+    .unwrap();
+    for batch in e.pipe.meta.batches.lock().unwrap().iter() {
+        assert!(
+            batch.preconditions.len() + batch.writes.len() <= crate::store::MAX_BATCH_OPS,
+            "{} ops",
+            batch.preconditions.len() + batch.writes.len()
+        );
+    }
+    assert_eq!(
+        delivered_any(&e, &p, "rid").procedure,
+        Some(Procedure::SetRepoVisibility)
+    );
+}
+
+#[test]
+fn many_expired_replays_a_reservation_and_charges_stay_inside_the_batch_limit() {
+    // The charge count shifts the base size, so every parity of the prune
+    // loop's stopping point is covered.
+    for count in 6..=11 {
+        expired_replays_with_charges_stay_inside_the_batch_limit(count);
+    }
+}
+
+fn full_backlog(cfg: &mut PipelineConfig) {
+    cfg.outbox_backlog_cap = Some(crate::pipeline::OutboxBacklogCap { rows: 0, bytes: 0 });
+}
+
+fn seed_backlog<H: HookSet>(e: &Env<H>, owner: &SigningKey) {
+    let p = coordinator(e, owner);
+    let batch = Batch::new().put(
+        keys::outcome_backlog(),
+        codec::encode_backlog(&codec::Backlog {
+            rows: 5,
+            bytes: 500,
+        }),
+    );
+    assert_eq!(
+        now(e.pipe.meta.inner.apply(&p, batch)).unwrap(),
+        BatchOutcome::Committed
+    );
+}
+
+#[test]
+fn a_full_outcome_backlog_never_blocks_a_change_without_a_reservation() {
+    let owner = key(1);
+    let repo = repository(&owner);
+    let e = env_configured(&owner, allow(), full_backlog);
+    seed_backlog(&e, &owner);
+    for (n, visibility) in [(1, Visibility::Public), (2, Visibility::Private)] {
+        set(
+            &e,
+            &signed_visibility(&owner, &repo, n, b"v"),
+            VisibilityRequest::Envelope(visibility),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn a_full_outcome_backlog_refuses_a_reserved_public_change_but_not_a_private_one() {
+    let owner = key(1);
+    let repo = repository(&owner);
+    let e = env_configured(&owner, reserved("rid"), full_backlog);
+    seed_backlog(&e, &owner);
+    let err = set(
+        &e,
+        &signed_visibility(&owner, &repo, 1, b"v"),
+        VisibilityRequest::Envelope(Visibility::Public),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), Code::Unavailable);
+    assert!(
+        e.pipe.meta.batches.lock().unwrap().len() <= 1,
+        "nothing but the seed"
+    );
+    set(
+        &e,
+        &signed_visibility(&owner, &repo, 2, b"v"),
+        VisibilityRequest::Envelope(Visibility::Private),
+    )
+    .unwrap();
+    // The outcome is recorded even above the soft bound.
+    let p = coordinator(&e, &owner);
+    let backlog = get(&e, &p, &keys::outcome_backlog()).unwrap();
+    assert_eq!(codec::decode_backlog(&backlog).unwrap().rows, 6);
+    assert_eq!(
+        delivered_any(&e, &p, "rid").visibility,
+        Some(Visibility::Private)
+    );
+}

@@ -1573,16 +1573,16 @@ mod tests {
             assert_eq!(decode_reservation(&value).unwrap(), row);
         }
         // An unknown operation fails closed, like an unknown state.
-        assert!(
-            decode_reservation(&Value::new(
-                [
-                    &[CODEC_V1][..],
-                    br#"{"state":"expired","repository":"a","occurred_at_ms":7,"procedure":"x"}"#
-                ]
-                .concat()
-            ))
-            .is_err()
-        );
+        for body in [
+            r#"{"state":"aborted","repository":"a","occurred_at_ms":7,"reason":"ABANDONED","detail":"","procedure":"x"}"#,
+            r#"{"state":"committed","repository":"a","occurred_at_ms":7,"bytes_stored":0,"new_to_repo":0,"new_to_store":0,"refs":[],"procedure":{"set_repo_visibility":"x"}}"#,
+        ] {
+            assert!(
+                decode_reservation(&Value::new([&[CODEC_V1][..], body.as_bytes()].concat()))
+                    .is_err(),
+                "{body}"
+            );
+        }
     }
 
     #[test]

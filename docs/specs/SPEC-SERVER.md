@@ -151,8 +151,14 @@ they do not reproduce its lifecycle table.
   default admission charges no quota for a visibility change (no bytes and
   no operation): the change is owner-only and stores no object bytes, and
   the per-namespace charge is planned only with the writes it aggregates.
-  Charges another admission returns for it are applied to the signer's
-  counter in the same unit. An `Allow`'s receipt headers are returned on
+  Charges another admission returns for it are applied, in the same unit,
+  to the quota scope each charge names. When the deployment also plans an
+  automatic cache purge for the change, the purge, the audit and the outcome
+  share one outbox update in that unit. The outcome-backlog bound (§5) is
+  checked only after admission returns a reservation, and never for a change
+  to `private`: making a repository private MUST remain applicable while an
+  outcome or purge sink is unavailable, so that change records its outcome
+  even above the soft bound. An `Allow`'s receipt headers are returned on
   the committed success only.
 - An `Aborted` outcome MUST be written in a separate atomic unit after
   a failed apply, as STC §7.7 requires. That unit replaces the pending
@@ -3840,8 +3846,7 @@ action descriptors and activate every requested denial before returning success.
 It returns `complete = false`; acceptance MUST NOT imply verified preservation,
 holder discovery or repository/global completion. The pending record MUST retain
 preservation work. Production takedown and `ReadPreserved` activation MUST be
-available only when admin keys, `LAUNCH_PROFILE=paid-workers` (or its deprecated
-`uno` alias, which MUST log a startup deprecation warning),
+available only when admin keys, `LAUNCH_PROFILE=paid-workers`,
 `TAKEDOWN_ENABLED=true`, indexed Workers Paid mode, and the complete §14.7
 preservation configuration are valid. This includes the `PRESERVATION`
 binding, explicit positive retention, receipt signing and publication keys,
@@ -3941,6 +3946,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 | Version | Status | Change |
 |---|---|---|
 | 1 | draft | `SetRepoVisibility` runs admission and records an outcome like other mutating RPCs, in envelope and statement modes (§2, §3). Additive optional `Outcome.procedure` and `Outcome.visibility` (fields 9 and 10) name the operation (§6.5); the pending and terminal reservation rows record an optional operation (additive `procedure`; rows written before decode as unknown), so every outcome, including a reconciled abandonment, names it. No row version changes. |
+| 1 | draft | The deprecated `LAUNCH_PROFILE=uno` alias is removed; `paid-workers` is the only accepted value (§14, §18). |
 | 1 | draft | Stored rows remain decodable throughout 0.5.x; additive JSON fields require serde defaults (§17). |
 | 1 | draft | Worker timer writes retry alarm scheduling twice inline, propagate exhaustion and retain cold-start repair. |
 | 1 | draft | Namespace-scoped ListRepos authorization with an arbitrary repository selector; authority full listing requires explicit opt-in and writer view (§6.2; STC §7.10). |

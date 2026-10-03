@@ -19,8 +19,7 @@ acceptance of incomplete takedown discovery. For `any`, remove the template's
 
 Provision only user-approved isolated resources, start on an empty store, and
 configure selected HTTP/token, hook/scanner or admin/preservation/purge roles
-completely. The snapshot bucket binding alone does not activate snapshots;
-programmatic fetch and all DO constructors must use the same configuration.
+completely.
 No deployment, secret installation or workflow is triggered by these files.
 
 All actual staging conformance, failure drills, CPU/memory/call/cost/multicolo

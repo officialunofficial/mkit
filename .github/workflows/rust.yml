@@ -110,6 +110,8 @@ jobs:
       # crate's next minor release (0.6.0) may break its public API, which
       # cargo-semver-checks calls the "major" release type for 0.x versions;
       # "minor" would still reject a breaking change.
+      # TODO(0.6.0 release prep): restore `--release-type patch` against the
+      # 0.6.0 baseline once 0.6.0 is tagged (see docs/RELEASE.md).
       - name: Check server 0.6 API against 0.5.0
         working-directory: rust
         run: cargo semver-checks -p mkit-server --all-features --baseline-version 0.5.0 --release-type major
