@@ -361,6 +361,51 @@ several colos, and retain operator access through separately controlled ingress.
 A WAF block creates no takedown or preservation record. Reopen only after the
 underlying denial and cache state are verified, with explicit incident approval.
 
+### Publication verification limits
+
+Publishing a ref value runs a verifier chosen by the deployment's
+configuration and the ref being written (SPEC-SERVER §9.3 and §10.2). With
+takedown denial off, no custom publication policy and no inspector, no
+publication verifier is selected and the limits below do not apply (other
+verification, ancestry, input, read and storage limits still do). Otherwise one
+of these paths runs:
+
+| Path | Selected when | Real limits |
+|---|---|---|
+| Resumable takedown | Takedown on, no custom policy, no inspector, and the pair has a packmap whose root pack was verified | At most 4,096 items in each of: packmap chain nodes, listed packs, pending queue, visited objects, dependencies and external delta bases. Canonical bytes are charged against the indexed decode budget (default 2 GiB, at most 8 MiB per slice). Each slice makes at most 128 metadata calls, in the foreground request and in each alarm. The whole job stops after 1,048,576 calls. Its checkpoint must fit in 520,192 bytes, which a long chain or many dependencies can reach before 4,096 items. At most 7 tickets per advance. |
+| Canonical, inspected | An inspector is configured | One allowance of 256 calls shared by pair verification and dependency visibility, and a 10,000 object whole-input bound checked before any scanner runs. |
+| Canonical, custom policy | A custom publication policy is configured | The 256-call canonical proof, and with takedown on a decode budget of at most 8 MiB. |
+| Canonical, mapless | Tags and other refs without a packmap, or a pair whose packmap root has no verification row, with takedown on | The same 256-call proof and 8 MiB decode budget. |
+
+The final denial proof and dependency visibility are further bounded by a
+9,000-call allowance and the request's physical budgets (see Limits and
+acceptance boundaries). Chain growth, dependency growth and the number of
+objects a head reaches consume these allowances together, so no count of
+objects, pushes or files is a supported workload size; the cliff depends on
+history shape, delta fanout, map depth and the size of the denial directory.
+
+These are availability limits, not an authorization decision. Hitting one
+makes the server refuse the write (`object index limit exceeded`, or
+`pack exceeds indexed decode budget` for the byte limit) or leave it pending
+(`pack verification pending`) while bounded progress continues. It never
+publishes on a partial proof, moves a ref, consumes a ticket, writes
+membership or calls a scanner. A repeated refusal or a pending state that never
+completes is an operational failure to investigate, not an in-progress success,
+and retrying does not necessarily resolve it.
+
+Operator rules:
+
+- Do not enable takedown on an existing store as a configuration-only change.
+  Before activation, copy the store and rehearse the representative worst
+  case on the copy: the longest history and packmap depth, tags, new branches
+  off the largest heads, force pushes, the real denial directory size and the
+  intended custom policies. Enable takedown only if every rehearsed publication
+  completes.
+- Enable inspection only on an empty store. Existing content has not been
+  scanned, and SPEC-SERVER §18 does not support activating inspection over it.
+- Keep the deployment on a path whose limits you have rehearsed. Switching
+  among these paths changes which limits apply.
+
 ### Limits and acceptance boundaries
 
 `ListRepos` is served with the namespace-scoped authorization of SPEC-SERVER §6.2.

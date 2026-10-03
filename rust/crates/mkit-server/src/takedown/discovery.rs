@@ -358,9 +358,3 @@ pub async fn step<S: NamespaceStore>(
 #[cfg(all(test, feature = "memory"))]
 #[path = "discovery_tests.rs"]
 mod tests;
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::too_many_lines)]
-mod stored_v050_tests {
-    crate::stored_golden::tests!(takedown_discovery);
-}

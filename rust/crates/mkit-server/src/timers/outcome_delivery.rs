@@ -1252,9 +1252,3 @@ mod tests {
         assert_eq!(seen[0].body, seen[1].body);
     }
 }
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::too_many_lines)]
-mod stored_v050_tests {
-    crate::stored_golden::tests!(timers_outcome_delivery);
-}

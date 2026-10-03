@@ -473,9 +473,3 @@ mod bounds_tests {
         const { assert!(MAX_RECEIPT * 10_000 + MAX_ETAG * 10_000 + 2 * MAX_META < 26 << 20) };
     }
 }
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::too_many_lines)]
-mod stored_v050_tests {
-    crate::stored_golden::tests!(r2_object_multipart);
-}

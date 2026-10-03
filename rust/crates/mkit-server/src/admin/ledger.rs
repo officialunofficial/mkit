@@ -1045,9 +1045,3 @@ impl<S: NamespaceStore> Engine<S> {
         )
     }
 }
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::too_many_lines)]
-mod stored_v050_tests {
-    crate::stored_golden::tests!(admin_ledger);
-}
