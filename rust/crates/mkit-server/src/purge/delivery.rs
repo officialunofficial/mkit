@@ -66,7 +66,7 @@ pub trait PurgeSink: MaybeSend + MaybeSync {
     /// Deliver unchanged body/id; the transport signs each attempt afresh.
     fn deliver<'a>(&'a self, request: &'a Request) -> BoxFuture<'a, Result<(), StoreError>>;
 }
-/// Checkpointed local cache invalidation, including namespace enumeration.
+/// Checkpointed local cache invalidation.
 pub trait LocalInvalidation: MaybeSend + MaybeSync {
     /// Charge enumeration and deletes before doing them. `None` means complete;
     /// `Some(cursor)` resumes at the next operation in another alarm.
@@ -76,7 +76,7 @@ pub trait LocalInvalidation: MaybeSend + MaybeSync {
         cursor: u32,
         budget: &'a SliceBudget,
     ) -> BoxFuture<'a, Result<Option<u32>, StoreError>>;
-    /// Opaque durable position for catalog traversal; legacy local adapters use a u32.
+    /// Opaque durable position; adapters that do not override this use a u32.
     fn invalidate_checkpoint<'a>(
         &'a self,
         request: &'a Request,
@@ -176,18 +176,8 @@ impl<S: NamespaceStore> TimerHandler<S> for PurgeDelivery {
         ctx: &'a TimerCtx<'a, S>,
         timer: &'a DueTimer,
     ) -> BoxFuture<'a, Result<Fired, StoreError>> {
-        self.fire_with_local(self.local.as_ref(), ctx, timer)
-    }
-}
-impl PurgeDelivery {
-    /// Use a context-local catalog reader without issuing a Durable Object self-call.
-    pub fn fire_with_local<'a, S: NamespaceStore>(
-        &'a self,
-        local: &'a dyn LocalInvalidation,
-        ctx: &'a TimerCtx<'a, S>,
-        timer: &'a DueTimer,
-    ) -> BoxFuture<'a, Result<Fired, StoreError>> {
         Box::pin(async move {
+            let local = self.local.as_ref();
             let id = core::str::from_utf8(&timer.reference)
                 .map_err(|_| StoreError::Corrupt("invalid purge timer id".into()))?;
             let key = keys::cache_purge(id)?;

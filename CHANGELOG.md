@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `WorkerConfig::inspection_mode` fields and the no-op Worker inspection
   marker guard are removed. Enabling inspection still requires an empty store;
   this is now documented as an operator requirement.
+- The namespace-scoped purge no longer walks the namespace's repository
+  catalog; with no per-repository URL paths that step deleted nothing. A
+  namespace purge deletes its own exact paths from the local cache and is
+  delivered once to the configured sink, unchanged. `PurgeDelivery::fire_with_local`
+  and the Worker `NamespaceDelivery` handler are removed. A v0.5.0 checkpoint
+  row for an in-flight namespace purge still decodes and finishes.
 
 ### Fixed
 
