@@ -1,10 +1,11 @@
 //! One typed call allowance for a publication request (SPEC-SERVER §10.2).
 //!
-//! The root ledger counts every metadata and blob call the request dispatches
-//! on its own behalf: snapshot reads, lease observation and grants, preparation,
+//! From publication preparation onward, the root ledger counts metadata and
+//! blob calls for snapshot reads, lease observation and grants, preparation,
 //! dependency visibility, each denial proof, the resume checkpoint and every
 //! commit attempt. Failed dispatches stay charged. Policy hooks, inspector
-//! calls and other RPC work are outside it.
+//! calls, authority activation, full-partition prune recovery and admission
+//! work before preparation are outside it.
 //!
 //! Proof work draws from a child of the root that stops `SETTLEMENT_RESERVE`
 //! calls short, so proof work cannot starve settlement. Settlement itself

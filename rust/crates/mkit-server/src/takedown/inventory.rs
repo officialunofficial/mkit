@@ -528,6 +528,7 @@ pub(crate) async fn member_with_caps<S: NamespaceStore>(
     let rows = index::locate_many(store, shards, repo, &[*id]).await?;
     let loc = match rows.first() {
         Some(Ok(Some(loc))) => *loc,
+        // TooManyRows on a delta-base hop makes a located target unreconstructable, not absent.
         Some(Err(_)) => return Err(MemberFail::Capped),
         _ => return Err(bad().into()),
     };

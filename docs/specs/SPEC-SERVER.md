@@ -1230,9 +1230,10 @@ row is a per-lookup index cap and is also this error on the resumable
 publication path. Informative: during publication verification the indexed
 decode budget is charged over the whole packmap chain and reachable closure,
 so it is history-scoped; it keeps its existing `invalid_argument` errors
-(`object index limit exceeded` on the canonical path, `pack exceeds indexed
-decode budget` on the resumable path, whose budget is cumulative over the
-pair) until a separate amendment of this input contract. Running out of an
+(`object index limit exceeded` or `pack exceeds indexed decode budget` on the
+canonical path, `pack exceeds indexed decode budget` on the resumable path,
+whose budget is cumulative over the pair) until a separate amendment of this
+input contract. Running out of an
 execution allowance, or of an implementation's retained-evidence capacity, is
 not a verification failure of the content and is not in this table: §10.2
 classifies it as `unavailable`.
@@ -1636,7 +1637,11 @@ the allowance runs out on: classification follows the allowance itself, not
 the shape of the error that surfaced. A publication request MUST draw all of
 that work, including every optimistic retry of the final apply and its own
 snapshot, lease, checkpoint and commit calls, from one allowance, counting
-every dispatched call whether or not it failed. An implementation SHOULD stop
+every dispatched metadata and blob call for that work from publication
+preparation onward, whether or not it failed. Admission work before preparation,
+policy hooks, inspector calls, authority activation inside lease reads and
+full-partition prune recovery are outside this ledger. An implementation SHOULD
+stop
 proof work short of the allowance to leave headroom for settlement; a
 settlement call the allowance cannot cover is refused as capacity. Explicit per-input index, inspection, decode and delta-depth
 limits retain their specified errors. An implementation unable to verify

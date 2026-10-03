@@ -922,3 +922,157 @@ fn a_per_lookup_index_cap_keeps_its_input_error_on_the_resumable_path() {
         "publication verification limit reached"
     );
 }
+
+#[derive(Default)]
+struct LimitMetrics(std::sync::Mutex<Vec<String>>);
+impl crate::Metrics for LimitMetrics {
+    fn incr(&self, name: &'static str, labels: &[(&'static str, &str)], by: u64) {
+        if name == crate::telemetry::METRIC_PUBLICATION_LIMIT_REACHED {
+            assert_eq!(by, 1);
+            self.0.lock().unwrap().push(labels[0].1.to_owned());
+        }
+    }
+    fn observe_ms(&self, _: &'static str, _: &[(&'static str, &str)], _: f64) {}
+}
+struct ConflictingCheckpoint<'a> {
+    store: &'a MemoryKv,
+    conflict: std::sync::atomic::AtomicBool,
+}
+impl NamespaceStore for ConflictingCheckpoint<'_> {
+    fn capabilities(&self) -> crate::store::StoreCapabilities {
+        self.store.capabilities()
+    }
+    async fn get(&self, p: &Partition, k: &crate::Key) -> Result<Option<Value>, StoreError> {
+        self.store.get(p, k).await
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &crate::Key,
+        end: &crate::Key,
+        after: Option<&crate::Cursor>,
+        limit: u32,
+    ) -> Result<crate::ScanPage, StoreError> {
+        self.store.scan(p, start, end, after, limit).await
+    }
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        if self
+            .conflict
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(BatchOutcome::PreconditionFailed {
+                index: 1,
+                observed: None,
+            });
+        }
+        self.store.apply(p, batch).await
+    }
+    async fn stats(&self, p: &Partition) -> Result<crate::PartitionStats, StoreError> {
+        self.store.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.store.probe().await
+    }
+}
+#[test]
+#[allow(clippy::too_many_lines)] // Conflicting checkpoint, commit and replay for each stop class.
+fn limit_counter_counts_only_committed_capacity_stops_once() {
+    block_on(async {
+        for failure in [
+            Exhaustion::IndexCalls,
+            Exhaustion::Traversal,
+            Exhaustion::IndexLookup,
+            Exhaustion::DecodeBudget,
+        ] {
+            let kv = MemoryKv::with_clock(std::sync::Arc::new(crate::rt::ManualClock::new(0)));
+            let repo = repo();
+            let root = [31; 32];
+            facts(&kv, root, None).await;
+            let source = SinglePartition.ref_shard(&repo, "refs/heads/main");
+            let mut cfg = IndexedConfig::default();
+            if failure == Exhaustion::DecodeBudget {
+                cfg.decode_budget = 50;
+            }
+            let mut a = advance(root);
+            let mut p = progress(&a);
+            p.binding = binding(&a, cfg).unwrap();
+            p.byte_limit = cfg.decode_budget;
+            p.missing = true; // Resume the retained slice on a foreground retry.
+            if failure == Exhaustion::IndexCalls {
+                p.calls = TOTAL_CALLS;
+            }
+            if failure == Exhaustion::Traversal {
+                p.dependencies = (0..MAX_ADVANCE_ITEMS)
+                    .map(|n| {
+                        let mut id = [0; 32];
+                        id[..8].copy_from_slice(&(n as u64).to_le_bytes());
+                        id
+                    })
+                    .collect();
+            }
+            if failure == Exhaustion::IndexLookup {
+                p.chain.insert(root); // Repeating a packmap hits the input lookup cap.
+            }
+            state::write(
+                &kv,
+                &source,
+                &repo.name,
+                &root,
+                None,
+                &state::VerificationV1::Verified {
+                    pack_len: 100,
+                    verified_at_ms: 0,
+                    publication: Some(Box::new(p)),
+                },
+                10_000,
+            )
+            .await
+            .unwrap();
+            let target = ConflictingCheckpoint {
+                store: &kv,
+                conflict: std::sync::atomic::AtomicBool::new(true),
+            };
+            let metrics = LimitMetrics::default();
+            let error = prepare(
+                &target,
+                &source,
+                &SinglePartition,
+                &repo,
+                &mut a,
+                cfg,
+                0,
+                &metrics,
+                0,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.public_message(), "pack verification pending");
+            assert!(metrics.0.lock().unwrap().is_empty());
+            assert!(read_progress(&kv, &repo, root).await.failure.is_none());
+            for _ in 0..2 {
+                let error = prepare(
+                    &target,
+                    &source,
+                    &SinglePartition,
+                    &repo,
+                    &mut a,
+                    cfg,
+                    0,
+                    &metrics,
+                    0,
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(error.code(), failure.error().code());
+                assert_eq!(error.public_message(), failure.error().public_message());
+            }
+            assert_eq!(read_progress(&kv, &repo, root).await.failure, Some(failure));
+            let expected: Vec<String> = match failure {
+                Exhaustion::IndexCalls => vec!["index_calls".into()],
+                Exhaustion::Traversal => vec!["retained_items".into()],
+                _ => vec![],
+            };
+            assert_eq!(*metrics.0.lock().unwrap(), expected);
+        }
+    });
+}
