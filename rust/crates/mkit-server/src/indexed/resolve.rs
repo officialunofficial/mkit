@@ -226,6 +226,8 @@ pub struct MemberCache {
     no_reads: BTreeSet<Hash>,
     rows: BTreeMap<Location, ResolvedMember>,
     retained_bytes: u64,
+    decoded_work: u64,
+    depth_capped: bool,
     retain_latest: bool,
     remaining_work: Option<u32>,
     selection: Option<(crate::Partition, crate::Key)>,
@@ -288,6 +290,15 @@ impl MemberCache {
     #[must_use]
     pub fn retained_bytes(&self) -> u64 {
         self.retained_bytes
+    }
+
+    #[cfg(feature = "http-objects")]
+    pub(crate) fn decoded_work(&self) -> u64 {
+        self.decoded_work
+    }
+    #[cfg(feature = "http-objects")]
+    pub(crate) fn depth_capped(&self) -> bool {
+        self.depth_capped
     }
 
     /// The retained locations, with their canonical bytes and total depth.
@@ -479,9 +490,20 @@ async fn member_base<S: NamespaceStore>(
     })
 }
 
+/// How resolution reports an exhausted cap: `Legacy` keeps the existing HTTP
+/// and writer behavior; `Reader` (object-reader paths only) reports caps as
+/// typed exhaustion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "http-objects"), allow(dead_code))]
+pub(crate) enum Caps {
+    Legacy,
+    Reader,
+}
+
 /// Prove the reconstruction chain clear using metadata only, with the same
 /// location-cycle and delta-hop limits as `member_object`.
 #[cfg(feature = "http-objects")]
+#[allow(clippy::too_many_arguments)] // `caps` selects reader-only typed exhaustion.
 pub(crate) async fn member_dependencies_clear<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
@@ -490,6 +512,7 @@ pub(crate) async fn member_dependencies_clear<S: NamespaceStore>(
     mut located: LocatedObject,
     cap: u32,
     metrics: &dyn Metrics,
+    caps: Caps,
 ) -> Result<bool, ServerError> {
     let mut visiting = BTreeSet::new();
     loop {
@@ -503,16 +526,29 @@ pub(crate) async fn member_dependencies_clear<S: NamespaceStore>(
             return Ok(true);
         };
         if visiting.len() > usize::try_from(cap).unwrap_or(usize::MAX) {
-            return Ok(false);
+            return dependency_cap(caps);
         }
         located = match member_base(store, shards, repo, base, located, metrics, None).await {
             Ok(next) => next,
-            Err(ResolveFailure::Missing | ResolveFailure::Capped) => return Ok(false),
+            Err(ResolveFailure::Missing) => return Ok(false),
+            Err(ResolveFailure::Capped) => return dependency_cap(caps),
             Err(ResolveFailure::Other(error) | ResolveFailure::Corrupt(error)) => {
                 return Err(error);
             }
         };
         id = base;
+    }
+}
+
+#[cfg(feature = "http-objects")]
+fn dependency_cap(caps: Caps) -> Result<bool, ServerError> {
+    if caps == Caps::Reader {
+        Err(ServerError::new(
+            crate::Code::ResourceExhausted,
+            crate::pipeline::OBJECT_READER_LIMIT_MESSAGE,
+        ))
+    } else {
+        Ok(false)
     }
 }
 
@@ -571,6 +607,7 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
         let available = memo.available(budget)?;
         if let Some(value) = memo.rows.get(&location) {
             if value.1 > cap {
+                memo.depth_capped = true;
                 return Err(ServerError::invalid_argument("delta chain too deep").into());
             }
             return Ok(value.clone());
@@ -598,6 +635,7 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
                 // A raw terminal base may be one node beyond the hop cap;
                 // another delta may not. Stop before a long chain recurses.
                 if visiting.len() > usize::try_from(cap).unwrap_or(usize::MAX) {
+                    memo.depth_capped = true;
                     return Err(ServerError::invalid_argument("delta chain too deep").into());
                 }
                 let selected =
@@ -623,6 +661,7 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
                 base_bytes = Some((base, canonical));
                 depth = base_depth.saturating_add(1);
                 if depth > cap {
+                    memo.depth_capped = true;
                     return Err(ServerError::invalid_argument("delta chain too deep").into());
                 }
             }
@@ -667,6 +706,11 @@ fn member_object_inner<'a, B: BlobStore, S: NamespaceStore>(
                 }
             }
             let mut source = CachedBase(base_bytes);
+            // Reserve canonical decode work even if hash verification or decoding
+            // fails; a reader session must not refund expensive corrupt inputs.
+            memo.decoded_work = memo
+                .decoded_work
+                .saturating_add(located.value.decoded_size.min(available));
             let (actual, bytes) = decode_frame_with(
                 &frame,
                 version,

@@ -1462,6 +1462,12 @@ response below:
 | Indexed pack size | `invalid_argument` | `pack exceeds indexed max_pack_bytes` |
 | Indexed decode budget | `invalid_argument` | `pack exceeds indexed decode budget` |
 
+Indexed canonical entries MUST NOT exceed 1,048,586 bytes, including object
+framing. An oversized entry is refused at indexed verification with the
+`invalid_argument` decode-limit message above; this limit and its refusal are
+unchanged. Very large trees and chunk manifests can exceed it, so clients
+should split very large flat directories into smaller subdirectories.
+
 ## 10. Published view
 
 ### 10.1 Caller's view
@@ -1504,6 +1510,16 @@ held content in §11.3. Readers and anonymous callers
 see published ref values and published membership only. These rules
 apply on every serving surface, including HTTP consumers of this
 abstract view.
+
+Server-side object-reader embedders MAY share an additive per-session ledger
+across calls. The ledger bounds storage call units, canonical decode work,
+encoded pack-range reservations and canonical output bytes, including duplicate
+outputs. Failed work MUST NOT refund consumed allowances. Read-path cap hits
+MUST use `resource_exhausted` and the public message `object reader limit exceeded`,
+except that IDs whose public reachability cannot be proved within the walk or
+decode caps MUST remain uniformly absent (SPEC-HTTP-OBJECTS §4). Storage failures
+remain `unavailable`. Existing per-call allowances and invocation call budgets
+remain applicable. This embedding API does not change HTTP error mappings.
 
 ### 10.2 Per-ref clearance and publication
 
@@ -3949,6 +3965,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Additive object-reader session accounting and typed exhaustion. Existing public absence, advance messages and stored/wire formats are unchanged. |
 | 1 | draft | `SetRepoVisibility` runs admission and records an outcome like other mutating RPCs, in envelope and statement modes (§2, §3). Additive optional `Outcome.procedure` and `Outcome.visibility` (fields 9 and 10) name the operation (§6.5); the pending and terminal reservation rows record an optional operation (additive `procedure`; rows written before decode as unknown), so every outcome, including a reconciled abandonment, names it. No row version changes. |
 | 1 | draft | The deprecated `LAUNCH_PROFILE=uno` alias is removed; `paid-workers` is the only accepted value (§14, §18). |
 | 1 | draft | Stored rows remain decodable throughout 0.5.x; additive JSON fields require serde defaults (§17). |

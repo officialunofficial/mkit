@@ -1,4 +1,5 @@
 //! Strong global denial. Serving proof is independent of holder discovery.
+use crate::indexed::resolve::Caps;
 use crate::indexed::{
     IndexedConfig,
     budget::{Budgeted, SliceBudget},
@@ -575,7 +576,7 @@ pub async fn require_object_clear<S: NamespaceStore>(
     budget: &SliceBudget,
 ) -> Result<(), ServerError> {
     let remote = Budgeted::new(store, budget);
-    let context = object_context(&remote, shards, repo, id, cfg).await?;
+    let context = object_context(&remote, shards, repo, id, cfg, Caps::Legacy).await?;
     prove(&remote, shards, repo, &context.target()).await
 }
 struct ObjectContext {
@@ -606,7 +607,18 @@ async fn object_context<S: NamespaceStore>(
     repo: &RepoId,
     id: &Hash,
     cfg: &IndexedConfig,
+    caps: Caps,
 ) -> Result<ObjectContext, ServerError> {
+    // Reader paths report a spent proof allowance as typed exhaustion; writer
+    // and admission paths keep the generic unavailable error.
+    let capped = || {
+        let _ = caps;
+        #[cfg(feature = "http-objects")]
+        if caps == Caps::Reader {
+            return reader_exhausted();
+        }
+        unavailable()
+    };
     let mut context = ObjectContext {
         ids: BTreeSet::from([*id]),
         manifests: Vec::new(),
@@ -614,14 +626,16 @@ async fn object_context<S: NamespaceStore>(
     let mut cursor = Some(*id);
     for _ in 0..=cfg.max_delta_chain_depth {
         let Some(id) = cursor else { break };
-        let (pack, row) = super::inventory::member(store, shards, repo, &id)
-            .await
-            .map_err(|_| unavailable())?;
+        let (pack, row) = match super::inventory::member_with_caps(store, shards, repo, &id).await {
+            Ok(member) => member,
+            Err(super::inventory::MemberFail::Capped) => return Err(capped()),
+            Err(super::inventory::MemberFail::Store(_)) => return Err(unavailable()),
+        };
         context.ids.insert(pack);
         if row.kind == 5 {
             context.manifests.push(row.references);
             if context.bytes() > MAX_PROOF_CONTEXT_BYTES {
-                return Err(unavailable());
+                return Err(capped());
             }
         }
         cursor = row.base;
@@ -632,9 +646,13 @@ async fn object_context<S: NamespaceStore>(
         }
     }
     if cursor.is_some() {
-        return Err(unavailable());
+        return Err(capped());
     }
     Ok(context)
+}
+#[cfg(feature = "http-objects")]
+fn reader_exhausted() -> ServerError {
+    ServerError::resource_exhausted(crate::pipeline::OBJECT_READER_LIMIT_MESSAGE)
 }
 #[cfg(feature = "http-objects")]
 pub(crate) async fn object_denials<S: NamespaceStore>(
@@ -647,10 +665,10 @@ pub(crate) async fn object_denials<S: NamespaceStore>(
     let mut contexts = Vec::new();
     let mut bytes = 0;
     for id in requested {
-        let context = object_context(store, shards, repo, id, cfg).await?;
+        let context = object_context(store, shards, repo, id, cfg, Caps::Reader).await?;
         bytes += context.bytes();
         if bytes > MAX_PROOF_CONTEXT_BYTES {
-            return Err(unavailable());
+            return Err(reader_exhausted());
         }
         contexts.push((*id, context));
     }

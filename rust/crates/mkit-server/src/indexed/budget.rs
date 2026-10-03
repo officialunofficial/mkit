@@ -13,7 +13,9 @@ use crate::{Batch, BatchOutcome, BoxFuture, MaybeSend, MaybeSync, PartitionStats
 use futures::StreamExt as _;
 use mkit_core::hash::Hash;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+
+pub(crate) const EXHAUSTED_MESSAGE: &str = "verification slice subrequest budget exhausted";
 
 /// A shared call counter with a fixed limit.
 #[derive(Debug, Clone)]
@@ -62,9 +64,7 @@ impl SliceBudget {
                 used.checked_add(calls).filter(|total| *total <= self.limit)
             })
             .map(|_| ())
-            .map_err(|_| {
-                StoreError::Unavailable("verification slice subrequest budget exhausted".into())
-            })
+            .map_err(|_| StoreError::Unavailable(EXHAUSTED_MESSAGE.into()))
     }
 }
 
@@ -74,19 +74,108 @@ pub fn is_exhausted(error: &StoreError) -> bool {
     matches!(error, StoreError::Unavailable(reason) if reason.to_string().contains("subrequest budget"))
 }
 
+/// Encoded pack-range bytes reserved by one object-reader session.
+#[derive(Debug)]
+pub(crate) struct EncodedBudget {
+    limit: u64,
+    pub(crate) used: AtomicU64,
+}
+
+#[cfg_attr(not(feature = "http-objects"), allow(dead_code))]
+impl EncodedBudget {
+    pub(crate) fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            used: AtomicU64::new(0),
+        }
+    }
+
+    pub(crate) fn charge(&self, bytes: u64) -> Result<(), StoreError> {
+        self.used
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
+                used.checked_add(bytes).filter(|total| *total <= self.limit)
+            })
+            .map(|_| ())
+            .map_err(|_| StoreError::unavailable("object reader encoded budget exhausted"))
+    }
+}
+
 /// A store whose every call is one charged unit, batched reads included (one
 /// round trip however many keys), as the rollup's budgeted store charges.
+///
+/// Object readers additionally compose a second (session) budget, an encoded
+/// byte budget for ranged blob reads, and a flag recording that a cap was hit
+/// before lower layers redact the error.
 #[derive(Debug)]
 pub struct Budgeted<'a, S> {
     inner: &'a S,
-    budget: &'a SliceBudget,
+    budget: Option<&'a SliceBudget>,
+    session: Option<&'a SliceBudget>,
+    encoded: Option<&'a EncodedBudget>,
+    hit: Option<&'a AtomicBool>,
 }
 
 impl<'a, S> Budgeted<'a, S> {
     /// `inner` charging `budget`.
     #[must_use]
     pub fn new(inner: &'a S, budget: &'a SliceBudget) -> Self {
-        Self { inner, budget }
+        Self {
+            inner,
+            budget: Some(budget),
+            session: None,
+            encoded: None,
+            hit: None,
+        }
+    }
+
+    /// `inner` charging nothing, but recording an inherited cap.
+    #[cfg_attr(not(feature = "http-objects"), allow(dead_code))]
+    pub(crate) fn capture(inner: &'a S, hit: &'a AtomicBool) -> Self {
+        Self {
+            inner,
+            budget: None,
+            session: None,
+            encoded: None,
+            hit: Some(hit),
+        }
+    }
+
+    /// Record in `hit` whenever a charge or the inner store reports a spent cap.
+    #[cfg_attr(not(feature = "http-objects"), allow(dead_code))]
+    pub(crate) fn flagging(mut self, hit: &'a AtomicBool) -> Self {
+        self.hit = Some(hit);
+        self
+    }
+
+    /// Also charge every call to a shared session budget, after `budget`.
+    #[cfg_attr(not(feature = "http-objects"), allow(dead_code))]
+    pub(crate) fn with_session(mut self, session: &'a SliceBudget) -> Self {
+        self.session = Some(session);
+        self
+    }
+
+    /// Reserve ranged blob reads against `encoded` before the read.
+    #[cfg_attr(not(feature = "http-objects"), allow(dead_code))]
+    pub(crate) fn with_encoded(mut self, encoded: &'a EncodedBudget) -> Self {
+        self.encoded = Some(encoded);
+        self
+    }
+
+    fn note<T>(&self, result: Result<T, StoreError>) -> Result<T, StoreError> {
+        if let Some(hit) = self.hit
+            && result.as_ref().is_err_and(is_exhausted)
+        {
+            hit.store(true, Ordering::SeqCst);
+        }
+        result
+    }
+
+    pub(crate) fn charge(&self) -> Result<(), StoreError> {
+        let result = self
+            .budget
+            .map_or(Ok(()), SliceBudget::charge)
+            .and_then(|()| self.session.map_or(Ok(()), SliceBudget::charge));
+        self.note(result)
     }
 }
 
@@ -95,28 +184,28 @@ impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
         self.inner.capabilities()
     }
     async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
-        self.budget.charge()?;
-        self.inner.get(p, key).await
+        self.charge()?;
+        self.note(self.inner.get(p, key).await)
     }
     async fn has(&self, p: &Partition, key: &Key) -> Result<bool, StoreError> {
-        self.budget.charge()?;
-        self.inner.has(p, key).await
+        self.charge()?;
+        self.note(self.inner.has(p, key).await)
     }
     async fn get_many(
         &self,
         p: &Partition,
         keys: &[Key],
     ) -> Result<Vec<Option<Value>>, StoreError> {
-        self.budget.charge()?;
-        self.inner.get_many(p, keys).await
+        self.charge()?;
+        self.note(self.inner.get_many(p, keys).await)
     }
     async fn scan_many(
         &self,
         p: &Partition,
         ranges: &[RangeScan],
     ) -> Result<Vec<ScanPage>, StoreError> {
-        self.budget.charge()?;
-        self.inner.scan_many(p, ranges).await
+        self.charge()?;
+        self.note(self.inner.scan_many(p, ranges).await)
     }
     async fn scan(
         &self,
@@ -126,20 +215,20 @@ impl<S: NamespaceStore> NamespaceStore for Budgeted<'_, S> {
         after: Option<&Cursor>,
         limit: u32,
     ) -> Result<ScanPage, StoreError> {
-        self.budget.charge()?;
-        self.inner.scan(p, start, end, after, limit).await
+        self.charge()?;
+        self.note(self.inner.scan(p, start, end, after, limit).await)
     }
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
-        self.budget.charge()?;
-        self.inner.apply(p, batch).await
+        self.charge()?;
+        self.note(self.inner.apply(p, batch).await)
     }
     async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
-        self.budget.charge()?;
-        self.inner.stats(p).await
+        self.charge()?;
+        self.note(self.inner.stats(p).await)
     }
     async fn probe(&self) -> Result<(), StoreError> {
-        self.budget.charge()?;
-        self.inner.probe().await
+        self.charge()?;
+        self.note(self.inner.probe().await)
     }
 }
 
@@ -155,17 +244,35 @@ impl<B: BlobStore> BlobStore for Budgeted<'_, B> {
         key: &BlobKey,
         range: Option<ByteRange>,
     ) -> Result<Option<BlobBody>, StoreError> {
-        self.budget.charge()?;
+        self.charge()?;
         // R2's ranged BlobStore read checks metadata before fetching bytes.
         // Reserve both backend requests even for stores that need only one.
-        if range.is_some() {
-            self.budget.charge()?;
+        if let Some(range) = range {
+            self.charge()?;
+            if let Some(encoded) = self.encoded {
+                let bytes = range
+                    .end_inclusive
+                    .saturating_sub(range.start)
+                    .saturating_add(1);
+                let result = encoded.charge(bytes);
+                if result.is_err()
+                    && let Some(hit) = self.hit
+                {
+                    hit.store(true, Ordering::SeqCst);
+                }
+                result?;
+            }
+        } else if self.encoded.is_some() {
+            // An unranged read cannot be reserved before it happens.
+            return Err(StoreError::unavailable(
+                "object reader blob reads must be ranged",
+            ));
         }
-        self.inner.get(key, range).await
+        self.note(self.inner.get(key, range).await)
     }
     async fn head(&self, key: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
-        self.budget.charge()?;
-        self.inner.head(key).await
+        self.charge()?;
+        self.note(self.inner.head(key).await)
     }
     async fn probe(&self) -> Result<(), StoreError> {
         self.inner.probe().await

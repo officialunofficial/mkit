@@ -20,7 +20,7 @@ use mkit_core::serialize::deserialize;
 use super::body::{self, EndHook, HttpBody};
 use super::{HttpObjectsConfig, METRIC_HTTP_INLINE_CAPPED};
 use crate::indexed::IndexedConfig;
-use crate::indexed::resolve::{self, DECODE_BUDGET_MESSAGE, MemberCache, ResolveFailure};
+use crate::indexed::resolve::{self, Caps, DECODE_BUDGET_MESSAGE, MemberCache, ResolveFailure};
 use crate::pipeline::ShardMap;
 use crate::repo::RepoId;
 use crate::store::index::{LocatedObject, LookupError, ObjectLookup};
@@ -45,11 +45,32 @@ pub(crate) struct Env<'a, B, N> {
     pub indexed: &'a IndexedConfig,
     pub cfg: &'a HttpObjectsConfig,
     pub metrics: &'a dyn Metrics,
+    /// Typed exhaustion applies on object-reader paths only.
+    pub caps: Caps,
 }
 
 /// The decode bytes one request may still spend, shared by resolution, the
 /// reachability walk and the inline byte source.
 pub(crate) struct Budget(pub u64);
+
+// A cancelled recursive load may already have decoded bases. Settle that
+// work before the surrounding reader-session guard settles its budget.
+struct LoadCharge<'a> {
+    budget: &'a mut Budget,
+    memo: MemberCache,
+    caps: Caps,
+}
+impl Drop for LoadCharge<'_> {
+    fn drop(&mut self) {
+        // HTTP serving keeps charging retained bytes only; readers also pay
+        // for work that failed.
+        let spent = match self.caps {
+            Caps::Reader => self.memo.decoded_work(),
+            Caps::Legacy => self.memo.retained_bytes(),
+        };
+        self.budget.0 = self.budget.0.saturating_sub(spent);
+    }
+}
 
 /// Why resolution stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,19 +124,45 @@ pub(crate) async fn locate<B: BlobStore, N: NamespaceStore>(
     membership(found.get(&id))?.ok_or(Miss::NotFound)
 }
 
-/// Locate several ids at once: the members among them, in id order.
-pub(crate) async fn locate_many<B: BlobStore, N: NamespaceStore>(
+/// What a locate call does with an id whose lookup hit a page or
+/// membership-read cap (reader paths only; legacy callers fail closed).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OnCap {
+    /// Fail the call with [`Miss::Capped`] (the owner/proven view).
+    Fail,
+    /// Omit the id and report that the answer is incomplete.
+    Skip,
+}
+
+/// Locate several ids at once: the members among them, in id order, and
+/// whether a capped id was skipped. `TooManyRows` is always "not a member"
+/// (R-148: it is permanent, so no retry could succeed).
+pub(crate) async fn locate_ids<B: BlobStore, N: NamespaceStore>(
     env: &Env<'_, B, N>,
     ids: &[Hash],
-) -> Result<Vec<(Hash, LocatedObject)>, Miss> {
+    on_cap: OnCap,
+) -> Result<(Vec<(Hash, LocatedObject)>, bool), Miss> {
     let found = resolve::locate_split(env.meta, env.shards, env.repo, ids, env.metrics).await?;
+    let mut skipped = false;
     let mut members = Vec::new();
     for (id, answer) in &found {
+        if env.caps == Caps::Reader
+            && matches!(
+                answer,
+                Err(LookupError::TooManyPages | LookupError::TooManyMembershipReads)
+            )
+        {
+            if on_cap == OnCap::Fail {
+                return Err(Miss::Capped);
+            }
+            skipped = true;
+            continue;
+        }
         if let Some(located) = membership(Some(answer))? {
             members.push((*id, located));
         }
     }
-    Ok(members)
+    Ok((members, skipped))
 }
 
 /// The canonical bytes of a located member, charged to `budget`.
@@ -128,8 +175,13 @@ pub(crate) async fn load<B: BlobStore, N: NamespaceStore>(
     if located.value.decoded_size > budget.0 {
         return Err(Miss::Capped);
     }
-    let mut memo = MemberCache::default();
-    memo.forbid_reads(env.no_reads);
+    let allowance = budget.0;
+    let mut charge = LoadCharge {
+        budget,
+        memo: MemberCache::default(),
+        caps: env.caps,
+    };
+    charge.memo.forbid_reads(env.no_reads);
     let mut visiting = BTreeSet::new();
     let result = resolve::member_object(
         env.blobs,
@@ -139,13 +191,14 @@ pub(crate) async fn load<B: BlobStore, N: NamespaceStore>(
         id,
         located,
         env.indexed.max_delta_chain_depth,
-        budget.0,
-        &mut memo,
+        allowance,
+        &mut charge.memo,
         &mut visiting,
         env.metrics,
     )
     .await;
-    budget.0 = budget.0.saturating_sub(memo.retained_bytes());
+    let depth_capped = charge.memo.depth_capped();
+    drop(charge);
     match result {
         Ok((bytes, _)) => Ok(bytes),
         Err(ResolveFailure::Other(error)) if error.public_message() == DECODE_BUDGET_MESSAGE => {
@@ -153,6 +206,10 @@ pub(crate) async fn load<B: BlobStore, N: NamespaceStore>(
         }
         Err(ResolveFailure::Other(error)) if error.public_message() == "object blocked" => {
             Err(Miss::NotFound)
+        }
+        Err(ResolveFailure::Capped) if env.caps == Caps::Reader => Err(Miss::Capped),
+        Err(ResolveFailure::Other(_)) if env.caps == Caps::Reader && depth_capped => {
+            Err(Miss::Capped)
         }
         Err(_) => {
             tracing::warn!("member object could not be reconstructed");
@@ -166,7 +223,8 @@ async fn load_object<B: BlobStore, N: NamespaceStore>(
     id: Hash,
     budget: &mut Budget,
 ) -> Result<Arc<[u8]>, Miss> {
-    let located = locate(env, id).await?;
+    let (found, _) = locate_ids(env, &[id], OnCap::Fail).await?;
+    let (_, located) = found.into_iter().next().ok_or(Miss::NotFound)?;
     load(env, id, located, budget).await
 }
 

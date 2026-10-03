@@ -42,9 +42,14 @@ mod http_tokens;
 #[cfg(feature = "http-objects")]
 mod object_reader;
 #[cfg(feature = "http-objects")]
+mod read_limits;
+#[cfg(feature = "http-objects")]
 pub use object_reader::{
-    IssuedUrl, OBJECT_READER_BATCH, OBJECT_READER_CALLS, ObjectMetadata, ObjectReader, ReaderView,
+    IssuedUrl, OBJECT_READER_BATCH, OBJECT_READER_CALLS, OBJECT_READER_LIMIT_MESSAGE,
+    ObjectMetadata, ObjectReader, ReaderView,
 };
+#[cfg(feature = "http-objects")]
+pub use read_limits::{ReadLimits, ReaderSession};
 mod implicit;
 mod info;
 #[cfg(feature = "remote-hooks")]
@@ -1556,13 +1561,30 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         ttl_seconds: u32,
         now_ms: i64,
     ) -> Result<MintedToken, ServerError> {
+        self.issue_url_with_meta(op, repository, target, ttl_seconds, now_ms, &self.meta)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)] // The reader captures inherited caps without changing RPC mappings.
+    async fn issue_url_with_meta<S: NamespaceStore>(
+        &self,
+        op: &Operation,
+        repository: &str,
+        target: &UrlTarget,
+        ttl_seconds: u32,
+        now_ms: i64,
+        meta: &S,
+    ) -> Result<MintedToken, ServerError> {
         let Some(tokens) = &self.cfg.url_tokens else {
             return Err(ServerError::unimplemented("URL tokens not configured"));
         };
-        let read = self.authorize_read(op).await?;
+        let read = self.authorize_read_with_meta(op, meta).await?;
         let epoch = match read.epoch {
             Some(epoch) => epoch,
-            None => self.stored_grant_epoch(&op.repo.namespace).await?,
+            None => {
+                self.stored_grant_epoch_with_meta(&op.repo.namespace, meta)
+                    .await?
+            }
         };
         let AuthMode::AuthV2(auth) = &self.cfg.auth else {
             return Err(internal("URL tokens without auth v2"));
@@ -2719,11 +2741,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     /// Multi reads require a repository registered in the namespace coordinator.
-    async fn require_repository(&self, repo: &crate::repo::RepoId) -> Result<(), ServerError> {
+    async fn require_repository<S: NamespaceStore>(
+        &self,
+        repo: &crate::repo::RepoId,
+        meta: &S,
+    ) -> Result<(), ServerError> {
         if matches!(self.cfg.addressing, Addressing::Multi(_)) {
             let p = self.shards.coordinator(&repo.namespace);
-            let value = self
-                .meta
+            let value = meta
                 .get(&p, &keys::repo_record(&repo.name))
                 .await
                 .map_err(meta_error)?;
@@ -2761,9 +2786,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// caller's view; `epoch` is the stored grant epoch, for
     /// `IssueObjectUrl`'s reuse.
     async fn authorize_read(&self, op: &Operation) -> Result<ReadAuth, ServerError> {
+        self.authorize_read_with_meta(op, &self.meta).await
+    }
+
+    async fn authorize_read_with_meta<S: NamespaceStore>(
+        &self,
+        op: &Operation,
+        meta: &S,
+    ) -> Result<ReadAuth, ServerError> {
         tracing::debug!(stage = "authorize");
         if !self.visibility_gates_reads() {
-            return self.authorize_read_ungated(op).await;
+            return self.authorize_read_ungated(op, meta).await;
         }
         // §7 steps 1–10 are stateless: run them before the coordinator
         // read, even when the repository turns out to be missing.
@@ -2783,7 +2816,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let owner = op.write_grant.is_none()
             && matches!(Namespace::parse(op.repo.namespace.as_str()),
                 Ok(Namespace::Ed25519(key)) if op.principal.ed25519() == Some(&key));
-        let Some((private, epoch)) = self.read_repo_state(&op.repo).await? else {
+        let Some((private, epoch)) = self.read_repo_state(&op.repo, meta).await? else {
             // A missing repository pays the hook round trip a private one
             // would, and discards it, so latency does not tell them apart.
             if signed && op.write_grant.is_none() {
@@ -2854,13 +2887,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// read: `Some((private, epoch))`. A missing `rr` is `None`
     /// (the caller answers the uniform `not_found`). Backend failures remain
     /// `unavailable`; a caller-budget refusal is `resource_exhausted`.
-    async fn read_repo_state(
+    async fn read_repo_state<S: NamespaceStore>(
         &self,
         repo: &crate::repo::RepoId,
+        meta: &S,
     ) -> Result<Option<(bool, u64)>, ServerError> {
         let coordinator = self.shards.coordinator(&repo.namespace);
-        let rows = self
-            .meta
+        let rows = meta
             .get_many(
                 &coordinator,
                 &[
@@ -2965,14 +2998,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// The read path when [`Self::visibility_gates_reads`] does not hold: the
     /// hook decides, then the `rr` row gates existence (Multi only). The
     /// caller's view comes from its principal and the write policy.
-    async fn authorize_read_ungated(&self, op: &Operation) -> Result<ReadAuth, ServerError> {
+    async fn authorize_read_ungated<S: NamespaceStore>(
+        &self,
+        op: &Operation,
+        meta: &S,
+    ) -> Result<ReadAuth, ServerError> {
         let facts = self
             .hooks
             .authorizer()
             .authorize(op)
             .await
             .map_err(ServerError::strip_admission_shape)?;
-        self.require_repository(&op.repo).await?;
+        self.require_repository(&op.repo, meta).await?;
         let caller_view = match &op.principal {
             Principal::Anonymous => CallerView::Anonymous,
             Principal::BearerHolder => CallerView::Reader,

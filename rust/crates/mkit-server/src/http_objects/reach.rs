@@ -311,7 +311,11 @@ pub(crate) async fn walk_many<B: BlobStore, N: NamespaceStore>(
         }
         let ids: Vec<Hash> = batch.iter().map(|(id, _)| *id).collect();
         let kinds: BTreeMap<Hash, Kind> = batch.into_iter().collect();
-        for (id, located) in resolve::locate_many(env, &ids).await? {
+        let (members, skipped) = resolve::locate_ids(env, &ids, resolve::OnCap::Skip).await?;
+        if skipped {
+            frontier.incomplete = Some(Miss::Capped);
+        }
+        for (id, located) in members {
             if crate::takedown::denial::denied(env.meta, &id)
                 .await
                 .map_err(|_| Miss::Unavailable)?

@@ -36,6 +36,40 @@ native targets and `wasm32-unknown-unknown`.
 | `pack-ruzstd` | Pure-Rust zstd decoding for wasm targets. |
 | `test-faults` | Test-only fault injection. Never enable it in a release build. |
 
+## Object-reader sessions and entry sizes
+
+With `http-objects`, pass one `pipeline::ReaderSession` to
+`ObjectReader::read_canonical_in` and `object_metadata_in` to share an allowance
+across calls (and readers). `ReadLimits::new(calls, decoded, encoded, output)`
+sets the four dimensions; `ReaderSession::used()` reports consumption.
+Defaults are 8,500 call units and 256 MiB each for decoded bytes and canonical
+output. Encoded I/O is unlimited by default, matching the existing API; set a
+finite encoded limit to bound storage traffic. The configured per-call HTTP
+decode allowance remains an additional ceiling.
+
+Calls use the existing `SliceBudget` granularity: a metadata store method call costs
+one unit, a blob `head` one, a ranged blob read two (blob `probe` is not charged), and authorization and read seams retain their
+existing call reservations. Encoded accounting reserves requested pack ranges
+before I/O, including prefixes, duplicate fetches and failed attempts; metadata
+row bytes are excluded. Decode work counts canonical objects, proof ancestors
+and delta bases each time they are decoded. Canonical outputs count duplicates
+individually; metadata outputs have no canonical byte charge. Failed calls keep
+charges already incurred. Cancellation settles completed decode work and keeps
+I/O reservations. Existing per-invocation `SliceBudget` decorators still work.
+
+The old reader methods retain their signatures and per-call allowances. Cap
+hits return `ResourceExhausted` with `OBJECT_READER_LIMIT_MESSAGE` (`object reader
+limit exceeded`). As required by SPEC-HTTP-OBJECTS §4 and SPEC-SERVER §10.1,
+public IDs whose reachability cannot be proved within the caps remain absent.
+An ID with more index rows than the lookup cap is absent for that ID only; page and membership-read caps on a proven or owner read are `ResourceExhausted`. Backend failures remain `Unavailable`.
+
+Indexed canonical entries are limited to **1,048,586 bytes**, including object
+framing. Very large trees and chunk manifests can exceed this even when the
+pack is small or highly compressed. Split very large flat directories into
+smaller subdirectories. An oversized entry is refused at indexed verification
+with the existing `InvalidArgument` decode-limit error (SPEC-SERVER section 9.8).
+Neither stored data nor pack framing changes.
+
 ## Related crates
 
 - `mkit-server-worker`: Cloudflare Workers adapter (R2 blobs, Durable Objects).

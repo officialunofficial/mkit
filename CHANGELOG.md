@@ -43,6 +43,8 @@ supported after new reservation rows are written.
   additive optional `Outcome` fields. `Pipeline::set_repo_visibility_with_meta`
   also returns the admission's receipt headers, which the Connect service now
   sets.
+- Server embedders can share `ReadLimits` and `ReaderSession` across canonical
+  and metadata reads to cap aggregate calls, decode work, encoded I/O and output.
 
 ### Removed
 
@@ -66,11 +68,21 @@ supported after new reservation rows are written.
   and the Worker `NamespaceDelivery` handler are removed. A v0.5.0 checkpoint
   row for an in-flight namespace purge still decodes and finishes.
 
+### Changed
+
+- `ObjectReader::object_metadata` now fails the whole batch with
+  `ResourceExhausted` when a proven object's delta depth or external base
+  lookup cap is hit, matching `read_canonical` (previously the ID was silently
+  absent).
+
 ### Fixed
 
+- Object-reader cap hits consistently return `ResourceExhausted` with a stable
+  public message, including delta-depth and external-base caps hit while
+  checking takedown denial; unprovable public IDs retain their uniform absent
+  result.
 - Owner object-reader authorization preserves `ResourceExhausted` when the
   caller's storage-call budget runs out during the repository-state lookup.
-
 - Workers retry transient alarm scheduling failures twice after committed timer
   writes and return exhausted failures for replay and cold-start repair.
 - The embedded Worker example enables the pure-Rust zstd decoder for default

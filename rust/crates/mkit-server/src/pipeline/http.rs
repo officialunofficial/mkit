@@ -216,6 +216,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             indexed,
             cfg,
             metrics: self.metrics.as_ref(),
+            caps: crate::indexed::resolve::Caps::Legacy,
         };
         let mut budget = Budget(cfg.http_decode_budget);
         let now = ms(self.clock.now_ms());
@@ -530,6 +531,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
                         indexed,
                         cfg,
                         metrics: self.metrics.as_ref(),
+                        caps: crate::indexed::resolve::Caps::Legacy,
                     },
                     budget: Budget(cfg.http_decode_budget),
                     gate: seams.takedown.as_ref(),

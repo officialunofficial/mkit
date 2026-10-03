@@ -736,6 +736,7 @@ fn assert_unresolvable_size_bases_absent(fx: &Fx, derived: &Object, derived_pack
             },
             0,
             fx.pipe.metrics.as_ref(),
+            crate::indexed::resolve::Caps::Legacy,
         ))
         .unwrap(),
         "a delta root exceeds a zero-hop bound"
@@ -1817,10 +1818,662 @@ fn unprovable_stored_ids_match_unknown_ids_for_public_readers_but_owners_get_typ
                 block_on(owner.object_metadata(&[stored]))
                     .unwrap_err()
                     .code(),
-                Code::Unavailable
+                Code::ResourceExhausted
             );
         }
     }
+}
+
+fn with_owner_reader(
+    fx: &Fx,
+    run: impl FnOnce(&crate::pipeline::ObjectReader<'_, SpyBlobs, Arc<Spy>, Hooks>),
+) {
+    let req = signed(
+        &fx.owner,
+        &fx.identity("room"),
+        Procedure::ListRefs,
+        fx.number(),
+    );
+    let lookup = |name: &str| {
+        req.headers
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.clone())
+    };
+    let meta = RequestMeta {
+        procedure: req.procedure,
+        header: &lookup,
+        header_values: None,
+        unary_body: Some(&req.body),
+        transport_principal: None,
+    };
+    let reader = block_on(
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Owner(&meta)),
+    )
+    .unwrap();
+    run(&reader);
+}
+
+#[test]
+fn load_default_decode_cap_is_typed_exhaustion() {
+    let d = data();
+    let size = serialize(&d.big).unwrap().len() as u64;
+    let fx = fixture_with(
+        Hooks::new(),
+        HttpObjectsConfig {
+            max_inline_object_bytes: size,
+            http_decode_budget: size,
+            ..http_cfg()
+        },
+    );
+    fx.push("room", &d.refs(), d.head(), None);
+    let reader = block_on(
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Public),
+    )
+    .unwrap();
+    let error = block_on(reader.read_canonical(&[id(&d.big)])).unwrap_err();
+    assert_eq!(error.code(), Code::ResourceExhausted);
+}
+
+#[test]
+fn too_many_rows_object_is_absent_without_failing_the_rest_of_the_batch() {
+    let (fx, d) = published();
+    let repo = fx.repo_id("room");
+    let target = [90; 32];
+    let partition = fx.pipe.shards.object_index(&repo, &target);
+    let row = crate::store::index::IndexValue {
+        frame_offset: 12,
+        frame_length: 15,
+        wire_type: 0,
+        decoded_size: 10,
+        chain_depth: 0,
+        delta_base: None,
+    };
+    let encoded = codec::encode_object_index(&target, &row).unwrap();
+    for chunk in (0..=crate::store::index::MAX_LOOKUP_ROWS)
+        .collect::<Vec<_>>()
+        .chunks(32)
+    {
+        let mut batch = Batch::new();
+        for index in chunk {
+            let mut pack = [0; 32];
+            pack[..8].copy_from_slice(&u64::try_from(*index).unwrap().to_le_bytes());
+            batch = batch.put(
+                keys::object_index(&repo.name, &target, &pack),
+                encoded.clone(),
+            );
+        }
+        block_on(fx.pipe.meta.inner.apply(&partition, batch)).unwrap();
+    }
+    // R-148: a permanent row-cap miss is "not a member" for that id only, for
+    // public and owner reads alike.
+    let ids = [target, id(&d.small)];
+    let expected = vec![None, Some(serialize(&d.small).unwrap())];
+    assert_eq!(public_read(&fx, "room", &ids), expected);
+    with_owner_reader(&fx, |reader| {
+        assert_eq!(block_on(reader.read_canonical(&ids)).unwrap(), expected);
+        let rows = block_on(reader.object_metadata(&ids)).unwrap();
+        assert!(rows[0].is_none() && rows[1].is_some());
+    });
+}
+
+#[test]
+fn shared_sessions_enforce_each_aggregate_dimension_across_calls() {
+    use crate::pipeline::{OBJECT_READER_LIMIT_MESSAGE, ReadLimits, ReaderSession};
+    let (fx, d) = published();
+    with_owner_reader(&fx, |reader| {
+        let ids = [id(&d.small)];
+        let mut probe = ReaderSession::default();
+        assert!(block_on(reader.read_canonical_in(&mut probe, &ids)).unwrap()[0].is_some());
+        let used = probe.used();
+        assert!(used.storage_calls > 2);
+        assert!(used.decoded_bytes > used.output_bytes);
+        assert!(
+            used.encoded_bytes > used.decoded_bytes,
+            "range prefixes and frame headers are charged too"
+        );
+        let limits = [
+            ReadLimits::new(used.storage_calls, u64::MAX, u64::MAX, u64::MAX),
+            ReadLimits::new(u32::MAX, used.decoded_bytes, u64::MAX, u64::MAX),
+            ReadLimits::new(u32::MAX, u64::MAX, used.encoded_bytes, u64::MAX),
+            ReadLimits::new(u32::MAX, u64::MAX, u64::MAX, used.output_bytes),
+        ];
+        for limit in limits {
+            let mut session = ReaderSession::new(limit);
+            assert!(block_on(reader.read_canonical_in(&mut session, &ids)).unwrap()[0].is_some());
+            let error = block_on(reader.read_canonical_in(&mut session, &ids)).unwrap_err();
+            assert_eq!(
+                (error.code(), error.public_message()),
+                (Code::ResourceExhausted, OBJECT_READER_LIMIT_MESSAGE)
+            );
+            let spent = session.used();
+            assert!(spent.storage_calls <= limit.storage_calls);
+            assert!(spent.decoded_bytes <= limit.decoded_bytes);
+            assert!(spent.encoded_bytes <= limit.encoded_bytes);
+            assert!(spent.output_bytes <= limit.output_bytes);
+        }
+    });
+}
+
+#[test]
+fn canonical_and_metadata_calls_share_one_session_call_ledger() {
+    use crate::pipeline::{ReadLimits, ReaderSession};
+    let (fx, d) = published();
+    with_owner_reader(&fx, |reader| {
+        let mut probe = ReaderSession::default();
+        assert!(block_on(reader.object_metadata_in(&mut probe, &[d.head()])).unwrap()[0].is_some());
+        let calls = probe.used().storage_calls;
+        assert_eq!(probe.used().output_bytes, 0);
+        let mut session =
+            ReaderSession::new(ReadLimits::new(calls + 2, u64::MAX, u64::MAX, u64::MAX));
+        assert!(
+            block_on(reader.object_metadata_in(&mut session, &[d.head()])).unwrap()[0].is_some()
+        );
+        assert_eq!(
+            block_on(reader.read_canonical_in(&mut session, &[d.head()]))
+                .unwrap_err()
+                .code(),
+            Code::ResourceExhausted
+        );
+        assert_eq!(session.used().storage_calls, calls + 2);
+    });
+}
+
+#[test]
+fn session_output_counts_duplicates_without_duplicate_decode_work() {
+    use crate::pipeline::{ReadLimits, ReaderSession};
+    let (fx, d) = published();
+    with_owner_reader(&fx, |reader| {
+        let canonical = serialize(&d.small).unwrap();
+        let limit = canonical.len() as u64 * 2;
+        let mut session = ReaderSession::new(ReadLimits::new(u32::MAX, u64::MAX, u64::MAX, limit));
+        assert_eq!(
+            block_on(reader.read_canonical_in(&mut session, &[id(&d.small); 2])).unwrap(),
+            [Some(canonical.clone()), Some(canonical)]
+        );
+        assert_eq!(session.used().output_bytes, limit);
+        assert_eq!(
+            block_on(reader.read_canonical_in(&mut session, &[id(&d.small)]))
+                .unwrap_err()
+                .code(),
+            Code::ResourceExhausted
+        );
+        assert_eq!(session.used().output_bytes, limit);
+    });
+}
+
+#[test]
+fn session_caps_preserve_public_uniform_absence() {
+    use crate::pipeline::{ReadLimits, ReaderSession};
+    let fx = fixture();
+    let d = data();
+    let orphan = blob(b"unreachable member");
+    let mut objects = d.refs();
+    objects.push(&orphan);
+    fx.push("room", &objects, d.head(), None);
+    let reader = block_on(
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Public),
+    )
+    .unwrap();
+    for limits in [
+        ReadLimits::new(2, u64::MAX, u64::MAX, u64::MAX),
+        ReadLimits::new(u32::MAX, 0, u64::MAX, u64::MAX),
+        ReadLimits::new(u32::MAX, u64::MAX, 0, u64::MAX),
+    ] {
+        for target in [id(&orphan), [91; 32]] {
+            let mut session = ReaderSession::new(limits);
+            assert_eq!(
+                block_on(reader.read_canonical_in(&mut session, &[target])).unwrap(),
+                [None]
+            );
+            let mut session = ReaderSession::new(limits);
+            assert_eq!(
+                block_on(reader.object_metadata_in(&mut session, &[target])).unwrap(),
+                [None]
+            );
+        }
+    }
+}
+
+#[test]
+fn inherited_invocation_call_exhaustion_is_typed_for_owner_reads() {
+    let (fx, d) = published();
+    with_owner_reader(&fx, |reader| {
+        let before = fx.pipe.meta.calls();
+        assert!(block_on(reader.read_canonical(&[id(&d.small)])).unwrap()[0].is_some());
+        let parent = crate::indexed::budget::SliceBudget::new(fx.pipe.meta.calls() - before - 1);
+        *fx.pipe.meta.request_budget.lock().unwrap() = Some(parent);
+        assert_eq!(
+            block_on(reader.read_canonical(&[id(&d.small)]))
+                .unwrap_err()
+                .code(),
+            Code::ResourceExhausted
+        );
+    });
+}
+
+struct PausedFrame<'a> {
+    inner: &'a SpyBlobs,
+    pack: Hash,
+}
+impl BlobStore for PausedFrame<'_> {
+    type Sink = <SpyBlobs as BlobStore>::Sink;
+    async fn begin(&self, key: BlobKey, len: u64) -> Result<Self::Sink, StoreError> {
+        self.inner.begin(key, len).await
+    }
+    async fn get(
+        &self,
+        key: &BlobKey,
+        range: Option<ByteRange>,
+    ) -> Result<Option<BlobBody>, StoreError> {
+        if *key == BlobKey::pack(self.pack) && range.is_some_and(|range| range.start >= 12) {
+            std::future::pending().await
+        } else {
+            self.inner.get(key, range).await
+        }
+    }
+    async fn head(&self, key: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
+        self.inner.head(key).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.inner.probe().await
+    }
+    async fn delete(&self, key: &BlobKey) -> Result<bool, StoreError> {
+        self.inner.delete(key).await
+    }
+}
+
+#[test]
+fn cancelled_recursive_load_keeps_completed_base_decode_debit() {
+    let debit = cancelled_load_debit(crate::indexed::resolve::Caps::Reader);
+    assert_eq!(
+        debit,
+        serialize(&blob(b"base payload")).unwrap().len() as u64
+    );
+}
+
+// HTTP serving charges retained bytes (here the retained base), as before.
+#[test]
+fn http_path_charges_retained_bytes_for_cancelled_loads() {
+    let debit = cancelled_load_debit(crate::indexed::resolve::Caps::Legacy);
+    assert_eq!(
+        debit,
+        serialize(&blob(b"base payload")).unwrap().len() as u64
+    );
+}
+
+fn cancelled_load_debit(caps: crate::indexed::resolve::Caps) -> u64 {
+    use crate::http_objects::resolve::{self, Env};
+    use crate::pipeline::ReaderSession;
+    use crate::store::view::ViewStore;
+    let fx = fixture();
+    let base = blob(b"base payload");
+    let old_root = tree(&[("base", EntryMode::Blob, &base)]);
+    let old_head = commit(&old_root, &[], "old");
+    let old_pack = fx.push("room", &[&base, &old_root, &old_head], id(&old_head), None);
+    let derived = blob(b"derived payload");
+    let root = tree(&[("derived", EntryMode::Blob, &derived)]);
+    let head = commit(&root, &[], "derived");
+    let mut writer = PackWriter::new();
+    writer
+        .push_delta(
+            &id(&base),
+            &mkit_core::delta::encode(&serialize(&base).unwrap(), &serialize(&derived).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+    for object in [&root, &head] {
+        writer
+            .push_raw(id(object), &serialize(object).unwrap())
+            .unwrap();
+    }
+    let (outcome, pack) = fx.push_pack(
+        "room",
+        &writer.finish().unwrap(),
+        (HEAD, PACKMAP),
+        id(&head),
+        (Match(id(&old_head)), Match(old_pack)),
+    );
+    assert_eq!(outcome, AdvanceOutcome::Committed);
+    let repo = fx.repo_id("room");
+    let view = ViewStore {
+        store: &fx.pipe.meta,
+        repo: &repo,
+        writer: true,
+        policy: None,
+    };
+    let blobs = PausedFrame {
+        inner: &fx.pipe.blobs,
+        pack,
+    };
+    let no_reads = std::collections::BTreeSet::new();
+    let env = Env {
+        no_reads: &no_reads,
+        blobs: &blobs,
+        meta: &view,
+        shards: fx.pipe.shards.as_ref(),
+        repo: &repo,
+        indexed: fx.pipe.cfg.indexed.as_ref().unwrap(),
+        cfg: fx.pipe.cfg.http_objects.as_ref().unwrap(),
+        metrics: fx.pipe.metrics.as_ref(),
+        caps,
+    };
+    let located = block_on(resolve::locate(&env, id(&derived))).unwrap();
+    let mut session = ReaderSession::default();
+    {
+        let (_, mut charge, _) = session.split(env.cfg.http_decode_budget);
+        let mut future = Box::pin(resolve::load(
+            &env,
+            id(&derived),
+            located,
+            &mut charge.budget,
+        ));
+        assert!(
+            block_on(std::future::poll_fn(|cx| std::task::Poll::Ready(
+                future.as_mut().poll(cx)
+            )))
+            .is_pending()
+        );
+        drop(future);
+    }
+    session.used().decoded_bytes
+}
+
+#[test]
+fn inherited_invocation_caps_during_authorization_are_typed() {
+    let (fx, d) = published();
+    with_owner_reader(&fx, |reader| {
+        *fx.pipe.meta.request_budget.lock().unwrap() =
+            Some(crate::indexed::budget::SliceBudget::new(0));
+        assert_eq!(
+            block_on(reader.read_canonical(&[id(&d.small)]))
+                .unwrap_err()
+                .code(),
+            Code::ResourceExhausted
+        );
+        assert_eq!(
+            block_on(reader.object_metadata(&[id(&d.small)]))
+                .unwrap_err()
+                .code(),
+            Code::ResourceExhausted
+        );
+    });
+    let reader = block_on(
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Public),
+    )
+    .unwrap();
+    for target in [id(&d.small), [91; 32]] {
+        assert_eq!(
+            block_on(reader.read_canonical(&[target]))
+                .unwrap_err()
+                .code(),
+            Code::ResourceExhausted
+        );
+    }
+}
+
+#[test]
+fn inherited_url_issuance_authorization_caps_are_typed() {
+    let (fx, d) = url_fixture();
+    *fx.pipe.meta.request_budget.lock().unwrap() =
+        Some(crate::indexed::budget::SliceBudget::new(1));
+    let error = public_urls(&fx, &[UrlTarget::Object(id(&d.small))], 0).unwrap_err();
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(
+        error.public_message(),
+        crate::pipeline::OBJECT_READER_LIMIT_MESSAGE
+    );
+}
+
+fn overflow_member_candidates(fx: &Fx, target: Hash) {
+    let repo = fx.repo_id("room");
+    let partition = fx.pipe.shards.object_index(&repo, &target);
+    let row = crate::store::index::IndexValue {
+        frame_offset: 12,
+        frame_length: 15,
+        wire_type: 0,
+        decoded_size: 10,
+        chain_depth: 0,
+        delta_base: None,
+    };
+    let encoded = codec::encode_object_index(&target, &row).unwrap();
+    for chunk in (0..=crate::store::index::MAX_LOOKUP_ROWS)
+        .collect::<Vec<_>>()
+        .chunks(32)
+    {
+        let mut batch = Batch::new();
+        for index in chunk {
+            let mut pack = [0; 32];
+            pack[24..].copy_from_slice(&u64::try_from(*index).unwrap().to_be_bytes());
+            batch = batch.put(
+                keys::object_index(&repo.name, &target, &pack),
+                encoded.clone(),
+            );
+        }
+        block_on(fx.pipe.meta.inner.apply(&partition, batch)).unwrap();
+    }
+}
+
+#[test]
+fn public_membership_cap_preserves_other_proven_targets_with_denial_enabled() {
+    let fx = fixture_tweaked(Hooks::new(), http_cfg(), |c| c.takedown_denial = true);
+    let d = data();
+    fx.push("room", &d.refs(), d.head(), None);
+    overflow_member_candidates(&fx, id(&d.small));
+    let reader = block_on(
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Public),
+    )
+    .unwrap();
+    assert_eq!(
+        block_on(reader.read_canonical(&[id(&d.small), id(&d.big)])).unwrap(),
+        vec![None, Some(serialize(&d.big).unwrap())]
+    );
+    let rows = block_on(reader.object_metadata(&[id(&d.small), id(&d.big)])).unwrap();
+    assert!(rows[0].is_none());
+    assert!(rows[1].is_some());
+}
+
+fn published_external_delta_member() -> (Fx, Hash, Hash) {
+    published_external_delta_member_with(fixture())
+}
+
+fn published_external_delta_member_with(fx: Fx) -> (Fx, Hash, Hash) {
+    let base = blob(b"base payload");
+    let old_root = tree(&[("base", EntryMode::Blob, &base)]);
+    let old_head = commit(&old_root, &[], "old");
+    let old_pack = fx.push("room", &[&base, &old_root, &old_head], id(&old_head), None);
+    let derived = blob(b"derived payload");
+    let root = tree(&[("derived", EntryMode::Blob, &derived)]);
+    let head = commit(&root, &[], "derived");
+    let mut writer = PackWriter::new();
+    writer
+        .push_delta(
+            &id(&base),
+            &mkit_core::delta::encode(&serialize(&base).unwrap(), &serialize(&derived).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+    for object in [&root, &head] {
+        writer
+            .push_raw(id(object), &serialize(object).unwrap())
+            .unwrap();
+    }
+    let (outcome, _) = fx.push_pack(
+        "room",
+        &writer.finish().unwrap(),
+        (HEAD, PACKMAP),
+        id(&head),
+        (Match(id(&old_head)), Match(old_pack)),
+    );
+    assert_eq!(outcome, AdvanceOutcome::Committed);
+    (fx, id(&base), id(&derived))
+}
+
+#[test]
+fn external_delta_base_membership_caps_are_typed_for_owner_reads() {
+    let (fx, base, target) = published_external_delta_member();
+    overflow_member_candidates(&fx, base);
+    with_owner_reader(&fx, |reader| {
+        assert_eq!(
+            block_on(reader.read_canonical(&[target]))
+                .unwrap_err()
+                .code(),
+            Code::ResourceExhausted
+        );
+        assert_eq!(
+            block_on(reader.object_metadata(&[target]))
+                .unwrap_err()
+                .code(),
+            Code::ResourceExhausted
+        );
+    });
+}
+
+#[test]
+fn reader_delta_depth_caps_are_typed_without_changing_http_errors() {
+    let (mut fx, _, target) = published_external_delta_member();
+    fx.pipe.cfg.indexed.as_mut().unwrap().max_delta_chain_depth = 0;
+    with_owner_reader(&fx, |reader| {
+        assert_eq!(
+            block_on(reader.read_canonical(&[target]))
+                .unwrap_err()
+                .code(),
+            Code::ResourceExhausted
+        );
+        assert_eq!(
+            block_on(reader.object_metadata(&[target]))
+                .unwrap_err()
+                .code(),
+            Code::ResourceExhausted
+        );
+    });
+    assert_eq!(fx.get(&fx.object_url("room", &target)).status, 503);
+}
+
+#[test]
+fn proven_public_metadata_depth_cap_is_typed() {
+    let (mut fx, _, target) = published_external_delta_member();
+    fx.pipe.cfg.indexed.as_mut().unwrap().max_delta_chain_depth = 0;
+    let reader = block_on(
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Public),
+    )
+    .unwrap();
+    let error = block_on(reader.object_metadata(&[target])).unwrap_err();
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(
+        error.public_message(),
+        crate::pipeline::OBJECT_READER_LIMIT_MESSAGE
+    );
+}
+
+#[test]
+fn proven_public_metadata_base_membership_cap_is_typed() {
+    let (fx, base, target) = published_external_delta_member();
+    overflow_member_candidates(&fx, base);
+    let reader = block_on(
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Public),
+    )
+    .unwrap();
+    let error = block_on(reader.object_metadata(&[target])).unwrap_err();
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(
+        error.public_message(),
+        crate::pipeline::OBJECT_READER_LIMIT_MESSAGE
+    );
+}
+
+fn denial_fixture() -> (Fx, Hash, Hash) {
+    published_external_delta_member_with(fixture_tweaked(Hooks::new(), http_cfg(), |c| {
+        c.takedown_denial = true;
+    }))
+}
+
+fn assert_typed_exhaustion(error: &ServerError) {
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(
+        error.public_message(),
+        crate::pipeline::OBJECT_READER_LIMIT_MESSAGE
+    );
+}
+
+fn assert_denial_caps_typed(fx: &Fx, target: Hash) {
+    let public = block_on(
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Public),
+    )
+    .unwrap();
+    assert_typed_exhaustion(&block_on(public.read_canonical(&[target])).unwrap_err());
+    assert_typed_exhaustion(&block_on(public.object_metadata(&[target])).unwrap_err());
+    with_owner_reader(fx, |reader| {
+        assert_typed_exhaustion(&block_on(reader.read_canonical(&[target])).unwrap_err());
+        assert_typed_exhaustion(&block_on(reader.object_metadata(&[target])).unwrap_err());
+    });
+}
+
+#[test]
+fn denial_traversal_depth_cap_is_typed_for_public_and_owner_reads() {
+    let (mut fx, _, target) = denial_fixture();
+    fx.pipe.cfg.indexed.as_mut().unwrap().max_delta_chain_depth = 0;
+    assert_denial_caps_typed(&fx, target);
+}
+
+#[test]
+fn denial_traversal_base_membership_cap_is_typed_for_public_and_owner_reads() {
+    let (fx, base, target) = denial_fixture();
+    overflow_member_candidates(&fx, base);
+    assert_denial_caps_typed(&fx, target);
+}
+
+#[test]
+fn corrupt_delta_cycles_remain_unavailable_instead_of_read_exhaustion() {
+    let (fx, base, target) = published_external_delta_member();
+    let repo = fx.repo_id("room");
+    let view = crate::store::view::ViewStore {
+        store: &fx.pipe.meta,
+        repo: &repo,
+        writer: true,
+        policy: None,
+    };
+    let located = block_on(crate::indexed::resolve::locate_split(
+        &view,
+        fx.pipe.shards.as_ref(),
+        &repo,
+        &[base],
+        fx.pipe.metrics.as_ref(),
+    ))
+    .unwrap()
+    .remove(&base)
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    let mut row = located.value;
+    row.delta_base = Some(target);
+    row.wire_type = 2;
+    row.chain_depth = 1;
+    block_on(fx.pipe.meta.inner.apply(
+        &fx.pipe.shards.object_index(&repo, &base),
+        Batch::new().put(
+            keys::object_index(&repo.name, &base, &located.pack),
+            codec::encode_object_index(&base, &row).unwrap(),
+        ),
+    ))
+    .unwrap();
+    with_owner_reader(&fx, |reader| {
+        assert_eq!(
+            block_on(reader.read_canonical(&[target]))
+                .unwrap_err()
+                .code(),
+            Code::Unavailable
+        );
+    });
+    assert_eq!(fx.get(&fx.object_url("room", &target)).status, 503);
 }
 
 #[test]
