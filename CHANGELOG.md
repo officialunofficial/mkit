@@ -184,6 +184,11 @@ supported after new reservation rows are written.
 
 ### Fixed
 
+- The public hook golden-request test expects all 18 requests, including
+  visibility and repository-storage outcomes, and checks that every fixture
+  field survives protobuf decoding. The stale 16-request assertion failed
+  both the macOS and Cloud Build main test gates.
+
 - Publication limit-reached telemetry counts only newly committed foreground
   stops that answer `unavailable`, excluding checkpoint conflicts and input
   limits. Per-target URL issuance preserves typed authorization errors after

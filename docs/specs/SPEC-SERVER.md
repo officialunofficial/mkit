@@ -4137,6 +4137,13 @@ The fixtures under `rust/tests/golden/server-hooks/` are the authoritative
 pinned bytes, as [SPEC-CONVENTIONS §5](SPEC-CONVENTIONS.md#5-golden-vectors-and-conformance-tests)
 requires. These anchors are informative descriptions of those bytes.
 
+`mkit-rpc::hooks_public::decode_every_golden_request` decodes every request
+through the public hook types and checks protobuf and JSON round trips,
+including equality with every field of the original JSON fixture. When adding
+request vectors, update its exact request count alongside this table and
+`scripts/check-server-hooks-goldens.sh`. Keep the field-preservation assertion:
+round-tripping only the decoded message can miss fields discarded at decode.
+
 | Golden file | Contract pinned |
 |---|---|
 | `authorize.request.json` | Operation, signer principal, and intended ref changes (§6.2). |
