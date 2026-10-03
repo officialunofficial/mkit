@@ -833,7 +833,12 @@ fn full_pending_reservation_is_retryable() {
     let req = request(Procedure::UpdateRef, &identity("new-repo"), Some(&key(1)));
     let a = e.auth(&req).unwrap();
     let partition = e.pipe.shards.coordinator(&a.repo().repo.namespace);
-    let error = block_on(e.pipe.record_pending(&a, &partition, "rid")).unwrap_err();
+    let error =
+        block_on(
+            e.pipe
+                .record_pending(&a, &partition, "rid", codec::StoredProcedure::UpdateRef),
+        )
+        .unwrap_err();
     assert_full(&e, &error);
 }
 

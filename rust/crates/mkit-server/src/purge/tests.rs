@@ -321,6 +321,7 @@ async fn purge_first_paid_terminal() -> (MemoryKv, Partition, Request, crate::Ma
         created_at_ms: 10,
         reconcile_at_ms: 60010,
         op: PendingOp::Read,
+        procedure: None,
     });
     let mut batch = Batch::new();
     let mut pending = OutboxBuilder::new(
@@ -358,6 +359,7 @@ async fn purge_first_paid_terminal() -> (MemoryKv, Partition, Request, crate::Ma
             occurred_at_ms: 20,
             object: [7; 32],
             bytes_served: 123,
+            procedure: None,
         })
         .unwrap(),
     );
@@ -690,6 +692,7 @@ async fn stale_zero_backlog_drain_cannot_delete_new_outcome_or_its_wake() {
             occurred_at_ms: 20,
             reason: codec::AbortReason::Unspecified,
             detail: String::new(),
+            procedure: None,
         })
         .unwrap(),
     );

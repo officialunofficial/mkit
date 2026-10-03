@@ -8,7 +8,7 @@ use super::{
     ServerError, ShardMap, Snapshot, StorageOp, codec, internal, keys, meta_error, ms, store_error,
 };
 use crate::repo::RepoId;
-use crate::store::codec::{AbortReason, OutcomeRef, ReservationV1, TicketV1};
+use crate::store::codec::{AbortReason, OutcomeRef, ReservationV1, StoredProcedure, TicketV1};
 use crate::store::outbox::{OutboxBuilder, Terminal};
 use crate::store::tickets::{self, CloseReason};
 use crate::store::{
@@ -214,6 +214,7 @@ pub(super) fn plan_consumption(
                 // Opaque M1 has no global content index; this is an upper bound (WP-3.3).
                 new_to_store: t.bytes,
                 refs: outcome_refs.clone(),
+                procedure: Some(StoredProcedure::AdvanceRefs),
             })
             .map_err(meta_error)?,
         );
@@ -379,6 +380,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         occurred_at_ms: now,
                         reason: AbortReason::PackMissing,
                         detail: "ticket pack missing after upload".into(),
+                        procedure: Some(StoredProcedure::AdvanceRefs),
                     })
                     .map_err(meta_error)?,
                 );

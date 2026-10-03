@@ -451,6 +451,7 @@ mod tests {
                     new_to_repo: 1,
                     new_to_store: 1,
                     refs: vec![],
+                    procedure: None,
                 })
                 .unwrap(),
             );
@@ -515,6 +516,7 @@ mod tests {
                     occurred_at_ms: 100,
                     reason: codec::AbortReason::RefConflict,
                     detail: String::new(),
+                    procedure: None,
                 })
                 .unwrap(),
             );

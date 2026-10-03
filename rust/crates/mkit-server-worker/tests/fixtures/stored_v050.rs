@@ -98,61 +98,37 @@ macro_rules! tests {
         #[test]
         fn v050_stored_encodings() {
             futures::executor::block_on(async {
-                let source = mkit_server::MemoryKv::default();
-                let partition = mkit_server::Partition::Coordinator(
-                    mkit_server::NamespaceKey::deployment_default(),
-                );
                 let local = LocalCache { cache: Cache };
-                let invalidator = NamespaceCache {
-                    local: &local,
-                    source: &source,
-                    remote: &source,
-                    partition: &partition,
-                    sharding: mkit_server::pipeline::Sharding::D34,
-                    single: None,
-                };
                 let request = Request {
                     purge_id: "golden".into(),
                     audience: "https://server.example".into(),
                     repository: String::new(),
                     namespace: "root".into(),
                     trigger: mkit_server::purge::Trigger::Suspension,
-                    url_paths: vec!["/object".into()],
+                    url_paths: Vec::new(),
                     object_ids: Vec::new(),
                     refs: Vec::new(),
                 };
-                for (expected, resumed_repository) in [
-                    (
-                        crate::stored_golden::row_fixture!("purge-NamespacePosition-empty", b""),
-                        false,
-                    ),
-                    (
-                        crate::stored_golden::row_fixture!(
-                            "purge-NamespacePosition-populated",
-                            b""
-                        ),
-                        true,
-                    ),
+                for expected in [
+                    crate::stored_golden::row_fixture!("purge-NamespacePosition-empty", b""),
+                    crate::stored_golden::row_fixture!("purge-NamespacePosition-populated", b""),
                 ] {
                     let row: NamespacePosition =
                         serde_json::from_slice(expected.as_bytes()).unwrap();
                     assert_eq!(serde_json::to_vec(&row).unwrap(), expected.as_bytes());
-                    let restored = invalidator
-                        .invalidate_checkpoint(&request, expected.as_bytes(), &SliceBudget::new(0))
-                        .await
-                        .unwrap()
-                        .unwrap();
-                    if resumed_repository {
-                        // A repository step has no cache keys beyond the intent's
-                        // paths, so a restored mid-repository position completes
-                        // that repository and keeps the catalog cursor.
-                        let mut next = row;
-                        next.repository = None;
-                        next.cursor = 0;
-                        assert_eq!(restored, serde_json::to_vec(&next).unwrap());
-                    } else {
-                        assert_eq!(restored, expected.as_bytes());
-                    }
+                    // The catalog walk is gone, so a restored v0.5.0 position
+                    // is complete once its (here empty) path deletion is.
+                    assert!(
+                        local
+                            .invalidate_checkpoint(
+                                &request,
+                                expected.as_bytes(),
+                                &SliceBudget::new(0)
+                            )
+                            .await
+                            .unwrap()
+                            .is_none()
+                    );
                 }
             });
         }

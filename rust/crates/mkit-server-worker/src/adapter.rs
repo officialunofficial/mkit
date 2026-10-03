@@ -2961,23 +2961,11 @@ mod glue {
                 registry.register(custom.delivery(budget.clone()))
             } else {
                 match crate::hooks::build::purge_from_env(env, cfg) {
-                    Ok(Some(sink)) => registry.register(crate::purge::NamespaceDelivery {
-                        delivery: mkit_server::purge::PurgeDelivery::new(
-                            Arc::new(mkit_server::purge::NoLocalCache),
-                            Some(Arc::new(sink)),
-                            budget.clone(),
-                        ),
-                        local: crate::purge::local_cache(),
-                        remote: WorkerNamespaceStore::new(
-                            StubTransport::new(env.clone(), cfg.placement.clone()),
-                            cfg.probe_partition(),
-                        ),
-                        sharding: cfg.sharding,
-                        single: match &cfg.addressing {
-                            mkit_server::Addressing::Single { repo } => Some(repo.clone()),
-                            _ => None,
-                        },
-                    }),
+                    Ok(Some(sink)) => registry.register(mkit_server::purge::PurgeDelivery::new(
+                        Arc::new(crate::purge::local_cache()),
+                        Some(Arc::new(sink)),
+                        budget.clone(),
+                    )),
                     Ok(None) => registry,
                     Err(error) => {
                         crate::log_failure(&format!("purge sink unavailable: {error}"));

@@ -5,7 +5,7 @@ use mkit_core::write_auth::MAX_CLOCK_LEAD_MS;
 use super::{Authenticated, Pipeline, meta_error, ms};
 use crate::error::{AbortCause, Code, ServerError};
 use crate::pipeline::HookSet;
-use crate::store::codec::{self, AbortReason, PendingOp, ReservationV1};
+use crate::store::codec::{self, AbortReason, PendingOp, ReservationV1, StoredProcedure};
 use crate::store::outbox::{OutboxBuilder, Terminal};
 use crate::store::{
     Batch, BatchOutcome, Key, MultipartBlobStore, NamespaceStore, Partition, Precondition, Value,
@@ -20,6 +20,8 @@ pub(crate) struct PendingGuard {
     pub(crate) value: Value,
     pub(crate) apply_deadline_ms: u64,
     pub(crate) repository: String,
+    /// The operation the reservation admitted, copied to its terminal row.
+    pub(crate) procedure: Option<StoredProcedure>,
 }
 
 /// Margin beyond the maximum permitted backend clock lead.
@@ -32,6 +34,7 @@ pub(crate) fn read_pending(
     created_at_ms: u64,
     deadline_ms: u64,
     read_reconcile_grace: core::time::Duration,
+    procedure: StoredProcedure,
 ) -> ReservationV1 {
     ReservationV1::Pending {
         repository,
@@ -39,6 +42,7 @@ pub(crate) fn read_pending(
         reconcile_at_ms: deadline_ms
             .saturating_add(u64::try_from(read_reconcile_grace.as_millis()).unwrap_or(u64::MAX)),
         op: PendingOp::Read,
+        procedure: Some(procedure),
     }
 }
 
@@ -106,6 +110,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 occurred_at_ms: ms(self.clock.now_ms()),
                 reason: AbortReason::Unspecified,
                 detail: "reservations unsupported on this transport".into(),
+                procedure: Some(StoredProcedure::UploadPack),
             })
             .map_err(meta_error)?;
             builder.abort_direct(rid, terminal);
@@ -129,6 +134,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         a: &Authenticated,
         partition: &Partition,
         rid: &str,
+        procedure: StoredProcedure,
     ) -> Result<PendingGuard, ServerError> {
         let now = ms(self.clock.now_ms());
         let apply_deadline_ms = now
@@ -146,6 +152,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             created_at_ms: now,
             reconcile_at_ms,
             op: PendingOp::Write,
+            procedure: Some(procedure),
         };
         let value = codec::encode_reservation(&pending);
         let mut builder = OutboxBuilder::new(None, None).map_err(meta_error)?;
@@ -164,6 +171,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 value,
                 apply_deadline_ms,
                 repository: a.repo().identity.clone(),
+                procedure: Some(procedure),
             }),
             BatchOutcome::PreconditionFailed { .. } => {
                 Err(ServerError::unavailable("admission unavailable"))
@@ -219,6 +227,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 occurred_at_ms: ms(self.clock.now_ms()),
                 reason,
                 detail: detail.clone(),
+                procedure: pending.procedure,
             };
             builder.outcome(
                 &pending.rid,
@@ -252,14 +261,21 @@ mod tests {
 
     #[test]
     fn read_planner_uses_sixty_second_reconcile_grace() {
-        let pending = read_pending("repo".into(), 1, 10_000, core::time::Duration::from_mins(1));
+        let pending = read_pending(
+            "repo".into(),
+            1,
+            10_000,
+            core::time::Duration::from_mins(1),
+            StoredProcedure::HttpGetObject,
+        );
         assert_eq!(
             pending,
             ReservationV1::Pending {
                 repository: "repo".into(),
                 created_at_ms: 1,
                 reconcile_at_ms: 70_000,
-                op: PendingOp::Read
+                op: PendingOp::Read,
+                procedure: Some(StoredProcedure::HttpGetObject),
             }
         );
         let value = codec::encode_reservation(&pending);
@@ -272,6 +288,7 @@ mod tests {
                 occurred_at_ms: 10_500,
                 object: [1; 32],
                 bytes_served: 7,
+                procedure: Some(StoredProcedure::HttpGetObject),
             })
             .unwrap(),
         );

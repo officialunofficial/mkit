@@ -3,7 +3,9 @@
 use core::time::Duration;
 
 use crate::error::Redacted;
+use crate::op::Procedure;
 use crate::store::codec::{AbortReason, OutcomeRef, ReservationV1};
+use mkit_attest::grant::Visibility;
 
 /// One durable reservation result. Delivery is at least once.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +21,14 @@ pub struct Outcome {
     pub occurred_unix_ms: i64,
     /// Terminal result payload.
     pub kind: OutcomeKind,
+    /// The operation that produced the outcome: `UpdateRef`, `AdvanceRefs`
+    /// (including each consumed ticket's outcome), `BeginUpload` (a ticket
+    /// that expired), `UploadPack`, `SetRepoVisibility`, or an HTTP read.
+    /// `None` only for an outcome written by v0.5.0, which did not record it.
+    pub procedure: Option<Procedure>,
+    /// The visibility a [`Procedure::SetRepoVisibility`] outcome set or
+    /// attempted; `None` for every other outcome.
+    pub visibility: Option<Visibility>,
 }
 
 /// Hooks.v1 terminal variants, field for field.
@@ -50,6 +60,7 @@ impl Outcome {
         audience: String,
         row: ReservationV1,
     ) -> Result<Self, &'static str> {
+        let recorded = row.procedure();
         let (repository, occurred, kind) = match row {
             ReservationV1::Committed {
                 repository,
@@ -58,6 +69,7 @@ impl Outcome {
                 new_to_repo,
                 new_to_store,
                 refs,
+                ..
             } => (
                 repository,
                 occurred_at_ms,
@@ -73,6 +85,7 @@ impl Outcome {
                 occurred_at_ms,
                 reason,
                 detail,
+                ..
             } => (
                 repository,
                 occurred_at_ms,
@@ -87,6 +100,7 @@ impl Outcome {
                 occurred_at_ms,
                 object,
                 bytes_served,
+                ..
             } => (
                 repository,
                 occurred_at_ms,
@@ -99,12 +113,23 @@ impl Outcome {
                 return Err("outcome row is not terminal");
             }
         };
+        // An expired reservation is always an unconsumed ticket's.
+        let recorded = match (&kind, recorded) {
+            (OutcomeKind::Expired, None) => Some(crate::store::codec::StoredProcedure::BeginUpload),
+            (_, recorded) => recorded,
+        };
+        let (procedure, visibility) = recorded.map_or((None, None), |recorded| {
+            let (procedure, visibility) = recorded.parts();
+            (Some(procedure), visibility)
+        });
         Ok(Self {
             reservation_id,
             audience,
             repository,
             occurred_unix_ms: i64::try_from(occurred).map_err(|_| "outcome timestamp overflow")?,
             kind,
+            procedure,
+            visibility,
         })
     }
 }

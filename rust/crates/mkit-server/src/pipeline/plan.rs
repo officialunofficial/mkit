@@ -647,6 +647,7 @@ pub(crate) fn plan_write(
                     occurred_at_ms: clock.plan_time_ms,
                     reason: codec::AbortReason::RefConflict,
                     detail: String::new(),
+                    procedure: pending.procedure,
                 }
             } else {
                 codec::ReservationV1::Committed {
@@ -664,6 +665,7 @@ pub(crate) fn plan_write(
                             deleted: update.new.is_none(),
                         })
                         .collect(),
+                    procedure: pending.procedure,
                 }
             };
             outbox.outcome(
@@ -868,7 +870,7 @@ pub(crate) fn epoch_moved() -> ServerError {
 
 /// Evaluate one charge and add its guard and writes, keeping the window
 /// index (`qx`) one-to-one with live quota rows.
-fn plan_charge(
+pub(super) fn plan_charge(
     charge: &QuotaCharge,
     snap: &Snapshot,
     now: i64,

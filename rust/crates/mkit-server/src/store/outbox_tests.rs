@@ -37,6 +37,7 @@ fn pending(op: codec::PendingOp) -> Value {
         created_at_ms: 1,
         reconcile_at_ms: 60_001,
         op,
+        procedure: None,
     })
 }
 
@@ -78,18 +79,21 @@ fn reservation_transition_table_and_kick_invariant() {
         new_to_repo: 0,
         new_to_store: 0,
         refs: Vec::new(),
+        procedure: None,
     };
     let aborted = ReservationV1::Aborted {
         repository: "repo".into(),
         occurred_at_ms: 10,
         reason: AbortReason::Unspecified,
         detail: String::new(),
+        procedure: None,
     };
     let read = ReservationV1::ReadServed {
         repository: "repo".into(),
         occurred_at_ms: 10,
         object: [1; 32],
         bytes_served: 8,
+        procedure: None,
     };
     let expired = ReservationV1::Expired {
         repository: "repo".into(),
@@ -279,6 +283,7 @@ fn backlog_bytes_are_exact_after_outcomes_and_each_ack() {
             occurred_at_ms: 200,
             reason: AbortReason::Abandoned,
             detail: "diagnostic".repeat(20),
+            procedure: None,
         })
         .unwrap(),
     );
@@ -501,6 +506,7 @@ fn stale_ticketed_snapshot_cannot_replace_a_committed_terminal_outcome() {
             occurred_at_ms: 300,
             reason: AbortReason::Internal,
             detail: "late failure".into(),
+            procedure: None,
         })
         .unwrap(),
     );

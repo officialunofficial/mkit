@@ -88,14 +88,14 @@ async fn open<S: NamespaceStore>(
 }
 
 fn terminal(spec: &TicketSpec) -> Result<Terminal, String> {
-    Ok(ok!(Terminal::new(ReservationV1::Committed {
-        repository: spec.repo.as_str().into(),
-        occurred_at_ms: 1_500,
-        bytes_stored: spec.bytes,
-        new_to_repo: spec.bytes,
-        new_to_store: spec.bytes,
-        refs: vec![],
-    })))
+    Ok(ok!(Terminal::new(ReservationV1::committed(
+        spec.repo.as_str().into(),
+        1_500,
+        spec.bytes,
+        spec.bytes,
+        spec.bytes,
+        vec![]
+    ))))
 }
 
 /// Compose the same fragments a ticket-consuming advance composes.
@@ -411,12 +411,7 @@ pub async fn kv_pending_terminal_arbitration<H: KvHarness>(h: H) -> Outcome {
     gate!(need_all_classes(&s, &p).await);
     gate!(need_atomic(&s, &p).await);
     for (rid, op) in [("write", PendingOp::Write), ("read", PendingOp::Read)] {
-        let pending = ReservationV1::Pending {
-            repository: "conformance".into(),
-            created_at_ms: 100,
-            reconcile_at_ms: 200,
-            op,
-        };
+        let pending = ReservationV1::pending("conformance".into(), 100, 200, op);
         let prior = codec::encode_reservation(&pending);
         let mut builder = ok!(OutboxBuilder::new(None, None));
         builder.pending(rid, None, &pending);
@@ -433,27 +428,17 @@ pub async fn kv_pending_terminal_arbitration<H: KvHarness>(h: H) -> Outcome {
         );
 
         let committed = match op {
-            PendingOp::Write => ReservationV1::Committed {
-                repository: "conformance".into(),
-                occurred_at_ms: 150,
-                bytes_stored: 0,
-                new_to_repo: 0,
-                new_to_store: 0,
-                refs: vec![],
-            },
-            PendingOp::Read => ReservationV1::ReadServed {
-                repository: "conformance".into(),
-                occurred_at_ms: 150,
-                object: [9; 32],
-                bytes_served: 7,
-            },
+            PendingOp::Write => {
+                ReservationV1::committed("conformance".into(), 150, 0, 0, 0, vec![])
+            }
+            PendingOp::Read => ReservationV1::read_served("conformance".into(), 150, [9; 32], 7),
         };
-        let abandoned = ReservationV1::Aborted {
-            repository: "conformance".into(),
-            occurred_at_ms: 201,
-            reason: AbortReason::Abandoned,
-            detail: String::new(),
-        };
+        let abandoned = ReservationV1::aborted(
+            "conformance".into(),
+            201,
+            AbortReason::Abandoned,
+            String::new(),
+        );
         let os = ok!(s.get(&p, &keys::outbox_sequence()).await);
         let oc = ok!(s.get(&p, &keys::outcome_backlog()).await);
         let mut winner = ok!(OutboxBuilder::new(os.as_ref(), oc.as_ref()));

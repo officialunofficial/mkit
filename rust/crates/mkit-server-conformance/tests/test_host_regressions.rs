@@ -97,14 +97,14 @@ async fn pending_outcome_sink_returns_a_bounded_error_and_retains_work() {
         )
         .await
         .unwrap();
-    let terminal = outbox::Terminal::new(codec::ReservationV1::Committed {
-        repository: "default".into(),
-        occurred_at_ms: u64::try_from(host.clock().now_ms()).unwrap(),
-        bytes_stored: 0,
-        new_to_repo: 0,
-        new_to_store: 0,
-        refs: Vec::new(),
-    })
+    let terminal = outbox::Terminal::new(codec::ReservationV1::committed(
+        "default".into(),
+        u64::try_from(host.clock().now_ms()).unwrap(),
+        0,
+        0,
+        0,
+        Vec::new(),
+    ))
     .unwrap();
     let mut outbox = outbox::OutboxBuilder::new(None, None).unwrap();
     outbox.outcome("pending-sink", &prior, terminal);

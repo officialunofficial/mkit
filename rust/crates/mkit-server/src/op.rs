@@ -338,8 +338,9 @@ pub enum OpKind {
         /// Pack digest.
         key: PackKey,
     },
-    /// Set the repository's visibility (envelope mode only; a
-    /// `signed_statement` request never becomes an `Operation`).
+    /// Set the repository's visibility, in the envelope mode and in the
+    /// statement mode (whose operation has no signed envelope and is
+    /// attributed to the namespace owner).
     SetRepoVisibility {
         /// The visibility to store.
         visibility: mkit_attest::grant::Visibility,
