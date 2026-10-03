@@ -187,30 +187,7 @@ fn run(count: usize, len: usize, chunked: bool, delay: i64, custom_policy: bool)
             result.as_ref().map_err(|e| (e.code(), e.public_message()))
         );
         match result {
-            Err(error) if custom_policy => {
-                assert_eq!(error.code(), Code::InvalidArgument);
-                assert_eq!(
-                    error.public_message(),
-                    crate::indexed::resolve::DECODE_BUDGET_MESSAGE
-                );
-                assert_eq!(continuation_rounds, 0);
-                assert_eq!(
-                    block_on(
-                        env.pipe
-                            .meta
-                            .get(&source, &keys::ref_key(&auth.repo().repo.name, HEAD))
-                    )
-                    .unwrap(),
-                    None,
-                    "canonical fallback exhaustion never moves refs"
-                );
-                break;
-            }
             Ok(AdvanceOutcome::Committed) => {
-                assert!(
-                    !custom_policy,
-                    "canonical fallback must refuse this closure"
-                );
                 assert_eq!(directory_scans, 16);
                 assert!(env.clock.now_ms() - sim < 1000);
                 break;
@@ -267,6 +244,6 @@ fn empty_directory_advance_has_commit_window_headroom() {
     run(1, 20, false, 3, false);
 }
 #[test]
-fn custom_publication_policy_retains_canonical_memory_bound() {
+fn custom_publication_policy_publishes_without_historical_decode_clamp() {
     run(9, (1 << 20) - 10, false, 0, true);
 }

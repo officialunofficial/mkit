@@ -57,6 +57,15 @@ pub(super) fn environment_with_policy(
 }
 
 pub(super) fn signed(owner: &SigningKey, identity: &str, procedure: Procedure, number: u32) -> Req {
+    signed_at(owner, identity, procedure, number, T0)
+}
+pub(super) fn signed_at(
+    owner: &SigningKey,
+    identity: &str,
+    procedure: Procedure,
+    number: u32,
+    now: i64,
+) -> Req {
     let body = b"indexed-pipeline".to_vec();
     let digest = to_hex(&hash(&body));
     let commitment = format!("body:{digest}");
@@ -68,8 +77,8 @@ pub(super) fn signed(owner: &SigningKey, identity: &str, procedure: Procedure, n
         },
         procedure: procedure.connect_path(),
         commitment: &commitment,
-        created_at: T0,
-        expires_at: T0 + 300_000,
+        created_at: now,
+        expires_at: now + 300_000,
         nonce: &nonce,
     };
     let signature = owner.sign(&envelope.digest().unwrap());
@@ -83,8 +92,8 @@ pub(super) fn signed(owner: &SigningKey, identity: &str, procedure: Procedure, n
         ("x-signature", to_hex_bytes(&signature.to_bytes())),
         ("x-content-commitment", commitment),
         ("x-digest", digest),
-        ("x-created-at", T0.to_string()),
-        ("x-expires-at", (T0 + 300_000).to_string()),
+        ("x-created-at", now.to_string()),
+        ("x-expires-at", (now + 300_000).to_string()),
         ("idempotency-key", nonce),
     ] {
         request = request.header(name, &value);

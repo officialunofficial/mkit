@@ -2,7 +2,10 @@
 //! Immutable sealed inventories replace repeated canonical reconstruction.
 use super::{PairStore, capped, closed, unavailable};
 use crate::indexed::{IndexedConfig, budget::SliceBudget, resolve, state};
-use crate::pipeline::{D34Shards, ShardMap, SinglePartition, clearance::Immediate};
+use crate::pipeline::{
+    D34Shards, ShardMap, SinglePartition,
+    clearance::{Immediate, PublicationPolicy},
+};
 use crate::store::{
     keys,
     publication::{Advance, MAX_ADVANCE_ITEMS, Pair},
@@ -36,7 +39,7 @@ impl Exhaustion {
     fn error(self) -> ServerError {
         match self {
             Self::DecodeBudget => ServerError::invalid_argument(resolve::DECODE_BUDGET_MESSAGE),
-            Self::IndexCalls | Self::Traversal => capped(),
+            Self::IndexCalls | Self::Traversal => limit(),
         }
     }
 }
@@ -55,19 +58,43 @@ impl TerminalFailure {
     }
 }
 
+fn is_unbound(prior: &Hash) -> bool {
+    *prior == Hash::default()
+}
+
+/// An explicit new-work or state limit is a resource limit, never a closure
+/// refusal. Slice exhaustion alone never reaches this: it resumes on timer 12.
+fn limit() -> ServerError {
+    ServerError::resource_exhausted("object index limit exceeded")
+}
+
 /// Verified pack state may carry exactly one frozen pair's resumable evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)] // Persisted checkpoint flags.
 pub struct Progress {
     binding: Hash,
     value: Pair,
     generation: u64,
+    /// Digest of the prior publication state this proof was started against;
+    /// all zero for a proof written before it existed.
+    #[serde(default, skip_serializing_if = "is_unbound")]
+    prior: Hash,
+    /// Whether verified members outside the consumed packs may stand in for
+    /// their closure. A ref with no published value inherits nothing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    inherit: bool,
     additions: Vec<Hash>,
     next_packmap: Option<Hash>,
     chain: BTreeSet<Hash>,
     packs: BTreeSet<Hash>,
     queue: VecDeque<Hash>,
+    /// Objects of the consumed packs whose references were walked.
     visited: BTreeSet<Hash>,
+    /// Already-verified repository members that new content references. Their
+    /// own facts are reused, so their references are not walked again.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    inherited: BTreeSet<Hash>,
     dependencies: BTreeSet<Hash>,
     bases: BTreeSet<Hash>,
     bytes: u64,
@@ -91,13 +118,14 @@ struct BaseCursor {
 }
 impl Progress {
     pub(crate) fn validate(&self) -> Result<(), StoreError> {
-        let frozen = serde_json::to_vec(&(
-            self.value.clone(),
+        let frozen = frozen(
+            &self.value,
             self.generation,
-            self.additions.clone(),
+            &self.additions,
             self.byte_limit,
             self.depth_limit,
-        ))
+            self.prior,
+        )
         .map_err(|_| StoreError::Corrupt("invalid publication binding".into()))?;
         if hash(&frozen) != self.binding {
             return Err(StoreError::Corrupt("publication binding mismatch".into()));
@@ -107,6 +135,7 @@ impl Progress {
             self.packs.len(),
             self.queue.len(),
             self.visited.len(),
+            self.inherited.len(),
             self.dependencies.len(),
             self.bases.len(),
         ]
@@ -122,7 +151,9 @@ impl Progress {
                     || self.failure.is_some()
                     || self.terminal.is_some()
                     || self.missing
-                    || self.value.head.is_some_and(|h| !self.visited.contains(&h))
+                    || self.value.head.is_some_and(|h| {
+                        !self.visited.contains(&h) && !self.inherited.contains(&h)
+                    })
                     || self.value.packmap.is_some_and(|m| !self.chain.contains(&m))
                     || !self.chain.is_subset(&self.dependencies)
                     || !self.packs.is_subset(&self.dependencies))
@@ -132,6 +163,9 @@ impl Progress {
             ));
         }
         Ok(())
+    }
+    fn frontier(&self) -> Vec<Hash> {
+        self.inherited.iter().copied().collect()
     }
     fn result(
         &self,
@@ -181,6 +215,7 @@ fn bounded_state(state: &mut state::VerificationV1) -> Value {
         p.packs.clear();
         p.queue.clear();
         p.visited.clear();
+        p.inherited.clear();
         p.dependencies.clear();
         p.bases.clear();
         p.complete = false;
@@ -190,20 +225,85 @@ fn bounded_state(state: &mut state::VerificationV1) -> Value {
     state::encode(state)
 }
 
-fn binding(advance: &Advance, cfg: IndexedConfig) -> Result<Hash, ServerError> {
-    let bytes = serde_json::to_vec(&(
-        advance.value.clone(),
+// A proof written before the prior-state digest existed bound only the first
+// five values; keep decoding it.
+fn frozen(
+    value: &Pair,
+    generation: u64,
+    additions: &[Hash],
+    byte_limit: u64,
+    depth_limit: u32,
+    prior: Hash,
+) -> Result<Vec<u8>, serde_json::Error> {
+    if prior == Hash::default() {
+        serde_json::to_vec(&(value, generation, additions, byte_limit, depth_limit))
+    } else {
+        serde_json::to_vec(&(value, generation, additions, byte_limit, depth_limit, prior))
+    }
+}
+
+/// Bind the proposed pair, the consumed packs and the digest of the exact prior
+/// publication row (pair, sequence, boundary and generation).
+fn binding(advance: &Advance, cfg: IndexedConfig, prior: Hash) -> Result<Hash, ServerError> {
+    frozen(
+        &advance.value,
         advance.generation,
-        advance.additions.clone(),
+        &advance.additions,
         cfg.decode_budget,
         cfg.max_delta_chain_depth,
-    ))
-    .map_err(|_| unavailable())?;
-    Ok(hash(&bytes))
+        prior,
+    )
+    .map(|bytes| hash(&bytes))
+    .map_err(|_| unavailable())
+}
+
+/// The prior publication state a proof starts from.
+#[derive(Clone, Copy)]
+pub(crate) struct Prior {
+    /// Digest of the exact prior publication row.
+    pub digest: Hash,
+    /// The ref already has a published value whose closure was verified.
+    pub inherits: bool,
+}
+
+fn fresh(advance: &Advance, cfg: IndexedConfig, prior: Prior, wanted: Hash) -> Progress {
+    Progress {
+        binding: wanted,
+        value: advance.value.clone(),
+        generation: advance.generation,
+        prior: prior.digest,
+        inherit: prior.inherits,
+        additions: advance.additions.clone(),
+        next_packmap: advance.value.packmap,
+        chain: BTreeSet::new(),
+        packs: BTreeSet::new(),
+        queue: VecDeque::from_iter(advance.value.head),
+        visited: BTreeSet::new(),
+        inherited: BTreeSet::new(),
+        dependencies: BTreeSet::new(),
+        bases: BTreeSet::new(),
+        bytes: 0,
+        calls: 0,
+        byte_limit: cfg.decode_budget,
+        depth_limit: cfg.max_delta_chain_depth,
+        base_cursor: None,
+        failure: None,
+        terminal: None,
+        missing: false,
+        missing_base: false,
+        complete: false,
+    }
 }
 
 /// First slice may complete inline. Otherwise only verification state and timer
 /// are written; no ref, membership, outcome or ticket is accepted/consumed.
+///
+/// Returns the already-verified members that new content references (the
+/// frontier), which the caller still checks against fresh denial state.
+///
+/// The retained proof holds only immutable facts. Whether a pack may be served
+/// is mutable policy, so it is asked again on every call, including one that
+/// finds the proof already complete.
 #[allow(clippy::too_many_arguments)] // Immutable proof inputs plus the consuming request lag context.
 pub(crate) async fn prepare<S: NamespaceStore>(
     store: &S,
@@ -215,56 +315,81 @@ pub(crate) async fn prepare<S: NamespaceStore>(
     now: u64,
     metrics: &dyn crate::Metrics,
     created: u64,
-) -> Result<bool, ServerError> {
-    let Some(root) = advance.value.packmap else {
-        return Ok(false);
+    (prior, policy): (Prior, &dyn PublicationPolicy),
+) -> Result<Vec<Hash>, ServerError> {
+    let frontier = prepare_proof(
+        store, source, shards, repo, advance, cfg, now, metrics, created, prior,
+    )
+    .await?;
+    if advance
+        .dependencies
+        .iter()
+        .chain(&advance.external_bases)
+        .any(|pack| !policy.pack_available(repo, pack))
+    {
+        return Err(crate::indexed::verify::closure_error(
+            now,
+            created,
+            cfg.relay_lag_bound_ms,
+        ));
+    }
+    Ok(frontier)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_proof<S: NamespaceStore>(
+    store: &S,
+    source: &Partition,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    advance: &mut Advance,
+    cfg: IndexedConfig,
+    now: u64,
+    metrics: &dyn crate::Metrics,
+    created: u64,
+    prior: Prior,
+) -> Result<Vec<Hash>, ServerError> {
+    let wanted = binding(advance, cfg, prior.digest)?;
+    let root_state = match advance.value.packmap {
+        Some(root) => state::read(store, source, &repo.name, &root)
+            .await
+            .map_err(|_| unavailable())?
+            .map(|state| (root, state)),
+        None => None,
     };
-    let Some((mut state, prior)) = state::read(store, source, &repo.name, &root)
-        .await
-        .map_err(|_| unavailable())?
-    else {
-        return Ok(false);
+    // A pair without a packmap, or whose packmap has no verification row to
+    // carry a checkpoint, completes inside one slice or is refused.
+    let Some((root, (mut state, prior_raw))) = root_state else {
+        let mut progress = fresh(advance, cfg, prior, wanted);
+        slice(store, shards, repo, &mut progress, metrics, None).await?;
+        if !progress.complete
+            && progress.failure.is_none()
+            && progress.terminal.is_none()
+            && !progress.missing
+        {
+            return Err(limit());
+        }
+        return progress
+            .result(advance, now, created, cfg.relay_lag_bound_ms)
+            .map(|()| progress.frontier());
     };
     let state::VerificationV1::Verified { publication, .. } = &mut state else {
         return Err(crate::indexed::pending(1_000));
     };
-    let wanted = binding(advance, cfg)?;
     if let Some(progress) = publication
         .as_ref()
         .filter(|p| p.binding == wanted && !p.missing)
     {
         return progress
             .result(advance, now, created, cfg.relay_lag_bound_ms)
-            .map(|()| true);
+            .map(|()| progress.frontier());
     }
     let mut progress = if let Some(old) = publication.as_ref().filter(|p| p.binding == wanted) {
         let mut resumed = (**old).clone();
         resumed.missing = false;
         resumed
     } else {
-        Progress {
-            binding: wanted,
-            value: advance.value.clone(),
-            generation: advance.generation,
-            additions: advance.additions.clone(),
-            next_packmap: Some(root),
-            chain: BTreeSet::new(),
-            packs: BTreeSet::new(),
-            queue: VecDeque::from_iter(advance.value.head),
-            visited: BTreeSet::new(),
-            dependencies: BTreeSet::new(),
-            bases: BTreeSet::new(),
-            bytes: 0,
-            calls: 0,
-            byte_limit: cfg.decode_budget,
-            depth_limit: cfg.max_delta_chain_depth,
-            base_cursor: None,
-            failure: None,
-            terminal: None,
-            missing: false,
-            missing_base: false,
-            complete: false,
-        }
+        fresh(advance, cfg, prior, wanted)
     };
     // A retryable read failure still spent work. Persist its safe checkpoint
     // before returning the original storage refusal to the foreground caller.
@@ -289,7 +414,7 @@ pub(crate) async fn prepare<S: NamespaceStore>(
     let key = keys::verification(&repo.name, &root);
     let mut batch = Batch::new()
         .require(Precondition::NotAfter(now.saturating_add(10_000)))
-        .require(Precondition::Equals(key.clone(), prior))
+        .require(Precondition::Equals(key.clone(), prior_raw))
         .put(key.clone(), encoded);
     if !progress.complete
         && progress.failure.is_none()
@@ -314,11 +439,40 @@ pub(crate) async fn prepare<S: NamespaceStore>(
     }
     progress
         .result(advance, now, created, cfg.relay_lag_bound_ms)
-        .map(|()| true)
+        .map(|()| progress.frontier())
 }
 
 fn missing() -> ServerError {
     ServerError::unavailable("publication membership missing")
+}
+
+// One packmap node: membership, then its sealed length, predecessor and packs.
+async fn chain_node<S: NamespaceStore>(
+    store: &S,
+    live: &PairStore<'_, S>,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    progress: &mut Progress,
+    id: Hash,
+) -> Result<u64, ServerError> {
+    if !progress.chain.insert(id) {
+        return Err(capped());
+    }
+    if !progress.additions.contains(&id)
+        && !crate::store::read::is_member(live, shards, repo, &id, None)
+            .await
+            .map_err(|_| unavailable())?
+    {
+        return Err(missing());
+    }
+    let (length, prev, packs) = inventory::packlist_facts(store, &id)
+        .await
+        .map_err(|_| unavailable())?;
+    progress.next_packmap = prev;
+    progress.dependencies.insert(id);
+    progress.dependencies.extend(packs.iter().copied());
+    progress.packs.extend(packs);
+    Ok(length)
 }
 
 async fn one<S: NamespaceStore>(
@@ -340,45 +494,46 @@ async fn one<S: NamespaceStore>(
         return external_base(store, &live, shards, repo, progress, metrics).await;
     }
     if let Some(id) = progress.next_packmap {
-        if !progress.chain.insert(id) {
-            return Err(capped());
-        }
-        if !progress.additions.contains(&id)
-            && !crate::store::read::is_member(&live, shards, repo, &id, None)
-                .await
-                .map_err(|_| unavailable())?
-        {
-            return Err(missing());
-        }
-        let (length, prev, packs) = inventory::packlist_facts(store, &id)
-            .await
-            .map_err(|_| unavailable())?;
-        progress.next_packmap = prev;
-        progress.dependencies.insert(id);
-        progress.dependencies.extend(packs.iter().copied());
-        progress.packs.extend(packs);
-        return Ok(length);
+        return chain_node(store, &live, shards, repo, progress, id).await;
     }
     let Some(id) = progress.queue.pop_front() else {
         progress.complete = true;
         return Ok(0);
     };
-    if !progress.visited.insert(id) {
+    if progress.visited.contains(&id) || progress.inherited.contains(&id) {
         return Ok(0);
     }
+    // Coverage by the proposed packmap chain applies to every object touched.
     let closure = PairStore {
         store,
         repo,
         additions: &progress.additions,
-        packs: Some(&progress.packs),
+        packs: progress.value.packmap.is_some().then_some(&progress.packs),
         policy: &Immediate,
     };
-    let located = resolve::locate_split(&closure, shards, repo, &[id], metrics)
+    let found = resolve::locate_split(&closure, shards, repo, &[id], metrics)
         .await?
         .remove(&id)
         .ok_or_else(missing)?
-        .map_err(|_| capped())?
-        .ok_or_else(missing)?;
+        .map_err(|_| capped())?;
+    let Some(located) = found else {
+        // A member outside the proposed packmap is permanently uncovered; only
+        // a miss everywhere may still be membership lag.
+        if progress.value.packmap.is_some() {
+            let anywhere = PairStore {
+                packs: None,
+                ..closure
+            };
+            let member = resolve::locate_split(&anywhere, shards, repo, &[id], metrics)
+                .await?
+                .remove(&id)
+                .is_some_and(|row| matches!(row, Ok(Some(_))));
+            if member {
+                return Err(closed());
+            }
+        }
+        return Err(missing());
+    };
     inventory::seal(store, &located.pack)
         .await
         .map_err(|_| unavailable())?;
@@ -393,11 +548,24 @@ async fn one<S: NamespaceStore>(
         return Err(closed());
     }
     progress.dependencies.insert(located.pack);
+    // A member of an earlier pair was verified, with its whole closure, when it
+    // was admitted; its sealed facts stand in for walking it again. Only the
+    // consumed packs' own objects and references are new content.
+    if progress.inherit && !progress.additions.contains(&located.pack) {
+        progress.inherited.insert(id);
+        return Ok(0);
+    }
+    progress.visited.insert(id);
     for n in 0..row.references.pages.len() {
         let children = denial::page(store, &row.references, n).await?;
         for child in children {
-            if !progress.visited.contains(&child) && !progress.queue.contains(&child) {
-                if progress.visited.len() + progress.queue.len() >= MAX_ADVANCE_ITEMS {
+            if !progress.visited.contains(&child)
+                && !progress.inherited.contains(&child)
+                && !progress.queue.contains(&child)
+            {
+                if progress.visited.len() + progress.inherited.len() + progress.queue.len()
+                    >= MAX_ADVANCE_ITEMS
+                {
                     return Err(capped());
                 }
                 progress.queue.push_back(child);

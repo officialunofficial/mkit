@@ -44,6 +44,14 @@ pub(crate) struct PublicationWrite<'a> {
     pub source: &'a crate::Partition,
     pub shards: &'a dyn super::ShardMap,
     pub prepared: Option<&'a Advance>,
+    /// Verified repository members the new content references; each gets a
+    /// fresh denial check, since inherited content is not proved again.
+    pub frontier: &'a [Hash],
+    /// The proof inherited verified members; otherwise every reachable pack is
+    /// new to this ref and gets the fresh denial check.
+    pub inherits: bool,
+    /// One call allowance shared by preparation and final clearance.
+    pub budget: Option<&'a crate::indexed::budget::SliceBudget>,
 }
 
 pub(crate) fn resulting_pair(

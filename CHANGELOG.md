@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Publication verification reuses the sealed facts of objects that are already
+  verified repository members and is bounded by the new content of an advance.
+  Repositories with more than 4,096 reachable objects can keep publishing with
+  takedown enabled, and advances with a synchronous inspector or a custom
+  publication policy no longer fail once a few hundred objects are reachable.
+  A new reference to a denied member is still refused. An object that is only
+  inherited through a verified member is not proved again; immediate denial
+  hides it from readers. An explicit new-work or state limit returns
+  `resource_exhausted`. `indexed::publication::verify` and `verify_inspected`
+  are deprecated; the pipeline no longer calls them.
 - Owner object-reader authorization preserves `ResourceExhausted` when the
   caller's storage-call budget runs out during the repository-state lookup.
 

@@ -173,6 +173,9 @@ fn planned_ticket_publication(count: usize, d34: bool, retained: bool) -> Batch 
             source: &source,
             shards,
             prepared: Some(&record),
+            frontier: &[],
+            inherits: false,
+            budget: None,
         }),
         pending: None,
     };
@@ -5265,6 +5268,7 @@ fn admin_keys_cannot_authenticate_client_transport_principals() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One real guarded race fixture.
 fn prepared_publication_pair_cannot_survive_a_counterpart_guard_race() {
     use crate::store::publication::{Pair, Publication};
     let repo = repo();
@@ -5304,6 +5308,9 @@ fn prepared_publication_pair_cannot_survive_a_counterpart_guard_race() {
             source: &source,
             shards: &SinglePartition,
             prepared: Some(&prepared),
+            frontier: &[],
+            inherits: false,
+            budget: None,
         }),
     };
     let values = [
@@ -5371,4 +5378,5 @@ fn prepared_publication_pair_cannot_survive_a_counterpart_guard_race() {
 #[cfg(feature = "remote-hooks")]
 mod inspection_budget;
 
+mod publication_incremental;
 mod takedown_performance;

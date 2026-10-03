@@ -3447,6 +3447,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
     /// Stages 4 and 6: plan and apply, as one batch on an atomic store or
     /// as sequential single-ref batches on a non-atomic one.
+    #[allow(clippy::too_many_lines)] // Carries the prepared publication and its shared allowance.
     async fn plan_and_apply(
         &self,
         op: &Operation,
@@ -3476,6 +3477,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             })
             .map(implicit::implicit_packs);
         let advance = self.publication_ticket_write(op, a, p)?;
+        // Publication preparation and final clearance spend one allowance.
+        let budget = crate::indexed::budget::SliceBudget::new(9000);
         let mut req = WriteRequest {
             denial_ids: Some(denial_ids),
             denial_packs,
@@ -3510,6 +3513,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     source: p,
                     shards: self.shards.as_ref(),
                     prepared: None,
+                    frontier: &[],
+                    inherits: false,
+                    budget: Some(&budget),
                 },
             ),
             pending,
@@ -3532,6 +3538,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             implicit_ids.as_deref(),
             external_bases,
             inspected,
+            &budget,
         ))
         .await
         {
@@ -3546,8 +3553,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
             Err(error) => return Err(error),
         };
+        let (prepared, frontier, inherits) = match prepared {
+            Some((advance, frontier, inherits)) => (Some(advance), frontier, inherits),
+            None => (None, Vec::new(), false),
+        };
         if let Some(publication) = &mut req.publication {
             publication.prepared = prepared.as_ref();
+            publication.frontier = &frontier;
+            publication.inherits = inherits;
         }
         if caps.atomic_multi_key || replay.is_some() || !charges.is_empty() {
             return self.apply_atomic(op, a, p, &req, ahead).await;
@@ -3626,7 +3639,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         implicit_ids: Option<&[Hash]>,
         external_bases: &std::collections::BTreeSet<Hash>,
         inspected: Option<&mut crate::indexed::inspection::InspectionSet>,
-    ) -> Result<Option<crate::store::publication::Advance>, ServerError> {
+        budget: &crate::indexed::budget::SliceBudget,
+    ) -> Result<Option<(crate::store::publication::Advance, Vec<Hash>, bool)>, ServerError> {
         #[cfg(not(feature = "remote-hooks"))]
         let _ = repository;
         // Deletions establish an immediate boundary without consulting inspection
@@ -3685,38 +3699,55 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             let verification_set = inspected.as_deref_mut();
             #[cfg(not(feature = "remote-hooks"))]
             let verification_set = inspected;
-            self.verify_publication(
-                op,
-                p,
-                &mut prepared,
-                policy,
-                mkit_attest::grant::head_packmap(&crate::store::publication::sequence_ref(
-                    &req.refs[0].name,
-                ))
-                .is_some(),
-                external_bases,
-                verification_set,
-                req.advance
-                    .as_ref()
-                    .and_then(|a| {
-                        a.ids
-                            .iter()
-                            .filter_map(|id| {
-                                snapshot
-                                    .get(&keys::ticket(id))
-                                    .and_then(|raw| codec::decode_ticket(raw).ok())
-                                    .filter(|t| Some(t.pack_id) == pair.packmap)
-                                    .map(|t| t.created_at_ms)
-                            })
-                            .min()
-                    })
-                    .unwrap_or_else(|| {
-                        op.auth
-                            .as_ref()
-                            .map_or(ms(self.clock.now_ms()), |a| ms(a.created_at_ms))
-                    }),
-            )
-            .await?;
+            // The proof binds the exact prior publication row (pair, sequence,
+            // boundary and generation) it was started against. Only a ref that
+            // already has a published value inherits verified members.
+            let prior_row = snapshot.get(&keys::publication(
+                &op.repo.name,
+                &crate::store::publication::sequence_ref(&req.refs[0].name),
+            ));
+            let inherits = crate::store::publication::Publication::decode(prior_row)
+                .map_err(meta_error)?
+                .value
+                != crate::store::publication::Pair::default();
+            let prior = crate::indexed::publication::resume::Prior {
+                digest: mkit_core::hash::hash(prior_row.map_or(&[][..], Value::as_bytes)),
+                inherits,
+            };
+            let frontier = self
+                .verify_publication(
+                    op,
+                    p,
+                    &mut prepared,
+                    policy,
+                    mkit_attest::grant::head_packmap(&crate::store::publication::sequence_ref(
+                        &req.refs[0].name,
+                    ))
+                    .is_some(),
+                    external_bases,
+                    verification_set,
+                    (prior, budget),
+                    req.advance
+                        .as_ref()
+                        .and_then(|a| {
+                            a.ids
+                                .iter()
+                                .filter_map(|id| {
+                                    snapshot
+                                        .get(&keys::ticket(id))
+                                        .and_then(|raw| codec::decode_ticket(raw).ok())
+                                        .filter(|t| Some(t.pack_id) == pair.packmap)
+                                        .map(|t| t.created_at_ms)
+                                })
+                                .min()
+                        })
+                        .unwrap_or_else(|| {
+                            op.auth
+                                .as_ref()
+                                .map_or(ms(self.clock.now_ms()), |a| ms(a.created_at_ms))
+                        }),
+                )
+                .await?;
             #[cfg(feature = "remote-hooks")]
             if let Some(set) = inspected {
                 let assignment = if self.cfg.scanner_retrieval.is_some() {
@@ -3738,7 +3769,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 )
                 .await?;
             }
-            Ok(Some(prepared))
+            Ok(Some((prepared, frontier, inherits)))
         } else {
             Ok(None)
         }
@@ -3753,69 +3784,36 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         policy: &dyn clearance::PublicationPolicy,
         branch: bool,
         external_bases: &std::collections::BTreeSet<Hash>,
-        mut inspected: Option<&mut crate::indexed::inspection::InspectionSet>,
+        inspected: Option<&mut crate::indexed::inspection::InspectionSet>,
+        (prior, budget): (
+            crate::indexed::publication::resume::Prior,
+            &crate::indexed::budget::SliceBudget,
+        ),
         created: u64,
-    ) -> Result<(), ServerError> {
+    ) -> Result<Vec<Hash>, ServerError> {
         let indexed = self
             .cfg
             .indexed
             .ok_or_else(|| internal("publication requires indexed mode"))?;
-        let resumed = self.cfg.takedown_denial
-            && self.publication_policy.is_none()
-            && inspected.is_none()
-            && Box::pin(crate::indexed::publication::resume::prepare(
-                &self.meta,
-                p,
-                self.shards.as_ref(),
-                &op.repo,
-                prepared,
-                indexed,
-                ms(self.clock.now_ms()),
-                self.metrics.as_ref(),
-                created,
-            ))
-            .await?;
-        // The canonical fallback retains delta bases; only the metadata-only
-        // continuation can use the whole-job allowance without that residency.
-        let mut indexed = indexed;
-        if self.cfg.takedown_denial && !resumed {
-            indexed.decode_budget = indexed.decode_budget.min(8 << 20);
+        // Branch pairs cannot use a nonempty head with no reconstructing packmap.
+        if branch && prepared.value.head.is_some() && prepared.value.packmap.is_none() {
+            return Err(ServerError::invalid_argument("open closure"));
         }
-        // Pair verification and dependency visibility share one allocation.
-        let inspection_budget = crate::indexed::budget::SliceBudget::new(256);
-        let inspection_blobs =
-            crate::indexed::budget::Budgeted::new(&self.blobs, &inspection_budget);
-        let inspection_meta = crate::indexed::budget::Budgeted::new(&self.meta, &inspection_budget);
-        if let Some(set) = inspected.as_deref_mut() {
-            crate::indexed::publication::verify_inspected(
-                &inspection_blobs,
-                &inspection_meta,
-                self.shards.as_ref(),
-                &op.repo,
-                &prepared.value.clone(),
-                branch,
-                prepared,
-                policy,
-                indexed,
-                self.metrics.as_ref(),
-                set,
-            )
-            .await?;
-        } else if !resumed {
-            crate::indexed::publication::verify(
-                &self.blobs,
-                &self.meta,
-                self.shards.as_ref(),
-                &op.repo,
-                &prepared.value.clone(),
-                branch,
-                prepared,
-                policy,
-                indexed,
-                self.metrics.as_ref(),
-            )
-            .await?;
-        }
+        // One bounded verifier serves every policy. Work is bounded by the new
+        // content; verified members are reused and resumed on timer 12.
+        let frontier = Box::pin(crate::indexed::publication::resume::prepare(
+            &self.meta,
+            p,
+            self.shards.as_ref(),
+            &op.repo,
+            prepared,
+            indexed,
+            ms(self.clock.now_ms()),
+            self.metrics.as_ref(),
+            created,
+            (prior, policy),
+        ))
+        .await?;
         prepared.external_bases = prepared
             .external_bases
             .iter()
@@ -3825,43 +3823,52 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .into_iter()
             .collect();
         if prepared.external_bases.len() > crate::store::publication::MAX_ADVANCE_ITEMS {
-            return Err(ServerError::invalid_argument("object index limit exceeded"));
+            return Err(ServerError::resource_exhausted(
+                "object index limit exceeded",
+            ));
+        }
+        // Inspection metadata and dependency visibility share the one allowance.
+        let meta = crate::indexed::budget::Budgeted::new(&self.meta, budget);
+        let exhausted = || ServerError::resource_exhausted("object index limit exceeded");
+        // Inspection metadata lookups report storage failures opaquely; a
+        // spent allowance is the only way they fail here, so keep its class.
+        let limit = |error: ServerError| {
+            if budget.remaining() == 0
+                && matches!(
+                    error.code(),
+                    crate::Code::Unavailable | crate::Code::Internal
+                )
+            {
+                exhausted()
+            } else {
+                error
+            }
+        };
+        if let Some(set) = inspected {
+            set.complete_added(&meta, &op.repo).await.map_err(limit)?;
         }
         if prepared.state.publishable() {
-            let visible = if inspected.is_some() {
-                crate::timers::publication_recheck::dependencies(
-                    &inspection_meta,
-                    &inspection_meta,
-                    p,
-                    self.shards.as_ref(),
-                    &op.repo,
-                    prepared,
-                )
-                .await
-                .map_err(|error| {
-                    if crate::indexed::budget::is_exhausted(&error) {
-                        ServerError::invalid_argument("object index limit exceeded")
-                    } else {
-                        meta_error(error)
-                    }
-                })?
-            } else {
-                crate::timers::publication_recheck::dependencies(
-                    &self.meta,
-                    &self.meta,
-                    p,
-                    self.shards.as_ref(),
-                    &op.repo,
-                    prepared,
-                )
-                .await
-                .map_err(meta_error)?
-            };
+            let visible = crate::timers::publication_recheck::dependencies(
+                &meta,
+                &meta,
+                p,
+                self.shards.as_ref(),
+                &op.repo,
+                prepared,
+            )
+            .await
+            .map_err(|error| {
+                if crate::indexed::budget::is_exhausted(&error) {
+                    exhausted()
+                } else {
+                    meta_error(error)
+                }
+            })?;
             if !visible {
                 prepared.state = crate::store::publication::Clearance::Pending;
             }
         }
-        Ok(())
+        Ok(frontier)
     }
 
     /// [`Self::apply_loop`] on a store with atomic multi-key batches, which
@@ -3907,7 +3914,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let skew_ms = a.business_skew_ms;
         let (mut replans, mut deadline_missed, mut prune_ok) = (0, false, true);
         let mut first_attempt = true;
-        let denial_budget = crate::indexed::budget::SliceBudget::new(9000);
+        let denial_budget = req
+            .publication
+            .as_ref()
+            .and_then(|p| p.budget)
+            .cloned()
+            .unwrap_or_else(|| crate::indexed::budget::SliceBudget::new(9000));
+        // Fresh denial covers the new content, its external delta sources and
+        // the verified members it newly references. Inherited history is not
+        // proved again: a denied inherited object stops at serve time. A ref
+        // that inherits nothing keeps the complete reachable-pack proof.
+        let frontier = req.publication.as_ref().map_or(&[][..], |p| p.frontier);
+        let inherits = req.publication.as_ref().is_some_and(|p| p.inherits);
         loop {
             let denial_packs: Vec<_> = req
                 .denial_packs
@@ -3916,23 +3934,32 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     req.publication
                         .iter()
                         .filter_map(|p| p.prepared)
-                        .flat_map(|a| a.dependencies.iter().chain(&a.external_bases)),
+                        .flat_map(|a| {
+                            a.external_bases.iter().chain(
+                                a.dependencies
+                                    .iter()
+                                    .filter(|d| !inherits || a.additions.contains(d)),
+                            )
+                        }),
                 )
                 .copied()
                 .collect();
             let prove = self.cfg.takedown_denial
-                && req
-                    .denial_ids
-                    .is_some_and(|ids| !ids.is_empty() || !denial_packs.is_empty());
+                && req.denial_ids.is_some_and(|ids| {
+                    !ids.is_empty() || !denial_packs.is_empty() || !frontier.is_empty()
+                });
             // Every gating denial read is at/after this attempt's plan time
             // (SPEC-SERVER §14.2). Slow proof cannot borrow a new commit window.
             let proof_plan_time = prove.then(|| ms(self.clock.now_ms()));
             if let Some(ids) = req.denial_ids.filter(|_| prove) {
+                // Newly referenced members are proved by id, like new content.
+                let mut ids = ids.clone();
+                ids.extend(frontier.iter().copied());
                 crate::takedown::denial::require_repo_clear_budgeted(
                     &self.meta,
                     self.shards.as_ref(),
                     &op.repo,
-                    ids,
+                    &ids,
                     &denial_packs,
                     &denial_budget,
                 )

@@ -1130,7 +1130,7 @@ rule):
 | Commit, remix, or tag signature does not verify | `bad signature` |
 | Object is absent from the permitted closure after §9.4's lag window | `open closure` |
 | Delta chain exceeds the advertised cap | `delta chain too deep` |
-| An object-index lookup limit is exceeded during closure or packlist checks | `object index limit exceeded` |
+| An object-index lookup limit is exceeded during closure or packlist checks | `object index limit exceeded` (`resource_exhausted` for publication verification, §10.2) |
 
 These are permanent failures. Clients MUST NOT retry the rejected
 upload as though polling or backoff could make its content valid.
@@ -1565,6 +1565,31 @@ publication state and original timer value. A missing witness leaves the cursor
 at that witness, never beyond it. Launch published-membership projections are
 monotonic within a generation; mutable source-local witnesses are re-read in
 full on each fire rather than trusted across checkpoints.
+
+**Bounded verification.** Verifying the resulting pair for an advance reuses
+what an earlier advance already verified. For a ref that already has a
+published value, an object that is a live, unheld member of this repository and
+lies outside the packs the advance consumes is a verified member (§9.3(c)): the
+server takes its sealed inventory facts instead of walking its references again,
+and its pack becomes a dependency (condition 2). Only the consumed packs'
+objects and their references are walked, so the work is bounded by the new
+content, not by history, and a repository whose history exceeds any fixed object
+count can keep publishing. A ref with no published value inherits nothing and
+verifies its whole closure. Every other obligation still applies to the new
+content and is not satisfied by inventory facts alone: coverage by the proposed
+packmap chain, published membership, inspection, external delta bases, the
+current publication policy (asked again on every request, never cached) and
+conditions 2 and 3. Fresh denial checks (§14.2) cover the consumed packs, their
+external delta sources, and every verified member the new content newly
+references. A denied object that is only inherited through such a member is not
+proved again: immediate global denial hides it from every reader (§11.3), and
+tombstone closure refusal (§14.5), which a launch profile does not implement, is
+not weakened by this. A missing or corrupt inventory fact refuses the
+advance; it never skips verification. Verification resumes across
+slices on the retained timer without client traffic. A limit on new work or on
+retained proof state is `resource_exhausted` with `object index limit exceeded`;
+exhausting a slice is not an error. Preparation and the final clearance share
+one call allowance for the request.
 
 A pack added by another advance that has not cleared or resolved blocks
 clearance. `AlreadyPresent` establishes live membership, not published
@@ -3913,6 +3938,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Publication verification reuses verified-member inventory facts and is bounded by new content; fresh denial covers new content and newly referenced members; explicit work and state limits are `resource_exhausted` (§10.2). |
 | 1 | draft | Stored rows remain decodable throughout 0.5.x; additive JSON fields require serde defaults (§17). |
 | 1 | draft | Worker timer writes retry alarm scheduling twice inline, propagate exhaustion and retain cold-start repair. |
 | 1 | draft | Namespace-scoped ListRepos authorization with an arbitrary repository selector; authority full listing requires explicit opt-in and writer view (§6.2; STC §7.10). |

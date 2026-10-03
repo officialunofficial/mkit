@@ -28,10 +28,43 @@ fn advance(root: Hash) -> Advance {
         operation: [7; 32],
     }
 }
+#[allow(clippy::too_many_arguments)]
+async fn prepare<S: NamespaceStore>(
+    store: &S,
+    source: &Partition,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    advance: &mut Advance,
+    cfg: IndexedConfig,
+    now: u64,
+    metrics: &dyn crate::Metrics,
+    created: u64,
+) -> Result<bool, ServerError> {
+    prepare_proof(
+        store,
+        source,
+        shards,
+        repo,
+        advance,
+        cfg,
+        now,
+        metrics,
+        created,
+        Prior {
+            digest: Hash::default(),
+            inherits: false,
+        },
+    )
+    .await
+    .map(|_| true)
+}
 fn progress(a: &Advance) -> Progress {
     let cfg = IndexedConfig::default();
     Progress {
-        binding: binding(a, cfg).unwrap(),
+        binding: binding(a, cfg, Hash::default()).unwrap(),
+        prior: Hash::default(),
+        inherit: false,
+        inherited: BTreeSet::new(),
         value: a.value.clone(),
         generation: a.generation,
         additions: a.additions.clone(),
@@ -640,7 +673,7 @@ fn lowered_delta_depth_becomes_durable_terminal_failure_across_timers() {
         // Existing sealed content can have been verified under a higher cap.
         // This is the frozen proof after its MKPL phase, at a base-hop boundary.
         let mut p = progress(&a);
-        p.binding = binding(&a, cfg).unwrap();
+        p.binding = binding(&a, cfg, Hash::default()).unwrap();
         p.depth_limit = cfg.max_delta_chain_depth;
         p.next_packmap = None;
         p.chain.insert(root);
@@ -749,4 +782,33 @@ fn lowered_delta_depth_becomes_durable_terminal_failure_across_timers() {
         corrupt["terminal"] = serde_json::json!("UnknownFailure");
         assert!(serde_json::from_value::<Progress>(corrupt).is_err());
     });
+}
+
+#[test]
+fn proof_written_before_the_prior_binding_still_decodes() {
+    let a = advance([5; 32]);
+    let mut json = serde_json::to_value(progress(&a)).unwrap();
+    let fields = json.as_object_mut().unwrap();
+    fields.remove("prior");
+    fields.remove("inherit");
+    fields.remove("inherited");
+    let old: Progress = serde_json::from_value(json).unwrap();
+    old.validate().unwrap();
+    assert!(!old.inherit);
+    assert!(old.inherited.is_empty());
+}
+
+#[test]
+fn explicit_work_and_state_limits_are_resource_exhaustion() {
+    for failure in [Exhaustion::IndexCalls, Exhaustion::Traversal] {
+        assert_eq!(failure.error().code(), Code::ResourceExhausted);
+        assert_eq!(
+            failure.error().public_message(),
+            "object index limit exceeded"
+        );
+    }
+    assert_eq!(
+        Exhaustion::DecodeBudget.error().code(),
+        Code::InvalidArgument
+    );
 }

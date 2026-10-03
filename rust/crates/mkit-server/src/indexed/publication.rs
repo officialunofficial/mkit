@@ -298,6 +298,9 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
 
 /// Verify within a shared metadata/blob-call cap; scheduled Workers retain
 /// their other advance work budget. Cap exhaustion is a closed-closure denial.
+#[deprecated(
+    note = "walks the whole history inside a fixed call cap; the pipeline verifies incrementally"
+)]
 #[allow(clippy::too_many_arguments)]
 pub async fn verify<B: BlobStore, S: NamespaceStore>(
     blobs: &B,
@@ -329,7 +332,10 @@ pub async fn verify<B: BlobStore, S: NamespaceStore>(
 /// Inspection does not alter the publication closure walk or its classification.
 /// # Errors
 /// Existing closed-closure, storage and index-limit refusals.
-#[allow(clippy::too_many_arguments)]
+#[deprecated(
+    note = "walks the whole history inside a fixed call cap; the pipeline verifies incrementally"
+)]
+#[allow(clippy::too_many_arguments, deprecated)]
 pub async fn verify_inspected<B: BlobStore, S: NamespaceStore>(
     blobs: &B,
     store: &S,
