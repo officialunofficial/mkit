@@ -85,9 +85,3 @@ pub async fn check_mode<S: NamespaceStore>(
         _ => Outcome::Corrupt,
     })
 }
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::too_many_lines)]
-mod stored_v050_tests {
-    crate::stored_golden::tests!(store_inspection_mode);
-}

@@ -70,6 +70,9 @@ supported after new reservation rows are written.
 
 ### Changed
 
+- Stored formats are not a compatibility contract before 1.0; the golden
+  fixtures that pinned v0.5.0 row encodings are removed and a store may need
+  a reset across versions (SPEC-SERVER §17).
 - Documentation: SPEC-SERVER §9.3, §10.2 and §18 clarify the integrity frontier
   that verified members provide, the pair-coverage and denial obligations it
   does not waive, and the duty to document historical-support limits.

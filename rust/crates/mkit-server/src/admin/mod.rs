@@ -331,9 +331,3 @@ impl<S> core::fmt::Debug for Engine<S> {
             .finish_non_exhaustive()
     }
 }
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::too_many_lines)]
-mod stored_v050_tests {
-    crate::stored_golden::tests!(admin_mod);
-}

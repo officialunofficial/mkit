@@ -3759,8 +3759,8 @@ automatic purges are audited with their system actor. §14
 
 ## 17. Custom backends, backup and migrations (reserved, M5)
 
-Rows written by any 0.5.x release MUST keep decoding in later 0.5.x releases;
-stored-row changes MUST be additive, with serde defaults for added JSON fields.
+Stored formats are not yet a compatibility contract before 1.0; a store may
+need a reset across versions.
 
 Reserved: this section is specified with M5 (see the version history).
 
@@ -3988,12 +3988,12 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | §17 no longer promises that rows written by 0.5.x keep decoding: stored formats are not a compatibility contract before 1.0. No behavior change. |
 | 1 | draft | Clarifies publication verification: a verified member terminates only the direct-child check and waives no §10.2, §14.2 or ref-policy obligation (§9.3); the inspector pair-check shorthand is made precise (§10.2); synchronous inspection of ref-only operations and the duty to document historical-support limits (§18). No wire, stored-row or version change. |
 | 1 | draft | Editorial: §18 states the launch profile deployment-neutrally and points to the Workers operator guide for the Worker-specific selection, bindings and purge configuration; the `store::inspection_*` modules are marked unintegrated groundwork and the deferred inspection, Event and proof work as not implemented. No behavior change. |
 | 1 | draft | Additive object-reader session accounting and typed exhaustion. Existing public absence, advance messages and stored/wire formats are unchanged. |
 | 1 | draft | `SetRepoVisibility` runs admission and records an outcome like other mutating RPCs, in envelope and statement modes (§2, §3). Additive optional `Outcome.procedure` and `Outcome.visibility` (fields 9 and 10) name the operation (§6.5); the pending and terminal reservation rows record an optional operation (additive `procedure`; rows written before decode as unknown), so every outcome, including a reconciled abandonment, names it. No row version changes. |
 | 1 | draft | The deprecated `LAUNCH_PROFILE=uno` alias is removed; `paid-workers` is the only accepted value (§14, §18). |
-| 1 | draft | Stored rows remain decodable throughout 0.5.x; additive JSON fields require serde defaults (§17). |
 | 1 | draft | Worker timer writes retry alarm scheduling twice inline, propagate exhaustion and retain cold-start repair. |
 | 1 | draft | Namespace-scoped ListRepos authorization with an arbitrary repository selector; authority full listing requires explicit opt-in and writer view (§6.2; STC §7.10). |
 | 1 | draft | Worker launch profile is `LAUNCH_PROFILE=paid-workers`; `uno` remains a deprecated alias with a startup warning. §18 accepts configured cache-purge delivery through the signed HTTPS hook or an embedder-supplied purge sink. |
