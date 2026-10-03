@@ -480,12 +480,16 @@ fn visibility_row_without_repository_record_is_missing() {
 
 // ----------------------------------------------------- SetRepoVisibility
 
-fn set<H: HookSet>(e: &Env<H>, req: &Req, mode: VisibilityRequest) -> Result<(), ServerError> {
+pub(super) fn set<H: HookSet>(
+    e: &Env<H>,
+    req: &Req,
+    mode: VisibilityRequest,
+) -> Result<(), ServerError> {
     let a = e.auth(req).unwrap();
     block_on(e.pipe.set_repo_visibility(&a, mode))
 }
 
-fn signed_visibility(signer: &SigningKey, repo: &str, n: u32, body: &[u8]) -> Req {
+pub(super) fn signed_visibility(signer: &SigningKey, repo: &str, n: u32, body: &[u8]) -> Req {
     Req::signed_for(
         signer,
         Procedure::SetRepoVisibility,
@@ -496,13 +500,13 @@ fn signed_visibility(signer: &SigningKey, repo: &str, n: u32, body: &[u8]) -> Re
     )
 }
 
-fn unsigned_visibility(repo: &str) -> Req {
+pub(super) fn unsigned_visibility(repo: &str) -> Req {
     Req::unsigned(Procedure::SetRepoVisibility).header("x-repository", repo)
 }
 
 /// The canonical `ed25519:<scheme>` signed header for a visibility
 /// statement, and the statement id the `rv` row records.
-fn statement(
+pub(super) fn statement(
     owner: &SigningKey,
     repo: &str,
     visibility: Visibility,
@@ -530,7 +534,10 @@ fn statement(
     (header, id)
 }
 
-fn stored_visibility_row<H: HookSet>(e: &Env<H>, id: &RepoId) -> codec::RepoVisibilityV1 {
+pub(super) fn stored_visibility_row<H: HookSet>(
+    e: &Env<H>,
+    id: &RepoId,
+) -> codec::RepoVisibilityV1 {
     let p = e.pipe.shards.coordinator(&id.namespace);
     now(e.pipe.meta.inner.get(&p, &keys::repo_visibility(&id.name)))
         .unwrap()

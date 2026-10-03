@@ -3,7 +3,10 @@
 use core::time::Duration;
 
 use crate::error::Redacted;
+use crate::op::Procedure;
+use crate::store::Value;
 use crate::store::codec::{AbortReason, OutcomeRef, ReservationV1};
+use mkit_attest::grant::Visibility;
 
 /// One durable reservation result. Delivery is at least once.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +22,40 @@ pub struct Outcome {
     pub occurred_unix_ms: i64,
     /// Terminal result payload.
     pub kind: OutcomeKind,
+    /// The operation that produced the outcome, when it is recorded.
+    ///
+    /// `Some(Procedure::SetRepoVisibility)` marks a repository visibility
+    /// change (its `Committed` carries no refs and no bytes). `None` means
+    /// the outcome does not record its operation, as for every ref write and
+    /// upload outcome and for a visibility reservation the reconciler
+    /// abandoned after a crash.
+    pub procedure: Option<Procedure>,
+    /// The visibility a [`Procedure::SetRepoVisibility`] outcome set or
+    /// attempted; `None` for every other outcome.
+    pub visibility: Option<Visibility>,
+}
+
+/// Operation marker stored in the value of an outcome's delivery index row.
+/// Rows written before the marker existed hold an empty value and decode to
+/// `(None, None)`; an unrecognized marker is ignored.
+const VISIBILITY_MARKER_PREFIX: &str = "set_repo_visibility:";
+
+/// The index-row value that records a visibility change to `visibility`.
+pub(crate) fn visibility_marker(visibility: Visibility) -> Value {
+    let name = match visibility {
+        Visibility::Public => "public",
+        Visibility::Private => "private",
+    };
+    Value::new(format!("{VISIBILITY_MARKER_PREFIX}{name}").into_bytes())
+}
+
+fn decode_marker(marker: &[u8]) -> (Option<Procedure>, Option<Visibility>) {
+    let visibility = match marker.strip_prefix(VISIBILITY_MARKER_PREFIX.as_bytes()) {
+        Some(b"public") => Visibility::Public,
+        Some(b"private") => Visibility::Private,
+        _ => return (None, None),
+    };
+    (Some(Procedure::SetRepoVisibility), Some(visibility))
 }
 
 /// Hooks.v1 terminal variants, field for field.
@@ -105,7 +142,16 @@ impl Outcome {
             repository,
             occurred_unix_ms: i64::try_from(occurred).map_err(|_| "outcome timestamp overflow")?,
             kind,
+            procedure: None,
+            visibility: None,
         })
+    }
+
+    /// Attach the operation recorded in the delivery index row's `marker`.
+    #[must_use]
+    pub(crate) fn with_marker(mut self, marker: &[u8]) -> Self {
+        (self.procedure, self.visibility) = decode_marker(marker);
+        self
     }
 }
 
@@ -134,6 +180,39 @@ impl DeliveryError {
         Self {
             reason: Redacted::new(reason),
             retry_after,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The marker bytes are a stored format: rows written by this form must
+    /// keep decoding, and rows from v0.5.0 (empty value) carry no operation.
+    #[test]
+    fn marker_bytes_are_pinned_and_legacy_rows_carry_no_operation() {
+        assert_eq!(
+            visibility_marker(Visibility::Private).as_bytes(),
+            b"set_repo_visibility:private"
+        );
+        assert_eq!(
+            visibility_marker(Visibility::Public).as_bytes(),
+            b"set_repo_visibility:public"
+        );
+        assert_eq!(
+            decode_marker(b"set_repo_visibility:private"),
+            (
+                Some(Procedure::SetRepoVisibility),
+                Some(Visibility::Private)
+            )
+        );
+        assert_eq!(
+            decode_marker(b"set_repo_visibility:public"),
+            (Some(Procedure::SetRepoVisibility), Some(Visibility::Public))
+        );
+        for unrecognized in [&b""[..], b"set_repo_visibility:", b"future:x", b"\xff"] {
+            assert_eq!(decode_marker(unrecognized), (None, None));
         }
     }
 }

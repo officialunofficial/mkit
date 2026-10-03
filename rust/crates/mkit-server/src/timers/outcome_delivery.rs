@@ -240,7 +240,7 @@ impl<O: OutcomeSink> OutcomeDelivery<O> {
         // Acknowledged rows are planned after the sink loop, against a fresh
         // `oc`, so slow sink awaits sit outside the read-modify-write window.
         let mut acked: Vec<(String, Value, u64)> = Vec::new();
-        for (index, (key, _)) in page.entries.iter().enumerate().take(max_rows) {
+        for (index, (key, marker)) in page.entries.iter().enumerate().take(max_rows) {
             let Some(keys::ParsedKey::OutcomePending {
                 seq,
                 reservation_id: rid,
@@ -266,7 +266,7 @@ impl<O: OutcomeSink> OutcomeDelivery<O> {
             };
             let outcome =
                 match Outcome::from_reservation(rid.clone(), self.audience.clone(), record) {
-                    Ok(outcome) => outcome,
+                    Ok(outcome) => outcome.with_marker(marker.as_bytes()),
                     Err(reason) => {
                         tracing::warn!(reason, "indexed outcome cannot be delivered; retaining");
                         continue;

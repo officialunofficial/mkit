@@ -72,7 +72,9 @@ as STC §7.1 requires; this list names server-internal extension points.
    and grant facts into both Authorize and Admit requests.
 3. **Admit.** Decide whether the deployment permits this operation now.
    Admission may allow, challenge, or deny it. Admission applies only
-   to unary RPCs, as STC §5.1 requires.
+   to unary RPCs, as STC §5.1 requires. Every mutating unary RPC runs it,
+   including `SetRepoVisibility` in both its envelope and statement modes
+   (§3).
 4. **Replay reservation and streamed body.** Reserve replay state as STC
    §7.1 requires, and receive any applicable streamed body under the
    ticket and part rules STC §7.6 requires. Durably record a pending
@@ -129,6 +131,29 @@ they do not reproduce its lifecycle table.
   a reservation the ref write and its
   `Committed` outcome MUST commit in one atomic unit. The successful
   apply replaces its pending reservation with that outcome.
+- A `SetRepoVisibility` change goes through admission and outcomes like
+  any other mutating RPC, in both modes. Admission runs after
+  authorization (the envelope mode's owner or authority check; the
+  statement mode has no authorizer call, its owner-signed statement being
+  its own authorization) and after the replay lookup or the already-applied
+  and not-newer statement checks, so a replay, an identical statement and a
+  stale statement run no admission and record no outcome. It runs before any
+  state change: a denial or challenge leaves no visibility row, listing
+  index, replay record or reservation. Admission sees
+  `procedure = /mkit.transport.v1.TransportService/SetRepoVisibility`,
+  `declared_bytes = 0` and an empty `pack_id`; the statement mode has no
+  signed envelope, so its `idempotency_key` is empty and its `owner` fact is
+  true (the statement's signer is the namespace owner). When admission
+  grants a reservation, the visibility row, its listing-index projection and
+  the `Committed` outcome (no refs, no bytes) MUST commit in one atomic
+  unit, replacing the pending reservation; a failed attempt records
+  `Aborted` as below, and a reconciled abandonment is `ABANDONED`. The
+  default admission charges no quota for a visibility change (no bytes and
+  no operation): the change is owner-only and stores no object bytes, and
+  the per-namespace charge is planned only with the writes it aggregates.
+  Charges another admission returns for it are applied to the signer's
+  counter in the same unit. An `Allow`'s receipt headers are returned on
+  the committed success only.
 - An `Aborted` outcome MUST be written in a separate atomic unit after
   a failed apply, as STC §7.7 requires. That unit replaces the pending
   reservation with `Aborted` when a pending reservation exists.
@@ -728,6 +753,8 @@ The shared `Outcome` fields are:
 | `repository` | The full repository identity as STC §7.4 requires. |
 | `occurred_unix_ms` | When the outcome occurred, as signed 64-bit Unix epoch milliseconds. |
 | `kind` | Exactly one of `committed`, `aborted`, `expired`, or `read_served`. |
+| `procedure` | Optional. The full Connect procedure path of the operation, present only when the outcome records it: today a `SetRepoVisibility` change, whether `committed` (with no refs and zero bytes) or `aborted`. Absent for ref writes, uploads, tickets and paid reads, and for a visibility reservation abandoned after a crash (the pending record does not name its operation). A receiver treats an absent or unrecognized value as unspecified. |
+| `visibility` | Optional. `public` or `private`: the visibility a `SetRepoVisibility` outcome set or attempted; present exactly when `procedure` names it. |
 
 `Committed` records a successful operation:
 
@@ -3913,6 +3940,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | `SetRepoVisibility` runs admission and records an outcome like other mutating RPCs, in envelope and statement modes (§2, §3). Additive optional `Outcome.procedure` and `Outcome.visibility` (fields 9 and 10) name the operation (§6.5); the outcome delivery index row's value carries an optional operation marker (empty on rows written before). No stored-row schema or version changes. |
 | 1 | draft | Stored rows remain decodable throughout 0.5.x; additive JSON fields require serde defaults (§17). |
 | 1 | draft | Worker timer writes retry alarm scheduling twice inline, propagate exhaustion and retain cold-start repair. |
 | 1 | draft | Namespace-scoped ListRepos authorization with an arbitrary repository selector; authority full listing requires explicit opt-in and writer view (§6.2; STC §7.10). |
@@ -3967,6 +3995,7 @@ requires. These anchors are informative descriptions of those bytes.
 | `inspect-defer.response.json` | Async retry-after suggestion (§6.4, §11.3). |
 | `authorize-writer-view.response.json` | Authority-source writer classification (§6.2, §10.1). |
 | `outcome-committed.request.json` | Committed byte accounting and refs (§5, §6.5). |
+| `outcome-visibility.request.json` | Committed repository visibility change with its procedure and visibility (§6.5). |
 | `outcome-aborted.request.json` | Apply-failure abort reason and operator detail (§5, §6.5). |
 | `outcome-abandoned.request.json` | Pending reservation reconciled with ABANDONED (§5, §6.5). |
 | `outcome-expired.request.json` | Unconsumed ticket expiry (§5, §6.5). |

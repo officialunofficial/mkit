@@ -16,6 +16,7 @@ mod remote_hooks;
 mod scheduled;
 mod url_token;
 mod visibility;
+mod visibility_hooks;
 
 use std::future::Future;
 use std::pin::{Pin, pin};

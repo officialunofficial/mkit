@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `SetRepoVisibility` now runs the embedder's `Admission` hook and records an
+  outcome for the `OutcomeSink`, in both the owner-signed envelope mode and the
+  statement mode, like every other mutating RPC. A refusal or challenge changes
+  nothing; a granted reservation is settled in the same atomic unit as the
+  visibility row and its listing index. Hooks recognize the change by
+  `input.op.procedure() == Procedure::SetRepoVisibility` (with
+  `OpKind::SetRepoVisibility { visibility }`, `declared_bytes = 0`), and
+  `Outcome` gains `procedure` and `visibility` fields. `DefaultAdmission`
+  charges nothing for it. Remote hooks send the procedure and visibility in
+  additive optional `Outcome` fields. `Pipeline::set_repo_visibility_with_meta`
+  also returns the admission's receipt headers, which the Connect service now
+  sets.
+
 ### Fixed
 
 - Owner object-reader authorization preserves `ResourceExhausted` when the

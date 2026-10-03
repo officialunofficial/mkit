@@ -351,6 +351,13 @@ message Outcome {
     // Paid read served content; SPEC-SERVER §6.5.
     ReadServed read_served = 8;
   }
+  // Full Connect procedure path of the operation, set only when the outcome
+  // records it (a repository visibility change); absent otherwise, so a ref
+  // write or upload outcome is unchanged; SPEC-SERVER §6.5.
+  string procedure = 9;
+  // "public" or "private": the visibility a SetRepoVisibility outcome set or
+  // attempted; absent for every other outcome; SPEC-SERVER §6.5.
+  string visibility = 10;
 }
 
 // Successful apply and its byte accounting and ref effects; SPEC-SERVER §6.5.

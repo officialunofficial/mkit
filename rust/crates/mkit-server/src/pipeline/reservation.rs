@@ -20,6 +20,8 @@ pub(crate) struct PendingGuard {
     pub(crate) value: Value,
     pub(crate) apply_deadline_ms: u64,
     pub(crate) repository: String,
+    /// Operation marker for the outcome's delivery index row (empty for none).
+    pub(crate) marker: Value,
 }
 
 /// Margin beyond the maximum permitted backend clock lead.
@@ -164,6 +166,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 value,
                 apply_deadline_ms,
                 repository: a.repo().identity.clone(),
+                marker: Value::default(),
             }),
             BatchOutcome::PreconditionFailed { .. } => {
                 Err(ServerError::unavailable("admission unavailable"))
@@ -220,10 +223,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 reason,
                 detail: detail.clone(),
             };
-            builder.outcome(
+            builder.outcome_marked(
                 &pending.rid,
                 &pending.value,
                 Terminal::new(record).map_err(meta_error)?,
+                pending.marker.clone(),
             );
             let mut batch = Batch::new();
             builder

@@ -205,6 +205,7 @@ fn proof_does_not_extend_fixed_pending_deadline() {
     let pending = PendingGuard {
         rid: "s:proof".into(),
         repository: REPO.into(),
+        marker: crate::store::Value::default(),
         key: keys::reservation("s:proof").unwrap(),
         value: codec::encode_reservation(&codec::ReservationV1::Pending {
             repository: REPO.into(),
