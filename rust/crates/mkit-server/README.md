@@ -69,8 +69,9 @@ framing. Very large trees and chunk manifests can exceed this even when the
 pack is small or highly compressed. Split very large flat directories into
 smaller subdirectories. Indexed `UploadPack` checks raw lengths, compressed raw
 claims and delta result sizes while streaming, before forwarding the chunk
-that reveals an oversize claim or committing the pack. Compressed deltas need
-a bounded frame to inspect their decoded result header. Multipart parts have
+that reveals an oversize claim or committing the pack. Compressed deltas use
+a bounded incremental header probe that processes each block once, refusing
+the revealing chunk before its sink write. Multipart parts have
 no independent entry geometry; existing indexed advance verification still
 checks assembled packs. The early upload refusal is `InvalidArgument`, using
 the indexed decode-limit taxonomy in SPEC-SERVER §9.8. Neither stored data nor

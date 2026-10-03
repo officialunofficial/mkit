@@ -16,7 +16,7 @@ enum Stage {
     Header,
     Frame,
     Prefix { kind: u8, payload: usize },
-    CompressedDelta { payload: usize },
+    CompressedDelta { left: usize },
     Skip(usize),
     Done,
 }
@@ -26,6 +26,7 @@ pub(crate) struct GeometryCheck {
     buffer: Vec<u8>,
     entries: u32,
     version: u32,
+    probe: Option<mkit_core::pack::DeltaHeaderProbe>,
 }
 impl Default for GeometryCheck {
     fn default() -> Self {
@@ -34,12 +35,30 @@ impl Default for GeometryCheck {
             buffer: Vec::new(),
             entries: 0,
             version: 0,
+            probe: None,
         }
     }
 }
 impl GeometryCheck {
     pub(crate) fn push(&mut self, mut bytes: &[u8]) -> Result<(), ServerError> {
         while !bytes.is_empty() {
+            if let Stage::CompressedDelta { left } = &mut self.stage {
+                let take = (*left).min(bytes.len());
+                *left -= take;
+                let result = self.probe.as_mut().map(|probe| probe.push(&bytes[..take]));
+                bytes = &bytes[take..];
+                match result {
+                    Some(Ok(Some((_, size)))) if u64::from(size) > CANONICAL_BYTES => {
+                        return Err(oversized());
+                    }
+                    Some(Ok(None)) if *left != 0 => continue,
+                    _ => {}
+                }
+                let remaining = *left;
+                self.probe = None;
+                self.skip(remaining);
+                continue;
+            }
             if let Stage::Skip(left) = &mut self.stage {
                 let take = (*left).min(bytes.len());
                 *left -= take;
@@ -55,7 +74,7 @@ impl GeometryCheck {
                 Stage::Prefix { kind: 2, .. } => 41,
                 Stage::Prefix { kind: 3, .. } => 4,
                 Stage::Prefix { kind: 4, .. } => 36,
-                Stage::CompressedDelta { payload } => payload,
+
                 Stage::Done => return Ok(()),
                 _ => return Err(malformed()),
             };
@@ -157,19 +176,12 @@ impl GeometryCheck {
                     return Err(oversized());
                 }
                 if kind == 4 {
-                    self.stage = Stage::CompressedDelta { payload };
+                    self.probe = mkit_core::pack::DeltaHeaderProbe::new().ok();
+                    self.stage = Stage::CompressedDelta { left: payload - 36 };
+                    self.buffer.clear();
                 } else {
                     self.skip(payload - self.buffer.len());
                 }
-            }
-            Stage::CompressedDelta { .. } => {
-                // Geometry preflight does not replace indexed pack validation:
-                // malformed or unsupported compression remains an advance error.
-                let result = mkit_core::pack::peek_delta_header(&self.buffer[36..]);
-                if result.is_ok_and(|(_, result)| u64::from(result) > CANONICAL_BYTES) {
-                    return Err(oversized());
-                }
-                self.next_entry();
             }
             _ => return Err(malformed()),
         }

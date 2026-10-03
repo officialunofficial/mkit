@@ -1639,13 +1639,30 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         ttl_seconds: u32,
         now_ms: i64,
     ) -> Result<MintedToken, ServerError> {
+        self.issue_url_with_meta(op, repository, target, ttl_seconds, now_ms, &self.meta)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)] // The reader captures inherited caps without changing RPC mappings.
+    async fn issue_url_with_meta<S: NamespaceStore>(
+        &self,
+        op: &Operation,
+        repository: &str,
+        target: &UrlTarget,
+        ttl_seconds: u32,
+        now_ms: i64,
+        meta: &S,
+    ) -> Result<MintedToken, ServerError> {
         let Some(tokens) = &self.cfg.url_tokens else {
             return Err(ServerError::unimplemented("URL tokens not configured"));
         };
-        let read = self.authorize_read(op).await?;
+        let read = self.authorize_read_with_meta(op, meta).await?;
         let epoch = match read.epoch {
             Some(epoch) => epoch,
-            None => self.stored_grant_epoch(&op.repo.namespace).await?,
+            None => {
+                self.stored_grant_epoch_with_meta(&op.repo.namespace, meta)
+                    .await?
+            }
         };
         let AuthMode::AuthV2(auth) = &self.cfg.auth else {
             return Err(internal("URL tokens without auth v2"));

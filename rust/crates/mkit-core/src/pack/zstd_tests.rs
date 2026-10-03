@@ -646,3 +646,43 @@ mod differential {
         }
     }
 }
+
+#[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
+#[test]
+fn incremental_delta_probe_reads_split_headers_before_frame_end() {
+    let mut header = vec![crate::delta::STREAM_VERSION];
+    header.extend_from_slice(&512_u32.to_le_bytes());
+    header.extend_from_slice(&u32::MAX.to_le_bytes());
+    let mut frame = MAGIC.to_vec();
+    frame.extend_from_slice(&[0, 0]);
+    for i in 0..3 {
+        frame.extend_from_slice(&(1024_u32 << 3).to_le_bytes()[..3]);
+        let mut body = vec![0; 1024];
+        if i == 0 {
+            body[..9].copy_from_slice(&header);
+        }
+        frame.extend_from_slice(&body);
+    }
+    assert_eq!(peek_delta_header(&frame).unwrap(), (512, u32::MAX));
+    for chunk in [1, 7, frame.len()] {
+        let mut probe = DeltaHeaderProbe::new().unwrap();
+        let mut found = None;
+        for part in frame.chunks(chunk) {
+            found = probe.push(part).unwrap().or(found);
+        }
+        assert_eq!(found, Some((512, u32::MAX)));
+        assert_eq!(probe.push(&[1, 0, 0, 0]).unwrap(), found);
+    }
+}
+
+#[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
+#[test]
+fn incremental_delta_probe_does_not_wait_for_a_trailing_checksum() {
+    let mut header = vec![crate::delta::STREAM_VERSION];
+    header.extend_from_slice(&0_u32.to_le_bytes());
+    header.extend_from_slice(&u32::MAX.to_le_bytes());
+    let mut frame = raw_block_frame(&header, None, Some(23));
+    frame[4] |= 4;
+    let mut probe = DeltaHeaderProbe::new().unwrap();
+    assert_eq!(probe.push(&frame).unwrap(), Some((0, u32::MAX)));
+}

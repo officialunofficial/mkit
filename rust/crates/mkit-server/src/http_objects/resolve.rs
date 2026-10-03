@@ -141,12 +141,64 @@ pub(crate) async fn locate_many_with_caps<B: BlobStore, N: NamespaceStore>(
     Ok(members)
 }
 
+pub(crate) async fn locate_walk_many<B: BlobStore, N: NamespaceStore>(
+    env: &Env<'_, B, N>,
+    ids: &[Hash],
+    typed_caps: bool,
+) -> Result<(Vec<(Hash, LocatedObject)>, bool), Miss> {
+    if !typed_caps {
+        return locate_many_with_caps(env, ids, false)
+            .await
+            .map(|rows| (rows, false));
+    }
+    let found = resolve::locate_split(env.meta, env.shards, env.repo, ids, env.metrics).await?;
+    let mut capped = false;
+    let mut members = Vec::new();
+    for (id, answer) in &found {
+        if answer.is_err() {
+            capped = true;
+            continue;
+        }
+        if let Some(row) = membership(Some(answer))? {
+            members.push((*id, row));
+        }
+    }
+    Ok((members, capped))
+}
+
+// Public membership caps omit only the affected ID, retaining independently proven results.
+pub(crate) async fn locate_public_many<B: BlobStore, N: NamespaceStore>(
+    env: &Env<'_, B, N>,
+    ids: &[Hash],
+) -> Result<Vec<(Hash, LocatedObject)>, Miss> {
+    let found = resolve::locate_split(env.meta, env.shards, env.repo, ids, env.metrics).await?;
+    let mut members = Vec::new();
+    for (id, answer) in &found {
+        if answer.is_err() {
+            continue;
+        }
+        if let Some(located) = membership(Some(answer))? {
+            members.push((*id, located));
+        }
+    }
+    Ok(members)
+}
+
 /// The canonical bytes of a located member, charged to `budget`.
 pub(crate) async fn load<B: BlobStore, N: NamespaceStore>(
     env: &Env<'_, B, N>,
     id: Hash,
     located: LocatedObject,
     budget: &mut Budget,
+) -> Result<Arc<[u8]>, Miss> {
+    load_with_caps(env, id, located, budget, false).await
+}
+pub(crate) async fn load_with_caps<B: BlobStore, N: NamespaceStore>(
+    env: &Env<'_, B, N>,
+    id: Hash,
+    located: LocatedObject,
+    budget: &mut Budget,
+    typed_caps: bool,
 ) -> Result<Arc<[u8]>, Miss> {
     if located.value.decoded_size > budget.0 {
         return Err(Miss::Capped);
@@ -172,6 +224,7 @@ pub(crate) async fn load<B: BlobStore, N: NamespaceStore>(
         env.metrics,
     )
     .await;
+    let depth_capped = charge.memo.depth_capped();
     drop(charge);
     match result {
         Ok((bytes, _)) => Ok(bytes),
@@ -181,6 +234,8 @@ pub(crate) async fn load<B: BlobStore, N: NamespaceStore>(
         Err(ResolveFailure::Other(error)) if error.public_message() == "object blocked" => {
             Err(Miss::NotFound)
         }
+        Err(ResolveFailure::Capped) if typed_caps => Err(Miss::Capped),
+        Err(ResolveFailure::Other(_)) if typed_caps && depth_capped => Err(Miss::Capped),
         Err(_) => {
             tracing::warn!("member object could not be reconstructed");
             Err(Miss::Unavailable)
@@ -192,9 +247,19 @@ async fn load_object<B: BlobStore, N: NamespaceStore>(
     env: &Env<'_, B, N>,
     id: Hash,
     budget: &mut Budget,
+    typed_caps: bool,
 ) -> Result<Arc<[u8]>, Miss> {
-    let located = locate(env, id).await?;
-    load(env, id, located, budget).await
+    let located = if typed_caps {
+        locate_many_with_caps(env, &[id], true)
+            .await?
+            .into_iter()
+            .next()
+            .map(|(_, row)| row)
+            .ok_or(Miss::NotFound)?
+    } else {
+        locate(env, id).await?
+    };
+    load_with_caps(env, id, located, budget, typed_caps).await
 }
 
 fn decode(bytes: &[u8]) -> Result<Object, Miss> {
@@ -221,10 +286,19 @@ pub(crate) async fn resolve_ref<B: BlobStore, N: NamespaceStore>(
     path: &[Vec<u8>],
     budget: &mut Budget,
 ) -> Result<RefResolved, Miss> {
+    resolve_ref_with_caps(env, tip, path, budget, false).await
+}
+pub(crate) async fn resolve_ref_with_caps<B: BlobStore, N: NamespaceStore>(
+    env: &Env<'_, B, N>,
+    tip: Hash,
+    path: &[Vec<u8>],
+    budget: &mut Budget,
+    typed_caps: bool,
+) -> Result<RefResolved, Miss> {
     let mut id = tip;
     let mut peeled = None;
     for depth in 0..=MAX_PEEL {
-        let bytes = load_object(env, id, budget).await?;
+        let bytes = load_object(env, id, budget, typed_caps).await?;
         match type_of(&bytes) {
             Some(ObjectType::Commit | ObjectType::Remix) => {
                 let tree = match decode(&bytes)? {
@@ -244,7 +318,7 @@ pub(crate) async fn resolve_ref<B: BlobStore, N: NamespaceStore>(
     }
     let (commit, mut current) = peeled.ok_or(Miss::NotFound)?;
     for (index, name) in path.iter().enumerate() {
-        let bytes = load_object(env, current, budget).await?;
+        let bytes = load_object(env, current, budget, typed_caps).await?;
         let Object::Tree(tree) = decode(&bytes)? else {
             return Err(Miss::NotFound);
         };

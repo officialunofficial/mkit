@@ -2203,3 +2203,184 @@ fn inherited_invocation_caps_during_authorization_are_typed() {
         );
     }
 }
+
+#[test]
+fn inherited_url_issuance_authorization_caps_are_typed() {
+    let (fx, d) = url_fixture();
+    *fx.pipe.meta.request_budget.lock().unwrap() =
+        Some(crate::indexed::budget::SliceBudget::new(1));
+    let error = public_urls(&fx, &[UrlTarget::Object(id(&d.small))], 0).unwrap_err();
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(
+        error.public_message(),
+        crate::pipeline::OBJECT_READER_LIMIT_MESSAGE
+    );
+}
+
+fn overflow_member_candidates(fx: &Fx, target: Hash) {
+    let repo = fx.repo_id("room");
+    let partition = fx.pipe.shards.object_index(&repo, &target);
+    let row = crate::store::index::IndexValue {
+        frame_offset: 12,
+        frame_length: 15,
+        wire_type: 0,
+        decoded_size: 10,
+        chain_depth: 0,
+        delta_base: None,
+    };
+    let encoded = codec::encode_object_index(&target, &row).unwrap();
+    for chunk in (0..=crate::store::index::MAX_LOOKUP_ROWS)
+        .collect::<Vec<_>>()
+        .chunks(32)
+    {
+        let mut batch = Batch::new();
+        for index in chunk {
+            let mut pack = [0; 32];
+            pack[24..].copy_from_slice(&u64::try_from(*index).unwrap().to_be_bytes());
+            batch = batch.put(
+                keys::object_index(&repo.name, &target, &pack),
+                encoded.clone(),
+            );
+        }
+        block_on(fx.pipe.meta.inner.apply(&partition, batch)).unwrap();
+    }
+}
+
+#[test]
+fn public_membership_cap_preserves_other_proven_targets_with_denial_enabled() {
+    let fx = fixture_tweaked(Hooks::new(), http_cfg(), |c| c.takedown_denial = true);
+    let d = data();
+    fx.push("room", &d.refs(), d.head(), None);
+    overflow_member_candidates(&fx, id(&d.small));
+    let reader = block_on(
+        fx.pipe
+            .object_reader(fx.repo_id("room"), ReaderView::Public),
+    )
+    .unwrap();
+    assert_eq!(
+        block_on(reader.read_canonical(&[id(&d.small), id(&d.big)])).unwrap(),
+        vec![None, Some(serialize(&d.big).unwrap())]
+    );
+    let rows = block_on(reader.object_metadata(&[id(&d.small), id(&d.big)])).unwrap();
+    assert!(rows[0].is_none());
+    assert!(rows[1].is_some());
+}
+
+fn published_external_delta_member() -> (Fx, Hash, Hash) {
+    let fx = fixture();
+    let base = blob(b"base payload");
+    let old_root = tree(&[("base", EntryMode::Blob, &base)]);
+    let old_head = commit(&old_root, &[], "old");
+    let old_pack = fx.push("room", &[&base, &old_root, &old_head], id(&old_head), None);
+    let derived = blob(b"derived payload");
+    let root = tree(&[("derived", EntryMode::Blob, &derived)]);
+    let head = commit(&root, &[], "derived");
+    let mut writer = PackWriter::new();
+    writer
+        .push_delta(
+            &id(&base),
+            &mkit_core::delta::encode(&serialize(&base).unwrap(), &serialize(&derived).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+    for object in [&root, &head] {
+        writer
+            .push_raw(id(object), &serialize(object).unwrap())
+            .unwrap();
+    }
+    let (outcome, _) = fx.push_pack(
+        "room",
+        &writer.finish().unwrap(),
+        (HEAD, PACKMAP),
+        id(&head),
+        (Match(id(&old_head)), Match(old_pack)),
+    );
+    assert_eq!(outcome, AdvanceOutcome::Committed);
+    (fx, id(&base), id(&derived))
+}
+
+#[test]
+fn external_delta_base_membership_caps_are_typed_for_owner_reads() {
+    let (fx, base, target) = published_external_delta_member();
+    overflow_member_candidates(&fx, base);
+    with_owner_reader(&fx, |reader| {
+        assert_eq!(
+            block_on(reader.read_canonical(&[target]))
+                .unwrap_err()
+                .code(),
+            Code::ResourceExhausted
+        );
+        assert_eq!(
+            block_on(reader.object_metadata(&[target]))
+                .unwrap_err()
+                .code(),
+            Code::ResourceExhausted
+        );
+    });
+}
+
+#[test]
+fn reader_delta_depth_caps_are_typed_without_changing_http_errors() {
+    let (mut fx, _, target) = published_external_delta_member();
+    fx.pipe.cfg.indexed.as_mut().unwrap().max_delta_chain_depth = 0;
+    with_owner_reader(&fx, |reader| {
+        assert_eq!(
+            block_on(reader.read_canonical(&[target]))
+                .unwrap_err()
+                .code(),
+            Code::ResourceExhausted
+        );
+        assert_eq!(
+            block_on(reader.object_metadata(&[target]))
+                .unwrap_err()
+                .code(),
+            Code::ResourceExhausted
+        );
+    });
+    assert_eq!(fx.get(&fx.object_url("room", &target)).status, 503);
+}
+
+#[test]
+fn corrupt_delta_cycles_remain_unavailable_instead_of_read_exhaustion() {
+    let (fx, base, target) = published_external_delta_member();
+    let repo = fx.repo_id("room");
+    let view = crate::store::view::ViewStore {
+        store: &fx.pipe.meta,
+        repo: &repo,
+        writer: true,
+        policy: None,
+    };
+    let located = block_on(crate::indexed::resolve::locate_split(
+        &view,
+        fx.pipe.shards.as_ref(),
+        &repo,
+        &[base],
+        fx.pipe.metrics.as_ref(),
+    ))
+    .unwrap()
+    .remove(&base)
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    let mut row = located.value;
+    row.delta_base = Some(target);
+    row.wire_type = 2;
+    row.chain_depth = 1;
+    block_on(fx.pipe.meta.inner.apply(
+        &fx.pipe.shards.object_index(&repo, &base),
+        Batch::new().put(
+            keys::object_index(&repo.name, &base, &located.pack),
+            codec::encode_object_index(&base, &row).unwrap(),
+        ),
+    ))
+    .unwrap();
+    with_owner_reader(&fx, |reader| {
+        assert_eq!(
+            block_on(reader.read_canonical(&[target]))
+                .unwrap_err()
+                .code(),
+            Code::Unavailable
+        );
+    });
+    assert_eq!(fx.get(&fx.object_url("room", &target)).status, 503);
+}

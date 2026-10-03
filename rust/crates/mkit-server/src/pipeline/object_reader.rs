@@ -254,7 +254,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
     }
     /// Historical mixed sizes: `Blob` payload, other kinds' canonical length.
     /// # Errors
-    /// As `object_metadata`; incomplete proofs remain unavailable.
+    /// As `object_metadata`; writer caps are typed exhaustion and unprovable public IDs are absent.
     #[deprecated(note = "use object_metadata for kind, canonical_len and logical_len")]
     pub async fn object_sizes(&self, ids: &[Hash]) -> Result<Vec<Option<u64>>, ServerError> {
         Ok(self
@@ -292,7 +292,25 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             return Err(ServerError::unimplemented("URL tokens not configured"));
         }
         let calls = SliceBudget::new(OBJECT_READER_CALLS);
-        match self.authorize(&calls).await {
+        let capped = AtomicBool::new(false);
+        let result = self
+            .issue_urls_with_budget(targets, ttl_s, &calls, &capped)
+            .await;
+        if capped.load(Ordering::SeqCst) && result.is_err() {
+            Err(exhausted())
+        } else {
+            result
+        }
+    }
+    #[allow(clippy::too_many_lines)] // Credential issuance and one published proof share a budget.
+    async fn issue_urls_with_budget(
+        &self,
+        targets: &[UrlTarget],
+        ttl_s: u32,
+        calls: &SliceBudget,
+        capped: &AtomicBool,
+    ) -> Result<Vec<Option<IssuedUrl>>, ServerError> {
+        match self.authorize(calls).await {
             Err(e) if e.code() == Code::NotFound && matches!(self.view, ReaderView::Public) => {
                 return Ok(vec![None; targets.len()]);
             }
@@ -330,6 +348,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         };
         let now = self.pipe.clock.now_ms();
         let mut issued = Vec::with_capacity(targets.len());
+        let capture = ReaderStore::capture(&self.pipe.meta, capped);
         for target in targets {
             calls.charge().map_err(|_| exhausted())?;
             calls.charge().map_err(|_| exhausted())?;
@@ -340,7 +359,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             issued.push(
                 match self
                     .pipe
-                    .issue_url(&op, &repository, target, ttl_s, now)
+                    .issue_url_with_meta(&op, &repository, target, ttl_s, now, &capture)
                     .await
                 {
                     Ok(token) => Some(token),
@@ -352,13 +371,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     {
                         None
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => return Err(authorization_failure(e)),
                 },
             );
         }
-        let capped = AtomicBool::new(false);
-        let meta = ReaderStore::new(&self.pipe.meta, &calls, None, &capped);
-        let blobs = ReaderStore::new(&self.pipe.blobs, &calls, None, &capped);
+        let meta = ReaderStore::new(&self.pipe.meta, calls, None, capped);
+        let blobs = ReaderStore::new(&self.pipe.blobs, calls, None, capped);
         let view = ViewStore {
             store: &meta,
             repo: &self.repo,
@@ -386,19 +404,32 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 UrlTarget::Object(id) => Some(*id),
                 UrlTarget::Path { reference, path } => {
                     let shard = self.pipe.shards.ref_shard(&self.repo, reference);
-                    let tip =
-                        crate::store::read::read_ref(&view, &shard, &self.repo.name, reference)
-                            .await
-                            .map_err(failure)?;
+                    let tip = match crate::store::read::read_ref(
+                        &view,
+                        &shard,
+                        &self.repo.name,
+                        reference,
+                    )
+                    .await
+                    {
+                        Err(_) if capped.load(Ordering::SeqCst) => {
+                            ids.push(None);
+                            continue;
+                        }
+                        other => other.map_err(failure)?,
+                    };
                     if let Some(tip) = tip {
                         let path = if path.is_empty() {
                             Vec::new()
                         } else {
                             path.split('/').map(|p| p.as_bytes().to_vec()).collect()
                         };
-                        match resolve::resolve_ref(&env, tip, &path, &mut decode).await {
+                        match resolve::resolve_ref_with_caps(&env, tip, &path, &mut decode, true)
+                            .await
+                        {
                             Ok(resolved) => Some(resolved.leaf),
                             Err(resolve::Miss::NotFound | resolve::Miss::Capped) => None,
+                            Err(_) if capped.load(Ordering::SeqCst) => None,
                             Err(miss) => return Err(failure(miss)),
                         }
                     } else {
@@ -413,14 +444,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             .batch_with_budget(
                 &leaves,
                 true,
-                &calls,
+                calls,
                 false,
                 &BTreeSet::new(),
                 &mut decode,
                 true,
                 None,
                 None,
-                &capped,
+                capped,
             )
             .await?;
         Ok(ids
@@ -655,12 +686,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     accessible.push(*id);
                 }
             }
-            reached = accessible.iter().copied().collect();
-            located = match resolve::locate_many_with_caps(&env, &accessible, true).await {
-                // Membership itself must also be provable for public IDs.
-                Err(resolve::Miss::Capped) => Vec::new(),
-                other => other.map_err(resolution_failure)?,
-            };
+            located = resolve::locate_public_many(&env, &accessible)
+                .await
+                .map_err(resolution_failure)?;
+            reached = located.iter().map(|(id, _)| *id).collect();
         }
         let blocked = if pipe.cfg.takedown_denial && !reached.is_empty() {
             object_denials(&view, pipe.shards.as_ref(), &self.repo, &reached, indexed).await?
@@ -690,7 +719,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     .record(&self.repo, &id, ms(pipe.clock.now_ms()));
             }
             if sizes_only {
-                if !crate::indexed::resolve::member_dependencies_clear(
+                if !crate::indexed::resolve::member_dependencies_clear_with_caps(
                     &view,
                     pipe.shards.as_ref(),
                     &self.repo,
@@ -698,6 +727,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     located,
                     indexed.max_delta_chain_depth,
                     pipe.metrics.as_ref(),
+                    writer,
                 )
                 .await?
                 {
@@ -737,7 +767,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     .checked_mul(ids.iter().filter(|requested| **requested == id).count() as u64)
                     .filter(|n| *n <= output_left)
                     .ok_or_else(exhausted)?;
-                match resolve::load(&env, id, located, decode).await {
+                match resolve::load_with_caps(&env, id, located, decode, true).await {
                     Ok(canonical) if resolve::type_of(&canonical) != Some(ObjectType::Delta) => {
                         if canonical.len() as u64 != located.value.decoded_size {
                             return Err(failure(resolve::Miss::Unavailable));

@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Server embedders can share `ReadLimits` and `ReaderSession` across canonical
   and metadata reads to cap aggregate calls, decode work, encoded I/O and output.
+- Core pack users can inspect compressed delta length claims incrementally with
+  `DeltaHeaderProbe`, retaining bounded decoder state across input chunks.
 
 ### Fixed
 

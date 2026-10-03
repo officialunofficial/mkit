@@ -25,8 +25,15 @@ fn rejected(reason: &str) -> ServerError {
 
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     pub(super) async fn stored_grant_epoch(&self, key: &NamespaceKey) -> Result<u64, ServerError> {
-        self.meta
-            .get(&self.shards.coordinator(key), &keys::grant_epoch())
+        self.stored_grant_epoch_with_meta(key, &self.meta).await
+    }
+
+    pub(super) async fn stored_grant_epoch_with_meta<S: NamespaceStore>(
+        &self,
+        key: &NamespaceKey,
+        meta: &S,
+    ) -> Result<u64, ServerError> {
+        meta.get(&self.shards.coordinator(key), &keys::grant_epoch())
             .await
             .map_err(meta_error)?
             .as_ref()
