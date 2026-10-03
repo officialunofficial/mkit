@@ -1169,7 +1169,13 @@ rule):
 
 These are permanent failures. Clients MUST NOT retry the rejected
 upload as though polling or backoff could make its content valid. The last
-row is a per-lookup cap on the request's own content. Running out of an
+row is a per-lookup index cap and is also this error on the resumable
+publication path. Informative: during publication verification the indexed
+decode budget is charged over the whole packmap chain and reachable closure,
+so it is history-scoped; it keeps its existing `invalid_argument` errors
+(`object index limit exceeded` on the canonical path, `pack exceeds indexed
+decode budget` on the resumable path, whose budget is cumulative over the
+pair) until a separate amendment of this input contract. Running out of an
 execution allowance, or of an implementation's retained-evidence capacity, is
 not a verification failure of the content and is not in this table: §10.2
 classifies it as `unavailable`.
@@ -1553,9 +1559,10 @@ view. Configured takedown or custom-policy verification and delayed
 dependency publication still retain their applicable rules, including pair
 coverage and published-membership dependencies.
 
-Evidence that depends on a prior publication value or membership generation
-MUST be bound to that state. The server MUST compare the publication state (its
-membership generation, sequence and deletion boundary) that verification,
+Evidence computed against a publication state MUST be bound to that state. The
+server MUST compare the publication state (its membership generation, sequence
+and deletion boundary; the published prefix and value are re-derived at apply
+and are not part of the binding) that verification,
 inspection, policy and denial clearance were computed against with the state
 the final atomic apply guards. On any difference it MUST obtain new evidence
 for the replacement state or refuse with a retryable `unavailable`; it MUST NOT
@@ -1570,9 +1577,11 @@ using `unavailable`. The same capacity cause MUST have the same classification
 in preparation, dependency verification and final clearance, whichever call
 the allowance runs out on: classification follows the allowance itself, not
 the shape of the error that surfaced. A publication request MUST draw all of
-that work, including every optimistic retry of the final apply, from one
-allowance, reserving headroom for snapshot and lease reads, a checkpoint and
-the final commit. Explicit per-input index, inspection, decode and delta-depth
+that work, including every optimistic retry of the final apply and its own
+snapshot, lease, checkpoint and commit calls, from one allowance, counting
+every dispatched call whether or not it failed. An implementation SHOULD stop
+proof work short of the allowance to leave headroom for settlement; a
+settlement call the allowance cannot cover is refused as capacity. Explicit per-input index, inspection, decode and delta-depth
 limits retain their specified errors. An implementation unable to verify
 historical support within its supported limits, such as a retained-evidence
 bound, MUST fail closed with `unavailable` and document the operational

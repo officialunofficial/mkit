@@ -565,7 +565,9 @@ fn over_capacity_closure_fails_closed_without_effects() {
             assert!(
                 matches!(
                     error.public_message(),
-                    "pack verification pending" | "publication verification capacity exhausted"
+                    "pack verification pending"
+                        | "publication verification capacity exhausted"
+                        | "publication verification limit reached"
                 ),
                 "{path:?} existing={existing}: {error:?}"
             );
@@ -733,4 +735,61 @@ fn packmap_chain_omitting_an_old_history_pack_is_refused() {
             .unwrap_err();
         assert_eq!(new_ref.public_message(), "open closure", "{path:?}");
     }
+}
+
+/// With takedown on, the foreground resume slice, preparation and the final
+/// denial proof all draw from one ledger. Whatever allowance a request has, a
+/// publication either commits or is refused for execution capacity, never as a
+/// verdict about the content, and a larger allowance never turns a commit into
+/// a refusal.
+#[test]
+fn takedown_paths_refuse_only_as_capacity_across_one_ledger() {
+    use crate::pipeline::publication_budget::tests::OVERRIDE;
+    let outcome = |path: Path, request_calls: u32| {
+        OVERRIDE.set(None);
+        let w = World::new(path);
+        let push = unrelated(1);
+        let names = branch("main");
+        let tickets = w.tickets(&names.0, &push);
+        w.lag();
+        let before = w.effects(&[names.0.as_str(), names.1.as_str()], &[], &tickets);
+        OVERRIDE.set(Some(request_calls));
+        let result = w.advance(&names, None, (push.head, push.map()), &tickets);
+        OVERRIDE.set(None);
+        if result.is_err() {
+            assert_eq!(
+                w.effects(&[names.0.as_str(), names.1.as_str()], &[], &tickets),
+                before,
+                "{path:?} at {request_calls}: a refusal leaves no effect"
+            );
+        }
+        result
+    };
+    for path in [Path::Takedown, Path::Custom] {
+        let mut committed = false;
+        for request_calls in [0, 64, 80, 100, 130, 200, 400, 1_000, 9_000] {
+            match outcome(path, request_calls) {
+                Ok(()) => committed = true,
+                Err(error) => {
+                    assert!(!committed, "{path:?} at {request_calls}: {error:?}");
+                    assert_eq!(
+                        error.code(),
+                        Code::Unavailable,
+                        "{path:?} at {request_calls}"
+                    );
+                    assert!(
+                        matches!(
+                            error.public_message(),
+                            "publication verification capacity exhausted"
+                                | "publication verification limit reached"
+                                | "pack verification pending"
+                        ),
+                        "{path:?} at {request_calls}: {error:?}"
+                    );
+                }
+            }
+        }
+        assert!(committed, "{path:?}: the full allowance must commit");
+    }
+    OVERRIDE.set(None);
 }

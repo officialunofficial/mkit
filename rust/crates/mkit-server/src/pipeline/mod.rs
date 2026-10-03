@@ -2342,7 +2342,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             return Ok((stored, ResponseMeta::default()));
         }
         let lease = if self.cfg.sharding == Sharding::D34 {
-            let observed = self.observe_lease(&op, &p, ahead.as_ref()).await?;
+            let observed = self.observe_lease(&op, &p, ahead.as_ref(), None).await?;
             if let Some((window, total)) = observed.quota_seed()
                 && let Some(snapshot) = ahead.as_mut()
             {
@@ -2580,7 +2580,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                             }
                             _ => None,
                         };
-                        self.admit_lease(&op, &p, observed, a.business_skew_ms)
+                        self.admit_lease(&op, &p, observed, a.business_skew_ms, None)
                             .await?
                     };
                     op.created = created;
@@ -3318,6 +3318,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         &self,
         p: &Partition,
         snap: &mut Snapshot,
+        wanted: Vec<Key>,
+    ) -> Result<(), ServerError> {
+        self.fill_with(&self.meta, p, snap, wanted).await
+    }
+
+    async fn fill_with<S: NamespaceStore>(
+        &self,
+        meta: &S,
+        p: &Partition,
+        snap: &mut Snapshot,
         mut wanted: Vec<Key>,
     ) -> Result<(), ServerError> {
         wanted.retain(|k| !snap.contains(k));
@@ -3326,7 +3336,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if wanted.is_empty() {
             return Ok(());
         }
-        let values = self.meta.get_many(p, &wanted).await.map_err(meta_error)?;
+        let values = meta.get_many(p, &wanted).await.map_err(meta_error)?;
         for (key, value) in wanted.into_iter().zip(values) {
             snap.insert(key, value);
         }
@@ -3716,7 +3726,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             && req.refs.iter().all(|update| update.new.is_some())
         {
             let snapshot = ahead.get_or_insert_with(Snapshot::default);
-            self.fill(p, snapshot, req.read_keys()).await?;
+            let settlement = crate::indexed::budget::Budgeted::new(&self.meta, budget.root());
+            publication_budget::PublicationBudget::settle(
+                budget.root(),
+                self.fill_with(&settlement, p, snapshot, req.read_keys())
+                    .await,
+            )?;
             let pair = clearance::resulting_pair(&op.repo.name, req.refs, snapshot)?;
             let mut prepared = policy.prepare(op, &pair).await?;
             if prepared.value != pair {
@@ -3837,19 +3852,23 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let resumed = self.cfg.takedown_denial
             && self.publication_policy.is_none()
             && inspected.is_none()
-            && Box::pin(crate::indexed::publication::resume::prepare_with(
-                &self.meta,
-                p,
-                self.shards.as_ref(),
-                &op.repo,
-                prepared,
-                indexed,
-                ms(self.clock.now_ms()),
-                self.metrics.as_ref(),
-                created,
-                Some(budget.proof()),
-            ))
-            .await?;
+            && publication_budget::PublicationBudget::settle(
+                budget.root(),
+                Box::pin(crate::indexed::publication::resume::prepare_with(
+                    &self.meta,
+                    p,
+                    self.shards.as_ref(),
+                    &op.repo,
+                    prepared,
+                    indexed,
+                    ms(self.clock.now_ms()),
+                    self.metrics.as_ref(),
+                    created,
+                    Some(budget.proof()),
+                    Some(budget.root()),
+                ))
+                .await,
+            )?;
         // The canonical fallback retains delta bases; only the metadata-only
         // continuation can use the whole-job allowance without that residency.
         let mut indexed = indexed;
@@ -3985,6 +4004,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             own_budget = crate::indexed::budget::SliceBudget::new(9000);
             &own_budget
         };
+        // Settlement calls (snapshot, lease, commit) charge the request root, or
+        // nothing when the write carries no publication ledger.
+        let ledger = budget.map(publication_budget::PublicationBudget::root);
+        let meter = publication_budget::PublicationBudget::meter(ledger);
+        let settlement = &meter;
         loop {
             let denial_packs: Vec<_> = req
                 .denial_packs
@@ -4031,7 +4055,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 base
             };
             let clock = self.plan_clock(skew_ms, &req);
-            let snap = self.read_snapshot(p, &req, &clock, base, prune_ok).await?;
+            let snap = publication_budget::PublicationBudget::settle(
+                settlement,
+                self.read_snapshot(p, &req, &clock, base, prune_ok, ledger)
+                    .await,
+            )?;
             if let Some(lease) = req.lease
                 && (prove
                     || !first_attempt
@@ -4041,8 +4069,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         .saturating_sub(self.cfg.lease_margin_ms)
                         < ms(self.clock.now_ms()).saturating_add(self.cfg.min_lease_budget_ms))
             {
-                let observed = self.observe_lease(op, p, Some(&snap)).await?;
-                let (_, renewed) = self.admit_lease(op, p, observed, skew_ms).await?;
+                let (_, renewed) = publication_budget::PublicationBudget::settle(
+                    settlement,
+                    async {
+                        let observed = self.observe_lease(op, p, Some(&snap), ledger).await?;
+                        self.admit_lease(op, p, observed, skew_ms, ledger).await
+                    }
+                    .await,
+                )?;
                 req.lease = Some(renewed);
             }
             first_attempt = false;
@@ -4082,7 +4116,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 }
             }
             tracing::debug!(stage = "apply", replans);
-            match self.meta.apply(p, batch).await {
+            let applied = crate::indexed::budget::Budgeted::new(&self.meta, &meter)
+                .apply(p, batch)
+                .await;
+            match applied {
                 Ok(BatchOutcome::Committed) => {
                     #[cfg(feature = "test-faults")]
                     self.schedule_test_ref_timer(op, a, &on_commit, ms(clock.business_now_ms))
@@ -4129,7 +4166,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     }
                 }
                 Err(StoreError::Full) => return Err(self.partition_full(p, prune).await),
-                Err(e) => return Err(meta_error(e)),
+                Err(e) => {
+                    return publication_budget::PublicationBudget::settle(
+                        settlement,
+                        Err(meta_error(e)),
+                    );
+                }
             }
         }
     }
@@ -4198,36 +4240,38 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         clock: &PlanClock,
         mut snap: Snapshot,
         prune: bool,
+        ledger: Option<&crate::indexed::budget::SliceBudget>,
     ) -> Result<Snapshot, ServerError> {
         let now = clock.plan_time_ms;
+        let meter = publication_budget::PublicationBudget::meter(ledger);
+        let meta = crate::indexed::budget::Budgeted::new(&self.meta, &meter);
         if prune && prune_sampled(req, now) {
             if req.replay.is_some() {
-                snap.expired_replays = read::expired_replay_keys(&self.meta, p, now, PRUNE_LIMIT)
+                snap.expired_replays = read::expired_replay_keys(&meta, p, now, PRUNE_LIMIT)
                     .await
                     .map_err(meta_error)?;
             }
             if let Some(window) = req.charges.iter().map(|c| c.limits.window_ms).max() {
-                snap.stale_quotas =
-                    read::stale_quota_keys(&self.meta, p, now, ms(window), PRUNE_LIMIT)
-                        .await
-                        .map_err(meta_error)?;
+                snap.stale_quotas = read::stale_quota_keys(&meta, p, now, ms(window), PRUNE_LIMIT)
+                    .await
+                    .map_err(meta_error)?;
             }
         }
         let mut wanted = req.read_keys();
         wanted.extend(snap.stale_quotas.iter().map(|(_, quota)| quota.clone()));
-        self.fill(p, &mut snap, wanted).await?;
+        self.fill_with(&meta, p, &mut snap, wanted).await?;
         if let Some(advance) = &req.advance {
             let detail = advance::detail_keys(&snap, advance)?;
-            self.fill(p, &mut snap, detail).await?;
+            self.fill_with(&meta, p, &mut snap, detail).await?;
         }
         if let Some(BeginWrite::Open(open)) = req.begin {
-            begin::read_indexed(&self.meta, p, &open.spec, &mut snap).await?;
+            begin::read_indexed(&meta, p, &open.spec, &mut snap).await?;
             let reservation = crate::store::tickets::keys(&open.spec).reservation;
             if snap.get(&reservation).is_some()
                 && let Some(replay) = req.replay
             {
                 let key = keys::replay(&replay.scope);
-                let value = self.meta.get(p, &key).await.map_err(meta_error)?;
+                let value = meta.get(p, &key).await.map_err(meta_error)?;
                 snap.insert(key, value);
             }
         }

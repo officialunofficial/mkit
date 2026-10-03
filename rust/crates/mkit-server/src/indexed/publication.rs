@@ -304,30 +304,9 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
     Ok(())
 }
 
-/// Verify within a fresh 256-call slice. Running out of calls is execution
-/// capacity (`unavailable`), never a closed-closure verdict.
-#[allow(clippy::too_many_arguments)]
-pub async fn verify<B: BlobStore, S: NamespaceStore>(
-    blobs: &B,
-    store: &S,
-    shards: &dyn ShardMap,
-    repo: &RepoId,
-    value: &Pair,
-    branch: bool,
-    advance: &mut Advance,
-    policy: &dyn PublicationPolicy,
-    cfg: IndexedConfig,
-    metrics: &dyn Metrics,
-) -> Result<(), ServerError> {
-    let slice = super::budget::SliceBudget::new(256);
-    verify_within(
-        blobs, store, shards, repo, value, branch, advance, policy, cfg, metrics, &slice,
-    )
-    .await
-}
-
-/// [`verify`] drawing from a caller's slice, which may be a child of the
-/// request's publication ledger. Exhaustion is read from the budget itself.
+/// Verify the resulting pair within a caller's slice, a child of the request's
+/// publication ledger. Exhaustion is read from the budget itself and is
+/// execution capacity (`unavailable`), never a closed-closure verdict.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn verify_within<B: BlobStore, S: NamespaceStore>(
     blobs: &B,
@@ -351,34 +330,9 @@ pub(crate) async fn verify_within<B: BlobStore, S: NamespaceStore>(
     crate::pipeline::publication_budget::PublicationBudget::settle(slice, result)
 }
 
-/// Verify the resulting pair, then collect only the added-pack inspection metadata.
-///
-/// Inspection does not alter the publication closure walk or its classification.
-/// # Errors
-/// Existing closed-closure, storage and index-limit refusals.
-#[allow(clippy::too_many_arguments)]
-pub async fn verify_inspected<B: BlobStore, S: NamespaceStore>(
-    blobs: &B,
-    store: &S,
-    shards: &dyn ShardMap,
-    repo: &RepoId,
-    value: &Pair,
-    branch: bool,
-    advance: &mut Advance,
-    policy: &dyn PublicationPolicy,
-    cfg: IndexedConfig,
-    metrics: &dyn Metrics,
-    inspection: &mut super::inspection::InspectionSet,
-) -> Result<(), ServerError> {
-    verify(
-        blobs, store, shards, repo, value, branch, advance, policy, cfg, metrics,
-    )
-    .await?;
-    inspection.complete_added(store, repo).await
-}
-
-/// [`verify_inspected`] with pair verification and inspection metadata sharing
-/// one caller slice.
+/// Verify the resulting pair, then collect only the added-pack inspection
+/// metadata, both sharing one caller slice. Inspection does not alter the
+/// publication closure walk or its classification.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn verify_inspected_within<B: BlobStore, S: NamespaceStore>(
     blobs: &B,

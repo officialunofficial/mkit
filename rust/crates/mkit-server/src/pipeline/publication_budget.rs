@@ -1,16 +1,24 @@
 //! One typed call allowance for a publication request (SPEC-SERVER §10.2).
 //!
-//! Preparation, dependency visibility and every final-denial retry draw from
-//! the same ledger. Nested slices are children of it, never extra allowance.
-//! The proof share stops short of the request's whole allowance so that the
-//! snapshot reads, lease check, checkpoint and final commit still fit.
+//! The root ledger counts every metadata and blob call the request dispatches
+//! on its own behalf: snapshot reads, lease observation and grants, preparation,
+//! dependency visibility, each denial proof, the resume checkpoint and every
+//! commit attempt. Failed dispatches stay charged. Policy hooks, inspector
+//! calls and other RPC work are outside it.
+//!
+//! Proof work draws from a child of the root that stops `SETTLEMENT_RESERVE`
+//! calls short, so proof work cannot starve settlement. Settlement itself
+//! charges the root, so the total including settlement cannot exceed the
+//! request allowance across any number of attempts. Nested slices are children
+//! of the proof share, never extra allowance.
 use crate::ServerError;
 use crate::indexed::budget::SliceBudget;
 
-/// The Workers request allowance this ledger is a share of.
+/// The request allowance this ledger divides.
 pub(crate) const REQUEST_CALLS: u32 = 9_000;
-/// Calls kept back for snapshot, authority and lease reads, the checkpoint
-/// write and the final commit, which are not proof work.
+/// Calls only settlement may spend: enough for one uncontended attempt's
+/// snapshot, lease, checkpoint and commit calls. Contended retries keep
+/// spending the root and are refused, as capacity, once it is empty.
 pub(crate) const SETTLEMENT_RESERVE: u32 = 64;
 /// Pair verification's own slice of the proof share.
 pub(crate) const VERIFY_SLICE_CALLS: u32 = 256;
@@ -18,6 +26,7 @@ pub(crate) const VERIFY_SLICE_CALLS: u32 = 256;
 /// The request-local publication ledger.
 #[derive(Debug, Clone)]
 pub(crate) struct PublicationBudget {
+    root: SliceBudget,
     proof: SliceBudget,
 }
 
@@ -33,12 +42,17 @@ impl PublicationBudget {
     }
 
     pub(crate) fn with_request_calls(request: u32) -> Self {
-        Self {
-            proof: SliceBudget::new(request.saturating_sub(SETTLEMENT_RESERVE)),
-        }
+        let root = SliceBudget::new(request);
+        let proof = root.child(request.saturating_sub(SETTLEMENT_RESERVE));
+        Self { root, proof }
     }
 
-    /// The proof share every phase of this request draws from.
+    /// Everything the request spends, settlement included.
+    pub(crate) fn root(&self) -> &SliceBudget {
+        &self.root
+    }
+
+    /// The share proof work draws from.
     pub(crate) fn proof(&self) -> &SliceBudget {
         &self.proof
     }
@@ -46,6 +60,20 @@ impl PublicationBudget {
     /// Pair verification's slice: a child of the proof share.
     pub(crate) fn verify_slice(&self) -> SliceBudget {
         self.proof.child(VERIFY_SLICE_CALLS)
+    }
+
+    /// `ledger`, or an unmetered counter when the call is not part of a
+    /// publication request.
+    pub(crate) fn meter(ledger: Option<&SliceBudget>) -> SliceBudget {
+        ledger
+            .cloned()
+            .unwrap_or_else(|| SliceBudget::new(u32::MAX))
+    }
+
+    /// A recorded stop at an unsupported historical limit: no retry of the same
+    /// pair can succeed until the implementation or its configuration changes.
+    pub(crate) fn limit_error() -> ServerError {
+        ServerError::unavailable("publication verification limit reached")
     }
 
     /// Execution capacity ran out; the content was never judged invalid.
@@ -93,6 +121,7 @@ pub(crate) mod tests {
         }
         assert!(verify.charge().is_err());
         assert_eq!(budget.proof().used(), VERIFY_SLICE_CALLS);
+        assert_eq!(budget.root().used(), VERIFY_SLICE_CALLS);
         assert!(verify.refused() && !budget.proof().refused());
         assert_eq!(PublicationBudget::with_request_calls(10).proof().limit(), 0);
     }

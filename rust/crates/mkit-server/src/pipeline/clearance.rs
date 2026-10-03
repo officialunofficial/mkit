@@ -54,6 +54,9 @@ pub(crate) struct PublicationWrite<'a> {
 /// meaningful for this row; a replanned write must refuse or re-prepare rather
 /// than transplant it onto a newer row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// `published` and `value` are deliberately excluded: only the recheck timer and
+// `append` move them, and `append` re-derives publication from the fresh row,
+// so including them would refuse proofs that remain valid.
 pub(crate) struct PreparedAt {
     pub generation: u64,
     pub sequence: u64,

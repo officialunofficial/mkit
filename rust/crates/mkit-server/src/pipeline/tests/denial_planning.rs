@@ -807,3 +807,54 @@ fn replans_share_one_proof_ledger_and_exhaustion_is_capacity() {
         .is_none()
     );
 }
+
+/// A lease-contended write replans up to the cap. Every settlement call it
+/// makes (snapshot reads, lease observation, each commit attempt) is charged
+/// to the request root, so the total including settlement stays inside the
+/// request allowance however many attempts run.
+#[test]
+fn contended_replans_charge_every_settlement_call_to_the_request_root() {
+    use crate::pipeline::publication_budget::PublicationBudget;
+    let (mut env, _) = proof_env(0, false, true);
+    let source = D34Shards.ref_shard(&repo(), HEAD);
+    let bumps = Arc::new(AtomicU32::new(0));
+    let counter = bumps.clone();
+    env.pipe.meta.hook = Some(Box::new(move |store, p, batch| {
+        if *p != source || batch.preconditions.iter().all(|c| !matches!(c, Precondition::Equals(k, _) | Precondition::Absent(k) if *k == keys::epoch_lease())) {
+            return;
+        }
+        // Another writer renews the lease under every commit attempt.
+        let epoch = u64::from(counter.fetch_add(1, Ordering::SeqCst)) + 1;
+        let lease = codec::EpochLease {
+            authority_ready: None,
+            authority_generation: None,
+            epoch,
+            expires_at_ms: ms(T0) + 600_000,
+            config_version: 1,
+        };
+        now(store.apply(
+            &source,
+            Batch::new().put(keys::epoch_lease(), codec::encode_epoch_lease(&lease)),
+        ))
+        .unwrap();
+    }));
+    let ledger = PublicationBudget::new();
+    let before = env.pipe.meta.calls();
+    let error = run_proved_ticket(&env, None, true, |_| {}, false, Some(&ledger)).unwrap_err();
+    assert_eq!(error.code(), Code::Aborted, "{error:?}");
+    assert!(bumps.load(Ordering::SeqCst) > 1, "the write must replan");
+    // Everything the loop dispatched on its own behalf was counted once.
+    assert_eq!(ledger.root().used(), env.pipe.meta.calls() - before);
+    assert!(ledger.root().used() > crate::pipeline::publication_budget::SETTLEMENT_RESERVE);
+    assert!(ledger.root().used() <= ledger.root().limit());
+    // With a smaller allowance the same contention is refused as capacity
+    // instead of running past it.
+    let tight = PublicationBudget::with_request_calls(20);
+    let error = run_proved_ticket(&env, None, true, |_| {}, false, Some(&tight)).unwrap_err();
+    assert_eq!(error.code(), Code::Unavailable, "{error:?}");
+    assert_eq!(
+        error.public_message(),
+        "publication verification capacity exhausted"
+    );
+    assert!(tight.root().used() <= tight.root().limit());
+}

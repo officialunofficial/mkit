@@ -283,7 +283,7 @@ fn exhaustion_and_shared_alarm_refusal_remain_typed_and_bounded() {
             p.result(&mut advance(root), 0, 0, 1)
                 .unwrap_err()
                 .public_message(),
-            "publication verification capacity exhausted"
+            "publication verification limit reached"
         );
         let mut p = progress(&a);
         p.byte_limit = 50;
@@ -617,7 +617,7 @@ fn failing_dispatch_at_total_limit_is_terminal_typed_exhaustion() {
             p.result(&mut advance([14; 32]), 0, 0, 1)
                 .unwrap_err()
                 .public_message(),
-            "publication verification capacity exhausted"
+            "publication verification limit reached"
         );
     });
 }
@@ -777,6 +777,7 @@ fn spent_request_ledger_checkpoints_resumable_work_without_a_terminal_verdict() 
             &crate::telemetry::NoopMetrics,
             0,
             Some(&ledger),
+            None,
         )
         .await
         .unwrap_err();
@@ -896,8 +897,28 @@ fn unsupported_historical_capacity_is_one_terminal_stop_not_a_recurring_alarm() 
             assert_eq!(error.code(), Code::Unavailable);
             assert_eq!(
                 error.public_message(),
-                "publication verification capacity exhausted"
+                "publication verification limit reached"
             );
         }
     });
+}
+
+#[test]
+fn a_per_lookup_index_cap_keeps_its_input_error_on_the_resumable_path() {
+    let a = advance([30; 32]);
+    let mut p = progress(&a);
+    p.failure = Some(Exhaustion::IndexLookup);
+    p.validate().unwrap();
+    let error = p.result(&mut advance([30; 32]), 0, 0, 1).unwrap_err();
+    // The same specified error as the canonical path's lookup cap.
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert_eq!(error.public_message(), "object index limit exceeded");
+    // A retained-evidence bound is capacity and says so distinctly.
+    p.failure = Some(Exhaustion::Traversal);
+    let error = p.result(&mut advance([30; 32]), 0, 0, 1).unwrap_err();
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(
+        error.public_message(),
+        "publication verification limit reached"
+    );
 }
