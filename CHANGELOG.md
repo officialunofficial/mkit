@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Server storage supports immutable, content-addressed publication certificate
   and frontier pages, with structural sharing and bounded exact lookups.
-  Existing rows need no migration. Publication integration follows separately.
+  Stores written by v0.5.0 need no migration. Publication integration follows separately.
 
 ### Changed
 

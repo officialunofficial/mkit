@@ -1757,10 +1757,11 @@ returns `resource_exhausted`; missing or corrupt proof data MUST NOT mean
 absence of a denial. No partial or alarm-checkpointed denial proof can authorize
 a later plan-time apply.
 
-**Upgrade and rollback.** Absent anchors on legacy rows require full verification
-through the bounded resumable path before the first certificate is published.
-Legacy inventory lengths may be unknown; that does not invalidate previously
-verified content or authorize an unchecked seed. Missing, corrupt, unanchored,
+**Upgrade and rollback.** The stored-data compatibility baseline is v0.5.0.
+Stores written by v0.5.0 require no migration. Absent certificate anchors on
+those rows require full verification through the bounded resumable path before
+the first certificate is published. Inventory entries retain their required
+canonical lengths and sealed packmap facts. Missing, corrupt, unanchored,
 or incompatible certificates require bounded resumable full verification, or
 an explicit closed refusal. No migration or wire change is required. Optional
 new stored fields MUST decode as absent when missing. Public Rust DTOs and
@@ -4078,7 +4079,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
-| 1 | draft | Optional immutable paged publication certificates: exact closure/support and denial targets, structural sharing, bounded lookup and timer continuation, fresh denial queries, compatible legacy bootstrap and explicit rollback requirements (§10.2a). |
+| 1 | draft | Optional immutable paged publication certificates: exact closure/support and denial targets, structural sharing, bounded lookup and timer continuation, fresh denial queries, migration-free v0.5.0 bootstrap and explicit rollback requirements (§10.2a). |
 | 1 | draft | Namespace-scoped ListRepos authorization with an arbitrary repository selector; authority full listing requires explicit opt-in and writer view (§6.2; STC §7.10). |
 | 1 | draft | Worker launch profile is `LAUNCH_PROFILE=paid-workers`; `uno` remains a deprecated alias with a startup warning. §18 accepts configured cache-purge delivery through the signed HTTPS hook or an embedder-supplied purge sink. |
 | 1 | draft | Production takedown and `ReadPreserved` activation uses the configured admin, Paid Workers launch profile, takedown, indexed Paid and complete §14.7 preservation gate; startup refuses partial configuration. |
