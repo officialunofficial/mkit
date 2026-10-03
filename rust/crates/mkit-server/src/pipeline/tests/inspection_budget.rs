@@ -127,6 +127,7 @@ fn inspection_pair_budget_includes_dependency_visibility_before_hooks() {
                 source: &source,
                 shards: &D34Shards,
                 prepared: None,
+                bound: None,
             }),
         };
         let mut collected = crate::indexed::inspection::InspectionSet::new(10_000);
@@ -141,12 +142,17 @@ fn inspection_pair_budget_includes_dependency_visibility_before_hooks() {
             None,
             &std::collections::BTreeSet::new(),
             inspecting.then_some(&mut collected),
+            &crate::pipeline::publication_budget::PublicationBudget::new(),
         ));
         let calls = env.pipe.meta.calls() - before;
         if inspecting {
             let error = result.unwrap_err();
-            assert_eq!(error.code(), Code::InvalidArgument);
-            assert_eq!(error.public_message(), "object index limit exceeded");
+            // Spent execution capacity is `unavailable`, never an index-limit verdict.
+            assert_eq!(error.code(), Code::Unavailable);
+            assert_eq!(
+                error.public_message(),
+                "publication verification capacity exhausted"
+            );
             // The one snapshot read is outside the shared allocation; the
             // MKPL HEAD and GET consume its other two non-metadata calls.
             assert_eq!(calls + 2 - 1, 256);
@@ -154,7 +160,7 @@ fn inspection_pair_budget_includes_dependency_visibility_before_hooks() {
             assert!(collected.finalize().is_empty());
             assert!(env.pipe.meta.batches.lock().unwrap().is_empty());
         } else {
-            let prepared = result.unwrap().unwrap();
+            let (prepared, _) = result.unwrap().unwrap();
             assert_eq!(
                 prepared.value,
                 Pair {

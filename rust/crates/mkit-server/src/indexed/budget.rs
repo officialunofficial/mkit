@@ -18,10 +18,18 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 pub(crate) const EXHAUSTED_MESSAGE: &str = "verification slice subrequest budget exhausted";
 
 /// A shared call counter with a fixed limit.
+///
+/// A [`Self::child`] draws from its parent too, so a nested slice can never
+/// grant more than the enclosing allowance has left. Every refusal is
+/// remembered ([`Self::refused`]) on the budget that refused and on its
+/// children, so a caller classifies capacity from the ledger itself rather than
+/// from where the last call happened to land.
 #[derive(Debug, Clone)]
 pub struct SliceBudget {
     used: Arc<AtomicU32>,
     limit: u32,
+    refused: Arc<AtomicBool>,
+    parent: Option<Box<SliceBudget>>,
 }
 
 impl SliceBudget {
@@ -31,6 +39,19 @@ impl SliceBudget {
         Self {
             used: Arc::new(AtomicU32::new(0)),
             limit,
+            refused: Arc::new(AtomicBool::new(false)),
+            parent: None,
+        }
+    }
+
+    /// A slice of at most `limit` calls that also spends this budget.
+    #[must_use]
+    pub fn child(&self, limit: u32) -> Self {
+        Self {
+            used: Arc::new(AtomicU32::new(0)),
+            limit,
+            refused: Arc::new(AtomicBool::new(false)),
+            parent: Some(Box::new(self.clone())),
         }
     }
 
@@ -40,10 +61,32 @@ impl SliceBudget {
         self.used.load(Ordering::SeqCst)
     }
 
-    /// Calls left.
+    /// The fixed limit of this budget alone.
+    #[must_use]
+    pub fn limit(&self) -> u32 {
+        self.limit
+    }
+
+    /// Calls left, including every ancestor's allowance.
     #[must_use]
     pub fn remaining(&self) -> u32 {
-        self.limit.saturating_sub(self.used())
+        let own = self.limit.saturating_sub(self.used());
+        self.parent
+            .as_ref()
+            .map_or(own, |parent| own.min(parent.remaining()))
+    }
+
+    /// Whether any charge was ever refused by this budget or an ancestor.
+    #[must_use]
+    pub fn refused(&self) -> bool {
+        self.refused.load(Ordering::SeqCst)
+            || self.parent.as_ref().is_some_and(|parent| parent.refused())
+    }
+
+    /// Whether this budget's own ancestors, not its own slice limit, refused.
+    #[must_use]
+    pub fn ancestor_refused(&self) -> bool {
+        self.parent.as_ref().is_some_and(|parent| parent.refused())
     }
 
     /// Charge one call, failing once the limit is spent. The failing call is
@@ -59,12 +102,28 @@ impl SliceBudget {
     /// # Errors
     /// Exhausted shared allowance, without partially charging the reservation.
     pub fn charge_many(&self, calls: u32) -> Result<(), StoreError> {
-        self.used
+        let reserved = self
+            .used
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
                 used.checked_add(calls).filter(|total| *total <= self.limit)
             })
-            .map(|_| ())
-            .map_err(|_| StoreError::Unavailable(EXHAUSTED_MESSAGE.into()))
+            .is_ok();
+        let granted = reserved
+            && match &self.parent {
+                Some(parent) => {
+                    let granted = parent.charge_many(calls).is_ok();
+                    if !granted {
+                        self.used.fetch_sub(calls, Ordering::SeqCst);
+                    }
+                    granted
+                }
+                None => true,
+            };
+        if granted {
+            return Ok(());
+        }
+        self.refused.store(true, Ordering::SeqCst);
+        Err(StoreError::Unavailable(EXHAUSTED_MESSAGE.into()))
     }
 }
 
@@ -381,5 +440,79 @@ mod tests {
         assert_eq!((budget.used(), budget.remaining()), (2, 0));
         assert!(budget.charge().is_err());
         assert!(!is_exhausted(&StoreError::Unavailable("x".into())));
+    }
+
+    #[test]
+    fn child_spends_its_parent_and_rolls_back_a_refused_charge() {
+        let parent = SliceBudget::new(3);
+        let child = parent.child(2);
+        child.charge().unwrap();
+        child.charge().unwrap();
+        // The child's own limit refuses first; the parent is untouched by it.
+        assert!(child.charge().is_err());
+        assert!(child.refused() && !parent.refused());
+        assert_eq!((child.used(), parent.used()), (2, 2));
+        let sibling = parent.child(5);
+        sibling.charge().unwrap();
+        // The parent refuses a charge its child would grant: no partial charge.
+        assert!(sibling.charge().is_err());
+        assert_eq!((sibling.used(), parent.used()), (1, 3));
+        assert!(parent.refused() && sibling.ancestor_refused());
+        assert_eq!(sibling.remaining(), 0);
+        assert!(parent.charge_many(2).is_err());
+        assert_eq!(parent.used(), 3);
+    }
+
+    #[test]
+    fn a_failed_dispatch_stays_charged() {
+        struct Failing;
+        impl NamespaceStore for Failing {
+            fn capabilities(&self) -> StoreCapabilities {
+                StoreCapabilities::full()
+            }
+            async fn get(&self, _: &Partition, _: &Key) -> Result<Option<Value>, StoreError> {
+                Err(StoreError::unavailable("injected"))
+            }
+            async fn has(&self, _: &Partition, _: &Key) -> Result<bool, StoreError> {
+                Err(StoreError::unavailable("injected"))
+            }
+            async fn get_many(
+                &self,
+                _: &Partition,
+                _: &[Key],
+            ) -> Result<Vec<Option<Value>>, StoreError> {
+                Err(StoreError::unavailable("injected"))
+            }
+            async fn scan(
+                &self,
+                _: &Partition,
+                _: &Key,
+                _: &Key,
+                _: Option<&Cursor>,
+                _: u32,
+            ) -> Result<ScanPage, StoreError> {
+                Err(StoreError::unavailable("injected"))
+            }
+            async fn apply(&self, _: &Partition, _: Batch) -> Result<BatchOutcome, StoreError> {
+                Err(StoreError::unavailable("injected"))
+            }
+            async fn stats(&self, _: &Partition) -> Result<PartitionStats, StoreError> {
+                Err(StoreError::unavailable("injected"))
+            }
+            async fn probe(&self) -> Result<(), StoreError> {
+                Err(StoreError::unavailable("injected"))
+            }
+        }
+        let budget = SliceBudget::new(2);
+        let store = Budgeted::new(&Failing, &budget);
+        let p = Partition::Namespace(crate::NamespaceKey::deployment_default());
+        let key = Key::new(b"k".to_vec());
+        for _ in 0..2 {
+            let error = futures_executor::block_on(store.get(&p, &key)).unwrap_err();
+            assert!(!is_exhausted(&error), "the dispatch failed, not the budget");
+        }
+        assert_eq!(budget.used(), 2, "failed dispatches are never refunded");
+        let error = futures_executor::block_on(store.get(&p, &key)).unwrap_err();
+        assert!(is_exhausted(&error) && budget.refused());
     }
 }

@@ -31,12 +31,20 @@ pub enum Exhaustion {
     DecodeBudget,
     IndexCalls,
     Traversal,
+    /// A per-lookup index cap on the pair's own content (an input limit).
+    IndexLookup,
 }
 impl Exhaustion {
     fn error(self) -> ServerError {
         match self {
             Self::DecodeBudget => ServerError::invalid_argument(resolve::DECODE_BUDGET_MESSAGE),
-            Self::IndexCalls | Self::Traversal => capped(),
+            // The same specified error as the canonical path's lookup cap.
+            Self::IndexLookup => capped(),
+            // Unsupported historical capacity: the content was never judged
+            // invalid, and retrying the same pair cannot succeed.
+            Self::IndexCalls | Self::Traversal => {
+                crate::pipeline::publication_budget::PublicationBudget::limit_error()
+            }
         }
     }
 }
@@ -204,6 +212,7 @@ fn binding(advance: &Advance, cfg: IndexedConfig) -> Result<Hash, ServerError> {
 
 /// First slice may complete inline. Otherwise only verification state and timer
 /// are written; no ref, membership, outcome or ticket is accepted/consumed.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)] // Immutable proof inputs plus the consuming request lag context.
 pub(crate) async fn prepare<S: NamespaceStore>(
     store: &S,
@@ -216,10 +225,36 @@ pub(crate) async fn prepare<S: NamespaceStore>(
     metrics: &dyn crate::Metrics,
     created: u64,
 ) -> Result<bool, ServerError> {
+    prepare_with(
+        store, source, shards, repo, advance, cfg, now, metrics, created, None, None,
+    )
+    .await
+}
+
+/// [`prepare`] whose slice draws from the foreground request's ledger.
+#[allow(clippy::too_many_arguments)] // Immutable proof inputs plus the consuming request lag context.
+#[allow(clippy::too_many_lines)] // One checkpointed foreground slice with its settlement metering.
+pub(crate) async fn prepare_with<S: NamespaceStore>(
+    store: &S,
+    source: &Partition,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    advance: &mut Advance,
+    cfg: IndexedConfig,
+    now: u64,
+    metrics: &dyn crate::Metrics,
+    created: u64,
+    request: Option<&SliceBudget>,
+    settle: Option<&SliceBudget>,
+) -> Result<bool, ServerError> {
+    // Reads of the verification row and the checkpoint write are settlement:
+    // they charge the request root, never the proof share.
+    let meter = crate::pipeline::publication_budget::PublicationBudget::meter(settle);
+    let metered = crate::indexed::budget::Budgeted::new(store, &meter);
     let Some(root) = advance.value.packmap else {
         return Ok(false);
     };
-    let Some((mut state, prior)) = state::read(store, source, &repo.name, &root)
+    let Some((mut state, prior)) = state::read(&metered, source, &repo.name, &root)
         .await
         .map_err(|_| unavailable())?
     else {
@@ -268,7 +303,7 @@ pub(crate) async fn prepare<S: NamespaceStore>(
     };
     // A retryable read failure still spent work. Persist its safe checkpoint
     // before returning the original storage refusal to the foreground caller.
-    let slice_error = slice(store, shards, repo, &mut progress, metrics, None)
+    let slice_error = slice_with(store, shards, repo, &mut progress, metrics, None, request)
         .await
         .err();
     if let Some(error) = slice_error.as_ref()
@@ -301,7 +336,7 @@ pub(crate) async fn prepare<S: NamespaceStore>(
             .require(Precondition::Absent(timer.clone()))
             .put(timer, Value::new(wanted.to_vec()));
     }
-    if store
+    if metered
         .apply(source, batch)
         .await
         .map_err(|_| unavailable())?
@@ -317,6 +352,20 @@ pub(crate) async fn prepare<S: NamespaceStore>(
         .map(|()| true)
 }
 
+/// Why one proof step stopped, typed so classification never reads messages.
+enum Step {
+    Server(ServerError),
+    /// A per-lookup index cap (input limit).
+    Lookup,
+    /// The retained-evidence item bound (implementation capacity).
+    Capacity,
+}
+impl From<ServerError> for Step {
+    fn from(error: ServerError) -> Self {
+        Self::Server(error)
+    }
+}
+
 fn missing() -> ServerError {
     ServerError::unavailable("publication membership missing")
 }
@@ -327,7 +376,7 @@ async fn one<S: NamespaceStore>(
     repo: &RepoId,
     progress: &mut Progress,
     metrics: &dyn crate::Metrics,
-) -> Result<u64, ServerError> {
+) -> Result<u64, Step> {
     let additions = progress.additions.clone();
     let live = PairStore {
         store,
@@ -341,14 +390,14 @@ async fn one<S: NamespaceStore>(
     }
     if let Some(id) = progress.next_packmap {
         if !progress.chain.insert(id) {
-            return Err(capped());
+            return Err(Step::Lookup);
         }
         if !progress.additions.contains(&id)
             && !crate::store::read::is_member(&live, shards, repo, &id, None)
                 .await
                 .map_err(|_| unavailable())?
         {
-            return Err(missing());
+            return Err(missing().into());
         }
         let (length, prev, packs) = inventory::packlist_facts(store, &id)
             .await
@@ -377,7 +426,7 @@ async fn one<S: NamespaceStore>(
         .await?
         .remove(&id)
         .ok_or_else(missing)?
-        .map_err(|_| capped())?
+        .map_err(|_| Step::Lookup)?
         .ok_or_else(missing)?;
     inventory::seal(store, &located.pack)
         .await
@@ -387,10 +436,10 @@ async fn one<S: NamespaceStore>(
         .map_err(|_| unavailable())?
         .ok_or_else(missing)?;
     if row.canonical_len != located.value.decoded_size || row.kind == 0 || row.kind == 6 {
-        return Err(unavailable());
+        return Err(unavailable().into());
     }
     if Some(id) == progress.value.head && !matches!(row.kind, 3 | 4 | 7) {
-        return Err(closed());
+        return Err(closed().into());
     }
     progress.dependencies.insert(located.pack);
     for n in 0..row.references.pages.len() {
@@ -398,7 +447,7 @@ async fn one<S: NamespaceStore>(
         for child in children {
             if !progress.visited.contains(&child) && !progress.queue.contains(&child) {
                 if progress.visited.len() + progress.queue.len() >= MAX_ADVANCE_ITEMS {
-                    return Err(capped());
+                    return Err(Step::Capacity);
                 }
                 progress.queue.push_back(child);
             }
@@ -421,16 +470,16 @@ async fn external_base<S: NamespaceStore>(
     repo: &RepoId,
     progress: &mut Progress,
     metrics: &dyn crate::Metrics,
-) -> Result<u64, ServerError> {
+) -> Result<u64, Step> {
     let cursor = progress.base_cursor.clone().ok_or_else(unavailable)?;
     if cursor.depth >= progress.depth_limit {
-        return Err(ServerError::invalid_argument("delta chain too deep"));
+        return Err(ServerError::invalid_argument("delta chain too deep").into());
     }
     let selected = resolve::locate_split(live, shards, repo, &[cursor.next], metrics)
         .await?
         .remove(&cursor.next)
         .ok_or_else(missing)?
-        .map_err(|_| capped())?
+        .map_err(|_| Step::Lookup)?
         .ok_or_else(missing)?;
     let parent = inventory::entry(store, &selected.pack, &cursor.next)
         .await
@@ -440,7 +489,7 @@ async fn external_base<S: NamespaceStore>(
         .await
         .map_err(|_| unavailable())?;
     if parent.canonical_len != selected.value.decoded_size || parent.kind == 0 || parent.kind == 6 {
-        return Err(unavailable());
+        return Err(unavailable().into());
     }
     if selected.pack != cursor.origin {
         progress.bases.insert(selected.pack);
@@ -521,7 +570,24 @@ async fn slice<S: NamespaceStore>(
     metrics: &dyn crate::Metrics,
     alarm: Option<&crate::purge::SliceBudget>,
 ) -> Result<(), ServerError> {
-    let budget = SliceBudget::new(SLICE_CALLS);
+    slice_with(store, shards, repo, progress, metrics, alarm, None).await
+}
+
+/// One slice drawing from the foreground request's ledger when it has one.
+#[allow(clippy::too_many_lines)] // Typed step outcomes, rollback and the slice's stop reasons.
+async fn slice_with<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    progress: &mut Progress,
+    metrics: &dyn crate::Metrics,
+    alarm: Option<&crate::purge::SliceBudget>,
+    request: Option<&SliceBudget>,
+) -> Result<(), ServerError> {
+    let budget = request.map_or_else(
+        || SliceBudget::new(SLICE_CALLS),
+        |request| request.child(SLICE_CALLS),
+    );
     let remote = SliceStore {
         store,
         calls: &budget,
@@ -529,6 +595,7 @@ async fn slice<S: NamespaceStore>(
         stopped: std::sync::atomic::AtomicBool::new(false),
     };
     let mut bytes = 0u64;
+    let failure_before = progress.failure;
     while !progress.complete && bytes < SLICE_BYTES {
         // A rollback retains only immutable metadata, never decoded content.
         let before = progress.clone();
@@ -570,17 +637,29 @@ async fn slice<S: NamespaceStore>(
                 let calls = progress.calls;
                 *progress = before;
                 progress.calls = calls;
-                if start == 0 && !remote.stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                // A step that alone outgrows a whole slice is unsupported capacity.
+                // A spent request ledger or alarm share only pauses resumable work.
+                if start == 0
+                    && !remote.stopped.load(std::sync::atomic::Ordering::Relaxed)
+                    && !budget.ancestor_refused()
+                {
                     progress.failure = Some(Exhaustion::IndexCalls);
                 }
                 break;
             }
-            Err(error) if error.public_message() == "object index limit exceeded" => {
+            Err(Step::Lookup) => {
+                *progress = before;
+                progress.failure = Some(Exhaustion::IndexLookup);
+                break;
+            }
+            Err(Step::Capacity) => {
                 *progress = before;
                 progress.failure = Some(Exhaustion::Traversal);
                 break;
             }
-            Err(error) if error.public_message() == "publication membership missing" => {
+            Err(Step::Server(error))
+                if error.public_message() == "publication membership missing" =>
+            {
                 let calls = progress.calls;
                 *progress = before;
                 progress.calls = calls;
@@ -588,7 +667,7 @@ async fn slice<S: NamespaceStore>(
                 progress.missing = true;
                 break;
             }
-            Err(error) => {
+            Err(Step::Server(error)) => {
                 let calls = progress.calls;
                 *progress = before;
                 progress.calls = calls;
@@ -606,6 +685,21 @@ async fn slice<S: NamespaceStore>(
         if budget.remaining() < 16 {
             break;
         }
+    }
+    if failure_before.is_none()
+        && let Some(failure) = progress.failure
+    {
+        let reason = match failure {
+            Exhaustion::IndexCalls => "index_calls",
+            Exhaustion::Traversal => "retained_items",
+            Exhaustion::DecodeBudget => "decode_budget",
+            Exhaustion::IndexLookup => "index_lookup",
+        };
+        metrics.incr(
+            crate::telemetry::METRIC_PUBLICATION_LIMIT_REACHED,
+            &[("reason", reason)],
+            1,
+        );
     }
     Ok(())
 }

@@ -44,6 +44,33 @@ pub(crate) struct PublicationWrite<'a> {
     pub source: &'a crate::Partition,
     pub shards: &'a dyn super::ShardMap,
     pub prepared: Option<&'a Advance>,
+    /// The publication row `prepared` was computed against. Request-local:
+    /// never stored, and required whenever `prepared` is present.
+    pub bound: Option<PreparedAt>,
+}
+
+/// Identity of the publication row a proof was computed against. The proof's
+/// verdict (membership generation, dependency visibility, boundary) is only
+/// meaningful for this row; a replanned write must refuse or re-prepare rather
+/// than transplant it onto a newer row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// `published` and `value` are deliberately excluded: only the recheck timer and
+// `append` move them, and `append` re-derives publication from the fresh row,
+// so including them would refuse proofs that remain valid.
+pub(crate) struct PreparedAt {
+    pub generation: u64,
+    pub sequence: u64,
+    pub boundary: u64,
+}
+
+impl PreparedAt {
+    pub(crate) fn of(row: &crate::store::publication::Publication) -> Self {
+        Self {
+            generation: row.generation,
+            sequence: row.sequence,
+            boundary: row.boundary,
+        }
+    }
 }
 
 pub(crate) fn resulting_pair(

@@ -10,6 +10,7 @@ mod indexed;
 mod info;
 mod list_repos;
 mod policy;
+mod publication_binding;
 mod ref_policy;
 #[cfg(feature = "remote-hooks")]
 mod remote_hooks;
@@ -86,13 +87,27 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
 fn planned_ticket_publication(count: usize, d34: bool, retained: bool) -> Batch {
     planned_ticket_publication_counted(count, d34, retained, false)
 }
-#[allow(clippy::too_many_lines)] // A complete ticket snapshot pins the maximal apply budget.
 fn planned_ticket_publication_counted(
     count: usize,
     d34: bool,
     retained: bool,
     count_storage: bool,
 ) -> Batch {
+    try_planned_ticket_publication(count, d34, retained, ZERO_ROW, count_storage).unwrap()
+}
+const ZERO_ROW: clearance::PreparedAt = clearance::PreparedAt {
+    generation: 0,
+    sequence: 0,
+    boundary: 0,
+};
+#[allow(clippy::too_many_lines)] // A complete ticket snapshot pins the maximal apply budget.
+fn try_planned_ticket_publication(
+    count: usize,
+    d34: bool,
+    retained: bool,
+    bound: clearance::PreparedAt,
+    count_storage: bool,
+) -> Result<Batch, ServerError> {
     use crate::store::codec::{ReservationV1, TicketV1};
     let repo = RepoId {
         namespace: NamespaceKey::deployment_default(),
@@ -184,6 +199,7 @@ fn planned_ticket_publication_counted(
             source: &source,
             shards,
             prepared: Some(&record),
+            bound: Some(bound),
         }),
         pending: None,
     };
@@ -237,11 +253,42 @@ fn planned_ticket_publication_counted(
         keys::tickets_per_signer(&repo.name, HEAD, &signer).unwrap(),
         Some(codec::encode_u64(count as u64)),
     );
-    let Planned::Apply(plan) = plan_write(&req, &snap, &clock_at(T0 as u64, None)).unwrap() else {
+    let Planned::Apply(plan) = plan_write(&req, &snap, &clock_at(T0 as u64, None))? else {
         panic!("expected batch")
     };
     plan.batch.validate(&StoreCapabilities::full()).unwrap();
-    plan.batch
+    Ok(plan.batch)
+}
+
+/// A proof bound to another publication row never reaches the batch builder,
+/// even at the largest ticket count, and the bound itself adds no batch ops.
+#[test]
+fn maximal_publication_refuses_a_proof_bound_to_another_row() {
+    use crate::store::outbox::MAX_TICKETS_PER_ADVANCE;
+    for (d34, retained) in [(true, true), (false, true), (true, false)] {
+        let at = |generation, sequence, boundary| clearance::PreparedAt {
+            generation,
+            sequence,
+            boundary,
+        };
+        // The planned snapshot holds the default (empty) publication row.
+        for stale in [at(1, 0, 0), at(0, 1, 0), at(0, 0, 1)] {
+            let error = try_planned_ticket_publication(
+                MAX_TICKETS_PER_ADVANCE,
+                d34,
+                retained,
+                stale,
+                false,
+            )
+            .unwrap_err();
+            assert_eq!(error.code(), Code::Unavailable);
+            assert_eq!(error.public_message(), "publication state changed; retry");
+        }
+        let batch =
+            try_planned_ticket_publication(MAX_TICKETS_PER_ADVANCE, d34, retained, ZERO_ROW, false)
+                .unwrap();
+        assert!(batch.preconditions.len() + batch.writes.len() <= crate::store::MAX_BATCH_OPS);
+    }
 }
 
 #[test]
@@ -4652,7 +4699,7 @@ fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
         .identify(&a, OpKind::UpdateRef(refs[0].clone()))
         .unwrap();
     assert_eq!(
-        block_on(env.pipe.apply_loop(&op, &a, &p, &req, Some(ahead)))
+        block_on(env.pipe.apply_loop(&op, &a, &p, &req, Some(ahead), None))
             .unwrap_err()
             .code(),
         Code::PermissionDenied
@@ -5306,6 +5353,7 @@ fn admin_keys_cannot_authenticate_client_transport_principals() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One race fixture checks the guard, the replan and the retained rows.
 fn prepared_publication_pair_cannot_survive_a_counterpart_guard_race() {
     use crate::store::publication::{Pair, Publication};
     let repo = repo();
@@ -5345,6 +5393,11 @@ fn prepared_publication_pair_cannot_survive_a_counterpart_guard_race() {
             source: &source,
             shards: &SinglePartition,
             prepared: Some(&prepared),
+            bound: Some(clearance::PreparedAt {
+                generation: 0,
+                sequence: 0,
+                boundary: 0,
+            }),
         }),
     };
     let values = [

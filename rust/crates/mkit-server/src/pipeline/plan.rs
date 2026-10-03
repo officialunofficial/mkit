@@ -29,7 +29,7 @@ use crate::store::{
     Batch, Key, MAX_BATCH_OPS, Partition, Precondition, Value, Write, codec, tickets,
 };
 
-use super::{ShardMap, meta_error};
+use super::{ShardMap, internal, meta_error};
 
 /// Actual backend support; never selected from deployment configuration.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -654,6 +654,22 @@ pub(crate) fn plan_write(
             });
             if advance.value != pair {
                 return Err(ServerError::unavailable("publication pair changed; retry"));
+            }
+            if publication.prepared.is_some() {
+                // The proof was computed against one publication row. Guarding
+                // only the row read now would validate evidence derived from
+                // an older one, so any difference refuses before commit.
+                let current = crate::store::publication::Publication::decode(
+                    snap.get(&keys::publication(req.repo, &name)),
+                )
+                .map_err(meta_error)?;
+                match publication.bound {
+                    Some(bound) if bound == super::clearance::PreparedAt::of(&current) => {}
+                    Some(_) => {
+                        return Err(ServerError::unavailable("publication state changed; retry"));
+                    }
+                    None => return Err(internal("publication proof is not bound to its state")),
+                }
             }
             advance.additions = additions;
             advance.operation = operation;

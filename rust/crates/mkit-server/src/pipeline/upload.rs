@@ -268,7 +268,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                     advance: None,
                     implicit: None,
                 };
-                pipe.apply_atomic(&op, a, &p, &req, ahead).await?;
+                pipe.apply_atomic(&op, a, &p, &req, ahead, None).await?;
             }
         }
         super::fault!(pipe, AfterReserve, &op, a);
@@ -572,7 +572,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             implicit: None,
         };
         match pipe
-            .apply_atomic(&self.op, &self.a, &self.p, &req, None)
+            .apply_atomic(&self.op, &self.a, &self.p, &req, None, None)
             .await
         {
             Ok(StoredResult::UploadPack) => Ok(()),

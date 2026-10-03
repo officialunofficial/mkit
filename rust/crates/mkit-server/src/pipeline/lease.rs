@@ -566,6 +566,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         op: &Operation,
         p: &Partition,
         ahead: Option<&Snapshot>,
+        ledger: Option<&crate::indexed::budget::SliceBudget>,
     ) -> Result<LeaseObservation, ServerError> {
         let snap = ahead.ok_or_else(|| internal("D34 lease requires an atomic snapshot"))?;
         let seed_window = snap.namespace_window.filter(|window| {
@@ -598,7 +599,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
         }
         Ok(LeaseObservation::Renew(Box::new(
-            self.read_lease(op, p, observed_el, seed_window).await?,
+            self.read_lease(op, p, observed_el, seed_window, ledger)
+                .await?,
         )))
     }
 
@@ -608,10 +610,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         p: &Partition,
         observed_el: Option<codec::EpochLease>,
         seed_window: Option<u64>,
+        ledger: Option<&crate::indexed::budget::SliceBudget>,
     ) -> Result<CoordinatorLease, ServerError> {
+        let meter = super::publication_budget::PublicationBudget::meter(ledger);
+        let meta = crate::indexed::budget::Budgeted::new(&self.meta, &meter);
         let read = read_lease_rows(
-            &self.meta,
-            &self.meta,
+            &meta,
+            &meta,
             self.shards.as_ref(),
             self.clock.as_ref(),
             &op.repo,
@@ -628,8 +633,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         {
             Box::pin(self.ensure_authority_activation(&op.repo.namespace)).await?;
             return read_lease_rows(
-                &self.meta,
-                &self.meta,
+                &meta,
+                &meta,
                 self.shards.as_ref(),
                 self.clock.as_ref(),
                 &op.repo,
@@ -649,7 +654,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         p: &Partition,
         observed: LeaseObservation,
         skew_ms: i64,
+        ledger: Option<&crate::indexed::budget::SliceBudget>,
     ) -> Result<(Creation, LeaseWrite), ServerError> {
+        let meter = super::publication_budget::PublicationBudget::meter(ledger);
         let LeaseObservation::Renew(read) = observed else {
             let LeaseObservation::Usable(value) = observed else {
                 unreachable!()
@@ -688,7 +695,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 created_at_ms,
                 &LeaseParams::from(&self.cfg),
             )?;
-            let outcome = match self.meta.apply(&coordinator, grant.batch).await {
+            let outcome = match crate::indexed::budget::Budgeted::new(&self.meta, &meter)
+                .apply(&coordinator, grant.batch)
+                .await
+            {
                 Ok(outcome) => outcome,
                 Err(StoreError::Full) => return Err(self.partition_full(&coordinator, None).await),
                 Err(error) => return Err(meta_error(error)),
@@ -710,7 +720,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 }
                 BatchOutcome::PreconditionFailed { .. } => {
                     read = self
-                        .read_lease(op, p, read.observed_el, read.quota_seed.map(|(w, _)| w))
+                        .read_lease(
+                            op,
+                            p,
+                            read.observed_el,
+                            read.quota_seed.map(|(w, _)| w),
+                            ledger,
+                        )
                         .await?;
                 }
                 BatchOutcome::DeadlinePassed { .. } => {
