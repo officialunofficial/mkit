@@ -1593,26 +1593,6 @@ An advance *k* clears only when all of these conditions hold:
 3. No flagged id in the repository occurs in its inspected set or its
    packs. Such an advance is `held` under §11.3, not merely `pending`.
 
-**Execution capacity.** Exhaustion of an invocation or alarm execution
-allowance MUST NOT be treated as evidence of malformed content or a missing
-closure member. A server MUST preserve any valid bounded continuation, or
-refuse without publication using `unavailable`. The same capacity cause MUST
-have the same classification in preparation, dependency verification and
-final clearance. Repeated attempts within one invocation MUST share the
-invocation allowance. Explicit per-input index, inspection, decode and
-delta-depth limits retain their specified errors. An implementation unable to
-verify historical support within its supported limits MUST fail closed and
-document the operational limitation; it MUST NOT claim that an ordinary retry
-necessarily resolves it. A capacity limit is an availability limit: it refuses
-or leaves a publication pending, and it never authorizes publishing on a
-partial proof.
-
-**Evidence binding.** Evidence that depends on a prior publication value or
-membership generation MUST be bound to that state. The final atomic apply
-MUST guard that state or obtain new evidence for the replacement state.
-Re-reading a newer publication row and guarding only the newer row does not
-validate evidence derived from the older row.
-
 A `hit` advance becomes `resolved` only when its §14 takedown is complete,
 all non-hit obligations are satisfied, and condition 2 holds for its
 post-takedown packmap chain and replacement packs. Its own replacement
@@ -4008,7 +3988,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
-| 1 | draft | Clarifies publication verification: a verified member terminates only the direct-child check and waives no §10.2, §14.2 or ref-policy obligation (§9.3); the inspector pair-check shorthand is made precise; execution-capacity exhaustion is an availability limit, distinct from permanent content failures and never a partial proof; evidence is bound to the state it was derived from (§10.2); synchronous inspection of ref-only operations and the duty to document historical-support limits (§18). The capacity classification and evidence binding state the contract that implementations converge on; no wire, stored-row or version change. |
+| 1 | draft | Clarifies publication verification: a verified member terminates only the direct-child check and waives no §10.2, §14.2 or ref-policy obligation (§9.3); the inspector pair-check shorthand is made precise (§10.2); synchronous inspection of ref-only operations and the duty to document historical-support limits (§18). No wire, stored-row or version change. |
 | 1 | draft | Editorial: §18 states the launch profile deployment-neutrally and points to the Workers operator guide for the Worker-specific selection, bindings and purge configuration; the `store::inspection_*` modules are marked unintegrated groundwork and the deferred inspection, Event and proof work as not implemented. No behavior change. |
 | 1 | draft | Additive object-reader session accounting and typed exhaustion. Existing public absence, advance messages and stored/wire formats are unchanged. |
 | 1 | draft | `SetRepoVisibility` runs admission and records an outcome like other mutating RPCs, in envelope and statement modes (§2, §3). Additive optional `Outcome.procedure` and `Outcome.visibility` (fields 9 and 10) name the operation (§6.5); the pending and terminal reservation rows record an optional operation (additive `procedure`; rows written before decode as unknown), so every outcome, including a reconciled abandonment, names it. No row version changes. |
