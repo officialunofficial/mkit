@@ -75,7 +75,7 @@ jobs:
           components: clippy
           cache-prefix: server-feature-clippy-${{ matrix.crate }}
           protoc: "false"
-      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
         with:
           tool: cargo-hack
       # Library-only avoids dev-dependency feature unification. Depth two
@@ -102,7 +102,7 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           cache-prefix: server-semver
           protoc: "false"
-      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
         with:
           tool: cargo-semver-checks
       # main retains the released version until release preparation, and is
@@ -170,7 +170,7 @@ jobs:
       # cosign-signed prebuilt binary from the cargo-nextest release.
       - name: Install cargo-nextest
         if: env.SHOULD_RUN == 'true'
-        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172  # v2
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2
         with:
           tool: cargo-nextest
 

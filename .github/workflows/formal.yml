@@ -53,7 +53,7 @@ jobs:
       - name: Install quint
         run: npm install -g "@informalsystems/quint@${QUINT_VERSION}"
 
-      - uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908  # v2
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2
         with:
           tool: just
 
@@ -95,7 +95,7 @@ jobs:
       - name: Install quint
         run: npm install -g "@informalsystems/quint@${QUINT_VERSION}"
 
-      - uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908  # v2
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2
         with:
           tool: just
 
@@ -120,7 +120,7 @@ jobs:
           cache-prefix: "formal-lean"
           protoc: "false"
 
-      - uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908  # v2
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2
         with:
           tool: just
 
@@ -154,7 +154,7 @@ jobs:
           cache-prefix: "formal-kani"
           protoc: "true"
 
-      - uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908  # v2
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2
         with:
           tool: just
 
@@ -180,7 +180,7 @@ jobs:
           cache-prefix: "formal-conformance"
           protoc: "false"
 
-      - uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908  # v2
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2
         with:
           tool: just
 
