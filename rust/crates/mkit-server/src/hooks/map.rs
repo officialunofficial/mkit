@@ -200,6 +200,16 @@ pub(super) fn outcome_request(outcome: &Outcome) -> pb::OutcomeRequest {
             repository: Some(outcome.repository.clone()),
             occurred_unix_ms: Some(outcome.occurred_unix_ms),
             kind: Some(kind),
+            procedure: outcome
+                .procedure
+                .map(|procedure| procedure.connect_path().to_owned()),
+            visibility: outcome.visibility.map(|visibility| {
+                match visibility {
+                    crate::pipeline::RepoVisibility::Public => "public",
+                    crate::pipeline::RepoVisibility::Private => "private",
+                }
+                .to_owned()
+            }),
             ..Default::default()
         }
         .into(),

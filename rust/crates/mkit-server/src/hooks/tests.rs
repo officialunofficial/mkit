@@ -243,6 +243,8 @@ fn outcome(reservation: &str, kind: OutcomeKind) -> Outcome {
         repository: format!("{NAMESPACE}/payments-demo"),
         occurred_unix_ms: 1_790_424_001_000,
         kind,
+        procedure: None,
+        visibility: None,
     }
 }
 
@@ -515,8 +517,20 @@ fn encoded_outcomes_equal_the_golden_outcomes() {
             ],
         },
     );
+    let mut visibility = outcome(
+        "demo:visibility-20260926-001",
+        OutcomeKind::Committed {
+            bytes_stored: 0,
+            new_to_repo: 0,
+            new_to_store: 0,
+            refs: Vec::new(),
+        },
+    );
+    visibility.procedure = Some(crate::op::Procedure::SetRepoVisibility);
+    visibility.visibility = Some(crate::pipeline::RepoVisibility::Private);
     let cases = [
         ("outcome-committed.request.json", committed),
+        ("outcome-visibility.request.json", visibility),
         (
             "outcome-aborted.request.json",
             outcome(

@@ -8109,6 +8109,25 @@ pub struct Outcome {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub occurred_unix_ms: ::core::option::Option<i64>,
+    /// Full Connect procedure path of the operation that produced the outcome.
+    /// Absent only for an outcome recorded before the server stored it (rows
+    /// written by v0.5.0); SPEC-SERVER §6.5.
+    ///
+    /// Field 9: `procedure`
+    #[serde(
+        rename = "procedure",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub procedure: ::core::option::Option<::buffa::alloc::string::String>,
+    /// "public" or "private": the visibility a SetRepoVisibility outcome set or
+    /// attempted; absent for every other outcome; SPEC-SERVER §6.5.
+    ///
+    /// Field 10: `visibility`
+    #[serde(
+        rename = "visibility",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub visibility: ::core::option::Option<::buffa::alloc::string::String>,
     #[serde(flatten)]
     pub kind: ::core::option::Option<__buffa::oneof::outcome::Kind>,
     #[serde(skip)]
@@ -8122,6 +8141,8 @@ impl ::core::fmt::Debug for Outcome {
             .field("audience", &self.audience)
             .field("repository", &self.repository)
             .field("occurred_unix_ms", &self.occurred_unix_ms)
+            .field("procedure", &self.procedure)
+            .field("visibility", &self.visibility)
             .field("kind", &self.kind)
             .finish()
     }
@@ -8169,6 +8190,26 @@ impl Outcome {
     ///Sets [`Self::occurred_unix_ms`] to `Some(value)`, consuming and returning `self`.
     pub fn with_occurred_unix_ms(mut self, value: i64) -> Self {
         self.occurred_unix_ms = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::procedure`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_procedure(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.procedure = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::visibility`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_visibility(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.visibility = Some(value.into());
         self
     }
 }
@@ -8240,6 +8281,12 @@ impl ::buffa::Message for Outcome {
                 }
             }
         }
+        if let Some(ref v) = self.procedure {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.visibility {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -8297,6 +8344,12 @@ impl ::buffa::Message for Outcome {
                     x.write_to(__cache, buf);
                 }
             }
+        }
+        if let Some(ref v) = self.procedure {
+            ::buffa::types::put_string_field(9u32, v, buf);
+        }
+        if let Some(ref v) = self.visibility {
+            ::buffa::types::put_string_field(10u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -8436,6 +8489,30 @@ impl ::buffa::Message for Outcome {
                     );
                 }
             }
+            9u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .procedure
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            10u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .visibility
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -8449,6 +8526,8 @@ impl ::buffa::Message for Outcome {
         self.repository = ::core::option::Option::None;
         self.occurred_unix_ms = ::core::option::Option::None;
         self.kind = ::core::option::Option::None;
+        self.procedure = ::core::option::Option::None;
+        self.visibility = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -8487,6 +8566,12 @@ impl<'de> serde::Deserialize<'de> for Outcome {
                 > = None;
                 let mut __f_occurred_unix_ms: ::core::option::Option<
                     ::core::option::Option<i64>,
+                > = None;
+                let mut __f_procedure: ::core::option::Option<
+                    ::core::option::Option<::buffa::alloc::string::String>,
+                > = None;
+                let mut __f_visibility: ::core::option::Option<
+                    ::core::option::Option<::buffa::alloc::string::String>,
                 > = None;
                 let mut __oneof_kind: ::core::option::Option<
                     __buffa::oneof::outcome::Kind,
@@ -8534,6 +8619,22 @@ impl<'de> serde::Deserialize<'de> for Outcome {
                                 }
                                 map.next_value_seed(_S)?
                             });
+                        }
+                        "procedure" => {
+                            __f_procedure = Some(
+                                map
+                                    .next_value::<
+                                        ::core::option::Option<::buffa::alloc::string::String>,
+                                    >()?,
+                            );
+                        }
+                        "visibility" => {
+                            __f_visibility = Some(
+                                map
+                                    .next_value::<
+                                        ::core::option::Option<::buffa::alloc::string::String>,
+                                    >()?,
+                            );
                         }
                         "committed" => {
                             let v: ::core::option::Option<Committed> = map
@@ -8648,6 +8749,12 @@ impl<'de> serde::Deserialize<'de> for Outcome {
                 }
                 if let ::core::option::Option::Some(v) = __f_occurred_unix_ms {
                     __r.occurred_unix_ms = v;
+                }
+                if let ::core::option::Option::Some(v) = __f_procedure {
+                    __r.procedure = v;
+                }
+                if let ::core::option::Option::Some(v) = __f_visibility {
+                    __r.visibility = v;
                 }
                 __r.kind = __oneof_kind;
                 Ok(__r)

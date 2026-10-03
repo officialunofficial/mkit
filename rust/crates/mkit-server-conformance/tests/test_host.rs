@@ -233,14 +233,14 @@ async fn ticketed_auth_v2_wire_cases_run_against_the_host() {
         mkit_server::BatchOutcome::Committed
     );
     let terminal = mkit_server::store::outbox::Terminal::new(
-        mkit_server::store::codec::ReservationV1::Committed {
-            repository: "default".into(),
-            occurred_at_ms: u64::try_from(host.clock().now_ms()).unwrap(),
-            bytes_stored: 0,
-            new_to_repo: 0,
-            new_to_store: 0,
-            refs: Vec::new(),
-        },
+        mkit_server::store::codec::ReservationV1::committed(
+            "default".into(),
+            u64::try_from(host.clock().now_ms()).unwrap(),
+            0,
+            0,
+            0,
+            Vec::new(),
+        ),
     )
     .unwrap();
     let outbox_sequence = host
@@ -286,6 +286,89 @@ async fn ticketed_auth_v2_wire_cases_run_against_the_host() {
             .any(|call| call.procedure == "Outcome" && call.verified),
         "the core outcome timer did not deliver through the signed fake hook: {timers:?}; calls: {:?}",
         hook.calls()
+    );
+    host.shutdown().await;
+}
+
+/// One admission as the hook saw it: procedure, requested visibility, declared bytes.
+type AdmissionSeen = (
+    mkit_server::Procedure,
+    Option<mkit_server::pipeline::RepoVisibility>,
+    u64,
+);
+
+/// Records the operation each admission sees.
+#[derive(Clone, Default)]
+struct RecordedAdmission(std::sync::Arc<std::sync::Mutex<Vec<AdmissionSeen>>>);
+
+impl mkit_server::pipeline::Admission for RecordedAdmission {
+    async fn admit(
+        &self,
+        input: &mkit_server::pipeline::AdmissionInput<'_>,
+    ) -> Result<mkit_server::pipeline::AdmissionDecision, mkit_server::ServerError> {
+        let visibility = match &input.op.kind {
+            mkit_server::OpKind::SetRepoVisibility { visibility } => Some(*visibility),
+            _ => None,
+        };
+        self.0.lock().expect("admission log").push((
+            input.op.procedure(),
+            visibility,
+            input.declared_bytes,
+        ));
+        mkit_server::pipeline::DefaultAdmission.admit(input).await
+    }
+}
+
+/// An embedder's in-process hooks (the Worker's `serve_with` takes the same
+/// `HookSet`) see `SetRepoVisibility` in both modes, with the requested
+/// visibility and no declared bytes.
+#[tokio::test]
+async fn in_process_hooks_see_repository_visibility_changes_over_the_wire() {
+    let mut profile = auth_v2_profile();
+    profile.milestone = Milestone::M2;
+    profile.atomic_advance = true;
+    profile.sign_reads = true;
+    profile.features.extend([
+        Feature::MultiRepo,
+        Feature::Grants,
+        Feature::SignedReads,
+        Feature::Tickets,
+    ]);
+    profile.derive_features();
+    let admission = RecordedAdmission::default();
+    let recorded = admission.0.clone();
+    let host = TestHost::start_with_hooks_factory(profile, move |_, _| {
+        Ok(mkit_server::pipeline::Hooks {
+            authorizer: mkit_server::pipeline::OpenAuthorizer,
+            admission,
+            pre_receive: mkit_server::pipeline::NoPreReceive,
+            receipts: mkit_server::pipeline::NoReceipts,
+            outcomes: mkit_server::pipeline::NoOutcomes,
+        })
+    })
+    .await
+    .unwrap();
+    for name in ["visibility.envelope_owner", "visibility.statement_ed25519"] {
+        let report = run(&target(&host), Some(name)).await;
+        assert!(
+            matches!(report.verdict(name), Some(Verdict::Pass(_))),
+            "{name}: {}",
+            report.tap()
+        );
+    }
+    let seen: Vec<_> = recorded
+        .lock()
+        .expect("admission log")
+        .iter()
+        .filter(|(procedure, _, _)| *procedure == mkit_server::Procedure::SetRepoVisibility)
+        .copied()
+        .collect();
+    assert!(
+        seen.len() >= 2
+            && seen
+                .iter()
+                .all(|(_, visibility, bytes)| visibility.is_some() && *bytes == 0),
+        "{seen:?}"
     );
     host.shutdown().await;
 }

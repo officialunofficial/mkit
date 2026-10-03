@@ -12,7 +12,7 @@ use std::sync::Arc;
 use mkit_core::protocol::PackKey;
 
 use crate::error::{Redacted, ServerError};
-use crate::op::{AuthzFacts, Operation};
+use crate::op::{AuthzFacts, Operation, Procedure};
 use crate::quota::{QuotaCharge, QuotaLimits, QuotaScope};
 use crate::rt::{MaybeSend, MaybeSync};
 use crate::store::BlobKey;
@@ -43,6 +43,17 @@ pub trait Authorizer: MaybeSend + MaybeSync {
 /// racing first writes may both observe creation. `new_to_repo_bytes` stays
 /// `None` until membership, and the grant comes from `op.authz` (M2). Bytes new to
 /// the store are deliberately absent: they would be a pricing oracle.
+///
+/// Admission runs for every mutating RPC, including a repository visibility
+/// change (`SetRepoVisibility`, in both its owner-signed envelope and
+/// statement modes). An embedder tells them apart by the operation:
+/// `input.op.procedure() == Procedure::SetRepoVisibility`, and
+/// `input.op.kind` is `OpKind::SetRepoVisibility { visibility }` with the
+/// requested value. For a visibility change `declared_bytes` is 0 and
+/// `pack_id` is `None`; the statement mode has no signed envelope, so
+/// `idempotency_key` is `None` and `op.auth` is unset (its signer is the
+/// namespace owner, reported as `op.authz.owner`). The resulting outcome
+/// carries `Outcome::procedure` and `Outcome::visibility`.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct AdmissionInput<'a> {
@@ -424,6 +435,12 @@ impl Authorizer for OpenAuthorizer {
 /// declared bytes to its signer's counter in its namespace, under
 /// `input.write_quota`. Unsigned writes and deployments without a quota
 /// are allowed with no charge. WP-1.26 adds the per-namespace charge.
+///
+/// A `SetRepoVisibility` is never charged, by bytes or by operation: it is an
+/// owner-only administrative write that stores no object bytes, and the
+/// per-namespace charge is planned only with the ref and upload writes it
+/// aggregates. It still runs admission, so another hook may price, refuse or
+/// challenge it.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultAdmission;
 
@@ -434,11 +451,16 @@ impl Admission for DefaultAdmission {
 
     async fn admit(&self, input: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
         let charges = match (input.write_quota, &input.op.auth) {
-            (Some(limits), Some(auth)) if input.op.procedure().is_write() => vec![QuotaCharge {
-                scope: QuotaScope::for_signer(&input.op.repo.namespace, &auth.signer),
-                bytes: input.declared_bytes,
-                limits,
-            }],
+            (Some(limits), Some(auth))
+                if input.op.procedure().is_write()
+                    && input.op.procedure() != Procedure::SetRepoVisibility =>
+            {
+                vec![QuotaCharge {
+                    scope: QuotaScope::for_signer(&input.op.repo.namespace, &auth.signer),
+                    bytes: input.declared_bytes,
+                    limits,
+                }]
+            }
             _ => Vec::new(),
         };
         Ok(AdmissionDecision::allow(charges))

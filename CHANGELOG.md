@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking (toward 0.6)
+
+`mkit-server` main now accumulates 0.6 changes; the `server-semver` check
+compares against the 0.5.0 baseline as the 0.6 release. Rows written by
+v0.5.0 keep decoding. Rows written once these changes run carry the new field,
+which v0.5.0 rejects (`deny_unknown_fields`), so a downgrade to 0.5.x is not
+supported after new reservation rows are written.
+
+- Reservations and outcomes record their operation. `ReservationV1::{Pending,
+  Committed, Aborted, ReadServed}` gain an optional `procedure:
+  Option<StoredProcedure>` (`#[serde(default, skip_serializing_if)]`; rows
+  written by v0.5.0 decode as `None`). These four variants are now
+  `#[non_exhaustive]`: build them with the new constructors
+  `ReservationV1::{pending, committed, aborted, read_served}` (and
+  `.with_procedure(..)`), and match them with `..`. `ReservationV1::Expired`,
+  `Ticketed`, `OutcomeRef` and `AbortReason` are unchanged.
+- `Outcome` gains `procedure: Option<Procedure>` and
+  `visibility: Option<RepoVisibility>` for every outcome (ref writes, ticket
+  advances, uploads, visibility changes and reads, including a reservation the
+  crash reconciler abandons). Only outcomes written by v0.5.0 have `None`
+  (an expired ticket is always `BeginUpload`).
+
+### Added
+
+- `SetRepoVisibility` now runs the embedder's `Admission` hook and records an
+  outcome for the `OutcomeSink`, in both the owner-signed envelope mode and the
+  statement mode, like every other mutating RPC. A refusal or challenge changes
+  nothing; a granted reservation is settled in the same atomic unit as the
+  visibility row and its listing index. Hooks recognize the change by
+  `input.op.procedure() == Procedure::SetRepoVisibility` (with
+  `OpKind::SetRepoVisibility { visibility }`, `declared_bytes = 0`), and
+  `DefaultAdmission`
+  charges nothing for it. Remote hooks send the procedure and visibility in
+  additive optional `Outcome` fields. `Pipeline::set_repo_visibility_with_meta`
+  also returns the admission's receipt headers, which the Connect service now
+  sets.
+
 ### Removed
 
 - The Workers-only `published-view` optimization (ref snapshots in R2, its

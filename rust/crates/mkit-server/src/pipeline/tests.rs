@@ -16,6 +16,7 @@ mod remote_hooks;
 mod scheduled;
 mod url_token;
 mod visibility;
+mod visibility_hooks;
 
 use std::future::Future;
 use std::pin::{Pin, pin};
@@ -2257,6 +2258,7 @@ fn pending_guard_loss_commits_no_ref_and_does_not_replan() {
                     occurred_at_ms: T0 as u64 + 41_000,
                     reason: codec::AbortReason::Abandoned,
                     detail: String::new(),
+                    procedure: None,
                 })
                 .unwrap(),
             );
@@ -4993,6 +4995,7 @@ fn abort_under_shard_counter_contention_retries_and_keeps_its_reason() {
                     occurred_at_ms: 1,
                     reason: codec::AbortReason::Unspecified,
                     detail: String::new(),
+                    procedure: None,
                 })
                 .unwrap(),
             );

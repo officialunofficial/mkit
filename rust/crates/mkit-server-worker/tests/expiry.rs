@@ -111,23 +111,18 @@ async fn outcome_delivery_and_reconcile_fire_on_every_outcome_class() {
         let mut builder = OutboxBuilder::new(None, None).unwrap();
         builder.abort_direct(
             "done-rid",
-            Terminal::new(ReservationV1::Aborted {
-                repository: "repo".into(),
-                occurred_at_ms: 100,
-                reason: AbortReason::Unspecified,
-                detail: String::new(),
-            })
+            Terminal::new(ReservationV1::aborted(
+                "repo".into(),
+                100,
+                AbortReason::Unspecified,
+                String::new(),
+            ))
             .unwrap(),
         );
         builder.pending(
             "stale-rid",
             None,
-            &ReservationV1::Pending {
-                repository: "repo".into(),
-                created_at_ms: 1,
-                reconcile_at_ms: 100,
-                op: PendingOp::Write,
-            },
+            &ReservationV1::pending("repo".into(), 1, 100, PendingOp::Write),
         );
         let mut batch = Batch::new();
         builder

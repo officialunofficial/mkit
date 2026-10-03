@@ -64,12 +64,12 @@ async fn seed(store: &MemoryKv, rows: usize) {
         for id in group {
             builder.abort_direct(
                 id,
-                Terminal::new(ReservationV1::Aborted {
-                    repository: "repo".into(),
-                    occurred_at_ms: 100,
-                    reason: AbortReason::Unspecified,
-                    detail: String::new(),
-                })
+                Terminal::new(ReservationV1::aborted(
+                    "repo".into(),
+                    100,
+                    AbortReason::Unspecified,
+                    String::new(),
+                ))
                 .unwrap(),
             );
         }

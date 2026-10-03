@@ -765,8 +765,12 @@ where
         };
         let pipe = self.pipe.arc();
         send_wrap(async move {
-            pipe.set_repo_visibility(&a, req).await?;
-            Response::ok(SetRepoVisibilityResponse::default())
+            let meta = pipe.set_repo_visibility_with_meta(&a, req).await?;
+            let mut response = Response::new(SetRepoVisibilityResponse::default());
+            for (name, value) in meta.headers() {
+                response = response.with_header(name, value);
+            }
+            Ok(response)
         })
         .await
     }

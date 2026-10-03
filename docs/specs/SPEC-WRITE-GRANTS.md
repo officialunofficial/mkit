@@ -812,6 +812,14 @@ repositories. Operators should set this default at deployment creation.
   so no content is ever public. A deployment may instead configure its default
   visibility as `private` at deployment creation.
 
+Both modes pass through the server's admission and outcome stages like
+any other mutating RPC (SPEC-SERVER §3): admission runs after the owner,
+authority or statement check and before any state change, a refusal or
+challenge writes nothing, and a reservation granted by admission is settled
+by an outcome that names the operation. The replay, owner-key and statement
+ordering rules above are unchanged, and a replay or an already-applied
+statement runs no admission.
+
 A change to `private` is reported complete only when no read that
 begins afterwards can be answered as `public`: every currently leased
 shard has acknowledged the change or its lease has expired (§5.4), and
@@ -1243,6 +1251,7 @@ Landed so far (each pinned by BLAKE3 in the directory's `MANIFEST.txt`):
 
 | Version | Status | Changes |
 |---|---|---|
+| `1` (visibility admission amendment) | draft | `SetRepoVisibility` runs the server's admission and outcome stages in both modes (§9.1; SPEC-SERVER §3). No change to the statement, signature or stored visibility row. |
 | `1` (URL-token visibility amendment) | draft | A URL token issued at or before the repository's last visibility change is refused (§9.4). The stored visibility row gains an optional server-clock change time (older rows fall back to their last accepted creation time); the token statement and signature are unchanged. |
 | `1` (R-205 amendment) | draft | Repository visibility without a stored setting follows the deployment default, public unless configured; explicit visibility always wins. Changing the default also changes existing repositories without explicit visibility. |
 | `1` | draft | Initial grant statement (audiences, ref scopes, capabilities), owner schemes, exact-epoch revocation with bounded epoch statements, epoch leases and the commit deadline, server policy, signed reads, private repositories and URL tokens, and server-side grants for ssh and enc (mkit#1085, mkit#1089). WP-4.11 adds the `token=` URL form and key-set publication, and amends token paths to 0–1024 bytes so an empty path names the root tree. Fix round 1 orders stateless token checks before the stored-epoch read. WP-2.9 pins the `DownloadPack` signed-read body; WP-2.11 lands the URL-token fixtures. Fix round 2 caps `url_token_ttl` at 24 h and excludes control characters from token paths. |

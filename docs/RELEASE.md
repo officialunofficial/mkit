@@ -214,13 +214,16 @@ The powerset covers no features, individual features and feature pairs.
 Separate checks cover default features across all targets and all features
 for the library. Library checks avoid dev-dependency feature unification;
 the default check also catches test-only warnings. Each crate has a 30-minute
-job limit. PRs enforce the server's patch API compatibility against 0.5.0;
+job limit. PRs enforce the server's API compatibility against 0.5.0 as the 0.6 release (a breaking-capable 0.x minor) while main accumulates it;
 the publish gate checks the server too, including that pinned baseline.
 
 ### Post-release
 
 - [ ] Verify the release-prep PR left a fresh `## [Unreleased]` heading at
       the top of `CHANGELOG.md`.
+- [ ] After 0.6.0 is tagged, restore the `server-semver` job in
+      `.github/workflows/rust.yml` to `--release-type patch` against the
+      0.6.0 baseline (it checks the 0.6 release class against 0.5.0 until then).
 - [ ] After a crate's first publish, add co-owners:
       `cargo owner --add github:officialunofficial:makechain <crate>`, then
       `cargo owner --add <maintainer> <crate>` for each maintainer. Confirm

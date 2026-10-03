@@ -66,6 +66,7 @@ mod staging;
 #[cfg(test)]
 mod tests;
 mod upload;
+mod visibility_hooks;
 mod watermark;
 
 use core::future::Future;
@@ -1592,6 +1593,24 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         a: &Authenticated,
         req: VisibilityRequest,
     ) -> Result<(), ServerError> {
+        self.set_repo_visibility_with_meta(a, req).await.map(|_| ())
+    }
+
+    /// [`Self::set_repo_visibility`], also returning the success-only
+    /// admission headers (empty on a replay or an already-applied statement).
+    ///
+    /// Both modes run stage 3 (admission) before any state change and record
+    /// an outcome after the commit, exactly as other writes do; the hooks see
+    /// `Procedure::SetRepoVisibility` with `declared_bytes = 0`.
+    ///
+    /// # Errors
+    /// Those of [`Self::set_repo_visibility`], plus an admission refusal or
+    /// challenge, and `unavailable` while the outcome backlog is full.
+    pub async fn set_repo_visibility_with_meta(
+        &self,
+        a: &Authenticated,
+        req: VisibilityRequest,
+    ) -> Result<ResponseMeta, ServerError> {
         self.observe(a, async {
             if !self.visibility_applies() {
                 return Err(ServerError::failed_precondition(
@@ -1647,7 +1666,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         repo: &RepoId,
         p: &Partition,
         visibility: Visibility,
-    ) -> Result<(), ServerError> {
+    ) -> Result<ResponseMeta, ServerError> {
         if a.write_grant.is_some() {
             return Err(ServerError::permission_denied(
                 "a grant never authorizes SetRepoVisibility",
@@ -1679,10 +1698,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .map(|v| codec::decode_replay_record(&v))
             .transpose()
             .map_err(meta_error)?;
-        let mut stored = rows.next().flatten();
+        let stored = rows.next().flatten();
         match classify(record.as_ref(), &auth.fingerprint) {
             ReplayDecision::New => {}
-            ReplayDecision::Return(StoredResult::RepoVisibility) => return Ok(()),
+            ReplayDecision::Return(StoredResult::RepoVisibility) => {
+                return Ok(ResponseMeta::default());
+            }
             ReplayDecision::Return(other) => return Err(stored_mismatch(&other)),
             ReplayDecision::FingerprintMismatch => {
                 return Err(ServerError::invalid_argument(
@@ -1697,10 +1718,43 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         Box::pin(self.ensure_authority_activation(&repo.namespace)).await?;
         let facts = self.authorize_visibility_envelope(&op).await?;
+        let mut op = op;
+        op.authz = facts.clone();
+        let hides = visibility == Visibility::Private
+            && !repo_is_private(
+                stored
+                    .as_ref()
+                    .map(codec::decode_repo_visibility)
+                    .transpose()
+                    .map_err(meta_error)?
+                    .as_ref(),
+                self.cfg.default_repo_visibility,
+            );
+        let admitted = self.admit_visibility(a, &op, p, hides).await?;
+        let committed = self
+            .commit_visibility_envelope(
+                (auth, repo, p),
+                (visibility, &facts, &admitted),
+                stored,
+                (&replay_key, &rv_key),
+            )
+            .await;
+        self.settle_visibility(p, admitted, committed).await
+    }
+
+    /// The guarded envelope commit: re-plan on contention until it lands.
+    #[allow(clippy::too_many_lines)] // Both guarded visibility retries share one lifecycle.
+    async fn commit_visibility_envelope(
+        &self,
+        (auth, repo, p): (&VerifiedAuth, &RepoId, &Partition),
+        (visibility, facts, admitted): (Visibility, &AuthzFacts, &visibility_hooks::Admitted),
+        mut stored: Option<Value>,
+        (replay_key, rv_key): (&Key, &Key),
+    ) -> Result<visibility_hooks::Landed, ServerError> {
         let mut replans = 0;
         loop {
             let (mut batch, prune) = self
-                .plan_visibility(p, auth, repo, visibility, stored.as_ref())
+                .plan_visibility(p, auth, repo, visibility, stored.as_ref(), admitted)
                 .await?;
             let fence_rows = self
                 .meta
@@ -1745,7 +1799,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             match self.meta.apply(p, batch).await {
                 Ok(BatchOutcome::Committed) => {
                     self.invalidate_local_cache(repo).await;
-                    return Ok(());
+                    return Ok(visibility_hooks::Landed::Committed);
                 }
                 Ok(BatchOutcome::DeadlinePassed { .. }) => {
                     return Err(ServerError::unavailable("commit deadline passed; retry"));
@@ -1754,14 +1808,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     if index == 1 {
                         // The replay guard failed: a request with this
                         // nonce landed first; answer it as stage 0 does.
-                        let value = self.meta.get(p, &replay_key).await.map_err(meta_error)?;
+                        let value = self.meta.get(p, replay_key).await.map_err(meta_error)?;
                         let record = value
                             .as_ref()
                             .map(codec::decode_replay_record)
                             .transpose()
                             .map_err(meta_error)?;
                         return match classify(record.as_ref(), &auth.fingerprint) {
-                            ReplayDecision::Return(StoredResult::RepoVisibility) => Ok(()),
+                            ReplayDecision::Return(StoredResult::RepoVisibility) => {
+                                Ok(visibility_hooks::Landed::Replayed)
+                            }
                             ReplayDecision::Return(other) => Err(stored_mismatch(&other)),
                             ReplayDecision::FingerprintMismatch => {
                                 Err(ServerError::invalid_argument(
@@ -1777,7 +1833,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     if replans > MAX_REPLAN {
                         return Err(ServerError::aborted_retryable("write contention; retry"));
                     }
-                    stored = self.meta.get(p, &rv_key).await.map_err(meta_error)?;
+                    self.require_pending_current(p, admitted).await?;
+                    stored = self.meta.get(p, rv_key).await.map_err(meta_error)?;
                 }
                 Err(StoreError::Full) => {
                     return Err(self.partition_full(p, prune).await);
@@ -1838,12 +1895,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         repo: &RepoId,
         visibility: Visibility,
         stored: Option<&Value>,
+        admitted: &visibility_hooks::Admitted,
     ) -> Result<(Batch, Option<Batch>), ServerError> {
         let now = ms(self.clock.now_ms());
         let window = u64::try_from(self.cfg.max_apply_window.as_millis()).unwrap_or(u64::MAX);
         let deadline = now
             .saturating_add(window)
-            .min(ms(auth.expires_at_ms).saturating_add(MAX_CLOCK_LEAD_MS.unsigned_abs()));
+            .min(ms(auth.expires_at_ms).saturating_add(MAX_CLOCK_LEAD_MS.unsigned_abs()))
+            .min(admitted.apply_deadline_ms());
         let replay_key = keys::replay(&auth.replay_scope);
         let rv_key = keys::repo_visibility(&repo.name);
         let row = stored
@@ -1896,9 +1955,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .await?;
         batch.preconditions.extend(purge.preconditions);
         batch.writes.extend(purge.writes);
+        self.plan_visibility_settlement(p, &mut batch, admitted, now)
+            .await?;
+        visibility_hooks::check_batch_room(&batch, visibility_hooks::FENCE_GUARDS)?;
         let mut prune = Batch::new().require(Precondition::NotAfter(deadline));
         for (index, target) in &expired {
-            if batch.preconditions.len() + batch.writes.len() + 2 > MAX_BATCH_OPS {
+            if batch.preconditions.len() + batch.writes.len() + 2 + visibility_hooks::FENCE_GUARDS
+                > MAX_BATCH_OPS
+            {
                 break;
             }
             batch = batch.delete(index.clone()).delete(target.clone());
@@ -1909,14 +1973,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
     /// Statement mode: the owner-signed statement is its own
     /// authorization; only a strictly newer `created` replaces the stored
-    /// one. No hook, no replay record, no admission.
+    /// one. There is no authorizer call and no replay record, but a change
+    /// that would write runs admission first and records an outcome, like
+    /// the envelope mode (an already-applied or stale statement allocates
+    /// nothing).
+    #[allow(clippy::too_many_lines)] // Verification, admission and the guarded retry share one lifecycle.
     async fn visibility_statement(
         &self,
         a: &Authenticated,
         repo: &RepoId,
         p: &Partition,
         statement: &str,
-    ) -> Result<(), ServerError> {
+    ) -> Result<ResponseMeta, ServerError> {
         let rejected = |e: mkit_attest::grant::GrantError| {
             ServerError::permission_denied(format!("visibility statement rejected: {}", e.reason()))
         };
@@ -1941,78 +2009,108 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let created = u64::try_from(verified.statement().created_ms)
             .map_err(|_| rejected(mkit_attest::grant::GrantError::DecimalOutOfRange))?;
         let id = to_hex(verified.id());
+        let visibility = verified.statement().visibility;
         let rv_key = keys::repo_visibility(&repo.name);
         let window = u64::try_from(self.cfg.max_apply_window.as_millis()).unwrap_or(u64::MAX);
-        let mut replans = 0;
-        loop {
-            let stored = self.meta.get(p, &rv_key).await.map_err(meta_error)?;
-            let row = stored
-                .as_ref()
-                .map(codec::decode_repo_visibility)
-                .transpose()
-                .map_err(meta_error)?;
-            match &row {
-                // The stored statement is this one: already applied.
-                Some(r)
-                    if r.last_created_ms == created
-                        && r.last_statement_id.as_deref() == Some(id.as_str())
-                        && r.visibility == stored_visibility(verified.statement().visibility) =>
-                {
-                    return Ok(());
-                }
-                Some(r) if created <= r.last_created_ms => {
-                    return Err(ServerError::permission_denied(
-                        "visibility statement rejected: not newer than the stored statement",
-                    ));
-                }
-                _ => {}
-            }
-            let deadline = ms(self.clock.now_ms()).saturating_add(window);
-            let rv_guard = match &stored {
-                Some(value) => Precondition::Equals(rv_key.clone(), value.clone()),
-                None => Precondition::Absent(rv_key.clone()),
-            };
-            let mut batch = Batch::new()
-                .require(Precondition::NotAfter(deadline))
-                .require(rv_guard)
-                .put(
-                    rv_key.clone(),
-                    codec::encode_repo_visibility(&codec::RepoVisibilityV1 {
-                        visibility: stored_visibility(verified.statement().visibility),
-                        last_created_ms: created,
-                        last_statement_id: Some(id.clone()),
-                        changed_ms: Some(ms(self.clock.now_ms())),
-                    }),
-                );
-            self.plan_listing_visibility(p, repo, &mut batch).await?;
-            let purge = self
-                .plan_repository_purge(
-                    p,
-                    repo,
-                    crate::purge::Trigger::VisibilityChange,
-                    &id,
-                    ms(self.clock.now_ms()),
-                )
-                .await?;
-            batch.preconditions.extend(purge.preconditions);
-            batch.writes.extend(purge.writes);
-            match self.meta.apply(p, batch).await {
-                Ok(BatchOutcome::Committed) => {
-                    self.invalidate_local_cache(repo).await;
-                    return Ok(());
-                }
-                Ok(BatchOutcome::DeadlinePassed { .. }) => {
-                    return Err(ServerError::unavailable("commit deadline passed; retry"));
-                }
-                Ok(BatchOutcome::PreconditionFailed { .. }) => {
-                    replans += 1;
-                    if replans > MAX_REPLAN {
-                        return Err(ServerError::aborted_retryable("write contention; retry"));
+        let mut admitted: Option<visibility_hooks::Admitted> = None;
+        let landed = async {
+            let mut replans = 0;
+            loop {
+                let stored = self.meta.get(p, &rv_key).await.map_err(meta_error)?;
+                let row = stored
+                    .as_ref()
+                    .map(codec::decode_repo_visibility)
+                    .transpose()
+                    .map_err(meta_error)?;
+                match &row {
+                    // The stored statement is this one: already applied.
+                    Some(r)
+                        if r.last_created_ms == created
+                            && r.last_statement_id.as_deref() == Some(id.as_str())
+                            && r.visibility == stored_visibility(visibility) =>
+                    {
+                        return Ok(visibility_hooks::Landed::Replayed);
                     }
+                    Some(r) if created <= r.last_created_ms => {
+                        return Err(ServerError::permission_denied(
+                            "visibility statement rejected: not newer than the stored statement",
+                        ));
+                    }
+                    _ => {}
                 }
-                Err(StoreError::Full) => return Err(self.partition_full(p, None).await),
-                Err(e) => return Err(meta_error(e)),
+                // Stage 3, once, for a change that will be written. The
+                // statement's signer is the namespace owner.
+                if admitted.is_none() {
+                    let mut op = self.identify(a, OpKind::SetRepoVisibility { visibility })?;
+                    op.authz = AuthzFacts {
+                        owner: true,
+                        caller_view: CallerView::Writer,
+                        ..AuthzFacts::default()
+                    };
+                    let hides = visibility == Visibility::Private
+                        && !repo_is_private(row.as_ref(), self.cfg.default_repo_visibility);
+                    admitted = Some(self.admit_visibility(a, &op, p, hides).await?);
+                }
+                let Some(admission) = admitted.as_ref() else {
+                    return Err(internal("visibility admission missing"));
+                };
+                let deadline = ms(self.clock.now_ms())
+                    .saturating_add(window)
+                    .min(admission.apply_deadline_ms());
+                let rv_guard = match &stored {
+                    Some(value) => Precondition::Equals(rv_key.clone(), value.clone()),
+                    None => Precondition::Absent(rv_key.clone()),
+                };
+                let mut batch = Batch::new()
+                    .require(Precondition::NotAfter(deadline))
+                    .require(rv_guard)
+                    .put(
+                        rv_key.clone(),
+                        codec::encode_repo_visibility(&codec::RepoVisibilityV1 {
+                            visibility: stored_visibility(visibility),
+                            last_created_ms: created,
+                            last_statement_id: Some(id.clone()),
+                            changed_ms: Some(ms(self.clock.now_ms())),
+                        }),
+                    );
+                self.plan_listing_visibility(p, repo, &mut batch).await?;
+                let purge = self
+                    .plan_repository_purge(
+                        p,
+                        repo,
+                        crate::purge::Trigger::VisibilityChange,
+                        &id,
+                        ms(self.clock.now_ms()),
+                    )
+                    .await?;
+                batch.preconditions.extend(purge.preconditions);
+                batch.writes.extend(purge.writes);
+                self.plan_visibility_settlement(p, &mut batch, admission, ms(self.clock.now_ms()))
+                    .await?;
+                match self.meta.apply(p, batch).await {
+                    Ok(BatchOutcome::Committed) => {
+                        self.invalidate_local_cache(repo).await;
+                        return Ok(visibility_hooks::Landed::Committed);
+                    }
+                    Ok(BatchOutcome::DeadlinePassed { .. }) => {
+                        return Err(ServerError::unavailable("commit deadline passed; retry"));
+                    }
+                    Ok(BatchOutcome::PreconditionFailed { .. }) => {
+                        replans += 1;
+                        if replans > MAX_REPLAN {
+                            return Err(ServerError::aborted_retryable("write contention; retry"));
+                        }
+                        self.require_pending_current(p, admission).await?;
+                    }
+                    Err(StoreError::Full) => return Err(self.partition_full(p, None).await),
+                    Err(e) => return Err(meta_error(e)),
+                }
             }
+        }
+        .await;
+        match admitted {
+            Some(admitted) => self.settle_visibility(p, admitted, landed).await,
+            None => landed.map(|_| ResponseMeta::default()),
         }
     }
 
@@ -2408,7 +2506,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             self.admit(input).await?
         };
         let pending = match allowance.reservation.as_deref() {
-            Some(rid) => Some(self.record_pending(a, &p, rid).await?),
+            Some(rid) => Some(
+                self.record_pending(a, &p, rid, stored_procedure(&op.kind)?)
+                    .await?,
+            ),
             None => None,
         };
         let write_result = async {
@@ -4098,6 +4199,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         ServerError::unavailable("storage partition full")
     }
+}
+
+/// The operation a write's reservation records.
+fn stored_procedure(kind: &OpKind) -> Result<codec::StoredProcedure, ServerError> {
+    Ok(match kind {
+        OpKind::UpdateRef(_) => codec::StoredProcedure::UpdateRef,
+        OpKind::AdvanceRefs { .. } => codec::StoredProcedure::AdvanceRefs,
+        OpKind::BeginUpload { .. } => codec::StoredProcedure::BeginUpload,
+        OpKind::UploadPack { .. } => codec::StoredProcedure::UploadPack,
+        OpKind::SetRepoVisibility { visibility } => {
+            codec::StoredProcedure::SetRepoVisibility(stored_visibility(*visibility))
+        }
+        _ => return Err(internal("a read operation cannot hold a write reservation")),
+    })
 }
 
 /// The allowance stays local until the guarded apply.
