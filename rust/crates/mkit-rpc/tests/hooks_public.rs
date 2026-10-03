@@ -15,11 +15,17 @@ fn fixture(name: &str) -> Vec<u8> {
     .unwrap()
 }
 fn decode<M: Message + serde::de::DeserializeOwned + serde::Serialize + PartialEq>(name: &str) {
-    let msg: M = serde_json::from_slice(&fixture(name)).unwrap();
+    let bytes = fixture(name);
+    let msg: M = serde_json::from_slice(&bytes).unwrap();
     let round = M::decode(&mut msg.encode_to_vec().as_slice()).unwrap();
     assert!(msg == round, "protobuf round trip: {name}");
     let json: M = serde_json::from_slice(&serde_json::to_vec(&msg).unwrap()).unwrap();
     assert!(msg == json, "JSON round trip: {name}");
+    assert_eq!(
+        serde_json::to_value(&round).unwrap(),
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+        "all golden fields survive protobuf decoding: {name}"
+    );
 }
 #[test]
 fn decode_every_golden_request() {
@@ -41,7 +47,8 @@ fn decode_every_golden_request() {
         }
         count += 1;
     }
-    assert_eq!(count, 16);
+    // SPEC-SERVER §20 includes visibility and repository-storage outcomes.
+    assert_eq!(count, 18);
 }
 fn header(name: &str, value: &str) -> Header {
     Header {

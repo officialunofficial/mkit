@@ -62,6 +62,30 @@ needs a maintainer **`/gcbrun`** only for external/fork PRs. See
 | `mkit-geiger-{pr,main}` | `geiger.yaml` | collaborators auto |
 | `mkit-coverage-main` | `coverage.yaml` | main push only |
 
+## Diagnosing main test failures
+
+At `e3440bd0`, [the macOS test run](https://github.com/officialunofficial/mkit/actions/runs/37141273001)
+and [Cloud Build's check step](https://console.cloud.google.com/cloud-build/builds;region=us-east4/bcfe7e6f-c2ef-404b-8c10-4dc164fd83f6?project=545902902213)
+failed in `mkit-rpc::hooks_public::decode_every_golden_request`: all 18
+requests decoded, but the test still asserted 16. The schema, generated
+types, manifest, spec anchors and schema-check script already contained
+`outcome-visibility` and `outcome-repo-storage`. Updating the count and
+asserting preservation of every fixture field fixes the test at its source.
+
+The wasm clippy command from `just ci-server` passed on a fresh checkout of
+`26375a0b` from both `rust/` and `rust/crates/`; the reported working-directory
+feature-unification failure did not reproduce. Keep the same command in the
+local gate and `cloudbuild/ci.yaml`.
+
+[The Workers conformance run](https://github.com/officialunofficial/mkit/actions/runs/37141273030)
+on `e3440bd0` logged HTTP 500 `Network connection lost` errors from
+Miniflare's `core/entry.worker.js` in `refs.many_refs_one_repository`, then
+passed the suite. This is evidence of transient dev-proxy failures, not a
+failed server assertion. Its existing bounded retry uses the same signed,
+idempotent request, records each retry, and still verifies every written ref
+and the exact ordered listing. Preserve these diagnostics and assertions;
+investigate runtime logs if a retry is exhausted.
+
 ## One-time setup
 
 ```bash
