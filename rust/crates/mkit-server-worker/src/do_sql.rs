@@ -1,5 +1,5 @@
 //! `DoSqlConn` (wasm32): Durable Object `SQLite` as a [`SqlConn`], so every
-//! partition's Durable Object runs `mkit-server`'s `SqlKvStore` unchanged:
+//! partition's Durable Object runs [`SqlKvStore`](crate::sql::SqlKvStore) unchanged:
 //! the same statements, the same migrations. This module adds no SQL.
 //!
 //! - Statements run through `ctx.storage.sql.exec`. Cursors are
