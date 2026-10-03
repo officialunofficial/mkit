@@ -3669,7 +3669,9 @@ of repository identity or namespace identity, a non-UNSPECIFIED trigger,
 and optional origin-relative URL paths, 32-byte object ids, or full
 ref names. A repository selector with no paths, ids, or refs requests a
 whole-repository purge; the analogous namespace selector purges the
-whole namespace. URL paths are matched by exact path. Paths MUST begin
+whole namespace. A namespace-scoped request is delivered once, unchanged;
+the server MUST NOT expand it into per-repository requests, and the
+receiver applies the namespace selector. URL paths are matched by exact path. Paths MUST begin
 with `/`, contain no query or fragment, and
 MUST NOT contain credentials. A delivery retry MUST retain the same
 body and purge id but use a fresh hook signing nonce. The response is
