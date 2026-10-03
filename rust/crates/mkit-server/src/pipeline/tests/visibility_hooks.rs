@@ -738,7 +738,16 @@ fn seed_backlog<H: HookSet>(e: &Env<H>, owner: &SigningKey) {
 fn a_full_outcome_backlog_never_blocks_a_change_without_a_reservation() {
     let owner = key(1);
     let repo = repository(&owner);
-    let e = env_configured(&owner, allow(), full_backlog);
+    let clock = clock();
+    let mut cfg = config(&owner, AuthorizerRole::Check);
+    full_backlog(&mut cfg);
+    // The default admission never reserves, so the bound gates nothing.
+    let e = build(
+        cfg,
+        Spy::new(store(&clock)),
+        with_admission(DefaultAdmission),
+        clock,
+    );
     seed_backlog(&e, &owner);
     for (n, visibility) in [(1, Visibility::Public), (2, Visibility::Private)] {
         set(
@@ -763,9 +772,11 @@ fn a_full_outcome_backlog_refuses_a_reserved_public_change_but_not_a_private_one
     )
     .unwrap_err();
     assert_eq!(err.code(), Code::Unavailable);
+    // Refused before admission: no hook call, so no stranded reservation.
+    assert!(e.pipe.hooks.admission.seen().is_empty());
     assert!(
-        e.pipe.meta.batches.lock().unwrap().len() <= 1,
-        "nothing but the seed"
+        e.pipe.meta.batches.lock().unwrap().is_empty(),
+        "nothing written"
     );
     set(
         &e,
@@ -773,6 +784,15 @@ fn a_full_outcome_backlog_refuses_a_reserved_public_change_but_not_a_private_one
         VisibilityRequest::Envelope(Visibility::Private),
     )
     .unwrap();
+    // Only a real change to private is exempt: repeating it is refused.
+    let err = set(
+        &e,
+        &signed_visibility(&owner, &repo, 3, b"v"),
+        VisibilityRequest::Envelope(Visibility::Private),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), Code::Unavailable);
+    assert_eq!(e.pipe.hooks.admission.seen().len(), 1);
     // The outcome is recorded even above the soft bound.
     let p = coordinator(&e, &owner);
     let backlog = get(&e, &p, &keys::outcome_backlog()).unwrap();
@@ -781,4 +801,41 @@ fn a_full_outcome_backlog_refuses_a_reserved_public_change_but_not_a_private_one
         delivered_any(&e, &p, "rid").visibility,
         Some(Visibility::Private)
     );
+}
+
+#[test]
+fn an_oversized_charge_list_is_resource_exhausted_and_aborts_the_reservation() {
+    let owner = key(1);
+    let repo = repository(&owner);
+    let ns = crate::NamespaceKey::from_namespace(&mkit_attest::grant::Namespace::Ed25519(
+        *owner.verifying_key().as_bytes(),
+    ));
+    let charges: Vec<_> = (0..60_u8)
+        .map(|i| crate::quota::QuotaCharge {
+            scope: crate::quota::QuotaScope::for_signer(&ns, &[i; 32]),
+            bytes: 0,
+            limits: QuotaLimits {
+                window_ms: 60_000,
+                max_ops: 1_000,
+                max_bytes: u64::MAX,
+            },
+        })
+        .collect();
+    let e = env_with(
+        &owner,
+        AdmissionDecision::allow(charges).with_reservation("rid"),
+    );
+    let err = set(
+        &e,
+        &signed_visibility(&owner, &repo, 1, b"v"),
+        VisibilityRequest::Envelope(Visibility::Private),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), Code::ResourceExhausted);
+    let p = coordinator(&e, &owner);
+    let outcome = delivered_any(&e, &p, "rid");
+    assert!(matches!(outcome.kind, OutcomeKind::Aborted { .. }));
+    assert_eq!(outcome.procedure, Some(Procedure::SetRepoVisibility));
+    let id = repo_id(&e, &owner);
+    assert!(get(&e, &p, &keys::repo_visibility(&id.name)).is_none());
 }

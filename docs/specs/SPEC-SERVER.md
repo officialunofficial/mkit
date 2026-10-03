@@ -154,11 +154,13 @@ they do not reproduce its lifecycle table.
   Charges another admission returns for it are applied, in the same unit,
   to the quota scope each charge names. When the deployment also plans an
   automatic cache purge for the change, the purge, the audit and the outcome
-  share one outbox update in that unit. The outcome-backlog bound (§5) is
-  checked only after admission returns a reservation, and never for a change
-  to `private`: making a repository private MUST remain applicable while an
-  outcome or purge sink is unavailable, so that change records its outcome
-  even above the soft bound. An `Allow`'s receipt headers are returned on
+  share one outbox update in that unit. The outcome-backlog bound (§5) is checked before admission, and only
+  for an admission other than the default one (which never reserves); a
+  refusal therefore strands no reservation. It is never applied to a real
+  change from public to private: making a repository private MUST remain
+  applicable while an outcome or purge sink is unavailable, so that change
+  records its outcome even above the soft bound. A request that repeats the
+  current value is not exempt. An `Allow`'s receipt headers are returned on
   the committed success only.
 - An `Aborted` outcome MUST be written in a separate atomic unit after
   a failed apply, as STC §7.7 requires. That unit replaces the pending

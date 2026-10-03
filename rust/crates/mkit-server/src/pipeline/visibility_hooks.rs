@@ -10,14 +10,13 @@ use super::{
 use crate::error::ServerError;
 use crate::op::Operation;
 use crate::pipeline::HookSet;
-use crate::pipeline::hooks::AdmissionInput;
+use crate::pipeline::hooks::{Admission, AdmissionInput};
 use crate::store::codec::{AbortReason, ReservationV1};
 use crate::store::outbox::{OutboxBuilder, Terminal};
 use crate::store::{
     Batch, Key, MAX_BATCH_OPS, MultipartBlobStore, NamespaceStore, Partition, Precondition, Value,
     Write, keys,
 };
-use mkit_attest::grant::Visibility;
 
 /// What stage 3 granted a visibility change.
 pub(super) struct Admitted {
@@ -66,24 +65,26 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Stage 3 for `op`, then the reservation's durable pending row when
     /// admission granted one. Nothing else is written.
     ///
-    /// The outcome-backlog bound applies only to a granted reservation (the
-    /// only thing that adds an outcome row), and never to a change to
-    /// `Private`: making a repository private must stay applicable while a
-    /// sink is down, so that change exceeds the soft bound by its one row.
+    /// The outcome-backlog bound is a soft snapshot check before admission.
+    /// It applies only when the admission can grant a reservation (not the
+    /// default admission, which never does), and never to `hides`, a real
+    /// change from public to private: making a repository private must stay
+    /// applicable while a sink is down, so that change exceeds the soft bound
+    /// by its one row. A same-value request is not exempt.
     pub(super) async fn admit_visibility(
         &self,
         a: &Authenticated,
         op: &Operation,
         p: &Partition,
-        visibility: Visibility,
+        hides: bool,
     ) -> Result<Admitted, ServerError> {
+        if !hides && !self.hooks.admission().is_default() {
+            self.check_outbox_backpressure(p, None).await?;
+        }
         let credentials = admission::validate_credentials(&a.credential_capture)?;
         let mut input = AdmissionInput::new(op);
         input.credential_headers = &credentials;
         let allowance = self.admit(input).await?;
-        if allowance.reservation.is_some() && visibility != Visibility::Private {
-            self.check_outbox_backpressure(p, None).await?;
-        }
         let pending = match allowance.reservation.as_deref() {
             Some(rid) => Some(
                 self.record_pending(a, p, rid, stored_procedure(&op.kind)?)

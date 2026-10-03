@@ -1720,7 +1720,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let facts = self.authorize_visibility_envelope(&op).await?;
         let mut op = op;
         op.authz = facts.clone();
-        let admitted = self.admit_visibility(a, &op, p, visibility).await?;
+        let hides = visibility == Visibility::Private
+            && !repo_is_private(
+                stored
+                    .as_ref()
+                    .map(codec::decode_repo_visibility)
+                    .transpose()
+                    .map_err(meta_error)?
+                    .as_ref(),
+                self.cfg.default_repo_visibility,
+            );
+        let admitted = self.admit_visibility(a, &op, p, hides).await?;
         let committed = self
             .commit_visibility_envelope(
                 (auth, repo, p),
@@ -2037,7 +2047,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         caller_view: CallerView::Writer,
                         ..AuthzFacts::default()
                     };
-                    admitted = Some(self.admit_visibility(a, &op, p, visibility).await?);
+                    let hides = visibility == Visibility::Private
+                        && !repo_is_private(row.as_ref(), self.cfg.default_repo_visibility);
+                    admitted = Some(self.admit_visibility(a, &op, p, hides).await?);
                 }
                 let Some(admission) = admitted.as_ref() else {
                     return Err(internal("visibility admission missing"));
