@@ -9,7 +9,7 @@
 #   - no hyper `server` feature, no hyper-util `server*` feature, and no
 #     connectrpc `server` or `axum` feature;
 #   - `mkit-server` (the engine of `mkit serve`) with only its `ssh` and
-#     `fs` features, never `connect`, `sql`, `memory` or `test-faults`;
+#     `fs` features, never `connect`, `memory` or `test-faults`;
 #
 # and `mkit serve` (rust/crates/mkit-cli/src/commands/serve/) must not name
 # tokio: it runs its session under `futures::executor::block_on` and builds

@@ -14,9 +14,6 @@
 
 use crate::rt::{MaybeSend, MaybeSync};
 
-/// Physical storage pressure and alert bookkeeping shared by adapters.
-pub mod pressure;
-
 /// Counter: requests handled. Labels: `procedure`, `code`.
 pub const METRIC_REQUESTS: &str = "mkit_server_requests_total";
 /// Histogram: request latency in milliseconds. Labels: `procedure`.

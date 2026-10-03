@@ -53,6 +53,14 @@ list is configured; without that list its routes are absent.
 For a branch, its head and packmap share one publication sequence even
 when either is written through `UpdateRef` (§10.2).
 
+### Storage adapter boundary
+
+`mkit-server` defines the engine-neutral `NamespaceStore` contract. The
+SQLite implementation (`mkit_server_worker::sql::{SqlConn, SqlKvStore}`),
+physical storage-pressure telemetry, and Cloudflare relay plan budgets belong
+to `mkit-server-worker`. Core has no `sql` feature or SQLite dependency.
+The adapter move changes no statements, stored formats, or store semantics.
+
 ## 2. Pipeline order
 
 The stages are numbered 0–9. An operation visits the stages applicable

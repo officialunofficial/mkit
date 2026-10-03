@@ -224,7 +224,7 @@ impl SqlConn for TimerProbe {
 
 #[test]
 fn timer_window_retains_raw_rows_and_binds_exact_exclusive_position() {
-    use crate::{Key, NamespaceKey, Partition};
+    use mkit_server::{Key, NamespaceKey, Partition};
     let conn = TimerProbe::default();
     let partition = Partition::Namespace(NamespaceKey::deployment_default());
     let part = partition.encode().unwrap().to_vec();
@@ -282,15 +282,15 @@ fn timer_window_refuses_corrupt_partition_columns() {
 #[test]
 fn relay_capacity_exception_requires_exact_guarded_empty_timer_move() {
     use super::kv::is_relay_timer_reschedule;
-    use crate::store::{Batch, Precondition, Value, keys};
-    fn moved(old: crate::Key, new: crate::Key) -> Batch {
+    use mkit_server::store::{Batch, Precondition, Value, keys};
+    fn moved(old: mkit_server::Key, new: mkit_server::Key) -> Batch {
         Batch::new()
             .require(Precondition::Equals(old.clone(), Value::default()))
             .require(Precondition::Absent(new.clone()))
             .delete(old)
             .put(new, Value::default())
     }
-    let relay_kind = crate::timers::registry::kinds::RELAY.get();
+    let relay_kind = mkit_server::timers::registry::kinds::RELAY.get();
     let old = keys::timer(10, relay_kind, b"relay-source");
     let new = keys::timer(15, relay_kind, b"relay-source");
     let valid = moved(old.clone(), new.clone());
@@ -309,24 +309,25 @@ fn relay_capacity_exception_requires_exact_guarded_empty_timer_move() {
     wrong_guard.preconditions[1] = Precondition::Absent(keys::timer(20, relay_kind, b"other"));
     assert!(!is_relay_timer_reschedule(&wrong_guard));
     let mut wrong_deleted = valid.clone();
-    wrong_deleted.writes[0] = crate::Write::Delete(new.clone());
+    wrong_deleted.writes[0] = mkit_server::Write::Delete(new.clone());
     assert!(!is_relay_timer_reschedule(&wrong_deleted));
     let mut old_payload = valid.clone();
     old_payload.preconditions[0] = Precondition::Equals(old, Value::new(b"opaque".to_vec()));
     assert!(!is_relay_timer_reschedule(&old_payload));
     let mut new_payload = valid.clone();
-    new_payload.writes[1] = crate::Write::Put(new, Value::new(b"opaque".to_vec()));
+    new_payload.writes[1] = mkit_server::Write::Put(new, Value::new(b"opaque".to_vec()));
     assert!(!is_relay_timer_reschedule(&new_payload));
-    assert!(!is_relay_timer_reschedule(
-        &valid.put(crate::Key::new(b"unrelated".to_vec()), Value::default())
-    ));
+    assert!(!is_relay_timer_reschedule(&valid.put(
+        mkit_server::Key::new(b"unrelated".to_vec()),
+        Value::default()
+    )));
 }
 
 #[test]
 fn retry_capacity_exception_requires_exact_guarded_payload_move() {
     use super::kv::is_timer_retry_move;
-    use crate::store::{Batch, Precondition, Value, keys};
-    fn moved(old: crate::Key, new: crate::Key, value: Value) -> Batch {
+    use mkit_server::store::{Batch, Precondition, Value, keys};
+    fn moved(old: mkit_server::Key, new: mkit_server::Key, value: Value) -> Batch {
         Batch::new()
             .require(Precondition::Equals(old.clone(), value.clone()))
             .require(Precondition::Absent(new.clone()))
@@ -361,16 +362,16 @@ fn retry_capacity_exception_requires_exact_guarded_payload_move() {
     no_destination_guard.preconditions.pop();
     assert!(!is_timer_retry_move(&no_destination_guard));
     let mut changed_payload = valid.clone();
-    changed_payload.writes[1] = crate::Write::Put(new, Value::new(b"changed".to_vec()));
+    changed_payload.writes[1] = mkit_server::Write::Put(new, Value::new(b"changed".to_vec()));
     assert!(!is_timer_retry_move(&changed_payload));
     assert!(!is_timer_retry_move(
-        &valid.put(crate::Key::new(b"unrelated".to_vec()), value)
+        &valid.put(mkit_server::Key::new(b"unrelated".to_vec()), value)
     ));
 }
 
 #[test]
 fn timer_payload_boundary_guarantees_max_key_retry_fits_original_batch_cap() {
-    use crate::store::{
+    use mkit_server::store::{
         Batch, MAX_BATCH_BYTES, MAX_KEY_BYTES, MAX_VALUE_BYTES, Precondition, StoreCapabilities,
         Value, keys,
     };
@@ -411,7 +412,7 @@ fn timer_payload_boundary_guarantees_max_key_retry_fits_original_batch_cap() {
     );
     Batch::new()
         .put(
-            crate::Key::new(b"ordinary-metadata".to_vec()),
+            mkit_server::Key::new(b"ordinary-metadata".to_vec()),
             Value::new(vec![0; MAX_VALUE_BYTES]),
         )
         .validate(&StoreCapabilities::full())

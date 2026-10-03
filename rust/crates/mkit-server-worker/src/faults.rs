@@ -12,8 +12,8 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use crate::sql::{Row, SqlConn, SqlError, SqlValue, TxFn};
 use mkit_server::Redacted;
-use mkit_server::sql::{Row, SqlConn, SqlError, SqlValue, TxFn};
 
 /// A written key containing this fails its batch once.
 pub const FAIL_ONCE_MARKER: &[u8] = b"__test_fail_once-";

@@ -9,9 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mkit_server::sql::{
-    GET_MANY_CHUNK, Row, SqlConn, SqlError, SqlValue, TxFn, batch_growth_bytes,
-};
+use super::sql::{GET_MANY_CHUNK, Row, SqlConn, SqlError, SqlValue, TxFn, batch_growth_bytes};
 use mkit_server::{Clock, Redacted, StoreError, SystemClock};
 use parking_lot::ReentrantMutex;
 use rusqlite::types::{ToSqlOutput, ValueRef};

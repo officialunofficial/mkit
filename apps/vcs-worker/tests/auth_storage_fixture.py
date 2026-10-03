@@ -3,7 +3,7 @@
 Usage: python3 tests/auth_storage_fixture.py prepare|verify <persist-dir>/v3/do/mkit-vcs-worker-RefStore/<id>.sqlite
 Restart workerd and run auth_v2.mjs --fault --corrupt-ref between the two steps.
 
-The RefStore object runs mkit-server's SqlKvStore: one `kv(part, key, value)`
+The RefStore object runs mkit-server-worker's SqlKvStore: one `kv(part, key, value)`
 table. The fixture stores an undecodable value under the ref
 `refs/heads/__corrupt` of repository `default` in the deployment-default
 namespace partition; the Worker must neither serve it as valid nor overwrite

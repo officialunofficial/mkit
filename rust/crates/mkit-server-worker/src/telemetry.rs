@@ -2,6 +2,9 @@
 //! latency observations emit on the first and then every hundredth call, across request-created
 //! default sinks in one isolate. Each emitted line is one JSON object.
 
+/// Physical Durable Object storage pressure and alert bookkeeping.
+pub mod pressure;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mkit_server::Metrics;
@@ -309,5 +312,34 @@ mod tests {
         assert_eq!(lines[1].1["event"], "storage_pressure");
         assert_eq!(lines[2].0, Channel::Error);
         assert_eq!(lines[2].1["level"], "error");
+    }
+
+    #[test]
+    fn pressure_alerts_preserve_console_output_across_module_moves() {
+        let sink = Capture::default();
+        tracing::subscriber::with_default(events::subscriber(sink.clone()), || {
+            pressure::emit(pressure::PressureLevel::Warn, "ref", 70, 100);
+            pressure::emit(pressure::PressureLevel::Critical, "ref", 90, 100);
+        });
+        let lines = sink.0.lock().unwrap();
+        assert_eq!(lines.len(), 2);
+        for ((channel, event), (level, bytes, pct)) in lines
+            .iter()
+            .zip([("warn", 70_u64, 70.0_f64), ("critical", 90_u64, 90.0_f64)])
+        {
+            assert_eq!(*channel, Channel::Error);
+            assert_eq!(
+                *event,
+                json!({
+                    "target": "mkit_server::telemetry::pressure",
+                    "event": "storage_pressure",
+                    "level": level,
+                    "kind": "ref",
+                    "bytes": bytes,
+                    "limit_bytes": 100,
+                    "pct": pct,
+                })
+            );
+        }
     }
 }

@@ -27,7 +27,7 @@ documentation = "https://docs.rs/mkit-server"
 [package.metadata.docs.rs]
 # Document the portable surface; `test-faults` and the pure-Rust zstd opt-in
 # stay off.
-features = ["connect", "memory", "sql", "ssh", "fs", "remote-hooks", "http-objects"]
+features = ["connect", "memory", "ssh", "fs", "remote-hooks", "http-objects"]
 
 [lints]
 workspace = true
@@ -104,10 +104,6 @@ test-faults = []
 # std-only, no async runtime, so the server-free `mkit serve` (ssh) can use
 # them. Native only: the module and its dependency are cfg'd out on wasm32.
 fs = ["dep:mkit-transport-file"]
-# The shared SQL backend (`sql::SqlKvStore`) over the synchronous
-# `sql::SqlConn` trait. No SQL engine dependency: The Workers adapter
-# implements `SqlConn` with Durable Object SQLite. Compiles for wasm32.
-sql = []
 # The `mkit.rpc.v1.ssh` session over the pipeline (`ssh::serve_session`),
 # used by `mkit serve` over stdio. No async runtime: it runs under the
 # CLI's blocking executor as well as under tokio.

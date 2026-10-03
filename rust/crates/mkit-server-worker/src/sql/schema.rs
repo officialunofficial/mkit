@@ -11,7 +11,7 @@
 //! `kv` table's shape.
 //!
 //! Physical v1: one `kv` table keyed by `(part, key)`. `part` is the
-//! [`Partition::encode`](crate::Partition::encode) bytes, so one native
+//! [`Partition::encode`](mkit_server::Partition::encode) bytes, so one native
 //! file holds every partition (a D34 shard is a `part` value); a Durable
 //! Object holds one partition, and the column is constant there. It is a
 //! `BLOB`, not `TEXT`: the encoding's components end in `0x00`, which
@@ -23,7 +23,7 @@
 //! ("schema is newer than this binary"): roll back only to a v2 binary.
 
 use super::{SqlConn, SqlError, SqlValue, TxFn, count};
-use crate::store::StoreError;
+use mkit_server::store::StoreError;
 
 /// One physical migration: its statements run in one transaction, which
 /// then records `version`.

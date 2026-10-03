@@ -20,6 +20,8 @@ def check(manifest, features=()):
     for name in ("mkit-server-worker", "mkit-server", "mkit-core"):
         if "pack-ruzstd" not in resolved[name]:
             raise SystemExit(f"{manifest}: missing {name}/pack-ruzstd")
+    if "sql" in resolved["mkit-server"]:
+        raise SystemExit(f"{manifest}: SQL belongs in the Workers adapter")
     if "pack-zstd" in resolved["mkit-core"]:
         raise SystemExit(f"{manifest}: launch must use the pure-Rust decoder")
     print(f"PASS {manifest}: Worker -> server -> core pack-ruzstd")

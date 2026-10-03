@@ -228,6 +228,7 @@ steps:
           cargo check --locked -p mkit-server --features remote-hooks --target wasm32-unknown-unknown
           cargo check --locked -p mkit-server --features http-objects --target wasm32-unknown-unknown
           cargo build --locked -p mkit-server-worker --target wasm32-unknown-unknown
+          cargo clippy --locked -p mkit-server -p mkit-server-worker --target wasm32-unknown-unknown -- -D warnings
         )
         bash scripts/check-wasm-dep-graph.sh
         bash scripts/check-cli-baseline.sh

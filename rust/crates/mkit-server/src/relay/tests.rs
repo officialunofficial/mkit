@@ -1575,11 +1575,19 @@ async fn plant_schedule<S: NamespaceStore>(store: &S, schedule: &[u16]) {
         .unwrap();
 }
 
+// Fixed budgets preserve the throughput regression without coupling core tests
+// to an adapter's plan constants.
+const TEST_LARGE_RELAY_TARGETS: u32 = 32;
+const TEST_SMALL_RELAY_TARGETS: u32 = 8;
+const TEST_LARGE_RELAY_FIRES: u32 = 8;
+const TEST_SMALL_RELAY_FIRES: u32 = 2;
+const TEST_RELAY_CALLS_PER_TARGET: u32 = 2;
+
 fn scan_budget(rows: u32, targets: u32) -> RelayBudget {
     RelayBudget {
         max_rows: rows,
         max_targets: targets,
-        max_target_calls: Some(WORKER_RELAY_CALLS_PER_TARGET),
+        max_target_calls: Some(TEST_RELAY_CALLS_PER_TARGET),
     }
 }
 
@@ -1985,10 +1993,10 @@ async fn worker_budget_drains_512_distinct_healthy_targets_without_idle_fires() 
 #[tokio::test]
 async fn worker_paid_and_free_budgets_drain_4096_targets_within_alarm_call_caps() {
     for (targets_per_fire, fires_per_alarm) in [
-        (WORKER_PAID_RELAY_TARGETS, WORKER_PAID_RELAY_FIRES),
-        (WORKER_FREE_RELAY_TARGETS, WORKER_FREE_RELAY_FIRES),
+        (TEST_LARGE_RELAY_TARGETS, TEST_LARGE_RELAY_FIRES),
+        (TEST_SMALL_RELAY_TARGETS, TEST_SMALL_RELAY_FIRES),
     ] {
-        let calls_per_alarm = targets_per_fire * fires_per_alarm * WORKER_RELAY_CALLS_PER_TARGET;
+        let calls_per_alarm = targets_per_fire * fires_per_alarm * TEST_RELAY_CALLS_PER_TARGET;
         let max_alarms = 4096_u32.div_ceil(targets_per_fire * fires_per_alarm) + 64;
         let source_store = memory();
         plant_schedule(&source_store, &(0..4096).collect::<Vec<_>>()).await;

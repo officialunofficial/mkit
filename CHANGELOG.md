@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking (toward 0.6)
 
+- `mkit_server::sql` moves to `mkit_server_worker::sql`, and the `sql`
+  feature is removed. Import SQL store types from the Workers adapter and
+  remove `sql` from `mkit-server` feature lists.
+- `mkit_server::telemetry::pressure` and `mkit_server::relay::WORKER_*`
+  move to `mkit_server_worker::telemetry::pressure` and
+  `mkit_server_worker::relay::WORKER_*`. Update imports to the adapter.
+
 `mkit-server` main now accumulates 0.6 changes; the `server-semver` check
 compares against the 0.5.0 baseline as the 0.6 release. Rows written by
 v0.5.0 keep decoding. Rows written once these changes run carry the new field,

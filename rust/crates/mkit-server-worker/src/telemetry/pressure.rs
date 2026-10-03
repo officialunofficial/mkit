@@ -86,8 +86,10 @@ pub fn percentage(bytes: u64, limit_bytes: u64) -> f64 {
 /// an error event; warning pressure is a warn event.
 pub fn emit(level: PressureLevel, kind: &str, bytes: u64, limit_bytes: u64) {
     let pct = percentage(bytes, limit_bytes);
+    // Keep alert metadata stable across adapter/module moves.
     match level {
         PressureLevel::Warn => tracing::warn!(
+            target: "mkit_server::telemetry::pressure",
             event = "storage_pressure",
             level = level.label(),
             kind,
@@ -96,6 +98,7 @@ pub fn emit(level: PressureLevel, kind: &str, bytes: u64, limit_bytes: u64) {
             pct
         ),
         PressureLevel::Critical => tracing::error!(
+            target: "mkit_server::telemetry::pressure",
             event = "storage_pressure",
             level = level.label(),
             kind,
