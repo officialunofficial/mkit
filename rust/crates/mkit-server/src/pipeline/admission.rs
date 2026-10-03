@@ -227,7 +227,9 @@ pub(crate) fn validate_decision(decision: &AdmissionDecision) -> Result<(), Serv
         } => {
             validate_headers(response_headers, true)?;
             if let Some(rid) = reservation
-                && (!keys::validate_reservation_id(rid) || rid.starts_with("s:"))
+                && (!keys::validate_reservation_id(rid)
+                    || rid.starts_with("s:")
+                    || rid.starts_with("rs:"))
             {
                 return Err(invalid("invalid reservation id"));
             }

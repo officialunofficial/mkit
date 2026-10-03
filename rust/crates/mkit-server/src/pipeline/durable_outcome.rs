@@ -48,6 +48,11 @@ pub enum OutcomeKind {
     Expired,
     /// An HTTP read completed, possibly after partial transmission.
     ReadServed { object: [u8; 32], bytes_served: u64 },
+    /// The repository's stored-bytes counter changed: the absolute pack-byte
+    /// total and a monotonic per-repository version. Delivery is at least
+    /// once and may be out of order, so keep the value with the highest
+    /// version.
+    RepoStorageChanged { stored_bytes: u64, version: u64 },
 }
 
 impl Outcome {
@@ -107,6 +112,19 @@ impl Outcome {
                 OutcomeKind::ReadServed {
                     object,
                     bytes_served,
+                },
+            ),
+            ReservationV1::RepoStorageChanged {
+                repository,
+                occurred_at_ms,
+                stored_bytes,
+                version,
+            } => (
+                repository,
+                occurred_at_ms,
+                OutcomeKind::RepoStorageChanged {
+                    stored_bytes,
+                    version,
                 },
             ),
             ReservationV1::Pending { .. } | ReservationV1::Ticketed { .. } => {

@@ -132,6 +132,7 @@ fn run_proved_ticket(
             repository: REPO,
             source: &source,
             shards: env.pipe.shards.as_ref(),
+            count_storage: false,
         }),
         implicit: None,
         rejection: None,

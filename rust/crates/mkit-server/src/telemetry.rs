@@ -29,6 +29,10 @@ pub const METRIC_UPLOAD_BYTES: &str = "mkit_server_upload_bytes_total";
 pub const METRIC_RELAY_LEASE_LAG: &str = "mkit_server_relay_lease_lag_total";
 /// Counter: an outbox row exceeded the relay lag bound. Label: `source_kind`.
 pub const METRIC_RELAY_LAG_EXCEEDED: &str = "mkit_server_relay_lag_exceeded_total";
+/// Counter: a relay delivery to a coordinator failed because the repository's
+/// stored-bytes counter is missing (a corrupt store; its rows stay queued).
+pub const METRIC_RELAY_STORAGE_COUNTER_MISSING: &str =
+    "mkit_server_relay_storage_counter_missing_total";
 /// Gauge: source outbox rows inspected in the current relay window.
 pub const METRIC_RELAY_BACKLOG_ROWS: &str = "mkit_server_relay_backlog_rows";
 /// Gauge: subrequests the last scheduled-verification slice spent (WP-4.8).

@@ -1,8 +1,5 @@
 use super::read_limits::ReaderSession;
-use super::{
-    AuthMode, CallerView, HookSet, OpKind, Operation, Pipeline, Principal, RequestMeta, ms,
-    read_policy,
-};
+use super::{HookSet, OpKind, Operation, Pipeline, Principal, RequestMeta, ms};
 use crate::http_objects::{
     Fail, TakedownVerdict, Target, reach,
     resolve::{self, Budget, Env},
@@ -20,7 +17,7 @@ use crate::{Code, RepoId, ServerError};
 use std::sync::atomic::{AtomicBool, Ordering};
 /// A signed token and expiry; its credential is redacted from Debug.
 pub type IssuedUrl = crate::url_token::MintedToken;
-use mkit_core::{hash::Hash, object::ObjectType, repo_identity::Namespace};
+use mkit_core::{hash::Hash, object::ObjectType};
 use std::collections::{BTreeMap, BTreeSet};
 type Prefetched = (BTreeMap<Hash, Vec<u8>>, BTreeMap<Hash, ObjectMetadata>);
 /// Verified lengths describe canonical objects separately from logical files.
@@ -34,7 +31,7 @@ pub struct ObjectMetadata {
     pub logical_len: Option<u64>,
 }
 fn exhausted() -> ServerError {
-    ServerError::resource_exhausted(OBJECT_READER_LIMIT_MESSAGE)
+    super::repo_storage::exhausted()
 }
 fn resolution_failure(miss: resolve::Miss) -> ServerError {
     if miss == resolve::Miss::Capped {
@@ -44,7 +41,7 @@ fn resolution_failure(miss: resolve::Miss) -> ServerError {
     }
 }
 /// Stable public message for exhausted object-reader allowances.
-pub const OBJECT_READER_LIMIT_MESSAGE: &str = "object reader limit exceeded";
+pub const OBJECT_READER_LIMIT_MESSAGE: &str = super::repo_storage::OWNER_READ_LIMIT_MESSAGE;
 /// Maximum IDs per call; duplicates preserve input order and share proof work.
 pub const OBJECT_READER_BATCH: usize = 16;
 /// Core call cap inside the Worker invocation allowance.
@@ -153,46 +150,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 Ok(false)
             }
             ReaderView::Owner(meta) => {
-                if !matches!(self.pipe.cfg.auth, AuthMode::AuthV2(_)) {
-                    return Err(ServerError::unauthenticated("auth v2 required"));
-                }
-                let a = self.pipe.authenticate(meta)?;
-                if a.auth.is_none() || a.repo().repo != self.repo {
-                    return Err(ServerError::unauthenticated("envelope mismatch"));
-                }
-                let op = self.pipe.identify(
-                    &a,
-                    OpKind::ListRefs {
-                        prefix: "refs/".into(),
-                    },
-                )?;
-                let capped = AtomicBool::new(false);
-                let store = Budgeted::capture(&self.pipe.meta, &capped);
-                let auth = self
-                    .pipe
-                    .authorize_read_with_meta(&op, &store)
-                    .await
-                    .map_err(|error| {
-                        if capped.load(Ordering::SeqCst) {
-                            exhausted()
-                        } else {
-                            error
-                        }
-                    })?;
-                let owner = Namespace::parse(self.repo.namespace.as_str()).is_ok_and(
-                    |n| matches!(n, Namespace::Ed25519(key) if a.principal.ed25519() == Some(&key)),
-                );
-                let grant = self.pipe.visibility_gates_reads()
-                    && auth.facts.grant.is_some()
-                    && op
-                        .write_grant
-                        .as_ref()
-                        .zip(self.pipe.cfg.grants.as_ref())
-                        .and_then(|(h, c)| read_policy::check_grant(c, h.expose(), &op))
-                        .is_some_and(|g| g.write);
-                if auth.facts.caller_view != CallerView::Writer || !(owner || grant) {
-                    return Err(ServerError::permission_denied("writer authority required"));
-                }
+                self.pipe.authorize_owner(&self.repo, meta).await?;
                 Ok(true)
             }
         }

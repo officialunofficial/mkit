@@ -507,7 +507,10 @@ impl OutcomeSink for RetrySink {
         outcome: &crate::pipeline::Outcome,
     ) -> Result<(), crate::pipeline::DeliveryError> {
         self.seen.lock().unwrap().push(outcome.clone());
-        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+        // Only reads fail; the repository's stored-bytes outcome precedes them.
+        if self.fail.load(std::sync::atomic::Ordering::SeqCst)
+            && outcome.reservation_id.starts_with("read-")
+        {
             Err(crate::pipeline::DeliveryError::new("retry", None))
         } else {
             Ok(())

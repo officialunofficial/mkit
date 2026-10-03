@@ -343,7 +343,8 @@ pub enum ReservationV1 {
         occurred_at_ms: u64,
         /// Stored bytes.
         bytes_stored: u64,
-        /// Bytes new to the repository.
+        /// Pack bytes this write observed as new to the repository: an
+        /// observation, not the accounting source (`RepoStorageChanged`).
         new_to_repo: u64,
         /// Bytes new to the store.
         new_to_store: u64,
@@ -390,6 +391,19 @@ pub enum ReservationV1 {
         /// The read that was served; absent on rows written by v0.5.0.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         procedure: Option<StoredProcedure>,
+    },
+    /// A repository's stored-bytes counter changed. Not tied to a request:
+    /// its id is `rs:<repository digest>:<version>`.
+    #[non_exhaustive]
+    RepoStorageChanged {
+        /// Full wire repository identity.
+        repository: String,
+        /// Time the counter changed, Unix milliseconds.
+        occurred_at_ms: u64,
+        /// Absolute pack bytes of the repository after the change.
+        stored_bytes: u64,
+        /// Monotonic per-repository counter version after the change.
+        version: u64,
     },
 }
 
@@ -475,7 +489,7 @@ impl ReservationV1 {
             | Self::Committed { procedure, .. }
             | Self::Aborted { procedure, .. }
             | Self::ReadServed { procedure, .. } => *procedure,
-            Self::Ticketed { .. } | Self::Expired { .. } => None,
+            Self::Ticketed { .. } | Self::Expired { .. } | Self::RepoStorageChanged { .. } => None,
         }
     }
 
@@ -492,6 +506,44 @@ impl ReservationV1 {
         }
         self
     }
+}
+
+/// A repository's pack-byte total and its monotonic change counter, stored
+/// at `rb` in the repository's coordinator.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RepoStorageV1 {
+    /// Sum of the sizes of the distinct packs that are members of the repository.
+    pub stored_bytes: u64,
+    /// Increments on every counter change.
+    pub version: u64,
+}
+
+/// Fixed 16-byte encoding: big-endian `stored_bytes`, then `version`.
+#[must_use]
+pub fn encode_repo_storage(value: &RepoStorageV1) -> Value {
+    let mut bytes = Vec::with_capacity(16);
+    bytes.extend_from_slice(&value.stored_bytes.to_be_bytes());
+    bytes.extend_from_slice(&value.version.to_be_bytes());
+    Value::new(bytes)
+}
+
+/// Refuse any value that is not exactly 16 bytes.
+pub fn decode_repo_storage(value: &Value) -> Result<RepoStorageV1, StoreError> {
+    let bytes: [u8; 16] = value
+        .as_bytes()
+        .try_into()
+        .map_err(|_| corrupt("bad repository storage counter"))?;
+    let (bytes_part, version_part) = bytes.split_at(8);
+    Ok(RepoStorageV1 {
+        stored_bytes: u64::from_be_bytes(
+            bytes_part.try_into().map_err(|_| corrupt("bad counter"))?,
+        ),
+        version: u64::from_be_bytes(
+            version_part
+                .try_into()
+                .map_err(|_| corrupt("bad counter"))?,
+        ),
+    })
 }
 
 /// An idempotent relay of upserts and deletes to one partition.
@@ -952,7 +1004,8 @@ pub fn decode_reservation(value: &Value) -> Result<ReservationV1, StoreError> {
             repository
         }
         ReservationV1::Expired { repository, .. }
-        | ReservationV1::ReadServed { repository, .. } => repository,
+        | ReservationV1::ReadServed { repository, .. }
+        | ReservationV1::RepoStorageChanged { repository, .. } => repository,
     };
     RepositoryIdentity::parse_bare_allowed(repository)
         .map_err(|_| corrupt("bad outcome repository"))?;

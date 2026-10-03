@@ -34,6 +34,22 @@ supported after new reservation rows are written.
 
 ### Added
 
+- Exact per-repository stored-bytes accounting for multi-repository
+  deployments: the sum of the sizes of the distinct packs that are members of
+  a repository (a pack shared by two repositories counts in each). A
+  per-repository counter lives in the coordinator, created with the
+  repository, and a pack is counted exactly once, when its consumption first
+  reaches the coordinator, including consumption on different branches under
+  D34 and consumption by implicit session writes. The counter is eventually
+  consistent and exact. Every change queues a new `OutcomeKind::RepoStorageChanged
+  { stored_bytes, version }` outcome (absolute value, monotonic per-repository
+  version; hooks proto `Outcome.repo_storage_changed`, field 11) through the
+  outcome sink, and `Pipeline::repo_storage` reads `{ stored_bytes, version }`
+  in one coordinator call, authorized as an owner read. Counting is part
+  of relay delivery to a coordinator, so every `RelayHandler` counts.
+  `ReservationV1` gains a `RepoStorageChanged` state, so exhaustive matches
+  must handle it. A store created before this change has repositories without a
+  counter and must be reset.
 - `SetRepoVisibility` now runs the embedder's `Admission` hook and records an
   outcome for the `OutcomeSink`, in both the owner-signed envelope mode and the
   statement mode, like every other mutating RPC. A refusal or challenge changes
@@ -104,6 +120,14 @@ supported after new reservation rows are written.
 
 ### Fixed
 
+- `AdmissionInput::new_to_repo_bytes` is now the declared pack size or `Some(0)`
+  when the pack is already counted for the repository, for `BeginUpload` and
+  streaming uploads under multi-repository addressing (it was always the
+  declared size, contradicting its doc), and its doc states that it is a
+  pre-admission observation. `Committed.new_to_repo` counted a pack twice when
+  two branches consumed it concurrently; it is documented as an observation and
+  is exact only where the counter is in the writing partition. The
+  `RepoStorageChanged` outcome is the accounting source.
 - Object-reader cap hits consistently return `ResourceExhausted` with a stable
   public message, including delta-depth and external-base caps hit while
   checking takedown denial; unprovable public IDs retain their uniform absent

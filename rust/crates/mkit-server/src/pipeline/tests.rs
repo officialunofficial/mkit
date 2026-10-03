@@ -14,6 +14,7 @@ mod publication_binding;
 mod ref_policy;
 #[cfg(feature = "remote-hooks")]
 mod remote_hooks;
+mod repo_storage;
 mod scheduled;
 mod url_token;
 mod visibility;
@@ -84,7 +85,15 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
     planned_ticket_publication(count, d34, false)
 }
 fn planned_ticket_publication(count: usize, d34: bool, retained: bool) -> Batch {
-    try_planned_ticket_publication(count, d34, retained, ZERO_ROW).unwrap()
+    planned_ticket_publication_counted(count, d34, retained, false)
+}
+fn planned_ticket_publication_counted(
+    count: usize,
+    d34: bool,
+    retained: bool,
+    count_storage: bool,
+) -> Batch {
+    try_planned_ticket_publication(count, d34, retained, ZERO_ROW, count_storage).unwrap()
 }
 const ZERO_ROW: clearance::PreparedAt = clearance::PreparedAt {
     generation: 0,
@@ -97,6 +106,7 @@ fn try_planned_ticket_publication(
     d34: bool,
     retained: bool,
     bound: clearance::PreparedAt,
+    count_storage: bool,
 ) -> Result<Batch, ServerError> {
     use crate::store::codec::{ReservationV1, TicketV1};
     let repo = RepoId {
@@ -127,6 +137,7 @@ fn try_planned_ticket_publication(
         repository: REPO,
         source: &source,
         shards,
+        count_storage,
     };
     let refs = [upd(PACKMAP, Missing, B), upd(HEAD, Missing, C)];
     let replay = ReplayGuard {
@@ -218,7 +229,9 @@ fn try_planned_ticket_publication(
         snap.insert(keys::ticket(id), Some(codec::encode_ticket(ticket)));
     }
     for key in advance::detail_keys(&snap, &advance).unwrap() {
-        snap.insert(key, None);
+        let value = (key == keys::repo_storage(&repo.name))
+            .then(crate::store::repo_storage::initial_counter);
+        snap.insert(key, value);
     }
     for (id, ticket) in ids.iter().zip(&tickets) {
         snap.insert(
@@ -260,14 +273,19 @@ fn maximal_publication_refuses_a_proof_bound_to_another_row() {
         };
         // The planned snapshot holds the default (empty) publication row.
         for stale in [at(1, 0, 0), at(0, 1, 0), at(0, 0, 1)] {
-            let error =
-                try_planned_ticket_publication(MAX_TICKETS_PER_ADVANCE, d34, retained, stale)
-                    .unwrap_err();
+            let error = try_planned_ticket_publication(
+                MAX_TICKETS_PER_ADVANCE,
+                d34,
+                retained,
+                stale,
+                false,
+            )
+            .unwrap_err();
             assert_eq!(error.code(), Code::Unavailable);
             assert_eq!(error.public_message(), "publication state changed; retry");
         }
         let batch =
-            try_planned_ticket_publication(MAX_TICKETS_PER_ADVANCE, d34, retained, ZERO_ROW)
+            try_planned_ticket_publication(MAX_TICKETS_PER_ADVANCE, d34, retained, ZERO_ROW, false)
                 .unwrap();
         assert!(batch.preconditions.len() + batch.writes.len() <= crate::store::MAX_BATCH_OPS);
     }
@@ -284,6 +302,32 @@ fn seven_ticket_publication_bounds_are_real_batches() {
         let batch = planned_ticket_publication(7, d34, retained);
         assert_eq!(batch.preconditions.len() + batch.writes.len(), expected);
         batch.validate(&StoreCapabilities::full()).unwrap();
+    }
+}
+
+/// Counting a seven-pack advance adds one relay row on D34 and, on Single,
+/// the markers, the counter and one outcome row: both stay within a batch.
+#[test]
+fn seven_ticket_publication_with_storage_counting_fits_a_batch() {
+    for (d34, retained, expected) in [
+        (true, false, 94),
+        (true, true, 95),
+        (false, false, 96),
+        (false, true, 97),
+    ] {
+        let batch = planned_ticket_publication_counted(7, d34, retained, true);
+        assert_eq!(batch.preconditions.len() + batch.writes.len(), expected);
+        batch.validate(&StoreCapabilities::full()).unwrap();
+        // Counting is independent of the publication this fixture defers:
+        // Single changes the counter in the batch, D34 relays the markers.
+        let counter = keys::repo_storage(&repo_name());
+        assert_eq!(
+            batch
+                .writes
+                .iter()
+                .any(|w| matches!(w, Write::Put(k, _) if *k == counter)),
+            !d34
+        );
     }
 }
 
@@ -418,11 +462,13 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
         "each pack must route to its own membership shard"
     );
     let refs = [upd(PACKMAP, Missing, B)];
+    let counted: Vec<_> = packs.iter().map(|pack| (*pack, 64)).collect();
     let implicit = ImplicitConsume {
         packs: &packs,
         repo_id: &repo,
         source: &source,
         shards: &shards,
+        counted: &counted,
     };
     let req = WriteRequest {
         denial_ids: None,
@@ -464,7 +510,8 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
     plan.batch.validate(&StoreCapabilities::full()).unwrap();
     let ops = plan.batch.preconditions.len() + plan.batch.writes.len();
     assert!(ops <= crate::store::MAX_BATCH_OPS, "{ops}");
-    assert_eq!(ops, 27, "adjust the note at MAX_TICKETS_PER_ADVANCE");
+    // Counting adds one relay row for the markers (28 = 27 + 1).
+    assert_eq!(ops, 28, "adjust the note at MAX_TICKETS_PER_ADVANCE");
     let writes_of = |wanted: fn(&keys::ParsedKey) -> bool| -> usize {
         plan.batch
             .writes
@@ -482,7 +529,7 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
     // Seven membership relay rows plus the packmap name's own ref-index
     // relay row (WP-1.28b); every row stays under the puts+deletes cap.
     let relays = index_relays(&plan.batch);
-    assert_eq!(relays.len(), packs.len() + 1);
+    assert_eq!(relays.len(), packs.len() + 2);
     for relay in &relays {
         assert!(relay.puts.len() + relay.deletes.len() <= crate::store::outbox::MAX_RELAY_PUTS);
     }
@@ -530,6 +577,7 @@ fn ticket_reservation_id_mismatch_is_corruption() {
         repository: REPO,
         source: &source,
         shards: &shards,
+        count_storage: false,
     };
     let mut snap = Snapshot::default();
     snap.insert(

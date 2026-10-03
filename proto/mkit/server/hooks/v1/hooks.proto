@@ -350,6 +350,8 @@ message Outcome {
     Expired expired = 7;
     // Paid read served content; SPEC-SERVER §6.5.
     ReadServed read_served = 8;
+    // The repository's absolute stored-bytes counter changed; SPEC-SERVER §6.5.
+    RepoStorageChanged repo_storage_changed = 11;
   }
   // Full Connect procedure path of the operation that produced the outcome.
   // Absent only for an outcome recorded before the server stored it (rows
@@ -364,7 +366,10 @@ message Outcome {
 message Committed {
   // Bytes stored for this reservation's committed operation; SPEC-SERVER §6.5.
   uint64 bytes_stored = 1;
-  // Bytes newly added to the repository's membership; SPEC-SERVER §6.5.
+  // Pack bytes this write observed as new to the repository: exact where the
+  // repository's counter is in the writing partition, otherwise an
+  // observation. Not the accounting source: use RepoStorageChanged;
+  // SPEC-SERVER §6.5.
   uint64 new_to_repo = 2;
   // Bytes new to the store, disclosed only in Committed; SPEC-SERVER §§5, 6.5.
   uint64 new_to_store = 3;
@@ -417,6 +422,16 @@ message ReadServed {
   bytes object = 1;
   // Number of bytes served to the client; SPEC-SERVER §6.5.
   uint64 bytes_served = 2;
+}
+
+// Per-repository stored-bytes accounting: the repository's absolute pack-byte
+// total after a counter change. Delivery is at least once and may be out of
+// order: keep the value with the highest version; SPEC-SERVER §6.5.
+message RepoStorageChanged {
+  // Sum of the sizes of the distinct packs that are members of the repository.
+  uint64 stored_bytes = 1;
+  // Monotonic per-repository counter version; increments on every change.
+  uint64 version = 2;
 }
 
 // Durable lifecycle event delivery; SPEC-SERVER §12.4.

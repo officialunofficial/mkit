@@ -10,6 +10,7 @@ use super::{
 use crate::repo::RepoId;
 use crate::store::codec::{AbortReason, OutcomeRef, ReservationV1, StoredProcedure, TicketV1};
 use crate::store::outbox::{OutboxBuilder, Terminal};
+use crate::store::repo_storage;
 use crate::store::tickets::{self, CloseReason};
 use crate::store::{
     Batch, BatchOutcome, BlobKey, Key, MultipartBlobStore, Precondition, Value, Write,
@@ -29,6 +30,15 @@ pub(super) struct AdvanceWrite<'a> {
     pub repository: &'a str,
     pub source: &'a Partition,
     pub shards: &'a dyn ShardMap,
+    /// Count consumed packs in the repository's stored-bytes counter (Multi).
+    pub count_storage: bool,
+}
+
+impl AdvanceWrite<'_> {
+    /// The counter is in this batch's own partition.
+    fn counts_inline(&self) -> bool {
+        self.count_storage && *self.source == self.shards.coordinator(&self.repo_id.namespace)
+    }
 }
 
 fn ticket(
@@ -84,14 +94,18 @@ pub(super) fn detail_keys(
             tickets.push(codec::decode_ticket(raw).map_err(meta_error)?);
         }
     }
-    detail_keys_for(tickets.iter())
+    detail_keys_for(advance, tickets.iter())
 }
 
 fn detail_keys_for<'a>(
+    advance: &AdvanceWrite<'_>,
     tickets: impl IntoIterator<Item = &'a TicketV1>,
 ) -> Result<Vec<Key>, ServerError> {
     let mut out = vec![keys::outbox_sequence(), keys::outcome_backlog()];
     for t in tickets {
+        if advance.counts_inline() {
+            out.extend(repo_storage::read_keys(&t.repo, &[(t.pack_id, t.bytes)]));
+        }
         out.push(
             keys::ticket_index(&t.repo, &t.ref_name, &t.pack_id, &t.signer).map_err(meta_error)?,
         );
@@ -206,7 +220,17 @@ pub(super) fn plan_consumption(
                 repository: advance.repository.to_owned(),
                 occurred_at_ms: ms(clock.business_now_ms),
                 bytes_stored: t.bytes,
-                new_to_repo: if snap.get(&keys::membership(&t.repo, &t.pack_id)).is_some() {
+                // Exact where the counter is in this batch's partition; elsewhere an
+                // observation from the consuming shard's local membership. The
+                // `RepoStorageChanged` outcome is the authoritative value.
+                new_to_repo: if snap
+                    .get(&if advance.counts_inline() {
+                        keys::repo_storage_pack(&t.repo, &t.pack_id)
+                    } else {
+                        keys::membership(&t.repo, &t.pack_id)
+                    })
+                    .is_some()
+                {
                     0
                 } else {
                     t.bytes
@@ -229,6 +253,25 @@ pub(super) fn plan_consumption(
                 writes,
             );
         }
+    }
+    if advance.count_storage {
+        let packs: Vec<_> = tickets.iter().map(|t| (t.pack_id, t.bytes)).collect();
+        repo_storage::plan_count(
+            advance.repo_id,
+            &packs,
+            advance.source,
+            advance.shards,
+            |key| snap.get(key),
+            |pack| {
+                snap.get(&keys::membership(&advance.repo_id.name, pack))
+                    .is_some()
+            },
+            clock.plan_time_ms,
+            outbox,
+            pre,
+            writes,
+        )
+        .map_err(meta_error)?;
     }
     Ok(())
 }
@@ -265,6 +308,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             repository: &a.repo().identity,
             source: p,
             shards: self.shards.as_ref(),
+            count_storage: matches!(self.cfg.addressing, crate::repo::Addressing::Multi(_)),
         };
         // A re-plan keeps proofs for unchanged ticket rows. Only a guard race
         // involving a ticket invalidates that ticket's blob observations.
@@ -281,7 +325,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .iter()
                 .map(|id| ticket(snap, id, &advance, business_now))
                 .collect::<Vec<_>>();
-            let detail = detail_keys_for(rows.iter().filter_map(|row| row.as_ref().ok()))?;
+            let detail =
+                detail_keys_for(&advance, rows.iter().filter_map(|row| row.as_ref().ok()))?;
             self.fill(p, snap, detail.clone()).await?;
 
             // GC is disabled in the launch profile; when GC lands, remove a

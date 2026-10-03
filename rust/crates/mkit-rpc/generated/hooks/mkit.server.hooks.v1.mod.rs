@@ -59,6 +59,7 @@ pub mod __buffa {
         reg.register_json_any(super::__ABORTED_JSON_ANY);
         reg.register_json_any(super::__EXPIRED_JSON_ANY);
         reg.register_json_any(super::__READ_SERVED_JSON_ANY);
+        reg.register_json_any(super::__REPO_STORAGE_CHANGED_JSON_ANY);
         reg.register_json_any(super::__EVENT_REQUEST_JSON_ANY);
         reg.register_json_any(super::__EVENT_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__EVENT_JSON_ANY);

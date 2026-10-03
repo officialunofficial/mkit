@@ -8,10 +8,11 @@ use crate::store::{
     Batch, BatchOutcome, Key, NamespaceStore, Partition, Precondition, StoreCapabilities,
     StoreError, Value, Write,
     codec::{self, MAX_BLOCKED_TARGETS, RelayScanV1, RelayV1},
-    keys,
+    keys, repo_storage,
 };
 use crate::telemetry::{
-    METRIC_RELAY_BACKLOG_ROWS, METRIC_RELAY_LAG_EXCEEDED, Metrics, NoopMetrics,
+    METRIC_RELAY_BACKLOG_ROWS, METRIC_RELAY_LAG_EXCEEDED, METRIC_RELAY_STORAGE_COUNTER_MISSING,
+    Metrics, NoopMetrics,
 };
 use crate::timers::{
     DueTimer, Fired, RETRY_BACKOFF_MS, TimerCtx, TimerHandler, TimerKind, registry::kinds,
@@ -22,9 +23,15 @@ use crate::timers::{
 // remains an upper bound; leftover rows schedule another tick.
 const MAX_FIRE_BYTES: usize = 4 * 1024 * 1024;
 const SCAN_PAGE_ROWS: u32 = 64;
-// At most 4.5 MiB raw snapshot values even for corrupt maximum-sized rows.
+// At most 6 MiB raw snapshot values even for corrupt maximum-sized rows.
 // Together with source pages and JSON/JS copies this leaves hook headroom.
-const MAX_HOOK_READ_KEYS: usize = 9;
+// Twelve fit the watermark, the outbox rows and the counter-marker rows
+// of a seven-pack advance (`repo_storage`).
+const MAX_HOOK_READ_KEYS: usize = 12;
+// The watermark, the outbox sequence and backlog, the counter and one marker
+// per counted pack of a single relay row must fit: otherwise a coordinator
+// target would stall permanently.
+const _: () = assert!(4 + repo_storage::MAX_COUNTED_PACKS <= MAX_HOOK_READ_KEYS);
 
 type QueuedRow = (u64, RelayV1, Key, Value);
 type TargetRows = (Partition, Vec<QueuedRow>);
@@ -182,7 +189,9 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
             );
         }
         let rh = keys::relay_high_water(ctx.partition)?;
-        let dispatch = self.dispatch(&window.groups, &scan.blocked, &rh).await;
+        let dispatch = self
+            .dispatch(&window.groups, &scan.blocked, &rh, metrics)
+            .await;
         if !checkpoint_window(ctx, &rs_key, &mut scan_value, &mut scan, &window, &dispatch).await? {
             return Ok(Fired::Retry);
         }
@@ -226,7 +235,13 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         }
     }
 
-    async fn dispatch(&self, groups: &[TargetRows], blocked: &[Partition], rh: &Key) -> Dispatch {
+    async fn dispatch(
+        &self,
+        groups: &[TargetRows],
+        blocked: &[Partition],
+        rh: &Key,
+        metrics: &dyn Metrics,
+    ) -> Dispatch {
         let mut progress = Dispatch {
             delivered: BTreeSet::new(),
             block: BTreeSet::new(),
@@ -264,7 +279,14 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                 .map(|(seq, row, _, _)| (*seq, row.clone()))
                 .collect::<Vec<_>>();
             let result = self
-                .deliver_target(target, rh, &target_rows, call_limit, selected < max_targets)
+                .deliver_target(
+                    target,
+                    rh,
+                    &target_rows,
+                    call_limit,
+                    selected < max_targets,
+                    metrics,
+                )
                 .await;
             calls = calls.saturating_add(result.calls);
             selected += u32::from(result.selected);
@@ -300,6 +322,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         rows: &[(u64, RelayV1)],
         call_limit: Option<u32>,
         allow_apply: bool,
+        metrics: &dyn Metrics,
     ) -> TargetResult {
         let mut result = TargetResult {
             completed: 0,
@@ -324,13 +347,15 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                     return result;
                 }
                 let declared = loop {
-                    let Ok(keys) = self
-                        .hook
-                        .read_keys(target, &rows[result.completed..prefix_end])
-                    else {
+                    let window = &rows[result.completed..prefix_end];
+                    let (Ok(mut keys), Ok(counted)) = (
+                        self.hook.read_keys(target, window),
+                        repo_storage::relay_read_keys(target, window),
+                    ) else {
                         result.failed = true;
                         return result;
                     };
+                    keys.extend(counted);
                     let keys = keys.into_iter().collect::<BTreeSet<_>>();
                     if keys.len() + usize::from(!keys.contains(rh)) <= MAX_HOOK_READ_KEYS {
                         break keys;
@@ -391,6 +416,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                         observed.as_ref(),
                         result.completed,
                         &observations,
+                        metrics,
                     )
                     .await
                 else {
@@ -432,6 +458,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         observed: Option<&Value>,
         start: usize,
         observations: &[(Key, Option<Value>)],
+        metrics: &dyn Metrics,
     ) -> Option<(Batch, usize)> {
         let base = Batch::new().require(match observed {
             Some(value) => Precondition::Equals(rh.clone(), value.clone()),
@@ -449,6 +476,23 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         // combined group rather than stalling rows that fit individually.
         loop {
             let mut batch = target_batch(rh, observed, &rows[start..end]);
+            // Stored-bytes counting is part of delivering to a coordinator,
+            // not an embedder hook: markers applied uncounted could never be
+            // counted afterwards.
+            if let Err(error) = repo_storage::relay_extend(
+                target,
+                &rows[start..end],
+                observations,
+                &mut batch.preconditions,
+                &mut batch.writes,
+            ) {
+                if matches!(&error, StoreError::Corrupt(m) if m.as_ref() == repo_storage::COUNTER_MISSING)
+                {
+                    metrics.incr(METRIC_RELAY_STORAGE_COUNTER_MISSING, &[], 1);
+                }
+                tracing::error!(?target, %error, "stored-bytes counting failed; rows stay queued");
+                return None;
+            }
             if let Err(error) = self
                 .hook
                 .before_apply_observed(
