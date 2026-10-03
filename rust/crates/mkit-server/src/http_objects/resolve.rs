@@ -20,7 +20,7 @@ use mkit_core::serialize::deserialize;
 use super::body::{self, EndHook, HttpBody};
 use super::{HttpObjectsConfig, METRIC_HTTP_INLINE_CAPPED};
 use crate::indexed::IndexedConfig;
-use crate::indexed::resolve::{self, DECODE_BUDGET_MESSAGE, MemberCache, ResolveFailure};
+use crate::indexed::resolve::{self, Caps, DECODE_BUDGET_MESSAGE, MemberCache, ResolveFailure};
 use crate::pipeline::ShardMap;
 use crate::repo::RepoId;
 use crate::store::index::{LocatedObject, LookupError, ObjectLookup};
@@ -45,6 +45,8 @@ pub(crate) struct Env<'a, B, N> {
     pub indexed: &'a IndexedConfig,
     pub cfg: &'a HttpObjectsConfig,
     pub metrics: &'a dyn Metrics,
+    /// Typed exhaustion applies on object-reader paths only.
+    pub caps: Caps,
 }
 
 /// The decode bytes one request may still spend, shared by resolution, the
@@ -56,10 +58,17 @@ pub(crate) struct Budget(pub u64);
 struct LoadCharge<'a> {
     budget: &'a mut Budget,
     memo: MemberCache,
+    caps: Caps,
 }
 impl Drop for LoadCharge<'_> {
     fn drop(&mut self) {
-        self.budget.0 = self.budget.0.saturating_sub(self.memo.decoded_work());
+        // HTTP serving keeps charging retained bytes only; readers also pay
+        // for work that failed.
+        let spent = match self.caps {
+            Caps::Reader => self.memo.decoded_work(),
+            Caps::Legacy => self.memo.retained_bytes(),
+        };
+        self.budget.0 = self.budget.0.saturating_sub(spent);
     }
 }
 
@@ -115,73 +124,45 @@ pub(crate) async fn locate<B: BlobStore, N: NamespaceStore>(
     membership(found.get(&id))?.ok_or(Miss::NotFound)
 }
 
-/// Locate several ids at once: the members among them, in id order.
-pub(crate) async fn locate_many_with_caps<B: BlobStore, N: NamespaceStore>(
+/// What a locate call does with an id whose lookup hit a page or
+/// membership-read cap (reader paths only; legacy callers fail closed).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OnCap {
+    /// Fail the call with [`Miss::Capped`] (the owner/proven view).
+    Fail,
+    /// Omit the id and report that the answer is incomplete.
+    Skip,
+}
+
+/// Locate several ids at once: the members among them, in id order, and
+/// whether a capped id was skipped. `TooManyRows` is always "not a member"
+/// (R-148: it is permanent, so no retry could succeed).
+pub(crate) async fn locate_ids<B: BlobStore, N: NamespaceStore>(
     env: &Env<'_, B, N>,
     ids: &[Hash],
-    typed_caps: bool,
-) -> Result<Vec<(Hash, LocatedObject)>, Miss> {
+    on_cap: OnCap,
+) -> Result<(Vec<(Hash, LocatedObject)>, bool), Miss> {
     let found = resolve::locate_split(env.meta, env.shards, env.repo, ids, env.metrics).await?;
+    let mut skipped = false;
     let mut members = Vec::new();
     for (id, answer) in &found {
-        if typed_caps
+        if env.caps == Caps::Reader
             && matches!(
                 answer,
-                Err(LookupError::TooManyRows
-                    | LookupError::TooManyPages
-                    | LookupError::TooManyMembershipReads)
+                Err(LookupError::TooManyPages | LookupError::TooManyMembershipReads)
             )
         {
-            return Err(Miss::Capped);
-        }
-        if let Some(located) = membership(Some(answer))? {
-            members.push((*id, located));
-        }
-    }
-    Ok(members)
-}
-
-pub(crate) async fn locate_walk_many<B: BlobStore, N: NamespaceStore>(
-    env: &Env<'_, B, N>,
-    ids: &[Hash],
-    typed_caps: bool,
-) -> Result<(Vec<(Hash, LocatedObject)>, bool), Miss> {
-    if !typed_caps {
-        return locate_many_with_caps(env, ids, false)
-            .await
-            .map(|rows| (rows, false));
-    }
-    let found = resolve::locate_split(env.meta, env.shards, env.repo, ids, env.metrics).await?;
-    let mut capped = false;
-    let mut members = Vec::new();
-    for (id, answer) in &found {
-        if answer.is_err() {
-            capped = true;
-            continue;
-        }
-        if let Some(row) = membership(Some(answer))? {
-            members.push((*id, row));
-        }
-    }
-    Ok((members, capped))
-}
-
-// Public membership caps omit only the affected ID, retaining independently proven results.
-pub(crate) async fn locate_public_many<B: BlobStore, N: NamespaceStore>(
-    env: &Env<'_, B, N>,
-    ids: &[Hash],
-) -> Result<Vec<(Hash, LocatedObject)>, Miss> {
-    let found = resolve::locate_split(env.meta, env.shards, env.repo, ids, env.metrics).await?;
-    let mut members = Vec::new();
-    for (id, answer) in &found {
-        if answer.is_err() {
+            if on_cap == OnCap::Fail {
+                return Err(Miss::Capped);
+            }
+            skipped = true;
             continue;
         }
         if let Some(located) = membership(Some(answer))? {
             members.push((*id, located));
         }
     }
-    Ok(members)
+    Ok((members, skipped))
 }
 
 /// The canonical bytes of a located member, charged to `budget`.
@@ -191,15 +172,6 @@ pub(crate) async fn load<B: BlobStore, N: NamespaceStore>(
     located: LocatedObject,
     budget: &mut Budget,
 ) -> Result<Arc<[u8]>, Miss> {
-    load_with_caps(env, id, located, budget, false).await
-}
-pub(crate) async fn load_with_caps<B: BlobStore, N: NamespaceStore>(
-    env: &Env<'_, B, N>,
-    id: Hash,
-    located: LocatedObject,
-    budget: &mut Budget,
-    typed_caps: bool,
-) -> Result<Arc<[u8]>, Miss> {
     if located.value.decoded_size > budget.0 {
         return Err(Miss::Capped);
     }
@@ -207,6 +179,7 @@ pub(crate) async fn load_with_caps<B: BlobStore, N: NamespaceStore>(
     let mut charge = LoadCharge {
         budget,
         memo: MemberCache::default(),
+        caps: env.caps,
     };
     charge.memo.forbid_reads(env.no_reads);
     let mut visiting = BTreeSet::new();
@@ -234,8 +207,10 @@ pub(crate) async fn load_with_caps<B: BlobStore, N: NamespaceStore>(
         Err(ResolveFailure::Other(error)) if error.public_message() == "object blocked" => {
             Err(Miss::NotFound)
         }
-        Err(ResolveFailure::Capped) if typed_caps => Err(Miss::Capped),
-        Err(ResolveFailure::Other(_)) if typed_caps && depth_capped => Err(Miss::Capped),
+        Err(ResolveFailure::Capped) if env.caps == Caps::Reader => Err(Miss::Capped),
+        Err(ResolveFailure::Other(_)) if env.caps == Caps::Reader && depth_capped => {
+            Err(Miss::Capped)
+        }
         Err(_) => {
             tracing::warn!("member object could not be reconstructed");
             Err(Miss::Unavailable)
@@ -247,19 +222,10 @@ async fn load_object<B: BlobStore, N: NamespaceStore>(
     env: &Env<'_, B, N>,
     id: Hash,
     budget: &mut Budget,
-    typed_caps: bool,
 ) -> Result<Arc<[u8]>, Miss> {
-    let located = if typed_caps {
-        locate_many_with_caps(env, &[id], true)
-            .await?
-            .into_iter()
-            .next()
-            .map(|(_, row)| row)
-            .ok_or(Miss::NotFound)?
-    } else {
-        locate(env, id).await?
-    };
-    load_with_caps(env, id, located, budget, typed_caps).await
+    let (found, _) = locate_ids(env, &[id], OnCap::Fail).await?;
+    let (_, located) = found.into_iter().next().ok_or(Miss::NotFound)?;
+    load(env, id, located, budget).await
 }
 
 fn decode(bytes: &[u8]) -> Result<Object, Miss> {
@@ -286,19 +252,10 @@ pub(crate) async fn resolve_ref<B: BlobStore, N: NamespaceStore>(
     path: &[Vec<u8>],
     budget: &mut Budget,
 ) -> Result<RefResolved, Miss> {
-    resolve_ref_with_caps(env, tip, path, budget, false).await
-}
-pub(crate) async fn resolve_ref_with_caps<B: BlobStore, N: NamespaceStore>(
-    env: &Env<'_, B, N>,
-    tip: Hash,
-    path: &[Vec<u8>],
-    budget: &mut Budget,
-    typed_caps: bool,
-) -> Result<RefResolved, Miss> {
     let mut id = tip;
     let mut peeled = None;
     for depth in 0..=MAX_PEEL {
-        let bytes = load_object(env, id, budget, typed_caps).await?;
+        let bytes = load_object(env, id, budget).await?;
         match type_of(&bytes) {
             Some(ObjectType::Commit | ObjectType::Remix) => {
                 let tree = match decode(&bytes)? {
@@ -318,7 +275,7 @@ pub(crate) async fn resolve_ref_with_caps<B: BlobStore, N: NamespaceStore>(
     }
     let (commit, mut current) = peeled.ok_or(Miss::NotFound)?;
     for (index, name) in path.iter().enumerate() {
-        let bytes = load_object(env, current, budget, typed_caps).await?;
+        let bytes = load_object(env, current, budget).await?;
         let Object::Tree(tree) = decode(&bytes)? else {
             return Err(Miss::NotFound);
         };

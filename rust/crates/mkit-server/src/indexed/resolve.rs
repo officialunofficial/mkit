@@ -490,23 +490,21 @@ async fn member_base<S: NamespaceStore>(
     })
 }
 
+/// How resolution reports an exhausted cap: `Legacy` keeps the existing HTTP
+/// and writer behavior; `Reader` (object-reader paths only) reports caps as
+/// typed exhaustion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "http-objects"), allow(dead_code))]
+pub(crate) enum Caps {
+    Legacy,
+    Reader,
+}
+
 /// Prove the reconstruction chain clear using metadata only, with the same
 /// location-cycle and delta-hop limits as `member_object`.
-#[cfg(all(feature = "http-objects", test))]
-pub(crate) async fn member_dependencies_clear<S: NamespaceStore>(
-    store: &S,
-    shards: &dyn ShardMap,
-    repo: &RepoId,
-    id: Hash,
-    located: LocatedObject,
-    cap: u32,
-    metrics: &dyn Metrics,
-) -> Result<bool, ServerError> {
-    member_dependencies_clear_with_caps(store, shards, repo, id, located, cap, metrics, false).await
-}
 #[cfg(feature = "http-objects")]
-#[allow(clippy::too_many_arguments)] // Reader-only typed caps preserve existing dependency consumers.
-pub(crate) async fn member_dependencies_clear_with_caps<S: NamespaceStore>(
+#[allow(clippy::too_many_arguments)] // `caps` selects reader-only typed exhaustion.
+pub(crate) async fn member_dependencies_clear<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
     repo: &RepoId,
@@ -514,7 +512,7 @@ pub(crate) async fn member_dependencies_clear_with_caps<S: NamespaceStore>(
     mut located: LocatedObject,
     cap: u32,
     metrics: &dyn Metrics,
-    typed_caps: bool,
+    caps: Caps,
 ) -> Result<bool, ServerError> {
     let mut visiting = BTreeSet::new();
     loop {
@@ -528,12 +526,12 @@ pub(crate) async fn member_dependencies_clear_with_caps<S: NamespaceStore>(
             return Ok(true);
         };
         if visiting.len() > usize::try_from(cap).unwrap_or(usize::MAX) {
-            return dependency_cap(typed_caps);
+            return dependency_cap(caps);
         }
         located = match member_base(store, shards, repo, base, located, metrics, None).await {
             Ok(next) => next,
             Err(ResolveFailure::Missing) => return Ok(false),
-            Err(ResolveFailure::Capped) => return dependency_cap(typed_caps),
+            Err(ResolveFailure::Capped) => return dependency_cap(caps),
             Err(ResolveFailure::Other(error) | ResolveFailure::Corrupt(error)) => {
                 return Err(error);
             }
@@ -543,8 +541,8 @@ pub(crate) async fn member_dependencies_clear_with_caps<S: NamespaceStore>(
 }
 
 #[cfg(feature = "http-objects")]
-fn dependency_cap(typed_caps: bool) -> Result<bool, ServerError> {
-    if typed_caps {
+fn dependency_cap(caps: Caps) -> Result<bool, ServerError> {
+    if caps == Caps::Reader {
         Err(ServerError::new(
             crate::Code::ResourceExhausted,
             crate::pipeline::OBJECT_READER_LIMIT_MESSAGE,

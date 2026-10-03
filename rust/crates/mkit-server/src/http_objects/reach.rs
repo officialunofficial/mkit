@@ -284,16 +284,6 @@ pub(crate) async fn walk_many<B: BlobStore, N: NamespaceStore>(
     targets: &BTreeSet<Hash>,
     budget: &mut Budget,
 ) -> Result<(BTreeSet<Hash>, Option<Miss>), Miss> {
-    walk_many_with_caps(env, takedown, tips, targets, budget, false).await
-}
-pub(crate) async fn walk_many_with_caps<B: BlobStore, N: NamespaceStore>(
-    env: &Env<'_, B, N>,
-    takedown: &dyn TakedownGate,
-    tips: &[Hash],
-    targets: &BTreeSet<Hash>,
-    budget: &mut Budget,
-    typed_caps: bool,
-) -> Result<(BTreeSet<Hash>, Option<Miss>), Miss> {
     let mut reached = BTreeSet::new();
     let mut frontier = Frontier {
         cap: env.cfg.max_walk_objects,
@@ -321,8 +311,8 @@ pub(crate) async fn walk_many_with_caps<B: BlobStore, N: NamespaceStore>(
         }
         let ids: Vec<Hash> = batch.iter().map(|(id, _)| *id).collect();
         let kinds: BTreeMap<Hash, Kind> = batch.into_iter().collect();
-        let (members, capped) = resolve::locate_walk_many(env, &ids, typed_caps).await?;
-        if capped {
+        let (members, skipped) = resolve::locate_ids(env, &ids, resolve::OnCap::Skip).await?;
+        if skipped {
             frontier.incomplete = Some(Miss::Capped);
         }
         for (id, located) in members {
@@ -340,7 +330,7 @@ pub(crate) async fn walk_many_with_caps<B: BlobStore, N: NamespaceStore>(
                 frontier.incomplete = Some(Miss::Capped);
                 continue;
             }
-            let bytes = match resolve::load_with_caps(env, id, located, budget, typed_caps).await {
+            let bytes = match resolve::load(env, id, located, budget).await {
                 Ok(bytes) => bytes,
                 Err(Miss::Capped) => {
                     frontier.incomplete = Some(Miss::Capped);

@@ -1,4 +1,5 @@
 //! Strong global denial. Serving proof is independent of holder discovery.
+use crate::indexed::resolve::Caps;
 use crate::indexed::{
     IndexedConfig,
     budget::{Budgeted, SliceBudget},
@@ -575,7 +576,7 @@ pub async fn require_object_clear<S: NamespaceStore>(
     budget: &SliceBudget,
 ) -> Result<(), ServerError> {
     let remote = Budgeted::new(store, budget);
-    let context = object_context(&remote, shards, repo, id, cfg, false).await?;
+    let context = object_context(&remote, shards, repo, id, cfg, Caps::Legacy).await?;
     prove(&remote, shards, repo, &context.target()).await
 }
 struct ObjectContext {
@@ -606,16 +607,16 @@ async fn object_context<S: NamespaceStore>(
     repo: &RepoId,
     id: &Hash,
     cfg: &IndexedConfig,
-    typed_caps: bool,
+    caps: Caps,
 ) -> Result<ObjectContext, ServerError> {
     // Reader paths report a spent proof allowance as typed exhaustion; writer
     // and admission paths keep the generic unavailable error.
     let capped = || {
+        let _ = caps;
         #[cfg(feature = "http-objects")]
-        if typed_caps {
+        if caps == Caps::Reader {
             return reader_exhausted();
         }
-        let _ = typed_caps;
         unavailable()
     };
     let mut context = ObjectContext {
@@ -664,7 +665,7 @@ pub(crate) async fn object_denials<S: NamespaceStore>(
     let mut contexts = Vec::new();
     let mut bytes = 0;
     for id in requested {
-        let context = object_context(store, shards, repo, id, cfg, true).await?;
+        let context = object_context(store, shards, repo, id, cfg, Caps::Reader).await?;
         bytes += context.bytes();
         if bytes > MAX_PROOF_CONTEXT_BYTES {
             return Err(reader_exhausted());

@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   marker guard are removed. Enabling inspection still requires an empty store;
   this is now documented as an operator requirement.
 
+### Changed
+
+- `ObjectReader::object_metadata` now fails the whole batch with
+  `ResourceExhausted` when a proven object's delta depth or external base
+  lookup cap is hit, matching `read_canonical` (previously the ID was silently
+  absent).
+
 ### Fixed
 
 - Object-reader cap hits consistently return `ResourceExhausted` with a stable

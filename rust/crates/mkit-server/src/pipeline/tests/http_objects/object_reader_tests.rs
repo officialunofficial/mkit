@@ -736,6 +736,7 @@ fn assert_unresolvable_size_bases_absent(fx: &Fx, derived: &Object, derived_pack
             },
             0,
             fx.pipe.metrics.as_ref(),
+            crate::indexed::resolve::Caps::Legacy,
         ))
         .unwrap(),
         "a delta root exceeds a zero-hop bound"
@@ -1877,8 +1878,8 @@ fn load_default_decode_cap_is_typed_exhaustion() {
 }
 
 #[test]
-fn owner_membership_lookup_caps_are_typed_while_public_ids_remain_absent() {
-    let (fx, _) = published();
+fn too_many_rows_object_is_absent_without_failing_the_rest_of_the_batch() {
+    let (fx, d) = published();
     let repo = fx.repo_id("room");
     let target = [90; 32];
     let partition = fx.pipe.shards.object_index(&repo, &target);
@@ -1906,20 +1907,15 @@ fn owner_membership_lookup_caps_are_typed_while_public_ids_remain_absent() {
         }
         block_on(fx.pipe.meta.inner.apply(&partition, batch)).unwrap();
     }
-    assert_eq!(public_read(&fx, "room", &[target]), [None]);
+    // R-148: a permanent row-cap miss is "not a member" for that id only, for
+    // public and owner reads alike.
+    let ids = [target, id(&d.small)];
+    let expected = vec![None, Some(serialize(&d.small).unwrap())];
+    assert_eq!(public_read(&fx, "room", &ids), expected);
     with_owner_reader(&fx, |reader| {
-        assert_eq!(
-            block_on(reader.read_canonical(&[target]))
-                .unwrap_err()
-                .code(),
-            Code::ResourceExhausted
-        );
-        assert_eq!(
-            block_on(reader.object_metadata(&[target]))
-                .unwrap_err()
-                .code(),
-            Code::ResourceExhausted
-        );
+        assert_eq!(block_on(reader.read_canonical(&ids)).unwrap(), expected);
+        let rows = block_on(reader.object_metadata(&ids)).unwrap();
+        assert!(rows[0].is_none() && rows[1].is_some());
     });
 }
 
@@ -2092,6 +2088,24 @@ impl BlobStore for PausedFrame<'_> {
 
 #[test]
 fn cancelled_recursive_load_keeps_completed_base_decode_debit() {
+    let debit = cancelled_load_debit(crate::indexed::resolve::Caps::Reader);
+    assert_eq!(
+        debit,
+        serialize(&blob(b"base payload")).unwrap().len() as u64
+    );
+}
+
+// HTTP serving charges retained bytes (here the retained base), as before.
+#[test]
+fn http_path_charges_retained_bytes_for_cancelled_loads() {
+    let debit = cancelled_load_debit(crate::indexed::resolve::Caps::Legacy);
+    assert_eq!(
+        debit,
+        serialize(&blob(b"base payload")).unwrap().len() as u64
+    );
+}
+
+fn cancelled_load_debit(caps: crate::indexed::resolve::Caps) -> u64 {
     use crate::http_objects::resolve::{self, Env};
     use crate::pipeline::ReaderSession;
     use crate::store::view::ViewStore;
@@ -2145,6 +2159,7 @@ fn cancelled_recursive_load_keeps_completed_base_decode_debit() {
         indexed: fx.pipe.cfg.indexed.as_ref().unwrap(),
         cfg: fx.pipe.cfg.http_objects.as_ref().unwrap(),
         metrics: fx.pipe.metrics.as_ref(),
+        caps,
     };
     let located = block_on(resolve::locate(&env, id(&derived))).unwrap();
     let mut session = ReaderSession::default();
@@ -2164,10 +2179,7 @@ fn cancelled_recursive_load_keeps_completed_base_decode_debit() {
         );
         drop(future);
     }
-    assert_eq!(
-        session.used().decoded_bytes,
-        serialize(&base).unwrap().len() as u64
-    );
+    session.used().decoded_bytes
 }
 
 #[test]

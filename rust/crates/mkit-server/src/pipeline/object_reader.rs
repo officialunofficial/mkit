@@ -1,4 +1,4 @@
-use super::read_limits::{ReaderSession, ReaderStore};
+use super::read_limits::ReaderSession;
 use super::{
     AuthMode, CallerView, HookSet, OpKind, Operation, Pipeline, Principal, RequestMeta, ms,
     read_policy,
@@ -7,7 +7,9 @@ use crate::http_objects::{
     Fail, TakedownVerdict, Target, reach,
     resolve::{self, Budget, Env},
 };
+use crate::indexed::budget::Budgeted;
 use crate::indexed::budget::SliceBudget;
+use crate::indexed::resolve::Caps;
 use crate::store::{MultipartBlobStore, NamespaceStore, view::ViewStore};
 use crate::takedown::{
     denial::{denied, object_denials},
@@ -68,17 +70,19 @@ pub struct ObjectReader<'a, B, N, H> {
 fn failure<E>(_: E) -> ServerError {
     ServerError::unavailable("object reader unavailable")
 }
-fn authorization_failure(error: ServerError) -> ServerError {
-    if error.code() == Code::ResourceExhausted
-        || error
-            .log_detail()
-            .is_some_and(|detail| detail.contains(crate::indexed::budget::EXHAUSTED_MESSAGE))
-    {
-        exhausted()
-    } else if error.code() == Code::Internal {
-        failure(error)
-    } else {
-        error
+// A cap converted to absence is consumed: a later, unrelated failure must not
+// inherit it.
+fn absorb(capped: &AtomicBool) -> bool {
+    capped.swap(false, Ordering::SeqCst)
+}
+// Backend errors redact the spent allowance; an `Unavailable` result while a
+// cap is recorded is that cap. Any other typed error passes through.
+fn settle<T>(result: Result<T, ServerError>, capped: &AtomicBool) -> Result<T, ServerError> {
+    match result {
+        Err(error) if error.code() == Code::Unavailable && capped.load(Ordering::SeqCst) => {
+            Err(exhausted())
+        }
+        other => other,
     }
 }
 fn http_failure(fail: &Fail) -> ServerError {
@@ -129,7 +133,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     OpKind::HttpGet { ref_name: None },
                 );
                 let capped = AtomicBool::new(false);
-                let meta = ReaderStore::capture(&self.pipe.meta, &capped);
+                let meta = Budgeted::capture(&self.pipe.meta, &capped);
                 self.pipe
                     .authorize_http_read_with_meta(
                         &op,
@@ -137,7 +141,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                         self.seams,
                         None,
                         &meta,
-                        Some(&capped),
                     )
                     .await
                     .map_err(|e| {
@@ -164,7 +167,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     },
                 )?;
                 let capped = AtomicBool::new(false);
-                let store = ReaderStore::capture(&self.pipe.meta, &capped);
+                let store = Budgeted::capture(&self.pipe.meta, &capped);
                 let auth = self
                     .pipe
                     .authorize_read_with_meta(&op, &store)
@@ -173,7 +176,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                         if capped.load(Ordering::SeqCst) {
                             exhausted()
                         } else {
-                            authorization_failure(error)
+                            error
                         }
                     })?;
                 let owner = Namespace::parse(self.repo.namespace.as_str()).is_ok_and(
@@ -296,11 +299,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         let result = self
             .issue_urls_with_budget(targets, ttl_s, &calls, &capped)
             .await;
-        if capped.load(Ordering::SeqCst) && result.is_err() {
-            Err(exhausted())
-        } else {
-            result
-        }
+        settle(result, &capped)
     }
     #[allow(clippy::too_many_lines)] // Credential issuance and one published proof share a budget.
     async fn issue_urls_with_budget(
@@ -348,7 +347,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         };
         let now = self.pipe.clock.now_ms();
         let mut issued = Vec::with_capacity(targets.len());
-        let capture = ReaderStore::capture(&self.pipe.meta, capped);
+        let capture = Budgeted::capture(&self.pipe.meta, capped);
         for target in targets {
             calls.charge().map_err(|_| exhausted())?;
             calls.charge().map_err(|_| exhausted())?;
@@ -371,12 +370,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     {
                         None
                     }
-                    Err(e) => return Err(authorization_failure(e)),
+                    Err(_) if capped.load(Ordering::SeqCst) => return Err(exhausted()),
+                    Err(e) => return Err(e),
                 },
             );
         }
-        let meta = ReaderStore::new(&self.pipe.meta, calls, None, capped);
-        let blobs = ReaderStore::new(&self.pipe.blobs, calls, None, capped);
+        let meta = Budgeted::new(&self.pipe.meta, calls).flagging(capped);
+        let blobs = Budgeted::new(&self.pipe.blobs, calls).flagging(capped);
         let view = ViewStore {
             store: &meta,
             repo: &self.repo,
@@ -392,6 +392,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             indexed: self.indexed,
             cfg: self.cfg,
             metrics: self.pipe.metrics.as_ref(),
+            caps: Caps::Reader,
         };
         let mut decode = Budget(self.cfg.http_decode_budget);
         let mut ids = Vec::with_capacity(targets.len());
@@ -412,7 +413,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     )
                     .await
                     {
-                        Err(_) if capped.load(Ordering::SeqCst) => {
+                        Err(_) if absorb(capped) => {
                             ids.push(None);
                             continue;
                         }
@@ -424,12 +425,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                         } else {
                             path.split('/').map(|p| p.as_bytes().to_vec()).collect()
                         };
-                        match resolve::resolve_ref_with_caps(&env, tip, &path, &mut decode, true)
-                            .await
-                        {
+                        match resolve::resolve_ref(&env, tip, &path, &mut decode).await {
                             Ok(resolved) => Some(resolved.leaf),
                             Err(resolve::Miss::NotFound | resolve::Miss::Capped) => None,
-                            Err(_) if capped.load(Ordering::SeqCst) => None,
+                            Err(_) if absorb(capped) => None,
                             Err(miss) => return Err(failure(miss)),
                         }
                     } else {
@@ -535,11 +534,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             )
             .await
         };
-        if capped.load(Ordering::SeqCst) && result.is_err() {
-            Err(exhausted())
-        } else {
-            result
-        }
+        settle(result, &capped)
     }
 
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // One shared-budget authorization/resolution pass, in precedence order.
@@ -567,18 +562,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
         }
         let pipe = self.pipe;
         let (cfg, indexed, seams) = (self.cfg, self.indexed, self.seams);
-        let meta = ReaderStore::new(
-            &pipe.meta,
-            calls,
-            session.as_ref().map(|(io, _)| *io),
-            capped,
-        );
-        let blobs = ReaderStore::new(
-            &pipe.blobs,
-            calls,
-            session.as_ref().map(|(io, _)| *io),
-            capped,
-        );
+        let mut meta = Budgeted::new(&pipe.meta, calls).flagging(capped);
+        let mut blobs = Budgeted::new(&pipe.blobs, calls).flagging(capped);
+        if let Some((io, _)) = &session {
+            meta = meta.with_session(&io.calls);
+            blobs = blobs.with_session(&io.calls).with_encoded(&io.encoded);
+        }
         let view = ViewStore {
             store: &meta,
             repo: &self.repo,
@@ -594,13 +583,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             indexed,
             cfg,
             metrics: pipe.metrics.as_ref(),
+            caps: Caps::Reader,
         };
         let mut located = if capped_as_absent {
             Vec::new()
         } else {
-            resolve::locate_many_with_caps(&env, ids, true)
+            resolve::locate_ids(&env, ids, resolve::OnCap::Fail)
                 .await
                 .map_err(resolution_failure)?
+                .0
         };
         // Directly denied members are absent even when their reachability
         // cannot be proved within the caller's byte or walk budget.
@@ -625,6 +616,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             for id in &targets {
                 if meta.charge().is_err() {
                     if capped_as_absent {
+                        absorb(capped);
                         break;
                     }
                     return Err(exhausted());
@@ -645,27 +637,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                 .await;
             // A spent call budget is an unprovable proof, not a store fault.
             let (tips, truncated) = match tips {
-                Err(_) if capped_as_absent && capped.load(Ordering::SeqCst) => (Vec::new(), true),
+                Err(_) if capped_as_absent && absorb(capped) => (Vec::new(), true),
                 other => other.map_err(|e| http_failure(&e))?,
             };
             if truncated && !capped_as_absent {
                 return Err(exhausted());
             }
             if !truncated {
-                let walked = reach::walk_many_with_caps(
-                    &env,
-                    seams.takedown.as_ref(),
-                    &tips,
-                    &targets,
-                    decode,
-                    true,
-                )
-                .await;
+                let walked =
+                    reach::walk_many(&env, seams.takedown.as_ref(), &tips, &targets, decode).await;
                 let (found, incomplete) = match walked {
                     Err(resolve::Miss::Capped) if capped_as_absent => {
                         (BTreeSet::new(), Some(resolve::Miss::Capped))
                     }
-                    Err(_) if capped_as_absent && capped.load(Ordering::SeqCst) => {
+                    Err(_) if capped_as_absent && absorb(capped) => {
                         (BTreeSet::new(), Some(resolve::Miss::Capped))
                     }
                     other => other.map_err(resolution_failure)?,
@@ -686,9 +671,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     accessible.push(*id);
                 }
             }
-            located = resolve::locate_public_many(&env, &accessible)
+            located = resolve::locate_ids(&env, &accessible, resolve::OnCap::Skip)
                 .await
-                .map_err(resolution_failure)?;
+                .map_err(resolution_failure)?
+                .0;
             reached = located.iter().map(|(id, _)| *id).collect();
         }
         let blocked = if pipe.cfg.takedown_denial && !reached.is_empty() {
@@ -719,7 +705,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     .record(&self.repo, &id, ms(pipe.clock.now_ms()));
             }
             if sizes_only {
-                if !crate::indexed::resolve::member_dependencies_clear_with_caps(
+                if !crate::indexed::resolve::member_dependencies_clear(
                     &view,
                     pipe.shards.as_ref(),
                     &self.repo,
@@ -727,7 +713,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     located,
                     indexed.max_delta_chain_depth,
                     pipe.metrics.as_ref(),
-                    true,
+                    Caps::Reader,
                 )
                 .await?
                 {
@@ -767,14 +753,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
                     .checked_mul(ids.iter().filter(|requested| **requested == id).count() as u64)
                     .filter(|n| *n <= output_left)
                     .ok_or_else(exhausted)?;
-                match resolve::load_with_caps(&env, id, located, decode, true).await {
+                match resolve::load(&env, id, located, decode).await {
                     Ok(canonical) if resolve::type_of(&canonical) != Some(ObjectType::Delta) => {
                         if canonical.len() as u64 != located.value.decoded_size {
                             return Err(failure(resolve::Miss::Unavailable));
                         }
                         output_left -= output;
                         if let Some((_, budget)) = &mut session {
-                            budget.used += output;
+                            budget.used = budget.used.saturating_add(output);
                         }
                         bytes.insert(id, canonical.to_vec());
                     }
@@ -784,5 +770,33 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet>
             }
         }
         Ok((bytes, sizes))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_absorbed_cap_does_not_reclassify_a_later_storage_failure() {
+        let capped = AtomicBool::new(true);
+        let failed: Result<(), ServerError> = Err(failure(()));
+        assert_eq!(
+            settle(failed, &capped).unwrap_err().code(),
+            Code::ResourceExhausted
+        );
+        // The cap was converted to absence, so a genuine fault stays one.
+        assert!(absorb(&capped));
+        let failed: Result<(), ServerError> = Err(failure(()));
+        let error = settle(failed, &capped).unwrap_err();
+        assert_eq!(error.code(), Code::Unavailable);
+        assert!(!absorb(&capped));
+    }
+
+    #[test]
+    fn settle_leaves_typed_errors_alone() {
+        let capped = AtomicBool::new(true);
+        let error = settle::<()>(Err(ServerError::permission_denied("x")), &capped).unwrap_err();
+        assert_eq!(error.code(), Code::PermissionDenied);
     }
 }
