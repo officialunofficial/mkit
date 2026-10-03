@@ -5370,4 +5370,6 @@ fn prepared_publication_pair_cannot_survive_a_counterpart_guard_race() {
 #[cfg(feature = "remote-hooks")]
 mod inspection_budget;
 
+mod publication_limits;
+
 mod takedown_performance;

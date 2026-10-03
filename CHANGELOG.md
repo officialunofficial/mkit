@@ -70,6 +70,14 @@ supported after new reservation rows are written.
 
 ### Changed
 
+- Documentation: SPEC-SERVER §9.3, §10.2 and §18 clarify the integrity frontier
+  that verified members provide, the pair-coverage and denial obligations it
+  does not waive, and the duty to document historical-support limits.
+  The Workers operator guide gains a table of the selected publication verifier
+  paths and their real limits, and the rules for enabling takedown (rehearse on
+  a copy of an existing store) and inspection (empty store). New regression
+  tests pin the baseline fail-closed behavior of every selected path. No
+  production behavior changes.
 - `ObjectReader::object_metadata` now fails the whole batch with
   `ResourceExhausted` when a proven object's delta depth or external base
   lookup cap is hit, matching `read_canonical` (previously the ID was silently

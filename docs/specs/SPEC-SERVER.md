@@ -1177,6 +1177,13 @@ objects for closure. This does not allow an unverified staged object
 to stand in for a verified member, or permit a membership lookup in
 another repository.
 
+A verified member of the same repository MAY terminate the direct-child
+integrity check without reconstructing that member's descendants again.
+This permission does not waive published-membership dependencies or
+resulting-pair coverage under §10.2, denial under §14.2, or configured ref
+policy. Verification of every entry in the consumed packs, including entries
+outside the advanced head's closure, remains required.
+
 ### 9.4 Repository-isolated membership checks
 
 A delta base MUST resolve only from an earlier entry in the same pack,
@@ -1536,8 +1543,11 @@ not append advances. In indexed mode with an inspector configured, a
 head-only `UpdateRef` MUST verify before apply that its unchanged packmap
 reconstructs the new head's closure; a packmap-only `UpdateRef` MUST
 verify the resulting pair too (§9.3; STC §4 defines the paired advance).
-This extra check is unnecessary in opaque mode or without inspectors,
-where the published view equals the live view.
+The inspector-specific pair check is not imposed on the immediate path in
+opaque mode or without inspectors, where the published view equals the live
+view. Configured takedown or custom-policy verification and delayed
+dependency publication still retain their applicable rules, including pair
+coverage and published-membership dependencies.
 
 Each advance has a clearance state:
 
@@ -3804,6 +3814,14 @@ publication is pending on D34 relay (§11.1). Enabling inspection
 over existing, unscanned content is unsupported: inspection deployments MUST
 start from an empty store. Enumeration reads frame/checkpoint pages of at most
 1,000 rows, without an inspection tree walk, reference pages or object-store reads.
+Synchronous inspection covers added-pack file entries under §11.1. A ref-only
+operation over previously admitted members does not require repeating that
+inspection. This does not waive §10.2 publication dependencies,
+resulting-pair requirements, or §14.2 pack-deduplication denial.
+Implementations MUST document any historical-support limits of the enabled
+publication verifier; the Workers operator guide does so for the Worker
+adapter. Enabling inspection over an existing unscanned store remains
+unsupported.
 PRE_RECEIVE quarantine rejects with 403 and commits nothing. Startup MUST
 refuse async or unavailable-publish inspectors, clear deadlines and a fifth inspector.
 The server MUST NOT create durable inspection continuations, outstanding
@@ -3970,6 +3988,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Clarifies publication verification: a verified member terminates only the direct-child check and waives no §10.2, §14.2 or ref-policy obligation (§9.3); the inspector pair-check shorthand is made precise (§10.2); synchronous inspection of ref-only operations and the duty to document historical-support limits (§18). No wire, stored-row or version change. |
 | 1 | draft | Editorial: §18 states the launch profile deployment-neutrally and points to the Workers operator guide for the Worker-specific selection, bindings and purge configuration; the `store::inspection_*` modules are marked unintegrated groundwork and the deferred inspection, Event and proof work as not implemented. No behavior change. |
 | 1 | draft | Additive object-reader session accounting and typed exhaustion. Existing public absence, advance messages and stored/wire formats are unchanged. |
 | 1 | draft | `SetRepoVisibility` runs admission and records an outcome like other mutating RPCs, in envelope and statement modes (§2, §3). Additive optional `Outcome.procedure` and `Outcome.visibility` (fields 9 and 10) name the operation (§6.5); the pending and terminal reservation rows record an optional operation (additive `procedure`; rows written before decode as unknown), so every outcome, including a reconciled abandonment, names it. No row version changes. |
