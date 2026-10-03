@@ -15,7 +15,6 @@ description = "Runtime-agnostic core of the mkit server: operation model, errors
 keywords = ["mkit", "vcs", "server", "connectrpc", "wasm"]
 categories = ["network-programming", "web-programming::http-server"]
 readme = "README.md"
-exclude = ["tests/fixtures/stored_v050.rs"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

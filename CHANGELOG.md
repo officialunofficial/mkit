@@ -70,6 +70,9 @@ supported after new reservation rows are written.
 
 ### Changed
 
+- Stored formats are not a compatibility contract before 1.0; the golden
+  fixtures that pinned v0.5.0 row encodings are removed and a store may need
+  a reset across versions (SPEC-SERVER §17).
 - `ObjectReader::object_metadata` now fails the whole batch with
   `ResourceExhausted` when a proven object's delta depth or external base
   lookup cap is hit, matching `read_canonical` (previously the ID was silently

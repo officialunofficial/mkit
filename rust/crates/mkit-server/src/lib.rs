@@ -98,7 +98,3 @@ pub use telemetry::{
     METRIC_LATENCY, METRIC_REQUESTS, METRIC_UPLOAD_BYTES, Metrics, NEVER_ECHO, NEVER_LOG,
     NoopMetrics, REDACTED_VALUE, Redactor, is_never_echo, is_never_log,
 };
-
-#[cfg(test)]
-#[path = "../tests/fixtures/stored_v050.rs"]
-mod stored_golden;

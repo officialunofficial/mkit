@@ -163,9 +163,3 @@ mod tests {
         assert!(concurrent_pending(&pending, 1000).is_none());
     }
 }
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::too_many_lines)]
-mod stored_v050_tests {
-    crate::stored_golden::tests!(indexed_state);
-}
