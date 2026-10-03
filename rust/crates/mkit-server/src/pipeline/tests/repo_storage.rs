@@ -3,14 +3,15 @@
 
 use std::sync::{Arc, Mutex};
 
-use super::indexed::{environment_with, pack, pack_with_blob, signed, upload};
+use super::indexed::{
+    environment_with, environment_with_hooks, pack, pack_with_blob, signed, upload,
+};
 use super::scheduled::Ref;
 use super::*;
 use crate::pipeline::{DeliveryError, Outcome, OutcomeKind, OutcomeSink};
-use crate::relay::{RelayBudget, RelayHandler};
+use crate::relay::{NoHook, RelayBudget, RelayHandler};
 use crate::rt::ManualSleep;
 use crate::store::codec::RepoStorageV1;
-use crate::store::repo_storage::RepoStorageHook;
 use crate::telemetry::NoopMetrics;
 use crate::timers::outcome_delivery::OutcomeDelivery;
 use crate::timers::{TickBudget, TimerRegistry, run_due};
@@ -29,13 +30,13 @@ fn other_identity(identity: &str, name: &str) -> String {
     format!("{}/{name}", identity.split('/').next().unwrap())
 }
 
-fn repo_of(env: &Env, owner: &SigningKey, identity: &str) -> RepoId {
+fn repo_of(env: &Env<impl HookSet>, owner: &SigningKey, identity: &str) -> RepoId {
     let request = signed(owner, identity, Procedure::AdvanceRefs, 9_000);
     env.auth(&request).unwrap().repo().repo.clone()
 }
 
 fn ticket(
-    env: &Env,
+    env: &Env<impl HookSet>,
     owner: &SigningKey,
     identity: &str,
     branch: &str,
@@ -58,7 +59,7 @@ fn ticket(
 
 /// Consume `tickets` on `branch`, whose packmap names the first pack.
 fn advance(
-    env: &Env,
+    env: &Env<impl HookSet>,
     owner: &SigningKey,
     identity: &str,
     number: u32,
@@ -85,12 +86,19 @@ fn advance(
 }
 
 /// Push `bytes` to `branch` in one ticket and one advance.
-fn push(env: &Env, owner: &SigningKey, identity: &str, branch: &str, bytes: &[u8], number: u32) {
+fn push(
+    env: &Env<impl HookSet>,
+    owner: &SigningKey,
+    identity: &str,
+    branch: &str,
+    bytes: &[u8],
+    number: u32,
+) {
     let id = ticket(env, owner, identity, branch, bytes, number);
     advance(env, owner, identity, number + 1, branch, &[bytes], vec![id]);
 }
 
-fn counter(env: &Env, repo: &RepoId) -> RepoStorageV1 {
+fn counter(env: &Env<impl HookSet>, repo: &RepoId) -> RepoStorageV1 {
     let raw = block_on(env.pipe.meta.get(
         &env.pipe.shards.coordinator(&repo.namespace),
         &keys::repo_storage(&repo.name),
@@ -108,10 +116,10 @@ fn state(bytes: usize, version: u64) -> RepoStorageV1 {
 }
 
 /// Deliver `source`'s queued relay rows, counting at the coordinator.
-fn relay(env: &Env, source: &Partition) {
+fn relay(env: &Env<impl HookSet>, source: &Partition) {
     let registry = TimerRegistry::new().register(RelayHandler {
         target: Ref(&env.pipe.meta),
-        hook: RepoStorageHook,
+        hook: NoHook,
         budget: RelayBudget::default(),
     });
     for _ in 0..4 {
@@ -128,7 +136,7 @@ fn relay(env: &Env, source: &Partition) {
     }
 }
 
-fn relay_all(env: &Env, repo: &RepoId, branches: &[&str]) {
+fn relay_all(env: &Env<impl HookSet>, repo: &RepoId, branches: &[&str]) {
     for branch in branches {
         relay(
             env,
@@ -140,7 +148,7 @@ fn relay_all(env: &Env, repo: &RepoId, branches: &[&str]) {
 }
 
 /// The `RepoStorageChanged` outcomes the repository's coordinator delivers.
-fn storage_outcomes(env: &Env, repo: &RepoId, identity: &str) -> Vec<(u64, u64)> {
+fn storage_outcomes(env: &Env<impl HookSet>, repo: &RepoId, identity: &str) -> Vec<(u64, u64)> {
     let sink = Arc::new(Capture::default());
     let registry = TimerRegistry::new().register(OutcomeDelivery::new(
         sink.clone(),
@@ -354,8 +362,13 @@ fn the_bounded_read_matches_the_delivered_outcome() {
 
 #[test]
 fn admission_observes_whether_the_pack_is_already_counted() {
-    let (env, owner, identity) =
-        environment_with(Sharding::Single, crate::indexed::IndexedConfig::default());
+    let hooks = with_admission(Fixed(AdmissionDecision::allow(Vec::new())));
+    let (env, owner, identity) = environment_with_hooks(
+        Sharding::Single,
+        crate::indexed::IndexedConfig::default(),
+        None,
+        hooks,
+    );
     let (bytes, _) = pack();
     let repo = repo_of(&env, &owner, &identity);
     let request = signed(&owner, &identity, Procedure::ListRefs, 700);
@@ -381,7 +394,35 @@ fn admission_observes_whether_the_pack_is_already_counted() {
 }
 
 #[test]
-fn a_coordinator_drops_markers_of_a_repository_without_a_counter() {
+fn the_default_admission_skips_the_membership_read() {
+    let (env, owner, identity) =
+        environment_with(Sharding::Single, crate::indexed::IndexedConfig::default());
+    let request = signed(&owner, &identity, Procedure::ListRefs, 720);
+    let op = env
+        .pipe
+        .identify(
+            &env.auth(&request).unwrap(),
+            OpKind::ListRefs {
+                prefix: "refs/".into(),
+            },
+        )
+        .unwrap();
+    let key = mkit_core::protocol::PackKey([1; 32]);
+    assert_eq!(
+        block_on(env.pipe.new_to_repo_bytes(&op, &key, 9)).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn the_reserved_storage_prefix_is_not_an_admission_reservation_id() {
+    let decision = AdmissionDecision::allow(Vec::new()).with_reservation("rs:abc:1".to_owned());
+    assert!(crate::pipeline::admission::validate_decision(&decision).is_err());
+}
+
+#[test]
+fn a_coordinator_without_a_counter_keeps_the_rows_queued() {
+    use crate::store::repo_storage::{relay_extend, relay_read_keys};
     let repo = RepoName::new("lost").unwrap();
     let ns = NamespaceKey::from_namespace(&mkit_core::repo_identity::Namespace::Ed25519([1; 32]));
     let target = Partition::Coordinator(ns);
@@ -389,30 +430,94 @@ fn a_coordinator_drops_markers_of_a_repository_without_a_counter() {
     let row = crate::store::codec::RelayV1 {
         at_ms: 1,
         target: target.clone(),
-        puts: vec![(marker.clone(), codec::encode_u64(10))],
+        puts: vec![(marker, codec::encode_u64(10))],
         deletes: vec![],
     };
-    let hook = RepoStorageHook;
     let rows = [(1, row)];
-    let wanted = crate::relay::RelayHook::read_keys(&hook, &target, &rows).unwrap();
+    let wanted = relay_read_keys(&target, &rows).unwrap();
     let observed: Vec<_> = wanted.into_iter().map(|key| (key, None)).collect();
-    let (mut pre, mut writes) = (Vec::new(), vec![Write::Put(marker, codec::encode_u64(10))]);
-    block_on(crate::relay::RelayHook::before_apply_observed(
-        &hook,
-        &target,
-        &rows,
-        &observed,
-        &mut pre,
-        &mut writes,
-    ))
-    .unwrap();
-    assert!(
-        writes.is_empty(),
-        "the marker is neither stored nor counted"
-    );
-    assert!(pre.is_empty());
-    // A marker value that is not a byte count refuses delivery.
+    let (mut pre, mut writes) = (Vec::new(), Vec::new());
+    let error = relay_extend(&target, &rows, &observed, &mut pre, &mut writes).unwrap_err();
+    assert!(matches!(error, crate::StoreError::Corrupt(_)));
+    // A marker value that is not a byte count refuses delivery too.
     let mut bad = rows[0].1.clone();
     bad.puts[0].1 = Value::default();
-    crate::relay::RelayHook::read_keys(&hook, &target, &[(1, bad)]).unwrap_err();
+    relay_read_keys(&target, &[(1, bad)]).unwrap_err();
+    // Other targets are untouched.
+    let other = Partition::Namespace(NamespaceKey::deployment_default());
+    assert!(relay_read_keys(&other, &rows).unwrap().is_empty());
+}
+
+#[test]
+fn a_stale_single_counter_snapshot_cannot_commit_a_second_count() {
+    // Single drops the markers' own guard because every counting batch
+    // guards the counter: a planner holding the pre-count counter fails its
+    // `Equals` once another batch counted the pack.
+    let repo = RepoId {
+        namespace: NamespaceKey::from_namespace(&mkit_core::repo_identity::Namespace::Ed25519(
+            [1; 32],
+        )),
+        name: RepoName::new("room").unwrap(),
+    };
+    let shards = SinglePartition;
+    let source = shards.coordinator(&repo.namespace);
+    let stale = crate::store::repo_storage::initial_counter();
+    let pack = [5; 32];
+    let packs = [(pack, 40_u64)];
+    let get = |key: &Key| (*key == keys::repo_storage(&repo.name)).then_some(&stale);
+    let mut outbox = crate::store::outbox::OutboxBuilder::new(None, None).unwrap();
+    let (mut pre, mut writes) = (Vec::new(), Vec::new());
+    crate::store::repo_storage::plan_count(
+        &repo,
+        &packs,
+        &source,
+        &shards,
+        get,
+        |_| false,
+        1,
+        &mut outbox,
+        &mut pre,
+        &mut writes,
+    )
+    .unwrap();
+    assert!(pre.contains(&Precondition::Equals(
+        keys::repo_storage(&repo.name),
+        stale.clone()
+    )));
+    // After the pack is counted the version moved, so that guard can no longer hold.
+    let counted = writes
+        .iter()
+        .find_map(|w| match w {
+            Write::Put(k, v) if *k == keys::repo_storage(&repo.name) => Some(v.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_ne!(counted, stale);
+}
+
+#[cfg(feature = "http-objects")]
+#[test]
+fn only_an_owner_reads_the_counter() {
+    let (env, owner, identity) =
+        environment_with(Sharding::Single, crate::indexed::IndexedConfig::default());
+    let (bytes, _) = pack();
+    let repo = repo_of(&env, &owner, &identity);
+    push(&env, &owner, &identity, "main", &bytes, 800);
+    let stranger = key(8);
+    let request = signed(&stranger, &identity, Procedure::ListRefs, 810);
+    let lookup = |name: &str| {
+        request
+            .headers
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.clone())
+    };
+    let meta = RequestMeta {
+        procedure: request.procedure,
+        header: &lookup,
+        header_values: None,
+        unary_body: Some(&request.body),
+        transport_principal: None,
+    };
+    block_on(env.pipe.repo_storage(&repo, &meta)).unwrap_err();
 }

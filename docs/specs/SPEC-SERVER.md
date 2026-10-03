@@ -588,7 +588,7 @@ admission-specific fields:
 | `pack_id` | The 32-byte pack id for `BeginUpload`; empty otherwise. |
 | `creates_namespace` | Whether the write creates its namespace. |
 | `creates_repo` | Whether the write creates its repository. |
-| `new_to_repo_bytes` | Bytes new to this repository: zero when the upload's pack is already counted for the repository (§6.5.1), else its declared size; absent for an operation that adds no pack. A pre-admission observation: racing writes MAY both see the pack as new, and the committed counter (§6.5.1) is the authoritative value. |
+| `new_to_repo_bytes` | Bytes new to this repository: zero when the upload's pack is already counted for the repository (§6.5.1), else its declared size; absent for an operation that adds no pack and when no admission hook is installed. A pre-admission observation: racing writes MAY both see the pack as new, and the committed counter (§6.5.1) is the authoritative value. |
 | `credential_headers` | Admission credential request headers under the forwarding rules below; empty on a first attempt without credentials. |
 
 Creation signals and admission input are supplied as STC §5.1 requires.
@@ -793,8 +793,9 @@ removed, so the counter never decreases.
 The counter is created, at zero with version zero, in the same batch that
 registers the repository in its coordinator. A repository without a counter
 is a corrupt store, never a reportable state: a write that would count a
-pack into it fails, a coordinator drops (and logs) the markers it receives for
-it rather than stall its other relay rows, and `Pipeline::repo_storage` fails.
+pack into it fails, a coordinator keeps the relay rows carrying its markers
+queued (stalling only that repository's stream, whose rows come from its own
+ref shards) until the counter exists, and `Pipeline::repo_storage` fails.
 A deployment with single-repository addressing keeps no counter.
 
 A pack is added to the counter exactly once per repository: when the
@@ -804,9 +805,11 @@ count at consumption, whether or not the advance has been published, so a
 held advance still counts. Where the consuming partition is the coordinator
 (single-partition deployments) the consuming batch counts the pack and changes
 the counter atomically. Under D34 the consuming ref shard relays a marker for
-each pack through its outbox to the coordinator, whose relay hook counts a
+each pack through its outbox to the coordinator, whose relay delivery counts a
 marker only if the pack is not yet counted, in the same batch that applies the
-relay row and advances its watermark. First recording is therefore decided in
+relay row and advances its watermark. Counting is part of delivering to a
+coordinator, not an embedder hook. A shard relays a marker only for a pack it
+does not already hold, since the batch that made it a member relayed it. First recording is therefore decided in
 one partition by one guarded batch, however many ref shards consume the pack
 and however often a relay row is redelivered or a source crashes. The value is
 **eventually consistent and exact**: it trails consumption by the relay lag
@@ -825,9 +828,12 @@ in one coordinator read, authorized as an owner read of the repository
 (`Unimplemented` without multi-repository addressing). The Worker embedding
 exposes the pipeline's method.
 
-A relay handler whose targets include a coordinator MUST install the storage
-hook (`RepoStorageHook`; the Worker adapter does). Without it the markers are
-stored but never counted.
+The `repo_storage_changed` `occurred_unix_ms` is the consuming batch's plan
+time. Its `reservation_id` prefix `rs:` is reserved: an admission reservation
+id beginning with `rs:` (or `s:`) is invalid. The coordinator's queued outcome
+rows are visible in the existing `mkit_server_outbox_backlog` gauge
+(`shard_kind="coordinator"`); the backlog adds no cap. Held, quarantined and
+later taken-down packs stay counted: membership is never removed.
 
 `Aborted.reason` classifies why the reservation did not commit:
 

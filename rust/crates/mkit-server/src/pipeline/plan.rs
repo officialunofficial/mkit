@@ -242,6 +242,14 @@ impl WriteRequest<'_> {
                     self.repo,
                     implicit.counted,
                 ));
+            } else {
+                // Packs the shard already holds need no marker relay.
+                out.extend(
+                    implicit
+                        .counted
+                        .iter()
+                        .map(|(pack, _)| keys::membership(self.repo, pack)),
+                );
             }
         }
         if self.mark_repo_known {
@@ -604,6 +612,7 @@ pub(crate) fn plan_write(
                 implicit.source,
                 implicit.shards,
                 |key| snap.get(key),
+                |pack| snap.get(&keys::membership(req.repo, pack)).is_some(),
                 clock.plan_time_ms,
                 &mut outbox,
                 &mut pre,

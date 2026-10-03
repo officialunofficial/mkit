@@ -11,7 +11,7 @@ use crate::store::{
     Batch, BatchOutcome, MultipartBlobStore, NamespaceStore, Precondition, StoreError, codec, keys,
 };
 
-use super::{HookSet, Pipeline, Snapshot, internal, meta_error, ms};
+use super::{Admission as _, HookSet, Pipeline, Snapshot, internal, meta_error, ms};
 
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     pub(super) async fn creation_facts(
@@ -56,14 +56,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// repository's counter already holds the pack, else its size. One
     /// bounded coordinator read, and a pre-admission observation: racing
     /// writes may both see the pack as new, and the counter alone is
-    /// authoritative. Single addressing keeps no counter and reports the
-    /// declared size for a ticket.
+    /// authoritative. Skipped (`None`) without an installed Admission hook.
+    /// Single addressing keeps no counter and reports the declared size.
     pub(super) async fn new_to_repo_bytes(
         &self,
         op: &Operation,
         pack: &mkit_core::protocol::PackKey,
         bytes: u64,
     ) -> Result<Option<u64>, ServerError> {
+        if self.hooks.admission().is_default() {
+            return Ok(None);
+        }
         if !matches!(self.cfg.addressing, Addressing::Multi(_)) {
             return Ok(Some(bytes));
         }

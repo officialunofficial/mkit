@@ -1795,7 +1795,6 @@ impl<S: mkit_server::NamespaceStore, T: mkit_server::NamespaceStore + 'static>
 struct WorkerRelayHook {
     content: mkit_server::relay::HolderRelayHook,
     audit: mkit_server::admin::AuditReserveHook,
-    storage: mkit_server::store::repo_storage::RepoStorageHook,
 }
 
 impl WorkerRelayHook {
@@ -1808,7 +1807,6 @@ impl WorkerRelayHook {
                 clock: Arc::new(mkit_server::SystemClock),
             },
             audit: mkit_server::admin::AuditReserveHook::new(root),
-            storage: mkit_server::store::repo_storage::RepoStorageHook,
         }
     }
 }
@@ -1827,9 +1825,7 @@ impl mkit_server::relay::RelayHook for WorkerRelayHook {
         target: &mkit_server::Partition,
         rows: &[(u64, mkit_server::store::codec::RelayV1)],
     ) -> Result<Vec<mkit_server::Key>, mkit_server::StoreError> {
-        let mut keys = self.content.read_keys(target, rows)?;
-        keys.extend(self.storage.read_keys(target, rows)?);
-        Ok(keys)
+        self.content.read_keys(target, rows)
     }
 
     fn before_apply<'a>(
@@ -1841,7 +1837,6 @@ impl mkit_server::relay::RelayHook for WorkerRelayHook {
     ) -> mkit_server::BoxFuture<'a, Result<(), mkit_server::StoreError>> {
         Box::pin(async move {
             self.content.before_apply(target, rows, pre, writes).await?;
-            self.storage.before_apply(target, rows, pre, writes).await?;
             self.audit.before_apply(target, rows, pre, writes).await
         })
     }
@@ -1856,9 +1851,6 @@ impl mkit_server::relay::RelayHook for WorkerRelayHook {
     ) -> mkit_server::BoxFuture<'a, Result<(), mkit_server::StoreError>> {
         Box::pin(async move {
             self.content
-                .before_apply_observed(target, rows, observed, pre, writes)
-                .await?;
-            self.storage
                 .before_apply_observed(target, rows, observed, pre, writes)
                 .await?;
             self.audit.before_apply(target, rows, pre, writes).await
@@ -2237,8 +2229,9 @@ mod faults {
     }
 }
 
+pub use mkit_server::pipeline::RepoStorage;
 #[cfg(feature = "http-objects")]
-pub use mkit_server::pipeline::{IssuedUrl, ObjectReader, ReaderView, RepoStorage};
+pub use mkit_server::pipeline::{IssuedUrl, ObjectReader, ReaderView};
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) use glue::build_ns_object;
@@ -5152,58 +5145,5 @@ mod tests {
             )));
             assert!(budget.used() > 0 && budget.used() < 1000);
         });
-    }
-
-    /// The Worker's relay hook counts stored bytes: it declares and applies
-    /// the coordinator's counter observations next to its other hooks.
-    #[test]
-    fn the_worker_relay_hook_counts_coordinator_storage_markers() {
-        use mkit_server::relay::RelayHook as _;
-        use mkit_server::store::codec::RelayV1;
-        let ns = mkit_server::NamespaceKey::from_namespace(
-            &mkit_core::repo_identity::Namespace::Ed25519([1; 32]),
-        );
-        let root = mkit_server::Partition::Coordinator(ns.clone());
-        let hook = WorkerRelayHook::new(root.clone());
-        let repo = mkit_server::RepoName::new("room").unwrap();
-        let marker = mkit_server::store::keys::repo_storage_pack(&repo, &[2; 32]);
-        let rows = [(
-            1,
-            RelayV1 {
-                at_ms: 5,
-                target: root.clone(),
-                puts: vec![(marker.clone(), mkit_server::store::codec::encode_u64(40))],
-                deletes: vec![],
-            },
-        )];
-        let wanted = hook.read_keys(&root, &rows).unwrap();
-        assert!(
-            wanted.contains(&mkit_server::store::keys::repo_storage(&repo))
-                && wanted.contains(&marker)
-        );
-        let observed: Vec<_> = wanted
-            .into_iter()
-            .map(|key| {
-                let value = (key == mkit_server::store::keys::repo_storage(&repo))
-                    .then(mkit_server::store::repo_storage::initial_counter);
-                (key, value)
-            })
-            .collect();
-        let (mut pre, mut writes) = (Vec::new(), Vec::new());
-        block_on(hook.before_apply_observed(&root, &rows, &observed, &mut pre, &mut writes))
-            .unwrap();
-        let counter = writes
-            .iter()
-            .find_map(|write| match write {
-                mkit_server::Write::Put(key, value)
-                    if *key == mkit_server::store::keys::repo_storage(&repo) =>
-                {
-                    Some(value.clone())
-                }
-                _ => None,
-            })
-            .expect("the counter is rewritten");
-        let state = mkit_server::store::codec::decode_repo_storage(&counter).unwrap();
-        assert_eq!((state.stored_bytes, state.version), (40, 1));
     }
 }

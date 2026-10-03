@@ -8,7 +8,7 @@ use crate::store::{
     Batch, BatchOutcome, Key, NamespaceStore, Partition, Precondition, StoreCapabilities,
     StoreError, Value, Write,
     codec::{self, MAX_BLOCKED_TARGETS, RelayScanV1, RelayV1},
-    keys,
+    keys, repo_storage,
 };
 use crate::telemetry::{
     METRIC_RELAY_BACKLOG_ROWS, METRIC_RELAY_LAG_EXCEEDED, Metrics, NoopMetrics,
@@ -27,6 +27,10 @@ const SCAN_PAGE_ROWS: u32 = 64;
 // Twelve fit the watermark, the outbox rows and the counter-marker rows
 // of a seven-pack advance (`repo_storage`).
 const MAX_HOOK_READ_KEYS: usize = 12;
+// The watermark, the outbox sequence and backlog, the counter and one marker
+// per counted pack of a single relay row must fit: otherwise a coordinator
+// target would stall permanently.
+const _: () = assert!(4 + repo_storage::MAX_COUNTED_PACKS <= MAX_HOOK_READ_KEYS);
 
 type QueuedRow = (u64, RelayV1, Key, Value);
 type TargetRows = (Partition, Vec<QueuedRow>);
@@ -326,13 +330,15 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                     return result;
                 }
                 let declared = loop {
-                    let Ok(keys) = self
-                        .hook
-                        .read_keys(target, &rows[result.completed..prefix_end])
-                    else {
+                    let window = &rows[result.completed..prefix_end];
+                    let (Ok(mut keys), Ok(counted)) = (
+                        self.hook.read_keys(target, window),
+                        repo_storage::relay_read_keys(target, window),
+                    ) else {
                         result.failed = true;
                         return result;
                     };
+                    keys.extend(counted);
                     let keys = keys.into_iter().collect::<BTreeSet<_>>();
                     if keys.len() + usize::from(!keys.contains(rh)) <= MAX_HOOK_READ_KEYS {
                         break keys;
@@ -451,6 +457,19 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         // combined group rather than stalling rows that fit individually.
         loop {
             let mut batch = target_batch(rh, observed, &rows[start..end]);
+            // Stored-bytes counting is part of delivering to a coordinator,
+            // not an embedder hook: markers applied uncounted could never be
+            // counted afterwards.
+            if let Err(error) = repo_storage::relay_extend(
+                target,
+                &rows[start..end],
+                observations,
+                &mut batch.preconditions,
+                &mut batch.writes,
+            ) {
+                tracing::error!(?target, %error, "stored-bytes counting failed; rows stay queued");
+                return None;
+            }
             if let Err(error) = self
                 .hook
                 .before_apply_observed(

@@ -28,7 +28,7 @@ use super::{
 /// cost `9 * 7 + 31 = 94` ops before
 /// opportunistic pruning. Stored-bytes counting (`repo_storage`) adds one
 /// relay row on D34 and, on Single, seven markers, the counter and one outcome
-/// row (96 ops for seven tickets).
+/// row: 97 ops for seven tickets with a retained obligation.
 ///
 /// The same constant caps an implicit transport-identity session's pending
 /// packs (WP-1.15 B9): a D34 packmap write consuming all seven — one
@@ -39,6 +39,14 @@ pub const MAX_TICKETS_PER_ADVANCE: usize = 7;
 /// The advance batch's ops outside the per-ticket and per-signer ones.
 pub const ADVANCE_SHARED_OPS: usize = 31;
 const _: () = assert!(MAX_TICKETS_PER_ADVANCE * 9 + ADVANCE_SHARED_OPS <= MAX_BATCH_OPS);
+/// What stored-bytes counting adds to a Single batch of seven packs: a marker
+/// put per pack, the counter guard and put, and the outcome's guard, row and
+/// pending index (`os`, `oc` and the kick are already present).
+const SINGLE_COUNT_OPS: usize = MAX_TICKETS_PER_ADVANCE + 5;
+// Single's maximal advance (85 ops with a retained obligation) plus counting.
+const _: () = assert!(MAX_TICKETS_PER_ADVANCE * 8 + 29 + SINGLE_COUNT_OPS <= MAX_BATCH_OPS);
+// D34 adds one relay row for the markers.
+const _: () = assert!(MAX_TICKETS_PER_ADVANCE * 9 + ADVANCE_SHARED_OPS < MAX_BATCH_OPS);
 
 /// Maximum operations (puts plus deletes) per relay row; two ops guard/advance rh,
 /// and two remain for hooks.

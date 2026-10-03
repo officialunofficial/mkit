@@ -34,6 +34,15 @@ pub(super) fn environment_with_policy(
     indexed: crate::indexed::IndexedConfig,
     ref_policy: Option<crate::policy::RefPolicy>,
 ) -> (Env, SigningKey, String) {
+    environment_with_hooks(sharding, indexed, ref_policy, Hooks::new())
+}
+
+pub(super) fn environment_with_hooks<H: HookSet>(
+    sharding: Sharding,
+    indexed: crate::indexed::IndexedConfig,
+    ref_policy: Option<crate::policy::RefPolicy>,
+    hooks: H,
+) -> (Env<H>, SigningKey, String) {
     let owner = key(7);
     let namespace = Namespace::Ed25519(*owner.verifying_key().as_bytes());
     let identity = format!("{namespace}/{REPO}");
@@ -50,7 +59,7 @@ pub(super) fn environment_with_policy(
     config.ref_policy = ref_policy;
     let clock = clock();
     (
-        build(config, Spy::new(store(&clock)), Hooks::new(), clock),
+        build(config, Spy::new(store(&clock)), hooks, clock),
         owner,
         identity,
     )
@@ -152,7 +161,7 @@ pub(super) fn split_pack() -> (Vec<u8>, Vec<u8>, Hash) {
     (first.finish().unwrap(), second.finish().unwrap(), head)
 }
 
-pub(super) fn upload(env: &Env, pack: &[u8], ticket_id: Hash) {
+pub(super) fn upload<H: HookSet>(env: &Env<H>, pack: &[u8], ticket_id: Hash) {
     let pack_id = hash(pack);
     block_on(async {
         let mut sink = env

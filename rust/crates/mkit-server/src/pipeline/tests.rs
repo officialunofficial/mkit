@@ -262,10 +262,25 @@ fn seven_ticket_publication_bounds_are_real_batches() {
 /// the markers, the counter and one outcome row: both stay within a batch.
 #[test]
 fn seven_ticket_publication_with_storage_counting_fits_a_batch() {
-    for (d34, expected) in [(true, 94), (false, 96)] {
-        let batch = planned_ticket_publication_counted(7, d34, false, true);
+    for (d34, retained, expected) in [
+        (true, false, 94),
+        (true, true, 95),
+        (false, false, 96),
+        (false, true, 97),
+    ] {
+        let batch = planned_ticket_publication_counted(7, d34, retained, true);
         assert_eq!(batch.preconditions.len() + batch.writes.len(), expected);
         batch.validate(&StoreCapabilities::full()).unwrap();
+        // Counting is independent of the publication this fixture defers:
+        // Single changes the counter in the batch, D34 relays the markers.
+        let counter = keys::repo_storage(&repo_name());
+        assert_eq!(
+            batch
+                .writes
+                .iter()
+                .any(|w| matches!(w, Write::Put(k, _) if *k == counter)),
+            !d34
+        );
     }
 }
 
@@ -400,12 +415,13 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
         "each pack must route to its own membership shard"
     );
     let refs = [upd(PACKMAP, Missing, B)];
+    let counted: Vec<_> = packs.iter().map(|pack| (*pack, 64)).collect();
     let implicit = ImplicitConsume {
         packs: &packs,
         repo_id: &repo,
         source: &source,
         shards: &shards,
-        counted: &[],
+        counted: &counted,
     };
     let req = WriteRequest {
         denial_ids: None,
@@ -447,7 +463,8 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
     plan.batch.validate(&StoreCapabilities::full()).unwrap();
     let ops = plan.batch.preconditions.len() + plan.batch.writes.len();
     assert!(ops <= crate::store::MAX_BATCH_OPS, "{ops}");
-    assert_eq!(ops, 27, "adjust the note at MAX_TICKETS_PER_ADVANCE");
+    // Counting adds one relay row for the markers (28 = 27 + 1).
+    assert_eq!(ops, 28, "adjust the note at MAX_TICKETS_PER_ADVANCE");
     let writes_of = |wanted: fn(&keys::ParsedKey) -> bool| -> usize {
         plan.batch
             .writes
@@ -465,7 +482,7 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
     // Seven membership relay rows plus the packmap name's own ref-index
     // relay row (WP-1.28b); every row stays under the puts+deletes cap.
     let relays = index_relays(&plan.batch);
-    assert_eq!(relays.len(), packs.len() + 1);
+    assert_eq!(relays.len(), packs.len() + 2);
     for relay in &relays {
         assert!(relay.puts.len() + relay.deletes.len() <= crate::store::outbox::MAX_RELAY_PUTS);
     }

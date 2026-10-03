@@ -71,9 +71,11 @@ pub struct AdmissionInput<'a> {
     /// Whether the repository was absent before admission; racing writes may both see true.
     pub creates_repo: bool,
     /// Bytes new to the repository: 0 when the upload's pack is already
-    /// counted for it, else the pack's declared size. `None` for operations
-    /// that add no pack and for streaming uploads without multi-repository
-    /// addressing. A pre-admission observation (SPEC-SERVER §6.5.1).
+    /// counted for it, else the pack's declared size. Without multi-repository
+    /// addressing nothing is counted and an upload reports its declared size.
+    /// `None` for operations that add no pack, and when no `Admission` hook is
+    /// installed (nothing would read it). A pre-admission observation
+    /// (SPEC-SERVER §6.5.1).
     pub new_to_repo_bytes: Option<u64>,
     /// The idempotency key: the auth v2 nonce of a signed write.
     pub idempotency_key: Option<&'a str>,

@@ -46,12 +46,14 @@ mod read_limits;
 #[cfg(feature = "http-objects")]
 pub use object_reader::{
     IssuedUrl, OBJECT_READER_BATCH, OBJECT_READER_CALLS, OBJECT_READER_LIMIT_MESSAGE,
-    ObjectMetadata, ObjectReader, ReaderView, RepoStorage,
+    ObjectMetadata, ObjectReader, ReaderView,
 };
 #[cfg(feature = "http-objects")]
 pub use read_limits::{ReadLimits, ReaderSession};
 mod implicit;
 mod info;
+mod repo_storage;
+pub use repo_storage::RepoStorage;
 #[cfg(feature = "remote-hooks")]
 pub mod inspection;
 mod lease;

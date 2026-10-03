@@ -42,9 +42,8 @@ supported after new reservation rows are written.
   { stored_bytes, version }` outcome (absolute value, monotonic per-repository
   version; hooks proto `Outcome.repo_storage_changed`, field 11) through the
   outcome sink, and `Pipeline::repo_storage` reads `{ stored_bytes, version }`
-  in one coordinator call, authorized as an owner read. The Worker adapter
-  installs the counting relay hook; embedders wiring their own
-  `RelayHandler` for D34 must install `store::repo_storage::RepoStorageHook`.
+  in one coordinator call, authorized as an owner read. Counting is part
+  of relay delivery to a coordinator, so every `RelayHandler` counts.
   `ReservationV1` gains a `RepoStorageChanged` state, so exhaustive matches
   must handle it. A store created before this change has repositories without a
   counter and must be reset.

@@ -262,6 +262,10 @@ pub(super) fn plan_consumption(
             advance.source,
             advance.shards,
             |key| snap.get(key),
+            |pack| {
+                snap.get(&keys::membership(&advance.repo_id.name, pack))
+                    .is_some()
+            },
             clock.plan_time_ms,
             outbox,
             pre,
