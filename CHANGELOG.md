@@ -25,13 +25,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The embedded Worker example enables the pure-Rust zstd decoder for default
   CLI pushes.
 
-### Changed
-
-- Indexed `UploadPack` streams reject oversized canonical entries as soon as
-  the size is visible in the entry header (raw entries, uncompressed deltas),
-  before committing an unusable pack. Compressed delta entries are refused at
-  verification, as before.
-
 ## [0.5.0](https://github.com/officialunofficial/mkit/compare/v0.4.2...v0.5.0) - 2026-10-02
 
 The production mkit server arrives as a runtime-agnostic core (`mkit-server`)

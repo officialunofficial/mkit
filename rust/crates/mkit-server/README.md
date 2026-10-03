@@ -67,16 +67,9 @@ Backend failures remain `Unavailable`.
 Indexed canonical entries are limited to **1,048,586 bytes**, including object
 framing. Very large trees and chunk manifests can exceed this even when the
 pack is small or highly compressed. Split very large flat directories into
-smaller subdirectories. Indexed `UploadPack` refuses an oversized entry early,
-before forwarding the chunk that reveals it, when the size is visible in the
-entry header: raw entries, compressed raw claims and uncompressed delta result
-sizes. Otherwise the entry is refused at verification, as before; in particular
-compressed delta entries are checked after upload and there is no decoder
-preflight. Multipart parts have
-no independent entry geometry; existing indexed advance verification still
-checks assembled packs. The early upload refusal is `InvalidArgument`, using
-the indexed decode-limit taxonomy in SPEC-SERVER §9.8. Neither stored data nor
-pack framing changes.
+smaller subdirectories. An oversized entry is refused at indexed verification
+with the existing `InvalidArgument` decode-limit error (SPEC-SERVER section 9.8).
+Neither stored data nor pack framing changes.
 
 ## Related crates
 

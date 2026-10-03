@@ -84,7 +84,6 @@ pub struct UploadSession<'p, B: BlobStore, N, H> {
     outcome: Outcome,
     ticket_id: Option<Hash>,
     staging: super::staging::StagingBuffer,
-    geometry: Option<crate::upload::geometry::GeometryCheck>,
 }
 
 impl<B: BlobStore, N, H> fmt::Debug for UploadSession<'_, B, N, H> {
@@ -172,11 +171,6 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                 outcome,
                 ticket_id: o.ticket_id,
                 staging: super::staging::StagingBuffer::default(),
-                geometry: pipe
-                    .cfg
-                    .indexed
-                    .as_ref()
-                    .map(|_| crate::upload::geometry::GeometryCheck::default()),
             }),
             Err(err) => {
                 outcome.record(Err(&err));
@@ -384,11 +378,6 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                 outcome,
                 ticket_id: o.ticket_id,
                 staging: super::staging::StagingBuffer::default(),
-                geometry: pipe
-                    .cfg
-                    .indexed
-                    .as_ref()
-                    .map(|_| crate::upload::geometry::GeometryCheck::default()),
             }),
             Err(err) => {
                 outcome.record(Err(&err));
@@ -425,14 +414,6 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             let progress = self
                 .validator
                 .push(chunk_pack_id, offset, data.len(), last)?;
-            if let Some(geometry) = &mut self.geometry
-                && let Err(error) = geometry.push(&data)
-            {
-                if let Some(Target::Sink(sink)) = self.target.take() {
-                    sink.abort().await;
-                }
-                return Err(error);
-            }
             if self.ticket_id.is_some() {
                 while !data.is_empty() {
                     if let Some(bytes) = self.staging.push(&mut data) {

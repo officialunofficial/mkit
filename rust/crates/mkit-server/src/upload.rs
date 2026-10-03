@@ -386,7 +386,6 @@ fn pack_key(id: Option<&[u8]>, chunk: bool) -> Result<PackKey, UploadError> {
 #[cfg(test)]
 mod tests;
 
-pub(crate) mod geometry;
 pub(crate) mod marker;
 pub(crate) mod receipt;
 pub(crate) mod ticket_auth;
