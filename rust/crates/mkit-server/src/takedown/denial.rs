@@ -625,8 +625,7 @@ async fn object_context<S: NamespaceStore>(
     let mut cursor = Some(*id);
     for _ in 0..=cfg.max_delta_chain_depth {
         let Some(id) = cursor else { break };
-        let (pack, row) = match super::inventory::member_with_caps(store, shards, repo, &id).await
-        {
+        let (pack, row) = match super::inventory::member_with_caps(store, shards, repo, &id).await {
             Ok(member) => member,
             Err(super::inventory::MemberFail::Capped) => return Err(capped()),
             Err(super::inventory::MemberFail::Store(_)) => return Err(unavailable()),

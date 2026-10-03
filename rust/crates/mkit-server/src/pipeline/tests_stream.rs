@@ -1850,4 +1850,3 @@ fn oversized_canonical_entry_is_refused_during_upload_without_storage() {
         assert!(env.rows().is_empty());
     }
 }
-

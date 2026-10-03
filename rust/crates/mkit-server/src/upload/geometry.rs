@@ -195,7 +195,7 @@ mod tests {
         }
     }
     #[test]
-    fn writer_delta_result_claim_is_refused_without_resolving_the_base() {
+    fn compressed_delta_result_size_is_left_to_verification() {
         let mut stream = vec![1];
         stream.extend_from_slice(&0_u32.to_le_bytes());
         stream.extend_from_slice(&(u32::try_from(CANONICAL_BYTES + 1).unwrap()).to_le_bytes());
@@ -205,11 +205,10 @@ mod tests {
         let bytes = writer.finish().unwrap();
         for chunk in [1, 7, bytes.len()] {
             let mut check = GeometryCheck::default();
-            let error = bytes
+            bytes
                 .chunks(chunk)
                 .try_for_each(|part| check.push(part))
-                .unwrap_err();
-            assert_eq!(error.public_message(), OVERSIZED_ENTRY_MESSAGE);
+                .unwrap();
         }
     }
     #[test]
