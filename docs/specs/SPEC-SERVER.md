@@ -1704,7 +1704,7 @@ obtain the writer view (§10.1). The launch profile (§18) MUST accept only
 `sync` inspectors with `on_unavailable = fail_closed`, and MUST refuse startup
 with any other inspector setting or more than four inspectors. The following
 async and unavailable-publish configuration rules apply to the full profile
-(deferred to WP-5.5c). An async inspector or an inspector with
+(deferred, not implemented). An async inspector or an inspector with
 `on_unavailable = publish` MUST configure
 `inspection_clear_deadline_ms`; otherwise startup MUST be refused.
 
@@ -1714,7 +1714,7 @@ single-repository mode. This associates all added pack entries with an
 advance. Storage completion alone MUST NOT establish published
 membership.
 
-**Full-profile inspected set (deferred to WP-5.5c).** A file object is a
+**Full-profile inspected set (deferred, not implemented).** A file object is a
 plain blob of any size, a ChunkedBlob manifest, or a chunk. The inspected
 set of each advance MUST be the union of:
 
@@ -1751,7 +1751,8 @@ alone establishes no membership, and ref deletion does not erase that coverage.
 Enabling inspection over existing, unscanned content is unsupported in this
 profile; an inspection deployment MUST start from an empty store. No durable
 inspection-mode marker is introduced at launch; the marker and full-profile
-activation rules belong to WP-5.5a-0 and WP-5.5c. Enumeration uses verified
+activation rules are deferred and not implemented (the `store::inspection_*`
+modules are unintegrated groundwork). Enumeration uses verified
 frame/checkpoint rows, in pages of at most 1,000 rows per storage call, without
 an inspection tree walk, reference-page reads or object-store reads.
 
@@ -1770,7 +1771,7 @@ behavior (STC §7.1). It MUST NOT be reported as inspector unavailability.
 This bound applies regardless of reachability; surplus entries alone remain
 permitted. Inspection-disabled deployments retain their existing limits.
 
-**Full-profile batching (deferred to WP-5.5c).** The full profile has no
+**Full-profile batching (deferred, not implemented).** The full profile has no
 launch whole-set bound. An inspected set larger than
 `inspect_batch_max_objects` MUST be sent
 in multiple Inspect calls of at most that many objects each. This named
@@ -1803,7 +1804,7 @@ Requests contain object metadata only; scanner byte retrieval is a separate
 private-channel capability (R-193).
 
 The following synchronous hold and unavailable-publish behavior applies to
-the full profile (deferred to WP-5.5c):
+the full profile (deferred, not implemented):
 
 | Result | Effect |
 |---|---|
@@ -1828,7 +1829,7 @@ storage by STC §7.1. A retry therefore re-runs the pre-receive check.
 
 ### 11.3 Asynchronous checks and resolution
 
-Full-profile semantics in this subsection are deferred to WP-5.5c.
+Full-profile semantics in this subsection are deferred and not implemented.
 
 Stage 6 commits live ref values, added membership, obligations, and
 durable scheduling in the same apply. Stage 9 calls MUST be scheduled
@@ -3809,28 +3810,32 @@ The server MUST NOT create durable inspection continuations, outstanding
 inspection obligations or inspection holds at launch. No durable inspection-mode marker is required:
 disabling inspection stops only future scanning. Async inspection, holds,
 quarantine suspension, inspection review procedures, complete full-profile
-classification and unrestricted whole-set multi-batch inspection are deferred to
-WP-5.5c; the durable marker belongs to
-WP-5.5a-0 immediately before that follow-up. Publication Event implementation
-(WP-5.15) and Worker proofs (WP-4.14b-2) are post-launch work. The profile does
-not waive takedown
+classification and unrestricted whole-set multi-batch inspection are deferred
+and not implemented. The `store::inspection_*` modules (the one-way mode
+marker, repository flags and repository-wide holds) are unintegrated
+groundwork for that follow-up: no pipeline or adapter path installs the marker
+or writes a flag or hold, and a deployment MUST NOT rely on them. Publication
+Event implementation and Worker proofs are post-launch work and are not
+implemented. The profile does not waive takedown
 or admin requirements applicable to its configuration. The profile and its
 permanent-retention/disabled-GC policy MUST be documented in deployment
 capabilities. It MUST NOT claim full-profile conformance.
 
-The Worker launch is explicitly selected on the Paid plan with indexed Multi
-addressing, D34 sharding and ticketed uploads at threshold zero. Namespace
-policy is `allowlist`, or `any` with explicit unsafe-open acknowledgment;
-under `any`, takedown discovery is incomplete. HTTP serving/URL tokens,
-signed hooks or the isolated service binding, inspection/retrieval, and
-admin/takedown are independent opt-ins. Each MUST validate its complete
-configuration and key-role separation at startup. Takedown MUST refuse
-activation without §14.7's preservation bucket, explicit retention and
-preservation signing key, and a configured purge sink. The environment
-configuration requires signed HTTPS cache-purge; an embedder MAY provide a
-custom purge sink and local invalidation. Worker proof serving remains
-unsupported and MUST NOT be advertised; native proof serving is documented
-only when its HTTP mount is enabled. No new profile/proof wire field is implied.
+A deployment selects the launch profile explicitly, with indexed Multi
+addressing, sharded storage and ticketed uploads at threshold zero. Namespace
+policy is an allowlist, or open with explicit unsafe-open acknowledgment;
+under open policy, takedown discovery is incomplete. HTTP serving/URL tokens,
+remote hooks, inspection/retrieval, and admin/takedown are independent
+opt-ins. Each MUST validate its complete configuration and key-role
+separation at startup. Takedown MUST refuse activation without §14.7's
+preservation store, explicit retention and preservation signing key, and a
+configured purge sink; an embedder MAY provide a custom purge sink and local
+invalidation. A server MUST NOT advertise proof serving it does not implement;
+native proof serving is documented only when its HTTP mount is enabled. No new
+profile/proof wire field is implied. Selecting the profile, its configuration
+names, platform requirements and deployment procedure belong to the
+deployment's operator documentation; the Cloudflare Workers adapter's are in
+[the Workers operator guide](../operations/workers.md).
 
 **Full profile.** The server implements every section that applies to its
 configuration, including §9–§16. An indexed deployment MUST support per-ref
@@ -3866,12 +3871,12 @@ action descriptors and activate every requested denial before returning success.
 It returns `complete = false`; acceptance MUST NOT imply verified preservation,
 holder discovery or repository/global completion. The pending record MUST retain
 preservation work. Production takedown and `ReadPreserved` activation MUST be
-available only when admin keys, `LAUNCH_PROFILE=paid-workers`,
-`TAKEDOWN_ENABLED=true`, indexed Workers Paid mode, and the complete §14.7
-preservation configuration are valid. This includes the `PRESERVATION`
-binding, explicit positive retention, receipt signing and publication keys,
-and a configured cache-purge delivery: the signed HTTPS hook, or an
-embedder-supplied purge sink. Startup MUST refuse partial or
+available only when admin keys, the explicitly selected launch profile,
+enabled takedown, indexed mode, and the complete §14.7
+preservation configuration are valid. This includes the restricted
+preservation store, explicit positive retention, receipt signing and
+publication keys, and a configured cache-purge delivery (a signed remote hook,
+or an embedder-supplied purge sink). Startup MUST refuse partial or
 invalid configuration. The
 preservation core, restricted admin catalog and §14.7 configuration are all
 required for launch, as are the launch conformance gates. This implementation
@@ -3965,6 +3970,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Editorial: §18 states the launch profile deployment-neutrally and points to the Workers operator guide for the Worker-specific selection, bindings and purge configuration; the `store::inspection_*` modules are marked unintegrated groundwork and the deferred inspection, Event and proof work as not implemented. No behavior change. |
 | 1 | draft | Additive object-reader session accounting and typed exhaustion. Existing public absence, advance messages and stored/wire formats are unchanged. |
 | 1 | draft | `SetRepoVisibility` runs admission and records an outcome like other mutating RPCs, in envelope and statement modes (§2, §3). Additive optional `Outcome.procedure` and `Outcome.visibility` (fields 9 and 10) name the operation (§6.5); the pending and terminal reservation rows record an optional operation (additive `procedure`; rows written before decode as unknown), so every outcome, including a reconciled abandonment, names it. No row version changes. |
 | 1 | draft | The deprecated `LAUNCH_PROFILE=uno` alias is removed; `paid-workers` is the only accepted value (§14, §18). |

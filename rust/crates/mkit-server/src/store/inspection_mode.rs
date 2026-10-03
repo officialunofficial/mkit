@@ -1,6 +1,7 @@
 //! One-way deployment inspection marker, checked before other startup writes.
 //!
-//! This prerequisite exposes the guard without wiring it into the pipeline.
+//! This prerequisite exposes the guard without wiring it into the pipeline;
+//! it is unintegrated groundwork for future async inspection.
 //! First activation must precede sharding/addressing markers and user writes.
 
 use super::keys;

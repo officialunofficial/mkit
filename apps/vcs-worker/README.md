@@ -435,7 +435,7 @@ complete takedown configuration. `ReadPreserved` streams freshly verified bounde
 with `Cache-Control: no-store`; retries retain byte-free descriptors and recheck
 authority, retention and ownership. Hold review operations and `Reinstate` remain unexposed.
 The launch creates no inspection holds or publication Events; async inspection,
-hold review, Events and Worker proofs are post-launch work (R-200).
+hold review, Events and Worker proofs are not implemented.
 
 R-193 scanner retrieval mounts `POST /_mkit/scanner/pack`. `SCANNER_KEYS`
 contains 1–32 distinct non-weak Ed25519 public keys, one per line.

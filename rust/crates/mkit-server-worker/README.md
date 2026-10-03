@@ -25,6 +25,8 @@ Visibility applies to Multi deployments with Owner write policy; Single/Open
 deployments do not gate reads by repository visibility.
 An explicit `SetRepoVisibility` wins. Changing the default changes every repository
 without an explicit setting; set it when creating the deployment.
+`SetRepoVisibility` runs the supplied Admission hook and records an Outcome like
+other mutating RPCs; a hook must handle that procedure.
 
 The feature-gated secret `URL_TOKEN_KEYS` uses the key-file grammar:
 `active <64 hex seed>` and `retired <64 hex public key> <retired_at_ms>`.
@@ -104,6 +106,17 @@ physical tick budget.
 
 ## Embedding (supported, 0.x)
 
+The `pack-ruzstd` feature (enabled by the vcs-worker `launch` feature) relies on
+a bounded-decode patch to ruzstd 0.9 that a git-dependency embedder must repeat
+in its own workspace, because Cargo does not inherit dependency patches:
+
+```toml
+[patch.crates-io]
+ruzstd = { git = "https://github.com/officialunofficial/mkit", tag = "v0.5.0" }
+```
+
+Upstreaming is in progress; drop the patch once a ruzstd release includes it.
+
 This crate stays `publish = false`. Consume it as a git dependency pinned to the
 release tag; breaking 0.x changes are called out in CHANGELOG.
 
@@ -179,8 +192,11 @@ core work at **8,500 calls** inside the request's physical allowance. It shares
 one bounded reachability walk (with eligible positive-cache proofs) and one
 set-based global-denial descriptor pass. Every store operation is charged;
 authorization and external seams reserve calls conservatively. Exhausted call,
-decode or denial-context budgets fail closed with `unavailable`. Canonical
-response bytes, including duplicate IDs, also fit `http_decode_budget`.
+decode or denial-context budgets fail closed: an Owner reader gets
+`ResourceExhausted` (`object reader limit exceeded`), while a Public reader sees
+an ID whose reachability cannot be proved within the caps as absent. Storage
+failures remain `unavailable`. Canonical response bytes, including duplicate
+IDs, also fit `http_decode_budget`.
 
 `read_canonical` returns serialized Blob, Tree, Commit, Remix, Tag and
 **ChunkedBlob manifest** bytes, never pack-only Delta encodings.
@@ -197,8 +213,9 @@ chunk. The restriction also covers delta bases used to reconstruct ancestors.
 Sizes check reconstruction base objects and packs through metadata only, using
 the same earlier in-pack frame preference, fallback and bounds as canonical reads.
 If a requested ancestor would need expansion to prove another requested ID,
-request their sizes in separate batches; an incomplete proof returns
-`unavailable` rather than reading the requested ancestor or claiming absence.
+request their sizes in separate batches; an incomplete proof is
+`ResourceExhausted` for an Owner reader and absent for a Public reader, and
+never reads the requested ancestor.
 Blocked ancestor packs leave unproven IDs absent and preserve earlier proven IDs.
 
 Prefetch the commit, trees, manifests and selected chunks asynchronously, then

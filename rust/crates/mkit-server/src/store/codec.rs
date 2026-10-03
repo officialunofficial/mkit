@@ -68,8 +68,8 @@ pub struct RepoVisibilityV1 {
 impl RepoVisibilityV1 {
     /// The time of the last visibility change. A legacy row has none, so
     /// its `last_created_ms` stands in: the envelope path stored server
-    /// time there and the statement path the accepted `created`, never
-    /// earlier than the change, so the fallback fails closed.
+    /// time there and the statement path the client-signed `created`, which
+    /// can be earlier than the change (SPEC-WRITE-GRANTS §9.4).
     #[must_use]
     pub fn visibility_changed_ms(&self) -> u64 {
         self.changed_ms.unwrap_or(self.last_created_ms)
