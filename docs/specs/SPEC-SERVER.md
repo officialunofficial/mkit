@@ -753,8 +753,8 @@ The shared `Outcome` fields are:
 | `repository` | The full repository identity as STC §7.4 requires. |
 | `occurred_unix_ms` | When the outcome occurred, as signed 64-bit Unix epoch milliseconds. |
 | `kind` | Exactly one of `committed`, `aborted`, `expired`, or `read_served`. |
-| `procedure` | Optional. The full Connect procedure path of the operation, present only when the outcome records it: today a `SetRepoVisibility` change, whether `committed` (with no refs and zero bytes) or `aborted`. Absent for ref writes, uploads, tickets and paid reads, and for a visibility reservation abandoned after a crash (the pending record does not name its operation). A receiver treats an absent or unrecognized value as unspecified. |
-| `visibility` | Optional. `public` or `private`: the visibility a `SetRepoVisibility` outcome set or attempted; present exactly when `procedure` names it. |
+| `procedure` | Optional. The full Connect procedure path of the operation that produced the outcome (`UpdateRef`, `AdvanceRefs` including each consumed ticket's outcome, `BeginUpload` for an expired ticket, `UploadPack`, `SetRepoVisibility`, or an HTTP read). The server records it on the pending row and copies it to the terminal row, so an abandoned reservation names it too. Absent only for an outcome recorded before the server stored it (v0.5.0 rows); a receiver treats an absent or unrecognized value as unspecified. A `SetRepoVisibility` `committed` carries no refs and zero bytes. |
+| `visibility` | Optional. `public` or `private`: the visibility a `SetRepoVisibility` outcome set or attempted; present exactly when `procedure` is `SetRepoVisibility`. |
 
 `Committed` records a successful operation:
 
@@ -3940,7 +3940,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
-| 1 | draft | `SetRepoVisibility` runs admission and records an outcome like other mutating RPCs, in envelope and statement modes (§2, §3). Additive optional `Outcome.procedure` and `Outcome.visibility` (fields 9 and 10) name the operation (§6.5); the outcome delivery index row's value carries an optional operation marker (empty on rows written before). No stored-row schema or version changes. |
+| 1 | draft | `SetRepoVisibility` runs admission and records an outcome like other mutating RPCs, in envelope and statement modes (§2, §3). Additive optional `Outcome.procedure` and `Outcome.visibility` (fields 9 and 10) name the operation (§6.5); the pending and terminal reservation rows record an optional operation (additive `procedure`; rows written before decode as unknown), so every outcome, including a reconciled abandonment, names it. No row version changes. |
 | 1 | draft | Stored rows remain decodable throughout 0.5.x; additive JSON fields require serde defaults (§17). |
 | 1 | draft | Worker timer writes retry alarm scheduling twice inline, propagate exhaustion and retain cold-start repair. |
 | 1 | draft | Namespace-scoped ListRepos authorization with an arbitrary repository selector; authority full listing requires explicit opt-in and writer view (§6.2; STC §7.10). |

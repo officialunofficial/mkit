@@ -225,12 +225,6 @@ impl OutboxBuilder {
     /// Replace still-Ticketed or Pending with exactly one terminal outcome,
     /// queued for delivery. A terminal prior is rejected rather than replaced.
     pub fn outcome(&mut self, rid: &str, prior: &Value, terminal: Terminal) {
-        self.outcome_marked(rid, prior, terminal, Value::default());
-    }
-
-    /// [`Self::outcome`] with an operation `marker` stored as the value of
-    /// the delivery index row, which delivery reads back (empty for none).
-    pub fn outcome_marked(&mut self, rid: &str, prior: &Value, terminal: Terminal, marker: Value) {
         let occurred_at_ms = terminal.occurred_at_ms();
         let record = terminal.0;
         let result = (|| {
@@ -288,8 +282,10 @@ impl OutboxBuilder {
             self.pre
                 .push(Precondition::Equals(key.clone(), prior.clone()));
             self.writes.push(Write::Put(key, value));
-            self.writes
-                .push(Write::Put(keys::outcome_pending(seq, rid)?, marker));
+            self.writes.push(Write::Put(
+                keys::outcome_pending(seq, rid)?,
+                Value::default(),
+            ));
             Ok(())
         })();
         self.remember(result);
@@ -627,9 +623,7 @@ pub fn plan_ack(
     let needs_guard = existing_guard.is_none();
     pre.extend([
         Precondition::Equals(key.clone(), value.clone()),
-        // The index row's value is an optional operation marker; the exact
-        // terminal row guarded above already pins which outcome this is.
-        Precondition::Present(pending.clone()),
+        Precondition::Equals(pending.clone(), Value::default()),
     ]);
     writes.extend([Write::Delete(key), Write::Delete(pending)]);
     if needs_guard {

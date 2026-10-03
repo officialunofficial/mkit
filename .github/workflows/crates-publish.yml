@@ -103,8 +103,8 @@ jobs:
       #
       # This workspace defers version bumps to the release-prep PR. At the
       # tag the version matches the intended release, so this gate can infer
-      # its semver class. rust.yml separately enforces the server's patch API
-      # policy on PRs with an explicit release type and the 0.5.0 baseline.
+      # its semver class. rust.yml separately enforces the server's 0.6 API
+      # policy on PRs (main accumulates 0.6 changes) with the 0.5.0 baseline.
       #
       # No-ops for any crate not yet on crates.io (a brand-new crate's first
       # publish has no baseline). Excludes mkit-cli (unstable CLI-internal lib

@@ -91,23 +91,19 @@ fn get<H: HookSet>(e: &Env<H>, p: &Partition, key: &Key) -> Option<Value> {
     now(e.pipe.meta.inner.get(p, key)).unwrap()
 }
 
-/// The terminal row and index marker of reservation `rid`, as delivery
-/// decodes them.
+/// The terminal row of reservation `rid`, as delivery decodes it.
 fn delivered<H: HookSet>(e: &Env<H>, owner: &SigningKey, rid: &str) -> Outcome {
     let p = coordinator(e, owner);
     let row = get(e, &p, &keys::reservation(rid).unwrap()).expect("reservation row");
     let (start, end) = keys::class_range(keys::TAG_OUTCOME_PENDING);
     let page = now(e.pipe.meta.inner.scan(&p, &start, &end, None, 100)).unwrap();
-    let [(_, marker)] = page.entries.as_slice() else {
-        panic!("one queued outcome, got {}", page.entries.len());
-    };
+    assert_eq!(page.entries.len(), 1, "one queued outcome");
     Outcome::from_reservation(
         rid.to_owned(),
         AUDIENCE.to_owned(),
         codec::decode_reservation(&row).unwrap(),
     )
     .unwrap()
-    .with_marker(marker.as_bytes())
 }
 
 fn assert_nothing_written<H: HookSet>(e: &Env<H>, owner: &SigningKey) {
@@ -394,7 +390,7 @@ fn the_outcome_sink_receives_the_visibility_outcome_through_the_delivery_timer()
     assert_eq!(seen[0].reservation_id, "env-rid");
     assert_eq!(seen[0].procedure, Some(Procedure::SetRepoVisibility));
     assert_eq!(seen[0].visibility, Some(Visibility::Public));
-    // Acknowledged: the queue and backlog drained despite the marker value.
+    // Acknowledged: the queue drained.
     assert_eq!(
         now(e.pipe.meta.inner.scan(
             &p,
@@ -411,7 +407,7 @@ fn the_outcome_sink_receives_the_visibility_outcome_through_the_delivery_timer()
 }
 
 #[test]
-fn a_failed_reserved_visibility_change_aborts_with_the_visibility_marker() {
+fn a_failed_reserved_visibility_change_aborts_naming_the_visibility_change() {
     let owner = key(1);
     let repo = repository(&owner);
     let current = clock();
@@ -502,4 +498,37 @@ fn a_visibility_outcome_without_a_reservation_queues_nothing() {
             .entries
             .is_empty()
     );
+}
+
+#[test]
+fn every_outcome_names_its_operation_not_only_visibility_changes() {
+    let clock = clock();
+    let env = build(
+        cfg(authv2()),
+        Spy::new(store(&clock)),
+        with_admission(Scripted::new(reserved("ref-rid"))),
+        clock,
+    );
+    let update = upd(HEAD, Missing, A);
+    env.update(&Req::update(&key(7), 1, &update, T0), &update)
+        .unwrap();
+    let row = reservation_row(&env, "ref-rid");
+    assert!(matches!(row, codec::ReservationV1::Committed { .. }));
+    let outcome = Outcome::from_reservation("ref-rid".into(), AUDIENCE.into(), row).unwrap();
+    assert_eq!(outcome.procedure, Some(Procedure::UpdateRef));
+    assert_eq!(outcome.visibility, None);
+}
+
+#[test]
+fn outcomes_from_v050_rows_have_no_recorded_operation() {
+    let row = codec::ReservationV1::committed("a".into(), 7, 0, 0, 0, Vec::new());
+    let outcome = Outcome::from_reservation("rid".into(), AUDIENCE.into(), row).unwrap();
+    assert_eq!((outcome.procedure, outcome.visibility), (None, None));
+    // An expired reservation is always an unconsumed ticket's.
+    let row = codec::ReservationV1::Expired {
+        repository: "a".into(),
+        occurred_at_ms: 7,
+    };
+    let outcome = Outcome::from_reservation("rid".into(), AUDIENCE.into(), row).unwrap();
+    assert_eq!(outcome.procedure, Some(Procedure::BeginUpload));
 }

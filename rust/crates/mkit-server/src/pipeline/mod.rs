@@ -1799,7 +1799,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let facts = self.authorize_visibility_envelope(&op).await?;
         let mut op = op;
         op.authz = facts.clone();
-        let admitted = self.admit_visibility(a, &op, p, visibility).await?;
+        let admitted = self.admit_visibility(a, &op, p).await?;
         let committed = self
             .commit_visibility_envelope(
                 (auth, repo, p),
@@ -2113,7 +2113,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         caller_view: CallerView::Writer,
                         ..AuthzFacts::default()
                     };
-                    admitted = Some(self.admit_visibility(a, &op, p, visibility).await?);
+                    admitted = Some(self.admit_visibility(a, &op, p).await?);
                 }
                 let Some(admission) = admitted.as_ref() else {
                     return Err(internal("visibility admission missing"));
@@ -2570,7 +2570,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             self.admit(input).await?
         };
         let pending = match allowance.reservation.as_deref() {
-            Some(rid) => Some(self.record_pending(a, &p, rid).await?),
+            Some(rid) => Some(
+                self.record_pending(a, &p, rid, stored_procedure(&op.kind))
+                    .await?,
+            ),
             None => None,
         };
         let write_result = async {
@@ -4259,6 +4262,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             tracing::warn!(error = %e, "prune on a full partition failed");
         }
         ServerError::unavailable("storage partition full")
+    }
+}
+
+/// The operation a write's reservation records.
+fn stored_procedure(kind: &OpKind) -> codec::StoredProcedure {
+    match kind {
+        OpKind::AdvanceRefs { .. } => codec::StoredProcedure::AdvanceRefs,
+        OpKind::BeginUpload { .. } => codec::StoredProcedure::BeginUpload,
+        OpKind::UploadPack { .. } => codec::StoredProcedure::UploadPack,
+        OpKind::SetRepoVisibility { visibility } => {
+            codec::StoredProcedure::SetRepoVisibility(stored_visibility(*visibility))
+        }
+        _ => codec::StoredProcedure::UpdateRef,
     }
 }
 

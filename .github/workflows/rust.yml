@@ -105,10 +105,14 @@ jobs:
       - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
         with:
           tool: cargo-semver-checks
-      # main retains the released version until release preparation.
-      - name: Check server patch API against 0.5.0
+      # main retains the released version until release preparation, and is
+      # accumulating 0.6 changes with no 0.5.x patch release planned. A 0.x
+      # crate's next minor release (0.6.0) may break its public API, which
+      # cargo-semver-checks calls the "major" release type for 0.x versions;
+      # "minor" would still reject a breaking change.
+      - name: Check server 0.6 API against 0.5.0
         working-directory: rust
-        run: cargo semver-checks -p mkit-server --all-features --baseline-version 0.5.0 --release-type patch
+        run: cargo semver-checks -p mkit-server --all-features --baseline-version 0.5.0 --release-type major
 
   build-and-test:
     name: Build & Test (${{ matrix.os }})

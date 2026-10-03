@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking (toward 0.6)
+
+`mkit-server` main now accumulates 0.6 changes; the `server-semver` check
+compares against the 0.5.0 baseline as the 0.6 release. Stored rows stay
+compatible with v0.5.0.
+
+- Reservations and outcomes record their operation. `ReservationV1::{Pending,
+  Committed, Aborted, ReadServed}` gain an optional `procedure:
+  Option<StoredProcedure>` (`#[serde(default, skip_serializing_if)]`; rows
+  written by v0.5.0 decode as `None`). These four variants are now
+  `#[non_exhaustive]`: build them with the new constructors
+  `ReservationV1::{pending, committed, aborted, read_served}` (and
+  `.with_procedure(..)`), and match them with `..`. `ReservationV1::Expired`,
+  `Ticketed`, `OutcomeRef` and `AbortReason` are unchanged.
+- `Outcome` gains `procedure: Option<Procedure>` and
+  `visibility: Option<RepoVisibility>` for every outcome (ref writes, ticket
+  advances, uploads, visibility changes and reads, including a reservation the
+  crash reconciler abandons). Only outcomes written by v0.5.0 have `None`
+  (an expired ticket is always `BeginUpload`).
+
 ### Added
 
 - `SetRepoVisibility` now runs the embedder's `Admission` hook and records an
@@ -16,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   visibility row and its listing index. Hooks recognize the change by
   `input.op.procedure() == Procedure::SetRepoVisibility` (with
   `OpKind::SetRepoVisibility { visibility }`, `declared_bytes = 0`), and
-  `Outcome` gains `procedure` and `visibility` fields. `DefaultAdmission`
+  `DefaultAdmission`
   charges nothing for it. Remote hooks send the procedure and visibility in
   additive optional `Outcome` fields. `Pipeline::set_repo_visibility_with_meta`
   also returns the admission's receipt headers, which the Connect service now

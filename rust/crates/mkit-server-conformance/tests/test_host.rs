@@ -233,14 +233,14 @@ async fn ticketed_auth_v2_wire_cases_run_against_the_host() {
         mkit_server::BatchOutcome::Committed
     );
     let terminal = mkit_server::store::outbox::Terminal::new(
-        mkit_server::store::codec::ReservationV1::Committed {
-            repository: "default".into(),
-            occurred_at_ms: u64::try_from(host.clock().now_ms()).unwrap(),
-            bytes_stored: 0,
-            new_to_repo: 0,
-            new_to_store: 0,
-            refs: Vec::new(),
-        },
+        mkit_server::store::codec::ReservationV1::committed(
+            "default".into(),
+            u64::try_from(host.clock().now_ms()).unwrap(),
+            0,
+            0,
+            0,
+            Vec::new(),
+        ),
     )
     .unwrap();
     let outbox_sequence = host

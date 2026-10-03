@@ -84,11 +84,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         let created = ms(self.clock.now_ms());
         let deadline = created
             .saturating_add(u64::try_from(cfg.read_deadline.as_millis()).unwrap_or(u64::MAX));
+        let procedure = if op.procedure() == crate::op::Procedure::HttpGetRefPath {
+            codec::StoredProcedure::HttpGetRefPath
+        } else {
+            codec::StoredProcedure::HttpGetObject
+        };
         let pending = super::reservation::read_pending(
             repository.clone(),
             created,
             deadline,
             cfg.read_reconcile_grace,
+            procedure,
         );
         let prior = codec::encode_reservation(&pending);
         let mut builder = OutboxBuilder::new(None, None).map_err(meta_error)?;
@@ -112,7 +118,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             finish: Some(Box::new(move |bytes, success| {
                 let occurred_at_ms = ms(clock.now_ms());
                 Box::pin(async move {
-                    let record = read_result(repository, object, bytes, success, occurred_at_ms);
+                    let record = read_result(
+                        repository,
+                        object,
+                        bytes,
+                        success,
+                        occurred_at_ms,
+                        procedure,
+                    );
                     settle(
                         &store,
                         &partition,
@@ -136,6 +149,7 @@ fn read_result(
     bytes: u64,
     success: bool,
     occurred_at_ms: u64,
+    procedure: codec::StoredProcedure,
 ) -> ReservationV1 {
     if success || bytes > 0 {
         ReservationV1::ReadServed {
@@ -143,6 +157,7 @@ fn read_result(
             occurred_at_ms,
             object,
             bytes_served: bytes,
+            procedure: Some(procedure),
         }
     } else {
         ReservationV1::Aborted {
@@ -150,6 +165,7 @@ fn read_result(
             occurred_at_ms,
             reason: AbortReason::Internal,
             detail: String::new(),
+            procedure: Some(procedure),
         }
     }
 }

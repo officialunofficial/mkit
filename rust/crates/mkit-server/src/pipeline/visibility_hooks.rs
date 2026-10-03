@@ -3,16 +3,17 @@
 //! batch, as for every other mutating RPC (SPEC-SERVER §6.3, §6.5).
 
 use super::plan::{Snapshot, plan_charge};
-use super::{Allowance, Authenticated, Pipeline, ResponseMeta, admission, meta_error, reservation};
+use super::{
+    Allowance, Authenticated, Pipeline, ResponseMeta, admission, meta_error, reservation,
+    stored_procedure,
+};
 use crate::error::ServerError;
 use crate::op::Operation;
 use crate::pipeline::HookSet;
-use crate::pipeline::durable_outcome::visibility_marker;
 use crate::pipeline::hooks::AdmissionInput;
 use crate::store::codec::{AbortReason, ReservationV1};
 use crate::store::outbox::{OutboxBuilder, Terminal};
 use crate::store::{Batch, MultipartBlobStore, NamespaceStore, Partition, keys};
-use mkit_attest::grant::Visibility;
 
 /// What stage 3 granted a visibility change.
 pub(super) struct Admitted {
@@ -49,7 +50,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         a: &Authenticated,
         op: &Operation,
         p: &Partition,
-        visibility: Visibility,
     ) -> Result<Admitted, ServerError> {
         self.check_outbox_backpressure(p, None).await?;
         let credentials = admission::validate_credentials(&a.credential_capture)?;
@@ -57,11 +57,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         input.credential_headers = &credentials;
         let allowance = self.admit(input).await?;
         let pending = match allowance.reservation.as_deref() {
-            Some(rid) => {
-                let mut guard = self.record_pending(a, p, rid).await?;
-                guard.marker = visibility_marker(visibility);
-                Some(guard)
-            }
+            Some(rid) => Some(
+                self.record_pending(a, p, rid, stored_procedure(&op.kind))
+                    .await?,
+            ),
             None => None,
         };
         Ok(Admitted {
@@ -114,12 +113,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             new_to_repo: 0,
             new_to_store: 0,
             refs: Vec::new(),
+            procedure: pending.procedure,
         };
-        builder.outcome_marked(
+        builder.outcome(
             &pending.rid,
             &pending.value,
             Terminal::new(record).map_err(meta_error)?,
-            pending.marker.clone(),
         );
         builder.relay_at(now_ms);
         builder

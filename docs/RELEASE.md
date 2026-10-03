@@ -214,7 +214,7 @@ The powerset covers no features, individual features and feature pairs.
 Separate checks cover default features across all targets and all features
 for the library. Library checks avoid dev-dependency feature unification;
 the default check also catches test-only warnings. Each crate has a 30-minute
-job limit. PRs enforce the server's patch API compatibility against 0.5.0;
+job limit. PRs enforce the server's API compatibility against 0.5.0 as the 0.6 release (a breaking-capable 0.x minor) while main accumulates it;
 the publish gate checks the server too, including that pinned baseline.
 
 ### Post-release

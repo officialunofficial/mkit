@@ -8109,9 +8109,9 @@ pub struct Outcome {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub occurred_unix_ms: ::core::option::Option<i64>,
-    /// Full Connect procedure path of the operation, set only when the outcome
-    /// records it (a repository visibility change); absent otherwise, so a ref
-    /// write or upload outcome is unchanged; SPEC-SERVER §6.5.
+    /// Full Connect procedure path of the operation that produced the outcome.
+    /// Absent only for an outcome recorded before the server stored it (rows
+    /// written by v0.5.0); SPEC-SERVER §6.5.
     ///
     /// Field 9: `procedure`
     #[serde(

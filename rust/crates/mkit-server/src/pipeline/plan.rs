@@ -647,6 +647,7 @@ pub(crate) fn plan_write(
                     occurred_at_ms: clock.plan_time_ms,
                     reason: codec::AbortReason::RefConflict,
                     detail: String::new(),
+                    procedure: pending.procedure,
                 }
             } else {
                 codec::ReservationV1::Committed {
@@ -664,6 +665,7 @@ pub(crate) fn plan_write(
                             deleted: update.new.is_none(),
                         })
                         .collect(),
+                    procedure: pending.procedure,
                 }
             };
             outbox.outcome(

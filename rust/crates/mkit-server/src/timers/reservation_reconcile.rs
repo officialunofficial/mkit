@@ -30,6 +30,7 @@ impl<S: NamespaceStore> TimerHandler<S> for ReservationReconcile {
             let ReservationV1::Pending {
                 repository,
                 reconcile_at_ms,
+                procedure,
                 ..
             } = codec::decode_reservation(&prior)?
             else {
@@ -56,6 +57,7 @@ impl<S: NamespaceStore> TimerHandler<S> for ReservationReconcile {
                     occurred_at_ms: ctx.now_ms,
                     reason: AbortReason::Abandoned,
                     detail: String::new(),
+                    procedure,
                 })?,
             );
             let mut batch = Batch::new();
@@ -71,7 +73,11 @@ mod tests {
     use crate::memory::MemoryKv;
     use crate::repo::NamespaceKey;
     use crate::rt::ManualClock;
-    use crate::store::codec::PendingOp;
+    use crate::store::codec::{PendingOp, StoredProcedure, StoredVisibility};
+
+    /// An abandoned reservation keeps the operation its pending row named.
+    const PRIVATE_CHANGE: StoredProcedure =
+        StoredProcedure::SetRepoVisibility(StoredVisibility::Private);
     use crate::store::outbox::OutboxBuilder;
     use crate::store::{BatchOutcome, Partition, Precondition, Value};
     use crate::timers::{TickBudget, TimerRegistry, run_due};
@@ -91,6 +97,7 @@ mod tests {
                 created_at_ms: 0,
                 reconcile_at_ms: reconcile_at,
                 op,
+                procedure: Some(PRIVATE_CHANGE),
             };
             let prior = codec::encode_reservation(&pending);
             let mut builder = OutboxBuilder::new(None, None).unwrap();
@@ -139,6 +146,7 @@ mod tests {
                 codec::decode_reservation(&value).unwrap(),
                 ReservationV1::Aborted {
                     reason: AbortReason::Abandoned,
+                    procedure: Some(PRIVATE_CHANGE),
                     ..
                 }
             ));
