@@ -543,12 +543,14 @@ fn scanner_fetches_during_inspect_and_fail_closed_window_then_retry_remints() {
             .collect::<Vec<_>>();
         let advance = signed(&owner, &identity, Procedure::AdvanceRefs, 193_053);
         let auth = env.auth(&advance).unwrap();
-        let attempt = block_on(env.pipe.advance_refs_with_tickets(
-            &auth,
-            upd(HEAD, Missing, head),
-            upd(PACKMAP, Missing, hash(&list)),
-            tickets.clone(),
-        ));
+        let attempt = complete(|| {
+            block_on(env.pipe.advance_refs_with_tickets(
+                &auth,
+                upd(HEAD, Missing, head),
+                upd(PACKMAP, Missing, hash(&list)),
+                tickets.clone(),
+            ))
+        });
         let error = attempt.unwrap_err();
         assert_eq!(
             error.code(),
@@ -1194,18 +1196,18 @@ fn ticketless_scanner_write(sharding: Sharding, case: u32) {
     let tickets = [(&one, 195_000), (&two, 195_001), (&list, 195_002)]
         .into_iter()
         .map(|(bytes, n)| begin_and_upload(&env, &owner, &identity, bytes, n))
-        .collect();
+        .collect::<Vec<_>>();
     let auth = env
         .auth(&signed(&owner, &identity, Procedure::AdvanceRefs, 195_003))
         .unwrap();
     let repo = auth.repo().repo.clone();
     assert_eq!(
-        block_on(env.pipe.advance_refs_with_tickets(
+        complete(|| block_on(env.pipe.advance_refs_with_tickets(
             &auth,
             upd(HEAD, Missing, head),
             upd(PACKMAP, Missing, map),
-            tickets
-        ))
+            tickets.clone()
+        )))
         .unwrap(),
         AdvanceOutcome::Committed
     );
@@ -1236,12 +1238,12 @@ fn ticketless_scanner_write(sharding: Sharding, case: u32) {
             .auth(&signed(&owner, &identity, Procedure::AdvanceRefs, 195_004))
             .unwrap();
         assert_eq!(
-            block_on(env.pipe.advance_refs_with_tickets(
+            complete(|| block_on(env.pipe.advance_refs_with_tickets(
                 &auth,
                 upd(HEAD, Match(head), head),
                 upd(PACKMAP, Match(map), map),
                 vec![]
-            ))
+            )))
             .unwrap(),
             AdvanceOutcome::Committed
         );
@@ -1255,7 +1257,8 @@ fn ticketless_scanner_write(sharding: Sharding, case: u32) {
             _ => (Match(map), map),
         };
         assert_eq!(
-            block_on(env.pipe.update_ref(&auth, upd(expected_ref, condition, id))).unwrap(),
+            complete(|| block_on(env.pipe.update_ref(&auth, upd(expected_ref, condition, id))))
+                .unwrap(),
             crate::UpdateRefResult::Committed
         );
     }

@@ -290,6 +290,7 @@ struct Target<'a> {
     ids: &'a BTreeSet<Hash>,
     manifests: &'a [StoredAction],
     packs: Vec<Hash>,
+    certificate: Option<crate::store::publication_certificate::Root>,
 }
 impl Target<'_> {
     async fn intersects<S: NamespaceStore>(
@@ -299,6 +300,18 @@ impl Target<'_> {
     ) -> Result<bool, ServerError> {
         if ids.iter().any(|id| self.ids.contains(id)) {
             return Ok(true);
+        }
+        if let Some(crate::store::publication_certificate::Root { root }) = self.certificate {
+            for id in ids {
+                if crate::store::publication_certificate::get(store, root, id)
+                    .await
+                    .map_err(|_| unavailable())?
+                    & crate::store::publication_certificate::DENIAL
+                    != 0
+                {
+                    return Ok(true);
+                }
+            }
         }
         let requested: BTreeSet<Hash> = ids.iter().copied().collect();
         for manifest in self.manifests {
@@ -349,7 +362,8 @@ impl Target<'_> {
         row: &StoredAction,
     ) -> Result<bool, ServerError> {
         for (n, desc) in row.pages.iter().enumerate() {
-            if self.packs.is_empty()
+            if self.certificate.is_none()
+                && self.packs.is_empty()
                 && self.ids.range(desc.first..=desc.last).next().is_none()
                 && !self
                     .manifests
@@ -536,6 +550,7 @@ pub async fn require_repo_clear<S: NamespaceStore>(
             ids,
             manifests: &[],
             packs: Vec::new(),
+            certificate: None,
         },
     )
     .await
@@ -562,9 +577,39 @@ pub async fn require_repo_clear_budgeted<S: NamespaceStore>(
             ids,
             manifests: &[],
             packs: packs.to_vec(),
+            certificate: None,
         },
     )
     .await
+}
+pub(crate) async fn require_certificate_clear<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    ids: &BTreeSet<Hash>,
+    header: &crate::store::publication_certificate::Header,
+    budget: &SliceBudget,
+) -> Result<(), ServerError> {
+    let result = prove(
+        &Budgeted::new(store, budget),
+        shards,
+        repo,
+        &Target {
+            ids,
+            manifests: &[],
+            packs: Vec::new(),
+            certificate: Some(crate::store::publication_certificate::Root {
+                root: header.root(),
+            }),
+        },
+    )
+    .await;
+    if result.is_err() && budget.remaining() == 0 {
+        return Err(ServerError::resource_exhausted(
+            "publication denial budget exhausted",
+        ));
+    }
+    result
 }
 pub async fn require_object_clear<S: NamespaceStore>(
     store: &S,
@@ -597,6 +642,7 @@ impl ObjectContext {
             ids: &self.ids,
             manifests: &self.manifests,
             packs: Vec::new(),
+            certificate: None,
         }
     }
 }
@@ -740,6 +786,7 @@ async fn require_pack_clear_with_concurrency<S: NamespaceStore>(
         ids: &BTreeSet::from([*pack]),
         manifests: &[],
         packs: vec![*pack],
+        certificate: None,
     };
     prove_shards(&remote, shards, repo, &target, &start, &end, concurrency).await?;
     for id in target.ids {
@@ -887,6 +934,7 @@ mod tests {
                 ids,
                 manifests: &[],
                 packs: Vec::new(),
+                certificate: None,
             },
             &Key::new(INDEX_PREFIX.to_vec()),
             &Key::new(end),

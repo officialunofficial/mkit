@@ -44,6 +44,7 @@ pub(crate) struct PublicationWrite<'a> {
     pub source: &'a crate::Partition,
     pub shards: &'a dyn super::ShardMap,
     pub prepared: Option<&'a Advance>,
+    pub proof: Option<&'a crate::indexed::publication::incremental::Proof>,
 }
 
 pub(crate) fn resulting_pair(
@@ -84,5 +85,17 @@ pub(crate) fn immediate(value: Pair, operation: Hash, additions: Vec<Hash>) -> A
         external_bases: Vec::new(),
         obligations: Vec::new(),
         state: Clearance::Cleared,
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct Prepared {
+    pub advance: Advance,
+    pub proof: crate::indexed::publication::incremental::Proof,
+}
+impl std::ops::Deref for Prepared {
+    type Target = Advance;
+    fn deref(&self) -> &Advance {
+        &self.advance
     }
 }

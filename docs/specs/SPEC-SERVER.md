@@ -1654,8 +1654,16 @@ MUST NOT give it any evidence flag.
 
 A header starts with version byte `1` followed by strict JSON binding the
 repository identity, membership generation, resulting head/packmap pair,
-verification depth limit, and map root. It MUST fit in 16 KiB. The existing
-publication row MAY carry an optional `certificate` digest. The existing
+verification depth limit, map root, and optional `support_root`. The support
+root uses the same radix page format and MUST be the complete exact projection
+of main-root flags 4 and 8, preserving both flags when present. Both roots MUST
+be updated in the same durable checkpoint and bound by the same final header
+and anchor. This structurally shared secondary index permits fresh mutable
+gate checks without enumerating unrelated objects. Old headers lacking this
+index cannot seed an incremental advance and require full verification. A
+retained candidate without this projection MUST NOT clear from the header alone.
+The header MUST fit in 16 KiB. The existing publication row MAY carry an
+optional certificate anchor. The existing
 verification row's publication progress MAY carry the candidate header/root,
 the exact prior published anchor, and bounded continuation state. An anchor
 MUST be written atomically with the corresponding published pair. Preparing a
@@ -1669,7 +1677,15 @@ only through the validated coverage-preserving relationship below. Neither
 may cross repositories or generations, or incompatible depth limits.
 
 Private stored envelopes around the existing public Publication and Advance
-DTOs carry these optional certificate digests; implementations MUST NOT add
+DTOs retain the existing metadata codec byte and MAY carry an optional
+`certificate` JSON member. Its value is a strict object containing
+`certificate` (the header digest as a 32-byte JSON array), `denial` (the
+preparation mode as a boolean), and `custom_policy` (whether clearance requires
+the configured policy callback, as a boolean). The digest is the anchor; neither
+boolean proves clearance. A retained certificate candidate MUST receive a fresh
+denial proof even when its preparation mode was disabled, because configuration
+can change before clearance. Without the current custom-policy callback, a
+custom-policy candidate MUST remain pending. Implementations MUST NOT add
 required Rust fields to those public structs. Every append, clearance, prefix
 movement, deletion, lifecycle invalidation, and late-verdict writer MUST
 preserve the matching evidence or deliberately invalidate it. If prefix
@@ -1719,12 +1735,28 @@ valid without providing a stability token. Such arbitrary policies, current
 denial-directory size, and denied-pack inspection have fresh costs independent
 of the amount of new content; each query still obeys the documented bounds.
 
-**Bounds and structural sharing.** Each map lookup reads at most 33 pages.
+**Bounds and structural sharing.** Each map lookup reads at most 33 pages. A
+lexicographic successor lookup
+reads at most 65 pages (one descent followed by one successor descent); fresh
+support enumeration uses this bounded operation on the support-only index.
+An authenticated immutable page cache MAY be retained in a bounded checkpoint;
+cache hits do not consume storage calls, and cached bytes MUST be reauthenticated
+before use. Mutable membership and policy results MUST NOT be cached across
+slices. Object-provider resolution MUST retain its scan cursor across slices;
+this implementation reads at most one candidate per scan, authenticates its
+index row only after repository and certified support membership qualify it,
+and uses at most 512 scan pages per object search. This candidate bound is
+independent of total reachable history; exhaustion returns `resource_exhausted`.
+A later request after a refused search MUST restart that mutable search so a
+newly available earlier provider is not permanently skipped.
 An insertion changes at most 34 pages and shares all untouched subtrees.
 Compressed branches provide compaction at every insertion: no linear chain of
 advance deltas is permitted. Storage growth per incremental advance is bounded
-by its newly encountered identifiers times 34 pages, plus a bounded header and
-continuation pages; it MUST NOT copy the inherited closure or inventory.
+by 34 pages per changed map insertion (up to 68 when new evidence for one
+identifier changes both indices), plus a bounded header and continuation pages.
+This includes new flags for previously known identifiers, such as a surplus
+denial target becoming reachable. No-op insertions MUST reuse the old root
+without creating pages; it MUST NOT copy the inherited closure or inventory.
 Revalidation of changed packmap coverage may require additional resumable work.
 Every read and page-creation apply MUST debit the existing request or alarm
 allowance exactly once. One page creation uses at most one absent-key guard and
@@ -1761,7 +1793,8 @@ a later plan-time apply.
 Stores written by v0.5.0 require no migration. Absent certificate anchors on
 those rows require full verification through the bounded resumable path before
 the first certificate is published. Inventory entries retain their required
-canonical lengths and sealed packmap facts. Missing, corrupt, unanchored,
+canonical lengths and sealed packmap facts. Missing required inventory facts
+MUST cause an explicit closed refusal. Missing, corrupt, unanchored,
 or incompatible certificates require bounded resumable full verification, or
 an explicit closed refusal. No migration or wire change is required. Optional
 new stored fields MUST decode as absent when missing. Public Rust DTOs and
@@ -4079,6 +4112,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Certificate-backed publication anchors private envelopes, shares the resumable walk across inspection and takedown, uses an exact support projection, and bootstraps stores written by v0.5.0 without changing inventory seals (§10.2a). |
 | 1 | draft | Optional immutable paged publication certificates: exact closure/support and denial targets, structural sharing, bounded lookup and timer continuation, fresh denial queries, migration-free v0.5.0 bootstrap and explicit rollback requirements (§10.2a). |
 | 1 | draft | Namespace-scoped ListRepos authorization with an arbitrary repository selector; authority full listing requires explicit opt-in and writer view (§6.2; STC §7.10). |
 | 1 | draft | Worker launch profile is `LAUNCH_PROFILE=paid-workers`; `uno` remains a deprecated alias with a startup warning. §18 accepts configured cache-purge delivery through the signed HTTPS hook or an embedder-supplied purge sink. |

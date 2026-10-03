@@ -1,4 +1,4 @@
-//! A tiny inspected set must not make a large packmap's dependency fanout free.
+//! Inspected publication resumes its immutable proof without a fixed call ceiling.
 
 use super::*;
 use crate::BlobKey;
@@ -55,7 +55,7 @@ fn fixture(inspecting: bool) -> (Env, Operation, Hash, Arc<Scanner>) {
     let request = indexed::signed(&owner, &identity, Procedure::UpdateRef, 30_000);
     let authenticated = env.auth(&request).unwrap();
     let repo = authenticated.repo().repo.clone();
-    let packs: Vec<_> = (0_u16..1001)
+    let packs: Vec<_> = (0_u16..240)
         .map(|prefix| {
             let mut id = [0; 32];
             id[..2].copy_from_slice(&(prefix << 4).to_be_bytes());
@@ -65,6 +65,31 @@ fn fixture(inspecting: bool) -> (Env, Operation, Hash, Arc<Scanner>) {
     let node = mkit_core::transfer::encode_packlist(None, &packs).unwrap();
     let node_id = hash(&node);
     indexed::upload(&env, &node, [8; 32]);
+    block_on(async {
+        for pack in &packs {
+            crate::takedown::inventory::complete(&env.pipe.meta.inner, pack, 0, T0 as u64)
+                .await
+                .unwrap();
+        }
+        crate::takedown::inventory::stage_packlist(
+            &env.pipe.meta.inner,
+            &node_id,
+            node.len() as u64,
+            None,
+            &packs,
+            T0 as u64,
+        )
+        .await
+        .unwrap();
+        crate::takedown::inventory::complete(
+            &env.pipe.meta.inner,
+            &node_id,
+            node.len() as u64,
+            T0 as u64,
+        )
+        .await
+        .unwrap();
+    });
     let witness = Witness {
         generation: 0,
         sequence: 1,
@@ -127,46 +152,48 @@ fn inspection_pair_budget_includes_dependency_visibility_before_hooks() {
                 source: &source,
                 shards: &D34Shards,
                 prepared: None,
+                proof: None,
             }),
         };
         let mut collected = crate::indexed::inspection::InspectionSet::new(10_000);
         let mut snapshot = None;
-        let before = env.pipe.meta.calls();
-        let result = block_on(env.pipe.prepare_publication(
-            &operation,
-            REPO,
-            &source,
-            &write,
-            &mut snapshot,
-            None,
-            &std::collections::BTreeSet::new(),
-            inspecting.then_some(&mut collected),
-        ));
-        let calls = env.pipe.meta.calls() - before;
-        if inspecting {
-            let error = result.unwrap_err();
-            assert_eq!(error.code(), Code::InvalidArgument);
-            assert_eq!(error.public_message(), "object index limit exceeded");
-            // The one snapshot read is outside the shared allocation; the
-            // MKPL HEAD and GET consume its other two non-metadata calls.
-            assert_eq!(calls + 2 - 1, 256);
-            assert_eq!(scanner.0.load(Ordering::SeqCst), 0);
-            assert!(collected.finalize().is_empty());
-            assert!(env.pipe.meta.batches.lock().unwrap().is_empty());
-        } else {
-            let prepared = result.unwrap().unwrap();
-            assert_eq!(
-                prepared.value,
-                Pair {
-                    head: None,
-                    packmap: Some(node_id)
+        let mut slices = 0;
+        loop {
+            let before = env.pipe.meta.calls();
+            let result = block_on(env.pipe.prepare_publication(
+                &operation,
+                REPO,
+                &source,
+                &write,
+                &mut snapshot,
+                None,
+                &std::collections::BTreeSet::new(),
+                inspecting.then_some(&mut collected),
+            ));
+            slices += 1;
+            match result {
+                Err(error) if error.public_message() == "pack verification pending" => {
+                    // Metadata reads plus page creations share the 128-call slice;
+                    // snapshot/checkpoint settlement remain outside it.
+                    assert!(env.pipe.meta.calls() - before <= 132);
+                    assert_eq!(scanner.0.load(Ordering::SeqCst), 0);
+                    assert!(collected.clone().finalize().is_empty());
                 }
-            );
-            assert_eq!(prepared.dependencies.len(), 1002);
-            assert!(
-                calls > 1000,
-                "disabled behavior retains the original dependency reads"
-            );
+                Ok(Some(prepared)) => {
+                    assert_eq!(
+                        prepared.value,
+                        Pair {
+                            head: None,
+                            packmap: Some(node_id)
+                        }
+                    );
+                    assert!(prepared.state.publishable());
+                    assert!(slices > 1);
+                    break;
+                }
+                other => panic!("valid publication failed: {other:?}"),
+            }
+            assert!(slices < 2000);
         }
     }
 }

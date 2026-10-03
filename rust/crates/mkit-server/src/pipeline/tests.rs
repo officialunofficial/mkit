@@ -10,6 +10,7 @@ mod indexed;
 mod info;
 mod list_repos;
 mod policy;
+mod publication_incremental;
 mod ref_policy;
 #[cfg(feature = "remote-hooks")]
 mod remote_hooks;
@@ -173,6 +174,7 @@ fn planned_ticket_publication(count: usize, d34: bool, retained: bool) -> Batch 
             source: &source,
             shards,
             prepared: Some(&record),
+            proof: None,
         }),
         pending: None,
     };
@@ -5304,6 +5306,7 @@ fn prepared_publication_pair_cannot_survive_a_counterpart_guard_race() {
             source: &source,
             shards: &SinglePartition,
             prepared: Some(&prepared),
+            proof: None,
         }),
     };
     let values = [

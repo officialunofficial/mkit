@@ -11,7 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Server storage supports immutable, content-addressed publication certificate
   and frontier pages, with structural sharing and bounded exact lookups.
-  Stores written by v0.5.0 need no migration. Publication integration follows separately.
+  Stores written by v0.5.0 need no migration.
+
+### Fixed
+
+- Publication verification reuses the last anchored closure instead of walking
+  all history. Takedown, synchronous inspection and custom publication policies
+  share a bounded verifier that resumes through timer 12. Fresh denial queries
+  use immutable certificates and refuse missing or corrupt evidence.
 
 ### Changed
 

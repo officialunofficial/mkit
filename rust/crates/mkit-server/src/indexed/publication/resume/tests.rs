@@ -52,6 +52,7 @@ fn progress(a: &Advance) -> Progress {
         missing: false,
         missing_base: false,
         complete: false,
+        incremental: None,
     }
 }
 async fn facts(kv: &MemoryKv, id: Hash, prev: Option<Hash>) {

@@ -33,6 +33,11 @@ fn corrupt() -> StoreError {
     StoreError::Corrupt("invalid publication certificate".into())
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct Root {
+    pub root: Option<Hash>,
+}
+
 /// A completed immutable proof, only authoritative through its row anchor.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,6 +49,8 @@ pub struct Header {
     pair: super::publication::Pair,
     depth_limit: u32,
     root: Option<Hash>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    support_root: Option<Hash>,
 }
 impl Header {
     /// Construct the proof binding. The caller must first finish all work.
@@ -62,12 +69,20 @@ impl Header {
             pair,
             depth_limit,
             root,
+            support_root: None,
         }
     }
     /// Root used by exact membership and denial queries.
     #[must_use]
     pub fn root(&self) -> Option<Hash> {
         self.root
+    }
+    pub(crate) fn with_support(mut self, root: Option<Hash>) -> Self {
+        self.support_root = root;
+        self
+    }
+    pub(crate) fn support_root(&self) -> Option<Hash> {
+        self.support_root
     }
     /// Whether the exact authoritative binding and verification limit match.
     #[must_use]
@@ -105,6 +120,9 @@ impl Header {
         }
         let header: Self = serde_json::from_slice(&bytes[1..]).map_err(|_| corrupt())?;
         if let Some(root) = header.root {
+            load(store, &root).await?;
+        }
+        if let Some(root) = header.support_root {
             load(store, &root).await?;
         }
         Ok(header)
@@ -303,6 +321,59 @@ pub async fn get<S: NamespaceStore>(
         }
     }
     Err(corrupt())
+}
+
+/// Bounded successor in a support-only index; at most two radix descents.
+pub(crate) async fn next<S: NamespaceStore>(
+    store: &S,
+    root: Option<Hash>,
+    after: Option<Hash>,
+) -> Result<Option<(Hash, u8)>, StoreError> {
+    let Some(root) = root else { return Ok(None) };
+    let mut pending = vec![(root, None, after)];
+    let mut calls = 0;
+    while let Some((digest, parent, after)) = pending.pop() {
+        calls += 1;
+        if calls > 65 {
+            return Err(corrupt());
+        }
+        let node = load(store, &digest).await?;
+        if let Some((parent, label)) = parent {
+            node.below(&parent, label)?;
+        }
+        let after = match after {
+            Some(id) => match node.prefix().cmp(&id[..node.prefix().len()]) {
+                std::cmp::Ordering::Less => continue,
+                std::cmp::Ordering::Greater => None,
+                std::cmp::Ordering::Equal => Some(id),
+            },
+            None => None,
+        };
+        match &node {
+            Node::Leaf { id, flags } => {
+                if after.is_none_or(|after| *id > after) {
+                    return Ok(Some((*id, *flags)));
+                }
+            }
+            Node::Branch {
+                depth, children, ..
+            } => {
+                let lower = after.map_or(0, |id| id[usize::from(*depth)]);
+                let mut choices = children.range(lower..);
+                if let Some((&label, &child)) = choices.next() {
+                    if after.is_some() && label == lower {
+                        if let Some((&label, &child)) = choices.next() {
+                            pending.push((child, Some((node.clone(), label)), None));
+                        }
+                        pending.push((child, Some((node.clone(), label)), after));
+                    } else {
+                        pending.push((child, Some((node.clone(), label)), None));
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Insert flags using path copying. Untouched subtrees and old roots survive.

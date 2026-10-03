@@ -480,12 +480,12 @@ fn valid_private_url_tokens_and_proofs_cannot_expose_pending_content() {
     }
     let req = signed(&fx.owner, &identity, Procedure::AdvanceRefs, fx.number());
     assert_eq!(
-        block_on(fx.pipe.advance_refs_with_tickets(
+        super::super::indexed::complete(|| block_on(fx.pipe.advance_refs_with_tickets(
             &fx.auth(&req),
             upd(HEAD, Missing, d.head()),
             upd(PACKMAP, Missing, hash(&map)),
-            tickets
-        ))
+            tickets.clone()
+        )))
         .unwrap(),
         AdvanceOutcome::Committed
     );

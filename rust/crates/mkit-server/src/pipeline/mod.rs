@@ -537,6 +537,14 @@ fn store_error(op: StorageOp, err: StoreError) -> ServerError {
     err
 }
 
+fn publication_meta_error(err: StoreError) -> ServerError {
+    if crate::indexed::budget::is_exhausted(&err) {
+        ServerError::resource_exhausted("publication verification budget exhausted")
+    } else {
+        meta_error(err)
+    }
+}
+
 fn meta_error(err: StoreError) -> ServerError {
     store_error(StorageOp::MetaCall, err)
 }
@@ -3505,6 +3513,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     source: p,
                     shards: self.shards.as_ref(),
                     prepared: None,
+                    proof: None,
                 },
             ),
             pending,
@@ -3542,7 +3551,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             Err(error) => return Err(error),
         };
         if let Some(publication) = &mut req.publication {
-            publication.prepared = prepared.as_ref();
+            publication.prepared = prepared.as_ref().map(|p| &p.advance);
+            publication.proof = prepared.as_ref().map(|p| &p.proof);
         }
         if caps.atomic_multi_key || replay.is_some() || !charges.is_empty() {
             return self.apply_atomic(op, a, p, &req, ahead).await;
@@ -3621,7 +3631,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         implicit_ids: Option<&[Hash]>,
         external_bases: &std::collections::BTreeSet<Hash>,
         inspected: Option<&mut crate::indexed::inspection::InspectionSet>,
-    ) -> Result<Option<crate::store::publication::Advance>, ServerError> {
+    ) -> Result<Option<clearance::Prepared>, ServerError> {
         #[cfg(not(feature = "remote-hooks"))]
         let _ = repository;
         // Deletions establish an immediate boundary without consulting inspection
@@ -3680,38 +3690,43 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             let verification_set = inspected.as_deref_mut();
             #[cfg(not(feature = "remote-hooks"))]
             let verification_set = inspected;
-            self.verify_publication(
-                op,
-                p,
-                &mut prepared,
-                policy,
-                mkit_attest::grant::head_packmap(&crate::store::publication::sequence_ref(
-                    &req.refs[0].name,
-                ))
-                .is_some(),
-                external_bases,
-                verification_set,
-                req.advance
-                    .as_ref()
-                    .and_then(|a| {
-                        a.ids
-                            .iter()
-                            .filter_map(|id| {
-                                snapshot
-                                    .get(&keys::ticket(id))
-                                    .and_then(|raw| codec::decode_ticket(raw).ok())
-                                    .filter(|t| Some(t.pack_id) == pair.packmap)
-                                    .map(|t| t.created_at_ms)
-                            })
-                            .min()
-                    })
-                    .unwrap_or_else(|| {
-                        op.auth
-                            .as_ref()
-                            .map_or(ms(self.clock.now_ms()), |a| ms(a.created_at_ms))
-                    }),
-            )
-            .await?;
+            let proof = self
+                .verify_publication(
+                    op,
+                    p,
+                    &mut prepared,
+                    policy,
+                    mkit_attest::grant::head_packmap(&crate::store::publication::sequence_ref(
+                        &req.refs[0].name,
+                    ))
+                    .is_some(),
+                    external_bases,
+                    verification_set,
+                    snapshot.get(&keys::publication(
+                        &op.repo.name,
+                        &crate::store::publication::sequence_ref(&req.refs[0].name),
+                    )),
+                    req.advance
+                        .as_ref()
+                        .and_then(|a| {
+                            a.ids
+                                .iter()
+                                .filter_map(|id| {
+                                    snapshot
+                                        .get(&keys::ticket(id))
+                                        .and_then(|raw| codec::decode_ticket(raw).ok())
+                                        .filter(|t| Some(t.pack_id) == pair.packmap)
+                                        .map(|t| t.created_at_ms)
+                                })
+                                .min()
+                        })
+                        .unwrap_or_else(|| {
+                            op.auth
+                                .as_ref()
+                                .map_or(ms(self.clock.now_ms()), |a| ms(a.created_at_ms))
+                        }),
+                )
+                .await?;
             #[cfg(feature = "remote-hooks")]
             if let Some(set) = inspected {
                 let assignment = if self.cfg.scanner_retrieval.is_some() {
@@ -3733,7 +3748,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 )
                 .await?;
             }
-            Ok(Some(prepared))
+            Ok(Some(clearance::Prepared {
+                advance: prepared,
+                proof,
+            }))
         } else {
             Ok(None)
         }
@@ -3748,115 +3766,66 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         policy: &dyn clearance::PublicationPolicy,
         branch: bool,
         external_bases: &std::collections::BTreeSet<Hash>,
-        mut inspected: Option<&mut crate::indexed::inspection::InspectionSet>,
-        created: u64,
-    ) -> Result<(), ServerError> {
+        inspected: Option<&mut crate::indexed::inspection::InspectionSet>,
+        prior: Option<&Value>,
+        _created: u64,
+    ) -> Result<crate::indexed::publication::incremental::Proof, ServerError> {
         let indexed = self
             .cfg
             .indexed
             .ok_or_else(|| internal("publication requires indexed mode"))?;
-        let resumed = self.cfg.takedown_denial
-            && self.publication_policy.is_none()
-            && inspected.is_none()
-            && Box::pin(crate::indexed::publication::resume::prepare(
-                &self.meta,
-                p,
-                self.shards.as_ref(),
-                &op.repo,
-                prepared,
-                indexed,
-                ms(self.clock.now_ms()),
-                self.metrics.as_ref(),
-                created,
-            ))
-            .await?;
-        // The canonical fallback retains delta bases; only the metadata-only
-        // continuation can use the whole-job allowance without that residency.
-        let mut indexed = indexed;
-        if self.cfg.takedown_denial && !resumed {
-            indexed.decode_budget = indexed.decode_budget.min(8 << 20);
+        if branch && prepared.value.head.is_some() && prepared.value.packmap.is_none() {
+            return Err(ServerError::invalid_argument("open closure"));
         }
-        // Pair verification and dependency visibility share one allocation.
-        let inspection_budget = crate::indexed::budget::SliceBudget::new(256);
-        let inspection_blobs =
-            crate::indexed::budget::Budgeted::new(&self.blobs, &inspection_budget);
-        let inspection_meta = crate::indexed::budget::Budgeted::new(&self.meta, &inspection_budget);
-        if let Some(set) = inspected.as_deref_mut() {
-            crate::indexed::publication::verify_inspected(
-                &inspection_blobs,
-                &inspection_meta,
-                self.shards.as_ref(),
-                &op.repo,
-                &prepared.value.clone(),
-                branch,
-                prepared,
-                policy,
-                indexed,
-                self.metrics.as_ref(),
-                set,
-            )
-            .await?;
-        } else if !resumed {
-            crate::indexed::publication::verify(
-                &self.blobs,
-                &self.meta,
-                self.shards.as_ref(),
-                &op.repo,
-                &prepared.value.clone(),
-                branch,
-                prepared,
-                policy,
-                indexed,
-                self.metrics.as_ref(),
-            )
-            .await?;
-        }
-        prepared.external_bases = prepared
-            .external_bases
-            .iter()
-            .copied()
-            .chain(external_bases.iter().copied())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        if prepared.external_bases.len() > crate::store::publication::MAX_ADVANCE_ITEMS {
-            return Err(ServerError::invalid_argument("object index limit exceeded"));
-        }
-        if prepared.state.publishable() {
-            let visible = if inspected.is_some() {
-                crate::timers::publication_recheck::dependencies(
-                    &inspection_meta,
-                    &inspection_meta,
-                    p,
-                    self.shards.as_ref(),
-                    &op.repo,
-                    prepared,
-                )
+        let proof = crate::indexed::publication::incremental::prepare(
+            &self.blobs,
+            &self.meta,
+            p,
+            self.shards.as_ref(),
+            &op.repo,
+            prepared,
+            prior,
+            indexed,
+            ms(self.clock.now_ms()),
+            self.cfg.takedown_denial,
+            self.publication_policy.is_some(),
+            self.metrics.as_ref(),
+        )
+        .await?;
+        prepared.external_bases = external_bases.iter().copied().collect();
+        let budget = crate::indexed::budget::SliceBudget::new(9000);
+        let meta = crate::indexed::budget::Budgeted::new(&self.meta, &budget);
+        let header =
+            crate::store::publication_certificate::Header::read(&meta, &proof.evidence.certificate)
                 .await
-                .map_err(|error| {
-                    if crate::indexed::budget::is_exhausted(&error) {
-                        ServerError::invalid_argument("object index limit exceeded")
-                    } else {
-                        meta_error(error)
-                    }
-                })?
+                .map_err(publication_meta_error)?;
+        let visible = crate::indexed::publication::incremental::support_clear(
+            &meta,
+            p,
+            self.shards.as_ref(),
+            &op.repo,
+            prepared,
+            &header,
+            policy,
+        )
+        .await
+        .map_err(|e| {
+            if crate::indexed::budget::is_exhausted(&e) {
+                ServerError::resource_exhausted("publication verification budget exhausted")
             } else {
-                crate::timers::publication_recheck::dependencies(
-                    &self.meta,
-                    &self.meta,
-                    p,
-                    self.shards.as_ref(),
-                    &op.repo,
-                    prepared,
-                )
-                .await
-                .map_err(meta_error)?
-            };
-            if !visible {
-                prepared.state = crate::store::publication::Clearance::Pending;
+                meta_error(e)
             }
+        })?;
+        if !visible {
+            if self.publication_policy.is_some() {
+                return Err(crate::indexed::pending(1_000));
+            }
+            prepared.state = crate::store::publication::Clearance::Pending;
         }
-        Ok(())
+        if let Some(set) = inspected {
+            set.complete_added(&self.meta, &op.repo).await?;
+        }
+        Ok(proof)
     }
 
     /// [`Self::apply_loop`] on a store with atomic multi-key batches, which
@@ -3904,6 +3873,52 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let mut first_attempt = true;
         let denial_budget = crate::indexed::budget::SliceBudget::new(9000);
         loop {
+            let certificate = if let Some(publication) = &req.publication
+                && let (Some(advance), Some(proof)) = (publication.prepared, publication.proof)
+            {
+                let meta = crate::indexed::budget::Budgeted::new(&self.meta, &denial_budget);
+                let header = crate::store::publication_certificate::Header::read(
+                    &meta,
+                    &proof.evidence.certificate,
+                )
+                .await
+                .map_err(publication_meta_error)?;
+                if !header.matches(
+                    &op.repo,
+                    advance.generation,
+                    &advance.value,
+                    self.cfg
+                        .indexed
+                        .ok_or_else(|| internal("publication requires indexed mode"))?
+                        .max_delta_chain_depth,
+                ) {
+                    return Err(ServerError::unavailable(
+                        "publication certificate binding changed",
+                    ));
+                }
+                let policy = self
+                    .publication_policy
+                    .as_deref()
+                    .unwrap_or(&clearance::Immediate);
+                if !crate::indexed::publication::incremental::support_clear(
+                    &meta,
+                    p,
+                    self.shards.as_ref(),
+                    &op.repo,
+                    advance,
+                    &header,
+                    policy,
+                )
+                .await
+                .map_err(publication_meta_error)?
+                    && advance.state.publishable()
+                {
+                    return Err(crate::indexed::pending(1_000));
+                }
+                Some(header)
+            } else {
+                None
+            };
             let denial_packs: Vec<_> = req
                 .denial_packs
                 .iter()
@@ -3916,22 +3931,37 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .copied()
                 .collect();
             let prove = self.cfg.takedown_denial
-                && req
-                    .denial_ids
-                    .is_some_and(|ids| !ids.is_empty() || !denial_packs.is_empty());
+                && (certificate.is_some()
+                    || req
+                        .denial_ids
+                        .is_some_and(|ids| !ids.is_empty() || !denial_packs.is_empty()));
             // Every gating denial read is at/after this attempt's plan time
             // (SPEC-SERVER §14.2). Slow proof cannot borrow a new commit window.
             let proof_plan_time = prove.then(|| ms(self.clock.now_ms()));
-            if let Some(ids) = req.denial_ids.filter(|_| prove) {
-                crate::takedown::denial::require_repo_clear_budgeted(
-                    &self.meta,
-                    self.shards.as_ref(),
-                    &op.repo,
-                    ids,
-                    &denial_packs,
-                    &denial_budget,
-                )
-                .await?;
+            let empty_denial_ids = std::collections::BTreeSet::new();
+            if prove {
+                let ids = req.denial_ids.unwrap_or(&empty_denial_ids);
+                if let Some(header) = &certificate {
+                    crate::takedown::denial::require_certificate_clear(
+                        &self.meta,
+                        self.shards.as_ref(),
+                        &op.repo,
+                        ids,
+                        header,
+                        &denial_budget,
+                    )
+                    .await?;
+                } else {
+                    crate::takedown::denial::require_repo_clear_budgeted(
+                        &self.meta,
+                        self.shards.as_ref(),
+                        &op.repo,
+                        ids,
+                        &denial_packs,
+                        &denial_budget,
+                    )
+                    .await?;
+                }
             }
             // A complete proof can outlive both the commit window and the
             // initial lease. Only fixed admission quota facts survive it;
@@ -3966,6 +3996,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 // Keep fresh business time and current lease/replay caps; only
                 // the denial attempt's original plan time remains immutable.
                 clock.plan_time_ms = plan_time;
+            }
+            if let Some(publication) = &req.publication
+                && let Some(proof) = publication.proof
+            {
+                let name = crate::store::publication::sequence_ref(&req.refs[0].name);
+                if snap.get(&keys::publication(&op.repo.name, &name)) != proof.prior.as_ref() {
+                    return Err(ServerError::unavailable("publication seed changed; retry"));
+                }
             }
             let plan = match plan_write(&req, &snap, &clock)? {
                 Planned::Done(result) => return Ok(result),

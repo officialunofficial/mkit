@@ -96,12 +96,15 @@ fn advance(
     nonce: u32,
 ) -> (Req, Result<AdvanceOutcome, ServerError>) {
     let request = signed(owner, identity, Procedure::AdvanceRefs, nonce);
-    let result = block_on(env.pipe.advance_refs_with_tickets(
-        &env.auth(&request).unwrap(),
-        upd(HEAD, Missing, head),
-        upd(PACKMAP, Missing, hash(bytes)),
-        tickets,
-    ));
+    let result = complete(|| {
+        block_on(env.pipe.advance_refs_with_tickets(
+            &env.auth(&request).unwrap(),
+            upd(HEAD, Missing, head),
+            upd(PACKMAP, Missing, hash(bytes)),
+            tickets.clone(),
+        ))
+    });
+    drop(tickets);
     (request, result)
 }
 
@@ -526,12 +529,12 @@ fn exactly_ten_thousand_distinct_file_objects_are_inspected_and_accepted() {
     ];
     let request = signed(&owner, &identity, Procedure::AdvanceRefs, 10705);
     assert_eq!(
-        block_on(env.pipe.advance_refs_with_tickets(
+        complete(|| block_on(env.pipe.advance_refs_with_tickets(
             &env.auth(&request).unwrap(),
             upd(HEAD, Match(head), head),
             upd(PACKMAP, Match(hash(&initial_map)), hash(&added_map)),
-            tickets,
-        ))
+            tickets.clone(),
+        )))
         .unwrap(),
         AdvanceOutcome::Committed
     );

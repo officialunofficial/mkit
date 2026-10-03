@@ -25,10 +25,11 @@ pub struct PublicationRecheck<T> {
 }
 
 /// A recheck sharing its caller's whole-alarm allowance.
-#[derive(Debug)]
 pub struct BudgetedRecheck<T> {
     recheck: PublicationRecheck<T>,
     budget: crate::purge::SliceBudget,
+    policy: Option<std::sync::Arc<dyn crate::pipeline::clearance::PublicationPolicy>>,
+    depth: u32,
 }
 
 impl<T> PublicationRecheck<T> {
@@ -44,7 +45,31 @@ impl<T> PublicationRecheck<T> {
         BudgetedRecheck {
             recheck: self,
             budget,
+            policy: None,
+            depth: crate::indexed::IndexedConfig::default().max_delta_chain_depth,
         }
+    }
+}
+
+impl<T> BudgetedRecheck<T> {
+    /// Supply the current policy and depth limit for fresh certificate clearance.
+    /// Without this callback, custom-policy candidates remain pending.
+    #[must_use]
+    pub fn with_publication_policy(
+        mut self,
+        policy: std::sync::Arc<dyn crate::pipeline::clearance::PublicationPolicy>,
+        max_delta_chain_depth: u32,
+    ) -> Self {
+        self.policy = Some(policy);
+        self.depth = max_delta_chain_depth;
+        self
+    }
+}
+impl<T> core::fmt::Debug for BudgetedRecheck<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BudgetedRecheck")
+            .field("depth", &self.depth)
+            .finish_non_exhaustive()
     }
 }
 
@@ -308,7 +333,13 @@ impl<S: NamespaceStore, T: NamespaceStore> TimerHandler<S> for PublicationRechec
         ctx: &'a TimerCtx<'a, S>,
         timer: &'a DueTimer,
     ) -> BoxFuture<'a, Result<Fired, StoreError>> {
-        self.fire_inner(ctx, timer, None)
+        self.fire_inner(
+            ctx,
+            timer,
+            None,
+            None,
+            crate::indexed::IndexedConfig::default().max_delta_chain_depth,
+        )
     }
 }
 
@@ -324,7 +355,13 @@ impl<S: NamespaceStore, T: NamespaceStore> TimerHandler<S> for BudgetedRecheck<T
         ctx: &'a TimerCtx<'a, S>,
         timer: &'a DueTimer,
     ) -> BoxFuture<'a, Result<Fired, StoreError>> {
-        self.recheck.fire_inner(ctx, timer, Some(&self.budget))
+        self.recheck.fire_inner(
+            ctx,
+            timer,
+            Some(&self.budget),
+            self.policy.as_deref(),
+            self.depth,
+        )
     }
 }
 
@@ -335,6 +372,8 @@ impl<T: NamespaceStore> PublicationRecheck<T> {
         ctx: &'a TimerCtx<'a, S>,
         timer: &'a DueTimer,
         alarm_budget: Option<&'a crate::purge::SliceBudget>,
+        policy: Option<&'a dyn crate::pipeline::clearance::PublicationPolicy>,
+        depth: u32,
     ) -> BoxFuture<'a, Result<Fired, StoreError>> {
         Box::pin(async move {
             if matches!(
@@ -365,7 +404,7 @@ impl<T: NamespaceStore> PublicationRecheck<T> {
             let raw = rows[0]
                 .as_ref()
                 .ok_or_else(|| StoreError::Corrupt("missing retained publication work".into()))?;
-            let mut changed = Advance::decode(raw)?;
+            let (mut changed, evidence) = publication::decode_advance(raw)?;
             let state_raw = rows[1]
                 .as_ref()
                 .ok_or_else(|| StoreError::Corrupt("missing publication state".into()))?;
@@ -381,21 +420,40 @@ impl<T: NamespaceStore> PublicationRecheck<T> {
             let eligible = changed.generation == state.generation
                 && (changed.state == Clearance::Pending || changed.state.publishable())
                 && changed.obligations.iter().all(|o| o.state.publishable());
+            let certificate_budget = crate::indexed::budget::SliceBudget::new(MAX_RECHECK_CALLS);
             let complete = if eligible {
-                resume_dependencies(
-                    ctx.store,
-                    &self.target,
-                    ctx.partition,
-                    shards,
-                    &repo,
-                    &changed,
-                    &mut progress,
-                    alarm_budget,
-                )
-                .await?
+                if let Some(evidence) = &evidence {
+                    if evidence.custom_policy && policy.is_none() {
+                        false
+                    } else {
+                        certificate_clear(
+                            &self.target,
+                            ctx.partition,
+                            shards,
+                            &repo,
+                            &changed,
+                            evidence,
+                            &certificate_budget,
+                            alarm_budget,
+                            policy,
+                            depth,
+                        )
+                        .await?
+                    }
+                } else {
+                    resume_dependencies(
+                        ctx.store,
+                        &self.target,
+                        ctx.partition,
+                        shards,
+                        &repo,
+                        &changed,
+                        &mut progress,
+                        alarm_budget,
+                    )
+                    .await?
+                }
             } else {
-                // A hold/hit or outstanding obligation never becomes cleared by
-                // the timer. If it is later released, check every witness afresh.
                 progress.position = 0;
                 false
             };
@@ -414,7 +472,7 @@ impl<T: NamespaceStore> PublicationRecheck<T> {
                 return Ok(Fired::Done(batch));
             }
             changed.state = Clearance::Cleared;
-            let eligible = publication::prefix(
+            let (eligible, eligible_evidence, prefix_guards) = publication::prefix_evidenced(
                 ctx.store,
                 ctx.partition,
                 &repo.name,
@@ -423,8 +481,40 @@ impl<T: NamespaceStore> PublicationRecheck<T> {
                 &changed,
             )
             .await?;
+            if let Some(candidate) = &eligible_evidence
+                && (evidence.as_ref() != Some(candidate) || eligible.1 != changed.value)
+            {
+                let mut projected = changed.clone();
+                projected.value = eligible.1.clone();
+                projected.additions.clear();
+                if candidate.custom_policy && policy.is_none()
+                    || !certificate_clear(
+                        &self.target,
+                        ctx.partition,
+                        shards,
+                        &repo,
+                        &projected,
+                        candidate,
+                        &certificate_budget,
+                        alarm_budget,
+                        policy,
+                        depth,
+                    )
+                    .await?
+                {
+                    batch.preconditions.extend([
+                        Precondition::Equals(key, raw.clone()),
+                        Precondition::Equals(wanted[1].clone(), state_raw.clone()),
+                    ]);
+                    return Ok(Fired::Reschedule {
+                        due_at_ms: ctx.now_ms.saturating_add(publication::RECHECK_MS),
+                        value: progress.encode(),
+                        batch,
+                    });
+                }
+            }
             let mut outbox = OutboxBuilder::new(rows[2].as_ref(), rows[3].as_ref())?;
-            publication::clear(
+            publication::clear_evidenced(
                 &repo,
                 &name,
                 ctx.partition,
@@ -433,14 +523,79 @@ impl<T: NamespaceStore> PublicationRecheck<T> {
                 raw,
                 &changed,
                 eligible,
+                eligible_evidence,
                 &mut batch.preconditions,
                 &mut batch.writes,
                 &mut outbox,
             )?;
+            for guard in prefix_guards {
+                if !batch.preconditions.contains(&guard) {
+                    batch.preconditions.push(guard);
+                }
+            }
             outbox.relay_at(ctx.now_ms);
             outbox.try_finish(&mut batch.preconditions, &mut batch.writes)?;
             Ok(Fired::Done(batch))
         })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn certificate_clear<S: NamespaceStore>(
+    store: &S,
+    source: &Partition,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    advance: &Advance,
+    evidence: &publication::Evidence,
+    budget: &crate::indexed::budget::SliceBudget,
+    alarm: Option<&crate::purge::SliceBudget>,
+    policy: Option<&dyn crate::pipeline::clearance::PublicationPolicy>,
+    depth: u32,
+) -> Result<bool, StoreError> {
+    let remote = crate::indexed::publication::incremental::charged(store, budget, alarm);
+    let check = async {
+        let header =
+            crate::store::publication_certificate::Header::read(&remote, &evidence.certificate)
+                .await?;
+        if !header.matches(repo, advance.generation, &advance.value, depth) {
+            return Err(StoreError::Corrupt(
+                "publication candidate binding mismatch".into(),
+            ));
+        }
+        if !crate::indexed::publication::incremental::support_clear(
+            &remote,
+            source,
+            shards,
+            repo,
+            advance,
+            &header,
+            policy.unwrap_or(&crate::pipeline::clearance::Immediate),
+        )
+        .await?
+        {
+            return Ok(false);
+        }
+        // A retained candidate can outlive the configuration that prepared it.
+        // The complete denial target index supports a fresh proof in either mode.
+        crate::takedown::denial::require_certificate_clear(
+            &remote,
+            shards,
+            repo,
+            &std::collections::BTreeSet::new(),
+            &header,
+            &crate::indexed::budget::SliceBudget::new(MAX_RECHECK_CALLS),
+        )
+        .await
+        .map_err(|_| StoreError::unavailable("publication denial recheck refused"))?;
+
+        Ok(true)
+    }
+    .await;
+    match check {
+        Err(_) if budget.remaining() == 0 => Ok(false),
+        Err(StoreError::Unavailable(_)) => Ok(false),
+        other => other,
     }
 }
 

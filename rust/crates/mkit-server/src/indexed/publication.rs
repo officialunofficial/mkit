@@ -1,4 +1,5 @@
 //! Verify the complete resulting pair, independently of inspector verdicts.
+pub(crate) mod incremental;
 pub mod resume;
 use super::{IndexedConfig, resolve};
 use crate::ServerError;
@@ -34,22 +35,32 @@ struct PairStore<'a, S> {
     additions: &'a [Hash],
     packs: Option<&'a BTreeSet<Hash>>,
     policy: &'a dyn PublicationPolicy,
+    certificate: Option<store::publication_certificate::Root>,
 }
 impl<S: NamespaceStore> PairStore<'_, S> {
-    fn member(&self, key: &Key, value: Option<Value>) -> Option<Value> {
+    async fn member(&self, key: &Key, value: Option<Value>) -> Result<Option<Value>, StoreError> {
         if let Some(keys::ParsedKey::Membership { repo, pack_id }) = keys::parse(key) {
             if repo != self.repo.name
                 || !self.policy.pack_available(self.repo, &pack_id)
                 || self.packs.is_some_and(|packs| !packs.contains(&pack_id))
             {
-                return None;
+                return Ok(None);
+            }
+            if let Some(store::publication_certificate::Root { root }) = self.certificate
+                && store::publication_certificate::get(self.store, root, &pack_id).await?
+                    & store::publication_certificate::SUPPORT
+                    == 0
+            {
+                return Ok(None);
             }
             if self.additions.contains(&pack_id) {
-                return Some(Value::default());
+                return Ok(Some(Value::default()));
             }
-            return value.filter(|v| store::publication::Witness::decode(v).is_ok_and(|w| !w.held));
+            return Ok(
+                value.filter(|v| store::publication::Witness::decode(v).is_ok_and(|w| !w.held))
+            );
         }
-        value
+        Ok(value)
     }
 }
 impl<S: NamespaceStore> NamespaceStore for PairStore<'_, S> {
@@ -63,7 +74,7 @@ impl<S: NamespaceStore> NamespaceStore for PairStore<'_, S> {
         {
             store::publication::Witness::decode(raw)?;
         }
-        Ok(self.member(k, row))
+        self.member(k, row).await
     }
     async fn get_many(
         &self,
@@ -84,11 +95,11 @@ impl<S: NamespaceStore> NamespaceStore for PairStore<'_, S> {
                 store::publication::Witness::decode(raw)?;
             }
         }
-        Ok(keys
-            .iter()
-            .zip(rows)
-            .map(|(k, v)| self.member(k, v))
-            .collect())
+        let mut result = Vec::with_capacity(keys.len());
+        for (key, row) in keys.iter().zip(rows) {
+            result.push(self.member(key, row).await?);
+        }
+        Ok(result)
     }
     async fn scan(
         &self,
@@ -197,6 +208,7 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
         additions: &advance.additions,
         packs: None,
         policy,
+        certificate: None,
     };
     let mut chain = BTreeSet::new();
     let mut packs = BTreeSet::new();
@@ -232,6 +244,7 @@ async fn verify_inner<B: BlobStore, S: NamespaceStore>(
         additions: &advance.additions,
         packs: restricted.then_some(&packs),
         policy,
+        certificate: None,
     };
     let mut queue = VecDeque::from_iter(value.head);
     let mut visited = BTreeSet::new();

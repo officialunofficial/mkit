@@ -17,6 +17,7 @@ pub const SCAN_ROWS: u32 = 8;
 pub struct Entry {
     pub version: u8,
     pub kind: u8,
+    #[serde(default)]
     pub canonical_len: u64,
     pub logical_len: Option<u64>,
     pub base: Option<Hash>,
@@ -116,6 +117,12 @@ pub(crate) async fn packlist_facts<S: NamespaceStore>(
     store: &S,
     pack: &Hash,
 ) -> Result<(u64, Option<Hash>, Vec<Hash>), StoreError> {
+    packlist_known(store, pack).await?.ok_or_else(bad)
+}
+pub(crate) async fn packlist_known<S: NamespaceStore>(
+    store: &S,
+    pack: &Hash,
+) -> Result<Option<(u64, Option<Hash>, Vec<Hash>)>, StoreError> {
     let raw = store
         .get(&content_shard(pack), &head_key(pack))
         .await?
@@ -124,13 +131,15 @@ pub(crate) async fn packlist_facts<S: NamespaceStore>(
     if head.version != 1 || !head.complete {
         return Err(bad());
     }
-    let facts = head.packlist.ok_or_else(bad)?;
+    let Some(facts) = head.packlist else {
+        return Ok(None);
+    };
     if facts.packs.len()
         > crate::store::index::MAX_LOOKUP_IDS + crate::store::outbox::MAX_TICKETS_PER_ADVANCE
     {
         return Err(bad());
     }
-    Ok((head.length, facts.prev, facts.packs))
+    Ok(Some((head.length, facts.prev, facts.packs)))
 }
 #[must_use]
 pub fn entry_key(pack: &Hash, id: &Hash) -> Key {
@@ -181,9 +190,9 @@ fn add_digest(digest: &mut Hash, id: &Hash, row: &Value) {
     }
 }
 /// A bounded inventory traversal whose aggregate is checked against the seal.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct InventoryCursor {
+pub(crate) struct InventoryCursor {
     after: Option<Vec<u8>>,
     count: u64,
     digest: Hash,
@@ -201,10 +210,25 @@ pub(super) async fn has_seal<S: NamespaceStore>(
     }
     Ok(true)
 }
-pub(super) async fn next<S: NamespaceStore>(
+pub(crate) async fn next<S: NamespaceStore>(
+    store: &S,
+    pack: &Hash,
+    state: InventoryCursor,
+) -> Result<(InventoryCursor, Vec<(Hash, Entry)>, bool), StoreError> {
+    next_page(store, pack, state, SCAN_ROWS).await
+}
+pub(crate) async fn next_one<S: NamespaceStore>(
+    store: &S,
+    pack: &Hash,
+    state: InventoryCursor,
+) -> Result<(InventoryCursor, Vec<(Hash, Entry)>, bool), StoreError> {
+    next_page(store, pack, state, 1).await
+}
+async fn next_page<S: NamespaceStore>(
     store: &S,
     pack: &Hash,
     mut state: InventoryCursor,
+    limit: u32,
 ) -> Result<(InventoryCursor, Vec<(Hash, Entry)>, bool), StoreError> {
     let raw = store
         .get(&content_shard(pack), &head_key(pack))
@@ -224,7 +248,7 @@ pub(super) async fn next<S: NamespaceStore>(
             &start,
             &Key::new(end),
             after.as_ref(),
-            SCAN_ROWS,
+            limit,
         )
         .await?;
     let mut entries = Vec::new();
@@ -458,6 +482,20 @@ pub async fn complete<S: NamespaceStore>(
     }
     Ok(())
 }
+pub(crate) async fn sealed_length<S: NamespaceStore>(
+    store: &S,
+    pack: &Hash,
+) -> Result<u64, StoreError> {
+    let raw = store
+        .get(&content_shard(pack), &head_key(pack))
+        .await?
+        .ok_or_else(bad)?;
+    let head: Head = decode(&raw)?;
+    if head.version != 1 || !head.complete {
+        return Err(bad());
+    }
+    Ok(head.length)
+}
 pub async fn seal<S: NamespaceStore>(store: &S, pack: &Hash) -> Result<Hash, StoreError> {
     let raw = store
         .get(&content_shard(pack), &head_key(pack))
@@ -470,6 +508,18 @@ pub async fn seal<S: NamespaceStore>(store: &S, pack: &Hash) -> Result<Hash, Sto
     Ok(mkit_core::hash::hash(raw.as_bytes()))
 }
 pub async fn entry<S: NamespaceStore>(
+    store: &S,
+    pack: &Hash,
+    id: &Hash,
+) -> Result<Option<Entry>, StoreError> {
+    let row = facts_entry(store, pack, id).await?;
+    if let Some(row) = &row {
+        row.validate()?;
+    }
+    Ok(row)
+}
+
+pub(crate) async fn facts_entry<S: NamespaceStore>(
     store: &S,
     pack: &Hash,
     id: &Hash,
@@ -491,7 +541,10 @@ pub async fn entry<S: NamespaceStore>(
     }
     let row: Option<Entry> = raw.map(decode).transpose()?;
     if let Some(row) = &row {
-        row.validate()?;
+        if row.version != 1 || row.kind > 7 {
+            return Err(bad());
+        }
+        denial::encode_actions(vec![row.references.clone()])?;
     }
     Ok(row)
 }

@@ -57,6 +57,15 @@ pub(super) fn environment_with_policy(
 }
 
 pub(super) fn signed(owner: &SigningKey, identity: &str, procedure: Procedure, number: u32) -> Req {
+    signed_at(owner, identity, procedure, number, T0)
+}
+pub(super) fn signed_at(
+    owner: &SigningKey,
+    identity: &str,
+    procedure: Procedure,
+    number: u32,
+    now: i64,
+) -> Req {
     let body = b"indexed-pipeline".to_vec();
     let digest = to_hex(&hash(&body));
     let commitment = format!("body:{digest}");
@@ -68,8 +77,8 @@ pub(super) fn signed(owner: &SigningKey, identity: &str, procedure: Procedure, n
         },
         procedure: procedure.connect_path(),
         commitment: &commitment,
-        created_at: T0,
-        expires_at: T0 + 300_000,
+        created_at: now,
+        expires_at: now + 300_000,
         nonce: &nonce,
     };
     let signature = owner.sign(&envelope.digest().unwrap());
@@ -83,8 +92,8 @@ pub(super) fn signed(owner: &SigningKey, identity: &str, procedure: Procedure, n
         ("x-signature", to_hex_bytes(&signature.to_bytes())),
         ("x-content-commitment", commitment),
         ("x-digest", digest),
-        ("x-created-at", T0.to_string()),
-        ("x-expires-at", (T0 + 300_000).to_string()),
+        ("x-created-at", now.to_string()),
+        ("x-expires-at", (now + 300_000).to_string()),
         ("idempotency-key", nonce),
     ] {
         request = request.header(name, &value);
@@ -1704,11 +1713,13 @@ fn ticketless_reuse_rechecks_file_in_another_source_pack_with_and_without_policy
             let reuse = env
                 .auth(&signed(&owner, &identity, Procedure::AdvanceRefs, 9884))
                 .unwrap();
-            let error = block_on(env.pipe.advance_refs(
-                &reuse,
-                upd("refs/heads/reuse", Missing, head),
-                upd("refs/mkit/packmap/reuse", Missing, map),
-            ))
+            let error = complete(|| {
+                block_on(env.pipe.advance_refs(
+                    &reuse,
+                    upd("refs/heads/reuse", Missing, head),
+                    upd("refs/mkit/packmap/reuse", Missing, map),
+                ))
+            })
             .expect_err("ticketless reuse published a blocked file from another source pack");
             assert_eq!(
                 error.code(),
@@ -1790,4 +1801,21 @@ fn lower_pack_cap_after_restart_preserves_exact_error_for_verified_native_pack()
         "pack exceeds indexed max_pack_bytes"
     );
     assert_advance_unmoved(&env, &repo, &[pack_id]);
+}
+
+pub(super) fn complete<T, F>(mut attempt: F) -> Result<T, ServerError>
+where
+    F: FnMut() -> Result<T, ServerError>,
+{
+    for _ in 0..20_000 {
+        let result = attempt();
+        if result
+            .as_ref()
+            .is_err_and(|e| e.public_message() == "pack verification pending")
+        {
+            continue;
+        }
+        return result;
+    }
+    panic!("bounded publication continuations must finish");
 }

@@ -142,7 +142,10 @@ pub struct Publication {
 impl Publication {
     /// Decode persistent state; absence is the only initial state.
     pub fn decode(value: Option<&Value>) -> Result<Self, StoreError> {
-        let row: Self = value.map(decode).transpose()?.unwrap_or_default();
+        let row: Self = value
+            .map(|v| stored(v).and_then(|(v, _)| decode(&v)))
+            .transpose()?
+            .unwrap_or_default();
         if row.boundary > row.published || row.published > row.sequence {
             return Err(StoreError::Corrupt("invalid publication prefix".into()));
         }
@@ -263,14 +266,37 @@ pub fn append(
     source: &Partition,
     shards: &dyn ShardMap,
     prior: Option<&Value>,
-    mut advance: Advance,
+    advance: Advance,
     deleted: bool,
     pre: &mut Vec<Precondition>,
     writes: &mut Vec<Write>,
     outbox: &mut OutboxBuilder,
 ) -> Result<Publication, StoreError> {
+    append_evidenced(
+        repo, name, source, shards, prior, advance, deleted, None, pre, writes, outbox,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn append_evidenced(
+    repo: &RepoId,
+    name: &str,
+    source: &Partition,
+    shards: &dyn ShardMap,
+    prior: Option<&Value>,
+    mut advance: Advance,
+    deleted: bool,
+    evidence: Option<&Evidence>,
+    pre: &mut Vec<Precondition>,
+    writes: &mut Vec<Write>,
+    outbox: &mut OutboxBuilder,
+) -> Result<Publication, StoreError> {
     let name = sequence_ref(name);
+    let mut anchor = prior.map(stored).transpose()?.and_then(|(_, e)| e);
     let mut state = Publication::decode(prior)?;
+    if evidence.is_some() && advance.generation != state.generation {
+        return Err(StoreError::unavailable("publication generation changed"));
+    }
     if !deleted && state.sequence - state.published >= MAX_UNPUBLISHED_ADVANCES {
         return Err(StoreError::unavailable("publication backlog full"));
     }
@@ -297,6 +323,7 @@ pub fn append(
     let key = keys::publication(&repo.name, &name);
     pre.push(guard(key.clone(), prior));
     if deleted {
+        anchor = None;
         state.boundary = state.sequence;
         state.published = state.sequence;
         // A partial deletion removes its component immediately, but must not
@@ -309,6 +336,7 @@ pub fn append(
     } else if advance.state.publishable() && state.published + 1 == state.sequence {
         state.published = state.sequence;
         state.value = advance.value.clone();
+        anchor = evidence.cloned();
         project_refs(repo, &name, source, shards, &state.value, writes, outbox);
     }
     // Completed obligation-free values need no retained work once the prefix
@@ -316,11 +344,14 @@ pub fn append(
     if advance.sequence > state.published || !advance.obligations.is_empty() {
         writes.push(Write::Put(
             keys::advance(&repo.name, &name, advance.sequence),
-            advance.encode()?,
+            evidenced(advance.encode()?, evidence)?,
         ));
     }
     project_members(repo, source, shards, &advance, writes, outbox);
-    writes.push(Write::Put(key, state.encode()?));
+    writes.push(Write::Put(
+        key,
+        evidenced(state.encode()?, anchor.as_ref())?,
+    ));
     Ok(state)
 }
 
@@ -405,13 +436,26 @@ pub async fn prefix<S: NamespaceStore>(
     state: &Publication,
     changed: &Advance,
 ) -> Result<(u64, Pair), StoreError> {
+    prefix_evidenced(store, source, repo, name, state, changed)
+        .await
+        .map(|(pair, _, _)| pair)
+}
+
+pub(crate) async fn prefix_evidenced<S: NamespaceStore>(
+    store: &S,
+    source: &Partition,
+    repo: &RepoName,
+    name: &str,
+    state: &Publication,
+    changed: &Advance,
+) -> Result<((u64, Pair), Option<Evidence>, Vec<Precondition>), StoreError> {
     if state.sequence - state.published > MAX_UNPUBLISHED_ADVANCES {
         return Err(StoreError::Corrupt(
             "publication prefix exceeds bound".into(),
         ));
     }
     if state.published == state.sequence {
-        return Ok((state.published, state.value.clone()));
+        return Ok(((state.published, state.value.clone()), None, Vec::new()));
     }
     let name = sequence_ref(name);
     let wanted: Vec<Key> = (state.published + 1..=state.sequence)
@@ -422,14 +466,21 @@ pub async fn prefix<S: NamespaceStore>(
         return Err(StoreError::Corrupt("short publication prefix read".into()));
     }
     let mut result = (state.published, state.value.clone());
+    let mut evidence = None;
+    let mut guards = Vec::new();
     for (sequence, raw) in (state.published + 1..=state.sequence).zip(rows) {
+        let raw = raw
+            .as_ref()
+            .ok_or_else(|| StoreError::Corrupt("missing retained advance".into()))?;
+        guards.push(Precondition::Equals(
+            keys::advance(repo, &name, sequence),
+            raw.clone(),
+        ));
+        let (retained, candidate) = decode_advance(raw)?;
         let current = if changed.sequence == sequence {
             changed.clone()
         } else {
-            Advance::decode(
-                raw.as_ref()
-                    .ok_or_else(|| StoreError::Corrupt("missing retained advance".into()))?,
-            )?
+            retained
         };
         if current.sequence != sequence || current.generation != state.generation {
             return Err(StoreError::Corrupt(
@@ -439,9 +490,14 @@ pub async fn prefix<S: NamespaceStore>(
         if !current.state.publishable() {
             break;
         }
+        evidence = if current.value == decode_advance(raw)?.0.value {
+            candidate
+        } else {
+            None
+        };
         result = (sequence, current.value);
     }
-    Ok(result)
+    Ok((result, evidence, guards))
 }
 
 /// Guarded clearance fragment. A caller has verified obligations, flags and membership
@@ -461,9 +517,48 @@ pub fn clear(
     writes: &mut Vec<Write>,
     outbox: &mut OutboxBuilder,
 ) -> Result<(), StoreError> {
+    if decode_advance(advance_raw)?.1.is_some() {
+        return Err(StoreError::Invalid(
+            "certificate clearance requires fresh proof".into(),
+        ));
+    }
+    clear_evidenced(
+        repo,
+        name,
+        source,
+        shards,
+        state_raw,
+        advance_raw,
+        changed,
+        eligible,
+        None,
+        pre,
+        writes,
+        outbox,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn clear_evidenced(
+    repo: &RepoId,
+    name: &str,
+    source: &Partition,
+    shards: &dyn ShardMap,
+    state_raw: &Value,
+    advance_raw: &Value,
+    changed: &Advance,
+    eligible: (u64, Pair),
+    eligible_evidence: Option<Evidence>,
+    pre: &mut Vec<Precondition>,
+    writes: &mut Vec<Write>,
+    outbox: &mut OutboxBuilder,
+) -> Result<(), StoreError> {
     let name = sequence_ref(name);
     let mut state = Publication::decode(Some(state_raw))?;
-    let old = Advance::decode(advance_raw)?;
+    let (old, candidate) = decode_advance(advance_raw)?;
+    let mut anchor = stored(state_raw)?.1;
+    let candidate =
+        candidate.filter(|_| changed.value == old.value && changed.generation == old.generation);
     changed.validate()?;
     if changed.sequence != old.sequence
         || changed.sequence > state.sequence
@@ -479,19 +574,62 @@ pub fn clear(
     }
     let key = keys::advance(&repo.name, &name, changed.sequence);
     pre.push(guard(key.clone(), Some(advance_raw)));
-    writes.push(Write::Put(key, changed.encode()?));
+    writes.push(Write::Put(
+        key,
+        evidenced(changed.encode()?, candidate.as_ref())?,
+    ));
     pre.push(guard(keys::publication(&repo.name, &name), Some(state_raw)));
     project_members(repo, source, shards, changed, writes, outbox);
     if eligible.0 > state.published {
         state.published = eligible.0;
         state.value = eligible.1;
+        anchor = eligible_evidence;
         project_refs(repo, &name, source, shards, &state.value, writes, outbox);
     }
     writes.push(Write::Put(
         keys::publication(&repo.name, &name),
-        state.encode()?,
+        evidenced(state.encode()?, anchor.as_ref())?,
     ));
     Ok(())
+}
+
+/// Private evidence envelope keeps published DTO construction unchanged.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Evidence {
+    pub certificate: Hash,
+    pub denial: bool,
+    pub custom_policy: bool,
+}
+pub(crate) fn stored(raw: &Value) -> Result<(Value, Option<Evidence>), StoreError> {
+    let mut row: serde_json::Value = decode(raw)?;
+    let object = row
+        .as_object_mut()
+        .ok_or_else(|| StoreError::Corrupt("bad publication envelope".into()))?;
+    let evidence = object
+        .remove("certificate")
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| StoreError::Corrupt("bad publication certificate anchor".into()))?;
+    Ok((encode(&row)?, evidence))
+}
+pub(crate) fn decode_advance(raw: &Value) -> Result<(Advance, Option<Evidence>), StoreError> {
+    let (plain, evidence) = stored(raw)?;
+    Ok((Advance::decode(&plain)?, evidence))
+}
+fn evidenced(plain: Value, evidence: Option<&Evidence>) -> Result<Value, StoreError> {
+    let Some(evidence) = evidence else {
+        return Ok(plain);
+    };
+    let mut row: serde_json::Value = decode(&plain)?;
+    row.as_object_mut()
+        .ok_or_else(|| StoreError::Invalid("bad publication envelope".into()))?
+        .insert(
+            "certificate".into(),
+            serde_json::to_value(evidence)
+                .map_err(|_| StoreError::Invalid("bad publication evidence".into()))?,
+        );
+    encode(&row)
 }
 
 #[cfg(test)]

@@ -180,6 +180,47 @@ fn deep_adversarial_prefixes_fit_the_lookup_and_insert_allowances() {
 }
 
 #[test]
+fn support_successors_are_sorted_and_fit_65_calls_at_maximum_depth() {
+    block_on(async {
+        let store = kv();
+        let mut ids = vec![[0; 32]];
+        for n in 0..32 {
+            let mut id = [0; 32];
+            id[n] = 1;
+            ids.push(id);
+        }
+        ids.sort_unstable();
+        let mut root = None;
+        for id in ids.iter().rev() {
+            root = Some(
+                insert(&store, root, *id, SUPPORT | EXTERNAL, 0)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let mut after = None;
+        for expected in &ids {
+            let budget = SliceBudget::new(65);
+            assert_eq!(
+                next(&Budgeted::new(&store, &budget), root, after)
+                    .await
+                    .unwrap(),
+                Some((*expected, SUPPORT | EXTERNAL))
+            );
+            assert!(budget.used() <= 65);
+            after = Some(*expected);
+        }
+        let budget = SliceBudget::new(65);
+        assert_eq!(
+            next(&Budgeted::new(&store, &budget), root, after)
+                .await
+                .unwrap(),
+            None
+        );
+    });
+}
+
+#[test]
 fn exhausted_partial_insert_does_not_change_the_old_root_and_can_retry() {
     block_on(async {
         let store = kv();

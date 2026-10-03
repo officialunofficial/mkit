@@ -402,13 +402,27 @@ impl<H: HookSet> Fx<H> {
             Procedure::AdvanceRefs,
             self.number(),
         );
-        let outcome = block_on(self.pipe.advance_refs_with_tickets(
-            &self.auth(&advance),
-            upd(head_ref, conditions.0, head),
-            upd(packmap_ref, map_condition, map_id),
-            tickets,
-        ))
-        .unwrap();
+        let mut attempts = 0;
+        let outcome = loop {
+            attempts += 1;
+            let result = block_on(self.pipe.advance_refs_with_tickets(
+                &self.auth(&advance),
+                upd(head_ref, conditions.0, head),
+                upd(packmap_ref, map_condition, map_id),
+                tickets.clone(),
+            ));
+            if result
+                .as_ref()
+                .is_err_and(|error| error.public_message() == "pack verification pending")
+            {
+                assert!(
+                    attempts < 20_000,
+                    "publication must finish its bounded preparation"
+                );
+                continue;
+            }
+            break result.unwrap();
+        };
         (outcome, pack_id)
     }
 

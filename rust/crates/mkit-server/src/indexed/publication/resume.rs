@@ -33,6 +33,7 @@ pub enum Exhaustion {
     Traversal,
 }
 impl Exhaustion {
+    #[cfg(test)]
     fn error(self) -> ServerError {
         match self {
             Self::DecodeBudget => ServerError::invalid_argument(resolve::DECODE_BUDGET_MESSAGE),
@@ -47,6 +48,7 @@ enum TerminalFailure {
     DeltaDepth,
 }
 impl TerminalFailure {
+    #[cfg(test)]
     fn error(self) -> ServerError {
         ServerError::invalid_argument(match self {
             Self::OpenClosure => "open closure",
@@ -81,6 +83,8 @@ pub struct Progress {
     missing: bool,
     missing_base: bool,
     complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    incremental: Option<Box<super::incremental::Progress>>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -91,6 +95,9 @@ struct BaseCursor {
 }
 impl Progress {
     pub(crate) fn validate(&self) -> Result<(), StoreError> {
+        if let Some(p) = &self.incremental {
+            return p.validate();
+        }
         let frozen = serde_json::to_vec(&(
             self.value.clone(),
             self.generation,
@@ -133,6 +140,7 @@ impl Progress {
         }
         Ok(())
     }
+    #[cfg(test)]
     fn result(
         &self,
         advance: &mut Advance,
@@ -162,6 +170,47 @@ impl Progress {
     }
 }
 
+pub(super) fn container(
+    advance: &Advance,
+    cfg: IndexedConfig,
+    incremental: super::incremental::Progress,
+) -> Result<Progress, ServerError> {
+    Ok(Progress {
+        binding: binding(advance, cfg)?,
+        value: advance.value.clone(),
+        generation: advance.generation,
+        additions: advance.additions.clone(),
+        next_packmap: None,
+        chain: BTreeSet::new(),
+        packs: BTreeSet::new(),
+        queue: VecDeque::new(),
+        visited: BTreeSet::new(),
+        dependencies: BTreeSet::new(),
+        bases: BTreeSet::new(),
+        bytes: 0,
+        calls: 0,
+        byte_limit: cfg.decode_budget,
+        depth_limit: cfg.max_delta_chain_depth,
+        base_cursor: None,
+        failure: None,
+        terminal: None,
+        missing: false,
+        missing_base: false,
+        complete: false,
+        incremental: Some(Box::new(incremental)),
+    })
+}
+pub(super) fn certificate_progress(
+    state: &mut state::VerificationV1,
+) -> Option<&mut super::incremental::Progress> {
+    match state {
+        state::VerificationV1::Verified {
+            publication: Some(p),
+            ..
+        } => p.incremental.as_deref_mut(),
+        _ => None,
+    }
+}
 // A state that cannot fit is terminal, rather than an alarm that repeats the
 // same oversized frontier forever. Retain binding/counters and the typed cause.
 fn bounded_state(state: &mut state::VerificationV1) -> Value {
@@ -205,6 +254,7 @@ fn binding(advance: &Advance, cfg: IndexedConfig) -> Result<Hash, ServerError> {
 /// First slice may complete inline. Otherwise only verification state and timer
 /// are written; no ref, membership, outcome or ticket is accepted/consumed.
 #[allow(clippy::too_many_arguments)] // Immutable proof inputs plus the consuming request lag context.
+#[cfg(test)]
 pub(crate) async fn prepare<S: NamespaceStore>(
     store: &S,
     source: &Partition,
@@ -264,6 +314,7 @@ pub(crate) async fn prepare<S: NamespaceStore>(
             missing: false,
             missing_base: false,
             complete: false,
+            incremental: None,
         }
     };
     // A retryable read failure still spent work. Persist its safe checkpoint
@@ -335,6 +386,7 @@ async fn one<S: NamespaceStore>(
         additions: &additions,
         packs: None,
         policy: &Immediate,
+        certificate: None,
     };
     if progress.base_cursor.is_some() {
         return external_base(store, &live, shards, repo, progress, metrics).await;
@@ -372,6 +424,7 @@ async fn one<S: NamespaceStore>(
         additions: &progress.additions,
         packs: Some(&progress.packs),
         policy: &Immediate,
+        certificate: None,
     };
     let located = resolve::locate_split(&closure, shards, repo, &[id], metrics)
         .await?
@@ -644,6 +697,10 @@ pub(crate) async fn fire<S: NamespaceStore, T: NamespaceStore>(
     else {
         return Ok(crate::timers::Fired::Done(Batch::new()));
     };
+    if progress.incremental.is_some() {
+        return super::incremental::fire(ctx, target, timer, alarm, raw, state, repo, ns, shards)
+            .await;
+    }
     if timer.value.as_bytes() != progress.binding
         || progress.complete
         || progress.failure.is_some()

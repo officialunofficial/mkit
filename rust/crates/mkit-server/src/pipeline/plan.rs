@@ -626,7 +626,7 @@ pub(crate) fn plan_write(
             }
             advance.additions = additions;
             advance.operation = operation;
-            crate::store::publication::append(
+            crate::store::publication::append_evidenced(
                 publication.repo,
                 &name,
                 publication.source,
@@ -634,6 +634,7 @@ pub(crate) fn plan_write(
                 snap.get(&keys::publication(req.repo, &name)),
                 advance,
                 req.refs.iter().any(|u| u.new.is_none()),
+                publication.proof.map(|p| &p.evidence),
                 &mut pre,
                 &mut puts,
                 &mut outbox,
