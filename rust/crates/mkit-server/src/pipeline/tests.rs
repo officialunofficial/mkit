@@ -13,6 +13,7 @@ mod policy;
 mod ref_policy;
 #[cfg(feature = "remote-hooks")]
 mod remote_hooks;
+mod repo_storage;
 mod scheduled;
 mod url_token;
 mod visibility;
@@ -82,8 +83,16 @@ fn planned_ticket_advance(count: usize) -> Batch {
 fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
     planned_ticket_publication(count, d34, false)
 }
-#[allow(clippy::too_many_lines)] // A complete ticket snapshot pins the maximal apply budget.
 fn planned_ticket_publication(count: usize, d34: bool, retained: bool) -> Batch {
+    planned_ticket_publication_counted(count, d34, retained, false)
+}
+#[allow(clippy::too_many_lines)] // A complete ticket snapshot pins the maximal apply budget.
+fn planned_ticket_publication_counted(
+    count: usize,
+    d34: bool,
+    retained: bool,
+    count_storage: bool,
+) -> Batch {
     use crate::store::codec::{ReservationV1, TicketV1};
     let repo = RepoId {
         namespace: NamespaceKey::deployment_default(),
@@ -113,6 +122,7 @@ fn planned_ticket_publication(count: usize, d34: bool, retained: bool) -> Batch 
         repository: REPO,
         source: &source,
         shards,
+        count_storage,
     };
     let refs = [upd(PACKMAP, Missing, B), upd(HEAD, Missing, C)];
     let replay = ReplayGuard {
@@ -203,7 +213,9 @@ fn planned_ticket_publication(count: usize, d34: bool, retained: bool) -> Batch 
         snap.insert(keys::ticket(id), Some(codec::encode_ticket(ticket)));
     }
     for key in advance::detail_keys(&snap, &advance).unwrap() {
-        snap.insert(key, None);
+        let value = (key == keys::repo_storage(&repo.name))
+            .then(crate::store::repo_storage::initial_counter);
+        snap.insert(key, value);
     }
     for (id, ticket) in ids.iter().zip(&tickets) {
         snap.insert(
@@ -241,6 +253,17 @@ fn seven_ticket_publication_bounds_are_real_batches() {
         (false, true, 85),
     ] {
         let batch = planned_ticket_publication(7, d34, retained);
+        assert_eq!(batch.preconditions.len() + batch.writes.len(), expected);
+        batch.validate(&StoreCapabilities::full()).unwrap();
+    }
+}
+
+/// Counting a seven-pack advance adds one relay row on D34 and, on Single,
+/// the markers, the counter and one outcome row: both stay within a batch.
+#[test]
+fn seven_ticket_publication_with_storage_counting_fits_a_batch() {
+    for (d34, expected) in [(true, 94), (false, 96)] {
+        let batch = planned_ticket_publication_counted(7, d34, false, true);
         assert_eq!(batch.preconditions.len() + batch.writes.len(), expected);
         batch.validate(&StoreCapabilities::full()).unwrap();
     }
@@ -382,6 +405,7 @@ fn maximal_implicit_consume_plans_a_valid_batch() {
         repo_id: &repo,
         source: &source,
         shards: &shards,
+        counted: &[],
     };
     let req = WriteRequest {
         denial_ids: None,
@@ -489,6 +513,7 @@ fn ticket_reservation_id_mismatch_is_corruption() {
         repository: REPO,
         source: &source,
         shards: &shards,
+        count_storage: false,
     };
     let mut snap = Snapshot::default();
     snap.insert(

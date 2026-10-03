@@ -39,6 +39,7 @@ outcome-aborted.request.json OutcomeRequest
 outcome-abandoned.request.json OutcomeRequest
 outcome-expired.request.json OutcomeRequest
 outcome-read-served.request.json OutcomeRequest
+outcome-repo-storage.request.json OutcomeRequest
 outcome.response.json OutcomeResponse
 event-lease-grace.request.json EventRequest
 event-lease-deleted.request.json EventRequest
@@ -76,8 +77,8 @@ for file in "$golden_dir"/*.request.json "$golden_dir"/*.response.json; do
   count=$((count + 1))
 done
 
-if [[ "$count" -ne 31 ]]; then
-  echo "check-server-hooks-goldens: expected 31 mapped fixtures, found $count" >&2
+if [[ "$count" -ne 32 ]]; then
+  echo "check-server-hooks-goldens: expected 32 mapped fixtures, found $count" >&2
   exit 1
 fi
 echo "check-server-hooks-goldens: all $count fixtures preserve canonical protobuf JSON"

@@ -145,6 +145,8 @@ pub(crate) struct ImplicitConsume<'a> {
     pub(crate) source: &'a Partition,
     /// Membership index routing.
     pub(crate) shards: &'a dyn super::ShardMap,
+    /// The same packs with their sizes, for the repository stored-bytes counter.
+    pub(crate) counted: &'a [(Hash, u64)],
 }
 
 /// A write to plan.
@@ -232,9 +234,15 @@ impl WriteRequest<'_> {
         if let Some(advance) = &self.advance {
             out.extend(advance.ids.iter().map(keys::ticket));
         }
-        if self.implicit.is_some() {
+        if let Some(implicit) = &self.implicit {
             out.push(keys::outbox_sequence());
             out.push(keys::outcome_backlog());
+            if *implicit.source == implicit.shards.coordinator(&implicit.repo_id.namespace) {
+                out.extend(crate::store::repo_storage::read_keys(
+                    self.repo,
+                    implicit.counted,
+                ));
+            }
         }
         if self.mark_repo_known {
             out.push(keys::repo_known(self.repo));
@@ -588,6 +596,20 @@ pub(crate) fn plan_write(
                 &mut outbox,
                 req.publication.is_none(),
             )?;
+        }
+        if !conflict && let Some(implicit) = &req.implicit {
+            crate::store::repo_storage::plan_count(
+                implicit.repo_id,
+                implicit.counted,
+                implicit.source,
+                implicit.shards,
+                |key| snap.get(key),
+                clock.plan_time_ms,
+                &mut outbox,
+                &mut pre,
+                &mut puts,
+            )
+            .map_err(meta_error)?;
         }
         if !conflict {
             add_ref_index_relays(req, &mut outbox);

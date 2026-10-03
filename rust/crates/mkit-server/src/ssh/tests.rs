@@ -2290,8 +2290,8 @@ fn member<N: NamespaceStore>(kv: &N, partition: &Partition, name: &RepoName, pac
         .is_some()
 }
 
-/// The `o*` rows — reservations, pending outcomes, the outcome backlog —
-/// implicit consuming writes must never plan.
+/// The `o*` rows — reservations, pending outcomes, the outcome backlog.
+/// Implicit consuming writes plan only the repository's stored-bytes outcome.
 fn o_rows<N: NamespaceStore>(kv: &N, partition: &Partition) -> Vec<(Key, Value)> {
     block_on(kv.scan(
         partition,
@@ -2351,7 +2351,8 @@ fn implicit_packmap_consumes_pending_into_membership() {
     };
     assert_eq!(resp.exists, Some(true));
     assert_eq!(downloaded(&frames[6..], &data_id), data);
-    // Every pending pack became a member; no reservation or outcome rows.
+    // Every pending pack became a member; the only outcome row is the
+    // repository's stored-bytes change.
     assert!(member(
         &kv,
         &root(&repo_id.namespace),
@@ -2364,7 +2365,28 @@ fn implicit_packmap_consumes_pending_into_membership() {
         &repo_id.name,
         &mkpl_id
     ));
-    assert!(o_rows(&kv, &root(&repo_id.namespace)).is_empty());
+    // Both packs are counted, once, by the consuming write itself.
+    let counter = kv
+        .read(
+            &root(&repo_id.namespace),
+            &keys::repo_storage(&repo_id.name),
+        )
+        .expect("registration creates the counter");
+    assert_eq!(
+        codec::decode_repo_storage(&counter).unwrap(),
+        codec::RepoStorageV1 {
+            stored_bytes: (data.len() + mkpl_bytes.len()) as u64,
+            version: 1,
+        }
+    );
+    let outcomes = o_rows(&kv, &root(&repo_id.namespace));
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|(key, _)| key.as_bytes().starts_with(b"o\0rs:"))
+            .count(),
+        1
+    );
     // Admission ran for the two uploads and the ordinary head write only.
     assert_eq!(
         *seen.lock().unwrap(),
@@ -2415,6 +2437,22 @@ fn implicit_packmap_queues_relay_rows_under_d34() {
     let seq = seq.map(|v| codec::decode_u64(&v).unwrap());
     assert!(seq.is_some_and(|s| s >= 1));
     assert!(kv.read(&source, &keys::relay(1)).is_some());
+    // The coordinator counts both packs from the relayed markers.
+    let coordinator = Partition::Coordinator(repo_id.namespace.clone());
+    let counted: std::collections::BTreeSet<_> = (1..=seq.unwrap())
+        .filter_map(|n| kv.read(&source, &keys::relay(n)))
+        .map(|raw| codec::decode_relay(&raw).unwrap())
+        .filter(|row| row.target == coordinator)
+        .flat_map(|row| row.puts)
+        .map(|(key, _)| key)
+        .collect();
+    assert_eq!(
+        counted,
+        [data_id, mkpl_id]
+            .iter()
+            .map(|pack| keys::repo_storage_pack(&repo_id.name, pack))
+            .collect()
+    );
     // Membership, ticket and outcome rows never leave the source as `o*`.
     let mut leftovers = o_rows(&kv, &source);
     leftovers.retain(|(k, _)| !k.as_bytes().starts_with(b"or") && !k.as_bytes().starts_with(b"os"));

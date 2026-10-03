@@ -46,7 +46,7 @@ mod read_limits;
 #[cfg(feature = "http-objects")]
 pub use object_reader::{
     IssuedUrl, OBJECT_READER_BATCH, OBJECT_READER_CALLS, OBJECT_READER_LIMIT_MESSAGE,
-    ObjectMetadata, ObjectReader, ReaderView,
+    ObjectMetadata, ObjectReader, ReaderView, RepoStorage,
 };
 #[cfg(feature = "http-objects")]
 pub use read_limits::{ReadLimits, ReaderSession};
@@ -2523,7 +2523,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             if let OpKind::BeginUpload { key, bytes, .. } = &op.kind {
                 input.declared_bytes = *bytes;
                 input.pack_id = Some(*key);
-                input.new_to_repo_bytes = Some(*bytes);
+                input.new_to_repo_bytes = self.new_to_repo_bytes(&op, key, *bytes).await?;
             }
             self.admit(input).await?
         };
@@ -3529,11 +3529,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         // Single's packs live in the repo directory itself; only Multi
         // plans `m` rows and relay for the consumed set, and only when
         // the set is non-empty (L2).
-        let implicit_ids = implicit
-            .filter(|pending| {
-                !pending.is_empty() && matches!(self.cfg.addressing, Addressing::Multi(_))
-            })
-            .map(implicit::implicit_packs);
+        let implicit = implicit.filter(|pending| {
+            !pending.is_empty() && matches!(self.cfg.addressing, Addressing::Multi(_))
+        });
+        let implicit_ids = implicit.map(implicit::implicit_packs);
+        let implicit_counted = implicit.map(implicit::implicit_counted);
         let advance = self.publication_ticket_write(op, a, p)?;
         let mut req = WriteRequest {
             denial_ids: Some(denial_ids),
@@ -3576,6 +3576,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             advance,
             implicit: implicit_ids.as_deref().map(|packs| ImplicitConsume {
                 packs,
+                counted: implicit_counted.as_deref().unwrap_or_default(),
                 repo_id: &op.repo,
                 source: p,
                 shards: self.shards.as_ref(),
@@ -3667,6 +3668,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     repository: &a.repo().identity,
                     source: p,
                     shards: self.shards.as_ref(),
+                    count_storage: matches!(self.cfg.addressing, Addressing::Multi(_)),
                 })
             }
             _ => None,

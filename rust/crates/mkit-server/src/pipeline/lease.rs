@@ -267,6 +267,10 @@ fn grant_batch(
             rr_key,
             codec::encode_repo_record(&codec::RepoRecord { created_at_ms }),
         );
+        batch = batch.put(
+            keys::repo_storage(repo),
+            crate::store::repo_storage::initial_counter(),
+        );
     }
     if let Some(old) = old {
         batch = batch.delete(keys::timer(

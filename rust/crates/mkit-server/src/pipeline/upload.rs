@@ -225,6 +225,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             input.credential_headers = &credentials;
             input.declared_bytes = declared;
             input.pack_id = Some(key);
+            input.new_to_repo_bytes = pipe.new_to_repo_bytes(&op, &key, declared).await?;
             let allowance = pipe.admit_streaming(input).await?;
             if let Some(rid) = &allowance.reservation {
                 pipe.abort_unsupported_stream(a, &p, rid).await?;

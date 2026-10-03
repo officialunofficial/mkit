@@ -588,7 +588,7 @@ admission-specific fields:
 | `pack_id` | The 32-byte pack id for `BeginUpload`; empty otherwise. |
 | `creates_namespace` | Whether the write creates its namespace. |
 | `creates_repo` | Whether the write creates its repository. |
-| `new_to_repo_bytes` | Bytes new to this repository, known from membership; absent when unknown. |
+| `new_to_repo_bytes` | Bytes new to this repository: zero when the upload's pack is already counted for the repository (§6.5.1), else its declared size; absent for an operation that adds no pack. A pre-admission observation: racing writes MAY both see the pack as new, and the committed counter (§6.5.1) is the authoritative value. |
 | `credential_headers` | Admission credential request headers under the forwarding rules below; empty on a first attempt without credentials. |
 
 Creation signals and admission input are supplied as STC §5.1 requires.
@@ -760,7 +760,7 @@ The shared `Outcome` fields are:
 | `audience` | The mkit server's canonical origin. |
 | `repository` | The full repository identity as STC §7.4 requires. |
 | `occurred_unix_ms` | When the outcome occurred, as signed 64-bit Unix epoch milliseconds. |
-| `kind` | Exactly one of `committed`, `aborted`, `expired`, or `read_served`. |
+| `kind` | Exactly one of `committed`, `aborted`, `expired`, `read_served`, or `repo_storage_changed`. |
 | `procedure` | Optional. The full Connect procedure path of the operation that produced the outcome (`UpdateRef`, `AdvanceRefs` including each consumed ticket's outcome, `BeginUpload` for an expired ticket, `UploadPack`, `SetRepoVisibility`, or an HTTP read). The server records it on the pending row and copies it to the terminal row, so an abandoned reservation names it too. Absent only for an outcome recorded before the server stored it (v0.5.0 rows); a receiver treats an absent or unrecognized value as unspecified. A `SetRepoVisibility` `committed` carries no refs and zero bytes. |
 | `visibility` | Optional. `public` or `private`: the visibility a `SetRepoVisibility` outcome set or attempted; present exactly when `procedure` is `SetRepoVisibility`. |
 
@@ -769,7 +769,7 @@ The shared `Outcome` fields are:
 | Field | Meaning |
 |---|---|
 | `bytes_stored` | The unsigned count of bytes stored by the operation. |
-| `new_to_repo` | The unsigned count of bytes new to the repository. |
+| `new_to_repo` | The unsigned count of pack bytes this write observed as new to the repository. Exact where the repository's counter lives in the writing partition; otherwise an observation by the consuming shard. It is not the accounting source: use `repo_storage_changed` (§6.5.1). |
 | `new_to_store` | The unsigned count of bytes new to the entire store; in opaque mode, an upper bound: the declared pack bytes. |
 | `refs` | The refs committed by the operation, in decision order. |
 
@@ -779,6 +779,55 @@ pack bytes.
 Each `CommittedRef.name` is the ref name. `CommittedRef.new` is
 the 32-byte committed target, or empty when `deleted` is true.
 `CommittedRef.deleted` identifies a committed deletion.
+
+#### 6.5.1 Repository storage accounting
+
+The server keeps an exact, generic stored-bytes counter per repository of a
+multi-repository deployment so an embedder can bill per owner by summing its
+repositories. The basis is pack bytes: the sum of the sizes of the distinct
+packs that are members of the repository. A pack shared by two repositories
+counts once in each; nothing is deduplicated across repositories, and
+physical garbage collection does not change the counter. Membership is never
+removed, so the counter never decreases.
+
+The counter is created, at zero with version zero, in the same batch that
+registers the repository in its coordinator. A repository without a counter
+is a corrupt store, never a reportable state: a write that would count a
+pack into it fails, a coordinator drops (and logs) the markers it receives for
+it rather than stall its other relay rows, and `Pipeline::repo_storage` fails.
+A deployment with single-repository addressing keeps no counter.
+
+A pack is added to the counter exactly once per repository: when the
+repository's coordinator first records the pack as counted. A ticket's
+consumption, an implicit session consumption and a deferred publication all
+count at consumption, whether or not the advance has been published, so a
+held advance still counts. Where the consuming partition is the coordinator
+(single-partition deployments) the consuming batch counts the pack and changes
+the counter atomically. Under D34 the consuming ref shard relays a marker for
+each pack through its outbox to the coordinator, whose relay hook counts a
+marker only if the pack is not yet counted, in the same batch that applies the
+relay row and advances its watermark. First recording is therefore decided in
+one partition by one guarded batch, however many ref shards consume the pack
+and however often a relay row is redelivered or a source crashes. The value is
+**eventually consistent and exact**: it trails consumption by the relay lag
+and is never wrong. Every counter change increments `version`.
+
+Every counter change queues one `repo_storage_changed` outcome through the
+ordinary outcome delivery (§5, §8). Its `reservation_id` is
+`rs:<digest>:<version>`, unique per repository and version. `stored_bytes` is
+the repository's absolute total after the change and `version` is monotonic per
+repository. Delivery is at least once and MAY be out of order: a receiver
+keeps the value with the highest `version` and ignores the rest. The outcome's
+`procedure` is absent.
+
+`Pipeline::repo_storage` returns `{ stored_bytes, version }` for a repository
+in one coordinator read, authorized as an owner read of the repository
+(`Unimplemented` without multi-repository addressing). The Worker embedding
+exposes the pipeline's method.
+
+A relay handler whose targets include a coordinator MUST install the storage
+hook (`RepoStorageHook`; the Worker adapter does). Without it the markers are
+stored but never counted.
 
 `Aborted.reason` classifies why the reservation did not commit:
 
@@ -3970,6 +4019,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Exact per-repository stored-bytes accounting (§6.5.1): a per-repository counter and counted-pack markers in the coordinator, counted exactly once per pack under D34 by the coordinator's relay hook; additive `Outcome.repo_storage_changed` (field 11) carrying the absolute total and a monotonic version; admission `new_to_repo_bytes` observes whether the pack is already counted. `Committed.new_to_repo` is documented as an observation. New stored rows `rb` and `rn`, and a new terminal reservation row state; no existing row changes. |
 | 1 | draft | Editorial: §18 states the launch profile deployment-neutrally and points to the Workers operator guide for the Worker-specific selection, bindings and purge configuration; the `store::inspection_*` modules are marked unintegrated groundwork and the deferred inspection, Event and proof work as not implemented. No behavior change. |
 | 1 | draft | Additive object-reader session accounting and typed exhaustion. Existing public absence, advance messages and stored/wire formats are unchanged. |
 | 1 | draft | `SetRepoVisibility` runs admission and records an outcome like other mutating RPCs, in envelope and statement modes (§2, §3). Additive optional `Outcome.procedure` and `Outcome.visibility` (fields 9 and 10) name the operation (§6.5); the pending and terminal reservation rows record an optional operation (additive `procedure`; rows written before decode as unknown), so every outcome, including a reconciled abandonment, names it. No row version changes. |
@@ -4033,6 +4083,7 @@ requires. These anchors are informative descriptions of those bytes.
 | `outcome-abandoned.request.json` | Pending reservation reconciled with ABANDONED (§5, §6.5). |
 | `outcome-expired.request.json` | Unconsumed ticket expiry (§5, §6.5). |
 | `outcome-read-served.request.json` | Paid-read object and bytes served (§5, §6.5). |
+| `outcome-repo-storage.request.json` | Repository stored-bytes change with absolute total and version (§6.5.1). |
 | `outcome.response.json` | Empty Outcome acknowledgement (§6.5, §8). |
 | `event-lease-grace.request.json` | Ref-level expiry into grace, sequence and lease terms (§12.4). |
 | `event-lease-deleted.request.json` | Repository-level expiry into deletion (§12.4). |

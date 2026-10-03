@@ -326,6 +326,16 @@ pub(crate) fn implicit_packs(pending: &[PendingPack]) -> Vec<Hash> {
         .collect()
 }
 
+/// The deduplicated packs and sizes of a pending set, for the stored-bytes counter.
+pub(crate) fn implicit_counted(pending: &[PendingPack]) -> Vec<(Hash, u64)> {
+    pending
+        .iter()
+        .map(|p| (p.pack, p.bytes))
+        .collect::<std::collections::BTreeMap<_, _>>()
+        .into_iter()
+        .collect()
+}
+
 #[cfg(test)]
 mod concurrency_tests {
     use super::*;

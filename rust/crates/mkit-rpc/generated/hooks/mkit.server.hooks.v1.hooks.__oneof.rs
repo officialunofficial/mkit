@@ -350,6 +350,9 @@ pub mod outcome {
         Aborted(::buffa::alloc::boxed::Box<super::super::super::Aborted>),
         Expired(::buffa::alloc::boxed::Box<super::super::super::Expired>),
         ReadServed(::buffa::alloc::boxed::Box<super::super::super::ReadServed>),
+        RepoStorageChanged(
+            ::buffa::alloc::boxed::Box<super::super::super::RepoStorageChanged>,
+        ),
     }
     impl ::buffa::Oneof for Kind {}
     impl From<super::super::super::Committed> for Kind {
@@ -392,6 +395,16 @@ pub mod outcome {
             Self::Some(Kind::from(v))
         }
     }
+    impl From<super::super::super::RepoStorageChanged> for Kind {
+        fn from(v: super::super::super::RepoStorageChanged) -> Self {
+            Self::RepoStorageChanged(::buffa::alloc::boxed::Box::new(v))
+        }
+    }
+    impl From<super::super::super::RepoStorageChanged> for ::core::option::Option<Kind> {
+        fn from(v: super::super::super::RepoStorageChanged) -> Self {
+            Self::Some(Kind::from(v))
+        }
+    }
     impl serde::Serialize for Kind {
         fn serialize<S: serde::Serializer>(
             &self,
@@ -411,6 +424,9 @@ pub mod outcome {
                 }
                 Self::ReadServed(v) => {
                     map.serialize_entry("readServed", v)?;
+                }
+                Self::RepoStorageChanged(v) => {
+                    map.serialize_entry("repoStorageChanged", v)?;
                 }
             }
             map.end()

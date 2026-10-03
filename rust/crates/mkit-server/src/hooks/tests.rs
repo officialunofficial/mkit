@@ -567,6 +567,16 @@ fn encoded_outcomes_equal_the_golden_outcomes() {
                 },
             ),
         ),
+        (
+            "outcome-repo-storage.request.json",
+            outcome(
+                "rs:0123456789abcdef0123456789abcdef:7",
+                OutcomeKind::RepoStorageChanged {
+                    stored_bytes: 1_048_576,
+                    version: 7,
+                },
+            ),
+        ),
     ];
     for (name, outcome) in cases {
         let request = map::outcome_request(&outcome);

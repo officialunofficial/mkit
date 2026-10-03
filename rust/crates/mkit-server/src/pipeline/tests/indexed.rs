@@ -92,7 +92,7 @@ pub(super) fn signed(owner: &SigningKey, identity: &str, procedure: Procedure, n
     request
 }
 
-fn signed_objects() -> (Object, Object, Hash) {
+pub(super) fn signed_objects() -> (Object, Object, Hash) {
     let tree = Object::Tree(Tree {
         entries: Vec::new(),
     });
@@ -121,6 +121,24 @@ pub(super) fn pack() -> (Vec<u8>, Hash) {
         .unwrap();
     writer.push_raw(head, &serialize(&commit).unwrap()).unwrap();
     (writer.finish().unwrap(), head)
+}
+
+/// The signed commit and its tree plus one blob of `extra`: a distinct pack
+/// with the same head, for tests that need several packs of one history.
+pub(super) fn pack_with_blob(extra: u8) -> Vec<u8> {
+    let (tree, commit, head) = signed_objects();
+    let blob = Object::Blob(Blob {
+        data: vec![extra; 64],
+    });
+    let mut writer = PackWriter::new_raw_only();
+    writer
+        .push_raw(tree.id().unwrap(), &serialize(&tree).unwrap())
+        .unwrap();
+    writer.push_raw(head, &serialize(&commit).unwrap()).unwrap();
+    writer
+        .push_raw(blob.id().unwrap(), &serialize(&blob).unwrap())
+        .unwrap();
+    writer.finish().unwrap()
 }
 
 pub(super) fn split_pack() -> (Vec<u8>, Vec<u8>, Hash) {
@@ -616,7 +634,10 @@ fn indexed_seven_ticket_advance_adds_no_batch_rows() {
             .collect();
         assert_eq!(advances.len(), 1);
         let actual = advances[0];
-        assert!(actual.preconditions.len() + actual.writes.len() <= expected);
+        // Stored-bytes counting adds one relay row on D34 and, on Single,
+        // the seven markers, the counter and one outcome row.
+        let counting = if d34 { 1 } else { 12 };
+        assert!(actual.preconditions.len() + actual.writes.len() <= expected + counting);
         assert!(actual.writes.iter().all(|write| {
             let (Write::Put(key, _) | Write::Delete(key)) = write;
             !matches!(

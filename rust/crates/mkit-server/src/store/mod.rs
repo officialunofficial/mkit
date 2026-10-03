@@ -27,6 +27,7 @@ pub mod outbox;
 mod partition;
 pub mod publication;
 pub mod read;
+pub mod repo_storage;
 pub mod restore;
 pub mod tickets;
 pub mod view;

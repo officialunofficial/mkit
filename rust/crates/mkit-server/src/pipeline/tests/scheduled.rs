@@ -15,7 +15,7 @@ use crate::store::{BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, Cursor, Ra
 use crate::timers::{TickBudget, TimerRegistry, run_due};
 
 /// A borrowed store: the handler owns its stores, the pipeline keeps its own.
-struct Ref<'a, T>(&'a T);
+pub(super) struct Ref<'a, T>(pub(super) &'a T);
 
 impl<T: NamespaceStore> NamespaceStore for Ref<'_, T> {
     fn capabilities(&self) -> StoreCapabilities {

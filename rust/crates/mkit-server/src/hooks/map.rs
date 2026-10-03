@@ -192,6 +192,15 @@ pub(super) fn outcome_request(outcome: &Outcome) -> pb::OutcomeRequest {
             ..Default::default()
         }
         .into(),
+        OutcomeKind::RepoStorageChanged {
+            stored_bytes,
+            version,
+        } => pb::RepoStorageChanged {
+            stored_bytes: Some(*stored_bytes),
+            version: Some(*version),
+            ..Default::default()
+        }
+        .into(),
     };
     pb::OutcomeRequest {
         outcome: pb::Outcome {

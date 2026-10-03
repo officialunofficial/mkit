@@ -40,6 +40,8 @@
 //! | repo record (`Coordinator`) | `rr 00 <repo>` | codec `RepoRecord` |
 //! | repository visibility (`Coordinator`) | `rv 00 <repo>` | codec `RepoVisibilityV1`; absent uses the deployment default |
 //! | repo-known marker (ref shard) | `rk 00 <repo>` | empty |
+//! | repository stored-bytes counter (`Coordinator`) | `rb 00 <repo>` | codec `RepoStorageV1` (absolute pack bytes, version) |
+//! | counted pack marker (`Coordinator`) | `rn 00 <repo> 00 <pack:32>` | be64 pack bytes |
 //! | grant epoch | `e 00` | be64; absent means 0, never written as 0 |
 //! | epoch lease (ref shard) | `el 00` | codec `EpochLease` |
 //! | leased shard (`Coordinator`) | `ls 00 <repo> 00 <shard_ref>` | codec `LeasedShard` |
@@ -205,6 +207,10 @@ pub const TAG_TICKET_INDEX: &str = "ti";
 pub const TAG_TICKETS_PER_REF: &str = "tc";
 /// Open-ticket counter per signer tag.
 pub const TAG_TICKETS_PER_SIGNER: &str = "tu";
+/// Repository stored-bytes counter tag.
+pub const TAG_REPO_STORAGE: &str = "rb";
+/// Counted-pack marker tag: a pack already added to its repository's counter.
+pub const TAG_REPO_STORAGE_PACK: &str = "rn";
 /// Local repository membership tag.
 pub const TAG_MEMBERSHIP: &str = "m";
 /// Per-(repository, pack) verification state in the ref shard.
@@ -325,6 +331,10 @@ pub enum ParsedKey {
     RepoVisibility(RepoName),
     /// `rk 00 <repo>`.
     RepoKnown(RepoName),
+    /// `rb 00 <repo>`.
+    RepoStorage(RepoName),
+    /// `rn 00 <repo> 00 <pack:32>`.
+    RepoStoragePack { repo: RepoName, pack_id: Hash },
     /// `rh 00 <Partition::encode(source)>`. Never pruned.
     RelayHighWater(Partition),
     /// `r 00 <repo> 00 <refname>`.
@@ -670,6 +680,21 @@ pub fn repo_visibility(repo: &RepoName) -> Key {
 #[must_use]
 pub fn repo_known(repo: &RepoName) -> Key {
     key(TAG_REPO_KNOWN, &[repo.as_str().as_bytes()])
+}
+
+/// `rb 00 <repo>`: the repository's stored-bytes counter in its coordinator.
+#[must_use]
+pub fn repo_storage(repo: &RepoName) -> Key {
+    key(TAG_REPO_STORAGE, &[repo.as_str().as_bytes()])
+}
+
+/// `rn 00 <repo> 00 <pack>`: the coordinator's marker that `pack` is counted.
+#[must_use]
+pub fn repo_storage_pack(repo: &RepoName, pack: &Hash) -> Key {
+    key(
+        TAG_REPO_STORAGE_PACK,
+        &[repo.as_str().as_bytes(), b"\0", pack],
+    )
 }
 
 /// `r 00 <repo> 00 <name>`.
@@ -1387,6 +1412,14 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"rh" => ParsedKey::RelayHighWater(Partition::decode(body).ok()?),
         b"rs" if body.is_empty() => ParsedKey::RelayScan,
         b"rk" => ParsedKey::RepoKnown(RepoName::new(text(body)?).ok()?),
+        b"rb" => ParsedKey::RepoStorage(RepoName::new(text(body)?).ok()?),
+        b"rn" => {
+            let sep = body.iter().position(|&b| b == 0)?;
+            ParsedKey::RepoStoragePack {
+                repo: RepoName::new(text(&body[..sep])?).ok()?,
+                pack_id: hash(&body[sep + 1..])?,
+            }
+        }
         b"r" => {
             let (repo, name) = parse_named_ref(body)?;
             ParsedKey::Ref { repo, name }
@@ -1628,6 +1661,8 @@ mod tests {
             TAG_REPO_LIST,
             TAG_REPO_VISIBILITY,
             TAG_REPO_KNOWN,
+            TAG_REPO_STORAGE,
+            TAG_REPO_STORAGE_PACK,
             TAG_RELAY_HIGH_WATER,
             TAG_RELAY_SCAN,
             TAG_TICKET,
@@ -1813,6 +1848,7 @@ mod tests {
             (repo_record(&repo("room-a")), b"rr\0room-a".to_vec()),
             (repo_visibility(&repo("room-a")), b"rv\0room-a".to_vec()),
             (repo_known(&repo("room-a")), b"rk\0room-a".to_vec()),
+            (repo_storage(&repo("room-a")), b"rb\0room-a".to_vec()),
             (
                 verification(&repo("room-a"), &s),
                 [&b"vs\0room-a\0"[..], &[0x11; 32]].concat(),
@@ -2240,6 +2276,14 @@ mod tests {
             (namespace_record(), ParsedKey::NamespaceRecord),
             (repo_record(&repo("a")), ParsedKey::RepoRecord(repo("a"))),
             (repo_known(&repo("a")), ParsedKey::RepoKnown(repo("a"))),
+            (repo_storage(&repo("a")), ParsedKey::RepoStorage(repo("a"))),
+            (
+                repo_storage_pack(&repo("a"), &[0x11; 32]),
+                ParsedKey::RepoStoragePack {
+                    repo: repo("a"),
+                    pack_id: [0x11; 32],
+                },
+            ),
             (
                 timer(3, 2, b"r"),
                 ParsedKey::Timer {

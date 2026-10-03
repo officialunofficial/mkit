@@ -40,8 +40,11 @@ pub trait Authorizer: MaybeSend + MaybeSync {
 /// (reconciliation R-10). M0 fills `op`, `declared_bytes`, `pack_id`,
 /// `idempotency_key` (the auth v2 nonce) and `write_quota`;
 /// Creation fields are the pre-admission observation from `op.creation`;
-/// racing first writes may both observe creation. `new_to_repo_bytes` stays
-/// `None` until membership, and the grant comes from `op.authz` (M2). Bytes new to
+/// racing first writes may both observe creation. `new_to_repo_bytes` is
+/// the pre-admission observation of the repository's pack-byte counter: 0
+/// when the pack is already counted for the repository, else its size
+/// (racing writes may both see it as new; the committed counter is the
+/// authoritative value). The grant comes from `op.authz` (M2). Bytes new to
 /// the store are deliberately absent: they would be a pricing oracle.
 ///
 /// Admission runs for every mutating RPC, including a repository visibility
@@ -67,7 +70,10 @@ pub struct AdmissionInput<'a> {
     pub creates_namespace: bool,
     /// Whether the repository was absent before admission; racing writes may both see true.
     pub creates_repo: bool,
-    /// Bytes new to the repository, known only from membership (M1).
+    /// Bytes new to the repository: 0 when the upload's pack is already
+    /// counted for it, else the pack's declared size. `None` for operations
+    /// that add no pack and for streaming uploads without multi-repository
+    /// addressing. A pre-admission observation (SPEC-SERVER §6.5.1).
     pub new_to_repo_bytes: Option<u64>,
     /// The idempotency key: the auth v2 nonce of a signed write.
     pub idempotency_key: Option<&'a str>,

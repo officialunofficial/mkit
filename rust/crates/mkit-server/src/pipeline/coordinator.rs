@@ -52,6 +52,33 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         })
     }
 
+    /// Admission's `new_to_repo_bytes` for a pack of `bytes`: 0 when the
+    /// repository's counter already holds the pack, else its size. One
+    /// bounded coordinator read, and a pre-admission observation: racing
+    /// writes may both see the pack as new, and the counter alone is
+    /// authoritative. Single addressing keeps no counter and reports the
+    /// declared size for a ticket.
+    pub(super) async fn new_to_repo_bytes(
+        &self,
+        op: &Operation,
+        pack: &mkit_core::protocol::PackKey,
+        bytes: u64,
+    ) -> Result<Option<u64>, ServerError> {
+        if !matches!(self.cfg.addressing, Addressing::Multi(_)) {
+            return Ok(Some(bytes));
+        }
+        let counted = self
+            .meta
+            .get(
+                &self.shards.coordinator(&op.repo.namespace),
+                &keys::repo_storage_pack(&op.repo.name, &pack.0),
+            )
+            .await
+            .map_err(meta_error)?
+            .is_some();
+        Ok(Some(if counted { 0 } else { bytes }))
+    }
+
     pub(super) async fn commit_creation(
         &self,
         op: &Operation,
@@ -111,7 +138,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 let record = codec::RepoRecord { created_at_ms };
                 batch = batch
                     .require(Precondition::Absent(key.clone()))
-                    .put(key, codec::encode_repo_record(&record));
+                    .put(key, codec::encode_repo_record(&record))
+                    .put(
+                        keys::repo_storage(&op.repo.name),
+                        crate::store::repo_storage::initial_counter(),
+                    );
             }
             let outcome = match self.meta.apply(&p, batch).await {
                 Ok(outcome) => outcome,

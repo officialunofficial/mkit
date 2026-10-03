@@ -26,7 +26,9 @@ use super::{
 /// `8 * 7 + 29 = 85`, including durable authority-generation/mode absence guards.
 /// The real maximal planner batches are tested separately. On D34, seven tickets
 /// cost `9 * 7 + 31 = 94` ops before
-/// opportunistic pruning.
+/// opportunistic pruning. Stored-bytes counting (`repo_storage`) adds one
+/// relay row on D34 and, on Single, seven markers, the counter and one outcome
+/// row (96 ops for seven tickets).
 ///
 /// The same constant caps an implicit transport-identity session's pending
 /// packs (WP-1.15 B9): a D34 packmap write consuming all seven — one
@@ -74,7 +76,8 @@ impl Terminal {
             ReservationV1::Committed { occurred_at_ms, .. }
             | ReservationV1::Aborted { occurred_at_ms, .. }
             | ReservationV1::Expired { occurred_at_ms, .. }
-            | ReservationV1::ReadServed { occurred_at_ms, .. } => *occurred_at_ms,
+            | ReservationV1::ReadServed { occurred_at_ms, .. }
+            | ReservationV1::RepoStorageChanged { occurred_at_ms, .. } => *occurred_at_ms,
             _ => 0,
         }
     }
@@ -299,34 +302,62 @@ impl OutboxBuilder {
             if !matches!(record, ReservationV1::Aborted { .. }) {
                 return Err(StoreError::Invalid("direct abort requires Aborted".into()));
             }
-            let key = keys::reservation(rid)?;
-            if !self.reservations.insert(rid.to_owned()) {
-                return Err(StoreError::Invalid("duplicate reservation in batch".into()));
+            self.new_terminal(rid, &record, occurred_at_ms)
+        })();
+        self.remember(result);
+    }
+
+    /// Insert a terminal row that has no prior state: guarded Absent, indexed
+    /// for delivery and counted in the backlog.
+    fn new_terminal(
+        &mut self,
+        rid: &str,
+        record: &ReservationV1,
+        occurred_at_ms: u64,
+    ) -> Result<(), StoreError> {
+        let key = keys::reservation(rid)?;
+        if !self.reservations.insert(rid.to_owned()) {
+            return Err(StoreError::Invalid("duplicate reservation in batch".into()));
+        }
+        let value = codec::encode_reservation(record);
+        let size = (key.as_bytes().len() + value.as_bytes().len()) as u64;
+        self.backlog.rows = self
+            .backlog
+            .rows
+            .checked_add(1)
+            .ok_or_else(|| corrupt("backlog rows overflow"))?;
+        self.backlog.bytes = self
+            .backlog
+            .bytes
+            .checked_add(size)
+            .ok_or_else(|| corrupt("backlog bytes overflow"))?;
+        let seq = self.allocate()?;
+        if self.oc.is_none() && self.kick_at_ms.is_none() {
+            self.kick_at_ms = Some(occurred_at_ms);
+        }
+        self.backlog_touched = true;
+        self.pre.push(Precondition::Absent(key.clone()));
+        self.writes.push(Write::Put(key, value));
+        self.writes.push(Write::Put(
+            keys::outcome_pending(seq, rid)?,
+            Value::default(),
+        ));
+        Ok(())
+    }
+
+    /// Queue a repository storage change for delivery as a new terminal row.
+    /// The id embeds the version, so a row that already exists fails its
+    /// Absent guard rather than being replaced.
+    pub fn storage_changed(&mut self, rid: &str, terminal: Terminal) {
+        let occurred_at_ms = terminal.occurred_at_ms();
+        let record = terminal.0;
+        let result = (|| {
+            if !matches!(record, ReservationV1::RepoStorageChanged { .. }) {
+                return Err(StoreError::Invalid(
+                    "storage change requires its row".into(),
+                ));
             }
-            let value = codec::encode_reservation(&record);
-            let size = (key.as_bytes().len() + value.as_bytes().len()) as u64;
-            self.backlog.rows = self
-                .backlog
-                .rows
-                .checked_add(1)
-                .ok_or_else(|| corrupt("backlog rows overflow"))?;
-            self.backlog.bytes = self
-                .backlog
-                .bytes
-                .checked_add(size)
-                .ok_or_else(|| corrupt("backlog bytes overflow"))?;
-            let seq = self.allocate()?;
-            if self.oc.is_none() && self.kick_at_ms.is_none() {
-                self.kick_at_ms = Some(occurred_at_ms);
-            }
-            self.backlog_touched = true;
-            self.pre.push(Precondition::Absent(key.clone()));
-            self.writes.push(Write::Put(key, value));
-            self.writes.push(Write::Put(
-                keys::outcome_pending(seq, rid)?,
-                Value::default(),
-            ));
-            Ok(())
+            self.new_terminal(rid, &record, occurred_at_ms)
         })();
         self.remember(result);
     }

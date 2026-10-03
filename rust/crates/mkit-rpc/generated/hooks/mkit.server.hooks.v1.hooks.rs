@@ -8279,6 +8279,14 @@ impl ::buffa::Message for Outcome {
                         += 1u64 + ::buffa::encoding::varint_len(inner as u64) as u64
                             + inner as u64;
                 }
+                __buffa::oneof::outcome::Kind::RepoStorageChanged(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner as u64) as u64
+                            + inner as u64;
+                }
             }
         }
         if let Some(ref v) = self.procedure {
@@ -8338,6 +8346,14 @@ impl ::buffa::Message for Outcome {
                 __buffa::oneof::outcome::Kind::ReadServed(x) => {
                     ::buffa::types::put_len_delimited_header(
                         8u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+                __buffa::oneof::outcome::Kind::RepoStorageChanged(x) => {
+                    ::buffa::types::put_len_delimited_header(
+                        11u32,
                         u64::from(__cache.consume_next()),
                         buf,
                     );
@@ -8484,6 +8500,26 @@ impl ::buffa::Message for Outcome {
                     ::buffa::Message::merge_length_delimited(&mut val, buf, ctx)?;
                     self.kind = ::core::option::Option::Some(
                         __buffa::oneof::outcome::Kind::ReadServed(
+                            ::buffa::alloc::boxed::Box::new(val),
+                        ),
+                    );
+                }
+            }
+            11u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                if let ::core::option::Option::Some(
+                    __buffa::oneof::outcome::Kind::RepoStorageChanged(ref mut existing),
+                ) = self.kind
+                {
+                    ::buffa::Message::merge_length_delimited(&mut **existing, buf, ctx)?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, ctx)?;
+                    self.kind = ::core::option::Option::Some(
+                        __buffa::oneof::outcome::Kind::RepoStorageChanged(
                             ::buffa::alloc::boxed::Box::new(val),
                         ),
                     );
@@ -8732,6 +8768,30 @@ impl<'de> serde::Deserialize<'de> for Outcome {
                                 );
                             }
                         }
+                        "repoStorageChanged" | "repo_storage_changed" => {
+                            let v: ::core::option::Option<RepoStorageChanged> = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(
+                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
+                                            RepoStorageChanged,
+                                        >::new(),
+                                    ),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_kind.is_some() {
+                                    return Err(
+                                        serde::de::Error::custom(
+                                            "multiple oneof fields set for 'kind'",
+                                        ),
+                                    );
+                                }
+                                __oneof_kind = Some(
+                                    __buffa::oneof::outcome::Kind::RepoStorageChanged(
+                                        ::buffa::alloc::boxed::Box::new(v),
+                                    ),
+                                );
+                            }
+                        }
                         _ => {
                             map.next_value::<serde::de::IgnoredAny>()?;
                         }
@@ -8804,7 +8864,10 @@ pub struct Committed {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub bytes_stored: ::core::option::Option<u64>,
-    /// Bytes newly added to the repository's membership; SPEC-SERVER §6.5.
+    /// Pack bytes this write observed as new to the repository: exact where the
+    /// repository's counter is in the writing partition, otherwise an
+    /// observation. Not the accounting source: use RepoStorageChanged;
+    /// SPEC-SERVER §6.5.
     ///
     /// Field 2: `new_to_repo`
     #[serde(
@@ -9696,6 +9759,182 @@ pub const __READ_SERVED_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa
     type_url: "type.googleapis.com/mkit.server.hooks.v1.ReadServed",
     to_json: ::buffa::type_registry::any_to_json::<ReadServed>,
     from_json: ::buffa::type_registry::any_from_json::<ReadServed>,
+    is_wkt: false,
+};
+/// Per-repository stored-bytes accounting: the repository's absolute pack-byte
+/// total after a counter change. Delivery is at least once and may be out of
+/// order: keep the value with the highest version; SPEC-SERVER §6.5.
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct RepoStorageChanged {
+    /// Sum of the sizes of the distinct packs that are members of the repository.
+    ///
+    /// Field 1: `stored_bytes`
+    #[serde(
+        rename = "storedBytes",
+        alias = "stored_bytes",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub stored_bytes: ::core::option::Option<u64>,
+    /// Monotonic per-repository counter version; increments on every change.
+    ///
+    /// Field 2: `version`
+    #[serde(
+        rename = "version",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub version: ::core::option::Option<u64>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for RepoStorageChanged {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("RepoStorageChanged")
+            .field("stored_bytes", &self.stored_bytes)
+            .field("version", &self.version)
+            .finish()
+    }
+}
+impl RepoStorageChanged {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.server.hooks.v1.RepoStorageChanged";
+}
+impl RepoStorageChanged {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::stored_bytes`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_stored_bytes(mut self, value: u64) -> Self {
+        self.stored_bytes = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::version`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_version(mut self, value: u64) -> Self {
+        self.version = Some(value);
+        self
+    }
+}
+::buffa::impl_default_instance!(RepoStorageChanged);
+impl ::buffa::MessageName for RepoStorageChanged {
+    const PACKAGE: &'static str = "mkit.server.hooks.v1";
+    const NAME: &'static str = "RepoStorageChanged";
+    const FULL_NAME: &'static str = "mkit.server.hooks.v1.RepoStorageChanged";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.server.hooks.v1.RepoStorageChanged";
+}
+impl ::buffa::Message for RepoStorageChanged {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(v) = self.stored_bytes {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.version {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(v) = self.stored_bytes {
+            ::buffa::types::put_uint64_field(1u32, v, buf);
+        }
+        if let Some(v) = self.version {
+            ::buffa::types::put_uint64_field(2u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.stored_bytes = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.version = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.stored_bytes = ::core::option::Option::None;
+        self.version = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for RepoStorageChanged {
+    const PROTO_FQN: &'static str = "mkit.server.hooks.v1.RepoStorageChanged";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for RepoStorageChanged {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __REPO_STORAGE_CHANGED_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.server.hooks.v1.RepoStorageChanged",
+    to_json: ::buffa::type_registry::any_to_json::<RepoStorageChanged>,
+    from_json: ::buffa::type_registry::any_from_json::<RepoStorageChanged>,
     is_wkt: false,
 };
 /// Durable lifecycle event delivery; SPEC-SERVER §12.4.
