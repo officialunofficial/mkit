@@ -1,6 +1,6 @@
 # mkit-server-worker — the Cloudflare Workers adapter of the mkit server
 # (production server work §5.1), storage half: a streaming R2 `BlobStore`, a Durable
-# Object `SqlConn` under `mkit-server`'s shared `SqlKvStore`, the Durable
+# Object `SqlConn` under this crate's `sql::SqlKvStore`, the Durable
 # Object request handler, the Worker-side `NamespaceStore` client that
 # routes each partition to its own Durable Object, and the fetch adapter
 # that serves the pipeline's Connect binding over them (`adapter`, which
@@ -41,12 +41,13 @@ http-objects = ["mkit-server/http-objects"]
 pack-ruzstd = ["mkit-server/pack-ruzstd"]
 
 [dependencies]
-# `connect` (on by default) for M0-17's fetch adapter; `sql` for the shared
-# `SqlKvStore`; `remote-hooks` for the service-binding hook channel
+# `connect` (on by default) for the fetch adapter; `remote-hooks` for the
+# service-binding hook channel
 # (WP-3.9). No `fs` (native only) and no `memory`.
-mkit-server = { version = "0.5", path = "../mkit-server", features = ["connect", "sql", "remote-hooks"] }
+mkit-server = { version = "0.5", path = "../mkit-server", features = ["connect", "remote-hooks"] }
 # default-features = false keeps `pack-zstd` (zstd-sys, C) out of wasm32.
 mkit-core = { version = "0.5", path = "../mkit-core", default-features = false }
+thiserror = "2"
 url = "2"
 zeroize = "1"
 bytes = "1"

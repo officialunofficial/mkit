@@ -1,11 +1,11 @@
 //! Integrated Worker registration and target-local SQL audit contracts.
 use super::*;
+use crate::sql::SqlKvStore;
 use crate::test_sqlite::RusqliteConn;
 use futures::executor::block_on;
 use mkit_server::admin::SystemAudit;
 use mkit_server::purge::{Request, Trigger};
 use mkit_server::relay::{RelayEnqueueSnapshot, RelayHook, enqueue_relay_rows};
-use mkit_server::sql::SqlKvStore;
 use mkit_server::store::{codec, keys};
 use mkit_server::timers::{TickBudget, run_due};
 use mkit_server::{

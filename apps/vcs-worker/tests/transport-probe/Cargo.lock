@@ -1029,6 +1029,7 @@ dependencies = [
  "mkit-worker-common",
  "serde",
  "serde_json",
+ "thiserror",
  "tower",
  "tracing",
  "tracing-subscriber",

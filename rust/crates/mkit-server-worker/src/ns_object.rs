@@ -9,15 +9,13 @@
 //! over the store, so host tests run it over a simulated Durable Object connection;
 //! `NsObject` is the wasm32 shell around it.
 
+use crate::sql::SqlError;
+use crate::sql::{SqlConn, SqlKvStore, TimerCursor};
+use crate::telemetry::pressure::{self, PressureState};
 use core::future::Future;
-use mkit_server::sql::SqlError;
-use mkit_server::sql::{SqlConn, SqlKvStore, TimerCursor};
 use mkit_server::storage_error::StorageOp;
 use mkit_server::store::export_page;
-use mkit_server::telemetry::{
-    Metrics,
-    pressure::{self, PressureState},
-};
+use mkit_server::telemetry::Metrics;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -547,8 +545,8 @@ mod object {
     use std::cell::{Cell, OnceCell};
     use std::sync::Arc;
 
+    use crate::sql::{Capacity, SqlKvStore, TimerCursor};
     use mkit_server::Clock;
-    use mkit_server::sql::{Capacity, SqlKvStore, TimerCursor};
     use mkit_server::timers::{TickBudget, TimerRegistry};
     use worker::{Method, Request, Response, ScheduledTime, State, Storage};
 

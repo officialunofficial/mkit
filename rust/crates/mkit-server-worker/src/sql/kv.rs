@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use super::{Capacity, Row, SqlConn, SqlError, SqlValue, TxFn, blob, count, schema};
-use crate::store::{
+use mkit_server::store::{
     Batch, BatchOutcome, Cursor, Key, NamespaceStore, Partition, PartitionStats, Precondition,
     ScanPage, StoreCapabilities, StoreError, StoreMaintenance, Value, Write, codec, keys,
 };
@@ -388,7 +388,7 @@ pub(super) fn is_relay_timer_reschedule(batch: &Batch) -> bool {
     else {
         return false;
     };
-    old_kind == crate::timers::registry::kinds::RELAY.get()
+    old_kind == mkit_server::timers::registry::kinds::RELAY.get()
         && new_kind == old_kind
         && old_ref == new_ref
         && new_due > old_due

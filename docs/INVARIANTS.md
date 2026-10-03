@@ -1843,7 +1843,7 @@ pre-commit or unsampled latency logging can mislead or overwhelm operators.
 **If violated:** capacity exhaustion becomes invisible, or repeated writes
 flood logs while operators need the critical alert.
 
-**Enforced by:** `telemetry/pressure.rs` pure transition tests, Worker
+**Enforced by:** `mkit-server-worker/src/telemetry/pressure.rs` pure transition tests, Worker
 `ns_object::PressureStore` and `tests/stores.rs` over the DO SQL shim,
 console sink/subscriber tests, and native `pressure.rs` shutdown/size-task tests.
 

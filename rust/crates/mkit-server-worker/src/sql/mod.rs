@@ -1,4 +1,4 @@
-//! The shared SQL backend (`sql` feature): the [`NamespaceStore`] contract
+//! The Workers SQL backend: the [`NamespaceStore`] contract
 //! implemented once over `SQLite`, on the tiny synchronous [`SqlConn`]
 //! trait.
 //!
@@ -12,7 +12,7 @@
 //! [`MAX_BOUND_PARAMS`] bound parameters, and no transaction-control
 //! statement ([`SqlConn::transaction`] owns atomicity).
 //!
-//! [`NamespaceStore`]: crate::NamespaceStore
+//! [`NamespaceStore`]: mkit_server::NamespaceStore
 
 mod capacity;
 mod kv;
@@ -25,9 +25,8 @@ pub use capacity::{
 };
 pub use kv::{GET_MANY_CHUNK, SqlKvStore, TIMER_WINDOW_AFTER, TIMER_WINDOW_START, TimerCursor};
 
-use crate::error::Redacted;
-use crate::rt::{MaybeSend, MaybeSync};
-use crate::store::StoreError;
+use mkit_server::store::StoreError;
+use mkit_server::{MaybeSend, MaybeSync, Redacted};
 
 /// Most bound parameters in one statement: the Durable Object SQL limit
 /// (<https://developers.cloudflare.com/durable-objects/platform/limits/>).
@@ -118,7 +117,7 @@ pub trait SqlConn: MaybeSend + MaybeSync + Clone + 'static {
     /// a Durable Object. A reading before the epoch is `u64::MAX`, so every
     /// deadline fails closed.
     ///
-    /// [`Precondition::NotAfter`]: crate::Precondition::NotAfter
+    /// [`Precondition::NotAfter`]: mkit_server::Precondition::NotAfter
     fn now_ms(&self) -> u64;
 
     /// Bytes the database uses, for the soft cap ([`Capacity`]): pages

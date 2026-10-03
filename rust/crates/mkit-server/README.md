@@ -29,7 +29,6 @@ native targets and `wasm32-unknown-unknown`.
 | `connect` (default) | The `mkit.transport.v1` Connect binding (`connect::service`), with its health service and auth interceptor. wasm-clean. |
 | `memory` | In-memory reference backends, a template for third-party backends. |
 | `fs` | std-only stores over the `.mkit` on-disk layout (`FsBlobStore`, `FsLayoutStore`). Native only. |
-| `sql` | A shared SQL backend (`SqlKvStore`) over a synchronous `SqlConn` trait; the embedder supplies the engine. |
 | `ssh` | The `mkit.rpc.v1.ssh` session (`ssh::serve_session`), with no async runtime of its own. |
 | `remote-hooks` | Signed `mkit.server.hooks.v1` authorization, admission and outcome adapters over a `HookChannel`. |
 | `http-objects` | Runtime-agnostic HTTP object serving; requires explicit configuration and indexed mode. |
@@ -102,3 +101,5 @@ details.
 
 Licensed under either of Apache License, Version 2.0 or MIT license, at your
 option.
+
+The `SQLite` store lives in `mkit_server_worker::sql`; core has no SQL feature.

@@ -4,13 +4,13 @@
 //! **Why a reserve.** Deleting from a `WITHOUT ROWID` b-tree can *grow* it:
 //! removing a cell from an interior page promotes a replacement divider,
 //! which may be longer (keys run from 1 to
-//! [`MAX_KEY_BYTES`](crate::store::MAX_KEY_BYTES) bytes) and split the page
+//! [`MAX_KEY_BYTES`](mkit_server::store::MAX_KEY_BYTES) bytes) and split the page
 //! and its ancestors. A store filled to its engine limit
 //! (`SQLite` `max_page_count`, a Durable Object's 10 GB) can therefore
 //! fail a delete with `SQLITE_FULL`, which breaks normative rule 7 (a
 //! delete-only batch never returns `Full`, so pruning always runs). The
 //! store keeps a reserve free: a batch with a put returns
-//! [`StoreError::Full`](crate::StoreError::Full) once the bytes in use
+//! [`StoreError::Full`](mkit_server::StoreError::Full) once the bytes in use
 //! reach `cap - reserve`, and delete-only batches are never refused.
 //!
 //! **The reserve formula.** One batch holds at most [`MAX_BATCH_OPS`]
@@ -30,7 +30,7 @@
 //! Pages freed by deletes go to the free list, and later splits reuse them
 //! first, so pruning mostly consumes no new pages.
 
-use crate::store::{MAX_BATCH_BYTES, MAX_BATCH_OPS};
+use mkit_server::store::{MAX_BATCH_BYTES, MAX_BATCH_OPS};
 
 /// The page size the default reserve assumes: `SQLite`'s default and a
 /// Durable Object's. A database with larger pages sets its reserve with

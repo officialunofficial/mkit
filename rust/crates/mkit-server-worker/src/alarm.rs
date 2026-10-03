@@ -2,7 +2,7 @@
 
 pub use mkit_server::timers::earliest_timer_put;
 
-use mkit_server::sql::{SqlConn, TimerCursor};
+use crate::sql::{SqlConn, TimerCursor};
 use mkit_server::store::keys;
 use mkit_server::timers::{TickBudget, TickState, TimerKind, TimerRegistry, run_due_with_state};
 use mkit_server::{Clock, StoreError};

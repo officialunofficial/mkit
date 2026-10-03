@@ -9,13 +9,13 @@ use common::{DoConfig, Loopback, SimBucket, SimDoConn, capacity_above_empty};
 use futures::executor::block_on;
 use mkit_core::hash::hash;
 use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan, part_subtree_cv};
-use mkit_server::sql::{Row, SqlConn, SqlError, SqlKvStore, SqlValue, TxFn};
 use mkit_server::{
     Batch, BatchOutcome, BlobKey, BlobStore, CommitOutcome, Key, MultipartBlobStore, NamespaceKey,
     NamespaceStore, PackSink, PartRef, PartSink, Partition, StoreError, StoreMaintenance, Value,
 };
 use mkit_server_worker::naming::{REFSTORE, ROOT_INSTANCE};
 use mkit_server_worker::r2::{PACKS_KEYSPACE, R2BlobStore};
+use mkit_server_worker::sql::{Row, SqlConn, SqlError, SqlKvStore, SqlValue, TxFn};
 
 fn key(i: u32) -> Key {
     Key::new([b"r\0cap\0".as_slice(), &i.to_be_bytes()].concat())

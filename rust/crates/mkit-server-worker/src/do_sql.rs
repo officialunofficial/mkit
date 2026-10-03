@@ -5,7 +5,7 @@
 //! - Statements run through `ctx.storage.sql.exec`. Cursors are
 //!   materialized before a call returns and never held across a
 //!   `transactionSync` boundary.
-//! - [`SqlConn::transaction`](mkit_server::sql::SqlConn::transaction) runs its owned body inside
+//! - [`SqlConn::transaction`](crate::sql::SqlConn::transaction) runs its owned body inside
 //!   `ctx.storage.transactionSync(callback)`: every statement of the body
 //!   runs in that transaction, which commits if the body returns `Ok` and
 //!   rolls back if it returns `Err` (the callback throws). There is no
@@ -43,10 +43,10 @@
 //! (it binds at most 65), 2 MB per row (values are at most 512 KiB), 100 KB
 //! per statement.
 //!
-//! [`SqlConn`]: mkit_server::sql::SqlConn
+//! [`SqlConn`]: crate::sql::SqlConn
 
+use crate::sql::{Capacity, MAX_BOUND_PARAMS, SqlError, SqlValue};
 use mkit_server::Redacted;
-use mkit_server::sql::{Capacity, MAX_BOUND_PARAMS, SqlError, SqlValue};
 
 /// The storage limit of a SQLite-backed Durable Object on Workers Paid:
 /// 10 GB, read as 10^10 bytes (the smaller reading).
@@ -182,8 +182,8 @@ mod conn {
     use std::cell::RefCell;
     use std::rc::Rc;
 
+    use crate::sql::{Row, SqlConn, SqlError, SqlValue, TxFn};
     use mkit_server::Redacted;
-    use mkit_server::sql::{Row, SqlConn, SqlError, SqlValue, TxFn};
     use worker::js_sys;
     use worker::wasm_bindgen::closure::Closure;
     use worker::wasm_bindgen::{JsCast, JsValue};

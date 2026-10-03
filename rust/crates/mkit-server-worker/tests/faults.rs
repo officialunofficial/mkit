@@ -9,13 +9,13 @@ use common::RusqliteConn;
 use common::{DoConfig, SimBucket, SimDoConn};
 use futures::executor::block_on;
 use mkit_core::hash::hash;
-use mkit_server::sql::SqlKvStore;
 use mkit_server::{
     Batch, BatchOutcome, BlobKey, BlobStore, CommitOutcome, Key, NamespaceKey, NamespaceStore,
     PackSink, Partition, StoreError, Value,
 };
 use mkit_server_worker::faults::{FAIL_ONCE_MARKER, FaultConn};
 use mkit_server_worker::r2::{PACKS_KEYSPACE, R2BlobStore};
+use mkit_server_worker::sql::SqlKvStore;
 
 #[test]
 fn r2_final_chunk_fault_fails_once_and_publishes_nothing() {

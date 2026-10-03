@@ -79,7 +79,8 @@ jobs:
         with:
           tool: cargo-hack
       # Library-only avoids dev-dependency feature unification. Depth two
-      # and the per-crate timeout bound the combinatorial cost.
+      # and the per-crate timeout bound the combinatorial cost. SQL is
+      # unconditional in the Workers adapter, outside the core feature graph.
       - name: Clippy feature powerset (depth two)
         working-directory: rust
         run: cargo hack clippy --locked -p ${{ matrix.crate }} --lib --feature-powerset --depth 2 -- -D warnings

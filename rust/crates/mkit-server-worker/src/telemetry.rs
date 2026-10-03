@@ -2,6 +2,9 @@
 //! latency observations emit on the first and then every hundredth call, across request-created
 //! default sinks in one isolate. Each emitted line is one JSON object.
 
+/// Physical Durable Object storage pressure and alert bookkeeping.
+pub mod pressure;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mkit_server::Metrics;

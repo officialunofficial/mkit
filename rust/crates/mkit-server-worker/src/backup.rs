@@ -664,8 +664,8 @@ mod tests {
 
     #[test]
     fn sqlite_eighty_thousand_small_rows_at_cap_under_five_seconds() {
+        use crate::sql::{SqlConn, SqlKvStore, SqlValue};
         use crate::test_sqlite::RusqliteConn;
-        use mkit_server::sql::{SqlConn, SqlKvStore, SqlValue};
 
         let dir = tempfile::tempdir().unwrap();
         let conn = RusqliteConn::open(dir.path().join("rows.sqlite3")).unwrap();

@@ -20,6 +20,8 @@
 //! [`R2BlobStore`]: mkit_server_worker::r2::R2BlobStore
 #![allow(dead_code, unreachable_pub)]
 
+use mkit_server_worker::sql;
+
 pub mod multipart_allocator;
 
 /// Check retained retry identity, capped delays and payloads through cold ticks.
@@ -94,10 +96,10 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use futures::channel::oneshot;
 use futures::executor::block_on;
-use mkit_server::sql::{
+use mkit_server::{Clock, StoreError};
+use mkit_server_worker::sql::{
     Capacity, DEFAULT_PAGE_SIZE, Row, SqlConn, SqlError, SqlKvStore, SqlValue, TxFn, reserve_floor,
 };
-use mkit_server::{Clock, StoreError};
 pub use sqlite::RusqliteConn;
 mod sqlite;
 use mkit_server_worker::do_sql::classify_error;

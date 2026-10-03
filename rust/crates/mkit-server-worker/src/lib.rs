@@ -58,7 +58,7 @@
 //! [`BlobStore`]: mkit_server::BlobStore
 //! [`NamespaceStore`]: mkit_server::NamespaceStore
 //! [`Partition`]: mkit_server::Partition
-//! [`SqlConn`]: mkit_server::sql::SqlConn
+//! [`SqlConn`]: crate::sql::SqlConn
 //! [`R2BlobStore`]: r2::R2BlobStore
 //! [`DoNamespaceStore`]: ns_client::DoNamespaceStore
 
@@ -86,9 +86,11 @@ pub mod ns_client;
 pub mod ns_object;
 pub mod purge;
 pub mod r2;
+pub mod relay;
 pub mod scanner_retrieval;
 pub mod sharding_guard;
 pub mod sleep;
+pub mod sql;
 pub mod telemetry;
 pub mod verify;
 pub mod wire;

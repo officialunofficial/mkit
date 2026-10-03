@@ -4,6 +4,12 @@ Cloudflare Workers adapter for the runtime-agnostic mkit server: streaming
 R2 blobs, Durable Object metadata, Connect dispatch and remote hooks over
 service bindings.
 
+`sql::SqlKvStore` implements the core `NamespaceStore` contract over the
+synchronous `sql::SqlConn` trait. `do_sql::DoSqlConn` supplies the Durable
+Object `SQLite` engine; native `SQLite` connections stay in the test host.
+Worker relay budgets live in `relay`, and physical storage alerts live in
+`telemetry::pressure`.
+
 HTTP object serving is explicitly opt-in. The default build omits
 `http-objects` and `WorkerConfig::http_mount` defaults to `None`. The Paid Workers
 profile (`LAUNCH_PROFILE=paid-workers`, `INDEXED_MODE=true`, Multi/D34 and tickets)

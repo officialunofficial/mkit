@@ -189,6 +189,8 @@ ci-server:
         && cargo check --locked -p mkit-server --features remote-hooks --target wasm32-unknown-unknown \
         && cargo check --locked -p mkit-server --features http-objects --target wasm32-unknown-unknown \
         && cargo build --locked -p mkit-server-worker --target wasm32-unknown-unknown )
+    ( cd rust && cargo clippy --locked -p mkit-server -p mkit-server-worker \
+        --target wasm32-unknown-unknown -- -D warnings )
     bash scripts/check-cli-baseline.sh
 
 # Mirrors cloudbuild/docs.yaml (rustdoc -D warnings).

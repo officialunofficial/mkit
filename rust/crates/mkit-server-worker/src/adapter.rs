@@ -54,11 +54,11 @@ use core::task::{Context, Poll};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use crate::sql::Capacity;
 use bytes::Bytes;
 use http_body::{Body, Frame, SizeHint};
 #[cfg(feature = "test-faults")]
 use mkit_server::quota::QuotaLimits;
-use mkit_server::sql::Capacity;
 
 use crate::naming::Placement;
 use mkit_server::pipeline::Sharding;
@@ -1247,9 +1247,9 @@ fn timer_registry_budgeted<
             ) {
         let paid = plan.is_some_and(|p| p.trim().eq_ignore_ascii_case("paid"));
         let max_per_tick = if paid {
-            mkit_server::relay::WORKER_PAID_RELAY_FIRES
+            crate::relay::WORKER_PAID_RELAY_FIRES
         } else {
-            mkit_server::relay::WORKER_FREE_RELAY_FIRES
+            crate::relay::WORKER_FREE_RELAY_FIRES
         };
         // Paid: <= 8 fires x 32 targets x 2 calls = 512 per alarm.
         // Free:
@@ -1258,11 +1258,11 @@ fn timer_registry_budgeted<
         let mut budget = RelayBudget::default();
         budget.max_rows = 128;
         budget.max_targets = if paid {
-            mkit_server::relay::WORKER_PAID_RELAY_TARGETS
+            crate::relay::WORKER_PAID_RELAY_TARGETS
         } else {
-            mkit_server::relay::WORKER_FREE_RELAY_TARGETS
+            crate::relay::WORKER_FREE_RELAY_TARGETS
         };
-        budget.max_target_calls = Some(mkit_server::relay::WORKER_RELAY_CALLS_PER_TARGET);
+        budget.max_target_calls = Some(crate::relay::WORKER_RELAY_CALLS_PER_TARGET);
         let relay = match target.clone() {
             Ok(target) => Some(RelayHandler {
                 target,
