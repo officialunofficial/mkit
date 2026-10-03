@@ -360,3 +360,7 @@ impl<S: crate::NamespaceStore> TimerHandler<S> for TakedownRequestTimer {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "content_v050_tests.rs"]
+mod v050_tests;

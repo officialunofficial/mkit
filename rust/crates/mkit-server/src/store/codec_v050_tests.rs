@@ -2,6 +2,13 @@
 use super::*;
 #[test]
 fn v050_stored_encodings() {
+    let expected = crate::stored_golden::row_fixture!("store-codec-BackupStateV1", b"\x01");
+    let row = decode_backup_state(&expected).unwrap();
+    assert_eq!(row.last_export_ms, 10);
+    assert_eq!(row.digest, [1; 32]);
+    assert_eq!(row.r2_key, "backups/sample");
+    assert_eq!(row.last_upload_ms, 11);
+    assert_eq!(encode_backup_state(&row), expected);
     let _ = crate::stored_golden::json_fixture!(OutcomeRef, "store-codec-OutcomeRef");
     let _ = crate::stored_golden::json_fixture!(AbortReason, "store-codec-AbortReason-ABANDONED");
     let _ =

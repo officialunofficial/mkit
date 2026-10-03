@@ -1179,3 +1179,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "published-view"))]
+#[path = "purge_v050_tests.rs"]
+mod v050_tests;

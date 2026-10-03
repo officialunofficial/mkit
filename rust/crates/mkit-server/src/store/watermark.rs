@@ -711,3 +711,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "watermark_v050_tests.rs"]
+mod v050_tests;

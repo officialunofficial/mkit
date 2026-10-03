@@ -203,3 +203,7 @@ pub fn cache_key(deployment: &str, partition: &Partition) -> Result<String, Stor
         to_hex_bytes(&hash(&bytes))
     ))
 }
+
+#[cfg(test)]
+#[path = "codec_v050_tests.rs"]
+mod v050_tests;

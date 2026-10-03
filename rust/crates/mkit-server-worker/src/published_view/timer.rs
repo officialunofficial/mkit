@@ -363,3 +363,7 @@ fn old_capture_time(bytes: &[u8]) -> Result<u64, StoreError> {
         .map(u64::from_be_bytes)
         .ok_or_else(|| StoreError::Corrupt("snapshot capture time".into()))
 }
+
+#[cfg(test)]
+#[path = "timer_v050_tests.rs"]
+mod v050_tests;

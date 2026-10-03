@@ -77,6 +77,7 @@ v0.5.0 bytes when adding later fixtures; new fields must have serde defaults.
 | `store::codec::AbortReason` | `store-codec-AbortReason-REF_CONFLICT.json` |
 | `store::codec::AbortReason` | `store-codec-AbortReason-REPLAY_RACE.json` |
 | `store::codec::AbortReason` | `store-codec-AbortReason-UNSPECIFIED.json` |
+| `store::codec::BackupStateV1` | `store-codec-BackupStateV1.json` |
 | `store::codec::Backlog` | `store-codec-Backlog.json` |
 | `store::codec::BlockV1` | `store-codec-BlockV1.json` |
 | `store::codec::EpochLease` | `store-codec-EpochLease.json` |
@@ -192,3 +193,18 @@ v0.5.0 bytes when adding later fixtures; new fields must have serde defaults.
 Binary row fixtures pin object indexes (all four wire types), verification frames/bases, namespace usage/views, references/integers, pending holders, publication witnesses, selection projections/pages, inspection holds/mode, denial directory pointers, preservation source frames/pieces, timer cursors, and portable exports. Worker fixtures also pin sharding/addressing markers. The existing `rust/tests/golden/uploads` fixtures pin authenticated multipart receipts and upload-marker blobs.
 
 Additional canonical fixtures: `pipeline-revocation-RevokeCheckpoint.json`, active and sealed inventory/denial records, inspection flag/source rows, and Worker object root bindings.
+
+Additional durable format cases:
+
+| Type / variant family | Canonical fixture |
+|---|---|
+| `relay::ContentTakedownV1`, pending / ready | `relay-ContentTakedownV1-pending.hex`, `relay-ContentTakedownV1-ready.hex` |
+| `store::watermark::WatermarkCheckpoint`, both recovery markers absent/present | `store-watermark-WatermarkCheckpoint-00.hex`, `-10.hex`, `-01.hex`, `-11.hex` |
+| Worker `published_view::timer::State`, clean / dirty | `published-view-State-clean.hex`, `published-view-State-dirty.hex` |
+| Worker `published_view::Envelope`, populated snapshot | `published-view-Envelope.hex` |
+| Worker `purge::NamespacePosition`, empty / populated checkpoint | `purge-NamespacePosition-empty.json`, `purge-NamespacePosition-populated.json` |
+
+The revoke checkpoint fixture is tested through the production versioned store
+reader and writer with matching generation and recovery. Worker snapshot and
+namespace-purge cases run in the `published-view` feature lane, which
+`just ci-server` includes through its all-features test run.
