@@ -447,7 +447,7 @@ pub(super) async fn expiry_timer_frees_cap_slot(ctx: Ctx) -> CaseResult {
     want_code(full, "failed_precondition", "BeginUpload at the cap")?;
     // Skew the business clock past every expiry and tick the shard: the
     // kind-2 handler closes each ticket and returns its cap slots.
-    let skew = last_expiry - crate::wire::sign::now_ms() + 1_000;
+    let skew = last_expiry - ctx.server_now_ms() + 1_000;
     super::timers::tick_shard(&ctx, &name, skew).await?;
     let freed: BeginUploadResponse = want_ok(
         ctx.call_as("expiring", Rpc::BeginUpload, &next).await?,
@@ -511,11 +511,11 @@ pub(super) async fn advance_expired_ticket(ctx: Ctx) -> CaseResult {
         .expires_unix_ms
         .ok_or_else(|| Failure::Fail("missing ticket expiry".into()))?;
     let req = ticket_advance(&ctx, "ticketed", vec![id]);
-    let skew = expires - crate::wire::sign::now_ms() + 1_000;
+    let skew = expires - ctx.server_now_ms() + 1_000;
     let signer = ctx.v2_signer("main")?;
     let envelope = sign_unary(&signer, Rpc::AdvanceRefs, &req, |env| {
-        env.created_at += skew;
-        env.expires_at += skew;
+        env.expires_at += expires + 1_000 - env.created_at;
+        env.created_at = expires + 1_000;
     })
     .with_header(crate::wire::CLOCK_SKEW_HEADER, skew.to_string());
     let response: Result<mkit_transport_connect::generated::AdvanceRefsResponse, _> =
@@ -578,14 +578,14 @@ pub(super) async fn upload_pack_expired_token(ctx: Ctx) -> CaseResult {
     let msgs = ticketed_msgs(pack, opened.token.unwrap_or_default());
     // The test directive shifts auth time too. Sign inside that shifted
     // validity window so ticket expiry is the first failing check.
-    let skew = expires - crate::wire::sign::now_ms() + 1_000;
+    let skew = expires - ctx.server_now_ms() + 1_000;
     let signer = ctx.v2_signer("main")?;
     let mut envelope = signer.envelope(
         Rpc::UploadPack.procedure(),
         crate::wire::sign::pack_commitment(&id, pack.len() as u64),
     );
-    envelope.created_at += skew;
-    envelope.expires_at += skew;
+    envelope.expires_at += expires + 1_000 - envelope.created_at;
+    envelope.created_at = expires + 1_000;
     let mut headers = signer.sign(&envelope).headers;
     headers.push((crate::wire::CLOCK_SKEW_HEADER.into(), skew.to_string()));
     let error = ctx.upload_with(&msgs, &headers).await?;

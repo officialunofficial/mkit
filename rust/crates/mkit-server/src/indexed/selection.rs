@@ -2,7 +2,7 @@
 //! already-Verified packs. Facts are derived only from verified decoded bytes;
 //! repository/global-store presence never changes the selection.
 
-#[cfg(test)]
+#[cfg(all(test, feature = "memory"))]
 use std::collections::{BTreeMap, BTreeSet};
 
 use mkit_core::hash::{Hash, Hasher};
@@ -10,7 +10,7 @@ use mkit_core::object::Object;
 use mkit_core::ops::graph::{ClosureMode, children};
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "memory"))]
 use super::extract::Kind;
 use crate::store::StoreError;
 use crate::store::Value;
@@ -49,14 +49,14 @@ impl SelectionFact {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "memory"))]
     pub(super) fn encode(&self) -> Value {
         let mut bytes = vec![1];
         serde_json::to_writer(&mut bytes, self).expect("selection DTO serializes");
         Value::new(bytes)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "memory"))]
     pub(super) fn decode(value: &Value) -> Result<Self, StoreError> {
         let Some((&1, bytes)) = value.as_bytes().split_first() else {
             return Err(StoreError::Corrupt("bad selection fact version".into()));
@@ -284,7 +284,7 @@ impl SelectionFact {
 /// The native union rule, operating without retaining decoded Blob payloads.
 /// Group drivers may accumulate referenced identities in bounded persistent
 /// rows; this function is also the native reference implementation.
-#[cfg(test)]
+#[cfg(all(test, feature = "memory"))]
 pub(super) fn select_facts(
     facts: &BTreeMap<Hash, SelectionFact>,
     min_bytes: u64,

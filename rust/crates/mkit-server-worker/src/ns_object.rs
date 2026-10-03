@@ -780,9 +780,10 @@ mod object {
                     if let Some(earliest) = earliest
                         && let Err(error) = self.lower_alarm(earliest).await
                     {
-                        // The write is committed; the next activation re-arms.
+                        // Leave the committed timer for replay and cold-start repair.
                         self.alarm_armed.set(false);
                         crate::log_failure(&format!("timer alarm update failed: {error}"));
+                        return Err(error);
                     }
                     encode(&reply)
                 }
@@ -839,7 +840,7 @@ mod object {
         async fn lower_alarm(&self, earliest: u64) -> worker::Result<()> {
             let current = self.storage.get_alarm().await?;
             if let Some(next) = alarm_after_put(current, earliest, self.now_ms()) {
-                self.set_alarm(next).await?;
+                super::retry_alarm(|| self.set_alarm(next)).await?;
             }
             Ok(())
         }
@@ -911,6 +912,21 @@ mod object {
     }
 }
 
+/// Two inline retries keep a transient scheduling failure from stranding work.
+#[cfg(any(target_arch = "wasm32", test))]
+async fn retry_alarm<E, F: Future<Output = Result<(), E>>>(
+    mut set_alarm: impl FnMut() -> F,
+) -> Result<(), E> {
+    for attempt in 0..=2 {
+        match set_alarm().await {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt == 2 => return Err(error),
+            Err(_) => {}
+        }
+    }
+    unreachable!("the last attempt returns")
+}
+
 #[cfg(test)]
 mod tests {
     use futures::executor::block_on;
@@ -918,6 +934,30 @@ mod tests {
 
     use super::*;
     use crate::wire::WireBatch;
+
+    #[test]
+    fn alarm_scheduling_retries_are_bounded_and_propagate_exhaustion() {
+        for failures in 0..=3 {
+            let mut calls = 0;
+            let result = block_on(retry_alarm(|| {
+                calls += 1;
+                std::future::ready(if calls <= failures {
+                    Err("set_alarm failed")
+                } else {
+                    Ok(())
+                })
+            }));
+            assert_eq!(calls, (failures + 1).min(3));
+            assert_eq!(
+                result,
+                if failures == 3 {
+                    Err("set_alarm failed")
+                } else {
+                    Ok(())
+                }
+            );
+        }
+    }
 
     fn request(call: NsCall) -> String {
         let p = Partition::decode(b"nroot\0").unwrap();

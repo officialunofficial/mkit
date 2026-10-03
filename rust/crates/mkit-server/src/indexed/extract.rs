@@ -35,7 +35,7 @@ use mkit_core::object::{ChunkedBlob, Object};
 use mkit_core::ops::graph::{ClosureMode, children};
 use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan, part_subtree_cv};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "memory"))]
 pub(super) use super::selection::{SelectionFact, select_facts};
 use super::{IndexedConfig, resolve};
 use crate::pipeline::{MAX_APPLY_WINDOW, ShardMap};

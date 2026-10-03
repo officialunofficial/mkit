@@ -227,6 +227,7 @@ impl TestHost {
         let address = listener.local_addr().map_err(|error| error.to_string())?;
         let base_url = format!("http://127.0.0.1:{}", address.port());
         let clock = Arc::new(ManualClock::new(crate::wire::sign::now_ms()));
+        profile.server_clock = Some(clock.clone());
         let hooks = make_hooks(&base_url, clock.clone())?;
 
         if let WireAuth::AuthV2 { audience, .. } = &mut profile.auth {
