@@ -37,10 +37,7 @@ pub(crate) async fn fixture() -> (TestPipeline, String, String) {
                 .with_namespace_policy(NamespacePolicy::Allowlist([namespace].into())),
         ),
         AuthMode::AuthV2(AuthV2Config::new("https://headers.test", "").unwrap()),
-        UploadLimits {
-            max_total_bytes: 1 << 20,
-            max_chunks: 64,
-        },
+        UploadLimits::new(1 << 20, 64),
     );
     cfg.write_policy = WritePolicy::Owner;
     cfg.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [8; 32])]).unwrap());

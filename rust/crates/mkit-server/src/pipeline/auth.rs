@@ -90,7 +90,7 @@ pub struct Authenticated {
     pub(crate) business_skew_ms: i64,
     /// Business time used for auth v2 verification, reused for the grant.
     pub(crate) business_now_ms: i64,
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     directives: super::TestDirectives,
 }
 
@@ -119,14 +119,14 @@ impl Authenticated {
         &self.repo
     }
 
-    /// The request's test directives (feature `test-faults` only).
-    #[cfg(feature = "test-faults")]
+    /// The request's test directives (feature `__test-faults` only).
+    #[cfg(feature = "__test-faults")]
     #[must_use]
     pub fn test_directives(&self) -> &super::TestDirectives {
         &self.directives
     }
 
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     pub(crate) fn set_test_directives(&mut self, directives: super::TestDirectives) {
         self.directives = directives;
     }
@@ -205,7 +205,7 @@ pub(crate) fn authenticate(
         ref_hint: None,
         business_skew_ms: 0,
         business_now_ms: now_ms,
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         directives: super::TestDirectives::default(),
     })
 }

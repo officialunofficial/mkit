@@ -22,8 +22,10 @@ use crate::{Code, NamespaceStore, Partition, ServerError};
 
 pub use auth::{Config, HEADER_NAMES};
 pub use automatic::{AuditRelayHook, AuditReserveHook, SystemAudit, extend_audit_batch};
+pub(crate) use ledger::plan_system;
 pub(crate) use ledger::plan_takedown_completion;
-pub use ledger::{OperationReplay, plan_operation, plan_system};
+#[cfg(test)]
+pub(crate) use ledger::{OperationReplay, plan_operation};
 
 /// Canonical admin path prefix; never rewrite paths before verification.
 pub const PREFIX: &str = "/mkit.server.admin.v1.AdminService/";

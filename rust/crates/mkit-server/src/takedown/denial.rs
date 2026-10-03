@@ -52,7 +52,7 @@ pub struct ChunkPage {
 }
 const INDEX_PREFIX: &[u8] = b"b\0\xffdenial-action-descriptors-v2-index\0";
 #[must_use]
-pub fn descriptor_key(object: &Hash) -> Key {
+pub(crate) fn descriptor_key(object: &Hash) -> Key {
     let mut bytes = INDEX_PREFIX.to_vec();
     bytes.extend_from_slice(object);
     Key::new(bytes)
@@ -212,12 +212,12 @@ pub(super) async fn chunks_intersect<S: NamespaceStore>(
 
 /// Approved subkey; current V1 producers cannot replace independent actions.
 #[must_use]
-pub fn action_key(id: &Hash) -> Key {
+pub(crate) fn action_key(id: &Hash) -> Key {
     let mut bytes = keys::block(id).as_bytes().to_vec();
     bytes.extend_from_slice(b"\0actions");
     Key::new(bytes)
 }
-pub fn decode_actions(raw: Option<&Value>) -> Result<Vec<StoredAction>, StoreError> {
+pub(crate) fn decode_actions(raw: Option<&Value>) -> Result<Vec<StoredAction>, StoreError> {
     let Some(raw) = raw else {
         return Ok(Vec::new());
     };
@@ -244,7 +244,7 @@ pub fn decode_actions(raw: Option<&Value>) -> Result<Vec<StoredAction>, StoreErr
     }
     Ok(dto.actions)
 }
-pub fn encode_actions(actions: Vec<StoredAction>) -> Result<Value, StoreError> {
+pub(crate) fn encode_actions(actions: Vec<StoredAction>) -> Result<Value, StoreError> {
     let bytes = serde_json::to_vec(&ActionsV2 {
         version: 2,
         actions,
@@ -370,7 +370,7 @@ impl Target<'_> {
     }
 }
 #[must_use]
-pub fn legacy_descriptor_key(object: &Hash) -> Key {
+pub(crate) fn legacy_descriptor_key(object: &Hash) -> Key {
     let mut bytes = descriptor_key(object).as_bytes().to_vec();
     bytes.push(0);
     Key::new(bytes)
@@ -744,7 +744,7 @@ async fn require_pack_clear_with_concurrency<S: NamespaceStore>(
     pack: &Hash,
     concurrency: usize,
 ) -> Result<(), ServerError> {
-    let budget = SliceBudget::new(9000);
+    let budget = SliceBudget::new(crate::limits::REQUEST_CALLS);
     let remote = Budgeted::new(store, &budget);
     require_clear(&remote, pack).await?;
     super::inventory::visit(&remote, pack, false, |_, _| async { Ok(false) })
@@ -918,7 +918,7 @@ mod tests {
         block_on(async {
             for concurrency in [1, WRITE_PROOF_CONCURRENCY, SCANNER_PROOF_CONCURRENCY] {
                 let store = ScanProbe::new(None, false);
-                let budget = SliceBudget::new(9000);
+                let budget = SliceBudget::new(crate::limits::REQUEST_CALLS);
                 probe_proof(&store, &budget, &BTreeSet::new(), concurrency)
                     .await
                     .unwrap();
@@ -944,7 +944,7 @@ mod tests {
                 assert!(matches!(
                     probe_proof(
                         &store,
-                        &SliceBudget::new(9000),
+                        &SliceBudget::new(crate::limits::REQUEST_CALLS),
                         &BTreeSet::from([blocked_id]),
                         concurrency
                     )
@@ -964,7 +964,7 @@ mod tests {
                 store.scans.store(0, Ordering::SeqCst);
                 probe_proof(
                     &store,
-                    &SliceBudget::new(9000),
+                    &SliceBudget::new(crate::limits::REQUEST_CALLS),
                     &BTreeSet::new(),
                     concurrency,
                 )
@@ -983,7 +983,7 @@ mod tests {
                     .unwrap();
                 store.scans.store(0, Ordering::SeqCst);
                 assert!(matches!(
-                    probe_proof(&store, &SliceBudget::new(9000), &BTreeSet::new(), concurrency).await,
+                    probe_proof(&store, &SliceBudget::new(crate::limits::REQUEST_CALLS), &BTreeSet::new(), concurrency).await,
                     Err(error) if error.code() == crate::Code::Unavailable
                 ));
                 assert_eq!(store.scans.load(Ordering::SeqCst), 16);
@@ -994,7 +994,7 @@ mod tests {
                 assert!(matches!(
                     probe_proof(
                         &failed,
-                        &SliceBudget::new(9000),
+                        &SliceBudget::new(crate::limits::REQUEST_CALLS),
                         &BTreeSet::new(),
                         concurrency
                     )
@@ -1020,20 +1020,22 @@ mod tests {
                     .await
                     .unwrap();
                 member_row(&store.inner, &r, [9; 32], manifest).await;
-                assert!(matches!(probe_proof(&store, &SliceBudget::new(9000),
+                assert!(
+                    matches!(probe_proof(&store, &SliceBudget::new(crate::limits::REQUEST_CALLS),
                     &BTreeSet::from([chunk]), concurrency).await,
-                    Err(error) if error.code() == crate::Code::PermissionDenied));
+                    Err(error) if error.code() == crate::Code::PermissionDenied)
+                );
                 assert_eq!(store.scans.load(Ordering::SeqCst), 16);
                 assert_eq!(store.completed.load(Ordering::SeqCst), 16);
                 assert!(store.nested.load(Ordering::SeqCst) > 0);
                 assert_eq!(store.active.load(Ordering::SeqCst), 0);
                 store.scans.store(0, Ordering::SeqCst);
-                let budget = SliceBudget::new(9000);
+                let budget = SliceBudget::new(crate::limits::REQUEST_CALLS);
                 probe_proof(&store, &budget, &BTreeSet::from([[7; 32]]), concurrency)
                     .await
                     .unwrap();
                 assert_eq!(store.scans.load(Ordering::SeqCst), 16);
-                assert!(budget.used() > 16 && budget.used() < 9000);
+                assert!(budget.used() > 16 && budget.used() < crate::limits::REQUEST_CALLS);
                 assert_eq!(store.active.load(Ordering::SeqCst), 0);
             }
         });
@@ -1044,7 +1046,7 @@ mod tests {
         block_on(async {
             for concurrency in [WRITE_PROOF_CONCURRENCY, SCANNER_PROOF_CONCURRENCY] {
                 let store = ScanProbe::new(Some(0), false);
-                let budget = SliceBudget::new(9000);
+                let budget = SliceBudget::new(crate::limits::REQUEST_CALLS);
                 for attempt in 1..=2 {
                     assert!(matches!(
                         probe_proof(&store, &budget, &BTreeSet::new(), concurrency).await,
@@ -1075,7 +1077,7 @@ mod tests {
             assert_eq!(store.active.load(Ordering::SeqCst), 0);
 
             let stalled = ScanProbe::new(None, true);
-            let budget = SliceBudget::new(9000);
+            let budget = SliceBudget::new(crate::limits::REQUEST_CALLS);
             let ids = BTreeSet::new();
             let mut proof = Box::pin(probe_proof(
                 &stalled,
@@ -1179,7 +1181,7 @@ mod tests {
                         .await
                         .unwrap();
                 }
-                let budget = SliceBudget::new(9000);
+                let budget = SliceBudget::new(crate::limits::REQUEST_CALLS);
                 require_repo_clear(&store, &D34Shards, &repo("a"), &BTreeSet::new(), &budget)
                     .await
                     .unwrap();
@@ -1195,7 +1197,7 @@ mod tests {
     fn empty_authoritative_scan_has_measured_bound() {
         block_on(async {
             let store = store();
-            let budget = SliceBudget::new(9000);
+            let budget = SliceBudget::new(crate::limits::REQUEST_CALLS);
             require_repo_clear(
                 &store,
                 &D34Shards,
@@ -1262,7 +1264,7 @@ mod tests {
                 &D34Shards,
                 &r,
                 &BTreeSet::from([chunk]),
-                &SliceBudget::new(9000),
+                &SliceBudget::new(crate::limits::REQUEST_CALLS),
             )
             .await;
             assert_eq!(result.unwrap_err().public_message(), "object blocked");
@@ -1271,7 +1273,7 @@ mod tests {
                 &D34Shards,
                 &repo("other"),
                 &BTreeSet::from([chunk]),
-                &SliceBudget::new(9000),
+                &SliceBudget::new(crate::limits::REQUEST_CALLS),
             )
             .await
             .unwrap();
@@ -1418,7 +1420,7 @@ mod tests {
             );
             assert!(row.references.pages.capacity() * std::mem::size_of::<ChunkPage>() < 32 * 1024);
             member_row(&store, &repo, pack, id).await;
-            let budget = SliceBudget::new(9000);
+            let budget = SliceBudget::new(crate::limits::REQUEST_CALLS);
             require_object_clear(
                 &store,
                 &D34Shards,
@@ -1441,7 +1443,7 @@ mod tests {
                 .install_block_action(&blocked_id, &action(92, vec![shared]), 1)
                 .await
                 .unwrap();
-            let budget = SliceBudget::new(9000);
+            let budget = SliceBudget::new(crate::limits::REQUEST_CALLS);
             let denied = require_object_clear(
                 &store,
                 &D34Shards,
@@ -1495,7 +1497,7 @@ mod tests {
                 &D34Shards,
                 &repo,
                 &BTreeSet::from([chunk]),
-                &SliceBudget::new(9000),
+                &SliceBudget::new(crate::limits::REQUEST_CALLS),
             )
             .await
             .unwrap_err();
@@ -1506,7 +1508,7 @@ mod tests {
                 &D34Shards,
                 &repo,
                 &BTreeSet::from([chunk]),
-                &SliceBudget::new(9000),
+                &SliceBudget::new(crate::limits::REQUEST_CALLS),
             )
             .await
             .unwrap();

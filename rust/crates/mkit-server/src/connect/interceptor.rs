@@ -20,7 +20,7 @@ use crate::store::{MultipartBlobStore, NamespaceStore};
 /// Runs [`Pipeline::authenticate`] once per call, before any message
 /// reaches a handler, and stores the resulting
 /// [`crate::pipeline::Authenticated`] (with its test directives under
-/// `test-faults`) in the request extensions. A unary call is checked
+/// `__test-faults`) in the request extensions. A unary call is checked
 /// against its exact request bytes; a client stream against its headers
 /// only; `DownloadPack`'s single request envelope is buffered, verified
 /// over its reconstructed framed body (`0x00‖be32(len)‖message`, R-129)

@@ -86,10 +86,7 @@ mod tests {
         let mut config = crate::pipeline::PipelineConfig::new(
             Addressing::Single { repo: repo.clone() },
             crate::pipeline::AuthMode::Open,
-            crate::upload::UploadLimits {
-                max_total_bytes: 1024,
-                max_chunks: 32,
-            },
+            crate::upload::UploadLimits::new(1024, 32),
         );
         config.purge = Some(
             PurgeConfig::new("https://server.example".into(), true, true).with_audit(Arc::new(
@@ -182,10 +179,7 @@ mod tests {
         let mut config = crate::pipeline::PipelineConfig::new(
             Addressing::Single { repo: repo.clone() },
             crate::pipeline::AuthMode::Open,
-            crate::upload::UploadLimits {
-                max_total_bytes: 1024,
-                max_chunks: 32,
-            },
+            crate::upload::UploadLimits::new(1024, 32),
         );
         config.purge = Some(
             PurgeConfig::new(request.audience.clone(), true, true).with_local(Arc::new(

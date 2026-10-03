@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 /// Explicit activation. A shared-cache deployment always needs a global sink.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct PurgeConfig {
     /// This server's canonical origin.
     pub audience: String,

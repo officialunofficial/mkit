@@ -20,10 +20,6 @@ mod tests;
 pub use intent::{Record, Service};
 pub use publication::PublicationConfig;
 
-/// Default-off native activation. The Paid Workers launch separately enables
-/// the completed lean catalog through its validated takedown configuration.
-pub const ACTIVATED: bool = false;
-
 /// Configured namespace roots; an open policy has no exhaustive configured set.
 #[must_use]
 pub fn configured_namespaces(addressing: &crate::Addressing) -> Vec<crate::NamespaceKey> {

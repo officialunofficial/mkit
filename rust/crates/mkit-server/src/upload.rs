@@ -27,11 +27,23 @@ use crate::error::{Code, ServerError};
 /// `mkit serve` its per-connection byte and frame caps, and the Workers
 /// server its 64 MiB buffer cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UploadLimits {
     /// Largest `total_bytes` a header may declare.
     pub max_total_bytes: u64,
     /// Most chunks accepted before the `last` one, inclusive.
     pub max_chunks: u32,
+}
+
+impl UploadLimits {
+    /// Construct explicit deployment settings; fields may be adjusted before use.
+    #[must_use]
+    pub const fn new(max_total_bytes: u64, max_chunks: u32) -> Self {
+        Self {
+            max_total_bytes,
+            max_chunks,
+        }
+    }
 }
 
 /// Where an upload stands after a chunk.

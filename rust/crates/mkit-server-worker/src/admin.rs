@@ -9,11 +9,23 @@ pub const PRESERVATION_BINDING: &str = "PRESERVATION";
 pub const RECEIPT_SECRET: &str = "RECEIPT_NOTICE_KEY";
 /// Default-off launch preservation configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TakedownSettings {
     /// Explicit positive preservation lifetime.
     pub retention_ms: u64,
     /// Required receipt-and-notice public key publication.
     pub publication: mkit_server::takedown::PublicationConfig,
+}
+
+impl TakedownSettings {
+    /// Construct explicit deployment settings; fields may be adjusted before use.
+    #[must_use]
+    pub fn new(retention_ms: u64, publication: mkit_server::takedown::PublicationConfig) -> Self {
+        Self {
+            retention_ms,
+            publication,
+        }
+    }
 }
 pub(crate) fn takedown(
     var: &impl Fn(&str) -> Option<String>,
@@ -70,10 +82,7 @@ pub(crate) fn takedown(
     }) {
         return Err(ConfigError("receipt key repeats ticket key".into()));
     }
-    Ok(Some(TakedownSettings {
-        retention_ms,
-        publication,
-    }))
+    Ok(Some(TakedownSettings::new(retention_ms, publication)))
 }
 /// Parse keys and reject reuse of ticket/MAC and URL-token keys.
 /// # Errors
@@ -486,7 +495,7 @@ mod tests {
         ] {
             let path = format!("{}{op}", mkit_server::admin::PREFIX);
             assert!(!supported_path(&path, &cfg), "unconfigured {op}");
-            cfg.launch = Some(crate::launch::LaunchConfig { takedown: true });
+            cfg.launch = Some(crate::launch::LaunchConfig::new(true));
             assert!(!supported_path(&path, &cfg), "selection alone {op}");
             cfg.takedown = fixture.settings(true, true).unwrap();
             cfg.takedown_denial = true;
@@ -504,10 +513,10 @@ mod tests {
                 },
                 timeout: crate::hooks::config::DEFAULT_TIMEOUT,
                 authorizer_role: mkit_server::policy::AuthorizerRole::Check,
-                http: Some(crate::hooks::config::HttpVars {
-                    endpoint: crate::hooks::fetch::Endpoint::new("https://hooks.example").unwrap(),
-                    validity: std::time::Duration::from_mins(1),
-                }),
+                http: Some(crate::hooks::config::HttpVars::new(
+                    crate::hooks::fetch::Endpoint::new("https://hooks.example").unwrap(),
+                    std::time::Duration::from_mins(1),
+                )),
                 inspect_batch_max_objects: 1,
             });
             assert!(supported_path(&path, &cfg), "configured {op}");
@@ -522,7 +531,7 @@ mod tests {
         }
         assert!(!supported_path(mkit_server::admin::AUDIT_PATH, &cfg));
         assert!(!supported_path(mkit_server::admin::PURGE_PATH, &cfg));
-        cfg.launch = Some(crate::launch::LaunchConfig { takedown: true });
+        cfg.launch = Some(crate::launch::LaunchConfig::new(true));
         for op in [
             "Reinstate",
             "GetHold",
@@ -567,10 +576,10 @@ mod tests {
             !purge_enabled(&cfg),
             "service binding alone cannot sign global purge"
         );
-        hooks.http = Some(crate::hooks::config::HttpVars {
-            endpoint: crate::hooks::fetch::Endpoint::new("https://hooks.example").unwrap(),
-            validity: std::time::Duration::from_mins(1),
-        });
+        hooks.http = Some(crate::hooks::config::HttpVars::new(
+            crate::hooks::fetch::Endpoint::new("https://hooks.example").unwrap(),
+            std::time::Duration::from_mins(1),
+        ));
         cfg.hooks = Some(hooks);
         assert!(purge_enabled(&cfg));
     }

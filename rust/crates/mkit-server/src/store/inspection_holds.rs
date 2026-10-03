@@ -15,21 +15,21 @@ use super::{
 };
 
 /// Forward-row writes per content id, on install and release.
-pub const HOLD_OPS_PER_ID: usize = 1;
+pub(crate) const HOLD_OPS_PER_ID: usize = 1;
 /// Shared manifest CAS and write cost per plan.
-pub const HOLD_SHARED_OPS: usize = 2;
+pub(crate) const HOLD_SHARED_OPS: usize = 2;
 /// Advance-level marker cost: one absence guard and one put.
-pub const ADVANCE_HOLD_MARKER_OPS: usize = 2;
+pub(crate) const ADVANCE_HOLD_MARKER_OPS: usize = 2;
 const PENDING_HOLD_MARKER: u8 = 0;
 /// Most input ids for an install plan, before deduplication.
-pub const MAX_HOLD_BATCH_IDS: usize = MAX_BATCH_OPS - HOLD_SHARED_OPS;
+pub(crate) const MAX_HOLD_BATCH_IDS: usize = MAX_BATCH_OPS - HOLD_SHARED_OPS;
 /// Maximum distinct ids per advance; the 320,001-byte manifest fits twice under the one MiB limit.
-pub const MAX_HOLD_IDS_PER_ADVANCE: usize = 10_000;
+pub(crate) const MAX_HOLD_IDS_PER_ADVANCE: usize = 10_000;
 
 /// Content holds and release manifests share the flag registry partition; advance records stay in ref shards.
 /// Callers use repository-unique advance ids, binding the ref identity and advance sequence.
 #[derive(Debug)]
-pub struct InspectionHolds<'a, S> {
+pub(crate) struct InspectionHolds<'a, S> {
     store: &'a S,
     repo: &'a RepoId,
     partition: Partition,
@@ -40,7 +40,12 @@ pub struct InspectionHolds<'a, S> {
 impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
     /// Resolve repository hold storage and the separate advance ref partition.
     #[must_use]
-    pub fn new(store: &'a S, shards: &dyn ShardMap, repo: &'a RepoId, ref_name: &str) -> Self {
+    pub(crate) fn new(
+        store: &'a S,
+        shards: &dyn ShardMap,
+        repo: &'a RepoId,
+        ref_name: &str,
+    ) -> Self {
         Self {
             store,
             repo,
@@ -52,27 +57,27 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
 
     /// Reserve operations for caller guards and state writes, in addition to backend reservations.
     #[must_use]
-    pub const fn with_reserved_ops(mut self, ops: usize) -> Self {
+    pub(crate) const fn with_reserved_ops(mut self, ops: usize) -> Self {
         self.reserved_ops = ops;
         self
     }
 
     /// Apply content installation and release plans in this repository partition.
     #[must_use]
-    pub fn partition(&self) -> &Partition {
+    pub(crate) fn partition(&self) -> &Partition {
         &self.partition
     }
 
     /// Apply advance hold, completion, and final removal plans in this ref partition.
     #[must_use]
-    pub fn advance_partition(&self) -> &Partition {
+    pub(crate) fn advance_partition(&self) -> &Partition {
         &self.advance_partition
     }
 
     /// Plan the constant-cost advance hold record; kind-14 work later materializes per-content rows.
     /// Repeated calls guard the existing record.
     /// # Errors Storage failures propagate; corrupt records and unsupported batches fail closed.
-    pub async fn plan_advance_hold(&self, advance: &Hash) -> Result<Batch, StoreError> {
+    pub(crate) async fn plan_advance_hold(&self, advance: &Hash) -> Result<Batch, StoreError> {
         let key = keys::inspection_hold_index(&self.repo.name, advance);
         let prior = self.store.get(&self.advance_partition, &key).await?;
         let mut batch = Batch::new().require(manifest_guard(key.clone(), prior.as_ref()));
@@ -88,7 +93,11 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
     /// Plan one repository-wide kind-14 page after advance commit; the manifest CAS serializes updates.
     /// Existing ids need no forward-row write; re-plan after CAS loss.
     /// # Errors Invalid for oversized input/batch; corrupt for invalid manifests; storage errors propagate.
-    pub async fn plan_holds(&self, advance: &Hash, ids: &[Hash]) -> Result<Batch, StoreError> {
+    pub(crate) async fn plan_holds(
+        &self,
+        advance: &Hash,
+        ids: &[Hash],
+    ) -> Result<Batch, StoreError> {
         if ids.len() > self.batch_limit()? {
             return Err(StoreError::Invalid(
                 "inspection hold batch is too large".into(),
@@ -136,7 +145,7 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
     /// The caller serializes completion with its kind-14 progress/advance state.
     /// Until this commits, serving treats all content of the advance as held.
     /// # Errors Returns storage, corrupt marker, or missing/released advance errors.
-    pub async fn plan_complete(&self, advance: &Hash) -> Result<Batch, StoreError> {
+    pub(crate) async fn plan_complete(&self, advance: &Hash) -> Result<Batch, StoreError> {
         let manifest_key = keys::inspection_hold_manifest(&self.repo.name, advance);
         let manifest = self.store.get(&self.partition, &manifest_key).await?;
         if decode_manifest(manifest.as_ref())?.released {
@@ -162,7 +171,7 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
     /// The manifest becomes permanently released on the first page, fencing late kind-14 writes.
     /// Re-plan after CAS loss; repeat until no writes, then remove the ref-level advance record.
     /// # Errors Returns invalid bounds, corrupt manifests, or storage failures.
-    pub async fn plan_release(&self, advance: &Hash) -> Result<Batch, StoreError> {
+    pub(crate) async fn plan_release(&self, advance: &Hash) -> Result<Batch, StoreError> {
         let limit = self.batch_limit()?;
         let key = keys::inspection_hold_manifest(&self.repo.name, advance);
         let prior = self.store.get(&self.partition, &key).await?;
@@ -187,7 +196,7 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
     /// Released manifests cannot gain new ids, so the completed release observation remains valid.
     /// The caller guards its terminal advance state in this ref-shard apply.
     /// # Errors Returns storage, corruption, or unfinished release errors.
-    pub async fn plan_release_advance(&self, advance: &Hash) -> Result<Batch, StoreError> {
+    pub(crate) async fn plan_release_advance(&self, advance: &Hash) -> Result<Batch, StoreError> {
         let manifest_key = keys::inspection_hold_manifest(&self.repo.name, advance);
         let manifest = self.store.get(&self.partition, &manifest_key).await?;
         let manifest = decode_manifest(manifest.as_ref())?;
@@ -211,7 +220,7 @@ impl<'a, S: NamespaceStore> InspectionHolds<'a, S> {
     /// Each id probes the canonical repository partition with limit one, across all ref advances.
     /// Reads are sequential, not a snapshot; pending ref-level advance records are checked by serving.
     /// # Errors Invalid above 256 ids; corrupt for malformed rows; storage failures propagate.
-    pub async fn is_held(&self, ids: &[Hash]) -> Result<Vec<Hash>, StoreError> {
+    pub(crate) async fn is_held(&self, ids: &[Hash]) -> Result<Vec<Hash>, StoreError> {
         if ids.len() > MAX_SCAN_RANGES {
             return Err(StoreError::Invalid(
                 "too many inspection hold probes".into(),

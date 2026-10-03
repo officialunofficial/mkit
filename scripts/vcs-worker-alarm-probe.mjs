@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Stress bounded alarm continuations on an already-built test-faults Worker.
 // This uses workerd's real clock; frozen-clock edge cases live in Rust tests.
-// Build: (cd apps/vcs-worker && worker-build --release --features test-faults)
+// Build: (cd apps/vcs-worker && worker-build --release --features __test-faults)
 // Run: node scripts/vcs-worker-alarm-probe.mjs
 import assert from 'node:assert/strict';
 import {mkdtemp, writeFile, open} from 'node:fs/promises';

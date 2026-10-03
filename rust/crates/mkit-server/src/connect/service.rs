@@ -832,7 +832,7 @@ impl From<ServerInfo> for GetServerInfoResponse {
             namespace_policy: Some(info.namespace_policy.into()),
             index_fanout: Some(info.index_fanout),
             max_delta_chain_depth: Some(info.max_delta_chain_depth),
-            leases: Some(false), // Launch retains content permanently; no storage leases.
+            leases: Some(info.capabilities.leases),
             // Launch inspection is synchronous only (SPEC-SERVER §18).
             async_inspection: Some(false),
             inspection_max_objects: info.inspection_max_objects,
@@ -920,6 +920,10 @@ mod proto_roundtrip {
     fn discovery_explicitly_denies_unimplemented_lease_and_async_capabilities() {
         for indexed_mode in [false, true] {
             let response = GetServerInfoResponse::from(ServerInfo {
+                capabilities: crate::pipeline::PipelineCapabilities {
+                    leases: false,
+                    atomic_advance: false,
+                },
                 protocol: "mkit.transport.v1",
                 spec_version: 2,
                 max_pack_bytes: 1 << 30,

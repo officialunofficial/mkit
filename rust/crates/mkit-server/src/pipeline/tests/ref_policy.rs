@@ -20,15 +20,15 @@ const NOT_VISIBLE: &str = "repository membership not yet visible";
 const LAG_MS: i64 = crate::relay::RELAY_LAG_BOUND_MS.cast_signed();
 
 fn rule(pattern: &str, signers: Option<&[&SigningKey]>, ff: bool) -> RefRule {
-    RefRule {
-        pattern: RefPattern::parse(pattern).unwrap(),
-        allowed_signers: signers.map(|keys| {
+    RefRule::new(
+        RefPattern::parse(pattern).unwrap(),
+        signers.map(|keys| {
             keys.iter()
                 .map(|key| *key.verifying_key().as_bytes())
                 .collect::<BTreeSet<_>>()
         }),
-        fast_forward_only: ff,
-    }
+        ff,
+    )
 }
 
 fn ff_main() -> RefPolicy {
@@ -487,11 +487,11 @@ fn fast_forward_only_needs_indexed_mode_and_a_valid_policy() {
         (ff_main(), Some(IndexedConfig::default()), true),
         (RefPolicy::new(vec![rule(HEAD, None, false)]), None, true),
         (
-            RefPolicy::new(vec![RefRule {
-                pattern: RefPattern::Exact(PACKMAP.into()),
-                allowed_signers: None,
-                fast_forward_only: false,
-            }]),
+            RefPolicy::new(vec![RefRule::new(
+                RefPattern::Exact(PACKMAP.into()),
+                None,
+                false,
+            )]),
             None,
             false,
         ),

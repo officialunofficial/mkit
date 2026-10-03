@@ -11,6 +11,8 @@ use crate::store::{BlobStore, INDEX_FANOUT, MultipartBlobStore, NamespaceStore};
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ServerInfo {
+    /// Capabilities advertised and enforced by this pipeline.
+    pub capabilities: super::PipelineCapabilities,
     /// Wire package.
     pub protocol: &'static str,
     /// Transport specification version.
@@ -87,6 +89,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     pub fn server_info(&self) -> ServerInfo {
         let admission = !self.hooks.admission().is_default();
         ServerInfo {
+            capabilities: self.capabilities(),
             protocol: "mkit.transport.v1",
             spec_version: 2,
             max_pack_bytes: if self.blobs.supports_multipart() {

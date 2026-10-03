@@ -44,7 +44,8 @@ use mkit_server::pipeline::{
 };
 use mkit_server::store::{
     Batch, BatchOutcome, Cursor, Key, NamespaceStore, Partition, PartitionStats, ScanPage,
-    StoreCapabilities, StoreError, Value, codec, keys,
+    StoreCapabilities, StoreError, Value,
+    adapter_spi::{codec, keys},
 };
 use mkit_server::upload::UploadLimits;
 use mkit_server::upload::token::{TicketClaims, TicketKeys};
@@ -158,10 +159,7 @@ fn spy_server(auth: AuthMode) -> (Server, Arc<AtomicUsize>) {
     let cfg = PipelineConfig::new(
         Addressing::Single { repo },
         auth,
-        UploadLimits {
-            max_total_bytes: 1 << 20,
-            max_chunks: 64,
-        },
+        UploadLimits::new(1 << 20, 64),
     );
     let writes = Arc::new(AtomicUsize::new(0));
     let meta = SpyStore {
@@ -194,10 +192,7 @@ impl<H: HookSet + 'static> Setup<H> {
             namespace: NamespaceKey::deployment_default(),
             name: RepoName::new(REPO).unwrap(),
         };
-        let limits = UploadLimits {
-            max_total_bytes: 1 << 20,
-            max_chunks: 64,
-        };
+        let limits = UploadLimits::new(1 << 20, 64);
         let addressing = self.addressing.unwrap_or(Addressing::Single { repo });
         let mut cfg = PipelineConfig::new(addressing, self.auth, limits);
         if matches!(cfg.addressing, Addressing::Multi(_)) {
@@ -1232,7 +1227,7 @@ fn fault_headers(fault: &str, skew: &str) -> Vec<(&'static str, String)> {
     ]
 }
 
-#[cfg(not(feature = "test-faults"))]
+#[cfg(not(feature = "__test-faults"))]
 #[tokio::test]
 async fn test_fault_header_ignored_without_feature() {
     let server = setup(AuthMode::Open).serve();
@@ -1248,7 +1243,7 @@ async fn test_fault_header_ignored_without_feature() {
     assert!(server.exists(&hash(&data)).await);
 }
 
-#[cfg(not(feature = "test-faults"))]
+#[cfg(not(feature = "__test-faults"))]
 #[tokio::test]
 async fn timer_headers_are_unknown_without_test_faults() {
     let server = setup(AuthMode::Open).serve();
@@ -1278,7 +1273,7 @@ async fn timer_headers_are_unknown_without_test_faults() {
     }
 }
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 #[tokio::test]
 async fn test_fault_header_honored_with_feature() {
     use mkit_server::pipeline::FailOnce;
@@ -1914,10 +1909,7 @@ async fn upload_part_stream_rejects_chunk_before_header_and_empty_chunk() {
     let mut cfg = PipelineConfig::new(
         Addressing::Single { repo },
         authv2(),
-        UploadLimits {
-            max_total_bytes: 3 * MIN_PART_SIZE,
-            max_chunks: 1024,
-        },
+        UploadLimits::new(3 * MIN_PART_SIZE, 1024),
     );
     let keys = TicketKeys::new(vec![("active".into(), [7; 32])]).unwrap();
     cfg.ticket_keys = Some(keys.clone());

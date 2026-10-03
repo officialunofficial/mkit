@@ -4,7 +4,10 @@
 use std::sync::{Arc, OnceLock};
 
 use mkit_server::pipeline::{Hooks, NoOutcomes, OutcomeSink};
-use mkit_server::store::{Cursor, keys, watermark};
+use mkit_server::store::{
+    Cursor,
+    adapter_spi::{keys, watermark},
+};
 use mkit_server::timers::{TickBudget, registry::kinds};
 use mkit_server::{Clock, NamespaceKey, NamespaceStore, Partition};
 use mkit_server_conformance::stubs::hook::HookKey;

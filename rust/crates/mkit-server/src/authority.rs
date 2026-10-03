@@ -30,6 +30,7 @@ pub struct AuthorityKey {
 
 /// Optional deployment fencing configuration. Construction validates all keys.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AuthorityFence {
     keys: Vec<AuthorityKey>,
 }

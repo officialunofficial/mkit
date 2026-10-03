@@ -33,7 +33,7 @@ pub async fn retained_timer_backoff<S: mkit_server::NamespaceStore>(
     payload: &mkit_server::Value,
     unknown: bool,
 ) -> u64 {
-    use mkit_server::store::keys;
+    use mkit_server::store::adapter_spi::keys;
     use mkit_server::timers::{MAX_RETRY_BACKOFF_MS, RETRY_BACKOFF_MS, TickBudget, run_due};
     let Some(keys::ParsedKey::Timer {
         kind,

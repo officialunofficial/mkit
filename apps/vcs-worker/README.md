@@ -208,7 +208,7 @@ ships no `GRANT_SCHEMES`.
 - `WEBAUTHN_RPS`: `WebAuthn` relying parties, `id=origin[,origin...]` entries
   separated by `;` or newlines (split on the first `=`). `webauthn-p256`
   requires one. Blank entries and duplicate ids are refused.
-- `UNSAFE_LOOPBACK_GRANTS`: honoured only in `test-faults` builds (local
+- `UNSAFE_LOOPBACK_GRANTS`: honoured only in `__test-faults` builds (local
   conformance). In a release build, setting it makes every RPC answer
   `unavailable`; a loopback `AUTH_AUDIENCE` or relying party is never accepted
   in production (SPEC-WRITE-GRANTS §3.2).
@@ -308,9 +308,9 @@ The logic's tests live with it: `cargo nextest run -p mkit-server -p
 mkit-server-worker -p mkit-server-conformance --all-features` in `rust/`.
 `cargo test --lib` here has nothing to test.
 
-## Test hooks (`test-faults`)
+## Test hooks (`__test-faults`)
 
-A `worker-build --dev --features test-faults` build adds, and a release
+A `worker-build --dev --features __test-faults` build adds, and a release
 build has none of:
 
 - `x-mkit-test-fault: after-reserve | after-put | final-chunk`: an upload

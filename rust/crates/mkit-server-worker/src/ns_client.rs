@@ -52,7 +52,7 @@ pub fn charge_request(budget: Option<&SliceBudget>) -> Result<(), StoreError> {
 /// # Errors
 /// Returns unavailable before a call would exceed the shared allowance.
 pub fn charge_alarm(budget: Option<&mkit_server::purge::SliceBudget>) -> Result<(), StoreError> {
-    if budget.is_some_and(|budget| !budget.charge(1)) {
+    if budget.is_some_and(|budget| !budget.charge_operations(1)) {
         return Err(StoreError::unavailable("alarm subrequest budget exhausted"));
     }
     Ok(())
@@ -78,9 +78,9 @@ fn op(call: &NsCall) -> &'static str {
         NsCall::Stats => "stats",
         NsCall::Probe => "probe",
         NsCall::Export { .. } => "export",
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         NsCall::TestSnapshot => "test_snapshot",
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         NsCall::TestImport { .. } => "test_import",
     }
 }

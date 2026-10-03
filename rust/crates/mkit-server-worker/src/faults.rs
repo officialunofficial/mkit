@@ -1,4 +1,4 @@
-//! Store-level fault injection (`test-faults` only). The pipeline's own
+//! Store-level fault injection (`__test-faults` only). The pipeline's own
 //! seam is `mkit_server::pipeline::FaultHooks` (M0-05b); these two cover
 //! what only a backend can fail:
 //!

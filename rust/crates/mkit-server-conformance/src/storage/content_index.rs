@@ -4,8 +4,9 @@
 
 use mkit_core::hash::Hash;
 use mkit_server::store::{
-    BlockEntry, HoldOutcome, Holder, MAX_BLOCK_REASON_BYTES, MAX_HOLD_TTL_MS, ObjectState, codec,
-    content_shard, keys,
+    BlockEntry, HoldOutcome, Holder, MAX_BLOCK_REASON_BYTES, MAX_HOLD_TTL_MS, ObjectState,
+    adapter_spi::{codec, keys},
+    content_shard,
 };
 use mkit_server::{
     Clock, ContentIndex, KeyClasses, NamespaceKey, NamespaceStore, RepoName, StoreError,

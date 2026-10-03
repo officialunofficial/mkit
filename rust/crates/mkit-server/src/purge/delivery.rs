@@ -1,66 +1,12 @@
 use super::{Request, guard};
+pub use crate::budget::SliceBudget;
 use crate::store::{codec, keys};
 use crate::timers::{DueTimer, Fired, TimerCtx, TimerHandler, TimerKind, registry::kinds};
 use crate::{
     Batch, BoxFuture, MaybeSend, MaybeSync, NamespaceStore, Precondition, StoreError, Value,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::{
-    Arc,
-    atomic::{AtomicU32, Ordering},
-};
-
-/// One combined operation budget for enumeration, invalidation and delivery.
-#[derive(Debug, Clone)]
-pub struct SliceBudget {
-    used: Arc<AtomicU32>,
-    limit: u32,
-    parent: Option<crate::indexed::budget::SliceBudget>,
-}
-impl SliceBudget {
-    /// Share the limit between all partition heads in a Worker alarm.
-    #[must_use]
-    pub fn new(limit: u32) -> Self {
-        Self {
-            used: Arc::new(AtomicU32::new(0)),
-            limit,
-            parent: None,
-        }
-    }
-    /// Share immediate cache operations with the caller's metadata/blob allowance.
-    #[must_use]
-    pub fn with_parent(limit: u32, parent: crate::indexed::budget::SliceBudget) -> Self {
-        Self {
-            parent: Some(parent),
-            ..Self::new(limit)
-        }
-    }
-    /// Reset once at alarm entry, never once per head or per purge.
-    pub fn reset(&self) {
-        self.used.store(0, Ordering::SeqCst);
-    }
-    /// Reserve before an operation. Exhaustion produces a durable checkpoint.
-    #[must_use]
-    pub fn charge(&self, operations: u32) -> bool {
-        let reserved = self
-            .used
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
-                used.checked_add(operations)
-                    .filter(|total| *total <= self.limit)
-            })
-            .is_ok();
-        reserved
-            && self
-                .parent
-                .as_ref()
-                .is_none_or(|parent| parent.charge_many(operations).is_ok())
-    }
-    /// Consumed operations, for tests and metrics.
-    #[must_use]
-    pub fn used(&self) -> u32 {
-        self.used.load(Ordering::SeqCst)
-    }
-}
+use std::sync::Arc;
 /// Global sink. Acknowledgement means every matching variant was purged.
 pub trait PurgeSink: MaybeSend + MaybeSync {
     /// Deliver unchanged body/id; the transport signs each attempt afresh.
@@ -219,7 +165,7 @@ impl<S: NamespaceStore> TimerHandler<S> for PurgeDelivery {
                 }
             }
             if let Some(sink) = &self.sink {
-                if !self.budget.charge(1) {
+                if !self.budget.charge_operations(1) {
                     return Self::resume(ctx.now_ms, &progress, false);
                 }
                 if sink.deliver(&request).await.is_err() {

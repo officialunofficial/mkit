@@ -44,7 +44,7 @@ impl TimerKind {
 /// | 15 | TAKEDOWN_WORK (WP-5.6a, R-190) |
 /// | 16..=0xEF | Production, unallocated |
 /// | 0xF0..=0xFE | Reserved for tests |
-/// | 0xFF | TEST (`test-faults` only) |
+/// | 0xFF | TEST (`__test-faults` only) |
 pub mod kinds {
     /// Expired coordinator epoch-lease table rows.
     pub const LEASE_SWEEP: super::TimerKind = super::TimerKind::new(1);
@@ -71,7 +71,7 @@ pub mod kinds {
     /// Preservation acquisition, holder discovery and audited retention purge.
     pub const TAKEDOWN_WORK: super::TimerKind = super::TimerKind::new(15);
     /// Ref deletion used only by test drivers and directives.
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     pub const TEST: super::TimerKind = super::TimerKind::new(0xFF);
 }
 

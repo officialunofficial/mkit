@@ -75,7 +75,7 @@ pub mod clock;
 pub mod do_sql;
 pub mod durable_objects;
 pub mod embedding;
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 pub mod faults;
 pub mod hooks;
 #[cfg(feature = "http-objects")]

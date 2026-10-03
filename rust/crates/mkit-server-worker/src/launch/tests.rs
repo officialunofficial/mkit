@@ -46,7 +46,7 @@ fn programmatic_launch_changes_cannot_disable_the_extraction_driver() {
     assert!(cfg.validate().unwrap_err().0.contains("scheduled indexed"));
 }
 
-#[cfg(not(feature = "test-faults"))]
+#[cfg(not(feature = "__test-faults"))]
 #[test]
 fn programmatic_indexed_activation_requires_the_launch_profile() {
     let mut cfg = check(&vars()).unwrap();
@@ -59,12 +59,11 @@ fn programmatic_indexed_activation_requires_the_launch_profile() {
     );
     #[cfg(feature = "http-objects")]
     {
-        cfg.http_mount = Some(crate::http_mount::WorkerHttpMountConfig {
-            indexed: cfg.indexed.take().unwrap(),
-            http_objects: mkit_server::http_objects::HttpObjectsConfig::default(),
-            options: mkit_server::http_objects::mount::HttpMountOptions::default(),
-            read_runtime: None,
-        });
+        cfg.http_mount = Some(crate::http_mount::WorkerHttpMountConfig::new(
+            cfg.indexed.take().unwrap(),
+            mkit_server::http_objects::HttpObjectsConfig::default(),
+            mkit_server::http_objects::mount::HttpMountOptions::default(),
+        ));
         assert!(
             cfg.validate()
                 .unwrap_err()
@@ -163,12 +162,11 @@ fn programmatic_remote_inspection_requires_scanner_retrieval() {
 #[test]
 fn programmatic_http_mount_validates_before_early_responses() {
     let mut cfg = check(&vars()).unwrap();
-    cfg.http_mount = Some(crate::http_mount::WorkerHttpMountConfig {
-        indexed: cfg.indexed.unwrap(),
-        http_objects: mkit_server::http_objects::HttpObjectsConfig::default(),
-        options: mkit_server::http_objects::mount::HttpMountOptions::default(),
-        read_runtime: None,
-    });
+    cfg.http_mount = Some(crate::http_mount::WorkerHttpMountConfig::new(
+        cfg.indexed.unwrap(),
+        mkit_server::http_objects::HttpObjectsConfig::default(),
+        mkit_server::http_objects::mount::HttpMountOptions::default(),
+    ));
     assert!(cfg.validate().unwrap_err().0.contains("URL_TOKEN_KEYS"));
     cfg.http_mount.as_mut().unwrap().http_objects.read_deadline = std::time::Duration::ZERO;
     assert!(cfg.validate().is_err());
@@ -177,7 +175,7 @@ fn programmatic_http_mount_validates_before_early_responses() {
 #[test]
 fn launch_profile_is_paid_indexed_permanent_and_optional_features_are_off() {
     let cfg = parse(&vars()).unwrap();
-    assert_eq!(cfg.launch, Some(LaunchConfig { takedown: false }));
+    assert_eq!(cfg.launch, Some(LaunchConfig::new(false)));
     assert!(cfg.indexed.is_some());
     assert!(cfg.admin.is_none());
     assert!(cfg.hooks.is_none());
@@ -416,12 +414,9 @@ fn mutated_programmatic_token_public_rechecks_environment_receipt_seed() {
         .unwrap()
         .public_key();
     let seed = mkit_core::hash::to_hex(&public);
-    cfg.takedown = Some(crate::admin::TakedownSettings {
-        retention_ms: 60000,
-        publication: mkit_server::takedown::PublicationConfig::parse(&seed,
+    cfg.takedown = Some(crate::admin::TakedownSettings::new(60000, mkit_server::takedown::PublicationConfig::parse(&seed,
             &serde_json::json!({"version":1,"keys":[{"keyId":mkit_core::hash::to_hex(&mkit_core::hash::hash(&receipt)),
-            "alg":"ed25519","publicKey":mkit_core::hash::to_hex(&receipt)}]}).to_string()).unwrap(),
-    });
+            "alg":"ed25519","publicKey":mkit_core::hash::to_hex(&receipt)}]}).to_string()).unwrap()));
     v.insert("RECEIPT_NOTICE_KEY".into(), seed);
     assert!(validate_runtime_key_material(&cfg, &|name| v.get(name).cloned()).is_ok());
     cfg.url_tokens = Some(mkit_server::url_token::UrlTokenConfig::new(future));
@@ -506,7 +501,7 @@ fn only_the_paid_workers_profile_name_starts_and_the_retired_alias_is_refused() 
     v.insert("LAUNCH_PROFILE".into(), "paid-workers".into());
     let cfg = check(&v).unwrap();
     cfg.validate().unwrap();
-    assert_eq!(cfg.launch, Some(LaunchConfig { takedown: false }));
+    assert_eq!(cfg.launch, Some(LaunchConfig::new(false)));
     assert!(cfg.pipeline_config().is_ok());
     for name in ["STORAGE_LEASES", "GC_ENABLED"] {
         let mut bad = v.clone();

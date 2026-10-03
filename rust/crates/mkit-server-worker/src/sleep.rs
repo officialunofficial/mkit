@@ -114,7 +114,7 @@ mod timer {
 }
 
 /// Test-only runtime probe, absent from builds without test-faults.
-#[cfg(all(target_arch = "wasm32", feature = "test-faults"))]
+#[cfg(all(target_arch = "wasm32", feature = "__test-faults"))]
 pub async fn runtime_probe() -> worker::Result<worker::Response> {
     use mkit_server::{Sleep, with_timeout};
     use std::time::Duration;

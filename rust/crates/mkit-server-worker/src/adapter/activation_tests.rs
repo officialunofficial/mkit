@@ -6,7 +6,7 @@ use futures::executor::block_on;
 use mkit_server::admin::SystemAudit;
 use mkit_server::purge::{Request, Trigger};
 use mkit_server::relay::{RelayEnqueueSnapshot, RelayHook, enqueue_relay_rows};
-use mkit_server::store::{codec, keys};
+use mkit_server::store::adapter_spi::{codec, keys};
 use mkit_server::timers::{TickBudget, run_due};
 use mkit_server::{
     Batch, BatchOutcome, Key, ManualClock, MemoryKv, NamespaceKey, NamespaceStore, NoopMetrics,
@@ -299,7 +299,7 @@ fn content_audit_refuses_remote_effects_at_shared_physical_limit_and_progresses_
             .unwrap();
         enqueue(&source, &partition, &[row], 10).await;
         let allowance = mkit_server::purge::SliceBudget::new(crate::purge::LAUNCH_ALARM_OPERATIONS);
-        assert!(allowance.charge(crate::purge::LAUNCH_ALARM_OPERATIONS - 1));
+        assert!(allowance.charge_operations(crate::purge::LAUNCH_ALARM_OPERATIONS - 1));
         let registry = timer_registry_budgeted::<MemoryKv, _>(
             crate::classes::ShardClass::ContentIndexShard,
             Ok(target.clone()),
@@ -561,7 +561,7 @@ impl mkit_server::purge::LocalInvalidation for CacheFailure {
     ) -> mkit_server::BoxFuture<'a, Result<Option<u32>, mkit_server::StoreError>> {
         Box::pin(async move {
             assert!(self.physical.used() >= 64);
-            assert!(local.charge(2));
+            assert!(local.charge_operations(2));
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(mkit_server::StoreError::unavailable("cache failure"))
         })
@@ -581,7 +581,7 @@ fn late_owner_reserves_before_any_effect_and_keeps_durable_purge_and_audit_after
                     calls: calls.clone(),
                     physical: physical.clone(),
                 }));
-        assert!(physical.charge(crate::purge::LAUNCH_ALARM_OPERATIONS - 63));
+        assert!(physical.charge_operations(crate::purge::LAUNCH_ALARM_OPERATIONS - 63));
         let registry = timer_registry_budgeted::<MemoryKv, _>(
             crate::classes::ShardClass::ContentIndexShard,
             Ok(store.clone()),

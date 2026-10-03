@@ -21,6 +21,7 @@ struct List {
 
 /// Validated public configuration; private key bytes never enter diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PublicationConfig {
     /// Current raw Ed25519 public key.
     pub public_key: [u8; 32],

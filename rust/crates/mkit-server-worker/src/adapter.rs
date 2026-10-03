@@ -39,7 +39,7 @@
 //! It is built per request from the request's `Env`: building it costs no
 //! I/O.
 //!
-//! **Test faults** (`test-faults` only): the pipeline gets
+//! **Test faults** (`__test-faults` only): the pipeline gets
 //! `WorkerFaults`, `GET /__mkit_test/stats` answers the default
 //! partition's size (under D34, that of the ref shard `?ref=<name>` names),
 //! `TEST_QUOTA_*` vars replace the write quota, `TEST_TICKET_TTL_MS`
@@ -57,7 +57,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::sql::Capacity;
 use bytes::Bytes;
 use http_body::{Body, Frame, SizeHint};
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 use mkit_server::quota::QuotaLimits;
 
 use crate::naming::Placement;
@@ -95,7 +95,7 @@ pub const GRANT_SCHEMES_VAR: &str = "GRANT_SCHEMES";
 /// `id=origin[,origin...]` entries separated by `;` or newlines.
 pub const WEBAUTHN_RPS_VAR: &str = "WEBAUTHN_RPS";
 /// Development only: accept a loopback `AUTH_AUDIENCE` or relying party for
-/// write grants. Honoured only in `test-faults` builds; a release build that
+/// write grants. Honoured only in `__test-faults` builds; a release build that
 /// sees it set refuses to start.
 pub const UNSAFE_LOOPBACK_GRANTS_VAR: &str = "UNSAFE_LOOPBACK_GRANTS";
 /// The Worker var that turns indexed mode on in the Paid launch profile.
@@ -249,17 +249,17 @@ pub struct WorkerConfig {
     pub url_tokens: Option<mkit_server::url_token::UrlTokenConfig>,
     /// `TEST_QUOTA_OPS`, `TEST_QUOTA_BYTES` and `TEST_QUOTA_WINDOW_MS`,
     /// when all three are set: the write quota instead of the default
-    /// (`test-faults` builds only, for the wire suite's quota and growth
+    /// (`__test-faults` builds only, for the wire suite's quota and growth
     /// cases).
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     pub test_quota: Option<QuotaLimits>,
     /// Test-only outbox row threshold; absent in release builds.
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     pub test_outbox_rows: Option<u64>,
     /// `TEST_TICKET_TTL_MS`: the upload ticket lifetime instead of the
-    /// default 24 hours (`test-faults` builds only, so the growth case can
+    /// default 24 hours (`__test-faults` builds only, so the growth case can
     /// wait out real ticket expiry).
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     pub test_ticket_ttl_ms: Option<u64>,
 }
 
@@ -332,11 +332,7 @@ impl WorkerConfig {
         // signs.
         let auth = AuthV2Config::new(&self.audience, self.repository.as_deref().unwrap_or(""))
             .map_err(|e| bad(&e))?;
-        let limits = UploadLimits {
-            max_total_bytes: self.max_pack_bytes,
-            // vcs-worker had no chunk cap; the body cap bounds the count.
-            max_chunks: u32::MAX,
-        };
+        let limits = UploadLimits::new(self.max_pack_bytes, u32::MAX);
         let mut config =
             PipelineConfig::new(self.addressing.clone(), AuthMode::AuthV2(auth), limits);
         config.single_upload_max_bytes = Some(SINGLE_PUT_MAX_BYTES);
@@ -383,17 +379,15 @@ impl WorkerConfig {
             .map(|settings| settings.build(&self.audience))
             .transpose()
             .map_err(|e| ConfigError(e.public_message().to_owned()))?;
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         if let Some(quota) = self.test_quota {
             config.write_quota = Some(quota);
         }
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         {
             if let Some(rows) = self.test_outbox_rows {
-                config.outbox_backlog_cap = Some(mkit_server::pipeline::OutboxBacklogCap {
-                    rows,
-                    bytes: u64::MAX,
-                });
+                config.outbox_backlog_cap =
+                    Some(mkit_server::pipeline::OutboxBacklogCap::new(rows, u64::MAX));
             }
             if let Some(ttl) = self.test_ticket_ttl_ms {
                 config.ticket_ttl_ms = ttl;
@@ -563,7 +557,7 @@ impl WorkerConfig {
             !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
         });
         let launch = crate::launch::LaunchConfig::parse(&var)?;
-        #[cfg(not(feature = "test-faults"))]
+        #[cfg(not(feature = "__test-faults"))]
         if indexed_requested && launch.is_none() {
             return Err(ConfigError(
                 "INDEXED_MODE requires LAUNCH_PROFILE=paid-workers".into(),
@@ -760,11 +754,11 @@ impl WorkerConfig {
             http_mount: None,
             #[cfg(feature = "http-objects")]
             url_tokens,
-            #[cfg(feature = "test-faults")]
+            #[cfg(feature = "__test-faults")]
             test_quota: test_quota(&var)?,
-            #[cfg(feature = "test-faults")]
+            #[cfg(feature = "__test-faults")]
             test_outbox_rows: test_number(&var, "TEST_OUTBOX_BACKLOG_ROWS", 16)?,
-            #[cfg(feature = "test-faults")]
+            #[cfg(feature = "__test-faults")]
             test_ticket_ttl_ms: test_ticket_ttl(&var)?,
         };
         crate::launch::validate(&mut cfg, &var)?;
@@ -1056,15 +1050,15 @@ fn resolve_grants(
         .unwrap_or_default();
     let loopback = match var(UNSAFE_LOOPBACK_GRANTS_VAR).as_deref() {
         None => false,
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         Some("true") => true,
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         Some(_) => {
             return Err(ConfigError(format!(
                 "{UNSAFE_LOOPBACK_GRANTS_VAR} must be `true` when set"
             )));
         }
-        #[cfg(not(feature = "test-faults"))]
+        #[cfg(not(feature = "__test-faults"))]
         Some(_) => {
             return Err(ConfigError(format!(
                 "{UNSAFE_LOOPBACK_GRANTS_VAR} is honoured only in test-faults builds; a \
@@ -1088,7 +1082,7 @@ fn resolve_grants(
     Ok(Some(settings))
 }
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 fn test_number(
     var: &impl Fn(&str) -> Option<String>,
     name: &str,
@@ -1107,7 +1101,7 @@ fn test_number(
 }
 
 /// `TEST_QUOTA_*`: all three or none.
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 fn test_quota(var: &impl Fn(&str) -> Option<String>) -> Result<Option<QuotaLimits>, ConfigError> {
     fn parse<T: core::str::FromStr>(name: &str, v: Option<&str>) -> Result<T, ConfigError> {
         v.and_then(|v| v.trim().parse().ok())
@@ -1118,15 +1112,15 @@ fn test_quota(var: &impl Fn(&str) -> Option<String>) -> Result<Option<QuotaLimit
     if ops.is_none() && bytes.is_none() && window.is_none() {
         return Ok(None);
     }
-    Ok(Some(QuotaLimits {
-        max_ops: parse(names[0], ops.as_deref())?,
-        max_bytes: parse(names[1], bytes.as_deref())?,
-        window_ms: parse(names[2], window.as_deref())?,
-    }))
+    Ok(Some(QuotaLimits::new(
+        parse(names[2], window.as_deref())?,
+        parse(names[0], ops.as_deref())?,
+        parse(names[1], bytes.as_deref())?,
+    )))
 }
 
 /// `TEST_TICKET_TTL_MS`: a positive lifetime in milliseconds, or unset.
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 fn test_ticket_ttl(var: &impl Fn(&str) -> Option<String>) -> Result<Option<u64>, ConfigError> {
     test_number(var, "TEST_TICKET_TTL_MS", 60_000)
 }
@@ -1322,7 +1316,7 @@ fn timer_registry_budgeted<
         }
         _ => registry,
     };
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     let registry = registry.register(mkit_server::timers::test_kind::TestTimer);
     registry
 }
@@ -1351,11 +1345,23 @@ where
 
 /// What kind-8 may spend in one Durable Object alarm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OutcomeBudget {
     /// Kind-8 fires per alarm.
     pub fires_per_alarm: u32,
     /// Rows (sink calls) per fire.
     pub rows_per_fire: usize,
+}
+
+impl OutcomeBudget {
+    /// Construct explicit deployment settings; fields may be adjusted before use.
+    #[must_use]
+    pub fn new(fires_per_alarm: u32, rows_per_fire: usize) -> Self {
+        Self {
+            fires_per_alarm,
+            rows_per_fire,
+        }
+    }
 }
 
 impl OutcomeBudget {
@@ -1399,15 +1405,9 @@ pub fn outcome_audience(cfg: &WorkerConfig) -> String {
 pub fn outcome_budget(plan: Option<&str>) -> OutcomeBudget {
     let paid = plan.is_some_and(|p| p.trim().eq_ignore_ascii_case("paid"));
     if paid {
-        OutcomeBudget {
-            fires_per_alarm: PAID_OUTCOME_FIRES_PER_ALARM,
-            rows_per_fire: PAID_OUTCOME_ROWS_PER_FIRE,
-        }
+        OutcomeBudget::new(PAID_OUTCOME_FIRES_PER_ALARM, PAID_OUTCOME_ROWS_PER_FIRE)
     } else {
-        OutcomeBudget {
-            fires_per_alarm: FREE_OUTCOME_FIRES_PER_ALARM,
-            rows_per_fire: FREE_OUTCOME_ROWS_PER_FIRE,
-        }
+        OutcomeBudget::new(FREE_OUTCOME_FIRES_PER_ALARM, FREE_OUTCOME_ROWS_PER_FIRE)
     }
 }
 
@@ -1528,7 +1528,11 @@ struct SharedStore<T>(Arc<T>, Option<mkit_server::purge::SliceBudget>);
 
 impl<T> SharedStore<T> {
     fn charge(&self) -> Result<(), mkit_server::StoreError> {
-        if self.1.as_ref().is_some_and(|budget| !budget.charge(1)) {
+        if self
+            .1
+            .as_ref()
+            .is_some_and(|budget| !budget.charge_operations(1))
+        {
             Err(mkit_server::StoreError::unavailable(
                 "alarm operation budget exhausted",
             ))
@@ -1815,7 +1819,7 @@ impl mkit_server::relay::RelayHook for WorkerRelayHook {
     fn reserved_ops(
         &self,
         target: &mkit_server::Partition,
-        rows: &[(u64, mkit_server::store::codec::RelayV1)],
+        rows: &[(u64, mkit_server::store::adapter_spi::codec::RelayV1)],
     ) -> usize {
         self.audit.reserved_ops(target, rows)
     }
@@ -1823,7 +1827,7 @@ impl mkit_server::relay::RelayHook for WorkerRelayHook {
     fn read_keys(
         &self,
         target: &mkit_server::Partition,
-        rows: &[(u64, mkit_server::store::codec::RelayV1)],
+        rows: &[(u64, mkit_server::store::adapter_spi::codec::RelayV1)],
     ) -> Result<Vec<mkit_server::Key>, mkit_server::StoreError> {
         self.content.read_keys(target, rows)
     }
@@ -1831,7 +1835,7 @@ impl mkit_server::relay::RelayHook for WorkerRelayHook {
     fn before_apply<'a>(
         &'a self,
         target: &'a mkit_server::Partition,
-        rows: &'a [(u64, mkit_server::store::codec::RelayV1)],
+        rows: &'a [(u64, mkit_server::store::adapter_spi::codec::RelayV1)],
         pre: &'a mut Vec<mkit_server::Precondition>,
         writes: &'a mut Vec<mkit_server::Write>,
     ) -> mkit_server::BoxFuture<'a, Result<(), mkit_server::StoreError>> {
@@ -1844,7 +1848,7 @@ impl mkit_server::relay::RelayHook for WorkerRelayHook {
     fn before_apply_observed<'a>(
         &'a self,
         target: &'a mkit_server::Partition,
-        rows: &'a [(u64, mkit_server::store::codec::RelayV1)],
+        rows: &'a [(u64, mkit_server::store::adapter_spi::codec::RelayV1)],
         observed: &'a [(mkit_server::Key, Option<mkit_server::Value>)],
         pre: &'a mut Vec<mkit_server::Precondition>,
         writes: &'a mut Vec<mkit_server::Write>,
@@ -2151,10 +2155,10 @@ pub fn unavailable_json(message: &str) -> String {
     body.to_string()
 }
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 pub use faults::{FINAL_CHUNK_FAULT, FaultState, WorkerFaults};
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 mod faults {
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex, PoisonError};
@@ -2180,7 +2184,7 @@ mod faults {
     /// store's withheld-final-chunk fault at the reservation. The Durable
     /// Object's own fault (a batch writing a key containing
     /// `__test_fail_once-` fails once) needs no hook: `NsObject` wraps its
-    /// connection in `FaultConn` under `test-faults`.
+    /// connection in `FaultConn` under `__test-faults`.
     pub struct WorkerFaults<A> {
         state: Arc<FaultState>,
         arm_final_chunk: A,
@@ -2355,7 +2359,7 @@ mod glue {
         )
         .with_budget(request_budget.clone());
         config.purge = crate::admin::purge_config(cfg, meta.clone(), Some(request_budget))?;
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         let faulted = blobs.clone();
         let pipe = Pipeline::new(
             blobs,
@@ -2384,7 +2388,7 @@ mod glue {
         } else {
             pipe
         };
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         let pipe = pipe.with_faults(super::WorkerFaults::new(test::fault_state(), move || {
             faulted.fail_final_chunk_once();
         }));
@@ -2628,7 +2632,7 @@ mod glue {
         H: HookSet + 'static,
         F: FnOnce(&Env, &WorkerConfig) -> Result<H, ConfigError>,
     {
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         let mut req = req;
         install();
         if let Some(response) = receipt_keys(&req, cfg)? {
@@ -2674,11 +2678,11 @@ mod glue {
             // refuse the operator route before its authenticated effect.
             return serve_admin_with(req, env, cfg).await;
         }
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         if let Some(response) = test::backup_round_trip(&mut req, &env, cfg).await? {
             return Ok(cors(response));
         }
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         if req.method() == worker::Method::Get && req.path() == test::STATS_PATH {
             let scope = req
                 .url()
@@ -2687,7 +2691,7 @@ mod glue {
                 .find_map(|(k, v)| (k == "ref").then(|| v.into_owned()));
             return Ok(cors(test::stats(&env, cfg, scope.as_deref()).await?));
         }
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         {
             let path = req.path();
             if let Some(pack) = path.strip_prefix(test::RELAY_PATH_PREFIX) {
@@ -2745,12 +2749,12 @@ mod glue {
         }
         let status = http_resp.status().as_u16();
         let headers = http_resp.headers().clone();
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         let report: Option<super::PeakReport> = {
             let path = req.path();
             Some(Box::new(move |bytes| test::report_peak(&path, bytes)))
         };
-        #[cfg(not(feature = "test-faults"))]
+        #[cfg(not(feature = "__test-faults"))]
         let report = None;
         let body = MeasuredBody::new(http_resp.into_body(), watch, report);
         let mut out = respond_streamed(status, body)?;
@@ -3042,12 +3046,12 @@ mod glue {
         );
     }
 
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     mod test {
         use std::sync::Arc;
 
         use mkit_server::pipeline::{D34Shards, ShardMap, Sharding};
-        use mkit_server::store::{keys, outbox::OutboxBuilder};
+        use mkit_server::store::adapter_spi::{keys, outbox::OutboxBuilder};
         use mkit_server::{
             Batch, BatchOutcome, BlobKey, Clock, NamespaceKey, NamespaceStore, Partition, RepoId,
             RepoName, StoreError, Value,
@@ -3294,7 +3298,9 @@ mod tests {
     )]
     fn publication_recheck_checkpoints_at_the_shared_alarm_limit() {
         use mkit_server::pipeline::{D34Shards, ShardMap};
-        use mkit_server::store::publication::{Advance, Clearance, Pair, Publication, Witness};
+        use mkit_server::store::adapter_spi::publication::{
+            Advance, Clearance, Pair, Publication, Witness,
+        };
         use mkit_server::timers::{TickBudget, run_due};
         use mkit_server::{
             Batch, BatchOutcome, NamespaceKey, NamespaceStore, RepoId, RepoName, Value,
@@ -3308,7 +3314,7 @@ mod tests {
             };
             let name = "refs/heads/main";
             let source = D34Shards.ref_shard(&repo, name);
-            let key = mkit_server::store::keys::advance(&repo.name, name, 1);
+            let key = mkit_server::store::adapter_spi::keys::advance(&repo.name, name, 1);
             let state = Publication {
                 sequence: 1,
                 published: 0,
@@ -3336,11 +3342,11 @@ mod tests {
                     Batch::new()
                         .put(key.clone(), advance.encode().unwrap())
                         .put(
-                            mkit_server::store::keys::publication(&repo.name, name),
+                            mkit_server::store::adapter_spi::keys::publication(&repo.name, name),
                             state.encode().unwrap()
                         )
                         .put(
-                            mkit_server::store::keys::timer(0, 12, key.as_bytes()),
+                            mkit_server::store::adapter_spi::keys::timer(0, 12, key.as_bytes()),
                             Value::new(initial)
                         )
                 )
@@ -3359,7 +3365,7 @@ mod tests {
                 kv.apply(
                     &target,
                     Batch::new().put(
-                        mkit_server::store::keys::published_member(&repo.name, pack),
+                        mkit_server::store::adapter_spi::keys::published_member(&repo.name, pack),
                         witness.encode(),
                     ),
                 )
@@ -3367,7 +3373,7 @@ mod tests {
                 .unwrap();
             }
             let budget = mkit_server::purge::SliceBudget::new(crate::purge::ALARM_OPERATIONS);
-            assert!(budget.charge(crate::purge::ALARM_OPERATIONS - 1));
+            assert!(budget.charge_operations(crate::purge::ALARM_OPERATIONS - 1));
             let registry = timer_registry_budgeted::<_, _>(
                 crate::classes::ShardClass::RefShard,
                 Ok(kv.clone()),
@@ -3390,7 +3396,7 @@ mod tests {
             assert_eq!((report.fired, report.failed), (1, 0));
             assert_eq!(budget.used(), crate::purge::ALARM_OPERATIONS);
             assert_eq!(
-                mkit_server::store::publication::read(&kv, &source, &repo.name, name)
+                mkit_server::store::adapter_spi::publication::read(&kv, &source, &repo.name, name)
                     .await
                     .unwrap()
                     .published,
@@ -3399,7 +3405,7 @@ mod tests {
             let continued = kv
                 .get(
                     &source,
-                    &mkit_server::store::keys::timer(5_000, 12, key.as_bytes()),
+                    &mkit_server::store::adapter_spi::keys::timer(5_000, 12, key.as_bytes()),
                 )
                 .await
                 .unwrap()
@@ -3427,7 +3433,7 @@ mod tests {
                 "resume must neither reread nor double-charge"
             );
             assert_eq!(
-                mkit_server::store::publication::read(&kv, &source, &repo.name, name)
+                mkit_server::store::adapter_spi::publication::read(&kv, &source, &repo.name, name)
                     .await
                     .unwrap()
                     .published,
@@ -3627,7 +3633,7 @@ mod tests {
         ));
         // Indexed configuration is only valid under the explicit launch
         // profile in release-shaped builds.
-        config.launch = Some(crate::launch::LaunchConfig { takedown: false });
+        config.launch = Some(crate::launch::LaunchConfig::new(false));
         let scanner_public =
             mkit_server::hooks::HookSigner::new("scanner", zeroize::Zeroizing::new([0x33; 32]))
                 .unwrap()
@@ -3946,7 +3952,7 @@ mod tests {
             shard_ref: "refs/heads/b0".into(),
         };
         let reference = bytes::Bytes::copy_from_slice(&0u64.to_be_bytes());
-        let timer_key = mkit_server::store::keys::timer(
+        let timer_key = mkit_server::store::adapter_spi::keys::timer(
             60_000,
             mkit_server::timers::registry::kinds::QUOTA_ROLLUP.get(),
             &reference,
@@ -3956,12 +3962,15 @@ mod tests {
                 &shard,
                 Batch::new()
                     .put(
-                        mkit_server::store::keys::quota_shard(0),
-                        mkit_server::store::codec::encode_namespace_usage(
+                        mkit_server::store::adapter_spi::keys::quota_shard(0),
+                        mkit_server::store::adapter_spi::codec::encode_namespace_usage(
                             mkit_server::quota::NamespaceUsage { ops: 3, bytes: 12 },
                         ),
                     )
-                    .put(timer_key, mkit_server::store::codec::encode_u64(60_000)),
+                    .put(
+                        timer_key,
+                        mkit_server::store::adapter_spi::codec::encode_u64(60_000),
+                    ),
             ),
         )
         .unwrap();
@@ -3994,7 +4003,7 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)] // End-to-end registration and cleanup fixture.
     fn worker_registry_delivers_a_current_96_effect_generic_relay_in_two_calls() {
-        use mkit_server::store::{codec, keys, outbox::OutboxBuilder};
+        use mkit_server::store::adapter_spi::{codec, keys, outbox::OutboxBuilder};
         use mkit_server::timers::{TickBudget, run_due};
         use mkit_server::{
             Batch, Key, ManualClock, MemoryKv, NamespaceKey, NamespaceStore, Partition, RepoName,
@@ -4131,7 +4140,7 @@ mod tests {
 
     #[test]
     fn paid_rollup_backlog_is_bounded_and_resumes_until_drained() {
-        use mkit_server::store::{codec, keys};
+        use mkit_server::store::adapter_spi::{codec, keys};
         use mkit_server::timers::{TickBudget, TimerRegistry, run_due};
         use mkit_server::{
             Batch, ManualClock, MemoryKv, NamespaceKey, NamespaceStore, Partition, RepoName,
@@ -4337,8 +4346,8 @@ mod tests {
         assert!(WorkerConfig::from_vars(vars(&pairs)).is_err());
     }
 
-    /// `UNSAFE_LOOPBACK_GRANTS` opens loopback grants in `test-faults` builds.
-    #[cfg(feature = "test-faults")]
+    /// `UNSAFE_LOOPBACK_GRANTS` opens loopback grants in `__test-faults` builds.
+    #[cfg(feature = "__test-faults")]
     #[test]
     fn loopback_grants_are_honoured_in_test_faults_builds() {
         let namespace = ns(1);
@@ -4357,7 +4366,7 @@ mod tests {
 
     /// A release build never honours it: setting it is an error, even with
     /// nothing else configured.
-    #[cfg(not(feature = "test-faults"))]
+    #[cfg(not(feature = "__test-faults"))]
     #[test]
     fn loopback_grants_var_is_refused_in_release_builds() {
         let namespace = ns(1);
@@ -4395,7 +4404,7 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     #[test]
     fn test_quota_is_all_or_nothing() {
         let base = [(AUDIENCE_VAR, "https://x.example"), (REPOSITORY_VAR, "r")];
@@ -4408,20 +4417,13 @@ mod tests {
             ("TEST_QUOTA_WINDOW_MS", "5000"),
         ]);
         let cfg = WorkerConfig::from_vars(vars(&all)).unwrap();
-        assert_eq!(
-            cfg.test_quota,
-            Some(QuotaLimits {
-                window_ms: 5000,
-                max_ops: 7,
-                max_bytes: 1024
-            })
-        );
+        assert_eq!(cfg.test_quota, Some(QuotaLimits::new(5000, 7, 1024)));
         let mut partial = base.to_vec();
         partial.push(("TEST_QUOTA_OPS", "7"));
         assert!(WorkerConfig::from_vars(vars(&partial)).is_err());
     }
 
-    #[cfg(not(feature = "test-faults"))]
+    #[cfg(not(feature = "__test-faults"))]
     #[test]
     fn release_never_reads_m3_test_vars() {
         let cfg = WorkerConfig::from_vars(|name| {
@@ -4440,7 +4442,7 @@ mod tests {
         assert_eq!(pipe.ticket_ttl_ms, 86_400_000);
         assert_eq!(pipe.outbox_backlog_cap.unwrap().rows, 100_000);
     }
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     #[test]
     fn m3_test_vars_are_bounded_and_injected() {
         for bad in ["0", "17", "invalid"] {
@@ -4459,7 +4461,7 @@ mod tests {
         assert_eq!(pipe.outbox_backlog_cap.unwrap().rows, 16);
     }
 
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     #[test]
     fn test_ticket_ttl_is_positive_or_unset() {
         let base = [(AUDIENCE_VAR, "https://x.example"), (REPOSITORY_VAR, "r")];
@@ -4479,7 +4481,7 @@ mod tests {
 
     /// `final-chunk` arms the blob store once per operation; `after-reserve`
     /// and `after-put` fail once per operation through `FailOnce`.
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     #[test]
     fn worker_faults_fire_once_per_operation() {
         use mkit_core::protocol::PackKey;
@@ -4623,7 +4625,7 @@ mod tests {
     }
 
     /// A release build requires the explicit launch profile for indexed mode.
-    #[cfg(not(feature = "test-faults"))]
+    #[cfg(not(feature = "__test-faults"))]
     #[test]
     fn a_release_worker_requires_launch_selection_for_indexed_mode() {
         for value in ["true", "1", "yes", "on"] {
@@ -4651,7 +4653,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     fn indexed_vars<'a>(extra: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |name| {
             if let Some((_, value)) = extra.iter().find(|(key, _)| *key == name) {
@@ -4671,8 +4673,8 @@ mod tests {
         }
     }
 
-    /// Under `test-faults` the var is accepted only on Paid, in Multi + D34.
-    #[cfg(feature = "test-faults")]
+    /// Under `__test-faults` the var is accepted only on Paid, with multiple repositories and ref shards.
+    #[cfg(feature = "__test-faults")]
     #[test]
     fn indexed_mode_is_scheduled_and_paid_only() {
         let config = WorkerConfig::from_vars(indexed_vars(&[(PLAN_VAR, "paid")])).unwrap();
@@ -4782,10 +4784,7 @@ mod tests {
             AuthMode::AuthV2(
                 mkit_server::auth_v2::AuthV2Config::new("http://localhost", "default").unwrap(),
             ),
-            UploadLimits {
-                max_total_bytes: 1 << 20,
-                max_chunks: 64,
-            },
+            UploadLimits::new(1 << 20, 64),
         );
         cfg.ticket_keys = Some(
             mkit_server::upload::token::TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap(),
@@ -4822,10 +4821,7 @@ mod tests {
             namespace: NamespaceKey::deployment_default(),
             name: RepoName::new("default").unwrap(),
         };
-        let limits = UploadLimits {
-            max_total_bytes: 1 << 20,
-            max_chunks: 64,
-        };
+        let limits = UploadLimits::new(1 << 20, 64);
         let cfg = PipelineConfig::new(Addressing::Single { repo }, AuthMode::Open, limits);
         let pipe = Pipeline::new(
             MemoryBlobStore::default(),
@@ -5031,7 +5027,9 @@ mod tests {
         mkit_server::Partition,
         mkit_server::Key,
     ) {
-        use mkit_server::store::{BlockEntry, ContentIndex, Holder, PendingHolderV1, keys};
+        use mkit_server::store::{
+            BlockEntry, ContentIndex, Holder, PendingHolderV1, adapter_spi::keys,
+        };
         use mkit_server::{
             Batch, ManualClock, MemoryKv, NamespaceKey, NamespaceStore, Partition, RepoName, Value,
         };
@@ -5080,7 +5078,7 @@ mod tests {
 
     #[test]
     fn real_late_holder_registration_takes_ownership_only_when_selected() {
-        use mkit_server::store::keys;
+        use mkit_server::store::adapter_spi::keys;
         use mkit_server::timers::{TickBudget, run_due};
         use mkit_server::{MemoryKv, NamespaceStore};
         block_on(async {

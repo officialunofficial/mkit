@@ -16,14 +16,11 @@ use crate::ServerError;
 use crate::indexed::budget::SliceBudget;
 
 /// The request allowance this ledger divides.
-pub(crate) const REQUEST_CALLS: u32 = 9_000;
+pub(crate) use crate::limits::{REQUEST_CALLS, VERIFY_SLICE_CALLS};
 /// Calls only settlement may spend: enough for one uncontended attempt's
 /// snapshot, lease, checkpoint and commit calls. Contended retries keep
 /// spending the root and are refused, as capacity, once it is empty.
 pub(crate) const SETTLEMENT_RESERVE: u32 = 64;
-/// Pair verification's own slice of the proof share.
-pub(crate) const VERIFY_SLICE_CALLS: u32 = 256;
-
 /// The request-local publication ledger.
 #[derive(Debug, Clone)]
 pub(crate) struct PublicationBudget {

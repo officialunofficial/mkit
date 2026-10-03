@@ -2,12 +2,13 @@
 #![cfg(feature = "memory")]
 #![allow(clippy::unwrap_used)]
 
+use crate as mkit_server;
 use futures_executor::block_on;
 use mkit_server::store::inspection_mode::{Outcome, check_mode};
 use mkit_server::store::restore::{RestoreOptions, restore};
 use mkit_server::store::{
-    EXPORT_END, ExportRecord, encode_export_header, encode_export_record, export_header,
-    export_page, keys,
+    EXPORT_END, ExportRecord, adapter_spi::keys, encode_export_header, encode_export_record,
+    export_header, export_page,
 };
 use mkit_server::{Batch, MemoryKv, NamespaceKey, NamespaceStore, Partition, Value};
 
@@ -35,7 +36,7 @@ fn archive_partition(store: &MemoryKv, partition: &Partition) -> Vec<u8> {
 
 #[test]
 fn restore_retains_registry_and_per_advance_hold_rows_in_single_and_d34() {
-    use mkit_server::store::codec;
+    use mkit_server::store::adapter_spi::codec;
     use mkit_server::store::inspection_flags::{FlagInstall, FlagSource, FlagV1, encode_flag};
     let ns = NamespaceKey::deployment_default();
     let repo = mkit_server::RepoName::new("project").unwrap();
@@ -191,7 +192,7 @@ impl NamespaceStore for LateWrite {
                 p,
                 Batch::new().put(
                     keys::layout_version(),
-                    mkit_server::store::codec::encode_u32(keys::LAYOUT_VERSION),
+                    mkit_server::store::adapter_spi::codec::encode_u32(keys::LAYOUT_VERSION),
                 ),
             )
             .await?;
@@ -435,7 +436,7 @@ fn restore_preserves_repository_release_fence_in_single_and_d34() {
                 &coordinator,
                 Batch::new().put(
                     keys::grant_epoch(),
-                    mkit_server::store::codec::encode_u64(1),
+                    mkit_server::store::adapter_spi::codec::encode_u64(1),
                 ),
             ))
             .unwrap();

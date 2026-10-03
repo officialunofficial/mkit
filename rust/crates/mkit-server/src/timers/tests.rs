@@ -27,7 +27,7 @@ fn takedown_work_timer_key_golden() {
     }) if reference.as_ref() == b"action-1"));
 }
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 #[tokio::test]
 async fn test_timer_d34_deletes_ref_and_enqueues_index_delete_without_lease() {
     use crate::pipeline::{D34Shards, ShardMap};

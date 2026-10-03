@@ -173,11 +173,11 @@ impl<B: ObjectBucket> PackWindows for R2Windows<B> {
 /// slice the runtime kills mid-pack does. With 16 MiB windows that is the
 /// second slice of a three-window pack, so the job must resume from the
 /// checkpoint the first slice left.
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 #[derive(Debug, Clone)]
 pub struct MidPackCrash<W>(pub W);
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 impl<W: PackWindows> PackWindows for MidPackCrash<W> {
     fn read<'a>(
         &'a self,
@@ -271,10 +271,7 @@ where
             cfg,
             // Default slices use indexed::geometry, shared with inline and preservation.
             limits: SliceLimits::default(),
-            lease: LeaseParams {
-                authority_fence,
-                ..LeaseParams::default()
-            },
+            lease: LeaseParams::default().with_authority_fence(authority_fence),
             clock,
             metrics,
             extension: FailClosedExtraction,
@@ -328,9 +325,9 @@ pub(crate) fn register_configured_budgeted<S: NamespaceStore>(
 
     let bucket = || EnvBucket::new(env.clone(), cfg.blob_binding);
     let probe = cfg.probe_partition();
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     let windows = MidPackCrash(R2Windows(bucket()));
-    #[cfg(not(feature = "test-faults"))]
+    #[cfg(not(feature = "__test-faults"))]
     let windows = R2Windows(bucket());
     let Some(indexed) = cfg
         .indexed
@@ -356,10 +353,7 @@ pub(crate) fn register_configured_budgeted<S: NamespaceStore>(
             cfg: indexed,
             // Default slices use indexed::geometry, shared with inline and preservation.
             limits: SliceLimits::default(),
-            lease: LeaseParams {
-                authority_fence: cfg.authority_fence.is_some(),
-                ..LeaseParams::default()
-            },
+            lease: LeaseParams::default().with_authority_fence(cfg.authority_fence.is_some()),
             clock: Arc::new(WorkerClock),
             metrics: Arc::new(ConsoleMetrics::default()),
         },

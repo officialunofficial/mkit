@@ -50,9 +50,9 @@ fn selectors_include_proof_and_snapshot_and_budget_is_shared() {
     assert!(tags.iter().any(|t| t.starts_with("mkit-snapshot-")));
     let budget = SliceBudget::new(2);
     let other = budget.clone();
-    assert!(budget.charge(1));
-    assert!(other.charge(1));
-    assert!(!budget.charge(1));
+    assert!(budget.charge_operations(1));
+    assert!(other.charge_operations(1));
+    assert!(!budget.charge_operations(1));
     assert_eq!(budget.used(), 2);
 }
 
@@ -99,7 +99,7 @@ impl LocalInvalidation for EnumeratedLocal {
         Box::pin(async move {
             while cursor < 2 {
                 // Enumeration and deletion must share the delivery allowance.
-                if !budget.charge(2) {
+                if !budget.charge_operations(2) {
                     return Ok(Some(cursor));
                 }
                 self.0.lock().unwrap().push(cursor);
@@ -737,7 +737,7 @@ fn immediate_budget_is_shared_across_actions_and_reserves_parent_before_effects(
     let immediate = SliceBudget::with_parent(64, parent.clone());
     let mut effects = 0;
     for _action in 0..256 {
-        if immediate.clone().charge(2) {
+        if immediate.clone().charge_operations(2) {
             effects += 1;
         }
     }

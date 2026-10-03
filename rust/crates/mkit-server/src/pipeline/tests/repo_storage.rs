@@ -31,7 +31,12 @@ fn other_identity(identity: &str, name: &str) -> String {
 }
 
 fn repo_of(env: &Env<impl HookSet>, owner: &SigningKey, identity: &str) -> RepoId {
-    let request = signed(owner, identity, Procedure::AdvanceRefs, 9_000);
+    let request = signed(
+        owner,
+        identity,
+        Procedure::AdvanceRefs,
+        crate::limits::REQUEST_CALLS,
+    );
     env.auth(&request).unwrap().repo().repo.clone()
 }
 

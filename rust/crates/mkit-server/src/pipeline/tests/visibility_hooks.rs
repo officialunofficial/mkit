@@ -241,11 +241,7 @@ fn a_visibility_change_charges_no_quota_even_when_the_quota_is_spent() {
     let repo = repository(&owner);
     let clock = clock();
     let mut cfg = config(&owner, AuthorizerRole::Check);
-    cfg.write_quota = Some(QuotaLimits {
-        window_ms: 60_000,
-        max_ops: 0,
-        max_bytes: 0,
-    });
+    cfg.write_quota = Some(QuotaLimits::new(60_000, 0, 0));
     // DefaultAdmission would exhaust a write that it charges.
     let e = build(
         cfg,
@@ -652,11 +648,7 @@ fn expired_replays_with_charges_stay_inside_the_batch_limit(count: u8) {
         .map(|i| crate::quota::QuotaCharge {
             scope: crate::quota::QuotaScope::for_signer(&ns, &[i; 32]),
             bytes: 0,
-            limits: QuotaLimits {
-                window_ms: 60_000,
-                max_ops: 1_000,
-                max_bytes: u64::MAX,
-            },
+            limits: QuotaLimits::new(60_000, 1_000, u64::MAX),
         })
         .collect();
     let e = env_configured(
@@ -716,7 +708,7 @@ fn many_expired_replays_a_reservation_and_charges_stay_inside_the_batch_limit() 
 }
 
 fn full_backlog(cfg: &mut PipelineConfig) {
-    cfg.outbox_backlog_cap = Some(crate::pipeline::OutboxBacklogCap { rows: 0, bytes: 0 });
+    cfg.outbox_backlog_cap = Some(crate::pipeline::OutboxBacklogCap::new(0, 0));
 }
 
 fn seed_backlog<H: HookSet>(e: &Env<H>, owner: &SigningKey) {
@@ -814,11 +806,7 @@ fn an_oversized_charge_list_is_resource_exhausted_and_aborts_the_reservation() {
         .map(|i| crate::quota::QuotaCharge {
             scope: crate::quota::QuotaScope::for_signer(&ns, &[i; 32]),
             bytes: 0,
-            limits: QuotaLimits {
-                window_ms: 60_000,
-                max_ops: 1_000,
-                max_bytes: u64::MAX,
-            },
+            limits: QuotaLimits::new(60_000, 1_000, u64::MAX),
         })
         .collect();
     let e = env_with(

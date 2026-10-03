@@ -7,7 +7,7 @@ use crate::pipeline::clearance::PublicationPolicy;
 use crate::repo::RepoId;
 
 /// A read-only store facade selected after repository authorization.
-pub struct ViewStore<'a, S> {
+pub(crate) struct ViewStore<'a, S> {
     /// Underlying store; mutations through the facade are refused.
     pub store: &'a S,
     /// Authorized repository identity.

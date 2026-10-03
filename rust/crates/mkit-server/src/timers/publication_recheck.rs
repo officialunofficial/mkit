@@ -238,7 +238,9 @@ async fn resume_dependencies<S: NamespaceStore, T: NamespaceStore>(
         let skip = position.saturating_sub(offset).min(keys.len());
         offset += keys.len();
         for page in keys[skip..].chunks(REMOTE_PAGE_KEYS) {
-            if calls == MAX_RECHECK_CALLS || alarm_budget.is_some_and(|budget| !budget.charge(1)) {
+            if calls == MAX_RECHECK_CALLS
+                || alarm_budget.is_some_and(|budget| !budget.charge_operations(1))
+            {
                 return Ok(false);
             }
             calls += 1;

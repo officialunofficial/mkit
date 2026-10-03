@@ -288,9 +288,9 @@ fn cas_retries_repeat_proof_without_resetting_nine_thousand_allowance() {
         Code::Unavailable
     );
     assert_eq!(races.load(Ordering::SeqCst), 2);
-    assert!(scans.load(Ordering::SeqCst) <= 9000);
+    assert!(scans.load(Ordering::SeqCst) <= crate::limits::REQUEST_CALLS);
     assert!(scans.load(Ordering::SeqCst) > 3 * DIRECTORY_SCANS);
-    assert!(env.pipe.meta.calls() <= 9000 + 32);
+    assert!(env.pipe.meta.calls() <= crate::limits::REQUEST_CALLS + 32);
 }
 
 #[test]

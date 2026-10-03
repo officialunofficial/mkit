@@ -1,8 +1,11 @@
 //! Object-index membership and repository isolation on every KV backend.
 
 use mkit_server::pipeline::{D34Shards, ShardMap, SinglePartition};
-use mkit_server::store::index::{self, IndexValue, LocatedObject};
-use mkit_server::store::{BlobKey, codec, keys};
+use mkit_server::store::adapter_spi::index::{self, IndexValue, LocatedObject};
+use mkit_server::store::{
+    BlobKey,
+    adapter_spi::{codec, keys},
+};
 use mkit_server::{
     Batch, KeyClasses, NamespaceKey, NamespaceStore, RangeScan, RepoId, RepoName, StoreError, Value,
 };

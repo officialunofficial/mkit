@@ -18,7 +18,7 @@ use mkit_server::auth_v2::AuthV2Config;
 use mkit_server::pipeline::{AuthMode, HookSet, Hooks, Pipeline, PipelineConfig, Sharding};
 use mkit_server::policy::NamespacePolicy;
 use mkit_server::quota::QuotaLimits;
-use mkit_server::store::keys;
+use mkit_server::store::adapter_spi::keys;
 use mkit_server::timers::outcome_delivery::OutcomeDelivery;
 use mkit_server::timers::ticket_expiry::TicketExpiry;
 use mkit_server::timers::{RunReport, TickBudget, TimerRegistry, run_due};
@@ -262,7 +262,7 @@ impl TestHost {
             let pipeline = pipeline.clone();
             async move { dispatch_http_objects(request, next, pipeline).await }
         }));
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         let app = if profile.has(Feature::TestFaults) {
             app.route(
                 crate::wire::STATS_PATH,
@@ -420,7 +420,7 @@ impl TestHost {
                 coordinator: target,
                 metrics: NoopMetrics,
             });
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         let registry = registry.register(mkit_server::timers::test_kind::TestTimer);
         self.drain_timers(partition, &registry, budget).await
     }
@@ -449,10 +449,7 @@ fn profile_config(profile: &Profile, origin: &str) -> Result<PipelineConfig, Str
         namespace: NamespaceKey::deployment_default(),
         name: RepoName::new(REPOSITORY).map_err(|error| error.to_string())?,
     };
-    let limits = UploadLimits {
-        max_total_bytes: profile.max_pack_bytes,
-        max_chunks: 64,
-    };
+    let limits = UploadLimits::new(profile.max_pack_bytes, 64);
     let addressing = if profile.has(Feature::MultiRepo) {
         Addressing::Multi(
             MultiAddressing::new()
@@ -467,19 +464,15 @@ fn profile_config(profile: &Profile, origin: &str) -> Result<PipelineConfig, Str
     } else {
         Sharding::Single
     };
-    config.outbox_backlog_cap =
-        profile
-            .backlog_cap
-            .map(|rows| mkit_server::pipeline::OutboxBacklogCap {
-                rows,
-                bytes: rows.saturating_mul(16 * 1024),
-            });
+    config.outbox_backlog_cap = profile.backlog_cap.map(|rows| {
+        mkit_server::pipeline::OutboxBacklogCap::new(rows, rows.saturating_mul(16 * 1024))
+    });
     if let Some(quota) = profile.quota {
-        config.write_quota = Some(QuotaLimits {
-            window_ms: quota.window_ms,
-            max_ops: quota.max_ops,
-            max_bytes: quota.max_bytes,
-        });
+        config.write_quota = Some(QuotaLimits::new(
+            quota.window_ms,
+            quota.max_ops,
+            quota.max_bytes,
+        ));
     }
     if profile.has(Feature::Tickets) {
         config.ticket_keys = Some(
@@ -785,7 +778,7 @@ async fn plant_membership(
     Ok(())
 }
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 async fn stats(kv: Arc<MemoryKv>) -> axum::Json<serde_json::Value> {
     let partition = Partition::Namespace(NamespaceKey::deployment_default());
     let stats = kv.stats(&partition).await.expect("memory store stats");

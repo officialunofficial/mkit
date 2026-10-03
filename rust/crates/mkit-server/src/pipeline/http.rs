@@ -198,7 +198,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             .authorize_http_read(&op, &parsed.target, seams, token)
             .await?;
 
-        let denial_budget = crate::indexed::budget::SliceBudget::new(9000);
+        let denial_budget = crate::indexed::budget::SliceBudget::new(crate::limits::REQUEST_CALLS);
         let proof_meta = crate::indexed::budget::Budgeted::new(&self.meta, &denial_budget);
         let proof_blobs = crate::indexed::budget::Budgeted::new(&self.blobs, &denial_budget);
         let view = crate::store::view::ViewStore {
@@ -461,9 +461,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             }
         };
         let request = AdmitRequest {
-            repo,
-            procedure: op.procedure(),
+            #[cfg(test)]
             head,
+            #[cfg(test)]
             ref_path,
             declared_bytes: selected_len,
             credential_headers: &credentials,
@@ -484,6 +484,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
                 .map_err(|e| Fail::from_server_error(&e))?
             {
                 AdmitDecision::Allow(admitted) => (admitted, None),
+                #[cfg(test)]
                 AdmitDecision::Respond(response) => return Ok(response),
             }
         };

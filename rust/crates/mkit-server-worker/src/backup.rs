@@ -3,8 +3,10 @@
 
 use core::future::Future;
 use mkit_core::hash::{hash, to_hex_bytes};
-use mkit_server::store::codec::{BackupStateV1, decode_backup_state, encode_backup_state};
-use mkit_server::store::keys::{self, ParsedKey};
+use mkit_server::store::adapter_spi::codec::{
+    BackupStateV1, decode_backup_state, encode_backup_state,
+};
+use mkit_server::store::adapter_spi::keys::{self, ParsedKey};
 use mkit_server::store::{
     EXPORT_END, MAX_KEY_BYTES, MAX_VALUE_BYTES, encode_export_header, encode_export_record,
     export_header, export_page,
@@ -44,6 +46,7 @@ pub trait BackupBucket: Clone + MaybeSend + MaybeSync + 'static {
 
 /// Runtime settings, parsed in the Worker adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BackupConfig {
     /// Milliseconds between attempts; zero disables backups.
     pub interval_ms: u64,
@@ -209,7 +212,7 @@ async fn snapshot<S: NamespaceStore>(
 }
 
 /// Test-only single-DO export, using the same uninterrupted read as the timer.
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 pub async fn test_snapshot<S: NamespaceStore>(
     store: &S,
     p: &Partition,

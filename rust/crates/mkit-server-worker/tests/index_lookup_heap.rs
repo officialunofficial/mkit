@@ -3,7 +3,7 @@
 #![allow(clippy::unwrap_used)] // Fixture failures must fail the regression.
 
 use mkit_server::pipeline::D34Shards;
-use mkit_server::store::{codec, index, keys};
+use mkit_server::store::adapter_spi::{codec, index, keys};
 use mkit_server::{NamespaceKey, Partition, RepoId, RepoName, StoreError};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};

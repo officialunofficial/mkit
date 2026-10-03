@@ -51,9 +51,9 @@ use core::future::Future;
 use core::ops::Range;
 use core::pin::Pin;
 use core::task::{Context, Poll};
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 use std::sync::Arc;
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
@@ -226,7 +226,7 @@ pub struct R2BlobStore<B> {
     keyspace: &'static str,
     max_bytes: u64,
     defer_abort: bool,
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     fail_final: Arc<AtomicBool>,
 }
 
@@ -248,7 +248,7 @@ impl<B: ObjectBucket> R2BlobStore<B> {
             keyspace,
             max_bytes: DEFAULT_MAX_BYTES,
             defer_abort: false,
-            #[cfg(feature = "test-faults")]
+            #[cfg(feature = "__test-faults")]
             fail_final: Arc::default(),
         }
     }
@@ -277,8 +277,8 @@ impl<B: ObjectBucket> R2BlobStore<B> {
     }
 
     /// Fail the next commit at its withheld final byte, after the hash
-    /// verified: the put fails and nothing becomes visible (`test-faults`).
-    #[cfg(feature = "test-faults")]
+    /// verified: the put fails and nothing becomes visible (`__test-faults`).
+    #[cfg(feature = "__test-faults")]
     pub fn fail_final_chunk_once(&self) {
         self.fail_final.store(true, Ordering::SeqCst);
     }
@@ -464,7 +464,7 @@ pub struct R2PackSink<B> {
     /// `None` for an empty blob, whose put starts only at commit.
     put: Option<Running>,
     failed: bool,
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     fail_final: Arc<AtomicBool>,
 }
 
@@ -563,7 +563,7 @@ impl<B: ObjectBucket> R2BlobStore<B> {
             core,
             put,
             failed: false,
-            #[cfg(feature = "test-faults")]
+            #[cfg(feature = "__test-faults")]
             fail_final: self.fail_final.clone(),
         }
     }
@@ -631,7 +631,7 @@ impl<B: ObjectBucket> R2PackSink<B> {
             self.fail().await;
             return Err(error);
         }
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         if self.fail_final.swap(false, Ordering::SeqCst) {
             self.fail().await;
             return Err(StoreError::unavailable(

@@ -60,6 +60,7 @@ mod extraction;
 
 /// Fixed work units of one slice. A Worker fixes them for its plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SliceLimits {
     /// One window of the resumable decoder.
     pub window_bytes: u64,
@@ -74,12 +75,21 @@ pub struct SliceLimits {
     pub max_entries: u32,
 }
 
+impl SliceLimits {
+    /// Set the resumable read window while retaining other slice limits.
+    #[must_use]
+    pub const fn with_window_bytes(mut self, bytes: u64) -> Self {
+        self.window_bytes = bytes;
+        self
+    }
+}
+
 impl Default for SliceLimits {
     fn default() -> Self {
         Self {
             window_bytes: super::geometry::FRAME_PAYLOAD_BYTES,
             resident_bytes: super::geometry::RESIDENT_BYTES,
-            max_subrequests: 256,
+            max_subrequests: crate::limits::VERIFY_SLICE_CALLS,
             max_entries: checkpoint::DEFAULT_ENTRY_CAP,
         }
     }

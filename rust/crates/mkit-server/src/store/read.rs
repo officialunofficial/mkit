@@ -7,16 +7,21 @@ use std::collections::BTreeMap;
 use super::codec;
 use super::error::StoreError;
 use super::keys::{self, ParsedKey};
-use super::kv::{Cursor, Key, NamespaceStore};
+#[cfg(test)]
+use super::kv::Cursor;
+use super::kv::{Key, NamespaceStore};
 use super::partition::Partition;
 use crate::pipeline::ShardMap;
+#[cfg(test)]
 use crate::quota::{QuotaScope, QuotaState};
+#[cfg(test)]
 use crate::replay::{ReplayKey, ReplayRecord};
 use crate::repo::{RepoId, RepoName};
 
 /// One page of [`list_refs`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct RefPage {
+#[cfg(test)]
+pub(crate) struct RefPage {
     /// Full ref names and ids, in name order.
     pub refs: Vec<(String, Hash)>,
     /// Resume point, if more refs may follow.
@@ -24,7 +29,7 @@ pub struct RefPage {
 }
 
 /// A ref's id, if it exists.
-pub async fn read_ref<S: NamespaceStore>(
+pub(crate) async fn read_ref<S: NamespaceStore>(
     store: &S,
     p: &Partition,
     repo: &RepoName,
@@ -38,7 +43,8 @@ pub async fn read_ref<S: NamespaceStore>(
 /// bytes, after `after`. Names are returned in full. `ListRefs` passes
 /// [`crate::refs::list_scan_prefix`] so it matches at a component boundary
 /// (SPEC-REFS §4), then strips it.
-pub async fn list_refs<S: NamespaceStore>(
+#[cfg(test)]
+pub(crate) async fn list_refs<S: NamespaceStore>(
     store: &S,
     p: &Partition,
     repo: &RepoName,
@@ -65,7 +71,7 @@ pub async fn list_refs<S: NamespaceStore>(
 /// Repository-scoped pack membership, with an optional read-your-writes ref.
 /// Unknown or malformed hints are ignored (STC §7.9). Membership is checked
 /// in this repository's index first, then in its strongly consistent ref shard.
-pub async fn is_member<S: NamespaceStore>(
+pub(crate) async fn is_member<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
     repo: &RepoId,
@@ -92,7 +98,7 @@ pub async fn is_member<S: NamespaceStore>(
 /// Batch membership for one repository: check the consuming ref shard's
 /// local rows first, then unresolved packs in their membership partitions.
 /// This is the hook point for §12.2's deleted-repository generation rule.
-pub async fn members_many<S: NamespaceStore>(
+pub(crate) async fn members_many<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
     repo: &RepoId,
@@ -135,7 +141,8 @@ pub async fn members_many<S: NamespaceStore>(
 }
 
 /// The replay record for `scope`, if any (PRD §5.4 stage 0).
-pub async fn replay_lookup<S: NamespaceStore>(
+#[cfg(test)]
+pub(crate) async fn replay_lookup<S: NamespaceStore>(
     store: &S,
     p: &Partition,
     scope: &ReplayKey,
@@ -144,8 +151,18 @@ pub async fn replay_lookup<S: NamespaceStore>(
     value.as_ref().map(codec::decode_replay_record).transpose()
 }
 
-/// The current quota window of `scope`, if any.
-pub async fn quota_state<S: NamespaceStore>(
+/// The grant epoch; an absent key is epoch 0.
+#[cfg(test)]
+pub(crate) async fn grant_epoch<S: NamespaceStore>(
+    store: &S,
+    p: &Partition,
+) -> Result<u64, StoreError> {
+    let value = store.get(p, &keys::grant_epoch()).await?;
+    value.as_ref().map_or(Ok(0), codec::decode_u64)
+}
+
+#[cfg(test)]
+pub(crate) async fn quota_state<S: NamespaceStore>(
     store: &S,
     p: &Partition,
     scope: &QuotaScope,
@@ -154,19 +171,13 @@ pub async fn quota_state<S: NamespaceStore>(
     value.as_ref().map(codec::decode_quota_state).transpose()
 }
 
-/// The grant epoch; an absent key is epoch 0.
-pub async fn grant_epoch<S: NamespaceStore>(store: &S, p: &Partition) -> Result<u64, StoreError> {
-    let value = store.get(p, &keys::grant_epoch()).await?;
-    value.as_ref().map_or(Ok(0), codec::decode_u64)
-}
-
 /// How long past its envelope's expiry a replay record is kept. An envelope
 /// verifies while the verifier's clock is at most its expiry, so a record
 /// pruned on a clock that runs ahead could let a replay through on a clock
 /// that runs behind. The grace exceeds any tolerated skew: the commit-
 /// deadline margin (SPEC-WRITE-GRANTS §5.5, 5 s) and the auth v2 clock
 /// lead (`mkit_core::write_auth::MAX_CLOCK_LEAD_MS`, 30 s).
-pub const REPLAY_PRUNE_GRACE_MS: u64 = 60_000;
+pub(crate) const REPLAY_PRUNE_GRACE_MS: u64 = 60_000;
 
 // The grace covers the largest skew the auth v2 verifier tolerates.
 const _: () =
@@ -176,7 +187,7 @@ const _: () =
 /// `now_ms - REPLAY_PRUNE_GRACE_MS`, as `(index key, record key)` pairs to
 /// delete. A record is written once per scope and never revived after its
 /// envelope expired, so the deletes need no precondition.
-pub async fn expired_replay_keys<S: NamespaceStore>(
+pub(crate) async fn expired_replay_keys<S: NamespaceStore>(
     store: &S,
     p: &Partition,
     now_ms: u64,
@@ -197,7 +208,7 @@ pub async fn expired_replay_keys<S: NamespaceStore>(
 /// `now_ms`, as `(index key, quota key)` pairs. A quota key is rewritten
 /// when its scope opens a new window, so the caller guards each quota-key
 /// delete with `Equals` on the value it read.
-pub async fn stale_quota_keys<S: NamespaceStore>(
+pub(crate) async fn stale_quota_keys<S: NamespaceStore>(
     store: &S,
     p: &Partition,
     now_ms: u64,

@@ -84,7 +84,7 @@ impl mkit_server::pipeline::OutcomeSink for Hang {
 
 #[tokio::test]
 async fn pending_outcome_sink_returns_a_bounded_error_and_retains_work() {
-    use mkit_server::store::{codec, keys, outbox};
+    use mkit_server::store::adapter_spi::{codec, keys, outbox};
     let host = TestHost::start(Profile::new(WireAuth::None)).await.unwrap();
     let partition = Partition::Namespace(NamespaceKey::deployment_default());
     let prior = codec::encode_reservation(&codec::ReservationV1::Ticketed {

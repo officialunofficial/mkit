@@ -87,7 +87,7 @@ impl<S: NamespaceStore, T: NamespaceStore, H: RelayHook> TimerHandler<S> for Rel
     }
 }
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 async fn apply_relay_delay<S: NamespaceStore>(
     ctx: &TimerCtx<'_, S>,
     timer: &DueTimer,
@@ -131,7 +131,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         timer: &DueTimer,
         metrics: &dyn Metrics,
     ) -> Result<Fired, StoreError> {
-        #[cfg(feature = "test-faults")]
+        #[cfg(feature = "__test-faults")]
         if let Some(fired) = apply_relay_delay(ctx, timer).await? {
             return Ok(fired);
         }

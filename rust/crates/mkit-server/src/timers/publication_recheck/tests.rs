@@ -616,7 +616,7 @@ fn shared_whole_alarm_allowance_checkpoints_before_exceeding_the_remaining_share
             fixture.clock.set(i64::try_from(fire).unwrap() * 5_000);
             fixture.target.reset();
             shared.reset();
-            assert!(shared.charge(WHOLE_ALARM_CALLS - remaining));
+            assert!(shared.charge_operations(WHOLE_ALARM_CALLS - remaining));
             let registry = TimerRegistry::new().register(
                 PublicationRecheck::new(fixture.target.clone()).with_alarm_budget(shared.clone()),
             );

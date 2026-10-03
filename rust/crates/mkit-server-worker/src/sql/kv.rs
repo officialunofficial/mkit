@@ -8,7 +8,8 @@ use std::sync::{Mutex, PoisonError};
 use super::{Capacity, Row, SqlConn, SqlError, SqlValue, TxFn, blob, count, schema};
 use mkit_server::store::{
     Batch, BatchOutcome, Cursor, Key, NamespaceStore, Partition, PartitionStats, Precondition,
-    ScanPage, StoreCapabilities, StoreError, StoreMaintenance, Value, Write, codec, keys,
+    ScanPage, StoreCapabilities, StoreError, StoreMaintenance, Value, Write,
+    adapter_spi::{codec, keys},
 };
 
 /// Keys per `get_many` statement: one partition parameter plus this many

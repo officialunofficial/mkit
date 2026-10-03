@@ -118,11 +118,11 @@ async fn accepted_action_activates_from_staged_headers_without_source_reread() {
     // No blob backend or original inventory source is present. Only the
     // immutable accepted descriptor remains, as after source loss.
     service
-        .resume(id, 11, &SliceBudget::new(9000))
+        .resume(id, 11, &SliceBudget::new(crate::limits::REQUEST_CALLS))
         .await
         .unwrap();
     service
-        .resume(id, 12, &SliceBudget::new(9000))
+        .resume(id, 12, &SliceBudget::new(crate::limits::REQUEST_CALLS))
         .await
         .unwrap();
     assert!(
@@ -200,7 +200,7 @@ async fn whole_pack_over_256_objects_is_one_pending_action() {
         .await
         .unwrap();
     let input = json!({"repository":"root/repo","packId":base64::Engine::encode(&base64::engine::general_purpose::STANDARD,id),"operationId":"whole-300","reason":"private","reasonToken":"policy"});
-    let budget = SliceBudget::new(9000);
+    let budget = SliceBudget::new(crate::limits::REQUEST_CALLS);
     let prepared = service
         .plan(
             crate::admin::TAKEDOWN_PATH,
@@ -602,7 +602,7 @@ mod accounting {
             );
             assert_eq!(phases.first().unwrap().0, 0);
             let charged = phases.last().unwrap().1;
-            assert!(charged <= 9000);
+            assert!(charged <= crate::limits::REQUEST_CALLS);
             assert!(
                 calls - charged as usize <= 1000,
                 "unbudgeted ledger reserve exceeded"
@@ -706,7 +706,7 @@ mod accounting {
         let (first, calls, charged) = fixture.dispatch(1).await;
         assert_eq!(first.status, 200);
         assert!(charged > 3000);
-        assert!(calls < 9000);
+        assert!(calls < (crate::limits::REQUEST_CALLS as usize));
         assert_eq!(fixture.record().await["activation_cursor"], 256);
         let (nonce, calls, charged) = fixture.replay(1).await;
         assert_eq!(nonce, first);
@@ -724,8 +724,8 @@ mod accounting {
         fixture.store().faults.lock().unwrap().acceptance = 15;
         let (failed, calls, charged) = fixture.dispatch(3).await;
         assert_eq!(failed.status, 503);
-        assert_eq!(charged, 9000);
-        assert!(calls >= 9000);
+        assert_eq!(charged, crate::limits::REQUEST_CALLS);
+        assert!(calls >= (crate::limits::REQUEST_CALLS as usize));
         assert!(fixture.observed.phases.lock().unwrap().len() > 2);
         let request = hash(&[b"mkit-takedown:v1\0".as_slice(), b"counted"].concat());
         assert!(
@@ -759,7 +759,7 @@ mod accounting {
         let (failed, calls, charged) = fixture.dispatch(5).await;
         assert_eq!(failed.status, 503);
         assert!(charged >= 4000);
-        assert!(calls < 9000);
+        assert!(calls < (crate::limits::REQUEST_CALLS as usize));
         let record = fixture.record().await;
         assert!(record["activation_cursor"].as_u64().unwrap() > 0);
         assert!(record["activation_cursor"].as_u64().unwrap() < 256);

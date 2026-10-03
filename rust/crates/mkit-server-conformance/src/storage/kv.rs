@@ -6,7 +6,11 @@ use futures::FutureExt as _;
 use futures::future::join_all;
 use mkit_core::protocol::AdvanceOutcome;
 use mkit_server::quota::QuotaState;
-use mkit_server::store::{BlockEntry, ObjectState, codec, export_header, keys};
+use mkit_server::store::{
+    BlockEntry, ObjectState,
+    adapter_spi::{codec, keys},
+    export_header,
+};
 use mkit_server::{
     Batch, BatchOutcome, Clock, Code, Cursor, Key, KeyClasses, MAX_BATCH_BYTES, MAX_BATCH_OPS,
     MAX_KEY_BYTES, MAX_VALUE_BYTES, NamespaceStore, Partition, Precondition, ReplayRecord,

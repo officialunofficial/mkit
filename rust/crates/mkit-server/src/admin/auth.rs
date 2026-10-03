@@ -23,6 +23,7 @@ pub const HEADER_NAMES: [&str; 8] = [
 
 /// Public operator keys and the deployment's canonical signing origin.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Config {
     pub(crate) audience: String,
     keys: Vec<Key>,

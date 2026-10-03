@@ -20,6 +20,9 @@ def check(manifest, features=()):
     for name in ("mkit-server-worker", "mkit-server", "mkit-core"):
         if "pack-ruzstd" not in resolved[name]:
             raise SystemExit(f"{manifest}: missing {name}/pack-ruzstd")
+    for name in ("mkit-server", "mkit-server-worker"):
+        if "__test-faults" in resolved[name]:
+            raise SystemExit(f"{manifest}: launch enables internal fault injection")
     if "sql" in resolved["mkit-server"]:
         raise SystemExit(f"{manifest}: SQL belongs in the Workers adapter")
     if "pack-zstd" in resolved["mkit-core"]:

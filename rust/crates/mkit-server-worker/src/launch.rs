@@ -4,9 +4,18 @@ use crate::adapter::{ConfigError, WorkerConfig};
 
 /// Explicit launch selection; optional features are validated independently.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LaunchConfig {
     /// Enable the completed lean takedown catalog, never the hold/reinstate ops.
     pub takedown: bool,
+}
+
+impl LaunchConfig {
+    /// Construct explicit deployment settings; fields may be adjusted before use.
+    #[must_use]
+    pub fn new(takedown: bool) -> Self {
+        Self { takedown }
+    }
 }
 
 fn error(message: impl Into<String>) -> ConfigError {
@@ -15,7 +24,7 @@ fn error(message: impl Into<String>) -> ConfigError {
 
 /// Check supported programmatic changes against the parsed launch contract.
 pub(crate) fn validate_programmatic(cfg: &WorkerConfig) -> Result<(), ConfigError> {
-    #[cfg(not(feature = "test-faults"))]
+    #[cfg(not(feature = "__test-faults"))]
     {
         let indexed = cfg.indexed.is_some();
         #[cfg(feature = "http-objects")]
@@ -391,12 +400,11 @@ fn validate_http(
             .ok_or_else(|| error("HTTP_OBJECTS requires indexed mode"))?;
         let mut limits = mkit_server::http_objects::HttpObjectsConfig::default();
         limits.admit_reads = reads;
-        cfg.http_mount = Some(crate::http_mount::WorkerHttpMountConfig {
+        cfg.http_mount = Some(crate::http_mount::WorkerHttpMountConfig::new(
             indexed,
-            http_objects: limits,
-            options: mkit_server::http_objects::mount::HttpMountOptions::default(),
-            read_runtime: None, // The fetch event attaches its wait_until lifetime.
-        });
+            limits,
+            mkit_server::http_objects::mount::HttpMountOptions::default(),
+        ));
     }
     Ok(())
 }

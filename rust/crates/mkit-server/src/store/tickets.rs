@@ -61,11 +61,23 @@ impl TicketSpec {
 
 /// Open-ticket caps, decided by the embedding RPC.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct TicketCaps {
     /// Maximum across all signers of the ref.
     pub per_ref: u64,
     /// Maximum for one ref/signer pair.
     pub per_signer: u64,
+}
+
+impl TicketCaps {
+    /// Construct explicit deployment settings; fields may be adjusted before use.
+    #[must_use]
+    pub const fn new(per_ref: u64, per_signer: u64) -> Self {
+        Self {
+            per_ref,
+            per_signer,
+        }
+    }
 }
 
 /// Initial read set. After reading index, fetch its ticket separately if

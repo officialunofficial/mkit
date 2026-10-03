@@ -135,10 +135,10 @@ pub enum NsCall {
     /// One `store::export_page`.
     Export { after: Option<Blob>, limit: u32 },
     /// Single-DO consistent export for wrangler-dev conformance only.
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     TestSnapshot,
     /// Fresh import into a test-only Durable Object.
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     TestImport { bytes: Blob },
 }
 
@@ -293,10 +293,10 @@ impl From<WireOutcome> for BatchOutcome {
 #[serde(tag = "reply", rename_all = "snake_case")]
 pub enum NsReply {
     /// Test-only complete snapshot.
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     Snapshot { bytes: Blob },
     /// Test-only number of imported records.
-    #[cfg(feature = "test-faults")]
+    #[cfg(feature = "__test-faults")]
     Imported { records: u64 },
     /// To `Get`.
     Value { value: Option<Blob> },

@@ -377,11 +377,11 @@ build_args=(--release)
 vars=(--var "AUTH_AUDIENCE:${ORIGIN}" --var "AUTH_REPOSITORY:${REPOSITORY}" --var "SHARDING:${sharding}")
 if [ "${test_faults}" -eq 1 ]; then
     features="${features},test-faults,timers"
-    build_args+=(--features test-faults)
+    build_args+=(--features __test-faults)
 fi
 
 if [ "${hooks}" -eq 1 ]; then
-    build_args=(--release --features test-faults,signed-http-hooks)
+    build_args=(--release --features __test-faults,signed-http-hooks)
 fi
 
 echo ">> building the conformance runner"

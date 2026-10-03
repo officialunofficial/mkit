@@ -410,10 +410,7 @@ fn repo() -> RepoId {
 
 #[test]
 fn pipeline_new_refuses_bad_token_config() {
-    let limits = UploadLimits {
-        max_total_bytes: 1 << 20,
-        max_chunks: 64,
-    };
+    let limits = UploadLimits::new(1 << 20, 64);
     let authv2 = AuthMode::AuthV2(AuthV2Config::new(AUDIENCE, REPO).unwrap());
     let clock = Arc::new(ManualClock::new(T0));
     let metrics = Arc::new(NoopMetrics);

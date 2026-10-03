@@ -14,7 +14,7 @@ use mkit_server::pipeline::{
     AuthMode, D34Shards, Hooks, Pipeline, PipelineConfig, ShardMap, Sharding,
 };
 use mkit_server::scanner_retrieval::{Assignment, PATH, PackGrant, RetrievalConfig};
-use mkit_server::store::{codec, keys, tickets};
+use mkit_server::store::adapter_spi::{codec, keys, tickets};
 use mkit_server::takedown::inventory;
 use mkit_server::{
     Addressing, Batch, BlobKey, ManualClock, NamespaceKey, NamespaceStore, NoopMetrics, Partition,
@@ -225,10 +225,7 @@ fn scanner_reads_and_decodes_staged_pack_ranges_on_worker_backends() {
             AuthMode::AuthV2(
                 mkit_server::auth_v2::AuthV2Config::new("https://scanner.example", "").unwrap(),
             ),
-            mkit_server::upload::UploadLimits {
-                max_total_bytes: 1 << 20,
-                max_chunks: 16,
-            },
+            mkit_server::upload::UploadLimits::new(1 << 20, 16),
         );
         cfg.sharding = Sharding::D34;
         cfg.write_policy = mkit_server::policy::WritePolicy::Owner;

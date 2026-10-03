@@ -21,7 +21,7 @@ pub const MAX_REQUEST_BYTES: usize = 16_384;
 /// Maximum returned range, or entire pack when no range is requested.
 pub const MAX_RESPONSE_BYTES: usize = 1 << 20;
 /// Shared bound for denial, ticket and blob operations; adapter work has headroom.
-pub const MAX_CALLS: u32 = 8_500;
+pub const MAX_CALLS: u32 = crate::limits::OBJECT_READER_CALLS;
 /// Small retrieval margin after the hook timeout.
 pub const MARGIN_MS: u64 = 1_000;
 /// Longest capability validity; hook timeout is at most five minutes.

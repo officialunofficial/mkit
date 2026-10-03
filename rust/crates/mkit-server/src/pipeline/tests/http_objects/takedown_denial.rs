@@ -224,7 +224,7 @@ fn legacy_pack_denial_precedes_exists_download_and_already_present() {
     ));
 }
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 #[test]
 fn pre_action_plan_may_publish_but_blocked_bytes_remain_unservable() {
     use crate::pipeline::faults::{FaultHooks, FaultPoint, TestDirectives};

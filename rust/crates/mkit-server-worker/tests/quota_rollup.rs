@@ -8,7 +8,7 @@ use common::RusqliteConn;
 use common::{DoConfig, Loopback, retained_timer_backoff};
 use futures::executor::block_on;
 use mkit_server::pipeline::{D34Shards, ShardMap};
-use mkit_server::store::{codec, keys};
+use mkit_server::store::adapter_spi::{codec, keys};
 use mkit_server::timers::{TickBudget, registry::kinds, run_due};
 use mkit_server::{
     Batch, ManualClock, NamespaceKey, NamespaceStore, Partition, RepoId, RepoName, Value,

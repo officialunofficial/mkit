@@ -223,13 +223,13 @@ impl<B: MultipartBlobStore> TicketExpiry<B> {
 }
 
 /// Borrow the pipeline's store for the test-only manual timer tick.
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 #[derive(Debug)]
 pub(crate) struct BorrowedTicketExpiry<'a, B> {
     pub(crate) blobs: &'a B,
 }
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 impl<S: NamespaceStore, B: MultipartBlobStore> TimerHandler<S> for BorrowedTicketExpiry<'_, B> {
     fn kind(&self) -> TimerKind {
         kinds::TICKET_EXPIRY

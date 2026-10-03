@@ -514,10 +514,7 @@ fn frame_byte_estimate_matches_mkit_serve() {
     assert_eq!(est(None), 64);
     assert_eq!(
         upload_limits(),
-        crate::upload::UploadLimits {
-            max_total_bytes: 1024 * 1024 * 1024,
-            max_chunks: 10_000,
-        }
+        crate::upload::UploadLimits::new(1024 * 1024 * 1024, 10_000)
     );
 }
 

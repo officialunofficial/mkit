@@ -10,6 +10,7 @@ use std::{collections::BTreeSet, sync::Arc};
 
 /// Validated limits; the caller budgets the actual namespace and blob boundaries.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct Profile {
     pub(super) limits: MemberSourceLimits,
     pub(super) chain_depth: u32,
@@ -32,10 +33,10 @@ impl Profile {
             .and_then(|n| n.checked_add(128 << 20))
             .ok_or_else(|| ServerError::invalid_argument("acquisition resident bound overflow"))?;
         Ok(Self {
-            limits: MemberSourceLimits {
-                max_frame_bytes: decode_budget.min(geometry::FRAME_BYTES),
-                max_decoded_bytes: decode_budget.min(geometry::CANONICAL_BYTES),
-            },
+            limits: MemberSourceLimits::new(
+                decode_budget.min(geometry::FRAME_BYTES),
+                decode_budget.min(geometry::CANONICAL_BYTES),
+            ),
             chain_depth,
             retained: decode_budget,
             retain_latest: false,
@@ -55,10 +56,7 @@ impl Profile {
     #[must_use]
     pub const fn scheduled() -> Self {
         Self {
-            limits: MemberSourceLimits {
-                max_frame_bytes: geometry::FRAME_BYTES,
-                max_decoded_bytes: geometry::CANONICAL_BYTES,
-            },
+            limits: MemberSourceLimits::new(geometry::FRAME_BYTES, geometry::CANONICAL_BYTES),
             chain_depth: 50,
             retained: geometry::CANONICAL_BYTES,
             retain_latest: true,

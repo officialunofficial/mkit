@@ -11,7 +11,7 @@ use mkit_core::{
 };
 use mkit_server::indexed::budget::{Budgeted, SliceBudget};
 use mkit_server::pipeline::{D34Shards, ShardMap, SinglePartition};
-use mkit_server::store::{
+use mkit_server::store::adapter_spi::{
     codec,
     index::{IndexEntry, IndexValue},
     keys,

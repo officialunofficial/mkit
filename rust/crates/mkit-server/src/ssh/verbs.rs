@@ -150,10 +150,10 @@ fn check_name(name: &str) -> Result<(), VerbError> {
 /// than the ssh wire's (SPEC-TRANSPORT §4.4), field by field.
 fn session_upload_limits(pipeline: UploadLimits) -> UploadLimits {
     let wire = super::upload_limits();
-    UploadLimits {
-        max_total_bytes: pipeline.max_total_bytes.min(wire.max_total_bytes),
-        max_chunks: pipeline.max_chunks.min(wire.max_chunks),
-    }
+    UploadLimits::new(
+        pipeline.max_total_bytes.min(wire.max_total_bytes),
+        pipeline.max_chunks.min(wire.max_chunks),
+    )
 }
 
 /// Whether `err` is the upload sink's digest check failing.

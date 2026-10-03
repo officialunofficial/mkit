@@ -955,7 +955,7 @@ fn single_sharding_watermark_reads_namespace_outbox() {
     );
 }
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 #[test]
 fn relay_delay_directive_commits_with_ref_write() {
     let env = env(AuthMode::Open);
@@ -973,7 +973,7 @@ fn relay_delay_directive_commits_with_ref_write() {
     );
 }
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 #[test]
 fn relay_delay_directive_commits_with_advance() {
     let env = env(AuthMode::Open);
@@ -994,10 +994,7 @@ fn authv2() -> AuthMode {
 }
 
 fn cfg(auth: AuthMode) -> PipelineConfig {
-    let limits = UploadLimits {
-        max_total_bytes: 1 << 20,
-        max_chunks: 64,
-    };
+    let limits = UploadLimits::new(1 << 20, 64);
     PipelineConfig::new(Addressing::Single { repo: repo() }, auth, limits)
 }
 
@@ -1609,11 +1606,7 @@ fn golden_signed_reads_verify_at_stage_0() {
 fn quota_exhaustion_is_resource_exhausted_and_allocates_no_replay_record() {
     let clock = clock();
     let mut cfg = cfg(authv2());
-    cfg.write_quota = Some(QuotaLimits {
-        window_ms: 60_000,
-        max_ops: 2,
-        max_bytes: 0,
-    });
+    cfg.write_quota = Some(QuotaLimits::new(60_000, 2, 0));
     let env = build(cfg, Spy::new(store(&clock)), Hooks::new(), clock);
     let k = key(7);
     let reqs: Vec<_> = (1..=3)
@@ -1639,11 +1632,7 @@ fn quota_exhaustion_is_resource_exhausted_and_allocates_no_replay_record() {
 fn retry_after_quota_exhaustion_still_returns_stored_result() {
     let clock = clock();
     let mut cfg = cfg(authv2());
-    cfg.write_quota = Some(QuotaLimits {
-        window_ms: 60_000,
-        max_ops: 1,
-        max_bytes: 0,
-    });
+    cfg.write_quota = Some(QuotaLimits::new(60_000, 1, 0));
     let env = build(cfg, Spy::new(store(&clock)), Hooks::new(), clock);
     let k = key(7);
     let first = upd(HEAD, Missing, A);
@@ -1675,11 +1664,7 @@ fn namespace_denial_before_lease_allocates_nothing_and_replay_stays_free() {
     );
     config.write_policy = WritePolicy::Owner;
     config.sharding = Sharding::D34;
-    config.write_quota = Some(QuotaLimits {
-        window_ms: 60_000,
-        max_ops: 2,
-        max_bytes: 0,
-    });
+    config.write_quota = Some(QuotaLimits::new(60_000, 2, 0));
     let env = build(config, Spy::new(store(&clock)), Hooks::new(), clock);
     let identity = format!("{namespace}/{REPO}");
     let request = Req::unsigned(Procedure::UpdateRef).header("x-repository", &identity);
@@ -1751,11 +1736,7 @@ fn fresh_shard_uses_coordinator_total_in_lease_read_and_persists_view() {
     );
     config.write_policy = WritePolicy::Owner;
     config.sharding = Sharding::D34;
-    config.write_quota = Some(QuotaLimits {
-        window_ms: 60_000,
-        max_ops: 2,
-        max_bytes: 0,
-    });
+    config.write_quota = Some(QuotaLimits::new(60_000, 2, 0));
     let env = build(config, Spy::new(store(&clock)), Hooks::new(), clock);
     let identity = format!("{namespace}/{REPO}");
     let request = Req::unsigned(Procedure::UpdateRef).header("x-repository", &identity);
@@ -1862,11 +1843,7 @@ fn namespace_race_after_lease_is_retryable_instead_of_a_late_denial() {
     );
     config.write_policy = WritePolicy::Owner;
     config.sharding = Sharding::D34;
-    config.write_quota = Some(QuotaLimits {
-        window_ms: 60_000,
-        max_ops: 2,
-        max_bytes: 0,
-    });
+    config.write_quota = Some(QuotaLimits::new(60_000, 2, 0));
     let window = crate::quota::namespace_window(T0, 60_000);
     let shard = Partition::Ref {
         ns: NamespaceKey::from_namespace(&namespace),
@@ -2215,10 +2192,7 @@ impl Admission for NumberedReservation {
 fn reserved_commit_conflict_backpressure_and_recovery() {
     let clock = clock();
     let mut config = cfg(authv2());
-    config.outbox_backlog_cap = Some(OutboxBacklogCap {
-        rows: 1,
-        bytes: u64::MAX,
-    });
+    config.outbox_backlog_cap = Some(OutboxBacklogCap::new(1, u64::MAX));
     let env = build(
         config,
         Spy::new(store(&clock)),
@@ -2624,11 +2598,7 @@ fn reserved_pre_receive_and_quota_exits_each_write_one_abort() {
 
     let quota_clock = clock();
     let mut config = cfg(authv2());
-    config.write_quota = Some(QuotaLimits {
-        window_ms: 60_000,
-        max_ops: 0,
-        max_bytes: u64::MAX,
-    });
+    config.write_quota = Some(QuotaLimits::new(60_000, 0, u64::MAX));
     let quota = build(
         config,
         Spy::new(store(&quota_clock)),
@@ -3341,11 +3311,7 @@ fn charge(max_ops: u32) -> QuotaCharge {
     QuotaCharge {
         scope: QuotaScope::for_signer(&NamespaceKey::deployment_default(), &[3; 32]),
         bytes: 0,
-        limits: QuotaLimits {
-            window_ms: 60_000,
-            max_ops,
-            max_bytes: 0,
-        },
+        limits: QuotaLimits::new(60_000, max_ops, 0),
     }
 }
 
@@ -3955,11 +3921,7 @@ fn admission_input_carries_nonce_and_declared_bytes() {
 fn replay_and_quota_rows_shrink_after_load() {
     let clock = clock();
     let mut cfg = cfg(authv2());
-    cfg.write_quota = Some(QuotaLimits {
-        window_ms: 60_000,
-        max_ops: 1_000,
-        max_bytes: 0,
-    });
+    cfg.write_quota = Some(QuotaLimits::new(60_000, 1_000, 0));
     let env = build(cfg, Spy::new(store(&clock)), Hooks::new(), clock);
     let write = |signer: u8, n: u32| {
         let u = upd(&format!("refs/heads/s{signer}-{n}"), Missing, A);
@@ -4876,7 +4838,7 @@ fn single_advance_preserves_noncanonical_served_pairing() {
     );
 }
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 #[test]
 fn lease_directives_parse_epochs_and_require_an_explicit_recovery_marker() {
     let directives = TestDirectives::from_headers(|name| match name {
@@ -5224,7 +5186,7 @@ fn second_batch_with_a_nonempty_backlog_adds_no_second_delivery_kick() {
 fn backlog_over_cap_refuses_begin_upload_but_not_reads() {
     let clock = clock();
     let mut config = cfg(authv2());
-    config.outbox_backlog_cap = Some(OutboxBacklogCap { rows: 0, bytes: 0 });
+    config.outbox_backlog_cap = Some(OutboxBacklogCap::new(0, 0));
     config.ticket_keys =
         Some(crate::upload::token::TicketKeys::new(vec![("t".into(), [7; 32])]).unwrap());
     let kv = store(&clock);

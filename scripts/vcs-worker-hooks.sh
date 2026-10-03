@@ -45,7 +45,7 @@ until curl -fsS "${upstream}/__stub/calls" >"${work}/calls.json" 2>/dev/null; do
     sleep 0.1
 done
 (cd apps/vcs-worker && CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
-    CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true worker-build --release --features test-faults)
+    CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true worker-build --release --features __test-faults)
 # The forwarder's settings are local to this run, with an absolute source path.
 node - "${root}" "${upstream}" "${work}/forwarder.json" <<'NODE'
 const fs = require('node:fs');

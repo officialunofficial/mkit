@@ -202,7 +202,7 @@ async fn accept(f: &Fixture, operation: &str, pack: Option<Hash>, objects: &[Has
         f.work.shards.clone(),
     )
     .with_purge(f.work.purge.clone());
-    let budget = SliceBudget::new(9000);
+    let budget = SliceBudget::new(crate::limits::REQUEST_CALLS);
     let prepared = service
         .plan(TAKEDOWN_PATH, &input, operation, 10, &budget)
         .await
@@ -1740,7 +1740,7 @@ async fn accepting_takedown_owns_automatic_cache_purge() {
             &input,
             "automatic-cache",
             10,
-            &SliceBudget::new(9000),
+            &SliceBudget::new(crate::limits::REQUEST_CALLS),
         )
         .await
         .unwrap();
@@ -1792,7 +1792,7 @@ async fn accepting_takedown_owns_automatic_cache_purge() {
         &input,
         prepared.response.clone(),
         10,
-        &SliceBudget::new(9000),
+        &SliceBudget::new(crate::limits::REQUEST_CALLS),
     )
     .await
     .unwrap();
@@ -1914,7 +1914,7 @@ impl crate::purge::LocalInvalidation for ParentChargedLocal {
             let before = self.parent.used();
             let mut effects = 0;
             for index in cursor..16 {
-                if !budget.charge(2) {
+                if !budget.charge_operations(2) {
                     assert_eq!(self.parent.used() - before, effects * 2);
                     return Ok(Some(index));
                 }
@@ -1974,7 +1974,7 @@ async fn multi_action_activation_shares_one_immediate_allowance_with_parent_call
             &input,
             "shared-cache-budget",
             10,
-            &SliceBudget::new(9000),
+            &SliceBudget::new(crate::limits::REQUEST_CALLS),
         )
         .await
         .unwrap();

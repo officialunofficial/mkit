@@ -8,7 +8,6 @@ use mkit_core::hash::Hash;
 use super::body::EndHook;
 use super::reach::{Reachability, TtlReachability};
 use super::{HttpObjectResponse, HttpObjectsConfig};
-use crate::Procedure;
 use crate::repo::RepoId;
 use crate::{BoxFuture, MaybeSend, MaybeSync, Redacted, ServerError};
 
@@ -59,14 +58,12 @@ impl TokenGate for crate::url_token::UrlTokenConfig {
 /// credential headers.
 #[derive(Debug)]
 #[non_exhaustive]
-pub struct AdmitRequest<'a> {
-    /// The selected repository.
-    pub repo: &'a RepoId,
-    /// `HttpGetObject` or `HttpGetRefPath`: the hook's `procedure` (§7).
-    pub procedure: Procedure,
+pub(crate) struct AdmitRequest<'a> {
     /// A HEAD declares the GET byte count but sends no body.
+    #[cfg(test)]
     pub head: bool,
     /// A ref path rather than an object id.
+    #[cfg(test)]
     pub ref_path: bool,
     /// The selected GET body length, after ordinary Range or proof selection.
     pub declared_bytes: u64,
@@ -76,7 +73,7 @@ pub struct AdmitRequest<'a> {
 
 /// What an admitted read adds to its 200 or 206.
 #[derive(Default)]
-pub struct Admitted {
+pub(crate) struct Admitted {
     /// Success means the response is `private` (§5.3).
     pub private: bool,
     /// Passthrough headers such as `Payment-Receipt`.
@@ -97,15 +94,16 @@ impl core::fmt::Debug for Admitted {
 
 /// The admission verdict.
 #[derive(Debug)]
-pub enum AdmitDecision {
+pub(crate) enum AdmitDecision {
     /// Serve the content.
     Allow(Admitted),
-    /// Answer with this instead (a 402 challenge).
+    /// A challenge supplied by a test seam.
+    #[cfg(test)]
     Respond(HttpObjectResponse),
 }
 
 /// §3 step 11: read Admission, when configured.
-pub trait HttpAdmission: MaybeSend + MaybeSync {
+pub(crate) trait HttpAdmission: MaybeSend + MaybeSync {
     /// Whether read Admission is configured. A 304 then selects the private
     /// cache policy, without calling [`Self::admit`] (§5.3).
     fn is_configured(&self) -> bool {
@@ -121,7 +119,7 @@ pub trait HttpAdmission: MaybeSend + MaybeSync {
 
 /// No read Admission is configured.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct NoAdmission;
+pub(crate) struct NoAdmission;
 
 impl HttpAdmission for NoAdmission {
     fn is_configured(&self) -> bool {
@@ -242,13 +240,14 @@ impl ProofServer for UnsupportedProofs {
 
 /// Every seam of one HTTP-objects deployment.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct HttpSeams {
     /// §3 step 5 (WP-4.15).
     pub tokens: Arc<dyn TokenGate>,
     /// Retains asynchronous read finalization on cancellation. Required for reservations.
     pub read_runtime: Option<super::HttpReadRuntime>,
     /// §3 step 11 (WP-4.13).
-    pub admission: Arc<dyn HttpAdmission>,
+    pub(crate) admission: Arc<dyn HttpAdmission>,
     /// §3 steps 7-8 (WP-5.9a).
     pub takedown: Arc<dyn TakedownGate>,
     /// Proof representations (WP-4.14b).

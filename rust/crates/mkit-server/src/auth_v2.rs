@@ -42,6 +42,7 @@ pub const CORS_ALLOW_HEADERS: &str = "x-envelope-version, x-audience, x-reposito
 /// In Multi mode the pipeline ignores this repository field and verifies
 /// against the resolved request identity instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AuthV2Config {
     audience: String,
     repository: String,

@@ -529,7 +529,7 @@ impl<S> SliceStore<'_, S> {
     fn charge(&self) -> Result<(), StoreError> {
         self.calls.charge()?;
         if let Some(alarm) = self.alarm
-            && !alarm.charge(1)
+            && !alarm.charge_operations(1)
         {
             self.stopped
                 .store(true, std::sync::atomic::Ordering::Relaxed);

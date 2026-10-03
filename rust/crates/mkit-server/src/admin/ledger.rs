@@ -39,7 +39,7 @@ struct Operation {
 
 /// A durable operation replay or an acceptance batch for a new operation.
 #[derive(Debug)]
-pub enum OperationReplay {
+pub(crate) enum OperationReplay {
     /// The original response, including stable action identity and pending state.
     Existing(Response),
     /// Merge this guarded batch with the operation's action and audit acceptance.
@@ -49,7 +49,7 @@ pub enum OperationReplay {
 /// A new action must commit this batch atomically with its audit and intent.
 /// # Errors
 /// Invalid identities, changed logical requests, or unavailable/corrupt storage.
-pub async fn plan_operation<S: NamespaceStore>(
+pub(crate) async fn plan_operation<S: NamespaceStore>(
     store: &S,
     partition: &Partition,
     operation_id: &str,
@@ -277,7 +277,7 @@ pub(super) fn audit_entry(
 ///
 /// # Errors
 /// Invalid automatic actor/target or corrupt/unavailable audit storage.
-pub async fn plan_system<S: NamespaceStore>(
+pub(crate) async fn plan_system<S: NamespaceStore>(
     store: &S,
     partition: &Partition,
     actor: &str,
@@ -369,7 +369,7 @@ impl<S: NamespaceStore> Engine<S> {
         streaming: bool,
     ) -> Result<Response, ServerError> {
         let verified = self.config.verify(path, headers, wire, now)?;
-        let budget = crate::indexed::budget::SliceBudget::new(9_000);
+        let budget = crate::indexed::budget::SliceBudget::new(crate::limits::REQUEST_CALLS);
         let nonce_key = key("an", verified.replay_key.as_bytes());
         let nonce = Nonce {
             digest: verified.digest.clone(),

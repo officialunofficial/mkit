@@ -116,6 +116,7 @@ const LEASE_GRANT_ATTEMPTS: usize = 8;
 /// configuration, so the relay seam ([`renew_for_relay`]) can run without a
 /// pipeline. Defaults equal [`super::PipelineConfig::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LeaseParams {
     /// Require the independent authority generation in the shared lease lifecycle.
     pub authority_fence: bool,
@@ -125,6 +126,30 @@ pub struct LeaseParams {
     pub lease_margin_ms: u64,
     /// Minimum useful lease budget before renewing, in milliseconds.
     pub min_lease_budget_ms: u64,
+}
+
+impl LeaseParams {
+    /// Configure the shared epoch lease lifecycle.
+    #[must_use]
+    pub const fn new(
+        authority_fence: bool,
+        epoch_lease_ms: u64,
+        lease_margin_ms: u64,
+        min_lease_budget_ms: u64,
+    ) -> Self {
+        Self {
+            authority_fence,
+            epoch_lease_ms,
+            lease_margin_ms,
+            min_lease_budget_ms,
+        }
+    }
+    /// Enable the authority-generation fence while retaining the other limits.
+    #[must_use]
+    pub const fn with_authority_fence(mut self, enabled: bool) -> Self {
+        self.authority_fence = enabled;
+        self
+    }
 }
 
 impl Default for LeaseParams {

@@ -12,7 +12,7 @@ use crate::{
 
 /// A definitive inspection startup observation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome {
+pub(crate) enum Outcome {
     /// Configuration matches, or the marker was installed on an empty store.
     Ok,
     /// A marked deployment cannot turn inspection off.
@@ -25,7 +25,7 @@ pub enum Outcome {
 
 /// Compare the strict marker codec with the configured mode.
 #[must_use]
-pub fn compare(value: &Value, enabled: bool) -> Outcome {
+pub(crate) fn compare(value: &Value, enabled: bool) -> Outcome {
     match (value.as_bytes(), enabled) {
         (b"on", true) => Outcome::Ok,
         (b"on", false) => Outcome::Disabled,
@@ -39,7 +39,7 @@ pub fn compare(value: &Value, enabled: bool) -> Outcome {
 ///
 /// # Errors
 /// Backend errors are transient and must not be cached as settled outcomes.
-pub async fn check_mode<S: NamespaceStore>(
+pub(crate) async fn check_mode<S: NamespaceStore>(
     store: &S,
     enabled: bool,
 ) -> Result<Outcome, StoreError> {

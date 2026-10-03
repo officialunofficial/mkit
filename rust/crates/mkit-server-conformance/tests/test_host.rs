@@ -140,9 +140,9 @@ async fn ticketed_auth_v2_wire_cases_run_against_the_host() {
     profile.ticket_per_ref = 8;
     profile.features.insert(Feature::ShortTickets);
     profile.quota = Some(QuotaLimits {
+        window_ms: 3_600_000,
         max_ops: 6,
         max_bytes: 2 << 20,
-        window_ms: 3_600_000,
     });
     profile.features.insert(Feature::Tickets);
     profile.features.insert(Feature::TestFaults);
@@ -214,8 +214,8 @@ async fn ticketed_auth_v2_wire_cases_run_against_the_host() {
         "the fake hook did not verify a signed Admit request"
     );
     let partition = mkit_server::Partition::Namespace(NamespaceKey::deployment_default());
-    let prior = mkit_server::store::codec::encode_reservation(
-        &mkit_server::store::codec::ReservationV1::Ticketed {
+    let prior = mkit_server::store::adapter_spi::codec::encode_reservation(
+        &mkit_server::store::adapter_spi::codec::ReservationV1::Ticketed {
             ticket_id: [0x71; 32],
         },
     );
@@ -224,7 +224,8 @@ async fn ticketed_auth_v2_wire_cases_run_against_the_host() {
             .apply(
                 &partition,
                 Batch::new().put(
-                    mkit_server::store::keys::reservation("test-host-outcome").unwrap(),
+                    mkit_server::store::adapter_spi::keys::reservation("test-host-outcome")
+                        .unwrap(),
                     prior.clone(),
                 ),
             )
@@ -232,8 +233,8 @@ async fn ticketed_auth_v2_wire_cases_run_against_the_host() {
             .unwrap(),
         mkit_server::BatchOutcome::Committed
     );
-    let terminal = mkit_server::store::outbox::Terminal::new(
-        mkit_server::store::codec::ReservationV1::committed(
+    let terminal = mkit_server::store::adapter_spi::outbox::Terminal::new(
+        mkit_server::store::adapter_spi::codec::ReservationV1::committed(
             "default".into(),
             u64::try_from(host.clock().now_ms()).unwrap(),
             0,
@@ -245,15 +246,21 @@ async fn ticketed_auth_v2_wire_cases_run_against_the_host() {
     .unwrap();
     let outbox_sequence = host
         .kv()
-        .get(&partition, &mkit_server::store::keys::outbox_sequence())
+        .get(
+            &partition,
+            &mkit_server::store::adapter_spi::keys::outbox_sequence(),
+        )
         .await
         .unwrap();
     let outcome_backlog = host
         .kv()
-        .get(&partition, &mkit_server::store::keys::outcome_backlog())
+        .get(
+            &partition,
+            &mkit_server::store::adapter_spi::keys::outcome_backlog(),
+        )
         .await
         .unwrap();
-    let mut outbox = mkit_server::store::outbox::OutboxBuilder::new(
+    let mut outbox = mkit_server::store::adapter_spi::outbox::OutboxBuilder::new(
         outbox_sequence.as_ref(),
         outcome_backlog.as_ref(),
     )
@@ -379,9 +386,9 @@ async fn sharded_auth_v2_quota_cases_run_against_the_host() {
     profile.sharding_d34 = true;
     profile.atomic_advance = true;
     profile.quota = Some(QuotaLimits {
+        window_ms: 3_600_000,
         max_ops: 6,
         max_bytes: 2 << 20,
-        window_ms: 3_600_000,
     });
     profile.derive_features();
 
@@ -635,7 +642,7 @@ async fn explicit_timer_drain_waits_for_manual_clock_advance() {
     let host = TestHost::start(Profile::new(WireAuth::None)).await.unwrap();
     let partition = Partition::Namespace(NamespaceKey::deployment_default());
     let due_at = u64::try_from(host.clock().now_ms()).unwrap() + 1_000;
-    let key = mkit_server::store::keys::timer(due_at, 0xf0, b"test-host-probe");
+    let key = mkit_server::store::adapter_spi::keys::timer(due_at, 0xf0, b"test-host-probe");
     assert_eq!(
         host.kv()
             .apply(&partition, Batch::new().put(key, Value::default()))

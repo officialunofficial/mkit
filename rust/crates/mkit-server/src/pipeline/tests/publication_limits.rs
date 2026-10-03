@@ -767,7 +767,17 @@ fn takedown_paths_refuse_only_as_capacity_across_one_ledger() {
     };
     for path in [Path::Takedown, Path::Custom] {
         let mut committed = false;
-        for request_calls in [0, 64, 80, 100, 130, 200, 400, 1_000, 9_000] {
+        for request_calls in [
+            0,
+            64,
+            80,
+            100,
+            130,
+            200,
+            400,
+            1_000,
+            crate::limits::REQUEST_CALLS,
+        ] {
             match outcome(path, request_calls) {
                 Ok(()) => committed = true,
                 Err(error) => {

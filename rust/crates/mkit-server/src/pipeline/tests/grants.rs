@@ -415,7 +415,7 @@ fn match_update_only_is_denied_before_allocation_and_owner_is_unaffected() {
     );
 }
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 struct CreateAtFinalApply {
     store: Arc<MemoryKv>,
     partition: Partition,
@@ -423,7 +423,7 @@ struct CreateAtFinalApply {
     fired: AtomicBool,
 }
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 impl FaultHooks for CreateAtFinalApply {
     async fn at(
         &self,
@@ -444,7 +444,7 @@ impl FaultHooks for CreateAtFinalApply {
     }
 }
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 #[test]
 fn any_create_only_race_replans_to_permission_denied_without_write_rows() {
     let owner = key(1);
@@ -620,14 +620,14 @@ fn grant_only_path_and_hook_composition() {
     assert!(!seen[0].authz.owner && seen[0].authz.grant.is_some());
 }
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 struct BumpAtAuthorize {
     store: Arc<MemoryKv>,
     partition: Partition,
     fired: AtomicBool,
 }
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 impl FaultHooks for BumpAtAuthorize {
     async fn at(
         &self,
@@ -648,7 +648,7 @@ impl FaultHooks for BumpAtAuthorize {
     }
 }
 
-#[cfg(feature = "test-faults")]
+#[cfg(feature = "__test-faults")]
 #[test]
 fn epoch_change_after_authorize_commits_no_write_state() {
     let owner = key(1);

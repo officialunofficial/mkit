@@ -22,6 +22,54 @@ native targets and `wasm32-unknown-unknown`.
 - Protocol helpers shared by every binding: ref CAS and name checks, upload
   and download framing, quota evaluation and storage-error redaction.
 
+## Supported public API
+
+Embedders construct `pipeline::Pipeline` with `PipelineConfig::new` and hook
+implementations (`Authorizer`, `Admission`, `PreReceive`, `OutcomeSink` and
+`HookSet`). Public repository identities, authentication, ref policy, quotas,
+upload limits and transport bindings remain part of that contract. Indexed
+and HTTP serving start with `IndexedConfig::default()` and
+`HttpObjectsConfig::default()`; adjust their public fields before building the
+pipeline. Public configuration structs are non-exhaustive: use constructors,
+parsers or `Default`, then setters or field assignment instead of literals.
+
+`Pipeline::{object_reader, issue_urls, repo_storage, set_repo_visibility}`,
+`ObjectReader::{read_canonical, object_metadata}`, `ReaderView`, `ReadLimits`
+and `ReaderSession` support embedding object access. Metadata distinguishes
+canonical length from a `Blob` or `ChunkedBlob`'s logical length; the removed
+`object_sizes` convenience can be reproduced by selecting the required length.
+`ReservationV1` constructors, `OutcomeRef`, `AbortReason`, `PendingOp` and
+`StoredProcedure` are documented exports of `store` for outcome integrations.
+
+Storage adapters implement `NamespaceStore`, `BlobStore` and
+`MultipartBlobStore`; `Partition`, batch/precondition types, capabilities,
+portable export/import and maintenance hooks remain public. The optional
+native `fs` stores keep their constructors and durable filesystem behavior.
+`budget::SliceBudget` is shared by request and purge accounting; its existing
+`indexed::budget::SliceBudget` and `purge::SliceBudget` paths remain reachable.
+Default call allowances are defined once in `limits`; compatibility constants
+such as `pipeline::OBJECT_READER_CALLS` keep their current paths.
+
+The doc-hidden `store::adapter_spi` exposes only the storage modules used by
+adapter and conformance implementations: `keys`, `codec`, `index`, `tickets`,
+`outbox`, `publication` and `watermark`. These layouts and codecs are an adapter
+SPI, outside the supported embedder API. Core-only typed readers and serving
+views are crate-private. Unintegrated inspection/restore planning stays in
+private test support; the live recovery marker and portable import API remain
+in core. The internal `__test-faults` feature is for repository tests, and is
+not a supported deployment feature. The wire test capability remains named
+`test-faults`.
+
+```rust
+use mkit_server::upload::UploadLimits;
+use mkit_server::indexed::IndexedConfig;
+
+let upload = UploadLimits::new(64 << 20, 1024);
+let mut indexed = IndexedConfig::default();
+indexed.max_pack_bytes = upload.max_total_bytes;
+indexed.decode_budget = 4 * upload.max_total_bytes;
+```
+
 ## Features
 
 | Feature | Effect |
@@ -33,7 +81,6 @@ native targets and `wasm32-unknown-unknown`.
 | `remote-hooks` | Signed `mkit.server.hooks.v1` authorization, admission and outcome adapters over a `HookChannel`. |
 | `http-objects` | Runtime-agnostic HTTP object serving; requires explicit configuration and indexed mode. |
 | `pack-ruzstd` | Pure-Rust zstd decoding for wasm targets. Needs a ruzstd patch when consumed from crates.io (see below). |
-| `test-faults` | Test-only fault injection. Never enable it in a release build. |
 
 ### `pack-ruzstd` and the ruzstd patch
 
