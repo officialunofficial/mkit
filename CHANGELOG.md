@@ -127,6 +127,11 @@ supported after new reservation rows are written.
 
 ### Fixed
 
+- Retire the stale Workers operations claim that interrupted takedown activation
+  can replay HTTP 200 with inactive denials. A regression checks denial rows
+  through signed-request and operation-id retries after interruption and restart:
+  both remain HTTP 503 until activation finishes. Runtime behavior is unchanged.
+
 - The public hook golden-request test expects all 18 requests, including
   visibility and repository-storage outcomes, and checks that every fixture
   field survives protobuf decoding. The stale 16-request assertion failed
