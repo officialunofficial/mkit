@@ -304,3 +304,24 @@ updates:
         update-types:
           - "minor"
           - "patch"
+
+  # The workspace-worker image pins the Cloudflare sandbox base by tag; a
+  # Docker entry keeps it moving with the same weekly cadence as the rest.
+  - package-ecosystem: "docker"
+    directory: "/apps/workspace-worker"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "deps(workspace-worker)"
+    groups:
+      docker-minor:
+        update-types:
+          - "minor"
+          - "patch"
