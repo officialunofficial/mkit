@@ -75,7 +75,7 @@ def main():
     parser.add_argument("--no-build", action="store_true", help="use the already built release bundle and runner")
     parser.add_argument("--port", type=int, default=int(os.environ.get("VCS_CONFORMANCE_PORT", "8795")))
     args = parser.parse_args()
-    scratch = Path.home() / ".cache/mkit-test-tmp/wp-4-18/embedding-example"
+    scratch = Path(os.environ.get("TMPDIR", Path.home() / ".cache/mkit-test-tmp/reference-embedding"))
     scratch.mkdir(parents=True, exist_ok=True)
     if scratch.resolve() != scratch or scratch.is_symlink():
         raise RuntimeError("embedding scratch must be an absolute nonsymlink path")
@@ -86,7 +86,6 @@ def main():
         raise RuntimeError("CARGO_TARGET_DIR must remain unset")
     origin = f"http://127.0.0.1:{args.port}"
     base = f"{origin}/_embedding/mkit"
-    hook = f"http://127.0.0.1:{args.port + 1}"
     runner = ROOT / "rust/target/debug/mkit-server-conformance"
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     dirty = subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True)
@@ -100,9 +99,9 @@ def main():
             subprocess.run(["worker-build", "--release"], cwd=APP, env=env, stdout=log, stderr=log, check=True)
     artifacts = artifact_hashes()
     # Copy the example's config into this run's private directory with absolute
-    # module paths. Different ports, registry and state keep other WPs isolated.
+    # module paths. Different ports, registry and state keep other runs isolated.
     configs = []
-    for source in [APP / "wrangler.jsonc", APP / "tests/hook/wrangler.jsonc"]:
+    for source in [APP / "wrangler.jsonc"]:
         text = "\n".join(line for line in source.read_text().splitlines() if not line.lstrip().startswith("//"))
         config = json.loads(text)
         config["main"] = str((source.parent / config["main"]).resolve())
@@ -119,15 +118,8 @@ def main():
                 "--persist-to", str(work / state), "--show-interactive-dev-session=false"]
 
     process = None
-    hook_process = None
     try:
-        with (work / "wrangler.log").open("w") as log, (work / "hook.log").open("w") as hook_log:
-            # Multi-config dev gives auxiliary Workers no public listener.
-            # Two owned processes share only this run's private registry.
-            hook_process = subprocess.Popen(command(configs[1], args.port + 1, "hook-state"),
-                                            cwd=APP, env=env, stdout=hook_log,
-                                            stderr=hook_log, start_new_session=True)
-            wait_ready(f"{hook}/calls", hook_process, body=None)
+        with (work / "wrangler.log").open("w") as log:
             process = subprocess.Popen(command(configs[0], args.port, "state"),
                                        cwd=APP, env=env, stdout=log, stderr=log,
                                        start_new_session=True)
@@ -143,7 +135,7 @@ def main():
                 if result.returncode or "# SKIP" in result.stdout or f"ok 1 - {case}" not in result.stdout:
                     raise RuntimeError(f"embedding {case} failed; see {work}")
                 print(f"PASS embedded release {case}")
-            before = request_json(f"{hook}/calls")
+            before_admissions = (work / "wrangler.log").read_text().count("REFERENCE admit ")
             # Auth remains bound to the public audience despite the in-process
             # Request URL. Signing for that internal origin must be rejected.
             internal = common.copy()
@@ -153,20 +145,13 @@ def main():
             (work / "internal-audience-rejected.tap").write_text(rejected.stdout + rejected.stderr)
             if rejected.returncode == 0 or "unauthenticated" not in rejected.stdout + rejected.stderr:
                 raise RuntimeError("internal audience was not rejected as unauthenticated")
+            assert (work / "wrangler.log").read_text().count("REFERENCE admit ") == before_admissions, "bad audience reached admission"
             deadline = time.monotonic() + 30
-            while True:
-                calls = request_json(f"{hook}/calls")
-                if calls["outcomes"]:
-                    break
+            while "REFERENCE outcome committed" not in (work / "wrangler.log").read_text():
                 if time.monotonic() >= deadline:
-                    raise RuntimeError("custom DO outcome sink did not deliver after ticketed AdvanceRefs committed")
+                    raise RuntimeError("custom DO outcome sink did not deliver after AdvanceRefs")
                 time.sleep(0.25)
-            assert calls["admissions"], "custom binding admission was not reached"
-            assert len(before["admissions"]) == len(calls["admissions"]), "bad audience reached admission"
-            assert all(op["audience"] == origin for op in calls["admissions"])
-            assert all(outcome["audience"] == origin for outcome in calls["outcomes"])
-            assert any("committed" in outcome for outcome in calls["outcomes"]), "missing committed outcome"
-            (work / "hook-calls.json").write_text(json.dumps(calls, indent=2))
+            assert "REFERENCE admit" in (work / "wrangler.log").read_text(), "in-process admission not reached"
             if artifact_hashes() != artifacts:
                 raise RuntimeError("embedded release artifacts changed during the conformance run")
             if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip() != sha \
@@ -182,12 +167,9 @@ def main():
                                   "tickets.advance_marker_then_upload", "internal_audience_rejected",
                                   "custom_outcome_sink"]}
             (work / "evidence.json").write_text(json.dumps(evidence, indent=2))
-            print("PASS custom binding hooks, DO outcome sink and public audience isolation")
+            print("PASS in-process hooks, DO outcome sink and public audience isolation")
     finally:
-        try:
-            stop(process)
-        finally:
-            stop(hook_process)
+        stop(process)
         print(f"Embedding evidence: {work}")
 
 

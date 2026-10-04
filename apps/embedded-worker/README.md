@@ -1,51 +1,73 @@
-# Embedding mkit in a Worker
+# Reference Workers embedding
 
-This local example hosts mkit under `/_embedding/mkit/`. Its fetch handler constructs a
-`worker::Request` and calls `mkit_server_worker::adapter::serve_with`, transferring
-the incoming `ReadableStream` directly. `UploadPart` stays streamed through the
-Connect bridge and R2 adapter. No HTTP call to the host's own public origin is
-needed. The five Durable Object classes come from `durable_objects!(config, sink)`.
+This small, generic host demonstrates the supported composition APIs. The
+[Workers embedder guide](../../docs/embedding/workers.md) explains request
+budgets, durable continuation and upgrade notes; the specs and conformance suite
+remain the contracts. Nothing here is a deployed performance measurement.
 
-`hooks` composes a custom `HookSet` from `OpenAuthorizer`, `RemoteAdmission`,
-`NoPreReceive`, `NoReceipts` and `RemoteOutcomes`. Admission and outcome delivery
-call another Worker over the isolated `ADMISSION_HOOK` service binding. `sink`
-constructs the same outcome sink for Durable Object alarms. The local fixture
-deduplicates admissions and outcomes; a real hook must durably deduplicate
-outcomes by reservation ID and have no public route, `workers.dev` or preview URL.
+| Host route | Composition |
+|---|---|
+| `/_embedding/mkit/<canonical procedure>` | Transfer method, headers and ReadableStream to safe `adapter::serve_with`; UploadPart stays streamed |
+| `/_embedding/read/public` | Anonymous published-view reader |
+| `/_embedding/read/owner` | Same preview, requiring a genuine signed ListRefs envelope |
+| Repository `/-/` URLs and token key document | Existing HTTP mount, preserving escaped query and request lifetime |
 
-The signed envelope audience must equal `WorkerConfig::audience` (`AUTH_AUDIENCE`,
-the exact public origin). Here that is `http://127.0.0.1:<port>`, even though the
-constructed request uses `https://embedded.invalid`. The request URL does not
-change the audience contract. In-process dispatch shares the caller isolate's
-CPU, memory and subrequest allowance. Hosts must account for their own work in
-the same budget.
+The read preview accepts POST with `X-Repository`, repeated `?id=<hex>` (at most
+`OBJECT_READER_BATCH`, 16) and optional `&metadata=true`. It returns canonical
+lengths, optional logical file lengths and scoped URL tokens. Owner headers must
+sign the exact bounded body for the canonical ListRefs procedure and public
+`AUTH_AUDIENCE`, even though the host constructs an internal dispatch URL.
+Selecting Owner alone confers no authority. Responses use `Cache-Control: no-store`.
+The reference accepts at most 4 KiB of body and 2 KiB of query.
 
-The example keeps AdminService off the public path using
-`admin_on_public_path = false`. A host with `ADMIN_KEYS` can route its chosen
-admin prefix to `adapter::serve_admin_with`; that entry point still authenticates
-the configured operator keys. See the [adapter embedding surface](../../rust/crates/mkit-server-worker/README.md)
-for HTTP mount configuration, ref policy, takedown and custom purge sinks.
+Each request constructs one pipeline, one reader and one ReaderSession. Canonical
+and optional metadata reads share that session; the outer SliceBudget also covers
+URL issuance, which has independent per-call limits. `REFERENCE reader` records
+calls, decoded bytes, encoded reservations, output bytes and physical units even
+on failure. The preview discards canonical bytes after measuring them; a host can
+feed them into `MemorySource` for bounded core algorithms.
 
-Use the repo's separate `apps/` workspace convention. The adapter stays
-`publish = false`; an external host consumes it as a git dependency pinned to the
-release tag. The supported surface is 0.x; breaking changes appear in CHANGELOG.
+`hooks.rs` implements Authorizer, Admission, OutcomeSink and PurgeSink in process.
+The Authorizer retains already verified facts; Admission delegates default limits
+and reserves signed write nonces. `durable_objects!(config, sink)` supplies the
+same sink to requests and cold alarms. Purge pairs budgeted LocalCache with a
+custom sink that acknowledges only this host's local serving cache; a host with
+additional caches must invalidate those before acknowledging. Complete
+preservation/admin configuration activates real purge delivery.
 
-From the repository root, with Rust 1.95, `worker-build`, Node and `npx` installed:
+The private `HostEvents` Durable Object atomically deduplicates reservation IDs
+and projects `RepoStorageChanged`, retaining the highest version. Its SQLite
+trigger and fixed-width decimal text preserve unordered delivery and full u64
+precision. The demo retains dedup IDs forever; define a suitable durable retention
+policy for a larger host. The receiver has no public route. Storage uses the five
+adapter DO classes plus this one host class; no extra server API is needed.
+
+From the repository root, with the pinned Rust/Node tools, `worker-build`, `b3sum`
+and the locked local Miniflare dependency installed:
 
 ```sh
-export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
-export TMPDIR="$HOME/.cache/mkit-test-tmp/wp-4-18/embedding-example"
+export CARGO_PROFILE_DEV_DEBUG=0
+export TMPDIR="$HOME/.cache/mkit-test-tmp/reference-embedding"
 mkdir -p "$TMPDIR"
 (cd apps/embedded-worker && cargo clippy --locked --target wasm32-unknown-unknown -- -D warnings)
-scripts/embedded-worker-conformance.sh --port 8795
+export MKIT_MINIFLARE_MODULE="$PWD/apps/workspace-worker/node_modules/miniflare"
+python3 scripts/reference-worker-acceptance.py
 ```
 
-The script builds the release example, starts both Workers on local pinned
-Wrangler, uploads three parts (8 MiB, 8 MiB, then a final smaller part), completes
-the upload and verifies pack visibility. A separate ticketed upload and
-`AdvanceRefs` commit consumes its ticket, producing the committed outcome
-observed through the custom sink. It also verifies that signatures for the internal request's
-origin fail before admission. Logs and disposable local state stay in the
-private TMPDIR. `--no-build` reuses binaries from the same worktree. Nothing is
-deployed and no cloud account is contacted. The fixed development MAC key in
-`wrangler.jsonc` is solely for these fresh local fixtures.
+Acceptance builds the release wasm, publishes an indexed pack, runs bounded
+public/owner previews and token readback, rejects invalid owner audiences and
+oversized batches/bodies, consumes real storage events, injects unordered and
+duplicate events in a private test wrapper, makes the repository private to
+exercise purge, then restarts workerd to verify cold outcome retry and retained
+projection state. `worker.log`, `producer.tap` and `evidence.json` are kept in
+TMPDIR. Hosted Workers CI builds and runs this same flow.
+
+Faults and receiver probes live only in `tests/reference-acceptance/wrapper.mjs`;
+the reference binary has no fault switch or test route. The separate
+`tests/embedding-conformance` fixture retains the broader hook/failure rehearsals.
+The single-repository streaming check remains
+`scripts/embedded-worker-conformance.sh --port 8795`.
+The fixed development keys in local configs are for fresh local state only.
+
+Use the separate `apps/` workspace convention. The adapter is unpublished; pin
+external git dependencies and repeat the root `pack-ruzstd` patch from the guide.
