@@ -12,6 +12,10 @@ remain the contracts. Nothing here is a deployed performance measurement.
 | `/_embedding/read/owner` | Same preview, requiring a genuine signed ListRefs envelope |
 | Repository `/-/` URLs and token key document | Existing HTTP mount, preserving escaped query and request lifetime |
 
+The reader requires indexed mode, an HTTP mount and dedicated URL-token keys.
+The acceptance flow supplies that configuration; `wrangler.jsonc` keeps the
+smaller single-repository streaming setup for the original streaming check.
+
 The read preview accepts POST with `X-Repository`, repeated `?id=<hex>` (at most
 `OBJECT_READER_BATCH`, 16) and optional `&metadata=true`. It returns canonical
 lengths, optional logical file lengths and scoped URL tokens. Owner headers must

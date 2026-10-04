@@ -144,7 +144,7 @@ restore the receiver and drain persisted rows. See
 `RepoStorageChanged` is an absolute repository pack-byte total, **eventually
 consistent and exact**, not a delta or a ref-commit counter. Count each distinct
 member pack once per repository; shared packs count once in each repository.
-D34 relays may lag consumption; publication delay does not defer counting.
+Sharded relays may lag consumption; publication delay does not defer counting.
 Membership is retained, so the total never decreases. Keep the highest version
 and ignore lower/equal versions. Single-repository addressing has no counter.
 Use owner-authorized `repo_storage` or `repo_storage_many` (up to 100 names) to
